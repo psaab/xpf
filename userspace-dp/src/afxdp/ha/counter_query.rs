@@ -65,6 +65,9 @@ pub(crate) struct WorkerSessionCounters {
 pub(crate) struct SessionCounterQueryWait {
     sequence: u64,
     slots: Vec<(u32, Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>)>,
+    /// #9900 F-093: workers shed at kick time; the wait reports them as
+    /// unanswered without eating the timeout.
+    dead: Vec<u32>,
 }
 
 impl crate::afxdp::Coordinator {
@@ -77,8 +80,14 @@ impl crate::afxdp::Coordinator {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let mut slots = Vec::with_capacity(self.workers.records().len());
+        let mut dead = Vec::new();
         for (worker_id, rec) in self.workers.records().iter() {
             let handle = &rec.handle;
+            // #9900 F-093: shed dead workers (see `dead` on the wait struct).
+            if rec.shed_if_dead(1) {
+                dead.push(*worker_id);
+                continue;
+            }
             // Recover, never early-return: one worker's poisoned queue must not
             // deny the reading for every healthy worker. A worker that never
             // receives the command simply never answers, which the deadline
@@ -94,7 +103,11 @@ impl crate::afxdp::Coordinator {
             drop(pending);
             slots.push((*worker_id, handle.runtime_atomics.clone()));
         }
-        SessionCounterQueryWait { sequence, slots }
+        SessionCounterQueryWait {
+            sequence,
+            slots,
+            dead,
+        }
     }
 }
 
@@ -134,6 +147,15 @@ impl SessionCounterQueryWait {
                 fwd_bytes: atomics.counter_query_fwd_bytes.load(Ordering::Relaxed),
                 rev_packets: atomics.counter_query_rev_packets.load(Ordering::Relaxed),
                 rev_bytes: atomics.counter_query_rev_bytes.load(Ordering::Relaxed),
+            });
+        }
+        // #9900 F-093: dead workers were shed at kick time; report them as
+        // unanswered (never silently drop — a partial answer must not look
+        // complete).
+        for worker_id in self.dead {
+            out.push(WorkerSessionCounters {
+                worker_id,
+                ..Default::default()
             });
         }
         out

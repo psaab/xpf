@@ -328,6 +328,151 @@ pub(in crate::afxdp) fn frame_l3_offset(frame: &[u8]) -> Option<usize> {
     Some(14)
 }
 
+/// A nibble-checked L3 resolution: the offset plus whether the STAMP was
+/// trusted. When `stamp_trusted` is false the shim's whole offset pair is
+/// suspect (both stamps come from one parse) — the caller must ALSO distrust
+/// `meta.l4_offset` (neutralize it so downstream derivation falls back to
+/// the wire) instead of mixing a corrected L3 with a stale L4 (GPT-5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct CheckedL3 {
+    pub(in crate::afxdp) l3: usize,
+    pub(in crate::afxdp) stamp_trusted: bool,
+}
+
+/// The stamp half of [`nibble_checked_l3`] without the wire fallback:
+/// `Some(stamp)` iff the stamp is 14/18 AND the nibble at it matches
+/// `addr_family`. For wire-FIRST callers whose ethertype parse already
+/// failed — there is no wire L2 length left to prefer, but an unverified
+/// stamp must still not index the frame (SPARK-m3).
+#[inline]
+pub(in crate::afxdp) fn nibble_trusted_stamp(
+    frame: &[u8],
+    l3_offset: u16,
+    addr_family: u8,
+) -> Option<usize> {
+    let expected_version = match addr_family as i32 {
+        libc::AF_INET => 4u8,
+        libc::AF_INET6 => 6u8,
+        _ => return None,
+    };
+    match l3_offset {
+        14 | 18
+            if frame
+                .get(l3_offset as usize)
+                .is_some_and(|byte| (byte >> 4) == expected_version) =>
+        {
+            Some(l3_offset as usize)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve the L3 offset, trusting the stamped `l3_offset` ONLY when the byte
+/// it points at carries the IP-version nibble matching `addr_family (#9900
+/// F-095). A wrong-but-plausible stamp (14 on a tagged frame, 18 on an
+/// untagged one) falls back to [`frame_l3_offset`], as does any non-14/18
+/// stamp and any unknown family; `None` means neither the stamp nor the wire
+/// yields an offset and the caller fails closed. The answer carries
+/// `stamp_trusted`: when false the caller must ALSO distrust `meta.l4_offset`
+/// (see [`CheckedL3`]) instead of mixing a corrected L3 with a stale L4.
+/// The gate is the #2344 idiom (`frame_is_non_first_fragment` below), factored
+/// out so the stamp consumers share one spelling instead of hand-mirrored
+/// matches. Converted callers and their fallback judgments:
+///
+/// - `frame/mod.rs` `rewrite_plan_eth_from_parts` — `?` (fail closed): the
+///   plan drives TTL decrement, checksum recompute and NAT at `plan.l3`.
+///   Carries `stamp_trusted` so callers neutralize `meta.l4_offset` when the
+///   stamp was distrusted (GPT-5: a corrected L3 with a stale L4 mis-drives
+///   the v6 transport rewrites).
+/// - `frame/build/mod.rs` `build_forwarded_frame_into_from_frame` — `?` plus
+///   the same L4 neutralization.
+/// - `forwarding/fib.rs` `parse_packet_destination` — `.unwrap_or(stamp)`:
+///   a read-only dst parse, so double-garbage keeps the old stamp-indexed
+///   behavior instead of growing a new NoRoute cliff.
+/// - `inspect.rs` `parse_packet_destination_from_frame` — same `.unwrap_or`
+///   judgment (SPARK-M4: DNAT/NAT64 dst parse, the converted twin's twin).
+/// - `wg/decap.rs` `outer_source_ip` — `?` (fail closed): the read feeds
+///   PERSISTENT roam/endpoint learning, so double-garbage must skip the
+///   observation, never learn a garbage endpoint (SPARK-M6).
+/// - `live_frame_ports_from_meta_bytes` — the meta fast arm derives its
+///   declared end from the nibble-checked L3 (SPARK-M5).
+/// - Declared-end readers `term_match_extra_from_frame` and
+///   `meta_icmp_identifier_bearing` — same treatment (filter/icmp verdict
+///   inputs; SPARK-m4).
+/// - Wire-first sites (`tx/dispatch/mod.rs` x3, `frame/wg.rs` x2,
+///   `gre.rs` inner, `forward_request.rs` hint chain) — stamp fallback
+///   nibble-gated via [`nibble_trusted_stamp`] (SPARK-m3).
+/// - `poll_descriptor` fragment predicates/slices + `nat64_icmp_error.rs` —
+///   `.unwrap_or(stamp)` (SPARK-m6: a wrong stamp previously flipped the
+///   SNAT-gate and NAT64-association verdicts).
+///
+/// No post-fallback nibble re-check: the fallback IS the wire parse, and the
+/// downstream TTL/checksum/NAT arms already version-gate (e.g.
+/// `frame/mod.rs` `validate_generic_rewrite_v4/v6`). `frame_is_non_first_fragment`
+/// keeps its own inline copy WITH the extra post-check (meta-led fixtures
+/// carry the tuple in metadata with no IP byte at the derived offset at all),
+/// so it is NOT refactored onto this helper — same deliberate-twin rationale
+/// as the `lock_recover` shapes.
+///
+/// #9900 audit: every other production `l3_offset` reader, dispositioned.
+///
+/// - Length-math ONLY (no wire indexing): `frame/mod.rs` `trim_l3_payload`
+///   meta fallback (`pkt_len - l3_offset` extent math, clamped to the payload;
+///   callers now pass the CORRECTED offset, which is the true L3 length).
+/// - Difference-only HINT (`l4 - l3`, never an index): `v6_rel_l4_offset`
+///   (neutralized `l4 == l3` input yields a 0 difference, forcing the wire
+///   parse — the GPT-5 convention, stated on the helper).
+/// - Bounded read-only cold/error-path readers with the same blind-trust SHAPE
+///   but fail-soft outcomes (a mis verdict or misaligned quote on one packet,
+///   no UMEM mutation, no forwarding corruption, no persistent learning):
+///   `icmp.rs` x4, `icmp_ptb.rs` x2, `gre.rs` OUTER readers x3
+///   (`parse_outer_addresses`, `outer_datagram_end`, `outer_ecn_bits` — the
+///   outer IP header of a decap candidate; worst case a misread outer addr
+///   on one error/quote path), `icmp_embed/*`, `icmp_embed/nat64_match.rs`.
+///   Converting them is follow-up scope, recorded in `docs/log/9900.md` —
+///   each needs its own `?`-vs-`unwrap_or` judgment and repro cell.
+/// - No production callers (re-exported, test-only): the
+///   `tx/dispatch/slow_path.rs` extract family.
+/// - Producers, not readers (stamp WRITES): `coordinator/inject.rs`,
+///   `tunnel.rs`, `frame/mod.rs` egress stamping.
+#[inline]
+pub(in crate::afxdp) fn nibble_checked_l3(
+    frame: &[u8],
+    l3_offset: u16,
+    addr_family: u8,
+) -> Option<CheckedL3> {
+    if let Some(l3) = nibble_trusted_stamp(frame, l3_offset, addr_family) {
+        return Some(CheckedL3 {
+            l3,
+            stamp_trusted: true,
+        });
+    }
+    // Unknown family, non-14/18 stamp, or nibble mismatch: the stamp is
+    // unverifiable, hence unusable — derive from the wire (operational)
+    // or fail closed.
+    frame_l3_offset(frame).map(|l3| CheckedL3 {
+        l3,
+        stamp_trusted: false,
+    })
+}
+
+/// Verified L3 with stamp fallback: [`nibble_checked_l3`] resolved, or the
+/// raw stamp when NEITHER verifies (double-garbage). For read-only callers
+/// whose old stamp-indexed behavior on double-garbage must be preserved
+/// (FIB/NAT64 dst parses, declared-end gates, poll predicates) — mutating
+/// callers use `?` on [`nibble_checked_l3`] instead, and L4-coherent callers
+/// read `stamp_trusted` off it.
+#[inline]
+pub(in crate::afxdp) fn verified_l3_or_stamp(
+    frame: &[u8],
+    l3_offset: u16,
+    addr_family: u8,
+) -> usize {
+    nibble_checked_l3(frame, l3_offset, addr_family)
+        .map(|checked| checked.l3)
+        .unwrap_or(l3_offset as usize)
+}
+
 // #989: tcp_flags_str moved to `frame/tcp.rs`.
 
 pub(in crate::afxdp) fn frame_l4_offset(frame: &[u8], addr_family: u8) -> Option<usize> {
@@ -681,7 +826,10 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
     // #5150 `ip_declared_end` SSOT — also backing the flex slices below), so a
     // single declared bound governs the whole builder. On the common no-slack
     // path `declared_end == frame.len()`, so classification is byte-identical.
-    let l3 = meta.l3_offset as usize;
+    // SPARK-m4: the declared end (and every verdict input below it) derives
+    // from a VERIFIED L3 — a wrong stamp previously mis-sized the datagram
+    // and flipped filter inputs. Double-garbage keeps the stamp (old shape).
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
     let l4 = meta.l4_offset as usize;
     let declared_end = ip_declared_end(frame, l3, meta.addr_family);
     // The fragment walkers see ONLY the declared datagram (`l3..declared_end`),
@@ -1071,7 +1219,8 @@ pub(in crate::afxdp) fn icmp_identifier_bearing(protocol: u8, icmp_type: u8) -> 
 /// gates the metadata fallback; the frame parsers re-derive the type
 /// independently.
 pub(in crate::afxdp) fn meta_icmp_identifier_bearing(frame: &[u8], meta: UserspaceDpMeta) -> bool {
-    let l3 = meta.l3_offset as usize;
+    // SPARK-m4: verify L3 before deriving the declared end (see above).
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
     let l4 = meta.l4_offset as usize;
     let declared_end = match meta.addr_family as i32 {
         libc::AF_INET => ipv4_declared_l3_end(frame, l3),
@@ -1114,7 +1263,8 @@ pub(in crate::afxdp) fn meta_icmp_identifier_bearing(frame: &[u8], meta: Userspa
 /// cost argument for the fast path is preserved.
 #[inline]
 pub(in crate::afxdp) fn meta_l4_ports_in_declared_end(frame: &[u8], meta: UserspaceDpMeta) -> bool {
-    let l3 = meta.l3_offset as usize;
+    // SPARK-m4: verify L3 before deriving the declared end (see above).
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
     let l4 = meta.l4_offset as usize;
     let Some(declared_end) = declared_l3_end(frame, l3, meta.addr_family) else {
         return false;
@@ -1242,18 +1392,27 @@ pub(in crate::afxdp) fn live_frame_ports_from_meta_bytes(
     if !matches!(meta.protocol, PROTO_TCP | PROTO_UDP) {
         return None;
     }
-    let l4 = meta.l4_offset as usize;
+    // SPARK-M5: the meta fast arm may only fire on a VERIFIED L3 — derive
+    // the declared end from the nibble-checked offset, and distrust the L4
+    // stamp with a distrusted L3 (`l4 = 0` forces the wire fallback below).
+    // A wrong-but-plausible stamp pair otherwise returns WRONG ports with no
+    // fallback, and these ports feed `enforce_expected_ports*` frame writes.
+    // Double-garbage keeps the old stamp-indexed attempt (bounded as before).
+    let (l3, l4) = match nibble_checked_l3(frame, meta.l3_offset, meta.addr_family) {
+        Some(checked) if checked.stamp_trusted => (checked.l3, meta.l4_offset as usize),
+        Some(checked) => (checked.l3, 0),
+        None => (meta.l3_offset as usize, meta.l4_offset as usize),
+    };
     // #2361: bound the meta-stamped L4 read by the IP-declared packet end,
     // not just the slice. The XDP shim stamps `meta.l4_offset` but does NOT
     // enforce that the L4 header lies inside the IP-declared datagram, so a
     // frame with a short total_len/payload_len + trailing slack could have
     // its ports read past the datagram. We re-derive the declared end from
-    // the L3 header in the frame (using `meta.l3_offset`). If the meta
+    // the L3 header in the frame (using the checked `l3`). If the meta
     // offsets are unusable, fall through to the byte-led parser, which
     // re-derives both L3 and the declared end from the frame.
     if l4 != 0
-        && let Some(declared_end) =
-            declared_l3_end(frame, meta.l3_offset as usize, meta.addr_family)
+        && let Some(declared_end) = declared_l3_end(frame, l3, meta.addr_family)
         && let Some(ports) = parse_flow_ports(frame, l4, meta.protocol, declared_end)
     {
         return Some(ports);
@@ -1458,8 +1617,18 @@ pub(in crate::afxdp) fn parse_session_flow_from_bytes(
         return Some(flow);
     }
 
-    let l3 = meta.l3_offset as usize;
-    let l4 = meta.l4_offset as usize;
+    // #9900 F-095 (SPARK-m4+): last-resort meta-offset fallback — verify the
+    // stamp before fabricating a session key from it. A distrusted stamp
+    // derives L3 from the wire and L4 along with it (GPT-5 coherence: a
+    // corrected L3 with a stale L4 mis-keys the flow); if neither resolves,
+    // decline rather than keying a session on garbage bytes.
+    let checked = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
+    let l3 = checked.l3;
+    let l4 = if checked.stamp_trusted {
+        meta.l4_offset as usize
+    } else {
+        frame_l4_offset(frame, meta.addr_family)?
+    };
     match meta.addr_family as i32 {
         libc::AF_INET => {
             if frame.len() < l3 + 20 || frame.len() < l4 {
@@ -2074,7 +2243,10 @@ pub(in crate::afxdp) fn parse_packet_destination_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
 ) -> Option<IpAddr> {
-    let l3 = meta.l3_offset as usize;
+    // #9900 F-095 (SPARK-M4): same judgment as the FIB twin — nibble-gate
+    // the stamp, keep it as the fallback (read-only dst parse; double-garbage
+    // keeps the old behavior instead of a new cliff).
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
     match meta.addr_family as i32 {
         libc::AF_INET => {
             let end = l3.checked_add(20)?;

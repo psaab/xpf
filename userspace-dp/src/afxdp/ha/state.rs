@@ -73,6 +73,10 @@ impl crate::afxdp::Coordinator {
         if !demoted_rgs.is_empty() {
             // #6242: fan out demote commands via each worker's runtime record.
             for rec in self.workers.records().values() {
+                // #9900 F-093: shed dead workers (2 pushes skipped: demote + vacate).
+                if rec.shed_if_dead(2) {
+                    continue;
+                }
                 // #1790/#1807: recover from a poisoned worker command mutex
                 // instead of early-returning. The new HA state was already
                 // published via rg_runtime.store above, so an Err here would
@@ -125,6 +129,24 @@ impl crate::afxdp::Coordinator {
         Ok(())
     }
 
+    /// #9900 F-093 (GPT-7): the command queues of LIVE workers only, for fan-outs
+    /// that push to every queue they are given (RG-activation Refresh + reverse
+    /// prewarm). Dead workers are shed + counted (2 per worker: one per fan-out,
+    /// operation-level) and their queues excluded, so neither fan-out feeds a
+    /// queue no thread will ever drain.
+    pub(super) fn collect_live_worker_commands(
+        records: &std::collections::BTreeMap<
+            u32,
+            std::sync::Arc<crate::afxdp::coordinator::WorkerRuntimeRecord>,
+        >,
+    ) -> Vec<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<WorkerCommand>>>> {
+        records
+            .values()
+            .filter(|rec| !rec.shed_if_dead(2))
+            .map(|rec| rec.handle.commands.clone())
+            .collect()
+    }
+
     fn handle_activated_rgs(&self, activated_rgs: &[i32], now_secs: u64) {
         if activated_rgs.is_empty() {
             return;
@@ -135,13 +157,12 @@ impl crate::afxdp::Coordinator {
         // increment would still invalidate correctly but is avoided for
         // clarity and to keep each transition a single epoch step.
 
-        let worker_commands = self
-            .workers
-            .records()
-            .values()
-            .map(|rec| rec.handle.commands.clone())
-            .collect::<Vec<_>>();
-        for commands in &worker_commands {
+        // #9900 F-093 (GPT-7): shed dead workers up front and hand the
+        // prewarm ONLY live queues — it pushes to every queue it is given
+        // with no shed check of its own, so a full list would feed dead
+        // queues (bounded, then overflow-misattributed as DROPS).
+        let live_commands = Self::collect_live_worker_commands(&self.workers.records());
+        for commands in &live_commands {
             // #1790/#1807: uniform poison recovery (worker_queue.rs).
             let mut pending = worker_queue::lock_recover(commands);
             worker_queue::push_bounded(
@@ -172,7 +193,7 @@ impl crate::afxdp::Coordinator {
             &self.sessions.nat,
             &self.sessions.forward_wire,
             &self.sessions.owner_rg_indexes,
-            &worker_commands,
+            &live_commands,
             session_map,
             &self.forwarding,
             current.as_ref(),

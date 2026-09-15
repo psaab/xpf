@@ -542,6 +542,7 @@ impl BindingWorker {
                 outstanding_tx: 0,
                 pending_fill_frames,
                 in_flight_prepared_recycles: FastMap::default(),
+                in_flight_untracked_tx: FastSet::default(),
                 // #812: pre-allocate the submit-timestamp sidecar once,
                 // sized to the binding's total UMEM frame count so every
                 // legal `offset >> UMEM_FRAME_SHIFT` index lands inside
@@ -696,6 +697,7 @@ impl BindingWorker {
                 outstanding_tx: 0,
                 pending_fill_frames: VecDeque::new(),
                 in_flight_prepared_recycles: FastMap::default(),
+                in_flight_untracked_tx: FastSet::default(),
                 tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; total_frames as usize].into_boxed_slice(),
             },
             cos: WorkerCos {
@@ -813,6 +815,7 @@ impl BindingWorker {
                 outstanding_tx: 0,
                 pending_fill_frames: VecDeque::new(),
                 in_flight_prepared_recycles: FastMap::default(),
+                in_flight_untracked_tx: FastSet::default(),
                 tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; total_frames as usize].into_boxed_slice(),
             },
             cos: WorkerCos {

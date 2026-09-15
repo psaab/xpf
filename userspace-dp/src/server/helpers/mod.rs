@@ -14,11 +14,14 @@
 // - `planning`     — binding-settle predicates, canonical plan-key hashing,
 //                    and RX-queue / binding replanning (one correctness unit).
 // - `persistence`  — owned state payload build + lock-free `write_state`.
+// - `guards`       — per-connection `catch_unwind` + poison-recovering state
+//                    lock (#9900 F-094).
 //
 // Pure relocation. Bodies are byte-for-byte identical to the pre-split
 // source; each submodule declares its own explicit dependencies in place
 // of the old crate-root glob.
 
+mod guards;
 mod persistence;
 mod planning;
 mod session_sync;
@@ -26,6 +29,7 @@ mod session_sync;
 // by a test that enters through refresh_status.
 pub(crate) mod status;
 
+pub(crate) use guards::*;
 pub(crate) use persistence::*;
 pub(crate) use planning::*;
 pub(crate) use session_sync::*;

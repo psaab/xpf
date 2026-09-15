@@ -6891,3 +6891,61 @@ fn canonical_route_table_borrows_when_no_rewrite_is_needed_7204() {
     assert!(matches!(v4, Cow::Owned(_)));
     assert_eq!(v4, "vrf-a.inet.0");
 }
+
+/// #9900 F-095 at the FIB layer: a wrong-but-plausible `l3_offset` stamp
+/// falls back to the wire parse instead of reading the destination from the
+/// wrong bytes. The untagged frame below carries dst 172.16.80.8; pre-fix a
+/// stamp of 18 indexed 4 bytes into the IP header and resolved 0.0.0.0.
+#[test]
+fn parse_packet_destination_falls_back_on_wrong_stamp_9900() {
+    let mut untagged = vlan_icmp_reply_frame();
+    untagged.drain(12..16); // strip the 802.1Q tag → 14-byte L2
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, untagged.len())
+        .expect("slice")
+        .copy_from_slice(&untagged);
+    let desc = XdpDesc {
+        addr: 0,
+        len: untagged.len() as u32,
+        options: 0,
+    };
+    let expected = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+
+    // Control: the correct stamp resolves the frame dst.
+    let mut meta = valid_meta();
+    meta.l3_offset = 14;
+    assert_eq!(
+        parse_packet_destination(&area, desc, meta).expect("dst"),
+        expected
+    );
+
+    // Repro: the wrong stamp resolves the SAME dst via the wire fallback.
+    meta.l3_offset = 18;
+    assert_eq!(
+        parse_packet_destination(&area, desc, meta).expect("dst"),
+        expected
+    );
+
+    // Revert-sensitive: a garbage (non-14/18) stamp on a good frame ALSO
+    // derives the dst from the wire. Pre-fix the blind stamp indexed out
+    // of bounds and returned None.
+    meta.l3_offset = 200;
+    assert_eq!(
+        parse_packet_destination(&area, desc, meta).expect("dst"),
+        expected
+    );
+
+    // Double-garbage keeps the old behavior: a truncated frame has no wire
+    // parse, so the stamp fallback fails closed through the length guards.
+    let mut tiny = MmapArea::new(4096).expect("mmap");
+    tiny.slice_mut(0, 10)
+        .expect("slice")
+        .copy_from_slice(&[0u8; 10]);
+    let tiny_desc = XdpDesc {
+        addr: 0,
+        len: 10,
+        options: 0,
+    };
+    meta.l3_offset = 14;
+    assert_eq!(parse_packet_destination(&tiny, tiny_desc, meta), None);
+}

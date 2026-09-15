@@ -183,9 +183,12 @@ fn compute_forwarded_egress_ptb(
     // of `post_transform_inner_mtu` consumes this; cheap enough
     // to always derive.
     let inner_dst = frame_l3_offset(source_frame)
-        .or_else(|| match meta.l3_offset {
-            14 | 18 => Some(meta.l3_offset as usize),
-            _ => None,
+        .or_else(|| {
+            crate::afxdp::frame::nibble_trusted_stamp(
+                source_frame,
+                meta.l3_offset,
+                meta.addr_family,
+            )
         })
         .and_then(|l3| source_frame.get(l3..))
         .and_then(|pkt| {
@@ -205,10 +208,7 @@ fn compute_forwarded_egress_ptb(
     };
     let ptb_meta: UserspaceDpMeta = meta.into();
     let l3 = frame_l3_offset(source_frame).or_else(|| {
-        match meta.l3_offset {
-            14 | 18 => Some(meta.l3_offset as usize),
-            _ => None,
-        }
+        crate::afxdp::frame::nibble_trusted_stamp(source_frame, meta.l3_offset, meta.addr_family)
     });
     if let Some(l3) = l3 {
         let egress_decision =
@@ -1644,9 +1644,8 @@ fn forwarded_tcp_may_need_segmentation(
     // `l3_offset=14` as authoritative falsely flags it as needing TCP
     // segmentation. The segmentation builders already re-derive L3 from
     // the frame, so keep this predicate aligned with them.
-    let l3 = frame_l3_offset(frame).or_else(|| match meta.l3_offset {
-        14 | 18 => Some(meta.l3_offset as usize),
-        _ => None,
+    let l3 = frame_l3_offset(frame).or_else(|| {
+        crate::afxdp::frame::nibble_trusted_stamp(frame, meta.l3_offset, meta.addr_family)
     });
     let Some(l3) = l3 else {
         return false;

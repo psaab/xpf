@@ -9,9 +9,11 @@ use crate::afxdp::PROTO_TCP;
 #[test]
 fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     let mut in_flight_prepared_recycles = FastMap::default();
+    let mut in_flight_untracked_tx = FastSet::default();
 
     remember_prepared_recycle(
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         &PreparedTxRequest {
             offset: 41,
             len: 64,
@@ -29,6 +31,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     );
     remember_prepared_recycle(
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         &PreparedTxRequest {
             offset: 42,
             len: 64,
@@ -46,6 +49,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     );
     remember_prepared_recycle(
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         &PreparedTxRequest {
             offset: 43,
             len: 64,
@@ -64,7 +68,6 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             enqueue_ns: 0,
         },
     );
-
     assert_eq!(in_flight_prepared_recycles.len(), 2);
     assert_eq!(
         in_flight_prepared_recycles.get(&42),
@@ -78,6 +81,12 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
         })
     );
     assert!(!in_flight_prepared_recycles.contains_key(&41));
+    // #9900 F-092 (GPT-2): the FreeTxFrame submit lands in the untracked
+    // ownership set instead — same split, both sides exact.
+    assert_eq!(in_flight_untracked_tx.len(), 1);
+    assert!(in_flight_untracked_tx.contains(&41));
+    assert!(!in_flight_untracked_tx.contains(&42));
+    assert!(!in_flight_untracked_tx.contains(&43));
 }
 
 #[test]
@@ -324,4 +333,42 @@ fn tx_retry_outcome_codes_4971() {
         "#4971: constructing an expected TX retry outcome must not \
          allocate (revert to `Retry(String)` makes this > 0)"
     );
+}
+
+#[test]
+fn cancelled_prepared_foreign_fill_without_sink_parks_masked_base_9900() {
+    // #9900 F-092: a cross-slot Fill recycle with no shared sink parks in
+    // the local free pool masked to its frame BASE — the stored recycle
+    // offset is an RX addr (base + headroom), and planting it verbatim
+    // would submit unaligned TX descs that the completion path must drop.
+    let mut free_tx_frames = VecDeque::new();
+    let mut pending_fill_frames = VecDeque::new();
+
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut free_tx_frames,
+        &mut pending_fill_frames,
+        None,
+        7,
+        PreparedTxRecycle::FillOnSlotWithOffset {
+            slot: 8,
+            offset: 4096 + 256,
+        },
+        4096 + 252,
+    );
+    assert!(pending_fill_frames.is_empty());
+    assert_eq!(free_tx_frames, VecDeque::from([4096]));
+
+    // An already-aligned offset is unchanged (the mask is idempotent).
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut free_tx_frames,
+        &mut pending_fill_frames,
+        None,
+        7,
+        PreparedTxRecycle::FillOnSlotWithOffset {
+            slot: 8,
+            offset: 8192,
+        },
+        8192,
+    );
+    assert_eq!(free_tx_frames, VecDeque::from([4096, 8192]));
 }

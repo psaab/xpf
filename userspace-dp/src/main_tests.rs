@@ -261,7 +261,7 @@ fn queue_planner_filters_non_data_interfaces() {
         ],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 2, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 2, &[], true).expect("plan");
     assert_eq!(bindings.len(), 2);
     assert!(bindings.iter().all(|b| {
         b.interface.starts_with("ge-")
@@ -315,7 +315,7 @@ fn queue_planner_and_plan_key_agree_on_binding_set() {
     let base = mk(99, 1);
 
     // Property 1: the mgmt-zone `ge-*` is NOT planned; only the data iface is.
-    let bindings = replan_queues(Some(&base), 1, &[], true);
+    let bindings = replan_queues(Some(&base), 1, &[], true).expect("plan");
     assert!(
         bindings.iter().all(|b| b.interface == "ge-0-0-1"),
         "mgmt-zone ge-* must be excluded from the plan, got: {:?}",
@@ -333,7 +333,7 @@ fn queue_planner_and_plan_key_agree_on_binding_set() {
          plan key — the hash and planner must share the exclusion contract"
     );
     // ...and the planned set is identical regardless of the mgmt change.
-    let bindings_changed = replan_queues(Some(&mgmt_changed), 1, &[], true);
+    let bindings_changed = replan_queues(Some(&mgmt_changed), 1, &[], true).expect("plan");
     assert_eq!(
         bindings.iter().map(|b| b.interface.clone()).collect::<Vec<_>>(),
         bindings_changed
@@ -392,7 +392,8 @@ fn plan_key_covers_every_replan_queues_input() {
 
     let base = mk("ge-0-0-1", 11, 2);
     let base_key = snapshot_binding_plan_key(&base);
-    let base_layout: Vec<(String, i32, u32)> = replan_queues(Some(&base), 2, &[], true)
+    let base_layout: Vec<(String, i32, u32)> =
+        replan_queues(Some(&base), 2, &[], true).expect("plan")
         .iter()
         .map(|b| (b.interface.clone(), b.ifindex, b.queue_id))
         .collect();
@@ -405,7 +406,7 @@ fn plan_key_covers_every_replan_queues_input() {
         "a candidate linux_name change must bump the plan key (#2916): the \
          same-plan branch would otherwise leave the binding on the old netdev"
     );
-    let name_layout: Vec<String> = replan_queues(Some(&name_changed), 2, &[], true)
+    let name_layout: Vec<String> = replan_queues(Some(&name_changed), 2, &[], true).expect("plan")
         .iter()
         .map(|b| b.interface.clone())
         .collect();
@@ -424,7 +425,7 @@ fn plan_key_covers_every_replan_queues_input() {
          ifindex"
     );
     assert!(
-        replan_queues(Some(&ifindex_changed), 2, &[], true)
+        replan_queues(Some(&ifindex_changed), 2, &[], true).expect("plan")
             .iter()
             .all(|b| b.ifindex == 99),
         "replan_queues must carry the new ifindex onto every binding"
@@ -440,7 +441,7 @@ fn plan_key_covers_every_replan_queues_input() {
     );
     assert_ne!(
         base_layout.len(),
-        replan_queues(Some(&rx_changed), 2, &[], true).len(),
+        replan_queues(Some(&rx_changed), 2, &[], true).expect("plan").len(),
         "replan_queues must emit a different number of bindings when \
          rx_queues changes"
     );
@@ -598,7 +599,7 @@ fn queue_planner_dedups_wan_vlan_child_onto_physical_parent() {
         ..Default::default()
     };
 
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
 
     // The VLAN-child netdevs must NOT be planned as separate candidates.
     assert!(
@@ -671,7 +672,7 @@ fn queue_planner_rekeys_orphan_vlan_child_onto_parent_netdev() {
         ..Default::default()
     };
 
-    let bindings = replan_queues(Some(&snapshot), 2, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 2, &[], true).expect("plan");
     assert!(
         bindings.iter().all(|b| b.interface == "ge-0-0-9"),
         "orphan VLAN child must bind on the parent netdev, not its own \
@@ -736,7 +737,7 @@ fn replan_queues_binds_vlan_unit_on_parent_netdev() {
         ..Default::default()
     };
 
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let bound: std::collections::BTreeSet<&str> =
         bindings.iter().map(|b| b.interface.as_str()).collect();
 
@@ -908,7 +909,7 @@ fn queue_planner_excludes_tunnel_and_local_fabric_ge_interfaces() {
         ],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 1, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 1, &[], true).expect("plan");
     assert_eq!(
         bindings.iter().map(|b| b.interface.clone()).collect::<Vec<_>>(),
         vec!["ge-0-0-7".to_string()],
@@ -956,7 +957,7 @@ fn queue_planner_includes_fabric_parent_interface() {
         }],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 1, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 1, &[], true).expect("plan");
     // Should have 3 bindings: ge-0-0-1, ge-0-0-2, ge-0-0-0 (fabric parent)
     assert_eq!(bindings.len(), 3);
     let fabric_binding = bindings
@@ -996,7 +997,7 @@ fn queue_planner_deduplicates_fabric_parent_already_in_interfaces() {
         }],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 1, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 1, &[], true).expect("plan");
     // ge-0-0-0 appears in both interfaces and fabrics but should only
     // produce one binding.
     assert_eq!(bindings.len(), 1);
@@ -1272,7 +1273,7 @@ fn queue_planner_preserves_existing_state() {
         vec![("ge-0-0-1".to_string(), 1)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    );
+    ).expect("plan");
     if let Some(b0) = bindings.iter().find(|b| b.slot == 0) {
         assert!(b0.registered);
         assert!(b0.armed);
@@ -1306,7 +1307,7 @@ fn queue_planner_ignores_tunnel_netdevices_for_transit() {
         ],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 1, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 1, &[], true).expect("plan");
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].interface, "ge-0-0-2.80");
     assert_eq!(bindings[0].ifindex, 24);
@@ -1331,7 +1332,7 @@ fn queue_planner_preserves_manual_unregistration() {
         vec![("ge-0-0-1".to_string(), 1)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    );
+    ).expect("plan");
     let b0 = bindings.iter().find(|b| b.slot == 0).expect("binding 0");
     assert!(!b0.registered);
     assert!(!b0.armed);
@@ -1364,7 +1365,7 @@ fn queue_planner_keeps_queue_zero_available_for_userspace() {
         ],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 2, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 2, &[], true).expect("plan");
     let q0 = bindings
         .iter()
         .find(|b| b.interface == "ge-0-0-1" && b.queue_id == 0)
@@ -1398,7 +1399,7 @@ fn queue_planner_binds_each_interfaces_own_queue_count_7497() {
         ],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 2, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 2, &[], true).expect("plan");
     // #7497: 4 + 2 = 6, not min(4,2) x 2 = 4. Under the old global-minimum rule
     // ge-0-0-1's queues 2 and 3 were left UNBOUND, and an unbound queue is not
     // idle — the shim takes `drop_degraded_transit` on BINDING_MISSING, so every
@@ -1458,7 +1459,7 @@ fn queue_planner_dedups_physical_and_unit_to_same_netdev() {
         ],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 1, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 1, &[], true).expect("plan");
     // 4 queues x 1 netdev = 4 bindings, NOT 8.
     assert_eq!(
         bindings.len(),
@@ -1810,6 +1811,7 @@ fn apply_snapshot_same_plan_clearing_defer_workers_reconcile_abort_fails_closed_
         snapshot: None,
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
     let state_file = format!(
         "{}/xpf-defer-workers-reconcile-{}.json",
@@ -1943,6 +1945,7 @@ fn apply_snapshot_rejects_unsupported_protocol_version() {
         snapshot: None,
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
     let running = Arc::new(AtomicBool::new(true));
     let state_file = format!(
@@ -2104,6 +2107,7 @@ fn apply_snapshot_same_plan_preserves_persistent_snat_lease_state() {
         snapshot: None,
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     let initial = apply_snapshot_for_test(state.clone(), persistent_snat_apply_snapshot(1));
@@ -2562,7 +2566,7 @@ fn binding_candidate_excludes_secure_tunnel() {
         ..Default::default()
     };
 
-    let bindings = replan_queues(Some(&snapshot), 2, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 2, &[], true).expect("plan");
     assert!(
         !bindings.is_empty(),
         "premise broken: the ordinary data interface must still be planned, \
@@ -2633,8 +2637,8 @@ fn secure_tunnel_adds_nothing_to_the_binding_plan() {
         ..Default::default()
     };
 
-    let got = replan_queues(Some(&with_tunnel), 2, &[], true);
-    let want = replan_queues(Some(&without_tunnel), 2, &[], true);
+    let got = replan_queues(Some(&with_tunnel), 2, &[], true).expect("plan");
+    let want = replan_queues(Some(&without_tunnel), 2, &[], true).expect("plan");
 
     assert!(
         !want.is_empty(),
@@ -2824,16 +2828,16 @@ fn shim_coordinate_ladder(ceiling: u32) -> Vec<u32> {
 fn shim_binding_slot_never_leaves_its_interfaces_row() {
     use shim_binding_index::{BINDING_QUEUES_PER_IFACE as STRIDE, RawRxQueue, binding_slot};
 
-    // The ifindex axis has a real ceiling; the queue axis does not.
-    // `binding_slot` multiplies the ifindex by the stride, so
-    // `ifindex * STRIDE + (STRIDE - 1)` must stay inside `u32` — and
-    // `(2^28 - 1) * 16 + 15` is exactly `u32::MAX`, so this is the largest
-    // ifindex the host can evaluate at all. Above it host and target genuinely
-    // disagree (a debug host build panics on the overflow, the release target
-    // wraps), which is why the axis stops here and why `binding_index.rs` names
-    // that range — and only that range — as uncovered. The queue coordinate is
-    // rejected before the multiply, so its axis runs to `u32::MAX`.
-    const IFINDEX_CEILING: u32 = (1 << 28) - 1;
+    // NEITHER axis has a ceiling (#9900 F-150). The interface-half axis used
+    // to stop at 2^28 - 1 because the plain `u32` multiply overflowed above
+    // it and host and target genuinely disagreed (a debug host build panics
+    // on the overflow, the release target wraps). The checked multiply
+    // resolves what overflows to NO slot, identically on both targets, so the
+    // axis runs to `u32::MAX` like the queue axis and asserts the `None`
+    // above 2^28 - 1 exactly as it asserts exact slots below it. The queue
+    // coordinate is rejected before the multiply, so its axis always ran to
+    // `u32::MAX`.
+    const IFINDEX_CEILING: u32 = u32::MAX;
     let ifindexes = shim_coordinate_ladder(IFINDEX_CEILING);
     let queues = shim_coordinate_ladder(u32::MAX);
 
@@ -2878,7 +2882,7 @@ fn shim_binding_slot_never_leaves_its_interfaces_row() {
 
     for &ifindex in &ifindexes {
         // u64 throughout: the top of the ifindex axis puts `row_start + STRIDE`
-        // one past `u32::MAX`, and the expected value must be computed in a
+        // far past `u32::MAX`, and the expected value must be computed in a
         // width that cannot itself wrap.
         let row_start = u64::from(ifindex) * u64::from(STRIDE);
         for &q in &queues {
@@ -2891,6 +2895,18 @@ fn shim_binding_slot_never_leaves_its_interfaces_row() {
                      clamping it back into range is the mis-steer in another form, and indexing \
                      with it addresses ifindex {}'s row",
                     u64::from(ifindex) + u64::from(q) / u64::from(STRIDE),
+                );
+                continue;
+            }
+            // #9900 F-150: above 2^28 - 1 the composed index overflows `u32`
+            // and must resolve to NO binding — a wrap would land on another
+            // interface's row, which is the defect this ladder exists to catch.
+            let exact = row_start + u64::from(q);
+            if exact > u64::from(u32::MAX) {
+                assert_eq!(
+                    got, None,
+                    "#9900: ifindex {ifindex} x queue {q} composes {exact}, past `u32::MAX`, \
+                     and must fail closed as a clean miss, not wrap onto another row",
                 );
                 continue;
             }
@@ -3723,9 +3739,10 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         "if", "rx_queue", ".", "0", ">", "=", "BINDING_QUEUES_PER_IFACE", "{",
         "return", "None", ";",
         "}",
-        "Some", "(",
-        "ingress_ifindex", "*", "BINDING_QUEUES_PER_IFACE", "+", "rx_queue", ".", "0",
-        ")",
+        // #9900 F-150: the tail is a checked multiply, not a wrapping one —
+        // an interface id at or above 2^28 resolves to no slot.
+        "ingress_ifindex", ".", "checked_mul", "(", "BINDING_QUEUES_PER_IFACE", ")",
+        "?", ".", "checked_add", "(", "rx_queue", ".", "0", ")",
         "}",
     ];
     let slot_body = seq(BINDING_SLOT_BODY);
@@ -4354,7 +4371,8 @@ fn no_plan_can_mint_a_worker_id_beyond_the_nat_holder_mask_6211_f2() {
                 ifidx.insert(n.clone(), (i + 2) as i32);
                 cands.push((n, rx));
             }
-            let plan = replan_bindings_from_candidates(workers, &[], cands, ifidx, true);
+            let plan = replan_bindings_from_candidates(workers, &[], cands, ifidx, true)
+                .expect("plan");
             for b in &plan {
                 assert!(
                     b.worker_id < crate::nat::MAX_NAT_HOLDER_WORKERS,
@@ -4399,7 +4417,7 @@ fn per_interface_queue_count_is_capped_at_the_stride_7497() {
         vec![("ge-0-0-1".to_string(), 200)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    );
+    ).expect("plan");
     assert_eq!(
         plan.len(),
         BINDING_QUEUES_PER_IFACE,
@@ -4436,7 +4454,8 @@ fn worker_knob_still_caps_worker_groups_7497() {
                 ifidx.insert(n.clone(), (i + 2) as i32);
                 cands.push((n, rx));
             }
-            let plan = replan_bindings_from_candidates(workers, &[], cands, ifidx, true);
+            let plan = replan_bindings_from_candidates(workers, &[], cands, ifidx, true)
+                .expect("plan");
             let ids: BTreeSet<u32> = plan.iter().map(|b| b.worker_id).collect();
             assert_eq!(
                 ids.len(),
@@ -4466,7 +4485,7 @@ fn replan_accepts_huge_worker_count_on_a_small_queue_nic_6211_f2() {
         vec![("ge-0-0-1".to_string(), 16)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    );
+    ).expect("plan");
     assert_eq!(
         bindings.len(),
         16,
@@ -4578,7 +4597,7 @@ fn orphan_vlan_child_cannot_readmit_its_refused_parent() {
         interfaces: vec![lan.clone(), xfrmi, sibling],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 4, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 4, &[], true).expect("plan");
 
     assert!(
         bindings.iter().all(|b| b.interface != "st10"),
@@ -4695,7 +4714,7 @@ fn orphan_vlan_child_still_rekeys_onto_an_unzoned_parent() {
         interfaces: vec![parent, child],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let planned = bindings
         .iter()
         .map(|b| b.interface.clone())
@@ -4810,7 +4829,7 @@ fn a_netdev_with_a_bindable_owner_is_not_refused() {
         interfaces: vec![base, tunnel_unit, vlan_child],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let planned = bindings
         .iter()
         .map(|b| b.interface.clone())
@@ -4925,7 +4944,7 @@ fn fabric_loop_cannot_readmit_a_refused_member_netdev() {
         }],
         ..Default::default()
     };
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let planned = bindings
         .iter()
         .map(|b| b.interface.clone())
@@ -5031,7 +5050,7 @@ fn ownerless_fabric_parent_is_refused() {
         "premise: the ownerless case needs NO interface row for the fabric parent"
     );
 
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let planned = bindings
         .iter()
         .map(|b| b.interface.clone())
@@ -5090,7 +5109,7 @@ fn ownerless_fabric_parent_is_refused() {
         }],
         ..Default::default()
     };
-    let planned = replan_queues(Some(&bindable), 6, &[], true)
+    let planned = replan_queues(Some(&bindable), 6, &[], true).expect("plan")
         .iter()
         .map(|b| b.interface.clone())
         .collect::<std::collections::BTreeSet<_>>();
@@ -5180,7 +5199,7 @@ fn fabric_vote_cannot_overturn_an_owning_row() {
         ..Default::default()
     };
 
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let planned = bindings
         .iter()
         .map(|b| b.interface.clone())
@@ -5237,6 +5256,7 @@ fn apply_snapshot_rejects_a_newer_protocol_version_too() {
         snapshot: None,
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
     let running = Arc::new(AtomicBool::new(true));
     let state_file = format!(
@@ -5357,7 +5377,7 @@ fn zero_ifindex_owner_row_still_refuses_the_fabric_parent() {
         ..Default::default()
     };
 
-    let bindings = replan_queues(Some(&snapshot), 6, &[], true);
+    let bindings = replan_queues(Some(&snapshot), 6, &[], true).expect("plan");
     let planned = bindings
         .iter()
         .map(|b| b.interface.clone())
@@ -5427,7 +5447,7 @@ fn expansion_arms_new_slots_from_the_global_state_6749() {
             vec![("ge-0-0-1".to_string(), 1), ("ge-0-0-2".to_string(), 1)],
             ifindex_by_name,
             forwarding_armed,
-        )
+        ).expect("plan")
     }
 
     let armed = expand(true);
@@ -5487,7 +5507,7 @@ fn expansion_does_not_overwrite_an_existing_slots_arm_state_6749() {
         vec![("ge-0-0-1".to_string(), 1), ("ge-0-0-2".to_string(), 1)],
         ifindex_by_name,
         true,
-    );
+    ).expect("plan");
     assert!(
         !out[0].armed,
         "the pre-existing mid-bringup slot was declared armed by the replan; \
@@ -5726,7 +5746,8 @@ fn plan_exceeding_binding_slot_capacity_is_refused_7497() {
     // refusing safe boxes, which is the failure direction a one-sided test
     // cannot see.
     let (candidates, ifindex_by_name) = slot_cap_candidates_7497(exact, stride);
-    let at_cap = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    let at_cap =
+        replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true).expect("plan");
     assert_eq!(
         at_cap.len(),
         MAX_BINDING_SLOTS as usize,
@@ -5743,12 +5764,89 @@ fn plan_exceeding_binding_slot_capacity_is_refused_7497() {
     let (candidates, ifindex_by_name) = slot_cap_candidates_7497(exact + 1, stride);
     let over = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
     assert!(
-        over.is_empty(),
+        over.is_err(),
         "a plan of {} bindings exceeds MAX_BINDING_SLOTS ({}) and must be refused \
-         whole, not truncated — got {} bindings",
+         whole as Err, not truncated and not an empty Ok",
         (exact + 1) * stride,
         MAX_BINDING_SLOTS,
-        over.len()
+    );
+}
+
+/// One interface's candidates with a caller-chosen ifindex, for the
+/// #9900 F-150 ceiling cells below.
+fn ifindex_ceiling_candidates_9900(
+    ifindex: i32,
+) -> (Vec<(String, usize)>, BTreeMap<String, i32>) {
+    let mut ifindex_by_name = BTreeMap::new();
+    ifindex_by_name.insert("ge-0-0-0".to_string(), ifindex);
+    (vec![("ge-0-0-0".to_string(), 2)], ifindex_by_name)
+}
+
+/// A plan naming an ifindex at or above the addressable ceiling is REFUSED
+/// whole, not minted into binding-missing queues.
+///
+/// The fixture straddles the boundary: 65535 plans (registered, armed), 65536
+/// refuses. A fixture that only tested a wildly oversized ifindex would stay
+/// green against an off-by-one in the comparison.
+#[test]
+fn plan_with_wild_ifindex_is_refused_9900() {
+    use crate::server::helpers::{MAX_BINDING_IFINDEX, replan_bindings_from_candidates};
+
+    // Boundary, admitted side: the largest plannable ifindex still plans.
+    let (candidates, ifindex_by_name) = ifindex_ceiling_candidates_9900(MAX_BINDING_IFINDEX - 1);
+    let admitted =
+        replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true).expect("plan");
+    assert_eq!(admitted.len(), 2, "one interface x two queues must plan");
+    assert!(
+        admitted.iter().all(|b| b.registered && b.armed),
+        "an admitted boundary plan must be fully usable, not degraded"
+    );
+
+    // Boundary, refused side: the ceiling itself refuses whole.
+    let (candidates, ifindex_by_name) = ifindex_ceiling_candidates_9900(MAX_BINDING_IFINDEX);
+    let refused = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    assert!(
+        refused.is_err(),
+        "ifindex {MAX_BINDING_IFINDEX} is past the addressable rows and must be refused whole as Err"
+    );
+
+    // One wild interface poisons the WHOLE plan, not just its own rows — a
+    // partial plan is an availability failure indistinguishable from healthy.
+    let candidates = vec![("ge-0-0-0".to_string(), 2), ("ge-0-0-1".to_string(), 2)];
+    let mut ifindex_by_name = BTreeMap::new();
+    ifindex_by_name.insert("ge-0-0-0".to_string(), 7);
+    ifindex_by_name.insert("ge-0-0-1".to_string(), 100_000);
+    let refused = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    assert!(
+        refused.is_err(),
+        "one wild ifindex must refuse the whole plan as Err, including the ordinary interface"
+    );
+}
+
+/// Control: ordinary ifindexes (and the missing/non-positive shapes the
+/// per-binding degrade owns) plan exactly as before — the refusal only fires
+/// on a resolved wild value.
+#[test]
+fn plan_with_ordinary_ifindexes_unchanged_9900() {
+    use crate::server::helpers::replan_bindings_from_candidates;
+
+    let candidates = vec![
+        ("ge-0-0-0".to_string(), 2),
+        ("ge-0-0-1".to_string(), 4),
+        ("ge-0-0-9".to_string(), 1),
+    ];
+    let mut ifindex_by_name = BTreeMap::new();
+    ifindex_by_name.insert("ge-0-0-0".to_string(), 7);
+    ifindex_by_name.insert("ge-0-0-1".to_string(), 0);
+    // ge-0-0-9 has no entry at all: unknown ifindex.
+    let plan =
+        replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true).expect("plan");
+    assert_eq!(plan.len(), 7, "2 + 4 + 1 rows must all mint");
+    let usable: Vec<_> = plan.iter().filter(|b| b.registered).collect();
+    assert_eq!(usable.len(), 2, "only the resolved interface registers");
+    assert!(
+        usable.iter().all(|b| b.interface == "ge-0-0-0"),
+        "the unresolved rows degrade per-binding instead of refusing"
     );
 }
 
@@ -5763,7 +5861,8 @@ fn every_minted_slot_is_addressable_7497() {
 
     for (ifaces, rx) in [(1usize, 1usize), (3, 6), (17, 16), (256, 16)] {
         let (candidates, ifindex_by_name) = slot_cap_candidates_7497(ifaces, rx);
-        let plan = replan_bindings_from_candidates(6, &[], candidates, ifindex_by_name, true);
+        let plan = replan_bindings_from_candidates(6, &[], candidates, ifindex_by_name, true)
+            .expect("plan");
         for b in &plan {
             assert!(
                 b.slot < MAX_BINDING_SLOTS,
@@ -5811,7 +5910,7 @@ fn carry_forward_follows_binding_identity_not_slot_7497() {
         vec![("ge-0-0-1".to_string(), 4), ("ge-0-0-2".to_string(), 2)],
         ifidx.clone(),
         true,
-    );
+    ).expect("plan");
     assert_eq!(gen1.len(), 6, "4 + 2 rows");
     for b in gen1.iter_mut() {
         b.rx_packets = tag(&b.interface, b.queue_id);
@@ -5835,7 +5934,7 @@ fn carry_forward_follows_binding_identity_not_slot_7497() {
         vec![("ge-0-0-1".to_string(), 4), ("ge-0-0-2".to_string(), 4)],
         ifidx,
         true,
-    );
+    ).expect("plan");
     assert_eq!(gen2.len(), 8, "4 + 4 rows after B grows");
 
     // The reshuffle actually happened — otherwise the two keyings agree and this

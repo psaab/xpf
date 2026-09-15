@@ -458,9 +458,12 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
     // endpoint.
     let inner_dst = decision.nat.rewrite_dst.or_else(|| {
         frame_l3_offset(inner_frame)
-            .or_else(|| match inner_l3_offset {
-                14 | 18 => Some(inner_l3_offset as usize),
-                _ => None,
+            .or_else(|| {
+                crate::afxdp::frame::nibble_trusted_stamp(
+                    inner_frame,
+                    inner_l3_offset,
+                    inner_addr_family,
+                )
             })
             .and_then(|l3| inner_frame.get(l3..))
             .and_then(|pkt| crate::afxdp::gre::inner_dst_ip(pkt, inner_addr_family))
@@ -491,11 +494,16 @@ pub(super) fn wg_encap_frame(
     }
     let engine = forwarding.wg_engines.get(&id)?;
 
-    // Extract the inner IP packet (strip L2).
-    let inner_l3 = match frame_l3_offset(inner_frame) {
-        Some(offset) => offset,
-        None => inner_meta.l3_offset as usize,
-    };
+    // Extract the inner IP packet (strip L2). The stamp fallback is
+    // nibble-gated (SPARK-m3): an unverified stamp must not select the
+    // inner packet the encap path authenticates-and-sends.
+    let inner_l3 = frame_l3_offset(inner_frame).or_else(|| {
+        crate::afxdp::frame::nibble_trusted_stamp(
+            inner_frame,
+            inner_meta.l3_offset,
+            inner_meta.addr_family,
+        )
+    })?;
     let inner_packet = inner_frame.get(inner_l3..)?;
     let inner_len = crate::afxdp::gre::packet_trimmed_len(inner_packet, inner_meta.addr_family)?;
     let inner_packet = &inner_packet[..inner_len];

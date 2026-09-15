@@ -18,6 +18,7 @@ use crate::afxdp;
 use crate::protocol::{BindingCountersSnapshot, ProcessStatus, UserspaceCapabilities};
 use crate::server::ServerState;
 use chrono::Utc;
+use std::sync::atomic::Ordering;
 
 pub(crate) fn refresh_status(state: &mut ServerState) {
     state.afxdp.refresh_bindings(&mut state.status.bindings);
@@ -184,6 +185,24 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.peer_delete_refused_local_owned_total();
     state.status.shared_session_poison_recoveries =
         state.afxdp.shared_session_poison_recoveries_total();
+    // #9900 F-091/F-092: TX completion skew (over-delivery), invalid
+    // completions dropped, duplicate completions dropped, and invalid fill
+    // offsets dropped. All four are kernel-fault signals: zero in a healthy
+    // dataplane.
+    state.status.tx_completion_skew = state.afxdp.tx_completion_skew_total();
+    state.status.tx_completion_invalid = state.afxdp.tx_completion_invalid_total();
+    state.status.tx_completion_duplicate = state.afxdp.tx_completion_duplicate_total();
+    state.status.fill_invalid = state.afxdp.fill_invalid_total();
+    // #9900 F-093: fan-out legs shed to dead workers.
+    state.status.worker_command_queue_shed = state.afxdp.worker_command_queue_shed_total();
+    // #9900 F-094 (m2): request-path fault counters, read directly (server
+    // statics, not Coordinator state — same direct-read precedent as the
+    // io_uring/neighbor/source_nat counters above). Any nonzero value is a
+    // bug report: the daemon quarantined and restarted for it.
+    state.status.server_state_poison_recoveries =
+        crate::server::helpers::guards::SERVER_STATE_POISON_RECOVERIES.load(Ordering::Relaxed);
+    state.status.server_handler_panics =
+        crate::server::helpers::guards::SERVER_HANDLER_PANICS.load(Ordering::Relaxed);
     // #7398: the three counters below were computed, unit-tested and never
     // assigned into ProcessStatus, so they reached no operator through status,
     // gRPC or Prometheus. They are the queue the UNSURFACED allowlist below

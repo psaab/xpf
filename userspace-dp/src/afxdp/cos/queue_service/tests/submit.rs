@@ -31,10 +31,12 @@ fn settle_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
     let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
     let mut scratch_local_tx: Vec<(u64, TxRequest)> =
         vec![t7_local_scratch_entry(64, 4), t7_local_scratch_entry(128, 4)];
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (packets, bytes) = settle_exact_local_scratch_submission_flow_fair(
         None,
         &mut free_tx_frames,
         &mut scratch_local_tx,
+        &mut in_flight_untracked_tx,
         0,
         0,
     );

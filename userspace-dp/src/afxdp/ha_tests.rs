@@ -6208,3 +6208,60 @@ fn an_ha_import_claims_its_steering_row_as_the_coordinator_9560() {
          window"
     );
 }
+
+/// #9900 F-093 (GPT-7): RG-activation fan-out collects LIVE queues only —
+/// the reverse prewarm pushes to every queue it is given, so handing it a
+/// dead worker's queue would feed (and eventually overflow-misattribute)
+/// a queue no thread drains.
+#[test]
+fn activation_fan_out_collects_live_queues_only_9900() {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let _shed_lock = crate::afxdp::worker_queue::SHED_TEST_LOCK
+        .lock()
+        .expect("shed test lock");
+
+    fn fake_handle() -> crate::afxdp::types::WorkerHandle {
+        crate::afxdp::types::WorkerHandle {
+            stop: Arc::new(AtomicBool::new(false)),
+            heartbeat: Arc::new(AtomicU64::new(0)),
+            commands: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            session_export_ack: Arc::new(AtomicU64::new(0)),
+            cos_status: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            runtime_atomics: Arc::new(
+                crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new(),
+            ),
+            cold_path_atomics: Arc::new(
+                crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new(),
+            ),
+        }
+    }
+
+    let live = Arc::new(crate::afxdp::coordinator::WorkerRuntimeRecord::for_test(
+        fake_handle(),
+    ));
+    let dead = Arc::new(crate::afxdp::coordinator::WorkerRuntimeRecord::for_test(
+        fake_handle(),
+    ));
+    dead.handle
+        .runtime_atomics
+        .dead
+        .store(true, Ordering::Relaxed);
+    let records: BTreeMap<u32, Arc<crate::afxdp::coordinator::WorkerRuntimeRecord>> =
+        BTreeMap::from([(5u32, dead), (6u32, live.clone())]);
+
+    let shed_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
+    let live_commands = crate::afxdp::Coordinator::collect_live_worker_commands(&records);
+    assert_eq!(live_commands.len(), 1, "only the live queue is collected");
+    assert!(
+        Arc::ptr_eq(&live_commands[0], &live.handle.commands),
+        "the collected queue must be the live worker's"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed),
+        shed_before + 2,
+        "one dead worker sheds two fan-outs (Refresh + prewarm)"
+    );
+}

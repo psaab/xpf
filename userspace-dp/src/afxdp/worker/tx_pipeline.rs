@@ -68,6 +68,14 @@ pub(crate) struct WorkerTxPipeline {
     pub(crate) outstanding_tx: u32,
     pub(crate) pending_fill_frames: VecDeque<u64>,
     pub(crate) in_flight_prepared_recycles: FastMap<u64, PreparedTxRecycle>,
+    /// #9900 F-092 (GPT-2): ownership set for UNTRACKED TX submits (local-TX
+    /// + `FreeTxFrame` prepared). Inserted at submit-settle for the
+    /// kernel-accepted prefix, removed by the completion else-branch; a
+    /// completion for an offset NOT in the set is a duplicate, stale, or
+    /// never-submitted fault and is dropped + counted instead of
+    /// double-pushed into the free pool. (Tracked `Fill*` submits already
+    /// carry exact ownership in `in_flight_prepared_recycles`.)
+    pub(crate) in_flight_untracked_tx: FastSet<u64>,
     /// #812 per-UMEM-frame submit timestamp sidecar. Indexed by
     /// `offset >> UMEM_FRAME_SHIFT`. Pre-allocated to total UMEM
     /// frames at `BindingWorker::create` so the hot-path stamp
@@ -109,6 +117,7 @@ impl WorkerTxPipeline {
             outstanding_tx: 0,
             pending_fill_frames: VecDeque::new(),
             in_flight_prepared_recycles: FastMap::default(),
+            in_flight_untracked_tx: FastSet::default(),
             tx_submit_ns: Box::new([]),
         }
     }

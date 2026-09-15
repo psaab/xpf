@@ -211,6 +211,7 @@ pub(super) fn pbr_reject_tx_pipeline(max_pending_tx: usize) -> crate::afxdp::wor
         outstanding_tx: 0,
         pending_fill_frames: std::collections::VecDeque::new(),
         in_flight_prepared_recycles: FastMap::default(),
+        in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
     }
 }

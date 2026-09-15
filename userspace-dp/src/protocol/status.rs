@@ -461,6 +461,34 @@ pub(crate) struct ProcessStatus {
     pub session_delete_replica_dropped: u64,
     #[serde(rename = "session_delete_replica_drop_repaired", default)]
     pub session_delete_replica_drop_repaired: u64,
+    /// #9900 F-092: TX completions reaped beyond `outstanding_tx` (including
+    /// completions drained at gauge 0, which are definitionally stale).
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "tx_completion_skew", default)]
+    pub tx_completion_skew: u64,
+    /// #9900 F-092: reaped completion offsets dropped instead of recycled
+    /// (not an aligned in-region frame base). Additive / defaulted.
+    #[serde(rename = "tx_completion_invalid", default)]
+    pub tx_completion_invalid: u64,
+    /// #9900 F-092 (GPT-2): aligned in-region completions dropped for lack
+    /// of submit ownership (duplicate/stale). Additive / defaulted.
+    #[serde(rename = "tx_completion_duplicate", default)]
+    pub tx_completion_duplicate: u64,
+    /// #9900 F-091/F-092: fill-ring offsets dropped instead of submitted.
+    /// Additive / defaulted.
+    #[serde(rename = "fill_invalid", default)]
+    pub fill_invalid: u64,
+    /// #9900 F-093: worker commands shed to dead workers. Additive / defaulted.
+    #[serde(rename = "worker_command_queue_shed", default)]
+    pub worker_command_queue_shed: u64,
+    /// #9900 F-094 (m2): `ServerState` mutex poison recoveries (each one
+    /// quarantined the daemon). Additive / defaulted.
+    #[serde(rename = "server_state_poison_recoveries", default)]
+    pub server_state_poison_recoveries: u64,
+    /// #9900 F-094 (m2): request-handler panics contained per-connection
+    /// (each one quarantined + restarted). Additive / defaulted.
+    #[serde(rename = "server_handler_panics", default)]
+    pub server_handler_panics: u64,
     /// #9048: peer `DeleteSynced` commands REFUSED because the key named a
     /// LIVE LOCAL session this node is actively forwarding for — the
     /// delete-side mirror of the install-side clobber guard in

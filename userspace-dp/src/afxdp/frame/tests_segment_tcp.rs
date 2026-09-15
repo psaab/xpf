@@ -28,7 +28,9 @@ fn segment_forwarded_tcp_frames_splits_ipv6_snat_payload_by_mtu() {
         0,
         0x86dd,
     );
-    let tcp_payload_len = 4096usize;
+    // #9900: fits one UMEM frame (headers + 4000 <= 4096) — the slicer refuses
+    // cross-frame spans, and no kernel descriptor can deliver one anyway.
+    let tcp_payload_len = 4000usize;
     let plen = (20 + tcp_payload_len) as u16;
     frame.extend_from_slice(&[
         0x60,
@@ -141,7 +143,7 @@ fn segment_forwarded_tcp_frames_repairs_ipv6_tcp_ports_when_metadata_disagrees()
     let dst_ip = "2001:559:8585:80::200".parse::<Ipv6Addr>().unwrap();
     let src_port = 38276u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 4096usize;
+    let tcp_payload_len = 4000usize;
     let plen = (20 + tcp_payload_len) as u16;
     let mut frame = Vec::new();
     write_eth_header(
@@ -246,7 +248,7 @@ fn segment_forwarded_tcp_frames_prefers_expected_ipv6_ports_over_wrong_live_port
     let dst_ip = "2001:559:8585:80::200".parse::<Ipv6Addr>().unwrap();
     let src_port = 42566u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 4096usize;
+    let tcp_payload_len = 4000usize;
     let plen = (20 + tcp_payload_len) as u16;
     let mut frame = Vec::new();
     write_eth_header(
@@ -352,7 +354,7 @@ fn segment_forwarded_tcp_frames_repairs_wrong_ipv6_frame_ports_from_expected_tup
     let expected_src_port = 36394u16;
     let wrong_src_port = 1025u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 4096usize;
+    let tcp_payload_len = 4000usize;
     let plen = (20 + tcp_payload_len) as u16;
     let mut frame = Vec::new();
     write_eth_header(
@@ -723,7 +725,7 @@ fn segment_forwarded_tcp_frames_keeps_ipv4_tcp_ports_after_vlan_snat() {
     let dst_ip = Ipv4Addr::new(172, 16, 80, 200);
     let src_port = 47308u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 30_408usize;
+    let tcp_payload_len = 4000usize;
     let tcp_header_len = 32usize;
     let total_len = (20 + tcp_header_len + tcp_payload_len) as u16;
 
@@ -986,7 +988,7 @@ fn segment_forwarded_tcp_frames_keeps_ipv4_snat_inside_native_gre() {
     let snat_ip = Ipv4Addr::new(10, 255, 192, 42);
     let src_port = 47308u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 30_408usize;
+    let tcp_payload_len = 4000usize;
     let tcp_header_len = 32usize;
     let total_len = (20 + tcp_header_len + tcp_payload_len) as u16;
 
@@ -1118,7 +1120,7 @@ fn segment_forwarded_tcp_frames_refuses_first_ipv4_fragment() {
     let dst_ip = Ipv4Addr::new(172, 16, 80, 200);
     let src_port = 47308u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 4096usize;
+    let tcp_payload_len = 4000usize;
     let tcp_header_len = 20usize;
     let total_len = (20 + tcp_header_len + tcp_payload_len) as u16;
 
@@ -1235,7 +1237,7 @@ fn segment_forwarded_tcp_frames_refuses_ipv6_fragment_header() {
     let dst_ip = "2001:559:8585:80::200".parse::<Ipv6Addr>().unwrap();
     let src_port = 54688u16;
     let dst_port = 5201u16;
-    let tcp_payload_len = 4096usize;
+    let tcp_payload_len = 4000usize;
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
@@ -1649,4 +1651,52 @@ fn segments_rebase_the_urgent_pointer_5191() {
     // reaches one of them would pass while the other is broken.
     assert_eq!(kept, 2, "segments 0 and 1 keep URG (got {kept})");
     assert!(cleared >= 1, "at least one later segment clears URG");
+}
+
+#[test]
+fn segment_forwarded_tcp_frames_refuses_cross_frame_span_9900() {
+    // #9900 F-091: a descriptor spanning the frame boundary fails closed at
+    // the segment entry (the slicer refuses the span) instead of segmenting
+    // the adjacent frame's bytes.
+    let area = MmapArea::new(8192).expect("mmap");
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        ..UserspaceDpMeta::default()
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+    };
+    let forwarding = ForwardingState::default();
+    assert!(
+        segment_forwarded_tcp_frames(
+            &area,
+            XdpDesc {
+                addr: 0,
+                len: 5000,
+                options: 0
+            },
+            meta,
+            &decision,
+            &forwarding,
+            None,
+        )
+        .is_none()
+    );
 }

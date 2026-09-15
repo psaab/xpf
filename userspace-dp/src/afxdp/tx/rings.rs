@@ -3,27 +3,90 @@
 // `Ordering::Relaxed`.
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::PreparedTxRecycle;
 use crate::afxdp::worker::{BindingWorker, WorkerTelemetry};
 use crate::afxdp::{
-    FILL_BATCH_SIZE, FILL_WAKE_SAFETY_INTERVAL_NS,
-    RX_WAKE_IDLE_POLLS, RX_WAKE_MIN_INTERVAL_NS,
-    TX_WAKE_MIN_INTERVAL_NS, XskBindMode,
+    FILL_BATCH_SIZE, FILL_WAKE_SAFETY_INTERVAL_NS, RX_WAKE_IDLE_POLLS, RX_WAKE_MIN_INTERVAL_NS,
+    TX_WAKE_MIN_INTERVAL_NS, UMEM_FRAME_SIZE, XskBindMode,
 };
 
 use super::stats::{record_kick_latency, record_tx_completions_with_stamp};
 use super::update_binding_debug_state;
 
+/// #9900 F-092: TX completions reaped beyond `outstanding_tx` (including
+/// completions drained at gauge 0, which are definitionally stale). The old
+/// `saturating_sub` hid this skew; the counter surfaces it.
+pub(in crate::afxdp) static TX_COMPLETION_SKEW_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// #9900 F-092: reaped completion offsets dropped instead of recycled (not an
+/// aligned in-region frame base).
+pub(in crate::afxdp) static TX_COMPLETION_INVALID_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// #9900 F-091/F-092: fill-ring offsets dropped instead of submitted (frame
+/// base outside the owned region — the kernel masks to base, so the remainder
+/// is never the reason).
+pub(in crate::afxdp) static FILL_INVALID_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// #9900 F-092 (GPT-2): aligned in-region completions dropped because the
+/// offset has no untracked-submit ownership — a duplicate or stale delivery
+/// (or a tracked completion re-delivered after its recycle entry was
+/// consumed). Recycling any of these would double-push the free pool.
+pub(in crate::afxdp) static TX_COMPLETION_DUPLICATE_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Byte length of this binding's UMEM region (the range every offset it
+/// recycles or submits must sit in). This is the REGION count — on shared
+/// UMEM it exceeds the binding's own frame count, and shared-pool offsets
+/// above the binding's sidecar are legitimate here.
+#[inline]
+fn umem_region_len(binding: &BindingWorker) -> u64 {
+    (binding.umem.total_frames() as u64) * (UMEM_FRAME_SIZE as u64)
+}
+
+/// #9900 F-092: whether a completion offset may return to the TX free pool.
+/// Untracked completions (no `in_flight_prepared_recycles` entry) are local-TX
+/// and `FreeTxFrame` submits, which are aligned pool pops — so an unaligned
+/// or out-of-region offset is a kernel fault, not a frame, and must be
+/// dropped. (Unaligned in-place submits always pair with a `Fill*` recycle
+/// and take the tracked path instead.)
+#[inline]
+fn completion_offset_returnable_to_free_pool(offset: u64, region_len: u64) -> bool {
+    offset % (UMEM_FRAME_SIZE as u64) == 0 && offset < region_len
+}
+
+/// #9900 F-091/F-092: whether a fill-ring offset may be submitted to the
+/// kernel. The kernel masks fill addrs to the chunk base (`xp_check_aligned`
+/// in `net/xdp/xsk_buff_pool.c`) and indexes the chunk by it, so ANY
+/// in-region offset submits the same frame — only the frame BASE must be
+/// owned (in-region). Legitimate shapes are bases (initial fill) and
+/// post-headroom RX addrs (steady-state recycles at base + 512, which is
+/// `UMEM_HEADROOM` + `XDP_PACKET_HEADROOM`: the kernel sums the configured
+/// frame headroom with its own 256 — `xsk_pool_get_headroom` — and hands
+/// back `xdp.data`, NOT the chunk base). Constraining the intra-frame
+/// remainder here would discard ordinary native RX and starve reception.
+#[inline]
+fn fill_offset_submittable(offset: u64, region_len: u64) -> bool {
+    (offset & !((UMEM_FRAME_SIZE as u64) - 1)) < region_len
+}
+
+/// #9900 F-092: fold a reap batch into the gauge, counting over-delivery
+/// instead of hiding it. Returns `(new_gauge, skew_delta)`; the caller adds
+/// the delta to `TX_COMPLETION_SKEW_TOTAL`.
+#[inline]
+fn account_tx_completions(outstanding_tx: u32, reaped: u32) -> (u32, u64) {
+    match outstanding_tx.checked_sub(reaped) {
+        Some(left) => (left, 0),
+        None => (0, (reaped - outstanding_tx) as u64),
+    }
+}
+
 pub(in crate::afxdp) fn reap_tx_completions(
     binding: &mut BindingWorker,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> u32 {
-    if binding.tx_pipeline.outstanding_tx == 0 {
-        return 0;
-    }
+    // #9900 F-092: NO `outstanding_tx == 0` early-return — it hid skew
+    // permanently (a completion ring with entries at gauge 0 never drained).
+    // The `available == 0 → None` fast path below keeps the idle cost at one
+    // shared-memory read.
     let Some(available) = record_tx_completion_ring_available_for_reap(
         &mut binding.telemetry,
         binding.xsk.device.available(),
@@ -45,22 +108,41 @@ pub(in crate::afxdp) fn reap_tx_completions(
     // batch = ~0.23 ns/pkt at the post-#920 batch of 64;
     // ~15 ns/pkt on the `reaped == 1` partial-batch worst case —
     // same shape as the submit-stamp cost analysis in plan §3.4).
-    let ts_completion = monotonic_nanos();
-    // #812: delegate the per-offset fold to the shared helper so
-    // tests exercising `record_tx_completions_with_stamp` cover the
-    // exact production algorithm — NOT a test-only fake. See unit
-    // pins under `#[cfg(test)]` below.
-    record_tx_completions_with_stamp(
-        &mut binding.tx_pipeline.tx_submit_ns,
-        &binding.scratch.scratch_completed_offsets,
-        ts_completion,
-        &binding.live.owner_profile_owner,
-    );
-    for i in 0..binding.scratch.scratch_completed_offsets.len() {
-        let offset = binding.scratch.scratch_completed_offsets[i];
-        recycle_completed_tx_offset(binding, shared_recycles, offset);
+    // #9900 F-092: at gauge 0 every completion is definitionally stale — all
+    // six submit sites bump the gauge and the reap decrement is the only
+    // drain — so the ring is drained WITHOUT recycling or sidecar folding.
+    // Recycling here would double-push a frame the pool already holds.
+    let stale_drain = binding.tx_pipeline.outstanding_tx == 0;
+    if !stale_drain {
+        let ts_completion = monotonic_nanos();
+        // #812: delegate the per-offset fold to the shared helper so
+        // tests exercising `record_tx_completions_with_stamp` cover the
+        // exact production algorithm — NOT a test-only fake. See unit
+        // pins under `#[cfg(test)]` below.
+        record_tx_completions_with_stamp(
+            &mut binding.tx_pipeline.tx_submit_ns,
+            &binding.scratch.scratch_completed_offsets,
+            ts_completion,
+            &binding.live.owner_profile_owner,
+        );
+        for i in 0..binding.scratch.scratch_completed_offsets.len() {
+            let offset = binding.scratch.scratch_completed_offsets[i];
+            recycle_completed_tx_offset(binding, shared_recycles, offset);
+        }
     }
-    binding.tx_pipeline.outstanding_tx = binding.tx_pipeline.outstanding_tx.saturating_sub(reaped);
+    // #9900 F-092: count over-delivery instead of saturating it away. The
+    // `reaped > outstanding > 0` residual (a bogus offset inside an otherwise
+    // legitimate batch) still recycles after range/align filtering — the
+    // batch members are indistinguishable without an ownership bitmap.
+    let outstanding_before = binding.tx_pipeline.outstanding_tx;
+    let (gauge, skew) = account_tx_completions(outstanding_before, reaped);
+    binding.tx_pipeline.outstanding_tx = gauge;
+    if skew != 0 && TX_COMPLETION_SKEW_TOTAL.fetch_add(skew, Ordering::Relaxed) < 10 {
+        eprintln!(
+            "TX_COMPLETION_SKEW: slot={} if={} q={} reaped={} outstanding_before={} (kernel over-delivered completions)",
+            binding.slot, binding.ifindex, binding.queue_id, reaped, outstanding_before,
+        );
+    }
     binding.telemetry.dbg_completions_reaped += reaped as u64;
     binding
         .live
@@ -100,6 +182,18 @@ pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: 
         let Some(offset) = binding.tx_pipeline.pending_fill_frames.pop_front() else {
             break;
         };
+        // #9900 F-091/F-092: validate before handing the offset to the kernel.
+        // A bad offset is DROPPED (neither submitted nor pushed back — pushing
+        // back would re-queue poison forever) and counted.
+        if !fill_offset_submittable(offset, umem_region_len(binding)) {
+            if FILL_INVALID_TOTAL.fetch_add(1, Ordering::Relaxed) < 10 {
+                eprintln!(
+                    "FILL_INVALID: slot={} if={} q={} offset={} (frame base outside the owned region; dropped, not submitted)",
+                    binding.slot, binding.ifindex, binding.queue_id, offset,
+                );
+            }
+            continue;
+        }
         // Poison the frame before submitting to fill ring — the kernel should
         // overwrite this with real packet data on RX. If we ever read back the
         // poison pattern in the RX path, it means the kernel recycled a
@@ -255,8 +349,35 @@ fn recycle_completed_tx_offset(
             recycle,
             offset,
         );
+    } else if completion_offset_returnable_to_free_pool(offset, umem_region_len(binding)) {
+        // #9900 F-092 (GPT-2): PRODUCTION ownership transition — the offset
+        // recycles only if an untracked submit recorded it. A duplicate or
+        // stale delivery (or a tracked completion re-delivered after its
+        // recycle entry was consumed) finds no entry and is dropped + counted
+        // instead of double-pushed into the free pool. `debug_assert` on the
+        // pool scan stays as the belt-and-braces exact property in tests.
+        if binding.tx_pipeline.in_flight_untracked_tx.remove(&offset) {
+            debug_assert!(
+                !binding.tx_pipeline.free_tx_frames.contains(&offset),
+                "TX completion double-free: offset {offset} already in the free pool",
+            );
+            binding.tx_pipeline.free_tx_frames.push_back(offset);
+        } else if TX_COMPLETION_DUPLICATE_TOTAL.fetch_add(1, Ordering::Relaxed) < 10 {
+            eprintln!(
+                "TX_COMPLETION_DUPLICATE: slot={} if={} q={} offset={} (no untracked-submit ownership; dropped, not recycled)",
+                binding.slot, binding.ifindex, binding.queue_id, offset,
+            );
+        }
     } else {
-        binding.tx_pipeline.free_tx_frames.push_back(offset);
+        // #9900 F-092: a completion for something that was never an aligned
+        // in-region TX frame — kernel fault, not a frame. Drop it (recycling
+        // would poison the free pool) and count it.
+        if TX_COMPLETION_INVALID_TOTAL.fetch_add(1, Ordering::Relaxed) < 10 {
+            eprintln!(
+                "TX_COMPLETION_INVALID: slot={} if={} q={} offset={} (not an aligned in-region frame base; dropped, not recycled)",
+                binding.slot, binding.ifindex, binding.queue_id, offset,
+            );
+        }
     }
 }
 
@@ -361,6 +482,13 @@ pub(in crate::afxdp) fn maybe_wake_tx(binding: &mut BindingWorker, force: bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializer for exact-delta assertions on the process-global TX
+    /// completion counters (SKEW/INVALID/DUPLICATE/FILL). Several tests bump
+    /// the same statics, so unsynchronized exact deltas flake under parallel
+    /// execution. Every test that bumps OR asserts these counters holds this
+    /// lock for its duration.
+    static COUNTER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn apply_prepared_recycle_routes_fill_and_free_explicitly() {
@@ -493,6 +621,183 @@ mod tests {
         assert!(
             !rx_wake_due(RX_WAKE_IDLE_POLLS, now_ns + 1_000_000, now_ns),
             "a backwards clock must saturate to 0, not wrap to a huge interval"
+        );
+    }
+
+    #[test]
+    fn account_tx_completions_counts_overdelivery_9900() {
+        assert_eq!(account_tx_completions(5, 3), (2, 0));
+        assert_eq!(account_tx_completions(2, 2), (0, 0));
+        assert_eq!(account_tx_completions(0, 0), (0, 0));
+        // Over-delivery clamps to 0 AND reports the delta (the old
+        // saturating_sub swallowed it).
+        assert_eq!(account_tx_completions(2, 5), (0, 3));
+        assert_eq!(account_tx_completions(0, 1), (0, 1));
+    }
+
+    #[test]
+    fn completion_offset_predicate_admits_pool_bases_only_9900() {
+        let region = 256u64 * 4096;
+        assert!(completion_offset_returnable_to_free_pool(0, region));
+        assert!(completion_offset_returnable_to_free_pool(4096, region));
+        assert!(completion_offset_returnable_to_free_pool(
+            region - 4096,
+            region
+        ));
+        // RX-addr and in-place shapes never complete untracked.
+        assert!(!completion_offset_returnable_to_free_pool(256, region));
+        assert!(!completion_offset_returnable_to_free_pool(4096 + 252, region));
+        assert!(!completion_offset_returnable_to_free_pool(region, region));
+        assert!(!completion_offset_returnable_to_free_pool(region + 4096, region));
+        assert!(!completion_offset_returnable_to_free_pool(
+            (u64::MAX - 4095) & !4095,
+            region
+        ));
+    }
+
+    #[test]
+    fn fill_offset_predicate_admits_any_in_region_offset_9900() {
+        let region = 256u64 * 4096;
+        // Bases (initial fill)…
+        assert!(fill_offset_submittable(0, region));
+        assert!(fill_offset_submittable(4096, region));
+        // …and post-headroom RX addrs (steady-state recycles at base + 512 —
+        // rejecting these starved reception, GPT-1). The kernel masks to the
+        // chunk base, so every in-region remainder submits the same frame.
+        assert!(fill_offset_submittable(512, region));
+        assert!(fill_offset_submittable(4096 + 512, region));
+        assert!(fill_offset_submittable(region - 4096 + 512, region));
+        assert!(fill_offset_submittable(256, region));
+        assert!(fill_offset_submittable(4095, region));
+        assert!(fill_offset_submittable(region - 1, region));
+        // Only the frame base must be owned: out-of-region bases refuse.
+        assert!(!fill_offset_submittable(region, region));
+        assert!(!fill_offset_submittable(region + 512, region));
+        assert!(!fill_offset_submittable(u64::MAX, region));
+    }
+
+    #[test]
+    fn recycle_completed_tx_offset_drops_invalid_completion_9900() {
+        let _counter_lock = COUNTER_TEST_LOCK.lock().expect("counter test lock");
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        let free_before = binding.tx_pipeline.free_tx_frames.len();
+        let invalid_before = TX_COMPLETION_INVALID_TOTAL.load(Ordering::Relaxed);
+        let mut shared = Vec::new();
+        // Untracked RX-addr shape, region-exact OOB, aligned-huge: all dropped.
+        recycle_completed_tx_offset(&mut binding, &mut shared, 256);
+        recycle_completed_tx_offset(&mut binding, &mut shared, 256 * 4096);
+        recycle_completed_tx_offset(&mut binding, &mut shared, (u64::MAX - 4095) & !4095);
+        assert_eq!(binding.tx_pipeline.free_tx_frames.len(), free_before);
+        assert!(shared.is_empty());
+        assert_eq!(
+            TX_COMPLETION_INVALID_TOTAL.load(Ordering::Relaxed),
+            invalid_before + 3
+        );
+        // Control: pop-then-record-then-complete (a genuine submit/completion
+        // pair) recycles byte-identically with no count.
+        let held = binding.tx_pipeline.free_tx_frames.pop_front().unwrap();
+        binding.tx_pipeline.in_flight_untracked_tx.insert(held);
+        recycle_completed_tx_offset(&mut binding, &mut shared, held);
+        assert_eq!(binding.tx_pipeline.free_tx_frames.len(), free_before);
+        assert_eq!(
+            TX_COMPLETION_INVALID_TOTAL.load(Ordering::Relaxed),
+            invalid_before + 3
+        );
+        // GPT-2: the SAME completion delivered twice — the second finds no
+        // ownership and is dropped as a duplicate, not double-pushed.
+        let dup_before = TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed);
+        recycle_completed_tx_offset(&mut binding, &mut shared, held);
+        assert_eq!(binding.tx_pipeline.free_tx_frames.len(), free_before);
+        assert_eq!(
+            TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed),
+            dup_before + 1
+        );
+
+    }
+    #[test]
+    fn reap_tx_completions_drains_stale_ring_at_zero_gauge_9900() {
+        let _counter_lock = COUNTER_TEST_LOCK.lock().expect("counter test lock");
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        binding.tx_pipeline.outstanding_tx = 0;
+        binding.xsk.device.push_comp_for_test(0);
+        let free_before = binding.tx_pipeline.free_tx_frames.len();
+        let skew_before = TX_COMPLETION_SKEW_TOTAL.load(Ordering::Relaxed);
+        let mut shared = Vec::new();
+        let reaped = reap_tx_completions(&mut binding, &mut shared);
+        // Ring drained (no wedging) but NOT recycled (no double-push).
+        assert_eq!(reaped, 1);
+        assert_eq!(binding.xsk.device.available(), 0);
+        assert_eq!(binding.tx_pipeline.outstanding_tx, 0);
+        assert_eq!(binding.tx_pipeline.free_tx_frames.len(), free_before);
+        assert!(shared.is_empty());
+        assert_eq!(
+            TX_COMPLETION_SKEW_TOTAL.load(Ordering::Relaxed),
+            skew_before + 1
+        );
+        // The sidecar fold is skipped too: no live stamp is disturbed.
+        assert!(
+            binding
+                .tx_pipeline
+                .tx_submit_ns
+                .iter()
+                .all(|s| *s == crate::afxdp::binding_state::TX_SIDECAR_UNSTAMPED)
+        );
+    }
+
+    #[test]
+    fn reap_tx_completions_counts_overdelivery_residual_9900() {
+        let _counter_lock = COUNTER_TEST_LOCK.lock().expect("counter test lock");
+        // set (GPT-2) distinguishes the batch members — the genuinely
+        // submitted offset recycles, the bogus one drops as a duplicate.
+        // (Pre-GPT-2 this recycled both after range/align filtering.)
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        let first = binding.tx_pipeline.free_tx_frames.pop_front().unwrap();
+        let second = binding.tx_pipeline.free_tx_frames.pop_front().unwrap();
+        binding.tx_pipeline.outstanding_tx = 1;
+        binding.tx_pipeline.in_flight_untracked_tx.insert(first);
+        binding.xsk.device.push_comp_for_test(first);
+        binding.xsk.device.push_comp_for_test(second);
+        let skew_before = TX_COMPLETION_SKEW_TOTAL.load(Ordering::Relaxed);
+        let dup_before = TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed);
+        let mut shared = Vec::new();
+        let reaped = reap_tx_completions(&mut binding, &mut shared);
+        assert_eq!(reaped, 2);
+        assert_eq!(binding.tx_pipeline.outstanding_tx, 0);
+        assert_eq!(
+            TX_COMPLETION_SKEW_TOTAL.load(Ordering::Relaxed),
+            skew_before + 1
+        );
+        assert_eq!(
+            TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed),
+            dup_before + 1
+        );
+        assert_eq!(binding.tx_pipeline.free_tx_frames.len(), 255);
+    }
+
+    #[test]
+    fn drain_pending_fill_drops_invalid_offset_9900() {
+        let _counter_lock = COUNTER_TEST_LOCK.lock().expect("counter test lock");
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        let region = 256u64 * 4096;
+        binding.tx_pipeline.pending_fill_frames.push_back(0);
+        binding.tx_pipeline.pending_fill_frames.push_back(256);
+        binding
+            .tx_pipeline
+            .pending_fill_frames
+            .push_back(region - 1);
+        binding
+            .tx_pipeline
+            .pending_fill_frames
+            .push_back(region + 4096);
+        let invalid_before = FILL_INVALID_TOTAL.load(Ordering::Relaxed);
+        assert!(drain_pending_fill(&mut binding, monotonic_nanos()));
+        // Invalids are dropped, NOT requeued; the in-region triple submits
+        // (base, headroom addr, last-frame tail — the kernel masks to base).
+        assert!(binding.tx_pipeline.pending_fill_frames.is_empty());
+        assert_eq!(binding.xsk.device.pending(), 3);
+        assert_eq!(
+            FILL_INVALID_TOTAL.load(Ordering::Relaxed),
+            invalid_before + 1
         );
     }
 }

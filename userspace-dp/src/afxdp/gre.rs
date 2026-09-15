@@ -994,10 +994,13 @@ pub(super) fn encapsulate_native_gre_frame(
     let src_mac = decision.resolution.src_mac?;
     let vlan_id = decision.resolution.tx_vlan_id;
     let outer_eth_len = if vlan_id > 0 { 18 } else { 14 };
-    let inner_l3 = match frame_l3_offset(inner_frame) {
-        Some(offset) => offset,
-        None => inner_meta.l3_offset as usize,
-    };
+    let inner_l3 = frame_l3_offset(inner_frame).or_else(|| {
+        crate::afxdp::frame::nibble_trusted_stamp(
+            inner_frame,
+            inner_meta.l3_offset,
+            inner_meta.addr_family,
+        )
+    })?;
     // #5381: borrow the inner packet directly out of `inner_frame` rather
     // than `.to_vec()`-ing it. Every use below is read-only
     // (`packet_trimmed_len`, `inner_tos_byte`, `.len()`, and as the

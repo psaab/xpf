@@ -503,6 +503,42 @@ impl super::Coordinator {
         crate::afxdp::PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed)
     }
 
+    /// #9900 F-092: TX completions reaped beyond `outstanding_tx` (including
+    /// completions drained at gauge 0, which are definitionally stale). The
+    /// old `saturating_sub` hid this skew; nonzero means the kernel
+    /// over-delivered completions (or re-delivered stale ones).
+    pub fn tx_completion_skew_total(&self) -> u64 {
+        crate::afxdp::tx::rings::TX_COMPLETION_SKEW_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9900 F-092: reaped completion offsets dropped instead of recycled
+    /// (not an aligned in-region frame base). Nonzero means the kernel
+    /// returned a completion for something that was never a TX frame.
+    pub fn tx_completion_invalid_total(&self) -> u64 {
+        crate::afxdp::tx::rings::TX_COMPLETION_INVALID_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9900 F-092 (GPT-2): aligned in-region completions dropped for lack
+    /// of submit ownership — duplicate/stale deliveries. Nonzero means the
+    /// kernel returned a completion twice (or for an untracked offset).
+    pub fn tx_completion_duplicate_total(&self) -> u64 {
+        crate::afxdp::tx::rings::TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9900 F-091/F-092: fill-ring offsets dropped instead of submitted
+    /// (frame base outside the owned region).
+    pub fn fill_invalid_total(&self) -> u64 {
+        crate::afxdp::tx::rings::FILL_INVALID_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9900 F-093: worker commands shed because the target worker is dead
+    /// (recorded panic, thread exited). Distinct from drops (live-queue
+    /// overload) and poison recoveries (lossless): shed load needs
+    /// restart/reconcile, not load-shedding.
+    pub fn worker_command_queue_shed_total(&self) -> u64 {
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #2402/#6641: total shared-session mutex poison recoveries across
     /// every shared-session and owner-RG-index site (publish, remove,
     /// lookups, index maintenance, and the #5154 HA import

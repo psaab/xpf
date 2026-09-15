@@ -4,6 +4,7 @@
 // policy: try explicit 2 MB hugepages first, fall back to standard
 // pages with a transparent-hugepage advisory hint.
 
+use crate::afxdp::UMEM_FRAME_SIZE;
 use std::io;
 use std::os::raw::c_void;
 use std::ptr::NonNull;
@@ -28,6 +29,28 @@ pub(in crate::afxdp) struct MmapArea {
 }
 
 const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
+
+/// #9900 F-091: single-frame containment for a `(offset, len)` slice request.
+///
+/// A descriptor's bytes must live in ONE UMEM frame: a `(offset, len)` that
+/// spans a 4 KiB boundary would forward the adjacent frame's bytes (a
+/// cross-flow leak) instead of failing closed. The mapping-bounds check in
+/// the callers stays; this is the second, orthogonal bound.
+///
+/// Boundary-inclusive by construction: a full frame at an aligned base
+/// (`0 + 4096`), an RX descriptor at `base + 256` with `len <= 3840`, the
+/// 96-byte meta read ending exactly at `desc.addr`, and in-place `±4`
+/// views all pass. `len > 4096` or a boundary-crossing span fails. The
+/// addition cannot overflow: `len <= 4096` is established first, so the sum
+/// is at most `4095 + 4096`.
+#[inline]
+fn frame_contained(offset: usize, len: usize) -> bool {
+    let frame = UMEM_FRAME_SIZE as usize;
+    if len > frame {
+        return false;
+    }
+    (offset & (frame - 1)) + len <= frame
+}
 
 impl MmapArea {
     pub(in crate::afxdp) fn new(len: usize) -> io::Result<Self> {
@@ -162,9 +185,14 @@ impl MmapArea {
         self.hugepage
     }
 
+    /// Byte view of `[offset, offset + len)` — `None` unless the range is
+    /// inside the mapping AND contained in a single UMEM frame (#9900 F-091).
     pub(in crate::afxdp) fn slice(&self, offset: usize, len: usize) -> Option<&[u8]> {
         let end = offset.checked_add(len)?;
         if end > self.len {
+            return None;
+        }
+        if !frame_contained(offset, len) {
             return None;
         }
         Some(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(offset), len) })
@@ -178,15 +206,14 @@ impl MmapArea {
     /// Returns a `&mut [u8]` view into the UMEM region from a
     /// shared `&self` reference.
     ///
-    /// ## What `_unchecked` does and does NOT mean here
-    ///
     /// It refers to ALIASING ONLY. The range itself IS checked: `offset +
-    /// len` is computed with `checked_add` (so it cannot wrap) and is
-    /// rejected when it exceeds `self.len`, returning `None` — every call
-    /// site therefore already handles an out-of-range request. There is no
-    /// bounds hole here and no "bounds-checked variant" to add; #7750 row 07
-    /// proposed one on the strength of the name, which is why this paragraph
-    /// exists.
+    /// len` is computed with `checked_add` (so it cannot wrap), is rejected
+    /// when it exceeds `self.len`, and — since #9900 F-091 — is rejected
+    /// unless contained in a single UMEM frame (see `frame_contained`),
+    /// returning `None` — every call site therefore already handles an
+    /// out-of-range request. There is no bounds hole here; #7750 row 07
+    /// proposed a bounds-checked variant on the strength of the name, which
+    /// is why this paragraph exists.
     ///
     /// What is genuinely unchecked is the exclusivity of the returned `&mut`,
     /// which is produced from a shared `&self` and so cannot be enforced by
@@ -208,6 +235,9 @@ impl MmapArea {
     ) -> Option<&mut [u8]> {
         let end = offset.checked_add(len)?;
         if end > self.len {
+            return None;
+        }
+        if !frame_contained(offset, len) {
             return None;
         }
         Some(unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(offset), len) })

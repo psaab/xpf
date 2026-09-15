@@ -672,6 +672,7 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
         outstanding_tx: 0,
         pending_fill_frames: std::collections::VecDeque::new(),
         in_flight_prepared_recycles: FastMap::default(),
+        in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
     };
     let mut counters = BatchCounters::default();
@@ -869,6 +870,7 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         outstanding_tx: 0,
         pending_fill_frames: std::collections::VecDeque::new(),
         in_flight_prepared_recycles: FastMap::default(),
+        in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
     };
     let mut counters = BatchCounters::default();
@@ -946,6 +948,7 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         outstanding_tx: 0,
         pending_fill_frames: std::collections::VecDeque::new(),
         in_flight_prepared_recycles: FastMap::default(),
+        in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
     };
     let mut counters2 = BatchCounters::default();

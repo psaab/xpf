@@ -85,12 +85,13 @@ pub(crate) use inspect::MAX_IPV6_EXT_HEADERS;
 // their fields, never name them.
 pub(crate) use inspect::{ExtChainOutcome, ipv6_ext_header_is_traversable, walk_ipv6_ext_chain};
 pub(super) use inspect::{
-    frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
-    live_frame_ports, live_frame_ports_bytes, live_frame_ports_from_meta_bytes,
-    metadata_tuple_complete, packet_rel_l4_offset, packet_rel_l4_offset_and_protocol,
-    parse_flow_ports, parse_ipv4_session_flow_from_frame, parse_packet_destination_from_frame,
-    parse_session_flow_from_bytes, parse_session_flow_from_frame, parse_session_flow_from_meta,
-    parse_zone_encoded_fabric_ingress, parse_zone_encoded_fabric_ingress_from_frame,
+    frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
+    live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
+    nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
+    packet_rel_l4_offset_and_protocol, parse_flow_ports, parse_ipv4_session_flow_from_frame,
+    parse_packet_destination_from_frame, parse_session_flow_from_bytes,
+    parse_session_flow_from_frame, parse_session_flow_from_meta, parse_zone_encoded_fabric_ingress,
+    parse_zone_encoded_fabric_ingress_from_frame, verified_l3_or_stamp,
 };
 pub(in crate::afxdp) use inspect::{
     authoritative_forward_ports, decode_frame_summary, declared_l3_end, dest_is_directed_broadcast,
@@ -161,6 +162,10 @@ pub(in crate::afxdp) use rewrite::apply_rewrite_descriptor;
 ///
 /// `packet` is the L3-relative slice; `l3_offset`/`l4_offset` are the
 /// frame-relative metadata scalars (only their difference is used).
+/// Callers that distrusted the L3 stamp pass `l4_offset == l3_offset`
+/// (GPT-5 neutralization): the 0 difference fails the plausibility gate
+/// and forces the wire walk, so a corrected L3 never pairs with a stale
+/// L4-derived transport offset.
 #[inline(always)]
 pub(in crate::afxdp) fn v6_rel_l4_offset(
     packet: &[u8],
@@ -642,6 +647,11 @@ pub(in crate::afxdp::frame) struct EthRewritePlan {
     /// commit's VLAN-push memmove relocates the L3 payload, this is where
     /// the descriptor bail gates must read the IP/L4 header.
     pub(in crate::afxdp::frame) l3: usize,
+    /// Whether the stamped offset was trusted (nibble match) or derived from
+    /// the wire. When false the caller must ALSO distrust `meta.l4_offset`
+    /// (neutralize it to `l3`) before the gates/apply — a corrected L3 with
+    /// a stale L4 mis-drives the v6 transport rewrites (GPT-5).
+    pub(in crate::afxdp::frame) stamp_trusted: bool,
     /// Trimmed L3 payload length (`== frame_len - eth_len`).
     pub(in crate::afxdp::frame) payload_len: usize,
     /// Post-commit descriptor result (offsets + L2 classification).
@@ -665,16 +675,28 @@ fn rewrite_plan_eth_from_parts(
     params: &RewriteEthParams,
 ) -> Option<EthRewritePlan> {
     let current_len = desc.len as usize;
-    let (l3, payload_len) = {
+    let (l3, stamp_trusted, payload_len) = {
         let frame = area.slice(desc.addr as usize, current_len)?;
-        let l3 = match meta.l3_offset {
-            14 | 18 => meta.l3_offset as usize,
-            _ => frame_l3_offset(frame)?,
-        };
+        let checked = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
+        let l3 = checked.l3;
         if l3 >= current_len {
             return None;
         }
-        (l3, trim_l3_payload(&frame[l3..current_len], meta).len())
+        // GPT-5: cohere the offsets BEFORE trimming — the `pkt_len` fallback
+        // math reads `l3_offset`, and a stale stamp would mis-size it. When
+        // the stamp was distrusted the L4 stamp dies with it (neutralize to
+        // `l3`, forcing wire derivation downstream); `l3` fits `u16`: the
+        // slice above proved `current_len <= 4096`.
+        let mut meta = meta;
+        meta.l3_offset = l3 as u16;
+        if !checked.stamp_trusted {
+            meta.l4_offset = l3 as u16;
+        }
+        (
+            l3,
+            checked.stamp_trusted,
+            trim_l3_payload(&frame[l3..current_len], meta).len(),
+        )
     };
     let eth_len = if params.vlan_id > 0 { 18usize } else { 14usize };
     let frame_len = eth_len.checked_add(payload_len)?;
@@ -684,6 +706,7 @@ fn rewrite_plan_eth_from_parts(
     let skip_ttl = (meta.meta_flags & 0x80) != 0;
     Some(EthRewritePlan {
         l3,
+        stamp_trusted,
         payload_len,
         prep: RewritePrep {
             eth_len,
@@ -1055,6 +1078,16 @@ pub(super) fn rewrite_forwarded_frame_in_place(
     // zero-copy ownership contract.
     let eth_params = rewrite_eth_params(meta, decision, apply_nat_on_fabric)?;
     let plan = rewrite_plan_eth_from_parts(area, desc, meta, &eth_params)?;
+    // GPT-5: cohere the offsets for the gates + apply below. The plan
+    // resolved L3 from the wire when the stamp was distrusted; the L4
+    // stamp dies with it (neutralize to `l3`, forcing wire derivation
+    // in `v6_rel_l4_offset`) instead of mis-driving the v6 transport
+    // rewrites from a stale offset.
+    let mut meta = meta;
+    meta.l3_offset = plan.l3 as u16;
+    if !plan.stamp_trusted {
+        meta.l4_offset = plan.l3 as u16;
+    }
     {
         // Read-only bail gates against the ORIGINAL L3 payload at `plan.l3`.
         // The commit's memmove is a pure relocation, so these byte reads
@@ -2220,3 +2253,65 @@ mod tests_9782_copy;
 // are simply not run under it today.
 #[cfg(all(test, not(miri)))]
 mod prop_tests;
+
+#[cfg(test)]
+mod rewrite_plan_nibble_tests_9900 {
+    use super::*;
+    use crate::afxdp::tests_support::build_txn_tcp_syn_frame_v4;
+    use std::net::Ipv4Addr;
+
+    /// Plan the L3 offset for an untagged TCP SYN under a stamped offset.
+    fn plan_l3_for_stamp_9900(l3_offset: u16, addr_family: u8) -> Option<usize> {
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            1234,
+            80,
+            0x02,
+        );
+        let mut area = MmapArea::new(4096).expect("mmap");
+        area.slice_mut(0, frame.len())
+            .expect("slice")
+            .copy_from_slice(&frame);
+        let meta = ForwardPacketMeta {
+            l3_offset,
+            addr_family,
+            pkt_len: frame.len() as u16,
+            ..Default::default()
+        };
+        let params = RewriteEthParams {
+            dst_mac: [0x02; 6],
+            src_mac: [0x03; 6],
+            vlan_id: 0,
+            ether_type: 0x0800,
+            apply_nat: false,
+        };
+        let desc = XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        };
+        rewrite_plan_eth_from_parts(&area, desc, meta, &params).map(|plan| plan.l3)
+    }
+
+    /// #9900 F-095 repro at the plan layer: an untagged v4 frame stamped 18
+    /// plans L3 at 14 via the wire fallback, not at the stamped 18 (where the
+    /// TTL decrement and NAT would have mutated IP-ID bytes). Pre-fix this
+    /// returned `Some(18)`.
+    #[test]
+    fn rewrite_plan_falls_back_on_wrong_stamp_9900() {
+        let inet = libc::AF_INET as u8;
+        assert_eq!(plan_l3_for_stamp_9900(14, inet), Some(14));
+        assert_eq!(plan_l3_for_stamp_9900(18, inet), Some(14));
+    }
+
+    /// Control: an unknown family derives from the wire (same value on a
+    /// well-formed frame), and a truncated frame fails closed.
+    #[test]
+    fn rewrite_plan_derives_on_unknown_family_9900() {
+        assert_eq!(
+            plan_l3_for_stamp_9900(14, libc::AF_UNIX as u8),
+            Some(14)
+        );
+    }
+}

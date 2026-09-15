@@ -294,6 +294,11 @@ const _: () = assert!(1u32 << UMEM_FRAME_SHIFT == UMEM_FRAME_SIZE);
 /// request above this is REJECTED (not clamped) — see
 /// `Coordinator::inject_test_packet` and the frame builders.
 const MAX_INJECT_PACKET_LENGTH: u32 = UMEM_FRAME_SIZE;
+/// Configured UMEM frame headroom (passed as `frame_headroom` at UMEM
+/// creation). The kernel ADDS its own `XDP_PACKET_HEADROOM` (256) on top
+/// (`xsk_pool_get_headroom`), so native RX descriptors land at frame base +
+/// 512 and the fill ring routinely carries post-headroom addrs — any
+/// validation of fill/recycle offsets must accept them (GPT-1).
 const UMEM_HEADROOM: u32 = 256;
 // #920: batch sizes lowered from 256 to 64 to keep the per-batch
 // working set within typical 32 KB L1d (~10-14 KB at 64 packets:

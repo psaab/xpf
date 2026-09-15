@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, decode_frame_summary, frame_has_tcp_rst};
 use crate::afxdp::neighbor::monotonic_nanos;
-use crate::afxdp::types::{FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest};
+use crate::afxdp::types::{FastMap, FastSet, PreparedTxRecycle, PreparedTxRequest, TxRequest};
 use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::{MIRROR_TX_FRAME_RESERVE, TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
@@ -134,7 +134,15 @@ pub(in crate::afxdp) fn recycle_cancelled_prepared_offset_with_shared(
                     return;
                 }
             }
-            free_tx_frames.push_back(recycle_offset);
+            // #9900 F-092: no shared sink for a cross-slot Fill recycle — the
+            // frame parks in the LOCAL free pool (an RX→TX migration, as
+            // before), but masked to its frame BASE. The stored recycle offset
+            // is a post-headroom RX addr (base + 512); planting it verbatim
+            // would submit unaligned TX descs that the completion path must
+            // then drop as invalid, leaking the frame. Masking keeps the pool
+            // aligned-only, which is what the reap check requires.
+            free_tx_frames
+                .push_back(recycle_offset & !((crate::afxdp::UMEM_FRAME_SIZE as u64) - 1));
         }
     }
 }
@@ -156,10 +164,16 @@ pub(in crate::afxdp) fn recycle_prepared_immediately_with_shared(
 
 pub(in crate::afxdp) fn remember_prepared_recycle(
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
     req: &PreparedTxRequest,
 ) {
     if req.recycle.fill_slot().is_some() {
         in_flight_prepared_recycles.insert(req.offset, req.recycle);
+    } else {
+        // #9900 F-092 (GPT-2): a `FreeTxFrame` submit has no tracked recycle
+        // entry — record it in the untracked ownership set instead, so its
+        // completion (and ONLY a first completion for it) recycles.
+        in_flight_untracked_tx.insert(req.offset);
     }
 }
 
@@ -377,6 +391,10 @@ pub(in crate::afxdp) fn transmit_batch(
         if idx < inserted as usize {
             sent_packets += 1;
             sent_bytes += req.bytes.len() as u64;
+            // #9900 F-092 (GPT-2): the kernel accepted this desc — record
+            // ownership so its completion (and ONLY a first completion for
+            // it) can return the frame to the free pool.
+            binding.tx_pipeline.in_flight_untracked_tx.insert(offset);
             // #5157: record the committed item's ORIGINAL-input position
             // (identity), not just a count. Reverse-pop order does not
             // matter — the caller's per-flow accounting is a set-sum over

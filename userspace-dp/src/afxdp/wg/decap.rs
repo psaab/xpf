@@ -271,8 +271,11 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
 /// Read from the outer IP header still present in the frame — the same header
 /// `outer_ecn_bits` reads. The control thread gets this from `recvfrom`; here
 /// it is parsed, which is why it is bounds-checked rather than assumed.
+/// Nibble-gated (#9900 F-095 SPARK-M6): the read feeds PERSISTENT roam
+/// learning, so a wrong stamp fails closed (skip the observation) instead
+/// of learning a garbage endpoint.
 fn outer_source_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAddr> {
-    let l3 = meta.l3_offset as usize;
+    let l3 = crate::afxdp::frame::nibble_checked_l3(outer, meta.l3_offset, meta.addr_family)?.l3;
     match meta.addr_family as i32 {
         libc::AF_INET => {
             let b = outer.get(l3.checked_add(12)?..l3.checked_add(16)?)?;
@@ -287,5 +290,39 @@ fn outer_source_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAd
             Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(a)))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod outer_source_ip_tests_9900 {
+    use super::*;
+
+    /// #9900 F-095 (SPARK-M6): the roam source read falls back on a wrong
+    /// stamp instead of learning a garbage endpoint. Pre-fix a stamp of 18
+    /// read the DESTINATION (bytes 30..34) as the source.
+    #[test]
+    fn outer_source_ip_falls_back_on_wrong_stamp_9900() {
+        let mut outer = vec![0u8; 14 + 20 + 8];
+        outer[12..14].copy_from_slice(&[0x08, 0x00]);
+        outer[14] = 0x45;
+        outer[16..18].copy_from_slice(&[0x00, 0x1c]);
+        outer[26..30].copy_from_slice(&[10, 0, 0, 1]);
+        outer[30..34].copy_from_slice(&[10, 0, 0, 2]);
+        let expected = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let meta_for = |l3_offset: u16| UserspaceDpMeta {
+            l3_offset,
+            addr_family: libc::AF_INET as u8,
+            ..UserspaceDpMeta::default()
+        };
+        assert_eq!(
+            outer_source_ip(&outer, meta_for(14)),
+            Some(expected),
+            "correct stamp reads the source"
+        );
+        assert_eq!(
+            outer_source_ip(&outer, meta_for(18)),
+            Some(expected),
+            "wrong stamp falls back to the wire source, not the dst bytes"
+        );
     }
 }

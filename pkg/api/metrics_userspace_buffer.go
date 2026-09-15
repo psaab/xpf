@@ -250,6 +250,45 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		float64(status.SharedSessionPoisonRecoveries),
 	)
 
+	// #9900: frame-ownership violation counters, emitted unconditionally
+	// like their neighbours — 0 is the expected healthy value and a real
+	// signal for each.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceTxCompletionSkew,
+		prometheus.CounterValue,
+		float64(status.TxCompletionSkew),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceTxCompletionInvalid,
+		prometheus.CounterValue,
+		float64(status.TxCompletionInvalid),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceTxCompletionDuplicate,
+		prometheus.CounterValue,
+		float64(status.TxCompletionDuplicate),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceFillInvalid,
+		prometheus.CounterValue,
+		float64(status.FillInvalid),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceWorkerCommandQueueShed,
+		prometheus.CounterValue,
+		float64(status.WorkerCommandQueueShed),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceServerStatePoisonRecoveries,
+		prometheus.CounterValue,
+		float64(status.ServerStatePoisonRecoveries),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceServerHandlerPanics,
+		prometheus.CounterValue,
+		float64(status.ServerHandlerPanics),
+	)
+
 	// #7398: emitted unconditionally like their neighbours. A 0 here is a real
 	// "no stale install/delete was refused, no import lost its reservation"
 	// signal; an absent series would be indistinguishable from a helper that

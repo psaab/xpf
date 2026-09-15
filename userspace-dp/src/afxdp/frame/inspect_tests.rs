@@ -183,6 +183,32 @@ fn meta_fallback_v6_short_payload_len_returns_none() {
     );
 }
 
+/// #9900 F-095 (SPARK-m4+): the last-resort meta-offset fallback verifies
+/// the stamp before fabricating a session key. Truncated ports defeat the
+/// wire parse; a wrong-but-covering stamp pair would then key a flow on
+/// IP-ID bytes — the fallback declines instead.
+#[test]
+fn meta_fallback_wrong_stamp_declines_instead_of_fabricating_9900() {
+    let mut frame = v4_frame(
+        PROTO_TCP,
+        22,
+        &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+    );
+    frame[18] = 0x05;
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 18,
+        l4_offset: 38,
+        ..UserspaceDpMeta::default()
+    };
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, meta),
+        None,
+        "a distrusted stamp must decline, not fabricate a flow from ID bytes"
+    );
+}
+
 // ---- meta fast path (live_frame_ports_from_meta_bytes / _bytes) ----
 
 #[test]
@@ -1383,4 +1409,149 @@ fn term_extra_builder_leaves_ports_unknown_to_flowless_sites_9894() {
     let frame = v4_frame(PROTO_TCP, 24, &[0xAB, 0xCD, 0x12, 0x34]);
     let extra = term_match_extra_from_frame(&frame, mk_meta(PROTO_TCP));
     assert!(!extra.ports_unknown);
+}
+
+/// Tag an untagged frame with 802.1Q (VID 10), moving L3 from 14 to 18.
+fn tag_vlan_9900(frame: &[u8]) -> Vec<u8> {
+    let mut tagged = frame.to_vec();
+    tagged.splice(12..12, [0x81, 0x00, 0x00, 0x0a]);
+    tagged
+}
+
+/// Resolve + project to `(l3, stamp_trusted)` for compact assertions.
+fn checked_9900(frame: &[u8], l3_offset: u16, addr_family: u8) -> Option<(usize, bool)> {
+    nibble_checked_l3(frame, l3_offset, addr_family).map(|c| (c.l3, c.stamp_trusted))
+}
+
+/// #9900 F-095 control: correct stamps resolve to themselves, tagged and
+/// untagged, v4 and v6. The normal path is byte-identical before and after.
+#[test]
+fn nibble_checked_l3_trusts_correct_stamp_9900() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let v4_tagged = tag_vlan_9900(&v4);
+    let inet = libc::AF_INET as u8;
+    let inet6 = libc::AF_INET6 as u8;
+    assert_eq!(checked_9900(&v4, 14, inet), Some((14, true)));
+    assert_eq!(checked_9900(&v4_tagged, 18, inet), Some((18, true)));
+    assert_eq!(checked_9900(&v6, 14, inet6), Some((14, true)));
+    // A non-14/18 stamp was never trusted and still derives from the wire.
+    assert_eq!(checked_9900(&v4, 20, inet), Some((14, false)));
+    assert_eq!(checked_9900(&v4_tagged, 20, inet), Some((18, false)));
+}
+
+/// #9900 F-095 repro: a wrong-but-plausible stamp falls back to the wire
+/// parse instead of shifting every L3 read. Pre-fix the `14 | 18` arm
+/// trusted the stamp, so each of these resolved to the STAMPED value.
+#[test]
+fn nibble_checked_l3_falls_back_on_wrong_stamp_9900() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let v4_tagged = tag_vlan_9900(&v4);
+    let inet = libc::AF_INET as u8;
+    let inet6 = libc::AF_INET6 as u8;
+    // Untagged frame stamped 18: byte 18 is IP-ID high (nibble 0), not v4.
+    assert_eq!(checked_9900(&v4, 18, inet), Some((14, false)));
+    // Tagged frame stamped 14: byte 14 is the tag TCI (0x00), not v4.
+    assert_eq!(checked_9900(&v4_tagged, 14, inet), Some((18, false)));
+    // Family-swapped stamp: v4 bytes under a v6 family claim.
+    assert_eq!(checked_9900(&v4, 18, inet6), Some((14, false)));
+    // v6 frame stamped 18: byte 18 is payload-len high (0x00), not v6.
+    assert_eq!(checked_9900(&v6, 18, inet6), Some((14, false)));
+}
+
+/// #9900 F-095: an unknown family cannot verify the stamp, so the offset is
+/// derived from the wire. Same values as the old blind trust on well-formed
+/// frames, but through the derive arm rather than the stamp arm.
+#[test]
+fn nibble_checked_l3_derives_on_unknown_family_9900() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v4_tagged = tag_vlan_9900(&v4);
+    let unix = libc::AF_UNIX as u8;
+    assert_eq!(checked_9900(&v4, 14, unix), Some((14, false)));
+    assert_eq!(checked_9900(&v4_tagged, 18, unix), Some((18, false)));
+    // ...and a wrong stamp under an unknown family still derives, not trusts.
+    assert_eq!(checked_9900(&v4, 18, unix), Some((14, false)));
+}
+
+/// #9900 F-095: nothing resolvable anywhere fails closed. A truncated frame
+/// has no byte at the stamp AND no parseable ethertype.
+#[test]
+fn nibble_checked_l3_fails_closed_on_double_garbage_9900() {
+    let inet = libc::AF_INET as u8;
+    assert_eq!(checked_9900(&[0u8; 10], 14, inet), None);
+    assert_eq!(checked_9900(&[0u8; 10], 18, inet), None);
+    assert_eq!(checked_9900(&[], 14, inet), None);
+}
+
+/// #9900 F-095 (SPARK-M4): the frame-based dst parse falls back like the FIB
+/// twin. Pre-fix a stamp of 18 read the dst from 4 bytes into the IP header
+/// (0.0.0.0 here) instead of the wire-derived 192.0.2.2.
+#[test]
+fn parse_packet_destination_from_frame_falls_back_on_wrong_stamp_9900() {
+    let frame = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let expected = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    let mut meta = v4_meta(PROTO_TCP);
+    meta.l3_offset = 14;
+    assert_eq!(
+        parse_packet_destination_from_frame(&frame, meta).expect("dst"),
+        expected
+    );
+    meta.l3_offset = 18;
+    assert_eq!(
+        parse_packet_destination_from_frame(&frame, meta).expect("dst"),
+        expected
+    );
+}
+
+/// #9900 F-095 (SPARK-M5): the meta fast arm fires only on a verified L3.
+/// The fixture's stamp pair (18/38) is wrong-but-plausible AND self-covering
+/// (byte 18 yields IHL 20 with no v4 nibble; the misread "total" covers 38),
+/// so pre-fix the meta arm returned the TCP seq bytes as ports with no wire
+/// fallback — ports that feed `enforce_expected_ports*` frame writes.
+#[test]
+fn live_frame_ports_from_meta_bytes_distrusts_unverified_l3_9900() {
+    let mut frame = v4_frame(
+        PROTO_TCP,
+        40,
+        &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0, 0, 0, 0],
+    );
+    frame[18] = 0x05;
+    let mut meta = v4_meta(PROTO_TCP);
+    // Control: correct stamps take the meta arm to the true ports.
+    meta.l3_offset = 14;
+    meta.l4_offset = 34;
+    assert_eq!(
+        live_frame_ports_from_meta_bytes(&frame, meta),
+        Some((0x1122, 0x3344))
+    );
+    // Repro: shifted stamps fall through to the wire parse, same true ports.
+    meta.l3_offset = 18;
+    meta.l4_offset = 38;
+    assert_eq!(
+        live_frame_ports_from_meta_bytes(&frame, meta),
+        Some((0x1122, 0x3344))
+    );
+}
+
+/// #9900 F-095 (SPARK-m4): filter match inputs derive from a verified L3 —
+/// a wrong stamp yields the SAME inputs as the correct stamp (pre-fix the
+/// mis-sized declared end suppressed the fragment/L4 inputs).
+#[test]
+fn term_match_extra_agrees_across_wrong_stamp_9900() {
+    let frame = v4_frame(PROTO_TCP, 40, &[0x02, 0x00, 0x00, 0x00, 0, 0]);
+    let mk_meta = |l3_offset: u16| UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset,
+        l4_offset: 34,
+        tcp_flags: 0x02,
+        ..UserspaceDpMeta::default()
+    };
+    let correct = format!("{:?}", term_match_extra_from_frame(&frame, mk_meta(14)));
+    let wrong_stamp = format!("{:?}", term_match_extra_from_frame(&frame, mk_meta(18)));
+    assert_eq!(
+        wrong_stamp, correct,
+        "a wrong L3 stamp must not change filter inputs"
+    );
 }

@@ -532,6 +532,40 @@ type ProcessStatus struct {
 	// for an older helper that does not send the key.
 	SharedSessionPoisonRecoveries uint64 `json:"shared_session_poison_recoveries,omitempty"`
 
+	// #9900 F-092: TX completions reaped beyond outstanding_tx (kernel
+	// over-delivery, including completions drained at gauge 0). Surfaced as
+	// xpf_userspace_tx_completion_skew_total. Decodes to 0 for an older
+	// helper that does not send the key.
+	TxCompletionSkew uint64 `json:"tx_completion_skew,omitempty"`
+	// #9900 F-092: reaped completion offsets dropped (not an aligned
+	// in-region frame base). Surfaced as
+	// xpf_userspace_tx_completion_invalid_total. Decodes to 0 for an older
+	// helper that does not send the key.
+	TxCompletionInvalid uint64 `json:"tx_completion_invalid,omitempty"`
+	// #9900 F-092 (GPT-2): aligned in-region completions dropped for lack
+	// of submit ownership (duplicate/stale). Surfaced as
+	// xpf_userspace_tx_completion_duplicate_total. Decodes to 0 for an
+	// older helper that does not send the key.
+	TxCompletionDuplicate uint64 `json:"tx_completion_duplicate,omitempty"`
+	// #9900 F-091/F-092: fill-ring offsets dropped (frame base outside the
+	// owned region). Surfaced as xpf_userspace_fill_invalid_total. Decodes
+	// to 0 for an older helper that does not send the key.
+	FillInvalid uint64 `json:"fill_invalid,omitempty"`
+	// #9900 F-093: worker commands shed to dead workers. Surfaced as
+	// xpf_userspace_worker_command_queue_shed_total. Decodes to 0 for an
+	// older helper that does not send the key.
+	WorkerCommandQueueShed uint64 `json:"worker_command_queue_shed,omitempty"`
+	// #9900 F-094 (m2): ServerState mutex poison recoveries (each one
+	// quarantined the daemon for a supervisor restart). Surfaced as
+	// xpf_userspace_server_state_poison_recoveries_total. Decodes to 0 for
+	// an older helper that does not send the key.
+	ServerStatePoisonRecoveries uint64 `json:"server_state_poison_recoveries,omitempty"`
+	// #9900 F-094 (m2): request-handler panics contained per-connection
+	// (each one quarantined + restarted). Surfaced as
+	// xpf_userspace_server_handler_panics_total. Decodes to 0 for an older
+	// helper that does not send the key.
+	ServerHandlerPanics uint64 `json:"server_handler_panics,omitempty"`
+
 	// SessionInstallStaleIgnored is xpf_userspace_session_install_stale_ignored_total
 	// (#2170/#7398): stale-generation session INSTALLS refused by the helper's
 	// in-memory SyncedSessionEntry guard. The authoritative guard is the Go

@@ -44,6 +44,7 @@ impl crate::afxdp::Coordinator {
                 sequence: 0,
                 max,
                 skip: false,
+                shed: 0,
                 ack_atomics: Vec::new(),
                 live,
             };
@@ -55,6 +56,7 @@ impl crate::afxdp::Coordinator {
                 sequence: 0,
                 max,
                 skip: true,
+                shed: 0,
                 ack_atomics: Vec::new(),
                 live,
             };
@@ -65,14 +67,26 @@ impl crate::afxdp::Coordinator {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let mut ack_atomics = Vec::with_capacity(self.workers.records().len());
+        let mut shed = 0u32;
         // #6242: enqueue the export command + collect the ack atomic via each
         // worker's runtime record.
         for rec in self.workers.records().values() {
+            // #9900 F-093: shed dead workers — excluded from the ack set, so
+            // the export no longer stalls 15 s on a worker that never acks.
+            // The count rides the wait handle: a shed worker's sessions are
+            // MISSING from the drain, so `wait_and_collect` must fail the
+            // export rather than assert a completeness the drain cannot keep
+            // (GPT-3 — the Go receiver deletes sessions missing from a
+            // window it believes complete).
+            if rec.shed_if_dead(1) {
+                shed += 1;
+                continue;
+            }
+            // #1790/#1807: recover, don't early-return — one worker's poisoned
+            // queue must not block session export for every HEALTHY worker.
+            // (Dead workers no longer reach this line: shed above, and the
+            // shed count fails the collect below instead of timing out.)
             let handle = &rec.handle;
-            // #1790/#1807: recover, don't early-return — one dead worker's
-            // poisoned queue must not block session export for every
-            // HEALTHY worker (the export-ack timeout handles dead workers
-            // in the wait). Same policy as update_ha_state above.
             let mut pending = worker_queue::lock_recover(&handle.commands);
             // #6929: bounded. A dropped export request means this worker
             // never acks, which the export-ack timeout in the wait below
@@ -92,6 +106,7 @@ impl crate::afxdp::Coordinator {
             sequence,
             max,
             skip: false,
+            shed,
             ack_atomics,
             live,
         }
@@ -268,6 +283,11 @@ pub struct OwnerRgExportWait {
     /// holds the `ServerState` lock), so this snapshot is equivalent to
     /// re-reading `workers.records` live.
     ack_atomics: Vec<Arc<AtomicU64>>,
+    /// #9900 F-093 (GPT-3): workers shed as dead at kick time. Their
+    /// sessions are missing from the drain, so a nonzero count fails
+    /// `wait_and_collect` — promptly, without the 15 s ack wait — instead
+    /// of returning an export the Go receiver would publish as complete.
+    shed: u32,
     /// Per-binding delta buffers (`workers.live` values) captured at kick
     /// time; drained after all workers ack.
     live: Vec<Arc<BindingLiveState>>,
@@ -302,6 +322,17 @@ impl OwnerRgExportWait {
     pub fn wait_and_collect(self) -> Result<(Vec<SessionDeltaInfo>, bool), String> {
         if self.skip {
             return Ok((Vec::new(), false));
+        }
+        // #9900 F-093 (GPT-3): shed workers' sessions are missing from the
+        // drain. Fail promptly — without the 15 s wait — instead of
+        // returning a window the Go receiver would publish as complete
+        // (missing sessions read as deletions there). Same outcome class as
+        // the pre-shed ack timeout (no publish), minus the stall.
+        if self.shed > 0 {
+            return Err(format!(
+                "owner-RG export incomplete: {} dead worker(s) shed at kick; refusing rather than publishing a partial window",
+                self.shed
+            ));
         }
         let deadline = std::time::Instant::now() + OWNER_RG_EXPORT_ACK_WAIT;
         loop {

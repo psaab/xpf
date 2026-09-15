@@ -92,6 +92,14 @@ pub(in crate::afxdp) fn apply_rewrite_descriptor(
     // they replace, and `validate_*` returns the L4 offset the infallible
     // `apply_*` mutation half needs.
     let plan = rewrite_plan_eth_from_parts(area, desc, meta.into(), &eth_params)?;
+    // GPT-5: cohere the offsets for the gates + apply below (see the
+    // in-place path: a corrected L3 with a stale L4 mis-drives the v6
+    // transport rewrites).
+    let mut meta = meta;
+    meta.l3_offset = plan.l3 as u16;
+    if !plan.stamp_trusted {
+        meta.l4_offset = plan.l3 as u16;
+    }
     let skip_ttl = plan.prep.skip_ttl;
     let apply_nat = plan.prep.apply_nat;
 

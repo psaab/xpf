@@ -68,7 +68,12 @@ pub(super) fn try_translate_nat64_icmp_error(
             resolution,
             metadata,
         } => {
-            let l3 = meta.l3_offset as usize;
+            // SPARK-m6: verify L3 — a wrong stamp misreads the hop address.
+            let l3 = crate::afxdp::frame::verified_l3_or_stamp(
+                packet_frame,
+                meta.l3_offset,
+                meta.addr_family,
+            );
             // RFC 7915 §4.1/§6: the translated error's outer source is the
             // stateless Pref64 mapping of the error's v4 source (the hop
             // that generated it). The NAT64 prefix is the high 96 bits of
