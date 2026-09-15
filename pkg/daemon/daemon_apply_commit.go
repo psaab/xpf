@@ -281,7 +281,15 @@ func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncP
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
 	d.armPolicyInvalidationPlan(oldActive, compiled)
-	applyErr := d.applyConfigLocked(d.applyCancelCtx(), compiled)
+	// #9841: the committing wrapper, not the bare apply — it returns the
+	// response object projecting this attempt's unconverged-MTU records
+	// (a copy carrying the lines, or the applied pointer itself when there
+	// is nothing to warn about). The only call site by construction (pinned
+	// structurally); every other applyConfigLocked caller is a
+	// background/sync/rollback path with no response to carry warnings.
+	// The pipeline below keeps running on the applied pointer; only the
+	// RETURN carries the response object.
+	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
 	if applyErrSkipsPeerSync(applyErr) {
 		// Fatal (required-protocol-gate: dataplane disarmed / fail-closed) or a
 		// daemon-stop context abort (#2926 boundary): report failure and do NOT
@@ -335,7 +343,11 @@ func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncP
 	if joined == nil && d.store != nil {
 		d.store.MarkActiveApplied()
 	}
-	return compiled, joined
+	resp := compiled
+	if respCfg != nil {
+		resp = respCfg
+	}
+	return resp, joined
 }
 
 // applyErrSkipsPeerSync reports whether an applyConfigLocked error means the

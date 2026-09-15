@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/vishvananda/netlink"
 )
@@ -95,6 +96,15 @@ func (c *CLI) showInterfaces(args []string) error {
 		return nil
 	}
 
+	// #9841: the last apply's unconverged MTUs, annotated onto their rows
+	// below (or the leftover section when no row matches). Nil-safe: a nil
+	// dp or an unpublished backend simply yields no records.
+	var mtuRecs []dataplane.MTUUnconverged
+	if ar := dataplane.LastApplyResultOf(c.dp); ar != nil {
+		mtuRecs = ar.UnconvergedMTUs
+	}
+	mtuConsumed := make(map[string]bool)
+
 	// Optional filter by interface name
 	var filterName string
 	if len(args) > 0 {
@@ -174,7 +184,15 @@ func (c *CLI) showInterfaces(args []string) error {
 	if len(logicals) == 0 && filterName != "" {
 		if rethName, ok := rethMaps.LookupMember(filterName); ok {
 			c.showInterfacesRethMemberSummary(cfg, filterName, rethName)
+			for _, line := range dataplane.RenderMTUUnconvergedLeftovers(mtuRecs, mtuConsumed, filterName) {
+				fmt.Println(line)
+			}
 			return nil
+		}
+		// No row rendered at all: surface matching leftovers (a rename
+		// between the apply and this show) ahead of the error.
+		for _, line := range dataplane.RenderMTUUnconvergedLeftovers(mtuRecs, mtuConsumed, filterName) {
+			fmt.Println(line)
 		}
 		return fmt.Errorf("interface %s not found in configuration", filterName)
 	}
@@ -271,6 +289,17 @@ func (c *CLI) showInterfaces(args []string) error {
 		}
 
 		fmt.Printf("  Link-level type: %s, MTU: %d%s\n", linkType, mtu, extra)
+		// #9841: unconverged-MTU annotations for this netdev. The helper
+		// matches, freshly observes, and formats; matched keys are consumed
+		// (even when verified converged and rendering nothing) so only
+		// rowless records reach the leftover section.
+		mtuLines, mtuMatched := dataplane.AnnotateMTUUnconvergedRow(mtuRecs, physName, kernelLookup, "  ")
+		for _, m := range mtuMatched {
+			mtuConsumed[m] = true
+		}
+		for _, line := range mtuLines {
+			fmt.Println(line)
+		}
 
 		if len(hwAddr) > 0 {
 			fmt.Printf("  Current address: %s, Hardware address: %s\n", hwAddr, hwAddr)
@@ -346,6 +375,26 @@ func (c *CLI) showInterfaces(args []string) error {
 				fmt.Printf(" VLAN-Tag [ 0x8100.%d ]", li.vlanID)
 			}
 			fmt.Println()
+			// #9841: this unit's unconverged-MTU annotations, first in the
+			// section so units without addresses still surface them. The live
+			// read targets the record's own kernel netdev, and the kernel-name
+			// fallback resolves through the actual member for RETH units (the
+			// child lives on ge-0-0-2.50, not reth0.50) — never the parent MTU
+			// the Protocol lines below print.
+			unitKernel := lookupName
+			if isReth {
+				unitKernel = config.LinuxIfName(rethMember)
+				if li.vlanID > 0 {
+					unitKernel = fmt.Sprintf("%s.%d", unitKernel, li.vlanID)
+				}
+			}
+			unitLines, unitMatched := dataplane.AnnotateMTUUnconvergedRow(mtuRecs, li.ifaceRef, unitKernel, "    ")
+			for _, m := range unitMatched {
+				mtuConsumed[m] = true
+			}
+			for _, line := range unitLines {
+				fmt.Println(line)
+			}
 
 			fmt.Printf("    Security: Zone: %s\n", li.zoneName)
 
@@ -470,6 +519,13 @@ func (c *CLI) showInterfaces(args []string) error {
 		}
 
 		fmt.Println()
+	}
+
+	// #9841: records no row consumed (absent at show time, renamed since
+	// the apply), restricted to the filter. Nil when nothing qualifies, so
+	// record-less output is byte-identical.
+	for _, line := range dataplane.RenderMTUUnconvergedLeftovers(mtuRecs, mtuConsumed, filterName) {
+		fmt.Println(line)
 	}
 
 	return nil

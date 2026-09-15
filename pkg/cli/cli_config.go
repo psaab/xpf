@@ -10,6 +10,7 @@ import (
 	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // commitApply invokes the reconcile path for a freshly-committed config.
@@ -22,16 +23,49 @@ import (
 // #797 H2: worker-count changes and rss-indirection enable|disable
 // committed through the in-process CLI must trigger D3 reapply; that
 // only happens on the applyConfig path.
-func (c *CLI) commitApply(compiled *config.Config) {
+//
+// It returns the object the commit response prints: the applied pointer
+// itself when there is nothing to warn about, else a shallow copy
+// carrying the just-published unconverged-MTU lines (#9841). The applied
+// object is NEVER mutated — the dataplane retains it (the userspace
+// snapshot keeps Config: cfg) and status/control readers observe it under
+// the userspace mutex, so a post-apply Warnings write would race readers
+// this goroutine holds no lock against, on BOTH paths below.
+func (c *CLI) commitApply(compiled *config.Config) *config.Config {
 	if c.applyConfigFn != nil {
+		// #9841: the daemon-backed hybrid. applyConfigFn reports no
+		// error, so the generation guard alone decides: a failed apply
+		// publishes nothing and projects nothing.
+		before, beforeOK := dataplane.LastApplyGenerationOf(c.dp)
 		c.applyConfigFn(compiled)
-		return
+		return mtuWarningsResponse9841(c.dp, compiled, before, beforeOK)
 	}
 	if c.dp != nil {
+		before, beforeOK := dataplane.LastApplyGenerationOf(c.dp)
 		if err := c.applyToDataplane(compiled); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: dataplane apply failed: %v\n", err)
+			return compiled
 		}
+		return mtuWarningsResponse9841(c.dp, compiled, before, beforeOK)
 	}
+	return compiled
+}
+
+// mtuWarningsResponse9841 projects the just-published unconverged-MTU
+// records onto the object the local commit path prints
+// (printConfigWarnings renders them below "commit complete"). It returns
+// the applied pointer itself unless a fresh publication advanced past the
+// entry snapshot, mirroring the daemon wrapper's predicate — a skipped,
+// failed, or dataplane-less apply projects the input unchanged.
+func mtuWarningsResponse9841(dp cliRuntime, compiled *config.Config, before uint64, beforeOK bool) *config.Config {
+	after := dataplane.LastApplyResultOf(dp)
+	if after == nil {
+		return compiled
+	}
+	if beforeOK && after.Generation == before {
+		return compiled
+	}
+	return dataplane.WithMTUWarningsForResponse9841(compiled, after.UnconvergedMTUs)
 }
 
 func (c *CLI) handleCopyRename(parts []string) error {
@@ -376,8 +410,7 @@ func (c *CLI) runCommit(comment string) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.commitApply(compiled)
-	return compiled, nil
+	return c.commitApply(compiled), nil
 }
 
 // runCommitConfirmed is the commit-confirmed analogue of runCommit.
@@ -391,8 +424,7 @@ func (c *CLI) runCommitConfirmed(minutes int) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.commitApply(compiled)
-	return compiled, nil
+	return c.commitApply(compiled), nil
 }
 
 // commitCtx returns a cancellable context registered with the CLI's
