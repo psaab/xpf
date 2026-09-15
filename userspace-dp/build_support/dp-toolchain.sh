@@ -24,17 +24,25 @@ toml=$1
 cargo=${2:-}
 [ -f "$toml" ] || fail "missing $toml (helper toolchain pin SSOT)"
 
-# Tolerant of quote style, spacing, and trailing comments; scoped to the
-# [toolchain] table; requires EXACTLY ONE channel key; strict shape check
-# afterwards. A garbled, missing, duplicated, or wrong-table parse fails
+# Tolerant of quote style (single/double), surrounding spacing, and trailing
+# comments on the section AND value lines; scoped to the [toolchain] table;
+# requires EXACTLY ONE channel key; strict shape check afterwards. The value
+# must be exactly one quoted token with no interior whitespace — stripping is
+# NOT validation (`channel = "1.98 .1"` must fail, not normalize to 1.98.1),
+# so a non-conforming value passes through raw and fails the X.Y.Z check
+# below, loudly. A garbled, missing, duplicated, or wrong-table parse fails
 # loudly and can never fall back to an unpinned toolchain. (awk program only
 # is shared with the bash pin block in pkg/dataplane/build-userspace-xdp.sh;
 # the surrounding checks below are POSIX sh.)
 channels=$(awk '
-/^[[:space:]]*\[/ { in_tc = ($0 ~ /^[[:space:]]*\[toolchain\][[:space:]]*$/) }
+/^[[:space:]]*\[/ { in_tc = ($0 ~ /^[[:space:]]*\[toolchain\][[:space:]]*(#.*)?$/) }
 in_tc && /^[[:space:]]*channel[[:space:]]*=/ {
 	v=$0; sub(/^[^=]*=/, "", v); sub(/#.*/, "", v)
-	gsub(/[[:space:]"'"'"']/, "", v); print v
+	if (v ~ /^[[:space:]]*"[^"[:space:]]+"[[:space:]]*$/ || v ~ /^[[:space:]]*'"'"'[^'"'"'[:space:]]+'"'"'[[:space:]]*$/) {
+		gsub(/[[:space:]"'"'"']/, "", v); print v
+	} else {
+		print v
+	}
 }' "$toml")
 [ -n "$channels" ] || fail "expected exactly one 'channel' key in the [toolchain] table of $toml; got none"
 nl='

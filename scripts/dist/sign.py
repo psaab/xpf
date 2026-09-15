@@ -38,6 +38,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # Pinned, checked-in public key (the trust root for image artifacts).
 # Overridable via XPF_IMAGE_PUBKEY for rotation/testing — the override is a
@@ -146,7 +147,7 @@ def assert_bake_set(manifest_path, files):
     xpf-<ver>.manifest sidecar does not assert validated/base_image_pinned/
     guest_kernel (the same three properties gate_provenance enforces).
 
-    Call BEFORE write_manifest: every refusal raises SignError (the CLI maps
+    Call BEFORE write_and_sign_manifest: every refusal raises SignError (the CLI maps
     it to `ERROR:` + exit 1) with the manifest and any pre-existing .minisig
     left byte-identical. What this is NOT, stated so a reader does not
     mistake the tripwire for authentication:
@@ -154,7 +155,7 @@ def assert_bake_set(manifest_path, files):
         the actor here is the publisher/operator, not a remote party);
       - it never compares current bytes to the recorded hashes — a byte
         tamper that preserves the flags is re-hashed and signed (publish's
-        hash checks then pass; pre-existing, outside F-063's letter);
+        hash checks then pass; tracked as #10120, outside F-063's letter);
       - it does not check the inventory leg (hollow/mismatched pkgs stays
         publish's job — publish remains the full downstream gate).
     """
@@ -295,6 +296,54 @@ def sign_manifest(manifest_path, seckey_path, comment=None, sig_path=None):
             "(a password-protected key cannot sign unattended — OQ-2 requires "
             "a passwordless image-signing key or an interactive signer).")
     return sig_path
+
+
+def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None):
+    """Write + minisign-sign `manifest_path`, committing atomically (#10119).
+
+    write_manifest() then sign_manifest() leaves a NEW manifest beside a
+    STALE-or-absent .minisig when signing fails (safe — a stale signature
+    cannot verify the new bytes — but confusing: the tree looks half-signed
+    and the previous manifest bytes are gone). Write + sign temp siblings in
+    the same directory and os.replace() both over only on success, so a
+    signing failure leaves the live manifest and the live .minisig
+    byte-identical (mtime included). Existing permission bits are preserved
+    across the replace.
+
+    Two renames cannot be one atomic step: a crash between them leaves a new
+    manifest beside the OLD .minisig — which fails closed downstream (the old
+    signature cannot verify the new bytes). Temp names start with '.' so
+    publish discovery (xpf-*.SHA256SUMS) never sees a stray on unclean exit;
+    leftovers are removed best-effort. (bake.py keeps its split-phase
+    write → validate → sign flow, where the gap is structural, not a bug.)
+    """
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+    base = os.path.basename(manifest_path)
+    tmp_manifest = None
+    tmp_sig = None
+    try:
+        fd, tmp_manifest = tempfile.mkstemp(prefix="." + base + ".",
+                                            suffix=".tmp", dir=manifest_dir)
+        os.close(fd)
+        write_manifest(tmp_manifest, files)
+        if os.path.exists(manifest_path):
+            shutil.copymode(manifest_path, tmp_manifest)
+        tmp_sig = tmp_manifest + ".minisig"
+        sign_manifest(tmp_manifest, seckey_path, comment, sig_path=tmp_sig)
+        if os.path.exists(manifest_path + ".minisig"):
+            shutil.copymode(manifest_path + ".minisig", tmp_sig)
+        os.replace(tmp_manifest, manifest_path)
+        os.replace(tmp_sig, manifest_path + ".minisig")
+        tmp_manifest = None  # committed; do not unlink below
+        tmp_sig = None
+    finally:
+        for tmp in (tmp_manifest, tmp_sig):
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    return manifest_path + ".minisig"
 
 
 def verify_signature(manifest_path, sig_path, pubkey_path):
@@ -496,14 +545,15 @@ def _main(argv):
         if a.cmd == "sign-manifest":
             # #9920 F-063: fail-CLOSED for bake manifests. An xpf-<ver>.SHA256SUMS
             # feeds publish discovery, so its set + provenance flags are asserted
-            # BEFORE anything is written; a refusal leaves the manifest and any
-            # pre-existing .minisig byte-identical. Other basenames are fixture
-            # scratch (never published) and stay permissive — deliberate
-            # rename-evasion is out of scope (publish still refuses bad sets).
+            # BEFORE anything is written. Other basenames are fixture scratch
+            # (never published) and stay permissive: a scratch-signed reduced
+            # manifest copied over a bake name is refused downstream —
+            # gate_images requires the signed set to equal the bake four-file
+            # set (parent review #10119).
             if is_bake_manifest(a.manifest):
                 assert_bake_set(a.manifest, a.files)
-            write_manifest(a.manifest, a.files)
-            sig = sign_manifest(a.manifest, a.seckey, a.comment)
+            sig = write_and_sign_manifest(a.manifest, a.files, a.seckey,
+                                          a.comment)
             print(f"signed: {a.manifest} -> {sig}")
             return 0
         if a.cmd == "verify":

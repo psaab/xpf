@@ -7,6 +7,9 @@ state with no validated/base_image_pinned/guest_kernel assertion. The
 sign-manifest CLI is now fail-CLOSED for xpf-*.SHA256SUMS manifests
 (sign.assert_bake_set, before any write); the library functions stay
 permissive (bake.py and the publish-negative fixtures call them directly).
+And publish.gate_images enforces the four-file set at the trust boundary, so
+direct-sign, library, and rename bypasses of the basename-scoped CLI gate all
+refuse downstream (parent review: publish previously verified listed-only).
 
 F-064: the recipe's status was the LAST iteration's (a failed rotation
 reported success, half-signed tree), and sign.py let OSError escape as an
@@ -51,6 +54,11 @@ _SPEC = importlib.util.spec_from_file_location(
 bake = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(bake)
+_PSPEC = importlib.util.spec_from_file_location(
+    "xpf_publish_9920", _HERE / "publish.py")
+publish = importlib.util.module_from_spec(_PSPEC)
+assert _PSPEC.loader is not None
+_PSPEC.loader.exec_module(publish)
 
 _HAVE_MINISIGN = shutil.which("minisign") is not None
 VER = "9.9.20"
@@ -164,6 +172,23 @@ class StrictSignManifestTests(unittest.TestCase):
         self.assertNotIn("Traceback", err)
         self.assertEqual(Path(sums).read_bytes(), old_sums)
         self.assertFalse(os.path.exists(sums + ".minisig"))
+
+    def test_sign_failure_leaves_live_files_identical(self):
+        # kill: write-then-sign in place instead of temp+rename (#10119).
+        # The gate PASSES (honest set); minisign then fails on the bogus key —
+        # and neither the live manifest nor the live .minisig may change.
+        files, sums = _write_set(self.dir)
+        old_sums, sums_mtime = _freeze(sums, b"stale-live-manifest-bytes\n")
+        old_sig, sig_mtime = _freeze(sums + ".minisig", b"stale-sig-bytes\n")
+        rc, err = _run_main(["sign-manifest", "--manifest", sums,
+                             "--seckey", "/nonexistent.sec"] + files)
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("ERROR:"), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(Path(sums).read_bytes(), old_sums)
+        self.assertEqual(os.stat(sums).st_mtime, sums_mtime)
+        self.assertEqual(Path(sums + ".minisig").read_bytes(), old_sig)
+        self.assertEqual(os.stat(sums + ".minisig").st_mtime, sig_mtime)
 
     def test_extra_file_refused(self):
         # kill: compare with subset instead of equality.
@@ -307,6 +332,72 @@ class OSErrorHandlingTests(unittest.TestCase):
         self.assertIn(f"xpf-{VER}.qcow2", err)
 
 
+@unittest.skipUnless(_HAVE_MINISIGN, "minisign not installed")
+class PublishCompletenessTests(unittest.TestCase):
+    """Parent review: gate_images enforces the four-file set, closing the
+    direct-sign, library, and rename bypasses of the basename-scoped CLI gate
+    (publish previously verified listed files only, and the orphan sweep only
+    fires for files PRESENT but uncovered — a manifest that OMITS qcow2 or the
+    metadata tarball published a partial set)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="xpf-9920-pub-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # Keys live OUTSIDE dist: the default-deny sweep refuses stray files.
+        self.keys = tempfile.mkdtemp(prefix="xpf-9920-keys-")
+        self.addCleanup(shutil.rmtree, self.keys, ignore_errors=True)
+        self.pub = os.path.join(self.keys, "img.pub")
+        self.sec = os.path.join(self.keys, "img.sec")
+        subprocess.run(["minisign", "-G", "-W", "-p", self.pub,
+                        "-s", self.sec],
+                       check=True, capture_output=True)
+        self._old_env = os.environ.get("XPF_IMAGE_PUBKEY")
+        os.environ["XPF_IMAGE_PUBKEY"] = self.pub
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        if self._old_env is None:
+            os.environ.pop("XPF_IMAGE_PUBKEY", None)
+        else:
+            os.environ["XPF_IMAGE_PUBKEY"] = self._old_env
+
+    def _signed_dist(self, omit=()):
+        """Genuinely-signed dist: 4-file set minus `omit` (disk AND manifest).
+
+        Signed via the LOW-LEVEL library — the bypass spelling the CLI gate
+        cannot see — proving the publish boundary holds regardless of how the
+        signature was produced."""
+        files, sums = _write_set(self.dir, omit=omit)
+        sign.write_manifest(sums, files)
+        sign.sign_manifest(sums, self.sec, comment="9920-pubtest")
+        return sums
+
+    def _refused(self, needle, needle2=None):
+        with self.assertRaises(SystemExit) as ctx:
+            publish.gate_images(self.dir, require_installer=False)
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn(needle, str(ctx.exception.code))
+        if needle2:
+            self.assertIn(needle2, str(ctx.exception.code))
+
+    def test_missing_qcow2_refused(self):
+        # kill: drop the set(checks)==SSOT check in gate_images.
+        self._signed_dist(omit=(".qcow2",))
+        self._refused("four-file set", f"xpf-{VER}.qcow2")
+
+    def test_missing_metadata_refused(self):
+        # kill: drop the set(checks)==SSOT check in gate_images.
+        self._signed_dist(omit=("incus-metadata.tar.gz",))
+        self._refused("four-file set", "incus-metadata")
+
+    def test_complete_set_passes_images_gate(self):
+        # kill: any over-strict membership comparison (e.g. order-sensitive).
+        self._signed_dist()
+        versions, _pub = publish.gate_images(self.dir,
+                                             require_installer=False)
+        self.assertIn(VER, versions)
+
+
 class HelperPinTests(unittest.TestCase):
     """F-148: the helper toolchain pin exists, parses strictly, and is enforced."""
 
@@ -338,6 +429,25 @@ class HelperPinTests(unittest.TestCase):
         r = self._script()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(r.stdout.strip(), r"\A\d+\.\d+\.\d+\Z")
+
+    def test_pin_script_tolerates_trailing_comments(self):
+        # kill: anchor the section match at line end (valid TOML refused).
+        r = self._script('[toolchain] # trailing comment\n'
+                         'channel = "1.2.3" # pinned\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "1.2.3")
+
+    def test_pin_script_rejects_interior_whitespace(self):
+        # kill: strip-all-whitespace normalization ("1.98 .1" -> 1.98.1).
+        r = self._script('[toolchain]\nchannel = "1.98 .1"\n')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("X.Y.Z", r.stderr)
+
+    def test_pin_script_rejects_unquoted_channel(self):
+        # kill: accept bare values (invalid TOML — strings must be quoted).
+        r = self._script('[toolchain]\nchannel = 1.2.3\n')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("X.Y.Z", r.stderr)
 
     def test_pin_script_rejects_unpinned_channel(self):
         # kill: accept any channel string (e.g. "stable" floats).
