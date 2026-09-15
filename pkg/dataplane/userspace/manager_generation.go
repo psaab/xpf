@@ -3,6 +3,7 @@ package userspace
 import (
 	"fmt"
 	"log/slog"
+	"math"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,10 +31,25 @@ func (m *Manager) bpfKtimeNs() uint64 {
 	return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec)
 }
 
+// incGenerationSaturatingLocked advances the snapshot allocator without
+// wrapping: at math.MaxUint64 it stays. m.generation therefore never wraps
+// within an incarnation, which is what the #9824 strictly-above offer rests
+// on (H <= m.generation+1 holds only while the counter is monotone). The one
+// caller that must OFFER a fresh generation from saturated state — the #9824
+// rebase — refuses allocation fail-closed instead; the recording callers
+// (partial/FIB bookkeeping) go idempotent there, and republish paths offering
+// m.generation+1 get a loud rollback refusal rather than a silent strand.
+// Caller holds m.mu.
+func (m *Manager) incGenerationSaturatingLocked() {
+	if m.generation < math.MaxUint64 {
+		m.generation++
+	}
+}
+
 func (m *Manager) bumpGeneration() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.generation++
+	m.incGenerationSaturatingLocked()
 	return m.generation
 }
 
@@ -68,7 +84,7 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 
 	// Update the cached snapshot's FIB generation without rebuilding.
 	m.lastSnapshot.FIBGeneration = newGen
-	m.generation++
+	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
 
 	// #1197 v4 (Codex code-review v3 #1): refresh the monitored
@@ -196,7 +212,7 @@ func (m *Manager) advanceGenerationAfterPartialUpdateLocked() {
 	// Sampled BEFORE the bump: after it, lastSnapshot.Generation has moved and
 	// the comparison would be meaningless.
 	fullSnapshotWasPublished := m.publishedSnapshot >= m.lastSnapshot.Generation
-	m.generation++
+	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
 	if !fullSnapshotWasPublished {
 		// A full-snapshot publish is outstanding. Leave publishedSnapshot and
