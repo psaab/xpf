@@ -432,11 +432,52 @@ impl ShardedNeighborMap {
         key: (i32, IpAddr),
         val: NeighborEntry,
     ) -> bool {
+        // #9893: the Override-unconditional leg of the CAS below — an ARP /
+        // RX learn always overwrites, so `override=true` never refuses. The
+        // `None` arm is a defined fallback, not a panic: a future `None`
+        // variant degrades to no-change (no insert happened, so `false` is
+        // accurate) instead of panicking a cold worker path. The
+        // `debug_assert` keeps the invariant loud in tests.
+        let result = self.insert_ndp_na_if_override_allows(key, val, true);
+        debug_assert!(
+            result.is_some(),
+            "override=true never refuses an NDP-NA-shaped insert"
+        );
+        result.unwrap_or(false)
+    }
+
+    /// #9893: atomic NDP Neighbor-Advertisement learn honoring RFC 4861 §7.2.5
+    /// Override under the key's shard lock.
+    /// Returns `None` when an Override=0 NA meets a live entry with a
+    /// DIFFERENT MAC — the unsolicited-NA next-hop hijack primitive (#4475).
+    /// The refusal makes no change: no insert, no `mac_change_epoch` bump,
+    /// no `learn_cap_drops` bump, no `insert_generation` bump. Otherwise
+    /// inserts exactly as `insert_if_changed` (same-MAC refresh → `Some(false)`,
+    /// cap refusal → `Some(false)`, first insert / MAC change → `Some(true)`
+    /// with the #3048/#5147/#5673/#7156 side effects) and returns `Some(changed)`.
+    ///
+    /// This closes the #4475 best-effort TOCTOU: the pre-#9893 call site did
+    /// `get` (lock #1) then `insert_if_changed` (lock #2), so a concurrent
+    /// insert of a differing MAC between the two locks was overwritten by
+    /// the Override=0 NA. The check and the write now share one shard lock,
+    /// so no interleave can slip between them. Costs nothing on the normal
+    /// path — one lock either way, one extra MAC compare on the NDP arm.
+    pub(crate) fn insert_ndp_na_if_override_allows(
+        &self,
+        key: (i32, IpAddr),
+        val: NeighborEntry,
+        override_flag: bool,
+    ) -> Option<bool> {
         let idx = shard_idx(&key);
         let mut shard = self.lock_shard(idx);
         let prior_mac = shard.get(&key).map(|existing| existing.mac);
+        // #9893 CAS: Override=0 creates or refreshes but never replaces a
+        // live differing LLA. Under the same lock as the write below.
+        if !override_flag && prior_mac.is_some_and(|old| old != val.mac) {
+            return None;
+        }
         if prior_mac == Some(val.mac) {
-            return false;
+            return Some(false);
         }
         // #5673: a NEW learn (no prior entry for this key) that would grow
         // the shard past the per-shard cap is refused — the spoofed-source
@@ -448,7 +489,7 @@ impl ShardedNeighborMap {
         // is never refused, so a legitimate learned neighbor keeps working.
         if prior_mac.is_none() && shard.len() >= MAX_DYNAMIC_NEIGHBORS_PER_SHARD {
             self.learn_cap_drops.fetch_add(1, Ordering::Relaxed);
-            return false;
+            return Some(false);
         }
         // #3048: a genuine MAC CHANGE (an existing entry whose hwaddr is
         // being replaced by a different one) invalidates any flow-cache
@@ -467,7 +508,7 @@ impl ShardedNeighborMap {
         // #7156: AFTER the map write, Release-ordered — a worker that observes
         // this generation is guaranteed to see the entry it announces.
         self.insert_generation.fetch_add(1, Ordering::Release);
-        true
+        Some(true)
     }
 
     /// Remove `key` if present and return whether it was actually
