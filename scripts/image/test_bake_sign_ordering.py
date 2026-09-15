@@ -174,6 +174,22 @@ class RuntimePackageSyncTests(unittest.TestCase):
         self.assertIn("frr", bake.RUNTIME_PACKAGES)
         self.assertIn("frr", self._appliance_depends())
 
+    def test_perl_base_in_runtime_packages(self):
+        # #9921 F-147: perl-base (with Fcntl) backs xpf-day0-config's
+        # O_NOFOLLOW medium read. Essential, so present by packaging
+        # invariant — pinned explicitly in both lists so the boot path's
+        # dependency is declared.
+        self.assertIn(
+            "perl-base", bake.RUNTIME_PACKAGES,
+            "perl-base missing from bake RUNTIME_PACKAGES "
+            "(#9921 F-147: safe_read_medium provider)")
+
+    def test_perl_base_in_appliance_depends(self):
+        self.assertIn(
+            "perl-base", self._appliance_depends(),
+            "perl-base missing from xpf-appliance Depends in "
+            "debian/control (#9921 F-147; keep in sync with RUNTIME_PACKAGES)")
+
 
 if __name__ == "__main__":
     unittest.main()

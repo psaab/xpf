@@ -61,7 +61,8 @@ Depends: ${misc:Depends},
  curl,
  ca-certificates,
  cloud-guest-utils,
- e2fsprogs
+ e2fsprogs,
+ perl-base
 Description: xpf firewall appliance metapackage
  Pulls in the xpf firewall binary package plus the full runtime
  dependency set (routing, IPsec, DHCP server, time sync, networking
