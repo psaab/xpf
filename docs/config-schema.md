@@ -12384,7 +12384,31 @@ packed-single bypass. `hoistAndSplitRun8939` at both readers expands
 one-line runs (`then forwarding-class af11 loss-priority high;`, flat-set
 single command), closing the #9156 divergence and a strict-path flat-set
 chain loss. `TestPolicerThenPackedParity_9882` pins packed/braced agreement
-per spelling.
+per spelling. Tokens fused past an action's arity are recorded as unknown
+(`policerThenExtras9882`, bound-for-bound with `thenActionExtras8971`).
+
+**Block-form values survive the hoist (review fold).** `loss-priority {
+high; }` carries its value as a child under the nodeVal contract, and the
+hoist would lift it as a sibling unknown — rejecting a previously accepted
+spelling on strict while lenient fell back to discard (meter-only flipped
+to dropped excess). `shieldPolicerThenValues9882` folds leading children
+into unsatisfied value slots first (positional, #9124: declared slots win
+even when the value spells a sibling; masks move with keys, #8921),
+promoting what a consumed value carried to sibling position so consumption
+never drops. Policer-local by design: the shared hoister still strips
+block-values at its other call sites (none has a measured block-value
+reader), and widening it needs fleet-wide re-adjudication. Block-form LP/FC
+are covered through render + replay + deletion.
+
+**Valueless marking is malformed (M1).** `then forwarding-class;` without a
+class records `forwarding-class (missing value)` into UnknownActions and the
+gate renders the requires-a-value message (one channel, two presentations).
+Hierarchical strict already rejects at SchemaValidate arity; the compiler
+record covers flat-set strict (reject) and lenient (warn + pre-gate
+discard). **Duplicate `then` blocks accumulate (M2, #3850 mirror):** both
+loops iterate `FindChildren("then")`, so a second block's unknown token or
+conflict is gated instead of dropped; a terminal resolves last-wins in block
+order and repetition stays redundancy.
 
 **Three-color coordination** (the #9503 pattern). The three-color `ThenAction`
 crosses to the helper as a string guarded on BOTH sides, so admitting the
@@ -12403,19 +12427,21 @@ semantics and the documented contract, so the flip is silent by design (no
 new advisory; single-rate loss-priority is the silent-meter-only precedent).
 A config with an unknown `then` token is newly REJECTED at commit (typo
 fail-closed, the #2399/#9877 doctrine); persisted/peer-synced copies still
-boot with a warning.
+boot with a warning. Valueless marking (`then forwarding-class;`) and
+cross-block conflicts (`then {discard;} then {loss-priority high;}`) are
+newly rejected the same way (the hierarchical valueless spelling already
+was, at SchemaValidate arity); block-form values (`loss-priority { high; }`)
+compile exactly as before.
 
-**Residuals (deliberately out of scope).** Valueless marking
-(`then loss-priority;`) keeps `"discard"` — pre-existing, shared with
-loss-priority. Tokens fused past a KNOWN action's arity
-(`then { discard foo; }`) are recorded as unknown (the #8971 shape,
-`policerThenExtras9882` mirroring `thenActionExtras8971`); the one
-remaining swallow is a second token nested UNDER an unknown head
-(`set … then discard [ v1 v2 ]`), where the hoist keeps the unresolvable
-head whole — the commit still rejects naming the first token, and the site
-is registered in `notAValueList` with the verified landing. LP/FC *values*
-are unvalidated, mirroring loss-priority. Duplicate `then` blocks read
-first-only in both compiler and gate, agreeing by construction.
+**Residuals (deliberately out of scope).** The one remaining swallow is a
+second token nested UNDER an unknown head (`set … then discard [ v1 v2 ]`),
+where the hoist keeps the unresolvable head whole — the commit still rejects
+naming the first token, and the site is registered in `notAValueList` with
+the verified landing. LP/FC *values* are unvalidated, mirroring
+loss-priority. Deleting a block-form marking leaf is refused by the
+pre-existing #8992 packed-run guard (a schema-leaf node with children reads
+as an elided run there); deleting the whole `then` block works — both
+pinned, neither silent.
 
 ### #3043 — Security-policy missing/conflicting terminal action (commit fail-closed)
 

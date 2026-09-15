@@ -458,3 +458,251 @@ func TestPolicerThenFlatSetChainReadsTail_9882(t *testing.T) {
 		t.Errorf("rejection must name both actions, got: %v", err)
 	}
 }
+
+// polLenientHier9882 compiles hierarchical firewall text on the TOLERANT path
+// (for shapes flat-set lines cannot spell, like block-form values).
+func polLenientHier9882(t *testing.T, firewall string) (*config.Config, error) {
+	t.Helper()
+	tree, perrs := config.NewParser(polBase9882 + "firewall {\n" + firewall + "\n}\n").Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs[0])
+	}
+	return config.CompileConfigLenient(tree)
+}
+
+// BLOCK-FORM VALUES (review fold: the hoist must not strip argument-bearing
+// children). `loss-priority { high; }` carries its value as a child under
+// the nodeVal contract; the base compiler read it and committed the marking.
+// Lifting it as a sibling unknown both rejects a previously accepted
+// spelling (strict) and flips meter-only traffic into dropped excess
+// (lenient ThenAction falls back to discard). The shield folds values back
+// into Keys before the hoist, so block-form compiles exactly like Keys-form
+// on both paths.
+func TestPolicerThenBlockFormValuesPreserved_9882(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		then       string
+		thenAction string
+	}{
+		{"loss-priority block value marks", "loss-priority { high; }", "loss-priority high"},
+		{"forwarding-class block value marks", "forwarding-class { af11; }", "forwarding-class af11"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := polCommit9882(t, pol9882(tc.then))
+			if err != nil {
+				t.Fatalf("block-form `then { %s }` must commit, got: %v", tc.then, err)
+			}
+			if got := cfg.Firewall.Policers["p1"].ThenAction; got != tc.thenAction {
+				t.Errorf("strict ThenAction = %q, want %q", got, tc.thenAction)
+			}
+			lc, err := polLenientHier9882(t, pol9882(tc.then))
+			if err != nil {
+				t.Fatalf("lenient must boot block-form, got: %v", err)
+			}
+			lp := lc.Firewall.Policers["p1"]
+			if lp.ThenAction != tc.thenAction {
+				t.Errorf("lenient ThenAction = %q, want %q (meter-only, not discard)", lp.ThenAction, tc.thenAction)
+			}
+			if len(lp.UnknownActions) != 0 {
+				t.Errorf("block-form value must not be flagged unknown, got %v", lp.UnknownActions)
+			}
+		})
+	}
+}
+
+// BLOCK-FORM LIFECYCLE (review fold): render the block-form config to
+// display-set, replay every line into a fresh tree, and delete back down —
+// each leg compiling to the same marking until the value is gone, at which
+// point the absence is loud (M1), never a silent discard.
+func TestPolicerThenBlockFormRenderReplayDelete_9882(t *testing.T) {
+	src := polBase9882 + "firewall {\n" + pol9882("loss-priority { high; }") + "\n}\n"
+	tree, perrs := config.NewParser(src).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs[0])
+	}
+	// RENDER: display-set must spell the value out, losslessly.
+	rendered := tree.FormatSet()
+	if !strings.Contains(rendered, "set firewall policer p1 then loss-priority high") {
+		t.Fatalf("rendered set-lines lost the block-form value:\n%s", rendered)
+	}
+	// REPLAY: every rendered line into a fresh tree compiles to the marking.
+	replay := &config.ConfigTree{}
+	for _, line := range strings.Split(strings.TrimSpace(rendered), "\n") {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("replay parse %q: %v", line, err)
+		}
+		if err := replay.SetPath(path); err != nil {
+			t.Fatalf("replay SetPath %q: %v", line, err)
+		}
+	}
+	rcfg, err := config.CompileConfig(replay)
+	if err != nil {
+		t.Fatalf("replayed tree must commit, got: %v", err)
+	}
+	if got := rcfg.Firewall.Policers["p1"].ThenAction; got != "loss-priority high" {
+		t.Fatalf("replayed ThenAction = %q, want %q", got, "loss-priority high")
+	}
+	// DELETION on the block-form tree: removing the leaf is REFUSED by the
+	// pre-existing #8992 packed-run guard — a schema-leaf node carrying
+	// children reads as an elided run there, and the value child is
+	// indistinguishable from a packed sibling at that layer. The refusal is
+	// loud (never a silent half-delete); teaching DeletePath the
+	// positional value rule is out of scope for this lane.
+	if err := tree.DeletePath([]string{"firewall", "policer", "p1", "then", "loss-priority"}); err == nil {
+		t.Fatalf("block-form leaf delete unexpectedly succeeded")
+	} else if !strings.Contains(err.Error(), "ELIDED") {
+		t.Errorf("block-form leaf delete must fail as elided-packed (#8992), got: %v", err)
+	}
+	// Deleting the whole `then` block works and returns to the default.
+	if err := tree.DeletePath([]string{"firewall", "policer", "p1", "then"}); err != nil {
+		t.Fatalf("delete then block: %v", err)
+	}
+	dcfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("then-deleted policer must commit, got: %v", err)
+	}
+	if got := dcfg.Firewall.Policers["p1"].ThenAction; got != "discard" {
+		t.Errorf("then-deleted ThenAction = %q, want default %q", got, "discard")
+	}
+	if len(dcfg.Firewall.Policers["p1"].UnknownActions) != 0 {
+		t.Errorf("then-deleted policer must carry no unknowns, got %v", dcfg.Firewall.Policers["p1"].UnknownActions)
+	}
+	// Same on the replayed Keys-form tree: deleting the value path removes
+	// the whole statement (there is no valueless residue to be loud about —
+	// valueless arises only from authoring it, which M1 covers).
+	if err := replay.DeletePath([]string{"firewall", "policer", "p1", "then", "loss-priority", "high"}); err != nil {
+		t.Fatalf("delete Keys-form value path: %v", err)
+	}
+	rcfg2, err := config.CompileConfig(replay)
+	if err != nil {
+		t.Fatalf("value-path-deleted policer must commit, got: %v", err)
+	}
+	if got := rcfg2.Firewall.Policers["p1"].ThenAction; got != "discard" {
+		t.Errorf("value-path-deleted ThenAction = %q, want default %q", got, "discard")
+	}
+}
+
+// M1: a marking action without its value is malformed, not a silent discard.
+// Hierarchical strict already rejects at SchemaValidate arity; flat-set
+// strict and the lenient path reach the compiler, where the missing value is
+// flagged for the gate (requires-a-value message) instead of compiling to
+// the discard default with zero diagnostic.
+func TestPolicerThenValuelessMarkingIsLoud_9882(t *testing.T) {
+	// Hierarchical: the schema-arity gate refuses (pre-existing message).
+	if _, err := polCommit9882(t, pol9882("forwarding-class;")); err == nil {
+		t.Fatalf("hierarchical valueless forwarding-class committed CLEAN")
+	} else if !strings.Contains(err.Error(), "declares a value") {
+		t.Errorf("hierarchical rejection must be the arity gate, got: %v", err)
+	}
+	// Flat-set strict: the compiler gate refuses with the missing-value text.
+	flat := func(t *testing.T, action string) (*config.Config, error) {
+		t.Helper()
+		tree := &config.ConfigTree{}
+		for _, cmd := range []string{
+			"set firewall policer p1 if-exceeding bandwidth-limit 10m",
+			"set firewall policer p1 if-exceeding burst-size-limit 15k",
+			"set firewall policer p1 then " + action,
+		} {
+			path, err := config.ParseSetCommand(cmd)
+			if err != nil {
+				t.Fatalf("parse %q: %v", cmd, err)
+			}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", cmd, err)
+			}
+		}
+		return config.CompileConfig(tree)
+	}
+	for _, action := range []string{"forwarding-class", "loss-priority"} {
+		if _, err := flat(t, action); err == nil {
+			t.Fatalf("flat-set valueless %s committed CLEAN as discard (M1)", action)
+		} else if !strings.Contains(err.Error(), "requires a value") || !strings.Contains(err.Error(), action) {
+			t.Errorf("flat-set rejection must name %s and the missing value, got: %v", action, err)
+		}
+		tree := &config.ConfigTree{}
+		for _, cmd := range []string{
+			"set firewall policer p1 if-exceeding bandwidth-limit 10m",
+			"set firewall policer p1 if-exceeding burst-size-limit 15k",
+			"set firewall policer p1 then " + action,
+		} {
+			path, _ := config.ParseSetCommand(cmd)
+			_ = tree.SetPath(path)
+		}
+		lc, err := config.CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("lenient must boot valueless %s, got: %v", action, err)
+		}
+		if got := lc.Firewall.Policers["p1"].ThenAction; got != "discard" {
+			t.Errorf("lenient ThenAction = %q, want pre-gate %q", got, "discard")
+		}
+		if joined := strings.Join(lc.Warnings, "\n"); !strings.Contains(joined, "requires a value") {
+			t.Errorf("lenient must WARN naming the missing value, got: %v", lc.Warnings)
+		}
+	}
+}
+
+// M2 (#3850 mirror): EVERY `then` block is read. A second block carrying an
+// unknown token or a conflicting action must not vanish while the first
+// block commits clean; actions accumulate across blocks and a terminal
+// resolves last-wins in block order.
+func TestPolicerThenDuplicateBlocksAccumulate_9882(t *testing.T) {
+	dup := func(a, b string) string {
+		return "policer p1 { if-exceeding { bandwidth-limit 10m; burst-size-limit 15k; } then { " + a + " } then { " + b + " } }"
+	}
+	// Unknown token in the second block is refused, naming it.
+	if _, err := polCommit9882(t, dup("discard;", "foo;")); err == nil {
+		t.Fatalf("duplicate-then with unknown in second block committed CLEAN (M2)")
+	} else if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("rejection must name the second-block token, got: %v", err)
+	}
+	// Conflict split across blocks is refused.
+	if _, err := polCommit9882(t, dup("discard;", "loss-priority high;")); err == nil {
+		t.Fatalf("duplicate-then split conflict committed CLEAN (M2/#8445)")
+	}
+	// Same action twice across blocks is redundancy, not conflict.
+	cfg, err := polCommit9882(t, dup("discard;", "discard;"))
+	if err != nil {
+		t.Fatalf("duplicate-then repeated discard must commit, got: %v", err)
+	}
+	if got := cfg.Firewall.Policers["p1"].ThenAction; got != "discard" {
+		t.Errorf("ThenAction = %q, want %q", got, "discard")
+	}
+	// Three-color twin: the second block is read there too.
+	tcp := "three-color-policer t1 { single-rate { committed-information-rate 10m; committed-burst-size 15k; excess-burst-size 15k; } then { discard; } then { foo; } }"
+	if _, err := polCommit9882(t, tcp); err == nil {
+		t.Fatalf("three-color duplicate-then with unknown committed CLEAN (M2)")
+	} else if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("rejection must name the second-block token, got: %v", err)
+	}
+}
+
+// Three-color twins of the review-fold shapes: block-form value marks (with
+// the #9503 advisory) and valueless warns-missing on the tolerant path.
+func TestThreeColorPolicerThenReviewShapes_9882(t *testing.T) {
+	cfg, err := polCommit9882(t, tcp9882("forwarding-class { af11; }"))
+	if err != nil {
+		t.Fatalf("three-color block-form forwarding-class must commit, got: %v", err)
+	}
+	if got := cfg.Firewall.ThreeColorPolicers["t1"].ThenAction; got != "forwarding-class af11" {
+		t.Errorf("ThenAction = %q, want %q", got, "forwarding-class af11")
+	}
+	if joined := strings.Join(cfg.Warnings, "\n"); !strings.Contains(joined, "t1") || !strings.Contains(joined, "meters only") {
+		t.Errorf("marking advisory must fire, got: %v", cfg.Warnings)
+	}
+	tree := &config.ConfigTree{}
+	for _, cmd := range []string{
+		"set firewall three-color-policer t1 single-rate committed-information-rate 10m",
+		"set firewall three-color-policer t1 single-rate committed-burst-size 15k",
+		"set firewall three-color-policer t1 single-rate excess-burst-size 15k",
+		"set firewall three-color-policer t1 then loss-priority",
+	} {
+		path, _ := config.ParseSetCommand(cmd)
+		_ = tree.SetPath(path)
+	}
+	if _, err := config.CompileConfig(tree); err == nil {
+		t.Fatalf("three-color flat-set valueless loss-priority committed CLEAN (M1)")
+	} else if !strings.Contains(err.Error(), "requires a value") {
+		t.Errorf("rejection must name the missing value, got: %v", err)
+	}
+}

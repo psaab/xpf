@@ -1921,11 +1921,22 @@ func validateFirewallPolicerUnknownActionsStrict(cfg *Config) error {
 			if len(unknownByName[name]) == 0 {
 				continue
 			}
+			tok := unknownByName[name][0]
+			// M1: a recognized marking action without its value is
+			// malformed, not unknown — name the missing value rather
+			// than calling a known action unknown.
+			if action, ok := strings.CutSuffix(tok, policerMissingValueSuffix9882); ok {
+				return fmt.Errorf(
+					"firewall %s %q: `then %s` requires a value "+
+						"(supported: `then discard`, `then loss-priority <level>`, "+
+						"`then forwarding-class <class>`)",
+					kind, name, action)
+			}
 			return fmt.Errorf(
 				"firewall %s %q: unknown `then` action %q "+
 					"(supported: `then discard`, `then loss-priority <level>`, "+
 					"`then forwarding-class <class>`)",
-				kind, name, unknownByName[name][0])
+				kind, name, tok)
 		}
 		return nil
 	}
