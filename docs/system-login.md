@@ -1328,12 +1328,23 @@ of work in progress (secrets are separately redacted, so this is not #4099).
 a config-backup client written without `?target=active` archives either nothing
 or somebody's draft and cannot tell which.
 
-The rule now, on both surfaces:
+The rule now, on both surfaces (#9324; `ShowCompare` folded in by #9889 — both
+of its arms diff against the candidate with no ACTIVE arm, so the whole RPC
+costs `PermConfig`):
 
 | request | permission |
 | --- | --- |
 | `ShowConfig` with `Target: ACTIVE`; `GET /api/v1/config/show` with no `?target` or `?target=active`; `GET /api/v1/config/export` | `PermView` |
-| `ShowConfig` with `Target: CANDIDATE` **or omitted**; `GET /api/v1/config/show?target=candidate`; `GET /api/v1/config/compare` (any `?rollback`) | **`PermConfig`** |
+| `ShowConfig` with `Target: CANDIDATE` **or omitted**; `ShowCompare` (any `rollback_n`); `GET /api/v1/config/show?target=candidate`; `GET /api/v1/config/compare` (any `?rollback`) | **`PermConfig`** |
+
+On gRPC the `PermConfig` price above is ADDITIVE, not replacing: the
+interceptor charges the table's `PermView` first and the candidate gate's
+`PermConfig` second, and the two are independent bits — so a class holding
+only `configure` (without `view`) is denied `ShowConfig{CANDIDATE}` and
+`ShowCompare`, while REST (which replaces the route price) admits it. The
+built-in classes never split the two — only `super-user` holds `configure`,
+and it holds everything — so the divergence bites only custom classes; it is
+pinned by `TestShowComparePriceIsViewAndConfigure_9889`.
 
 That is the Junos reading: operational `show configuration` renders the
 **committed** configuration, and seeing a candidate is a configure-mode activity
