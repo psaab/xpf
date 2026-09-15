@@ -356,7 +356,7 @@ impl IfInfo {
         self.queue_id
     }
 
-    fn ifname_cstring(&self) -> CString {
+    pub(crate) fn ifname_cstring(&self) -> CString {
         let nul_pos = self
             .ifname
             .iter()

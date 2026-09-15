@@ -198,6 +198,8 @@ fn binding_live_snapshot_propagates_710_drop_counters() {
     live.tx_submit_error_drops.store(7, Ordering::Relaxed);
     live.tx_shared_recycle_unknown_slot_drops
         .store(13, Ordering::Relaxed);
+    live.tx_shared_recycle_unknown_slot_rescued
+        .store(47, Ordering::Relaxed);
     live.syn_cookie_challenges.store(17, Ordering::Relaxed);
     live.syn_cookie_secret_unavailable
         .store(19, Ordering::Relaxed);
@@ -215,6 +217,7 @@ fn binding_live_snapshot_propagates_710_drop_counters() {
     assert_eq!(snap.pending_tx_local_overflow_drops, 5);
     assert_eq!(snap.tx_submit_error_drops, 7);
     assert_eq!(snap.tx_shared_recycle_unknown_slot_drops, 13);
+    assert_eq!(snap.tx_shared_recycle_unknown_slot_rescued, 47);
     assert_eq!(snap.syn_cookie_challenges, 17);
     assert_eq!(snap.syn_cookie_secret_unavailable, 19);
     assert_eq!(snap.syn_cookie_syn_ack_sent, 23);

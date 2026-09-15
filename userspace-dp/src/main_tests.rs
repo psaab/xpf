@@ -1566,6 +1566,7 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
         outstanding_tx: 23,
         tx_errors: 29,
         tx_shared_recycle_unknown_slot_drops: 43,
+        tx_shared_recycle_unknown_slot_rescued: 61,
         tx_submit_error_drops: 31,
         pending_tx_local_overflow_drops: 37,
         mirror_drops_queue_full_same_worker: 47,
@@ -1596,6 +1597,7 @@ fn binding_counters_snapshot_projects_ring_pressure_fields() {
     assert_eq!(snap.outstanding_tx, 23);
     assert_eq!(snap.tx_errors, 29);
     assert_eq!(snap.tx_shared_recycle_unknown_slot_drops, 43);
+    assert_eq!(snap.tx_shared_recycle_unknown_slot_rescued, 61);
     assert_eq!(snap.tx_submit_error_drops, 31);
     assert_eq!(snap.pending_tx_local_overflow_drops, 37);
     assert_eq!(snap.mirror_drops_queue_full_same_worker, 47);
@@ -1632,6 +1634,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_completion_ring_available_max: 32,
         tx_errors: 9,
         tx_shared_recycle_unknown_slot_drops: 14,
+        tx_shared_recycle_unknown_slot_rescued: 15,
         tx_submit_error_drops: 10,
         pending_tx_local_overflow_drops: 11,
         mirrored_packets: 32,
@@ -1693,6 +1696,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "tx_completion_ring_available_max",
         "tx_errors",
         "tx_shared_recycle_unknown_slot_drops",
+        "tx_shared_recycle_unknown_slot_rescued",
         "tx_submit_error_drops",
         "pending_tx_local_overflow_drops",
         "mirrored_packets",
@@ -2393,6 +2397,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         tx_completion_ring_available_max: 0,
         tx_errors: 0,
         tx_shared_recycle_unknown_slot_drops: 0,
+        tx_shared_recycle_unknown_slot_rescued: 0,
         tx_submit_error_drops: 0,
         pending_tx_local_overflow_drops: 0,
         mirrored_packets: 0,

@@ -447,6 +447,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #1307: subset of `tx_errors` for shared-UMEM recycle drops whose
     /// target slot no longer maps to a live binding.
     pub(super) tx_shared_recycle_unknown_slot_drops: AtomicU64,
+    /// F-149 (#9904): subset of `tx_errors` for shared-UMEM recycles whose
+    /// target slot is unknown but whose offset was preserved via the
+    /// same-region backstop (single-region workers only) instead of lost.
+    /// `tx_errors == drops + rescued` for unknown slots.
+    pub(super) tx_shared_recycle_unknown_slot_rescued: AtomicU64,
     /// #710: counts packets that hit the redirect-inbox overflow path
     /// in `enqueue_tx` / `enqueue_tx_owned`. Multi-writer (every
     /// redirecting worker writes; the owner reads). Atomic because
@@ -937,9 +942,15 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // layout change from defeating the guard — a `#[cfg(test)]` field would have
 // moved the test build alone, and one pair of literals could not have made
 // both green.
+// F-149 (#9904) adds `tx_shared_recycle_unknown_slot_rescued` and repeats
+// #8670/#8890's case exactly: `size_of` stays 2368 (the #7156 alignment
+// unit still has room) while both offsets move 2200 -> 2208 and
+// 2328 -> 2336. The field is UNCONDITIONAL, so both configurations (normal
+// and test builds) must report the same two shifts — verified by building
+// both.
 const _: [(); 2368] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2200] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2328] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2208] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2336] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1049,6 +1060,7 @@ impl BindingLiveState {
             tx_completions: AtomicU64::new(0),
             tx_errors: AtomicU64::new(0),
             tx_shared_recycle_unknown_slot_drops: AtomicU64::new(0),
+            tx_shared_recycle_unknown_slot_rescued: AtomicU64::new(0),
             redirect_inbox_overflow_drops: AtomicU64::new(0),
             pending_tx_local_overflow_drops: AtomicU64::new(0),
             tx_submit_error_drops: AtomicU64::new(0),

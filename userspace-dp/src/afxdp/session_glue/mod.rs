@@ -1604,6 +1604,14 @@ fn route_cancelled_shared_recycles(
     if shared_recycles.is_empty() {
         return;
     }
+    // F-149 (#9904): same single-region backstop as the dispatch paths, with
+    // the same bounded one-line-per-drain logging (this site previously logged
+    // per drop inside the loop — a spam vector on a stale-slot flood).
+    let backstop = split_is_single_region(left, current, right);
+    let mut dropped = 0u64;
+    let mut rescued = 0u64;
+    let mut first_drop = None;
+    let mut first_rescue = None;
     for (slot, offset) in shared_recycles.drain(..) {
         if let Some(binding) = left
             .iter_mut()
@@ -1612,18 +1620,21 @@ fn route_cancelled_shared_recycles(
             .find(|binding| binding.slot == slot)
         {
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        } else if backstop {
+            // Same-region per the premise on `split_is_single_region`:
+            // kernel-masked, bounds-checked, growth-bounded. See note.
+            current.tx_pipeline.pending_fill_frames.push_back(offset);
+            first_rescue.get_or_insert((slot, offset));
+            rescued = rescued.saturating_add(1);
         } else {
-            eprintln!(
-                "xpf-userspace-dp: dropping shared UMEM recycle for unknown slot {} offset {}",
-                slot, offset
-            );
-            current.live.tx_errors.fetch_add(1, Ordering::Relaxed);
-            current
-                .live
-                .tx_shared_recycle_unknown_slot_drops
-                .fetch_add(1, Ordering::Relaxed);
+            first_drop.get_or_insert((slot, offset));
+            dropped = dropped.saturating_add(1);
         }
     }
+    log_shared_recycle_unknown_slot_drops(dropped, first_drop);
+    log_shared_recycle_unknown_slot_rescues(rescued, first_rescue);
+    record_shared_recycle_unknown_slot_drops(Some(&current.live), dropped);
+    record_shared_recycle_unknown_slot_rescues(Some(&current.live), rescued);
 }
 
 pub(super) fn cancel_queued_flow_on_binding(

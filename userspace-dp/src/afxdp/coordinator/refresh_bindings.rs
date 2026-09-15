@@ -201,6 +201,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.tx_completions = snap.tx_completions;
     binding.tx_errors = snap.tx_errors;
     binding.tx_shared_recycle_unknown_slot_drops = snap.tx_shared_recycle_unknown_slot_drops;
+    binding.tx_shared_recycle_unknown_slot_rescued = snap.tx_shared_recycle_unknown_slot_rescued;
     binding.redirect_inbox_overflow_drops = snap.redirect_inbox_overflow_drops;
     binding.pending_tx_local_overflow_drops = snap.pending_tx_local_overflow_drops;
     binding.tx_submit_error_drops = snap.tx_submit_error_drops;
@@ -428,6 +429,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.tx_completions = 0;
     binding.tx_errors = 0;
     binding.tx_shared_recycle_unknown_slot_drops = 0;
+    binding.tx_shared_recycle_unknown_slot_rescued = 0;
     // Copilot finding (PR #1570): these three are subsets of
     // `tx_errors`. The pre-#1328 master `refresh_bindings` else-branch
     // also did not zero them, but leaving them stale when a slot

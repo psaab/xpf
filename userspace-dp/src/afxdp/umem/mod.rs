@@ -3,6 +3,17 @@ use super::*;
 mod mmap;
 pub(in crate::afxdp) use mmap::MmapArea;
 
+/// F-069 (#9904): UMEM creation flags — `0` selects AF_XDP aligned-chunk
+/// mode, the load-bearing precondition of the fill-alignment contract
+/// (`umem/README.md`): only in aligned mode does the kernel mask FILL-ring
+/// addresses to the chunk base (`xp_check_aligned`), which is what makes
+/// the verbatim headroom-shifted RX recycle correct. Flipping bit 0
+/// (`XDP_UMEM_UNALIGNED_CHUNK_FLAG`) without adding an explicit mask at the
+/// fill-submit boundary would silently corrupt the fill ring. Both
+/// constructors below must use this constant, and the test at the file end
+/// pins its value.
+pub(super) const UMEM_CREATE_FLAGS: u32 = 0;
+
 /// The UMEM region plus the libxdp UMEM object registered against it.
 ///
 /// **Field order is load-bearing (#5192).** `xsk_ffi::Umem::new` is
@@ -45,7 +56,7 @@ impl WorkerUmem {
             complete_size: ring_size,
             frame_size: UMEM_FRAME_SIZE,
             headroom: UMEM_HEADROOM,
-            flags: 0,
+            flags: UMEM_CREATE_FLAGS,
         };
         let umem = unsafe { Umem::new(umem_cfg, area.as_nonnull_slice()) }
             .map_err(|e| format!("create umem: {e}"))?;
@@ -69,7 +80,7 @@ impl WorkerUmem {
             complete_size: ring_size,
             frame_size: UMEM_FRAME_SIZE,
             headroom: UMEM_HEADROOM,
-            flags: 0,
+            flags: UMEM_CREATE_FLAGS,
         };
         let umem = Umem::new_for_test(umem_cfg, area.as_nonnull_slice());
         Ok(Self {
@@ -134,3 +145,24 @@ impl WorkerUmemPool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod create_flags_9904_tests {
+    use super::*;
+
+    // F-069 (#9904): pin the aligned-mode precondition. `0` is not "no
+    // flags" trivia — it is the selected chunk mode, and bit 0 set means
+    // unaligned (no kernel masking). If this ever needs to change, the
+    // fill-alignment contract in `umem/README.md` must be re-proven first.
+    #[test]
+    fn umem_create_flags_select_aligned_chunk_mode_9904() {
+        assert_eq!(UMEM_CREATE_FLAGS, 0);
+        assert_eq!(
+            UMEM_CREATE_FLAGS & 1,
+            0,
+            "bit 0 is XDP_UMEM_UNALIGNED_CHUNK_FLAG; setting it disables the \
+             kernel FILL mask the recycle path relies on"
+        );
+        assert_eq!(UMEM_FRAME_SIZE, 4096);
+    }
+}

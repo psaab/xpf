@@ -723,6 +723,11 @@ pub(crate) struct BindingStatus {
     // `tx_errors`.
     #[serde(rename = "tx_shared_recycle_unknown_slot_drops", default)]
     pub tx_shared_recycle_unknown_slot_drops: u64,
+    // F-149 (#9904): shared-UMEM recycles with an unknown slot that were
+    // preserved via the same-region backstop instead of dropped. Subset of
+    // `tx_errors`; `tx_errors == drops + rescued` for unknown slots.
+    #[serde(rename = "tx_shared_recycle_unknown_slot_rescued", default)]
+    pub tx_shared_recycle_unknown_slot_rescued: u64,
     // #710: per-binding subset of `tx_errors` attributed to the
     // redirect-inbox overflow path in `BindingLiveState::enqueue_tx` /
     // `enqueue_tx_owned`. Indicates the owner is not draining redirects
@@ -1019,6 +1024,8 @@ pub(crate) struct BindingCountersSnapshot {
     pub tx_errors: u64,
     #[serde(rename = "tx_shared_recycle_unknown_slot_drops", default)]
     pub tx_shared_recycle_unknown_slot_drops: u64,
+    #[serde(rename = "tx_shared_recycle_unknown_slot_rescued", default)]
+    pub tx_shared_recycle_unknown_slot_rescued: u64,
     #[serde(rename = "tx_submit_error_drops", default)]
     pub tx_submit_error_drops: u64,
     #[serde(rename = "pending_tx_local_overflow_drops", default)]
@@ -1142,6 +1149,7 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             umem_inflight_frames: b.umem_inflight_frames,
             tx_errors: b.tx_errors,
             tx_shared_recycle_unknown_slot_drops: b.tx_shared_recycle_unknown_slot_drops,
+            tx_shared_recycle_unknown_slot_rescued: b.tx_shared_recycle_unknown_slot_rescued,
             tx_submit_error_drops: b.tx_submit_error_drops,
             pending_tx_local_overflow_drops: b.pending_tx_local_overflow_drops,
             mirrored_packets: b.mirrored_packets,
