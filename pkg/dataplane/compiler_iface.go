@@ -142,6 +142,9 @@ func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, confi
 
 	// Resolve fabric interface to local physical member for BPF attachment.
 	// fab0 is an IPVLAN on ge-0-0-0; XDP/TC must attach to the parent.
+	// Configured members with no local member (#9872) intentionally keep fab0
+	// itself: that shape is the bond ApplyBonds creates, not an overlay, so
+	// VLAN children and BPF attach to the bond, never to a slave.
 	if ifCfg, ok := cfg.Interfaces.Interfaces[configName]; ok && ifCfg != nil && ifCfg.LocalFabricMember != "" {
 		physBase = ifCfg.LocalFabricMember
 	}

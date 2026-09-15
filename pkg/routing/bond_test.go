@@ -2,6 +2,7 @@ package routing
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -20,6 +21,7 @@ type fakeBondLinkOps struct {
 	failLinkSetUp     map[string]error // link name -> LinkSetUp error
 	failLinkSetMaster map[string]error // member name -> LinkSetMaster error
 	failLinkDel       map[string]error // link name -> LinkDel error
+	failLinkSetMTU    map[string]error // link name -> LinkSetMTU error
 
 	// substituteAfterAdd[name], when set, replaces the link stored under name
 	// during LinkAdd so the post-create LinkByName readback returns the
@@ -31,6 +33,13 @@ type fakeBondLinkOps struct {
 	masterCalls []string
 	addCalls    []string // names passed to LinkAdd
 	delCalls    []string // names passed to LinkDel
+	mtuCalls    []mtuCall
+}
+
+// mtuCall records one LinkSetMTU invocation.
+type mtuCall struct {
+	name string
+	mtu  int
 }
 
 func newFakeBondLinkOps() *fakeBondLinkOps {
@@ -41,6 +50,7 @@ func newFakeBondLinkOps() *fakeBondLinkOps {
 		failLinkSetUp:      map[string]error{},
 		failLinkSetMaster:  map[string]error{},
 		failLinkDel:        map[string]error{},
+		failLinkSetMTU:     map[string]error{},
 		substituteAfterAdd: map[string]netlink.Link{},
 	}
 }
@@ -52,6 +62,7 @@ func (f *fakeBondLinkOps) reset() {
 	f.masterCalls = nil
 	f.addCalls = nil
 	f.delCalls = nil
+	f.mtuCalls = nil
 }
 
 func (f *fakeBondLinkOps) LinkByName(name string) (netlink.Link, error) {
@@ -124,8 +135,15 @@ func (f *fakeBondLinkOps) LinkSetMaster(member, master netlink.Link) error {
 	return nil
 }
 
-func (f *fakeBondLinkOps) LinkSetNoMaster(netlink.Link) error        { return nil }
-func (f *fakeBondLinkOps) LinkSetMTU(netlink.Link, int) error        { return nil }
+func (f *fakeBondLinkOps) LinkSetNoMaster(netlink.Link) error { return nil }
+func (f *fakeBondLinkOps) LinkSetMTU(l netlink.Link, mtu int) error {
+	f.mtuCalls = append(f.mtuCalls, mtuCall{name: l.Attrs().Name, mtu: mtu})
+	if err, ok := f.failLinkSetMTU[l.Attrs().Name]; ok {
+		return err
+	}
+	l.Attrs().MTU = mtu
+	return nil
+}
 func (f *fakeBondLinkOps) AddrAdd(netlink.Link, *netlink.Addr) error { return nil }
 func (f *fakeBondLinkOps) AddrDel(netlink.Link, *netlink.Addr) error { return nil }
 func (f *fakeBondLinkOps) AddrList(netlink.Link, int) ([]netlink.Addr, error) {
@@ -763,5 +781,137 @@ func TestBondFreshCreateAbsentMemberConvergesInPlace(t *testing.T) {
 	}
 	if got := b.bonds["bond0"]; got != full {
 		t.Fatalf("after convergence b.bonds[bond0]=%+v, want full desired %+v", got, full)
+	}
+}
+
+// TestBondKeepRestoresInterfaceMTUAfterOverrideRemoved_9872 is the parent-review
+// transition the planner-only #9872 fix loses: a no-cluster fabric bond with
+// interface MTU 1400 and a zoned untagged unit-0 override at 1300 has the
+// override written onto fab0 by the dataplane; the operator then removes unit 0,
+// leaving only tagged fab0.10. The bond signature carries no units, so it is
+// unchanged and Apply takes the KEEP path — which must restore the live MTU to
+// 1400, because nothing else writes the bond's MTU anymore (the dataplane
+// plans nothing for a bond-mode tagged ref, and networkd only stamps MTU at
+// creation). RED without reconcileBondMTU: the second Apply issues no MTU
+// write and the bond sits at 1300 forever.
+func TestBondKeepRestoresInterfaceMTUAfterOverrideRemoved_9872(t *testing.T) {
+	ops := newFakeBondLinkOps()
+	ops.seedMember("ge-0-0-0")
+	ops.seedMember("ge-0-0-1")
+	b := &bondManager{ops: ops}
+
+	ifc := bondFabricConfig("fab0", "ge-0/0/0", "ge-0/0/1")
+	ifc.MTU = 1400
+	cfg := []*config.InterfaceConfig{ifc}
+	if err := b.Apply(cfg); err != nil {
+		t.Fatalf("first Apply() (create) = %v, want nil", err)
+	}
+	if got := ops.links["fab0"].Attrs().MTU; got != 1400 {
+		t.Fatalf("premise: created bond MTU = %d, want the interface-level 1400", got)
+	}
+
+	// The dataplane's untagged unit-0 override (1300) lands on fab0 while the
+	// unit exists; the unit is then removed. Same interface MTU and members,
+	// so the desired signature is unchanged.
+	ops.links["fab0"].Attrs().MTU = 1300
+
+	ops.reset()
+	if err := b.Apply(cfg); err != nil {
+		t.Fatalf("second Apply() (KEEP) = %v, want nil", err)
+	}
+	if len(ops.delCalls) != 0 || len(ops.addCalls) != 0 || len(ops.masterCalls) != 0 {
+		t.Fatalf("KEEP flapped the bond: delCalls=%v addCalls=%v masterCalls=%v",
+			ops.delCalls, ops.addCalls, ops.masterCalls)
+	}
+	if len(ops.mtuCalls) != 1 || ops.mtuCalls[0] != (mtuCall{name: "fab0", mtu: 1400}) {
+		t.Fatalf("KEEP MTU writes = %+v, want exactly [{fab0 1400}]: the retained bond never reconverged", ops.mtuCalls)
+	}
+	if got := ops.links["fab0"].Attrs().MTU; got != 1400 {
+		t.Fatalf("live bond MTU = %d after KEEP, want the interface-level 1400", got)
+	}
+
+	// Converged: a further identical Apply writes nothing (compare-then-write).
+	ops.reset()
+	if err := b.Apply(cfg); err != nil {
+		t.Fatalf("third Apply() (converged) = %v, want nil", err)
+	}
+	if len(ops.mtuCalls) != 0 {
+		t.Fatalf("converged Apply wrote MTU %v, want no netlink churn on an unchanged bond", ops.mtuCalls)
+	}
+}
+
+// TestBondAdoptRestoresInterfaceMTU_9872 is the same handoff on the adopt
+// path: a bond that outlived in-memory tracking (daemon restart) carries
+// whatever live MTU the last writer left — possibly a since-removed unit
+// override — and adoption must converge it to the interface level without
+// flapping the bond.
+func TestBondAdoptRestoresInterfaceMTU_9872(t *testing.T) {
+	ops := newFakeBondLinkOps()
+	ops.seedBond("fab0", 7)
+	ops.seedEnslavedMember("ge-0-0-0", 7)
+	ops.seedEnslavedMember("ge-0-0-1", 7)
+	ops.links["fab0"].Attrs().MTU = 1300 // left by a since-removed override
+	b := &bondManager{ops: ops}
+
+	ifc := bondFabricConfig("fab0", "ge-0/0/0", "ge-0/0/1")
+	ifc.MTU = 1400
+	cfg := []*config.InterfaceConfig{ifc}
+	full := bondSigOf(cfg[0])
+	if err := b.Apply(cfg); err != nil {
+		t.Fatalf("Apply() (adopt) = %v, want nil", err)
+	}
+	if len(ops.delCalls) != 0 || len(ops.addCalls) != 0 {
+		t.Fatalf("adopt flapped the bond: delCalls=%v addCalls=%v", ops.delCalls, ops.addCalls)
+	}
+	if len(ops.mtuCalls) != 1 || ops.mtuCalls[0] != (mtuCall{name: "fab0", mtu: 1400}) {
+		t.Fatalf("adopt MTU writes = %+v, want exactly [{fab0 1400}]", ops.mtuCalls)
+	}
+	if got := ops.links["fab0"].Attrs().MTU; got != 1400 {
+		t.Fatalf("live bond MTU = %d after adopt, want the interface-level 1400", got)
+	}
+	if got := b.bonds["fab0"]; got != full {
+		t.Fatalf("after adopt b.bonds[fab0]=%+v, want full desired %+v", got, full)
+	}
+}
+
+// TestBondKeepMTUSetFailureIsHardAndRetried_9872 pins the #4823 shape of the
+// new write: a LinkSetMTU failure on the KEEP path surfaces (like LinkSetUp),
+// the bond stays tracked, and the next reconcile retries the convergence.
+func TestBondKeepMTUSetFailureIsHardAndRetried_9872(t *testing.T) {
+	ops := newFakeBondLinkOps()
+	ops.seedMember("ge-0-0-0")
+	ops.seedMember("ge-0-0-1")
+	b := &bondManager{ops: ops}
+
+	ifc := bondFabricConfig("fab0", "ge-0/0/0", "ge-0/0/1")
+	ifc.MTU = 1400
+	cfg := []*config.InterfaceConfig{ifc}
+	if err := b.Apply(cfg); err != nil {
+		t.Fatalf("first Apply() (create) = %v, want nil", err)
+	}
+	ops.links["fab0"].Attrs().MTU = 1300
+	ops.failLinkSetMTU["fab0"] = errors.New("injected: EINVAL")
+
+	ops.reset()
+	if err := b.Apply(cfg); err == nil {
+		t.Fatalf("KEEP Apply() with failing LinkSetMTU = nil, want the hard error")
+	} else if !strings.Contains(err.Error(), "MTU") {
+		t.Fatalf("KEEP Apply() error = %v, want it to name the MTU write", err)
+	}
+	if !contains(ops.setUpCalls, "fab0") {
+		t.Fatalf("LinkSetUp not attempted alongside the failed MTU write: setUpCalls=%v", ops.setUpCalls)
+	}
+
+	// The failure clears: the next reconcile converges.
+	delete(ops.failLinkSetMTU, "fab0")
+	ops.reset()
+	if err := b.Apply(cfg); err != nil {
+		t.Fatalf("retry Apply() = %v, want nil", err)
+	}
+	if len(ops.mtuCalls) != 1 || ops.mtuCalls[0] != (mtuCall{name: "fab0", mtu: 1400}) {
+		t.Fatalf("retry MTU writes = %+v, want exactly [{fab0 1400}]", ops.mtuCalls)
+	}
+	if got := ops.links["fab0"].Attrs().MTU; got != 1400 {
+		t.Fatalf("live bond MTU = %d after retry, want 1400", got)
 	}
 }

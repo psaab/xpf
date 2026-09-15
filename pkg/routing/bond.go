@@ -209,6 +209,15 @@ func (b *bondManager) Apply(interfaces []*config.InterfaceConfig) error {
 				// presented as satisfied.
 				if link, err := b.ops.LinkByName(name); err == nil {
 					if _, isBond := link.(*netlink.Bond); isBond {
+						// #9872: the bond owner converges the live MTU. The
+						// dataplane no longer plans a fabric bond's MTU from a
+						// tagged ref, and the signature carries no units — so a
+						// unit-MTU override written while an untagged unit
+						// existed would otherwise stick forever once the unit
+						// is removed (same sig → KEEP, no correction anywhere).
+						if err := b.reconcileBondMTU(name, link, sig); err != nil {
+							errs = append(errs, err)
+						}
 						if err := b.ops.LinkSetUp(link); err != nil {
 							slog.Warn("failed to bring up existing bond", "name", name, "err", err)
 							errs = append(errs, fmt.Errorf("bond %s: bring up existing: %w", name, err))
@@ -333,6 +342,12 @@ func (b *bondManager) createLocked(name string, ifc *config.InterfaceConfig, sig
 			}
 			b.bonds[name] = trackSig
 			slog.Debug("bond already exists", "name", name, "complete", trackSig == sig)
+			// #9872: same MTU handoff as the KEEP path — an adopted bond
+			// outlived tracking, so its live MTU is whatever the last writer
+			// (possibly a since-removed unit override) left behind.
+			if err := b.reconcileBondMTU(name, existing, sig); err != nil {
+				errs = append(errs, err)
+			}
 			if err := b.ops.LinkSetUp(existing); err != nil {
 				slog.Warn("failed to bring up existing bond", "name", name, "err", err)
 				errs = append(errs, fmt.Errorf("bond %s: bring up existing: %w", name, err))
@@ -406,6 +421,30 @@ func (b *bondManager) createLocked(name string, ifc *config.InterfaceConfig, sig
 	b.bonds[name] = sigWithMembers(sig, realized)
 	slog.Info("bond created", "name", name, "mode", sig.mode, "members", ifc.FabricMembers)
 	return errors.Join(errs...)
+}
+
+// reconcileBondMTU converges a KEPT or ADOPTED bond's live MTU to the
+// interface-level MTU in sig (#9872). The bond signature carries no units,
+// and the dataplane plans no MTU for a bond-mode fabric ref, so without this
+// a unit-MTU override written while an untagged unit existed would stick
+// forever once the unit is removed: same sig → KEEP, and nothing else writes
+// the bond's MTU. Compare-then-write, so a converged bond sees zero netlink
+// churn on unrelated commits (#5119); a zero sig MTU means kernel default,
+// unmanaged here exactly as on the create path. A set failure is a hard
+// #4823 error (like LinkSetUp on these paths): the bond stays tracked, so
+// the next reconcile retries. Caller must hold mu.
+func (b *bondManager) reconcileBondMTU(name string, link netlink.Link, sig bondSig) error {
+	if sig.mtu <= 0 {
+		return nil
+	}
+	if cur := link.Attrs().MTU; cur == sig.mtu {
+		return nil
+	}
+	if err := b.ops.LinkSetMTU(link, sig.mtu); err != nil {
+		slog.Warn("failed to converge bond MTU", "name", name, "mtu", sig.mtu, "err", err)
+		return fmt.Errorf("bond %s: set MTU %d: %w", name, sig.mtu, err)
+	}
+	return nil
 }
 
 // enslaveMembers enslaves the given fabric members (Junos names) into
