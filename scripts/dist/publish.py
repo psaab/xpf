@@ -466,11 +466,13 @@ def list_versions(dist):
 
 
 def gate_images(dist, require_installer=True):
-    """(a)+(c): every signed image manifest verifies and the listed files
-    hash-match; EVERY image artifact in dist is covered by a verified manifest
-    (no orphans); install.sh is PRESENT (unless require_installer is False),
-    has a verifying signature, is not the placeholder, and carries no
-    unsubstituted %%…%% marker."""
+    """(a)+(c): every signed image manifest verifies, covers EXACTLY the bake's
+    four-file set (#9920: a manifest that merely OMITS qcow2/metadata used to
+    sail through — listed-only checks plus a present-only orphan sweep), and the
+    listed files hash-match; EVERY image artifact in dist is covered by a
+    verified manifest (no orphans); install.sh is PRESENT (unless
+    require_installer is False), has a verifying signature, is not the
+    placeholder, and carries no unsubstituted %%…%% marker."""
     versions = list_versions(dist)
     if not versions:
         die(f"no signed image manifests (xpf-*.SHA256SUMS + .minisig) in {dist} "
@@ -486,7 +488,21 @@ def gate_images(dist, require_installer=True):
             checks = sign.verify_manifest_map(manifest, sig, pub)
         except sign.SignError as e:
             die(f"image manifest {os.path.basename(manifest)} failed verify: {e}")
-        # Every file the manifest lists must be present + hash-match.
+        # #9920 F-063: the SIGNED SET must be exactly the bake's four-file set
+        # (SSOT: sign.bake_set_basenames). verify_manifest_map authenticates
+        # whatever the manifest lists, the loop below only checks listed files,
+        # and the orphan sweep only fires for files PRESENT but uncovered — so
+        # a genuinely-signed manifest that OMITS qcow2 (or the metadata
+        # tarball) published a partial set. Membership is names, not bytes:
+        # qcow2-only consumers still fetch + verify per-file downstream.
+        expected = set(sign.bake_set_basenames(ver))
+        if set(checks) != expected:
+            missing = sorted(expected - set(checks))
+            extra = sorted(set(checks) - expected)
+            die(f"image set {ver} manifest {os.path.basename(manifest)} does "
+                f"not cover the bake's four-file set (#9920): "
+                f"missing={missing or 'none'} extra={extra or 'none'} — "
+                "refusing to publish a partial set. Re-bake.")
         for base in checks:
             path = os.path.join(dist, base)
             if not os.path.isfile(path):
@@ -609,20 +625,6 @@ def gate_images(dist, require_installer=True):
     return versions, pub
 
 
-def _parse_manifest_fields(text):
-    """Parse a bake `.manifest` sidecar (key: value lines) into a dict, keys
-    verbatim. Mirrors scripts/deploy/xpf-deploy.py:_parse_image_manifest_versions
-    but keeps underscores so `validated` / `base_image_pinned` read directly."""
-    d = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        d[k.strip()] = v.strip()
-    return d
-
-
 def gate_provenance(dist, versions, pub):
     """#4904 A/B: refuse to publish an image set that did not pass the in-guest
     verify-dataplane validation gate OR whose Ubuntu base was not anchored to a
@@ -673,7 +675,7 @@ def gate_provenance(dist, versions, pub):
         except sign.SignError as e:
             die(f"provenance sidecar xpf-{ver}.manifest failed verify against "
                 f"the signed manifest {os.path.basename(sums)}: {e}")
-        fields = _parse_manifest_fields(data.decode("utf-8", "replace"))
+        fields = sign.parse_sidecar_fields(data.decode("utf-8", "replace"))
         validated = fields.get("validated")
         if validated != "true":
             die(f"image set {ver} provenance says validated={validated!r} (not "

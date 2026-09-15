@@ -553,6 +553,23 @@ else
     bad "publish MUST pass a signed edge latest.json but FAILED (H-13)"
 fi
 
+# #9920 F-063: sign a manifest WITHOUT the sign.py gate — for fixtures that
+# MODEL a signed-but-bad set reaching publish. sign-manifest now refuses
+# non-conforming xpf-*.SHA256SUMS by design, so these legs build the manifest
+# with sha256sum + minisign directly (the primitives sign.py wraps). publish
+# must still refuse such sets: they model old tooling / a key-holder's output.
+# direct_sign <dir> <ver> <artifact>... — writes xpf-<ver>.SHA256SUMS + .minisig.
+direct_sign() {
+    _dd=$1; _vv=$2; shift 2
+    _names=
+    for _f in "$@"; do _names="$_names $(basename "$_f")"; done
+    # Word-split of basenames is intentional.
+    # shellcheck disable=SC2086
+    (cd "$_dd" && sha256sum $_names > "xpf-$_vv.SHA256SUMS")
+    minisign -S -W -s "$WORK/img.sec" -m "$_dd/xpf-$_vv.SHA256SUMS" \
+        -x "$_dd/xpf-$_vv.SHA256SUMS.minisig" >/dev/null 2>&1
+}
+
 # ── 8i. #4904 A: publish REFUSES a --skip-validate (validated:false) image ──
 info "8i. publish provenance gate — validated:false is refused"
 PROV="$WORK/prov"; mkdir -p "$PROV"
@@ -564,11 +581,11 @@ cp "$QCOW" "$META" "$PROV/"
 # satisfied by the wrong cause stops testing what it names.
 prov_sidecar "$PROV/xpf-$VER.manifest" false
 make_pkgs "$PROV/xpf-$VER.pkgs"
-XPF_IMAGE_PUBKEY="$WORK/img.pub" $PY "$DIST/sign.py" sign-manifest \
-    --manifest "$PROV/xpf-$VER.SHA256SUMS" --seckey "$WORK/img.sec" \
-    --comment "selftest-skipvalidate" "$PROV/xpf-$VER.qcow2" \
+# #9920: validated:false is refused by sign-manifest itself now, so this
+# publish-negative fixture is built with the direct primitives.
+direct_sign "$PROV" "$VER" "$PROV/xpf-$VER.qcow2" \
     "$PROV/xpf-$VER.incus-metadata.tar.gz" "$PROV/xpf-$VER.manifest" \
-    "$PROV/xpf-$VER.pkgs" >/dev/null
+    "$PROV/xpf-$VER.pkgs"
 XPF_SIGN_SECKEY="$WORK/img.sec" $PY "$DIST/publish.py" make-latest \
     --channel stable --version "$VER" --dist "$PROV" >/dev/null 2>&1
 $PY "$DIST/publish.py" stamp-installer --out "$PROV/install.sh" \
@@ -634,7 +651,10 @@ inv_reset() {
 # 8j-1: manifest with NO guest_kernel (an older bake) — inventory sidecar present.
 inv_reset
 prov_sidecar "$INV/xpf-$VER.manifest" true -
-resign_inv "$INV/xpf-$VER.pkgs"
+# #9920: no-guest_kernel is refused by sign-manifest itself now.
+direct_sign "$INV" "$VER" "$INV/xpf-$VER.qcow2" \
+    "$INV/xpf-$VER.incus-metadata.tar.gz" "$INV/xpf-$VER.manifest" \
+    "$INV/xpf-$VER.pkgs"
 if inv_publish; then
     bad "publish MUST refuse a manifest with no guest_kernel but PASSED (#6500)"
 else
@@ -644,7 +664,9 @@ fi
 # 8j-2: guest_kernel present, inventory sidecar ABSENT.
 inv_reset
 rm -f "$INV/xpf-$VER.pkgs"
-resign_inv
+# #9920: a reduced set is refused by sign-manifest itself now.
+direct_sign "$INV" "$VER" "$INV/xpf-$VER.qcow2" \
+    "$INV/xpf-$VER.incus-metadata.tar.gz" "$INV/xpf-$VER.manifest"
 if inv_publish; then
     bad "publish MUST refuse a set with no xpf-<ver>.pkgs but PASSED (#6500)"
 else
@@ -734,6 +756,69 @@ if fetch_stable "$FD" >/dev/null 2>&1; then
 else
     ok "fetch refuses a tampered latest.json (#6504)"
 fi
+
+# ── 8l. #9920 F-064: dist-sign attempts every manifest, names failures ──────
+# The recipe's status used to be the LAST iteration's: a failed rotation
+# reported success and left the tree half-signed. This leg drives the REAL
+# `make dist-sign` recipe text (via -f $ROOT/Makefile) in a fixture dir, so
+# the worktree is never mutated: dist-sign hardcodes relative dist/ +
+# scripts/dist/sign.py, which resolve under the -C directory.
+info "8l. dist-sign accumulates failures and names each (#9920 F-064)"
+FIX9920="$WORK/fix9920"; mkdir -p "$FIX9920/dist" "$FIX9920/scripts/dist"
+ln -s "$DIST/sign.py" "$FIX9920/scripts/dist/sign.py"
+mk_9920_set() { # <ver>: honest 4-file set + UNSIGNED manifest in fixture dist/
+    _v=$1
+    echo "qcow-$_v" > "$FIX9920/dist/xpf-$_v.qcow2"
+    echo "meta-$_v" > "$FIX9920/dist/xpf-$_v.incus-metadata.tar.gz"
+    printf 'version: %s\nbase_image_pinned: true\nvalidated: true\nguest_kernel: 7.0.0-15-generic\n' "$_v" > "$FIX9920/dist/xpf-$_v.manifest"
+    make_pkgs "$FIX9920/dist/xpf-$_v.pkgs"
+    (cd "$FIX9920/dist" && sha256sum "xpf-$_v.qcow2" "xpf-$_v.incus-metadata.tar.gz" "xpf-$_v.manifest" "xpf-$_v.pkgs" > "xpf-$_v.SHA256SUMS")
+}
+run_distsign() { # real recipe, fixture dir; transcript in $FIX9920/out
+    make --no-print-directory -C "$FIX9920" -f "$ROOT/Makefile" dist-sign \
+        XPF_SIGN_SECKEY="$WORK/img.sec" >"$FIX9920/out" 2>&1
+}
+# 8l-a: first-broken (deleted artifact) + second-honest. The recipe must FAIL,
+# name the broken manifest, leave it unsigned, and STILL sign the honest one.
+mk_9920_set "8l-broken"
+mk_9920_set "8l-honest"
+rm "$FIX9920/dist/xpf-8l-broken.qcow2"
+if run_distsign; then
+    bad "dist-sign MUST fail when one manifest is broken but PASSED (#9920 F-064)"
+else
+    ok "dist-sign fails when one manifest is broken (#9920 F-064)"
+fi
+if grep -q "dist-sign: dist/xpf-8l-broken.SHA256SUMS: FAILED" "$FIX9920/out"; then
+    ok "dist-sign names the broken manifest (#9920 F-064)"
+else
+    bad "dist-sign did NOT name the broken manifest (#9920 F-064)"
+fi
+if [ ! -f "$FIX9920/dist/xpf-8l-broken.SHA256SUMS.minisig" ]; then
+    ok "dist-sign leaves the broken manifest unsigned (#9920 F-064)"
+else
+    bad "dist-sign SIGNED the broken manifest (#9920 F-064)"
+fi
+if [ -f "$FIX9920/dist/xpf-8l-honest.SHA256SUMS.minisig" ]; then
+    ok "dist-sign still signs the honest manifest after a failure (#9920 F-064)"
+else
+    bad "dist-sign did NOT sign the honest manifest after a failure (#9920 F-064)"
+fi
+# 8l-b: all-honest control — the same recipe passes and both outputs verify.
+rm -rf "$FIX9920/dist"; mkdir -p "$FIX9920/dist"
+mk_9920_set "8l-ok1"
+mk_9920_set "8l-ok2"
+if run_distsign; then
+    ok "dist-sign passes an all-honest tree (#9920 F-064 control)"
+else
+    bad "dist-sign MUST pass an all-honest tree but FAILED (#9920 F-064 control)"
+fi
+for _v in 8l-ok1 8l-ok2; do
+    if minisign -V -p "$WORK/img.pub" -m "$FIX9920/dist/xpf-$_v.SHA256SUMS" -x "$FIX9920/dist/xpf-$_v.SHA256SUMS.minisig" >/dev/null 2>&1; then
+        ok "dist-sign output verifies: xpf-$_v (#9920 F-064 control)"
+    else
+        bad "dist-sign output does NOT verify: xpf-$_v (#9920 F-064 control)"
+    fi
+done
 
 # ── 9. install.sh H-16: validate-before-mutate + cleanup-on-failure ─────────
 info "9. install.sh validate-before-mutate + cleanup-on-failure (H-16)"

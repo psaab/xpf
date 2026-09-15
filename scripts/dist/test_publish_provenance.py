@@ -196,7 +196,8 @@ class GateProvenanceTests(unittest.TestCase):
 
 class ParseManifestFieldsTests(unittest.TestCase):
     def test_parse(self):
-        fields = publish._parse_manifest_fields(
+        # #9920: the parser lives in sign now (publish imports it); same cases.
+        fields = sign.parse_sidecar_fields(
             "version: 1.2.3\n# comment\nvalidated: true\n"
             "base_image_pinned: false\nblank\n\n")
         self.assertEqual(fields["validated"], "true")
