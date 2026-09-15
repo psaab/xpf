@@ -117,10 +117,13 @@ func injectCtrlAndBindingMaps(t *testing.T, m *Manager) (*ebpf.Map, *ebpf.Map) {
 
 func injectUserspaceSessionMap(t *testing.T, m *Manager) *ebpf.Map {
 	t.Helper()
+	// #9770: the real ABI — 40-byte bare-tuple key (UserspaceSessionMapKey) and a u8
+	// action value (1 REDIRECT, 2 PASS_TO_KERNEL). The old 4-byte/8-byte shape never
+	// matched the map and made value-selective assertions meaningless.
 	usMap, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
-		ValueSize:  8,
+		KeySize:    40,
+		ValueSize:  1,
 		MaxEntries: 256,
 	})
 	if err != nil {
