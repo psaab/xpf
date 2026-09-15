@@ -109,8 +109,12 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				// interface resolves to the local fabric member, whose MTU the
 				// fabric setup owns, and a per-unit tunnel resolves to its tunnel
 				// device, whose MTU the tunnel manager owns, even when a WireGuard
-				// unit shares the interface's own device (#6941).
-				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil && ifCfg.MTU > 0 && ifCfg.LocalFabricMember == "" {
+				// unit shares the interface's own device (#6941). #9872: the fabric
+				// half keys on CONFIGURED membership, not the local-node
+				// derivation -- with members but no local member the reference
+				// resolves to fab0 itself (the bond ApplyBonds creates), whose MTU
+				// the bond setup owns.
+				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil && ifCfg.MTU > 0 && ifCfg.LocalFabricMember == "" && len(ifCfg.FabricMembers) == 0 {
 					if unit := ifCfg.Units[unitNum]; unit != nil && unit.Tunnel != nil {
 						continue
 					}
