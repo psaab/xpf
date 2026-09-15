@@ -987,7 +987,16 @@ func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string) map
 			if member == "" {
 				continue
 			}
-			if nd := netdevByRef[CanonicalInterfaceUnitRef(member)]; nd != "" {
+			// #9821: probe the fan-down's canonical first key so a padded
+			// declared-unit member (`p.0.01`) normalizes onto the netdev the
+			// binders bind (`p.0.1`); bare members probe the literal as
+			// before (base netdev only — no bare fan-down here, matching
+			// the pre-existing undotted behavior).
+			probe := CanonicalInterfaceUnitRef(member)
+			if keys := InterfaceUnitRefKeys(cfg, member); len(keys) > 0 {
+				probe = keys[0]
+			}
+			if nd := netdevByRef[probe]; nd != "" {
 				out[nd] = true
 			}
 		}
@@ -1205,25 +1214,29 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 			if rawIface == "" {
 				continue
 			}
-			// #5878 phase 2: bind on the canonical logical-unit identity so this
-			// mirror resolves ge-0/0/0.01 to the same runtime unit (ge-0/0/0.1)
-			// the dataplane snapshot does — the consumer looks this map up by the
-			// canonical "%s.%d" unit name.
-			iface := CanonicalInterfaceUnitRef(rawIface)
-			if _, exists := out[iface]; !exists {
-				out[iface] = zoneName
+			// #5878 phase 2, declared-aware (#9821): bind on the split identity
+			// so this mirror resolves ge-0/0/0.01 AND ge-0/0/5.0.01 onto the
+			// canonical unit rows the dataplane snapshot emits — the consumer
+			// looks this map up by the canonical "%s.%d" unit name. Inserting
+			// the Literal (not the legacy canon) keeps a padded multi-dot
+			// spelling from stranding a `.01` key no row carries.
+			s := cfg.SplitInterfaceUnitRef(rawIface)
+			if _, exists := out[s.Literal]; !exists {
+				out[s.Literal] = zoneName
 			}
-			if base, unit, ok := strings.Cut(iface, "."); ok && base != "" {
-				if _, exists := out[base]; !exists {
-					out[base] = zoneName
+			if s.HasUnit {
+				// Unit (or trailing-dot) reference: also bind the physical
+				// base, mirroring InterfaceZoneMap's zone-specific fan-up.
+				if s.Base != "" {
+					if _, exists := out[s.Base]; !exists {
+						out[s.Base] = zoneName
+					}
 				}
-				if unit != "" {
-					continue
-				}
+				continue
 			}
-			if ifCfg := cfg.Interfaces.Interfaces[iface]; ifCfg != nil {
+			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
-					unitName := fmt.Sprintf("%s.%d", iface, unitNum)
+					unitName := fmt.Sprintf("%s.%d", s.Base, unitNum)
 					if _, exists := out[unitName]; !exists {
 						out[unitName] = zoneName
 					}

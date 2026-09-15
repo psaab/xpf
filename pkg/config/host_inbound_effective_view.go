@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"sort"
-	"strings"
 )
 
 // The EFFECTIVE host-inbound view, shared by the dataplane enforcement builders
@@ -69,17 +68,22 @@ func InterfaceUnitRefKeys(cfg *Config, rawRef string) []string {
 	if rawRef == "" {
 		return nil
 	}
-	ref := CanonicalInterfaceUnitRef(rawRef)
-	if _, _, hasUnit := strings.Cut(ref, "."); hasUnit {
+	// #9821: resolve the RAW ref against declared interfaces before deciding
+	// bare-vs-unit (#8994 precedence). A ref naming a declared interface IS
+	// that interface — even dotted — and fans down like any bare ref; a unit
+	// of a declared dotted base binds its canonical Literal. cfg-free and
+	// undeclared inputs degrade to the legacy canon-then-cut, byte-identical.
+	s := cfg.SplitInterfaceUnitRef(rawRef)
+	if s.HasUnit {
 		// A unit reference, a degenerate ".<unit>", or the trailing-dot form:
 		// all bind the literal key only.
-		return []string{ref}
+		return []string{s.Literal}
 	}
-	keys := []string{ref}
+	keys := []string{s.Literal}
 	if cfg == nil {
 		return keys
 	}
-	ifCfg := cfg.Interfaces.Interfaces[ref]
+	ifCfg := cfg.Interfaces.Interfaces[s.Base]
 	if ifCfg == nil {
 		return keys
 	}
@@ -89,7 +93,7 @@ func InterfaceUnitRefKeys(cfg *Config, rawRef string) []string {
 	}
 	sort.Ints(units)
 	for _, unitNum := range units {
-		keys = append(keys, fmt.Sprintf("%s.%d", ref, unitNum))
+		keys = append(keys, fmt.Sprintf("%s.%d", s.Base, unitNum))
 	}
 	return keys
 }
@@ -136,9 +140,12 @@ func InterfaceZoneMap(cfg *Config) map[string]string {
 			// routing binders must NOT do this — the base row inherits unit 0's
 			// kernel addresses, so a unit-1 reference would drag unit 0's prefix
 			// into unit 1's routing instance. See InterfaceUnitRefKeys.
-			if base, _, ok := strings.Cut(CanonicalInterfaceUnitRef(rawIface), "."); ok && base != "" {
-				if _, exists := out[base]; !exists {
-					out[base] = zoneName
+			// #9821: the base comes from the split, not a first-dot cut — a
+			// declared-unit `p.0.1` binds base `p.0` (was bogus `p`), and a
+			// declared bare `p.0` skips this (the fan-down already bound it).
+			if s := cfg.SplitInterfaceUnitRef(rawIface); s.HasUnit && s.Base != "" {
+				if _, exists := out[s.Base]; !exists {
+					out[s.Base] = zoneName
 				}
 			}
 		}
@@ -246,12 +253,21 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 			if ref == "" || hib == nil {
 				continue
 			}
-			if strings.Contains(ref, ".") {
-				// #5878 phase 2: resolve the unit ref on its canonical identity so
-				// a reth0.050 override lands on the same key (reth0.50) the per-unit
-				// snapshot consumer looks up, and the #5489 owner guard compares the
-				// canonical unit against the (now canonical) zone map.
-				canonRef := CanonicalInterfaceUnitRef(ref)
+			// #9821: bare-vs-unit decided by the split (declared-first). A
+			// dotted-physical override fans down; a declared-unit override
+			// binds its canonical Literal. Trailing-dot stays unit-branch
+			// (legacy). Refs stay single-sorted-loop: undotted bare always
+			// sorts before its units, so physical ∪ unit order is unchanged
+			// there; alias spellings may order unit-first, but grouping
+			// canonicalizes token order (sorted+deduped sig) so only the
+			// SET is load-bearing — pinned as sets.
+			s := cfg.SplitInterfaceUnitRef(ref)
+			if s.HasUnit {
+				// #5878 phase 2: resolve the unit ref on its canonical identity
+				// so reth0.050 AND p.0.01 overrides land on the canonical key
+				// the per-unit snapshot consumer looks up, and the #5489 owner
+				// guard compares the canonical unit against the (now canonical)
+				// zone map.
 				// #5489: a unit-level override must come ONLY from the unit's
 				// authoritative zone owner. InterfaceZoneMap resolves the
 				// owner as the first sorted zone that claims the unit; on a
@@ -262,7 +278,7 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 				// InterfaceSnapshot / ZoneHostInboundView. Quarantine the leak with
 				// the SAME predicate the physical-expansion branch uses (#3720
 				// M01): skip when a DIFFERENT zone owns this unit.
-				if z := zoneByIface[canonRef]; z != "" && z != zn {
+				if z := zoneByIface[s.Literal]; z != "" && z != zn {
 					continue
 				}
 				// Logical unit ref: the most specific override. Merge (union) it
@@ -270,17 +286,17 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 				// refs are walked sorted and a bare physical ref sorts before its
 				// units, a same-zone physical expansion below has already run, so
 				// this yields physical ∪ unit.
-				out[canonRef] = MergeHostInboundTraffic(out[canonRef], hib)
+				out[s.Literal] = MergeHostInboundTraffic(out[s.Literal], hib)
 				continue
 			}
 			// Bare physical ref: first-writer-wins across zones for the bare key
 			// itself (preserves the lenient cross-zone quarantine).
-			if _, ok := out[ref]; !ok {
-				out[ref] = hib
+			if _, ok := out[s.Literal]; !ok {
+				out[s.Literal] = hib
 			}
-			if ifCfg := cfg.Interfaces.Interfaces[ref]; ifCfg != nil {
+			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
-					un := fmt.Sprintf("%s.%d", ref, unitNum)
+					un := fmt.Sprintf("%s.%d", s.Base, unitNum)
 					// #3720 M01: do not leak a physical override onto a unit that
 					// resolves to a different zone.
 					if z := zoneByIface[un]; z != "" && z != zn {

@@ -77,7 +77,13 @@ func userspaceRxMTUOverBudget(cfg *Config) map[string]int {
 			continue
 		}
 		for _, ref := range zone.Interfaces {
-			base, unitText, _ := strings.Cut(ref, ".")
+			// #9821 D17: the split base (declared-aware) — a dotted unit
+			// ref resolves against its declared stanza instead of an
+			// undeclared first segment, so strict-reachable both-declared
+			// zone members keep their over-budget warnings. Lifeline-prefix
+			// skip preserved on the split base.
+			s := cfg.SplitInterfaceUnitRef(ref)
+			base := s.Base
 			if strings.HasPrefix(base, "fxp") || strings.HasPrefix(base, "em") ||
 				strings.HasPrefix(base, "fab") || base == "lo0" {
 				continue
@@ -87,7 +93,14 @@ func userspaceRxMTUOverBudget(cfg *Config) map[string]int {
 				continue
 			}
 			mtu := ifc.MTU
-			if unitNum, err := strconv.Atoi(unitText); err == nil || unitText == "" {
+			unitNum := 0
+			unitOK := true
+			if s.HasUnit {
+				var err error
+				unitNum, err = strconv.Atoi(s.UnitTok)
+				unitOK = err == nil
+			}
+			if unitOK {
 				if unit := ifc.Units[unitNum]; unit != nil {
 					if unit.Tunnel != nil {
 						continue

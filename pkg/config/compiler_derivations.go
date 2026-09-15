@@ -193,4 +193,9 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 	// zone-level token that still authorizes from one that no longer does —
 	// and because every consumer of the resolution holds only a *ZoneConfig.
 	stampZoneDHCPScopeWithheld(cfg)
+	// #9821: per-zone override closure for InterfaceHostInboundOverride,
+	// adjacent to the scope-withhold stamp for the same reason (the method
+	// cannot take a *Config). Independent of it — order between the two
+	// does not matter.
+	stampResolvedInterfaceOverrides(cfg)
 }

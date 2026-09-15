@@ -470,7 +470,35 @@ type ZoneConfig struct {
 	// hand-built ZoneConfig that never went through the compiler therefore
 	// keeps the OLD, WIDER admission rather than silently narrowing.
 	DHCPScopeWithheld map[string]bool
-	TCPRst            bool // send TCP RST for non-SYN packets to closed ports
+	// ResolvedInterfaceOverrides holds the EFFECTIVE per-interface override
+	// for every spelling the dataplane binds (#9821): each authored ref
+	// under its raw spelling AND its canonical Literal, plus every
+	// configured unit beneath a bare (incl. dotted-bare) ref. Values are
+	// merged physical∪unit unions (#3720) over FRESH structs, never aliases
+	// of the authored stanzas.
+	//
+	// DERIVED, not authored: stamped by resolveDerivedConfig via
+	// stampResolvedInterfaceOverrides (adjacent to the scope-withhold
+	// stamp), because InterfaceHostInboundOverride (a *ZoneConfig method
+	// reaching sixteen diagnostic surfaces plus the nft enforcement path)
+	// cannot take a *Config. Consulted by that method: hit → stamped
+	// value (normalized on return exactly as the legacy walk normalizes);
+	// miss with a stamped (non-nil) map → authoritative ABSENT (any
+	// authored physical would have fanned down to cover the query, so
+	// absence proves no governing override — this ALIGNS the method with
+	// the runtime map, which has no key for unlisted units either); nil
+	// map (hand-built cfgs bypassing compile) → the legacy first-dot
+	// walk, byte-identical.
+	//
+	// ResolvedInterfaceDeclared is the declared-interface set the stamp
+	// was built against (present-and-non-nil names only, #5886). The
+	// method resolves probe spellings through the shared splitter over
+	// this set so alias queries (`p.0.001`) reach their canonical key
+	// (`p.0.1`) without a *Config. Always stamped together with
+	// ResolvedInterfaceOverrides; either nil means "unstamped".
+	ResolvedInterfaceOverrides map[string]*HostInboundTraffic
+	ResolvedInterfaceDeclared  map[string]bool
+	TCPRst                     bool // send TCP RST for non-SYN packets to closed ports
 	// AddressBook is the zone-local address book (#3061). A policy whose
 	// from-zone (source-address) or to-zone (destination-address) is this
 	// zone resolves a name against this book FIRST, then falls back to the

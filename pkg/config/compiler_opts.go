@@ -2692,6 +2692,18 @@ type compileOpts struct {
 	// (#5829); this closes the residual #5829 deferred to #5933.
 	lenientInterfaceUnitRef bool
 
+	// lenientRIMemberCollision (#9821) downgrades the routing-instance member
+	// declared-name / unit-ref collision gate (a member that claims a key
+	// which is BOTH a declared interface name and `base.<unit>` of another
+	// declared interface's non-nil unit) from a hard compile error to a
+	// cfg.Warnings entry. Strict commit / commit-check hard-reject so the two
+	// objects cannot commit and then disagree about instance, bind and
+	// overlap across consumers. Set ONLY on the tolerant load / peer-sync
+	// paths so a config an older binary already persisted — which compiled
+	// and silently conflated the two — still BOOTS, now with a deterministic
+	// warning. Same doctrine as lenientInterfaceUnitRef (#5933).
+	lenientRIMemberCollision bool
+
 	// lenientInterfaceRangeBudget (#8438) downgrades the total interface-range
 	// expansion budget from a hard compile error to a cfg.Warnings entry. The
 	// expansion is SKIPPED either way — the harm is the replay cost itself, so a
@@ -2949,6 +2961,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPGroupTimers:                 true,
 		lenientRethVRRPGroupID:                 true,
 		lenientIfNameCollision:                 true,
+		lenientRIMemberCollision:               true,
 		lenientRethMember:                      true,
 		lenientRethRGOwnership:                 true,
 		lenientReservedZoneNames:               true,

@@ -192,8 +192,12 @@ func routingInstanceByInterface(cfg *Config) map[string]string {
 			if ifName == "" {
 				continue
 			}
-			if _, ok := out[ifName]; !ok {
-				out[ifName] = ri.Name
+			// #9821: index the canonical Literal so padded spellings
+			// (`p.0.01`) hit the same key the runtime binds (`p.0.1`); bare
+			// members keep their spelling (Literal == member when bare).
+			key := cfg.SplitInterfaceUnitRef(ifName).Literal
+			if _, ok := out[key]; !ok {
+				out[key] = ri.Name
 			}
 		}
 	}

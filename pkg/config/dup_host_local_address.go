@@ -225,19 +225,29 @@ func buildHostInboundOverrideMapLocal(cfg *Config) map[string]*HostInboundTraffi
 			if ref == "" || hib == nil {
 				continue
 			}
-			if strings.Contains(ref, ".") {
+			// #9821: bare-vs-unit decided by the split (declared-first),
+			// mirroring ResolveInterfaceHostInbound. Unit keys are the raw
+			// spelling plus — multi-dot only — the canonical Literal the
+			// gate probes: `p.0.01`-authored overrides must govern `p.0.1`
+			// rows. Single-dot keeps raw-only (the pre-existing padded
+			// gate miss is preserved exactly, not fixed as a drive-by).
+			s := cfg.SplitInterfaceUnitRef(ref)
+			if s.HasUnit {
 				// Logical unit ref: most specific — merge onto any physical-
 				// inherited set (both are INTERFACE-level statements and union
-				// with each other, #3720), exact match only.
+				// with each other, #3720).
 				out[ref] = mergeHostInboundOverrideLocal(out[ref], hib)
+				if s.Literal != ref && strings.Count(ref, ".") > 1 {
+					out[s.Literal] = mergeHostInboundOverrideLocal(out[s.Literal], hib)
+				}
 				continue
 			}
 			if _, ok := out[ref]; !ok {
 				out[ref] = hib
 			}
-			if ifCfg := cfg.Interfaces.Interfaces[ref]; ifCfg != nil {
+			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
-					un := fmt.Sprintf("%s.%d", ref, unitNum)
+					un := fmt.Sprintf("%s.%d", s.Base, unitNum)
 					if z := zoneByIface[un]; z != "" && z != zn {
 						continue // #3720 M01: do not leak cross-zone
 					}

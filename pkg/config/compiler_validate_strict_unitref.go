@@ -55,11 +55,23 @@ func validateInterfaceUnitReferencesStrict(cfg *Config) error {
 	}
 
 	// checkRef validates one interface reference's OPTIONAL ".unit" suffix. ctx
-	// names the subsystem + scope so the operator error is actionable.
-	checkRef := func(ctx, ref string) error {
-		_, unitTok, hasUnit := strings.Cut(ref, ".")
-		if !hasUnit || unitTok == "" {
-			return nil // bare interface (or trailing-dot bare form) — no unit slot
+	// names the subsystem + scope so the operator error is actionable. cosArm
+	// selects the legacy first-dot suffix: CoS binders key exact declared names
+	// with nested `unit` children and never fold dotted unit refs, so the CoS
+	// arm keeps legacy acceptance (a double-dot CoS key still rejects) while
+	// the RI and zone arms — whose binders moved to the split — validate the
+	// split suffix (#9821).
+	checkRef := func(ctx, ref string, cosArm bool) error {
+		s := cfg.SplitInterfaceUnitRef(ref)
+		if !s.HasUnit {
+			return nil // bare interface (declared or not) — no unit slot
+		}
+		unitTok := s.UnitTok
+		if cosArm {
+			_, unitTok, _ = strings.Cut(ref, ".")
+		}
+		if unitTok == "" {
+			return nil // trailing-dot bare form — no unit slot
 		}
 		if err := ValidateLogicalUnit(unitTok, cfg); err != nil {
 			return fmt.Errorf("%s interface reference %q has invalid logical unit %q: %w",
@@ -78,7 +90,7 @@ func validateInterfaceUnitReferencesStrict(cfg *Config) error {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			if err := checkRef("class-of-service interfaces", name); err != nil {
+			if err := checkRef("class-of-service interfaces", name, true); err != nil {
 				return err
 			}
 		}
@@ -102,7 +114,7 @@ func validateInterfaceUnitReferencesStrict(cfg *Config) error {
 				continue
 			}
 			ctx := fmt.Sprintf("security zones security-zone %q", zoneName)
-			if err := checkRef(ctx, iface); err != nil {
+			if err := checkRef(ctx, iface, false); err != nil {
 				return err
 			}
 		}
@@ -119,7 +131,7 @@ func validateInterfaceUnitReferencesStrict(cfg *Config) error {
 				continue
 			}
 			ctx := fmt.Sprintf("routing-instances %q", ri.Name)
-			if err := checkRef(ctx, iface); err != nil {
+			if err := checkRef(ctx, iface, false); err != nil {
 				return err
 			}
 		}

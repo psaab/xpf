@@ -500,10 +500,10 @@ func ValidateConfig(cfg *Config) []string {
 			continue
 		}
 		for _, ifName := range ri.Interfaces {
-			base := ifName
-			if idx := strings.Index(ifName, "."); idx > 0 {
-				base = ifName[:idx]
-			}
+			// #9821: a member naming a declared interface IS that interface
+			// even when dotted (#8994 precedence) — resolve the base through
+			// the split instead of cutting at the first dot.
+			base := cfg.SplitInterfaceUnitRef(ifName).Base
 			if !configuredIfaces[base] {
 				warnings = append(warnings, fmt.Sprintf(
 					"routing-instance %q: interface %q not in interfaces config",
