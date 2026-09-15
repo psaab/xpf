@@ -6459,6 +6459,16 @@ pub(super) fn poll_binding_process_descriptor(
                             packet_frame,
                             meta,
                             decision,
+                            // #9637 operator narrowing: the ONLY trusted path
+                            // through this filtered chokepoint is a
+                            // LocalDelivery disposition — every such frame
+                            // passed the session-hit / session-miss /
+                            // flowless host-inbound gates upstream (each deny
+                            // `continue`s before reinject). NoRoute (incl.
+                            // capped), transit-adjudicated MissingNeighbor
+                            // and any other disposition take the delegated
+                            // outlet (destination-judged as pre-#9637).
+                            reinject_host_authorized(decision.resolution.disposition),
                             worker_ctx.recent_exceptions,
                             "slow_path",
                             worker_ctx.forwarding,

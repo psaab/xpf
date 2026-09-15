@@ -1405,6 +1405,12 @@ pub(super) fn stage_ipsec_passthrough_check(
         packet_frame,
         meta,
         ipsec_decision,
+        // #9637 operator narrowing: synthetic IPsec passthrough (ESP/AH,
+        // ESP-in-UDP/NAT-T, seeded IKE — unconditionally exempt, never
+        // gate-passed; IKE-new passes its own gate but rides this
+        // unfiltered site) takes the delegated outlet: the destination
+        // judges it on the same token set with identical verdicts.
+        false,
         worker_ctx.recent_exceptions,
         "slow_path",
         worker_ctx.forwarding,

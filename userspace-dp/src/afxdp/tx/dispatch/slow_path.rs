@@ -97,6 +97,11 @@ pub(in crate::afxdp) fn handle_forward_build_failure(
             frame,
             meta,
             decision,
+            // #9637 operator narrowing: the build-failure fallback carries a
+            // FORWARD disposition (possibly firewall-local via a non-owning
+            // table) that never passed a host gate — delegated outlet, so the
+            // kernel judges it by destination exactly as pre-#9637.
+            false,
             recent_exceptions,
             "forward_build_slow_path",
             forwarding,
@@ -137,6 +142,32 @@ pub(in crate::afxdp) fn slow_path_admit(
     false
 }
 
+/// #9637 operator narrowing: which slow-path TUN a reinject takes.
+///
+/// Returns true for the adjudicated outlet (`xpf-usp0`, kernel-exempted by
+/// the host-inbound reinject accept) and false for the delegated outlet
+/// (`xpf-usp1`, judged by the destination rules exactly as pre-#9637).
+///
+/// The ONLY trusted path is a `LocalDelivery` disposition through the
+/// FILTERED chokepoint (`poll_descriptor`, downstream of the session-hit /
+/// session-miss / flowless host-inbound gates — every deny `continue`s
+/// before reinject). All other reinject classes are delegated: forced and
+/// common-skew NoRoute (incl. capped), transit-adjudicated MissingNeighbor,
+/// ForwardCandidate build-failure fallback, and the synthetic IPsec
+/// passthrough (ESP/AH, ESP-in-UDP/NAT-T, seeded IKE — unconditionally
+/// exempt, never gate-passed; IKE-new passes its own gate but rides the
+/// unfiltered passthrough site, so the destination judges it on the same
+/// token set with identical verdicts).
+///
+/// Callers pass the result as `maybe_reinject_slow_path_from_frame`'s
+/// `host_authorized` flag; unfiltered sites pass `false` directly (their
+/// classes are enumerated here, not inferred). Exhaustively pinned below.
+pub(in crate::afxdp) fn reinject_host_authorized(
+    disposition: ForwardingDisposition,
+) -> bool {
+    matches!(disposition, ForwardingDisposition::LocalDelivery)
+}
+
 #[cold]
 #[inline(never)]
 pub(in crate::afxdp) fn maybe_reinject_slow_path(
@@ -148,6 +179,9 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path(
     desc: XdpDesc,
     meta: impl Into<UserspaceDpMeta>,
     decision: SessionDecision,
+    // #9637: test-only wrapper (no production callers) — threaded through
+    // so tests pin the outlet under test explicitly.
+    host_authorized: bool,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     forwarding: &ForwardingState,
 ) {
@@ -180,6 +214,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path(
         frame,
         meta,
         decision,
+        host_authorized,
         recent_exceptions,
         "slow_path",
         forwarding,
@@ -244,6 +279,15 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
     frame: &[u8],
     meta: impl Into<UserspaceDpMeta>,
     decision: SessionDecision,
+    // #9637 operator narrowing: true routes the frame to the adjudicated
+    // outlet (`xpf-usp0`, kernel-exempted); false to the delegated outlet
+    // (`xpf-usp1`, destination-judged). Callers declare the authorization
+    // they verified: the filtered chokepoint passes
+    // `reinject_host_authorized(disposition)`; unfiltered sites pass
+    // `false` (their classes are enumerated on that function, not inferred
+    // here — a new unfiltered caller that needs the trusted outlet must
+    // justify it at its site, not widen this primitive).
+    host_authorized: bool,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     reason: &'static str,
     forwarding: &ForwardingState,
@@ -347,7 +391,16 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
         );
         return;
     };
-    match slow_path.enqueue(packet) {
+    // #9637 operator narrowing: the outlet IS the authorization proof the
+    // kernel accept keys on. Trusted ⟺ the caller verified host
+    // authorization; delegated frames meet the destination rules exactly as
+    // pre-#9637 (no accept references `xpf-usp1` on either render surface).
+    let enqueue_outcome = if host_authorized {
+        slow_path.enqueue(packet)
+    } else {
+        slow_path.enqueue_delegated(packet)
+    };
+    match enqueue_outcome {
         Ok(EnqueueOutcome::Accepted) => {
             live.record_slow_path_accept(decision.resolution.disposition, reason, packet_len);
         }

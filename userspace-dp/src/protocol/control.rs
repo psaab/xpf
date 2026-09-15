@@ -137,7 +137,7 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // §5e), independently of this JSON gate. See protocol.go's v17 note. The
 // #8892 digest moves with it (the plural is a real, transmitted field).
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 17;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 18;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

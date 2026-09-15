@@ -506,7 +506,7 @@ pub(super) fn reconcile_preserved_slow_path_mtu(
     slow_path: &SlowPathReinjector,
     desired_mtu: i32,
     last_acted: &mut i32,
-    programmer: impl FnOnce(&str, i32) -> Result<(), String>,
+    programmer: impl FnMut(&str, i32) -> Result<(), String>,
 ) -> bool {
     if desired_mtu == slow_path.status().live_mtu || desired_mtu == *last_acted {
         return false;
@@ -542,7 +542,7 @@ pub(super) fn apply_snapshot(
     prior_tunnel_owners: &[(u16, String)],
     snapshot_was_installed: bool,
     fds: ReconcileSnapshotFds,
-    mtu_programmer: impl FnOnce(&str, i32) -> Result<(), String>,
+    mtu_programmer: impl FnMut(&str, i32) -> Result<(), String>,
 ) -> Option<(ReconcileSnapshotFds, Vec<u16>)> {
     // #2484: the forwarding state was already built in the pre-teardown
     // preflight (`build_reconcile_forwarding`) and stashed on
@@ -827,6 +827,103 @@ mod slow_path_mtu_tests {
                 panic!("must not re-issue SIOCSIFMTU for an unchanged desired value");
             });
         assert!(!again, "a persistently degraded TUN is deduped by last_acted");
+    }
+
+    /// #9637 operator narrowing (GPT-2): a PARTIAL MTU-program failure
+    /// (trusted converges, delegated fails) must stay fail-visible AND
+    /// storm-free. The attempt programs both outlets (programmer sees two
+    /// calls); reconcile reports the minimum live MTU; the lagging outlet
+    /// stays degraded with its retained MTU; a same-value repeat does NOT
+    /// re-issue (last_acted dedup holds per the #6097 storm invariant —
+    /// bounded retry of a persistently failing outlet is filed follow-up
+    /// #10069 (recovery design + delegated status reporting, with
+    /// acceptance), not this lane). If reconcile ever short-circuits on
+    /// the trusted outlet alone, the delegated attempt count drops to 1
+    /// and this reds.
+    #[test]
+    fn partial_delegated_mtu_failure_stays_visible_and_deduped() {
+        let reinjector = SlowPathReinjector::new_without_worker(1500);
+        // Trusted starts degraded (live 1500) so the reconcile attempts;
+        // delegated was never programmed (live 0). Programmer order is
+        // trusted-first (reconcile_mtu programs both unconditionally).
+        reinjector.force_mtu_state_for_test(9000, 1500, true);
+        let mut last_acted = 0i32;
+        let mut calls = 0;
+        let acted = reconcile_preserved_slow_path_mtu(
+            &reinjector,
+            9000,
+            &mut last_acted,
+            |_n, _m| {
+                calls += 1;
+                // Trusted programs; delegated fails persistently.
+                if calls == 1 {
+                    Ok(())
+                } else {
+                    Err("SIOCSIFMTU: simulated delegated failure".to_string())
+                }
+            },
+        );
+        assert!(acted, "a partially-unconverged pair must attempt");
+        assert_eq!(calls, 2, "one program per outlet");
+        assert_eq!(
+            reinjector.status().live_mtu,
+            9000,
+            "trusted outlet converged"
+        );
+        assert_eq!(
+            reinjector.delegated_status().live_mtu,
+            1500,
+            "delegated outlet retains its live MTU on failure"
+        );
+        assert!(
+            reinjector.delegated_status().degraded,
+            "delegated outlet stays degraded and visible"
+        );
+        assert!(
+            !reinjector.status().degraded,
+            "trusted outlet is not marked by the sibling failure"
+        );
+        // Same desired again: last_acted dedups (no per-tick retry storm),
+        // even though the delegated outlet never converged.
+        let again = reconcile_preserved_slow_path_mtu(
+            &reinjector,
+            9000,
+            &mut last_acted,
+            |_n, _m| {
+                panic!("must not re-issue SIOCSIFMTU for an unchanged desired value");
+            },
+        );
+        assert!(!again, "partial failure dedups like a full one");
+    }
+
+    /// #9637 GPT-2 gap characterization (NOT a fix): trusted converged +
+    /// delegated lagging skips the reconcile entirely, so a delegated outlet
+    /// that fails while trusted is already converged never gets even a first
+    /// recovery attempt on an unchanged config — whether the value was
+    /// already acted (dedup) or never acted (the trusted-live short-circuit
+    /// fires first). This pins the documented gap (bounded retry is filed
+    /// follow-up #10069): if the preserved path ever starts recovering the
+    /// lagging outlet here, this reds and the follow-up closes.
+    #[test]
+    fn converged_trusted_lagging_delegated_skips_recovery() {
+        let reinjector = SlowPathReinjector::new_without_worker(1500);
+        reinjector.force_mtu_state_for_test(9000, 9000, false);
+        // Trusted converged at 9000; delegated never programmed (live 1500).
+        for last in [9000i32, 0i32] {
+            let mut last_acted = last;
+            let again = reconcile_preserved_slow_path_mtu(
+                &reinjector,
+                9000,
+                &mut last_acted,
+                |_n, _m| {
+                    panic!("no program may issue: trusted converged (last_acted={last})");
+                },
+            );
+            assert!(
+                !again,
+                "documents the gap: a lagging delegated outlet is not recovered while trusted is converged (last_acted={last})"
+            );
+        }
     }
 
     /// #6097 fail-on-revert (item 2, WIRING — primary deliverable): drive the

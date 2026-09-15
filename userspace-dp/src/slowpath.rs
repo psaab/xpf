@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -175,6 +175,16 @@ enum WriteMode {
 
 struct SharedStatus {
     active: AtomicBool,
+    /// #9637 GPT-1: single-atomic worker initialization outcome, published
+    /// by the worker thread and read by the constructor handshake. The old
+    /// handshake sampled `active` and the `last_error` diagnostic in two
+    /// loads: a worker that had published `active` but not yet its
+    /// io_uring-fallback note (or an MTU-degradation error before `active`)
+    /// could be misread as failed-while-healthy. One load decides; the
+    /// diagnostic slot is consulted ONLY after Failed is observed (the
+    /// worker records the cause BEFORE publishing Failed, so it is present).
+    /// 0 = starting, 1 = live, 2 = failed.
+    init_state: AtomicU8,
     /// #2471: set when the worker is active but the live TUN MTU is below the
     /// configured/desired MTU (set_if_mtu failed). See `SlowPathStatus`.
     degraded: AtomicBool,
@@ -196,10 +206,31 @@ struct SharedStatus {
     last_error: Mutex<String>,
 }
 
+/// #9637 GPT-1: worker initialization outcome as a single atomic value.
+/// Values match the `init_state` encoding (0 = starting, 1 = live,
+/// 2 = failed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutletInit {
+    Starting,
+    Live,
+    Failed,
+}
+
 impl SharedStatus {
+    /// The worker's published initialization outcome: ONE atomic load, so
+    /// the constructor handshake can never combine a stale `active` with
+    /// a fresh diagnostic (or vice versa).
+    fn init_outcome(&self) -> OutletInit {
+        match self.init_state.load(Ordering::Relaxed) {
+            1 => OutletInit::Live,
+            2 => OutletInit::Failed,
+            _ => OutletInit::Starting,
+        }
+    }
     fn new() -> Self {
         Self {
             active: AtomicBool::new(false),
+            init_state: AtomicU8::new(OutletInit::Starting as u8),
             degraded: AtomicBool::new(false),
             live_mtu: AtomicI64::new(DEFAULT_TUN_MTU as i64),
             queued_packets: AtomicU64::new(0),
@@ -349,8 +380,17 @@ impl SharedStatus {
 
 pub struct SlowPathReinjector {
     tx: SyncSender<PacketRequest>,
+    /// #9637 operator narrowing: outlet for reinjects that did NOT pass a
+    /// userspace host-inbound gate (delegated NoRoute/MissingNeighbor,
+    /// ForwardCandidate fallback, exempt IPsec). Separate worker + TUN
+    /// (`xpf-usp1`); the kernel holds no accept for it. `tx` stays the
+    /// adjudicated-only outlet (`xpf-usp0`).
+    tx_delegated: SyncSender<PacketRequest>,
     limiter: Mutex<RateLimiter>,
     status: Arc<SharedStatus>,
+    /// Per-outlet status for the delegated TUN (live MTU, degraded, active,
+    /// counters). Admission and MTU gating read the outlet's own status.
+    status_delegated: Arc<SharedStatus>,
     /// MTU the live slow-path TUN is currently programmed with. Set at
     /// creation (#2408) and, on a day-2 config MTU change (#5801), updated by
     /// [`Self::reconcile_mtu`]: the reinjector is PRESERVED across snapshot
@@ -358,7 +398,44 @@ pub struct SlowPathReinjector {
     /// record the new value here so `mtu()`, `live_mtu`, and enqueue admission
     /// stay in agreement. `AtomicI64` (mirroring `SharedStatus::live_mtu`) so
     /// `mtu()`/`reconcile_mtu` need no `&mut` on the Arc-shared reinjector.
+    /// Dual-outlet (#9637): both TUNs take the same desired MTU;
+    /// `reconcile_mtu` reprograms both and records the minimum live value.
     mtu: AtomicI64,
+}
+
+/// #9637 F3 (GPT-1 form): one dual-outlet startup-handshake step as pure logic.
+///
+/// Each outlet contributes its single-atom `OutletInit` outcome: Live means
+/// the worker owns a TUN (later diagnostics, e.g. the io_uring-unavailable
+/// note recorded while the sync fallback succeeds, cannot un-live it);
+/// Failed means it recorded a cause THEN published failure (so the Fail arm
+/// can always report it). Terminal failure fast-fails without waiting for
+/// the sibling; a both-pending timeout stays optimistic (pre-existing
+/// behaviour). The pinning matrix lives in slowpath_tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandshakePoll {
+    Wait,
+    Ready,
+    Fail,
+}
+
+fn handshake_step(a: OutletInit, b: OutletInit, timed_out: bool) -> HandshakePoll {
+    // #9637 GPT-1: each outlet contributes ONE atomic outcome, so the four
+    // booleans (and their read-skew) are gone. Live dominates: a live
+    // outlet's diagnostics can never fail the handshake — the worker
+    // publishes Live before recording any diagnostic note, and Failed only
+    // after recording its cause (which the Fail arm below then reports).
+    // A both-pending timeout stays optimistic (pre-existing behaviour).
+    if a == OutletInit::Live && b == OutletInit::Live {
+        return HandshakePoll::Ready;
+    }
+    if a == OutletInit::Failed || b == OutletInit::Failed {
+        return HandshakePoll::Fail;
+    }
+    if timed_out {
+        return HandshakePoll::Ready;
+    }
+    HandshakePoll::Wait
 }
 
 impl SlowPathReinjector {
@@ -377,6 +454,19 @@ impl SlowPathReinjector {
             .name("xpf-slowpath".to_string())
             .spawn(move || slow_path_worker(&name, mtu, rx, thread_status))
             .map_err(|e| format!("spawn slow-path worker: {e}"))?;
+        // #9637 operator narrowing: the delegated outlet gets its own worker
+        // + TUN. Either worker failing to come up fails construction: an
+        // adjudicated-only reinjector would silently re-widen (delegated
+        // traffic with nowhere safe to go), and a delegated-only one would
+        // silently reopen the residual.
+        let status_delegated = Arc::new(SharedStatus::new());
+        let (tx_delegated, rx_delegated) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
+        let thread_status_delegated = status_delegated.clone();
+        let delegated_name = crate::afxdp::DELEGATED_SLOW_PATH_TUN.to_string();
+        thread::Builder::new()
+            .name("xpf-slowpath-delegated".to_string())
+            .spawn(move || slow_path_worker(&delegated_name, mtu, rx_delegated, thread_status_delegated))
+            .map_err(|e| format!("spawn delegated slow-path worker: {e}"))?;
 
         // #7820: wait for the worker to report EITHER that it is live or why it
         // is not, instead of returning Ok the instant the thread is spawned.
@@ -398,25 +488,36 @@ impl SlowPathReinjector {
         // we prefer today's optimistic behaviour to hanging dataplane startup.
         let deadline = Instant::now() + INIT_HANDSHAKE_TIMEOUT;
         loop {
-            if status.active.load(Ordering::Relaxed) {
-                break;
+            // One load per outlet: no read-skew between a flag and a
+            // diagnostic is possible here by construction.
+            let a = status.init_outcome();
+            let b = status_delegated.init_outcome();
+            match handshake_step(a, b, Instant::now() >= deadline) {
+                HandshakePoll::Wait => thread::sleep(INIT_HANDSHAKE_POLL),
+                HandshakePoll::Ready => break,
+                HandshakePoll::Fail => {
+                    // Report the first terminally failed outlet's cause
+                    // (Failed ⟹ cause present by worker contract).
+                    if a == OutletInit::Failed {
+                        return Err(status.last_error_if_set().unwrap_or_else(|| {
+                            "slow-path worker failed without a recorded cause".to_string()
+                        }));
+                    }
+                    return Err(status_delegated.last_error_if_set().unwrap_or_else(|| {
+                        "delegated slow-path worker failed without a recorded cause".to_string()
+                    }));
+                }
             }
-            if let Some(err) = status.last_error_if_set() {
-                return Err(err);
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            thread::sleep(INIT_HANDSHAKE_POLL);
         }
-
         Ok(Self {
             tx,
+            tx_delegated,
             limiter: Mutex::new(RateLimiter::new(
                 DEFAULT_RATE_LIMIT_PACKETS_PER_SEC,
                 DEFAULT_RATE_LIMIT_BYTES_PER_SEC,
             )),
             status,
+            status_delegated,
             mtu: AtomicI64::new(mtu as i64),
         })
     }
@@ -449,13 +550,21 @@ impl SlowPathReinjector {
         let (tx, rx) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
         std::mem::forget(rx);
         status.active.store(true, Ordering::Relaxed);
+        status.init_state.store(OutletInit::Live as u8, Ordering::Relaxed);
+        let status_delegated = Arc::new(SharedStatus::new());
+        let (tx_delegated, rx_delegated) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
+        std::mem::forget(rx_delegated);
+        status_delegated.active.store(true, Ordering::Relaxed);
+        status_delegated.init_state.store(OutletInit::Live as u8, Ordering::Relaxed);
         Self {
             tx,
+            tx_delegated,
             limiter: Mutex::new(RateLimiter::new(
                 DEFAULT_RATE_LIMIT_PACKETS_PER_SEC,
                 DEFAULT_RATE_LIMIT_BYTES_PER_SEC,
             )),
             status,
+            status_delegated,
             mtu: AtomicI64::new(mtu as i64),
         }
     }
@@ -510,17 +619,16 @@ impl SlowPathReinjector {
     pub(crate) fn reconcile_mtu(
         &self,
         desired_mtu: i32,
-        programmer: impl FnOnce(&str, i32) -> Result<(), String>,
+        mut programmer: impl FnMut(&str, i32) -> Result<(), String>,
     ) -> i32 {
-        let name = self
-            .status
-            .device_name
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default();
-        let live = self
-            .status
-            .reprogram_mtu_status(&name, desired_mtu, programmer);
+        // #9637: reprogram BOTH outlets; report the minimum live MTU so no
+        // caller treats one outlet's success as both converged. A partial
+        // failure degrades exactly like the single-outlet case (retained live
+        // MTU, degraded flag, logged cause) on the failing outlet only.
+        let live_trusted = self.reconcile_outlet_mtu(&self.status, desired_mtu, &mut programmer);
+        let live_delegated =
+            self.reconcile_outlet_mtu(&self.status_delegated, desired_mtu, &mut programmer);
+        let live = live_trusted.min(live_delegated);
         // Record what was ACTUALLY installed (== desired on success, or the
         // retained live MTU on a failed program) so mtu() never over-reports a
         // ceiling the device cannot honour.
@@ -528,18 +636,49 @@ impl SlowPathReinjector {
         live
     }
 
+    fn reconcile_outlet_mtu(
+        &self,
+        status: &Arc<SharedStatus>,
+        desired_mtu: i32,
+        programmer: &mut impl FnMut(&str, i32) -> Result<(), String>,
+    ) -> i32 {
+        let name = status
+            .device_name
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        status.reprogram_mtu_status(&name, desired_mtu, programmer)
+    }
+
     pub fn enqueue(&self, bytes: Vec<u8>) -> Result<EnqueueOutcome, String> {
+        self.enqueue_on(&self.tx, &self.status, bytes)
+    }
+
+    /// #9637 operator narrowing: enqueue to the DELEGATED outlet
+    /// (`xpf-usp1`) for reinjects that did NOT pass a userspace host-inbound
+    /// gate. Admission, rate limiting and counters run on that outlet's own
+    /// status; the kernel holds no accept for it.
+    pub fn enqueue_delegated(&self, bytes: Vec<u8>) -> Result<EnqueueOutcome, String> {
+        self.enqueue_on(&self.tx_delegated, &self.status_delegated, bytes)
+    }
+
+    fn enqueue_on(
+        &self,
+        tx: &SyncSender<PacketRequest>,
+        status: &Arc<SharedStatus>,
+        bytes: Vec<u8>,
+    ) -> Result<EnqueueOutcome, String> {
         let packet_len = bytes.len() as u64;
         // #2471: refuse frames larger than the live TUN MTU. When MTU
         // programming failed the live TUN is at 1500; injecting a jumbo frame
         // would be silently dropped by the kernel on TUN egress while status
         // still reported `active`. Drop it here with an explicit counter so the
         // degradation is firewall-visible, not hidden in the kernel.
-        let live_mtu = self.status.live_mtu.load(Ordering::Relaxed);
+        let live_mtu = status.live_mtu.load(Ordering::Relaxed);
         if live_mtu > 0 && packet_len > live_mtu as u64 {
-            self.status.mtu_dropped_packets.fetch_add(1, Ordering::Relaxed);
-            self.status.dropped_packets.fetch_add(1, Ordering::Relaxed);
-            self.status
+            status.mtu_dropped_packets.fetch_add(1, Ordering::Relaxed);
+            status.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            status
                 .dropped_bytes
                 .fetch_add(packet_len, Ordering::Relaxed);
             return Ok(EnqueueOutcome::MtuExceeded);
@@ -550,37 +689,37 @@ impl SlowPathReinjector {
             .map_err(|_| "slow-path limiter lock poisoned".to_string())?
             .allow(bytes.len());
         if !allowed {
-            self.status.dropped_packets.fetch_add(1, Ordering::Relaxed);
-            self.status
+            status.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            status
                 .dropped_bytes
                 .fetch_add(packet_len, Ordering::Relaxed);
-            self.status
+            status
                 .rate_limited_packets
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(EnqueueOutcome::RateLimited);
         }
-        self.status.queued_packets.fetch_add(1, Ordering::Relaxed);
-        match self.tx.try_send(PacketRequest { bytes }) {
+        status.queued_packets.fetch_add(1, Ordering::Relaxed);
+        match tx.try_send(PacketRequest { bytes }) {
             Ok(()) => Ok(EnqueueOutcome::Accepted),
             Err(TrySendError::Full(req)) => {
-                self.status.queued_packets.fetch_sub(1, Ordering::Relaxed);
-                self.status.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                self.status
+                status.queued_packets.fetch_sub(1, Ordering::Relaxed);
+                status.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                status
                     .dropped_bytes
                     .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
-                self.status
+                status
                     .queue_full_packets
                     .fetch_add(1, Ordering::Relaxed);
                 Ok(EnqueueOutcome::QueueFull)
             }
             Err(TrySendError::Disconnected(req)) => {
-                self.status.queued_packets.fetch_sub(1, Ordering::Relaxed);
-                self.status.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                self.status
+                status.queued_packets.fetch_sub(1, Ordering::Relaxed);
+                status.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                status
                     .dropped_bytes
                     .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
                 let err = "slow-path worker is not running".to_string();
-                self.status.set_last_error(err.clone());
+                status.set_last_error(err.clone());
                 Err(err)
             }
         }
@@ -589,13 +728,27 @@ impl SlowPathReinjector {
     pub fn status(&self) -> SlowPathStatus {
         self.status.snapshot()
     }
+
+    /// Snapshot of the delegated outlet's status (live MTU, degraded, active,
+    /// counters). Consumed by reconcile_mtu internals and the partial-failure
+    /// pin; operator-surface reporting of the delegated outlet (status wire
+    /// + metrics) is filed follow-up #10069 — the kernel destination
+    /// counters already observe its traffic, and construction/MTU failures
+    /// log per-device causes.
+    pub fn delegated_status(&self) -> SlowPathStatus {
+        self.status_delegated.snapshot()
+    }
 }
 
 fn slow_path_worker(name: &str, mtu: i32, rx: Receiver<PacketRequest>, status: Arc<SharedStatus>) {
     let (tun, actual_name) = match open_tun(name) {
         Ok(v) => v,
         Err(err) => {
+            // Cause BEFORE outcome: the handshake reads the outcome first
+            // and the cause only after observing Failed, so the cause must
+            // already be present then.
             status.set_last_error(err);
+            status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
             status.active.store(false, Ordering::Relaxed);
             return;
         }
@@ -610,6 +763,11 @@ fn slow_path_worker(name: &str, mtu: i32, rx: Receiver<PacketRequest>, status: A
     status.apply_mtu_status(&actual_name, mtu, set_if_mtu);
     status.set_device_name(&actual_name);
     status.active.store(true, Ordering::Relaxed);
+    // #9637 GPT-1: publish the initialization outcome AFTER `active` (same
+    // critical section in program order): the constructor handshake reads
+    // ONLY this atomic, so later diagnostics (io_uring note, MTU-degraded
+    // error) can never skew it back to failure.
+    status.init_state.store(OutletInit::Live as u8, Ordering::Relaxed);
 
     let mut mode = match crate::io_uring_write::RingWriter::new(256) {
         Ok(ring) => {
