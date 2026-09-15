@@ -303,19 +303,21 @@ func (m *Manager) resolveXSKLivenessProbeTimeoutLocked(
 	}
 }
 
-// flushStaleBPFStateOnCtrlEnableLocked flushes stale BPF session entries when
-// ctrl transitions from disabled to enabled. Older legacy-fallback windows
-// could create PASS_TO_KERNEL entries in the userspace session map. These
-// poison the XDP shim after ctrl enables: it sees the stale entry and
-// bypasses XSK instead of redirecting to the userspace helper.
-//
-// It also flushes BPF conntrack sessions left by earlier legacy-fallback
-// windows. These sessions interfere with the userspace pipeline via TC
-// egress: when the Rust helper sends packets via XSK TX, TC egress finds the
-// stale BPF conntrack entries and may apply conflicting NAT or update session
-// state incorrectly. The userspace helper's own session table (Rust
+// flushStaleBPFStateOnCtrlEnableLocked flushes stale BPF conntrack sessions left by
+// earlier legacy-fallback windows when ctrl first enables. These sessions interfere
+// with the userspace pipeline via TC egress: when the Rust helper sends packets via XSK
+// TX, TC egress finds the stale BPF conntrack entries and may apply conflicting NAT or
+// update session state incorrectly. The userspace helper's own session table (Rust
 // SessionTable + shared_sessions) holds the authoritative synced sessions, so
 // BPF conntrack must be empty when ctrl re-enables.
+//
+// #9770: the userspace_sessions half of this flush is gone. It deleted EVERY steering
+// row — including rows the helper's live sessions had published before the first enable
+// (peer-synced imports land off-lock; bringup replays preserved sessions first). Stale
+// steering rows are now reclaimed at helper-spawn time (clearStaleSteeringRows: at spawn
+// no row can be live) and after proven full stops (drainAndClearSteeringRowsLocked).
+// The conntrack half stays here: sessions/sessions_v6 have kernel writers, so the helper
+// cannot own their cleanup, and the keep-synced-by-Created logic below is Go's.
 //
 // The caller gates this on the very first ctrl enable after daemon startup.
 // Snapshot generation is not a reliable proxy for "startup" on long-lived HA
@@ -324,24 +326,6 @@ func (m *Manager) resolveXSKLivenessProbeTimeoutLocked(
 // flush and destroy synced sessions. This function sets
 // m.initialCtrlCleanupDone as its last act, which is what closes that gate.
 func (m *Manager) flushStaleBPFStateOnCtrlEnableLocked() {
-	if usMap := m.bpfShim.Map(mapNameUserspaceSessions); usMap != nil {
-		var key, nextKey []byte
-		key = make([]byte, usMap.KeySize())
-		nextKey = make([]byte, usMap.KeySize())
-		deleted := 0
-		for {
-			if err := usMap.NextKey(key, nextKey); err != nil {
-				break
-			}
-			copy(key, nextKey)
-			_ = usMap.Delete(key)
-			deleted++
-		}
-		if deleted > 0 {
-			slog.Info("userspace: flushed stale BPF session entries on initial ctrl enable",
-				"deleted", deleted)
-		}
-	}
 	// Flush BPF conntrack sessions left by an earlier fallback
 	// transition window. Only delete
 	// sessions whose Created timestamp is AFTER ctrlDisabledAt —

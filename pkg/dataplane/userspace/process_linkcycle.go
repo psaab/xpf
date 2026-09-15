@@ -731,6 +731,13 @@ func (m *Manager) PrepareLinkCycle() error {
 			"err", err)
 		return fmt.Errorf("userspace: stop_workers before link cycle: %w", err)
 	}
+	// #9770: stop_workers landed (full stop: workers joined, authority cleared),
+	// orphaning pre-stop rows the spawn clear predates. Reclaim them under the
+	// session fence before the link cycles and rebind republishes. Never runs on
+	// RPC failure (workers possibly live); no-op post-enable by design (failback
+	// recovery needs those rows). Void by design: map hygiene must not
+	// fail the cycle contract below.
+	m.drainAndClearSteeringRowsLocked("link-cycle-stop")
 	slog.Info("userspace: workers stopped before link cycle",
 		"bindings", len(status.Bindings))
 	// SCOPE of the error contract, deliberately narrow: it reports whether the

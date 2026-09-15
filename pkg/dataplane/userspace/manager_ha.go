@@ -561,6 +561,9 @@ func (m *Manager) disarmBeforeUnsupportedPublishLocked(snap *ConfigSnapshot) err
 	}, &status); err != nil {
 		return fmt.Errorf("disarm userspace forwarding before %s publish: %w", reason, err)
 	}
+	// #9770: the disarm landed; reclaim pre-enable orphans under the session fence.
+	// No-op post-enable by design (failback recovery needs those rows).
+	m.drainAndClearSteeringRowsLocked("unsupported-publish-disarm")
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return fmt.Errorf("sync helper status after pre-publish disarm: %w", err)
 	}
@@ -736,6 +739,12 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 	}
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
+	}
+	if !desired {
+		// #9770: the disarm half of this sync landed; reclaim pre-enable orphans
+		// under the session fence. Never on the arm half (re-arm republishes live
+		// rows); no-op post-enable by design (failback recovery needs those rows).
+		m.drainAndClearSteeringRowsLocked("desired-state-disarm")
 	}
 	return m.applyHelperStatusLocked(&status)
 }
