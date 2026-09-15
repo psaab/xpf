@@ -141,3 +141,33 @@ pub fn wg_worker_claims_record(
 ) -> bool {
     wg_rx_enabled && port_matches && local_destination && is_transport_data
 }
+
+/// #9587: the bound on the steered WireGuard listen-port set. Shared by the
+/// shim ctrl block (`UserspaceCtrl.wg_ports`), the helper forwarding state
+/// and the snapshot decode (each crate carries its own copy; the Go
+/// cross-plane test pins all three equal to `config.MaxSteeredWireGuardPorts`).
+pub const WG_STEERED_PORT_SET_MAX: usize = 8;
+
+/// Given a UDP datagram's destination port, is it a member of the steered
+/// set? `ports` is the fixed ctrl array, `count` the valid prefix length
+/// (clamped defensively — the Go programmer guarantees count <= MAX).
+///
+/// The loop bound is the CONST, not the count, so the verifier sees a fixed
+/// trip count; the count only gates matching. Zero never matches, so a
+/// zero-filled tail and a corrupt over-count alike match nothing.
+#[inline(always)]
+pub fn wg_port_is_steered(port: u16, ports: &[u16; WG_STEERED_PORT_SET_MAX], count: u32) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let mut matched = false;
+    let mut i = 0usize;
+    while i < WG_STEERED_PORT_SET_MAX {
+        if (i as u32) < count && ports[i] == port {
+            matched = true;
+            break;
+        }
+        i += 1;
+    }
+    matched
+}

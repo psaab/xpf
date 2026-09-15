@@ -488,22 +488,24 @@ pub(crate) struct ConfigSnapshot {
     pub flow: FlowSnapshot,
     #[serde(rename = "default_policy", default)]
     pub default_policy: String,
-    /// #9521: the ONE WireGuard listen port the AF_XDP shim steers, derived by
-    /// the Go control plane from the configuration
-    /// (`config.SteeredWireGuardListenPort`) — the same value it programs into
-    /// `UserspaceCtrl.wg_listen_port`. The WireGuard control-thread spawn lets
-    /// only this port's thread write kernel-path transport plaintext to its wgN
-    /// TUN. A missing key decodes to 0, which delivers for NO endpoint (fail
-    /// closed); CONFIG_SNAPSHOT_PROTOCOL_VERSION 14 and later refuse the older daemon
-    /// that would omit it. Serialized only when non-zero, mirroring the Go
-    /// side's `omitempty`, so a snapshot with no WireGuard tunnel keeps the
-    /// default specimen byte-identical (`protocol_wire_v1.json`).
+    /// #9587: the bounded SET of WireGuard listen ports the AF_XDP shim
+    /// steers (at most 8, `WG_STEERED_PORT_SET_MAX`), derived by the Go
+    /// control plane from the configuration
+    /// (`config.SteeredWireGuardListenPorts` + `SplitSteeredPorts`, selected
+    /// only) — the same set it programs into `UserspaceCtrl.wg_ports`. The
+    /// WireGuard control-thread spawn lets every listed port's thread write
+    /// kernel-path transport plaintext to its wgN TUN. A missing key decodes
+    /// to empty, which delivers for NO endpoint (fail closed);
+    /// CONFIG_SNAPSHOT_PROTOCOL_VERSION 17 refuses a daemon that would omit
+    /// it. Serialized only when non-empty, mirroring the Go side's
+    /// `omitempty`, so a snapshot with no WireGuard tunnel keeps the default
+    /// specimen byte-identical (`protocol_wire_v1.json`).
     #[serde(
-        rename = "wg_steered_listen_port",
+        rename = "wg_steered_listen_ports",
         default,
-        skip_serializing_if = "crate::protocol::u16_is_zero"
+        skip_serializing_if = "Vec::is_empty"
     )]
-    pub wg_steered_listen_port: u16,
+    pub wg_steered_listen_ports: Vec<u16>,
     /// #3534: RT_FLOW session logging for the IMPLICIT default-policy verdict
     /// (`security policies default-policy-log session-init|session-close`).
     /// Stamped onto a default-PERMIT session's metadata so it emits

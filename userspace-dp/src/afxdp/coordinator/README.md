@@ -60,16 +60,17 @@ Differences that matter (#1881):
   `load_forwarding_if_changed` per loop iteration, the #1188 pattern —
   it compares the view's NESTED forwarding Arc, so a validation-only
   publish correctly reads as no change).
-- A WG thread whose listen port is not the snapshot's
-  `wg_steered_listen_port` DROPS a transport record that reaches its
+- A WG thread whose listen port is not in the snapshot's
+  `wg_steered_listen_ports` set DROPS a transport record that reaches its
   socket through the kernel (counted as `rx_unsteered_transport_drops`)
-  instead of writing the plaintext to its wgN TUN (#9521). The shim claims
-  transport data for the steered port only, so those records never reach
-  the worker, and the TUN write handed them to the kernel's forwarding
-  path with no zone policy. The decision is `WgKernelTransport`, computed
-  once per spawn (`wg_kernel_transport_for_endpoint`) and fail-closed: a
-  snapshot naming no steered port delivers for no endpoint. The steered
-  port's thread keeps delivering, per #8274's stated residual. Tests reach a
+  instead of writing the plaintext to its wgN TUN (#9521, set-valued since
+  #9587). The shim claims transport data for the steered ports only, so those
+  records never reach the worker, and the TUN write handed them to the
+  kernel's forwarding path with no zone policy. The decision is
+  `WgKernelTransport`, computed once per spawn
+  (`wg_kernel_transport_for_endpoint`) and fail-closed: a snapshot with an
+  empty steered set delivers for no endpoint. A steered port's thread keeps
+  delivering, per #8274's stated residual. Tests reach a
   spawned thread's packet path through the `#[cfg(test)]` TUN stand-in
   registry in `wg_control/mod.rs` (a real TUN needs CAP_NET_ADMIN).
 - The steered port's WG thread applies the XDP shim's degraded posture to a

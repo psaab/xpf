@@ -617,10 +617,11 @@ on the kernel path, names both ways onto the kernel path, says other listen
 ports are dropped there, and says an unzoned tunnel's transit is denied on the
 dataplane path. Until #9251 the WireGuard advisory rendered the IPsec account,
 which described the pre-#8274 dataplane. It still names every WireGuard tunnel
-rather than only the steered one: the steered port has one derivation
-(`SteeredWireGuardListenPort`), which reads the typed Config the advisory's AST
-pre-walk runs before, and with several ports the multi-port warning names the
-steered tunnel from that derivation. Each advisory is ONE aggregated message per
+rather than only the steered ones: the steered set has one derivation
+(`SteeredWireGuardListenPorts` plus
+`SplitSteeredPorts`), which reads the typed Config the advisory's AST
+pre-walk runs before, and with more ports than the bound the multi-port
+warning names the steered set from that derivation. Each advisory is ONE aggregated message per
 commit on every compile path — strict commit, lenient restart/peer-sync, and
 both HA node views — and NEITHER can reject: they have no error return and no
 `lenient` flag, so a box already running a tunnel can still commit an unrelated

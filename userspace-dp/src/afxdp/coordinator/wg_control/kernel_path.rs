@@ -1,10 +1,10 @@
 //! #9594: the posture a WireGuard control thread applies to a TRANSPORT record
 //! that reached it through the kernel rather than through the AF_XDP worker.
 //!
-//! Only the STEERED listen port's thread gets here — #9521 already drops every
-//! other port's kernel-path transport (`WgKernelTransport::DropUnsteered`). For
-//! the steered port the kernel path has two causes, and they need opposite
-//! answers:
+//! Only a STEERED port's thread gets here — #9521 already drops every
+//! other port's kernel-path transport (`WgKernelTransport::DropUnsteered`,
+//! set-valued since #9587). For a steered port the kernel path has two
+//! causes, and they need opposite answers:
 //!
 //!   * the record arrived on an ingress the XDP shim does NOT adjudicate (#8274's
 //!     stated residual, `docs/log/8274.md`). The TUN write is the only path there,

@@ -596,9 +596,9 @@ impl super::Coordinator {
                     } else if self.wg_kernel_transport_for_endpoint(*id)
                         != entry.spawned_kernel_transport
                     {
-                        // #9521: the snapshot re-steered WireGuard (a tunnel
-                        // that sorts first was added or removed), so this
-                        // thread's permission to deliver kernel-path transport
+                        // #9521/#9587: the snapshot re-steered WireGuard (set
+                        // membership changed — a tunnel added or removed, or a
+                        // port moved in or out of the steered set), so this
                         // plaintext changed. The decision is captured by value
                         // at spawn, so only a restart applies it.
                         Some("kernel_transport_changed")
@@ -714,19 +714,21 @@ impl super::Coordinator {
         }
     }
 
-    /// #9521: may endpoint `id`'s control thread write kernel-path transport
-    /// plaintext to its wgN TUN? ONE decision, read at spawn and by the stale
-    /// prune, so a snapshot that re-steers WireGuard restarts exactly the
-    /// threads whose answer changed.
+    /// #9587: may endpoint `id`'s control thread write kernel-path transport
+    /// plaintext to its wgN TUN? ONE decision per endpoint, read at spawn and
+    /// by the stale prune, so a snapshot that re-steers WireGuard restarts
+    /// exactly the threads whose answer changed.
     fn wg_kernel_transport_for_endpoint(&self, id: u16) -> crate::afxdp::types::WgKernelTransport {
         let listen_port = self
             .forwarding
             .tunnel_endpoints
             .get(&id)
             .map_or(0, |endpoint| endpoint.wg_listen_port);
+        let n = (self.forwarding.wg_steered_listen_port_count as usize)
+            .min(crate::afxdp::types::WG_STEERED_PORT_SET_MAX);
         crate::afxdp::types::WgKernelTransport::for_listen_port(
             listen_port,
-            self.forwarding.wg_steered_listen_port,
+            &self.forwarding.wg_steered_listen_ports[..n],
         )
     }
 

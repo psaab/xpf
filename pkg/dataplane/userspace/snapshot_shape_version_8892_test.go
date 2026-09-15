@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "9dc3d11cd31664846ce9a022529a064461673e2cfa6d9eb759400ffbc4fc1514"
+	snapshotShapeGolden8892 = "d4b2056304c402fd1b42b6b910f0a8466d7da81c44c97cf8890098b8d530008c"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -268,7 +268,19 @@ const (
 	// old behaviour (delete a live local session on a peer's say-so) is the defect
 	// it closes. The session-sync messages are not snapshot structs, which is why
 	// the digest above did not move.
-	snapshotShapeVersion8892 = 16
+	// v16 -> v17 BUMPED (issue 9587), and this one DID move the digest above:
+	// `ConfigSnapshot.WgSteeredListenPorts` is a real, transmitted field. It is
+	// the bounded set of WireGuard listen ports the shim steers, and the helper
+	// uses it to decide which control threads may write kernel-path transport
+	// plaintext to their wgN TUN. An old helper ignores the field and falls back
+	// to the absent singular key, which decodes to 0 and delivers kernel-path
+	// transport for NO endpoint — a total loss of kernel-path inbound delivery,
+	// which IS the defect (worker-path decap is endpoint-keyed and unaffected,
+	// so "total outage" overstates). Ctrl-layout skew is refused separately by
+	// the pinned-map pre-flight (fail-closed deploy per §5e), not by this gate;
+	// a new helper under an old daemon reads an empty set and refuses kernel-path
+	// transport for every endpoint — the v10/v11 arm, not a STANDS entry.
+	snapshotShapeVersion8892 = 17
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

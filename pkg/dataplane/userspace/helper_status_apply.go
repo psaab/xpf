@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -25,10 +26,10 @@ import (
 // no new allocation, and no promotion of a slog.Debug to slog.Info.
 
 // helperCtrlFlagsLocked derives the userspace_ctrl feature flags and the
-// WireGuard listen port from the loaded shim maps and the last applied
-// snapshot. Returns (flags, wgListenPort); wgListenPort is 0 when no WG
-// tunnel is configured.
-func (m *Manager) helperCtrlFlagsLocked() (uint32, uint32) {
+// WireGuard steered-port set from the loaded shim maps and the last applied
+// snapshot. Returns (flags, wgPortCount, wgPorts); the set is empty when no
+// WG tunnel is configured.
+func (m *Manager) helperCtrlFlagsLocked() (uint32, uint32, [config.MaxSteeredWireGuardPorts]uint16) {
 	// Preserve cpumap flag if cpumap is populated.
 	var ctrlFlags uint32
 	if cpuMap := m.bpfShim.Map(mapNameUserspaceCPUMap); cpuMap != nil {
@@ -37,11 +38,11 @@ func (m *Manager) helperCtrlFlagsLocked() (uint32, uint32) {
 	if snapshotHasNativeGRE(m.lastSnapshot) {
 		ctrlFlags |= userspaceCtrlFlagNativeGRE
 	}
-	wgPort := snapshotWgListenPort(m.lastSnapshot)
-	if wgPort != 0 {
+	wgPortCount, wgPorts := encodeSteeredPortSet(snapshotWgListenPorts(m.lastSnapshot))
+	if wgPortCount != 0 {
 		ctrlFlags |= userspaceCtrlFlagWgRx
 	}
-	return ctrlFlags, wgPort
+	return ctrlFlags, wgPortCount, wgPorts
 }
 
 // resolveCtrlEnableLocked decides ctrl.Enabled for this status tick and

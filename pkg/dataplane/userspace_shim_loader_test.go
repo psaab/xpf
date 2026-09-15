@@ -137,7 +137,10 @@ func validABIBaseSpec() *ebpf.CollectionSpec {
 			"userspace_bindings":       {Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: BindingArrayMaxEntries},
 			"userspace_ingress_ifaces": {Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: MaxInterfaces},
 			"dnat_table":               {Type: ebpf.Hash, KeySize: 12, ValueSize: 8, MaxEntries: userspaceShimMaxSessions, Flags: unix.BPF_F_NO_PREALLOC},
-			"userspace_ctrl":           {Type: ebpf.Array, KeySize: 4, ValueSize: 40, MaxEntries: 1},
+			// #9587: the ctrl value grew 40 -> 56 (count+array replacing the
+			// steering scalar); the drift cells below still catch any other
+			// ValueSize.
+			"userspace_ctrl": {Type: ebpf.Array, KeySize: 4, ValueSize: 56, MaxEntries: 1},
 			// #7497: the slot-keyed maps. Present here so the base spec still
 			// reaches the checks that follow them; their own drift arm is
 			// exercised by TestValidateUserspaceShimSpecSlotMapDrift.
