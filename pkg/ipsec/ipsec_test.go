@@ -323,27 +323,59 @@ func TestResolveESPSettings_NoPolicyStaysDefault(t *testing.T) {
 // TestGenerateConfig_DanglingPolicyRefSkips checks the full render for the
 // dangling-POLICY half: the VPN names an undefined ipsec-policy, so no
 // connection block is emitted and no orphan secret is written, while the
-// healthy sibling renders.
+// healthy sibling (connection and secret) renders.
+//
+// The secret half is pinned in two phases so the omission cannot pass
+// vacuously: first the SAME PSK-carrying VPN renders its secret against a
+// resolving chain (positive control), then the chain breaks and the secret
+// must disappear with the connection.
 func TestGenerateConfig_DanglingPolicyRefSkips(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
-	cfg := &config.IPsecConfig{
-		VPNs: map[string]*config.IPsecVPN{
+	mkVPNs := func(policy string) map[string]*config.IPsecVPN {
+		return map[string]*config.IPsecVPN{
 			"tun1": {
 				Gateway:     "172.16.0.1",
-				IPsecPolicy: "does-not-exist",
+				IPsecPolicy: policy,
+				PSK:         "tun1-secret",
 				LocalID:     "10.0.1.0/24",
 				RemoteID:    "10.0.2.0/24",
 			},
 			"healthy": {
 				Gateway:  "172.16.0.2",
+				PSK:      "healthy-secret",
 				LocalID:  "10.0.3.0/24",
 				RemoteID: "10.0.4.0/24",
 			},
+		}
+	}
+
+	// Phase 1: resolving chain — both connections and both secrets render.
+	resolving := &config.IPsecConfig{
+		VPNs: mkVPNs("ipsec-pol"),
+		Proposals: map[string]*config.IPsecProposal{
+			"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
+		},
+		Policies: map[string]*config.IPsecPolicyDef{
+			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-p2"}},
 		},
 	}
-	got, rendered, err := m.renderConfig(cfg)
+	got, rendered, err := m.renderConfig(resolving)
 	if err != nil {
-		t.Fatalf("renderConfig: %v", err)
+		t.Fatalf("renderConfig (resolving): %v", err)
+	}
+	if !rendered["tun1"] || !rendered["healthy"] {
+		t.Fatalf("positive control must render both VPNs, got %v\n%s", rendered, got)
+	}
+	ctrl := parseSwanctlDoc(t, got)
+	ctrl.at(t, "secrets", "ike-tun1").requireSetting(t, "secret", `"tun1-secret"`)
+	ctrl.at(t, "secrets", "ike-healthy").requireSetting(t, "secret", `"healthy-secret"`)
+
+	// Phase 2: the chain breaks — tun1's connection AND secret disappear,
+	// while the healthy sibling keeps both.
+	broken := &config.IPsecConfig{VPNs: mkVPNs("does-not-exist")}
+	got, rendered, err = m.renderConfig(broken)
+	if err != nil {
+		t.Fatalf("renderConfig (dangling): %v", err)
 	}
 	if rendered["tun1"] {
 		t.Errorf("dangling-policy VPN tun1 was rendered; want skip.\n%s", got)
@@ -354,6 +386,7 @@ func TestGenerateConfig_DanglingPolicyRefSkips(t *testing.T) {
 	doc := parseSwanctlDoc(t, got)
 	doc.at(t, "connections").hasNoChild(t, "tun1")
 	doc.at(t, "secrets").hasNoChild(t, "ike-tun1")
+	doc.at(t, "secrets", "ike-healthy").requireSetting(t, "secret", `"healthy-secret"`)
 }
 
 // readSAFixture loads a captured `swanctl --list-sas` golden fixture. The
