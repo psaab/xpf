@@ -90,8 +90,13 @@ func (s *Store) Load() error {
 		// edge with errors.Is and refuse takeover (enter the #1922
 		// bootstrap/lifeline safe state) instead.
 		//
-		// s.compiled MUST stay nil — ActiveConfig() returns s.compiled, and
-		// nil is precisely the signal that forces bootstrap (computeBootClass).
+		// s.compiled stays nil on this path — ActiveConfig() returns
+		// s.compiled — unless the #9884 expired recovery below heals it to
+		// a compilable rollback target. Either way the bootstrap authority
+		// is the ErrConfigCompile CLASSIFICATION of the returned error
+		// (classifyLoadError → loadCompileFailed), not the nilness of the
+		// pointer: the healed arm returns the same tag, so takeover stays
+		// refused until an authorized recovery transition.
 		// BUT retain the parsed-but-broken tree as s.active and load rollback
 		// history, so the recovery the daemon advertises ("fix the config from
 		// the CLI/gRPC and commit, or roll back") actually works (Codex #1991
@@ -105,7 +110,18 @@ func (s *Store) Load() error {
 		// here is the same one a fresh boot already has — no new invariant.
 		s.active = tree
 		s.loadRollbackHistory()
-		return fmt.Errorf("compile config: %w: %w", ErrConfigCompile, err)
+		// #9884: a compile-failed Load must still resolve a pending
+		// commit-confirmed window — an expired record rolls back to the prev
+		// tree (persisted, record cleared), a live one re-arms its timer —
+		// instead of stranding the record on disk with no in-memory timer.
+		// The original compile error is always returned (joined with any
+		// recovery error) so the #1960/#1922 fail-closed boot class is
+		// preserved even when the rollback healed the store.
+		origErr := fmt.Errorf("compile config: %w: %w", ErrConfigCompile, err)
+		if recErr := s.recoverPendingConfirmLocked(); recErr != nil {
+			return errors.Join(origErr, recErr)
+		}
+		return origErr
 	}
 
 	s.active = tree
@@ -128,8 +144,8 @@ func (s *Store) Load() error {
 // a reboot and rolls back if it is not confirmed; this gives xpf the same
 // property.
 //
-// Runs at the tail of a SUCCESSFUL Load (active.json read+compiled), under
-// s.mu. Two outcomes:
+// Runs at the tail of Load once active.json is read — on the success path
+// and on the compile-failed path (#9884) — under s.mu. Two outcomes:
 //   - deadline already passed during downtime -> roll back to the persisted
 //     prev tree NOW (the operator never confirmed) exactly as the in-memory
 //     PromoteRollback would have, including the #1922 Item 1b first-commit
