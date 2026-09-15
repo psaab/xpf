@@ -85,10 +85,10 @@ pub(crate) use inspect::MAX_IPV6_EXT_HEADERS;
 // their fields, never name them.
 pub(crate) use inspect::{ExtChainOutcome, ipv6_ext_header_is_traversable, walk_ipv6_ext_chain};
 pub(super) use inspect::{
-    frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
-    live_frame_ports, live_frame_ports_bytes, live_frame_ports_from_meta_bytes,
-    metadata_tuple_complete, packet_rel_l4_offset, packet_rel_l4_offset_and_protocol,
-    parse_flow_ports, parse_ipv4_session_flow_from_frame, parse_packet_destination_from_frame,
+    frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
+    live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
+    nibble_checked_l3, packet_rel_l4_offset, packet_rel_l4_offset_and_protocol, parse_flow_ports,
+    parse_ipv4_session_flow_from_frame, parse_packet_destination_from_frame,
     parse_session_flow_from_bytes, parse_session_flow_from_frame, parse_session_flow_from_meta,
     parse_zone_encoded_fabric_ingress, parse_zone_encoded_fabric_ingress_from_frame,
 };
@@ -667,10 +667,7 @@ fn rewrite_plan_eth_from_parts(
     let current_len = desc.len as usize;
     let (l3, payload_len) = {
         let frame = area.slice(desc.addr as usize, current_len)?;
-        let l3 = match meta.l3_offset {
-            14 | 18 => meta.l3_offset as usize,
-            _ => frame_l3_offset(frame)?,
-        };
+        let l3 = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
         if l3 >= current_len {
             return None;
         }
@@ -2220,3 +2217,65 @@ mod tests_9782_copy;
 // are simply not run under it today.
 #[cfg(all(test, not(miri)))]
 mod prop_tests;
+
+#[cfg(test)]
+mod rewrite_plan_nibble_tests_9900 {
+    use super::*;
+    use crate::afxdp::tests_support::build_txn_tcp_syn_frame_v4;
+    use std::net::Ipv4Addr;
+
+    /// Plan the L3 offset for an untagged TCP SYN under a stamped offset.
+    fn plan_l3_for_stamp_9900(l3_offset: u16, addr_family: u8) -> Option<usize> {
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            1234,
+            80,
+            0x02,
+        );
+        let mut area = MmapArea::new(4096).expect("mmap");
+        area.slice_mut(0, frame.len())
+            .expect("slice")
+            .copy_from_slice(&frame);
+        let meta = ForwardPacketMeta {
+            l3_offset,
+            addr_family,
+            pkt_len: frame.len() as u16,
+            ..Default::default()
+        };
+        let params = RewriteEthParams {
+            dst_mac: [0x02; 6],
+            src_mac: [0x03; 6],
+            vlan_id: 0,
+            ether_type: 0x0800,
+            apply_nat: false,
+        };
+        let desc = XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        };
+        rewrite_plan_eth_from_parts(&area, desc, meta, &params).map(|plan| plan.l3)
+    }
+
+    /// #9900 F-095 repro at the plan layer: an untagged v4 frame stamped 18
+    /// plans L3 at 14 via the wire fallback, not at the stamped 18 (where the
+    /// TTL decrement and NAT would have mutated IP-ID bytes). Pre-fix this
+    /// returned `Some(18)`.
+    #[test]
+    fn rewrite_plan_falls_back_on_wrong_stamp_9900() {
+        let inet = libc::AF_INET as u8;
+        assert_eq!(plan_l3_for_stamp_9900(14, inet), Some(14));
+        assert_eq!(plan_l3_for_stamp_9900(18, inet), Some(14));
+    }
+
+    /// Control: an unknown family derives from the wire (same value on a
+    /// well-formed frame), and a truncated frame fails closed.
+    #[test]
+    fn rewrite_plan_derives_on_unknown_family_9900() {
+        assert_eq!(
+            plan_l3_for_stamp_9900(14, libc::AF_UNIX as u8),
+            Some(14)
+        );
+    }
+}

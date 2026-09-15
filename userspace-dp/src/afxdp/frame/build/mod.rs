@@ -19,7 +19,7 @@ use ipv4::build_forwarded_frame_into_ipv4;
 use ipv6::build_forwarded_frame_into_ipv6;
 
 use super::{
-    decode_frame_summary, frame_has_tcp_rst, frame_l3_offset, select_tcp_mss, trim_l3_payload,
+    decode_frame_summary, frame_has_tcp_rst, nibble_checked_l3, select_tcp_mss, trim_l3_payload,
     verify_built_frame_checksums, write_eth_header_slice, ForwardPacketMeta,
     ForwardingDisposition, ForwardingState, SessionDecision,
 };
@@ -35,12 +35,10 @@ pub(in crate::afxdp) fn build_forwarded_frame_into_from_frame(
     expected_ports: Option<(u16, u16)>,
 ) -> Option<usize> {
     let dst_mac = decision.resolution.neighbor_mac?;
-    // Use meta L3 offset when it's a valid Ethernet header size (14 or 18),
-    // otherwise re-derive from the frame's ethertype.
-    let l3 = match meta.l3_offset {
-        14 | 18 => meta.l3_offset as usize,
-        _ => frame_l3_offset(frame)?,
-    };
+    // Trust the stamped L3 offset only when the nibble at it matches the
+    // family (#9900 F-095); a wrong-but-plausible stamp falls back to the
+    // wire parse instead of shifting the payload copy and every L3 rewrite.
+    let l3 = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
     if l3 >= frame.len() {
         return None;
     }

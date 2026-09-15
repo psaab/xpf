@@ -328,6 +328,87 @@ pub(in crate::afxdp) fn frame_l3_offset(frame: &[u8]) -> Option<usize> {
     Some(14)
 }
 
+/// Resolve the L3 offset, trusting the stamped `l3_offset` ONLY when the byte
+/// it points at carries the IP-version nibble matching `addr_family (#9900
+/// F-095). A wrong-but-plausible stamp (14 on a tagged frame, 18 on an
+/// untagged one) falls back to [`frame_l3_offset`], as does any non-14/18
+/// stamp and any unknown family; `None` means neither the stamp nor the wire
+/// yields an offset and the caller fails closed.
+///
+/// The gate is the #2344 idiom (`frame_is_non_first_fragment` below), factored
+/// out so the three MUTATING-or-forwarding-critical stamp consumers share one
+/// spelling instead of three hand-mirrored matches:
+///
+/// - `frame/mod.rs` `rewrite_plan_eth_from_parts` — `?` (fail closed): the
+///   plan drives TTL decrement, checksum recompute and NAT at `plan.l3`.
+/// - `frame/build/mod.rs` `build_forwarded_frame_into_from_frame` — `?` (fail
+///   closed): the payload copy, TTL and NAT all start at `l3`.
+/// - `forwarding/fib.rs` `parse_packet_destination` — `.unwrap_or(stamp)`:
+///   a read-only dst parse, so double-garbage (bad stamp AND unparseable
+///   ethertype) keeps the old stamp-indexed behavior instead of growing a new
+///   NoRoute cliff; every other shape resolves identically-or-better.
+///
+/// No post-fallback nibble re-check: the fallback IS the wire parse, and the
+/// downstream TTL/checksum/NAT arms already version-gate (e.g.
+/// `frame/mod.rs` `validate_generic_rewrite_v4/v6`). `frame_is_non_first_fragment`
+/// keeps its own inline copy WITH the extra post-check (meta-led fixtures
+/// carry the tuple in metadata with no IP byte at the derived offset at all),
+/// so it is NOT refactored onto this helper — same deliberate-twin rationale
+/// as the `lock_recover` shapes.
+///
+/// #9900 audit: every other production `l3_offset` reader, dispositioned.
+/// Verified by reading each site; none of them indexes wire bytes for
+/// mutation on a blind stamp the way the three above did:
+///
+/// - Wire-FIRST (stamp only when the ethertype is unparseable, i.e. there is
+///   no wire L2 length to check a nibble against): `tx/dispatch/mod.rs` (inner
+///   dst, MTU decision, TCP-segmentation predicate), `frame/wg.rs` (transit
+///   peer selection, encap inner strip), `gre.rs` inner strip. Consumers are
+///   fail-closed predicates/derivation.
+/// - Declared-end-BOUNDED (stamp feeds IP-declared-end derivation; every byte
+///   read is `.get()`-bounded; outputs are classification booleans, never
+///   mutations): `term_match_extra_from_frame`, `meta_icmp_identifier_bearing`.
+/// - Length-math ONLY (no wire indexing): `frame/mod.rs` `trim_l3_payload`
+///   meta fallback (`pkt_len - l3_offset` extent math, clamped to the payload).
+/// - Difference-only HINT (`l4 - l3`, never an index): `v6_rel_l4_offset`.
+/// - Bounded read-only cold/error-path readers with the same blind-trust SHAPE
+///   but fail-soft outcomes (a mis verdict or misaligned quote on one packet,
+///   no UMEM mutation, no forwarding corruption): `icmp.rs` x4,
+///   `icmp_ptb.rs` x2, `gre.rs` outer readers x3, `wg/decap.rs`
+///   `outer_source_ip`, `icmp_embed/*`, `poll_descriptor` fragment predicates,
+///   `nat64_icmp_error.rs`, the `forward_request.rs` hint chain. Converting
+///   them is follow-up scope beyond the settled three, recorded in
+///   `docs/log/9900.md` — each needs its own `?`-vs-`unwrap_or` judgment and
+///   repro cell.
+/// - No production callers (re-exported, test-only): the
+///   `tx/dispatch/slow_path.rs` extract family.
+/// - Producers, not readers (stamp WRITES): `coordinator/inject.rs`,
+///   `tunnel.rs`, `frame/mod.rs` egress stamping.
+#[inline]
+pub(in crate::afxdp) fn nibble_checked_l3(
+    frame: &[u8],
+    l3_offset: u16,
+    addr_family: u8,
+) -> Option<usize> {
+    let expected_version = match addr_family as i32 {
+        libc::AF_INET => 4u8,
+        libc::AF_INET6 => 6u8,
+        // Unknown family: the stamp is unverifiable, hence unusable — derive
+        // from the wire (operational) or fail closed.
+        _ => return frame_l3_offset(frame),
+    };
+    match l3_offset {
+        14 | 18
+            if frame
+                .get(l3_offset as usize)
+                .is_some_and(|byte| (byte >> 4) == expected_version) =>
+        {
+            Some(l3_offset as usize)
+        }
+        _ => frame_l3_offset(frame),
+    }
+}
+
 // #989: tcp_flags_str moved to `frame/tcp.rs`.
 
 pub(in crate::afxdp) fn frame_l4_offset(frame: &[u8], addr_family: u8) -> Option<usize> {

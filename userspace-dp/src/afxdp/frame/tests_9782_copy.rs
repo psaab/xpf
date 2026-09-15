@@ -122,3 +122,61 @@ fn copy_v6_snat_port_survives_expected_ports_9782() {
     assert_eq!(u16::from_be_bytes([out[54], out[55]]), 40001);
     assert!(tcp_checksum_ok_ipv6(&out[14..]), "copy output csum valid");
 }
+
+/// #9900 F-095 at the copy-builder layer: an untagged v4 frame stamped 18
+/// builds the SAME correct output as a stamp of 14 — the payload copy, TTL
+/// decrement and checksum all start at the wire-derived 14. Pre-fix the
+/// stamp shifted L3 by 4 and the output carried a misaligned payload with a
+/// TTL decrement applied to an IP-ID byte.
+#[test]
+fn copy_v4_build_ignores_wrong_l3_stamp_9900() {
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(172, 16, 80, 200),
+        59508,
+        5201,
+        0x02,
+    );
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
+        &mut frame[14..],
+        20,
+        PROTO_TCP,
+        true,
+    )
+    .expect("seed");
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    for stamp in [14u16, 18u16] {
+        let meta: ForwardPacketMeta = UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            l3_offset: stamp,
+            l4_offset: 34,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            ..UserspaceDpMeta::default()
+        }
+        .into();
+        let decision = copy_decision(crate::nat::NatDecision::default());
+        let mut out = vec![0u8; frame.len() + 4];
+        let written = build_forwarded_frame_into_from_frame(
+            &mut out,
+            &frame,
+            meta,
+            &decision,
+            &ForwardingState::default(),
+            false,
+            Some((59508, 5201)),
+        )
+        .expect("copy build must succeed");
+        let out = &out[..written];
+        assert_eq!(written, frame.len(), "stamp {stamp}: no VLAN, same length");
+        assert_eq!(
+            &out[30..34],
+            &dst.octets(),
+            "stamp {stamp}: dst IP must survive at the v4 offset"
+        );
+        assert_eq!(out[14 + 8], 63, "stamp {stamp}: TTL 64 decremented once");
+        assert!(tcp_checksum_ok_ipv4(&out[14..]), "stamp {stamp}: csum valid");
+    }
+}

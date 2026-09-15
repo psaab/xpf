@@ -1384,3 +1384,71 @@ fn term_extra_builder_leaves_ports_unknown_to_flowless_sites_9894() {
     let extra = term_match_extra_from_frame(&frame, mk_meta(PROTO_TCP));
     assert!(!extra.ports_unknown);
 }
+
+/// Tag an untagged frame with 802.1Q (VID 10), moving L3 from 14 to 18.
+fn tag_vlan_9900(frame: &[u8]) -> Vec<u8> {
+    let mut tagged = frame.to_vec();
+    tagged.splice(12..12, [0x81, 0x00, 0x00, 0x0a]);
+    tagged
+}
+
+/// #9900 F-095 control: correct stamps resolve to themselves, tagged and
+/// untagged, v4 and v6. The normal path is byte-identical before and after.
+#[test]
+fn nibble_checked_l3_trusts_correct_stamp_9900() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let v4_tagged = tag_vlan_9900(&v4);
+    let inet = libc::AF_INET as u8;
+    let inet6 = libc::AF_INET6 as u8;
+    assert_eq!(nibble_checked_l3(&v4, 14, inet), Some(14));
+    assert_eq!(nibble_checked_l3(&v4_tagged, 18, inet), Some(18));
+    assert_eq!(nibble_checked_l3(&v6, 14, inet6), Some(14));
+    // A non-14/18 stamp was never trusted and still derives from the wire.
+    assert_eq!(nibble_checked_l3(&v4, 20, inet), Some(14));
+    assert_eq!(nibble_checked_l3(&v4_tagged, 20, inet), Some(18));
+}
+
+/// #9900 F-095 repro: a wrong-but-plausible stamp falls back to the wire
+/// parse instead of shifting every L3 read. Pre-fix the `14 | 18` arm
+/// trusted the stamp, so each of these resolved to the STAMPED value.
+#[test]
+fn nibble_checked_l3_falls_back_on_wrong_stamp_9900() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let v4_tagged = tag_vlan_9900(&v4);
+    let inet = libc::AF_INET as u8;
+    let inet6 = libc::AF_INET6 as u8;
+    // Untagged frame stamped 18: byte 18 is IP-ID high (nibble 0), not v4.
+    assert_eq!(nibble_checked_l3(&v4, 18, inet), Some(14));
+    // Tagged frame stamped 14: byte 14 is the tag TCI (0x00), not v4.
+    assert_eq!(nibble_checked_l3(&v4_tagged, 14, inet), Some(18));
+    // Family-swapped stamp: v4 bytes under a v6 family claim.
+    assert_eq!(nibble_checked_l3(&v4, 18, inet6), Some(14));
+    // v6 frame stamped 18: byte 18 is payload-len high (0x00), not v6.
+    assert_eq!(nibble_checked_l3(&v6, 18, inet6), Some(14));
+}
+
+/// #9900 F-095: an unknown family cannot verify the stamp, so the offset is
+/// derived from the wire. Same values as the old blind trust on well-formed
+/// frames, but through the derive arm rather than the stamp arm.
+#[test]
+fn nibble_checked_l3_derives_on_unknown_family_9900() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v4_tagged = tag_vlan_9900(&v4);
+    let unix = libc::AF_UNIX as u8;
+    assert_eq!(nibble_checked_l3(&v4, 14, unix), Some(14));
+    assert_eq!(nibble_checked_l3(&v4_tagged, 18, unix), Some(18));
+    // ...and a wrong stamp under an unknown family still derives, not trusts.
+    assert_eq!(nibble_checked_l3(&v4, 18, unix), Some(14));
+}
+
+/// #9900 F-095: nothing resolvable anywhere fails closed. A truncated frame
+/// has no byte at the stamp AND no parseable ethertype.
+#[test]
+fn nibble_checked_l3_fails_closed_on_double_garbage_9900() {
+    let inet = libc::AF_INET as u8;
+    assert_eq!(nibble_checked_l3(&[0u8; 10], 14, inet), None);
+    assert_eq!(nibble_checked_l3(&[0u8; 10], 18, inet), None);
+    assert_eq!(nibble_checked_l3(&[], 14, inet), None);
+}
