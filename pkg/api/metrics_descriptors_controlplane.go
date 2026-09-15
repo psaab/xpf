@@ -322,6 +322,16 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"flags a degraded recovery aid, not a forwarding outage.",
 		nil, nil,
 	)
+	c.journalPermsDegraded = prometheus.NewDesc(
+		"xpf_config_journal_perms_degraded",
+		"1 while journal permission repair is degraded: a pre-existing "+
+			"segment could not be tightened to owner-only 0600 and "+
+			"world-readable history (which may carry operator free text) "+
+			"may still be exposed (#9898 F-113); 0 when repair is clean. "+
+			"Appends continue — a confidentiality exposure on a recovery "+
+			"aid, not a forwarding outage.",
+		nil, nil,
+	)
 	c.userspacePolicyContentRejected = prometheus.NewDesc(
 		"xpf_userspace_policy_content_rejected",
 		"1 while the most recently built userspace snapshot carries "+

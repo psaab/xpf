@@ -763,6 +763,13 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// files. The active config is durable; this flags a degraded
 		// recovery aid, so it does not 503.
 		RollbackHistoryDegradedFn: d.store.RollbackHistoryDegraded,
+		// #9898 F-113: surface journal permission-repair state so
+		// /health reports it (non-fatal) and
+		// xpf_config_journal_perms_degraded reads 1 while a segment
+		// could not be tightened to owner-only 0600. Appends continue;
+		// this flags a confidentiality exposure on history, so it does
+		// not 503.
+		JournalPermsDegradedFn: d.store.JournalPermsDegraded,
 		// #2050: surface dynamic-address feed staleness so the
 		// xpf_feed_seconds_since_last_success / xpf_feed_stale gauges
 		// read live status. A frozen enforced address set (retain-forever

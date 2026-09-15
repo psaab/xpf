@@ -50,6 +50,17 @@ security {
 		t.Fatalf("fixture assumption broken: %q occurs %d times, want 1", "ids-option", n)
 	}
 	mutated := strings.Replace(raw, "ids-option", "ids-optionz", 1)
+	// #9898 F-035: the mutation is deliberate test surgery on a
+	// digest-stamped envelope; strip the tamper-evidence field so the
+	// reload exercises the legacy-accept path (see the twin fixture in
+	// pkg/api/metrics_screen_unresolved_5806_test.go).
+	if i := strings.Index(mutated, " body-sha256="); i >= 0 {
+		nl := strings.IndexByte(mutated[i:], '\n')
+		if nl < 0 {
+			t.Fatalf("fixture broken: stamped header has no newline")
+		}
+		mutated = mutated[:i] + mutated[i+nl:]
+	}
 	if err := os.WriteFile(dbPath, []byte(mutated), 0o644); err != nil {
 		t.Fatalf("write mutated db: %v", err)
 	}

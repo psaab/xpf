@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 const encryptedTreeFormat = "xpf-master-password-v1"
@@ -643,14 +642,43 @@ func (db *DB) readMasterKey() ([]byte, error) {
 	return data, nil
 }
 
+// masterKeyLink publishes a complete temp key file at the final master-key
+// path. A seam so tests can inject EEXIST/ENOENT races deterministically
+// (#9898 F-111). Production code must never mutate it.
+var masterKeyLink = os.Link
+
+// syncMasterKeyFile fsyncs an adopted key file's content. A seam so tests
+// can observe (and fail) the durability assist deterministically (#9898
+// F-111). Production code must never mutate it.
+var syncMasterKeyFile = func(f *os.File) error { return f.Sync() }
+
+// masterKeyPublishAttempts bounds recreate retries when a concurrent NewDB
+// temp sweep deletes a live key temp between CreateTemp and Link (the sweep
+// matches `.*.tmp-*` unconditionally). The sweep is one-shot per NewDB, so
+// recreating converges; the bound keeps a vanishing directory fail-closed
+// and loud instead of looping.
+const masterKeyPublishAttempts = 3
+
 func (db *DB) readOrCreateMasterKey() ([]byte, error) {
 	path := db.masterKeyPath()
 	// #8597 (muse-004 K70): bounded — see readMasterKey.
-	if data, err := ReadBoundedFile(path, maxMasterKeyFileSize); err == nil {
-		if len(data) != 32 {
-			return nil, fmt.Errorf("invalid master key length in %s", path)
-		}
-		return data, nil
+	//
+	// #9898 F-111: EVERY return from this function carries a DURABLE key.
+	// A racing read sees absent or complete, never partial (Link publishes
+	// only a fully-written, synced, closed temp), so an invalid length is
+	// genuinely corrupt — but "complete" is not "durable": the entry may
+	// predate its creator's dir sync (a racing winner parked between Link
+	// and sync, or a previous EIO-leave). The existing file therefore goes
+	// through the same durability adoption as a Link loser: without a
+	// barrier here, an adopter seals ciphertext that WriteFileDurable
+	// rename-publishes BEFORE any dir sync covers the key entry (the
+	// rename lands at fsatomic writeFile's rename, the dir sync after it),
+	// and a power cut with selective entry loss strands the ciphertext
+	// with its key gone. The two syncs below cost an adopter one file
+	// fsync (no-op I/O on an unchanged file) plus one dir sync (this
+	// directory is synced repeatedly on the commit path anyway).
+	if _, err := ReadBoundedFile(path, maxMasterKeyFileSize); err == nil {
+		return adoptPublishedMasterKey(path)
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read master key: %w", err)
 	}
@@ -660,13 +688,121 @@ func (db *DB) readOrCreateMasterKey() ([]byte, error) {
 		return nil, fmt.Errorf("generate master key: %w", err)
 	}
 
-	// DurableState (#1894): a master.key lost to a power cut after the
-	// first encrypted active-config write makes that config permanently
-	// undecryptable — the key must hit stable storage before any tree
-	// encrypted with it does (readOrCreateMasterKey runs inside the
-	// encrypt step of writeTree, so this ordering is structural).
-	if err := fsatomic.WriteFileDurable(path, key, 0600); err != nil {
-		return nil, fmt.Errorf("persist master key: %w", err)
+	// Atomic publish (#9898 F-111): the base check-then-act (read miss ->
+	// generate -> temp+rename) let racing creators seal with divergent
+	// keys, the loser's ciphertext permanently undecryptable. link(2)
+	// publishes exactly one winner; losers see EEXIST and adopt the
+	// winner's complete file. Durability matches WriteFileDurable (temp
+	// sync + close check + dir sync, key before any tree encrypted with
+	// it — this runs inside the encrypt step of writeTree, so the ordering
+	// is structural), and a crash-leaked temp matches the NewDB `.*.tmp-*`
+	// sweep. Owner-only 0600 is enforced explicitly like the old
+	// WriteFileDurable call (CreateTemp starts 0600 but umask could
+	// tighten it into unreadability).
+	//
+	// On dir-sync failure the file is LEFT in place and a PLAIN error is
+	// returned: "first key wins forever" stays unconditional (no remove
+	// race against a concurrent adopter), and the error never takes the
+	// *PostRenameSyncError shape — Commit reads that type as "the NEW
+	// ACTIVE config is visible, converge" (#5185), which is wrong for a
+	// key file (the active write never ran; a plain reject leaves the old
+	// active plus an intact candidate to retry, and the base misclassified
+	// exactly this case). The left file is undurable-known, not broken:
+	// the next acquisition adopt-syncs it before use (see below), so the
+	// EIO heals instead of stranding.
+	//
+	// Mixed-version residual: a pre-fix binary racing this path still
+	// overwrites via rename; convergence needs cooperating (post-fix)
+	// writers — the upgrade window only.
+	dir := filepath.Dir(path)
+	for attempt := 0; ; attempt++ {
+		tmp, err := os.CreateTemp(dir, ".master.key.tmp-")
+		if err != nil {
+			return nil, fmt.Errorf("create master key temp in %s: %w", dir, err)
+		}
+		tmpName := tmp.Name()
+		removeTmp := func() { _ = os.Remove(tmpName) }
+		failTemp := func(format string, args ...any) ([]byte, error) {
+			_ = tmp.Close()
+			removeTmp()
+			return nil, fmt.Errorf(format, args...)
+		}
+		if n, werr := tmp.Write(key); werr != nil || n != len(key) {
+			if werr == nil {
+				werr = fmt.Errorf("short write (%d of %d bytes)", n, len(key))
+			}
+			return failTemp("write master key temp: %w", werr)
+		}
+		if err := tmp.Chmod(0600); err != nil {
+			return failTemp("chmod master key temp: %w", err)
+		}
+		if err := tmp.Sync(); err != nil {
+			return failTemp("sync master key temp: %w", err)
+		}
+		if err := tmp.Close(); err != nil {
+			removeTmp()
+			return nil, fmt.Errorf("close master key temp: %w", err)
+		}
+		err = masterKeyLink(tmpName, path)
+		removeTmp() // drop the temp name (winner) or sweep the orphan (loser)
+		if err == nil {
+			// Winner. The entry is visible; one dir sync makes both the
+			// publish and the temp-name removal durable.
+			if serr := rbSyncDir(dir); serr != nil {
+				return nil, fmt.Errorf("persist master key: dir sync: %w", serr)
+			}
+			return key, nil
+		}
+		if os.IsExist(err) {
+			// Loser: discard our key and adopt the winner's complete file.
+			return adoptPublishedMasterKey(path)
+		}
+		if os.IsNotExist(err) && attempt+1 < masterKeyPublishAttempts {
+			continue // swept by a concurrent NewDB; recreate and converge
+		}
+		return nil, fmt.Errorf("publish master key: %w", err)
 	}
-	return key, nil
+}
+
+// adoptPublishedMasterKey adopts another creator's published key file with
+// full durability (#9898 F-111): the file's content is fsynced and its
+// directory entry synced before the key is returned, so EVERY
+// readOrCreateMasterKey return — winner, loser, or fast-path reader — is
+// durable BEFORE any ciphertext sealed with it can be rename-published. A
+// post-fix winner's content is already durable (temp synced pre-Link), so
+// the file sync is belt (it also covers hand-placed keys); the dir sync is
+// the load-bearing barrier for a racing winner parked between Link and its
+// own sync, or a previous EIO-leave. Any sync failure fails closed with a
+// plain error — the file stays put, so a retry re-syncs and converges to
+// the same key (an EIO-leave heals on the next acquisition; there is no
+// double-EIO strand: durability is re-established, not assumed).
+func adoptPublishedMasterKey(path string) ([]byte, error) {
+	data, err := ReadBoundedFile(path, maxMasterKeyFileSize)
+	if err != nil {
+		return nil, fmt.Errorf("read published master key: %w", err)
+	}
+	if len(data) != 32 {
+		return nil, fmt.Errorf("invalid published master key length in %s", path)
+	}
+	// Sync the content through a second descriptor: ReadBoundedFile above
+	// already closed its own. A concurrent replace between the read and
+	// this open (a mixed-version renamer — the accepted upgrade-window
+	// residual) could sync a successor inode while these bytes are used;
+	// post-fix publishers never replace, so the window is empty for them.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("adopt published master key: open: %w", err)
+	}
+	serr := syncMasterKeyFile(f)
+	cerr := f.Close()
+	if serr != nil {
+		return nil, fmt.Errorf("adopt published master key: file sync: %w", serr)
+	}
+	if cerr != nil {
+		return nil, fmt.Errorf("adopt published master key: close: %w", cerr)
+	}
+	if err := rbSyncDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("adopt published master key: dir sync: %w", err)
+	}
+	return data, nil
 }

@@ -310,6 +310,13 @@ type xpfCollector struct {
 	// a forwarding/durability emergency.
 	rollbackHistoryDegraded *prometheus.Desc
 
+	// #9898 F-113: 0/1 gauge — 1 while journal permission repair is
+	// degraded (a pre-existing segment could not be tightened to
+	// owner-only 0600 and world-readable history may still be exposed).
+	// Appends continue, so like rollbackHistoryDegraded this is an
+	// observability signal, not a forwarding/durability emergency.
+	journalPermsDegraded *prometheus.Desc
+
 	// #3261: 0/1 gauge — 1 while the most recently built userspace snapshot
 	// carries unrepresentable policy content that the helper integrity
 	// preflight rejects (previous-good retained / fresh-boot default-deny —
@@ -913,6 +920,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.forwardingSupported
 	ch <- c.configPersistDegraded
 	ch <- c.rollbackHistoryDegraded
+	ch <- c.journalPermsDegraded
 	ch <- c.userspacePolicyContentRejected
 	ch <- c.userspaceZoneIDCollision
 	ch <- c.ipmonPolicyFailed
@@ -1234,6 +1242,18 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 			v = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.rollbackHistoryDegraded,
+			prometheus.GaugeValue, v)
+	}
+
+	// #9898 F-113: journal permission-repair health is likewise a
+	// control-plane signal — emit it before the dataplane gate so the
+	// degraded state stays visible even when the dataplane is not loaded.
+	if c.srv.journalPermsDegradedFn != nil {
+		v := 0.0
+		if c.srv.journalPermsDegradedFn() {
+			v = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.journalPermsDegraded,
 			prometheus.GaugeValue, v)
 	}
 
