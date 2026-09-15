@@ -17,6 +17,30 @@ import (
 // remaining string matchers continue to work during the transition.
 var ErrPathNotFound = errors.New("path not found")
 
+// rekeyBracketProvenance carries a copied/renamed node's bracket mask across
+// its new identity (parent-review MEDIUM on #9881). Bracket provenance has
+// two roles and they re-key differently:
+//   - STRUCTURAL (containers): where the key group ends. FormatSet re-emits
+//     the brackets from it and replay rebuilds wide from that; the clone
+//     shares the source's shape and key count, so the mask stays valid and
+//     MUST stay — clearing it renders the copy bare and replay splits a
+//     surplus member into the body (the #6668 defect).
+//   - AUTHORSHIP (leaves): which value tokens were bracket-written, read by
+//     the #9881 as-path gate. The destination keys were never
+//     bracket-authored, so a stale true would refuse a key that was never
+//     bracketed — clear it. (Leaves never render brackets either way:
+//     nodeKeyBracketMask nils them and the multi absorber re-collapses.)
+//
+// A rename that changes nothing (same keys) keeps the mask even on a leaf:
+// clearing there would let `rename X to X` launder a flagged definition
+// past the strict gate.
+func rekeyBracketProvenance(n *Node, changed bool) {
+	if n == nil || !n.IsLeaf || !changed {
+		return
+	}
+	n.KeysBracketed = nil
+}
+
 // CopyPath copies a subtree from src to dst, replacing the source node's keys
 // with the destination's last N keys (N = len(sourceNode.Keys)).
 //
@@ -76,6 +100,9 @@ func (t *ConfigTree) CopyPath(src, dst []string) error {
 	// per-key quote provenance no longer describes it (#6673). Dropping it is
 	// the honest state — "unknown", never a false "these were bare".
 	cloned.KeysQuoted = nil
+	// Brackets re-key by role: containers keep the structural grouping the
+	// clone shares, leaves drop authorship they were never written with.
+	rekeyBracketProvenance(cloned, true)
 	*dstParent = append(*dstParent, cloned)
 	return nil
 }
@@ -126,8 +153,12 @@ func (t *ConfigTree) RenamePath(src, dst []string) error {
 	}
 	if dstParent == srcParent {
 		// Same parent: rename in place, preserving sibling order and children.
+		// Compare BEFORE stamping: a same-name rename is a no-op and keeps
+		// the mask rather than laundering it.
+		changed := !keysEqual(srcNode.Keys, newKeys)
 		srcNode.Keys = newKeys
 		srcNode.KeysQuoted = nil // new identity — see CopyPath (#6673)
+		rekeyBracketProvenance(srcNode, changed)
 		return nil
 	}
 	// Different parent: detach from the source parent and append to the
@@ -138,8 +169,10 @@ func (t *ConfigTree) RenamePath(src, dst []string) error {
 			break
 		}
 	}
+	changed := !keysEqual(srcNode.Keys, newKeys)
 	srcNode.Keys = newKeys
 	srcNode.KeysQuoted = nil // new identity — see CopyPath (#6673)
+	rekeyBracketProvenance(srcNode, changed)
 	*dstParent = append(*dstParent, srcNode)
 	return nil
 }
@@ -248,8 +281,9 @@ func (t *ConfigTree) insertRelative(elementPath, refPath []string, after bool) e
 	return nil
 }
 
-// refreshDupKeysQuoted re-stamps an already-present duplicate leaf's authored
-// quote provenance from the CURRENT set command (#6673 r11 B2).
+// refreshDupKeysProvenance re-stamps an already-present duplicate leaf's
+// authored quote AND bracket provenance from the CURRENT set command (#6673
+// r11 B2, extended to brackets on #9881).
 //
 // SetPath's dedup arms short-circuit on keysEqual, which compares the key TEXT
 // and nothing else. Two set commands with identical text but different quoting
@@ -261,14 +295,20 @@ func (t *ConfigTree) insertRelative(elementPath, refPath []string, after bool) e
 // re-issuing the path with mask [true,false] left [false,true] in place and the
 // group joined where it should have split.
 //
+// The bracket mask needs the same restamp for the same reason: `as-path AP1
+// [0-9]+` and `as-path AP1 0-9 +` share their Keys text, so without it a
+// re-issued bare line keeps a stale bracket bit (a false strict refusal) and
+// a re-issued bracketed line keeps a bare nil (a missed refusal).
+//
 // The LATER command wins, which is what `set` means everywhere else here — the
 // single-value arm a few lines up replaces the node outright for the same
 // reason.
-func refreshDupKeysQuoted(n *Node, quoted []bool) {
+func refreshDupKeysProvenance(n *Node, quoted, grouped []bool) {
 	if n == nil {
 		return
 	}
 	n.setKeysQuoted(quoted)
+	n.setKeysBracketed(grouped)
 }
 
 // widenKeyCountToGroupEnd extends a node's key slice path[from:end) so that no
@@ -459,7 +499,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 			remaining := path[i:]
 			for _, n := range *current {
 				if n.IsLeaf && keysEqual(n.Keys, remaining) {
-					refreshDupKeysQuoted(n, quotedRange(i, len(path)))
+					refreshDupKeysProvenance(n, quotedRange(i, len(path)), groupedRange(i, len(path)))
 					return nil
 				}
 			}
@@ -540,7 +580,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				for _, n := range *current {
 					if keysEqual(n.Keys, nodeKeys) {
 						if n.IsLeaf {
-							refreshDupKeysQuoted(n, quotedRange(keyStart, i))
+							refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
 						}
 						return nil
 					}
@@ -616,7 +656,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				// Flag leaf (args == 0) or multi-value leaf: skip if exact duplicate.
 				for _, n := range *current {
 					if n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-						refreshDupKeysQuoted(n, quotedRange(keyStart, i))
+						refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
 						return nil
 					}
 				}
@@ -699,7 +739,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				dup := false
 				for _, n := range *current {
 					if n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-						refreshDupKeysQuoted(n, quotedRange(keyStart, i))
+						refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
 						dup = true
 						break
 					}
@@ -777,7 +817,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 			dup := false
 			for _, n := range *current {
 				if n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-					refreshDupKeysQuoted(n, quotedRange(keyStart, i))
+					refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
 					dup = true
 					break
 				}
@@ -1197,9 +1237,13 @@ func removeMultiLeafMembers(nodes *[]*Node, keyword string, members []string, mo
 		// #6673: the surviving keys keep their AUTHORED-quote provenance, which
 		// means rebuilding the mask in lockstep — a stale-length KeysQuoted
 		// would silently demote the node to "provenance unknown" and re-expose
-		// the fused-member read that provenance exists to close.
+		// the fused-member read that provenance exists to close. #9881: the
+		// bracket mask rebuilds in the same lockstep — without it a dropped
+		// member shifts a stale true onto a surviving neighbour that was
+		// never bracketed (a false strict refusal downstream).
 		newKeys := append([]string(nil), n.Keys[:1]...)
 		newQuoted := []bool{n.KeyQuoted(0)}
+		newBracketed := []bool{n.KeyBracketed(0)}
 		for i, v := range n.Keys[1:] {
 			if drop[v] {
 				removedAny = true
@@ -1207,6 +1251,7 @@ func removeMultiLeafMembers(nodes *[]*Node, keyword string, members []string, mo
 			}
 			newKeys = append(newKeys, v)
 			newQuoted = append(newQuoted, n.KeyQuoted(i+1))
+			newBracketed = append(newBracketed, n.KeyBracketed(i+1))
 		}
 		if modifierChildren {
 			// valueList node: children are MODIFIERS of the value, not members.
@@ -1218,6 +1263,7 @@ func removeMultiLeafMembers(nodes *[]*Node, keyword string, members []string, mo
 			}
 			n.Keys = newKeys
 			n.setKeysQuoted(newQuoted)
+			n.setKeysBracketed(newBracketed)
 			out = append(out, n)
 			continue
 		}
@@ -1236,6 +1282,7 @@ func removeMultiLeafMembers(nodes *[]*Node, keyword string, members []string, mo
 		}
 		n.Keys = newKeys
 		n.setKeysQuoted(newQuoted)
+		n.setKeysBracketed(newBracketed)
 		n.Children = newChildren
 		out = append(out, n)
 	}

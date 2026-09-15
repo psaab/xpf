@@ -840,6 +840,11 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 		// `show configuration` displayed the authored regex back verbatim.
 		name := child.Keys[1]
 		regex := ASPathRegexFromTokens(child.Keys[2:])
+		// The flag travels with the WINNING span only: the instance tail
+		// when it is non-empty, else the last non-empty body entry. A
+		// bracketed span the join ignores (a shadowed body, an overwritten
+		// entry) must not refuse a config whose effective regex is clean.
+		unquotedBracket := asPathKeysHaveUnquotedBracket(child, 2)
 		if regex == "" {
 			// No tail on the instance node: the regex sits on a CHILD
 			// leaf instead, which is what a hierarchical brace body
@@ -852,10 +857,11 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 			for _, entry := range child.Children {
 				if v := ASPathRegexFromTokens(entry.Keys); v != "" {
 					regex = v
+					unquotedBracket = asPathKeysHaveUnquotedBracket(entry, 0)
 				}
 			}
 		}
-		po.ASPaths[name] = &ASPathDef{Name: name, Regex: regex}
+		po.ASPaths[name] = &ASPathDef{Name: name, Regex: regex, RegexUnquotedBracket: unquotedBracket}
 	}
 
 	// Parse policy-statements. A named policy-statement may be defined across

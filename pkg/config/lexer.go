@@ -84,16 +84,40 @@ type Lexer struct {
 	// boundary back exactly where it was authored.
 	bracketDepth int
 	// tokInBracket is bracketDepth > 0 as of the token most recently returned
-	// by Next. It is sampled after the skip loop, so it describes THAT token
-	// and not the lexer's current position.
+	// by Next — OR the gap-loss mark when the preceding gap stripped
+	// tokenless brackets (see gapLoss). It is sampled after the skip loop,
+	// so it describes THAT token and not the lexer's current position.
 	tokInBracket bool
+	// gapLoss records whether the gap most recently scanned by Next (or by
+	// Peek's internal Next) stripped tokenless brackets: an empty `[]` pair
+	// closed within the gap, or a stray `]` at depth zero. It is sampled
+	// into tokInBracket for the token the gap precedes, and ALSO persists
+	// after the return so a span-end check can ask about a TRAILING gap —
+	// brackets stripped after the span's last value token, which precede
+	// no recorded token at all (LastGapLoss). Reset at every Next entry;
+	// Peek deliberately does NOT restore it (see Peek).
+	gapLoss bool
 }
 
 // InBracket reports whether the token most recently returned by Next was
-// authored inside a `[ ... ]` list. It is only meaningful immediately after a
-// Next that returned an identifier or string; callers that do not need the
-// grouping ignore it, which is every caller predating #6668.
+// authored inside a `[ ... ]` list. It ALSO reports true when the token
+// follows a gap in which brackets were stripped tokenlessly — an empty `[]`
+// pair (including the POSIX `[]...]` char-class head) or a stray `]` at
+// depth zero (#9881): those delimiters vanish leaving no inside token, so
+// the following token carries the loss instead. Balanced, non-empty lists
+// never mark this way — their delimiters always have a token between them.
+// It is only meaningful immediately after a Next that returned an identifier
+// or string; callers that do not need the grouping ignore it, which is every
+// caller predating #6668.
 func (l *Lexer) InBracket() bool { return l.tokInBracket }
+
+// LastGapLoss reports whether the most recently scanned gap — the one just
+// before the token Peek returned, or just before the EOF/semicolon that
+// ended the loop — stripped tokenless brackets (#9881). Span-end checks
+// (parseKeys, ParseSetVerbGrouped) taint the span's last key with it, so a
+// trailing `[]` or stray `]` cannot silently narrow a value. Meaningful only
+// immediately after the Peek/Next that scanned the span-ending gap.
+func (l *Lexer) LastGapLoss() bool { return l.gapLoss }
 
 // NewLexer creates a new Lexer for the given input string.
 func NewLexer(input string) *Lexer {
@@ -106,6 +130,15 @@ func NewLexer(input string) *Lexer {
 
 // Next returns the next token, advancing the position.
 func (l *Lexer) Next() Token {
+	// Gap-loss state is recomputed from scratch on every call (see gapLoss):
+	// whatever a previous gap (or a Peek's internal scan) recorded is dead
+	// the moment a new scan starts.
+	l.gapLoss = false
+	// sawOpenAtZero remembers a `[` consumed at depth zero during THIS
+	// call's gap. If the gap later closes back to zero, the pair was
+	// tokenless — no Next returned between the delimiters, so no token
+	// carries the inside bit for them.
+	sawOpenAtZero := false
 	// Skip leading whitespace, comments, and bracket-list delimiters. The
 	// bracket characters of a Junos list (`[ a b c ]`) are structural sugar:
 	// the lexer strips them and yields the enclosed words as ordinary tokens
@@ -142,8 +175,11 @@ func (l *Lexer) Next() Token {
 			// open such a literal.
 			if c == '[' {
 				if tok, ok := l.tryBracketedEndpointLiteral(); ok {
-					l.tokInBracket = l.bracketDepth > 0
+					l.tokInBracket = l.bracketDepth > 0 || l.gapLoss
 					return tok
+				}
+				if l.bracketDepth == 0 {
+					sawOpenAtZero = true
 				}
 				l.bracketDepth++
 			} else if l.bracketDepth > 0 {
@@ -152,13 +188,27 @@ func (l *Lexer) Next() Token {
 				// underflow. The parser reports the malformed input; the
 				// grouping record simply stays off.
 				l.bracketDepth--
+				if l.bracketDepth == 0 && sawOpenAtZero {
+					// Tokenless pair: the gap opened at zero and closed
+					// within itself — `[]`, `[ ]`, or the POSIX `[]...]`
+					// char-class head — so the delimiters vanish leaving
+					// no inside token. The following token carries the
+					// loss instead (#9881).
+					l.gapLoss = true
+				}
+			} else {
+				// Stray ']' at depth zero: floored (see above), and it
+				// vanishes with no trace — no depth change for any later
+				// token to observe. The following token carries the loss
+				// instead (#9881).
+				l.gapLoss = true
 			}
 			l.advance()
 			continue
 		}
 		break
 	}
-	l.tokInBracket = l.bracketDepth > 0
+	l.tokInBracket = l.bracketDepth > 0 || l.gapLoss
 
 	ch := l.input[l.pos]
 	line, col := l.line, l.column
@@ -256,6 +306,11 @@ func (l *Lexer) Peek() Token {
 	l.pending = savedPending
 	l.bracketDepth = savedDepth
 	l.tokInBracket = savedInBracket
+	// gapLoss is deliberately NOT restored: the peeked gap may BE the
+	// span's trailing gap (parseKeys breaks on the peeked `;`/`}`/EOF),
+	// and its loss must survive to the span-end LastGapLoss check. Every
+	// Next recomputes it from scratch, so the leak cannot contaminate a
+	// later span — the next real Next overwrites it.
 	return tok
 }
 
@@ -408,7 +463,11 @@ func (l *Lexer) readString(line, col int) Token {
 //
 // Deliberately NOT fixed here: a LEADING '[' — `as-path ap1 [0-9]+` — is
 // genuinely indistinguishable from a one-element list by any local rule, and
-// still requires quoting. See lexer_mid_token_bracket_8453_test.go.
+// still requires quoting. See lexer_mid_token_bracket_8453_test.go. The
+// quoting requirement is ENFORCED, not aspirational: the bracket bit travels
+// with the token (InBracket) into the AST (Node.KeysBracketed), and the
+// strict commit gate rejects an unquoted-bracketed as-path tail with a
+// quote-the-regex diagnostic (#9881).
 func (l *Lexer) readIdentifier(line, col int) Token {
 	start := l.pos
 	for l.pos < len(l.input) {

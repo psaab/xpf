@@ -140,8 +140,9 @@ func TestEventCommands6673QuoteProvenanceHierarchical(t *testing.T) {
 }
 
 // TestEventCommands6673QuoteProvenanceFlatSet drives the flat-set path through
-// the SAME entry points production uses (ParseSetCommandQuoted + SetPathQuoted,
-// which is what configstore.Store.SetFromInputAs calls). There the bracketed
+// the SAME entry points production uses (ParseSetCommandGrouped +
+// SetPathQuotedGrouped, which is what configstore.Store.SetFromInputAs calls
+// since #9881 unified the operator-set and replay pairs). There the bracketed
 // list lands on a CHILD's Keys instead, so it exercises a different arm of the
 // reader — and a fix applied to only one arm fails one of these two tests.
 //
@@ -152,13 +153,13 @@ func TestEventCommands6673QuoteProvenanceFlatSet(t *testing.T) {
 	for _, tc := range quoteProvenanceCases {
 		t.Run(tc.name, func(t *testing.T) {
 			line := "set event-options policy p then change-configuration commands " + tc.valueText
-			path, quoted, err := ParseSetCommandQuoted(line)
+			path, quoted, grouped, err := ParseSetCommandGrouped(line)
 			if err != nil {
-				t.Fatalf("ParseSetCommandQuoted: %v", err)
+				t.Fatalf("ParseSetCommandGrouped: %v", err)
 			}
 			tree := &ConfigTree{}
-			if err := tree.SetPathQuoted(path, quoted); err != nil {
-				t.Fatalf("SetPathQuoted: %v", err)
+			if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+				t.Fatalf("SetPathQuotedGrouped: %v", err)
 			}
 			got := eventChangeConfigCommands(commandsNode6673(t, tree))
 			assertValues6673(t, "flat-set", tc, got)
@@ -208,11 +209,11 @@ func TestEventCommands6673QuoteProvenanceSurvivesTextRoundTrip(t *testing.T) {
 				if line == "" {
 					continue
 				}
-				path, quoted, err := ParseSetCommandQuoted(line)
+				path, quoted, grouped, err := ParseSetCommandGrouped(line)
 				if err != nil {
 					t.Fatalf("replaying %q: %v", line, err)
 				}
-				if err := replay.SetPathQuoted(path, quoted); err != nil {
+				if err := replay.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
 					t.Fatalf("replaying %q: %v", line, err)
 				}
 			}

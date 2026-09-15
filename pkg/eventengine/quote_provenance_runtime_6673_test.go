@@ -88,22 +88,23 @@ func TestClassifyPlan6673FusedMemberBatchIsDeclined(t *testing.T) {
 // assertion reached through the OTHER authoring path — and the one that binds
 // the production wiring rather than a test-only helper.
 //
-// It goes through config.ParseSetCommandQuoted + SetPathQuoted, which is exactly
-// the pair configstore.Store.SetFromInputAs calls for every `set` an operator
-// types at the CLI, over gRPC, or over the REST API. If either half of that
-// wiring stopped carrying provenance, the flat-set tree would fall back to the
-// text rule and this batch would be ACCEPTED again.
+// It goes through config.ParseSetCommandGrouped + SetPathQuotedGrouped, which is
+// exactly the pair configstore.Store.SetFromInputAs calls for every `set` an
+// operator types at the CLI, over gRPC, or over the REST API (unified on
+// #9881). If either half of that wiring stopped carrying provenance, the
+// flat-set tree would fall back to the text rule and this batch would be
+// ACCEPTED again.
 func TestClassifyPlan6673FusedMemberDeclinedViaFlatSet(t *testing.T) {
 	e := &Engine{}
 	line := `set event-options policy p then change-configuration commands ` +
 		`[ "set" "system host-name pwned" ]`
-	path, quoted, err := config.ParseSetCommandQuoted(line)
+	path, quoted, grouped, err := config.ParseSetCommandGrouped(line)
 	if err != nil {
-		t.Fatalf("ParseSetCommandQuoted: %v", err)
+		t.Fatalf("ParseSetCommandGrouped: %v", err)
 	}
 	tree := &config.ConfigTree{}
-	if err := tree.SetPathQuoted(path, quoted); err != nil {
-		t.Fatalf("SetPathQuoted: %v", err)
+	if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+		t.Fatalf("SetPathQuotedGrouped: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
 	if err != nil {

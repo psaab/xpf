@@ -262,9 +262,15 @@ func ParseSetVerbGrouped(input string) (verb string, path []string, quoted, grou
 		grouped = append(grouped, lexer.InBracket())
 	}
 
+	// #9881 trailing gap: brackets stripped after the line's last value
+	// token precede no recorded token (EOF is not one). Capture the loss at
+	// each loop exit and taint the last path element after the loop so the
+	// span carries it.
+	trailingLoss := false
 	for {
 		tok = lexer.Next()
 		if tok.Type == TokenEOF {
+			trailingLoss = lexer.LastGapLoss()
 			break
 		}
 		if tok.Type == TokenSemicolon {
@@ -276,6 +282,10 @@ func ParseSetVerbGrouped(input string) (verb string, path []string, quoted, grou
 			// applied — so the trailing `delete` never ran yet commit reported
 			// success. Permit at most one terminating semicolon, then require EOF;
 			// reject any subsequent token with its line/column.
+			// The span's trailing gap is the one BEFORE this semicolon —
+			// read it before the EOF check below scans (and reports) the
+			// post-terminator gap instead.
+			trailingLoss = lexer.LastGapLoss()
 			if next := lexer.Next(); next.Type != TokenEOF {
 				return "", nil, nil, nil, fmt.Errorf(
 					"unexpected token %s after ';' at line %d, column %d (only one statement per line)",
@@ -293,6 +303,9 @@ func ParseSetVerbGrouped(input string) (verb string, path []string, quoted, grou
 		}
 	}
 
+	if trailingLoss && len(grouped) > 0 {
+		grouped[len(grouped)-1] = true
+	}
 	if len(path) == 0 {
 		return "", nil, nil, nil, fmt.Errorf("empty path")
 	}
@@ -612,6 +625,14 @@ func (p *Parser) parseKeys() ([]string, []TokenType, []bool) {
 		} else {
 			break
 		}
+	}
+	// #9881 trailing gap: brackets stripped after the span's last value
+	// token (`as-path AP1 .* []`) precede no recorded token, so the
+	// per-token bit above never sees them. The breaking Peek just scanned
+	// that gap (Peek lets gapLoss leak for exactly this read) — taint the
+	// last key with it so the span carries the delimiter loss.
+	if p.lexer.LastGapLoss() && len(bracketed) > 0 {
+		bracketed[len(bracketed)-1] = true
 	}
 	return keys, kinds, bracketed
 }

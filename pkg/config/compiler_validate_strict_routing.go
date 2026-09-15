@@ -1520,7 +1520,9 @@ func validatePolicyReservedChainNameStrict(cfg *Config) error {
 // validatePolicyASPathRegexStrict hard-rejects a `policy-options as-path
 // <name>` whose regular expression cannot be rendered into frr.conf at
 // all — an EMPTY regex, or one that is not a valid POSIX extended regular
-// expression (#6686).
+// expression (#6686) — or whose tokens were authored inside an UNQUOTED
+// `[ ... ]` list, which the lexer strips as list sugar so the compiled
+// pattern differs from the written one while staying valid POSIX (#9881).
 //
 // xpf renders one `bgp as-path access-list <name> permit <regex>` line per
 // definition (pkg/frr/policy_render.go). FRR's DEFUN for that command ends
@@ -1536,6 +1538,18 @@ func validatePolicyReservedChainNameStrict(cfg *Config) error {
 // An empty regex was reachable with no diagnostic at all: `set
 // policy-options as-path AP1` with no value compiled to an ASPathDef with
 // Regex "" and committed clean.
+//
+// An unquoted leading bracket was reachable the same silent way: `set
+// policy-options as-path AP1 [0-9]+` lexes `[`/`]` as list sugar and joins
+// the surviving tokens to `0-9 +` — valid POSIX, so neither the #6686
+// validity check nor FRR's regcomp can catch it, and the definition matches
+// a different set than the operator wrote. The signal is bracket PROVENANCE
+// (ASPathDef.RegexUnquotedBracket), never the regex text: the mangled form
+// is byte-identical to a legitimately-authored bare `0-9 +`. Faithful
+// reconstruction is impossible (`[0-9]+` and `[0-9] +` lex identically), so
+// this rejects with a quote-the-regex diagnostic instead of guessing. A tree
+// with no provenance answers false and behaves exactly as before — the gate
+// fires only on a positive bracket bit.
 //
 // On the tolerant load / peer-sync paths the call site downgrades this to
 // a warning (opts.lenientPolicyASPathRegex) so an already-persisted or
@@ -1611,6 +1625,23 @@ func validatePolicyASPathRegexStrict(cfg *Config) error {
 		ap := cfg.PolicyOptions.ASPaths[name]
 		if ap == nil {
 			continue
+		}
+		// #9881, checked FIRST: the mangled join is valid POSIX (and loads
+		// fine in FRR), so the validity check below cannot see it — and its
+		// "frr-reload rejects" message would be factually wrong here. The
+		// compiled pattern differs from the authored text; quote the regex
+		// (or drop the brackets if they were grouping, not pattern text).
+		// The diagnostic never reconstructs the authored spelling — `[0-9]+`
+		// and `[0-9] +` are indistinguishable post-lex — the example is an
+		// example, not a guess.
+		if ap.RegexUnquotedBracket {
+			return fmt.Errorf("policy-options as-path %s: compiled regular expression "+
+				"%q came from an UNQUOTED '[' — the lexer strips brackets as list "+
+				"sugar, so the committed pattern differs from the text written "+
+				"(e.g. `[0-9]+` becomes `0-9 +`); write the regular expression "+
+				"as a QUOTED value, e.g. `set policy-options as-path %s \"[0-9]+\"`, "+
+				"or drop the brackets if they were grouping rather than pattern text",
+				name, ap.Regex, name)
 		}
 		if err := ValidASPathRegex(ap.Regex); err != nil {
 			return fmt.Errorf("policy-options as-path %s: %v — xpf renders "+

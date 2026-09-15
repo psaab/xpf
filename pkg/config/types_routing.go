@@ -23,6 +23,17 @@ type PolicyOptionsConfig struct {
 type ASPathDef struct {
 	Name  string
 	Regex string // AS-path regex pattern (e.g. "65000", "65[0-9]+")
+	// RegexUnquotedBracket reports that a token of the span Regex was joined
+	// from was authored inside an UNQUOTED `[ ... ]` list (#9881). The lexer
+	// strips brackets as list sugar, so such a Regex is the JOIN of the
+	// surviving tokens (`[0-9]+` becomes `0-9 +`) — a different pattern than
+	// the one written, and one no validity check can catch, because the
+	// mangled form is itself valid POSIX. The strict commit gate rejects it
+	// with a quote-the-regex diagnostic; the FRR renderer omits it on the
+	// lenient path. False means "not known to be bracketed", never "known
+	// bare": provenance-less trees (legacy persisted configs, synthesized
+	// nodes) compile exactly as before.
+	RegexUnquotedBracket bool
 }
 
 // CommunityDef defines a named BGP community with member values.

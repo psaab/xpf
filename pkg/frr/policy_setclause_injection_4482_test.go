@@ -54,6 +54,16 @@ func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T
 			"pl-evil":  {Name: "pl-evil", Prefixes: []string{"10.0.0.0/8\n router bgp 65000"}},
 			"pl-evil6": {Name: "pl-evil6", Prefixes: []string{"2001:db8::/32\n router bgp 65000"}},
 		},
+		ASPaths: map[string]*config.ASPathDef{
+			// The t3 `match as-path` name slot must resolve: since #9881
+			// the renderer never emits a dangling match (a reject term
+			// over an absent list renders deny-all, other terms skip the
+			// branch), so an undefined list would drop the very line this
+			// test sanitizes. Defining it keeps the test on the
+			// sanitization contract — and exercises frrName on the
+			// `bgp as-path access-list` definition line too.
+			"ap1\n router bgp 65000": {Name: "ap1\n router bgp 65000", Regex: "65000"},
+		},
 		PolicyStatements: map[string]*config.PolicyStatement{
 			"P": {
 				Name: "P",

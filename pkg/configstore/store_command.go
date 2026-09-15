@@ -27,8 +27,20 @@ func (s *Store) SetAs(sessionID string, path []string) error {
 // config.ParseSetCommandQuoted (#6673). It is what lets a bracketed list
 // authored through the flat-set path — `set ... commands [ "set" "system
 // host-name x" ]` — keep the one bit that distinguishes its members from the
-// words of a single unquoted command.
+// words of a single unquoted command. It carries no BRACKET grouping: a
+// caller with a grouped parse uses SetAsQuotedGrouped instead.
 func (s *Store) SetAsQuoted(sessionID string, path []string, quoted []bool) error {
+	return s.SetAsQuotedGrouped(sessionID, path, quoted, nil)
+}
+
+// SetAsQuotedGrouped is SetAsQuoted carrying the per-token BRACKET GROUPING
+// produced by config.ParseSetCommandGrouped (#6668, #9881): grouped[i]
+// reports whether path[i] was authored inside a `[ ... ]` list. The grouping
+// both widens bracketed container key groups (which the schema arity cannot
+// infer) and records Node.KeysBracketed, the bit the #9881 strict gate reads.
+// A nil grouping is the pre-#6668 behaviour: nothing is widened and no
+// bracket provenance is recorded.
+func (s *Store) SetAsQuotedGrouped(sessionID string, path []string, quoted, grouped []bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -42,7 +54,7 @@ func (s *Store) SetAsQuoted(sessionID string, path []string, quoted []bool) erro
 		return fmt.Errorf("not in configuration mode")
 	}
 
-	if err := s.candidate.SetPathQuoted(path, quoted); err != nil {
+	if err := s.candidate.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
 		return err
 	}
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
@@ -55,20 +67,36 @@ func (s *Store) SetAsQuoted(sessionID string, path []string, quoted []bool) erro
 func (s *Store) SetFromInput(input string) error { return s.SetFromInputAs("", input) }
 
 // SetFromInputAs is SetFromInput scoped to a config-lock holder session (#5059).
+// Every operator `set` — CLI, gRPC, REST — arrives here as a string, so this
+// method's choice of parser and setter decides which provenance survives
+// into the candidate tree. It parses with the grouped pair (#6668, #9881),
+// matching the load-merge / replay path (applyEditLine): an interactive set
+// line and its `show | display set` replay now build the same tree.
 func (s *Store) SetFromInputAs(sessionID, input string) error {
-	path, quoted, err := config.ParseSetCommandQuoted("set " + input)
+	path, quoted, grouped, err := config.ParseSetCommandGrouped("set " + input)
 	if err != nil {
 		return err
 	}
-	return s.SetAsQuoted(sessionID, path, quoted)
+	return s.SetAsQuotedGrouped(sessionID, path, quoted, grouped)
 }
 
 // Delete removes a node at the given path from the candidate configuration. The
 // internal/system entry point; the gRPC user path uses DeleteAs (#5059).
 func (s *Store) Delete(path []string) error { return s.DeleteAs("", path) }
 
-// DeleteAs is Delete scoped to a config-lock holder session (#5059).
+// DeleteAs is Delete scoped to a config-lock holder session (#5059). It
+// navigates without bracket grouping: a caller with a grouped parse uses
+// DeleteAsGrouped instead.
 func (s *Store) DeleteAs(sessionID string, path []string) error {
+	return s.DeleteAsGrouped(sessionID, path, nil)
+}
+
+// DeleteAsGrouped is DeleteAs carrying the per-token BRACKET GROUPING
+// produced by config.ParseSetCommandGrouped (#6668, #9881), so a `delete`
+// line navigates to the same node the matching `set` line built. Without it
+// the walk re-splits a bracketed container key group at the schema arity and
+// reports the node missing. A nil grouping is the pre-#6668 behaviour.
+func (s *Store) DeleteAsGrouped(sessionID string, path []string, grouped []bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -82,7 +110,7 @@ func (s *Store) DeleteAs(sessionID string, path []string) error {
 		return fmt.Errorf("not in configuration mode")
 	}
 
-	if err := s.candidate.DeletePath(path); err != nil {
+	if err := s.candidate.DeletePathGrouped(path, grouped); err != nil {
 		return err
 	}
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
@@ -95,13 +123,16 @@ func (s *Store) DeleteAs(sessionID string, path []string) error {
 func (s *Store) DeleteFromInput(input string) error { return s.DeleteFromInputAs("", input) }
 
 // DeleteFromInputAs is DeleteFromInput scoped to a config-lock holder session
-// (#5059).
+// (#5059). It parses with the grouped pair (#6668, #9881), matching the
+// replay path (applyEditLine) and the interactive `set` side: after #9881 an
+// interactive `set` builds bracketed containers wide, so the matching
+// interactive `delete` must navigate wide too.
 func (s *Store) DeleteFromInputAs(sessionID, input string) error {
-	path, err := config.ParseSetCommand("delete " + input)
+	path, _, grouped, err := config.ParseSetCommandGrouped("delete " + input)
 	if err != nil {
 		return err
 	}
-	return s.DeleteAs(sessionID, path)
+	return s.DeleteAsGrouped(sessionID, path, grouped)
 }
 
 // DeactivateFromInput marks the candidate node at the given path inactive
