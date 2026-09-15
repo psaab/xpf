@@ -159,6 +159,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // stream signal, distinct from routine idle-TTL churn.
     state.status.frag_max_lifetime_evictions_total =
         state.afxdp.frag_max_lifetime_evictions_total();
+    // #9901 (F-074): unknown-MTU fail-open forwards — the configuration /
+    // tunnel-kind signal, distinct from in-MTU fast-path forwards.
+    state.status.egress_mtu_unknown_forward_total =
+        state.afxdp.egress_mtu_unknown_forward_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state

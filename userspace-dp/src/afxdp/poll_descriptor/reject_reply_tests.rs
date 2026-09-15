@@ -1838,10 +1838,9 @@ fn deny_reply_and_emit_plain_deny_silent_logs_deny_no_session_init_4499() {
 #[test]
 fn per_zone_reject_isolation_at_call_site_3618() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
-    use crate::afxdp::icmp_ratelimit::TokenBucket;
+    use crate::afxdp::icmp_ratelimit::ZoneLimiter;
     use crate::afxdp::icmp_ratelimit::{
-        GeneratedErrorReason, allow_generated_reject_at, global_bucket_test_lock,
-        reset_bucket_for_test,
+        GeneratedErrorReason, global_bucket_test_lock, reset_bucket_for_test,
     };
     use crate::afxdp::types::FastMap;
     use std::sync::Arc;
@@ -1858,21 +1857,26 @@ fn per_zone_reject_isolation_at_call_site_3618() {
     let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
     ifindex_to_zone_id.insert(ifidx_a, zone_a);
     ifindex_to_zone_id.insert(ifidx_b, zone_b);
-    let mut reject_buckets: FastMap<u16, Arc<TokenBucket>> = FastMap::default();
-    reject_buckets.insert(zone_a, Arc::new(TokenBucket::new()));
-    reject_buckets.insert(zone_b, Arc::new(TokenBucket::new()));
+    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
+    reject_buckets.insert(zone_b, Arc::new(ZoneLimiter::new()));
     let forwarding = ForwardingState {
         ifindex_to_zone_id,
         reject_buckets,
         ..ForwardingState::default()
     };
 
-    // Drain zone A's bucket. The enqueue call samples the REAL (small)
-    // monotonic clock, so pin zone A's refill epoch to the far future and
-    // drain it there: the smaller call-site `now` yields zero refill and
-    // the bucket stays empty across the call (mirrors the #2472 tests).
+    // Drain zone A's limiter AGGREGATE. The enqueue call samples the REAL
+    // (small) monotonic clock, so pin the refill epoch to the far future and
+    // drain it there: the smaller call-site `now` yields zero refill and the
+    // limiter stays empty across the call (mirrors the #2472 tests). #9901
+    // (F-074): drain the aggregate tier DIRECTLY — a gate drain would stop at
+    // the source tier's smaller budget and leave the aggregate half-full.
     let far_future = u64::MAX / 2;
-    while allow_generated_reject_at(&forwarding, zone_a, far_future, 1000, 1000) {}
+    forwarding
+        .generated_error_bucket(GeneratedErrorReason::Reject, zone_a)
+        .expect("per-zone reject limiter")
+        .drain_aggregate_for_test(far_future, 1000, 1000);
 
     let (frame, meta, flow) = tcp_v4_syn();
     let mut pipeline = tx_pipeline(
@@ -1941,7 +1945,7 @@ fn per_zone_reject_isolation_at_call_site_3618() {
 #[test]
 fn egress_filtered_reject_does_not_drain_zone_token_5569() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
-    use crate::afxdp::icmp_ratelimit::TokenBucket;
+    use crate::afxdp::icmp_ratelimit::ZoneLimiter;
     use crate::afxdp::icmp_ratelimit::{
         GeneratedErrorReason, global_bucket_test_lock, reset_bucket_for_test,
     };
@@ -1958,8 +1962,8 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
     let ifidx = 5i32;
     let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
     ifindex_to_zone_id.insert(ifidx, zone_a);
-    let mut reject_buckets: FastMap<u16, Arc<TokenBucket>> = FastMap::default();
-    reject_buckets.insert(zone_a, Arc::new(TokenBucket::new()));
+    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
 
     // Output filter on ifindex 5: accept TCP (RST permitted), discard ICMP
     // (the generated ICMP unreachable is filtered). First-match terms.
@@ -2089,10 +2093,9 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
 #[test]
 fn token_exhausted_reject_after_classify_survives_still_rate_limited_5569() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
-    use crate::afxdp::icmp_ratelimit::TokenBucket;
+    use crate::afxdp::icmp_ratelimit::ZoneLimiter;
     use crate::afxdp::icmp_ratelimit::{
-        GeneratedErrorReason, allow_generated_reject_at, global_bucket_test_lock,
-        rate_limited_count, reset_bucket_for_test,
+        GeneratedErrorReason, global_bucket_test_lock, rate_limited_count, reset_bucket_for_test,
     };
     use crate::afxdp::types::FastMap;
     use std::sync::Arc;
@@ -2104,19 +2107,23 @@ fn token_exhausted_reject_after_classify_survives_still_rate_limited_5569() {
     let ifidx = 5i32;
     let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
     ifindex_to_zone_id.insert(ifidx, zone_a);
-    let mut reject_buckets: FastMap<u16, Arc<TokenBucket>> = FastMap::default();
-    reject_buckets.insert(zone_a, Arc::new(TokenBucket::new()));
+    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
     let forwarding = ForwardingState {
         ifindex_to_zone_id,
         reject_buckets,
         ..ForwardingState::default()
     };
 
-    // Drain zone A's bucket at a far-future epoch so the call site's smaller
-    // monotonic `now` yields zero refill and the bucket stays empty across the
-    // call (mirrors per_zone_reject_isolation_at_call_site_3618).
+    // Drain zone A's limiter aggregate at a far-future epoch so the call
+    // site's smaller monotonic `now` yields zero refill and the limiter stays
+    // empty across the call (mirrors per_zone_reject_isolation_at_call_site_3618).
+    // #9901 (F-074): aggregate tier directly — see the note above.
     let far_future = u64::MAX / 2;
-    while allow_generated_reject_at(&forwarding, zone_a, far_future, 1000, 1000) {}
+    forwarding
+        .generated_error_bucket(GeneratedErrorReason::Reject, zone_a)
+        .expect("per-zone reject limiter")
+        .drain_aggregate_for_test(far_future, 1000, 1000);
     let before = rate_limited_count(GeneratedErrorReason::Reject);
 
     let (frame, meta, flow) = tcp_v4_syn(); // RST survives classify (no filter)

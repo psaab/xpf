@@ -213,6 +213,16 @@ fn compute_forwarded_egress_ptb(
         crate::afxdp::frame::nibble_trusted_stamp(source_frame, meta.l3_offset, meta.addr_family)
     });
     if let Some(l3) = l3 {
+        // #9901 (F-074): the decision below runs with NO known MTU — it will
+        // fail-open to `Forward` (never invent an MTU smaller than the link).
+        // Count it: before, "unknown" was indistinguishable from "fits".
+        // Predicate is `mtu == 0` AND L3 readable (this arm); the
+        // unparseable-frame fallthrough below never consults an MTU and is
+        // excluded.
+        if mtu == 0 {
+            crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let egress_decision =
             forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu);
         // #9328: an oversized DF-CLEAR IPv4 datagram is still forwarded at full
@@ -265,7 +275,7 @@ fn compute_forwarded_egress_ptb(
             // better than the pre-#5856 global bucket, just coarser than
             // the reject path's per-logical-unit granularity. An
             // unzoned / unknown ingress (id 0) falls back to the
-            // shared `PACKET_TOO_BIG_FALLBACK_BUCKET`.
+            // shared `PACKET_TOO_BIG_FALLBACK_LIMITER`.
             if !ptb_reply_suppressed(source_frame, ptb_meta, l3, forwarding) {
                 // #5567: build the PTB FIRST — the build IS the feasibility
                 // proof (each builder returns None on a missing egress object
@@ -323,18 +333,29 @@ fn compute_forwarded_egress_ptb(
                 // ingress bind ifindex `ingress_ident.ifindex` via
                 // `ifindex_to_zone_id` — NOT the logical unit (unlike the #3618
                 // reject path), so VLAN sub-interfaces on one physical port share
-                // that port's bucket (unzoned / unknown → the shared
-                // `PACKET_TOO_BIG_FALLBACK_BUCKET`).
+                // that port's limiter (unzoned / unknown → the shared
+                // `PACKET_TOO_BIG_FALLBACK_LIMITER`).
                 let from_zone_id = forwarding
                     .ifindex_to_zone_id
                     .get(&ingress_ident.ifindex)
                     .copied()
                     .unwrap_or(0);
+                // #9901 (F-074): key the limiter's per-source tier on the META
+                // addrs — NOT frame bytes: `source_frame` is the post-NAT
+                // egress frame, while the meta addrs are the shim-stamped
+                // pre-NAT L3 tuple. `l3_addrs_unfiltered` (not `l3_addrs`,
+                // which bumps the #7890 filter-enforcement witness) + drop an
+                // unspecified source to the shared overflow tier.
+                let ptb_src = meta
+                    .l3_addrs_unfiltered()
+                    .map(|(src, _)| src)
+                    .filter(|s| !s.is_unspecified());
                 if built.is_some()
                     && allow_generated_error_zoned(
                         forwarding,
                         GeneratedErrorReason::PacketTooBig,
                         from_zone_id,
+                        ptb_src,
                     )
                 {
                     ptb_reply = built;
