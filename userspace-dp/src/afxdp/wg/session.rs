@@ -173,7 +173,27 @@ impl std::fmt::Debug for WgSession {
             .finish_non_exhaustive()
     }
 }
-
+/// #9918 F-142: best-effort wipe of the transport keys when the session
+/// drops. snow 0.10.0 has no `zeroize` and no `Drop` impl (verified against
+/// the locked registry: no `zeroize` dep, no `impl Drop`, no wipe in `src/`),
+/// so without this the 64 bytes of session keys (initiator + responder
+/// directions) persist in freed heap until reuse. `rekey_manually` overwrites
+/// both cipher keys in place and zeros need no RNG, so there is no failure
+/// mode in `Drop` — but the overwrite runs through snow's `set` (a plain
+/// `copy_from_slice` in vendored code we cannot change), and the compiler
+/// could theoretically dead-store-eliminate a write whose value is never
+/// read before free. Erasure is therefore NOT guaranteed; this narrows the
+/// window (keys die at session teardown instead of lingering until heap
+/// reuse) but the DSE-theoretical residual is honestly documented here
+/// rather than claimed away. The handshake `HandshakeState` (static-key and
+/// PSK copies, chaining keys, ephemerals — see engine.rs) has no wipe API at
+/// all and remains an accepted residual alongside it.
+impl Drop for WgSession {
+    fn drop(&mut self) {
+        const ZEROS: [u8; 32] = [0u8; 32];
+        self.transport.rekey_manually(Some(&ZEROS), Some(&ZEROS));
+    }
+}
 impl WgSession {
     /// Create a session in initiator role — confirmed at install
     /// (the initiator is the side that sends first per the WG spec).

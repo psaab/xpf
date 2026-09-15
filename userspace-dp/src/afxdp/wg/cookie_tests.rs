@@ -611,23 +611,24 @@ fn note_initiation_recovers_poisoned_load_lock_6422() {
     );
 }
 
-/// #6422: the rotating cookie secret. `secrets()` is on the path of
+/// #6422: the rotating cookie secret. `with_secrets()` is on the path of
 /// every cookie-reply build and every MAC2 verification; panicking there
 /// forever would disable MAC2 for the tunnel. Recovery cannot weaken the
 /// #4094 BUG-2 fail-closed posture, because `secure` is only ever set to
-/// `true` AFTER a fresh secret has been written.
+/// `true` AFTER a fresh secret has been written. #9918 F-145: the secrets
+/// no longer escape as bare copies, so this pins the SAME-secret property
+/// via the derived cookie (same secret → same cookie for same src/now).
 #[test]
 fn secrets_recovers_poisoned_secret_lock_6422() {
     use crate::afxdp::wg::poison_tests::poison_mutex;
     let our_pub = [0x22u8; 32];
     let cc = CookieChecker::new(&our_pub);
-    let (first, _) = cc.secrets(10_000).expect("a secure secret is available");
+    let peer = src(51820);
+    let first = cc.cookie_for_test(peer, 10_000);
 
     poison_mutex(&cc.secret);
 
-    let (after, _) = cc
-        .secrets(10_000)
-        .expect("secrets() must still resolve through a poisoned lock");
+    let after = cc.cookie_for_test(peer, 10_000);
     assert_eq!(
         first, after,
         "recovery must return the SAME committed secret — a fresh one \
