@@ -10,9 +10,13 @@
 // (generation, fib, digest) separately from Go's counters and enforces the
 // Rust's real admission gates (first-apply bypass, monotonic pair, equal-gen
 // digest identity incl. partial digest invalidation) — gate arithmetic alone
-// would pass the half-fixes this issue's review rounds killed. Cell R pins the
-// conceded residual (post-store drift + lost conflict retry, #10041) as a
-// dual-numbering run proving pre-existing shape, not v4-created.
+// would pass the half-fixes this issue's review rounds killed. Cell R runs the
+// r3-main drift trace (post-store drift + lost conflict retry, #10041) as a
+// dual-numbering run proving pre-existing shape, not v4-created: pre-#9642 it
+// demonstrated the conceded residual (below-installed stranding); #9642's
+// deliberate retry adoption repairs that trace, so it now proves the repair
+// converges identically at both numberings (#10064). Rollback-no-retry
+// mechanics keep a direct pin (TestRollbackRefusalRetriesNothing9824).
 package userspace
 
 import (
@@ -1003,7 +1007,9 @@ func TestHelperModelAdmitsIdenticalRetry9824(t *testing.T) {
 }
 
 // driftTerminal9824 is the terminal strand vector Cell R compares across its
-// dual-numbering legs.
+// dual-numbering legs. Numbering legs (retained/installed/published/mgen)
+// must match at +2; strand legs (unknown/debtZero/ctrlDisabled) must match
+// exactly and show convergence.
 type driftTerminal9824 struct {
 	retained     uint64
 	installed    uint64
@@ -1012,32 +1018,37 @@ type driftTerminal9824 struct {
 	unknown      bool
 	debtZero     bool
 	ctrlDisabled bool
-	rollbackSeen bool
 }
 
-// TestCompileRebaseDriftResidualIsPreExistingShape9824 is Cell R: Astra's
+// TestCompileRebaseDriftRepairIsPreExistingShape9824 is Cell R: Astra's
 // round-3 composition (resample β / lands-lost + generation-no-op fabric
 // sync clearing debt and the helper's digest + equal-gen conflict + lost
 // retry), run at fixed numbering (real apply) and pre-fix numbering
 // (allocator AND retained generation emulated — decrementing only the
-// snapshot would leave retry allocation on the fixed counter). Both legs
-// must reach the identical terminal strand: the residual is pre-existing
-// shape at new numbers, not v4-created. The recovery half is #10041; this
-// cell GREENs by demonstrating the documented residual — a scope pin.
-func TestCompileRebaseDriftResidualIsPreExistingShape9824(t *testing.T) {
+// snapshot would leave retry allocation on the fixed counter). Pre-#9642
+// both legs stranded below installed (the conceded residual, #10041);
+// #9642's deliberate retry adoption (debt consumes the possibly-landed
+// retry generation — the updated 9520 conflict_then_transport_error cell
+// pins it on this same tick path, and it is #10041's repair direction #1)
+// repairs the trace, so both legs must now reach the identical CONVERGED
+// terminal at +2 numbering: the repair is pre-existing shape at new
+// numbers, not v4-created. #10041 handoff: r2 already converges via the
+// rebase (Cell 3); r3-main (here) and r3-short (same shape) converge via
+// retry adoption — #10041 owner to re-verify scope (docs/log/10064.md).
+func TestCompileRebaseDriftRepairIsPreExistingShape9824(t *testing.T) {
 	fixed := runDriftLeg9824(t, true)
 	prefix := runDriftLeg9824(t, false)
 	t.Logf("drift terminal vectors: fixed=%+v prefix=%+v", fixed, prefix)
-	if fixed.retained != prefix.retained+2 || fixed.installed != prefix.installed+2 || fixed.mgen != prefix.mgen+2 {
+	if fixed.retained != prefix.retained+2 || fixed.installed != prefix.installed+2 ||
+		fixed.published != prefix.published+2 || fixed.mgen != prefix.mgen+2 {
 		t.Fatalf("legs differ by more than numbering: fixed=%+v prefix=%+v", fixed, prefix)
 	}
-	if fixed.published != prefix.published || fixed.unknown != prefix.unknown ||
-		fixed.debtZero != prefix.debtZero || fixed.ctrlDisabled != prefix.ctrlDisabled ||
-		fixed.rollbackSeen != prefix.rollbackSeen {
-		t.Fatalf("terminal strand differs between legs: fixed=%+v prefix=%+v — the residual is NOT pre-existing shape", fixed, prefix)
+	if fixed.unknown != prefix.unknown ||
+		fixed.debtZero != prefix.debtZero || fixed.ctrlDisabled != prefix.ctrlDisabled {
+		t.Fatalf("terminal strand differs between legs: fixed=%+v prefix=%+v", fixed, prefix)
 	}
-	if !fixed.rollbackSeen || !fixed.ctrlDisabled || !fixed.unknown || !fixed.debtZero {
-		t.Fatalf("terminal strand incomplete: %+v — want rollback + disabled + unknown + debt-clear", fixed)
+	if fixed.unknown || !fixed.debtZero || fixed.ctrlDisabled {
+		t.Fatalf("terminal strand not converged: %+v — want known + debt-clear + ctrl re-enabled", fixed)
 	}
 }
 
@@ -1183,8 +1194,11 @@ func runDriftLeg9824(t *testing.T, fixed bool) driftTerminal9824 {
 	}
 
 	// Tick 2: retained Cα/store conflicts (empty installed digest); the
-	// retry at store+1 lands and loses its response. Consume-only-first:
-	// m.generation keeps 10/8 while the helper takes 11/9.
+	// retry at store+1 lands and loses its response. The lost retry
+	// generation is retained as retry debt (deliberate #9642 — debt
+	// consumes the possibly-landed generation, the updated 9520
+	// conflict_then_transport_error cell pins it on this tick path):
+	// m.generation takes 11/9 with the helper.
 	f.model.scriptDrops(1)
 	tick2base := f.model.countVerb("apply_snapshot")
 	if err := f.tick(t); err == nil {
@@ -1199,39 +1213,60 @@ func runDriftLeg9824(t *testing.T, fixed bool) driftTerminal9824 {
 	mgen, pub, retained = f.m.generation, f.m.publishedSnapshot, f.m.lastSnapshot.Generation
 	f.m.mu.Unlock()
 	installed, _ = f.model.installedState()
-	if mgen != store || pub != 7 || retained != store || installed != store+1 {
-		t.Fatalf("post-tick-2 = mgen %d pub %d retained %d installed %d, want %d/7/%d/%d",
-			mgen, pub, retained, installed, store, store, store+1)
+	if mgen != store+1 || pub != 7 || retained != store+1 || installed != store+1 {
+		t.Fatalf("post-tick-2 = mgen %d pub %d retained %d installed %d, want %d/7/%d/%d (lost retry adopted)",
+			mgen, pub, retained, installed, store+1, store+1, store+1)
 	}
 	if f.ctrl.stored.Enabled != 0 {
 		t.Fatalf("ctrl.Enabled = %d after tick 2, want disabled 0", f.ctrl.stored.Enabled)
 	}
 
-	// Tick 3 (healthy): the retained offer is now below installed — a
-	// rollback refusal with no retry, and frozen bookkeeping.
+	// Tick 3 (healthy): the retained offer is the landed retry generation
+	// with identical content — it admits idempotently (#4036 arm, Cell 5)
+	// and bookkeeping converges. Pre-#9642 this offered store below
+	// installed store+1 and rollback-refused every tick (the #10041
+	// residual); the retry adoption above is #10041's repair direction #1,
+	// so this leg now proves the repair. Rollback-no-retry mechanics keep
+	// their own pin (TestRollbackRefusalRetriesNothing9824).
 	tick3base := f.model.countVerb("apply_snapshot")
-	tickErr := f.tick(t)
-	if tickErr == nil {
-		t.Fatal("tick 3 returned nil, want the rollback refusal")
+	if err := f.tick(t); err != nil {
+		t.Fatalf("tick 3 returned %v, want nil (identical admit of the adopted retry)", err)
 	}
-	if !errors.Is(tickErr, errHelperRejected) || !strings.Contains(tickErr.Error(), rollbackPrefix9824) {
-		t.Fatalf("tick 3 error = %v, want a ROLLBACK refusal", tickErr)
+	if gens := f.model.applyGenerations()[tick3base:]; !equalUint64s(gens, []uint64{store + 1}) {
+		t.Fatalf("tick-3 offers = %v, want single [%d] (identical re-offer, no conflict retry)", gens, store+1)
 	}
-	if gens := f.model.applyGenerations()[tick3base:]; !equalUint64s(gens, []uint64{store}) {
-		t.Fatalf("tick-3 offers = %v, want single [%d] (refusal retries nothing)", gens, store)
+	sent := f.lastApplyOfType(t, "apply_snapshot")
+	if sent.Snapshot == nil || !snapshotHasZone(sent.Snapshot, markerZone9824) {
+		t.Fatal("the converged apply_snapshot does not carry the COMPILED marker zone")
 	}
 	f.m.mu.Lock()
 	mgen, pub, retained = f.m.generation, f.m.publishedSnapshot, f.m.lastSnapshot.Generation
 	unknown := f.m.applySnapshotOutcomeUnknown
 	debtZero := f.m.partialOutcomeUnknown == 0
 	f.m.mu.Unlock()
-	if mgen != store || pub != 7 || retained != store {
-		t.Fatalf("post-tick-3 bookkeeping moved: mgen %d pub %d retained %d", mgen, pub, retained)
+	if mgen != store+1 || pub != store+1 || retained != store+1 {
+		t.Fatalf("post-tick-3 = mgen %d pub %d retained %d, want all %d (not converged)",
+			mgen, pub, retained, store+1)
+	}
+	if unknown || !debtZero {
+		t.Fatalf("post-tick-3 unknown=%v debtZero=%v, want false/true — the admit did not settle the books", unknown, debtZero)
+	}
+	if f.ctrl.stored.Enabled != 1 {
+		t.Fatalf("ctrl.Enabled = %d after tick 3, want re-enabled 1", f.ctrl.stored.Enabled)
+	}
+
+	// Tick 4: cessation — the gate is closed, nothing is offered.
+	tick4base := f.model.countVerb("apply_snapshot")
+	if err := f.tick(t); err != nil {
+		t.Fatalf("tick 4 returned %v, want nil (cessation)", err)
+	}
+	if gens := f.model.applyGenerations()[tick4base:]; len(gens) != 0 {
+		t.Fatalf("tick-4 offers = %v, want none (no cessation)", gens)
 	}
 	terminal := driftTerminal9824{
 		retained: retained, installed: store + 1, published: pub, mgen: mgen,
 		unknown: unknown, debtZero: debtZero,
-		ctrlDisabled: f.ctrl.stored.Enabled == 0, rollbackSeen: true,
+		ctrlDisabled: f.ctrl.stored.Enabled == 0,
 	}
 	installedNow, _ := f.model.installedState()
 	if installedNow != store+1 {
@@ -1239,6 +1274,214 @@ func runDriftLeg9824(t *testing.T, fixed bool) driftTerminal9824 {
 	}
 	f.assertNoViolations(t)
 	return terminal
+}
+
+// TestRollbackRefusalRetriesNothing9824 pins the rollback-refusal mechanics
+// the old Cell R tick-3 carried: a below-installed offer is refused once,
+// retried never, with frozen bookkeeping and fail-closed ctrl. FORCED setup,
+// disclosed (GPT-P3 corrected the original "no natural trace" overclaim):
+// one natural trace still offers below installed — a lost scheduler (or
+// worker-arm) republish over a deferral, pinned end-to-end by
+// TestDeferredTickRollsBackAfterLostSchedulerPublish9824 — while the rebase
+// (Cell 3) and retry adoption (Cell R) close the others. The helper is
+// hand-seeded ahead of retained to pin the gate in isolation; do not
+// "naturalize" this into a reachable script.
+func TestRollbackRefusalRetriesNothing9824(t *testing.T) {
+	f := newFixture9824(t)
+	n0 := neighbor9824(7, "10.0.0.2", "02:00:00:00:00:01")
+	alpha := []FabricSnapshot{fabricAlpha9824()}
+	seed := f.seedPublished(t, 7, baseZones9824(), []NeighborSnapshot{n0}, alpha)
+	f.endXSKWindow()
+	// Retained C@10 behind a helper holding 11: the next tick offers below
+	// installed. Direct set, prefix-leg style — the mechanics need an open
+	// gate, not a store narrative.
+	stored := f.snap9824(10,
+		[]ZoneSnapshot{{Name: "zone-a", ID: 1}, {Name: markerZone9824, ID: 77}},
+		[]NeighborSnapshot{n0}, append([]FabricSnapshot(nil), alpha...))
+	f.m.mu.Lock()
+	f.m.lastSnapshot = stored
+	f.m.generation = 10
+	f.m.mu.Unlock()
+	f.model.seed(11, 0, digest9824(t, seed), append([]FabricSnapshot(nil), alpha...))
+	tickBase := f.model.countVerb("apply_snapshot")
+	tickErr := f.tick(t)
+	if tickErr == nil {
+		t.Fatal("tick returned nil, want the rollback refusal")
+	}
+	if !errors.Is(tickErr, errHelperRejected) || !strings.Contains(tickErr.Error(), rollbackPrefix9824) {
+		t.Fatalf("tick error = %v, want a ROLLBACK refusal", tickErr)
+	}
+	if gens := f.model.applyGenerations()[tickBase:]; !equalUint64s(gens, []uint64{10}) {
+		t.Fatalf("offers = %v, want single [10] (refusal retries nothing)", gens)
+	}
+	sent := f.lastApplyOfType(t, "apply_snapshot")
+	if sent.Snapshot == nil || !snapshotHasZone(sent.Snapshot, markerZone9824) {
+		t.Fatal("the refused apply_snapshot does not carry the COMPILED marker zone")
+	}
+	f.m.mu.Lock()
+	mgen, pub, retained := f.m.generation, f.m.publishedSnapshot, f.m.lastSnapshot.Generation
+	unknown := f.m.applySnapshotOutcomeUnknown
+	f.m.mu.Unlock()
+	if mgen != 10 || pub != 7 || retained != 10 {
+		t.Fatalf("bookkeeping moved after a refusal: mgen %d pub %d retained %d, want 10/7/10", mgen, pub, retained)
+	}
+	if unknown {
+		t.Fatal("refusal set the unknown-outcome mark — a refusal proves the helper kept its state")
+	}
+	if f.ctrl.stored.Enabled != 0 {
+		t.Fatalf("ctrl.Enabled = %d after the refusal, want disabled 0 (fail closed)", f.ctrl.stored.Enabled)
+	}
+	f.assertNoViolations(t)
+}
+
+// TestDeferredTickRollsBackAfterLostSchedulerPublish9824 pins the reachable
+// below-installed tick offer GPT-P3 caught the rollback-mechanics header
+// overclaiming away: over deferred retained G, a scheduler republish of
+// m.generation+1 lands but loses its response — the direct-request path
+// (UpdatePolicyScheduleState) commits nothing on failure, so retained/mgen
+// stay G while the helper holds G+1 with the unknown-outcome mark set — and
+// the mark suppresses the generation-only catch-up that would otherwise
+// mistake the helper's G+1 status report for possession of G. The tick
+// offers G below installed G+1: rollback refusal, no retry, frozen
+// bookkeeping, fail-closed ctrl, mark kept. Handled, not stranded: the next
+// commit's rebase offers strictly above and converges (tail of this cell).
+// Same shape as a lost worker-arm republish (Cell 3 premise proves that
+// path also commits nothing); the scheduler is the cited instance.
+func TestDeferredTickRollsBackAfterLostSchedulerPublish9824(t *testing.T) {
+	f := newFixture9824(t)
+	n0 := neighbor9824(7, "10.0.0.2", "02:00:00:00:00:01")
+	alpha := []FabricSnapshot{fabricAlpha9824()}
+	f.seedPublished(t, 7, baseZones9824(), []NeighborSnapshot{n0}, alpha)
+	f.forcePendingXSK()
+	// No resample on any path (no partial verb crosses the epoch, no mark
+	// until the scheduler's loss — and the scheduler resamples nothing with
+	// nothing marked): echo retained content and prove it by zero calls.
+	f.neighborFunc = func(*config.Config) []NeighborSnapshot { return []NeighborSnapshot{n0} }
+	f.fabricFunc = func(*config.Config) []FabricSnapshot { return append([]FabricSnapshot(nil), alpha...) }
+
+	// Deferred C@10 through the real apply (Cell-2 shape, zone-b content).
+	epochB := f.m.partialUpdateEpoch.Load()
+	reservedB := f.m.bumpGeneration()
+	deferred := f.snap9824(reservedB,
+		[]ZoneSnapshot{{Name: "zone-a", ID: 1}, {Name: "zone-b", ID: 2}},
+		[]NeighborSnapshot{n0}, append([]FabricSnapshot(nil), alpha...))
+	deferred.partialUpdateEpoch = epochB
+	appliesBefore := f.model.countVerb("apply_snapshot")
+	if _, err := f.apply(t, deferred); err != nil {
+		t.Fatalf("deferral apply returned %v, want nil", err)
+	}
+	if got := f.model.countVerb("apply_snapshot"); got != appliesBefore {
+		t.Fatalf("apply_snapshot requests during deferral = %d, want 0", got-appliesBefore)
+	}
+	publishedB, lastB, openB := f.gate()
+	if !openB || publishedB != 7 || lastB != 10 {
+		t.Fatalf("gate after deferral = published %d last %d open %v, want 7/10/open", publishedB, lastB, openB)
+	}
+
+	// The lost scheduler republish of unallocated m.generation+1, through
+	// the real entry point. Direct-request failure commits nothing: Go's
+	// counters stay G while the helper takes G+1 with the mark set.
+	f.model.scriptDrops(1)
+	schedErr := f.m.UpdatePolicyScheduleState(f.cfg, map[string]bool{})
+	if schedErr == nil {
+		t.Fatal("premise broken: the dropped scheduler publish returned nil")
+	} else if errors.Is(schedErr, errHelperRejected) {
+		t.Fatalf("premise broken: scheduler error = %v, want a TRANSPORT error, not a refusal", schedErr)
+	}
+	if gens := f.model.applyGenerations(); !equalUint64s(gens, []uint64{11}) {
+		t.Fatalf("premise broken: scheduler offers = %v, want single unallocated [11]", gens)
+	}
+	f.m.mu.Lock()
+	mgen, retainedGen, pub := f.m.generation, f.m.lastSnapshot.Generation, f.m.publishedSnapshot
+	unknown := f.m.applySnapshotOutcomeUnknown
+	f.m.mu.Unlock()
+	if mgen != 10 || retainedGen != 10 || pub != 7 || !unknown {
+		t.Fatalf("premise broken: mgen=%d retained=%d pub=%d unknown=%v, want 10/10/7/true — the lost republish must leave Go's counters untouched with the mark set", mgen, retainedGen, pub, unknown)
+	}
+	installed, _ := f.model.installedState()
+	if installed != 11 {
+		t.Fatalf("premise broken: helper holds %d, want unallocated 11", installed)
+	}
+
+	// The helper genuinely holds 11, so a status poll would report it;
+	// mirror that report. The unknown-outcome mark must still suppress the
+	// generation-only catch-up that would mistake it for possession of 10:
+	// the tick below must OFFER (not skip), then be refused below installed.
+	f.m.mu.Lock()
+	f.m.lastStatus.LastSnapshotGeneration = 11
+	f.m.mu.Unlock()
+	tickBase := f.model.countVerb("apply_snapshot")
+	tickErr := f.tick(t)
+	if tickErr == nil {
+		t.Fatal("tick returned nil, want the rollback refusal")
+	}
+	if !errors.Is(tickErr, errHelperRejected) || !strings.Contains(tickErr.Error(), rollbackPrefix9824) {
+		t.Fatalf("tick error = %v, want a ROLLBACK refusal", tickErr)
+	}
+	if gens := f.model.applyGenerations()[tickBase:]; !equalUint64s(gens, []uint64{10}) {
+		t.Fatalf("tick offers = %v, want single [10] (catch-up stood down, refusal retries nothing)", gens)
+	}
+	refused := f.lastApplyOfType(t, "apply_snapshot")
+	if refused.Snapshot == nil || refused.Snapshot.Generation != 10 || !snapshotHasZone(refused.Snapshot, "zone-b") {
+		t.Fatal("the refused offer is not the deferred C@10 snapshot")
+	}
+	if snapshotHasZone(refused.Snapshot, markerZone9824) {
+		t.Fatal("the refused offer carries the compiled marker — the tick offered something other than retained")
+	}
+	f.m.mu.Lock()
+	mgen, pub, retainedGen = f.m.generation, f.m.publishedSnapshot, f.m.lastSnapshot.Generation
+	unknown = f.m.applySnapshotOutcomeUnknown
+	f.m.mu.Unlock()
+	if mgen != 10 || pub != 7 || retainedGen != 10 {
+		t.Fatalf("bookkeeping moved after the refusal: mgen %d pub %d retained %d, want 10/7/10", mgen, pub, retainedGen)
+	}
+	if !unknown {
+		t.Fatal("refusal cleared the unknown-outcome mark — a refusal proves the helper kept its state, and the scheduler's outcome is still unknown")
+	}
+	if f.ctrl.stored.Enabled != 0 {
+		t.Fatalf("ctrl.Enabled = %d after the refusal, want disabled 0 (fail closed)", f.ctrl.stored.Enabled)
+	}
+
+	// Handled: the next commit's rebase offers strictly above installed
+	// and converges with the marker.
+	f.endXSKWindow()
+	epochD := f.m.partialUpdateEpoch.Load()
+	reservedD := f.m.bumpGeneration()
+	compiled := f.snap9824(reservedD,
+		[]ZoneSnapshot{{Name: "zone-a", ID: 1}, {Name: markerZone9824, ID: 77}},
+		[]NeighborSnapshot{n0}, append([]FabricSnapshot(nil), alpha...))
+	compiled.partialUpdateEpoch = epochD
+	if _, err := f.apply(t, compiled); err != nil {
+		t.Fatalf("recovery commit returned %v, want nil", err)
+	}
+	f.m.mu.Lock()
+	stored, pub := f.m.lastSnapshot.Generation, f.m.publishedSnapshot
+	unknown = f.m.applySnapshotOutcomeUnknown
+	f.m.mu.Unlock()
+	if stored != 13 || pub != 13 {
+		t.Fatalf("recovery stored/published = %d/%d, want 13/13 (reserve 11 + rebase 2)", stored, pub)
+	}
+	if unknown {
+		t.Fatal("recovery left the unknown-outcome mark set — the admit did not settle the books")
+	}
+	installed, _ = f.model.installedState()
+	if installed != 13 {
+		t.Fatalf("helper holds %d after recovery, want 13", installed)
+	}
+	if f.ctrl.stored.Enabled != 1 {
+		t.Fatalf("ctrl.Enabled = %d after recovery, want re-enabled 1", f.ctrl.stored.Enabled)
+	}
+	sent := f.lastApplyOfType(t, "apply_snapshot")
+	if sent.Snapshot == nil || !snapshotHasZone(sent.Snapshot, markerZone9824) {
+		t.Fatal("the converged apply_snapshot does not carry the COMPILED marker zone")
+	}
+	if gens := f.model.applyGenerations(); !equalUint64s(gens, []uint64{11, 10, 13}) {
+		t.Fatalf("wire offers = %v, want [11 10 13] (lost republish, refused tick, recovery)", gens)
+	}
+	if f.neighborCalls != 0 || f.fabricCalls != 0 {
+		t.Fatalf("sampler calls = neighbors %d fabrics %d, want 0/0 — nothing here should resample", f.neighborCalls, f.fabricCalls)
+	}
+	f.assertNoViolations(t)
 }
 
 // TestCompileRebaseRefusesToWrapAtExhaustion9824 pins the allocator ceiling:
