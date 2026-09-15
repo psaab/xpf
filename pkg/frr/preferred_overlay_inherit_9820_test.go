@@ -35,13 +35,13 @@ func TestForwardingInstanceTablePreservedOnKeptRow_9820(t *testing.T) {
 	m := &Manager{}
 	kept := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
 		config.NextHopEntry{Address: "2001:db8::1"},
-	), "", 100, nil, nil)
+	), "", 100, nil, nil, nil)
 	if kept != "ipv6 route 2001:db8::/32 2001:db8::1 5 table 100\n" {
 		t.Fatalf("forwarding-instance kept row = %q", kept)
 	}
 	dropped := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
 		config.NextHopEntry{Address: "192.0.2.1"},
-	), "", 100, nil, nil)
+	), "", 100, nil, nil, nil)
 	if strings.TrimSpace(dropped) != "" {
 		t.Fatalf("forwarding-instance bad row must render nothing, got:\n%s", dropped)
 	}

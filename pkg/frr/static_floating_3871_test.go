@@ -22,7 +22,7 @@ func TestFloatingStaticQualifiedNextHopDistance_3871(t *testing.T) {
 			{Address: "10.0.0.2", Preference: 250, HasPreference: true}, // floating backup
 		},
 	}
-	got := m.generateStaticRoute(sr, "", nil, nil)
+	got := m.generateStaticRoute(sr, "", nil, nil, nil)
 	wantPrimary := "ip route 10.5.0.0/16 10.0.0.1 5\n"
 	wantBackup := "ip route 10.5.0.0/16 10.0.0.2 250\n"
 	if !strings.Contains(got, wantPrimary) {
@@ -45,7 +45,7 @@ func TestPlainNextHopListEqualCost_3871(t *testing.T) {
 			{Address: "10.0.0.2"},
 		},
 	}
-	got := m.generateStaticRoute(sr, "", nil, nil)
+	got := m.generateStaticRoute(sr, "", nil, nil, nil)
 	for _, want := range []string{
 		"ip route 10.6.0.0/16 10.0.0.1 5\n",
 		"ip route 10.6.0.0/16 10.0.0.2 5\n",

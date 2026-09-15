@@ -12,7 +12,7 @@ import (
 func TestZeroNextHopRouteNotBlackholed_3872(t *testing.T) {
 	m := New()
 	sr := &config.StaticRoute{Destination: "10.1.0.0/16", Preference: 5}
-	if got := m.generateStaticRoute(sr, "", nil, nil); got != "" {
+	if got := m.generateStaticRoute(sr, "", nil, nil, nil); got != "" {
 		t.Fatalf("0-next-hop non-discard route rendered %q, want \"\" (must not blackhole)", got)
 	}
 }
@@ -22,7 +22,7 @@ func TestExplicitDiscardStillNull0_3872(t *testing.T) {
 	m := New()
 	sr := &config.StaticRoute{Destination: "10.0.99.0/24", Discard: true}
 	want := "ip route 10.0.99.0/24 Null0\n"
-	if got := m.generateStaticRoute(sr, "", nil, nil); got != want {
+	if got := m.generateStaticRoute(sr, "", nil, nil, nil); got != want {
 		t.Fatalf("discard route = %q, want %q", got, want)
 	}
 }

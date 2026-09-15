@@ -20,7 +20,7 @@ func TestStaticPaddingRendersNothing_9820(t *testing.T) {
 		Preference:  5,
 		NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
 	}
-	if got := m.generateStaticRoute(paddedDst, "", nil, nil); strings.TrimSpace(got) != "" {
+	if got := m.generateStaticRoute(paddedDst, "", nil, nil, nil); strings.TrimSpace(got) != "" {
 		t.Fatalf("padded destination must render nothing, got:\n%s", got)
 	}
 	paddedNH := &config.StaticRoute{
@@ -31,7 +31,7 @@ func TestStaticPaddingRendersNothing_9820(t *testing.T) {
 			{Address: "2001:db8::2"},
 		},
 	}
-	got := m.generateStaticRoute(paddedNH, "", nil, nil)
+	got := m.generateStaticRoute(paddedNH, "", nil, nil, nil)
 	if strings.Contains(got, " 2001:db8::1 ") {
 		t.Fatalf("padded next-hop reached frr.conf:\n%s", got)
 	}
@@ -65,7 +65,7 @@ routing-options {
 	m := &Manager{}
 	var b strings.Builder
 	for _, sr := range cfg.RoutingOptions.StaticRoutes {
-		b.WriteString(m.generateStaticRoute(sr, "", nil, nil))
+		b.WriteString(m.generateStaticRoute(sr, "", nil, nil, nil))
 	}
 	got := b.String()
 	if strings.Contains(got, "2001:db8::9") {

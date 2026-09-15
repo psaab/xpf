@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "15332c48080e7b148e5150a43075f1f5043bf76da659332398ef00b2edf7b65a"
+	snapshotShapeGolden8892 = "7a80a7c85c37140e043129805e14b25f0a855b993c4817fb832e0d01fdb3dadc"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -275,10 +275,6 @@ const (
 	// plaintext to their wgN TUN. An old helper ignores the field and falls back
 	// to the absent singular key, which decodes to 0 and delivers kernel-path
 	// transport for NO endpoint — a total loss of kernel-path inbound delivery,
-	// which IS the defect (worker-path decap is endpoint-keyed and unaffected,
-	// so "total outage" overstates). Ctrl-layout skew is refused separately by
-	// the pinned-map pre-flight (fail-closed deploy per §5e), not by this gate;
-	// a new helper under an old daemon reads an empty set and refuses kernel-path
 	// transport for every endpoint — the v10/v11 arm, not a STANDS entry.
 	// v18 (issue 9637) moved NO snapshot field (dual-outlet behavioral
 	// contract), so neither the digest nor this comment block moved for it.
@@ -303,7 +299,12 @@ const (
 	// enforces the widened term exactly as before — the pre-fix window, closed
 	// on upgrade. Exact equality refuses both pairings — the v10/v11 arm, not
 	// a STANDS entry.
-	snapshotShapeVersion8892 = 20
+	// v20 -> v21 BUMPED (issue 9821), and this one DID move the digest above:
+	// `InterfaceSnapshot.is_unit` is a real, transmitted field. It is the
+	// structural row identity the helper reads instead of parsing name shape;
+	// an old helper parses every row by name and reads a dotted base row as a
+	// unit row, which IS the defect the field closes.
+	snapshotShapeVersion8892 = 21
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
