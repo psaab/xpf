@@ -265,3 +265,109 @@ func TestHookedQuarantinedFilterDanglesLenient9883(t *testing.T) {
 		}
 	})
 }
+
+// TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883 is the nested
+// multi-key coverage: a set-shape family child carrying extra keys (only
+// producible via a peer-synced / hand-built AST — the parser and SetPath
+// always mint single-key children, and a flat-set unknown collapses to a
+// LEAF) must not split the gate from the compiler in either direction.
+func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
+	mkChild := func(keys []string, name string) *ConfigTree {
+		return &ConfigTree{Children: []*Node{
+			{Keys: []string{"firewall"}, Children: []*Node{
+				{Keys: []string{"family"}, Children: []*Node{
+					{Keys: keys, Children: []*Node{
+						{Keys: []string{"filter", name}, Children: []*Node{
+							{Keys: []string{"term", "T1"}, Children: []*Node{
+								{Keys: []string{"then", "discard"}, IsLeaf: true},
+							}},
+						}},
+					}},
+				}},
+			}},
+		}}
+	}
+	for _, tc := range []struct {
+		name string
+		keys []string
+		want string
+	}{
+		// Undeclared leading + declared trailing: the old compiler read
+		// Keys[1] ("inet") and INSTALLED while the gate warned NOTHING.
+		{"undeclared-leading", []string{"inett", "inet"}, "F"},
+		// Declared leading + undeclared trailing: the old gate read Keys[0]
+		// ("inet") only and the old compiler quarantined on Keys[1] — a
+		// strict silent void with no diagnostic anywhere.
+		{"declared-leading", []string{"inet", "inett"}, "G"},
+	} {
+		t.Run(tc.name+"/strict-rejects-naming-trailing-or-leading", func(t *testing.T) {
+			_, err := CompileConfig(mkChild(tc.keys, tc.want))
+			if err == nil {
+				t.Fatalf("strict compile accepted multi-key child %q with no diagnostic", tc.keys)
+			}
+			if !strings.Contains(err.Error(), "inett") {
+				t.Fatalf("strict refusal must name the undeclared token: %v", err)
+			}
+		})
+		t.Run(tc.name+"/lenient-warns-and-installs-nothing", func(t *testing.T) {
+			cfg, err := CompileConfigLenient(mkChild(tc.keys, tc.want))
+			if err != nil {
+				t.Fatalf("lenient compile must not brick (#1960): %v", err)
+			}
+			var warned bool
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "inett") && strings.Contains(w, "compiles to NOTHING") {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Fatalf("lenient path silent on multi-key child %q (warnings=%v)", tc.keys, cfg.Warnings)
+			}
+			if _, ok := cfg.Firewall.FiltersInet[tc.want]; ok {
+				t.Errorf("quarantine breach: %q installed from multi-key child %q", tc.want, tc.keys)
+			}
+			if _, ok := cfg.Firewall.FiltersInet6[tc.want]; ok {
+				t.Errorf("quarantine breach: %q installed from multi-key child %q", tc.want, tc.keys)
+			}
+		})
+	}
+	// Packed-shape residue: `family inet inett { filter H }` — the trailing
+	// token rides on the family node itself (Keys[2:]) rather than a child.
+	t.Run("packed-residue", func(t *testing.T) {
+		tree := &ConfigTree{Children: []*Node{
+			{Keys: []string{"firewall"}, Children: []*Node{
+				{Keys: []string{"family", "inet", "inett"}, Children: []*Node{
+					{Keys: []string{"filter", "H"}, Children: []*Node{
+						{Keys: []string{"term", "T1"}, Children: []*Node{
+							{Keys: []string{"then", "discard"}, IsLeaf: true},
+						}},
+					}},
+				}},
+			}},
+		}}
+		if _, err := CompileConfig(tree); err == nil {
+			t.Fatal("strict compile accepted packed residue [family inet inett] with no diagnostic")
+		} else if !strings.Contains(err.Error(), "inett") {
+			t.Fatalf("strict refusal must name the undeclared trailing token: %v", err)
+		}
+		cfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("lenient compile must not brick (#1960): %v", err)
+		}
+		var warned bool
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "inett") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Fatalf("lenient path silent on packed residue (warnings=%v)", cfg.Warnings)
+		}
+		if _, ok := cfg.Firewall.FiltersInet["H"]; ok {
+			t.Error("quarantine breach: H installed from packed residue node")
+		}
+		if _, ok := cfg.Firewall.FiltersInet6["H"]; ok {
+			t.Error("quarantine breach: H installed from packed residue node")
+		}
+	})
+}

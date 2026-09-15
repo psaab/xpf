@@ -205,52 +205,27 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 	firewallPermitted := firewallFamilyPermitted9017()
 
 	for _, familyNode := range node.FindChildren("family") {
-		var afNodes []*Node
-		var afName string
-
-		if len(familyNode.Keys) >= 2 {
-			// Hierarchical: family inet { ... }
-			afName = familyNode.Keys[1]
-			afNodes = []*Node{familyNode}
-		} else {
-			// Set-command shape: family { inet { ... } inet6 { ... } }
-			for _, child := range familyNode.Children {
-				afNodes = append(afNodes, child)
-			}
-		}
-
-		for _, afNode := range afNodes {
-			af := afName
-			if af == "" {
-				// #4827: Name() safely returns "" for an empty Keys slice —
-				// afNode.Keys[0] would panic (index out of range) on a
-				// malformed persisted Node reaching this compile path (a
-				// corrupted on-disk config-store JSON blob;
-				// pkg/configstore/db.go's plain json.Unmarshal has no Node
-				// validator). The live parser/SetPath paths structurally
-				// guarantee len(Keys) >= 1, so this only ever bites a
-				// corrupted store, but a bad persisted state must error on
-				// load, never panic (#1960 fail-closed-on-load doctrine).
-				af = afNode.Name()
-				if len(afNode.Keys) >= 2 {
-					af = afNode.Keys[1]
-				}
-			}
+		// The shared extractor: the token installed under is always a token
+		// the #9017 gate judged (effective token plus trailing tokens on
+		// structured nodes), so gate and compiler cannot disagree on any
+		// shape — including a malformed multi-key child, whose residue the
+		// quarantine below also consults.
+		for _, m := range firewallFamilyMembers9883(familyNode) {
+			afNode, af := m.AfNode, m.Af
 			// #9883 QUARANTINE: an address-family token the schema does not
 			// declare (a typo like `inett`, or a not-yet-modelled family)
-			// compiles to NOTHING — out of BOTH pools. The old default-fold
-			// (every non-inet6/non-any token landing in FiltersInet) installed
-			// the braced spelling into the IPv4 pool on the tolerant path
-			// while the #9017 warning told the operator it enforces no rule
-			// at all — an inverted diagnostic. Skipping makes the message
-			// true on every route (the flat-set path never nested the token,
-			// so it always compiled to nothing there). An interface hook
-			// naming the quarantined filter dangles: strict already rejects
-			// the token, and on the tolerant path the #3296 reference gate
-			// warns while the snapshot-integrity backstop refuses to publish
-			// the broken snapshot (fail-closed, prior state kept) — the hook
-			// never degrades to Accept.
-			if !firewallPermitted[af] {
+			// compiles to NOTHING — out of BOTH pools — as does a
+			// structured member carrying an undeclared trailing token. The
+			// old default-fold installed the braced spelling into the IPv4
+			// pool on the tolerant path while the #9017 warning told the
+			// operator it enforces no rule at all — an inverted diagnostic.
+			// Skipping makes the message true on every route. An interface
+			// hook naming the quarantined filter dangles: strict already
+			// rejects the token, and on the tolerant path the #3296
+			// reference gate warns while the snapshot-integrity backstop
+			// refuses to publish the broken snapshot (fail-closed, prior
+			// state kept) — the hook never degrades to Accept.
+			if firewallFamilyQuarantined9883(m, firewallPermitted) {
 				continue
 			}
 			// #4287: a Junos `family any` filter is protocol-independent —
@@ -405,11 +380,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 // Junos namespaces firewall filters per family; xpf folds them, so it rejects
 // the reuse fail-closed instead of resolving it by arbitrary map-write order.
 //
-// inet6 has its own destination map (fw.FiltersInet6) and is the ONLY family
-// that folds there, so a name shared between family inet and family inet6 lands
-// in two DIFFERENT maps and does NOT collide — that legitimate dual-stack case
-// (the same filter name for the V4 and V6 path) is preserved. Only a name that
-// appears under >= 2 distinct non-inet6 families is flagged.
+// FiltersInet6 holds `family inet6` filters AND the v6 arm of `family any`
+// filters (#4287 dual-compiles `any` into BOTH pools), so a name shared
+// between family inet and family inet6 still lands in two DIFFERENT maps per
+// arm and does NOT collide — that legitimate dual-stack case (the same filter
+// name for the V4 and V6 path) is preserved. Flagged: a name under >= 2
+// distinct DECLARED non-inet6 families (inet/any overwrite in FiltersInet),
+// and a name under BOTH any and inet6 (overwrite in FiltersInet6 via the
+// dual-compile — the any+inet6 cross-check below).
 //
 // Strict path (commit / commit-check, lenient=false): the first collision is a
 // hard compile error naming the offending filter and its families. Lenient path
@@ -492,33 +470,13 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 			continue
 		}
 		for _, familyNode := range fwNode.FindChildren("family") {
-			var afNodes []*Node
-			var afName string
-			if len(familyNode.Keys) >= 2 {
-				// Hierarchical: family inet { ... }
-				afName = familyNode.Keys[1]
-				afNodes = []*Node{familyNode}
-			} else {
-				// Set-command shape: family { inet { ... } inet6 { ... } }
-				afNodes = append(afNodes, familyNode.Children...)
-			}
-			for _, afNode := range afNodes {
-				af := afName
-				if af == "" {
-					// #4827: Name() safely returns "" for an empty Keys
-					// slice — afNode.Keys[0] would panic (index out of
-					// range) on a malformed persisted Node (e.g. a
-					// corrupted on-disk config-store JSON blob;
-					// pkg/configstore/db.go's plain json.Unmarshal has no
-					// Node validator). The live parser/SetPath paths
-					// structurally guarantee len(Keys) >= 1, so this only
-					// ever bites a corrupted store, but a bad persisted
-					// state must error on load, never panic (#1960
-					// fail-closed-on-load doctrine).
-					af = afNode.Name()
-					if len(afNode.Keys) >= 2 {
-						af = afNode.Keys[1]
-					}
+			// The shared extractor (see compileFirewall): same members, same
+			// tokens, same quarantine verdict — this gate cannot see a
+			// family the compiler installs differently.
+			for _, m := range firewallFamilyMembers9883(familyNode) {
+				afNode, af := m.AfNode, m.Af
+				if firewallFamilyQuarantined9883(m, firewallPermitted) {
+					continue // #9883: compiles to NOTHING, cannot collide
 				}
 				if af == "inet6" {
 					// Its own dest map (FiltersInet6). It cannot collide with
@@ -532,9 +490,6 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 						}
 					}
 					continue
-				}
-				if !firewallPermitted[af] {
-					continue // #9883 quarantine: compiles to NOTHING, cannot collide
 				}
 				for _, filterInst := range namedInstances(afNode.FindChildren("filter")) {
 					if filterInst.name == "" {
@@ -754,38 +709,22 @@ func firewallPrefixListFamilies(nodes []*Node) map[string]plFamily {
 func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	plFamilies := firewallPrefixListFamilies(nodes)
+	// #9883: skip quarantined members — a filter that compiles to NOTHING
+	// cannot under-block any family, and flagging its matches would
+	// contradict the token gate's warning on the same config.
+	firewallPermitted := firewallFamilyPermitted9017()
 	for _, fwNode := range nodes {
 		if fwNode.Name() != "firewall" {
 			continue
 		}
 		for _, familyNode := range fwNode.FindChildren("family") {
-			var afNodes []*Node
-			var afName string
-			if len(familyNode.Keys) >= 2 {
-				// Hierarchical: family any { ... }
-				afName = familyNode.Keys[1]
-				afNodes = []*Node{familyNode}
-			} else {
-				// Set-command shape: family { any { ... } }
-				afNodes = append(afNodes, familyNode.Children...)
-			}
-			for _, afNode := range afNodes {
-				af := afName
-				if af == "" {
-					// #4827: Name() safely returns "" for an empty Keys
-					// slice — afNode.Keys[0] would panic (index out of
-					// range) on a malformed persisted Node (e.g. a
-					// corrupted on-disk config-store JSON blob;
-					// pkg/configstore/db.go's plain json.Unmarshal has no
-					// Node validator). The live parser/SetPath paths
-					// structurally guarantee len(Keys) >= 1, so this only
-					// ever bites a corrupted store, but a bad persisted
-					// state must error on load, never panic (#1960
-					// fail-closed-on-load doctrine).
-					af = afNode.Name()
-					if len(afNode.Keys) >= 2 {
-						af = afNode.Keys[1]
-					}
+			// The shared extractor (see compileFirewall): same members, same
+			// tokens — this gate cannot see a family the compiler installs
+			// differently.
+			for _, m := range firewallFamilyMembers9883(familyNode) {
+				afNode, af := m.AfNode, m.Af
+				if firewallFamilyQuarantined9883(m, firewallPermitted) {
+					continue
 				}
 				if af != "any" {
 					continue
