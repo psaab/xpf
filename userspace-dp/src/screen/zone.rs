@@ -105,6 +105,13 @@ pub(super) struct ZoneScreenState {
     pub(super) syn_cookie_active_until_secs: u64,
     /// #3607 standby SYN-cookie ACK validation budget (`TokenBucket`).
     pub(super) syn_cookie_standby_ack_counter: TokenBucket,
+    /// #9902 F-023 flood-ACTIVE SYN-cookie ACK validation budget (`TokenBucket`).
+    /// Separate from the standby budget: the standby arm validates rare misses
+    /// opportunistically (fail-open), while the active arm validates every
+    /// session-miss ACK during a flood (fail-closed) — one bucket would couple
+    /// background misses to flood defense. Per worker per zone, like all screen
+    /// budgets: aggregate allowance scales with workers and zones.
+    pub(super) syn_cookie_active_ack_counter: TokenBucket,
     /// #2446 per-zone SYN-cookie profile generation. Bumped by `update_profiles`
     /// whenever a zone's SYN-cookie-relevant profile fields (`syn_cookie`,
     /// `syn_flood_threshold`) change (including gaining/losing a profile). The
@@ -190,6 +197,7 @@ impl ZoneScreenState {
             syn_src_sketch,
             syn_cookie_active_until_secs: 0,
             syn_cookie_standby_ack_counter: TokenBucket::default(),
+            syn_cookie_active_ack_counter: TokenBucket::default(),
             syn_cookie_profile_gen: 0,
             syn_cookie_zone_tag: syn_cookie_zone_tag(zone),
             syn_alarm_last_emit_sec: u64::MAX,

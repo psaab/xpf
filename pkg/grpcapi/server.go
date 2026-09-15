@@ -103,7 +103,11 @@ type Config struct {
 	// NATPoolAlarmsFn returns the active NAT pool-utilization alarms for
 	// `show security alarms` (#2079). nil when no monitor is wired.
 	NATPoolAlarmsFn func() []natpoolalarm.ActiveAlarm
-	FeedsFn         func() map[string]feeds.FeedInfo // returns live feed status
+	// NATPoolExhaustionAlarmsFn returns the active NAT pool-exhaustion
+	// alarms for `show security alarms` (#9902 F-026). nil when no monitor
+	// is wired.
+	NATPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
+	FeedsFn                   func() map[string]feeds.FeedInfo // returns live feed status
 	// FeedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#2049) — an address-name -> union-of-feed-CIDRs map for the active
 	// config — consulted by the `match-policies` simulator (#3042) so a
@@ -206,38 +210,39 @@ type Server struct {
 	// key is stored on the first CHECK, not only on a warning, so the #9340
 	// per-alternative analysis runs once per class and pattern, never per
 	// request.
-	unenforceableDenyWarned sync.Map
-	store                   *configstore.Store
-	dp                      grpcRuntime
-	eventBuf                *logging.EventBuffer
-	gc                      *conntrack.GC
-	routing                 *routing.Manager
-	frr                     *frr.Manager
-	ipsec                   *ipsec.Manager
-	cluster                 *cluster.Manager
-	dhcp                    *dhcp.Manager
-	dhcpServer              DHCPServerStatus
-	rpmResultsFn            func() []*rpm.ProbeResult
-	ipmonStatusFn           func() []ipmon.PolicyStatus
-	natPoolAlarmsFn         func() []natpoolalarm.ActiveAlarm
-	feedsFn                 func() map[string]feeds.FeedInfo
-	feedOverlayFn           func() map[string][]string
-	lldpNeighborsFn         func() []*lldp.Neighbor
-	ddnsStatsFn             func() *dhcpserver.DDNSStats
-	ddnsOwnedRecordsFn      func() []dhcpserver.DDNSOwnedRecordView
-	surfaceADDNSStatsFn     func() *ddnspkg.SurfaceAStats
-	surfaceADDNSStatusFn    func() []ddnspkg.SurfaceAStatusView
-	surfaceADDNSForceFn     func(force bool) (bool, string)
-	flowCollectorHealthFn   func() []flowexport.ExporterCollectorHealth
-	commitFn                func(ctx context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error)
-	commitConfirmedFn       func(ctx context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error)
-	zeroizeFn               func(ctx context.Context, wipe func() error) error
-	vrrpMgr                 *vrrp.Manager
-	raMgr                   *ra.Manager
-	fwdSampler              *fwdstatus.Sampler
-	startTime               time.Time
-	addr                    string
-	version                 string
+	unenforceableDenyWarned   sync.Map
+	store                     *configstore.Store
+	dp                        grpcRuntime
+	eventBuf                  *logging.EventBuffer
+	gc                        *conntrack.GC
+	routing                   *routing.Manager
+	frr                       *frr.Manager
+	ipsec                     *ipsec.Manager
+	cluster                   *cluster.Manager
+	dhcp                      *dhcp.Manager
+	dhcpServer                DHCPServerStatus
+	rpmResultsFn              func() []*rpm.ProbeResult
+	ipmonStatusFn             func() []ipmon.PolicyStatus
+	natPoolAlarmsFn           func() []natpoolalarm.ActiveAlarm
+	natPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
+	feedsFn                   func() map[string]feeds.FeedInfo
+	feedOverlayFn             func() map[string][]string
+	lldpNeighborsFn           func() []*lldp.Neighbor
+	ddnsStatsFn               func() *dhcpserver.DDNSStats
+	ddnsOwnedRecordsFn        func() []dhcpserver.DDNSOwnedRecordView
+	surfaceADDNSStatsFn       func() *ddnspkg.SurfaceAStats
+	surfaceADDNSStatusFn      func() []ddnspkg.SurfaceAStatusView
+	surfaceADDNSForceFn       func(force bool) (bool, string)
+	flowCollectorHealthFn     func() []flowexport.ExporterCollectorHealth
+	commitFn                  func(ctx context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error)
+	commitConfirmedFn         func(ctx context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error)
+	zeroizeFn                 func(ctx context.Context, wipe func() error) error
+	vrrpMgr                   *vrrp.Manager
+	raMgr                     *ra.Manager
+	fwdSampler                *fwdstatus.Sampler
+	startTime                 time.Time
+	addr                      string
+	version                   string
 	// listenersFn returns the effective management-listener snapshot for
 	// `show system services` (#6385). Wired from Config.ListenersFn; nil in a
 	// no-daemon unit-test build.
@@ -360,45 +365,46 @@ func (s *Server) userspaceDataplaneControl() (userspaceControlProvider, error) {
 // authenticated fabric listener (RunFabricListener), not this one.
 func NewServer(addr string, cfg Config) *Server {
 	return &Server{
-		store:                 cfg.Store,
-		dp:                    cfg.DP,
-		eventBuf:              cfg.EventBuf,
-		gc:                    cfg.GC,
-		routing:               cfg.Routing,
-		frr:                   cfg.FRR,
-		ipsec:                 cfg.IPsec,
-		cluster:               cfg.Cluster,
-		dhcp:                  cfg.DHCP,
-		dhcpServer:            cfg.DHCPServer,
-		rpmResultsFn:          cfg.RPMResultsFn,
-		ipmonStatusFn:         cfg.IPMonStatusFn,
-		natPoolAlarmsFn:       cfg.NATPoolAlarmsFn,
-		feedsFn:               cfg.FeedsFn,
-		feedOverlayFn:         cfg.FeedOverlayFn,
-		lldpNeighborsFn:       cfg.LLDPNeighborsFn,
-		ddnsStatsFn:           cfg.DDNSStatsFn,
-		ddnsOwnedRecordsFn:    cfg.DDNSOwnedRecordsFn,
-		surfaceADDNSStatsFn:   cfg.SurfaceADDNSStatsFn,
-		surfaceADDNSStatusFn:  cfg.SurfaceADDNSStatusFn,
-		surfaceADDNSForceFn:   cfg.SurfaceADDNSForceFn,
-		flowCollectorHealthFn: cfg.FlowCollectorHealthFn,
-		commitFn:              cfg.CommitFn,
-		commitConfirmedFn:     cfg.CommitConfirmedFn,
-		zeroizeFn:             cfg.ZeroizeFn,
-		vrrpMgr:               cfg.VRRPMgr,
-		raMgr:                 cfg.RAMgr,
-		fwdSampler:            cfg.FwdSampler,
-		startTime:             time.Now(),
-		addr:                  addr,
-		requestedAddr:         addr,
-		version:               cfg.Version,
-		fabricPeerAddrFn:      cfg.FabricPeerAddrFn,
-		fabricVRFDevice:       cfg.FabricVRFDevice,
-		listenersFn:           cfg.ListenersFn,
-		kernelUpgradeStatusFn: cfg.KernelUpgradeStatusFn,
-		bootstrapImportFn:     cfg.BootstrapImportFn,
-		hostInboundAppliedFn:  cfg.HostInboundAppliedFn,
-		peerLookupFn:          cfg.PeerLookupFn,
+		store:                     cfg.Store,
+		dp:                        cfg.DP,
+		eventBuf:                  cfg.EventBuf,
+		gc:                        cfg.GC,
+		routing:                   cfg.Routing,
+		frr:                       cfg.FRR,
+		ipsec:                     cfg.IPsec,
+		cluster:                   cfg.Cluster,
+		dhcp:                      cfg.DHCP,
+		dhcpServer:                cfg.DHCPServer,
+		rpmResultsFn:              cfg.RPMResultsFn,
+		ipmonStatusFn:             cfg.IPMonStatusFn,
+		natPoolAlarmsFn:           cfg.NATPoolAlarmsFn,
+		natPoolExhaustionAlarmsFn: cfg.NATPoolExhaustionAlarmsFn,
+		feedsFn:                   cfg.FeedsFn,
+		feedOverlayFn:             cfg.FeedOverlayFn,
+		lldpNeighborsFn:           cfg.LLDPNeighborsFn,
+		ddnsStatsFn:               cfg.DDNSStatsFn,
+		ddnsOwnedRecordsFn:        cfg.DDNSOwnedRecordsFn,
+		surfaceADDNSStatsFn:       cfg.SurfaceADDNSStatsFn,
+		surfaceADDNSStatusFn:      cfg.SurfaceADDNSStatusFn,
+		surfaceADDNSForceFn:       cfg.SurfaceADDNSForceFn,
+		flowCollectorHealthFn:     cfg.FlowCollectorHealthFn,
+		commitFn:                  cfg.CommitFn,
+		commitConfirmedFn:         cfg.CommitConfirmedFn,
+		zeroizeFn:                 cfg.ZeroizeFn,
+		vrrpMgr:                   cfg.VRRPMgr,
+		raMgr:                     cfg.RAMgr,
+		fwdSampler:                cfg.FwdSampler,
+		startTime:                 time.Now(),
+		addr:                      addr,
+		requestedAddr:             addr,
+		version:                   cfg.Version,
+		fabricPeerAddrFn:          cfg.FabricPeerAddrFn,
+		fabricVRFDevice:           cfg.FabricVRFDevice,
+		listenersFn:               cfg.ListenersFn,
+		kernelUpgradeStatusFn:     cfg.KernelUpgradeStatusFn,
+		bootstrapImportFn:         cfg.BootstrapImportFn,
+		hostInboundAppliedFn:      cfg.HostInboundAppliedFn,
+		peerLookupFn:              cfg.PeerLookupFn,
 	}
 }
 

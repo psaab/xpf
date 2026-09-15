@@ -34,3 +34,34 @@ func RenderAlarms(w io.Writer, alarms []ActiveAlarm, startCount int, detail bool
 	}
 	return count
 }
+
+// RenderExhaustionAlarms writes the active NAT pool-exhaustion alarms
+// (#9902 F-026) in the same `show security alarms` style as RenderAlarms,
+// shared by both render sites so the two cannot diverge. Numbering continues
+// from startCount exactly like RenderAlarms; the returned int is the running
+// count after these alarms.
+//
+// alarms must already be sorted (Monitor.ActiveExhaustionAlarms returns a
+// sorted snapshot). A nil/empty slice writes nothing and returns startCount.
+func RenderExhaustionAlarms(w io.Writer, alarms []ActiveExhaustionAlarm, startCount int, detail bool) int {
+	count := startCount
+	for _, a := range alarms {
+		count++
+		if detail {
+			// "Last nonzero observed delta", not "most recent sample": the
+			// monitor refreshes Events only on positive deltas, so clean
+			// ticks and identity rebases deliberately leave the last
+			// nonzero delta displayed (the alarm means "exhaustion was
+			// recently observed", and the number says how much was last
+			// seen — never zero while raised).
+			fmt.Fprintf(w,
+				"Alarm %d:\n  Class: NAT\n  Severity: Minor\n  Description: NAT source pool %s allocator-reported exhaustion events: %d (last nonzero observed delta)\n",
+				count, a.PoolName, a.Events)
+			if !a.FirstSeen.IsZero() {
+				fmt.Fprintf(w, "  First seen: %s\n", a.FirstSeen.Format("2006-01-02 15:04:05"))
+			}
+			fmt.Fprintf(w, "\n")
+		}
+	}
+	return count
+}

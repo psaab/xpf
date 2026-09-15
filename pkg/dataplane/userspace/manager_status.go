@@ -50,6 +50,8 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 func (m *Manager) setLastStatusLocked(status ProcessStatus) {
 	m.lastStatus = status
 	m.helperStatusObserved = true
+	// #9902 F-026: exactly one bump per publication (all callers hold m.mu).
+	m.lastStatusSeq++
 }
 
 // clearLastStatusLocked forgets the helper status and the observation together.

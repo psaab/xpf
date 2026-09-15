@@ -35,26 +35,37 @@ func (d *Daemon) natPoolAlarmSampler() natpoolalarm.Sampler {
 		if mgr == nil {
 			return natpoolalarm.View{Available: false}
 		}
-		v := mgr.AppliedNATView()
-		if !v.Available {
-			return natpoolalarm.View{Available: false}
+		return projectNATPoolView(mgr.AppliedNATView())
+	}
+}
+
+// projectNATPoolView maps the manager's applied NAT view onto the monitor's
+// dataplane-free View. Pure function of its argument (all fields exported)
+// so the field copy is unit-testable: dropping a field here silently
+// starves the monitor, and the test pins every copied field.
+func projectNATPoolView(v dpuserspace.AppliedNATView) natpoolalarm.View {
+	if !v.Available {
+		return natpoolalarm.View{Available: false}
+	}
+	pools := make(map[string]natpoolalarm.PoolStatus, len(v.Pools))
+	for name, p := range v.Pools {
+		pools[name] = natpoolalarm.PoolStatus{
+			PoolName:        p.PoolName,
+			AddressCount:    p.AddressCount,
+			PortLow:         p.PortLow,
+			PortHigh:        p.PortHigh,
+			UsedPorts:       p.UsedPorts,
+			ExhaustionTotal: p.ExhaustionTotal,
+			AllocatorID:     p.AllocatorID,
 		}
-		pools := make(map[string]natpoolalarm.PoolStatus, len(v.Pools))
-		for name, p := range v.Pools {
-			pools[name] = natpoolalarm.PoolStatus{
-				PoolName:     p.PoolName,
-				AddressCount: p.AddressCount,
-				PortLow:      p.PortLow,
-				PortHigh:     p.PortHigh,
-				UsedPorts:    p.UsedPorts,
-			}
-		}
-		return natpoolalarm.View{
-			Config:         v.Config,
-			Pools:          pools,
-			HelperCoherent: v.HelperCoherent,
-			Available:      true,
-		}
+	}
+	return natpoolalarm.View{
+		Config:         v.Config,
+		Pools:          pools,
+		HelperCoherent: v.HelperCoherent,
+		Available:      true,
+		StatusSequence: v.StatusSequence,
+		ProcGen:        v.ProcGen,
 	}
 }
 
@@ -92,8 +103,22 @@ func (d *Daemon) natPoolAlarms() []natpoolalarm.ActiveAlarm {
 	return m.ActiveAlarms()
 }
 
+// natPoolExhaustionAlarms returns the active NAT pool-exhaustion alarms for
+// the `show security alarms` render sites (#9902 F-026). Returns nil when
+// the monitor is not running. Same #2114 atomic-read contract as
+// natPoolAlarms.
+func (d *Daemon) natPoolExhaustionAlarms() []natpoolalarm.ActiveExhaustionAlarm {
+	if d == nil {
+		return nil
+	}
+	m := d.natPoolAlarm.Load()
+	if m == nil {
+		return nil
+	}
+	return m.ActiveExhaustionAlarms()
+}
+
 // maybeStartNATPoolAlarm constructs and starts the NAT pool-alarm monitor
-// exactly once, gated on a non-NoDataplane, non-bootstrap, dataplane-armed
 // daemon (#2114). It is idempotent: a non-nil stored monitor short-circuits.
 //
 // Called from the normal-boot background-services block (daemon_run.go) and

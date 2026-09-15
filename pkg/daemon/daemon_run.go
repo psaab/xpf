@@ -829,6 +829,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		})
 		// #2079: active NAT pool-utilization alarms for `show security alarms`.
 		shell.SetNATPoolAlarmsFn(d.natPoolAlarms)
+		// #9902 F-026: active NAT pool-exhaustion alarms.
+		shell.SetNATPoolExhaustionAlarmsFn(d.natPoolExhaustionAlarms)
 		shell.SetFeedsFn(func() map[string]feeds.FeedInfo {
 			if d.feeds != nil {
 				return d.feeds.AllFeeds()

@@ -8037,3 +8037,235 @@ fn syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173() {
         "the refreshed pair must disagree again from the next boundary, until the next full snapshot"
     );
 }
+
+/// #9902 F-023: flood-active-zone ACK validation is rate-limited (fail-closed
+/// Invalid), like the standby path — a flood of spoofed ACKs must not buy
+/// unbounded SipHash work per ACK.
+///
+/// FAIL-ON-REVERT: remove the active-arm limiter check and the 65th ACK
+/// validates instead of refusing as Invalid.
+#[test]
+fn syn_cookie_active_ack_validation_is_rate_limited_9902() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    state.force_syn_cookie_active_for_test("trust", 200);
+
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+
+    // Drain the whole test budget (64/s) at ONE instant with valid ACKs.
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+            SynCookieAckVerdict::Validated
+        );
+    }
+    assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+        SynCookieAckVerdict::Invalid,
+        "over-budget active-path ACKs must refuse fail-closed, not validate"
+    );
+    // Same source, so the validated-client cache holds one entry: the 64
+    // validations above shared it, and the throttled ACK added nothing.
+    assert_eq!(state.syn_cookie_validated_len(), 1);
+    // Refill next second (still active: 129 < 200).
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns + NS, 129),
+        SynCookieAckVerdict::Validated,
+        "the active budget refills at its configured rate"
+    );
+}
+
+/// #9902 F-023 (M23.3): out-of-window ACKs refuse as Invalid WITHOUT spending
+/// active validation budget — the prefilter sits ahead of the limiter, so
+/// epoch garbage cannot drain the allowance legitimate handshakes need.
+#[test]
+fn syn_cookie_active_prefilter_skips_implausible_epoch_without_spending_budget_9902() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(40);
+    state.force_syn_cookie_active_for_test("trust", 200);
+
+    let mut ack = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_ACK,
+    );
+    let implausible_cookie =
+        ((45u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x00ff_eeaa;
+    ack.tcp_ack = implausible_cookie.wrapping_add(1);
+
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128 * NS, 128),
+        SynCookieAckVerdict::Invalid,
+        "out-of-window ACKs refuse as Invalid on the active arm"
+    );
+    assert!(
+        state.syn_cookie_active_ack_untouched("trust"),
+        "wire-epoch prefilter must not spend active validation budget"
+    );
+    // The allowance is intact: a valid ACK validates immediately after.
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        40,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated
+    );
+}
+
+/// #9902 F-023 (active→standby): spending the active budget leaves the standby
+/// budget full — separate buckets, no shared history. Forced at ONE instant via
+/// the active-until seam so no time passes (a real transition would refill).
+#[test]
+fn syn_cookie_active_spend_leaves_standby_budget_full_9902() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    state.force_syn_cookie_active_for_test("trust", 200);
+
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+            SynCookieAckVerdict::Validated
+        );
+    }
+    assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
+    assert!(
+        state.syn_cookie_standby_ack_untouched("trust"),
+        "active-path validations must not spend the standby budget"
+    );
+    // Flood over at the same instant: the standby arm validates from its own
+    // full budget.
+    state.force_syn_cookie_active_for_test("trust", 100);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+        SynCookieAckVerdict::Validated,
+        "standby validation must draw on its own untouched budget"
+    );
+    assert_eq!(
+        state.syn_cookie_standby_ack_available("trust"),
+        SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC as u64 - 1
+    );
+}
+
+/// #9902 F-023 (standby→active): spending the standby budget leaves the active
+/// budget full — background misses cannot clip flood-time handshakes.
+#[test]
+fn syn_cookie_standby_spend_leaves_active_budget_full_9902() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    // Inactive (fresh zones start with active_until 0): the standby arm.
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 2;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+            SynCookieAckVerdict::NotApplicable
+        );
+    }
+    assert_eq!(state.syn_cookie_standby_ack_available("trust"), 0);
+    assert!(
+        state.syn_cookie_active_ack_untouched("trust"),
+        "standby-path validations must not spend the active budget"
+    );
+    // Flood starts at the same instant: the active arm validates from its own
+    // full budget.
+    state.force_syn_cookie_active_for_test("trust", 200);
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+        SynCookieAckVerdict::Validated,
+        "active validation must draw on its own untouched budget"
+    );
+    assert_eq!(
+        state.syn_cookie_active_ack_available("trust"),
+        SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC as u64 - 1
+    );
+}

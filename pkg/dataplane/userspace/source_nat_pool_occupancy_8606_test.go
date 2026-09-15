@@ -205,3 +205,33 @@ func occupancyWiredNames(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// #9902 F-026: the reporting surfaces share AppliedNATView's constructed-
+// first contract — a poisoned rule's default-zeros row must not shadow the
+// live allocator's row on `show`/API while the alarm evaluates the live
+// one. Both orders (first-wins takes the poisoned row when it sorts first).
+func TestSourceNATPoolOccupancySelectsConstructed9902(t *testing.T) {
+	healthy := SourceNATPoolStatus{
+		PoolName: "p1", RuleName: "good",
+		AddressCount: 1, PortLow: 1, PortHigh: 100,
+		UsedPorts: 50, MaxTrackedFlows: 90,
+	}
+	poisoned := SourceNATPoolStatus{PoolName: "p1", RuleName: "bad"}
+	for _, tc := range []struct {
+		name string
+		rows []SourceNATPoolStatus
+	}{
+		{"poisoned-first", []SourceNATPoolStatus{poisoned, healthy}},
+		{"healthy-first", []SourceNATPoolStatus{healthy, poisoned}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SourceNATPoolOccupancy(ProcessStatus{SourceNATPools: tc.rows})
+			if len(got) != 1 {
+				t.Fatalf("expected 1 deduped pool, got %d", len(got))
+			}
+			if got["p1"].UsedPorts != 50 {
+				t.Fatalf("constructed row must win, got %+v", got["p1"])
+			}
+		})
+	}
+}

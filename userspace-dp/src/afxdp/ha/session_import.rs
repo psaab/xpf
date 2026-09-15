@@ -294,7 +294,7 @@ impl crate::afxdp::ha::SessionDomain {
             entry.metadata.is_reverse,
             now_ns,
         ) {
-            crate::nat::release_source_nat_allocation(
+            crate::nat::release_synced_source_nat_allocation_untracked(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &entry.key,

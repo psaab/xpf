@@ -21,6 +21,12 @@ type SourceNATPoolStatus struct {
 	AllocationsTotal               uint64 `json:"allocations_total,omitempty"`
 	ReusesTotal                    uint64 `json:"reuses_total,omitempty"`
 	ExhaustionTotal                uint64 `json:"exhaustion_total,omitempty"`
+	// #9902 F-026: the reporting allocator's instance id. Same id ⇒ same
+	// counter instance (deltas comparable); changed id ⇒ the allocator was
+	// rebuilt (rebaseline silently). 0 from a helper older than the field.
+	// JSON tag MUST match the Rust serde rename(...) exactly
+	// (protocol/nat.rs).
+	AllocatorID uint64 `json:"allocator_id,omitempty"`
 	// #8447: persistent-NAT admissions that produced a translation, and those
 	// that returned a failure instead. Read as a PAIR for the same reason the
 	// lock counters below are: a decline count of zero cannot tell "nothing

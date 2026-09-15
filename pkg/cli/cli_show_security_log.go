@@ -212,6 +212,10 @@ func (c *CLI) showSecurityAlarms(args []string) error {
 	if c.natPoolAlarmsFn != nil {
 		alarmCount = natpoolalarm.RenderAlarms(os.Stdout, c.natPoolAlarmsFn(), alarmCount, detail)
 	}
+	// #9902 F-026: NAT source pool-exhaustion alarms from the daemon monitor.
+	if c.natPoolExhaustionAlarmsFn != nil {
+		alarmCount = natpoolalarm.RenderExhaustionAlarms(os.Stdout, c.natPoolExhaustionAlarmsFn(), alarmCount, detail)
+	}
 
 	if alarmCount == 0 {
 		fmt.Println("No security alarms currently active")

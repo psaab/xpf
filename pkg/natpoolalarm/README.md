@@ -56,22 +56,60 @@ coherent applied config is available.
 
 ## Constraints honoured
 
-- **No Rust / wire change** — reuses the existing 1 Hz `SourceNATPoolStatus`
-  counters and `last_snapshot_generation`.
 - **No new control-socket request** — the sampler reads the manager's CACHED
   status + applied snapshot, no socket I/O (CLAUDE.md control-socket-contention
   rule).
 - **No per-tick logging** — the syslog emit is gated entirely behind a raise/
   clear transition.
+- The utilization half reuses the existing 1 Hz `SourceNATPoolStatus`
+  counters and `last_snapshot_generation` with no Rust change (#2079); the
+  exhaustion half adds one additive `allocator_id` u64 to the pool row
+  (#9902 F-026), defaulted on both planes so mixed-version pairs degrade to
+  the documented legacy-0 residual instead of failing a decode.
 
 ## Dedup / deterministic / persistent
 
 - Rules sharing a pool share one `Arc<PortAllocatorShared>` and report identical
   `UsedPorts`; `AppliedNATView` deduplicates by pool name and takes one entry —
-  never sums (summing would double/triple-count → false alarms).
-- Deterministic pools are SKIPPED in this release (`UsedPorts` is not the right
-  numerator for block-based allocation; block-based utilization is a follow-up).
+  never sums (summing would double/triple-count → false alarms). Among
+  same-name rows the CONSTRUCTED allocator wins (`MaxTrackedFlows>0`, tie →
+  first): a poisoned rule (#9874) keeps its pool_mode but builds no allocator,
+  and its default-zeros row must not shadow the live one (#9902 F-026).
+- Deterministic pools are INAPPLICABLE for utilization (aggregate utilization
+  cannot predict per-block exhaustion) and marked as such at runtime and at
+  commit time — but their allocator-reported exhaustion events ARE watched
+  (see below). Same for address-only pools.
 - Persistent-NAT pools use raw `UsedPorts`.
+
+## Exhaustion-event alarm (#9902 F-026)
+
+Utilization cannot see every pool class, so the same monitor also watches the
+allocator's cumulative `exhaustion_total` per pool — "allocator-REPORTED
+exhaustion events" (block/pool/cap fullness, deterministic bounds,
+address-only collision; config-error/drift refusals reusing the reason string
+are deliberately uncounted). Any positive delta on a comparable baseline
+raises `NAT_POOL_EXHAUSTION_ALARM_RAISED` (syslog `events=<delta>`); 3 fresh
+clean ticks clear it. "Clear" means "no recently observed exhaustion", not
+"capacity recovered".
+
+Comparability is keyed on instance identity, not the counter value: each pool
+row carries the reporting allocator's instance id (`allocator_id`, minted per
+`PortAllocatorShared` construction) and the sample carries the helper
+incarnation (`procGen`). A change in EITHER means the counter instance was
+replaced (rebuild or helper restart) and the tick rebases SILENTLY — no
+evaluation, no clear, no false hysteresis credit. Freshness comes from the
+manager's status-publication sequence: a repeated sequence means the sampler
+re-read the same cached sample, so the exhaustion pass skips the tick
+entirely. Watches every rule-referenced pool class (PAT, deterministic,
+address-only); still gated on the same stanza (feature-disabled / nil-config
+clears and retires baselines).
+
+Two stated residuals. (1) Legacy `allocator_id` 0 ALWAYS rebases — a legacy
+same-process rebuild is invisible (0→0), and evaluating the delta would
+false-raise on a fast re-exhaustion past the old count — so legacy helpers
+fail silent (never raise) for the skewed-upgrade window. (2) Rebase loses the
+inter-tick delta: events between the last tick and a rebuild are unobservable
+at the 1 Hz poll cadence, and a rebase neither counts nor clears them.
 
 ## Commit-time validation
 
@@ -87,8 +125,22 @@ raise=0/clear=0 is an always-firing alarm). See `docs/config-schema.md` #2079.
   deterministic skip + det-convert clear, no-double-count, nil-config / feature-
   disabled clear-all, unavailable / not-coherent HOLD-all, updatePct-no-syslog,
   syslog severity/shape, start/stop. Mutation-verified non-tautological.
+- `natpoolalarm_exhaustion_9902_test.go` — exhaustion first-sight silence,
+  raise/refresh/clear-3, id×{below,equal,above} + procGen×{below,equal,above}
+  silent rebase, same-key below/equal/above, rebase-no-clear-credit,
+  same-seq HOLD, absent HOLD, removal retire + re-add silence,
+  baseline-only prune, deterministic + address-only watched, det-convert
+  1-clear, class-change continuity, disable/nil-config clear,
+  unavailable/incoherent HOLD, severity/shape.
 - `render_test.go` — shared `show security alarms` render (detail/summary/empty,
-  numbering continuation).
+  numbering continuation), utilization + exhaustion.
 - `../dataplane/userspace/applied_nat_view_test.go` — coherency, the FIB-bump
   fixed point, dedup, unavailable-before-apply.
+- `../dataplane/userspace/applied_nat_view_9902_test.go` — constructed-first
+  selection (both orders, import-only vs poisoned, identical dedup),
+  exhaustion-identity projection, allocator_id wire lockstep, status-sequence
+  publish/fail/clear semantics.
+- `../daemon/natpoolalarm_projection_9902_test.go` — sampler field projection.
 - `../config/compiler_nat_pool_alarm_test.go` — commit-time threshold validation.
+- `../config/natpoolalarm_inapplicable_7361_test.go` — address-only advisory +
+  deterministic sentence (#9902).

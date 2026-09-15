@@ -17,20 +17,20 @@ use super::*;
 /// Production forwarding paths must use
 /// [`release_source_nat_allocation_for_worker`] instead: an HA-synced session is
 /// reserved once per worker against one shared allocator, and only the LAST
-/// holder may free the port. This entry point remains for local-only callers and
-/// for tests that exercise the single-holder semantics directly.
+/// holder may free the port. This entry point remains for tests that exercise
+/// the single-holder semantics directly.
 /// Compile-time completeness guard for #6211 F2: this untracked entry point is
 /// TEST-ONLY, so a production caller that forgot to thread its `worker_id` is a
 /// BUILD FAILURE in the non-test profile rather than a silent single-holder
 /// release of a reservation every worker holds. Production uses the
 /// `_for_worker` twin.
 ///
-/// #6600: one production caller now exists, and it is the exact case the guard
-/// above was written to permit — the ROLLBACK of an `Untracked` reservation the
-/// coordinator took moments earlier and no worker has adopted. There is no
-/// worker_id to thread, because no worker holds it: the reservation is being
-/// withdrawn precisely BECAUSE the import is not going to be published. A
-/// holder-aware release would be the wrong call here, not a safer one.
+/// The one permitted untracked production use — a coordinator import-time
+/// reservation withdrawn before any worker adopts it (the #6600 NAT64-refusal
+/// rollback and the #8138 tunnel-purge release, where there is no worker_id to
+/// thread) — goes through the NAMED production entry
+/// [`release_synced_source_nat_allocation_untracked`], not here.
+#[cfg(test)]
 pub(crate) fn release_source_nat_allocation(
     // #6751: the interface-mode identity registry. Passed EXPLICITLY rather
     // than reached through `rules`, because a teardown must free the identity
@@ -59,13 +59,50 @@ pub(crate) fn release_source_nat_allocation(
     )
 }
 
+/// Release a coordinator's import-time UNTRACKED reservation — the ONLY
+/// permitted untracked production use (#9902 F-097).
+///
+/// The coordinator takes import-time reservations as `NatHolder::Untracked`
+/// ([`reserve_synced_source_nat_allocation_untracked`]); when the import is
+/// withdrawn before any worker adopts it — the #6600 NAT64-refusal rollback
+/// and the #8138 tunnel-purge release — there is no worker_id to thread, so
+/// the holder-aware twins are the wrong call, not a safer one. Records a
+/// worker HAS adopted survive: `Untracked.bit()` is 0, so `drop_holder_locked`
+/// keeps any record with holders set. That is the deliberate direction for a
+/// release site that cannot name a worker: an under-release leaks a bounded
+/// pool port, an over-release hands a live worker's port to a new flow.
+///
+/// Behavior-identical to the pre-#9902 direct `release_source_nat_allocation`
+/// calls at those two sites (a release, not a rollback). Returns whether a
+/// reservation was actually freed (#8138 counting).
+pub(crate) fn release_synced_source_nat_allocation_untracked(
+    // #6751: see `release_source_nat_allocation`.
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> bool {
+    release_source_nat_allocation_with_mode(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        false,
+        NatHolder::Untracked,
+    )
+}
+
 /// #6211 F2: release THIS worker's hold on a source-NAT allocation.
 ///
 /// For a local allocation (no holder set) this is bit-identical to
-/// [`release_source_nat_allocation`] — the port is freed. For an HA-synced
-/// reservation, which every worker took against the single shared allocator,
-/// only `worker_id`'s bit is cleared and the port survives until the last worker
-/// releases it.
+/// [`release_synced_source_nat_allocation_untracked`] — the port is freed. For
+/// an HA-synced reservation, which every worker took against the single shared
+/// allocator, only `worker_id`'s bit is cleared and the port survives until the
+/// last worker releases it.
 /// #6979: clear `worker_id`'s holder bit across every POOL-mode rule allocator,
 /// freeing any record the clear empties. Returns records freed.
 ///
@@ -120,7 +157,7 @@ pub(crate) fn release_source_nat_allocation_for_worker(
 }
 
 /// Roll back an UNTRACKED (single-holder) source-NAT allocation. See
-/// [`release_source_nat_allocation`]; production paths use
+/// [`release_synced_source_nat_allocation_untracked`]; production paths use
 /// [`rollback_source_nat_allocation_for_worker`].
 /// Compile-time completeness guard for #6211 F2: this untracked entry point is
 /// TEST-ONLY, so a production caller that forgot to thread its `worker_id` is a
@@ -292,10 +329,12 @@ fn release_source_nat_allocation_with_mode(
     // config could already hold one flow in two allocators (see above).
     //
     // That early exit was NOT on a cold path, so state the cost honestly rather
-    // than waving it off. This body backs `rollback_source_nat_allocation` as
-    // well as the release, and that has five non-test call sites, all of them on
-    // the packet path in `afxdp/poll_descriptor/mod.rs` (:2313, :2374, :2472,
-    // :2644, :4912) — :2374 is the admission-refusal arm, i.e. the flood regime.
+    // than waving it off. This body backs `rollback_source_nat_allocation_for_worker`
+    // as well as the releases, and that has five production call sites, all of
+    // them on the packet path in `afxdp/poll_descriptor/mod.rs` — including the
+    // admission-refusal arm, i.e. the flood regime. (Pre-#9902 this comment named
+    // the TEST-ONLY `rollback_source_nat_allocation`, which has no production
+    // callers.)
     // Per refused SNAT'ed flow the sweep takes K allocator locks instead of
     // (owning index + 1), where K is the pool-mode rule count. This is a
     // mechanism statement: no throughput measurement was taken and none is

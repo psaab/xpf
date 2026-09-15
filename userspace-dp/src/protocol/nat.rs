@@ -439,6 +439,12 @@ pub(crate) struct SourceNatPoolStatus {
     pub reuses_total: u64,
     #[serde(rename = "exhaustion_total", default)]
     pub exhaustion_total: u64,
+    /// #9902 F-026: the reporting allocator's instance id (see
+    /// `PortAllocatorShared::allocator_id`). Lets the control plane tell a
+    /// rebuilt allocator (fresh zeroed counters) from the one it baselined.
+    /// 0 from a helper older than this field (serde default).
+    #[serde(rename = "allocator_id", default)]
+    pub allocator_id: u64,
     /// #8447: persistent-NAT admissions that produced a translation. Reported
     /// as a PAIR with the decline counter below — a zero decline count is
     /// equally consistent with "nothing declined" and "this path never ran",

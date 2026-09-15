@@ -76,8 +76,8 @@ pub(crate) fn allocate_nat64_pool_port_deterministic_v6(
 }
 
 /// #4381: release (or roll back) a NAT64 forward flow's translated pool port,
-/// mirroring [`release_source_nat_allocation`]'s flow-key / translated-tuple
-/// construction so the SAME `release_flow` / `rollback_flow` frees the port the
+/// mirroring [`release_synced_source_nat_allocation_untracked`]'s flow-key /
+/// translated-tuple construction so the SAME `release_flow` / `rollback_flow`
 /// forward flow allocated. Returns whether the allocation was found and freed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn release_nat64_pool_port(

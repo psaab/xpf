@@ -54,6 +54,7 @@
 package natshow
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -69,10 +70,19 @@ import (
 // counts silently understated — a zero that reads as "no sessions"
 // rather than "could not read". Surfacing the error tells the operator
 // the displayed counts are partial (#5557).
+//
+// A walk stopped by cancellation (ErrSessionWalkCancelled, #9902 F-096)
+// maps to a "counts are partial" caveat rather than the error line: there
+// is no error value to format, and the partial tally still prints.
 func noteSessionScanError(w io.Writer, err error) {
-	if err != nil {
-		fmt.Fprintf(w, "Warning: active session counts may be incomplete: %v\n", err)
+	if err == nil {
+		return
 	}
+	if errors.Is(err, ErrSessionWalkCancelled) {
+		fmt.Fprintln(w, "Warning: active session counts are partial (session walk cancelled)")
+		return
+	}
+	fmt.Fprintf(w, "Warning: active session counts may be incomplete: %v\n", err)
 }
 
 // noteNotInstalled emits the #6534 exclusion annotation for a NAT object the

@@ -1234,6 +1234,7 @@
   "source_nat_pool_status": {
     "address_count": 0,
     "allocations_total": 0,
+    "allocator_id": 0,
     "exhaustion_total": 0,
     "live_flows": 0,
     "live_lock_acquisitions_total": 0,

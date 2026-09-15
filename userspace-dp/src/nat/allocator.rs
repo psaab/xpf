@@ -890,6 +890,16 @@ struct AddressOccupancy {
     words: Vec<AtomicU64>,
     cursor: AtomicU32,
     recycle: Mutex<RecycleRing>,
+    /// #9902 F-098: test-only attempt accounting for `claim_in_block` (the
+    /// deterministic block probe). `probe_word_loads` counts bitmap words
+    /// loaded; `probe_claim_rmws` counts `claim_offset` attempts. The bound
+    /// test pins loads ≈ words and RMWs ≈ 1 on a dense-prefix fixture — the
+    /// architectural contract the word-skip exists to provide (per-port CAS
+    /// would show RMWs ≈ occupied ports). Compiled out of production builds.
+    #[cfg(test)]
+    probe_word_loads: AtomicU64,
+    #[cfg(test)]
+    probe_claim_rmws: AtomicU64,
     /// #7174 (M13): live count of set bits in `words`, maintained by the two
     /// (and only two) sites that transition a bit — `claim_offset` (0 -> 1) and
     /// `free_offset` (1 -> 0). `Relaxed` is sufficient: the ONE consumer that
@@ -947,6 +957,10 @@ impl AddressOccupancy {
             words,
             cursor: AtomicU32::new(0),
             recycle: Mutex::new(RecycleRing::new(range)),
+            #[cfg(test)]
+            probe_word_loads: AtomicU64::new(0),
+            #[cfg(test)]
+            probe_claim_rmws: AtomicU64::new(0),
             occupied: AtomicU32::new(0),
             recycle_scan_pops: AtomicU64::new(0),
             recycle_scan_walks: AtomicU64::new(0),
@@ -1195,6 +1209,81 @@ impl AddressOccupancy {
         }
     }
 
+    /// Claim the first free port in the CLOSED interval `[start_port, end_port]`
+    /// (#9902 F-098): the word-skipping probe both deterministic-CGNAT arms use
+    /// for a subscriber's block.
+    ///
+    /// The pre-#9902 loop CAS-probed every port from the block start, so a
+    /// subscriber near its block budget paid one `fetch_or` RMW per occupied
+    /// port on every allocation. This loads each spanned bitmap word ONCE and
+    /// skips all-ones words, then names the first zero bit of a word with
+    /// `trailing_zeros` and claims it directly. Single-threaded cost is one
+    /// load per fully-occupied word plus one bitmap claim RMW for an
+    /// uncontended successful search (none for a full block); single-threaded
+    /// it claims the SAME port the naive loop would (first-free ascending).
+    /// It still starts at the block beginning — O(occupied words) loads, not a
+    /// roving hint — because per-block hints would need state keyed by
+    /// call-level geometry this address-level bitmap does not have.
+    ///
+    /// EDGES. Block sizes are arbitrary positive integers
+    /// (compiler_nat_source.rs validates `> 0` and `<= range` only), so a block
+    /// need not align to 64-bit words: out-of-block bits in the first and last
+    /// word are masked as occupied (never claimed), including the both-edges-
+    /// in-one-word case.
+    ///
+    /// FORWARD PROGRESS. Tried candidates are masked out of the LOCAL word copy
+    /// and a word is never reloaded within one call, so each in-block bit is
+    /// tried at most once per call — the finite forward scan the naive loop had.
+    /// A lost CAS means a racer owns the bit now; move on.
+    ///
+    /// RACES. There is no coherent full-block snapshot: a bit freed concurrently
+    /// inside a skipped all-ones word may be passed over (a later free port is
+    /// claimed instead, or a full block is reported while a free exists). Still
+    /// correct — every claimed port was free and is won by exactly one claimer.
+    /// Lock-free w.r.t. the global allocator mutex (same as the naive loop).
+    fn claim_in_block(&self, start_port: u16, end_port: u16) -> Option<u16> {
+        let start = self.offset_of(start_port)?;
+        let end = self.offset_of(end_port)?;
+        if start > end {
+            return None;
+        }
+        let first_word = (start / 64) as usize;
+        let last_word = (end / 64) as usize;
+        for w in first_word..=last_word {
+            let mut word = self.words[w].load(Ordering::Acquire);
+            #[cfg(test)]
+            self.probe_word_loads.fetch_add(1, Ordering::Relaxed);
+            if w == first_word {
+                let lead = start % 64;
+                if lead != 0 {
+                    word |= (1u64 << lead) - 1;
+                }
+            }
+            if w == last_word {
+                let tail = end % 64;
+                if tail != 63 {
+                    word |= !((1u64 << (tail + 1)) - 1);
+                }
+            }
+            // Zero bits of the masked word, ascending, each tried at most once.
+            let mut pending = !word;
+            while pending != 0 {
+                let bit = pending.trailing_zeros();
+                pending &= pending - 1;
+                let offset = w as u32 * 64 + bit;
+                #[cfg(test)]
+                self.probe_claim_rmws.fetch_add(1, Ordering::Relaxed);
+                if self.claim_offset(offset) {
+                    // In-block offsets are `< range` by construction (both ports
+                    // passed `offset_of`), so `port_of` is `Some` — the same
+                    // shape the PAT cursor claim relies on.
+                    return self.port_of(offset);
+                }
+            }
+        }
+        None
+    }
+
     /// Count of currently-occupied ports on this address (popcount over the
     /// bitmap). Cold path (snapshot / tests only).
     ///
@@ -1225,8 +1314,30 @@ const PRESSURE_GC_BUDGET: usize = 64;
 /// release/idle budgets (64) yield the mutex several times.
 const GC_CHUNK: usize = 8;
 
+/// #9902 F-026: process-global allocator-instance counter. Each
+/// `PortAllocatorShared` takes the next id at construction; the id travels
+/// with the status row so the control plane can tell a rebuilt allocator
+/// (fresh zeroed counters) from the one it baselined. 0 is never assigned —
+/// it means "no id reported" (a helper older than this field).
+///
+/// Monotonic `fetch_add`, never reused: an id identifies one counter instance
+/// for the helper's lifetime. Tests assert only distinctness/equality of ids
+/// from constructions they perform themselves, never absolute values, so
+/// parallel `cargo test` threads cannot flake on the shared sequence (#6819).
+static NEXT_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_allocator_id() -> u64 {
+    NEXT_ALLOCATOR_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Debug)]
 struct PortAllocatorShared {
+    /// #9902 F-026: this shared state's instance id (see `NEXT_ALLOCATOR_ID`).
+    /// Immutable after construction; `Clone` shares the `Arc`, so a reused
+    /// allocator keeps its id WITH its counters (comparable), while every
+    /// fresh build — reconcile, runtime refresh, disarmed refresh, reseed-new —
+    /// mints a new one (rebaseline). Echoed per pool row in the status.
+    allocator_id: u64,
     /// One atomic counter per pool address, used for the stateless round-robin
     /// `try_next_port` (address-only / `port no-translation` paths). Separate
     /// from `occupancy` (which tracks flow-keyed pool-mode PAT allocation).
@@ -1298,6 +1409,7 @@ impl Default for PortAllocator {
     fn default() -> Self {
         Self {
             shared: Arc::new(PortAllocatorShared {
+                allocator_id: next_allocator_id(),
                 counters: Vec::new(),
                 addr_counter_v4: AtomicU32::new(0),
                 addr_counter_v6: AtomicU32::new(0),
@@ -1388,6 +1500,7 @@ impl PortAllocator {
             .min(MAX_SOURCE_NAT_POOL_TRACKED_FLOWS);
         Self {
             shared: Arc::new(PortAllocatorShared {
+                allocator_id: next_allocator_id(),
                 counters,
                 addr_counter_v4: AtomicU32::new(0),
                 addr_counter_v6: AtomicU32::new(0),
@@ -1694,6 +1807,23 @@ impl PortAllocator {
         match self.shared.occupancy.get(addr_index) {
             Some(occ) => occ.recycle_scan_pops.load(Ordering::Relaxed),
             None => 0,
+        }
+    }
+
+    /// Test-only: `claim_in_block` attempt accounting for pool address
+    /// `addr_index` since construction: (bitmap words loaded, `claim_offset`
+    /// attempts). The seam that makes the #9902 word-skip MEASURABLE — the
+    /// return value (first-free port) is identical with or without it. Use
+    /// `debug_seed_owner` to prepare dense-prefix fixtures: it sets bits
+    /// without touching these counters, so one measured allocation reads exact.
+    #[cfg(test)]
+    pub(super) fn debug_probe_attempts(&self, addr_index: usize) -> (u64, u64) {
+        match self.shared.occupancy.get(addr_index) {
+            Some(occ) => (
+                occ.probe_word_loads.load(Ordering::Relaxed),
+                occ.probe_claim_rmws.load(Ordering::Relaxed),
+            ),
+            None => (0, 0),
         }
     }
 
@@ -2720,15 +2850,14 @@ impl PortAllocator {
         // Claim the first free port in the subscriber's block, LOCK-FREE: the
         // occupancy bitmap is CAS-based and lives outside the map mutex, and
         // nothing above this point takes the mutex, so no thread ever holds it
-        // across the scan.
-        let mut claimed = None;
-        for p in port_start..=port_end {
-            let port = p as u16;
-            if self.shared.occupancy[ip_idx].reserve(port) {
-                claimed = Some(port);
-                break;
-            }
-        }
+        // across the scan. #9902 F-098: word-skipping probe — one load per
+        // fully-occupied word instead of one CAS per occupied port; the claimed
+        // port is still the first free one, ascending.
+        // (`port_start`/`port_end` are clamped to `port_high <= u16::MAX` above,
+        // so the narrowing casts cannot truncate — the same casts the naive
+        // per-port loop made.)
+        let claimed =
+            self.shared.occupancy[ip_idx].claim_in_block(port_start as u16, port_end as u16);
         let Some(port) = claimed else {
             // No free port in the subscriber's block. Take the mutex ONCE, for
             // O(1), before reporting the block full: a LIVE flow's own port is
@@ -2884,15 +3013,9 @@ impl PortAllocator {
         // own block budget serialized every other flow through this pool.
         //
         // Claim the first free port in the subscriber's block, LOCK-FREE (the
-        // v4 arm's comment applies verbatim).
-        let mut claimed = None;
-        for p in port_start..=port_end {
-            let port = p as u16;
-            if self.shared.occupancy[ip_idx].reserve(port) {
-                claimed = Some(port);
-                break;
-            }
-        }
+        // v4 arm's comment applies verbatim; #9902 F-098 word-skipping probe).
+        let claimed =
+            self.shared.occupancy[ip_idx].claim_in_block(port_start as u16, port_end as u16);
         let Some(port) = claimed else {
             // No free port in the subscriber's block. Take the mutex ONCE, for
             // O(1), before reporting the block full: a LIVE flow's own port is
@@ -4550,6 +4673,7 @@ impl PortAllocator {
             .map(|occ| occ.occupied_count() as u64)
             .sum();
         PortAllocatorSnapshot {
+            allocator_id: self.shared.allocator_id,
             live_flows,
             used_ports,
             persistent_leases,
@@ -4803,6 +4927,11 @@ impl PortAllocator {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PortAllocatorSnapshot {
+    /// #9902 F-026: the snapshotted allocator's instance id: two snapshots
+    /// with the same id came from the same counter instance (cumulative
+    /// counters comparable); different ids mean a rebuild happened between
+    /// them (rebaseline, never delta).
+    pub(crate) allocator_id: u64,
     pub(crate) live_flows: u64,
     pub(crate) used_ports: u64,
     pub(crate) persistent_leases: u64,

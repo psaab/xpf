@@ -1051,6 +1051,7 @@ fn process_status_source_nat_pool_status_roundtrip() {
             allocations_total: 1,
             reuses_total: 3,
             exhaustion_total: 5,
+            allocator_id: 7,
             ..Default::default()
         }],
         ..Default::default()
@@ -1061,6 +1062,10 @@ fn process_status_source_nat_pool_status_roundtrip() {
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.source_nat_pools.len(), 1);
     assert_eq!(back.source_nat_pools[0].exhaustion_total, 5);
+    assert_eq!(
+        back.source_nat_pools[0].allocator_id, 7,
+        "#9902 F-026: allocator instance id must survive the status wire"
+    );
 }
 
 #[test]

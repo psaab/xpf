@@ -203,8 +203,16 @@ type Manager struct {
 	// the field". Both are < ProtocolVersion, and only the second is an
 	// incompatibility. Guarded by m.mu, like lastStatus itself.
 	helperStatusObserved bool
-	lastSnapshot         *ConfigSnapshot
-	lastApply            *dataplane.ApplyResult
+	// lastStatusSeq counts helper-status PUBLICATIONS into lastStatus (#9902
+	// F-026): bumped inside setLastStatusLocked, so it advances exactly when
+	// the cache is replaced — never on a failed apply (which leaves the
+	// cache in place) and never on a clear (gen-0 ⇒ incoherent ⇒ HOLD
+	// anyway). The NAT exhaustion monitor keys its freshness gate off it: a
+	// repeated sequence means the sampler re-read the same cached sample.
+	// Guarded by m.mu, like lastStatus itself.
+	lastStatusSeq uint64
+	lastSnapshot  *ConfigSnapshot
+	lastApply     *dataplane.ApplyResult
 	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
 	// most recently built snapshot carries unrepresentable policy content that
 	// the helper integrity preflight rejects (previous-good retained, or
