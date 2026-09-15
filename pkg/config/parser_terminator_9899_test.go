@@ -9,12 +9,13 @@ import (
 // hierarchical leaf at EOF must be a parse error, not a silent implicit leaf.
 //
 // parser.go's default terminator arm treats "no semicolon or brace" as an
-// implicit leaf with zero errors. That is correct before a right brace
-// (`system { host-name foo }` omits the semicolon and Junos tolerates it),
-// but at EOF there is no closing brace to justify the omission —
-// `system host-name foo` (no `;`, no braces) parsed clean with nil errors,
-// so CheckText/LoadOverride gated on len(errs)==0 accepted a truncated
-// statement as if it were complete.
+// implicit leaf with zero errors. That stands before a right brace
+// (`system { host-name foo }` omits the semicolon and this parser has always
+// accepted it — pinned by the scope-guard leg below, not by an external
+// grammar citation), but at EOF there is no closing brace to justify the
+// omission — `system host-name foo` (no `;`, no braces) parsed clean with nil
+// errors, so CheckText/LoadOverride gated on len(errs)==0 accepted a
+// truncated statement as if it were complete.
 //
 // The fix records an expected-semicolon ParseError when the default arm sees
 // EOF, while still carrying the node for recovery (like the existing

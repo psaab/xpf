@@ -78,6 +78,11 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		ifc := &InterfaceConfig{
 			Name:  ifName,
 			Units: make(map[int]*InterfaceUnit),
+			// #9899 P2: record unit authorship BEFORE the quarantine loop
+			// below can skip every unit. An interface that authored units but
+			// kept none is quarantined, not unitless — the emitter must not
+			// fall back to the bare-name endpoint.
+			AuthoredUnits: len(child.FindChildren("unit")) > 0,
 		}
 
 		// Check for description

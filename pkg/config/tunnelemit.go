@@ -95,6 +95,12 @@ func EmitTunnelEndpointNames(cfg *Config) []TunnelEndpointName {
 		}
 		if iface.Tunnel != nil {
 			if len(iface.Units) == 0 {
+				// #9899 P2: an interface that authored units but kept none
+				// had every unit quarantined on the lenient path — it is not
+				// unitless, so the bare-name fallback must not activate.
+				if iface.AuthoredUnits {
+					continue
+				}
 				add(name, iface.Tunnel)
 				continue
 			}

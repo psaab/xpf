@@ -824,3 +824,47 @@ func TestInterfaceNumericEmpty9899(t *testing.T) {
 		}
 	})
 }
+
+// TestInterfaceFinalUnitQuarantineSuppressesFallback9899 pins P2: when lenient
+// compilation quarantines the FINAL unit of an interface that authored units,
+// the emitter must NOT fall back to the unitless bare-name endpoint. That
+// fallback (tunnelemit.go) is for interfaces authored WITHOUT units; emitting
+// it here activates a parent-tunnel endpoint the operator never configured on
+// the bare device name. Pre-fix RED: the quarantined interface emits "gr-0/0/0".
+func TestInterfaceFinalUnitQuarantineSuppressesFallback9899(t *testing.T) {
+	cmds := []string{
+		"set interfaces gr-0/0/0 tunnel source 10.0.0.1",
+		"set interfaces gr-0/0/0 tunnel destination 10.0.0.2",
+		"set interfaces gr-0/0/0 tunnel ttl 64",
+		"set interfaces gr-0/0/0 unit 5 tunnel ttl 256",
+	}
+	what := "final unit ttl 256"
+	ifaceNumStrictMustContain9899(t, ifaceNumFlatTree9899(t, cmds...), what, "gr-0/0/0", "ttl")
+	cfg := ifaceNumLenientMustWarn9899(t, ifaceNumFlatTree9899(t, cmds...), what, "gr-0/0/0", "ttl")
+	ifc := cfg.Interfaces.Interfaces["gr-0/0/0"]
+	if ifc == nil {
+		t.Fatalf("parent must survive a unit quarantine; got nil")
+	}
+	if len(ifc.Units) != 0 {
+		t.Fatalf("lenient must SKIP the only unit (%s); got %d units", what, len(ifc.Units))
+	}
+	if _, ok := ifaceNumEmitted9899(cfg)["gr-0/0/0"]; ok {
+		t.Errorf("all-units-quarantined must NOT emit the unitless fallback endpoint")
+	}
+	if got := len(EmitTunnelEndpointNames(cfg)); got != 0 {
+		t.Errorf("quarantined interface must emit no endpoints, got %d", got)
+	}
+	// Control: a truly unitless interface with the same tunnel still emits.
+	unitless := []string{
+		"set interfaces gr-0/0/1 tunnel source 10.0.1.1",
+		"set interfaces gr-0/0/1 tunnel destination 10.0.1.2",
+		"set interfaces gr-0/0/1 tunnel ttl 64",
+	}
+	cfg2, err := CompileConfigLenient(ifaceNumFlatTree9899(t, unitless...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ifaceNumEmitted9899(cfg2)["gr-0/0/1"]; !ok {
+		t.Errorf("truly unitless interface must still emit its bare-name endpoint")
+	}
+}

@@ -46,6 +46,14 @@ type InterfaceConfig struct {
 	AggregatedEtherOpts *AggregatedEtherOptions // ae interface options (LACP, etc.)
 	Units               map[int]*InterfaceUnit
 	Tunnel              *TunnelConfig // non-nil for tunnel interfaces (gre0, etc.)
+	// AuthoredUnits reports that the candidate carried at least one `unit`
+	// instance for this interface, even when every one was quarantined on the
+	// lenient path and Units is empty (#9899 P2). The tunnel emitter's
+	// unitless fallback (bare-name endpoint from the interface-level tunnel)
+	// is only for interfaces authored WITHOUT units; without this bit an
+	// interface whose final unit was quarantined would activate a fallback
+	// endpoint the operator never configured.
+	AuthoredUnits bool
 	// #4308 (fable-review-167 I-3): parity knobs that are typed + compiled
 	// so they stop silently vanishing, but are ACCEPTED-ONLY today (a
 	// commit-time advisory warns they are not enforced). native-vlan-id

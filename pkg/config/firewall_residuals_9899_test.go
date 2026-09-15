@@ -162,3 +162,104 @@ func TestImplicitInetFilterGates9899(t *testing.T) {
 		t.Fatal("implicit inet and explicit inet6 did not remain separate")
 	}
 }
+
+// TestImplicitInetNestedGroupMultiFilter9899 pins P1: nested group inheritance
+// with MORE THAN ONE filter. walkGroupToContext returns the FIRST matching
+// scope only (ast_groups.go), so a group body normalized to one synthetic
+// `family inet` wrapper PER implicit filter hides every later filter's
+// template from a nested apply-groups lookup. Pre-fix RED: filter G loses its
+// inherited term while F keeps its own.
+func TestImplicitInetNestedGroupMultiFilter9899(t *testing.T) {
+	termsOf := func(t *testing.T, cfg *Config, filter string) map[string]string {
+		t.Helper()
+		f := cfg.Firewall.FiltersInet[filter]
+		if f == nil {
+			t.Fatalf("filter %q missing after nested group expansion", filter)
+		}
+		out := make(map[string]string, len(f.Terms))
+		for _, term := range f.Terms {
+			out[term.Name] = term.Action
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		group string
+		main  string
+	}{
+		{
+			// The RED cell: group carries two IMPLICIT filters, main inherits
+			// nested per-filter. Pre-fix the group normalizes to two
+			// identically-keyed wrappers and G's lookup finds F's scope only.
+			name:  "group implicit main explicit nested",
+			group: `groups { G { firewall { filter F { term TG { then { accept; } } } filter G { term TG { then { accept; } } } } } }`,
+			main:  `firewall { family inet { filter F { apply-groups G; term T1 { then { discard; } } } filter G { apply-groups G; term T1 { then { discard; } } } } }`,
+		},
+		{
+			// Both sides implicit: same group-side cause, main-side wrappers
+			// expand per-filter without cross-contamination.
+			name:  "group implicit main implicit nested",
+			group: `groups { G { firewall { filter F { term TG { then { accept; } } } filter G { term TG { then { accept; } } } } } }`,
+			main:  `firewall { filter F { apply-groups G; term T1 { then { discard; } } } filter G { apply-groups G; term T1 { then { discard; } } } }`,
+		},
+		{
+			// Group explicit (single navigable scope) with main implicit:
+			// GREEN before and after; guards the main-side merge.
+			name:  "group explicit main implicit nested",
+			group: `groups { G { firewall { family inet { filter F { term TG { then { accept; } } } filter G { term TG { then { accept; } } } } } } }`,
+			main:  `firewall { filter F { apply-groups G; term T1 { then { discard; } } } filter G { apply-groups G; term T1 { then { discard; } } } }`,
+		},
+		{
+			// Top-level inheritance of two implicit filters: wholesale adoption
+			// path, GREEN before and after; guards against over-correction.
+			name:  "group implicit top-level two filters",
+			group: `groups { G { firewall { filter F { term TG { then { accept; } } } filter G { term TG { then { accept; } } } } } }`,
+			main:  `apply-groups G;`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := fwRawTree9875(t, tc.group+" "+tc.main)
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, filter := range []string{"F", "G"} {
+				terms := termsOf(t, cfg, filter)
+				if tc.name == "group implicit top-level two filters" {
+					if terms["TG"] != "accept" || len(terms) != 1 {
+						t.Fatalf("filter %s inherited %v, want only TG=accept", filter, terms)
+					}
+					continue
+				}
+				if terms["T1"] != "discard" || terms["TG"] != "accept" {
+					t.Fatalf("filter %s terms=%v, want T1=discard plus inherited TG=accept", filter, terms)
+				}
+			}
+		})
+	}
+}
+
+// TestQuotedSelfMatchValuesPackedTerm9899 pins P2: the F-105 quoted-operand
+// preservation through a PACKED term body. packedBody synthesizes the `from`
+// and `protocol` nodes from the term tail without quote provenance, so the
+// firewallMatchValues KeyQuoted check reads the synthesized node as bare and
+// drops the quoted self-named operand. Pre-fix RED: strict accepts (the
+// unknown value vanished) and lenient keeps nothing. Single value isolates
+// the quote bit: multi-value packed runs (`protocol tcp udp`) are a separate
+// pre-existing consumeNodeKeys arity limitation, not this defect.
+func TestQuotedSelfMatchValuesPackedTerm9899(t *testing.T) {
+	tree := fwTree9875(t, `term T from protocol "protocol" then discard;`)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Errorf("packed term: quoted self-named protocol silently disappeared at strict compile")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := firstInetTerm(t, cfg, "F").Protocols; !reflect.DeepEqual(got, []string{"protocol"}) {
+		t.Errorf("packed term: tolerant compile protocols=%q, want [protocol]", got)
+	}
+	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "protocol") {
+		t.Errorf("packed term: missing unknown-protocol warning")
+	}
+}
