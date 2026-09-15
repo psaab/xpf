@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -393,6 +394,13 @@ func (p *nlPlan) pfxAddrMatch(field string, f nlFamily, addrs []string, except b
 	// identically at every layer; lo0 itself is unaffected (it pre-splits
 	// families and fails malformed tokens before this helper runs).
 	for _, a := range addrs {
+		// #9903 M3: "" and "any" are established no-constraint
+		// placeholders (lo0's filterFamilyAddrs strips them); failing a
+		// whole install on them would be an availability hit on
+		// tolerant-load artifacts, not a typo catch.
+		if a == "" || a == "any" {
+			continue
+		}
 		if pfx, err := netip.ParsePrefix(a); err == nil {
 			if pfx.Addr().Is6() != f.v6 {
 				p.fail(fmt.Errorf("address %q is the wrong family for this rule", a))
@@ -404,6 +412,14 @@ func (p *nlPlan) pfxAddrMatch(field string, f nlFamily, addrs []string, except b
 		if ip, err := netip.ParseAddr(a); err == nil {
 			if ip.Is6() != f.v6 {
 				p.fail(fmt.Errorf("address %q is the wrong family for this rule", a))
+				return nil
+			}
+			// #9903 M4: a zone scope (%eth0) has no representation in a
+			// payload compare — As16 drops it silently, un-scoping a
+			// link-local to every interface. Refuse rather than un-scope.
+			// (Prefixes cannot carry zones: ParsePrefix rejects them.)
+			if ip.Zone() != "" {
+				p.fail(fmt.Errorf("address %q carries a zone scope the payload compare cannot represent", a))
 				return nil
 			}
 			pfxs = append(pfxs, netip.PrefixFrom(ip, ip.BitLen()))
@@ -685,6 +701,16 @@ func (p *nlPlan) iifnameMatch(names []string) []expr.Any {
 	if len(names) == 0 {
 		return nil
 	}
+	for _, n := range names {
+		// #9903 F-126/M1: empty renders 16 zero bytes (a jump that matches
+		// nothing, silently) and an embedded NUL passes a length check
+		// while truncating the kernel comparison. Neither can name a real
+		// interface; both fail the plan with the overlong case.
+		if n == "" || len(n) > unix.IFNAMSIZ-1 || strings.IndexByte(n, 0) >= 0 {
+			p.fail(fmt.Errorf("iifname %q is not a representable interface name (empty, embedded NUL, or over the 15-byte limit) and would never match", n))
+			return nil
+		}
+	}
 	// #9903 F-126: a kernel interface name is at most 15 bytes (IFNAMSIZ-1,
 	// NUL-padded to 16). ifname16 below copies without a length check, so a
 	// longer name fills the field with no NUL and the compare key can never
@@ -696,14 +722,12 @@ func (p *nlPlan) iifnameMatch(names []string) []expr.Any {
 	// invalid member fails the whole set build — the tradeoff is
 	// deliberate: a partially-installed generation is worse than a refused
 	// one, and no legitimate name exceeds 15 bytes. The text renderer
-	// keeps the token verbatim for the kernel to refuse loudly (#6512
-	// doctrine); parity is no-silent-truncation, not kernel behavior.
-	for _, n := range names {
-		if len(n) > unix.IFNAMSIZ-1 {
-			p.fail(fmt.Errorf("iifname %q exceeds the 15-byte interface-name limit and would never match", n))
-			return nil
-		}
-	}
+	// keeps the token verbatim: text is the parity-test ORACLE (it must
+	// render the intended ruleset for comparison), netlink is the
+	// enforcement builder (it must refuse the unrepresentable). Their
+	// divergence on invalid input is intentional; parity is that valid
+	// inputs render identically and invalid inputs never silently
+	// install (#9903 M2).
 	load := &expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1}
 	if len(names) == 1 {
 		return []expr.Any{load, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname16(names[0])}}

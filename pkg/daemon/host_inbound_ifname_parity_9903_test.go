@@ -5,14 +5,15 @@ import (
 	"testing"
 )
 
-// #9903 F-126 — text-renderer half of the parity cell. The netlink builder
-// refuses a >15-byte ifname at plan time (p.fail in iifnameMatch,
-// pkg/nftables); the text renderer keeps the token VERBATIM so the kernel
-// refuses the load loudly (#6512 doctrine) instead of installing a
-// truncated never-matching rule. This cell pins verbatim rendering —
-// truncating or sanitizing here would diverge the builders into a silent
-// never-match at the kernel while netlink refuses. It asserts rendering
-// only, never kernel refusal.
+// #9903 F-126/M2 — text-renderer half of the parity cell. The netlink
+// builder refuses a >15-byte ifname at plan time (p.fail in iifnameMatch,
+// pkg/nftables); the text renderer keeps the token VERBATIM. That is an
+// intentional DIVERGENCE, not agreement: text is the parity-test ORACLE
+// (it must render the intended ruleset for comparison; production no
+// longer execs it), netlink is the enforcement builder (it must refuse
+// the unrepresentable). This cell pins verbatim rendering — truncating or
+// sanitizing here would make the oracle lie about what was intended while
+// netlink refuses. It asserts rendering only, never kernel refusal.
 func TestTextRendersOverlongIfnameVerbatim9903(t *testing.T) {
 	long := "1234567890123456"
 	single := nftIifnameSet([]string{long})

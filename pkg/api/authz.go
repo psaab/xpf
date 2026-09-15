@@ -811,15 +811,18 @@ func credentialPrincipalUser(cfg AuthConfig, r *http.Request) (string, bool) {
 // the verdict and the action for a revocation to fall into. One pass is the
 // whole decision here.
 //
-// An UNGUARDED safe route is served, not refused -- the opposite of the mutation
-// gate's fail-closed default. That asymmetry is deliberate too. /health and
-// /metrics are safe routes with no entry in the table and must keep serving:
-// authCheck already exempts them, the in-tree incus harnesses read /metrics, and
-// a fail-closed default here would break them at the first request. The cost is
-// that a NEW read route added without a table entry serves unauthenticated --
-// which is why TestEveryReadRouteHasAPermission_6660 enumerates the mux and
-// fails on any /api/v1 GET the table does not cover, moving that risk from
-// runtime to the test suite.
+// An UNGUARDED NON-API safe route is served, not refused -- the opposite of
+// the mutation gate's fail-closed default. That asymmetry is deliberate too.
+// /health and /metrics are safe routes with no entry in the table and must
+// keep serving: authCheck already exempts them, the in-tree incus harnesses
+// read /metrics, and a fail-closed default here would break them at the
+// first request. Inside the API namespace the default is CLOSED (#9903
+// F-129): an /api/v1 path with no table entry is refused, because a NEW
+// read route added without a table entry would otherwise serve with no
+// authorization decision. TestEveryReadRouteHasAPermission_6660 enumerates
+// the mux and fails on any /api/v1 GET the table does not cover, moving
+// the registered-shape risk from runtime to the test suite; the runtime
+// deny covers the shapes no census sees.
 // readPermissionFor resolves the permission guarding a SAFE request, keyed on
 // (method, path), and adjudicates a non-GET safe method against the GET entry.
 //
