@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"log/slog"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -33,11 +32,11 @@ func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) map[uint16]in
 		}
 		rgSeen := -1
 		for _, ifName := range zone.Interfaces {
-			// Strip unit suffix (e.g. "reth0.0" → "reth0") for config lookup.
-			baseName := ifName
-			if idx := strings.IndexByte(ifName, '.'); idx >= 0 {
-				baseName = ifName[:idx]
-			}
+			// #9821 D17: the split base (declared-aware), suffix ignored as
+			// before — a dotted RG owner's member (`p.0.1`) resolves to the
+			// declared stanza instead of nothing (strict-reachable via
+			// member-declared RedundantParent, which is name-agnostic).
+			baseName := cfg.SplitInterfaceUnitRef(ifName).Base
 			// comma-ok checks key-presence, not value-non-nil; a
 			// (nil, true) map entry would panic on ifc.RedundancyGroup.
 			if ifc, ok := cfg.Interfaces.Interfaces[baseName]; ok && ifc != nil && ifc.RedundancyGroup > 0 {

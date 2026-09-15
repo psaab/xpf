@@ -355,7 +355,10 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			rg = rethRG[name]
 		}
 		out = append(out, InterfaceSnapshot{
-			Name:            name,
+			Name: name,
+			// #9821 #22: structural row identity, stated explicitly — a
+			// dotted base name (`ge-0/0/5.0`) must not parse as a unit.
+			IsUnit:          false,
 			Zone:            zoneByInterface[name],
 			RoutingInstance: ifaceRoutingInstance[name],
 			RoutingDomain:   routingInstanceDomain(ifaceRoutingInstance[name]),
@@ -430,6 +433,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses))
 			out = append(out, InterfaceSnapshot{
 				Name:                      unitName,
+				IsUnit:                    true,
 				Zone:                      zoneByInterface[unitName],
 				RoutingInstance:           ifaceRoutingInstance[unitName],
 				RoutingDomain:             routingInstanceDomain(ifaceRoutingInstance[unitName]),

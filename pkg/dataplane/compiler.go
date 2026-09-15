@@ -1430,6 +1430,14 @@ func compileFlowConfig(dp DataPlane, cfg *config.Config, result *CompileResult) 
 	return nil
 }
 
+// getInterfaceIPFn / getInterfaceIPv6Fn are the test seams for the SNAT
+// egress-IP live queries (#9821 R6-5): same signature, defaulting to the
+// funcs below (tree-idiom package vars, restored via defer). The cell seeds
+// distinct parent/child addresses through them and asserts pool-ID
+// consumption + selected v4/v6 + warn-iff-empty on the observable outputs.
+var getInterfaceIPFn = getInterfaceIP
+var getInterfaceIPv6Fn = getInterfaceIPv6
+
 // getInterfaceIP returns the first IPv4 address of a network interface.
 // Uses the compile-pass cache to avoid redundant syscalls.
 func getInterfaceIP(ifaceName string, result *CompileResult) (net.IP, error) {

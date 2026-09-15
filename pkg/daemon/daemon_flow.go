@@ -85,23 +85,27 @@ func dhcpLeaseKeysForMember(cfg *config.Config, member string) []string {
 	if member == "" {
 		return nil
 	}
-	baseRef, unitTok, hasUnit := strings.Cut(config.CanonicalInterfaceUnitRef(member), ".")
-	base := config.LinuxIfName(baseRef)
-
-	// The member may be authored in either spelling while cfg.Interfaces is
-	// keyed by the spelling the `interfaces` stanza used, and the two need not
-	// agree (#8829). Match on the kernel name, which both reduce to.
+	// #9821 D16: resolve through the shared 4-level alias order (exact
+	// split-Base → linux-match split-Base → linux-match RAW → linux-match
+	// Literal) — the same order the D2 pool claims use, so DHCP keys and
+	// pool ownership resolve a member identically. The member may be
+	// authored in either spelling while cfg.Interfaces is keyed by the
+	// spelling the `interfaces` stanza used (#8829); linux-name matching
+	// lives in the helper, first-sorted for determinism.
+	s := cfg.SplitInterfaceUnitRef(member)
+	claim := resolveMemberDeclaredBase(cfg, member)
+	base := config.LinuxIfName(s.Base)
 	var ifc *config.InterfaceConfig
-	if cfg != nil {
-		for name, candidate := range cfg.Interfaces.Interfaces {
-			if candidate != nil && config.LinuxIfName(name) == base {
-				ifc = candidate
-				break
-			}
-		}
+	if claim.ok {
+		base = config.LinuxIfName(claim.base)
+		ifc = cfg.Interfaces.Interfaces[claim.base]
+	}
+	whole := !s.HasUnit
+	if claim.ok {
+		whole = !claim.hasUnit
 	}
 
-	if !hasUnit {
+	if whole {
 		// Whole-device member: it claims every unit on the device (#9063's
 		// reading of the same list), and each unit's lease is keyed
 		// independently — a tagged one by its VLAN ID, which the device name
@@ -121,8 +125,8 @@ func dhcpLeaseKeysForMember(cfg *config.Config, member string) []string {
 		return keys
 	}
 	var unit *config.InterfaceUnit
-	if unitNum, _, err := config.CanonicalLogicalUnit(unitTok); err == nil && ifc != nil {
-		unit = ifc.Units[unitNum]
+	if claim.ok && claim.hasUnit && claim.unit >= 0 && ifc != nil {
+		unit = ifc.Units[claim.unit]
 	}
 	// A nil unit (stanza absent, or an unparseable unit token) yields the bare
 	// base — which is what an untagged lease is keyed by, so this degrades to

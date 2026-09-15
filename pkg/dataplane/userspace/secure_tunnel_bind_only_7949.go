@@ -173,7 +173,11 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			parentIfindex, _, _, _ = buildLinkSnapshot(parentLinux)
 		}
 		out = append(out, InterfaceSnapshot{
-			Name:            ref,
+			Name: ref,
+			// #9821 #22: same rule as the idents entry below — a dotted
+			// ref with a unit part is a unit row (st-family-correct: a
+			// bare `st0` bind stays a base row).
+			IsUnit:          dotted && unit != "",
 			Zone:            zone,
 			RoutingInstance: ifaceRoutingInstance[ref],
 			RoutingDomain:   routingInstanceDomain(ifaceRoutingInstance[ref]),

@@ -248,11 +248,13 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	// zone-level stanza and the per-interface override — the override REPLACES the
 	// zone set when present, #6515 — physical→unit inheritance included), then
 	// classify that single view.
-	// #5878 phase 2: look the override up on the ref's canonical logical-unit
-	// identity so a query for ge-0/0/0.01 finds an override authored as
-	// ge-0/0/0.1 (buildInterfaceHostInboundMap now keys by the canonical unit).
-	canonRef := config.CanonicalInterfaceUnitRef(ifaceRef)
-	svc, prot := effectiveHostInboundTokens(zone, canonRef, buildInterfaceHostInboundMap(cfg)[canonRef])
+	// #9821 D6: look the override up on the ref's declared-aware SPLIT
+	// Literal (cfg is in scope), so a query for `p.0.01` finds an override
+	// authored as `p.0.1` — the cfg-free canonicalization first-cut onto
+	// `p` and missed. Undotted refs are byte-identical (step-4 Literal ≡
+	// legacy canon).
+	split := cfg.SplitInterfaceUnitRef(ifaceRef)
+	svc, prot := effectiveHostInboundTokens(zone, split.Literal, buildInterfaceHostInboundMap(cfg)[split.Literal])
 	v := ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}, SystemServices: svc, Protocols: prot}
 	return classifyOneView(v, proto, hasProto, dstPort, icmpType, family)
 }
@@ -341,15 +343,18 @@ func ResolveHostInboundIngressInterface(cfg *config.Config, fromZone, ifaceRef s
 	// and pointing the operator at the unit form. (A unit-less physical carrying
 	// only a physical-level override is keyed correctly on the physical key, so it
 	// is not rejected here — it falls through to the zone-membership check.)
-	if !strings.Contains(ifaceRef, ".") {
-		if ic := cfg.Interfaces.Interfaces[ifaceRef]; ic != nil && len(ic.Units) > 0 {
-			return fmt.Errorf("ingress-interface %q is a physical interface; specify the logical unit, e.g. %s.%d", ifaceRef, ifaceRef, smallestUnitNumber(ic.Units))
+	// #9821 D6: physical/unit inference on the declared-aware split — a bare
+	// `p.0` (declared, dotted) IS a physical ref and must hit the rejection
+	// below, not bypass it on dot-presence; the redirect names the Base's
+	// smallest unit. The zone probe follows on the split Literal, so
+	// `p.0.01` validates against the zone its canonical unit binds.
+	split := cfg.SplitInterfaceUnitRef(ifaceRef)
+	if !split.HasUnit {
+		if ic := cfg.Interfaces.Interfaces[split.Base]; ic != nil && len(ic.Units) > 0 {
+			return fmt.Errorf("ingress-interface %q is a physical interface; specify the logical unit, e.g. %s.%d", ifaceRef, split.Base, smallestUnitNumber(ic.Units))
 		}
 	}
-	// #5878 phase 2: resolve the operator ref on its canonical logical-unit
-	// identity so `ingress-interface ge-0/0/0.01` validates against the zone the
-	// canonical unit ge-0/0/0.1 binds (buildInterfaceZoneMap now keys canonical).
-	zone := buildInterfaceZoneMap(cfg)[config.CanonicalInterfaceUnitRef(ifaceRef)]
+	zone := buildInterfaceZoneMap(cfg)[split.Literal]
 	if zone == "" {
 		return fmt.Errorf("unknown ingress-interface %q (not assigned to any security zone)", ifaceRef)
 	}

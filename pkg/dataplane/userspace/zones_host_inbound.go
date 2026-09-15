@@ -259,7 +259,9 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		// chain falls through to `policy accept` (FAIL-OPEN). Compare the unit-0
 		// resolved linux name to the base snapshot's linux name so the skip fires
 		// only when they are literally the same kernel device.
-		if !strings.Contains(snap.Name, ".") {
+		// #9821 #22: structural row identity — a dotted base name is a base
+		// row, not a unit row, so the collapse-dedup applies to it.
+		if !snap.IsUnit {
 			if ifc := cfg.Interfaces.Interfaces[snap.Name]; ifc != nil {
 				if u0 := ifc.Units[0]; u0 != nil &&
 					snapshotLinuxName(cfg, snap.Name, ifc, u0) == snap.LinuxName {
@@ -277,7 +279,9 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		// arrive on the subunit netdevs, or the netdev its unit 0 collapses onto,
 		// which that unit claims. Claiming a trunk parent would have one zone
 		// judge untagged frames no unit owns.
-		if strings.Contains(snap.Name, ".") {
+		// #9821 #22: structural — only unit rows claim netdevs, so a dotted
+		// base row's netdev is claimed by its collapsing unit, not twice.
+		if snap.IsUnit {
 			claimNetdev(snap.LinuxName, snap.Zone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
 		}
 		var g *group

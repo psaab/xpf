@@ -107,8 +107,10 @@ func staticRouteRendersFIB(sr *config.StaticRoute) bool {
 // generateStaticRoute produces FRR static route commands.
 // Multiple next-hops produce one line each (FRR creates ECMP).
 // Routes with NextTable are handled via ip rule (policy routing), not FRR.
-func (m *Manager) generateStaticRoute(sr *config.StaticRoute, vrfName string, rethMap map[string]string, ipv6NextHopInterfaces map[string]map[string]string) string {
-	return m.generateStaticRouteInTable(sr, vrfName, 0, rethMap, ipv6NextHopInterfaces)
+// declaredNetdevs maps declared interface names (both spellings) to kernel
+// devices (#9821); nil renders legacy behavior.
+func (m *Manager) generateStaticRoute(sr *config.StaticRoute, vrfName string, rethMap map[string]string, ipv6NextHopInterfaces map[string]map[string]string, declaredNetdevs map[string]string) string {
+	return m.generateStaticRouteInTable(sr, vrfName, 0, rethMap, ipv6NextHopInterfaces, declaredNetdevs)
 }
 
 // generateStaticRouteInTable is generateStaticRoute with an optional
@@ -121,7 +123,9 @@ func (m *Manager) generateStaticRoute(sr *config.StaticRoute, vrfName string, re
 // userspace dataplane files under `<ri>.inet.0`). vrfName and tableID
 // are mutually exclusive: FRR only accepts `table` on default-VRF
 // statics, and forwarding instances always render with vrfName == "".
-func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName string, tableID int, rethMap map[string]string, ipv6NextHopInterfaces map[string]map[string]string) string {
+// declaredNetdevs (nil-safe, nil → legacy) is probed before the `.0`
+// strip: declared names render their kernel device (#9821 #15v3 + D7).
+func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName string, tableID int, rethMap map[string]string, ipv6NextHopInterfaces map[string]map[string]string, declaredNetdevs map[string]string) string {
 	if sr.NextTable != "" {
 		return "" // handled via ip rule in routing package
 	}
@@ -197,14 +201,28 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 	// One line per next-hop → FRR creates ECMP.
 	var b strings.Builder
 	for _, nh := range sr.NextHops {
-		// Strip Junos default unit suffix ".0" (e.g. "wan0.0" → "wan0") for FRR
-		// kernel names. VLAN suffixes like ".50" in "wan0.50" are real kernel
-		// interface names and must NOT be stripped.
+		// #9821 (#15v3 + D7): a DECLARED interface name renders its kernel
+		// device. The map holds every declaration in BOTH spellings
+		// (authored + linux) → linux device, so authored `ge-0/0/5.0`
+		// renders `ge-0-0-5.0` (a device) instead of being mis-stripped to
+		// the slash-broken `ge-0/0/5`, and authored slash-spelled UNDOTTED
+		// operands (`ge-0/0/1`) newly render kernel names instead of
+		// FRR-choking verbatim slashes (intended repair — no config can
+		// depend on output FRR cannot parse). Inferred operands and
+		// undeclared names miss the map and keep legacy behavior below.
+		// Junos UNIT refs (`ge-0/0/1.0`) are NOT declarations, so they keep
+		// the legacy strip (still slash-broken — pre-existing, follow-up,
+		// not fixed here).
 		ifName := nh.Interface
 		if isV6 && ifName == "" && nh.Address != "" {
 			ifName = ipv6NextHopInterfaces[vrfName][nh.Address]
 		}
-		if strings.HasSuffix(ifName, ".0") {
+		if dev, ok := declaredNetdevs[ifName]; ok {
+			ifName = dev
+		} else if strings.HasSuffix(ifName, ".0") {
+			// Strip Junos default unit suffix ".0" (e.g. "wan0.0" → "wan0")
+			// for FRR kernel names. VLAN suffixes like ".50" in "wan0.50"
+			// are real kernel interface names and must NOT be stripped.
 			ifName = ifName[:len(ifName)-2]
 		}
 		// Resolve RETH names to physical member names (e.g. "reth0.50" → "ge-0-0-1.50").
@@ -595,7 +613,7 @@ func (m *Manager) renderPreferredRoutes(b *strings.Builder, fc *FullConfig) {
 			Preference:  1,
 			NextHops:    []config.NextHopEntry{{Address: entry.NextHop}},
 		}
-		b.WriteString(m.generateStaticRouteInTable(sr, vrfName, tableID, fc.RethMap, fc.IPv6NextHopInterfaces))
+		b.WriteString(m.generateStaticRouteInTable(sr, vrfName, tableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
 	}
 	b.WriteString("!\n")
 }
