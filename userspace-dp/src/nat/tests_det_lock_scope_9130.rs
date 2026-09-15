@@ -469,3 +469,329 @@ fn an_idempotency_race_gives_the_claimed_port_back_unrecycled_9130() {
         alloc.debug_recycled_ports(0)
     );
 }
+
+/// #9902 F-098 (v4 behavior): the word-skipping probe claims the first free
+/// port ascending, reports a full block as exhaustion (bumping the counter),
+/// and reclaims a freed port as the new lowest-free — the exact contract the
+/// naive per-port loop provided.
+#[test]
+fn deterministic_block_probe_claims_first_free_reclaims_and_reports_full_9902() {
+    let alloc = PortAllocator::new(1, 1024, 2047);
+    let pool = [POOL_V4];
+    let det = det_v4();
+    let src = Ipv4Addr::new(100, 64, 0, 0); // block 0: [1024, 1279].
+    let ip = IpAddr::V4(POOL_V4);
+    // Neighbor-block ports pin the probe inside its block: it must neither
+    // claim them nor disturb them.
+    alloc.debug_seed_owner(0, ip, 1280);
+    for p in 1024..1279u16 {
+        alloc.debug_seed_owner(0, ip, p);
+    }
+    let t = alloc
+        .allocate_deterministic_v4(v4_flow(src, 40000), &pool, det, src, NatHolder::Untracked)
+        .expect("one free port left in the block");
+    assert_eq!(t.port, 1279, "must claim the only free port");
+    assert!(
+        alloc.debug_is_port_occupied(0, 1280),
+        "probe must not disturb the neighboring block"
+    );
+    let before = alloc.snapshot().exhaustion_total;
+    let err = alloc
+        .allocate_deterministic_v4(v4_flow(src, 40001), &pool, det, src, NatHolder::Untracked)
+        .expect_err("a full block must report exhaustion");
+    assert!(
+        matches!(err, SourceNatFailureReason::AllocatorExhausted),
+        "full block must be AllocatorExhausted, got {err:?}"
+    );
+    assert_eq!(
+        alloc.snapshot().exhaustion_total,
+        before + 1,
+        "full block must bump exhaustion_total exactly once"
+    );
+    alloc.debug_clear_owner(0, ip, 1100);
+    let t = alloc
+        .allocate_deterministic_v4(v4_flow(src, 40002), &pool, det, src, NatHolder::Untracked)
+        .expect("freed port must be reclaimable");
+    assert_eq!(t.port, 1100, "must reclaim the freed port as lowest-free");
+}
+
+/// #9902 F-098 (v4 attempt bound): on a dense-prefix fixture the probe loads
+/// one word per 64 occupied ports and performs exactly one claim RMW — NOT one
+/// RMW per occupied port. `debug_seed_owner` sets bits without touching the
+/// counters, so one measured allocation reads exact.
+///
+/// FAIL-ON-REVERT: restore the naive `for p in port_start..=port_end` loop and
+/// the RMW count is 201, not 1 (verified by scratch-revert during review).
+#[test]
+fn deterministic_block_probe_attempts_bounded_by_words_9902() {
+    let alloc = PortAllocator::new(1, 1024, 2047);
+    let pool = [POOL_V4];
+    let det = det_v4();
+    let src = Ipv4Addr::new(100, 64, 0, 0); // block 0: [1024, 1279].
+    let ip = IpAddr::V4(POOL_V4);
+    for p in 1024..1224u16 {
+        alloc.debug_seed_owner(0, ip, p);
+    }
+    assert_eq!(alloc.debug_probe_attempts(0), (0, 0), "seeding must not count");
+    let t = alloc
+        .allocate_deterministic_v4(v4_flow(src, 40000), &pool, det, src, NatHolder::Untracked)
+        .expect("ports free in the block");
+    assert_eq!(t.port, 1224, "must claim the first free port");
+    assert_eq!(
+        alloc.debug_probe_attempts(0),
+        (4, 1),
+        "200 occupied ports = 3 skipped full words + 1 word holding the \
+         candidate: 4 loads and exactly 1 claim RMW"
+    );
+    // A full block loads every word and attempts no claim.
+    for p in 1224..1280u16 {
+        alloc.debug_seed_owner(0, ip, p);
+    }
+    let err = alloc
+        .allocate_deterministic_v4(v4_flow(src, 40001), &pool, det, src, NatHolder::Untracked)
+        .expect_err("a full block must report exhaustion");
+    assert!(matches!(err, SourceNatFailureReason::AllocatorExhausted));
+    assert_eq!(
+        alloc.debug_probe_attempts(0),
+        (8, 1),
+        "full-block probe adds 4 loads and 0 claim RMWs"
+    );
+}
+
+/// #9902 F-098 (v6 attempt bound): the NAPT64 arm shares the helper, so the
+/// same bound holds there — a v6-only bypass of the helper cannot stay green.
+#[test]
+fn deterministic_v6_block_probe_attempts_bounded_by_words_9902() {
+    let alloc = PortAllocator::new(1, 1024, 2047);
+    let pool = [POOL_V4];
+    let det = det_v6();
+    let src: Ipv6Addr = "2001:db8::".parse().expect("base");
+    let ip = IpAddr::V4(POOL_V4);
+    for p in 1024..1224u16 {
+        alloc.debug_seed_owner(0, ip, p);
+    }
+    let t = alloc
+        .allocate_deterministic_v6(v6_flow(src, 40000), &pool, det, src, NatHolder::Untracked)
+        .expect("ports free in the block");
+    assert_eq!(t.port, 1224, "must claim the first free port of block 0");
+    assert_eq!(
+        alloc.debug_probe_attempts(0),
+        (4, 1),
+        "v6 arm must share the word-skipping probe, not a per-port loop"
+    );
+}
+
+/// #9902 F-098 (v6 behavior mirror): first-free claim and full-block
+/// exhaustion on the NAPT64 arm.
+#[test]
+fn deterministic_v6_block_probe_claims_first_free_and_reports_full_9902() {
+    let alloc = PortAllocator::new(1, 1024, 2047);
+    let pool = [POOL_V4];
+    let det = det_v6();
+    let src: Ipv6Addr = "2001:db8::".parse().expect("base");
+    let ip = IpAddr::V4(POOL_V4);
+    for p in 1024..1279u16 {
+        alloc.debug_seed_owner(0, ip, p);
+    }
+    let t = alloc
+        .allocate_deterministic_v6(v6_flow(src, 40000), &pool, det, src, NatHolder::Untracked)
+        .expect("one free port left in the block");
+    assert_eq!(t.port, 1279, "must claim the only free port");
+    let err = alloc
+        .allocate_deterministic_v6(v6_flow(src, 40001), &pool, det, src, NatHolder::Untracked)
+        .expect_err("a full block must report exhaustion");
+    assert!(matches!(err, SourceNatFailureReason::AllocatorExhausted));
+}
+
+/// #9902 F-098 (edge masks): blocks are arbitrary positive sizes, so the probe
+/// must mask out-of-block bits in the first and last word — both-edges-in-one-
+/// word, a 63/64 boundary crossing, a partial final word with the highest valid
+/// port, and untouched neighbors.
+#[test]
+fn deterministic_block_probe_edge_masks_9902() {
+    let pool = [POOL_V4];
+    let ip = IpAddr::V4(POOL_V4);
+    // Both edges in one word: block_size 32 -> block 0 = offsets [0, 31].
+    {
+        let alloc = PortAllocator::new(1, 1024, 2047);
+        let det = DeterministicV4 {
+            block_size: 32,
+            blocks_per_ip: 32,
+            host_base: u32::from(Ipv4Addr::new(100, 64, 0, 0)),
+            host_count: 32,
+        };
+        let src = Ipv4Addr::new(100, 64, 0, 0);
+        for p in 1024..1055u16 {
+            alloc.debug_seed_owner(0, ip, p);
+        }
+        let t = alloc
+            .allocate_deterministic_v4(
+                v4_flow(src, 40000),
+                &pool,
+                det,
+                src,
+                NatHolder::Untracked,
+            )
+            .expect("one free port in the one-word block");
+        assert_eq!(t.port, 1055, "must claim the block's last port");
+        alloc.debug_seed_owner(0, ip, 1055);
+        assert!(
+            matches!(
+                alloc.allocate_deterministic_v4(
+                    v4_flow(src, 40001),
+                    &pool,
+                    det,
+                    src,
+                    NatHolder::Untracked
+                ),
+                Err(SourceNatFailureReason::AllocatorExhausted)
+            ),
+            "a full one-word block must report exhaustion, never an out-of-block bit"
+        );
+    }
+    // 63/64 boundary crossing: block_size 128 -> block 0 = offsets [0, 127].
+    // Word 0 is fully occupied; only offset 64 (the first bit of word 1) is free.
+    {
+        let alloc = PortAllocator::new(1, 1024, 2047);
+        let det = DeterministicV4 {
+            block_size: 128,
+            blocks_per_ip: 8,
+            host_base: u32::from(Ipv4Addr::new(100, 64, 0, 0)),
+            host_count: 8,
+        };
+        let src = Ipv4Addr::new(100, 64, 0, 0);
+        for p in 1024..1152u16 {
+            if p == 1088 {
+                continue;
+            }
+            alloc.debug_seed_owner(0, ip, p);
+        }
+        let t = alloc
+            .allocate_deterministic_v4(
+                v4_flow(src, 40000),
+                &pool,
+                det,
+                src,
+                NatHolder::Untracked,
+            )
+            .expect("offset 64 free across the word boundary");
+        assert_eq!(t.port, 1088, "must cross into word 1 for the free bit");
+    }
+    // Partial final word + highest valid port: range 1024..=2000 (977 ports).
+    // Block 3 = [1792, 2000]; the last word's bits past offset 976 are masked.
+    {
+        let alloc = PortAllocator::new(1, 1024, 2000);
+        let det = DeterministicV4 {
+            block_size: 256,
+            blocks_per_ip: 4,
+            host_base: u32::from(Ipv4Addr::new(100, 64, 0, 0)),
+            host_count: 4,
+        };
+        let src = Ipv4Addr::new(100, 64, 0, 3);
+        for p in 1792..2000u16 {
+            alloc.debug_seed_owner(0, ip, p);
+        }
+        let t = alloc
+            .allocate_deterministic_v4(
+                v4_flow(src, 40000),
+                &pool,
+                det,
+                src,
+                NatHolder::Untracked,
+            )
+            .expect("highest port free in the partial-word block");
+        assert_eq!(t.port, 2000, "must claim the highest valid port");
+        alloc.debug_seed_owner(0, ip, 2000);
+        assert!(
+            matches!(
+                alloc.allocate_deterministic_v4(
+                    v4_flow(src, 40001),
+                    &pool,
+                    det,
+                    src,
+                    NatHolder::Untracked
+                ),
+                Err(SourceNatFailureReason::AllocatorExhausted)
+            ),
+            "masked-out-of-range bits must never be claimed"
+        );
+        assert_eq!(
+            alloc.debug_occupied_count(),
+            209,
+            "exactly the 209 block ports occupied, nothing outside"
+        );
+    }
+    // Adjacent out-of-block neighbors stay owned by their own blocks.
+    {
+        let alloc = PortAllocator::new(1, 1024, 2047);
+        let det = DeterministicV4 {
+            block_size: 32,
+            blocks_per_ip: 32,
+            host_base: u32::from(Ipv4Addr::new(100, 64, 0, 0)),
+            host_count: 32,
+        };
+        let src = Ipv4Addr::new(100, 64, 0, 1); // block 1: [1056, 1087].
+        alloc.debug_seed_owner(0, ip, 1055); // block 0's last port.
+        alloc.debug_seed_owner(0, ip, 1088); // block 2's first port.
+        for p in 1056..1087u16 {
+            if p == 1060 {
+                continue;
+            }
+            alloc.debug_seed_owner(0, ip, p);
+        }
+        let t = alloc
+            .allocate_deterministic_v4(
+                v4_flow(src, 40000),
+                &pool,
+                det,
+                src,
+                NatHolder::Untracked,
+            )
+            .expect("one free port in block 1");
+        assert_eq!(t.port, 1060, "must claim inside the block");
+        assert!(
+            alloc.debug_is_port_occupied(0, 1055) && alloc.debug_is_port_occupied(0, 1088),
+            "adjacent out-of-block ports must stay owned"
+        );
+    }
+}
+
+/// #9902 F-098 (progress under contention): 4 threads drain one 256-port block
+/// concurrently. Every allocation must succeed exactly once with a distinct
+/// port — a claim-loss retry that reloaded words or retried tried bits could
+/// livelock or double-claim here. Joined directly like the #9130 cells: a
+/// forward-progress failure hangs the suite loudly rather than flaking.
+#[test]
+fn deterministic_block_probe_progress_under_contention_9902() {
+    let alloc = Arc::new(PortAllocator::new(1, 1024, 2047));
+    let det = det_v4();
+    let src = Ipv4Addr::new(100, 64, 0, 2); // block 2: [1536, 1791].
+    let mut workers = Vec::new();
+    for t in 0..4u16 {
+        let alloc = Arc::clone(&alloc);
+        workers.push(std::thread::spawn(move || {
+            let pool = [POOL_V4];
+            let mut ports = Vec::new();
+            for i in 0..64u16 {
+                let flow = v4_flow(src, 50000 + t * 64 + i);
+                let out = alloc
+                    .allocate_deterministic_v4(flow, &pool, det, src, NatHolder::Untracked)
+                    .expect("block has room for every worker's flows");
+                ports.push(out.port);
+            }
+            ports
+        }));
+    }
+    let mut all = Vec::new();
+    for w in workers {
+        all.extend(w.join().expect("worker must not panic"));
+    }
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), 256, "every flow must hold a DISTINCT port");
+    assert!(
+        all.iter().all(|p| (1536..=1791).contains(p)),
+        "every claim must stay in block 2"
+    );
+    assert_eq!(alloc.debug_occupied_count(), 256);
+}
