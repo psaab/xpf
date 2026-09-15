@@ -9988,6 +9988,18 @@ reserved for whole-dataplane selection where a rewrite shim
   only; `classify_wg_endpoint` in the Rust hydrate decides the same
   question, and both sides are asserted to agree against the shared
   fixture `test/fixtures/wg-endpoint-shape.txt`.
+  Trust boundary (#9918 F-162): a hostname endpoint trusts DNS for egress
+  steering after 90 s of peer silence. An attacker who controls DNS for the
+  DDNS name AND catches the peer silent for a full handshake attempt window
+  can redirect tunnel egress (blackhole) and learn traffic timing and
+  handshake cadence; they cannot decrypt or complete a handshake (no keys).
+  Mitigations: the 90 s roam-hold (an authenticated datagram pins the peer's
+  real address, including NAT, against re-resolution), first-authenticated-
+  datagram re-win (a live peer reclaims its endpoint immediately), and
+  opt-in hostnames (IP literals never resolve). Moves surface via the
+  `endpoint_changed` status counter (resolver-side change), the
+  `endpoint_last_error` text, and the control-thread `peer endpoint resolved
+  to ... (was ...)` log. High-assurance peers should use IP literals.
 
   A hostname's family is not knowable at commit, so it does NOT
   participate in the mixed-family gate below; literals still pin the

@@ -73,7 +73,7 @@ use snow::{Builder, HandshakeState};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Errors that can fail the egress path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,10 +420,28 @@ impl PeerTable {
 /// The engine.
 pub(crate) struct WgEngine {
     /// Local X25519 private key. Held in the engine because every
-    /// slow-path handshake needs it. Wrapped in `Zeroizing` so the
-    /// 32 bytes of key material are wiped on engine drop — kernel
-    /// WG and wireguard-go both do this. snow internally zeroizes
-    /// its own copies; this is for the engine's persistent copy.
+    /// slow-path handshake needs it. Wrapped in `Zeroizing` so THIS copy's
+    /// 32 bytes of key material are wiped on engine drop — kernel WG and
+    /// wireguard-go both do this. #9918 F-142: snow 0.10.0 has NO `zeroize`
+    /// and NO `Drop` impl (verified against the locked registry copy: no
+    /// `zeroize` dep, no `impl Drop` anywhere in `src/`) — the old comment
+    /// claiming "snow internally zeroizes its own copies" was false and is
+    /// corrected here. snow COPIES our long-lived secrets into unwiped heap
+    /// objects on every handshake build: the static private key via
+    /// `Builder::local_private_key` → `(*s_dh).set(k)` (`builder.rs:232`,
+    /// owned by `HandshakeState.s`, `handshakestate.rs:35`) and the PSK via
+    /// `psk(2, …)`/`set_psk` into owned `psks: [Option<[u8; 32]>; 10]`
+    /// (`handshakestate.rs:42,145,457-464`). Those snow-held copies of the
+    /// static key and PSKs persist in freed heap with no wipe API and are an
+    /// ACCEPTED residual (heap-scrape of per-handshake heap, process-isolated;
+    /// only our own carriers — this `Zeroizing` key and the `PeerConfig`
+    /// `Zeroizing` PSKs — are wiped). Transport keys are best-effort wiped by
+    /// `WgSession::drop` (rekey-to-zero through snow's `set`, a plain
+    /// `copy_from_slice` in vendored code we cannot change — the compiler
+    /// could theoretically dead-store-eliminate it, so erasure is not
+    /// guaranteed; see the `Drop` doc). Chaining keys and ephemerals in
+    /// `HandshakeState` (seconds-lived pendings) likewise have no wipe API
+    /// and share the same accepted residual.
     local_private_key: Zeroizing<[u8; 32]>,
     /// Local X25519 static PUBLIC key, derived once at construction from
     /// `local_private_key` via `MontgomeryPoint::mul_base_clamped` (the
@@ -436,6 +454,12 @@ pub(crate) struct WgEngine {
     /// `pub(in crate::afxdp::wg)` so the handshake orchestration in
     /// `handshake_session.rs` (a sibling file, same `wg` module) can read it.
     pub(in crate::afxdp::wg) local_public_key: [u8; WG_KEY_LEN],
+    /// Precomputed MAC1 keyed-hash key: `BLAKE2s-256("mac1----" ||
+    /// local_public_key)`. #9918 F-144: derived once at construction (the
+    /// local pub never changes) so the under-load flood path avoids one
+    /// BLAKE2s-256 per junk packet. Inbound parses use this; outbound
+    /// builds key on the PEER pub and still derive per message.
+    pub(in crate::afxdp::wg) mac1_key: [u8; 32],
     /// Monotonic TAI64N clock for the initiator handshake timestamp.
     /// In-process strict monotonicity; cross-restart persistence is a
     /// future control-plane concern (#1703 S6).
@@ -532,11 +556,13 @@ impl WgEngine {
     pub(crate) fn new(config: WgEngineConfig) -> Self {
         let local_public_key =
             MontgomeryPoint::mul_base_clamped(*config.local_private_key).to_bytes();
+        let mac1_key = super::handshake::mac1_key_for(&local_public_key);
         let engine = Self {
             // Move the Zeroizing carrier straight into the engine (no
             // intermediate plaintext copy). #4103 F12.
             local_private_key: config.local_private_key,
             local_public_key,
+            mac1_key,
             tai64n_clock: Tai64nClock::new(),
             pending: RwLock::new(FxHashMap::default()),
             pending_by_peer: RwLock::new(FxHashMap::default()),
@@ -608,12 +634,16 @@ impl WgEngine {
     /// [`InitiationAction::SendCookie`] arm; it is untouched otherwise, so
     /// the caller may reuse the same buffer for `consume_...`'s response.
     ///
-    /// Ordering mirrors wireguard-go `device/receive.go`:
+    /// Ordering mirrors wireguard-go `device/receive.go`, with the #9918
+    /// F-144 MAC1-first reorder: a bad-MAC1 junk packet costs one keyed
+    /// hash (precomputed key) instead of 4-6 (MAC2 cookie + expect x2
+    /// secrets, then MAC1 with per-message key derivation).
     /// 1. Not under load → `Process` (skip-verify MAC2, spec-correct).
-    /// 2. Under load + valid MAC2 → `Process` (the peer proved liveness).
-    /// 3. Under load + MAC1 invalid / malformed → `Process` so the consume
-    ///    path drops it cheaply (no crypto) with the right counter and NO
-    ///    reply — a random / bad-MAC1 flood cannot turn us into a reflector.
+    /// 2. Under load + MAC1 invalid / malformed → `Process` so the consume
+    ///    path drops it cheaply (one more precomputed MAC1, no crypto) with
+    ///    the right counter and NO reply — a random / bad-MAC1 flood cannot
+    ///    turn us into a reflector. MAC2 is never verified for these.
+    /// 3. Under load + MAC1 valid + valid MAC2 → `Process` (liveness proved).
     /// 4. Under load + MAC1 valid + MAC2 missing/bad → `SendCookie` (budget
     ///    permitting) else `Drop`.
     pub(crate) fn classify_initiation(
@@ -629,26 +659,30 @@ impl WgEngine {
         if !under_load {
             return InitiationAction::Process;
         }
-        // Under load. A valid MAC2 (peer holds a fresh cookie bound to this
+        // Under load, check MAC1 FIRST with the precomputed key (#9918
+        // F-144). A malformed or bad-MAC1 datagram falls through to the
+        // cheap consume-path drop (which re-verifies MAC1 with the same
+        // precomputed key before any Noise crypto, correct per-reason
+        // counter) with NO reply and WITHOUT verifying MAC2 — so one
+        // junk packet costs ~1 hash here + ~1 in consume, not 4-6.
+        // The double-verify is deliberate: classify and consume stay
+        // independent (defense in depth), and both are cheap now.
+        if super::handshake::parse_initiation_with_key(msg, &self.mac1_key).is_err() {
+            return InitiationAction::Process;
+        }
+        // Valid MAC1. A valid MAC2 (peer holds a fresh cookie bound to this
         // exact source) authorizes the expensive handshake.
         if self.cookie.verify_initiation_mac2(msg, from, now_ns) {
             WgCounters::bump(&self.counters.hs_rx_under_load_mac2_ok);
             return InitiationAction::Process;
         }
-        // No valid MAC2. Only spend a cookie reply on a message that passes
-        // MAC1 (proves the sender knows our public key). A malformed or
-        // bad-MAC1 datagram falls through to the cheap consume-path drop
-        // (parse fails before any Noise crypto, correct per-reason counter)
-        // with NO reply — so a spoofed / bad-MAC1 flood cannot make us a
-        // reflector.
-        if super::handshake::parse_initiation(msg, &self.local_public_key).is_err() {
-            return InitiationAction::Process;
-        }
         // Valid MAC1, under load, no valid MAC2 → challenge with a cookie
-        // reply. #4332: gate on the per-SOURCE bucket FIRST so a flood from one
-        // source throttles only itself and cannot drain the global per-window
-        // budget away from a legit peer at a different source. BOTH the
-        // per-source bucket and the global budget must pass.
+        // reply (gated below). Only a sender that knows our public key
+        // (MAC1 proves it) can draw a reply, so a spoofed flood cannot
+        // make us a reflector. #4332: gate on the per-SOURCE bucket FIRST
+        // so a flood from one source throttles only itself and cannot drain
+        // the global per-window budget away from a legit peer at a different
+        // source. BOTH the per-source bucket and the global budget must pass.
         if !self.cookie.source_reply_allowed(from.ip(), now_ns) {
             WgCounters::bump(&self.counters.hs_cookie_reply_budget_drops);
             return InitiationAction::Drop;
@@ -1566,10 +1600,21 @@ impl WgEngine {
                 return Err(self.counters.count_decap_err(DecapError::ReplayOutOfWindow));
             }
         }
-        let n = session
+        // #9918 F-143: snow's decrypt copies ciphertext into `out` then
+        // decrypts in place; on tag failure `out[..plaintext_len_max]`
+        // holds attacker-influenced unauthenticated bytes. Zero the staging
+        // region before returning so a caller that mishandles the error path
+        // cannot leak them upstream — matching every sibling post-AEAD arm.
+        let n = match session
             .transport
             .read_message(hdr.counter, hdr.ciphertext, out)
-            .map_err(|_| self.counters.count_decap_err(DecapError::CryptoFailed))?;
+        {
+            Ok(n) => n,
+            Err(_) => {
+                out[..plaintext_len_max].zeroize();
+                return Err(self.counters.count_decap_err(DecapError::CryptoFailed));
+            }
+        };
         // WG key-confirmation: a successful AEAD authenticate is
         // proof that the peer has the session keys, so a responder-
         // role session can now be used for egress. Initiator-role
@@ -1671,11 +1716,12 @@ impl WgEngine {
         // If not, drop." This is the cryptokey-routing safety
         // invariant on the receive side.
         //
-        // Every error arm past `read_message` MUST zero `out[..n]`
-        // before returning so the contract "on Err the caller MUST
-        // NOT inspect `out`" is structurally enforced. We use a
-        // single fall-through with the helper below; adding a new
-        // post-AEAD error arm cannot accidentally skip the wipe.
+        // Every error arm at or past `read_message` MUST zero the staging
+        // region before returning so the contract "on Err the caller MUST
+        // NOT inspect `out`" is structurally enforced: `CryptoFailed` zeros
+        // `out[..plaintext_len_max]` at the failure site above; the arms
+        // below use a single fall-through that zeros `out[..n]`, so adding
+        // a new post-decrypt error arm cannot accidentally skip the wipe.
         //
         // The plaintext is the padded form (WG §5.4.6 zero-padded
         // to a 16-byte multiple at the sender). We parse src IP
@@ -1741,6 +1787,30 @@ impl WgEngine {
         &self,
         peer_pubkey: &[u8; 32],
     ) -> Result<HandshakeState, snow::Error> {
+        self.build_initiator_handshake_with_ephemeral(peer_pubkey, None)
+    }
+
+    /// Test seam for #9918 F-146 deterministic vectors: same production
+    /// pattern/prologue/key-role/PSK wiring as [`Self::build_initiator_handshake`],
+    /// but with a fixed ephemeral via snow's
+    /// `fixed_ephemeral_key_for_testing_only` (a `#[doc(hidden)]` unstable
+    /// test API — pinned knowingly, test-only). Vectors driven through this
+    /// cover what ships; a prologue/pattern/PSK regression in production
+    /// fails them.
+    #[cfg(test)]
+    pub(crate) fn build_initiator_handshake_with_fixed_for_test(
+        &self,
+        peer_pubkey: &[u8; 32],
+        e_fixed: &[u8],
+    ) -> Result<HandshakeState, snow::Error> {
+        self.build_initiator_handshake_with_ephemeral(peer_pubkey, Some(e_fixed))
+    }
+
+    fn build_initiator_handshake_with_ephemeral(
+        &self,
+        peer_pubkey: &[u8; 32],
+        e_fixed: Option<&[u8]>,
+    ) -> Result<HandshakeState, snow::Error> {
         // `.prologue(WG_PROTOCOL_ID_BYTES)` is mandatory for wire
         // interoperability with kernel WireGuard and wireguard-go. The
         // WG protocol mixes the ASCII identifier
@@ -1757,12 +1827,16 @@ impl WgEngine {
             .peer_config(peer_pubkey)
             .map(|c| c.preshared_key())
             .unwrap_or(WG_ZERO_PSK);
-        Builder::new(WG_NOISE_PATTERN.parse()?)
+        let builder = Builder::new(WG_NOISE_PATTERN.parse()?)
             .prologue(WG_PROTOCOL_ID_BYTES)?
             .local_private_key(self.local_private_key.as_slice())?
             .remote_public_key(peer_pubkey)?
-            .psk(2, &psk)?
-            .build_initiator()
+            .psk(2, &psk)?;
+        let builder = match e_fixed {
+            Some(e) => builder.fixed_ephemeral_key_for_testing_only(e),
+            None => builder,
+        };
+        builder.build_initiator()
     }
 
     /// Build a snow `HandshakeState` configured as the responder.
@@ -1778,14 +1852,34 @@ impl WgEngine {
     /// to the snow message-bytes parser which is integration-layer
     /// concern. Tracked for the integration PR.
     pub(crate) fn build_responder_handshake(&self) -> Result<HandshakeState, snow::Error> {
+        self.build_responder_handshake_with_ephemeral(None)
+    }
+
+    /// Test seam for #9918 F-146 (see the initiator seam above).
+    #[cfg(test)]
+    pub(crate) fn build_responder_handshake_with_fixed_for_test(
+        &self,
+        e_fixed: &[u8],
+    ) -> Result<HandshakeState, snow::Error> {
+        self.build_responder_handshake_with_ephemeral(Some(e_fixed))
+    }
+
+    fn build_responder_handshake_with_ephemeral(
+        &self,
+        e_fixed: Option<&[u8]>,
+    ) -> Result<HandshakeState, snow::Error> {
         // See `build_initiator_handshake` for the prologue rationale.
         // Both sides must mix the same identifier into the Noise
         // initial hash or the transcripts diverge from byte one.
-        Builder::new(WG_NOISE_PATTERN.parse()?)
+        let builder = Builder::new(WG_NOISE_PATTERN.parse()?)
             .prologue(WG_PROTOCOL_ID_BYTES)?
             .local_private_key(self.local_private_key.as_slice())?
-            .psk(2, &WG_ZERO_PSK)?
-            .build_responder()
+            .psk(2, &WG_ZERO_PSK)?;
+        let builder = match e_fixed {
+            Some(e) => builder.fixed_ephemeral_key_for_testing_only(e),
+            None => builder,
+        };
+        builder.build_responder()
     }
 }
 
