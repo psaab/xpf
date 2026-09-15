@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/monitoriface"
 	"google.golang.org/grpc"
@@ -50,6 +51,51 @@ func (s *Server) monitorInterfaceDataplane() monitoriface.RuntimeDataPlane {
 		return nil
 	}
 	return monitorInterfaceServerDataPlane{server: s}
+}
+
+// monitorInterfaceLimiter bounds concurrent MonitorInterface streams (#9891).
+// It aliases the process-wide diagcmd.MonitorInterfaceLimiter so the bound
+// holds regardless of how many Server instances serve the RPC. Acquire is
+// fail-fast; over-cap streams return codes.ResourceExhausted without creating
+// a ticker, a rendering goroutine, or a peer dial. A package var so a test can
+// swap in a fresh small-capacity limiter.
+var monitorInterfaceLimiter = diagcmd.MonitorInterfaceLimiter
+
+// monitorInterfaceSendTimeout bounds a SINGLE downstream frame write. A client
+// that cannot accept one frame within this window is not reading. Per-write,
+// not elapsed: an idle-healthy stream (valid in summary mode between ticks)
+// is untouched and only a peer that has stopped draining is cut — the same
+// axis sseWriteDeadline uses for SSE (#7632). Matches the 30s slow-reader
+// budget so one tuning covers both streaming surfaces. A package var so a test
+// can compress it without a real slow reader.
+var monitorInterfaceSendTimeout = 30 * time.Second
+
+// sendMonitorInterfaceFrame sends one frame with a slow-consumer bound. gRPC
+// has no socket write deadline, so Send runs in a short-lived goroutine and
+// the handler selects over its completion, the client context, and the
+// per-write timeout. On timeout the stream is severed with DeadlineExceeded;
+// the handler return then tears the RPC down, which unblocks the helper Send
+// so it cannot outlive the stream. The timer is stopped on the fast path so a
+// healthy Send leaves no 30s timer behind.
+func sendMonitorInterfaceFrame(stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse], resp *pb.MonitorInterfaceResponse) error {
+	ctx := stream.Context()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	done := make(chan error, 1)
+	go func() { done <- stream.Send(resp) }()
+	timer := time.NewTimer(monitorInterfaceSendTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return status.Error(codes.DeadlineExceeded, "monitor interface client is not reading; stream severed")
+	}
 }
 
 // MonitorPacketDrop streams packet drop events matching the request filters.
@@ -467,6 +513,7 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 
 	isSingle := req.InterfaceName != ""
 	var singleDisplayName, singleKernelName string
+	proxyToPeer := false
 	if isSingle {
 		singleDisplayName = req.InterfaceName
 		singleKernelName = monitoriface.ResolvePhysicalParent(resolveToKernel(req.InterfaceName))
@@ -476,6 +523,9 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		// is never re-proxied, and a locally-present RETH is proxied only when
 		// the peer actually owns the RG — together these bound the forwarding
 		// to a single hop and close the #5497 A->B->A recursion.
+		// NotFound returns BEFORE admission below so validation failures cost
+		// no subscriber slot; the proxy decision is recorded and acted on only
+		// once a slot is held, so a refused subscriber dials no peer.
 		_, ifErr := net.InterfaceByName(singleKernelName)
 		var cl monitorClusterState
 		if s.cluster != nil {
@@ -490,11 +540,25 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 			cl,
 		) {
 		case monitorProxyToPeer:
-			return s.proxyMonitorInterface(req, stream)
+			proxyToPeer = true
 		case monitorNotFound:
 			return status.Errorf(codes.NotFound, "interface %s not found", req.InterfaceName)
 		}
 		// monitorServeLocal: fall through and read local counters below.
+	}
+
+	// Admission bound (#9891): fail-fast before the ticker, the rendering
+	// state, and any peer dial, so a refused subscriber costs no goroutine,
+	// no ticker, and no connection. Held across the proxy forwarding loop as
+	// well — it still pins a local goroutine plus a peer connection — while
+	// the peer charges its own slot for the rendering half.
+	release, err := monitorInterfaceLimiter.Acquire()
+	if err != nil {
+		return status.Error(codes.ResourceExhausted, "too many concurrent monitor interface subscribers")
+	}
+	defer release()
+	if proxyToPeer {
+		return s.proxyMonitorInterface(req, stream)
 	}
 
 	summaryInterfaces := func() ([]string, map[string]string) {
@@ -557,7 +621,7 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 			prevAll = newPrev
 		}
 
-		if err := stream.Send(&pb.MonitorInterfaceResponse{Frame: buf.String()}); err != nil {
+		if err := sendMonitorInterfaceFrame(stream, &pb.MonitorInterfaceResponse{Frame: buf.String()}); err != nil {
 			return err
 		}
 
@@ -570,6 +634,8 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 }
 
 // proxyMonitorInterface forwards a MonitorInterface stream to the cluster peer.
+// The caller (MonitorInterface) already holds this node's subscriber slot; the
+// peer charges its own for the rendering half.
 func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse]) error {
 	conn, err := s.dialPeer()
 	if err != nil {
@@ -596,7 +662,7 @@ func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream g
 			}
 			return err
 		}
-		if err := stream.Send(resp); err != nil {
+		if err := sendMonitorInterfaceFrame(stream, resp); err != nil {
 			return err
 		}
 	}
