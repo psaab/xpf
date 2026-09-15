@@ -68,11 +68,13 @@ const USERSPACE_CTRL_FLAG_STRICT: u32 = 8;
 /// property.
 const USERSPACE_CTRL_FLAG_WG_RX: u32 = 16;
 mod binding_index;
+mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod wg_classify;
 use binding_index::{
     BINDING_QUEUES_PER_IFACE, BINDING_SLOT_MAP_MAX_ENTRIES, RawRxQueue, binding_slot,
 };
+use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
 use ipv6_ext_walk::{
     EH_CLASS_TERMINAL, FragHdr, MAX_EXT_HDRS, PROTO_FRAGMENT_NO_L4, eh_class, eh_class_table,
     read_bytes,
@@ -1548,6 +1550,21 @@ fn parse_ipv4(
         return None;
     }
     unsafe { read_bytes(data, data_end, l3_offset as usize, ihl) }?;
+    // #9901 (F-075): the declared-length gate. Bytes 2..4 sit inside the
+    // 20-byte header slice already held, so consulting them costs nothing.
+    // A total length below the header length is impossible on the wire and
+    // is refused outright; otherwise L4 reads are bounded by the declared
+    // datagram end (`l4_end`, a pure scalar) so slack past it is never
+    // parsed as a tuple. A lying-LONG length clamps to the capture exactly
+    // as before. Every read below still runs against the REAL capture end:
+    // the verifier proves packet bounds only against that value, so the
+    // declared end is enforced with scalar pre-checks, never substituted
+    // for it.
+    let total_len = u16::from_be_bytes([iph[2], iph[3]]);
+    if !ipv4_declared_len_covers_header(total_len, ihl) {
+        return None;
+    }
+    let l4_end = ipv4_declared_read_end(l3_offset as usize, total_len, data_end);
     // #7494: a non-first fragment has no L4 header -- the bytes at the resolved
     // offset are payload. Substituting the sentinel routes it into parse_l4's
     // EXISTING unknown-protocol arm, which returns zeroed ports and cannot
@@ -1567,16 +1584,38 @@ fn parse_ipv4(
     // the parser, so #5's drop happens before any later consumer sees the
     // packet. That is why this is in the parser and not beside the session
     // lookup.
-    let non_first_fragment = (u16::from_be_bytes([iph[6], iph[7]]) & 0x1FFF) != 0;
-    let protocol = if non_first_fragment {
+    let frag_field = u16::from_be_bytes([iph[6], iph[7]]);
+    let non_first_fragment = (frag_field & 0x1FFF) != 0;
+    let first_fragment = (frag_field & 0x2000) != 0 && !non_first_fragment;
+    let mut protocol = if non_first_fragment {
         PROTO_FRAGMENT_NO_L4
     } else {
         iph[9]
     };
     let tos = iph[1];
     let l4_offset = l3_offset.checked_add(ihl as u16)?;
+    // A first fragment's L4 header is legitimately PARTIAL (a minimum legal
+    // first fragment carries 8 L4 bytes, below the TCP arm's 14-byte span),
+    // so it takes the tuple-tolerant path: ports, plus flags when the
+    // declared datagram covers them. When even the tuple falls outside the
+    // declared end there is no L4 to stamp — punt to userspace under the
+    // no-L4 marker via parse_l4's infallible unknown arm (userspace
+    // re-derives fragment status from the header itself downstream) rather
+    // than dropping a packet the slow path may still forward. A WHOLE packet
+    // short of its L4 inside the declared end is malformed (its full headers
+    // are covered by definition), so parse_l4's None still drops it.
     let (payload_offset, tcp_flags, flow_src_port, flow_dst_port, icmp_type, udp_wg_transport_data) =
-        parse_l4(data, data_end, l4_offset, protocol)?;
+        if first_fragment {
+            match first_fragment_l4(data, data_end, l4_end, l4_offset, protocol) {
+                Some(t) => t,
+                None => {
+                    protocol = PROTO_FRAGMENT_NO_L4;
+                    parse_l4(data, data_end, l4_offset, protocol, data_end)?
+                }
+            }
+        } else {
+            parse_l4(data, data_end, l4_offset, protocol, l4_end)?
+        };
     let src_bytes = unsafe { read_bytes(data, data_end, l3_offset as usize + 12, 4) }?;
     let dst_bytes = unsafe { read_bytes(data, data_end, l3_offset as usize + 16, 4) }?;
     let mut src_addr = [0u8; 16];
@@ -1693,7 +1732,7 @@ fn parse_ipv6(
     let flow_lbl0 = ip6[1];
     let dscp = ((version_priority & 0x0f) << 2) | (flow_lbl0 >> 6);
     let (payload_offset, tcp_flags, flow_src_port, flow_dst_port, icmp_type, udp_wg_transport_data) =
-        parse_l4(data, data_end, offset, protocol)?;
+        parse_l4(data, data_end, offset, protocol, data_end)?;
     // #8249 EXPERIMENT: reuse the already-validated 40-byte header slice
     // instead of re-reading the addresses from the packet. `ip6` covers
     // [l3_offset, l3_offset+40) and the addresses live at +8 and +24 within it.
@@ -1886,6 +1925,49 @@ fn is_ipv6_link_local(ip: [u8; 16]) -> bool {
     ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80
 }
 
+/// #9901 (F-075): the L4 tuple for a FIRST fragment, whose L4 header is
+/// legitimately partial. `declared_end` is the declared-datagram bound (a pure
+/// scalar from `parse_ipv4`); every span is scalar-checked against it BEFORE
+/// the corresponding read, which itself runs against the real capture end —
+/// the verifier proves packet bounds only against that value.
+///
+/// TCP takes the tuple-tolerant shape: the 4 port bytes must be covered
+/// (else None, and the caller punts under the no-L4 marker), while the flags
+/// byte is read when covered and zero otherwise — a minimum legal first
+/// fragment carries 8 L4 bytes, which names the tuple but not the flags.
+/// Every other protocol runs the standard arms against the same declared
+/// end (UDP's 8/9-byte and ICMP's 8-byte spans fit a minimum first fragment;
+/// short of that the caller punts rather than dropping).
+#[inline(always)]
+fn first_fragment_l4(
+    data: usize,
+    data_end: usize,
+    declared_end: usize,
+    l4_offset: u16,
+    protocol: u8,
+) -> Option<(u16, u8, u16, u16, u8, bool)> {
+    if protocol == PROTO_TCP {
+        if declared_end < l4_offset as usize + 4 {
+            return None;
+        }
+        let ports = unsafe { read_bytes(data, data_end, l4_offset as usize, 4) }?;
+        let flags = if declared_end >= l4_offset as usize + 14 {
+            unsafe { read_bytes(data, data_end, l4_offset as usize + 13, 1) }.map_or(0, |b| b[0])
+        } else {
+            0
+        };
+        return Some((
+            l4_offset,
+            flags,
+            u16::from_be_bytes([ports[0], ports[1]]),
+            u16::from_be_bytes([ports[2], ports[3]]),
+            0,
+            false,
+        ));
+    }
+    parse_l4(data, data_end, l4_offset, protocol, declared_end)
+}
+
 /// #8249: `#[inline(always)]` is LOAD-BEARING for verifier headroom, not a
 /// performance hint.
 ///
@@ -1945,18 +2027,33 @@ fn is_ipv6_link_local(ip: [u8; 16]) -> bool {
 /// #8249 twice sent someone to reason against a baseline that had already
 /// moved, which is most of what that issue cost. #8241 is the census that now
 /// refuses an undated figure; date yours, or state the floor.
+/// `declared_end` (#9901, F-075) is the caller's bound on how far L4 reads
+/// may go — the IPv4 declared-datagram end, a pure scalar. Every arm below
+/// scalar-checks its span against it BEFORE reading; the reads themselves
+/// run against the real capture end, which is the only value the verifier
+/// proves packet bounds against. Callers with no declared bound (IPv6,
+/// GRE-inner) pass `data_end`, which makes every check vacuous.
 #[inline(always)]
 fn parse_l4(
     data: usize,
     data_end: usize,
     l4_offset: u16,
     protocol: u8,
+    declared_end: usize,
 ) -> Option<(u16, u8, u16, u16, u8, bool)> {
     match protocol {
         PROTO_TCP => {
+            // Span first (scalar), read second (packet): the 14-byte span,
+            // then the data-offset span once the byte is known.
+            if declared_end < l4_offset as usize + 14 {
+                return None;
+            }
             let bytes = unsafe { read_bytes(data, data_end, l4_offset as usize, 14) }?;
             let data_offset = ((bytes[12] >> 4) as u16) * 4;
             if data_offset < 20 {
+                return None;
+            }
+            if declared_end < l4_offset as usize + data_offset as usize {
                 return None;
             }
             unsafe { read_bytes(data, data_end, l4_offset as usize, data_offset as usize) }?;
@@ -1994,15 +2091,24 @@ fn parse_l4(
             // is legal (a WireGuard keepalive is a type-4 record with an empty
             // payload, but plenty of other UDP has none at all), and it must
             // still parse and yield its ports.
-            if let Some(b) = unsafe { read_bytes(data, data_end, l4_offset as usize, 9) } {
-                return Some((
-                    l4_offset.checked_add(8)?,
-                    0,
-                    u16::from_be_bytes([b[0], b[1]]),
-                    u16::from_be_bytes([b[2], b[3]]),
-                    0,
-                    wg_record_is_transport_data(Some(b[8])),
-                ));
+            // #9901: the 9-byte fast path additionally requires the 9th byte
+            // inside the DECLARED datagram — past it lies pad/slack, whose
+            // value must not steer WireGuard classification. The scalar gate
+            // wraps the read without merging packet checks, so the #8274
+            // one-dominating-check-per-read shape is preserved.
+            if declared_end >= l4_offset as usize + 9 {
+                if let Some(b) = unsafe { read_bytes(data, data_end, l4_offset as usize, 9) } {
+                    return Some((
+                        l4_offset.checked_add(8)?,
+                        0,
+                        u16::from_be_bytes([b[0], b[1]]),
+                        u16::from_be_bytes([b[2], b[3]]),
+                        0,
+                        wg_record_is_transport_data(Some(b[8])),
+                    ));
+                }
+            } else if declared_end < l4_offset as usize + 8 {
+                return None;
             }
             let bytes = unsafe { read_bytes(data, data_end, l4_offset as usize, 8) }?;
             Some((
@@ -2015,6 +2121,9 @@ fn parse_l4(
             ))
         }
         PROTO_ICMP | PROTO_ICMPV6 => {
+            if declared_end < l4_offset as usize + 8 {
+                return None;
+            }
             let bytes = unsafe { read_bytes(data, data_end, l4_offset as usize, 8) }?;
             Some((
                 l4_offset.checked_add(8)?,

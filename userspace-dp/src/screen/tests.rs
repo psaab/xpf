@@ -1530,6 +1530,9 @@ fn extract_screen_info_ipv4_minimal_header_not_overdropped() {
     let mut frame = vec![0u8; 14 + 20];
     let ip = 14;
     frame[ip] = 0x45; // version=4, ihl=5 → 20-byte header, no options
+    // #9901: a VALID header declares a covering total length — the bare
+    // 20-byte datagram (no L4). Total 0 is malformed, not minimal.
+    frame[ip + 2..ip + 4].copy_from_slice(&20u16.to_be_bytes());
     frame[ip + 9] = 6; // protocol = TCP
     let info = extract_screen_info(
         &frame,
