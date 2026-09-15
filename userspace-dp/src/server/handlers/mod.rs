@@ -37,7 +37,7 @@ mod sync_session;
 
 use crate::afxdp::SessionDomain;
 use super::super::*;
-use super::helpers::{refresh_status, wait_for_binding_settle, write_state};
+use super::helpers::{lock_server_recover, refresh_status, wait_for_binding_settle, write_state};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,7 +175,7 @@ pub(crate) fn handle_stream(
     }
 
     if !served_off_lock {
-        let mut guard = state.lock().expect("server state poisoned");
+        let mut guard = lock_server_recover(&state);
         match request.request_type.as_str() {
             "ping" | "status" => {}
             "apply_snapshot" => snapshot::apply(
@@ -384,7 +384,7 @@ pub(crate) fn handle_stream(
     if let Some(timeout) = settle_wait {
         wait_for_binding_settle(&state, timeout);
         if !suppress_status {
-            let mut guard = state.lock().expect("server state poisoned");
+            let mut guard = lock_server_recover(&state);
             refresh_status(&mut guard);
             response.status = Some(guard.status.clone());
         }
@@ -401,7 +401,7 @@ pub(crate) fn handle_stream(
     if let Some(wait) = export_wait {
         export::owner_rg_collect(wait, &mut response, &mut persist_state);
         if !suppress_status {
-            let mut guard = state.lock().expect("server state poisoned");
+            let mut guard = lock_server_recover(&state);
             refresh_status(&mut guard);
             response.status = Some(guard.status.clone());
         }
@@ -414,7 +414,7 @@ pub(crate) fn handle_stream(
     if let Some(export) = all_export {
         export::all_push(export, &mut response);
         if !suppress_status {
-            let mut guard = state.lock().expect("server state poisoned");
+            let mut guard = lock_server_recover(&state);
             refresh_status(&mut guard);
             response.status = Some(guard.status.clone());
         }

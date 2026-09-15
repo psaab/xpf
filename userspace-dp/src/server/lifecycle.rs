@@ -530,6 +530,11 @@ pub(crate) fn run() -> Result<(), String> {
     // socket off the mutex: deriving it from `state` would need the very lock
     // this exists to avoid.
     let session_domain = {
+        // #9900 F-094: `.expect`, not `lock_server_recover` — startup is still
+        // single-threaded (the session thread spawns below), so no prior
+        // handler could have poisoned this lock; poison here would mean a
+        // startup bug, and failing fast beats recovering toward a half-built
+        // state no request has ever observed.
         let guard = state.lock().expect("state poisoned");
         guard.afxdp.session_domain().clone()
     };
@@ -538,6 +543,8 @@ pub(crate) fn run() -> Result<(), String> {
     // Start the event stream sender (connects to daemon's event listener socket).
     {
         let event_socket_path = derive_event_socket_path(&args.control_socket);
+        // #9900 F-094: `.expect` kept — same single-threaded startup reasoning
+        // as the session-domain acquisition above.
         let mut guard = state.lock().expect("state poisoned");
         guard.afxdp.start_event_stream(&event_socket_path);
         eprintln!(
@@ -597,8 +604,11 @@ pub(crate) fn run() -> Result<(), String> {
                             // response, and the Go side sees only a bare EOF.
                             // Surfacing the error here turns a silent
                             // multi-session debugging chase into one log line
-                            // (#1961).
-                            if let Err(err) =
+                            // (#1961). Served under per-connection
+                            // `catch_unwind` (#9900 F-094): a handler panic
+                            // drops this connection and is counted, instead of
+                            // killing the session thread's accept loop.
+                            serve_one_catch_unwind("session", || {
                                 handle_stream(
                                     stream,
                                     &state_file,
@@ -606,9 +616,7 @@ pub(crate) fn run() -> Result<(), String> {
                                     running.clone(),
                                     session_domain.clone(),
                                 )
-                            {
-                                eprintln!("xpf-userspace-dp: session request failed: {err}");
-                            }
+                            });
                         }
                         AcceptStep::Sleep(delay) => thread::sleep(delay),
                         // Unreachable with retry_unclassified = true; kept so a
@@ -650,7 +658,11 @@ pub(crate) fn run() -> Result<(), String> {
                 // failures instead of discarding them. This is the socket that
                 // carries apply_snapshot, where a wire-type mismatch silently
                 // left the helper disabled and forwarding nothing (#1961).
-                if let Err(err) =
+                // Per-connection `catch_unwind` (#9900 F-094): a handler panic
+                // drops this connection and is counted, instead of killing the
+                // control thread's accept loop (which would wedge the daemon:
+                // `running` stays true and nothing serves requests).
+                serve_one_catch_unwind("control", || {
                     handle_stream(
                         stream,
                         &args.state_file,
@@ -658,9 +670,7 @@ pub(crate) fn run() -> Result<(), String> {
                         running.clone(),
                         main_session_domain.clone(),
                     )
-                {
-                    eprintln!("xpf-userspace-dp: control request failed: {err}");
-                }
+                });
             }
             AcceptStep::Sleep(delay) => thread::sleep(delay),
             AcceptStep::Fail(msg) => return Err(msg),
@@ -672,6 +682,10 @@ pub(crate) fn run() -> Result<(), String> {
         eprintln!("xpf-userspace-dp: session thread panicked: {panic:?}");
     }
     {
+        // #9900 F-094: `.expect` kept — shutdown teardown, not a request: the
+        // daemon is exiting, so there is no next request to recover FOR, and
+        // recovering here would trade a loud teardown abort for a quiet one
+        // (a torn-down-while-poisoned coordinator behind a green exit code).
         let mut guard = state.lock().expect("state poisoned");
         guard.afxdp.stop_with_event_stream();
         refresh_status(&mut guard);

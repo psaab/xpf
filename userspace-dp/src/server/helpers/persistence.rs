@@ -10,7 +10,7 @@
 // reach the guard. Cold path (periodic + fallback delta poll), not the
 // worker loop. Bodies byte-for-byte identical to the pre-split source.
 
-use super::refresh_status;
+use super::{lock_server_recover, refresh_status};
 use crate::protocol::{ConfigSnapshot, ProcessStatus};
 use crate::server::ServerState;
 use serde::Serialize;
@@ -73,7 +73,7 @@ pub(crate) fn write_state(state_file: &str, state: &Arc<Mutex<ServerState>>) -> 
     // delta poll serialized+fsynced the whole state while holding the lock,
     // delaying every other control op that needs it.
     let (payload, writer) = {
-        let mut guard = state.lock().expect("state poisoned");
+        let mut guard = lock_server_recover(&state);
         let payload = build_state_payload(&mut guard);
         let writer = guard.state_writer.clone();
         (payload, writer)

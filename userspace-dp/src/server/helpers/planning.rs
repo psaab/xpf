@@ -15,7 +15,7 @@
 // filter and the candidate loop rather than restated in each. Cold path
 // only (control responses), no per-packet work.
 
-use super::{refresh_status, should_run_afxdp};
+use super::{lock_server_recover, refresh_status, should_run_afxdp};
 use crate::protocol::{BindingStatus, ConfigSnapshot, InterfaceSnapshot, QueueStatus};
 use crate::server::ServerState;
 use chrono::Utc;
@@ -92,7 +92,7 @@ pub(crate) fn wait_for_binding_settle(state: &Arc<Mutex<ServerState>>, timeout: 
     let deadline = Instant::now() + timeout;
     loop {
         {
-            let mut guard = state.lock().expect("server state poisoned");
+            let mut guard = lock_server_recover(&state);
             refresh_status(&mut guard);
             if bindings_settled(&guard.status.bindings) || Instant::now() >= deadline {
                 return;
