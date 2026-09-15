@@ -76,12 +76,24 @@ func TestUnstampedInstallReachesAnIncapablePeer9752(t *testing.T) {
 	}
 }
 
-func TestStampedInstallReachesAnUnlearnedPeer9752(t *testing.T) {
+func TestStampedInstallWithheldWhileUnlearnedThenFlows9752(t *testing.T) {
 	ss := fenceSync9752()
-	// No capability frame: gating here would discard installs on every
-	// reconnect of a matched pair.
+	// No capability frame yet: the transport is connected before the
+	// exchange, so default-deny (round 4) — pass-through here would plant
+	// the lie on every connect to an old peer.
+	ss.QueueSessionV4(rtflowKeyV4(42004), stampedVal9752())
+	if got := len(ss.sendCh); got != 0 {
+		t.Fatalf("sendCh holds %d, want 0: an undiscovered peer must not receive stamped installs", got)
+	}
+	if got := ss.stats.InstallsSuppressedNoPeerInstallTable.Load(); got != 1 {
+		t.Fatalf("InstallsSuppressedNoPeerInstallTable = %d, want 1", got)
+	}
+	// Discovery lands capable: the next send flows (the sweep re-sends a
+	// withheld install, so default-deny delays, never drops).
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagPurgeRetirementForwardOnly|capFlagInstallTableIdentity))
 	ss.QueueSessionV4(rtflowKeyV4(42004), stampedVal9752())
 	if got := len(ss.sendCh); got != 1 {
-		t.Fatalf("sendCh holds %d, want 1: an unlearned peer must not be gated", got)
+		t.Fatalf("sendCh holds %d, want 1: post-discovery sends must flow", got)
 	}
 }

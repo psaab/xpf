@@ -865,6 +865,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
 		s.peerSessionSyncWire.Store(uint32(peerWire))
+		// #9752 round 4: a capable discovery re-arms the bulk. A window that
+		// aborted during the discovery race must not stay latched once the
+		// peer proves capable — the next redrive completes it.
+		if s.InstallTableIdentityCapable() {
+			s.bulkFencedForPeer.Store(false)
+		}
 		slog.Info("cluster sync: peer advertised capabilities",
 			"version", peerProto, "flags", peerFlags, "session_sync_wire", peerWire)
 	case syncMsgClockSync:

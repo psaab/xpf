@@ -379,14 +379,16 @@ fn unstamped_hit_resolves_in_default_table() {
     );
 }
 
-/// C2: the installing table flows producer → import → re-resolution → resend.
-/// The STAMP ITSELF comes from `session_delta_info` JSON output and travels
-/// the real `SessionSyncRequest` wire form; the envelope is the COMPLETE
-/// production shape the Go builder emits for an upsert (every always-sent
-/// key present, omitempty-absent keys omitted exactly as on the wire), so no
-/// hand-picked subset can mask a producer/consumer skew. A second import —
-/// same incarnation, higher generation, stamp absent — then proves the
-/// resend leg: the stamp is preserved AND the re-resolution stays blue.
+/// C2 (round 4 item 4, chain link R1): the installing table flows
+/// producer → transport → import → re-resolution → resend. The request is
+/// the GO BUILDER's verified output (the cluster link's installed row
+/// through `buildSessionSyncRequestV4`, via the shared
+/// `synced_request_9752.json` golden) — no hand-written envelope, no field
+/// extraction: every byte this hop consumes was produced by the prior hop.
+/// A second import — the SAME golden with the stamp zeroed and the
+/// generation bumped (the old-sender shape, derived programmatically) —
+/// then proves the resend leg: the stamp is preserved AND the
+/// re-resolution stays blue.
 #[test]
 fn synced_import_reresolves_in_installing_table() {
     use crate::protocol::SessionSyncRequest;
@@ -395,84 +397,42 @@ fn synced_import_reresolves_in_installing_table() {
 
     let forwarding = pbr_state();
     let mut sessions = SessionTable::new();
-    // Producer side: a delta for the PBR flow carrying the blue stamp.
-    let delta = SessionDelta {
-        kind: SessionDeltaKind::Open,
-        key: pbr_key(),
-        decision: stamped_decision(unusable_resolution()),
-        metadata: pbr_metadata(),
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
-    let mut names: FastMap<u16, String> = FastMap::default();
-    names.insert(1, "lan".to_string());
-    names.insert(2, "wan".to_string());
-    let identity = super::super::types::BindingIdentity {
-        slot: 0,
-        queue_id: 0,
-        worker_id: 7,
-        interface: Arc::from("ge-0-0-1"),
-        ifindex: 12,
-    };
-    let produced = serde_json::to_value(super::super::session_delta::session_delta_info(
-        &identity, &delta, &names,
-    ))
-    .expect("delta serializes");
-    let domain = produced
-        .get("install_table_domain")
-        .expect("producer emits the domain")
-        .as_u64()
-        .expect("domain is a number");
-    let check = produced
-        .get("install_table_check")
-        .expect("producer emits the check")
-        .as_u64()
-        .expect("check is a number");
-    // Full production envelope as `buildSessionSyncRequestV4` emits it for
-    // an upsert of a session whose neighbor is NOT yet resolved: every
-    // always-sent key present (`generation`, `session_id`, and
-    // `tunnel_discriminator`, which has no omitempty), every omitempty-absent
-    // key omitted exactly as on the wire. The MACs are absent because the
-    // peer had not resolved them (`macString` emits "" for a zero Dmac, and
-    // omitempty drops it) — that incompleteness is what routes the import
-    // through the table re-resolve instead of the cached fast path, which
-    // would keep a complete carried resolution without consulting any table.
-    let req_json = serde_json::json!({
-        "operation": "upsert",
-        "addr_family": 2,
-        "protocol": 6,
-        "src_ip": "10.0.61.102",
-        "dst_ip": "8.8.8.8",
-        "src_port": 55068,
-        "dst_port": 443,
-        "ingress_zone": "lan",
-        "egress_zone": "wan",
-        "ingress_zone_id": 1,
-        "egress_zone_id": 2,
-        "owner_rg_id": 1,
-        "egress_ifindex": 5,
-        "tx_ifindex": 5,
-        "generation": 10,
-        "session_id": 77,
-        "tunnel_discriminator": 0,
-        "install_table_domain": domain,
-        "install_table_check": check,
-    });
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/dataplane/userspace/testdata/synced_request_9752.json"
+    );
+    let req_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read the shared request golden"))
+            .expect("request golden parses");
+    // Pin the chain's load-bearing content at this hop.
+    assert_eq!(req_json.get("operation").and_then(|v| v.as_str()), Some("upsert"));
+    assert_eq!(req_json.get("src_ip").and_then(|v| v.as_str()), Some("10.0.61.102"));
+    assert_eq!(req_json.get("dst_ip").and_then(|v| v.as_str()), Some("8.8.8.8"));
+    let (want_domain, want_check) = blue_stamp();
+    assert_eq!(
+        req_json.get("install_table_domain").and_then(|v| v.as_u64()),
+        Some(want_domain as u64)
+    );
+    assert_eq!(
+        req_json.get("install_table_check").and_then(|v| v.as_u64()),
+        Some(want_check as u64)
+    );
+    // Production loss, pinned at the Go link: the mirror-sourced resend
+    // carries no RTFlowSessionID, so the request omits session_id and the
+    // import below must treat it as unknown (preserve), never default.
+    assert!(
+        req_json.get("session_id").is_none(),
+        "the request golden carries session_id; the chain's loss assumption changed — re-derive, don't delete"
+    );
     let req: SessionSyncRequest =
-        serde_json::from_value(req_json).expect("request parses");
+        serde_json::from_value(req_json.clone()).expect("request parses");
     let zones = FxHashMap::from_iter([
         ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
         ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
     ]);
+    // Wire 1 is Present(0): `routing_domain_from_wire` maps the request's
+    // default-instance encoding back to tenant 0, which is what the
+    // coordinator passes here in production.
     let entry = build_synced_session_entry(&req, &zones, 0).expect("import");
     // Producer → import leg pinned: the installer receives the emitted stamp
     // on the PBR tuple.
@@ -501,30 +461,16 @@ fn synced_import_reresolves_in_installing_table() {
     assert_eq!(decision.resolution.egress_ifindex, BLUE_IFINDEX);
     assert_eq!(decision.install_table_domain, want_domain);
     assert_eq!(decision.install_table_check, want_check);
-    // Resend leg: an old sender's re-announce — same incarnation, higher
-    // generation, stamp absent — arrives through the same import + worker
-    // path. The stamp is preserved AND the re-resolution stays in the
-    // installing table (resolving with the incoming (0,0) would install a
-    // default-table resolution under the preserved stamp).
-    let resend_json = serde_json::json!({
-        "operation": "upsert",
-        "addr_family": 2,
-        "protocol": 6,
-        "src_ip": "10.0.61.102",
-        "dst_ip": "8.8.8.8",
-        "src_port": 55068,
-        "dst_port": 443,
-        "ingress_zone": "lan",
-        "egress_zone": "wan",
-        "ingress_zone_id": 1,
-        "egress_zone_id": 2,
-        "owner_rg_id": 1,
-        "egress_ifindex": 5,
-        "tx_ifindex": 5,
-        "generation": 11,
-        "session_id": 77,
-        "tunnel_discriminator": 0,
-    });
+    // Resend leg: the SAME golden transformed into the old-sender shape —
+    // stamp zeroed, generation bumped (derived programmatically, not
+    // hand-written) — through the same import + worker path. The stamp is
+    // preserved AND the re-resolution stays in the installing table
+    // (resolving with the incoming (0,0) would install a default-table
+    // resolution under the preserved stamp).
+    let mut resend_json = req_json;
+    resend_json["install_table_domain"] = serde_json::Value::from(0);
+    resend_json["install_table_check"] = serde_json::Value::from(0);
+    resend_json["generation"] = serde_json::Value::from(11);
     let resend_req: SessionSyncRequest =
         serde_json::from_value(resend_json).expect("resend parses");
     let resend = build_synced_session_entry(&resend_req, &zones, 0).expect("re-import");
@@ -1900,11 +1846,13 @@ fn reimport_stamped_overwrites() {
     assert_eq!(decision.install_table_check, check);
 }
 
-/// Round 3 item 3, presence leg: the table is STILL gone but traffic
-/// reinstalled before the drain. The predicate holds under current truth, yet
-/// the close predates the live entry — the shared presence proves the
-/// republish, so the drain drops the whole delta: shared survives, no HA
-/// close is queued. Production ordering: stale snapshot + fresh reader.
+/// Round 4 item 3, presence leg: the table is STILL gone but traffic
+/// reinstalls AFTER the guard's table answer. The predicate holds under
+/// current truth, yet the close predates the live entry — only the removal
+/// bound to its own authorization (decline-on-present under one hold)
+/// saves it: shared survives, no HA close is queued. A check-then-delete
+/// re-checked too early destroys the republish. Production ordering:
+/// stale snapshot + fresh reader + post-guard publish.
 #[test]
 fn purge_close_after_reinstall_without_readd_drops_through_flush() {
     let channel = RuntimeViewChannel::default();
@@ -1969,7 +1917,21 @@ fn purge_close_after_reinstall_without_readd_drops_through_flush() {
     let deltas = sessions.drain_deltas(64);
     assert_eq!(deltas.len(), 1);
     assert!(deltas[0].purge_retirement);
-    // NO re-add: blue stays gone. Traffic reinstalls anyway.
+    // NO re-add: blue stays gone. The drain guard's TABLE answer is PROCEED
+    // (evaluate it explicitly: a republish must be what saves this close,
+    // not the table leg).
+    assert!(
+        super::install_table_purge::install_table_purge_predicate(
+            reader.load().forwarding(),
+            &deltas[0].key,
+            &deltas[0].decision,
+        ),
+        "FIXTURE: the table leg must say live, or this cell cannot pin the atomic presence leg"
+    );
+    // The concurrent window: traffic reinstalls AFTER the guard's table
+    // answer and before the drain's atomic removal. Only a removal bound
+    // to its own authorization survives this ordering — a check-then-delete
+    // re-checked too early destroys the republish.
     install(&mut sessions);
     sessions.drain_deltas(64);
     publish(&shared);
@@ -2202,5 +2164,84 @@ fn purge_close_after_readd_without_reinstall_drops_through_flush() {
     assert!(
         std::iter::from_fn(|| rx.try_recv().ok()).count() == 0,
         "a close for a re-added table must queue no HA/event frame"
+    );
+}
+
+/// Round 4 sub-point (d): NON-PBR (ordinary) closes bypass the stale check
+/// entirely. Even with both purge-stale conditions present (table valid
+/// under current truth AND shared republished), an ordinary close flushes
+/// fully: HA + RT_FLOW frames, shared retirement, and sibling delete
+/// replication. A misclassified suppression here would drop delete
+/// replication and strand the peer + siblings.
+#[test]
+fn ordinary_close_bypasses_the_stale_check_through_flush() {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    sessions.drain_deltas(64);
+    let shared = shared_maps();
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    // Explicit-close production ordering: remove, then emit an ORDINARY close.
+    sessions.delete(&key);
+    sessions.emit_close_delta_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        false,
+    );
+    let deltas = sessions.drain_deltas(64);
+    assert_eq!(deltas.len(), 1);
+    assert!(!deltas[0].purge_retirement);
+    // Both purge-stale conditions hold — and must be irrelevant.
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let handle = Some(handle);
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &forwarding, &reader, &handle);
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).count() == 2,
+        "an ordinary close must queue the HA + RT_FLOW frame pair"
+    );
+    assert!(
+        !shared.sessions.lock().expect("lock").contains_key(&key),
+        "an ordinary close retires shared authority"
+    );
+    let q = peer_queue.lock().expect("lock");
+    assert!(
+        q.iter().any(|c| matches!(c, WorkerCommand::DeleteSynced(k) if k == &key)),
+        "an ordinary close must replicate the forward delete, got {q:?}"
     );
 }

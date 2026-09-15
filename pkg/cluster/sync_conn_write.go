@@ -198,29 +198,36 @@ func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) b
 }
 
 // suppressStampedInstallForIncapablePeer reports whether an outgoing STAMPED
-// session install must be WITHHELD because the peer never advertised
-// capFlagInstallTableIdentity (#9752 round 3).
+// session install must be WITHHELD because the peer cannot take it (#9752
+// round 3, hardened round 4).
 //
 // Such a peer installs every session stamp-less: it decodes no tail and
 // re-resolves in the default table. Sending it a stamped install would plant
 // a session that silently wrong-tables after failover — the defect in the
 // other direction. Withholding leaves the session off the peer; a later miss
 // there re-establishes it in the right table. Unstamped installs are never
-// withheld (the peer handles them exactly as before), and an unlearned peer
-// is never gated (same reconnect rule as the delete suppressors).
+// withheld (the peer handles them exactly as before).
+//
+// Round 4: an UNLEARNED peer is gated too — the transport is connected
+// before the capability exchange, so pass-through-during-discovery would
+// plant the lie on every connect to an old peer. This is deliberately
+// stricter than the delete suppressors' reconnect rule, and safe where
+// theirs would not be: deletes are one-shot, but installs repeat — the
+// sweep re-sends a withheld install on the next tick after learning, so
+// default-deny during discovery delays, never drops.
 func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint32, source string) bool {
 	if domain == 0 && check == 0 {
 		return false
 	}
-	if s == nil || !s.peerCapabilitiesLearned() || s.InstallTableIdentityCapable() {
+	if s == nil || s.InstallTableIdentityCapable() {
 		return false
 	}
 	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
 	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
-		slog.Warn("cluster sync: withholding stamped session installs — the peer does not advertise "+
-			"#9752 install-table identity, so it would install them stamp-less and wrong-table after "+
-			"failover. That peer will miss these sessions until a miss re-establishes them or the "+
-			"upgrade completes on both nodes.",
+		slog.Warn("cluster sync: withholding stamped session installs — the peer has not advertised "+
+			"#9752 install-table identity (incapable or not yet discovered), so it would install them "+
+			"stamp-less and wrong-table after failover. That peer will miss these sessions until a miss "+
+			"re-establishes them or the upgrade completes on both nodes.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))

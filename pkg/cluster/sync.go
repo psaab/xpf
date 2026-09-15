@@ -1043,12 +1043,18 @@ type SessionSync struct {
 	// suppression warning, same incarnation scoping (reset alongside on
 	// full disconnect).
 	installTableSuppressionWarned atomic.Bool
-	lastNewCounter                uint64
-	lastClosedCounter             uint64
-	lastSweepEmpty                bool
-	vrfDevice                     string
-	peerClockOffset               atomic.Int64
-	clockSynced                   atomic.Bool
+	// bulkFencedForPeer latches a #9752 round 4 bulk refusal for the peer
+	// incarnation: once a window aborts on the install fence, retries skip
+	// quietly instead of burning full-table walks that all abort the same
+	// way. Same incarnation scoping (reset on full disconnect), plus an
+	// early clear when a capable capability frame lands.
+	bulkFencedForPeer atomic.Bool
+	lastNewCounter    uint64
+	lastClosedCounter uint64
+	lastSweepEmpty    bool
+	vrfDevice         string
+	peerClockOffset   atomic.Int64
+	clockSynced       atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the

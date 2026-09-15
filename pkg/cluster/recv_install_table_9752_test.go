@@ -15,14 +15,45 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-// lossyMirrorDP9752 is a mockSweepDP whose session reads drop the
-// installing-table identity, exactly as bpfSessionValue.sessionValue does in
-// production (and whose writes are recorded so the test can see what the
-// cluster apply handed down — the only place the restored stamp is
-// observable, since the mirror itself cannot hold it).
+// lossyMirrorDP9752 is a mockSweepDP whose session reads drop EXACTLY the
+// fields production drops: bpfSessionValue.sessionValue rebuilds only the
+// on-map ABI prefix (through RoutingDomain) and zeroes every sync-only
+// trailing field. Writes are recorded so the test can see what the cluster
+// apply handed down — the only place a restored stamp is observable, since
+// the mirror itself cannot hold it.
 type lossyMirrorDP9752 struct {
 	*mockSweepDP
 	sets []dataplane.SessionValue
+}
+
+// dropSyncOnly9752 mirrors the production loss field-for-field
+// (pkg/dataplane/bpf_session_value.go: the toBPF projection drops, and
+// sessionValue never restores, everything past RoutingDomain). If the BPF
+// ABI grows a field, this list must grow with it — a narrower fake would
+// hand the code under test state production never provides.
+func dropSyncOnly9752(v *dataplane.SessionValue) {
+	v.Generation = 0
+	v.PolicyCounterIdx = 0
+	v.ConfigEpoch = 0
+	v.RTFlowSessionID = 0
+	v.IngressIfaceFold = 0
+	v.TunnelDiscriminator = 0
+	v.TCPCloseClass = 0
+	v.InstallTableDomain = 0
+	v.InstallTableCheck = 0
+}
+
+func dropSyncOnlyV69752(v *dataplane.SessionValueV6) {
+	v.Generation = 0
+	v.PolicyCounterIdx = 0
+	v.Nat64SnatV4 = [4]byte{}
+	v.ConfigEpoch = 0
+	v.RTFlowSessionID = 0
+	v.IngressIfaceFold = 0
+	v.TunnelDiscriminator = 0
+	v.TCPCloseClass = 0
+	v.InstallTableDomain = 0
+	v.InstallTableCheck = 0
 }
 
 func (f *lossyMirrorDP9752) Sessions() dataplane.SessionStore {
@@ -31,19 +62,37 @@ func (f *lossyMirrorDP9752) Sessions() dataplane.SessionStore {
 
 func (f *lossyMirrorDP9752) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
 	f.sets = append(f.sets, val)
-	val.InstallTableDomain, val.InstallTableCheck = 0, 0
+	dropSyncOnly9752(&val)
 	return f.mockSweepDP.SetSessionV4(key, val)
 }
 
 func (f *lossyMirrorDP9752) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error) {
 	v, err := f.mockSweepDP.GetSessionV4(key)
-	v.InstallTableDomain, v.InstallTableCheck = 0, 0
+	dropSyncOnly9752(&v)
 	return v, err
 }
 
 func (f *lossyMirrorDP9752) BatchIterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
 	return f.mockSweepDP.BatchIterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
-		val.InstallTableDomain, val.InstallTableCheck = 0, 0
+		dropSyncOnly9752(&val)
+		return fn(key, val)
+	})
+}
+
+func (f *lossyMirrorDP9752) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
+	dropSyncOnlyV69752(&val)
+	return f.mockSweepDP.SetSessionV6(key, val)
+}
+
+func (f *lossyMirrorDP9752) GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error) {
+	v, err := f.mockSweepDP.GetSessionV6(key)
+	dropSyncOnlyV69752(&v)
+	return v, err
+}
+
+func (f *lossyMirrorDP9752) BatchIterateSessionsV6(fn func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	return f.mockSweepDP.BatchIterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+		dropSyncOnlyV69752(&val)
 		return fn(key, val)
 	})
 }
@@ -142,5 +191,51 @@ func TestRecvMemoDeleteEvicts9752(t *testing.T) {
 	if got := lastSet9752(t, dp); got.InstallTableDomain != 0 || got.InstallTableCheck != 0 {
 		t.Fatalf("#9752 round 3: a delete did not evict the received record; got (%d,%d)",
 			got.InstallTableDomain, got.InstallTableCheck)
+	}
+}
+
+// TestLossyMirrorMatchesProductionLossExactly9752 pins the fixture to the
+// production loss (TestBPFConversionDropsExactlyTheSyncOnlyTail9752 in
+// pkg/dataplane): the same fully-populated value must emerge identically
+// from both. If the BPF ABI grows a field, that test breaks first — update
+// dropSyncOnly9752 with it, or this cell fails next.
+func TestLossyMirrorMatchesProductionLossExactly9752(t *testing.T) {
+	full := dataplane.SessionValue{
+		State: 1, Flags: 2, TCPState: 3, IsReverse: 1, AppTimeout: 4,
+		SessionID: 5, Created: 6, LastSeen: 7, Timeout: 8, PolicyID: 9,
+		IngressZone: 10, EgressZone: 11,
+		NATSrcIP: 12, NATDstIP: 13, NATSrcPort: 14, NATDstPort: 15,
+		FwdPackets: 16, FwdBytes: 17, RevPackets: 18, RevBytes: 19,
+		ReverseKey: dataplane.SessionKey{Protocol: 6, SrcPort: 1, DstPort: 2},
+		ALGType:    20, LogFlags: 21, AppID: 22,
+		FibIfindex: 23, FibVlanID: 24,
+		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
+		FibGen: 25, IngressIfindex: 26, IngressVlanID: 27, RoutingDomain: 28,
+		Generation: 29, PolicyCounterIdx: 30, ConfigEpoch: 31,
+		RTFlowSessionID: 32, IngressIfaceFold: 33, TunnelDiscriminator: 34,
+		TCPCloseClass: 35, InstallTableDomain: 36, InstallTableCheck: 37,
+	}
+	got := full
+	dropSyncOnly9752(&got)
+	want := full
+	want.Generation, want.PolicyCounterIdx, want.ConfigEpoch = 0, 0, 0
+	want.RTFlowSessionID, want.IngressIfaceFold, want.TunnelDiscriminator = 0, 0, 0
+	want.TCPCloseClass, want.InstallTableDomain, want.InstallTableCheck = 0, 0, 0
+	if got != want {
+		t.Fatalf("lossy fixture diverges from production loss:\n got %+v\nwant %+v", got, want)
+	}
+	// The mirror reads must apply it (not just the helper): seed full, read lossy.
+	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
+	f := &lossyMirrorDP9752{mockSweepDP: dp}
+	key := dataplane.SessionKey{Protocol: 6, SrcPort: 1, DstPort: 2}
+	if err := dp.SetSessionV4(key, full); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	read, err := f.GetSessionV4(key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if read != want {
+		t.Fatalf("lossy Get diverges from production loss:\n got %+v\nwant %+v", read, want)
 	}
 }
