@@ -1010,7 +1010,10 @@ func (c *CLI) handleShowSystem(args []string) error {
 		// (and the no-RBAC empty class) still sees cleartext.
 		redact := c.showConfigRedacted()
 		if len(args) >= 2 {
-			// "show system rollback compare N" — diff rollback N against active
+			// "show system rollback compare N" — diff rollback N against the
+			// CANDIDATE (ShowCompareRollbackRedacted), not against active:
+			// the same both-arms candidate read the gRPC ShowCompare RPC
+			// prices at PermConfig (#9889).
 			if args[1] == "compare" {
 				if len(args) < 3 {
 					return fmt.Errorf("usage: show system rollback compare <N>")

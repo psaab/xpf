@@ -253,11 +253,13 @@ func (s *Server) authorizeRPC(ctx context.Context, fullMethod string, req any) e
 
 	// #9324: the method table prices ShowConfig at PermView, but ConfigTarget's
 	// proto3 zero value is CANDIDATE, so a view-only principal that omitted the
-	// target read another session's uncommitted configuration. Reading a
-	// candidate costs PermConfig — the permission that lets you be in
-	// configuration mode at all — and it is charged HERE, at the same choke
-	// point as the coarse check, so a new target-taking RPC cannot be added
-	// with its continuation ungated.
+	// target read another session's uncommitted configuration. #9889 is the
+	// same shape on the sibling RPC: ShowCompare diffs against the candidate
+	// on BOTH arms with no ACTIVE arm at all. Reading a candidate costs
+	// PermConfig — the permission that lets you be in configuration mode at
+	// all — and it is charged HERE, at the same choke point as the coarse
+	// check, so a new candidate-reading RPC cannot be added with its
+	// continuation ungated.
 	if err := s.authorizeRPCConfigTargetRead(cfg, p, fullMethod, req); err != nil {
 		return denyRPC(fullMethod, config.PermConfig, p, err)
 	}
