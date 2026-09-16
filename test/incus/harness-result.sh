@@ -67,7 +67,7 @@ HARNESS_RESULT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_RESULT_SCHEMA=1
 
 # The adapter table. A source not listed here is REFUSED, never defaulted.
-HARNESS_ADAPTERS="ha-smoke newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
+HARNESS_ADAPTERS="ha-smoke smoke-cells newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
 
 harness_result_root() {
 	if [[ -n "${XPF_REPO_ROOT:-}" ]]; then
@@ -128,11 +128,16 @@ harness_adapt() {
 	"harness_adapt_${adapter//-/_}" "$rc" "$log"
 }
 
-# ── ha-smoke ─────────────────────────────────────────────────────────
+# ── ha-smoke / smoke-cells ─────────────────────────────────────────────
 #
-# Covers all 8 destructive HA smokes AND test-connectivity.sh: they carry
-# byte-identical pass()/fail() definitions and all end with a
-# `<n> passed, <n> failed` summary.
+# The two HA-smoke adapters share one summary parse and differ ONLY in the
+# headline (#9922 F-155). Five smokes emit an iperf3 throughput cell
+# (failover, double, stress, chained, active-active) and keep ha-smoke;
+# seven emit cells only (connectivity, wire-properties, ha-crash,
+# persistent-nat, dhcp-lease, private-rg, restart-connectivity) and take
+# smoke-cells. The Makefile mapping is census-checked against "calls
+# iperf_throughput_verdict" in harness-result-selftest.sh, so a future
+# mis-mapping reds there instead of silently switching headline families.
 #
 # Match the NUMERIC TAIL, never the label prefix. The prefixes differ --
 # "Failover test:", "HA crash test:", "Double failover test:", "Stress
@@ -147,15 +152,15 @@ harness_adapt() {
 # before its summary prints no pair at all; today that is indistinguishable
 # from a clean run to anything reading only the tail. Here it is a VOID with a
 # reason, which is the one thing it must never be confused with.
-harness_adapt_ha_smoke() {
-	local rc="$1" log="$2"
+_ha_smoke_summary() {
+	local log="$1" rc="$2"
 	local line p f skipped=""
 	# LAST match: a smoke that prints an intermediate tally must not have it
 	# read as the result.
 	line=$(grep -oE '[0-9]+ passed, [0-9]+ failed' "$log" | tail -1)
 	if [[ -z "$line" ]]; then
 		printf 'VOID\tno "<n> passed, <n> failed" summary line in the output (rc=%s) — the smoke aborted before reaching its summary\t\t\t\n' "$rc"
-		return 0
+		return 1
 	fi
 	p=${line%% passed,*}
 	f=${line##*, }
@@ -166,30 +171,46 @@ harness_adapt_ha_smoke() {
 	f=$((10#$f))
 	if ((p + f == 0)); then
 		printf 'VOID\tsummary reports 0 passed and 0 failed — the smoke reached its summary but ran no assertions\t\t\t\n'
-		return 0
+		return 1
 	fi
 	skipped=$(grep -oE '[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped' "$log" | tail -1 |
 		sed -E 's/.*, ([0-9]+) skipped/\1/')
-
+	printf '%s %s %s' "$p" "$f" "$skipped"
+}
+harness_adapt_ha_smoke() {
+	local rc="$1" log="$2"
+	local summary p f skipped=""
+	if ! summary=$(_ha_smoke_summary "$log" "$rc"); then
+		printf '%s\n' "$summary"
+		return 0
+	fi
+	read -r p f skipped <<<"$summary"
+	# ANCHORED iperf extraction: Gbps comes ONLY from a pass()/fail() cell
+	# line -- `^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput` --
+	# LAST match; the figure is the FIRST `<n> Gbps` on it. Floor prose
+	# ("iperf3 throughput floor 5 Gbps") has no cell prefix and data-transfer
+	# prose ("iperf3 data transfer completed (2.5 Gbps)") has neither the
+	# prefix nor the phrase; both used to become banded measurements.
+	local cell="" gbps=""
+	cell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | tail -1)
+	if [[ -n "$cell" ]]; then
+		gbps=$(grep -oE '([0-9]+\.[0-9]+|[0-9]+) Gbps' <<<"$cell" | head -1 | sed 's/ Gbps//')
+	fi
 	# Invariant metrics beside the headline. The iperf3 throughput cell is the
 	# only continuous scalar these smokes produce; the cell counts are the
 	# discrete invariants that say whether a headline move came with a
 	# behaviour change (regression candidate) or alone (flake candidate).
-	local gbps
-	gbps=$(grep -oE 'iperf3 throughput[^0-9]*([0-9]+\.[0-9]+|[0-9]+) Gbps' "$log" | tail -1 |
-		grep -oE '([0-9]+\.[0-9]+|[0-9]+) Gbps' | sed 's/ Gbps//')
-
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
-	local headline="cells_passed" direction="higher-better"
-	if [[ -n "$gbps" ]]; then
-		metrics="$metrics throughput_gbps=$gbps"
-		headline="throughput_gbps"
-		direction="higher-better"
-	fi
-
+	[[ -n "$gbps" ]] && metrics="$metrics throughput_gbps=$gbps"
 	if ((f > 0)); then
-		printf 'FAIL\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics"
+		# FAIL headlines are diagnostic-only: FAIL rows never enter bands,
+		# so the FAIL shape keeps throughput-when-present, cells otherwise.
+		if [[ -n "$gbps" ]]; then
+			printf 'FAIL\t\tthroughput_gbps\thigher-better\t%s\n' "$metrics"
+		else
+			printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
+		fi
 		return 0
 	fi
 	# 0 failed but the process still failed: the summary and the exit status
@@ -199,7 +220,36 @@ harness_adapt_ha_smoke() {
 		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree\t\t\t\n' "$rc"
 		return 0
 	fi
-	printf 'PASS\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics"
+	# A PASS summary with no anchored figure is a pass the throughput band
+	# cannot see -- VOID, never a cells-headlined PASS that would silently
+	# switch headline families mid-history.
+	if [[ -z "$gbps" ]]; then
+		printf 'VOID\tPASS summary but no anchored "PASS|FAIL iperf3 throughput" cell line carrying "<n> Gbps" — the iperf measurement is missing\t\t\t\n'
+		return 0
+	fi
+	printf 'PASS\t\tthroughput_gbps\thigher-better\t%s\n' "$metrics"
+}
+harness_adapt_smoke_cells() {
+	local rc="$1" log="$2"
+	local summary p f skipped=""
+	if ! summary=$(_ha_smoke_summary "$log" "$rc"); then
+		printf '%s\n' "$summary"
+		return 0
+	fi
+	read -r p f skipped <<<"$summary"
+	# NO iperf extraction by design: these smokes emit no throughput cell,
+	# so the headline is FIXED and iperf-looking prose is ignored.
+	local metrics="cells_passed=$p cells_failed=$f"
+	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
+	if ((f > 0)); then
+		printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
+		return 0
+	fi
+	if [[ "$rc" != "0" ]]; then
+		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree\t\t\t\n' "$rc"
+		return 0
+	fi
+	printf 'PASS\t\tcells_passed\thigher-better\t%s\n' "$metrics"
 }
 
 # ── newflow-ceiling ──────────────────────────────────────────────────

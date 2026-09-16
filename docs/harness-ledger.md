@@ -53,7 +53,7 @@ explicit row in an adapter table that is itself exercised by cells.
 
 | Source | → PASS | → FAIL | → VOID |
 |---|---|---|---|
-| the 9 cluster gates (`pass()`/`fail()`) | `failed == 0` | `failed > 0` | no summary line; `passed + failed == 0`; summary says 0 failed but the process exited non-zero |
+| the 12 smoke gates (`pass()`/`fail()`, `ha-smoke` or `smoke-cells`) | `failed == 0` (+ anchored figure for `ha-smoke` PASS) | `failed > 0` | no summary line; `passed + failed == 0`; summary says 0 failed but the process exited non-zero; `ha-smoke` PASS with no figure |
 | `newflow_ceiling_analyze.py` | `verdict=VALID` | *(never — it reports a rate, not a gate)* | `INVALID`, `INCONCLUSIVE`, no JSON document, VALID without the headline metric |
 | `mouse_latency_aggregate.py` | `verdict=PASS` | `verdict=FAIL` | `INSUFFICIENT-DATA`, no verdict line, a verdict without a ratio |
 | `run-selftests.sh` | `failed=0` | `failed>0` | no summary; `passed + failed == 0` (it swept an empty set) |
@@ -63,23 +63,34 @@ That last row is the table earning its keep. `iperf-throughput-lib.sh` has no
 void state to express, so it files a non-measurement as a regression; the
 adapter recovers the third state from the text.
 
-### One adapter covers all nine cluster gates
+### Two adapters cover the twelve smoke gates
 
-The eight destructive HA smokes plus `test-connectivity.sh` carry
-byte-identical `pass()`/`fail()` definitions and all end with a
-`<n> passed, <n> failed` summary. **The adapter matches the numeric tail, never
-the label prefix** — the prefixes differ (`Failover test:`, `HA crash test:`,
-`Double failover test:`, `Stress failover:`, `Chained crash test:`,
-`Restart connectivity:`, and a bare `Results:` on two of them), so a
-prefix-anchored adapter silently covers six of eight while looking complete.
-Nor is it anchored at end of line: `test-connectivity.sh` continues
-`, <n> skipped` after the pair.
+The eight destructive HA smokes plus `test-connectivity.sh`,
+`test-wire-properties.sh`, `persistent-nat-failover.sh` and
+`dhcp-lease-failover.sh` carry byte-identical `pass()`/`fail()` definitions
+and all end with a `<n> passed, <n> failed` summary. **The adapters match the
+numeric tail, never the label prefix** — the prefixes differ (`Failover test:`,
+`HA crash test:`, `Double failover test:`, `Stress failover:`,
+`Chained crash test:`, `Restart connectivity:`, and a bare `Results:` on two
+of them), so a prefix-anchored adapter silently covers six of eight while
+looking complete. Nor is it anchored at end of line: `test-connectivity.sh`
+continues `, <n> skipped` after the pair.
 
-Both mistakes are mutation cells, and the selftest's census does not invent its
-fixtures — it **extracts the real `echo` line from each of the nine scripts**
-and renders it. It also asserts that the *discovered* set of gates carrying the
-shape **equals** the declared set, so a tenth gate added later cannot
-accumulate uncovered.
+The summary parse is shared; the headline is not (#9922 F-155). The five smokes
+that emit an iperf3 throughput cell keep `ha-smoke`, whose PASS headline is
+FIXED to `throughput_gbps` and whose figure comes ONLY from a `PASS`/`FAIL`
+cell line (floor/threshold prose used to become a banded measurement). The
+seven that emit cells only take `smoke-cells`, whose headline is FIXED to
+cells_passed. A Makefile↔script cross-check asserts each gate's adapter
+matches whether its script calls `iperf_throughput_verdict`, so a mis-mapping
+reds instead of silently switching headline families.
+
+Both prefix mistakes are mutation cells, and the selftest's census does not
+invent its fixtures — it **extracts the real `echo` line from each of the
+twelve scripts** (the LAST one for `dhcp-lease-failover.sh`, which carries an
+early-exit echo plus the canonical final) and renders it. It also asserts that
+the *discovered* set of gates carrying the shape **equals** the declared set,
+so a thirteenth gate added later cannot accumulate uncovered.
 
 ## What a row records
 

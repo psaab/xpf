@@ -1122,13 +1122,13 @@ MODE ?= all
 PRIVATE_RG_MODE ?= $(if $(filter all,$(MODE)),full,$(MODE))
 test-connectivity:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-connectivity --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-connectivity.sh $(MODE)
 
 # On-wire properties test (PMTUD reflection + NPTv6 checksum neutrality)
 test-wire-properties:
 	./test/incus/harness-result.sh run \
-		--gate test-wire-properties --adapter ha-smoke --env $(HARNESS_ENV) --hermetic \
+		--gate test-wire-properties --adapter smoke-cells --env $(HARNESS_ENV) --hermetic \
 		-- ./test/incus/test-wire-properties.sh
 
 # Cluster failover test (iperf3 through reboot — requires cluster + iperf3 server)
@@ -1158,7 +1158,7 @@ test-stress-failover:
 # Hard-crash / hung-node HA test (force-stop + daemon stop + multi-cycle — requires cluster + iperf3 server)
 test-ha-crash:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-ha-crash --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-ha-crash --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-ha-crash.sh
 
 # #9729: persistent-NAT binding survives promotion (#7360). DESTRUCTIVE and
@@ -1166,7 +1166,7 @@ test-ha-crash:
 # and restores interface-mode SNAT on exit.
 test-persistent-nat-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-persistent-nat-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-persistent-nat-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/persistent-nat-failover.sh
 
 # #9729: a Kea lease survives a hard failover (#2261). DESTRUCTIVE and
@@ -1174,7 +1174,7 @@ test-persistent-nat-failover:
 # dhcp-local-server pool); without it the preflight refuses and the row is VOID.
 test-dhcp-lease-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-dhcp-lease-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-dhcp-lease-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/dhcp-lease-failover.sh
 
 # Chained hard-reset failover test (fw0 crash → fw1 crash → both rejoin — requires cluster + iperf3 server)
@@ -1186,13 +1186,13 @@ test-chained-crash:
 # Private RG election test (enable/disable private-rg-election, verify VRRP behavior)
 test-private-rg:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-private-rg --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-private-rg --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-private-rg.sh $(PRIVATE_RG_MODE)
 
 # Restart connectivity regression test (verify no transient loss during daemon restart — requires cluster + iperf3 server)
 test-restart-connectivity:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-restart-connectivity --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-restart-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-restart-connectivity.sh
 
 # Canonical cluster HA test environment (isolated loss userspace cluster).

@@ -238,6 +238,34 @@ MUTATIONS = {
         """\tline=$(grep -oE '[0-9]+ passed, [0-9]+ failed$' "$log" | tail -1)""",
         "tolerance of a trailing field: test-connectivity.sh's summary stops matching",
     ),
+    "ha-iperf-cell-prefix-dropped": (
+        SH_FILE, "sh",
+        """\tcell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | tail -1)""",
+        """\tcell=$(grep -E 'iperf3 throughput' "$log" | tail -1)""",
+        "the cell-line anchor: bare floor/threshold prose becomes a banded "
+        "measurement again (#9922 F-155)",
+    ),
+    "ha-iperf-last-match-dropped": (
+        SH_FILE, "sh",
+        """\tcell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | tail -1)""",
+        """\tcell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | head -1)""",
+        "the LAST-match on throughput cells: a stale first reading wins "
+        "(#9922 F-155)",
+    ),
+    "ha-pass-without-figure-scored-as-a-pass": (
+        SH_FILE, "sh",
+        """\tif [[ -z "$gbps" ]]; then\n\t\tprintf 'VOID\\tPASS summary but no anchored""",
+        """\tif false; then\n\t\tprintf 'VOID\\tPASS summary but no anchored""",
+        "the no-figure VOID: an iperf PASS with no measurement banks a "
+        "headline it never measured (#9922 F-155)",
+    ),
+    "ha-fail-cells-headline-dropped": (
+        SH_FILE, "sh",
+        """\t\t\tprintf 'FAIL\\t\\tcells_passed\\thigher-better\\t%s\\n' "$metrics\"""",
+        """\t\t\tprintf 'FAIL\\t\\tthroughput_gbps\\thigher-better\\t%s\\n' "$metrics\"""",
+        "the unmeasured-FAIL cells headline: a FAIL with no figure claims a "
+        "throughput it never measured (#9922 F-155)",
+    ),
     "missing-summary-scored-as-a-pass": (
         SH_FILE, "sh",
         '\t\tprintf \'VOID\\tno "<n> passed, <n> failed" summary line',
