@@ -123,13 +123,16 @@ impl std::fmt::Debug for PeerConfig {
 ///     session was rotated straight into `current`, so every
 ///     peer-initiated rekey blackholed xpf→peer egress until the peer
 ///     sent data (a replayable egress DoS — the F-019 defect).
+///
 /// #9644: lock-free last-observed-endpoint snapshot for the WireGuard
 /// decap hot path. `note_worker_observed_endpoint` runs once per
 /// authenticated transport-data record; the steady state (endpoint
-/// unchanged) must cost relaxed loads and a compare, never the
-/// peer's roaming `Mutex`. This snapshot is ADVISORY ONLY: the
-/// mutex-protected `Peer::roamed_endpoint` slot stays the authority
-/// (every report path re-checks under lock).
+/// unchanged) must cost one optimistic snapshot read — atomic loads
+/// (Acquire on the sequence/epochs, Relaxed on the words), an Acquire
+/// fence, and a compare — never the peer's roaming `Mutex`. This
+/// snapshot is ADVISORY ONLY: the mutex-protected
+/// `Peer::roamed_endpoint` slot stays the authority (every report
+/// path re-checks under lock).
 ///
 /// Suppression contract — complete statement, normative here (this
 /// comment, not an external plan, is what the code implements). A
@@ -171,6 +174,15 @@ impl std::fmt::Debug for PeerConfig {
 /// Layout: seq + live/stamped epochs + 5 payload words = 8 × 8 B on
 /// ONE cache line, so steady-state readers touch exactly one line
 /// that no writer stores to between roams.
+///
+/// Access protocol: the fields stay `pub(crate)` ONLY for the test
+/// cells (controlled torn-state staging + seq/epoch stability
+/// oracles). Production code MUST NOT store these fields directly:
+/// every production mutation goes through `begin/commit_publish`
+/// (peer mutex held) or `bump_live_epoch`, and every production read
+/// goes through `read_validated_endpoint`. A direct word store
+/// outside the odd..even bracket would publish unanchored words that
+/// a concurrent reader could validate as a complete publication.
 #[repr(align(64))]
 pub(crate) struct RoamSnapshot {
     pub(crate) seq: AtomicU64,
@@ -277,6 +289,13 @@ impl RoamSnapshot {
     /// in a publication. Call only with the peer mutex
     /// held; the matching [`RoamSnapshot::commit_publish`] must
     /// follow in the same critical section.
+    ///
+    /// Ordering: `Relaxed` suffices for the mark because it publishes
+    /// no data — a reader that observes odd bails WITHOUT touching
+    /// the words, and the commit's Release fence (below) retroactively
+    /// orders this mark before the word stores for any reader that
+    /// goes on to validate. Atomicity (not ordering) is what the
+    /// mark needs, and the mutex serializes publishers.
     pub(crate) fn begin_publish(&self) {
         let prev = self.seq.fetch_add(1, Ordering::Relaxed);
         debug_assert!(prev & 1 == 0, "9644: publish without matching close");
@@ -287,6 +306,14 @@ impl RoamSnapshot {
     /// the same critical section. Only infallible operations may
     /// appear in the odd region — no panic/unwind may abandon it
     /// (preemption remains possible).
+    ///
+    /// Ordering: the Release fence pairs with the reader's Acquire
+    /// fence — together they order the Relaxed word/`snap_epoch`
+    /// stores between the odd mark and the even close — and the
+    /// Release close lets a validating reader's Acquire `s1` import
+    /// the whole publication. The words themselves need no stronger
+    /// ordering because no reader consumes them without first
+    /// validating the bracketing sequence.
     pub(crate) fn commit_publish(&self, words: [u64; 5], epoch: u64) {
         fence(Ordering::Release);
         self.w0.store(words[0], Ordering::Relaxed);
@@ -296,6 +323,52 @@ impl RoamSnapshot {
         self.w4.store(words[4], Ordering::Relaxed);
         self.snap_epoch.store(epoch, Ordering::Relaxed);
         self.seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// #9644 fast-path decision: the optimistic seqlock read, exactly
+    /// as the decap hot path performs it. Returns the decoded
+    /// endpoint iff the sequence is stable and even across the read
+    /// AND the stamped epoch matches both live-epoch observations;
+    /// `None` for an in-flight (odd) publication, a torn read
+    /// (`s0 != s1`), a stale-epoch snapshot, or the family-0
+    /// sentinel. This validates coherence only, NOT currentness
+    /// (E1–E4 in the contract above may validate stale snapshots).
+    /// The sole production caller is
+    /// `note_worker_observed_endpoint`'s duplicate-suppression check;
+    /// the unit cells below call it directly against controlled
+    /// torn/stale states, which is what makes them sensitive to
+    /// broken sequence/epoch validation rather than to the mailbox
+    /// mutex they never touch.
+    pub(crate) fn read_validated_endpoint(&self) -> Option<SocketAddr> {
+        // `e0`/`s0` are Acquire so no word load hoists above them and
+        // the opening reads import the latest closed publication;
+        // `s1`/`e1` are Acquire so a validated read imports it.
+        let e0 = self.live_epoch.load(Ordering::Acquire);
+        let s0 = self.seq.load(Ordering::Acquire);
+        if s0 & 1 == 0 {
+            // Relaxed: these words are consumed ONLY under a stable
+            // `s0 == s1` below, which proves no publication spanned
+            // the read; the Acquire fence pairs with the commit's
+            // Release fence to order them before the `s1` re-read
+            // (on x86 TSO this is belt-and-braces; on AArch64 the
+            // fence is what stops later word stores validating under
+            // an earlier sequence).
+            let words = [
+                self.w0.load(Ordering::Relaxed),
+                self.w1.load(Ordering::Relaxed),
+                self.w2.load(Ordering::Relaxed),
+                self.w3.load(Ordering::Relaxed),
+                self.w4.load(Ordering::Relaxed),
+            ];
+            let snap_epoch = self.snap_epoch.load(Ordering::Relaxed);
+            fence(Ordering::Acquire);
+            let s1 = self.seq.load(Ordering::Acquire);
+            let e1 = self.live_epoch.load(Ordering::Acquire);
+            if s0 == s1 && snap_epoch == e0 && snap_epoch == e1 {
+                return decode_roam_endpoint(&words);
+            }
+        }
+        None
     }
 }
 
@@ -396,13 +469,18 @@ pub(crate) struct Peer {
     /// initiations, the TUN-read egress — not the dataplane's forwarding.
     ///
     /// Shaped like `handshake_request_pending` beside it: per-peer,
-    /// last-write-wins, lossy-tolerable, drained by the control thread's
-    /// existing per-peer timer pass. A roam has exactly last-write-wins
-    /// semantics, so coalescing is correct rather than merely acceptable.
-    /// A `Mutex<Option<SocketAddr>>` and not an atomic because a `SocketAddr`
-    /// does not fit one: the lock is taken only on a CHANGE (the worker
-    /// compares first), so the steady state pays one relaxed load per record
-    /// and never the lock.
+    /// lossy-tolerable, drained by the control thread's existing
+    /// per-peer timer pass. The SLOT is last-write-wins among the
+    /// reports that reach it — a roam has exactly last-write-wins
+    /// semantics, so coalescing is correct rather than merely
+    /// acceptable — but the reporting CHANNEL is not: #9644 snapshot
+    /// suppression may drop the latest observation (stale-observation
+    /// contract on `RoamSnapshot` above: ancestor suppression,
+    /// E1–E4), so end to end this mailbox is NOT last-write-wins
+    /// linearizable. A `Mutex<Option<SocketAddr>>` and not an atomic
+    /// because a `SocketAddr` does not fit one: the lock is taken
+    /// only on a CHANGE (the worker compares against the lock-free
+    /// snapshot first), so duplicates never take the lock.
     pub(crate) roamed_endpoint: std::sync::Mutex<Option<SocketAddr>>,
     /// Relaxed mirror of `roamed_endpoint.is_some()`, so the per-packet path
     /// can skip the mutex entirely once a roam is already pending and the

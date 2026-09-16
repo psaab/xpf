@@ -59,7 +59,7 @@ use super::framing::{encode_data_header, parse_data_header};
 // handshake_session.rs (same `wg` module); the engine struct holds a map of
 // them, so it imports the type here.
 use super::handshake_session::PendingHandshake;
-use super::peer::{decode_roam_endpoint, encode_roam_endpoint, Peer, PeerConfig};
+use super::peer::{encode_roam_endpoint, Peer, PeerConfig};
 use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
@@ -728,9 +728,12 @@ impl WgEngine {
     /// not free on the dataplane hot path: this runs once per
     /// transport-data record, i.e. once per packet of every WireGuard
     /// flow. The steady state — a peer that is not roaming — costs an
-    /// optimistic snapshot read (relaxed loads + compare, no lock, no
-    /// shared write) against the peer's `RoamSnapshot`; the mutex is
-    /// taken only on the slow path.
+    /// optimistic snapshot read (relaxed loads + compare) against the
+    /// peer's `RoamSnapshot`: the roaming mutex stays untaken and no
+    /// snapshot or pending word is stored on duplicates (the table and
+    /// peer `Arc` refcounts in `peer_arc` below are still touched —
+    /// the saving is the mutex and the snapshot line, not every
+    /// shared write); the mutex is taken only on the slow path.
     ///
     /// Suppression contract — complete statement (normative; the
     /// `RoamSnapshot` comment carries the same text). A suppression on
@@ -762,32 +765,15 @@ impl WgEngine {
         // #9644 fast path: optimistic seqlock read of the snapshot.
         // A stable snapshot whose stamped epoch matches both epoch
         // observations and whose words decode to the endpoint means
-        // there is nothing to say — no lock, no shared-memory write.
+        // there is nothing to say — the roaming mutex stays untaken
+        // and no snapshot or pending word is stored (only the `Arc`
+        // refcounts from the `peer_arc` load above are touched).
         // This validates coherence, NOT currentness: the matched
         // publication may be stale (E1–E4), which the contract above
         // permits.
         let snap = &peer.roam_snapshot;
-        let e0 = snap.live_epoch.load(Ordering::Acquire);
-        let s0 = snap.seq.load(Ordering::Acquire);
-        if s0 & 1 == 0 {
-            let words = [
-                snap.w0.load(Ordering::Relaxed),
-                snap.w1.load(Ordering::Relaxed),
-                snap.w2.load(Ordering::Relaxed),
-                snap.w3.load(Ordering::Relaxed),
-                snap.w4.load(Ordering::Relaxed),
-            ];
-            let snap_epoch = snap.snap_epoch.load(Ordering::Relaxed);
-            std::sync::atomic::fence(Ordering::Acquire);
-            let s1 = snap.seq.load(Ordering::Acquire);
-            let e1 = snap.live_epoch.load(Ordering::Acquire);
-            if s0 == s1
-                && snap_epoch == e0
-                && snap_epoch == e1
-                && decode_roam_endpoint(&words) == Some(endpoint)
-            {
-                return false;
-            }
+        if snap.read_validated_endpoint() == Some(endpoint) {
+            return false;
         }
         // Slow path: the mutex-protected slot is the authority and is
         // always re-checked under lock, so any fast-path staleness
@@ -800,6 +786,9 @@ impl WgEngine {
             // Equal but snapshot-stale (publish/invalidate race): repair
             // the snapshot so stable traffic regains lock-free
             // suppression on the very next packet. Same odd-first protocol.
+            // Relaxed: take-side bumps hold this same mutex, so no take
+            // can interleave; a lock-free consumer-start bump racing us
+            // merely stamps a stale epoch, which E3 permits.
             let epoch = snap.live_epoch.load(Ordering::Relaxed);
             snap.begin_publish();
             // Slot + pending already hold the right values; only the
@@ -810,6 +799,9 @@ impl WgEngine {
         // ODD-FIRST publish: the odd mark precedes the slot
         // write, so no reader can observe a slot write unanchored in a
         // publication. Slot + pending live inside the odd..even bracket.
+        // Relaxed epoch: same argument as the repair arm above — the
+        // mutex serializes us against take-side bumps, and a racing
+        // consumer-start bump is E3-permitted staleness.
         let epoch = snap.live_epoch.load(Ordering::Relaxed);
         snap.begin_publish();
         *slot = Some(endpoint);

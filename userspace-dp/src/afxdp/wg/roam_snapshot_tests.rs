@@ -3,14 +3,18 @@
 //! Each cell pins worker-observable behavior, never the mechanism:
 //! a cell that stays green when the snapshot is deleted (all reports
 //! still flow through the mutex slot) is vacuous, so every suppression
-//! assertion is paired with a shared-write-stability read (seq/epoch/
-//! pending bit-identical) or the mutex-held adversary.
+//! assertion is paired with a snapshot-write-stability read (seq/epoch/
+//! pending bit-identical) or the mutex-held adversary. ("Snapshot
+//! write" is exactly the seq/epoch/pending words: the table/peer `Arc`
+//! refcount touches in `peer_arc` are out of scope for every oracle
+//! here.) Concurrent cells additionally gate on reporter progress so
+//! they fail loudly — never pass vacuously — when no overlap happens.
 
-use super::peer::{decode_roam_endpoint, encode_roam_endpoint};
+use super::peer::{RoamSnapshot, decode_roam_endpoint, encode_roam_endpoint};
 use super::tests::established_pair;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const A: &str = "203.0.113.7:51820";
 const B: &str = "198.51.100.9:51820";
@@ -85,9 +89,10 @@ fn snapshot_encoding_round_trips_9644() {
 /// observable — no seq/epoch/pending write. A lock-path duplicate
 /// (`lock` + equal + return) also leaves these unchanged, so this
 /// cell pairs with the mutex-held adversary below, which only the
-/// lock-free path can pass.
+/// lock-free path can pass. (The `Arc` refcounts in `peer_arc` are
+/// still touched; the oracle is the snapshot words, not all memory.)
 #[test]
-fn steady_state_suppresses_without_shared_write_9644() {
+fn steady_state_suppresses_without_snapshot_write_9644() {
     let (engine, pk) = fixture();
     let a = addr(A);
     assert!(engine.note_worker_observed_endpoint(&pk, a));
@@ -261,7 +266,7 @@ fn restart_invalidation_rereports_empty_and_populated_9644() {
 /// A stale-but-equal slow hit repairs the snapshot: after racing an
 /// invalidation, the repairing note restamps to the live generation
 /// and advances the sequence; the next packet suppresses with zero
-/// further shared write (no permanently-cold state). Capturing state
+/// further snapshot write (no permanently-cold state). Capturing state
 /// BEFORE the repair is what makes this cell sensitive: a repair
 /// no-op'd to bare `return false` leaves the stamped epoch stale and
 /// the sequence still, failing both freshness assertions.
@@ -307,10 +312,15 @@ fn racing_invalidation_regains_suppression_9644() {
 /// Three reporters publish DISTINCT multiword V6 endpoints (address
 /// words, ports, and scope spread across w0..w4) while the main
 /// thread interleaves the two consumer transitions — take and
-/// consumer-start invalidation. The prior same-value cell drained
-/// pre-spawn on one atomic word and proved nothing about races; this
-/// one holds on EVERY interleaving (oracles are universal, never
-/// timing-dependent).
+/// consumer-start invalidation. The main thread runs until EVERY
+/// reporter has published through the window (per-reporter progress
+/// counters, bounded spin), so the concurrent phase provably contains
+/// reporter work — a main thread that outruns the reporters fails
+/// loudly instead of passing on the sequential tail alone. Every
+/// oracle holds on EVERY interleaving (universal, never
+/// timing-dependent); seqlock-reader acceptance itself is pinned by
+/// the `read_validated_endpoint` cells below, not by this mailbox
+/// oracle.
 #[test]
 fn concurrent_reports_takes_and_invalidations_coalesce_9644() {
     let (engine, pk) = fixture();
@@ -328,25 +338,43 @@ fn concurrent_reports_takes_and_invalidations_coalesce_9644() {
         9,
     ));
     let reported = [va, vb, vc];
+    // Notes each reporter must complete inside the concurrent window
+    // before the main thread may stop it. Any positive count proves
+    // overlap; 50 keeps the window meaningfully concurrent without
+    // costing measurable time (a note is sub-microsecond).
+    const MIN_REPORTS_PER_REPORTER: u64 = 50;
+    const MAX_MAIN_ITERS: u64 = 1_000_000;
     let engine = Arc::new(engine);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let barrier = Arc::new(std::sync::Barrier::new(4));
+    let progress: Arc<[AtomicU64; 3]> =
+        Arc::new([AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]);
     let mut handles = Vec::new();
-    for &ep in &reported {
-        let (engine, stop, barrier) =
-            (Arc::clone(&engine), Arc::clone(&stop), Arc::clone(&barrier));
+    for (i, &ep) in reported.iter().enumerate() {
+        let (engine, stop, barrier, progress) = (
+            Arc::clone(&engine),
+            Arc::clone(&stop),
+            Arc::clone(&barrier),
+            Arc::clone(&progress),
+        );
         handles.push(std::thread::spawn(move || {
             barrier.wait();
             while !stop.load(Ordering::Relaxed) {
                 engine.note_worker_observed_endpoint(&pk, ep);
+                progress[i].fetch_add(1, Ordering::Relaxed);
             }
         }));
     }
     barrier.wait();
     // Main thread interleaves takes with consumer-start invalidations
-    // while publishes fly. Every drained value must be a reported one.
+    // until every reporter has published through the window. Every
+    // drained value must be a reported one.
     let mut taken = Vec::new();
-    for _ in 0..400 {
+    let mut iters = 0u64;
+    while progress
+        .iter()
+        .any(|p| p.load(Ordering::Relaxed) < MIN_REPORTS_PER_REPORTER)
+    {
         if let Some(ep) = engine.take_worker_observed_endpoint(&pk) {
             assert!(
                 reported.contains(&ep),
@@ -355,10 +383,21 @@ fn concurrent_reports_takes_and_invalidations_coalesce_9644() {
             taken.push(ep);
         }
         engine.invalidate_roam_snapshots();
+        iters += 1;
+        assert!(
+            iters < MAX_MAIN_ITERS,
+            "reporters stalled: {iters} take/invalidate rounds without {MIN_REPORTS_PER_REPORTER} notes per reporter"
+        );
     }
     stop.store(true, Ordering::Relaxed);
     for h in handles {
         h.join().expect("reporter thread");
+    }
+    for (i, p) in progress.iter().enumerate() {
+        assert!(
+            p.load(Ordering::Relaxed) >= MIN_REPORTS_PER_REPORTER,
+            "reporter {i} must publish inside the concurrent window"
+        );
     }
     // Quiesce: drain the residue under the same oracle.
     while let Some(ep) = engine.take_worker_observed_endpoint(&pk) {
@@ -368,17 +407,31 @@ fn concurrent_reports_takes_and_invalidations_coalesce_9644() {
         );
         taken.push(ep);
     }
+    // The very first note (empty slot, zeroed snapshot) always
+    // reports, and every report is eventually drained exactly once
+    // (a take that swaps `pending` true provably takes `Some`: the
+    // publish's slot write precedes its pending store under the same
+    // mutex the take serializes on) — so an empty `taken` means the
+    // concurrent phase never happened, not that it coalesced.
+    assert!(
+        !taken.is_empty(),
+        "the concurrent window must adopt at least one report"
+    );
     // Deterministic tail on the quiesced mailbox (slot is empty):
-    // report once, suppress with no further shared write, then prove
+    // report once, suppress with no further snapshot write, then prove
     // the take bumped — with the bump no-op'd the post-take note
-    // would suppress instead of re-reporting.
+    // would suppress instead of re-reporting. (Unchanged snapshot
+    // words alone do NOT prove lock-freedom — a lock-path duplicate
+    // leaves them unchanged too — so this tail pairs with
+    // `suppression_needs_no_mutex_9644`, which only the lock-free
+    // path can pass.)
     assert!(engine.note_worker_observed_endpoint(&pk, va));
     let settled = snapshot_state(&engine, &pk);
     assert!(!engine.note_worker_observed_endpoint(&pk, va));
     assert_eq!(
         snapshot_state(&engine, &pk),
         settled,
-        "post-chaos steady state suppresses lock-free"
+        "post-chaos steady state publishes nothing further"
     );
     assert_eq!(engine.take_worker_observed_endpoint(&pk), Some(va));
     assert!(
@@ -408,4 +461,158 @@ fn v6_roam_reports_distinct_endpoints_9644() {
     // Last-write-wins: the drain adopts the latest.
     assert_eq!(engine.take_worker_observed_endpoint(&pk), Some(v6c));
     assert_eq!(engine.take_worker_observed_endpoint(&pk), None);
+}
+
+/// The production snapshot-validation decision against controlled
+/// torn/stale states: `read_validated_endpoint` is the exact fast-path
+/// read (the hot path calls it; the mailbox mutex is never touched
+/// here), driven single-threaded through odd, mixed-word, and
+/// stale-epoch publications. Each rejection below fails if its guard
+/// is deleted: without the odd check the in-flight states validate
+/// (`s0 == s1`, both odd, epochs matching); without the epoch checks
+/// the bumped state validates. Deterministic — no threads, no timing.
+#[test]
+fn snapshot_reader_rejects_inflight_and_stale_9644() {
+    let a: SocketAddr = "[2001:db8::1]:51820".parse().unwrap();
+    let b = SocketAddr::V6(std::net::SocketAddrV6::new(
+        "2001:db8:1:2:3:4:5:6".parse().unwrap(),
+        41820,
+        7,
+        9,
+    ));
+    let wa = encode_roam_endpoint(a);
+    let wb = encode_roam_endpoint(b);
+    assert!(
+        wa.iter().zip(wb.iter()).all(|(x, y)| x != y),
+        "fixture precondition: every word differs, so any mixed-word publication decodes to neither endpoint"
+    );
+    let snap = RoamSnapshot::new();
+    // Fresh (family-0 sentinel) validates to nothing.
+    assert_eq!(snap.read_validated_endpoint(), None);
+    // A complete epoch-0 publication of A validates to A.
+    snap.begin_publish();
+    snap.commit_publish(wa, 0);
+    assert_eq!(snap.read_validated_endpoint(), Some(a));
+    // In-flight publication of B with MIXED words (w0 of B, rest of
+    // A): the odd sequence must reject it even though the epochs
+    // still match. Without the odd gate this validates to a neither
+    // endpoint (s0 == s1, epochs equal, mixed words decode).
+    snap.begin_publish();
+    snap.w0.store(wb[0], Ordering::Relaxed);
+    assert_eq!(
+        snap.read_validated_endpoint(),
+        None,
+        "an in-flight mixed-word publication must not validate"
+    );
+    // In-flight with ALL words of B: still odd, still rejected.
+    // Without the odd gate this validates to Some(b).
+    snap.w1.store(wb[1], Ordering::Relaxed);
+    snap.w2.store(wb[2], Ordering::Relaxed);
+    snap.w3.store(wb[3], Ordering::Relaxed);
+    snap.w4.store(wb[4], Ordering::Relaxed);
+    snap.snap_epoch.store(0, Ordering::Relaxed);
+    assert_eq!(
+        snap.read_validated_endpoint(),
+        None,
+        "an in-flight complete-word publication must not validate while odd"
+    );
+    // Closed, the same words validate to B.
+    snap.commit_publish(wb, 0);
+    assert_eq!(snap.read_validated_endpoint(), Some(b));
+    // A drained/restarted generation (live bumped past the stamped
+    // epoch) must not validate: without the epoch checks this
+    // returns Some(b) and the next packet wrongly suppresses.
+    snap.bump_live_epoch();
+    assert_eq!(
+        snap.read_validated_endpoint(),
+        None,
+        "a stale-epoch snapshot must not validate"
+    );
+    // Republishing at the live generation restores validation.
+    let live = snap.live_epoch.load(Ordering::Relaxed);
+    snap.begin_publish();
+    snap.commit_publish(wb, live);
+    assert_eq!(snap.read_validated_endpoint(), Some(b));
+}
+
+/// The production reader against racing publications: a writer
+/// alternating two every-word-distinct V6 endpoints through the
+/// production `begin/commit_publish` at full speed while the main
+/// thread hammers the production `read_validated_endpoint`.
+/// Universal oracle: every accepted read is a COMPLETE publication
+/// (A or B — the encoding is injective, so a torn mix decodes to
+/// neither); a validator that skips the `s0 == s1` check accepts
+/// mixes and fails. The writer runs TIGHT (no stretching): a reader
+/// loads its words nanoseconds after `s0`, so only a production-rate
+/// publisher lands stores inside that span — stretched windows just
+/// separate the timescales and never straddle. Overlap is proven,
+/// not assumed: the reader must observe the writer strictly
+/// mid-stream (the writer yields every 256 publications to keep that
+/// window open). (The Acquire fence has no x86-observable mutant —
+/// TSO orders the loads regardless — so the fence is pinned by
+/// review, not here.)
+#[test]
+fn snapshot_reader_accepts_only_complete_publications_9644() {
+    use std::sync::atomic::AtomicBool;
+    let a: SocketAddr = "[2001:db8::1]:51820".parse().unwrap();
+    let b = SocketAddr::V6(std::net::SocketAddrV6::new(
+        "2001:db8:1:2:3:4:5:6".parse().unwrap(),
+        41820,
+        7,
+        9,
+    ));
+    let wa = encode_roam_endpoint(a);
+    let wb = encode_roam_endpoint(b);
+    assert!(
+        wa.iter().zip(wb.iter()).all(|(x, y)| x != y),
+        "fixture precondition: every word differs, so a torn mix decodes to neither endpoint"
+    );
+    const PUBS: u64 = 20_000;
+    let snap = Arc::new(RoamSnapshot::new());
+    let pubs = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (snap, pubs, done) = (Arc::clone(&snap), Arc::clone(&pubs), Arc::clone(&done));
+        std::thread::spawn(move || {
+            for i in 0..PUBS {
+                let w = if i & 1 == 0 { wa } else { wb };
+                snap.begin_publish();
+                snap.commit_publish(w, 0);
+                pubs.fetch_add(1, Ordering::Relaxed);
+                // Keep the overlap window open; the publications
+                // themselves run at production rate between yields.
+                if i % 256 == 255 {
+                    std::thread::yield_now();
+                }
+            }
+            done.store(true, Ordering::Relaxed);
+        })
+    };
+    let mut reads = 0u64;
+    let mut overlapped = false;
+    while !done.load(Ordering::Relaxed) {
+        if let Some(x) = snap.read_validated_endpoint() {
+            assert!(
+                x == a || x == b,
+                "the reader must only ever accept a complete publication, got {x:?}"
+            );
+        }
+        reads += 1;
+        // Strictly mid-stream: the writer started and has not
+        // finished while this read executed.
+        let p = pubs.load(Ordering::Relaxed);
+        if p > 0 && p < PUBS {
+            overlapped = true;
+        }
+    }
+    writer.join().expect("writer thread");
+    assert!(
+        overlapped,
+        "the reader must observe the writer mid-stream ({reads} reads, {PUBS} publications)"
+    );
+    // Deterministic anchor: quiesced, the final publication (B —
+    // PUBS is even, so the last write is index PUBS-1, odd, B) reads
+    // back exactly.
+    assert_eq!(pubs.load(Ordering::Relaxed), PUBS);
+    assert_eq!(snap.read_validated_endpoint(), Some(b));
 }
