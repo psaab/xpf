@@ -388,6 +388,14 @@ pub(crate) struct BindingStatus {
     pub local_delivery_packets: u64,
     #[serde(rename = "forward_candidate_packets", default)]
     pub forward_candidate_packets: u64,
+    /// #9956 F-051: flowless-forwarded packets/bytes — the session-uncharged
+    /// share of `forward_candidate_packets` (no flow exists to charge, so
+    /// session + flowless reconciles with the zone/global totals). `default`
+    /// keeps cross-version wire safety.
+    #[serde(rename = "flowless_forward_packets", default)]
+    pub flowless_forward_packets: u64,
+    #[serde(rename = "flowless_forward_bytes", default)]
+    pub flowless_forward_bytes: u64,
     #[serde(rename = "route_miss_packets", default)]
     pub route_miss_packets: u64,
     /// #4743: NoRoute drops whose destination is a MARTIAN address (IPv4

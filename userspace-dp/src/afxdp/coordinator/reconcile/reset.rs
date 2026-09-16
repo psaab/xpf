@@ -21,6 +21,8 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.validated_bytes = 0;
         binding.local_delivery_packets = 0;
         binding.forward_candidate_packets = 0;
+        binding.flowless_forward_packets = 0;
+        binding.flowless_forward_bytes = 0;
         binding.route_miss_packets = 0;
         binding.martian_dropped = 0;
         binding.ipv6_ext_header_dropped = 0;
@@ -78,5 +80,31 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.kernel_rx_invalid_descs = 0;
         binding.last_error.clear();
         binding.ready = false;
+    }
+}
+
+#[cfg(test)]
+mod reset_9956_tests {
+    use super::*;
+
+    #[test]
+    fn reset_binding_counters_clears_the_flowless_family_9956() {
+        // #9956 F-051: companion to the round-trip cell in
+        // `refresh_bindings_9956_tests.rs` (which cannot name this
+        // `pub(super)`-scoped zero-pass). Neither reset half has a census;
+        // an omitted field here would report a frozen flowless count on a
+        // rebound slot.
+        let mut binding = BindingStatus::default();
+        binding.flowless_forward_packets = 9;
+        binding.flowless_forward_bytes = 900;
+        reset_binding_counters(std::slice::from_mut(&mut binding));
+        assert_eq!(
+            (
+                binding.flowless_forward_packets,
+                binding.flowless_forward_bytes
+            ),
+            (0, 0),
+            "reset_binding_counters must clear the flowless family"
+        );
     }
 }

@@ -109,6 +109,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) validated_bytes: AtomicU64,
     pub(super) local_delivery_packets: AtomicU64,
     pub(super) forward_candidate_packets: AtomicU64,
+    /// #9956 F-051: cumulative flowless-forwarded packets/bytes (see
+    /// `BatchCounters::flowless_forward_packets`). Surfaced as the `Flowless
+    /// forwards` operator counter.
+    pub(super) flowless_forward_packets: AtomicU64,
+    pub(super) flowless_forward_bytes: AtomicU64,
     pub(super) route_miss_packets: AtomicU64,
     /// #4743: cumulative NoRoute drops whose destination is a MARTIAN address
     /// (IPv4 multicast/broadcast/unspecified/loopback, IPv6
@@ -948,9 +953,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // 2328 -> 2336. The field is UNCONDITIONAL, so both configurations (normal
 // and test builds) must report the same two shifts — verified by building
 // both.
+// #9956 F-051 repeats it once more: `flowless_forward_packets/bytes` move
+// both offsets 2208 -> 2224 and 2336 -> 2352 while `size_of` stays 2368.
 const _: [(); 2368] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2208] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2336] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2224] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2352] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -973,6 +980,8 @@ impl BindingLiveState {
             validated_bytes: AtomicU64::new(0),
             local_delivery_packets: AtomicU64::new(0),
             forward_candidate_packets: AtomicU64::new(0),
+            flowless_forward_packets: AtomicU64::new(0),
+            flowless_forward_bytes: AtomicU64::new(0),
             route_miss_packets: AtomicU64::new(0),
             martian_dropped: AtomicU64::new(0),
             ipv6_ext_header_dropped: AtomicU64::new(0),

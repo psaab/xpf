@@ -35,6 +35,7 @@ Userspace dataplane helper:
   RX packets:                100
   Validated packets:         90
   Forward candidates:        80
+  Flowless forwards:         7 pkts / 700 bytes
   Route misses:              2
   Martian drops:             1
   IPv6 ext-header drops:     4

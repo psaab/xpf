@@ -58,7 +58,15 @@ type BindingStatus struct {
 	ValidatedBytes           uint64 `json:"validated_bytes,omitempty"`
 	LocalDeliveryPackets     uint64 `json:"local_delivery_packets,omitempty"`
 	ForwardCandidatePkts     uint64 `json:"forward_candidate_packets,omitempty"`
-	RouteMissPackets         uint64 `json:"route_miss_packets,omitempty"`
+	// #9956 F-051: flowless-forwarded packets/bytes — the session-uncharged
+	// share of ForwardCandidatePkts (forwarded and counted globally + per
+	// zone, but no flow exists to charge). Session + flowless reconciles
+	// with the zone/global totals. omitempty + the Rust serde `default`
+	// keep cross-version wire safety. Summed across bindings and rendered
+	// as the "Flowless forwards" status row.
+	FlowlessForwardPkts  uint64 `json:"flowless_forward_packets,omitempty"`
+	FlowlessForwardBytes uint64 `json:"flowless_forward_bytes,omitempty"`
+	RouteMissPackets     uint64 `json:"route_miss_packets,omitempty"`
 	// #4743: NoRoute drops whose destination is a MARTIAN address (IPv4
 	// multicast/broadcast/unspecified/loopback, IPv6
 	// multicast/unspecified/loopback). A strict sub-breakout of RouteMissPackets

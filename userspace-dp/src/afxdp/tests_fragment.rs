@@ -2188,10 +2188,11 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
     // session) and the NON-first (flowless, forwards). Both forward and both
     // are counted globally; the session sees only the first.
     //
-    // RED on base: the session carries 1 packet / 42 bytes instead of 2 / 84.
-    // The fix direction (charge flowless bytes to the session, or export an
-    // explicit flowless counter family so the gap is visible) is decided in
-    // the plan review; this cell pins the gap either fix must close.
+    // RED on base: the session carried 1 packet / 42 bytes instead of 2 / 84
+    // with the gap silent. The shipped direction is the explicit flowless
+    // counter family (charging a port-less fragment to a 5-tuple session is
+    // ambiguous under port reuse): session + flowless now reconciles with the
+    // global total, packets and bytes.
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
@@ -2248,7 +2249,13 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
          forwarding gap"
     );
 
-    // THE DEFECT: the session carries only the first fragment's volume.
+    // THE FIX (#9956 F-051): the session still carries only the first
+    // fragment — charging a port-less fragment to a 5-tuple session would be
+    // ambiguous under port reuse — but the non-first volume is now VISIBLE in
+    // the dedicated flowless family instead of silent. Frame lengths are the
+    // byte basis (no forward-bytes counter exists; `rx_bytes` is
+    // receive-side); in production session + flowless reconciles against the
+    // zone-pair delta.
     let key = SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_UDP,
@@ -2262,15 +2269,28 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
     let c = sessions
         .session_counters(&key)
         .expect("#9956 F-051 precondition: the first fragment must have installed the session");
-    let total_bytes = (first.len() + non_first.len()) as u64;
     assert_eq!(
-        c.fwd_packets, 2,
-        "#9956 F-051: the session must carry BOTH fragments' packets (got 1: \
-         the flowless non-first fragment was never charged)"
+        (c.fwd_packets, c.fwd_bytes),
+        (1, first.len() as u64),
+        "#9956 F-051: the session carries exactly the flow-backed first \
+         fragment (RED form asserted 2 here: the gap this family closes)"
+    );
+    let flowless_packets = batch1.flowless_forward_packets + batch2.flowless_forward_packets;
+    let flowless_bytes = batch1.flowless_forward_bytes + batch2.flowless_forward_bytes;
+    assert_eq!(
+        (flowless_packets, flowless_bytes),
+        (1, non_first.len() as u64),
+        "#9956 F-051: the flowless family must carry exactly the non-first \
+         fragment's volume"
     );
     assert_eq!(
-        c.fwd_bytes, total_bytes,
-        "#9956 F-051: session bytes must match the forwarded volume over the \
-         same window (got only the first fragment's bytes)"
+        c.fwd_packets + flowless_packets,
+        batch1.forward_candidate_packets + batch2.forward_candidate_packets,
+        "#9956 F-051: session + flowless must reconcile with the global total"
+    );
+    assert_eq!(
+        c.fwd_bytes + flowless_bytes,
+        (first.len() + non_first.len()) as u64,
+        "#9956 F-051: session + flowless bytes must match the forwarded volume"
     );
 }

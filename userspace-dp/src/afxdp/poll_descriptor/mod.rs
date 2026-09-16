@@ -4911,6 +4911,20 @@ pub(super) fn poll_binding_process_descriptor(
                             .push((flow.forward_key.clone(), decision.nat));
                     }
                     telemetry.counters.forward_candidate_packets += 1;
+                    // #9956 F-051: the session-uncharged share of the tally
+                    // above. flow==None here ⟺ the packet forwarded with no
+                    // flow — any flow None, whatever the parse refused
+                    // (fragments, no-L4 protocols, non-query ICMP, truncated
+                    // chains, unspecified IPs): the session-hit/fast paths
+                    // always carry a flow, and the account site above only
+                    // charges `Some(flow)`. Placed adjacent to the global tally
+                    // (same block, same condition) rather than at the account
+                    // site ~226 lines up, so no future `continue` between the
+                    // two can silently break session+flowless==global.
+                    if flow.is_none() {
+                        telemetry.counters.flowless_forward_packets += 1;
+                        telemetry.counters.flowless_forward_bytes += meta.pkt_len as u64;
+                    }
                     // #3651: per-zone traffic volume for this slow-path (first-
                     // packet / non-cacheable) forwarded packet, mirroring the
                     // flow-cache-hit fast path.

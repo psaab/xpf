@@ -163,7 +163,10 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
         "VID-50 traffic on parent 11 must resolve to logical unit 13"
     );
     assert_eq!(
-        forwarding.ifindex_to_config_name.get(&13).map(String::as_str),
+        forwarding
+            .ifindex_to_config_name
+            .get(&13)
+            .map(String::as_str),
         Some("reth0.50"),
         "logical 13 must carry unit-B's config name"
     );
@@ -176,7 +179,10 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
         "logical 13 must carry unit-B's routing instance"
     );
     assert_eq!(
-        forwarding.ifindex_to_config_name.get(&11).map(String::as_str),
+        forwarding
+            .ifindex_to_config_name
+            .get(&11)
+            .map(String::as_str),
         Some("reth0.0"),
         "precondition: the parent bind ifindex carries unit-A's identity, \
          which is the arm the escape needs"

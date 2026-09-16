@@ -1395,6 +1395,10 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) validated_bytes: u64,
     pub(crate) local_delivery_packets: u64,
     pub(crate) forward_candidate_packets: u64,
+    /// #9956 F-051: flowless-forwarded packets/bytes snapshotted from
+    /// BindingLiveState (the session-uncharged share of forward candidates).
+    pub(crate) flowless_forward_packets: u64,
+    pub(crate) flowless_forward_bytes: u64,
     pub(crate) route_miss_packets: u64,
     /// #4743: martian-dst NoRoute drops snapshotted from BindingLiveState (a
     /// sub-breakout of route_miss_packets).

@@ -646,6 +646,11 @@ impl DispositionCounters<'_> {
                 c.touched = true;
                 c.forward_candidate_packets += 1;
             }
+            // #9956 F-051 why-not: the Cold arm serves RPC-injected forwards
+            // (coordinator/inject.rs, test-only paths) that never cross the
+            // poll chokepoint, so an injected forward is globally counted but
+            // never flowless-attributed. Reconciliation scope is
+            // userspace-forwarded wire transit only, by design.
             Self::Cold(live) => {
                 live.forward_candidate_packets
                     .fetch_add(1, Ordering::Relaxed);

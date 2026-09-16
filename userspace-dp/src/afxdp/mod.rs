@@ -718,6 +718,12 @@ pub(in crate::afxdp) struct BatchCounters {
     validated_packets: u64,
     validated_bytes: u64,
     forward_candidate_packets: u64,
+    // #9956 F-051: flowless-forwarded packets/bytes — forwarded and counted
+    // globally + per zone, but charged to no session (no flow exists to key
+    // `account_packet` on). Session + flowless reconciles with the zone/global
+    // totals; without this family the gap is silent.
+    flowless_forward_packets: u64,
+    flowless_forward_bytes: u64,
     session_hits: u64,
     session_misses: u64,
     session_creates: u64,
@@ -1134,6 +1140,16 @@ impl BatchCounters {
             live.forward_candidate_packets
                 .fetch_add(self.forward_candidate_packets, Ordering::Relaxed);
             self.forward_candidate_packets = 0;
+        }
+        if self.flowless_forward_packets != 0 {
+            live.flowless_forward_packets
+                .fetch_add(self.flowless_forward_packets, Ordering::Relaxed);
+            self.flowless_forward_packets = 0;
+        }
+        if self.flowless_forward_bytes != 0 {
+            live.flowless_forward_bytes
+                .fetch_add(self.flowless_forward_bytes, Ordering::Relaxed);
+            self.flowless_forward_bytes = 0;
         }
         if self.session_hits != 0 {
             live.session_hits
