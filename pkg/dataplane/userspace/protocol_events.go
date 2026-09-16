@@ -19,6 +19,8 @@ type EventStreamStatus struct {
 	SessionCloseDrops      uint64 `json:"session_close_drops,omitempty"`  // #2460/#2510
 	SessionCreateDrops     uint64 `json:"session_create_drops,omitempty"` // #2508/#2510
 	UnknownFrameDrops      uint64 `json:"unknown_frame_drops,omitempty"`
+	Paused                 bool   `json:"paused,omitempty"`           // #9915 F-125: last Pause/Resume request state
+	EventsSinceAck         uint64 `json:"events_since_ack,omitempty"` // #9915 F-125: applied events since last ACK flush; resets ~100ms (sawtooth, not a gauge)
 }
 
 // ---------------------------------------------------------------------------

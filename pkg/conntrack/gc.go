@@ -20,6 +20,7 @@ type GCStats struct {
 	TotalEntries        int
 	EstablishedSessions int
 	ExpiredDeleted      int
+	DeadlinesSaturated  int
 	NextSweepDelay      time.Duration
 }
 
@@ -223,6 +224,21 @@ func (gc *GC) Run(ctx context.Context) {
 	}
 }
 
+// saturatingDeadline adds a session timeout to a LastSeen timestamp without
+// wrapping (#9915 F-118): on overflow the deadline saturates at MaxUint64
+// (never expires on wrapped math) instead of landing in the past and
+// instantly reaping a live session. Reports saturation via saturated, which
+// may be nil for count-only uses (the expiry check already counted the row).
+func saturatingDeadline(lastSeen, timeout uint64, saturated *int) uint64 {
+	if deadline := lastSeen + timeout; deadline >= lastSeen {
+		return deadline
+	}
+	if saturated != nil {
+		*saturated++
+	}
+	return ^uint64(0)
+}
+
 func (gc *GC) sweep() time.Duration {
 	// When userspace dataplane is active, skip the BPF session map scan
 	// entirely — sessions are managed in user-space. Without this, the
@@ -273,7 +289,7 @@ func (gc *GC) sweep() time.Duration {
 	// expiry — the primary owns session lifetime and syncs deletes.
 	isPrimary := gc.IsLocalPrimary == nil || gc.IsLocalPrimary()
 
-	var total, established, expired int
+	var total, established, expired, saturated int
 	var earliestDeadline uint64
 	toDelete := gc.toDeleteV4[:0]
 
@@ -304,7 +320,7 @@ func (gc *GC) sweep() time.Duration {
 			if agingActive && earlyAgeout > 0 && earlyAgeout < effectiveTimeout {
 				effectiveTimeout = earlyAgeout
 			}
-			deadline := val.LastSeen + effectiveTimeout
+			deadline := saturatingDeadline(val.LastSeen, effectiveTimeout, &saturated)
 			if deadline < now {
 				toDelete = append(toDelete, dataplane.SessionEntryV4{Key: key, Value: val})
 			} else if earliestDeadline == 0 || deadline < earliestDeadline {
@@ -313,7 +329,9 @@ func (gc *GC) sweep() time.Duration {
 		}
 		// Count active (non-expired) forward sessions per src/dst IP.
 		// On secondary, all sessions are active (no local expiry).
-		if countSessions && (!isPrimary || val.LastSeen+uint64(val.Timeout) >= now) {
+		// Count-only use: nil counter (the expiry check above already counted
+		// this row; counting twice would inflate the statistic).
+		if countSessions && (!isPrimary || saturatingDeadline(val.LastSeen, uint64(val.Timeout), nil) >= now) {
 			srcKey := dataplane.SessionCountKey{
 				IP:     binary.NativeEndian.Uint32(key.SrcIP[:]),
 				ZoneID: val.IngressZone,
@@ -378,14 +396,16 @@ func (gc *GC) sweep() time.Duration {
 				if agingActive && earlyAgeout > 0 && earlyAgeout < effectiveTimeout {
 					effectiveTimeout = earlyAgeout
 				}
-				deadline := val.LastSeen + effectiveTimeout
+				deadline := saturatingDeadline(val.LastSeen, effectiveTimeout, &saturated)
 				if deadline < now {
 					toDeleteV6 = append(toDeleteV6, dataplane.SessionEntryV6{Key: key, Value: val})
 				} else if earliestDeadline == 0 || deadline < earliestDeadline {
 					earliestDeadline = deadline
 				}
 			}
-			if countSessions && (!isPrimary || val.LastSeen+uint64(val.Timeout) >= now) {
+			// Count-only use: nil counter (the expiry check above already counted
+			// this row; counting twice would inflate the statistic).
+			if countSessions && (!isPrimary || saturatingDeadline(val.LastSeen, uint64(val.Timeout), nil) >= now) {
 				// XOR-hash IPv6 addresses to uint32 for session count key
 				srcHash := binary.NativeEndian.Uint32(key.SrcIP[0:4]) ^
 					binary.NativeEndian.Uint32(key.SrcIP[4:8]) ^
@@ -446,11 +466,12 @@ func (gc *GC) sweep() time.Duration {
 		}
 	}
 
-	if expired > 0 {
+	if expired > 0 || saturated > 0 {
 		slog.Info("conntrack GC sweep",
 			"total_entries", total,
 			"established", established,
-			"expired_deleted", expired)
+			"expired_deleted", expired,
+			"deadlines_saturated", saturated)
 	}
 
 	gc.lastTotal = total
@@ -499,6 +520,7 @@ func (gc *GC) sweep() time.Duration {
 		TotalEntries:        total,
 		EstablishedSessions: established,
 		ExpiredDeleted:      expired,
+		DeadlinesSaturated:  saturated,
 		NextSweepDelay:      nextDelay,
 	}
 	gc.mu.Unlock()

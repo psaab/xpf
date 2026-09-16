@@ -478,6 +478,10 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 			if err != nil {
 				return nil, status.Errorf(codes.InvalidArgument, "invalid userspace slot: %s", parts[0])
 			}
+			if slot < 0 || slot >= int(dataplane.BindingSlotMapMaxEntries) {
+				return nil, status.Errorf(codes.InvalidArgument,
+					"userspace slot %d out of range [0, %d)", slot, dataplane.BindingSlotMapMaxEntries)
+			}
 			registered, armed, err := dpuserspace.ParseRegistrationOperation(parts[1])
 			if err != nil {
 				return nil, status.Error(codes.InvalidArgument, err.Error())
