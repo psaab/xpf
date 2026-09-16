@@ -313,6 +313,11 @@ type SyncStats struct {
 	// ClockSyncsRefused counts ClockSync frames refused for a peer monotonic
 	// clock no running peer can read (#9653). The previous offset stays in force.
 	ClockSyncsRefused atomic.Uint64
+	// RebaseSaturations counts session installs whose peer Created/LastSeen
+	// fell outside int64 range and were clamped to the far future by the
+	// saturating rebase (#9915 F-118). Honest clocks never approach 2^63,
+	// so nonzero means corrupt input, counted rather than silently installed.
+	RebaseSaturations atomic.Uint64
 	// BulkEndsForeignConnDropped counts BulkEnd frames refused because they
 	// arrived on a connection other than the one that carried the accepted
 	// BulkStart (#9716). BulkSync pins one connection per bulk, so such a frame
@@ -390,8 +395,14 @@ type SyncStats struct {
 	// standby's held set for a family.
 	DHCPLeasesStaleIgnored atomic.Uint64
 	DHCPLeasesSeeded       atomic.Uint64
-	FencesSent             atomic.Uint64
-	FencesReceived         atomic.Uint64
+	// DHCPLeasesDroppedNoIdentity counts synced lease records dropped for
+	// lacking the minimal identity their message family requires (#9915
+	// F-117). Only the violating members drop; a push filtering to zero
+	// survivors retains the prior held set (#7175 posture), so this never
+	// wipes failover data.
+	DHCPLeasesDroppedNoIdentity atomic.Uint64
+	FencesSent                  atomic.Uint64
+	FencesReceived              atomic.Uint64
 	// FenceAcksSent / FenceAcksReceived / FenceAcksTimedOut instrument the
 	// #7147 confirmed fence. FenceAcksTimedOut is the one that matters
 	// operationally: it counts takeovers that proceeded WITHOUT the
@@ -479,7 +490,7 @@ type SyncStats struct {
 	// (the immediate-policy-invalidation gap across the HA boundary).
 	SessionsStaleConfigIgnored atomic.Uint64
 	// GenMapOverflow counts how many times a #2170 generation map (sender
-	// echo or receiver stored) was at genGuardMapCap and a NEW key therefore
+	// echo or receiver stored) was at its effective cap and a NEW key therefore
 	// could not be recorded (#2198 F1). The key degrades to gen-0 (safe,
 	// unconditional) behavior. A nonzero value means a churn workload pushed
 	// a generation map to its cap; the map is never cleared, so existing live
@@ -487,12 +498,16 @@ type SyncStats struct {
 	// them.
 	GenMapOverflow atomic.Uint64
 	// GenTombstonesEvicted counts receiver-side delete tombstones evicted, oldest
-	// first, to record a NEW key in a generation map at genGuardMapCap (#9719).
+	// first, to record a NEW key in a generation map at its effective cap (#9719).
 	// A tombstone never frees its entry, so without the eviction a long-lived
 	// connection filled the map with tombstones of closed sessions and switched
 	// the ordering guards off for every new session until the next bulk. A
 	// nonzero value means churn reached the cap between two bulks.
 	GenTombstonesEvicted atomic.Uint64
+	// GenCapGrown counts generation-guard cap doublings (#9915 F-044): a map
+	// full of LIVE entries grew its side cap instead of skip-recording.
+	// Nonzero means live demand exceeded the starting default.
+	GenCapGrown atomic.Uint64
 	// PreAuthRejected counts inbound sync connections dropped by the #5303
 	// pre-auth admission cap: a connection accepted while the pre-auth setup
 	// pool was saturated (a flood of connections that stall before
@@ -533,6 +548,7 @@ type SyncStatsSnapshot struct {
 	ConfigsDeadIncarnationDropped  uint64
 	BulkEndsDeadIncarnationDropped uint64 // #9174 V013
 	ClockSyncsRefused              uint64 // #9653
+	RebaseSaturations              uint64 // #9915 F-118
 	BulkEndsForeignConnDropped     uint64 // #9716
 	BulkEndsEpochOnlyMatched       uint64 // #9716
 	// PeerBootIncarnation renders the boot id of the peer incarnation that
@@ -548,37 +564,40 @@ type SyncStatsSnapshot struct {
 	// nacks are not tells the operator the recovery path itself is broken (a
 	// pre-#7328 peer, or a nack that never matched lastSentConfigGen). Both are
 	// rendered only when nonzero.
-	ConfigsQueueFullDropped    uint64
-	ConfigApplyNacksReceived   uint64
-	IPsecSASent                uint64
-	IPsecSAReceived            uint64
-	IPsecSAStaleIgnored        uint64
-	DHCPLeasesSent             uint64
-	DHCPLeasesReceived         uint64
-	DHCPLeasesStaleIgnored     uint64
-	DHCPLeasesSeeded           uint64
-	FencesSent                 uint64
-	FencesReceived             uint64
-	FenceAcksSent              uint64
-	FenceAcksReceived          uint64
-	FenceAcksTimedOut          uint64
-	Errors                     uint64
-	DeletesDropped             uint64
-	DeletesStaleIgnored        uint64
-	InstallsStaleIgnored       uint64
-	SessionsStaleConfigIgnored uint64
-	GenMapOverflow             uint64
-	GenTombstonesEvicted       uint64 // #9719
-	PreAuthRejected            uint64
-	Connected                  bool
-	ActiveFabric               int
-	BulkSyncStartTime          int64
-	BulkSyncEndTime            int64
-	BulkSyncSessions           uint64
-	LastConfigSyncTime         int64
-	LastConfigSyncSize         uint64
-	LastFenceSeq               uint64
-	LastFenceAckAt             int64
+	ConfigsQueueFullDropped     uint64
+	ConfigApplyNacksReceived    uint64
+	IPsecSASent                 uint64
+	IPsecSAReceived             uint64
+	IPsecSAStaleIgnored         uint64
+	DHCPLeasesSent              uint64
+	DHCPLeasesReceived          uint64
+	DHCPLeasesStaleIgnored      uint64
+	DHCPLeasesSeeded            uint64
+	DHCPLeasesDroppedNoIdentity uint64 // #9915 F-117
+	GenGuardSessionCap          uint64 // #9915 F-044 wired helper capacity (0 = unwired)
+	FencesSent                  uint64
+	FencesReceived              uint64
+	FenceAcksSent               uint64
+	FenceAcksReceived           uint64
+	FenceAcksTimedOut           uint64
+	Errors                      uint64
+	DeletesDropped              uint64
+	DeletesStaleIgnored         uint64
+	InstallsStaleIgnored        uint64
+	SessionsStaleConfigIgnored  uint64
+	GenMapOverflow              uint64
+	GenTombstonesEvicted        uint64 // #9719
+	GenCapGrown                 uint64 // #9915 F-044
+	PreAuthRejected             uint64
+	Connected                   bool
+	ActiveFabric                int
+	BulkSyncStartTime           int64
+	BulkSyncEndTime             int64
+	BulkSyncSessions            uint64
+	LastConfigSyncTime          int64
+	LastConfigSyncSize          uint64
+	LastFenceSeq                uint64
+	LastFenceAckAt              int64
 }
 
 // TransferReadinessSnapshot captures session-sync state that determines whether
@@ -1125,9 +1144,10 @@ type SessionSync struct {
 	// ever read via Add(1), so the first fence is seq 1 — seq 0 is reserved on
 	// the wire to mean "no ack requested", which is how a pre-#7147 fence's
 	// empty payload decodes.
-	fenceSeq        atomic.Uint64
-	fenceAckMu      sync.Mutex
-	fenceAckWaiters map[uint64]chan FenceAck
+	fenceSeq   atomic.Uint64
+	fenceAckMu sync.Mutex
+	// fenceAckWaiters tags each waiter with the conn its fence went out on (#9915 F-116).
+	fenceAckWaiters map[uint64]fenceAckWaiter
 
 	zoneRGMu  sync.RWMutex
 	zoneRGMap map[uint16]int
@@ -1288,12 +1308,30 @@ type SessionSync struct {
 	genSentV4  map[dataplane.SessionKey]uint64
 	genSentV6  map[dataplane.SessionKeyV6]uint64
 	// genSentOverflowV4/V6 latch, per family and for the life of the process, that
-	// the stamp map has ever been at genGuardMapCap and skipped a key (#9719).
+	// the stamp map has ever been at its effective cap and skipped a key (#9719).
 	// After that, a delete for an unstamped key may be for a live session whose
 	// stamp was skipped, so takeDeleteGen* draws a fresh generation instead of 0.
 	// Guarded by genSentMu.
 	genSentOverflowV4 bool
 	genSentOverflowV6 bool
+	// sentGenGuardCap/recvGenGuardCap are the effective sender/receiver-side
+	// generation-guard caps (#9915 F-044): genGuardMapDefaultCap until demand
+	// growth doubles them toward genGuardMapCap. Zero means never grown.
+	// Guarded by genSentMu/recvGenMu respectively (see sentCap/growSentCap);
+	// resetRecvGen returns the receiver side to zero with the maps it bounds.
+	sentGenGuardCap int
+	recvGenGuardCap int
+	// genGuardSessionCap is the helper-provisioned session capacity wired by
+	// the daemon (SetGenGuardSessionCap tracks current, 0 = unwired). It
+	// bounds demand growth to provisioned RAM. Atomic so the daemon tick
+	// never contends the guard mutexes (a mutex here would invert lock order
+	// against the BPF-walking guard paths it gates).
+	genGuardSessionCap atomic.Uint64
+	// genGuardMapCeilingOverride injects a small growth ceiling for tests (0 =
+	// production ceiling). Skip/overflow paths are otherwise reachable only at
+	// 5M entries; the override keeps call-site coverage executed at unit-test
+	// volumes. Test-only; production never sets it. Same mutex as its side cap.
+	genGuardMapCeilingOverride int
 	// #9412: per tuple, the TCP close class this node last SENT for one session
 	// incarnation (matched on SessionID), so a mirror-sourced resend cannot
 	// regress it. Guarded by genSentMu, beside the generation maps it mirrors;
@@ -1319,7 +1357,7 @@ type SessionSync struct {
 	recvGenV4          map[dataplane.SessionKey]uint64
 	recvGenV6          map[dataplane.SessionKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
-	// map at genGuardMapCap evicts the oldest tombstone to record a new key instead
+	// map at its effective cap evicts the oldest tombstone to record a new key instead
 	// of skip-recording it (#9719). Guarded by recvGenMu, and reset with the maps.
 	recvTombV4 genTombstoneOrder[dataplane.SessionKey]
 	recvTombV6 genTombstoneOrder[dataplane.SessionKeyV6]
@@ -1856,7 +1894,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		activeFabric = -1
 	}
 	s.mu.Unlock()
-	return SyncStatsSnapshot{SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(), SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(), DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(), BulkSyncs: s.stats.BulkSyncs.Load(), ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(), ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(), BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(), PeerBootIncarnation: s.PeerBootIncarnation().String(), ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(), BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(), ClockSyncsRefused: s.stats.ClockSyncsRefused.Load(), BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(), BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(), ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(), ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(), ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(), ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(), IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(), IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(), DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(), DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(), DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(), FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(), FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(), FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(), DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(), InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(), SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(), GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(), PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(), ActiveFabric: activeFabric, BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(), BulkSyncSessions: s.stats.BulkSyncSessions.Load(), LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(), LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load()}
+	return SyncStatsSnapshot{SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(), SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(), DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(), BulkSyncs: s.stats.BulkSyncs.Load(), ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(), ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(), BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(), PeerBootIncarnation: s.PeerBootIncarnation().String(), ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(), BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(), ClockSyncsRefused: s.stats.ClockSyncsRefused.Load(), BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(), BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(), ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(), ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(), ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(), ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(), IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(), IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(), DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(), DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(), DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(), FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(), FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(), FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(), DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(), InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(), SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(), GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(), PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(), ActiveFabric: activeFabric, BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(), BulkSyncSessions: s.stats.BulkSyncSessions.Load(), LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(), LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load(), GenCapGrown: s.stats.GenCapGrown.Load(), RebaseSaturations: s.stats.RebaseSaturations.Load(), DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(), GenGuardSessionCap: s.genGuardSessionCap.Load()}
 }
 
 // IsConnected reports whether a peer sync connection is currently established.

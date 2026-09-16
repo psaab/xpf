@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -21,11 +22,31 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 	slog.Debug("cluster sync: repeated synced-session helper mirror failure", "af", af, "err", err)
 }
 
-// genGuardMapCap bounds the sender-side echo maps and the receiver-side
-// stored-generation maps so a churning workload cannot grow them without
-// limit. Both are evicted on delete; the cap is a safety valve for keys whose
-// delete never arrives (e.g. dropped close delta). It matches the delete
-// journal cap order-of-magnitude.
+// genGuardMapCap is the ABSOLUTE CEILING for the sender-side echo maps, the
+// receiver-side stored-generation maps, and the #9412 close-class memos: half
+// of conntrack.MaxSessions, which counts forward+reverse entries while guard
+// keys are forward sessions (#9915 F-044).
+//
+// The EFFECTIVE cap starts at genGuardMapDefaultCap (the pre-#9915 static
+// value) and grows by doubling, per side (sender/receiver), whenever a map is
+// full of LIVE entries with nothing evictable — nondecreasing within an epoch
+// and reclaimed for the receiver at each bulk barrier (resetRecvGen); sender
+// maps self-drain on delete-echo so need no reset. All three map families are
+// evicted on delete; the cap is a safety valve for keys whose delete never
+// arrives (e.g. dropped close delta).
+//
+// Maps grow on demand, so the ceiling costs nothing until the table genuinely
+// fills: guard heap stays proportionate to the table it protects (~56B/entry
+// measured at 1M representative keys, plus 64B per tombstone order node;
+// worst case ~1.1GiB only at 100% single-family occupancy of a full 10M-entry
+// table — see docs/log/9915.md for the measurement and budget).
+//
+// Honesty notes the ceiling does NOT promise: fabric-redirected sessions
+// consume TWO stamps (primary plus wire alias), so alias-heavy tables past
+// ~50% still degrade safely to gen-0; the receiver records whatever wire keys
+// arrive (IsReverse-ungated), so a corrupt peer emitting reverse keys spends
+// the same safe fallback. Evicting a LIVE entry to make room would reintroduce
+// #2170/#2198 and is FORBIDDEN — only tombstones are ever evicted (#9719).
 //
 // Overflow handling (#2198 F1): when a map is at cap, a NEW key is NOT
 // recorded (skip-record-on-full) and an EXISTING key is updated in place. The
@@ -44,24 +65,125 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 //   - Sender: above the cap a new key was not stamped, so its delete went out
 //     with generation 0. After an overflow, a missing stamp now draws a fresh
 //     generation (takeDeleteGenV4).
-const genGuardMapCap = 200000
+const genGuardMapCap = conntrack.MaxSessions / 2
+
+// genGuardMapDefaultCap is the starting effective cap: the pre-#9915 static
+// value. Growth past it is strictly demand-driven (full-of-live), so quiet
+// paths behave exactly as before.
+const genGuardMapDefaultCap = 200000
 
 // putGenBounded records gen for key in m without ever clearing the map or
 // dropping the stored generation of an existing key. An existing key is always
 // updated in place; a new key is recorded only while the map is below
-// genGuardMapCap. Returns true if the entry was stored. The caller holds the
-// map's mutex. Generic over the two wire-key types.
-func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64) bool {
+// maxEntries. Returns true if the entry was stored. The caller holds the
+// map's mutex and supplies the effective cap (SessionSync.genGuardCap).
+// Generic over the two wire-key types.
+func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64, maxEntries int) bool {
 	if _, exists := m[key]; exists {
 		m[key] = gen
 		return true
 	}
-	if len(m) >= genGuardMapCap {
+	if len(m) >= maxEntries {
 		// Map is full and this is a new key: skip-record. The key degrades to
 		// gen-0 behavior, which is safe (see genGuardMapCap doc).
 		return false
 	}
 	m[key] = gen
+	return true
+}
+
+// sentCap/recvCap return the effective sender/receiver-side guard caps. Zero
+// means never grown: the default. Callers hold genSentMu/recvGenMu
+// respectively (plain ints, no atomics needed); every read and write runs
+// under those mutexes.
+func (s *SessionSync) sentCap() int {
+	if s == nil || s.sentGenGuardCap == 0 {
+		return genGuardMapDefaultCap
+	}
+	return s.sentGenGuardCap
+}
+
+func (s *SessionSync) recvCap() int {
+	if s == nil || s.recvGenGuardCap == 0 {
+		return genGuardMapDefaultCap
+	}
+	return s.recvGenGuardCap
+}
+
+// maxCap returns the growth ceiling (#9915 F-044): the injected test override
+// when set; else the wired helper session capacity clamped to
+// [genGuardMapDefaultCap, genGuardMapCap]; else the default (unwired paths
+// never grow past status quo — no provisioning proof, no new headroom).
+func (s *SessionSync) maxCap() int {
+	if s != nil && s.genGuardMapCeilingOverride != 0 {
+		return s.genGuardMapCeilingOverride
+	}
+	if s != nil {
+		if wired := s.genGuardSessionCap.Load(); wired != 0 {
+			if wired < uint64(genGuardMapDefaultCap) {
+				return genGuardMapDefaultCap
+			}
+			if wired > uint64(genGuardMapCap) {
+				return genGuardMapCap
+			}
+			return int(wired)
+		}
+	}
+	return genGuardMapDefaultCap
+}
+
+// SetGenGuardSessionCap wires the helper-provisioned aggregate session
+// capacity (logical sessions, worker_count × 131072) into guard sizing.
+// Tracks the CURRENT backend: each nonzero report overwrites, so a
+// replacement reporting fewer workers shrinks the ceiling honestly instead of
+// pinning it at a stale larger value (side maps themselves stay
+// nonshrinking). Zero (unknown) retains previous. Lock-free by necessity:
+// read on guard paths under genSentMu/recvGenMu and written from the daemon
+// tick — a mutex here could invert lock order. Differs from the SetZoneRGMap
+// mutex shape deliberately, for that reason.
+func (s *SessionSync) SetGenGuardSessionCap(sessions uint64) {
+	if sessions == 0 {
+		return
+	}
+	s.genGuardSessionCap.Store(sessions)
+}
+
+// growSentCap/growRecvCap double the side cap up to the ceiling; they report
+// whether the cap grew. Called only when a map is full of LIVE entries, so
+// churn (which always leaves evictable tombstones) never grows. Nondecreasing
+// within an epoch; the receiver side is reclaimed by resetRecvGen while the
+// sender side self-drains on delete-echo and needs no reset. Growths are
+// counted and logged — an operator-visible demand signal, not silent bloat.
+func (s *SessionSync) growSentCap() bool {
+	return s.growGuardCapSide(true)
+}
+
+func (s *SessionSync) growRecvCap() bool {
+	return s.growGuardCapSide(false)
+}
+
+func (s *SessionSync) growGuardCapSide(sender bool) bool {
+	capPtr := &s.recvGenGuardCap
+	side := "receiver"
+	if sender {
+		capPtr = &s.sentGenGuardCap
+		side = "sender"
+	}
+	cur := *capPtr
+	if cur == 0 {
+		cur = genGuardMapDefaultCap
+	}
+	if cur >= s.maxCap() {
+		return false
+	}
+	grown := cur * 2
+	if grown > s.maxCap() {
+		grown = s.maxCap()
+	}
+	*capPtr = grown
+	n := s.stats.GenCapGrown.Add(1)
+	slog.Warn("cluster sync: generation-guard cap grew on full-of-live demand",
+		"side", side, "old", cur, "new", grown, "grown_total", n)
 	return true
 }
 
@@ -169,7 +291,11 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	if s.genSentV4 == nil {
 		s.genSentV4 = make(map[dataplane.SessionKey]uint64)
 	}
-	if !putGenBounded(s.genSentV4, key, g) {
+	stored := putGenBounded(s.genSentV4, key, g, s.sentCap())
+	if !stored && s.growSentCap() {
+		stored = putGenBounded(s.genSentV4, key, g, s.sentCap())
+	}
+	if !stored {
 		s.stats.GenMapOverflow.Add(1)
 		// #9719: from now on a missing stamp no longer means "never sent in this
 		// boot"; see takeDeleteGenV4.
@@ -177,10 +303,7 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	}
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
-	if s.closeClassSentV4 == nil {
-		s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
-	}
-	stampCloseClassLocked(s.closeClassSentV4, key, val.SessionID, &val.TCPCloseClass)
+	s.stampCloseClassSentV4(key, val.SessionID, &val.TCPCloseClass)
 	// #9752: keep this frame from regressing the installing-table identity
 	// already sent for the same incarnation (a mirror-sourced resend carries
 	// (0,0): the BPF mirror has no slot for sync-only fields). Same lock.
@@ -220,16 +343,17 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	if s.genSentV6 == nil {
 		s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
 	}
-	if !putGenBounded(s.genSentV6, key, g) {
+	stored := putGenBounded(s.genSentV6, key, g, s.sentCap())
+	if !stored && s.growSentCap() {
+		stored = putGenBounded(s.genSentV6, key, g, s.sentCap())
+	}
+	if !stored {
 		s.stats.GenMapOverflow.Add(1)
 		s.genSentOverflowV6 = true // #9719: see stampInstallGenV4.
 	}
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
-	if s.closeClassSentV6 == nil {
-		s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
-	}
-	stampCloseClassLocked(s.closeClassSentV6, key, val.SessionID, &val.TCPCloseClass)
+	s.stampCloseClassSentV6(key, val.SessionID, &val.TCPCloseClass)
 	// #9752: v6 twin of the installing-table memo above.
 	if s.installTableSentV6 == nil {
 		s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
@@ -247,6 +371,28 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		s.recvGenMu.Unlock()
 	}
 	s.genSentMu.Unlock()
+}
+
+// stampCloseClassSentV4/V6 record the close class under the sender-side cap,
+// growing once on full-of-live like the generation stamps. Callers hold genSentMu.
+func (s *SessionSync) stampCloseClassSentV4(key dataplane.SessionKey, sessionID uint64, class *uint8) {
+	if s.closeClassSentV4 == nil {
+		s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
+	}
+	if _, ok := s.closeClassSentV4[key]; !ok && len(s.closeClassSentV4) >= s.sentCap() {
+		s.growSentCap()
+	}
+	stampCloseClassLocked(s.closeClassSentV4, key, sessionID, class, s.sentCap())
+}
+
+func (s *SessionSync) stampCloseClassSentV6(key dataplane.SessionKeyV6, sessionID uint64, class *uint8) {
+	if s.closeClassSentV6 == nil {
+		s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
+	}
+	if _, ok := s.closeClassSentV6[key]; !ok && len(s.closeClassSentV6) >= s.sentCap() {
+		s.growSentCap()
+	}
+	stampCloseClassLocked(s.closeClassSentV6, key, sessionID, class, s.sentCap())
 }
 
 // takeDeleteGenV4 returns the generation a delete for this wire key should
@@ -409,7 +555,10 @@ func (s *SessionSync) recordInstalledGenV4(key dataplane.SessionKey, gen uint64)
 	}
 	// #9719: a new key at the cap first evicts the oldest tombstone, so churn
 	// cannot starve live keys of their ordering guard.
-	stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen)
+	stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
+	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
 	}
@@ -432,7 +581,10 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	}
 	// #9719: see the v4 twin.
-	stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen)
+	stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
+	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
 	}
@@ -481,7 +633,10 @@ func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint6
 		if s.recvGenV4 == nil {
 			s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 		}
-		stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, deleteGen)
+		stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, deleteGen, s.recvCap())
+		if !stored && !evicted && s.growRecvCap() {
+			stored, evicted = putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, deleteGen, s.recvCap())
+		}
 		if evicted {
 			s.stats.GenTombstonesEvicted.Add(1)
 		}
@@ -509,7 +664,10 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 		if s.recvGenV6 == nil {
 			s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 		}
-		stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, deleteGen)
+		stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, deleteGen, s.recvCap())
+		if !stored && !evicted && s.growRecvCap() {
+			stored, evicted = putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, deleteGen, s.recvCap())
+		}
 		if evicted {
 			s.stats.GenTombstonesEvicted.Add(1)
 		}
@@ -552,6 +710,7 @@ func (s *SessionSync) resetRecvGen() {
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.recvTombV4.reset() // #9719: the tombstone order describes the maps just cleared.
 	s.recvTombV6.reset()
+	s.recvGenGuardCap = 0 // #9915 F-044: new epoch, recount demand from the default.
 	s.recvGenMu.Unlock()
 	s.applyMu.Unlock()
 	// #3931: also reset the last-applied config generation. A reconnecting

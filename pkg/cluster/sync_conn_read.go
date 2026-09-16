@@ -125,6 +125,16 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 					s.bulkMu.Unlock()
 				}
 				offset := s.clockOffsetFor(conn)
+				// #9915 F-118: count exactly the installs the saturating rebase
+				// will clamp (shared predicate — counting and clamping agree).
+				if rebaseSaturates(val.Created, offset) || rebaseSaturates(val.LastSeen, offset) {
+					n := s.stats.RebaseSaturations.Add(1)
+					if n == 1 || n%64 == 0 {
+						slog.Warn("cluster sync: saturating peer timestamp on rebase overflow; install clamped to far future",
+							"created", val.Created, "last_seen", val.LastSeen, "offset", offset,
+							"saturated_total", n, "remote", connRemoteAddrString(conn))
+					}
+				}
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
 				s.installClusterSyncedV4(key, val)
@@ -160,6 +170,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 					s.bulkMu.Unlock()
 				}
 				offset := s.clockOffsetFor(conn)
+				// #9915 F-118: see the v4 twin — count exactly the clamped installs.
+				if rebaseSaturates(val.Created, offset) || rebaseSaturates(val.LastSeen, offset) {
+					n := s.stats.RebaseSaturations.Add(1)
+					if n == 1 || n%64 == 0 {
+						slog.Warn("cluster sync: saturating peer timestamp on rebase overflow; install clamped to far future",
+							"created", val.Created, "last_seen", val.LastSeen, "offset", offset,
+							"saturated_total", n, "remote", connRemoteAddrString(conn))
+					}
+				}
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
 				s.installClusterSyncedV6(key, val)
@@ -700,6 +719,20 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"incarnation", incarnation, "seq", seq, "bytes", len(base))
 			return
 		}
+		origCount := len(leases)
+		leases, dropped := filterDHCPLeasesByIdentity(4, leases)
+		if dropped > 0 {
+			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(dropped))
+			slog.Warn("cluster sync: dropping DHCP v4 lease records without family identity — keeping the rest",
+				"dropped", dropped, "kept", len(leases), "incarnation", incarnation, "seq", seq)
+		}
+		if len(leases) == 0 && origCount > 0 {
+			// #9915 F-117: a filtered-to-empty set retains the prior held set
+			// (the #7175 posture) — only a genuine count==0 push clears.
+			slog.Warn("cluster sync: DHCP v4 lease set filtered to empty — standby retains previous set",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
 		s.storePeerDHCPLeases(4, leases)
 		slog.Debug("cluster sync: received DHCP v4 lease set", "count", len(leases), "incarnation", incarnation, "seq", seq)
 		if s.OnDHCPLeasesReceived != nil {
@@ -725,6 +758,20 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed DHCP v6 lease set — standby retains previous set",
 				"incarnation", incarnation, "seq", seq, "bytes", len(base))
+			return
+		}
+		origCount := len(leases)
+		leases, dropped := filterDHCPLeasesByIdentity(6, leases)
+		if dropped > 0 {
+			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(dropped))
+			slog.Warn("cluster sync: dropping DHCP v6 lease records without family identity — keeping the rest",
+				"dropped", dropped, "kept", len(leases), "incarnation", incarnation, "seq", seq)
+		}
+		if len(leases) == 0 && origCount > 0 {
+			// #9915 F-117: a filtered-to-empty set retains the prior held set
+			// (the #7175 posture) — only a genuine count==0 push clears.
+			slog.Warn("cluster sync: DHCP v6 lease set filtered to empty — standby retains previous set",
+				"incarnation", incarnation, "seq", seq)
 			return
 		}
 		s.storePeerDHCPLeases(6, leases)

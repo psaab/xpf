@@ -540,7 +540,10 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
 	if err != nil || !initiator {
 		// A Request from a peer that should itself be answering ours. Role is
 		// local knowledge on both sides, so this is a misconfiguration or an
-		// injection, never a state we should accommodate.
+		// injection, never a state we should accommodate. NOTE (#9915 F-043):
+		// swallowing identity errors here (leave-as-is, plaintext sync
+		// continues) is INTENTIONAL — never escalate to a disconnect. A bad
+		// node id must fail new handshakes closed, not tear down working sync.
 		slog.Warn("cluster sync: ignoring an auth-upgrade request that arrived at the "+
 			"responder-role node (#6628/#7163)", "err", err)
 		return

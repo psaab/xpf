@@ -134,7 +134,18 @@ func (s *SessionSync) syncNoiseIdentity() (clusterID, nodeID int, err error) {
 			"cluster sync: auth provider %T does not supply cluster/node identity; "+
 				"the #7163 handshake cannot bind identity and refuses to run unbound", box.p)
 	}
-	return ident.ClusterID(), ident.NodeID(), nil
+	cluster, node := ident.ClusterID(), ident.NodeID()
+	// #9915 F-043: the prologue derives the peer as 1-local, so any node id
+	// outside {0,1} makes the two ends derive DIFFERENT prologues and the
+	// msg1 AEAD fails permanently on both fabrics while the cluster looks
+	// alive. Fail LOUD naming the identity instead of handshaking unbound.
+	if node != 0 && node != 1 {
+		return 0, 0, fmt.Errorf(
+			"cluster sync: local node id %d outside {0,1} (cluster %d); "+
+				"the keyed handshake cannot bind identity and refuses to run — "+
+				"check /etc/xpf/node-id", node, cluster)
+	}
+	return cluster, node, nil
 }
 
 // syncNoisePrologue builds the transcript-bound identity blob.

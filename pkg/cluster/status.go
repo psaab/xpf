@@ -581,6 +581,31 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.ClockSyncsRefused > 0 {
 			fmt.Fprintf(&b, "  Clock syncs refused: %d\n", syncStats.ClockSyncsRefused)
 		}
+		// #9915 F-044: same posture. A nonzero value means a churn workload
+		// pushed a generation map to its effective cap (GenMapOverflow) or
+		// forced tombstone evictions to make room (GenTombstonesEvicted).
+		if syncStats.GenMapOverflow > 0 {
+			fmt.Fprintf(&b, "  Generation-guard map overflows: %d\n", syncStats.GenMapOverflow)
+		}
+		if syncStats.GenTombstonesEvicted > 0 {
+			fmt.Fprintf(&b, "  Generation-guard tombstones evicted: %d\n", syncStats.GenTombstonesEvicted)
+		}
+		// #9915 F-044: cap growths are demand, not saturation — but an operator
+		// watching saturation wants both counters side by side.
+		if syncStats.GenCapGrown > 0 {
+			fmt.Fprintf(&b, "  Generation-guard cap growths: %d\n", syncStats.GenCapGrown)
+		}
+		// #9915 F-118: same posture. A nonzero value means installs arrived
+		// with peer timestamps no honest clock can read; they were clamped
+		// to the far future instead of wrapping into the past.
+		if syncStats.RebaseSaturations > 0 {
+			fmt.Fprintf(&b, "  Rebase saturations: %d\n", syncStats.RebaseSaturations)
+		}
+		// #9915 F-117: same posture. Only violating members drop; a push
+		// filtering to zero retains the prior set (see the handler).
+		if syncStats.DHCPLeasesDroppedNoIdentity > 0 {
+			fmt.Fprintf(&b, "  DHCP leases dropped (no identity): %d\n", syncStats.DHCPLeasesDroppedNoIdentity)
+		}
 		// #9716: the connection fence, and the fail-open completions it covers.
 		// Same posture: counters an operator can see, not a health annotation.
 		if syncStats.BulkEndsForeignConnDropped > 0 {

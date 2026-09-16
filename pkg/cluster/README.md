@@ -3789,8 +3789,9 @@ outside the monitor loop:
   standby converges to the master's state (session GONE) regardless of
   install/delete arrival order; a genuinely newer incarnation (re-stamped by a
   later sweep) carries a higher generation and still installs (last-writer-wins).
-  A `gen == 0` (legacy) delete still evicts. The generation maps are bounded by
-  `genGuardMapCap` (200000). On overflow the map is NEVER cleared (#2198 F1): an
+  A `gen == 0` (legacy) delete still evicts. The generation maps start bounded by
+  `genGuardMapDefaultCap` (200000) and grow on full-of-live demand toward the
+  `genGuardMapCap` ceiling (half of conntrack.MaxSessions; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
   existing key updates in place, and a live entry is never dropped.
   **Tombstones age out oldest-first (#9719).**
   - A tombstone never frees its entry. So a long-lived connection used to fill the

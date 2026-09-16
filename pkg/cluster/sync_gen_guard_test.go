@@ -612,16 +612,19 @@ func TestGenMapOverflowKeepsLiveKeyV4(t *testing.T) {
 		t.Fatal("live session should be installed")
 	}
 
-	// Fill the stored-generation map to exactly cap-1 (live key already counts
-	// as one entry, so the map holds the live key + (cap-1) synthetic keys).
-	fillRecvGenV4ToCount(ss, key, genGuardMapCap)
-	if got := len(ss.recvGenV4); got != genGuardMapCap {
-		t.Fatalf("recvGenV4 pre-condition: %d entries, want %d", got, genGuardMapCap)
+	// #9915: inject a small effective cap (decoupled from the 5M ceiling
+	// symbol) and fill to it; the overflow episode then grows once instead of
+	// skipping — either way the live key must survive it.
+	const wantCap = 1000
+	ss.recvGenGuardCap = wantCap
+	fillRecvGenV4ToCount(ss, key, wantCap)
+	if got := len(ss.recvGenV4); got != wantCap {
+		t.Fatalf("recvGenV4 pre-condition: %d entries, want %d", got, wantCap)
 	}
 
 	// A NEW-key install now drives recordInstalledGenV4 while the map is at
-	// cap. Pre-fix this make(...)-cleared the whole map (wiping the live key);
-	// post-fix the new key is skip-recorded and the live key is untouched.
+	// cap. Pre-growth this skip-recorded; now the cap grows once. The live
+	// key is untouched either way (the F1 invariant).
 	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0x1234, DstPort: 0x5678}
 	installWithGenV4(ss, newKey, 3)
 
@@ -631,6 +634,9 @@ func TestGenMapOverflowKeepsLiveKeyV4(t *testing.T) {
 	ss.recvGenMu.Unlock()
 	if !ok || stored != 2 {
 		t.Fatalf("live key stored generation lost across overflow: ok=%v stored=%d (want 2) — F1 overflow-clear regression", ok, stored)
+	}
+	if got := ss.stats.GenCapGrown.Load(); got != 1 {
+		t.Fatalf("GenCapGrown = %d, want 1 (the overflow episode must grow, not skip)", got)
 	}
 
 	// A stale delete (gen=1, strictly older) MUST be refused.
@@ -644,17 +650,22 @@ func TestGenMapOverflowKeepsLiveKeyV4(t *testing.T) {
 }
 
 // TestRecordInstalledGenSkipsNewKeyOnFull verifies the F1 skip-record-on-full
-// semantics directly: at cap, a NEW key is NOT recorded (the map is never
-// cleared and never grows past cap), the GenMapOverflow counter increments, and
-// an EXISTING key is still updated in place (its stored generation is never
-// dropped).
+// semantics at an injected small ceiling: with start==ceiling==8, a NEW key is
+// NOT recorded (the map is never cleared and never grows past cap), the
+// GenMapOverflow counter increments, and an EXISTING key is still updated in
+// place. (#9915: skip now happens only at the ceiling, so tests inject a small
+// ceiling instead of filling 5M; growth itself is pinned by
+// TestGenGuardCapGrowsOnLiveDemand_9915.)
 func TestRecordInstalledGenSkipsNewKeyOnFull(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	live := gen2170KeyV4()
+	const wantCap = 8
+	ss.recvGenGuardCap = wantCap
+	ss.genGuardMapCeilingOverride = wantCap
 
 	// Record the live key first (it exists), then fill to cap around it.
 	ss.recordInstalledGenV4(live, 2)
-	fillRecvGenV4ToCount(ss, live, genGuardMapCap)
+	fillRecvGenV4ToCount(ss, live, wantCap)
 
 	// A NEW key at cap is skipped — map stays at cap, counter increments.
 	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0xBEEF, DstPort: 0xCAFE}
@@ -667,8 +678,8 @@ func TestRecordInstalledGenSkipsNewKeyOnFull(t *testing.T) {
 	if newStored {
 		t.Fatal("a new key was recorded while the map was at cap (should skip-record)")
 	}
-	if sz != genGuardMapCap {
-		t.Fatalf("map grew/shrank past cap on overflow: %d != %d", sz, genGuardMapCap)
+	if sz != wantCap {
+		t.Fatalf("map grew/shrank past cap on overflow: %d != %d", sz, wantCap)
 	}
 	if got := ss.stats.GenMapOverflow.Load(); got != 1 {
 		t.Fatalf("GenMapOverflow = %d, want 1", got)
