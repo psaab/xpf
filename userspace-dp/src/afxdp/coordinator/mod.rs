@@ -49,6 +49,7 @@ pub(crate) use cos_state::SharedCoSState;
 #[cfg(test)]
 pub(crate) use cos_state::PrePublishSiblings;
 pub(in crate::afxdp) use ha_state::HaState;
+pub(in crate::afxdp) use ha_state::lock_ha_recover;
 pub(in crate::afxdp) use routing_domain::{configured_routing_domains, synced_routing_domain_in};
 // #10038: the WG TUN-origin builder, re-exported (the `HaState` precedent)
 // so the end-to-end cell in `wg/decap_tests.rs` can drive production code

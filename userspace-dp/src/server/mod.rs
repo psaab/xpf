@@ -17,7 +17,7 @@ pub(crate) mod state;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use handlers::handle_stream;
+pub(crate) use handlers::{handle_stream, SocketMode};
 pub(crate) use state::{Args, PollMode, ServerState};
 // Issue 69.1: daemon-loop helpers live in server::helpers and are reached
 // directly via `use server::helpers::*` in main.rs and `use super::super::*`

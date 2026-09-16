@@ -10,6 +10,14 @@ use super::*;
 /// reconcile call sites.
 pub(in crate::afxdp) struct HaState {
     pub(in crate::afxdp) rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    /// #9629: leaf mutex serializing the HA load→diff→store section across
+    /// the locked path (`Coordinator::update_ha_state`) and the session
+    /// fast path (`SessionDomain::try_refresh_ha_leases`). Guards no data —
+    /// the section holds only ArcSwap/atomics/local builds — so poison is
+    /// recovered (`lock_ha_recover`), never quarantined. Lock order is
+    /// `ServerState → ha` (leaf, acyclic); hold is µs (no slow ops, no
+    /// logging inside).
+    pub(in crate::afxdp) ha_mutex: Arc<Mutex<()>>,
     pub(in crate::afxdp) fabrics: Arc<ArcSwap<Vec<FabricLink>>>,
     /// #6592: the single worker-visible runtime gate — validation AND
     /// forwarding in ONE `Arc`, so a reader can never pair them across
@@ -37,11 +45,37 @@ impl HaState {
     pub(super) fn new() -> Self {
         Self {
             rg_runtime: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            ha_mutex: Arc::new(Mutex::new(())),
             fabrics: Arc::new(ArcSwap::from_pointee(Vec::new())),
             runtime: RuntimeViewChannel::default(),
         }
     }
+}
 
+/// #9629: recover the HA leaf mutex, never propagate poison.
+///
+/// `worker_queue::lock_recover` is type-bound to
+/// `Mutex<VecDeque<WorkerCommand>>` and cannot serve `Mutex<()>`; this is
+/// the same committed-prefix + clear-poison policy for the HA leaf. No
+/// quarantine (unlike `ServerState` poison): the mutex guards no data, the
+/// section contains only ArcSwap loads, atomic bumps and local map builds,
+#[inline]
+pub(in crate::afxdp) fn lock_ha_recover(m: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            // Clear (not just recover): `into_inner()` alone leaves the poison
+            // bit set, so every later `lock()` would re-enter this arm
+            // forever. Same committed-prefix + clear policy as
+            // `worker_queue::lock_recover`, minus its queue-specific counter
+            // and log (this mutex guards no data; nothing to count).
+            m.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
+
+impl HaState {
     /// #6592: a READ-ONLY handle on the published runtime view, for the worker
     /// launch bundle and the GRE/WG aux threads.
     ///

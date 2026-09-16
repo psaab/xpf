@@ -65,7 +65,7 @@ mod server;
 // Re-export at the crate root so other modules (afxdp/bind, afxdp/coordinator)
 // can continue to reach `crate::PollMode` after the move into server/state.rs
 // without depending on ancestor-privacy of a private use statement.
-pub(crate) use server::{handle_stream, Args, PollMode, ServerState};
+pub(crate) use server::{handle_stream, Args, PollMode, ServerState, SocketMode};
 use server::helpers::*;
 
 use chrono::Utc;

@@ -35,7 +35,7 @@ mod snapshot;
 mod stop_workers;
 mod sync_session;
 
-use crate::afxdp::SessionDomain;
+use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
 use super::helpers::{
     lock_server_state_recover, refresh_status, wait_for_binding_settle, write_state,
@@ -46,6 +46,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// #9629: which socket accepted this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketMode {
+    /// Control socket: today's behavior (locked `update_ha_state`, full serve).
+    Main,
+    /// Session socket: `update_ha_state` takes the lease fast path (never `ServerState`).
+    Session,
+}
+
 pub(crate) fn handle_stream(
     stream: UnixStream,
     state_file: &str,
@@ -54,8 +63,13 @@ pub(crate) fn handle_stream(
     // #7209: the session-domain handle, passed EXPLICITLY rather than derived
     // from `state` — deriving it would need the very mutex this exists to
     // avoid. Taking it as a parameter also puts the fact in the signature: this
-    // dispatcher can serve one verb without `ServerState` at all.
+    // dispatcher can serve `sync_session` (both sockets) and session `update_ha_state`
+    // without `ServerState` at all.
     session_domain: SessionDomain,
+    // #9629: which socket accepted this connection. Session `update_ha_state`
+    // takes the lease fast path (never `ServerState`); Main takes the locked
+    // path (today's behavior, byte-identical).
+    mode: SocketMode,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -176,7 +190,28 @@ pub(crate) fn handle_stream(
         sync_session::handle(&session_domain, request.session_sync, &mut response);
     }
 
-    if !served_off_lock {
+    // #9629: session-socket HA fast path — lease-only refresh, never `ServerState`.
+    // Served and NeedsLock both skip the lock (no status attach, no persist,
+    // quarantine-immune like `sync_session`); transitions/CLEARs are owned by
+    // the main path (`UpdateRGActive` + reconcile retry).
+    let session_ha = mode == SocketMode::Session && request.request_type == "update_ha_state";
+    if session_ha {
+        match request.ha_state.as_ref() {
+            None => {
+                response.ok = false;
+                response.error = "missing HA state".to_string();
+            }
+            Some(ha_req) => match session_domain.try_refresh_ha_leases(&ha_req.groups) {
+                HaRefreshOutcome::Served(_) => {}
+                HaRefreshOutcome::NeedsLock => {
+                    response.ok = false;
+                    response.error = HA_REFRESH_NEEDS_CONTROL_SOCKET.to_string();
+                }
+            },
+        }
+    }
+
+    if !served_off_lock && !session_ha {
         let mut guard = lock_server_state_recover(&state);
         // GPT-4: quarantined state serves nothing — a prior handler panic may
         // have torn it mid-mutation. Refuse and ensure shutdown is underway
