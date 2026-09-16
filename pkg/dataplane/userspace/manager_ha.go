@@ -926,7 +926,6 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 		return err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	group := m.haGroups[rgID]
 	group.RGID = rgID
 	group.WatchdogTimestamp = timestamp
@@ -935,17 +934,69 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// Throttle the update_ha_state socket IPC. Nothing to send before the helper
 	// is up; the first tick after it comes up seeds the baseline and syncs.
 	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
 		return nil
 	}
 	if !m.shouldSyncHAWatchdogIPCLocked(rgID, group.Active, timestamp) {
+		m.mu.Unlock()
 		return nil
 	}
-	// Record the baseline BEFORE the send so a post-send applyHelperStatusLocked
-	// or transient socket error cannot trigger a per-tick resync storm: the next
-	// backstop (<= haWatchdogIPCBackstopSecs) retries, and the shim map write
-	// keeps the kernel watchdog fresh in the meantime.
+	// Capability gate (#9629): explicit helper-status bit, NOT the snapshot
+	// protocol version (this behavior adds no snapshot-wire bump, so old and
+	// new helpers report the same version and version inference would be
+	// unsound). False when never observed → legacy main path. Branched BEFORE
+	// any refresh so the legacy arm below stays byte-for-byte (single inner
+	// BPF refresh, unchanged failure timing) instead of paying two reads.
+	sessionFastPath := m.helperStatusObserved && m.lastStatus.HaSessionRefreshSupported
+	if !sessionFastPath {
+		// Record the baseline BEFORE the send so a post-send applyHelperStatusLocked
+		// or transient socket error cannot trigger a per-tick resync storm: the next
+		// backstop (<= haWatchdogIPCBackstopSecs) retries, and the shim map write
+		// keeps the kernel watchdog fresh in the meantime.
+		m.markHAWatchdogIPCSyncedLocked()
+		defer m.mu.Unlock()
+		return m.syncHAStateLocked()
+	}
+	// Session arm: refresh from the maps BEFORE snapshot/mark (preserves
+	// syncHAStateLocked's refresh-then-build order): the mark records fresh
+	// full-set timestamps so the remaining RGs' heartbeat calls in the same
+	// tick stay throttled (one full-set publish per tick, not one IPC per RG).
+	// On map failure, still mark (today's no-storm throttle: the baseline is
+	// recorded even when the sync fails) and return — no publish, no flag.
+	if err := m.refreshHAWatchdogOnlyFromMapsLocked(); err != nil {
+		m.markHAWatchdogIPCSyncedLocked()
+		m.mu.Unlock()
+		return err
+	}
+	// Snapshot the full group set under the lock (deterministic RGID order,
+	// matching syncHAStateLocked); the send below runs outside m.mu.
+	groups := make([]HAGroupStatus, 0, len(m.haGroups))
+	for _, g := range m.haGroups {
+		groups = append(groups, g)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].RGID < groups[j].RGID })
+	// Record the baseline BEFORE the send (same no-storm rationale as above).
+	// Marked ONCE here, never re-marked after the send (a stale snapshot
+	// overwriting a fresher UpdateRGActive baseline would fire one redundant
+	// immediate IPC at failover).
 	m.markHAWatchdogIPCSyncedLocked()
-	return m.syncHAStateLocked()
+	m.mu.Unlock()
+	// Session path: lease-only refresh OUTSIDE m.mu, so a 10s apply holding
+	// m.mu never blocks the 3s watchdog backstop (G1). Transport errors return
+	// to the daemon caller, which Warn-and-continues per RG per tick
+	// (daemon_ha_comms_wiring) and retries next tick/backstop.
+	err := m.requestHAWatchdogSession(groups)
+	if errors.Is(err, errHARefreshNeedsControlSocket) {
+		// Healthy helper, transition/CLEAR owned by the main path
+		// (UpdateRGActive + 2s reconcile retry, apply replay, #5487):
+		// throttle-success, no error. NEVER set helperHAStatePublished here
+		// (an unlocked send + helper restart + re-lock would mark the new
+		// empty helper as inventoried, fail-open #7465) — first-inventory
+		// authority stays exclusively with main-path sends under continuous
+		// m.mu.
+		return nil
+	}
+	return err
 }
 
 func activeHAGroupSignature(groups map[int]HAGroupStatus) string {

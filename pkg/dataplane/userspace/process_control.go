@@ -94,6 +94,23 @@ var errSessionHelperUnreachable = errors.New("session helper unreachable")
 // a transport failure.
 const syncedImportRefusedPrefix = "synced-import-refused:"
 
+// haRefreshNeedsControlPrefix is the machine-readable token the helper prefixes
+// onto a session fast-path refusal that must be retried on the control socket
+// (HA_REFRESH_NEEDS_CONTROL_SOCKET in
+// userspace-dp/src/afxdp/ha/session_domain.rs). The two spellings must agree;
+// TestHARefreshNeedsControlPrefixMatchesTheHelper asserts the AGREEMENT by
+// reading the Rust constant rather than pinning either side to a literal, so a
+// rename on either side reds instead of silently reclassifying every refusal as
+// a transport failure.
+const haRefreshNeedsControlPrefix = "ha-refresh-needs-control:"
+
+// errHARefreshNeedsControlSocket marks a HEALTHY helper's NeedsLock answer to a
+// session HA refresh: the transition/CLEAR is owned by the main path
+// (UpdateRGActive + reconcile retry), so the watchdog treats it as
+// throttle-success (no error return, no published-flag set), never as a
+// transport failure.
+var errHARefreshNeedsControlSocket = errors.New("ha refresh needs control socket")
+
 // sessionSyncDialTimeout and sessionSyncRoundtripDeadline bound a single
 // session-socket round-trip so a hung helper fails one mirror request in a few
 // seconds instead of the OS default (which can be minutes). They match the
@@ -396,6 +413,69 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 		if strings.HasPrefix(resp.Error, syncedImportRefusedPrefix) {
 			return fmt.Errorf("%w: %s", dataplane.ErrSyncedImportRefused,
 				strings.TrimPrefix(resp.Error, syncedImportRefusedPrefix))
+		}
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// requestHAWatchdogSession publishes a lease-only HA refresh via the dedicated
+// session socket (#9629), using sessionMu instead of mu so a 10s apply holding
+// mu never blocks the 3s watchdog backstop (G1), and the session accept thread
+// serves it while the main accept thread is wedged in the apply (H1).
+//
+// Per-request sessionMu (like requestSessionSync): bulk batches hold sessionMu
+// per-request so HA interleaves (at most one in-flight sync ahead). HA never
+// holds sessionMu across a 3s timeout on old helpers because old helpers never
+// see this path (capability gate in UpdateHAWatchdog keeps them on main).
+func (m *Manager) requestHAWatchdogSession(groups []HAGroupStatus) error {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.requestHAWatchdogSessionLocked(groups)
+}
+
+// requestHAWatchdogSessionLocked performs ONE session-socket HA round trip. The
+// caller MUST already hold m.sessionMu; it is not reentrant.
+func (m *Manager) requestHAWatchdogSessionLocked(groups []HAGroupStatus) error {
+	req := ControlRequest{
+		Type:           "update_ha_state",
+		SuppressStatus: true,
+		HAState:        &HAStateUpdateRequest{Groups: groups},
+	}
+	if m.sessionRequestHook != nil {
+		return m.sessionRequestHook(req, nil)
+	}
+	sockPath := m.sessionSocketPath()
+	if sockPath == "" {
+		return errors.New("session socket not configured")
+	}
+	conn, err := dialTrustedHelperSocket("session socket", sockPath, sessionSyncDialTimeout)
+	if err != nil {
+		return fmt.Errorf("%w: dial session socket: %w", errSessionHelperUnreachable, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(sessionSyncRoundtripDeadline))
+	if err := json.NewEncoder(conn).Encode(&req); err != nil {
+		return fmt.Errorf("%w: write session HA request: %w", errSessionHelperUnreachable, err)
+	}
+	var resp ControlResponse
+	bounded := boundedResponseReader(conn)
+	if err := json.NewDecoder(bufio.NewReader(bounded)).Decode(&resp); err != nil {
+		if bounded.truncated {
+			return fmt.Errorf("%w: read session HA response: %w",
+				errSessionHelperUnreachable, responseCapError(req.Type, err))
+		}
+		return fmt.Errorf("%w: read session HA response: %w", errSessionHelperUnreachable, err)
+	}
+	if !resp.OK {
+		if resp.Error == "" {
+			resp.Error = "unknown helper error"
+		}
+		// #9629: NeedsLock is the CORRECT answer from a HEALTHY helper
+		// (transition/CLEAR owned by main), classified on the stable prefix
+		// (never the remainder), exactly like syncedImportRefusedPrefix.
+		if strings.HasPrefix(resp.Error, haRefreshNeedsControlPrefix) {
+			return errHARefreshNeedsControlSocket
 		}
 		return errors.New(resp.Error)
 	}

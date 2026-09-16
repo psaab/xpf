@@ -450,6 +450,12 @@ type Manager struct {
 	// manager state transitions without opening a Unix control socket.
 	controlRequestHook func(ControlRequest, *ProcessStatus) error
 
+	// sessionRequestHook replaces the session-socket round trip in unit tests
+	// (mirror of controlRequestHook, which only covers requestLocked and never
+	// the session path — without this the #9629 sender would ship bound by
+	// nothing CI runs, the #6994 failure mode).
+	sessionRequestHook func(ControlRequest, *ProcessStatus) error
+
 	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
 	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate
 	// a successful respawn without spawning a helper process. Teardown
