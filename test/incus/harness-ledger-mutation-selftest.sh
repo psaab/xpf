@@ -173,6 +173,34 @@ MUTATIONS = {
         "the shrink-only half of expected-red: a tolerated red that went "
         "green stays declared forever (#9922 F-086)",
     ),
+    "coverage-void-counts-as-measured": (
+        PY_FILE, "py",
+        '        measured = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]',
+        '        measured = [r for r in grows if r.get("verdict") in ("PASS", "FAIL", "VOID")]',
+        "the VOID exclusion from coverage: a gate that never measured reads "
+        "REACHED (#9922 F-087)",
+    ),
+    "coverage-missing-check-dropped": (
+        PY_FILE, "py",
+        "    missing = sorted(g for g in unreached if g not in declared)",
+        "    missing = []",
+        "the missing half of the coverage census: unreached-and-undeclared "
+        "gates read as covered (#9922 F-087)",
+    ),
+    "coverage-stale-check-dropped": (
+        PY_FILE, "py",
+        "    stale = sorted(g for g in declared if g not in unreached)",
+        "    stale = []",
+        "the shrink-only half of the coverage census: a declared gate that "
+        "gained rows stays declared forever (#9922 F-087)",
+    ),
+    "coverage-recipe-filter-dropped": (
+        PY_FILE, "py",
+        '        ln for ln in makefile_text.splitlines() if ln.startswith("\\t")',
+        "        ln for ln in makefile_text.splitlines()",
+        "the recipe-line restriction: comment prose mentioning --gate becomes "
+        "a wrapped gate (#9922 F-087)",
+    ),
     "env-filter-dropped": (
         PY_FILE, "py",
         'prior = [r for r in matching[:-1] if r.get("env") == resolved_env]',

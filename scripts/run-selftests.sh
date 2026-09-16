@@ -582,10 +582,25 @@ if command -v python3 >/dev/null 2>&1; then
 		faill "ledger-compare-all"
 		echo "$out" | sed 's/^/      /'
 	fi
+	# #9922 F-087: the coverage census. The aggregate above judges what the
+	# rows SAY; this judges whether every wrapped gate has rows at all —
+	# 12 of 18 wrapped gates had ZERO rows while everything stayed green.
+	# Unreached gates live in test/incus/LEDGER_COVERAGE.unreached
+	# (shrink-only: a declared gate that gains a measured row fails until
+	# the line is removed). Same command as `make harness-coverage`.
+	out=$(python3 test/incus/ledger_compare.py --coverage --ledger test/results/ledger.d 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		passl "ledger-coverage ($(echo "$out" | tail -1))"
+	else
+		faill "ledger-coverage"
+		echo "$out" | sed 's/^/      /'
+	fi
 else
 	skipl "ledger-lint (python3 not installed)"
 	skipl "ledger-merge-completeness (python3 not installed)"
 	skipl "ledger-compare-all (python3 not installed)"
+	skipl "ledger-coverage (python3 not installed)"
 fi
 
 # ── summary ──

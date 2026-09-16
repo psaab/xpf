@@ -31,6 +31,7 @@ import uuid
 from ledger_compare import (
     BAND_REL_FLOOR,
     BAND_Z,
+    COVERAGE_POSITIVE_CONTROL,
     IMPROVED,
     LEDGER_CORRUPT,
     LEDGER_DIR_NAME,
@@ -47,6 +48,7 @@ from ledger_compare import (
     classify,
     compare,
     compare_all,
+    coverage,
     exit_status,
     lint_ledger,
     lint_merge_completeness,
@@ -55,10 +57,12 @@ from ledger_compare import (
     lint_shard_names,
     load_ledger_text,
     main,
+    parse_coverage_declared,
     parse_expected_red,
     parse_ledger,
     render,
     render_all,
+    render_coverage,
     run_ids,
     run_ids_at_rev,
     shard_paths,
@@ -1025,6 +1029,120 @@ class MergeCompletenessSeesADroppedRow8346(unittest.TestCase):
         # existing at all: run the ROW linter over the damaged merge result
         # and watch it report clean.
         self.assertEqual(lint_ledger(self._led("a", "b")), [])
+
+
+class CoverageCensus(unittest.TestCase):
+    """#9922 F-087: every wrapped gate measured, or declared unreached."""
+    MAKE = "\trun --gate test-failover\n\trun --gate test-foo\n"
+
+    def test_void_only_does_not_count_as_reached(self):
+        # MUTATION: coverage-void-counts-as-measured (VOID in the filter).
+        # A gate whose rows are all VOID never measured anything; counting
+        # them would let it read green here AND as undetermined (surfaced,
+        # non-failing) in the red-watch aggregate — green in both, measured
+        # in neither.
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)] + [
+            row("2026-09-01T00:01:00Z", verdict="VOID", value=None,
+                gate="test-foo", void_reason="no summary")
+        ]
+        cov = coverage(self.MAKE, rows, "test-foo needs a recorded run\n")
+        self.assertIn("test-foo", cov["void_only"])
+        self.assertNotIn("test-foo", cov["reached"])
+        self.assertTrue(cov["ok"])
+        self.assertIn("VOID-ONLY", render_coverage(cov))
+        # And without the declaration the same void-only gate fails.
+        cov2 = coverage(self.MAKE, rows, "")
+        self.assertEqual(cov2["missing"], ["test-foo"])
+        self.assertFalse(cov2["ok"])
+
+    def test_unreached_undeclared_is_missing(self):
+        # MUTATION: coverage-missing-check-dropped (missing = []).
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)]
+        cov = coverage(self.MAKE, rows, "")
+        self.assertEqual(cov["zero_row"], ["test-foo"])
+        self.assertEqual(cov["missing"], ["test-foo"])
+        self.assertFalse(cov["ok"])
+        self.assertIn("MISSING", render_coverage(cov))
+
+    def test_declared_but_reached_is_stale_shrink_only(self):
+        # MUTATION: coverage-stale-check-dropped (stale = []).
+        rows = [row("2026-09-01T00:00:00Z", value=100.0),
+                row("2026-09-01T00:01:00Z", value=100.0, gate="test-foo")]
+        cov = coverage(self.MAKE, rows, "test-foo was red once\n")
+        self.assertEqual(cov["stale"], ["test-foo"])
+        self.assertFalse(cov["ok"])
+        self.assertIn("STALE", render_coverage(cov))
+
+    def test_declared_unreached_is_ok_and_makefile_placeholders_excluded(self):
+        # $(GATE) is the harness-compare recipe's expansion, not a gate.
+        make = self.MAKE + "\trun --gate $(GATE)\n"
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)]
+        cov = coverage(make, rows, "test-foo needs a recorded run\n")
+        self.assertNotIn("$(GATE)", cov["wrapped"])
+        self.assertTrue(cov["ok"])
+
+    def test_comment_prose_is_not_a_wrapped_gate(self):
+        # MUTATION: coverage-recipe-filter-dropped (every line scanned).
+        # The harness-coverage target's own comment says "--gate recipe";
+        # without the tab-indented-recipe restriction the census adopts
+        # "recipe" as a wrapped gate and the target reds itself.
+        make = self.MAKE + "# Census every Makefile --gate recipe\n"
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)]
+        cov = coverage(make, rows, "test-foo needs a recorded run\n")
+        self.assertNotIn("recipe", cov["wrapped"])
+        self.assertTrue(cov["ok"])
+
+    def test_positive_control_and_empty_wrapped_fail_closed(self):
+        # A matcher that never reports REACHED must trip by name, not report
+        # a clean board over an inverted world.
+        cov = coverage("\trun --gate test-foo\n",
+                       [row("2026-09-01T00:00:00Z", value=100.0, gate="test-foo")],
+                       "")
+        self.assertTrue(any("positive control" in p for p in cov["problems"]))
+        self.assertFalse(cov["ok"])
+        cov2 = coverage("no gates here\n", [], "")
+        self.assertTrue(any("no --gate recipes" in p for p in cov2["problems"]))
+        self.assertFalse(cov2["ok"])
+        _d, problems = parse_coverage_declared("gate-only\n")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("line 1", problems[0])
+
+    def test_main_coverage_over_a_fixture_ledger(self):
+        # End to end through main(): shards on disk, strict rc 1 on the
+        # undeclared gate, rc 0 once declared, corrupt mapping to rc 2.
+        work = tempfile.mkdtemp(prefix="xpf-coverage.")
+        self.addCleanup(shutil.rmtree, work, True)
+        for r in [row("2026-09-01T00:00:00Z", value=100.0)]:
+            with open(os.path.join(work, f"{r['run_id']}.json"), "w") as fh:
+                json.dump(r, fh)
+        mk = os.path.join(work, "Makefile")
+        with open(mk, "w") as fh:
+            fh.write(self.MAKE)
+        decl = os.path.join(work, "declared.txt")
+        with open(decl, "w") as fh:
+            fh.write("test-foo needs a recorded run\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--coverage", "--ledger", work, "--makefile", mk,
+                       "--coverage-declared", decl])
+        self.assertEqual(rc, 0)
+        self.assertIn("coverage: OK", buf.getvalue())
+        empty = os.path.join(work, "empty.txt")
+        with open(empty, "w") as fh:
+            fh.write("")
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rc2 = main(["--coverage", "--ledger", work, "--makefile", mk,
+                        "--coverage-declared", empty])
+        self.assertEqual(rc2, 1)
+        self.assertIn("coverage: FAIL", buf2.getvalue())
+        with open(os.path.join(work, "broken.json"), "w") as fh:
+            fh.write("{not json\n")
+        buf3 = io.StringIO()
+        with contextlib.redirect_stdout(buf3):
+            rc3 = main(["--coverage", "--ledger", work, "--makefile", mk,
+                        "--coverage-declared", decl])
+        self.assertEqual(rc3, 2)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-ledger-lint
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint
 
 all: generate build build-ctl
 
@@ -1004,6 +1004,15 @@ harness-compare:
 # is not declared there fails the suite.
 harness-compare-all:
 	@python3 ./test/incus/ledger_compare.py --all
+
+# Census every Makefile --gate recipe against the tracked ledger (#9922
+# F-087). Exit 1 unless each wrapped gate has >= 1 PASS/FAIL row or a
+# declaration in test/incus/LEDGER_COVERAGE.unreached (shrink-only: a
+# declared gate that gains a measured row fails until the line is
+# removed). VOID-only counts as unreached. Also runs as a leg of `make
+# selftest`.
+harness-coverage:
+	@python3 ./test/incus/ledger_compare.py --coverage
 
 # Lint every row in the tracked ledger. FAILS on a zero-row ledger and names
 # the first unparseable line, so a committed conflict marker is a red gate

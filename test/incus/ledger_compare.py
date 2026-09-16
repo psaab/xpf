@@ -959,8 +959,11 @@ def _jsonable_agg(agg: Dict, declared: Dict[Tuple[str, str], str]) -> Dict:
     }
 
 
-#: A ledger-wrapped Makefile recipe names its gate `--gate <name>`. Values
-#: containing `$` are make expansions (the `harness-compare` recipe's `$(GATE)`)
+#: A ledger-wrapped Makefile recipe names its gate `--gate <name>` on a
+#: TAB-indented recipe line. The tab requirement is load-bearing: prose
+#: (comments, help text) mentions `--gate <word>` too, and without it the
+#: census would adopt comment words as wrapped gates. Values containing
+#: `$` are make expansions (the `harness-compare` recipe's `$(GATE)`)
 #: rather than gates and are excluded by coverage().
 WRAPPED_GATE_RE = re.compile(r"--gate (\S+)")
 
@@ -1010,10 +1013,13 @@ def coverage(
     census and the red-watch aggregate (which surfaces undetermined pairs
     without failing). Such gates report as void-only, distinctly from zero-row.
     """
+    recipe_text = "\n".join(
+        ln for ln in makefile_text.splitlines() if ln.startswith("\t")
+    )
     wrapped = sorted(
         {
             m.group(1)
-            for m in WRAPPED_GATE_RE.finditer(makefile_text)
+            for m in WRAPPED_GATE_RE.finditer(recipe_text)
             if "$" not in m.group(1)
         }
     )
