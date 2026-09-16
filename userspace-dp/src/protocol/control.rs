@@ -166,8 +166,15 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // behavior exactly) but exact equality refuses it anyway, so no mixed window
 // silently loses the fix. See protocol.go's v21 note. The #8892 digest moves
 // with it (a real, transmitted field).
+// v22 (#9752): `SessionDecision`'s installing-table identity now crosses the HA
+// session-sync path (open-frame trailing pair, both `SessionDeltaInfo` legs,
+// `SessionSyncRequest.install_table_*`). Additive, but under the v9 rule that is
+// not enough, because the old behaviour IS the defect: an old helper would import
+// every PBR-steered session stamp-less and re-resolve it in `inet.0`. Exact
+// equality refuses that pairing. The #8892 digest did not move (session-sync
+// messages are not snapshot structs). See protocol.go's v22 note.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 21;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 22;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -936,6 +943,32 @@ pub(crate) struct SessionSyncRequest {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest.PeerDelete`).
     #[serde(rename = "peer_delete", default)]
     pub peer_delete: bool,
+    /// #9752 round 3: this delete retires exactly the named key — no reverse
+    /// derivation, no reverse removal, no reverse `DeleteSynced` fan-out. Set
+    /// for purge-retirement closes, whose sender already decided every
+    /// companion (deriving here would destroy a session the purge
+    /// deliberately preserved). `false` deletes exactly as before.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest.ForwardOnly`).
+    #[serde(rename = "forward_only", default)]
+    pub forward_only: bool,
+    /// #9752: the session's installing route-table domain id
+    /// (`routingInstanceDomain` semantics: 0 = default table). Carried so a
+    /// peer-synced session re-resolves in the table its PBR steer installed
+    /// instead of `inet.0`. `serde(default)` => 0 on an old peer (default),
+    /// the pre-#9752 behavior (rolling-upgrade safe).
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
+    #[serde(rename = "install_table_domain", default)]
+    pub install_table_domain: u32,
+    /// #9752: owner check for `install_table_domain` (high 32 of the FNV-64).
+    /// 0 iff the domain is 0. Same upgrade semantics as the domain.
+    ///
+    /// The rename MUST match the Go struct tag (same file).
+    #[serde(rename = "install_table_check", default)]
+    pub install_table_check: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

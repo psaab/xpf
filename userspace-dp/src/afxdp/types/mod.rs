@@ -95,6 +95,14 @@ pub(super) struct PendingNeighPacket {
 // Compile-time size guard: pending-neighbor retry carries the session key so
 // runtime TX-selection policers still meter packets after ARP/NDP resolution.
 //
+// 280 -> 288 (#9752). `SessionDecision` gained the installing-table identity
+// (`install_table_domain` + `install_table_check`), and this struct embeds
+// one, so it grew by 8 bytes (~32 KB more at the `MAX_PENDING_NEIGH` cap of
+// ~4096). Accepted deliberately on the same reasoning as the growths below:
+// this queue carries the decision so a retried packet re-resolves in its
+// installing table, and a decision that could not name it would re-resolve a
+// retried PBR packet in the default table — the #9752 defect for retried flows.
+//
 // 272 -> 280 (#7160/#2387). `SessionKey` gained the `routing_domain` u32 that
 // makes two tenants' identical 5-tuples distinct sessions, and this struct
 // embeds one; with alignment that is 8 more bytes, ~32 KB more at the
@@ -113,7 +121,7 @@ pub(super) struct PendingNeighPacket {
 // retried packet metered against a DIFFERENT tunnel's session than the one it
 // belongs to.
 const _: () = assert!(
-    core::mem::size_of::<PendingNeighPacket>() == 280,
+    core::mem::size_of::<PendingNeighPacket>() == 288,
     "PendingNeighPacket size changed — update afxdp.rs MAX_PENDING_NEIGH commentary",
 );
 

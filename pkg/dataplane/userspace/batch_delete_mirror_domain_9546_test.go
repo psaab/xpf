@@ -82,7 +82,7 @@ func TestBatchDeleteNamesTheMirroredDomainOnTheWire9546(t *testing.T) {
 			"domain again, so every batch delete goes out bare", got, tenant)
 	}
 
-	if _, err := store.DeleteBatchKnownV4(entries, dataplane.DeleteReasonGCExpired); err != nil {
+	if _, err := store.DeleteBatchKnownV4(entries, dataplane.DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 

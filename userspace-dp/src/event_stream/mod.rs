@@ -748,6 +748,7 @@ impl EventStreamWorkerHandle {
                 close_flags(delta),
                 delta.metadata.ingress_zone,
                 delta.metadata.egress_zone,
+                delta.purge_retirement,
             ),
         }
     }

@@ -139,6 +139,11 @@ pub(in crate::afxdp) fn slow_path_admit(
     if disposition == ForwardingDisposition::NextTableUnsupported {
         live.record_next_table_unsupported_drop();
     }
+    // #9752: same accounting shape as #6664 above — the refusal must be
+    // counted where it happens or the signal vanishes.
+    if disposition == ForwardingDisposition::TableUnavailable {
+        live.record_table_unavailable_drop();
+    }
     false
 }
 

@@ -898,27 +898,26 @@ fn tunnel_decision() -> SessionDecision {
     SessionDecision {
         resolution: tunnel_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 
 fn nat64_decision(nat64: bool) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: TRANSPORT_IFINDEX,
-            tx_ifindex: TRANSPORT_IFINDEX,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
-            src_mac: Some(EGRESS_SRC_MAC),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision {
-            nat64,
-            ..NatDecision::default()
-        },
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: TRANSPORT_IFINDEX,
+        tx_ifindex: TRANSPORT_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
+        src_mac: Some(EGRESS_SRC_MAC),
+        tx_vlan_id: 0,
+    }, nat: NatDecision {
+        nat64,
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 }
 }
 
 /// Insert a minimal tunnel endpoint of the given `mode` / outer family /
@@ -1320,20 +1319,17 @@ use crate::afxdp::forwarding_build::build_forwarding_state;
 /// stored tx_ifindex is unset). This is the production shape that makes
 /// `tunnel_outer_mtu` fall back to the LOGICAL MTU.
 fn wg_logical_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::MissingNeighbor,
-            local_ifindex: 0,
-            egress_ifindex: logical_ifindex,
-            tx_ifindex: 0,
-            tunnel_endpoint_id,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: logical_ifindex,
+        tx_ifindex: 0,
+        tunnel_endpoint_id,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 #[test]

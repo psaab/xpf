@@ -40,20 +40,17 @@ fn wg_encapped_size_is_pad_aware() {
 /// `egress_ifindex` = the tunnel LOGICAL ifindex (what the resolver
 /// stores) and `tunnel_endpoint_id` = the WG endpoint id.
 fn wg_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::MissingNeighbor,
-            local_ifindex: 0,
-            egress_ifindex: logical_ifindex,
-            tx_ifindex: 0,
-            tunnel_endpoint_id,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: crate::nat::NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: logical_ifindex,
+        tx_ifindex: 0,
+        tunnel_endpoint_id,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 // The peer endpoint the WG fixture's single peer learns / is configured

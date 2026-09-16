@@ -128,20 +128,17 @@ fn flow_key_to(dst: Ipv4Addr) -> crate::session::SessionKey {
 /// models the unresolvable case (a peer-synced import for an inactive RG keeps
 /// `NoRoute`/0).
 fn decision(egress_ifindex: i32) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex,
-            tx_ifindex: egress_ifindex,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(DST)),
-            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 80,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex,
+        tx_ifindex: egress_ifindex,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(DST)),
+        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 /// `is_reverse` and the zone pair are the two axes these cells vary. A REVERSE
@@ -2491,6 +2488,8 @@ fn install_pair_9604(
 ) -> SessionKey {
     let rev_key = reverse_session_key(fwd_key, fwd_decision.nat);
     let rev_decision = SessionDecision {
+        install_table_domain: 0,
+        install_table_check: 0,
         resolution: fwd_decision.resolution,
         nat: fwd_decision.nat.reverse(
             fwd_key.src_ip,
@@ -3154,6 +3153,8 @@ fn install_nat64_icmp_pair_9604(sessions: &mut SessionTable) -> (SessionKey, Ses
         ..crate::nat::NatDecision::default()
     };
     let fwd_decision = SessionDecision {
+        install_table_domain: 0,
+        install_table_check: 0,
         resolution: decision(WAN_IFINDEX).resolution,
         nat,
     };
@@ -3299,6 +3300,8 @@ fn install_synced_pair_9604(sessions: &mut SessionTable) -> (SessionKey, Session
         sessions.upsert_synced(
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: rev_nat,
             },
@@ -3350,6 +3353,8 @@ fn shared_promote_pair_reverse_triggered_deny_revokes_9604() {
         (
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: NatDecision::default(),
             },
@@ -3426,6 +3431,8 @@ fn shared_promote_collision_kept_on_reverse_9604() {
             SessionInstall {
                 key: rev_key.clone(),
                 decision: SessionDecision {
+                    install_table_domain: 0,
+                    install_table_check: 0,
                     resolution: decision(WAN_IFINDEX).resolution,
                     nat: NatDecision::default(),
                 },
@@ -3483,6 +3490,8 @@ fn recorded_zone_zero_declines_on_reverse_9604() {
         sessions.upsert_synced(
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: NatDecision::default(),
             },
@@ -3874,6 +3883,8 @@ fn lone_reverse_companion_reaching_revalidation_is_declined_9604() {
         sessions.install_with_protocol_with_origin(
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: NatDecision::default(),
             },

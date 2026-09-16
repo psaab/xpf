@@ -416,6 +416,17 @@ type SessionValue struct {
 	// It is deliberately NOT TCPState. That is the BPF mirror's own field and
 	// keeps its original meaning (#9412: add a field, never redefine one).
 	TCPCloseClass uint8
+	// InstallTableDomain/InstallTableCheck (#9752) are the session's
+	// installing route-table identity the owning node's helper states: the
+	// FNV-1a/64 instance-name domain id + high-32 owner check, (0,0) for the
+	// default table. They exist so a peer-synced PBR session re-resolves in
+	// the table its steer installed instead of inet.0 after a failover.
+	// Userspace-sync-only HA metadata, like TCPCloseClass: length-gated
+	// trailing u32s on the cluster wire, never part of the BPF/C conntrack
+	// ABI. (0,0) is what a peer predating the fields sends, and it means
+	// today's behaviour.
+	InstallTableDomain uint32
+	InstallTableCheck  uint32
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -795,6 +806,11 @@ type SessionValueV6 struct {
 	// It is deliberately NOT TCPState. That is the BPF mirror's own field and
 	// keeps its original meaning (#9412: add a field, never redefine one).
 	TCPCloseClass uint8
+	// InstallTableDomain/InstallTableCheck (#9752): v6 analogue of the v4
+	// fields above — same semantics, same wire placement (trailing u32s
+	// after TCPCloseClass on the v6 cluster payload).
+	InstallTableDomain uint32
+	InstallTableCheck  uint32
 }
 
 // ZoneConfig mirrors the C struct zone_config.
@@ -1500,6 +1516,13 @@ const (
 const (
 	LogFlagUserspaceTunnelEndpoint = 1 << 6
 	LogFlagUserspaceFabricIngress  = 1 << 7
+	// LogFlagPurgeRetirementOnly (#9752): the converted delta is a Close
+	// that retires exactly its key. Set by the delta converter from the
+	// helper's marker; read ONLY by the delete sinks to skip companion
+	// deletes and send a forward-only cluster delete. Never persisted
+	// meaningfully and never matched by eBPF (bit 2 is free in both
+	// namespaces: C defines 0-1).
+	LogFlagPurgeRetirementOnly = 1 << 2
 )
 
 // Event type constants.

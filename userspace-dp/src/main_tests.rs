@@ -6037,3 +6037,60 @@ fn a_zero_translated_port_means_no_translation_on_the_sync_wire_8640() {
          sets rewrite_src_port at all"
     );
 }
+
+#[test]
+fn build_synced_session_entry_carries_install_table_identity_9752() {
+    let req = SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.61.102".to_string(),
+        dst_ip: "172.16.80.200".to_string(),
+        src_port: 40000,
+        dst_port: 5201,
+        ingress_zone: "lan".to_string(),
+        egress_zone: "wan".to_string(),
+        owner_rg_id: 1,
+        egress_ifindex: 5,
+        tx_ifindex: 5,
+        install_table_domain: 525590,
+        install_table_check: 0x1234_5678,
+        ..SessionSyncRequest::default()
+    };
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
+    assert_eq!(
+        entry.decision.install_table_domain, 525590,
+        "import must adopt the origin's table domain verbatim"
+    );
+    assert_eq!(
+        entry.decision.install_table_check, 0x1234_5678,
+        "import must adopt the owner check verbatim (opaque u32)"
+    );
+}
+
+#[test]
+fn build_synced_session_entry_defaults_install_table_for_legacy_peer_9752() {
+    let req = SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.61.102".to_string(),
+        dst_ip: "172.16.80.200".to_string(),
+        src_port: 40000,
+        dst_port: 5201,
+        ingress_zone: "lan".to_string(),
+        egress_zone: "wan".to_string(),
+        ..SessionSyncRequest::default()
+    };
+    // A legacy payload omits both keys: serde(default) 0 = default table.
+    let legacy: SessionSyncRequest =
+        serde_json::from_str(r#"{"operation":"upsert","src_ip":"10.0.61.102"}"#)
+            .expect("legacy request decodes");
+    assert_eq!(legacy.install_table_domain, 0);
+    assert_eq!(legacy.install_table_check, 0);
+    let entry =
+        build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
+    assert_eq!(entry.decision.install_table_domain, 0);
+    assert_eq!(entry.decision.install_table_check, 0);
+}

@@ -480,6 +480,27 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
+        // #9752 round 5 item 3: revalidate the installing table on retry.
+        // The buffered decision was stamped when the packet was buffered;
+        // the table may have been removed/re-homed since, and serving the
+        // buffered egress unchecked forwards stale (the types/mod.rs
+        // contract says a retried packet re-resolves in its installing
+        // table). Unresolvable → drop + count + arm the purge (D8); the
+        // frame is recycled like every other retry failure. Keyless
+        // (flowless) packets keep legacy behavior — only keyed flows can
+        // carry a stamp to revalidate.
+        if let Some(flow_key) = pkt.flow_key.as_ref() {
+            let target = decision.nat.rewrite_dst.unwrap_or(flow_key.dst_ip);
+            if matches!(
+                super::session_glue::resolve_install_table_for_session(forwarding, decision, target),
+                super::session_glue::InstallTable::Unresolvable
+            ) {
+                binding.live.table_unavailable_packets.fetch_add(1, Ordering::Relaxed);
+                super::session_glue::flag_install_table_purge(binding.worker_id);
+                binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                continue;
+            }
+        }
         decision.resolution.neighbor_mac = Some(neighbor_mac);
         decision.resolution.disposition = ForwardingDisposition::ForwardCandidate;
         let expected_ports = None;

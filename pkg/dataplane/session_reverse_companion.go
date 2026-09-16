@@ -103,6 +103,11 @@ func (v *SessionValue) ResetUnobservedForReverseCompanion() {
 	v.IngressIfindex = 0
 	v.IngressVlanID = 0
 	v.IngressIfaceFold = 0
+	// #9752 round 5: the installing-table identity is the FORWARD steer
+	// outcome. A reverse companion resolving by it would re-resolve in a
+	// table chosen for the other direction — companions stamp (0,0) (R1).
+	v.InstallTableDomain = 0
+	v.InstallTableCheck = 0
 }
 
 // ResetUnobservedForReverseCompanion is the IPv6 twin.
@@ -118,4 +123,7 @@ func (v *SessionValueV6) ResetUnobservedForReverseCompanion() {
 	v.IngressIfindex = 0
 	v.IngressVlanID = 0
 	v.IngressIfaceFold = 0
+	// #9752 round 5: v6 twin — see above.
+	v.InstallTableDomain = 0
+	v.InstallTableCheck = 0
 }

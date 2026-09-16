@@ -227,20 +227,17 @@ fn all_tcp_clamps_plain_forwarded_ipv6_syn() {
         flow_dst_port: 5201,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(dst)),
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(dst)),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let built = build_forwarded_frame_from_frame(&frame, meta, &decision, &forwarding, false, None)
         .expect("plain forward v6 build");
     assert_eq!(

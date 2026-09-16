@@ -40,7 +40,9 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
     now_secs: u64,
     cancelled_keys: &mut Vec<SessionKey>,
     cancelled_keys_seen: &mut rustc_hash::FxHashSet<SessionKey>,
-) {
+) -> bool {
+    // #9752: report terminal observations (see refresh path above).
+    let mut observed_terminal = false;
     let mut seen_owner_rgs = std::collections::BTreeSet::new();
     for owner_rg_id in owner_rgs {
         if !seen_owner_rgs.insert(owner_rg_id) {
@@ -70,6 +72,7 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 now_secs,
                 metadata.fabric_ingress,
                 resolution_target,
+            install_table_name_for_session(forwarding, decision, resolution_target),
                 looked_up_resolution,
             );
             let enforced_resolution =
@@ -83,8 +86,14 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 ),
                 ..decision
             };
-            let rewrote_session = refreshed_decision.resolution.disposition
-                != ForwardingDisposition::HAInactive
+            observed_terminal |= refreshed_decision.resolution.disposition
+                == ForwardingDisposition::TableUnavailable;
+            // #9752: terminal joins the HAInactive exclusion (same HOLD-clock
+            // reasoning as the refresh path above).
+            let rewrote_session = !matches!(
+                refreshed_decision.resolution.disposition,
+                ForwardingDisposition::HAInactive | ForwardingDisposition::TableUnavailable
+            )
                 && sessions.refresh_for_ha_transition(
                     &demoted_key,
                     refreshed_decision,
@@ -123,4 +132,5 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
             }
         }
     }
+    observed_terminal
 }

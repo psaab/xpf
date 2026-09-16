@@ -45,6 +45,12 @@ func TestSessionUpdateGoldenFrameDecodes9412(t *testing.T) {
 	if d.SrcPort != 12345 || d.DstPort != 80 || d.RTFlowSessionID != 0x5EED {
 		t.Fatalf("golden fields misread: src=%d dst=%d id=%#x", d.SrcPort, d.DstPort, d.RTFlowSessionID)
 	}
+	// #9752: the golden's fixture decision is stamped, so the tail decodes
+	// to the real pair — every consumer test downstream of these bytes
+	// exercises a stamped record.
+	if d.InstallTableDomain != 525590 || d.InstallTableCheck != 3318534811 {
+		t.Fatalf("golden UPDATE decoded install_table=(%d,%d), want (525590,3318534811)", d.InstallTableDomain, d.InstallTableCheck)
+	}
 }
 
 func TestCloseClassWireKeyLockstepWithRust9412(t *testing.T) {
@@ -69,6 +75,36 @@ func TestCloseClassWireKeyLockstepWithRust9412(t *testing.T) {
 		}
 		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "tcp_close_class" {
 			t.Fatalf("%s.TCPCloseClass json tag = %q, want the Rust key tcp_close_class", c.typ.Name(), tag)
+		}
+	}
+}
+
+func TestInstallTableWireKeyLockstepWithRust9752(t *testing.T) {
+	for _, c := range []struct {
+		rust  string
+		typ   reflect.Type
+		field string
+		key   string
+	}{
+		{"../../../userspace-dp/src/protocol/binding.rs", reflect.TypeOf(SessionDeltaInfo{}), "InstallTableDomain", "install_table_domain"},
+		{"../../../userspace-dp/src/protocol/binding.rs", reflect.TypeOf(SessionDeltaInfo{}), "InstallTableCheck", "install_table_check"},
+		{"../../../userspace-dp/src/protocol/control.rs", reflect.TypeOf(SessionSyncRequest{}), "InstallTableDomain", "install_table_domain"},
+		{"../../../userspace-dp/src/protocol/control.rs", reflect.TypeOf(SessionSyncRequest{}), "InstallTableCheck", "install_table_check"},
+	} {
+		src, err := os.ReadFile(c.rust)
+		if err != nil {
+			t.Fatalf("read %s: %v", c.rust, err)
+		}
+		decl := `#[serde(rename = "` + c.key + `", default)]`
+		if !strings.Contains(string(src), decl) {
+			t.Fatalf("%s no longer declares %s: the Rust wire key moved", c.rust, decl)
+		}
+		f, ok := c.typ.FieldByName(c.field)
+		if !ok {
+			t.Fatalf("%s has no %s field", c.typ.Name(), c.field)
+		}
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != c.key {
+			t.Fatalf("%s.%s json tag = %q, want the Rust key %s", c.typ.Name(), c.field, tag, c.key)
 		}
 	}
 }

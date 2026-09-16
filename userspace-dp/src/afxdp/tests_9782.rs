@@ -191,6 +191,8 @@ fn unit_decision_v4(nat: crate::nat::NatDecision) -> SessionDecision {
             tx_vlan_id: 80,
         },
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 
@@ -208,6 +210,8 @@ fn unit_decision_v6(nat: crate::nat::NatDecision) -> SessionDecision {
             tx_vlan_id: 80,
         },
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 

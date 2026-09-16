@@ -27,9 +27,9 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
     owner_rgs: Vec<i32>,
     now_ns: u64,
     now_secs: u64,
-) {
+) -> bool {
     if !owner_rgs.iter().any(|owner_rg_id| *owner_rg_id > 0) {
-        return;
+        return false;
     }
 
     let refresh = collect_refresh_owner_rgs_items(
@@ -39,6 +39,11 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
         dynamic_neighbors,
         now_secs,
     );
+    // #9752: report whether any refreshed decision terminalized (the caller
+    // arms the purge walk). Scanned, not threaded: `collect_*` stays pure.
+    let observed_terminal = refresh.iter().any(|(_, decision, _, _, _)| {
+        decision.resolution.disposition == ForwardingDisposition::TableUnavailable
+    });
 
     for (key, refreshed_decision, refreshed_metadata, origin, allow_replace_local) in refresh {
         // #5152: gate the LIVENESS re-stamp on the refreshed disposition,
@@ -52,8 +57,12 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
         // reset its bounded-leak HOLD clock, defeating the standby leak ceiling
         // for a redundancy group that never activated here. Only re-stamp
         // liveness for a genuinely-forwarding session.
-        let rewrote_session = refreshed_decision.resolution.disposition
-            != ForwardingDisposition::HAInactive
+        // #9752: terminal joins the HAInactive exclusion — a non-forwarding
+        // entry must not reset its HOLD clock, same reasoning.
+        let rewrote_session = !matches!(
+            refreshed_decision.resolution.disposition,
+            ForwardingDisposition::HAInactive | ForwardingDisposition::TableUnavailable
+        )
             && sessions.refresh_for_ha_transition(
                 &key,
                 refreshed_decision,
@@ -96,6 +105,7 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
             allow_replace_local,
         );
     }
+    observed_terminal
 }
 
 /// Re-evaluate every HA-managed worker session and produce its refreshed
@@ -142,6 +152,7 @@ pub(in crate::afxdp::session_glue) fn collect_refresh_owner_rgs_items(
             now_secs,
             metadata.fabric_ingress,
             resolution_target,
+            install_table_name_for_session(forwarding, decision, resolution_target),
             looked_up_resolution,
         );
         let enforced_resolution =

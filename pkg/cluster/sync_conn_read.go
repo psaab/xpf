@@ -180,7 +180,10 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			if len(payload) >= 24 {
 				gen = binary.LittleEndian.Uint64(payload[16:24])
 			}
-			s.deleteClusterSyncedV4(key, gen)
+			// #9752: length-gated trailing forward-only marker. Absent (old
+			// peer) keeps the historical derive-and-retract behavior.
+			forwardOnly := len(payload) >= 25 && payload[24] != 0
+			s.deleteClusterSyncedV4(key, gen, forwardOnly)
 		}
 	case syncMsgDeleteV6:
 		s.stats.DeletesReceived.Add(1)
@@ -196,7 +199,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			if len(payload) >= 48 {
 				gen = binary.LittleEndian.Uint64(payload[40:48])
 			}
-			s.deleteClusterSyncedV6(key, gen)
+			// #9752: length-gated trailing forward-only marker (v6 twin).
+			forwardOnly := len(payload) >= 49 && payload[48] != 0
+			s.deleteClusterSyncedV6(key, gen, forwardOnly)
 		}
 	case syncMsgBulkStart:
 		var epoch uint64
@@ -860,6 +865,32 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
 		s.peerSessionSyncWire.Store(uint32(peerWire))
+		// #9752 round 4: a capable discovery re-arms the bulk. A window that
+		// aborted during the discovery race must not stay latched once the
+		// peer proves capable — the next redrive completes it.
+		if s.InstallTableIdentityCapable() {
+			s.bulkFencedForPeer.Store(false)
+			// #9752 round 5 item 5: suppressed installs are never retried
+			// by the sweep (its Created>=threshold window advances past
+			// them), so transfer the suppress debt into a cold-prime
+			// re-arm: the redriven bulk snapshot carries full state and
+			// heals every withheld install at once. The debt is consumed
+			// whenever a prime is already owed (that redrive carries it)
+			// or armed here; future suppressions re-set it. Both checked
+			// under s.mu with the arm so a concurrent ack discharge
+			// cannot interleave a redundant bulk.
+			if s.installTableSuppressDebt.Load() {
+				s.mu.Lock()
+				if s.installTableSuppressDebt.Load() {
+					s.installTableSuppressDebt.Store(false)
+					if !s.needColdPrime.Load() {
+						s.armColdPrimeLocked()
+						slog.Info("cluster sync: re-arming cold prime after capable discovery with withheld installs")
+					}
+				}
+				s.mu.Unlock()
+			}
+		}
 		slog.Info("cluster sync: peer advertised capabilities",
 			"version", peerProto, "flags", peerFlags, "session_sync_wire", peerWire)
 	case syncMsgClockSync:

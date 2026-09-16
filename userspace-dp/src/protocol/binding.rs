@@ -421,6 +421,8 @@ pub(crate) struct BindingStatus {
     pub discard_route_packets: u64,
     #[serde(rename = "next_table_packets", default)]
     pub next_table_packets: u64,
+    #[serde(rename = "table_unavailable_packets", default)]
+    pub table_unavailable_packets: u64,
     #[serde(rename = "exception_packets", default)]
     pub exception_packets: u64,
     #[serde(rename = "config_gen_mismatches", default)]
@@ -691,6 +693,10 @@ pub(crate) struct BindingStatus {
     /// readers but no longer advances.
     #[serde(rename = "next_table_unsupported_drops", default)]
     pub next_table_unsupported_drops: u64,
+    /// #9752: TableUnavailable frames dropped fail-closed by the slow-path
+    /// allow-list (the #6664 refusal signal shape).
+    #[serde(rename = "table_unavailable_drops", default)]
+    pub table_unavailable_drops: u64,
     #[serde(rename = "slow_path_forward_build_packets", default)]
     pub slow_path_forward_build_packets: u64,
     #[serde(rename = "slow_path_drops", default)]
@@ -1431,6 +1437,28 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "tcp_close_class", default)]
     pub tcp_close_class: u8,
+    /// #9752: the session's installing route-table domain id (0 = default
+    /// table), at parity with the binary open frame's trailing u32 pair.
+    /// Additive: an old daemon ignores the keys and imports default-table
+    /// behavior; an old helper omits them and `default` decodes (0,0).
+    ///
+    /// The renames MUST match the Go struct tags
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "install_table_domain", default)]
+    pub install_table_domain: u32,
+    /// #9752: owner check for `install_table_domain` (high 32 of the
+    /// FNV-64). 0 iff the domain is 0. Same upgrade semantics as the domain.
+    #[serde(rename = "install_table_check", default)]
+    pub install_table_check: u32,
+    /// #9752: this Close retires exactly its key (see
+    /// `SessionDelta::purge_retirement`). The drain-fallback leg must convey
+    /// it exactly like the binary close frame's marker byte, or a fallback
+    /// close would retract companions the purge preserved. Additive.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "purge_retirement", default)]
+    pub purge_retirement: bool,
 }
 
 

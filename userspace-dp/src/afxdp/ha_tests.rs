@@ -132,6 +132,8 @@ fn test_decision() -> SessionDecision {
     SessionDecision {
         resolution: test_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 
@@ -750,7 +752,7 @@ fn refusal_counters_are_per_coordinator_not_process_global() {
     // (a) stale install — refused, counted.
     busy.upsert_synced_session(synced_entry_with_generation(1));
     // (b) stale delete — refused, counted; the entry survives.
-    busy.delete_synced_session_gen(key.clone(), 1);
+    busy.delete_synced_session_gen(key.clone(), 1, false);
     // (c) over-ceiling NEW forward — the map already holds the forward + its
     // synthesized reverse, so it is at the entry cap. Refused, counted.
     busy.upsert_synced_session(synced_entry_port(2000, 0));
@@ -1189,7 +1191,7 @@ fn delete_synced_session_gen_refuses_stale_generation() {
     coordinator.upsert_synced_session(synced_entry_with_generation(2));
 
     // Stale delete (gen=1) — refused, entry survives.
-    coordinator.delete_synced_session_gen(key.clone(), 1);
+    coordinator.delete_synced_session_gen(key.clone(), 1, false);
     assert!(
         synced_generation(&coordinator, &key).is_some(),
         "stale-generation delete wrongly removed the live entry"
@@ -1199,7 +1201,7 @@ fn delete_synced_session_gen_refuses_stale_generation() {
     // Equal-generation delete (gen=2) — applies. This is the positive control:
     // without it the test accepts a guard that refuses EVERY generation-aware
     // delete.
-    coordinator.delete_synced_session_gen(key.clone(), 2);
+    coordinator.delete_synced_session_gen(key.clone(), 2, false);
     assert!(
         synced_generation(&coordinator, &key).is_none(),
         "equal-generation delete should remove the entry"
@@ -1221,7 +1223,7 @@ fn delete_synced_session_zero_generation_is_unconditional() {
     let coordinator = Coordinator::new();
     let key = test_key();
     coordinator.upsert_synced_session(synced_entry_with_generation(9));
-    coordinator.delete_synced_session(key.clone());
+    coordinator.delete_synced_session(key.clone(), false);
     assert!(
         synced_generation(&coordinator, &key).is_none(),
         "a gen-0 (unconditional) delete must remove the entry"
@@ -1335,7 +1337,7 @@ fn stale_generation_delete_refused_on_poisoned_shared_mutex() {
     // returned None, so the delete-side guard never evaluated and
     // `remove_shared_session` recovered the poison and removed the entry —
     // a stale delete killing a newer same-key replacement.
-    coordinator.delete_synced_session_gen(key.clone(), 1);
+    coordinator.delete_synced_session_gen(key.clone(), 1, false);
     assert_eq!(
         synced_generation_recovered(&coordinator, &key),
         Some(2),
@@ -1383,7 +1385,7 @@ fn current_generation_install_and_delete_still_apply_on_poisoned_shared_mutex() 
 
     // Equal-generation delete on a (re-)poisoned mutex — must APPLY.
     poison_shared_synced(&coordinator);
-    coordinator.delete_synced_session_gen(key.clone(), 3);
+    coordinator.delete_synced_session_gen(key.clone(), 3, false);
     assert!(
         synced_generation_recovered(&coordinator, &key).is_none(),
         "an equal-generation delete must still remove the entry after \
@@ -1447,7 +1449,7 @@ fn current_generation_install_and_delete_still_apply_on_poisoned_shared_mutex() 
     );
 
     poison_shared_synced(&coordinator);
-    coordinator.delete_synced_session_gen(stale_key.clone(), 8);
+    coordinator.delete_synced_session_gen(stale_key.clone(), 8, false);
     assert_eq!(
         synced_generation_recovered(&coordinator, &stale_key),
         Some(9),
@@ -1561,7 +1563,7 @@ fn synced_snat_install_publishes_and_delete_releases_dnat_table_entry() {
 
     // Deleting the synced SNAT session must release the reverse-SNAT entry.
     let before_del = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(key.clone());
+    coordinator.delete_synced_session(key.clone(), false);
     let after_del = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     assert_eq!(
         after_del - before_del,
@@ -1582,7 +1584,7 @@ fn synced_snat_install_publishes_and_delete_releases_dnat_table_entry() {
         "a non-SNAT synced install must not publish a dnat_table entry"
     );
     let before_del2 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(key);
+    coordinator.delete_synced_session(key, false);
     let after_del2 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     assert_eq!(
         after_del2 - before_del2,
@@ -2310,14 +2312,11 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
             src_port,
             ..test_key()
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-                rewrite_src_port: Some(pool_port),
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            rewrite_src_port: Some(pool_port),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: test_metadata(),
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2525,15 +2524,12 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
             src_port,
             ..test_key()
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-                rewrite_src_port: Some(nat64_port),
-                nat64: true,
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            rewrite_src_port: Some(nat64_port),
+            nat64: true,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: test_metadata(),
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3438,7 +3434,7 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
     // the synced session is untouched and still live.
     coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
 
-    coordinator.delete_synced_session(entry.key.clone());
+    coordinator.delete_synced_session(entry.key.clone(), false);
 
     assert!(
         coordinator
@@ -3539,7 +3535,7 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
         }
     }
 
-    coordinator.delete_synced_session(doomed.key.clone());
+    coordinator.delete_synced_session(doomed.key.clone(), false);
 
     let index = coordinator
         .sessions
@@ -3630,7 +3626,7 @@ fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209()
 
     // The bound that makes the residue acceptable: the delete takes ALL of it,
     // whichever forwarding is live at the time.
-    coordinator.delete_synced_session(entry.key.clone());
+    coordinator.delete_synced_session(entry.key.clone(), false);
     let after_delete = filed_under_7209(&coordinator, &entry.key);
     assert!(
         after_delete.is_empty(),
@@ -3787,7 +3783,7 @@ fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
         &promoted,
     );
 
-    coordinator.delete_synced_session(entry.key.clone());
+    coordinator.delete_synced_session(entry.key.clone(), false);
 
     let stranded = filed_under_7209(&coordinator, &entry.key);
     assert!(
@@ -4795,7 +4791,7 @@ fn cap_rejected_forward_leaves_no_orphan_reverse_8015() {
     }
 
     // Fact 3, re-measured: a forward delete takes its synthesized companion.
-    coordinator.delete_synced_session(seed_key.clone());
+    coordinator.delete_synced_session(seed_key.clone(), false);
     let synced = coordinator.sessions.synced.lock().expect("shared sessions");
     assert!(
         !synced.contains_key(&seed_key),
@@ -5067,7 +5063,7 @@ fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
     let b_after_replace = dnat_steering_holder_count(&key, b);
     assert_eq!(b_after_replace, 1, "precondition: the replacement landed and holds row B");
 
-    coordinator.delete_synced_session(key.clone());
+    coordinator.delete_synced_session(key.clone(), false);
     let a_after_delete = dnat_steering_holder_count(&key, a);
     let b_after_delete = dnat_steering_holder_count(&key, b);
 
@@ -5075,7 +5071,7 @@ fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
     let k2 = same_row_sibling_9514(&key);
     coordinator.upsert_synced_session(synced_with_nat_9514(k2.clone(), a, 1));
     let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(k2.clone());
+    coordinator.delete_synced_session(k2.clone(), false);
     let later_row_a_deletes = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
 
     assert!(
@@ -5106,7 +5102,7 @@ fn ha_same_key_replace_with_the_same_snat_row_holds_exactly_once_9514() {
     let deletes_on_refresh = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
     let after_refresh = dnat_steering_holder_count(&key, a);
     let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(key.clone());
+    coordinator.delete_synced_session(key.clone(), false);
     let deletes_on_delete = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
     let after_delete = dnat_steering_holder_count(&key, a);
     assert_eq!(
@@ -5148,14 +5144,14 @@ fn ha_replace_migrating_off_a_shared_row_keeps_the_siblings_hold_9514() {
     );
 
     let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(k2.clone());
+    coordinator.delete_synced_session(k2.clone(), false);
     assert_eq!(
         DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1,
         1,
         "once the sibling closes, row A is nobody's and must be deleted"
     );
     assert_eq!(dnat_steering_holder_count(&k2, a), 0);
-    coordinator.delete_synced_session(key.clone());
+    coordinator.delete_synced_session(key.clone(), false);
     assert_eq!(dnat_steering_holder_count(&key, b), 0, "K's close releases row B");
 }
 
@@ -5550,7 +5546,7 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone())
+        .delete_peer_synced_session(fixture.forward.key.clone(), false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -5608,7 +5604,7 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone())
+        .delete_peer_synced_session(fixture.forward.key.clone(), false)
         .is_refused_local_owned();
 
     assert!(
@@ -5810,7 +5806,7 @@ fn a_stale_generation_delete_is_refused_and_keeps_the_entry_9714() {
     fixture
         .coordinator
         .session_domain()
-        .delete_synced_session_gen(fixture.forward.key.clone(), 3);
+        .delete_synced_session_gen(fixture.forward.key.clone(), 3, false);
 
     assert_eq!(
         fixture.coordinator.session_delete_stale_ignored_total(),
@@ -5849,7 +5845,7 @@ fn a_newer_generation_delete_still_applies_9714() {
     fixture
         .coordinator
         .session_domain()
-        .delete_synced_session_gen(fixture.forward.key.clone(), 11);
+        .delete_synced_session_gen(fixture.forward.key.clone(), 11, false);
 
     assert_eq!(
         fixture.coordinator.session_delete_stale_ignored_total(),
@@ -5879,7 +5875,7 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone())
+        .delete_peer_synced_session(fixture.forward.key.clone(), false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -5952,7 +5948,7 @@ fn an_authoritative_delete_of_the_same_live_local_session_still_deletes_9714() {
     fixture
         .coordinator
         .session_domain()
-        .delete_synced_session(fixture.forward.key.clone());
+        .delete_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert!(
@@ -5979,7 +5975,7 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone())
+        .delete_peer_synced_session(fixture.forward.key.clone(), false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -6014,7 +6010,7 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone())
+        .delete_peer_synced_session(fixture.forward.key.clone(), false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -6050,7 +6046,7 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone())
+        .delete_peer_synced_session(fixture.reverse_key.clone(), false)
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
@@ -6142,7 +6138,7 @@ fn a_dropped_delete_half_raises_the_workers_delete_drop_epoch_9560() {
     }
 
     let before = crate::afxdp::session_glue::session_delete_drop_epoch(0);
-    coordinator.delete_synced_session_gen(key, 1);
+    coordinator.delete_synced_session_gen(key, 1, false);
     let after = crate::afxdp::session_glue::session_delete_drop_epoch(0);
 
     {
@@ -6263,5 +6259,142 @@ fn activation_fan_out_collects_live_queues_only_9900() {
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed),
         shed_before + 2,
         "one dead worker sheds two fan-outs (Refresh + prewarm)"
+    );
+}
+
+/// #9752 round 3 item 4: a forward-only peer delete retires exactly the named
+/// key — the reverse shared entry survives and no reverse `DeleteSynced` is
+/// queued. The sender (a purge-retirement close) already decided every
+/// companion; deriving here would destroy a session the purge deliberately
+/// preserved. Production shape: the real `delete_peer_synced_session` on a
+/// real Coordinator (shared maps + worker queues + session-map fd).
+#[test]
+fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
+    let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "FIXTURE: forward and reverse must be in the shared maps"
+    );
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone(), true)
+        .is_refused_local_owned();
+    assert!(!refused, "forward-only delete must apply");
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "forward-only delete must remove the named key"
+    );
+    assert!(
+        fixture.shared_has(&fixture.reverse_key),
+        "forward-only delete must preserve the reverse shared entry"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "forward-only delete must still queue DeleteSynced for the named key"
+    );
+    assert!(
+        !fixture.queued_delete(&fixture.reverse_key),
+        "forward-only delete must not queue DeleteSynced for the reverse key"
+    );
+}
+
+/// Control: an ordinary peer delete still retires both halves.
+#[test]
+fn ordinary_peer_delete_retires_both_halves_9752() {
+    let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone(), false)
+        .is_refused_local_owned();
+    assert!(!refused, "ordinary delete must apply");
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
+        "ordinary delete must remove both halves"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key) && fixture.queued_delete(&fixture.reverse_key),
+        "ordinary delete must queue DeleteSynced for both halves"
+    );
+}
+
+/// #9752 round 4 item 2: unknown-never-default AT the authoritative shared
+/// install. A locally-originated PBR session's shared row is stamped, but the
+/// Go receive memo never recorded it (nothing was ever received). After
+/// demotion an old peer's stamp-less resend must NOT overwrite shared
+/// authority with zeros — materialization forwards on this copy. Production
+/// shape: the real `upsert_synced_session` on a real Coordinator (shared
+/// maps + worker fan-out), over a locally-published stamped row.
+#[test]
+fn authoritative_shared_install_preserves_stamp_over_local_origin_9752() {
+    let fixture = fixture_9714_with_origin(false, SessionOrigin::ForwardFlow);
+    // Stamp the locally-published shared row (the state a PBR miss on this
+    // node publishes at HA-publish time; the miss-side stamping itself is
+    // pinned by the install-table stamp matrix).
+    let (domain, check) = crate::session::install_table_identity("blue");
+    {
+        let mut synced = fixture.coordinator.sessions.synced.lock().expect("synced map");
+        let stored = synced.get_mut(&fixture.forward.key).expect("forward row present");
+        stored.decision.install_table_domain = domain;
+        stored.decision.install_table_check = check;
+    }
+    // Old peer's resend: stamp absent, its own incarnation id.
+    let mut resend = fixture.forward.clone();
+    resend.origin = SessionOrigin::SyncImport;
+    resend.decision.install_table_domain = 0;
+    resend.decision.install_table_check = 0;
+    resend.session_id = 99;
+    resend.generation = 11;
+    let _ = fixture.coordinator.upsert_synced_session(resend);
+    let stored = fixture
+        .coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced map")
+        .get(&fixture.forward.key)
+        .expect("shared row must survive a resend")
+        .clone();
+    assert_eq!(
+        (stored.decision.install_table_domain, stored.decision.install_table_check),
+        (domain, check),
+        "a stamp-less resend must not overwrite shared authority with zeros"
+    );
+}
+
+/// Control: a new incarnation stating (0,0) applies it — no inheritance at
+/// the shared install either.
+#[test]
+fn authoritative_shared_install_new_incarnation_applies_zero_9752() {
+    let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
+    let (domain, check) = crate::session::install_table_identity("blue");
+    {
+        let mut synced = fixture.coordinator.sessions.synced.lock().expect("synced map");
+        let stored = synced.get_mut(&fixture.forward.key).expect("forward row present");
+        stored.decision.install_table_domain = domain;
+        stored.decision.install_table_check = check;
+        stored.session_id = 77;
+    }
+    let mut resend = fixture.forward.clone();
+    resend.origin = SessionOrigin::SyncImport;
+    resend.decision.install_table_domain = 0;
+    resend.decision.install_table_check = 0;
+    resend.session_id = 78;
+    resend.generation = 11;
+    let _ = fixture.coordinator.upsert_synced_session(resend);
+    let stored = fixture
+        .coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced map")
+        .get(&fixture.forward.key)
+        .expect("shared row must survive a resend")
+        .clone();
+    assert_eq!(
+        (stored.decision.install_table_domain, stored.decision.install_table_check),
+        (0, 0),
+        "a new incarnation stating (0,0) must apply it, not inherit"
     );
 }

@@ -40,6 +40,10 @@ var companionResetFields = map[string]bool{
 	"IngressIfindex":   true,
 	"IngressVlanID":    true,
 	"IngressIfaceFold": true,
+	// #9752: the installing-table identity is the forward steer outcome;
+	// companions resolve unstamped (R1).
+	"InstallTableDomain": true,
+	"InstallTableCheck":  true,
 }
 
 // conditionallyUnobservedCompanionFields mirrors

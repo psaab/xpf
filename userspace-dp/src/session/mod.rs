@@ -61,7 +61,8 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 // decode — #7188's shape, for #7188's reason.
 mod routing_domain_wire;
 pub(crate) use routing_domain_wire::{
-    QUARANTINED_ROUTING_DOMAIN, WireRoutingDomain, routing_domain_from_wire,
+    QUARANTINED_ROUTING_DOMAIN, WireRoutingDomain, install_table_identity,
+    routing_domain_from_wire,
     routing_domain_to_wire,
     // #9546: named at the crate level so the conntrack mirror states absence
     // with the codec's own constant rather than a bare literal.
@@ -2380,6 +2381,7 @@ impl SessionTable {
             session_id: forward.session_id,
             bulk_resync: false,
             tcp_close_class: class_after,
+            purge_retirement: false,
         };
         self.push_delta(delta);
     }
@@ -2736,6 +2738,7 @@ impl SessionTable {
             let tcp_close_class = self.close_class_wire_for(key);
             self.push_delta(SessionDelta {
                 tcp_close_class,
+                purge_retirement: false,
                 kind: SessionDeltaKind::Open,
                 key: key.clone(),
                 decision,

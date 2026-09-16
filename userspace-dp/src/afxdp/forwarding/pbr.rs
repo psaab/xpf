@@ -30,7 +30,18 @@ pub(in crate::afxdp) enum RouteOverride {
     /// A PBR routing-instance term matched with a non-drop (accept) action.
     /// Steer the route lookup to this override table (`<ri>.inet[6].0`) and
     /// forward — normal policy-based routing, unchanged.
-    Table(String),
+    /// #9752: carries the installing-table identity alongside the string so
+    /// the miss path stamps the session without reverse-parsing the name
+    /// (which could desync from this formation site).
+    Table {
+        /// The override table (`<ri>.inet[6].0` for this packet's family).
+        table: String,
+        /// The target instance's stable domain id (0 never appears here —
+        /// a matched term always names an instance).
+        domain: u32,
+        /// The owner check for `domain` (same hash's high half).
+        check: u32,
+    },
     /// A PBR routing-instance term matched with a `reject`/`discard` action.
     /// The caller MUST DROP: do NOT apply the override, do NOT route-lookup or
     /// forward. Any reject reply (TCP RST / ICMP unreachable) has already been
@@ -171,9 +182,35 @@ pub(in crate::afxdp) fn ingress_route_table_override(
         return RouteOverride::Drop;
     }
     let routing_instance = routing_result.routing_instance;
-    RouteOverride::Table(if is_v6 {
+    // #9752: the identity travels with the string (no reverse-parsing at the
+    // stamp site). A matched term always names a non-empty instance.
+    let (domain, check) = crate::session::install_table_identity(routing_instance);
+    let table = if is_v6 {
         format!("{routing_instance}.inet6.0")
     } else {
         format!("{routing_instance}.inet.0")
-    })
+    };
+    RouteOverride::Table {
+        table,
+        domain,
+        check,
+    }
+}
+
+/// #9752: the installing-table stamp for a miss outcome: arm provenance, not
+/// disposition. Only the table arm with a live override stamps nonzero;
+/// tunnel-egress outcomes stamp `(0,0)` (endpoint-pinned, table-free) and so
+/// do precedence/blocked outcomes (no table consulted). Pure so the matrix
+/// is unit-testable; the poll-level wiring (override → stamp → install) is
+/// pinned by a C2 acceptance cell.
+pub(in crate::afxdp) fn install_table_stamp_for_miss(
+    pbr_install_table: Option<(u32, u32)>,
+    resolved_in_table: bool,
+    resolution: ForwardingResolution,
+) -> (u32, u32) {
+    if resolved_in_table && resolution.tunnel_endpoint_id == 0 {
+        pbr_install_table.unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    }
 }

@@ -343,36 +343,45 @@ pub(crate) fn build_synced_session_entry(
         // copy gets its close bits and its close window.
         tcp_close_class: req.tcp_close_class,
         key,
-        decision: crate::session::SessionDecision {
-            resolution: afxdp::ForwardingResolution {
-                disposition: if req.egress_ifindex > 0
-                    || req.tx_ifindex > 0
-                    || req.tunnel_endpoint_id != 0
-                {
-                    afxdp::ForwardingDisposition::ForwardCandidate
-                } else {
-                    afxdp::ForwardingDisposition::NoRoute
-                },
-                local_ifindex: 0,
-                egress_ifindex: req.egress_ifindex,
-                tx_ifindex,
-                tunnel_endpoint_id: req.tunnel_endpoint_id,
-                next_hop,
-                neighbor_mac,
-                src_mac,
-                tx_vlan_id: req.tx_vlan_id,
+        decision: crate::session::SessionDecision { resolution: afxdp::ForwardingResolution {
+            disposition: if req.egress_ifindex > 0
+                || req.tx_ifindex > 0
+                || req.tunnel_endpoint_id != 0
+            {
+                afxdp::ForwardingDisposition::ForwardCandidate
+            } else {
+                afxdp::ForwardingDisposition::NoRoute
             },
-            nat: crate::nat::NatDecision {
-                rewrite_src,
-                rewrite_dst,
-                rewrite_src_port: nat_src_port,
-                rewrite_dst_port: nat_dst_port,
-                // #4565: set the NAT64 cross-family bit for a promoted NAT64
-                // session so tx dispatch reverse-translates and the reverse key
-                // derives its v4 address family. `nptv6` stays default (false).
-                nat64: nat64_flag,
-                ..crate::nat::NatDecision::default()
-            },
+            local_ifindex: 0,
+            egress_ifindex: req.egress_ifindex,
+            tx_ifindex,
+            tunnel_endpoint_id: req.tunnel_endpoint_id,
+            next_hop,
+            neighbor_mac,
+            src_mac,
+            tx_vlan_id: req.tx_vlan_id,
+        }, nat: crate::nat::NatDecision {
+            rewrite_src,
+            rewrite_dst,
+            rewrite_src_port: nat_src_port,
+            rewrite_dst_port: nat_dst_port,
+            // #4565: set the NAT64 cross-family bit for a promoted NAT64
+            // session so tx dispatch reverse-translates and the reverse key
+            // derives its v4 address family. `nptv6` stays default (false).
+            nat64: nat64_flag,
+            ..crate::nat::NatDecision::default()
+        },
+            // #9752: adopt the origin's installing-table identity verbatim so
+            // re-resolve runs where the flow was installed. An old peer omits
+            // both fields (`serde(default)` 0 = default table), the pre-#9752
+            // behavior (rolling-upgrade safe).
+            // Round 5 item 10: reverse imports normalize to (0,0) at the
+            // trust boundary (companions resolve unstamped, R1).
+            // Defense-in-depth: unreachable today since Go never sends
+            // stamped reverses — but a stamped reverse would re-resolve a
+            // reply in a table chosen for the forward direction.
+            install_table_domain: if req.is_reverse { 0 } else { req.install_table_domain },
+            install_table_check: if req.is_reverse { 0 } else { req.install_table_check },
         },
         metadata: crate::session::SessionMetadata {
             // #4983/#7095: a peer-imported session now carries an ingress

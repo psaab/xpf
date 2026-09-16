@@ -8499,24 +8499,21 @@ fn f4_seed_shared_only(
     // fix applied.
     let entry = crate::afxdp::worker::SyncedSessionEntry {
         key: key.clone(),
-        decision: crate::afxdp::SessionDecision {
-            resolution: crate::afxdp::ForwardingResolution {
-                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: crate::nat::NatDecision {
-                rewrite_src: Some(translated.ip),
-                rewrite_src_port: Some(translated.port),
-                ..crate::nat::NatDecision::default()
-            },
-        },
+        decision: crate::afxdp::SessionDecision { resolution: crate::afxdp::ForwardingResolution {
+            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: crate::nat::NatDecision {
+            rewrite_src: Some(translated.ip),
+            rewrite_src_port: Some(translated.port),
+            ..crate::nat::NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: crate::session::SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
@@ -8579,7 +8576,7 @@ fn a_dropped_deletesynced_releases_the_workers_reservation_6979_f4() {
     f4_fill_queue(&coordinator, 3);
 
     let drops_before = WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(f4_key());
+    coordinator.delete_synced_session(f4_key(), false);
     assert!(
         WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed) > drops_before,
         "fixture: the DeleteSynced must actually have been DROPPED — if the queue \
@@ -8616,7 +8613,7 @@ fn a_queued_deletesynced_leaves_the_release_to_the_worker_6979_f4() {
     f4_seed(&mut coordinator, 3);
     // Queue NOT filled: the push succeeds.
 
-    coordinator.delete_synced_session(f4_key());
+    coordinator.delete_synced_session(f4_key(), false);
 
     assert!(
         coordinator.forwarding.source_nat_rules[0]
@@ -10075,7 +10072,7 @@ fn session_delete_fan_out_sheds_dead_workers_9900() {
 
     let shed_before =
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(f4_key());
+    coordinator.delete_synced_session(f4_key(), false);
     assert_eq!(
         live_commands.lock().unwrap().len(),
         1,

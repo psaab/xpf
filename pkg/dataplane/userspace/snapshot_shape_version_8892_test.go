@@ -313,7 +313,12 @@ const (
 	// config with nothing quarantined. Nothing transmits it, so no helper of
 	// any vintage can observe it, and bumping the protocol for it would spend
 	// the one signal that says the wire really changed.
-	snapshotShapeVersion8892 = 21
+	// v21 -> v22 BUMPED (issue 9752) against the SAME digest: the
+	// installing-table identity crosses the HA session-sync path, and the old
+	// behaviour (re-resolve every PBR-steered session in inet.0) is the defect
+	// it closes. The session-sync messages are not snapshot structs, which is
+	// why the digest above did not move.
+	snapshotShapeVersion8892 = 22
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

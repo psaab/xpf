@@ -11,6 +11,20 @@ use super::*;
 pub(crate) struct SessionDecision {
     pub(crate) resolution: ForwardingResolution,
     pub(crate) nat: NatDecision,
+    /// #9752: the installing route table's stable domain id
+    /// (`routingInstanceDomain` semantics: 0 = default table, else
+    /// `StableRoutingInstanceTableID` of the PBR target instance). Stamped
+    /// once at install from the miss `route_table_override` (or the HA sync
+    /// wire on import); every re-resolve runs in this table. `Copy` is
+    /// preserved deliberately: no heap, no atomics on the per-packet copy.
+    pub(crate) install_table_domain: u32,
+    /// #9752: owner check for `install_table_domain`: high 32 of the same
+    /// FNV-1a/64 whose fold is the domain. The registry verifies the pair,
+    /// so a successive-config collision (removed A, added B under one
+    /// number) fails verification and terminals instead of resolving in
+    /// B under A's retained decision. 0 iff the domain is 0 (default has
+    /// no name to check); a named owner whose H2 is genuinely 0 is valid.
+    pub(crate) install_table_check: u32,
 }
 
 /// #919: zone names dropped from the fast path. `ingress_zone` and
@@ -563,6 +577,27 @@ pub(crate) struct SessionDelta {
     /// loss-of-sync resync, which is an Open re-export, also restore a dropped
     /// Update. Close deltas carry `0`.
     pub(crate) tcp_close_class: u8,
+    /// #9752: this Close retires exactly `key` — the drain must neither
+    /// derive the reverse half nor replicate sibling deletes for it.
+    ///
+    /// The purge already decided the pair: the forward was fenced-removed
+    /// (shared authority checked under the removal lock against the LATEST
+    /// registry), the companion was either linked-removed or deliberately
+    /// preserved (ambiguous backlink), and siblings got the CONDITIONAL
+    /// delete (recipient re-checks). An ordinary Close here would bypass all
+    /// three: the drain derives the reverse key unconditionally and fans out
+    /// repairing (unconditional) deletes for both halves. The HA/event-stream
+    /// legs still fire — but they carry the marker (binary close tail,
+    /// JSON key, cluster-delete tail), because downstream retraction DOES
+    /// derive: the Go mirror deletes stored companions and the peer helper
+    /// applies each delete it is sent. Every downstream consumer honors the
+    /// marker by acting forward-only; flowexport needs the close record
+    /// either way.
+    ///
+    /// Carried on the DELTA like `bulk_resync`, for the same reason: the
+    /// producer (`InstallTablePurge` teardown, the only setter) decides, and
+    /// no drain call site can get it wrong because none chooses.
+    pub(crate) purge_retirement: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

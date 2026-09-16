@@ -110,6 +110,8 @@ fn entry(src_port: u16) -> SyncedSessionEntry {
         decision: SessionDecision {
             resolution: resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         metadata: metadata(),
         origin: SessionOrigin::ForwardFlow,

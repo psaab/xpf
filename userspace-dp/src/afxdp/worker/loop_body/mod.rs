@@ -367,6 +367,7 @@ pub(crate) fn worker_loop(
                         &worker_commands_by_id,
                         &event_stream,
                         forwarding.as_ref(),
+                        &shared_runtime,
                         &mut worker_lossless_wedged,
                     )
                 }
@@ -395,6 +396,7 @@ pub(crate) fn worker_loop(
                         &worker_commands_by_id,
                         &event_stream,
                         forwarding.as_ref(),
+                        &shared_runtime,
                         &mut worker_lossless_wedged,
                     )
                 }
@@ -420,6 +422,9 @@ pub(crate) fn worker_loop(
     // the epoch it is armed by, and carried across passes so no single pass
     // exceeds the RX-ring fill time.
     let mut delete_drop_sweep = crate::afxdp::session_glue::DeleteDropSweep::default();
+    // #9752: the installing-table purge walk is resumable and budgeted, like
+    // the sweep above. Armed by re-resolve terminal observations.
+    let mut install_table_purge = crate::afxdp::session_glue::InstallTablePurge::default();
     let mut dbg_last_report_ns = monotonic_nanos();
     // #1776: the per-interval cfg(debug-log) dbg_* counters are
     // consolidated into debug_report::DbgCounters (single-line
@@ -1287,6 +1292,8 @@ pub(crate) fn worker_loop(
                         &mut bindings,
                         &binding_lookup,
                         &mut shared_recycles,
+                        &shared_runtime,
+                        &shared_sessions,
                         &deltas,
                     );
                     // #2669: flush UNCONDITIONALLY. The binding-independent
@@ -1395,6 +1402,44 @@ pub(crate) fn worker_loop(
                 );
             }
         }
+        // #9752: purge sessions whose installing table is unresolvable. The
+        // flag is set by re-resolve terminal observations (cold); the walk is
+        // paced like the sweep above (never whole-table in one pass) and
+        // restarts on generation change inside `step`.
+        if crate::afxdp::session_glue::take_install_table_purge_flag(worker_id) {
+            install_table_purge.arm(validation.fib_generation);
+        }
+        {
+            let mut evicted_keys: Vec<crate::session::SessionKey> = Vec::new();
+            let purged = install_table_purge.step(
+                &mut sessions,
+                session_map.handle(),
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &forwarding,
+                &shared_runtime,
+                validation.fib_generation,
+                loop_now_ns,
+                worker_id,
+                &mut evicted_keys,
+            );
+            if purged > 0 {
+                crate::afxdp::worker::invalidate_flow_cache_slots_for_keys(
+                    &mut bindings,
+                    &evicted_keys,
+                );
+                debug_log!(
+                    "INSTALL_TABLE_PURGE: worker={} purged={}",
+                    worker_id,
+                    purged,
+                );
+            }
+        }
         if sessions.take_delta_loss() {
             // #2442 loss-of-sync resync. If `push_delta` dropped any delta
             // since the last drain, the in-worker session-delta ring
@@ -1490,6 +1535,8 @@ pub(crate) fn worker_loop(
                 &mut bindings,
                 &binding_lookup,
                 &mut shared_recycles,
+                &shared_runtime,
+                &shared_sessions,
                 &deltas,
             );
             // #2669: flush unconditionally — see flush_drained_session_deltas!.
@@ -2049,14 +2096,11 @@ mod flow_cache_invalidation_tests {
     }
 
     fn reap_decision(snat_port: Option<u16>) -> SessionDecision {
-        SessionDecision {
-            resolution: reap_resolution(),
-            nat: NatDecision {
-                rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_src_port: snat_port,
-                ..NatDecision::default()
-            },
-        }
+        SessionDecision { resolution: reap_resolution(), nat: NatDecision {
+            rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: snat_port,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 }
     }
 
     fn insert_cache_entry(binding: &mut BindingWorker, key: &SessionKey, snat_port: Option<u16>) {
@@ -2748,20 +2792,17 @@ mod gc_reap_source_nat_release_tests_6901 {
     fn expired_for(src_port: u16, pool_addr: Ipv4Addr, snat_port: u16) -> ExpiredSession {
         ExpiredSession {
             key: key_for(src_port),
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: Some([6, 7, 8, 9, 10, 11]),
-                    tx_vlan_id: 0,
-                },
-                nat: nat_for(pool_addr, snat_port),
-            },
+            decision: SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+            }, nat: nat_for(pool_addr, snat_port), install_table_domain: 0, install_table_check: 0 },
             metadata: metadata(),
             origin: SessionOrigin::ForwardFlow,
         }
@@ -2949,20 +2990,17 @@ mod gc_reap_nat64_release_tests_7740 {
     fn expired(key: SessionKey, nat: crate::nat::NatDecision) -> ExpiredSession {
         ExpiredSession {
             key,
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: Some([6, 7, 8, 9, 10, 11]),
-                    tx_vlan_id: 0,
-                },
-                nat,
-            },
+            decision: SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+            }, nat, install_table_domain: 0, install_table_check: 0 },
             metadata: metadata(),
             origin: SessionOrigin::ForwardFlow,
         }

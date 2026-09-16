@@ -125,6 +125,7 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
     assert!(!cached_flow_decision_valid(
@@ -135,6 +136,7 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -155,6 +157,7 @@ fn cached_flow_decision_invalidates_fabric_redirect_on_fabric_ingress_when_local
         1,
         true,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -176,6 +179,7 @@ fn cached_flow_decision_invalidates_fabric_redirect_on_non_fabric_ingress_when_l
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -196,6 +200,7 @@ fn cached_flow_decision_keeps_fabric_redirect_on_fabric_ingress_when_local_owner
         1,
         true,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -216,6 +221,7 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -238,6 +244,7 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        None,
         resolution
     ));
     assert!(!cached_flow_decision_valid(
@@ -248,6 +255,7 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        None,
         resolution
     ));
 }
@@ -329,6 +337,7 @@ fn fabric_ingress_prefers_local_active_owner_resolution_over_fabric_redirect() {
         now_secs,
         true,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         redirected,
     );
     assert_eq!(
@@ -1255,22 +1264,19 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
     });
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::MissingNeighbor,
-            local_ifindex: 0,
-            egress_ifindex: 13,
-            tx_ifindex: 13,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(Ipv6Addr::new(
-                0x2001, 0x559, 0x8585, 0x50, 0, 0, 0, 0x1,
-            ))),
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: 13,
+        tx_ifindex: 13,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x559, 0x8585, 0x50, 0, 0, 0, 0x1,
+        ))),
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let metadata = build_missing_neighbor_session_metadata(
         &state,
@@ -1377,11 +1383,8 @@ fn session_hit_keeps_interface_snat_ipv4_local_delivery() {
                     routing_domain: 0,
         },
     };
-    let decision = SessionDecision {
-        resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-            .expect("interface nat local delivery"),
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
+        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let resolved =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1412,11 +1415,8 @@ fn inactive_interface_snat_session_hit_redirects_to_fabric() {
                     routing_domain: 0,
         },
     };
-    let decision = SessionDecision {
-        resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-            .expect("interface nat local delivery"),
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
+        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let looked_up =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1449,11 +1449,8 @@ fn session_hit_keeps_interface_snat_ipv6_local_delivery() {
                     routing_domain: 0,
         },
     };
-    let decision = SessionDecision {
-        resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-            .expect("interface nat local delivery"),
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
+        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let resolved =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -2345,13 +2342,10 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: ingress_interface_local_resolution_on_session_miss(
-            &state, 11, 80, key.src_ip, PROTO_TCP,
-        )
-        .expect("tcp ingress local delivery"),
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(
+        &state, 11, 80, key.src_ip, PROTO_TCP,
+    )
+    .expect("tcp ingress local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -2420,13 +2414,10 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: ingress_interface_local_resolution_on_session_miss(
-            &state, 11, 80, key.src_ip, PROTO_TCP,
-        )
-        .expect("tcp ingress local delivery"),
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(
+        &state, 11, 80, key.src_ip, PROTO_TCP,
+    )
+    .expect("tcp ingress local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -4573,6 +4564,8 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
         let decision = SessionDecision {
             resolution: no_route_resolution(None),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, flow, decision)
     };

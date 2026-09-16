@@ -548,7 +548,7 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	var errs []error
 	v4Cleared := 0
 	if len(c.v4) > 0 {
-		if n, err := store.DeleteBatchKnownV4(c.v4, reason); err != nil {
+		if n, err := store.DeleteBatchKnownV4(c.v4, reason, false); err != nil {
 			slog.Warn("policy session invalidation: v4 clear failed",
 				"reason", reason, "policies", c.targets, "matched", len(c.v4), "err", err)
 			errs = append(errs, fmt.Errorf("policy session invalidation (%s): v4 delete: %w", what, err))
@@ -557,14 +557,14 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 		}
 		if syncPeer {
 			for _, e := range c.v4 {
-				ss.QueueDeleteV4(e.Key)
+				ss.QueueDeleteV4(e.Key, false)
 			}
 		}
 	}
 
 	v6Cleared := 0
 	if len(c.v6) > 0 {
-		if n, err := store.DeleteBatchKnownV6(c.v6, reason); err != nil {
+		if n, err := store.DeleteBatchKnownV6(c.v6, reason, false); err != nil {
 			slog.Warn("policy session invalidation: v6 clear failed",
 				"reason", reason, "policies", c.targets, "matched", len(c.v6), "err", err)
 			errs = append(errs, fmt.Errorf("policy session invalidation (%s): v6 delete: %w", what, err))
@@ -573,7 +573,7 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 		}
 		if syncPeer {
 			for _, e := range c.v6 {
-				ss.QueueDeleteV6(e.Key)
+				ss.QueueDeleteV6(e.Key, false)
 			}
 		}
 	}

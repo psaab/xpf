@@ -156,6 +156,20 @@ const (
 	// destroys a flow that peer is still forwarding — #9714's defect reached
 	// from the other side of the wire.
 	capFlagPeerDeleteOwnership uint8 = 1 << 1
+
+	// capFlagPurgeRetirementForwardOnly: the sender understands a FORWARD-ONLY
+	// session delete (control protocol v22, #9752) and will retract exactly
+	// the named key, skipping companion deletes. Absent => the peer derives
+	// companions for every delete, so a purge-retirement close sent there
+	// would destroy sessions the purge deliberately preserved.
+	capFlagPurgeRetirementForwardOnly uint8 = 1 << 2
+
+	// capFlagInstallTableIdentity: the sender decodes the installing-table
+	// tail on session installs (#9752 round 3) and re-resolves a stamped
+	// session in its installing table instead of inet.0. Absent => the peer
+	// installs every session stamp-less, so a stamped install sent there
+	// would silently wrong-table after failover.
+	capFlagInstallTableIdentity uint8 = 1 << 3
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -163,7 +177,7 @@ const (
 // configuration, so it must not be conditioned on anything a deployment can
 // turn off. In particular it is deliberately independent of
 // localSnapshotProtocol — see sendCapabilities for why that mattered.
-const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership
+const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -298,6 +312,35 @@ func (s *SessionSync) PeerDeleteOwnershipCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags.Load())&capFlagPeerDeleteOwnership != 0
+}
+
+// PurgeRetirementForwardOnlyCapable reports whether the peer advertised that
+// it honors forward-only session deletes (#9752). Same false-reading rule as
+// PeerDeleteOwnershipCapable: callers MUST pair this with
+// peerCapabilitiesLearned, or deletes are silently discarded on every
+// reconnect of a matched pair.
+func (s *SessionSync) PurgeRetirementForwardOnlyCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagPurgeRetirementForwardOnly != 0
+}
+
+// InstallTableIdentityCapable reports whether the peer advertised that it
+// decodes the installing-table tail on session installs (#9752 round 3).
+//
+// The MUST-pair-with-peerCapabilitiesLearned rule stated on
+// PeerDeleteOwnershipCapable applies to DELETE suppressors (one-shot: gating
+// undiscovered deletes would discard them on every reconnect). It does NOT
+// apply to the install suppressor, which deliberately default-denies while
+// unlearned (round 4): installs repeat via sweep, so discovery-deny delays,
+// never drops — while pass-through would plant stamp-less installs on every
+// connect to an old peer.
+func (s *SessionSync) InstallTableIdentityCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagInstallTableIdentity != 0
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

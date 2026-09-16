@@ -373,6 +373,8 @@ fn gre_encap_copies_inner_dscp_ecn_to_outer_ipv6_traffic_class() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mut meta = ForwardPacketMeta::default();
     meta.addr_family = libc::AF_INET as u8;
@@ -442,6 +444,8 @@ fn gre_encap_drops_oversized_df_outer_and_bumps_counter() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let endpoint = state.tunnel_endpoints.get(&1).expect("fixture endpoint");
     let outer_mtu = tunnel_outer_mtu(&state, &decision, endpoint);
@@ -482,6 +486,8 @@ fn gre_encap_emits_when_outer_within_mtu() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let endpoint = state.tunnel_endpoints.get(&1).expect("fixture endpoint");
     let outer_mtu = tunnel_outer_mtu(&state, &decision, endpoint);
@@ -518,6 +524,8 @@ fn gre_encap_mtu_accounts_for_4byte_key() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let endpoint = state.tunnel_endpoints.get(&1).expect("fixture endpoint");
     let outer_mtu = tunnel_outer_mtu(&state, &decision, endpoint);
@@ -636,6 +644,8 @@ fn gre_encap_output_is_byte_identical_and_trims_inner_slack() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mut meta = ForwardPacketMeta::default();
     meta.addr_family = libc::AF_INET as u8;
@@ -954,6 +964,8 @@ fn tunnel_tcp_mss_wireguard_uses_wg_overhead_not_gre() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let inner_family = libc::AF_INET as u8;
 
@@ -1008,6 +1020,8 @@ fn native_gre_inner_mtu_falls_back_to_1500_on_egress_miss() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
 
     // Endpoint is IPv6-outer (40), no key (gre 4): inner MTU =
@@ -1052,6 +1066,8 @@ fn native_gre_inner_mtu_uses_real_egress_mtu_when_present() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
 
     let inner_mtu = native_gre_inner_mtu(&state, &decision);
@@ -1084,6 +1100,8 @@ fn tunnel_tcp_mss_gre_unchanged_for_gre_endpoint() {
     let decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let inner_family = libc::AF_INET as u8;
     assert_eq!(

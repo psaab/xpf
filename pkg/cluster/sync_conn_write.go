@@ -55,6 +55,11 @@ func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, sourc
 // delete can echo it and the peer can refuse a stale superseded delete.
 func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) {
 	s.stampInstallGenV4(key, &val)
+	// #9752 round 3: after the stamp — the memo may have restored an
+	// identity the mirror could not carry, and THAT is what the fence judges.
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
+		return
+	}
 	msg := encodeSessionV4(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v4")
 }
@@ -62,6 +67,9 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 // QueueSessionV6 queues a v6 session for synchronization to the peer.
 func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
 	s.stampInstallGenV6(key, &val)
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
+		return
+	}
 	msg := encodeSessionV6(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v6")
 }
@@ -78,12 +86,20 @@ const pacedQueuePoll = 10 * time.Millisecond
 // larger than the queue, in order, where QueueSessionV4 discards its tail.
 func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplane.SessionValue, maxWait time.Duration) bool {
 	s.stampInstallGenV4(key, &val)
+	// #9752 round 3: false is honest — the frame did not reach the queue,
+	// and the caller counts it missed (no retry loop to spin).
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
+		return false
+	}
 	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
 }
 
 // QueueSessionV6Paced is the v6 form of QueueSessionV4Paced.
 func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, maxWait time.Duration) bool {
 	s.stampInstallGenV6(key, &val)
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
+		return false
+	}
 	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
 }
 
@@ -134,15 +150,135 @@ func (s *SessionSync) queueMessagePaced(msg []byte, sentCounter *atomic.Uint64, 
 // is strictly older than the live entry) and (b) a delete reordered ahead of
 // its own install out-ranks it, letting the peer's tombstone refuse the late
 // install of the cancelled session.
-func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey) {
+//
+// forwardOnly (#9752) marks a purge-retirement delete: the peer must retract
+// exactly the named key, skipping companion deletes. It is withheld from a
+// peer that never advertised the capability (same drop-not-journal shape as
+// suppressDeleteForIncapablePeer: journaling would escalate to a bulk resync
+// whose reconcile deletes unmarked on the protected peer).
+func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey, forwardOnly bool) {
 	if s.suppressDeleteForIncapablePeer("delete_v4") {
 		return
 	}
+	if forwardOnly && s.suppressForwardOnlyDeleteForIncapablePeer("delete_v4") {
+		return
+	}
 	gen := s.takeDeleteGenV4(key)
-	msg := encodeDeleteV4(key, gen)
+	msg := encodeDeleteV4(key, gen, forwardOnly)
 	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_v4") {
 		s.journalDelete(msg)
 	}
+}
+
+// suppressForwardOnlyDeleteForIncapablePeer reports whether an outgoing
+// FORWARD-ONLY session delete must be WITHHELD because the peer never
+// advertised capFlagPurgeRetirementForwardOnly (#9752).
+//
+// Such a peer derives companions for every delete, so our purge-retirement
+// close would destroy sessions the purge deliberately preserved. Withholding
+// leaves them on the peer until they idle out or the upgrade completes —
+// the same visible-leak-over-invisible-teardown trade the #9714 suppressor
+// makes, with its own counter and one-shot warning. Ordinary (non-forward-
+// only) deletes are never withheld here; see suppressDeleteForIncapablePeer.
+func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) bool {
+	if s == nil || !s.peerCapabilitiesLearned() || s.PurgeRetirementForwardOnlyCapable() {
+		return false
+	}
+	s.stats.DeletesSuppressedPurgeRetirement.Add(1)
+	if s.purgeRetirementSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding forward-only session deletes — the peer does not advertise "+
+			"#9752 forward-only deletes, so it would derive companions and destroy sessions the purge "+
+			"deliberately preserved. That peer will retain sessions this node has retired until they "+
+			"idle out. Completing the upgrade on both nodes restores delete sync.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
+}
+
+// suppressStampedInstallForIncapablePeer reports whether an outgoing STAMPED
+// session install must be WITHHELD because the peer cannot take it (#9752
+// round 3, hardened round 4).
+//
+// Such a peer installs every session stamp-less: it decodes no tail and
+// re-resolves in the default table. Sending it a stamped install would plant
+// a session that silently wrong-tables after failover — the defect in the
+// other direction. Withholding leaves the session off the peer; a later miss
+// there re-establishes it in the right table. Unstamped installs are never
+// withheld (the peer handles them exactly as before).
+//
+// Round 4: an UNLEARNED peer is gated too — the transport is connected
+// before the capability exchange, so pass-through-during-discovery would
+// plant the lie on every connect to an old peer. This is deliberately
+// stricter than the delete suppressors' reconnect rule, and safe where
+// theirs would not be: deletes are one-shot, but installs repeat — the
+// sweep re-sends a withheld install on the next tick after learning, so
+// default-deny during discovery delays, never drops.
+func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint32, source string) bool {
+	if domain == 0 && check == 0 {
+		return false
+	}
+	if s == nil || s.InstallTableIdentityCapable() {
+		return false
+	}
+	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
+	s.installTableSuppressDebt.Store(true)
+	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding stamped session installs — the peer has not advertised "+
+			"#9752 install-table identity (incapable or not yet discovered), so it would install them "+
+			"stamp-less and wrong-table after failover. That peer will miss these sessions until a miss "+
+			"re-establishes them or the upgrade completes on both nodes.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
+}
+
+// suppressUnannouncedForPBRActivePeer reports whether a mirror-sourced (0,0)
+// install must be WITHHELD because it was never announced on a node that
+// does PBR (#9752 round 5 item 1).
+//
+// A (0,0) rebuilt from the BPF mirror is AMBIGUOUS: genuinely-non-PBR, or a
+// PBR session whose memo record is missing (sweep raced the announcing
+// delta, foreign row, or post-cap). Sending it to an incapable peer
+// installs a possibly-PBR session stamp-less (default-table resolution).
+// On a node that announced stamps this incarnation, fail closed: withhold
+// it (the delta announces + records, the sweep retries, the bulk carries
+// helper truth). On a node that never announced (kernel dataplanes always
+// land here — only userspace convert stamps), (0,0) is genuine: send.
+//
+// ONLY for mirror-derived sends (sweep + store-walk bulk). Delta/queue
+// (0,0)s are authoritative (the helper said default) and helper-truth bulk
+// snapshots carry real stamps — neither consults this. Same counter and
+// one-shot warning as the stamped suppressor (one alarm per incarnation
+// for both withholding reasons).
+//
+// `announced` is memo membership captured BEFORE stamping: stamping records
+// (round 5 item 1 records everything announced), which would destroy the
+// miss signal if re-read after. A concurrent record landing between the
+// capture and this decision fails closed (a redundant withhold; the
+// announcing send carries the session anyway).
+func suppressUnannouncedForPBRActivePeer(s *SessionSync, announced bool, source string) bool {
+	if announced {
+		return false
+	}
+	if s == nil || !s.pbrAnnouncedForFence.Load() || s.InstallTableIdentityCapable() {
+		return false
+	}
+	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
+	s.installTableSuppressDebt.Store(true)
+	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding unannounced session installs — this node does PBR and "+
+			"these mirror-sourced (0,0)s were never announced (in-race delta, foreign row, or memo "+
+			"at cap), so the peer would install possibly-PBR sessions stamp-less. They flow once "+
+			"announced, or on upgrade.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
 }
 
 // suppressDeleteForIncapablePeer reports whether an outgoing session delete must be
@@ -194,12 +330,16 @@ func (s *SessionSync) suppressDeleteForIncapablePeer(source string) bool {
 
 // QueueDeleteV6 queues a v6 session deletion for synchronization. If the peer
 // is disconnected, the delete is journaled for replay on reconnect.
-func (s *SessionSync) QueueDeleteV6(key dataplane.SessionKeyV6) {
+// forwardOnly (#9752): v6 twin of the QueueDeleteV4 marker.
+func (s *SessionSync) QueueDeleteV6(key dataplane.SessionKeyV6, forwardOnly bool) {
 	if s.suppressDeleteForIncapablePeer("delete_v6") {
 		return
 	}
+	if forwardOnly && s.suppressForwardOnlyDeleteForIncapablePeer("delete_v6") {
+		return
+	}
 	gen := s.takeDeleteGenV6(key)
-	msg := encodeDeleteV6(key, gen)
+	msg := encodeDeleteV6(key, gen, forwardOnly)
 	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_v6") {
 		s.journalDelete(msg)
 	}

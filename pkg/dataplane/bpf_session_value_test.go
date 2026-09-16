@@ -499,3 +499,42 @@ func TestBPFSessionValueLiftsIngressIdentity(t *testing.T) {
 			gotV6.IngressVlanID, convIngressVlanIDV6)
 	}
 }
+
+// TestBPFConversionDropsExactlyTheSyncOnlyTail9752 pins the production loss
+// the round-4 lossy fixtures mirror: toBPF→sessionValue preserves the full
+// on-map ABI prefix (through RoutingDomain) and zeroes every sync-only
+// trailing field. If the BPF ABI grows a field, update the mirror list in
+// pkg/cluster/recv_install_table_9752_test.go (dropSyncOnly9752) with it —
+// a narrower fixture would hand code state production never provides.
+func TestBPFConversionDropsExactlyTheSyncOnlyTail9752(t *testing.T) {
+	full := SessionValue{
+		State: 1, Flags: 2, TCPState: 3, IsReverse: 1, AppTimeout: 4,
+		SessionID: 5, Created: 6, LastSeen: 7, Timeout: 8, PolicyID: 9,
+		IngressZone: 10, EgressZone: 11,
+		NATSrcIP: 12, NATDstIP: 13, NATSrcPort: 14, NATDstPort: 15,
+		FwdPackets: 16, FwdBytes: 17, RevPackets: 18, RevBytes: 19,
+		ReverseKey: SessionKey{Protocol: 6, SrcPort: 1, DstPort: 2},
+		ALGType:    20, LogFlags: 21, AppID: 22,
+		FibIfindex: 23, FibVlanID: 24,
+		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
+		FibGen: 25, IngressIfindex: 26, IngressVlanID: 27, RoutingDomain: 28,
+		Generation: 29, PolicyCounterIdx: 30, ConfigEpoch: 31,
+		RTFlowSessionID: 32, IngressIfaceFold: 33, TunnelDiscriminator: 34,
+		TCPCloseClass: 35, InstallTableDomain: 36, InstallTableCheck: 37,
+	}
+	got := full.toBPF().sessionValue()
+	// Prefix preserved field-for-field.
+	wantPrefix := full
+	wantPrefix.Generation, wantPrefix.PolicyCounterIdx, wantPrefix.ConfigEpoch = 0, 0, 0
+	wantPrefix.RTFlowSessionID, wantPrefix.IngressIfaceFold, wantPrefix.TunnelDiscriminator = 0, 0, 0
+	wantPrefix.TCPCloseClass, wantPrefix.InstallTableDomain, wantPrefix.InstallTableCheck = 0, 0, 0
+	if got != wantPrefix {
+		t.Fatalf("BPF round-trip mismatch:\n got %+v\nwant %+v", got, wantPrefix)
+	}
+	// And explicitly: every sync-only field reads zero.
+	if got.Generation != 0 || got.PolicyCounterIdx != 0 || got.ConfigEpoch != 0 ||
+		got.RTFlowSessionID != 0 || got.IngressIfaceFold != 0 || got.TunnelDiscriminator != 0 ||
+		got.TCPCloseClass != 0 || got.InstallTableDomain != 0 || got.InstallTableCheck != 0 {
+		t.Fatalf("sync-only tail survived the BPF round-trip: %+v", got)
+	}
+}

@@ -27,6 +27,9 @@ type peerRecorderDP struct {
 	peerSingleV4 []SessionKey
 	singleV4     []SessionKey
 	dnatV4       []DNATKey
+	// #9752 round 3: the forward-only mark each helper batch/single carried.
+	peerBatchMarks  []bool
+	peerSingleMarks []bool
 	// refuseV4 names the keys the "helper" refuses as peer deletes; events records
 	// the order of peer deletes and DNAT deletes; iterV4 is what a bulk sweep sees.
 	refuseV4 map[ScopedSessionKey]bool
@@ -34,8 +37,9 @@ type peerRecorderDP struct {
 	iterV4   []SessionEntryV4
 }
 
-func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKey) (int, []ScopedSessionKey, error) {
+func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKey, forwardOnly bool) (int, []ScopedSessionKey, error) {
 	d.peerBatchV4 = append(d.peerBatchV4, s...)
+	d.peerBatchMarks = append(d.peerBatchMarks, forwardOnly)
 	var refused []ScopedSessionKey
 	for _, k := range s {
 		d.events = append(d.events, "peer-delete")
@@ -46,17 +50,20 @@ func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKe
 	return len(s) - len(refused), refused, nil
 }
 
-func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScopedV6(s []ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error) {
+func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScopedV6(s []ScopedSessionKeyV6, forwardOnly bool) (int, []ScopedSessionKeyV6, error) {
 	d.peerBatchV6 = append(d.peerBatchV6, s...)
 	return len(s), nil, nil
 }
 
-func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey) (bool, error) {
+func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey, forwardOnly bool) (bool, error) {
 	d.peerSingleV4 = append(d.peerSingleV4, k)
+	d.peerSingleMarks = append(d.peerSingleMarks, forwardOnly)
 	return false, nil
 }
 
-func (d *peerRecorderDP) DeletePeerSyncedSessionV6(SessionKeyV6) (bool, error) { return false, nil }
+func (d *peerRecorderDP) DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error) {
+	return false, nil
+}
 
 func (d *peerRecorderDP) BatchDeleteSessionsScoped(s []ScopedSessionKey) (int, error) {
 	d.scopedV4 = append(d.scopedV4, s...)
@@ -112,7 +119,7 @@ func knownEntry9714() []SessionEntryV4 {
 func TestAClusterStaleDeleteIsMarkedAsAPeerDelete9714(t *testing.T) {
 	dp := &peerRecorderDP{}
 	store := dataPlaneSessionStore{dp: dp}
-	if _, err := store.DeleteBatchKnownV4(knownEntry9714(), DeleteReasonClusterStale); err != nil {
+	if _, err := store.DeleteBatchKnownV4(knownEntry9714(), DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 	if len(dp.peerBatchV4) != 2 {
@@ -129,7 +136,7 @@ func TestAClusterStaleDeleteIsMarkedAsAPeerDelete9714(t *testing.T) {
 func TestAGCExpiryDeleteStaysUnmarked9714(t *testing.T) {
 	dp := &peerRecorderDP{}
 	store := dataPlaneSessionStore{dp: dp}
-	if _, err := store.DeleteBatchKnownV4(knownEntry9714(), DeleteReasonGCExpired); err != nil {
+	if _, err := store.DeleteBatchKnownV4(knownEntry9714(), DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 	if len(dp.peerBatchV4) != 0 {
@@ -145,14 +152,14 @@ func TestAGCExpiryDeleteStaysUnmarked9714(t *testing.T) {
 func TestTheNotFoundFallbackIsMarkedOnlyForClusterStale9714(t *testing.T) {
 	dp := &peerRecorderDP{}
 	store := dataPlaneSessionStore{dp: dp}
-	if err := store.DeleteWithCompanionsV4(key9364(1234), DeleteReasonClusterStale); err != nil {
+	if err := store.DeleteWithCompanionsV4(key9364(1234), DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteWithCompanionsV4 cluster-stale: %v", err)
 	}
 	if len(dp.peerSingleV4) != 1 || len(dp.singleV4) != 0 {
 		t.Errorf("a cluster-stale delete of a key the mirror no longer holds must use the peer single-key "+
 			"delete; peer=%d unmarked=%d", len(dp.peerSingleV4), len(dp.singleV4))
 	}
-	if err := store.DeleteWithCompanionsV4(key9364(1235), DeleteReasonGCExpired); err != nil {
+	if err := store.DeleteWithCompanionsV4(key9364(1235), DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteWithCompanionsV4 gc: %v", err)
 	}
 	if len(dp.peerSingleV4) != 1 || len(dp.singleV4) != 1 {
@@ -169,7 +176,7 @@ func TestAClusterStaleV6DeleteIsMarkedAsAPeerDelete9714(t *testing.T) {
 		Key:   SessionKeyV6{SrcPort: 1234, DstPort: 443, Protocol: 6},
 		Value: SessionValueV6{RoutingDomain: 100007, ReverseKey: SessionKeyV6{SrcPort: 443, DstPort: 1234, Protocol: 6}},
 	}}
-	if _, err := store.DeleteBatchKnownV6(entries, DeleteReasonClusterStale); err != nil {
+	if _, err := store.DeleteBatchKnownV6(entries, DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV6: %v", err)
 	}
 	if len(dp.peerBatchV6) != 2 || len(dp.scopedV6) != 0 {
@@ -183,7 +190,7 @@ func TestAClusterStaleV6DeleteIsMarkedAsAPeerDelete9714(t *testing.T) {
 func TestADataplaneWithoutThePeerCapabilityStillDeletes9714(t *testing.T) {
 	dp := &domainRecorderDP{}
 	store := dataPlaneSessionStore{dp: dp}
-	if _, err := store.DeleteBatchKnownV4(knownEntry9714(), DeleteReasonClusterStale); err != nil {
+	if _, err := store.DeleteBatchKnownV4(knownEntry9714(), DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 	if len(dp.scopedV4) != 2 {
@@ -212,7 +219,7 @@ func TestARefusedPeerDeleteKeepsItsReverseAndDNATRow9714(t *testing.T) {
 	dp := &peerRecorderDP{refuseV4: map[ScopedSessionKey]bool{forward: true}}
 	store := dataPlaneSessionStore{dp: dp}
 
-	if _, err := store.DeleteBatchKnownV4(entries, DeleteReasonClusterStale); err != nil {
+	if _, err := store.DeleteBatchKnownV4(entries, DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 	if len(dp.peerBatchV4) != 1 || dp.peerBatchV4[0] != forward {
@@ -229,7 +236,7 @@ func TestARefusedPeerDeleteKeepsItsReverseAndDNATRow9714(t *testing.T) {
 func TestAnAppliedPeerDeleteDeletesTheDNATRowAfterTheHelper9714(t *testing.T) {
 	dp := &peerRecorderDP{}
 	store := dataPlaneSessionStore{dp: dp}
-	if _, err := store.DeleteBatchKnownV4(snatEntry9714(), DeleteReasonClusterStale); err != nil {
+	if _, err := store.DeleteBatchKnownV4(snatEntry9714(), DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 	want := []string{"peer-delete", "peer-delete", "dnat-delete"}

@@ -34,20 +34,17 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 2,
-                egress_ifindex: 3,
-                tx_ifindex: 3,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision::default(),
-        },
+        decision: SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 2,
+            egress_ifindex: 3,
+            tx_ifindex: 3,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
@@ -74,6 +71,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
         session_id,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     }
 }
 
@@ -248,9 +246,10 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // #9412: discount the trailing close-class byte. The fields below are read
-    // end-relative, and the open frame now ends one byte after the routing domain.
-    let n = payload.len() - 1;
+    // #9412 + #9752: discount the trailing close-class byte and install-table
+    // pair. The fields below are read end-relative, and the open frame now
+    // ends nine bytes after the routing domain.
+    let n = payload.len() - 9;
     let u32_at = |off: usize| -> u32 {
         u32::from_le_bytes(payload[off..off + 4].try_into().expect("4 bytes"))
     };
@@ -625,9 +624,10 @@ fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // #9412: discount the trailing close-class byte. The fields below are read
-    // end-relative, and the open frame now ends one byte after the routing domain.
-    let n = payload.len() - 1;
+    // #9412 + #9752: discount the trailing close-class byte and install-table
+    // pair. The fields below are read end-relative, and the open frame now
+    // ends nine bytes after the routing domain.
+    let n = payload.len() - 9;
     let binary = u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
@@ -678,4 +678,163 @@ fn session_delta_info_carries_the_close_class_and_names_an_update_9412() {
     assert_eq!(info.event, "update", "a close-state Update must be named \"update\" on the JSON leg (#9412)");
     // Positive control: this really is the delta -> JSON conversion.
     assert_eq!(info.src_port, 12345, "conversion produced the delta's tuple");
+}
+
+/// #9752: the two delta legs must agree on the installing-table identity, for
+/// the reason #6949 exists on this same struct — a field carried by the binary
+/// leg and not the JSON one is not an error anywhere, it is a (0,0) at the
+/// consumer, and (0,0) here means "default table", a legal value rather than
+/// an obvious absence. A session recovered through the drain fallback or a
+/// FullResync export would then re-resolve in `inet.0` while the binary leg
+/// pins it to its installing table.
+///
+/// FAIL-ON-REVERT: stop populating `install_table_*` in
+/// `afxdp::session_delta_info` and this reds.
+#[test]
+fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
+    let mut delta = delta_with_attribution();
+    // NONZERO stamp, so a leg that dropped the field entirely cannot compare
+    // equal (both legs would emit (0,0)).
+    delta.decision.install_table_domain = 525_590;
+    delta.decision.install_table_check = 3_318_534_811;
+    let frame = EventFrame::encode_session_open(
+        1,
+        &delta.key,
+        &delta.decision,
+        &delta.metadata,
+        &FxHashMap::default(),
+        delta.fabric_redirect_sync,
+        delta.session_id,
+        0, // #9412: tcp_close_class
+    );
+    let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
+    let n = payload.len();
+    let binary_domain =
+        u32::from_le_bytes(payload[n - 8..n - 4].try_into().expect("4 bytes"));
+    let binary_check =
+        u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
+
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    let json_domain = json
+        .get("install_table_domain")
+        .unwrap_or_else(|| {
+            panic!(
+                "the JSON session-delta leg carries no `install_table_domain` key at all: {json}"
+            )
+        })
+        .as_u64()
+        .expect("install_table_domain is a number") as u32;
+    let json_check = json
+        .get("install_table_check")
+        .unwrap_or_else(|| {
+            panic!(
+                "the JSON session-delta leg carries no `install_table_check` key at all: {json}"
+            )
+        })
+        .as_u64()
+        .expect("install_table_check is a number") as u32;
+
+    assert_eq!(
+        (json_domain, json_check),
+        (binary_domain, binary_check),
+        "the two session-delta legs disagree on the installing table"
+    );
+    assert_eq!((binary_domain, binary_check), (525_590, 3_318_534_811));
+}
+
+/// #9752: the JSON leg carries the purge-retirement marker exactly as the
+/// binary close frame's trailing byte, so drain-fallback closes honor the
+/// same forward-only retraction. Ordinary closes carry false.
+#[test]
+fn session_delta_json_carries_the_purge_retirement_marker_9752() {
+    let mut delta = delta_with_session_id(1);
+    delta.kind = SessionDeltaKind::Close;
+    delta.purge_retirement = true;
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    assert_eq!(
+        json.get("purge_retirement").and_then(|v| v.as_bool()),
+        Some(true),
+        "a purge-retirement close must set the JSON marker"
+    );
+    let mut ordinary = delta_with_session_id(2);
+    ordinary.kind = SessionDeltaKind::Close;
+    let info = session_delta_info(&test_binding_identity(), &ordinary, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    assert_eq!(
+        json.get("purge_retirement").and_then(|v| v.as_bool()),
+        Some(false),
+        "an ordinary close must not set the marker"
+    );
+}
+
+/// Round 4 item 4, chain root (R0): the producer's session-delta JSON for the
+/// PBR flow, as `session_delta_info` emits it — tuple, blue stamp, stable id
+/// 77, zones, owner RG 1. Written to the shared golden
+/// `pbr_delta_9752.json`, which the Go chain test consumes; no hand-shaped
+/// delta exists anywhere downstream. Regen with
+/// `XPF_WRITE_PBR_DELTA_9752=1` (deliberate shape change only).
+#[test]
+fn producer_delta_json_matches_the_shared_golden_9752() {
+    use crate::session::install_table_identity;
+    let (domain, check) = install_table_identity("blue");
+    let mut delta = delta_with_session_id(77);
+    delta.key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: 55068,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    delta.decision.install_table_domain = domain;
+    delta.decision.install_table_check = check;
+    delta.metadata.ingress_zone = 1;
+    delta.metadata.egress_zone = 2;
+    delta.metadata.owner_rg_id = 1;
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    // Pin the load-bearing keys the chain downstream consumes.
+    assert_eq!(json.get("event").and_then(|v| v.as_str()), Some("open"));
+    assert_eq!(json.get("src_ip").and_then(|v| v.as_str()), Some("10.0.61.102"));
+    assert_eq!(json.get("dst_ip").and_then(|v| v.as_str()), Some("8.8.8.8"));
+    assert_eq!(
+        json.get("install_table_domain").and_then(|v| v.as_u64()),
+        Some(domain as u64)
+    );
+    assert_eq!(
+        json.get("install_table_check").and_then(|v| v.as_u64()),
+        Some(check as u64)
+    );
+    assert_eq!(
+        json.get("rt_flow_session_id").and_then(|v| v.as_u64()),
+        Some(77)
+    );
+    // Normalize the wall-clock timestamp: the golden pins the SHAPE, not the
+    // instant (production stamps time.Now at emit; the chain downstream never
+    // reads it — convert ignores it).
+    let mut json = json;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String("1970-01-01T00:00:00Z".to_string()),
+        );
+    }
+    let text = serde_json::to_string_pretty(&json).expect("json renders");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/dataplane/userspace/testdata/pbr_delta_9752.json"
+    );
+    if std::env::var_os("XPF_WRITE_PBR_DELTA_9752").is_some() {
+        std::fs::write(path, format!("{text}\n")).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(path).expect("read the shared golden");
+    assert_eq!(
+        format!("{text}\n"),
+        golden,
+        "producer delta JSON drifted vs the shared golden"
+    );
 }

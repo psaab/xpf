@@ -1307,27 +1307,24 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         external_prefix: "2602:fd41:0070::/48".to_string(),
     }]);
 
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 24,
-            tx_ifindex: 24,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(internal_client)),
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V6(external_client)),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            nat64: false,
-            nptv6: true,
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 24,
+        tx_ifindex: 24,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(internal_client)),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V6(external_client)),
+        rewrite_dst: None,
+        rewrite_src_port: None,
+        rewrite_dst_port: None,
+        nat64: false,
+        nptv6: true,
+    }, install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1507,20 +1504,17 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
     // zone-gated NPTv6 reverse translation feeding `embedded_key` (see the
     // doc comment above for why a recorded `rewrite_src` would mask the bug
     // via the `reverse_translated_index` alias).
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 24,
-            tx_ifindex: 24,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(internal_client)),
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 24,
+        tx_ifindex: 24,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(internal_client)),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: ZONE_B_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1626,27 +1620,24 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let forward_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(server_ip)),
-            neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V6(external_client)),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            nat64: false,
-            nptv6: true,
-        },
-    };
+    let forward_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(server_ip)),
+        neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V6(external_client)),
+        rewrite_dst: None,
+        rewrite_src_port: None,
+        rewrite_dst_port: None,
+        nat64: false,
+        nptv6: true,
+    }, install_table_domain: 0, install_table_check: 0 };
     let forward_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1676,15 +1667,12 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
         tx_vlan_id: 0,
     };
-    let reverse_decision = SessionDecision {
-        resolution: reverse_resolution,
-        nat: forward_decision.nat.reverse(
-            forward_key.src_ip,
-            forward_key.dst_ip,
-            forward_key.src_port,
-            forward_key.dst_port,
-        ),
-    };
+    let reverse_decision = SessionDecision { resolution: reverse_resolution, nat: forward_decision.nat.reverse(
+        forward_key.src_ip,
+        forward_key.dst_ip,
+        forward_key.src_port,
+        forward_key.dst_port,
+    ), install_table_domain: 0, install_table_check: 0 };
     let reverse_metadata = SessionMetadata {
         ingress_zone: TEST_WAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,

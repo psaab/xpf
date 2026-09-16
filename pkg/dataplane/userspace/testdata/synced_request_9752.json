@@ -1,0 +1,1 @@
+{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.61.102","dst_ip":"8.8.8.8","src_port":55068,"dst_port":443,"ingress_zone_id":1,"egress_zone_id":2,"generation":10,"session_id":77,"tunnel_discriminator":0,"routing_domain":1,"install_table_domain":525590,"install_table_check":3318534811}

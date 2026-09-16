@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -122,7 +123,13 @@ func (s *SessionSync) syncSweep() int {
 		slog.Warn("cluster sync: forcing full bulk resync after delete-journal overflow (standby may retain stale sessions)")
 		if err := s.doBulkSync(); err != nil {
 			s.forceResync.Store(true)
-			slog.Warn("cluster sync: forced resync bulk failed, will retry", "err", err)
+			// #9752 round 4: a fenced bulk is a quiet skip (the fence
+			// already counted and warned once), not a hot retry loop.
+			if errors.Is(err, errBulkFencedForPeer) {
+				slog.Debug("cluster sync: forced resync bulk fenced for peer; waiting for disconnect or capable discovery")
+			} else {
+				slog.Warn("cluster sync: forced resync bulk failed, will retry", "err", err)
+			}
 		}
 	} else if s.needColdPrime.Load() && !s.coldPrimeAckAwaited() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
 		// #82: an OWED cold prime had exactly two consumers — installConn (a
@@ -164,7 +171,12 @@ func (s *SessionSync) syncSweep() int {
 		err := s.doBulkSync()
 		s.bulkRedriveInFlight.Store(false)
 		if err != nil {
-			slog.Warn("cluster sync: owed cold-prime re-drive failed, will retry", "err", err)
+			// #9752 round 4: quiet when fenced (see the forced-resync twin).
+			if errors.Is(err, errBulkFencedForPeer) {
+				slog.Debug("cluster sync: owed cold-prime re-drive fenced for peer; waiting for disconnect or capable discovery")
+			} else {
+				slog.Warn("cluster sync: owed cold-prime re-drive failed, will retry", "err", err)
+			}
 		}
 	}
 	if s.lastSweepEmpty && !s.syncBackfillNeeded.Load() {
@@ -189,7 +201,24 @@ func (s *SessionSync) syncSweep() int {
 			return true
 		}
 		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+			announced := s.installTableAnnouncedV4(key)
 			s.stampInstallGenV4(key, &val)
+			// #9752 round 4: the sweep is its own transmission path — it
+			// must judge the fence, not bypass it. A skip is intentional
+			// (never backpressure): no count, no overflow. Retried not by
+			// the next tick (round 5 item 5: the window advances past it)
+			// but by the caps-triggered bulk redrive, or the delta that
+			// announces it.
+			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v4") {
+				return true
+			}
+			// #9752 round 5 item 1: a mirror (0,0) this node never
+			// announced is suspect on a PBR-active node (in-race delta,
+			// foreign row, or post-cap) — withhold it the same way.
+			if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+				suppressUnannouncedForPBRActivePeer(s, announced, "sweep_v4") {
+				return true
+			}
 			msg := encodeSessionV4(key, val)
 			if s.queueMessage(msg, &s.stats.SessionsSent, "sweep_v4") {
 				// #7842: attribute this send to the sweep. A sub-total of
@@ -212,7 +241,17 @@ func (s *SessionSync) syncSweep() int {
 			return true
 		}
 		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+			announced := s.installTableAnnouncedV6(key)
 			s.stampInstallGenV6(key, &val)
+			// #9752 round 4: v6 twin of the sweep fence above.
+			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v6") {
+				return true
+			}
+			// #9752 round 5 item 1: v6 twin of the unannounced rule above.
+			if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+				suppressUnannouncedForPBRActivePeer(s, announced, "sweep_v6") {
+				return true
+			}
 			msg := encodeSessionV6(key, val)
 			if s.queueMessage(msg, &s.stats.SessionsSent, "sweep_v6") {
 				s.stats.SweepSessionsSent.Add(1)
