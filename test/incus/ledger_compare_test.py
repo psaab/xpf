@@ -32,6 +32,7 @@ from ledger_compare import (
     BAND_REL_FLOOR,
     BAND_Z,
     COVERAGE_POSITIVE_CONTROL,
+    COVERAGE_WINDOW,
     IMPROVED,
     LEDGER_CORRUPT,
     LEDGER_DIR_NAME,
@@ -545,9 +546,30 @@ class AggregateComparison(unittest.TestCase):
         self.assertEqual(all_exit_status(agg, declared), 0)
         self.assertIn("expected-red: still red", render_all(agg, declared))
         # A stale declaration (green now) fails so the file can only shrink.
-        stale = {("gate-green", ENV): "was red once"}
+        # ALL live reds stay declared here: with an undeclared red present the
+        # first branch returns 1 regardless, and the cell could not kill a
+        # VALID stale-check removal (it would pass for the wrong reason).
+        stale = {("gate-fail", ENV): "x", ("gate-reg", ENV): "y",
+                 ("gate-green", ENV): "was red once"}
         self.assertEqual(all_exit_status(agg, stale), 1)
         self.assertIn("STALE", render_all(agg, stale))
+    def test_summary_carries_window_and_drift_warning_counts(self):
+        # The automation boundary (run-selftests.sh) prints tail -1 on success;
+        # without these counts a newest-PASS-after-FAILs and a DRIFT-flagged
+        # WITHIN-BAND render identically to a clean history — the defect
+        # recreated one layer up.
+        windowed = (
+            [row(f"2026-09-01T00:0{i}:00Z", value=100.0, gate="gate-win") for i in range(3)]
+            + [row("2026-09-01T00:03:00Z", verdict="FAIL", value=10.0, gate="gate-win")]
+            + [row("2026-09-01T00:04:00Z", value=100.0, gate="gate-win")]
+        )
+        drifted = [
+            row(f"2026-09-01T00:{i:02d}:00Z", value=100.0 * (0.96 ** i), gate="gate-drift")
+            for i in range(12)
+        ]
+        agg = compare_all(windowed + drifted)
+        text = render_all(agg)
+        self.assertIn("1 with window FAILs, 1 DRIFT-flagged", text.splitlines()[-1])
 
     def test_main_all_over_a_fixture_ledger(self):
         # End to end through main(): shards on disk, strict and declared runs,
@@ -1036,7 +1058,8 @@ class CoverageCensus(unittest.TestCase):
     MAKE = "\trun --gate test-failover\n\trun --gate test-foo\n"
 
     def test_void_only_does_not_count_as_reached(self):
-        # MUTATION: coverage-void-counts-as-measured (VOID in the filter).
+        # MUTATION: coverage-void-counts-as-measured (VOID in ever-measured).
+        # MUTATION: coverage-window-void-counts-as-measured (VOID in the window).
         # A gate whose rows are all VOID never measured anything; counting
         # them would let it read green here AND as undetermined (surfaced,
         # non-failing) in the red-watch aggregate — green in both, measured
@@ -1091,6 +1114,55 @@ class CoverageCensus(unittest.TestCase):
         cov = coverage(make, rows, "test-foo needs a recorded run\n")
         self.assertNotIn("recipe", cov["wrapped"])
         self.assertTrue(cov["ok"])
+
+    def test_measurement_in_a_retired_env_does_not_satisfy_the_newest_env(self):
+        # MUTATION: coverage-env-check-dropped (newest-env conjunct removed).
+        # A gate measured long ago in env-retired whose newest rows (VOID) run
+        # in the current env is NOT covered: the old other-env measurement
+        # must not satisfy coverage forever.
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)] + [
+            row("2026-08-01T00:00:00Z", value=100.0, gate="test-foo", env="env-retired"),
+            row("2026-09-01T00:01:00Z", verdict="VOID", value=None,
+                gate="test-foo", void_reason="cluster down"),
+        ]
+        cov = coverage(self.MAKE, rows, "")
+        self.assertNotIn("test-foo", cov["reached"])
+        self.assertIn("test-foo", cov["window_stale"])
+        self.assertEqual(cov["missing"], ["test-foo"])
+        self.assertFalse(cov["ok"])
+        self.assertIn("STALE", render_coverage(cov))
+
+    def test_measurement_outside_the_trailing_window_is_stale(self):
+        # MUTATION: coverage-window-check-dropped (window = all rows).
+        # One PASS followed by COVERAGE_WINDOW consecutive VOIDs: the gate is
+        # not being measured anymore, and recency is ledger-relative (last K
+        # rows), never wall-clock, so no frozen time is needed.
+        olds = [row("2026-08-01T00:00:00Z", value=100.0, gate="test-foo")]
+        voids = [
+            row(f"2026-09-01T00:0{i}:00Z", verdict="VOID", value=None,
+                gate="test-foo", void_reason="cluster down")
+            for i in range(1, COVERAGE_WINDOW + 1)
+        ]
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)] + olds + voids
+        cov = coverage(self.MAKE, rows, "")
+        self.assertNotIn("test-foo", cov["reached"])
+        self.assertIn("test-foo", cov["window_stale"])
+        self.assertFalse(cov["ok"])
+        # Twin: the same history with the PASS inside the window stays reached.
+        rows2 = [row("2026-09-01T00:00:00Z", value=100.0)] + voids + [
+            row("2026-09-02T00:00:00Z", value=100.0, gate="test-foo")
+        ]
+        cov2 = coverage(self.MAKE, rows2, "")
+        self.assertIn("test-foo", cov2["reached"])
+
+    def test_positive_control_wrapped_but_unreached(self):
+        # The :1054 branch: the control gate is wrapped but has no measured
+        # row in its newest-env window — the matcher trips by name instead of
+        # reporting a clean board.
+        rows = [row("2026-09-01T00:01:00Z", value=100.0, gate="test-foo")]
+        cov = coverage(self.MAKE, rows, "")
+        self.assertTrue(any("test-failover" in p and "unreached" in p for p in cov["problems"]))
+        self.assertFalse(cov["ok"])
 
     def test_positive_control_and_empty_wrapped_fail_closed(self):
         # A matcher that never reports REACHED must trip by name, not report

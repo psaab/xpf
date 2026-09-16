@@ -917,10 +917,13 @@ def render_all(agg: Dict, declared: Optional[Dict[Tuple[str, str], str]] = None)
     green = agg.get("green") or {}
     undeclared_red = sorted(p for p in red if p not in declared)
     stale = sorted(p for p in declared if p not in red)
+    warn_window = sum(1 for res in pairs.values() if res.get("window_fails"))
+    warn_drift = sum(1 for res in pairs.values() if res.get("drift"))
     out.append(
         f"summary: {len(red)} red ({len(undeclared_red)} undeclared), "
         f"{len(undet)} undetermined, {len(green)} green, "
-        f"{len(stale)} stale declaration(s)"
+        f"{len(stale)} stale declaration(s), "
+        f"{warn_window} with window FAILs, {warn_drift} DRIFT-flagged"
     )
     for pair in undeclared_red:
         out.append(f"  RED: {pair[0]} @ {pair[1]} — {red[pair].get('outcome')}/{red[pair].get('verdict')}")
@@ -967,6 +970,10 @@ def _jsonable_agg(agg: Dict, declared: Dict[Tuple[str, str], str]) -> Dict:
 #: rather than gates and are excluded by coverage().
 WRAPPED_GATE_RE = re.compile(r"--gate (\S+)")
 
+#: Trailing ledger-relative window for coverage(): reached needs a measured
+#: row in the gate's newest env among its last COVERAGE_WINDOW rows.
+COVERAGE_WINDOW = 5
+
 #: The positive control: this gate is wrapped AND has measured rows, so a
 #: coverage matcher that never reports REACHED trips here by name instead of
 #: reporting a clean board over an inverted world.
@@ -1005,13 +1012,21 @@ def coverage(
     #9922 F-087: emitter refusal (rc 2, NO row) is the design's falsifiability
     backstop, and its reader was never built — 12 of 18 wrapped gates have
     ZERO rows while every aggregate stays green. This is that reader: the
-    wrapped set comes from the Makefile's `--gate` recipes, reached means
-    >= 1 PASS or FAIL row, and anything else must be declared with a reason.
+    wrapped set comes from the Makefile's `--gate` recipes, and anything
+    unreached must be declared with a reason.
+
+    Reached means a PASS or FAIL row in the gate's NEWEST env inside the
+    trailing COVERAGE_WINDOW ledger rows — not merely "measured once, ever".
+    Per-gate-any-env would let one old measurement in a retired env satisfy
+    coverage forever while every current run VOIDs; the window is ledger-
+    relative (last K rows), never wall-clock, so the census is deterministic
+    and fixtures need no frozen time.
 
     VOID rows do NOT count as coverage: a gate whose rows are all VOID never
     measured anything, and counting them would let it read green in both this
     census and the red-watch aggregate (which surfaces undetermined pairs
-    without failing). Such gates report as void-only, distinctly from zero-row.
+    without failing). Such gates report as void-only, distinctly from zero-row;
+    gates measured only outside the window/env report as stale.
     """
     recipe_text = "\n".join(
         ln for ln in makefile_text.splitlines() if ln.startswith("\t")
@@ -1031,16 +1046,29 @@ def coverage(
     per_gate = {}
     for gate in wrapped:
         grows = by_gate.get(gate, [])
-        measured = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]
+        ordered = sorted(grows, key=lambda r: (r.get("ts", ""), r.get("run_id", "")))
+        newest_env = ordered[-1].get("env") if ordered else None
+        window = ordered[-COVERAGE_WINDOW:]
+        measured_ever = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]
+        measured = [
+            r for r in window
+            if r.get("verdict") in ("PASS", "FAIL") and r.get("env") == newest_env
+        ]
         per_gate[gate] = {
             "rows": len(grows),
             "measured_rows": len(measured),
+            "measured_ever": len(measured_ever),
+            "newest_env": newest_env,
             "envs": sorted({str(r.get("env")) for r in grows}),
             "newest_ts": max((r.get("ts", "") for r in grows), default=None),
+            "last_measured_ts": max((r.get("ts", "") for r in measured_ever), default=None),
         }
     reached = sorted(g for g in wrapped if per_gate[g]["measured_rows"] > 0)
     void_only = sorted(
-        g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_rows"] == 0
+        g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_ever"] == 0
+    )
+    window_stale = sorted(
+        g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_ever"] > 0 and per_gate[g]["measured_rows"] == 0
     )
     zero_row = sorted(g for g in wrapped if per_gate[g]["rows"] == 0)
     unreached = sorted(set(wrapped) - set(reached))
@@ -1061,6 +1089,7 @@ def coverage(
         "wrapped": wrapped,
         "reached": reached,
         "void_only": void_only,
+        "window_stale": window_stale,
         "zero_row": zero_row,
         "declared": declared,
         "missing": missing,
@@ -1080,6 +1109,8 @@ def render_coverage(cov: Dict) -> str:
             state = f"REACHED ({pg.get('measured_rows')} measured / {pg.get('rows')} rows)"
         elif gate in (cov.get("void_only") or []):
             state = f"VOID-ONLY ({pg.get('rows')} rows, none measured)"
+        elif gate in (cov.get("window_stale") or []):
+            state = f"STALE ({pg.get('measured_ever')} measured ever, none in the newest-env window)"
         else:
             state = "ZERO ROWS"
         extra = ""
