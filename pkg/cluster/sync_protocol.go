@@ -478,6 +478,47 @@ func encodeDeleteV6(key dataplane.SessionKeyV6, gen uint64, forwardOnly bool) []
 	return hdr
 }
 
+// parseDeleteV4Wire is the ONE parser for a v4 delete payload: the read loop
+// (sync_conn_read.go) and the test seam (TakeQueuedMessageForTesting) both
+// call it, so a layout change cannot drift one past the other. Length gates
+// mirror the encoder: 16-byte 5-tuple required, #2170 generation at [16:24]
+// when present (absent on a legacy peer → 0 → unconditional delete in the
+// apply guard), #9752 forward-only marker at [24] when present (absent keeps
+// the historical derive-and-retract behavior).
+func parseDeleteV4Wire(payload []byte) (key dataplane.SessionKey, gen uint64, forwardOnly bool, ok bool) {
+	if len(payload) < 16 {
+		return key, 0, false, false
+	}
+	copy(key.SrcIP[:], payload[0:4])
+	copy(key.DstIP[:], payload[4:8])
+	key.SrcPort = binary.LittleEndian.Uint16(payload[8:10])
+	key.DstPort = binary.LittleEndian.Uint16(payload[10:12])
+	key.Protocol = payload[12]
+	if len(payload) >= 24 {
+		gen = binary.LittleEndian.Uint64(payload[16:24])
+	}
+	forwardOnly = len(payload) >= 25 && payload[24] != 0
+	return key, gen, forwardOnly, true
+}
+
+// parseDeleteV6Wire is the v6 twin of parseDeleteV4Wire: 40-byte 5-tuple
+// required, generation at [40:48] when present, forward-only marker at [48].
+func parseDeleteV6Wire(payload []byte) (key dataplane.SessionKeyV6, gen uint64, forwardOnly bool, ok bool) {
+	if len(payload) < 40 {
+		return key, 0, false, false
+	}
+	copy(key.SrcIP[:], payload[0:16])
+	copy(key.DstIP[:], payload[16:32])
+	key.SrcPort = binary.LittleEndian.Uint16(payload[32:34])
+	key.DstPort = binary.LittleEndian.Uint16(payload[34:36])
+	key.Protocol = payload[36]
+	if len(payload) >= 48 {
+		gen = binary.LittleEndian.Uint64(payload[40:48])
+	}
+	forwardOnly = len(payload) >= 49 && payload[48] != 0
+	return key, gen, forwardOnly, true
+}
+
 // decodeSessionV4Payload decodes a v4 session from wire format. It returns the
 // decoded key, value, and an ok flag. The layout must match encodeSessionV4Payload.
 func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.SessionValue, bool) {

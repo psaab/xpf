@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -60,8 +61,9 @@ func isTransientLocalSeedOrigin(origin string) bool {
 }
 
 // synced to the peer. ss is the caller's captured session-sync object (#4958):
-// the per-delta hot path takes the snapshot once in queueUserspaceSessionDeltas
-// rather than re-reading the shared field under lock for every delta.
+// the per-delta hot path takes the snapshot once in
+// queueUserspaceSessionDeltasLocked rather than re-reading the shared field
+// under lock for every delta.
 func (d *Daemon) shouldSyncUserspaceDelta(ss *cluster.SessionSync, delta dpuserspace.SessionDeltaInfo, ingressZone uint16) bool {
 	// Local-delivery sessions are traffic destined TO the firewall itself
 	// (management SSH, BGP peering, DHCP, NDP, ICMP echo, etc.).  These are
@@ -331,6 +333,65 @@ func (d *Daemon) installEventStreamCallbacks(es *dpuserspace.EventStream) {
 	}
 }
 
+// userspaceWarnThrottle is a lock-free, monotonic warning dampener. The
+// deadline keeps the monotonic component of time.Time; unlike UnixNano it
+// remains ordered when the wall clock steps backwards. The pointer is only
+// allocated for an emission attempt after the fast suppressed path.
+type userspaceWarnThrottle struct {
+	next       atomic.Pointer[time.Time]
+	suppressed atomic.Uint64
+}
+
+func (t *userspaceWarnThrottle) shouldLog(now time.Time, interval time.Duration) (bool, uint64) {
+	for {
+		until := t.next.Load()
+		if until != nil && now.Before(*until) {
+			t.suppressed.Add(1)
+			return false, 0
+		}
+		next := now.Add(interval)
+		if t.next.CompareAndSwap(until, &next) {
+			return true, t.suppressed.Swap(0)
+		}
+	}
+}
+func userspaceSessionEventName(eventType uint8) string {
+	switch eventType {
+	case dpuserspace.EventTypeSessionOpen:
+		return "session-open"
+	case dpuserspace.EventTypeSessionClose:
+		return "session-close"
+	case dpuserspace.EventTypeSessionUpdate:
+		return "session-update"
+	default:
+		return "unknown"
+	}
+}
+
+// userspaceDeltaPeerDownWarnInterval bounds the #9631 peer-down drop warning:
+// the first drop warns, then at most once per interval, while the
+// userspaceDeltaPeerDownDropped counter keeps advancing at delta rate.
+const userspaceDeltaPeerDownWarnInterval = time.Minute
+
+// UserspaceDeltaPeerDownDroppedCount is the #9631 observable: how many
+// session-delta opens/updates were dropped while the HA sync peer was down.
+// Non-zero means outage opens were shed instead of being ACK-withheld and
+// storming the event stream on the 4096 cap. Reconnect reconciliation is
+// expected to restore live state, but this counter alone does not prove that
+// reconciliation completed. Closes are not counted here: they fall through
+// to the queue path and journal for replay like the drain fallback's.
+func (d *Daemon) UserspaceDeltaPeerDownDroppedCount() uint64 {
+	return d.userspaceDeltaPeerDownDropped.Load()
+}
+
+// UserspaceFullResyncPeerDownDroppedCount is the #9631 observable for helper
+// FullResync resyncs shed while the peer was down (wire barriers plus
+// refusal-triggered resyncs); each shed barrier arms the owed-repayment
+// export instead of wedging the pending queue head.
+func (d *Daemon) UserspaceFullResyncPeerDownDroppedCount() uint64 {
+	return d.userspaceFullResyncPeerDownDropped.Load()
+}
+
 // handleEventStreamDelta processes a single session event from the event
 // stream. It returns true when the delta has been handled, including permanent
 // non-owner no-op handling on HA backups. It returns false only for transient
@@ -345,17 +406,56 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 		slog.Debug("userspace delta: ignored (not primary for any RG)", "type", eventType)
 		return true
 	}
-	if !ss.IsConnected() {
-		slog.Debug("userspace delta: dropped (sync not connected)", "type", eventType)
-		return false
+	// #9631: while the sync peer is down, deltas fall through the normal
+	// conversion/queue path and report handled instead of answering
+	// not-ready (which queues one pending frame per delta and storms the
+	// event stream on the 4096 cap for the whole outage). The fall-through
+	// preserves generation ordering: QueueSession stamps before its
+	// disconnected send no-op, so a later close draws a fresh delete
+	// generation (never gen-0 unconditional) and QueueDelete journals it
+	// for replay. Reconnect reconciliation normally re-derives live state,
+	// but this path alone does not prove that reconciliation completed.
+	// Opens and updates are counted as shed (pre-filter frames); closes
+	// journal and are not counted. The schema gate and sync filter keep running.
+	peerDown := !ss.IsConnected()
+	if peerDown {
+		switch eventType {
+		case dpuserspace.EventTypeSessionOpen, dpuserspace.EventTypeSessionUpdate:
+			shedTotal := d.userspaceDeltaPeerDownDropped.Add(1)
+			if emit, suppressed := d.userspaceDeltaPeerDownWarn.shouldLog(time.Now(), userspaceDeltaPeerDownWarnInterval); emit {
+				slog.Warn("userspace delta: shedding opens/updates while sync peer down; reconnect reconciliation normally re-derives live state",
+					"event", userspaceSessionEventName(eventType),
+					"shed_total", shedTotal, "suppressed_since_last", suppressed)
+			} else {
+				slog.Debug("userspace delta: dropped (sync not connected)",
+					"event", userspaceSessionEventName(eventType))
+			}
+		case dpuserspace.EventTypeSessionClose:
+			slog.Debug("userspace delta: queueing close while sync peer down (journals for replay)",
+				"event", userspaceSessionEventName(eventType))
+		default:
+			slog.Debug("userspace delta: ignored unknown event type while sync peer down",
+				"event", userspaceSessionEventName(eventType))
+		}
 	}
-	cfg := d.store.ActiveConfig()
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
 	if cfg == nil {
+		if peerDown {
+			// Nothing is convertible without config, but peer-down events must
+			// still shed, never queue. This covers both the bounded boot window
+			// and a rollback-to-nil publication; cfg-nil while connected
+			// remains a readiness gap below.
+			return true
+		}
 		return false
 	}
 	zoneIDs := buildZoneIDs(cfg)
 
-	// Map binary event type to the string event expected by queueUserspaceSessionDeltas.
+	// Map binary event type to the string event expected by
+	// queueUserspaceSessionDeltasLocked.
 	switch eventType {
 	case dpuserspace.EventTypeSessionOpen, dpuserspace.EventTypeSessionUpdate:
 		delta.Event = "open"
@@ -363,48 +463,103 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 		delta.Event = "close"
 	}
 
-	d.queueUserspaceSessionDeltas(zoneIDs, []dpuserspace.SessionDeltaInfo{delta})
+	if d.userspaceDeltaBeforeLockForTest != nil {
+		d.userspaceDeltaBeforeLockForTest()
+	}
+	// Hold userspaceDeltaSyncMu from the queue boundary until the queue call
+	// completes. FullResync holds the same mutex over its snapshot and paced
+	// queue, so a stream close cannot enqueue ahead of the repayment install.
+	// Lock order for code nested under this boundary is
+	// userspaceDeltaSyncMu > clusterCommsMu > manager.mu(R)/zoneRGMu(R) >
+	// genSentMu > recvGenMu; queue helpers must not acquire a reverse edge.
+	d.userspaceDeltaSyncMu.Lock()
+	if d.userspaceDeltaAfterLockForTest != nil {
+		d.userspaceDeltaAfterLockForTest()
+	}
+	d.queueUserspaceSessionDeltasLocked(zoneIDs, []dpuserspace.SessionDeltaInfo{delta})
+	if d.userspaceDeltaAfterQueueForTest != nil {
+		d.userspaceDeltaAfterQueueForTest()
+	}
+	d.userspaceDeltaSyncMu.Unlock()
 	return true
 }
 
-// handleEventStreamFullResync handles a FullResync frame from the helper.
-// This means the helper's replay buffer was trimmed past our last ack; we need
-// a one-shot bulk export to catch up.
-func (d *Daemon) handleEventStreamFullResync() bool {
-	slog.Warn("userspace event stream: full resync requested, triggering bulk export")
+// userspaceFullResyncWarnInterval bounds warnings for connected-state
+// FullResync readiness gaps. Peer-down shedding has its own once-per-debt
+// transition warning below.
+const userspaceFullResyncWarnInterval = time.Minute
+
+func (d *Daemon) warnUserspaceFullResyncGap(reason string) {
+	if emit, suppressed := d.userspaceFullResyncWarn.shouldLog(time.Now(), userspaceFullResyncWarnInterval); emit {
+		slog.Warn("userspace event stream: full resync not ready",
+			"reason", reason, "suppressed_since_last", suppressed)
+	}
+}
+
+// fullResyncAttempt runs the normal FullResync action and reports both the
+// callback result and whether an export actually completed. A shed callback is
+// handled=true (so the event stream advances) but exported=false; repayment
+// must use the second result or it could clear debt after a demotion, config
+// gap, or peer flap.
+func (d *Daemon) fullResyncAttempt(countShed bool) (handled, exported bool) {
 	ss := d.getSessionSync()
 	if d.cluster == nil || ss == nil {
 		slog.Debug("userspace event stream: full resync ignored (no cluster/sync)")
-		return true
+		return true, false
 	}
 	if !d.cluster.IsLocalPrimaryAny() {
 		slog.Debug("userspace event stream: full resync ignored (not primary for any RG)")
-		return true
+		return true, false
 	}
 	if !ss.IsConnected() {
-		slog.Debug("userspace event stream: full resync deferred (sync not connected)")
-		return false
+		// #9631: shed, don't wedge: a not-ready barrier head-blocks the
+		// flush, so one mid-outage barrier re-arms the delta storm. The export
+		// it asks for cannot deliver while disconnected; latch debt for
+		// post-reconnect repayment instead.
+		if countShed {
+			shedTotal := d.userspaceFullResyncPeerDownDropped.Add(1)
+			if d.userspaceFullResyncOwedWhileDown.CompareAndSwap(false, true) {
+				slog.Warn("userspace event stream: shedding full resync while sync peer down; reconnect reconciliation will repay",
+					"shed_total", shedTotal)
+			}
+		} else {
+			// A repayment can observe a flap after claiming its debt. Keep the
+			// debt armed; the next connected tick retries the export.
+			d.userspaceFullResyncOwedWhileDown.Store(true)
+		}
+		slog.Debug("userspace event stream: full resync shed while sync peer down (owed for reconnect)",
+			"shed_total", d.UserspaceFullResyncPeerDownDroppedCount())
+		return true, false
 	}
 	exporter, ok := d.dataplane().(userspaceSessionExporter)
 	if !ok {
-		return false
+		d.warnUserspaceFullResyncGap("userspace session exporter unavailable")
+		return false, false
+	}
+	if d.store == nil {
+		d.warnUserspaceFullResyncGap("active config store unavailable")
+		return false, false
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return false
+		d.warnUserspaceFullResyncGap("active config unavailable")
+		return false, false
 	}
 	rgIDs := d.primaryOwnerRGIDs(cfg)
 	if len(rgIDs) == 0 {
-		return false
+		d.warnUserspaceFullResyncGap("no locally-primary redundancy groups")
+		return false, false
 	}
 	// #9767: the event stream retries a withheld FullResync on every later frame
 	// and every ACK tick. Inside the backoff after a failed attempt, decline
 	// without re-running the export.
 	if d.fullResyncHeldOff(time.Now()) {
-		return false
+		d.warnUserspaceFullResyncGap("retry backoff active")
+		return false, false
 	}
-	// #9766: hold the fallback loop's drain off the whole export-and-queue
-	// transaction; see full_resync_transaction_9767.go.
+	slog.Info("userspace event stream: full resync requested, triggering bulk export")
+	// #9766: hold the fallback loop's drain and stream delta callback off the
+	// whole export-and-queue transaction; see full_resync_transaction_9767.go.
 	d.userspaceDeltaSyncMu.Lock()
 	_, err := d.exportUserspaceOwnerRGSessionsWithConfig(exporter, cfg, rgIDs)
 	d.userspaceDeltaSyncMu.Unlock()
@@ -412,9 +567,46 @@ func (d *Daemon) handleEventStreamFullResync() bool {
 		d.holdOffFullResync(time.Now())
 		slog.Warn("userspace event stream: full resync export failed; the frame is not acknowledged",
 			"err", err, "retry_after", fullResyncRetryBackoff)
-		return false
+		return false, false
 	}
-	return true
+	return true, true
+}
+
+// handleEventStreamFullResync handles a FullResync frame from the helper.
+// This means the helper's replay buffer was trimmed past our last ack; we need
+// a one-shot bulk export to catch up.
+func (d *Daemon) handleEventStreamFullResync() bool {
+	handled, _ := d.fullResyncAttempt(true)
+	return handled
+}
+
+// repayOwedFullResyncIfDue repays a FullResync shed during a peer-down outage
+// (#9631) once the peer is back. It claims debt before attempting so a barrier
+// shed during the export remains visible; it re-arms whenever no export
+// completed, including the handled-but-not-exported demotion/config paths.
+// Process restart abandons this in-memory latch; the cold-start bulk is an
+// authoritative recovery window, but is broader than this paced incremental
+// repayment and reconciles the receiver's stale set.
+func (d *Daemon) repayOwedFullResyncIfDue() {
+	if !d.userspaceFullResyncOwedWhileDown.Load() {
+		return
+	}
+	ss := d.getSessionSync()
+	if d.cluster == nil || ss == nil || !d.cluster.IsLocalPrimaryAny() || !ss.IsConnected() {
+		return
+	}
+	if !d.userspaceFullResyncOwedWhileDown.CompareAndSwap(true, false) {
+		return
+	}
+	_, exported := d.fullResyncAttempt(false)
+	if exported {
+		slog.Info("userspace event stream: repaid full resync owed from peer-down outage")
+		return
+	}
+	// Keep the debt for a later connected tick. This covers both an ordinary
+	// export failure and the handler's handled-but-not-exported demotion/config
+	// path; clearing on handled alone loses the requested recovery.
+	d.userspaceFullResyncOwedWhileDown.Store(true)
 }
 
 // eventStreamFallbackLoop monitors the event stream connection and falls back
@@ -476,6 +668,12 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace
 				slog.Info("userspace: event stream disconnected, polling resumed at 100ms")
 			}
 		}
+		// #9631: repay a FullResync shed during a peer-down outage, if any.
+		// Runs once per tick in both arms: repayment is gated on HA sync
+		// connectivity, not helper-stream connectivity, so an HA reconnect
+		// while the helper stream is down must still repay. No-op unless
+		// the owed latch is set (one atomic load per tick).
+		d.repayOwedFullResyncIfDue()
 
 		if connected {
 			// Stream is live — run reconciliation drain to catch any
@@ -546,7 +744,7 @@ type userspaceDeltaSink interface {
 
 // queueDeltaSink forwards each resolved session onto the incremental
 // session-sync send queue — the historical behavior of
-// queueUserspaceSessionDeltas.
+// queueUserspaceSessionDeltasLocked.
 type queueDeltaSink struct{ ss *cluster.SessionSync }
 
 func (q queueDeltaSink) openV4(key dataplane.SessionKey, val dataplane.SessionValue) {
@@ -772,7 +970,11 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 	return n
 }
 
-func (d *Daemon) queueUserspaceSessionDeltas(
+// queueUserspaceSessionDeltasLocked queues an admitted delta batch while the
+// caller holds userspaceDeltaSyncMu. Keeping the lock at this boundary makes
+// every producer — event-stream callback, fallback drain, and FullResync —
+// participate in one export/delta ordering domain.
+func (d *Daemon) queueUserspaceSessionDeltasLocked(
 	zoneIDs map[string]uint16,
 	deltas []dpuserspace.SessionDeltaInfo,
 ) int {
@@ -794,7 +996,21 @@ func (d *Daemon) queueUserspaceSessionDeltas(
 	return d.walkUserspaceSessionDeltas(ss, zoneIDs, deltas, queueDeltaSink{ss: ss})
 }
 
+// drainUserspaceSessionDeltasWithConfig is the unlocked public-to-package
+// helper retained for direct callers and tests. Production fallback callers
+// use drainUserspaceSessionDeltasLocked so the RPC and every queue operation
+// share userspaceDeltaSyncMu.
 func (d *Daemon) drainUserspaceSessionDeltasWithConfig(
+	drainer userspaceSessionDeltaDrainer,
+	cfg *config.Config,
+	maxBatches int,
+) (int, error) {
+	d.userspaceDeltaSyncMu.Lock()
+	defer d.userspaceDeltaSyncMu.Unlock()
+	return d.drainUserspaceSessionDeltasWithConfigLocked(drainer, cfg, maxBatches)
+}
+
+func (d *Daemon) drainUserspaceSessionDeltasWithConfigLocked(
 	drainer userspaceSessionDeltaDrainer,
 	cfg *config.Config,
 	maxBatches int,
@@ -817,7 +1033,7 @@ func (d *Daemon) drainUserspaceSessionDeltasWithConfig(
 		if len(deltas) == 0 {
 			break
 		}
-		total += d.queueUserspaceSessionDeltas(zoneIDs, deltas)
+		total += d.queueUserspaceSessionDeltasLocked(zoneIDs, deltas)
 		if len(deltas) < 256 {
 			break
 		}

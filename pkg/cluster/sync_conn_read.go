@@ -167,41 +167,19 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 	case syncMsgDeleteV4:
 		s.stats.DeletesReceived.Add(1)
-		if s.sessions != nil && len(payload) >= 16 {
-			var key dataplane.SessionKey
-			copy(key.SrcIP[:], payload[0:4])
-			copy(key.DstIP[:], payload[4:8])
-			key.SrcPort = binary.LittleEndian.Uint16(payload[8:10])
-			key.DstPort = binary.LittleEndian.Uint16(payload[10:12])
-			key.Protocol = payload[12]
-			// #2170: length-gated trailing install generation (absent on a
-			// legacy peer → 0 → unconditional delete in the apply guard).
-			var gen uint64
-			if len(payload) >= 24 {
-				gen = binary.LittleEndian.Uint64(payload[16:24])
+		if s.sessions != nil {
+			key, gen, forwardOnly, ok := parseDeleteV4Wire(payload)
+			if ok {
+				s.deleteClusterSyncedV4(key, gen, forwardOnly)
 			}
-			// #9752: length-gated trailing forward-only marker. Absent (old
-			// peer) keeps the historical derive-and-retract behavior.
-			forwardOnly := len(payload) >= 25 && payload[24] != 0
-			s.deleteClusterSyncedV4(key, gen, forwardOnly)
 		}
 	case syncMsgDeleteV6:
 		s.stats.DeletesReceived.Add(1)
-		if s.sessions != nil && len(payload) >= 40 {
-			var key dataplane.SessionKeyV6
-			copy(key.SrcIP[:], payload[0:16])
-			copy(key.DstIP[:], payload[16:32])
-			key.SrcPort = binary.LittleEndian.Uint16(payload[32:34])
-			key.DstPort = binary.LittleEndian.Uint16(payload[34:36])
-			key.Protocol = payload[36]
-			// #2170: length-gated trailing install generation.
-			var gen uint64
-			if len(payload) >= 48 {
-				gen = binary.LittleEndian.Uint64(payload[40:48])
+		if s.sessions != nil {
+			key, gen, forwardOnly, ok := parseDeleteV6Wire(payload)
+			if ok {
+				s.deleteClusterSyncedV6(key, gen, forwardOnly)
 			}
-			// #9752: length-gated trailing forward-only marker (v6 twin).
-			forwardOnly := len(payload) >= 49 && payload[48] != 0
-			s.deleteClusterSyncedV6(key, gen, forwardOnly)
 		}
 	case syncMsgBulkStart:
 		var epoch uint64

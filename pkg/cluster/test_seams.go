@@ -11,7 +11,12 @@
 
 package cluster
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/psaab/xpf/pkg/dataplane"
+)
 
 // SetPeerIPsecSAsForTesting installs the peer's advertised IPsec
 // connection-name set without a wire round trip, mirroring
@@ -68,6 +73,58 @@ func (s *SessionSync) TakeQueuedMessageTypeForTesting(wait time.Duration) (typ s
 		return queuedMessageTypeForTesting(msg), true
 	case <-timer.C:
 		return "", false
+	}
+}
+
+// SentInstallGenerationV4ForTesting returns the sender-side generation stamp
+// for key. It is used by daemon-level admission cells to prove that the
+// daemon reached QueueSessionV4; a zero result means no install was stamped.
+func (s *SessionSync) SentInstallGenerationV4ForTesting(key dataplane.SessionKey) uint64 {
+	s.genSentMu.Lock()
+	defer s.genSentMu.Unlock()
+	return s.genSentV4[key]
+}
+
+// DeleteJournalGenerationV4ForTesting returns the newest journaled v4 delete
+// generation for key, parsing the same delete wire payload used by the reader.
+func (s *SessionSync) DeleteJournalGenerationV4ForTesting(key dataplane.SessionKey) (uint64, bool) {
+	s.deleteJournalMu.Lock()
+	defer s.deleteJournalMu.Unlock()
+	for i := len(s.deleteJournal) - 1; i >= 0; i-- {
+		raw := s.deleteJournal[i]
+		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
+			continue
+		}
+		got, gen, _, ok := parseDeleteV4Wire(raw[syncHeaderSize:])
+		if ok && got == key {
+			return gen, true
+		}
+	}
+	return 0, false
+}
+
+// ApplyQueuedMessagesForTesting drains this sender's queued wire frames in
+// FIFO order and feeds each frame through the receiver's real handleMessage
+// path. It is intentionally a receiver seam rather than a boolean model:
+// decoding, generation guards, install-table identity, and dataplane helper
+// vetoes remain production behavior. The returned types are the exact wire
+// order observed by the receiver.
+func (s *SessionSync) ApplyQueuedMessagesForTesting(receiver *SessionSync) ([]string, error) {
+	if receiver == nil {
+		return nil, fmt.Errorf("receiver session sync is nil")
+	}
+	var types []string
+	for {
+		select {
+		case msg := <-s.sendCh:
+			if len(msg) < syncHeaderSize {
+				return types, fmt.Errorf("queued message too short: %d", len(msg))
+			}
+			types = append(types, queuedMessageTypeForTesting(msg))
+			receiver.handleMessage(nil, msg[4], msg[syncHeaderSize:])
+		default:
+			return types, nil
+		}
 	}
 }
 
