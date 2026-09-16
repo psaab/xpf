@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,20 +17,24 @@ import (
 // #9766 / #9767: the FullResync export is one transaction. Its frame is
 // acknowledged only if the whole export reached the send queue, and the
 // fallback loop's drain cannot queue a delta in the middle of it.
-
 // resyncDeltaExporterDP is a publishable backend whose owner-RG export returns
 // fixed deltas. during, when set, runs inside the export after its snapshot.
 type resyncDeltaExporterDP struct {
 	runtimeOnlyApplyTestDP
-	deltas  []dpuserspace.SessionDeltaInfo
-	during  func()
-	exports atomic.Int64
+	deltas     []dpuserspace.SessionDeltaInfo
+	during     func()
+	exports    atomic.Int64
+	exported   chan struct{}
+	exportOnce sync.Once
 }
 
 func (r *resyncDeltaExporterDP) ExportOwnerRGSessionsPaged(rgIDs []int) (
 	[]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error,
 ) {
 	r.exports.Add(1)
+	if r.exported != nil {
+		r.exportOnce.Do(func() { close(r.exported) })
+	}
 	if r.during != nil {
 		r.during()
 	}
@@ -362,5 +367,82 @@ func TestFallbackLoopDrainsUnderTheDeltaLock_9766(t *testing.T) {
 	if locked != 2 || unlocked != 0 {
 		t.Fatalf("#9766: eventStreamFallbackLoop drains %d times through drainUserspaceSessionDeltasLocked and "+
 			"%d times through the unlocked drain, want 2 and 0", locked, unlocked)
+	}
+}
+
+// The queue helper is deliberately named Locked: a future producer must opt
+// into the ordering domain explicitly rather than silently reopening #9766.
+// The handler-specific bracket check below makes lock ownership structural;
+// a scheduler cannot make a test seam look serialized after Lock/Unlock removal.
+func TestUserspaceDeltaQueueCallsitesUseLockedHelper_9766(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "daemon_ha_userspace_stream.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse daemon_ha_userspace_stream.go: %v", err)
+	}
+	locked, old := 0, 0
+	handlerFound := false
+	handlerQueue := 0
+	var lockPos, queuePos, unlockPos token.Pos
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "queueUserspaceSessionDeltasLocked":
+			locked++
+		case "queueUserspaceSessionDeltas":
+			old++
+		}
+		return true
+	})
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "handleEventStreamDelta" {
+			continue
+		}
+		handlerFound = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if sel.Sel.Name == "queueUserspaceSessionDeltasLocked" {
+				handlerQueue++
+				queuePos = call.Pos()
+				return true
+			}
+			receiver, ok := sel.X.(*ast.SelectorExpr)
+			if !ok || receiver.Sel.Name != "userspaceDeltaSyncMu" {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "Lock":
+				lockPos = call.Pos()
+			case "Unlock":
+				unlockPos = call.Pos()
+			}
+			return true
+		})
+	}
+	if !handlerFound {
+		t.Fatal("handleEventStreamDelta is not in daemon_ha_userspace_stream.go")
+	}
+	if locked != 2 || old != 0 {
+		t.Fatalf("#9766: queue helper callsites = locked:%d old:%d, want locked:2 old:0", locked, old)
+	}
+	if handlerQueue != 1 || lockPos == 0 || queuePos == 0 || unlockPos == 0 ||
+		!(lockPos < queuePos && queuePos < unlockPos) {
+		t.Fatalf("#9766: handleEventStreamDelta mutex bracket = lock:%v queue:%v unlock:%v calls:%d, want one lock < queue < unlock",
+			lockPos, queuePos, unlockPos, handlerQueue)
 	}
 }
