@@ -5,24 +5,27 @@ import (
 	"testing"
 )
 
-// #3884 (fable-review-161 F-030): compileFirewall folds every firewall-filter
-// family except inet6 into ONE name-keyed map (fw.FiltersInet) with an
-// unconditional `dest[name] = filter` write, so two same-name filters authored
-// under DIFFERENT non-inet6 families silently collapse — the later definition
-// overwrites the earlier with no commit error. If the IPv4 (`family inet`)
-// filter was a `discard`/deny and the colliding-family filter is accept-all,
-// the effective IPv4 filter becomes accept-all (a security fail-open). These
+// #3884 (fable-review-161 F-030): compileFirewall folds every DECLARED
+// firewall-filter family except inet6 (inet, any) into ONE name-keyed map
+// (fw.FiltersInet) with an unconditional `dest[name] = filter` write, so two
+// same-name filters authored under DIFFERENT declared non-inet6 families
+// silently collapse — the later definition overwrites the earlier with no
+// commit error. (An UNDECLARED token like `mpls` no longer folds at all: it
+// is quarantined out of both pools by compileFirewall (#9883) and named by
+// the #9017 token gate instead, so it cannot collide — that scoping is pinned
+// in firewall_family_unknown_9883_test.go, not here.)
+// If the IPv4 (`family inet`) filter was a `discard`/deny and the
+// colliding-family filter is accept-all, the effective IPv4 filter becomes
+// accept-all (a security fail-open). These
 // fixtures pin the strict reject at commit and the lenient warn on the tolerant
 // load / peer-sync path, and confirm the legitimate single-family and
 // inet/inet6 dual-stack cases are unaffected.
 //
-// Note on parse shape: a family the schema does not model (`any`, `mpls`, ...)
-// only reaches a structured `filter` subtree via a HIERARCHICAL config-file
-// parse or a directly-constructed / peer-synced AST — the schema-driven flat
-// `set` parser collapses `family any filter ...` into one unstructured leaf, so
-// it never mints a colliding filter. The reproduction therefore uses parseHier
-// (how a config file loads) and a directly-built AST (how a peer-synced tree
-// arrives), exactly the paths where the fold-overwrite fail-open is reachable.
+// Note on parse shape: the reproduction uses parseHier (how a config file
+// loads) and directly-built ASTs (how a peer-synced tree arrives) — the paths
+// where structured multi-family filter subtrees reach the gate. (An undeclared
+// token like `mpls` reaches a structured subtree the same way, but it is
+// quarantined before it can fold or collide — #9883.)
 
 // Strict commit: a filter name reused across family inet (discard) and family
 // any (accept) is hard-rejected. On revert of the #3884 gate this goes RED —
@@ -57,40 +60,6 @@ firewall {
 		t.Fatal("CompileConfig: expected rejection of cross-family firewall filter name collision, got nil")
 	}
 	if !strings.Contains(err.Error(), "blockX") ||
-		!strings.Contains(err.Error(), "#3884") {
-		t.Fatalf("unexpected error text: %v", err)
-	}
-}
-
-// The collision is just as real between two families that are BOTH non-inet /
-// non-inet6 (e.g. mpls and any) — anything except inet6 folds into the same
-// pool. Built as a direct AST (a peer-synced / load-merge tree can carry any
-// structured family node).
-func TestFirewallFilterCrossFamilyNameCollisionNonInetRejected(t *testing.T) {
-	tree := &ConfigTree{Children: []*Node{
-		{Keys: []string{"firewall"}, Children: []*Node{
-			{Keys: []string{"family", "mpls"}, Children: []*Node{
-				{Keys: []string{"filter", "blockY"}, Children: []*Node{
-					{Keys: []string{"term", "t1"}, Children: []*Node{
-						{Keys: []string{"then", "discard"}, IsLeaf: true},
-					}},
-				}},
-			}},
-			{Keys: []string{"family", "any"}, Children: []*Node{
-				{Keys: []string{"filter", "blockY"}, Children: []*Node{
-					{Keys: []string{"term", "t1"}, Children: []*Node{
-						{Keys: []string{"then", "accept"}, IsLeaf: true},
-					}},
-				}},
-			}},
-		}},
-	}}
-
-	_, err := CompileConfig(tree)
-	if err == nil {
-		t.Fatal("CompileConfig: expected rejection of mpls/any firewall filter name collision, got nil")
-	}
-	if !strings.Contains(err.Error(), "blockY") ||
 		!strings.Contains(err.Error(), "#3884") {
 		t.Fatalf("unexpected error text: %v", err)
 	}

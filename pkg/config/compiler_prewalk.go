@@ -257,8 +257,9 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 
 	// #9017 undeclared address-family token. Same AST-level reason as the
-	// collision gate above: an unknown family compiles to nothing, so by the
-	// time fw.FiltersInet exists there is no trace of it left to validate.
+	// collision gate above: an unknown family compiles to nothing (#9883
+	// quarantine in compileFirewall), so by the time fw.FiltersInet exists
+	// there is no trace of it left to validate.
 	fwFamilyTokenWarnings, err := validateFirewallFilterFamilyTokensAST(
 		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
 	if err != nil {
