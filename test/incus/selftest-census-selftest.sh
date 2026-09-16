@@ -108,6 +108,63 @@ else
 	esac
 fi
 
+# ── 4b. `__main__` in a comment is not a guard ──
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+printf '# classes must be defined before `if __name__ == "__main__":`\nx = 1\n' >"$fix/scripts/image/test_a.py"
+if out=$(run_census "$fix"); then
+	bad "comment-only __main__ mention passed the census"
+else
+	case "$out" in
+	*"scripts/image/test_a.py"*) ok "comment-only __main__ fails, naming the file" ;;
+	*) bad "comment-only failure did not name the file: $out" ;;
+	esac
+fi
+
+# ── 4c. `__main__` in a string literal is not a guard ──
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+printf 'GUARD = %s\nx = 1\n' "'if __name__ == \"__main__\":'" >"$fix/scripts/image/test_a.py"
+if out=$(run_census "$fix"); then
+	bad "string-only __main__ mention passed the census"
+else
+	case "$out" in
+	*"scripts/image/test_a.py"*) ok "string-only __main__ fails, naming the file" ;;
+	*) bad "string-only failure did not name the file: $out" ;;
+	esac
+fi
+
+# ── 4d. the concrete victim: guard-deleted real file still mentions __main__ ──
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+grep -vE "^[[:space:]]*if __name__ ==" "$ROOT/scripts/test_selftest_main_guard_9669.py" >"$fix/scripts/image/test_a.py"
+if grep -q '__main__' "$fix/scripts/image/test_a.py"; then
+	if out=$(run_census "$fix"); then
+		bad "guard-deleted victim (mentions intact) passed the census"
+	else
+		case "$out" in
+		*"scripts/image/test_a.py"*) ok "guard-deleted victim fails despite __main__ mentions" ;;
+		*) bad "victim failure did not name the file: $out" ;;
+		esac
+	fi
+else
+	bad "victim fixture lost its __main__ mentions — the negative control is void"
+fi
+
+# ── 4e. all-globs-empty fails rc 1 with named EMPTY, not a set -u crash ──
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"
+printf '# ── 4. shell self-tests ──\nrun_shell scripts/dist/selftest.sh\nrun_shell scripts/image/test-grow-root.sh\nrun_bash test/incus/wire-policy-deny.sh --selftest\nrun_bash test/incus/wire-appmatch-twins.sh --selftest\n# -- harness reachability census (#8302) --\n' >"$fix/runner.sh"
+if out=$(run_census "$fix"); then
+	bad "all-empty discovery passed the census"
+else
+	case "$out" in
+	*"discovery is EMPTY"* | *"parameter not set"*)
+		case "$out" in
+		*"parameter not set"*) bad "all-empty discovery crashed (set -u): $out" ;;
+		*) ok "all-empty discovery fails rc 1 with named EMPTY" ;;
+		esac
+		;;
+	*) bad "all-empty failure did not name EMPTY: $out" ;;
+	esac
+fi
+
 # ── 5. a fifth odd name fails (exact-set, extra direction) ──
 n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
 printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
@@ -186,6 +243,53 @@ if [ "$T_PASS" -eq 1 ] && [ "$T_FAIL" -eq 0 ]; then
 	ok "extracted run_shell executes (control)"
 else
 	bad "extracted run_shell control: PASS=$T_PASS FAIL=$T_FAIL"
+fi
+
+# ── 10b. the caller's warn excerpt preserves warnings on success ──
+# run-selftests.sh prints tail -1 on a green aggregate; the warn-excerpt line
+# below it must reprint window-FAIL and DRIFT lines so success stays
+# informative. This cell executes the CALLER'S REAL pipeline text (extracted
+# at test time — a copy would prove nothing about the runner) against a
+# fixture aggregate carrying both markers.
+if ! command -v python3 >/dev/null 2>&1; then
+	ok "caller warn excerpt (SKIP: python3 not installed)"
+else
+	n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix/led"
+	PYTHONPATH="$ROOT/test/incus" python3 - "$fix/led" <<'PY'
+import json, sys
+sys.path.insert(0, "test/incus")
+from ledger_compare_test import row
+led = sys.argv[1]
+rows = (
+    [row(f"2026-09-01T00:0{i}:00Z", value=100.0, gate="gate-win") for i in range(3)]
+    + [row("2026-09-01T00:03:00Z", verdict="FAIL", value=10.0, gate="gate-win")]
+    + [row("2026-09-01T00:04:00Z", value=100.0, gate="gate-win")]
+    + [row(f"2026-09-01T00:{i:02d}:00Z", value=100.0 * (0.96 ** i), gate="gate-drift") for i in range(12)]
+)
+for r in rows:
+    open(f"{led}/{r['run_id']}.json", "w").write(json.dumps(r))
+PY
+	out=$(python3 "$ROOT/test/incus/ledger_compare.py" --all --ledger "$fix/led" 2>&1)
+	leg=$(grep -F 'warn: /' "$ROOT/scripts/run-selftests.sh" | head -1)
+	if [ -z "$leg" ]; then
+		bad "caller warn excerpt line not found in run-selftests.sh (extraction void)"
+	else
+		warns=$(eval "$leg")
+		case "$warns" in
+		*"FAIL rows inside the baseline window"* | *"DRIFT"*)
+			case "$warns" in
+			*"FAIL rows inside the baseline window"*)
+				case "$warns" in
+				*"DRIFT"*) ok "caller warn excerpt reprints window-FAIL and DRIFT lines" ;;
+				*) bad "caller excerpt missed the DRIFT line: $warns" ;;
+				esac
+				;;
+			*) bad "caller excerpt missed the window-FAIL line: $warns" ;;
+			esac
+			;;
+		*) bad "caller warn excerpt printed nothing for a warnings-carrying aggregate" ;;
+		esac
+	fi
 fi
 
 # ── 11. positive control on the real tree ──

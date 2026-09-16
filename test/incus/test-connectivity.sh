@@ -58,7 +58,9 @@ skip()  { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
 # acquires the lock mid-window, between the two probes, slips through
 # undetected. What it DOES catch is steady-state contention — destructive
 # lanes hold the lock for minutes, so an overlap at either edge is the
-# common case. Today: zero detection.
+# common case. Today: zero detection. The residual whole-window hole is
+# tracked in #10126 (periodic re-probe vs owner-epoch vs blocking flock —
+# each needs its own design); this member is DONE for edge detection.
 #
 # The probe fires only when FW0 is remote-qualified (contains ':'):
 # 'loss:xpf-userspace-fw0' samples the SHARED cluster, while a bare

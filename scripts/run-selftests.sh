@@ -303,6 +303,11 @@ run_shell test/xsk-repro/selftest-multitoken-cc_6355.sh
 # the exact failure the reproducer exists to detect, reported as PASS. SKIPs
 # without cargo or offline-buildable deps.
 run_shell test/xsk-repro/selftest-probe-filter_6898.sh
+# The committed fixture negatives for the by-name asserts above (#9922
+# SPARK-MINOR-7): stub-cargo cells proving a deleted/renamed guarded cell
+# FAILs. Same file, so no discovery churn (already in the odd-set math as
+# discovered, not odd).
+run_shell test/xsk-repro/selftest-probe-filter_6898.sh --selftest
 # #7796: the FBF DSCP ip-rule APPLY LEG. The defect was invisible to every
 # compile-side test — the pre-fix code built a well-formed netlink.Rule and the
 # kernel rejected it (FRA_TOS masks to IPTOS_TOS_MASK, so DSCP<<2 is refused from
@@ -577,6 +582,12 @@ if command -v python3 >/dev/null 2>&1; then
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
 		passl "ledger-compare-all ($(echo "$out" | tail -1))"
+		# The summary line above carries warning COUNTS, but a newest-PASS-
+		# after-FAILs and a DRIFT-flagged WITHIN-BAND must not render
+		# identically to a clean history in a successful run — that is the
+		# indistinguishability the CLI boundary fixed, recreated one layer
+		# up. Reprint the warning lines so success stays informative.
+		echo "$out" | grep -E "FAIL rows inside the baseline window|DRIFT —" | sed 's/^/      warn: /' || true
 	else
 		faill "ledger-compare-all"
 		echo "$out" | sed 's/^/      /'

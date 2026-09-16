@@ -81,6 +81,7 @@ runner_code=$(sed 's/#.*//' "$RUNNER")
 # ── 1. discovery: every self-test invoked ──
 echo "selftest census: discovery over 6 globs"
 discovered=""
+discovered_n=0
 set -f
 for g in $SELFTEST_GLOBS; do
 	set +f
@@ -120,7 +121,7 @@ for f in $discovered; do
 done
 if [ -n "$missing" ]; then
 	note_fail "on disk but not invoked by $RUNNER:$missing"
-else
+elif [ "$discovered_n" -gt 0 ]; then
 	note_pass "$discovered_n discovered self-tests, all invoked"
 fi
 
@@ -174,7 +175,7 @@ for g in $PY_GLOBS; do
 		[ -f "$f" ] || continue
 		glob_n=$((glob_n + 1))
 		py_n=$((py_n + 1))
-		if ! grep -q '__main__' "$f"; then
+		if ! grep -qE "^[[:space:]]*if __name__ == ['\"]__main__['\"]:" "$f"; then
 			py_missing="$py_missing $f"
 		fi
 	done
@@ -189,7 +190,7 @@ if [ "$py_n" -eq 0 ]; then
 fi
 if [ -n "$py_missing" ]; then
 	note_fail "runs via direct python3 but defines no __main__ guard (exits 0 measuring nothing):$py_missing"
-else
+elif [ "$py_n" -gt 0 ]; then
 	note_pass "$py_n §3 python files, all guarded"
 fi
 

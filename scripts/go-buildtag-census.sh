@@ -32,10 +32,18 @@
 #     file, the tag, and the vet diagnostic.
 #   * A NEW tagged file is picked up by discovery on the first run after it
 #     lands — no registration step, so there is nothing to forget.
-#   * A COMPLEX constraint (`//go:build foo && bar`, `!cgo`, ...) is printed
-#     as a NEEDS-REVIEW line: loud, non-failing. The census has no compile
-#     leg for it and says so instead of silently dropping it (none exist
-#     today; the first one must be impossible to miss, not impossible to land).
+#   * A COMPLEX constraint (`//go:build foo && bar`, `!cgo`, ...) FAILS the
+#     census unless test/incus/GO_BUILDTAG_REVIEWED declares it reviewed
+#     (`file constraint reason...`, constraint matched exactly): the census
+#     has no compile leg for that shape, so a human must add a compile
+#     configuration covering it or accept it with a reason, and the failure
+#     names the file, the constraint, and the declaration file. A declared
+#     complex file still prints its NEEDS-REVIEW line — now meaning
+#     reviewed-accepted rather than uncovered (none exist today).
+#   * A declaration whose file is no longer complex — simple tag now,
+#     untagged, or gone — FAILS (shrink-only: remove the line, the same
+#     contract as test/incus/LEDGER_COVERAGE.unreached), as does a malformed
+#     declaration line. The declaration file can only shrink toward zero.
 #   * If discovery finds NOTHING while the known tagged file is still on disk,
 #     the census FAILS closed. A parse that cannot see `functional1944` is
 #     broken, not clean — an inverted matcher plus an empty board is the exact
@@ -49,11 +57,21 @@
 #   compiles them. A file that compiles but fails at runtime is a matter for
 #   the gate that runs it, not for this census.
 #
+#   It does not COMPILE complex constraints: no `go vet -tags` invocation
+#   can express `foo && bar` / `!cgo`, so those files are gated on a
+#   reviewed declaration instead of a vet leg. The NEEDS-REVIEW line on a
+#   declared file is the audit trail of that human acceptance, not a
+#   second compile.
+#
 #   No overlap with #9812 (scripts/go-skip-census.sh): that census counts
 #   `t.Skip` call sites, not build tags — it has no `go:build` handling.
 #
 # USAGE
 #   sh scripts/go-buildtag-census.sh          # census this tree
+#
+#   No new arguments: the declaration file is test/incus/GO_BUILDTAG_REVIEWED
+#   under ROOT, overridable only by the GO_BUILDTAG_REVIEWED environment
+#   variable (which is how the self-test points fixtures at their own).
 GO=${GO:-go}
 
 # The tool check comes before everything else — even the path computation
@@ -77,6 +95,13 @@ SCAN_DIRS=${GO_BUILDTAG_DIRS:-"pkg cmd test"}
 KNOWN=${GO_BUILDTAG_KNOWN:-"pkg/daemon/login_password_functional_test.go"}
 
 cd "$ROOT" || { echo "FATAL: cannot cd to $ROOT" >&2; exit 2; }
+
+# Reviewed-complex declarations (§2). Relative paths resolve against ROOT —
+# the cd above already happened — so fixtures pass an absolute path or a
+# fixture-local name. A MISSING file means zero declarations: safe, not lax,
+# because an undeclared complex file fails on its own row, so deleting the
+# file can never green a board that has one.
+REVIEWED=${GO_BUILDTAG_REVIEWED:-test/incus/GO_BUILDTAG_REVIEWED}
 
 FAIL=0
 note_fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
@@ -117,7 +142,56 @@ if [ -n "$discovered" ]; then
 	done
 fi
 
-# ── 2. fail closed: the known tagged file must be VISIBLE, not merely present ──
+# ── 2. reviewed declarations for complex constraints ──
+# A complex constraint has no compile leg, so each one needs a human: either
+# a compile configuration that covers the shape, or a reviewed line in
+# $REVIEWED (`file constraint reason...`, `#` comments and blanks ignored).
+# The constraint must match the file's `//go:build` line exactly — a drifted
+# constraint fails until the line is updated — and a line whose file is no
+# longer complex fails shrink-only (§5). Same contract shape as
+# test/incus/LEDGER_COVERAGE.unreached.
+declared=""
+if [ -f "$REVIEWED" ]; then
+	parsed=$(awk '
+		/^[[:space:]]*(#|$)/ { next }
+		NF < 2 { print "MALFORMED\t" NR "\t" $0; next }
+		{
+			file = $1
+			rest = $0
+			sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, "", rest)
+			sub(/[[:space:]]+$/, "", rest)
+			print "DECL\t" file "\t" rest
+		}
+	' "$REVIEWED" 2>/dev/null) || note_fail "cannot parse declaration file $REVIEWED"
+	OLD_IFS=$IFS
+	IFS='
+'
+	for pline in $parsed; do
+		IFS=$OLD_IFS
+		[ -n "$pline" ] || { IFS='
+'; continue; }
+		kind=${pline%%	*}
+		pline_rest=${pline#*	}
+		case "$kind" in
+			MALFORMED)
+				mlineno=${pline_rest%%	*}
+				mtext=${pline_rest#*	}
+				note_fail "malformed declaration $REVIEWED line $mlineno: expected \`file constraint reason...\`, got '$mtext'"
+				;;
+			DECL)
+				dfile=${pline_rest%%	*}
+				drest=${pline_rest#*	}
+				declared="${declared:+$declared
+}$dfile	$drest"
+				;;
+		esac
+		IFS='
+'
+	done
+	IFS=$OLD_IFS
+fi
+
+# ── 3. fail closed: the known tagged file must be VISIBLE, not merely present ──
 # If it exists on disk but discovery missed it — an inverted matcher, a moved
 # glob, a parse that finds nothing — the board is broken, not clean.
 if [ -f "$KNOWN" ]; then
@@ -136,13 +210,15 @@ $KNOWN	"*)
 	esac
 fi
 
-# ── 3. compile legs: one `go vet -tags` per (identifier, pkgdir) ──
+# ── 4. compile legs: one `go vet -tags` per (identifier, pkgdir) ──
 # Single-identifier constraints only. Anything else (negation, &&/||,
-# parens) is a NEEDS-REVIEW line: loud, non-failing — the census must not
-# silently drop a shape it cannot compile-check.
+# parens) must be DECLARED reviewed in $REVIEWED (§2): undeclared, drifted,
+# or reason-less fails the census, while a declared file keeps its
+# NEEDS-REVIEW line as the audit trail of that human acceptance.
 n_vet=0
 n_review=0
 vetted=""
+complex_files=""
 # POSIX-sh note: the row loop below iterates the newline list with IFS
 # splitting, not a `while read` pipeline, because POSIX sh has no lastpipe
 # and a pipeline loop would run in a subshell where FAIL/n_vet/n_review
@@ -160,8 +236,35 @@ for row in $discovered; do
 	expr=${row#*	}
 	case "$expr" in
 		''|*[!A-Za-z0-9_.]*)
-			echo "  NEEDS-REVIEW: $file carries a complex constraint ('$expr') — no compile leg covers it"
-			n_review=$((n_review + 1))
+			complex_files="${complex_files:+$complex_files
+}$file"
+			# Literal file match (index, not regex) so `.` and `/` in
+			# paths cannot misfire; a duplicate line overwrites, mirroring
+			# the LEDGER_COVERAGE parser's last-wins dict.
+			decl_rest=$(printf '%s\n' "$declared" | awk -v f="$file" '
+				index($0, f "\t") == 1 { rest = substr($0, length(f) + 2) }
+				END { print rest }
+			')
+			if [ -z "$decl_rest" ]; then
+				note_fail "complex constraint in $file ('$expr') is NOT declared — add a compile configuration covering it, or a reviewed declaration \`$file $expr <reason>\` in $REVIEWED"
+			elif [ -z "$expr" ]; then
+				echo "  NEEDS-REVIEW: $file carries an empty constraint — reviewed/accepted per $REVIEWED"
+				n_review=$((n_review + 1))
+			else
+				case "$decl_rest" in
+					"$expr "*)
+						echo "  NEEDS-REVIEW: $file carries a complex constraint ('$expr') — reviewed/accepted per $REVIEWED"
+						n_review=$((n_review + 1))
+						;;
+					*)
+						if [ "$decl_rest" = "$expr" ]; then
+							note_fail "declaration for $file names the constraint ('$expr') but carries no reason — add one in $REVIEWED"
+						else
+							note_fail "declared constraint for $file ('$decl_rest') does not match its //go:build line ('$expr') — update the declaration in $REVIEWED"
+						fi
+						;;
+				esac
+			fi
 			;;
 		*)
 			pkgdir=$(dirname -- "$file")
@@ -187,7 +290,46 @@ for row in $discovered; do
 done
 IFS=$OLD_IFS
 
-# ── 4. verdict ──
+# ── 5. stale declarations (shrink-only) ──
+# A declared file that is no longer complex — simple tag now, untagged, or
+# gone — fails until the line is removed. Mirror of LEDGER_COVERAGE's STALE:
+# the declaration file can only shrink toward zero.
+stale_done=""
+OLD_IFS=$IFS
+IFS='
+'
+for drow in $declared; do
+	IFS=$OLD_IFS
+	[ -n "$drow" ] || { IFS='
+'; continue; }
+	dfile=${drow%%	*}
+	case "
+$stale_done
+" in
+	*"
+$dfile
+"*) ;;
+		*)
+			case "
+$complex_files
+" in
+				*"
+$dfile
+"*) ;;
+					*)
+						note_fail "STALE: $dfile — declared in $REVIEWED but no longer complex (remove the declaration)"
+						;;
+			esac
+			stale_done="${stale_done:+$stale_done
+}$dfile"
+			;;
+	esac
+	IFS='
+'
+done
+IFS=$OLD_IFS
+
+# ── 6. verdict ──
 echo ""
 echo "go-buildtag census: $n_tagged tagged file(s), $n_vet vet leg(s) OK, $n_review needs-review"
 if [ "$FAIL" -ne 0 ]; then

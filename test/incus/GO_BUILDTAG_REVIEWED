@@ -1,0 +1,17 @@
+# Reviewed complex build constraints (#9922 F-159).
+#
+# The buildtag census (scripts/go-buildtag-census.sh) compiles every
+# single-identifier `//go:build` constraint with a `go vet -tags` leg. A
+# COMPLEX constraint (`foo && bar`, `!cgo`, ...) has no compile leg, so the
+# file fails the census UNLESS a line here declares it reviewed — either add
+# a compile configuration that covers the shape, or accept it with a reason.
+# A declared file that stops being complex fails the census (shrink-only:
+# remove the line). Same contract shape as LEDGER_COVERAGE.unreached.
+#
+# One `file constraint reason...` per line; blank lines and #-comments are
+# ignored. The constraint must match the file's `//go:build` line exactly; a
+# drifted constraint fails until the line is updated. A line naming only a
+# file (no constraint + reason) is malformed and fails. Example:
+# pkg/gpu/gpu_tagged_test.go linux && amd64 needs bare metal; covered by the nightly GPU leg, which the default gate cannot run
+#
+# None declared today: no complex-constraint test file exists in this tree.

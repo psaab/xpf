@@ -10,10 +10,11 @@
 # THE CELLS THAT MATTER ARE THE ONES THAT MUST FAIL. A census is a gate, and
 # a gate that cannot be made to FAIL is indistinguishable from one that
 # examines nothing — which is the defect this whole cohort is about. So the
-# FAIL branches (uncompilable tag, fail-closed blindness) are asserted by
-# fixtures the census MUST reject, each paired with a near-twin it MUST
-# accept, because a census that reddened on everything would satisfy every
-# failure cell while being useless.
+# FAIL branches (uncompilable tag, fail-closed blindness, undeclared /
+# stale / malformed complex declarations) are asserted by fixtures the
+# census MUST reject, each paired with a near-twin it MUST accept, because
+# a census that reddened on everything would satisfy every failure cell
+# while being useless.
 set -u
 
 PASS=0; FAIL=0; SKIPPED=0
@@ -65,13 +66,21 @@ new_fixture() { # new_fixture <name> -> echoes the fixture root
 	mkdir -p "$fx/pkg"
 	echo "$fx"
 }
+# Empty reviewed-declarations file for cells with no complex constraint:
+# missing-vs-empty must not matter to them, so run_census points the
+# override at a real zero-entry file unless the cell passes its own.
+EMPTY_REVIEWED="$WORK/empty-reviewed"
+: >"$EMPTY_REVIEWED"
 
-# run_census <fx> <known> <log> -> prints merged output, returns census rc.
+# run_census <fx> <known> <log> [reviewed] -> prints merged output, returns census rc.
 # KNOWN is per-fixture: point it at the tagged file when the cell wants the
 # fail-closed control to pass, at an absent path when the cell wants it out
 # of the way, at a present-but-untagged file when the cell wants it to trip.
+# REVIEWED is the GO_BUILDTAG_REVIEWED override: cells that exercise complex
+# declarations pass a per-fixture file, the rest default to the empty one.
 run_census() {
 	GO_BUILDTAG_ROOT="$1" GO_BUILDTAG_DIRS="pkg" GO_BUILDTAG_KNOWN="$2" \
+	GO_BUILDTAG_REVIEWED="${4:-$EMPTY_REVIEWED}" \
 	GO="$STUB_GO" STUB_GO_LOG="$3" "$SH_BIN" "$CENSUS" 2>&1
 }
 
@@ -172,10 +181,14 @@ echo "$out" | grep -q "gamma_test.go: //go:build" \
 	&& bad "a vet leg ran for a misplaced constraint: $(cat "$LOG3")" \
 	|| ok "no vet leg runs for a misplaced constraint"
 
-# ── 4. complex expression: NEEDS-REVIEW, loud but non-failing ──
-# The census has no compile leg for `!cgo` / `foo && bar`; it must SAY so on
-# every run, not silently drop the file. None exist today — the first one
-# must be impossible to miss, not impossible to land.
+# ── 4. complex expression: gated by reviewed declarations ──
+# A complex constraint (`linux && amd64`, `!cgo`) has no compile leg, so it
+# must FAIL until a human either adds a compile configuration covering the
+# shape or accepts it as reviewed (`file constraint reason...` in
+# GO_BUILDTAG_REVIEWED). A declared complex file still prints its
+# NEEDS-REVIEW line — now meaning reviewed-accepted — and a stale,
+# drifted, reason-less, or malformed declaration FAILs (shrink-only, the
+# LEDGER_COVERAGE.unreached contract).
 FX4=$(new_fixture complex)
 mkdir -p "$FX4/pkg/delta"
 cat >"$FX4/pkg/delta/delta.go" <<'GO'
@@ -191,16 +204,107 @@ import "testing"
 
 func TestDelta(t *testing.T) {}
 GO
-LOG4="$WORK/log4"; : >"$LOG4"
-out=$(run_census "$FX4" "pkg/delta/delta_tagged_test.go" "$LOG4"); rc=$?
-[ "$rc" = "0" ] && ok "complex constraint does not fail the census" \
-	|| bad "complex constraint failed the census (rc=$rc): $out"
-echo "$out" | grep -q "NEEDS-REVIEW: pkg/delta/delta_tagged_test.go" \
-	&& ok "complex constraint is a loud NEEDS-REVIEW line" \
-	|| bad "no NEEDS-REVIEW line for the complex constraint: $out"
-[ -s "$LOG4" ] \
-	&& bad "a vet leg ran for a complex constraint it cannot express: $(cat "$LOG4")" \
+
+# 4a. undeclared complex MUST fail, naming the file and the constraint.
+LOG4a="$WORK/log4a"; : >"$LOG4a"
+out=$(run_census "$FX4" "pkg/delta/delta_tagged_test.go" "$LOG4a" "$EMPTY_REVIEWED"); rc=$?
+[ "$rc" = "1" ] \
+	&& ok "undeclared complex constraint fails the census (rc 1)" \
+	|| bad "undeclared complex did NOT fail rc 1 (rc=$rc): $out"
+echo "$out" | grep -q "pkg/delta/delta_tagged_test.go" \
+	&& ok "the undeclared failure names the file" \
+	|| bad "undeclared failure does not name the file: $out"
+echo "$out" | grep -q "linux && amd64" \
+	&& ok "the undeclared failure names the constraint" \
+	|| bad "undeclared failure does not name the constraint: $out"
+echo "$out" | grep -q "declaration" \
+	&& ok "the undeclared failure tells the human to declare it" \
+	|| bad "undeclared failure has no declaration pointer: $out"
+[ -s "$LOG4a" ] \
+	&& bad "a vet leg ran for a complex constraint it cannot express: $(cat "$LOG4a")" \
 	|| ok "no vet leg runs for a complex constraint"
+
+# 4b. declared complex passes, NEEDS-REVIEW line present (reviewed-accepted).
+printf '%s\n' "pkg/delta/delta_tagged_test.go linux && amd64 bare-metal GPU leg covers this shape; accepted for the default gate" >"$FX4/reviewed-ok"
+LOG4b="$WORK/log4b"; : >"$LOG4b"
+out=$(run_census "$FX4" "pkg/delta/delta_tagged_test.go" "$LOG4b" "$FX4/reviewed-ok"); rc=$?
+[ "$rc" = "0" ] \
+	&& ok "declared complex constraint passes" \
+	|| bad "declared complex failed (rc=$rc): $out"
+echo "$out" | grep -q "NEEDS-REVIEW: pkg/delta/delta_tagged_test.go" \
+	&& ok "declared complex keeps its loud NEEDS-REVIEW line" \
+	|| bad "no NEEDS-REVIEW line for the declared complex constraint: $out"
+[ -s "$LOG4b" ] \
+	&& bad "a vet leg ran for a declared complex constraint: $(cat "$LOG4b")" \
+	|| ok "no vet leg runs for a declared complex constraint"
+
+# 4c. stale declaration MUST fail: the declared file carries a simple tag now.
+FX4c=$(new_fixture complexstale)
+mkdir -p "$FX4c/pkg/zeta"
+cat >"$FX4c/pkg/zeta/zeta.go" <<'GO'
+package zeta
+func Zeta() int { return 26; }
+GO
+cat >"$FX4c/pkg/zeta/zeta_tagged_test.go" <<'GO'
+//go:build fixtag
+
+package zeta
+
+import "testing"
+
+func TestZeta(t *testing.T) {}
+GO
+printf '%s\n' "pkg/zeta/zeta_tagged_test.go linux && amd64 left over from when this file carried a complex tag" >"$FX4c/reviewed-stale"
+LOG4c="$WORK/log4c"; : >"$LOG4c"
+out=$(run_census "$FX4c" "pkg/zeta/zeta_tagged_test.go" "$LOG4c" "$FX4c/reviewed-stale"); rc=$?
+[ "$rc" != "0" ] \
+	&& ok "stale declaration fails the census" \
+	|| bad "stale declaration did NOT fail — the file can only grow"
+echo "$out" | grep -q "STALE: pkg/zeta/zeta_tagged_test.go" \
+	&& ok "the stale failure names the file" \
+	|| bad "stale failure does not name the file: $out"
+
+# 4d. malformed declaration MUST fail, even on an otherwise empty board.
+FX4d=$(new_fixture complexmalformed)
+mkdir -p "$FX4d/pkg/theta"
+cat >"$FX4d/pkg/theta/theta_test.go" <<'GO'
+package theta
+
+import "testing"
+
+func TestTheta(t *testing.T) {}
+GO
+printf '%s\n' "oops-no-constraint-or-reason" >"$FX4d/reviewed-malformed"
+LOG4d="$WORK/log4d"; : >"$LOG4d"
+out=$(run_census "$FX4d" "pkg/theta/does-not-exist_test.go" "$LOG4d" "$FX4d/reviewed-malformed"); rc=$?
+[ "$rc" != "0" ] \
+	&& ok "malformed declaration fails the census" \
+	|| bad "malformed declaration did NOT fail the census"
+echo "$out" | grep -q "malformed declaration" \
+	&& ok "the malformed failure says so by name" \
+	|| bad "malformed trip has no malformed text: $out"
+
+# 4e. drifted constraint MUST fail: the declaration names yesterday's text.
+printf '%s\n' "pkg/delta/delta_tagged_test.go linux && arm64 reason written against the old constraint" >"$FX4/reviewed-drifted"
+LOG4e="$WORK/log4e"; : >"$LOG4e"
+out=$(run_census "$FX4" "pkg/delta/delta_tagged_test.go" "$LOG4e" "$FX4/reviewed-drifted"); rc=$?
+[ "$rc" != "0" ] \
+	&& ok "drifted declaration fails the census" \
+	|| bad "drifted declaration did NOT fail — the constraint match is file-only"
+echo "$out" | grep -q "pkg/delta/delta_tagged_test.go" \
+	&& ok "the drifted failure names the file" \
+	|| bad "drifted failure does not name the file: $out"
+
+# 4f. reason-less declaration MUST fail: `file constraint` alone is not a review.
+printf '%s\n' "pkg/delta/delta_tagged_test.go linux && amd64" >"$FX4/reviewed-noreason"
+LOG4f="$WORK/log4f"; : >"$LOG4f"
+out=$(run_census "$FX4" "pkg/delta/delta_tagged_test.go" "$LOG4f" "$FX4/reviewed-noreason"); rc=$?
+[ "$rc" != "0" ] \
+	&& ok "reason-less declaration fails the census" \
+	|| bad "reason-less declaration did NOT fail — the reason is optional"
+echo "$out" | grep -q "no reason" \
+	&& ok "the reason-less failure says so by name" \
+	|| bad "reason-less trip has no reason text: $out"
 
 # ── 5. FAIL-CLOSED pair: blindness to the known file MUST fail ──
 # (a) the trip: KNOWN exists on disk but discovery finds nothing (here the
