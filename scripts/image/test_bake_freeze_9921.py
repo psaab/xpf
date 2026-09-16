@@ -1,30 +1,39 @@
 #!/usr/bin/env python3
 """Unit tests for psaab/xpf#9921 F-068 (bake.py half) — freeze gate inputs,
-hash the staged bytes, re-assert live-vs-snapshot before signing.
+hash the staged bytes, re-assert live-vs-snapshot, sign from memory.
 
 bake.py hashes its checksum manifest pre-gate and signs it post-gate while
 the gate boots the live files for minutes. The fix stages the gate-consumed
 artifacts (stage_artifacts_for_gate), snapshots {basename: digest} IN MEMORY
-at hash time (snapshot_manifest_inputs), and re-asserts inside sign_step
-(assert_live_matches_manifest): a rewritten live sums file OR a swapped live
-artifact both die before the signature.
+at hash time (snapshot_manifest_inputs), re-asserts inside sign_step
+(assert_live_matches_manifest, fail-fast), and signs bytes rendered from
+that snapshot via a private manifest (sign_manifest_step_from_snapshot) that
+is installed over the live pair — the live manifest is never reopened for
+signing.
 
-The joint-tamper cell is the key: rewriting the live sums to match swapped
-live artifacts must STILL die, because the snapshot (not the live sums) is
-ground truth. A live-vs-live comparison would pass it — exactly the F-068
-impact.
+The joint-tamper cell is the key for the assert: rewriting the live sums to
+match swapped live artifacts must STILL die, because the snapshot (not the
+live sums) is ground truth. The post-parse-swap cell is the key for the
+signer: a live-sums replacement landing AFTER the assert's parse (during
+the multi-GB rehash) must not reach the signature — the installed pair must
+equal the snapshot bytes.
 
-RED on revert: no helpers (AttributeError).
+RED on revert: no helpers (AttributeError); signing the live pathname fails
+the swap cells.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
+import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 
@@ -40,6 +49,8 @@ def _load(name, directory):
 
 bake = _load("bake", _HERE)
 sign = _load("sign", _HERE.parent / "dist")
+
+_HAVE_MINISIGN = shutil.which("minisign") is not None
 
 
 class StageTests(unittest.TestCase):
@@ -126,6 +137,153 @@ class StageTests(unittest.TestCase):
         Path(sums).write_text("garbage not a manifest\n")
         with self.assertRaises(SystemExit):
             bake.assert_live_matches_manifest(live_inputs, sums, snap)
+
+
+class SignFromSnapshotTests(unittest.TestCase):
+    """sign_manifest_step_from_snapshot signs memory, never the live file."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="xpf-bakesign9921-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.work = os.path.join(self.dir, "work")
+        os.makedirs(self.work)
+        self.out = os.path.join(self.dir, "out")
+        os.makedirs(self.out)
+        self.qcow = os.path.join(self.out, "xpf-9.qcow2")
+        self.meta = os.path.join(self.out, "xpf-9.incus-metadata.tar.gz")
+        Path(self.qcow).write_bytes(b"Q" * 1000)
+        Path(self.meta).write_bytes(b"M" * 100)
+        self.manifest = os.path.join(self.out, "xpf-9.manifest")
+        self.pkgs = os.path.join(self.out, "xpf-9.pkgs")
+        Path(self.manifest).write_text("validated: true\n")
+        Path(self.pkgs).write_text("pkg-a\n")
+
+    def _hash_and_snapshot(self):
+        staged = bake.stage_artifacts_for_gate(self.work, self.qcow, self.meta)
+        live_inputs = [self.qcow, self.meta, self.manifest, self.pkgs]
+        hashing = [staged.get(p, p) for p in live_inputs]
+        snap = bake.snapshot_manifest_inputs(hashing)
+        sums = os.path.join(self.out, "xpf-9.SHA256SUMS")
+        sign.write_manifest(sums, hashing)
+        return live_inputs, snap, sums
+
+    def _evil_sums_text(self, expected):
+        # Attacker manifest: valid format, same basenames, wrong qcow digest.
+        # Constructed by replacing the qcow line of the good rendering so the
+        # other three lines (and the exact format) stay identical.
+        evil_digest = hashlib.sha256(b"EVIL-QCOW-POST-PARSE").hexdigest()
+        lines = []
+        for line in expected.splitlines():
+            digest, base = line.split()
+            if base == os.path.basename(self.qcow):
+                digest = evil_digest
+            lines.append(f"{digest}  {base}\n")
+        return "".join(lines)
+
+    def _capture_signer(self, captured):
+        def fake_sign_manifest(manifest_path, seckey_path, comment=None,
+                               sig_path=None):
+            captured["bytes"] = Path(manifest_path).read_bytes()
+            captured["path"] = manifest_path
+            captured["seckey"] = seckey_path
+            sig = sig_path or manifest_path + ".minisig"
+            Path(sig).write_bytes(b"DUMMY-SIG")
+            return sig
+        return fake_sign_manifest
+
+    def _run_sign_step(self, sums, snap, captured):
+        with mock.patch.object(bake.sign, "require_minisign",
+                               return_value="/usr/bin/minisign"), \
+                mock.patch.object(bake.sign, "sign_manifest",
+                                  side_effect=self._capture_signer(captured)), \
+                mock.patch.dict(os.environ, {"XPF_SIGN_SECKEY": "dummy.sec"}):
+            bake.sign_manifest_step_from_snapshot(
+                self.out, sums, "9", snap, self.work)
+
+    def test_render_matches_write_manifest_bytes(self):
+        _live, snap, sums = self._hash_and_snapshot()
+        self.assertEqual(bake.render_snapshot_manifest(snap),
+                         Path(sums).read_text())
+
+    def test_sign_ignores_attacker_live_sums(self):
+        # Live sums already replaced with attacker bytes BEFORE the sign
+        # step: the installed pair must still equal the snapshot rendering.
+        # (Pre-fix code signing the live pathname captures attacker bytes.)
+        _live, snap, sums = self._hash_and_snapshot()
+        expected = Path(sums).read_bytes()
+        Path(sums).write_text(self._evil_sums_text(expected.decode()))
+        captured = {}
+        self._run_sign_step(sums, snap, captured)
+        self.assertEqual(captured["bytes"], expected)
+        self.assertTrue(captured["path"].startswith(self.work + os.sep),
+                        f"signer opened {captured['path']} — not private")
+        self.assertEqual(captured["seckey"], "dummy.sec")
+        self.assertEqual(Path(sums).read_bytes(), expected,
+                         "live sums not healed to snapshot bytes")
+        self.assertEqual(Path(sums + ".minisig").read_bytes(), b"DUMMY-SIG")
+
+    def test_post_parse_live_swap_cannot_reach_signature(self):
+        # The parent-review interleaving: the assert parses good live bytes,
+        # then a writer swaps the sums file DURING the rehash (multi-GB work
+        # takes seconds). The assert passes on the good bytes — and the
+        # signature must still cover the snapshot, not the replacement.
+        live_inputs, snap, sums = self._hash_and_snapshot()
+        expected = Path(sums).read_bytes()
+        evil = self._evil_sums_text(expected.decode())
+        swapped = []
+        real_sha = bake.sign.sha256_file
+
+        def swapping_sha(path):
+            if path in live_inputs and not swapped:
+                # Inside the assert's rehash loop: parse already consumed the
+                # good live bytes. Land the replacement now.
+                Path(sums).write_text(evil)
+                swapped.append(True)
+            return real_sha(path)
+
+        with mock.patch.object(bake.sign, "sha256_file",
+                               side_effect=swapping_sha):
+            bake.assert_live_matches_manifest(live_inputs, sums, snap)
+        self.assertTrue(swapped, "swap never fired — test is vacuous")
+        self.assertEqual(Path(sums).read_text(), evil,
+                         "race setup failed: live sums not replaced")
+        captured = {}
+        self._run_sign_step(sums, snap, captured)
+        self.assertEqual(captured["bytes"], expected,
+                         "replacement bytes reached the signer!")
+        self.assertEqual(Path(sums).read_bytes(), expected)
+
+    def test_sign_without_seckey_warns_and_leaves_live_untouched(self):
+        _live, snap, sums = self._hash_and_snapshot()
+        expected = Path(sums).read_bytes()
+        env = dict(os.environ)
+        env.pop("XPF_SIGN_SECKEY", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            bake.sign_manifest_step_from_snapshot(
+                self.out, sums, "9", snap, self.work)
+        self.assertEqual(Path(sums).read_bytes(), expected)
+        self.assertFalse(os.path.exists(sums + ".minisig"))
+
+    @unittest.skipUnless(_HAVE_MINISIGN, "minisign not installed")
+    def test_sign_e2e_installed_pair_verifies_snapshot_bytes(self):
+        # Real minisign end-to-end: live sums replaced with attacker bytes
+        # before signing; the installed pair must verify AND equal the
+        # snapshot rendering.
+        _live, snap, sums = self._hash_and_snapshot()
+        expected = Path(sums).read_bytes()
+        Path(sums).write_text(self._evil_sums_text(expected.decode()))
+        pub = os.path.join(self.dir, "t.pub")
+        sec = os.path.join(self.dir, "t.sec")
+        subprocess.run(["minisign", "-G", "-W", "-p", pub, "-s", sec],
+                       check=True, capture_output=True, timeout=60)
+        with mock.patch.dict(os.environ, {"XPF_SIGN_SECKEY": sec}):
+            bake.sign_manifest_step_from_snapshot(
+                self.out, sums, "9", snap, self.work)
+        self.assertEqual(Path(sums).read_bytes(), expected)
+        r = subprocess.run(["minisign", "-V", "-p", pub, "-m", sums,
+                            "-x", sums + ".minisig"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
 
 
 if __name__ == "__main__":

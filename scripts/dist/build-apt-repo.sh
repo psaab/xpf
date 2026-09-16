@@ -71,6 +71,21 @@ case "$ORIGIN" in ""|*[![:print:]]*)
     die "origin must be non-empty single-line printable text (got '$ORIGIN')" ;;
 esac
 if [ "$_lc_had" = "1" ]; then LC_ALL=$_lc_saved; else unset LC_ALL; fi
+# F-066c/#9921 (parent review): VALID_DAYS and XPF_GPG_KEY interpolate into
+# the reprepro distributions file (ValidFor/SignWith) and the flat Release
+# knob (ValidTime). A newline-bearing VALID_DAYS injects a config line, so
+# VALID_DAYS is digits-only (1-5 digits; 0 is allowed and fails closed
+# downstream as an immediately-stale horizon). XPF_GPG_KEY flows into argv
+# (flat gpg --local-user: immune) and a line-based file, so only a newline
+# could inject there — reject newlines alone so key IDs, fingerprints, and
+# space/unicode UID strings keep working.
+case "$VALID_DAYS" in ""|*[!0-9]*|??????*)
+    die "valid-days must be 1-5 digits (got '$VALID_DAYS')" ;;
+esac
+case "${XPF_GPG_KEY-}" in
+    *'
+'*) die "gpg key id must be single-line" ;;
+esac
 
 # Default deb set: the freshly built binary + appliance packages.
 if [ -z "$DEBS" ]; then
@@ -88,13 +103,35 @@ APT="$OUT/apt"
 POOL="$APT/pool/$SUITE/$COMPONENT/x/xpf"
 DISTDIR="$APT/dists/$SUITE/$COMPONENT/binary-$ARCH"
 mkdir -p "$POOL" "$DISTDIR"
+# F-066b/#9921 (parent review): lexical validation cannot see a PRE-PLANTED
+# symlink: $OUT/apt/dists/stable/<escape> -> /external makes a lexically
+# VALID COMPONENT=escape resolve outside --out, and mkdir -p happily creates
+# binary-$ARCH through it. Resolve both COMPONENT-derived sinks and verify
+# containment within the resolved --out; die loudly on escape. (Static
+# subpaths like conf/ are the operator's exclusive-dir responsibility; only
+# validated-input-derived sinks are pinned here. A planter racing mkdir
+# itself is narrowed to microseconds by this ordering, not closed — shell
+# cannot mkdir with O_NOFOLLOW.)
+_out_resolved=$(cd "$OUT" && pwd -P) || die "cannot resolve --out $OUT"
+for _d in "$POOL" "$DISTDIR"; do
+    _r=$(cd "$_d" 2>/dev/null && pwd -P) || _r=""
+    case "${_r:-MISSING}" in
+        "$_out_resolved"|"$_out_resolved"/*) : ;;
+        *) die "repo path escapes --out ($_d resolves outside $OUT) — refusing to write" ;;
+    esac
+done
+unset _d _r _out_resolved
 
 info "apt repo tool: $TOOL, suite: $SUITE, arch: $ARCH, out: $APT"
 
-# NOTE(F-066/#9921): the COMPONENT/ARCH/ORIGIN gate above also covers this
-# path's distributions file (single-line values cannot inject fields), but the
-# Valid-Until count+value assert below is flat-path-only: reprepro synthesizes
-# its Release from its own database plus the ValidFor knob and exits here.
+# NOTE(F-066/#9921): the COMPONENT/ARCH/ORIGIN/VALID_DAYS/GPG_KEY gate above
+# also covers this path's distributions file (allowlisted/digit/single-line
+# values cannot inject fields), but the Valid-Until count+value assert below
+# is flat-path-only: reprepro synthesizes its Release from its own database
+# plus the ValidFor knob and exits here. The reprepro operator (persistent
+# publisher holding the signing key) is the trusted actor for that synthesis;
+# post-hoc verification of reprepro's own emission is defense-in-depth tracked
+# in #10123 (needs a reprepro binary to verify the emission format).
 if [ "$TOOL" = "reprepro" ]; then
     command -v reprepro >/dev/null 2>&1 || die "reprepro not found (apt-get install reprepro)"
     [ -n "${XPF_GPG_KEY:-}" ] || die "reprepro path requires XPF_GPG_KEY (signs Release)"

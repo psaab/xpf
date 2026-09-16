@@ -703,8 +703,19 @@ def validation_gate_step(skip_validate, qcow_out, meta_out):
         die("validation gate FAILED — artifacts are NOT publishable")
 
 
-def sign_manifest_step(out_dir, sums, ver):
-    """Sign the checksum manifest with minisign (#1924 §5.1).
+def render_snapshot_manifest(snapshot):
+    """Render sha256sum-format manifest text from the in-memory `snapshot`
+    (#9921 F-068). Line format matches sign.write_manifest
+    (`<hex>  <basename>`, two spaces); order is the snapshot's insertion
+    order, which snapshot_manifest_inputs sets to the hashed-files order —
+    so these bytes are identical to a hash-time write_manifest over the same
+    inputs.
+    """
+    return "".join(f"{digest}  {base}\n" for base, digest in snapshot.items())
+
+
+def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work):
+    """Sign the in-memory `snapshot` via a PRIVATE manifest file (#1924 §5.1).
 
     #4017: the signature is a TRUST artifact — downstream publish and
     operators read a signed image as a validated one — so this step is
@@ -717,6 +728,17 @@ def sign_manifest_step(out_dir, sums, ver):
     pinned public key is copied into dist/ so the published tree is
     self-describing (its trust root remains the in-repo checked-in copy,
     not this convenience copy).
+
+    #9921 F-068 (parent review): the signed bytes MUST come from memory,
+    never from reopening the writable live manifest. The pre-sign assert
+    parses the live sums and re-hashes multi-GB artifacts over SECONDS, and
+    minisign would then reopen the live pathname for signing — a writer
+    swapping the sums file in that window gets their bytes signed while every
+    assertion passed on the good bytes. So: render the snapshot to a manifest
+    inside a private 0700 dir, minisign THAT file, and os.replace() the pair over
+    the live sums + .minisig. A crash between the two renames leaves new
+    sums beside a stale-or-absent sig, which publish refuses (fail-closed;
+    same shape as sign.write_and_sign_manifest).
     """
     seckey = os.environ.get("XPF_SIGN_SECKEY")
     if not seckey:
@@ -727,9 +749,17 @@ def sign_manifest_step(out_dir, sums, ver):
         return
     try:
         sign.require_minisign()
-        sig = sign.sign_manifest(sums, seckey,
+        stage = os.path.join(work, "signing")
+        os.makedirs(stage, mode=0o700, exist_ok=True)
+        os.chmod(stage, 0o700)
+        priv = os.path.join(stage, os.path.basename(sums))
+        with open(priv, "w") as f:
+            f.write(render_snapshot_manifest(snapshot))
+        sig = sign.sign_manifest(priv, seckey,
                                  comment=f"xpf image {ver} sha256sums")
-        info(f"signed manifest: {os.path.basename(sig)}")
+        os.replace(priv, sums)
+        os.replace(sig, sums + ".minisig")
+        info(f"signed manifest: {os.path.basename(sums + '.minisig')}")
         pub_src = sign.DEFAULT_IMAGE_PUBKEY
         if os.path.isfile(pub_src):
             shutil.copyfile(pub_src, os.path.join(out_dir, "xpf-image.pub"))
@@ -800,11 +830,17 @@ def snapshot_manifest_inputs(files):
 
 
 def assert_live_matches_manifest(live_files, sums_path, snapshot):
-    """Re-assert, immediately before signing, that the live tree still matches
-    the in-memory `snapshot` taken at hash time (#9921 F-068). Dies on ANY
-    drift: a rewritten live sums file (parsed map != snapshot) or a swapped
-    live artifact (re-hash != snapshot). Call this INSIDE sign_step so the
-    #4017 validate-before-sign ordering binds it.
+    """Fail-fast drift check immediately before signing (#9921 F-068). Dies
+    on ANY drift: a rewritten live sums file (parsed map != snapshot) or a
+    swapped live artifact (re-hash != snapshot). Call this INSIDE sign_step
+    so the #4017 validate-before-sign ordering binds it.
+
+    Defense in depth, not the security boundary: a race winning between this
+    check and signing cannot corrupt the signature, because
+    sign_manifest_step_from_snapshot signs bytes rendered from the in-memory
+    snapshot (never reopened from the live tree) and installs them over the
+    live pair. This assert exists to fail fast with a clear bake-time error
+    instead of shipping a tree publish would refuse.
     """
     try:
         live_map = sign.parse_manifest(sums_path)
@@ -1109,7 +1145,7 @@ def main():
         # (die(), exit non-zero) BEFORE any .minisig is written.
         def sign_step():
             assert_live_matches_manifest(live_inputs, sums, snapshot)
-            sign_manifest_step(a.out, sums, ver)
+            sign_manifest_step_from_snapshot(a.out, sums, ver, snapshot, work)
 
         finalize_artifacts(
             validate_step=lambda: validation_gate_step(

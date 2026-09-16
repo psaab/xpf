@@ -120,6 +120,65 @@ class RefusalTests(unittest.TestCase):
             with self.subTest(origin=repr(origin)):
                 self._refused("origin", {"XPF_APT_ORIGIN": origin})
 
+    def test_valid_days_rejected_pre_write(self):
+        for days in ("7\nValidFor: evil", "abc", "12x", "3.5", "-7", "123456"):
+            with self.subTest(days=repr(days)):
+                self._refused("valid-days", {"XPF_APT_VALID_DAYS": days})
+
+    def test_valid_days_valid_shapes_pass_gate(self):
+        # Digits sail past the gate; '0'/huge values may still die LATER
+        # (missing Valid-Until / apt overflow caught by the value assert) —
+        # either way the error must NOT be the gate's.
+        for days in ("365", "7", "0", "99999"):
+            with self.subTest(days=days):
+                outdir = os.path.join(self.dir, "out")
+                os.makedirs(outdir, exist_ok=True)
+                _rc, out = _build(outdir, os.path.join(self.dir, "fake.deb"),
+                                  {"XPF_APT_VALID_DAYS": days})
+                self.assertNotIn("valid-days must be", out.lower(),
+                                 f"valid VALID_DAYS rejected: {out[-300:]}")
+
+    def test_gpg_key_newline_rejected_pre_write(self):
+        self._refused("gpg key", {"XPF_GPG_KEY": "ABC\nSignWith: evil"})
+
+    def test_gpg_key_uid_shapes_pass_gate(self):
+        # Key IDs, fingerprints, and space/unicode UID strings must keep
+        # working — only a newline is refused.
+        for key in ("ABCDEF1234567890",
+                    "selftest@xpf.invalid",
+                    "John J\u00fcrgen Doe <j@x.invalid>"):
+            with self.subTest(key=key):
+                outdir = os.path.join(self.dir, "out")
+                os.makedirs(outdir, exist_ok=True)
+                _rc, out = _build(outdir, os.path.join(self.dir, "fake.deb"),
+                                  {"XPF_GPG_KEY": key})
+                self.assertNotIn("single-line", out,
+                                 f"legit GPG key refused: {out[-300:]}")
+
+    def test_preplanted_symlink_escape_refused(self):
+        # F-066b (parent review): a lexically VALID COMPONENT whose tree
+        # position was pre-planted as a symlink to an external dir must die
+        # loudly at the containment check — before any deb copy or Packages
+        # write lands outside --out.
+        for sub in ("dists", "pool"):
+            with self.subTest(tree=sub):
+                outdir = os.path.join(self.dir, f"out-{sub}")
+                victim = os.path.join(self.dir, f"victim-{sub}")
+                os.makedirs(victim)
+                link_parent = os.path.join(outdir, "apt", sub, "stable")
+                os.makedirs(link_parent)
+                os.symlink(victim, os.path.join(link_parent, "pescape"))
+                rc, out = _build(outdir, os.path.join(self.dir, "fake.deb"),
+                                 {"XPF_APT_COMPONENT": "pescape"})
+                self.assertNotEqual(rc, 0, f"symlink escape accepted: {out[-500:]}")
+                self.assertIn("escapes --out", out,
+                              f"refusal names no escape: {out[-500:]}")
+                stray = []
+                for root, _dirs, files in os.walk(victim):
+                    stray.extend(os.path.join(root, f) for f in files)
+                self.assertEqual(stray, [],
+                                 f"content written outside --out: {stray}")
+
 
 @unittest.skipUnless(_HAS_BUILD_TOOLS,
                      "needs apt-ftparchive + dpkg-deb for a real build")
@@ -166,6 +225,24 @@ class PositiveBuildTests(unittest.TestCase):
         text = self._release(outdir)
         self.assertEqual(sum(1 for ln in text.splitlines()
                              if ln.startswith("Valid-Until:")), 1)
+
+    def test_zero_horizon_refused_by_singleton_assert(self):
+        # VALID_DAYS=0 passes the digit gate; apt then emits NO Valid-Until
+        # and the count assert refuses (fail closed, never an unstamped repo).
+        outdir = os.path.join(self.dir, "out")
+        rc, out = _build(outdir, self.deb, {"XPF_APT_VALID_DAYS": "0"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("exactly 1", out)
+
+    def test_absurd_horizon_refused_by_value_assert(self):
+        # VALID_DAYS=99999 passes the digit gate; apt's own Valid-Until
+        # computation overflows (emits ~2028, not +99999d) and the exact
+        # epoch assert refuses. This cell pins the value half, not just the
+        # count: without it the miscomputed horizon would ship signed.
+        outdir = os.path.join(self.dir, "out")
+        rc, out = _build(outdir, self.deb, {"XPF_APT_VALID_DAYS": "99999"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ValidTime-derived", out)
 
 
 if __name__ == "__main__":
