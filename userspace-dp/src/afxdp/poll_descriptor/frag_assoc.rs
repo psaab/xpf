@@ -391,8 +391,9 @@ pub(super) fn flowless_fragment_requires_nat_translation(
         meta.ingress_ifindex as i32,
         // #9956 F-052: the fragment's OWN vlan. This probe runs on the
         // association-MISS path where the first fragment's vlan is unknowable
-        // (no assoc exists); the probe is a per-packet fail-closed decision
-        // for which this fragment's own ingress is the admitting identity.
+        // (no assoc exists); scoping on this fragment's own ingress is
+        // best-effort under ECMP (fragments can split across ingress links),
+        // and the admitting identity for this per-packet decision.
         meta.ingress_vlan_id,
         from_zone,
         to_zone,

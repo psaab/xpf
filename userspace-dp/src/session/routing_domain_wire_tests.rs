@@ -125,6 +125,12 @@ fn the_quarantine_sentinel_decodes_unrecognized_9956() {
         .parse()
         .expect("sentinel parses as u32");
     assert_eq!(
+        QUARANTINED_ROUTING_DOMAIN, value,
+        "Rust QUARANTINED_ROUTING_DOMAIN must equal Go's \
+         QuarantinedRoutingInstanceDomain ({value}): the interface consumer \
+         and the sync handler key off the Rust const"
+    );
+    assert_eq!(
         routing_domain_from_wire(routing_domain_to_wire(value)),
         WireRoutingDomain::Unrecognized,
         "quarantine sentinel {value} must round-trip as Unrecognized (refused \

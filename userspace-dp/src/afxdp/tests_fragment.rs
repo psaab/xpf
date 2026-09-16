@@ -2191,8 +2191,10 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
     // RED on base: the session carried 1 packet / 42 bytes instead of 2 / 84
     // with the gap silent. The shipped direction is the explicit flowless
     // counter family (charging a port-less fragment to a 5-tuple session is
-    // ambiguous under port reuse): session + flowless now reconciles with the
-    // global total, packets and bytes.
+    // ambiguous under port reuse): session + flowless reconciles with the
+    // global total here — fixture-exact, not universal (`account_packet`
+    // no-ops on not-yet-existing sessions, so production can still
+    // under-count the session leg on install races).
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
