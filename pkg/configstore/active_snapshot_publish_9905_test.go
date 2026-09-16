@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Active-snapshot publication coverage (#9905, review GPT-1/SPARK-F5).
@@ -18,7 +19,9 @@ import (
 // Coverage here is behavioral per promotion path — commit, SyncApply,
 // PromoteRollback (incl. the nil first-commit target), boot recovery
 // (incl. the nil first-commit outcome) — plus a structural test pinning
-// the swap↔publish pairing itself (an 8th swap site fails loudly either
+// the swap↔publish pairing within store*.go production files (line and
+// block comments excluded on both sides of the check). Swaps outside
+// store*.go non-test files are out of this guard's sight by construction.
 // way). The daemon rebuild test pins the commit path end to end, and the
 // daemon withhold cell pins the (gen, nil) snapshot shape the daemon
 // treats as transient.
@@ -128,6 +131,10 @@ func TestActiveSnapshotConcurrentLoads9905(t *testing.T) {
 	s := snapshotPublishStore9905(t, "a")
 	g0, _ := s.ActiveSnapshot()
 	const readers = 8
+	// snapshotAckTimeout bounds a collection stall (deadlock/bug) instead of
+	// hanging to package timeout. Generous on purpose: it is a liveness
+	// backstop, not a perf assertion — healthy rounds complete in milliseconds.
+	const snapshotAckTimeout = 2 * time.Minute
 	// committed pre-registers generation → hostname BEFORE each commit, so
 	// every observable generation has an expectation: readers assert
 	// version-correspondence (the observed cfg's hostname must equal the
@@ -206,12 +213,21 @@ func TestActiveSnapshotConcurrentLoads9905(t *testing.T) {
 			close(done)
 			t.Fatal(err)
 		}
+		// Publication check: the commit must have advanced the snapshot.
+		// Without it, a mutant that drops publication would leave readers
+		// spinning on the old generation while the ack collection below
+		// hangs to package timeout instead of failing cleanly here.
+		if gen, _ := s.ActiveSnapshot(); gen != wantGen {
+			close(done)
+			t.Fatalf("post-commit snapshot gen = %d, want %d (publication missing?)", gen, wantGen)
+		}
 		// Every reader validates this generation before the next commit:
 		// collect one ack ≥ wantGen per distinct reader. The snapshot
 		// stays at wantGen until the next commit, so spinning readers
 		// must observe and ack it — and every publication window is
 		// provably sampled by every reader.
 		seen := make(map[int]bool, readers)
+		deadline := time.After(snapshotAckTimeout)
 		for len(seen) < readers {
 			select {
 			case a := <-acks:
@@ -221,6 +237,9 @@ func TestActiveSnapshotConcurrentLoads9905(t *testing.T) {
 			case err := <-errc:
 				close(done)
 				t.Fatalf("reader failure: %s", err)
+			case <-deadline:
+				close(done)
+				t.Fatalf("timed out waiting for acks ≥ %d (liveness backstop, not a perf assertion)", wantGen)
 			}
 		}
 	}
@@ -269,13 +288,21 @@ func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
 		}
 	}
 	swapRE := regexp.MustCompile(`s\.compiled = [^=]`)
+	blockRE := regexp.MustCompile(`(?s)/\*.*?\*/`)
+	stripBlocks := func(s string) string {
+		// Blank block comments to newlines (never delete): line numbers
+		// below a multi-line comment must keep matching the file.
+		return blockRE.ReplaceAllStringFunc(s, func(m string) string {
+			return strings.Repeat("\n", strings.Count(m, "\n"))
+		})
+	}
 	swaps := 0
 	for _, name := range files {
 		raw, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		lines := strings.Split(string(raw), "\n")
+		lines := strings.Split(stripBlocks(string(raw)), "\n")
 		for i, line := range lines {
 			// Code lines only: doc comments (including this test's own
 			// description of the pattern) must not count as swaps.

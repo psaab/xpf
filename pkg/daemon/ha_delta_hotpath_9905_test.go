@@ -494,12 +494,14 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 }
 
 // TestNAT64SnatFlagGate9905 pins the per-leg NAT64 gating intent (#9905
-// review F2). Old-code evidence: pre-change convert did
-// ParseIP(delta.Nat64SnatV4) on BOTH legs, but the binary-leg string was
-// decode-gated (flag && nonzero at eventstream.go) while the JSON leg
-// carried whatever the producer sent. Post-change equivalence: binary
-// honors the flag (a flagless bin never stamps), string stays flag-blind
-// (legacy fallback).
+// review F2). Base evidence (609433efb): convert had ONE NAT64 site,
+// flag-blind `ParseIP(delta.Nat64SnatV4)` at
+// daemon_ha_userspace_convert.go:575, through which BOTH string sources
+// flowed (strings were the only carrier — no BinAddrLen existed); the
+// binary-decoded string was decode-gated on flag && nonzero at
+// eventstream.go:1553-1554, while JSON carried producer bytes. Post-change
+// equivalence: binary honors the flag explicitly (a flagless bin never
+// stamps), string stays flag-blind (legacy fallback).
 func TestNAT64SnatFlagGate9905(t *testing.T) {
 	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
 	// String leg, flag unset, snat present → stamps (flag-blind legacy).
@@ -662,5 +664,68 @@ func TestHandleDeltaWithholdsWithoutConfig9905(t *testing.T) {
 	delta.IngressZone = "lan"
 	if d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta) {
 		t.Fatal("delta with no compiled config was handled, want withhold (false)")
+	}
+	// Warm-cache variant: the same store after a first-commit rollback —
+	// snapshot (gen≥1, nil) with a stale-but-pinned warm entry. The
+	// handler must still withhold (not convert against nil) and must not
+	// clobber the warm entry with a nil build.
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "config"))
+	d2 := &Daemon{
+		cluster: clusterManagerPrimaryForRGs(0, 1),
+		store:   store,
+	}
+	ss2 := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:1", nil)
+	ss2.IsPrimaryFn = func() bool { return true }
+	ss2.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 0 || rgID == 1 }
+	ss2.SetConnectedForTesting(true)
+	d2.sessionSync = ss2
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		"set system dataplane-type userspace",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key test-cluster-psk-9905",
+		"set chassis cluster node 0",
+		"set chassis cluster redundancy-group 0 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set security zones security-zone lan",
+		"set security zones security-zone wan",
+	}
+	if _, err := store.LoadSet(strings.Join(lines, "\n")); err != nil {
+		t.Fatalf("LoadSet: %v", err)
+	}
+	if _, err := store.CommitConfirmed(10); err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	g1, c1 := store.ActiveSnapshot()
+	if g1 == 0 || c1 == nil {
+		t.Fatalf("post-confirm snapshot = (%d,%v), want (nonzero,non-nil)", g1, c1)
+	}
+	dl := natDelta9905()
+	dl.IngressZone = "lan"
+	if !d2.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, dl) {
+		t.Fatal("warmup delta withheld, want handled")
+	}
+	e1 := d2.userspaceZoneIDs.Load()
+	if e1 == nil || e1.gen != g1 {
+		t.Fatal("no warm cache entry after handled delta")
+	}
+	prevCfg, ok := store.PromoteRollback(store.ConfirmGenForTesting())
+	if !ok {
+		t.Fatal("PromoteRollback: ok=false, want true")
+	}
+	if prevCfg != nil {
+		t.Fatalf("prevCfg = %v, want nil (first-commit rollback)", prevCfg)
+	}
+	g2, c2 := store.ActiveSnapshot()
+	if g2 != g1+1 || c2 != nil {
+		t.Fatalf("post-rollback snapshot = (%d,%v), want (%d,nil)", g2, c2, g1+1)
+	}
+	if d2.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, dl) {
+		t.Fatal("delta with nil snapshot was handled, want withhold (false)")
+	}
+	if e := d2.userspaceZoneIDs.Load(); e != e1 {
+		t.Fatal("warm entry clobbered by nil snapshot (want pointer stability)")
 	}
 }
