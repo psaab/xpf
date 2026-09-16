@@ -854,12 +854,14 @@ type compileOpts struct {
 	// lenientFirewallFilterFamilyCollisions (#3884, fable-review-161 F-030)
 	// downgrades the firewall-filter cross-family name-collision gate
 	// (validateFirewallFilterFamilyCollisionsAST) from a hard compile error to a
-	// cfg.Warnings entry. compileFirewall folds every filter family except inet6
-	// (inet, any, mpls, ccc, vpls, bridge, ...) into ONE name-keyed map
-	// (fw.FiltersInet) with an unconditional `dest[name] = filter` write, so a
-	// same-name filter authored under a second such family silently OVERWRITES
-	// the first — a `discard` filter can be replaced by a same-name accept-all
-	// (fail-open). Downstream consumers key filters by name within the inet (V4) /
+	// cfg.Warnings entry. compileFirewall folds every DECLARED filter family
+	// except inet6 (inet, any) into ONE name-keyed map (fw.FiltersInet) with an
+	// unconditional `dest[name] = filter` write, so a same-name filter authored
+	// under a second such family silently OVERWRITES the first — a `discard`
+	// filter can be replaced by a same-name accept-all (fail-open). An UNDECLARED
+	// token (a typo like `inett`, or a not-yet-modelled family) is QUARANTINED
+	// out of BOTH pools (#9883): it neither folds nor collides, and this gate
+	// ignores it. Downstream consumers key filters by name within the inet (V4) /
 	// inet6 (V6) buckets only, with no family dimension to disambiguate, so the
 	// reuse is genuinely ambiguous. The strict commit / commit-check path hard-
 	// rejects it; the tolerant load / peer-sync paths downgrade to a warning so

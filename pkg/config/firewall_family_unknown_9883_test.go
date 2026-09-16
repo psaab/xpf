@@ -206,8 +206,10 @@ func TestUnknownFamilyEscapesCollisionGate9883(t *testing.T) {
 // TestHookedQuarantinedFilterDanglesLenient9883: an interface hook naming a
 // quarantined filter dangles. Strict rejects the token; lenient boots with
 // BOTH warnings true at once (unknown token + dangling reference) and empty
-// pools — the snapshot-integrity backstop then refuses to publish (fail-closed,
-// #3296), so the hook never degrades to Accept.
+// pools. Per #3296, the snapshot-integrity backstop then refuses to publish such
+// a snapshot (fail-closed — proven in #3296; this cell pins the backstop INPUT:
+// pools empty + hook dangling + both warnings, not the Rust refusal itself), so
+// the hook never degrades to Accept on the userspace path.
 func TestHookedQuarantinedFilterDanglesLenient9883(t *testing.T) {
 	text := `firewall {
 		family inett {
@@ -370,4 +372,101 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 			t.Error("quarantine breach: H installed from packed residue node")
 		}
 	})
+}
+
+// TestEmptyPermittedSetFailsLoud9883 (GPT-LOW): an empty permitted set (the
+// schema could not be read) disables BOTH the quarantine and the token gate —
+// and compileFirewall's IPv4 default restores the pre-#9883 wrong-family fold.
+// That fold must never be silent: the gate warns loud (lenient) / hard-rejects
+// (strict) whenever a firewall family is present. With no families there is
+// nothing to fold and the gate stays silent.
+func TestEmptyPermittedSetFailsLoud9883(t *testing.T) {
+	// The quarantine helper declines to judge on empty (documented fold).
+	m := firewallFamilyMember{AfNode: &Node{Keys: []string{"inett"}}, Af: "inett"}
+	if firewallFamilyQuarantined9883(m, map[string]bool{}) {
+		t.Fatal("empty permitted set must decline to judge (return false), not quarantine everything into an outage")
+	}
+	if firewallFamilyQuarantined9883(m, nil) {
+		t.Fatal("nil permitted set must decline to judge (return false)")
+	}
+
+	// The gate fails loud on empty — mock the schema unreadable.
+	orig := schemaFirewall.children["family"]
+	schemaFirewall.children["family"] = nil
+	defer func() { schemaFirewall.children["family"] = orig }()
+	if got := firewallFamilyPermitted9017(); len(got) != 0 {
+		t.Fatalf("precondition: mocked schema must yield an empty permitted set, got %v", got)
+	}
+
+	withFamily := hier9883(t, `firewall { family inet { filter F { term T1 { then { accept; } } } } }`)
+	if _, err := validateFirewallFilterFamilyTokensAST(withFamily.Children, false); err == nil {
+		t.Fatal("strict gate with an unreadable schema must hard-reject when a firewall family is present, got nil")
+	} else if !strings.Contains(err.Error(), "schema unreadable") {
+		t.Fatalf("strict refusal must name the schema failure, got: %v", err)
+	}
+	if warns, err := validateFirewallFilterFamilyTokensAST(withFamily.Children, true); err != nil {
+		t.Fatalf("lenient gate with an unreadable schema must warn, not error: %v", err)
+	} else if len(warns) != 1 || !strings.Contains(warns[0], "schema unreadable") {
+		t.Fatalf("lenient gate must warn loud on an unreadable schema, got %v", warns)
+	}
+
+	// No firewall families — nothing to fold, nothing at risk, stays silent.
+	empty := &ConfigTree{Children: []*Node{{Keys: []string{"system"}}}}
+	if warns, err := validateFirewallFilterFamilyTokensAST(empty.Children, true); err != nil || len(warns) != 0 {
+		t.Fatalf("gate with no firewall families must stay silent on empty schema, got warns=%v err=%v", warns, err)
+	}
+	if _, err := validateFirewallFilterFamilyTokensAST(empty.Children, false); err != nil {
+		t.Fatalf("strict gate with no firewall families must stay silent on empty schema, got %v", err)
+	}
+}
+
+// TestDeclaredFamilyDestArms9883 (SPARK-F2): every schema-DECLARED firewall family
+// must have an explicit dest arm in compileFirewall's switch — a 4th declared
+// family must NOT silently inherit the IPv4 default (that would reintroduce the
+// pre-#9883 wrong-pool compile for the new family). Declaring a fourth family
+// without adding its arm turns this RED with instructions.
+func TestDeclaredFamilyDestArms9883(t *testing.T) {
+	permitted := firewallFamilyPermitted9017()
+	if len(permitted) == 0 {
+		t.Fatal("precondition: schema must declare at least one firewall family")
+	}
+	// The explicit arms in compileFirewall today, with their expected pools.
+	// Keep in sync with the dest switch (inet/inet6/any); a new family adds a
+	// row here AND an arm there.
+	wantPools := map[string][2]int{
+		"inet":  {1, 0},
+		"inet6": {0, 1},
+		"any":   {1, 1},
+	}
+	for fam := range permitted {
+		want, ok := wantPools[fam]
+		if !ok {
+			t.Errorf("firewall family %q is schema-declared but has NO explicit dest arm "+
+				"in compileFirewall — add a `case %q:` arm (SPARK-F2) and a row in this test; "+
+				"it must NOT silently inherit the IPv4 default", fam, fam)
+			continue
+		}
+		// Pin the arm's pools end-to-end (braced route; flat pinned by
+		// TestDeclaredFamiliesStillInstall9883).
+		cfg, err := CompileConfigLenient(hier9883(t, `firewall {
+			family `+fam+` {
+				filter OK {
+					term T1 {
+						from { protocol tcp; }
+						then { discard; }
+					}
+				}
+			}
+		}`))
+		if err != nil {
+			t.Errorf("family %s: lenient compile: %v", fam, err)
+			continue
+		}
+		if got := len(cfg.Firewall.FiltersInet); got != want[0] {
+			t.Errorf("family %s: FiltersInet = %d, want %d (dest arm drift)", fam, got, want[0])
+		}
+		if got := len(cfg.Firewall.FiltersInet6); got != want[1] {
+			t.Errorf("family %s: FiltersInet6 = %d, want %d (dest arm drift)", fam, got, want[1])
+		}
+	}
 }

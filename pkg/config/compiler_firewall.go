@@ -200,8 +200,10 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 	// #9883: the schema-declared `firewall family` set — the SAME
 	// firewallFamilyPermitted9017 source the #9017 token gate reads, built once
 	// here so the af loop below consults it without re-allocating. Declaring a
-	// fourth family permits it in the gate, here, and in the #3884 collision
-	// gate automatically; a hardcoded list would be a second place to remember.
+	// fourth family permits it in the #9017/#3884/#4296 gates automatically; a
+	// hardcoded list would be a second place to remember. The dest switch below
+	// still needs an explicit arm for the new family (SPARK-F2) — until then it
+	// inherits the IPv4 default, which TestDeclaredFamilyDestArms9883 forbids.
 	firewallPermitted := firewallFamilyPermitted9017()
 
 	for _, familyNode := range node.FindChildren("family") {
@@ -221,10 +223,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			// operator it enforces no rule at all — an inverted diagnostic.
 			// Skipping makes the message true on every route. An interface
 			// hook naming the quarantined filter dangles: strict already
-			// rejects the token, and on the tolerant path the #3296
-			// reference gate warns while the snapshot-integrity backstop
-			// refuses to publish the broken snapshot (fail-closed, prior
-			// state kept) — the hook never degrades to Accept.
+			// rejects the token, and on the tolerant path the #3296 reference
+			// gate warns. Per #3296, the userspace snapshot-integrity backstop
+			// then refuses to publish such a broken snapshot (fail-closed, prior
+			// state kept — proven in #3296, not re-proven here; this PR pins the
+			// backstop INPUT: pools empty + hook dangling + both warnings) — the
+			// hook never degrades to Accept on the userspace path. The kernel lo0
+			// path fails closed separately via the dangling pre-check in
+			// applyLo0Filter (fence on cold-start, retain on existing-state).
 			if firewallFamilyQuarantined9883(m, firewallPermitted) {
 				continue
 			}
@@ -239,12 +245,27 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			// `any`+`inet6` same-name reuse as a collision, since `any` folds
 			// into FiltersInet6 too — a name shared with a distinct inet6
 			// filter would otherwise silently overwrite in FiltersInet6.
-			dests := []map[string]*FirewallFilter{fw.FiltersInet}
+			// #9883 SPARK-F2: the IPv4 default is for "inet" ONLY. A 4th DECLARED
+			// family MUST add an explicit dest arm here — it must NOT silently
+			// inherit the IPv4 fold (that would reintroduce the pre-#9883
+			// wrong-pool compile for the new family). TestDeclaredFamilyDestArms9883
+			// fails if a declared family lacks an explicit arm.
+			var dests []map[string]*FirewallFilter
 			switch af {
+			case "inet":
+				dests = []map[string]*FirewallFilter{fw.FiltersInet}
 			case "inet6":
 				dests = []map[string]*FirewallFilter{fw.FiltersInet6}
 			case "any":
 				dests = []map[string]*FirewallFilter{fw.FiltersInet, fw.FiltersInet6}
+			default:
+				// Unreachable today: the quarantine above skips every undeclared
+				// token, and the only declared families are inet/inet6/any. A 4th
+				// declared family lands here until it gets its own arm — fold into
+				// IPv4 (the pre-quarantine default) so the filter still installs
+				// somewhere rather than voiding silently; the dest-arms test forces
+				// the explicit arm at dev time.
+				dests = []map[string]*FirewallFilter{fw.FiltersInet}
 			}
 
 			for _, filterInst := range namedInstances(afNode.FindChildren("filter")) {

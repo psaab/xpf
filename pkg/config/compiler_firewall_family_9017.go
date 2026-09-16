@@ -24,8 +24,10 @@ import (
 // tests. The gate below is scoped to the family token and nothing else.
 //
 // THE PERMITTED SET IS READ FROM THE SCHEMA, not hardcoded. Declaring a fourth
-// family permits it here automatically; a hardcoded list would be a second
-// place to remember, and the first thing anyone would forget.
+// family permits it in the gates automatically; a hardcoded list would be a
+// second place to remember, and the first thing anyone would forget. (The
+// compileFirewall dest switch still needs an explicit arm for the new family —
+// SPARK-F2; see TestDeclaredFamilyDestArms9883.)
 
 // firewallFamilyTokens9017 returns the address families `firewall family`
 // declares, sorted, for use in the gate and its message.
@@ -50,9 +52,10 @@ func firewallFamilyTokens9017() []string {
 // SKIPS undeclared families (quarantine: out of BOTH pools) and the #3884
 // collision gate ignores them too, so the message is true on every route and
 // the two gates cannot contradict each other on `inett/X` + `inet/X`.
-// firewallFamilyPermitted9017 builds the schema-read permitted set both the
-// gate below and those two quarantines consult — declaring a fourth family
-// permits it in all three places automatically.
+// firewallFamilyPermitted9017 builds the schema-read permitted set the #9017 gate
+// below and the #3884/#4296 quarantines consult — declaring a fourth family
+// permits it in the gates automatically. compileFirewall's dest switch needs a
+// matching explicit arm (SPARK-F2), pinned by TestDeclaredFamilyDestArms9883.
 func firewallFamilyPermitted9017() map[string]bool {
 	permitted := map[string]bool{}
 	for _, f := range firewallFamilyTokens9017() {
@@ -137,7 +140,10 @@ func firewallFamilyMembers9883(famNode *Node) []firewallFamilyMember {
 // its effective token is undeclared, or a structured member carries an
 // undeclared trailing token. An empty permitted set declines to judge (the
 // schema could not be read — quarantining everything would be a total filter
-// outage), mirroring the #9017 gate.
+// outage), mirroring the #9017 gate. The decline-to-judge FOLD (into IPv4 via
+// compileFirewall's default) is never silent: the #9017 gate warns loud
+// (lenient) / hard-rejects (strict) on an empty permitted set whenever a
+// firewall family is present (#9883 GPT-LOW).
 func firewallFamilyQuarantined9883(m firewallFamilyMember, permitted map[string]bool) bool {
 	if len(permitted) == 0 {
 		return false
@@ -168,8 +174,30 @@ func firewallFamilyQuarantined9883(m firewallFamilyMember, permitted map[string]
 func validateFirewallFilterFamilyTokensAST(nodes []*Node, lenient bool) ([]string, error) {
 	permitted := firewallFamilyPermitted9017()
 	if len(permitted) == 0 {
-		// The schema could not be read. Refusing every family here would turn a
-		// lookup failure into a total outage, so decline to judge.
+		// #9883 GPT-LOW: the schema could not be read, so BOTH the quarantine
+		// (firewallFamilyQuarantined9883 declines to judge above) AND this gate
+		// are disabled — and compileFirewall's IPv4 default restores the
+		// pre-#9883 wrong-family fold SILENTLY. Never silent: fail loud here
+		// (the compiler has no warnings channel, so this gate is the only
+		// voice). Strict hard-rejects — a commit must not proceed on an
+		// unreadable schema; lenient warns so boot/peer-sync still proceed
+		// (#1960) but the operator sees the fail-open risk. Only when a
+		// firewall family is present — with no families there is nothing to
+		// fold and nothing at risk.
+		for _, fwNode := range nodes {
+			if fwNode == nil || fwNode.Name() != "firewall" {
+				continue
+			}
+			if len(fwNode.FindChildren("family")) > 0 {
+				msg := "firewall family schema unreadable — cannot validate family tokens; " +
+					"unknown families will fold into IPv4 instead of quarantining " +
+					"(pre-#9883 fail-open risk) (#9883)"
+				if lenient {
+					return []string{msg}, nil
+				}
+				return nil, fmt.Errorf("%s", msg)
+			}
+		}
 		return nil, nil
 	}
 
