@@ -1069,6 +1069,18 @@ type compileOpts struct {
 	// gate, so a leniently-loaded config is no worse off. Same doctrine as
 	// lenientFilterTerminalConflict.
 	lenientPolicerThenConflict bool
+	// lenientPolicerUnknownActions (#9882) downgrades the policer `then`
+	// unknown-action gate (validateFirewallPolicerUnknownActionsStrict) from
+	// a hard compile error to a cfg.Warnings entry. The strict commit /
+	// commit-check path hard-rejects a policer whose `then` carries a token
+	// that is none of the recognized actions, because the compiler silently
+	// dropped the token while ThenAction kept its "discard" default — a typo
+	// that over-drops with zero diagnostic. The tolerant load / peer-sync
+	// paths warn so an already-persisted or peer-synced config still BOOTS
+	// (#1960 no-brick); the "discard" default drives the dataplane exactly
+	// as it did before the gate, so a leniently-loaded config is no worse
+	// off. Same doctrine as lenientFilterActions (#2399).
+	lenientPolicerUnknownActions bool
 	// lenientFilterDSCP (#3309) downgrades the firewall-filter DSCP /
 	// traffic-class range gate (validateFilterDSCPStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -2919,6 +2931,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFilterRoutingInstanceConflict:   true,
 		lenientFilterTerminalConflict:          true,
 		lenientPolicerThenConflict:             true,
+		lenientPolicerUnknownActions:           true,
 		lenientFilterDSCP:                      true,
 		lenientNPTv6:                           true,
 		lenientVRFOverlapPBR:                   true,
