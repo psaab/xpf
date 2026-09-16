@@ -24,6 +24,14 @@ pub(crate) const WIRE_ABSENT: u32 = 0;
 /// the overwhelming majority of deployments make.
 pub(crate) const WIRE_DEFAULT_INSTANCE: u32 = 1;
 
+/// #9956 F-032: the quarantine sentinel — must equal Go's
+/// `QuarantinedRoutingInstanceDomain` (pinned by agreement in
+/// `the_quarantine_sentinel_decodes_unrecognized_9956`). A row carrying it is
+/// quarantined, NOT a member: the interface consumer must never let it
+/// overwrite a surviving member's ifindex claim, and the sync handler refuses
+/// to import under it while still deleting by exact key.
+pub(crate) const QUARANTINED_ROUTING_DOMAIN: u32 = 2;
+
 /// What a decoded wire value means. Mirrors `WireDiscriminator` (#7188).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WireRoutingDomain {

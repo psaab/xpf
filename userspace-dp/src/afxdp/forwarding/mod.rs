@@ -350,3 +350,7 @@ mod tests_lpm_parity_9522;
 #[cfg(test)]
 #[path = "tests_leak_overlap_9955.rs"]
 mod tests_leak_overlap_9955;
+// #9956 F-052: the SNAT scope must resolve on the logical ingress unit.
+#[cfg(test)]
+#[path = "tests_snat_scope_9956.rs"]
+mod tests_snat_scope_9956;

@@ -2168,3 +2168,131 @@ fn unspecified_source_flowless_egress_filter_log_is_still_emitted_7890() {
         "and the packet's actual destination"
     );
 }
+
+
+#[test]
+fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
+    // #9956 F-051: both packet-accounting sites are flow-gated
+    // (`poll_descriptor/mod.rs`: `if let Some(flow) = flow.as_ref()` before
+    // `sessions.account_packet(..)`, and `flow_cache_hit.rs`), so a
+    // flowless-forwarded (non-first fragment) packet is NEVER charged to a
+    // session. The SAME chokepoint still counts it globally
+    // (`forward_candidate_packets`) and per zone (`record_zone_traffic`), so
+    // `SESSION_CLOSE`, flow export and `show security flow session`
+    // under-report a fragmented flow by its entire non-first volume while the
+    // zone/global totals tell the truth — a silent gap with no counter family
+    // of its own.
+    //
+    // This cell drives TWO fragments of one plain (no-NAT) UDP datagram
+    // through the real poll path: the FIRST (flow-backed, installs the
+    // session) and the NON-first (flowless, forwards). Both forward and both
+    // are counted globally; the session sees only the first.
+    //
+    // RED on base: the session carried 1 packet / 42 bytes instead of 2 / 84
+    // with the gap silent. The shipped direction is the explicit flowless
+    // counter family (charging a port-less fragment to a 5-tuple session is
+    // ambiguous under port reuse): session + flowless reconciles with the
+    // global total here — fixture-exact, not universal (`account_packet`
+    // no-ops on not-yet-existing sessions, so production can still
+    // under-count the session leg on install races).
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    // No source_nat_rules / DNAT / static-NAT / NPTv6 -> a plain (no-NAT)
+    // flow, so both fragments forward untranslated.
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    // (1) FIRST fragment: MF=1, offset 0, id 0xbeef. Flow-backed: installs
+    //     the session and is charged to it at the shared chokepoint.
+    let first = udp_frag_frame_5689(0x2000, 0xbeef);
+    let (batch1, dbg1) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        udp_frag_meta_5689(),
+    );
+    assert_eq!(
+        dbg1.forward, 1,
+        "#9956 F-051 precondition: the first fragment must forward"
+    );
+
+    // (2) NON-first fragment: offset 1, SAME id 0xbeef. Flowless (#2344):
+    //     forwards with no session to charge (RED-on-revert guard for the
+    //     "still forwards" half lives in
+    //     `nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122`).
+    let non_first = udp_frag_frame_5689(0x0001, 0xbeef);
+    let (batch2, dbg2) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &non_first,
+        udp_frag_meta_5689(),
+    );
+    assert_eq!(
+        dbg2.forward, 1,
+        "#9956 F-051 precondition: the non-first fragment must forward"
+    );
+
+    // Control: the global chokepoint counted BOTH packets.
+    assert_eq!(
+        batch1.forward_candidate_packets + batch2.forward_candidate_packets,
+        2,
+        "#9956 F-051 control: both fragments must be counted globally, so a \
+         session total below 2 is a session-accounting gap rather than a \
+         forwarding gap"
+    );
+
+    // THE FIX (#9956 F-051): the session still carries only the first
+    // fragment — charging a port-less fragment to a 5-tuple session would be
+    // ambiguous under port reuse — but the non-first volume is now VISIBLE in
+    // the dedicated flowless family instead of silent. Frame lengths are the
+    // byte basis (no forward-bytes counter exists; `rx_bytes` is
+    // receive-side); in production session + flowless reconciles against the
+    // zone-pair delta.
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: "10.0.61.100".parse().expect("src"),
+        dst_ip: "172.16.80.200".parse().expect("dst"),
+        src_port: 33333,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let c = sessions
+        .session_counters(&key)
+        .expect("#9956 F-051 precondition: the first fragment must have installed the session");
+    assert_eq!(
+        (c.fwd_packets, c.fwd_bytes),
+        (1, first.len() as u64),
+        "#9956 F-051: the session carries exactly the flow-backed first \
+         fragment (RED form asserted 2 here: the gap this family closes)"
+    );
+    let flowless_packets = batch1.flowless_forward_packets + batch2.flowless_forward_packets;
+    let flowless_bytes = batch1.flowless_forward_bytes + batch2.flowless_forward_bytes;
+    assert_eq!(
+        (flowless_packets, flowless_bytes),
+        (1, non_first.len() as u64),
+        "#9956 F-051: the flowless family must carry exactly the non-first \
+         fragment's volume"
+    );
+    assert_eq!(
+        c.fwd_packets + flowless_packets,
+        batch1.forward_candidate_packets + batch2.forward_candidate_packets,
+        "#9956 F-051: session + flowless must reconcile with the global total"
+    );
+    assert_eq!(
+        c.fwd_bytes + flowless_bytes,
+        (first.len() + non_first.len()) as u64,
+        "#9956 F-051: session + flowless bytes must match the forwarded volume"
+    );
+}

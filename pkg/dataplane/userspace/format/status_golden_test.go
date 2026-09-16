@@ -80,6 +80,7 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 				Slot: 0, Armed: true, Ready: true, Bound: true, XSKRegistered: true, ZeroCopy: true,
 				SharedUMEMMode: "cross-nic", SharedUMEMSocketRole: "owner",
 				RXPackets: 100, ValidatedPackets: 90, ForwardCandidatePkts: 80,
+				FlowlessForwardPkts: 7, FlowlessForwardBytes: 700,
 				RouteMissPackets: 2, MartianDropped: 1, IPv6ExtHeaderDropped: 4,
 				NeighborMissPackets: 1, ExceptionPackets: 3,
 				FlowCacheHits: 40, FlowCacheMisses: 10, FlowCacheEvictions: 1,

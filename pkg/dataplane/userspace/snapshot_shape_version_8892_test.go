@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "7a80a7c85c37140e043129805e14b25f0a855b993c4817fb832e0d01fdb3dadc"
+	snapshotShapeGolden8892 = "55e9864f9ca4710fbb053ae46d80ee2a7a14e44368438f83bdc7c7db13caeb70"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -304,6 +304,15 @@ const (
 	// structural row identity the helper reads instead of parsing name shape;
 	// an old helper parses every row by name and reads a dotted base row as a
 	// unit row, which IS the defect the field closes.
+	// v21 STANDS (issue 9956 F-032): `Config.QuarantinedRoutingInstances` was
+	// added to the typed config, and ConfigSnapshot embeds the whole Config,
+	// so it moved this digest for the same reason HasPreference did. Same arm,
+	// same answer: it is tagged `json:"-"`, it is a COMPILE-TIME record of the
+	// instances the #9622/#3855 passes dropped (with membership, for the Go
+	// snapshot builders' sentinel-domain binding), and it is nil in every
+	// config with nothing quarantined. Nothing transmits it, so no helper of
+	// any vintage can observe it, and bumping the protocol for it would spend
+	// the one signal that says the wire really changed.
 	snapshotShapeVersion8892 = 21
 )
 

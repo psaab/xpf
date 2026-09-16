@@ -90,6 +90,8 @@
     "flow_cache_evictions": 0,
     "flow_cache_hits": 0,
     "flow_cache_misses": 0,
+    "flowless_forward_bytes": 0,
+    "flowless_forward_packets": 0,
     "forward_candidate_packets": 0,
     "generated_reply_classify_parse_errors": 0,
     "host_inbound_denied_packets": 0,

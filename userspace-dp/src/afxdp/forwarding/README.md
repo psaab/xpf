@@ -306,7 +306,12 @@ forward-direction collision.
   (`routingInstanceDomain`, `pkg/dataplane/userspace/routes.go`) and shipped
   per interface on the config snapshot, never re-hashed in Rust: both HA
   nodes run the same function over the same config, so the value cannot
-  drift between them.
+  drift between them. One exception: an interface no surviving instance
+  claims but a quarantined one does ships domain 2
+  (`QuarantinedRoutingInstanceDomain`, #9956 F-032) — nonzero so it never
+  shares the default session space, outside the stable band so it never
+  collides with a tenant (the #3855 door means the stable id itself would),
+  and HA-refused on import (wire 2 decodes Unrecognized, fail-closed).
 - **Why the ingress interface and nothing else.** The reverse key is built
   by swapping the forward key's fields and never observes the reply, so the
   domain must be a quantity a packet resolves from its own arrival. A PBR

@@ -573,6 +573,198 @@ fn sync_session_upsert_with_malformed_mac_is_rejected() {
 }
 
 #[test]
+fn sync_session_upsert_with_quarantine_sentinel_domain_is_refused_9956() {
+    // #9956 F-032: a session carrying the quarantine sentinel (Unrecognized)
+    // must be REFUSED pre-operation — never imported under a live domain.
+    // This cell pins the handler half (refusal + token, no import); the value
+    // agreement with Go's `QuarantinedRoutingInstanceDomain` is pinned in
+    // `the_quarantine_sentinel_decodes_unrecognized_9956`.
+    let mut request = req("sync_session");
+    request.session_sync = Some(SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        routing_domain: quarantine_sentinel_domain_9956(),
+        ..SessionSyncRequest::default()
+    });
+    let response = run_request(new_state(ProcessStatus::default()), request);
+    assert!(
+        !response.ok,
+        "a quarantined-domain upsert must be refused, not imported"
+    );
+    assert!(
+        response.error.contains("routing-domain-unrecognized"),
+        "unexpected error: {}",
+        response.error
+    );
+}
+
+/// #9956 M9: read Go's `QuarantinedRoutingInstanceDomain` rather than
+/// hardcoding it — a renumber on the Go side must move these cells with it
+/// instead of silently de-scoping them to a stale value.
+fn quarantine_sentinel_domain_9956() -> u32 {
+    let go = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("pkg/dataplane/userspace/routes.go"),
+    )
+    .expect("read routes.go");
+    go.lines()
+        .find(|l| l.contains("QuarantinedRoutingInstanceDomain uint32 = "))
+        .expect("routes.go must define QuarantinedRoutingInstanceDomain")
+        .rsplit('=')
+        .next()
+        .expect("const has a value")
+        .trim()
+        .parse()
+        .expect("sentinel parses as u32")
+}
+
+#[test]
+fn sync_session_delete_with_quarantine_sentinel_domain_removes_v4_9956() {
+    // #9956 GPT-1: a delete carrying the quarantine sentinel must REMOVE the
+    // exact v4 session — never refuse. The upsert arm refuses (it would
+    // PUBLISH an identity under an unreproducible domain), but a refused
+    // delete LEAKS an authoritative session while Go already removed its
+    // mirrors and discards the helper error: the flow would keep forwarding
+    // after "successful" deletion. Delete needs identity, not domain
+    // validity — the wire value IS the raw domain for every Unrecognized
+    // value, so the removal is exact, not a guess.
+    let sentinel = quarantine_sentinel_domain_9956();
+    let afxdp = afxdp::Coordinator::new();
+    let entry = crate::server::helpers::build_synced_session_entry(
+        &SessionSyncRequest {
+            operation: "upsert".to_string(),
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        },
+        afxdp.zone_name_to_id_ref(),
+        sentinel,
+    )
+    .expect("build the sentinel-domain entry the delete must reach");
+    afxdp.upsert_synced_session(entry);
+    assert!(
+        afxdp.synced_session_entry_count_for_test() > 0,
+        "setup: the sentinel session must exist before the delete"
+    );
+    let state = Arc::new(Mutex::new(ServerState {
+        status: ProcessStatus::default(),
+        snapshot: None,
+        afxdp,
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+    }));
+    let mut request = req("sync_session");
+    request.session_sync = Some(SessionSyncRequest {
+        operation: "delete".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        routing_domain: sentinel,
+        ..SessionSyncRequest::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(
+        response.ok,
+        "a sentinel-domain delete must succeed, not refuse: {}",
+        response.error
+    );
+    assert_eq!(
+        state
+            .lock()
+            .expect("state")
+            .afxdp
+            .synced_session_entry_count_for_test(),
+        0,
+        "the sentinel-domain session must be gone after the delete"
+    );
+}
+
+#[test]
+fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
+    // #9956 GPT-1: the IPv6 half of the exact-key delete above — same rule,
+    // same verb, v6 tuple.
+    let sentinel = quarantine_sentinel_domain_9956();
+    let afxdp = afxdp::Coordinator::new();
+    let entry = crate::server::helpers::build_synced_session_entry(
+        &SessionSyncRequest {
+            operation: "upsert".to_string(),
+            addr_family: libc::AF_INET6 as u8,
+            protocol: 6,
+            src_ip: "2001:db8::1".to_string(),
+            dst_ip: "2001:db8::2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        },
+        afxdp.zone_name_to_id_ref(),
+        sentinel,
+    )
+    .expect("build the sentinel-domain v6 entry the delete must reach");
+    afxdp.upsert_synced_session(entry);
+    assert!(
+        afxdp.synced_session_entry_count_for_test() > 0,
+        "setup: the sentinel v6 session must exist before the delete"
+    );
+    let state = Arc::new(Mutex::new(ServerState {
+        status: ProcessStatus::default(),
+        snapshot: None,
+        afxdp,
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+    }));
+    let mut request = req("sync_session");
+    request.session_sync = Some(SessionSyncRequest {
+        operation: "delete".to_string(),
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: "2001:db8::1".to_string(),
+        dst_ip: "2001:db8::2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        routing_domain: sentinel,
+        ..SessionSyncRequest::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(
+        response.ok,
+        "a sentinel-domain v6 delete must succeed, not refuse: {}",
+        response.error
+    );
+    assert_eq!(
+        state
+            .lock()
+            .expect("state")
+            .afxdp
+            .synced_session_entry_count_for_test(),
+        0,
+        "the sentinel-domain v6 session must be gone after the delete"
+    );
+}
+
+#[test]
 fn sync_session_delete_with_unparseable_ip_is_rejected() {
     let mut request = req("sync_session");
     request.session_sync = Some(SessionSyncRequest {

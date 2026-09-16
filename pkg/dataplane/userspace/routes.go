@@ -600,6 +600,60 @@ func buildInterfaceRoutingInstances(cfg *config.Config) map[string]string {
 	return out
 }
 
+// QuarantinedRoutingInstanceDomain is the session-domain label for an
+// interface no surviving routing instance claims but a quarantined one does
+// (#9956 F-032). 2, not 1: the HA session-sync codec maps wire 1 to
+// Present(default) (`routing_domain_wire.rs`), so 1 would reintroduce the
+// default-domain aliasing on the peer; 2 decodes Unrecognized and the peer
+// REFUSES the import (fail-closed) while bumping
+// SyncedImportUnknownRoutingDomain. Outside the stable band [100000, 999999),
+// so never a real tenant's domain — which matters because the #3855 door
+// means StableRoutingInstanceTableID(quarantined) EQUALS the survivor's. A
+// const, so both HA nodes agree with no synced state.
+const QuarantinedRoutingInstanceDomain uint32 = 2
+
+// quarantinedInterfaceKeys expands every quarantined routing instance's
+// interface refs to the snapshot keys they address, using the same
+// config.InterfaceUnitRefKeys expansion (as-written keys[0] AND fanout
+// keys[1:]) the survivor maps use — so a quarantined BARE ref fans down onto
+// its units exactly like #9132. That fanout reads cfg.Interfaces.Units, never
+// cfg.RoutingInstances, so the dropped instances expand normally. Returns nil
+// when nothing was quarantined (the common case).
+func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
+	if cfg == nil || len(cfg.QuarantinedRoutingInstances) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{})
+	for _, ri := range cfg.QuarantinedRoutingInstances {
+		if ri == nil || ri.Name == "" {
+			continue
+		}
+		for _, ifname := range ri.Interfaces {
+			if ifname == "" {
+				continue
+			}
+			for _, key := range config.InterfaceUnitRefKeys(cfg, ifname) {
+				out[key] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// routingDomainForInterfaceKey resolves the session domain for one snapshot
+// row key. Survivor-wins: a key the survivor map claims keeps the survivor's
+// domain (the byte-identical survivor path); a key ONLY the quarantined set
+// claims takes the sentinel; anything else keeps today's answer (0 = default).
+func routingDomainForInterfaceKey(key string, ifaceRI map[string]string, quarantined map[string]struct{}) uint32 {
+	if name, survives := ifaceRI[key]; survives {
+		return routingInstanceDomain(name)
+	}
+	if _, drop := quarantined[key]; drop {
+		return QuarantinedRoutingInstanceDomain
+	}
+	return 0
+}
+
 // routingInstanceDomain maps a bare routing-instance name to the #7160 (#2387)
 // ROUTING DOMAIN id carried on `InterfaceSnapshot.RoutingDomain` and, from
 // there, into `SessionKey.routing_domain` in the Rust dataplane.
@@ -616,6 +670,12 @@ func buildInterfaceRoutingInstances(cfg *config.Config) map[string]string {
 // and a second parallel numbering would need its own gate to say the same
 // thing. It is a routing-domain LABEL here, not a kernel table handle — the
 // dataplane never indexes a kernel table with it.
+//
+// Quarantined interfaces do NOT flow through this function: row builders call
+// routingDomainForInterfaceKey, which returns QuarantinedRoutingInstanceDomain
+// (2) for a key only a quarantined instance claims (#9956 F-032). The #7160
+// band test pins THIS function's band; the sentinel deliberately lives outside
+// it (the #3855 door means the stable id itself would collide).
 func routingInstanceDomain(name string) uint32 {
 	if name == "" {
 		return 0

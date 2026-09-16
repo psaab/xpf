@@ -9125,3 +9125,90 @@ mod contract_9821_tests {
         );
     }
 }
+
+/// #9956 GPT-2: a quarantine-sentinel row sharing its netdev ifindex with a
+/// surviving member row must NEVER overwrite the survivor's claim — in row
+/// order OR reverse. The Go snapshot sorts unit rows ascending, so the
+/// survivor (`reth0.0`, tenant-a) precedes the quarantine row (`reth0.1`,
+/// `"", 2`); the Rust consumer used to treat EVERY nonzero domain as an
+/// authoritative member claim (last-wins), so the later quarantine row stole
+/// the shared ifindex: survivor traffic took domain 2 + empty RI (SNAT scope
+/// stopped matching, HA refused). Pre-fix the quarantine row's 0 could not
+/// overwrite; the sentinel must preserve that. Asserted at the RUST maps AND
+/// the NAT scope read, not just the Go rows — Go-row-level survivor-wins does
+/// not cover the cross-row last-wins hole.
+#[test]
+fn quarantine_row_never_overwrites_survivor_ifindex_claim_9956() {
+    use crate::session::QUARANTINED_ROUTING_DOMAIN;
+    const TENANT_A_DOMAIN: u32 = 100_001;
+    fn survivor_row() -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: "reth0.0".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            routing_domain: TENANT_A_DOMAIN,
+            linux_name: "ge-0-0-0".to_string(),
+            ifindex: 11,
+            parent_ifindex: 11,
+            vlan_id: 0,
+            hardware_addr: "02:bf:72:00:00:0b".to_string(),
+            ..Default::default()
+        }
+    }
+    fn quarantine_row() -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: "reth0.1".to_string(),
+            routing_instance: String::new(),
+            routing_domain: QUARANTINED_ROUTING_DOMAIN,
+            linux_name: "ge-0-0-0".to_string(),
+            ifindex: 11,
+            parent_ifindex: 11,
+            vlan_id: 1,
+            hardware_addr: "02:bf:72:00:00:0b".to_string(),
+            ..Default::default()
+        }
+    }
+    for (order, rows) in [
+        ("survivor-first", vec![survivor_row(), quarantine_row()]),
+        ("quarantine-first", vec![quarantine_row(), survivor_row()]),
+    ] {
+        let state = build_forwarding_state(&ConfigSnapshot {
+            interfaces: rows,
+            ..Default::default()
+        });
+        assert_eq!(
+            state.ifindex_to_routing_domain.get(&11).copied(),
+            Some(TENANT_A_DOMAIN),
+            "#9956 GPT-2 ({order}): the survivor must own the shared ifindex's domain"
+        );
+        assert_eq!(
+            state
+                .ifindex_to_routing_instance
+                .get(&11)
+                .map(String::as_str),
+            Some("tenant-a"),
+            "#9956 GPT-2 ({order}): the survivor must own the shared ifindex's RI name"
+        );
+        let scope =
+            crate::afxdp::forwarding::nat_scope_ctx_for_flow(&state, 11, 0, 24, TENANT_A_DOMAIN);
+        assert_eq!(
+            scope.ingress_routing_instance, "tenant-a",
+            "#9956 GPT-2 ({order}): NAT scope on the shared ifindex must see tenant-a"
+        );
+    }
+    // The fix it must not break: a quarantined-ONLY ifindex still claims the
+    // sentinel (the F-032 isolation), including the sticky membership flag the
+    // ingress resolver requires to stamp it.
+    let state = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![quarantine_row()],
+        ..Default::default()
+    });
+    assert_eq!(
+        state.ifindex_to_routing_domain.get(&11).copied(),
+        Some(QUARANTINED_ROUTING_DOMAIN),
+        "#9956 GPT-2: a quarantined-only ifindex must claim the sentinel"
+    );
+    assert!(
+        state.has_routing_domains,
+        "#9956 GPT-2: the sentinel claim must set has_routing_domains"
+    );
+}

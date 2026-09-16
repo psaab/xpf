@@ -61,6 +61,8 @@ impl BindingLiveState {
             validated_bytes: self.validated_bytes.load(Ordering::Relaxed),
             local_delivery_packets: self.local_delivery_packets.load(Ordering::Relaxed),
             forward_candidate_packets: self.forward_candidate_packets.load(Ordering::Relaxed),
+            flowless_forward_packets: self.flowless_forward_packets.load(Ordering::Relaxed),
+            flowless_forward_bytes: self.flowless_forward_bytes.load(Ordering::Relaxed),
             route_miss_packets: self.route_miss_packets.load(Ordering::Relaxed),
             martian_dropped: self.martian_dropped.load(Ordering::Relaxed),
             ipv6_ext_header_dropped: self.ipv6_ext_header_dropped.load(Ordering::Relaxed),

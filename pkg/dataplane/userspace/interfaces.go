@@ -295,6 +295,9 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 	}
 	zoneByInterface := buildInterfaceZoneMap(cfg)
 	ifaceRoutingInstance := buildInterfaceRoutingInstances(cfg)
+	// #9956 F-032: keys ONLY a quarantined instance claims take the sentinel
+	// session domain (never the default 0) via routingDomainForInterfaceKey.
+	quarantinedKeys := quarantinedInterfaceKeys(cfg)
 	usedSyntheticIfindexes := make(map[int]struct{})
 	// Build RETH RG lookup: physical member → RETH's RedundancyGroup.
 	// Physical members have RedundantParent set but RedundancyGroup=0;
@@ -361,7 +364,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			IsUnit:          false,
 			Zone:            zoneByInterface[name],
 			RoutingInstance: ifaceRoutingInstance[name],
-			RoutingDomain:   routingInstanceDomain(ifaceRoutingInstance[name]),
+			RoutingDomain:   routingDomainForInterfaceKey(name, ifaceRoutingInstance, quarantinedKeys),
 			LinuxName:       linuxName,
 			ParentLinuxName: "",
 			Ifindex:         ifindex,
@@ -436,7 +439,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				IsUnit:                    true,
 				Zone:                      zoneByInterface[unitName],
 				RoutingInstance:           ifaceRoutingInstance[unitName],
-				RoutingDomain:             routingInstanceDomain(ifaceRoutingInstance[unitName]),
+				RoutingDomain:             routingDomainForInterfaceKey(unitName, ifaceRoutingInstance, quarantinedKeys),
 				LinuxName:                 linuxUnit,
 				ParentLinuxName:           parentLinux,
 				Ifindex:                   ifindex,
@@ -534,7 +537,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 	// returns early unless the two slices are the same length, so growing one
 	// alone would silently disable the egress decision for the entire snapshot.
 	out, idents = appendBindInterfaceOnlySecureTunnelRows(
-		cfg, out, idents, authored, zoneByInterface, ifaceRoutingInstance, liveXfrm)
+		cfg, out, idents, authored, zoneByInterface, ifaceRoutingInstance, quarantinedKeys, liveXfrm)
 	// #6722: decide each ifindex's EGRESS zone here, from the operator's authored
 	// bindings and this loop's own aliasing, and stamp the answer on every row.
 	stampEgressZones(cfg, out, idents, authored)

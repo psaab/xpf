@@ -253,7 +253,19 @@ pub(super) fn populate_interfaces(
         // reads as domain 0 — and `has_routing_domains` is sticky (set on
         // claim, never cleared: membership, once observed, is not lost to
         // row order).
-        if iface.routing_domain != 0 {
+        // #9956 GPT-2: a quarantine-sentinel row ("", 2) is NOT a member
+        // claim — it must never overwrite a surviving member's claim on a
+        // shared ifindex (collapsed unit rows sort ascending, so the survivor
+        // row comes first and the quarantine row later). Member rows keep
+        // unconditional last-wins; sentinel rows are fill-only like
+        // zero-domain rows, except they also claim the sentinel domain when
+        // the ifindex is otherwise unclaimed (that claim IS the F-032 fix —
+        // and `has_routing_domains` must be set for it, or the ingress
+        // resolver short-circuits quarantined traffic back to domain 0).
+        // Either row order leaves the survivor owning the ifindex.
+        if iface.routing_domain != 0
+            && iface.routing_domain != crate::session::QUARANTINED_ROUTING_DOMAIN
+        {
             state
                 .ifindex_to_routing_instance
                 .insert(iface.ifindex, iface.routing_instance.clone());
@@ -265,6 +277,12 @@ pub(super) fn populate_interfaces(
             state
                 .ifindex_to_routing_instance
                 .insert(iface.ifindex, iface.routing_instance.clone());
+            if iface.routing_domain == crate::session::QUARANTINED_ROUTING_DOMAIN {
+                state
+                    .ifindex_to_routing_domain
+                    .insert(iface.ifindex, iface.routing_domain);
+                state.has_routing_domains = true;
+            }
         }
         name_to_ifindex.insert(iface.name.clone(), iface.ifindex);
         if !iface.linux_name.is_empty() {

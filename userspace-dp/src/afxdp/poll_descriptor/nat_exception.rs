@@ -40,6 +40,7 @@ use super::*;
 pub(super) fn source_nat_decision_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    ingress_vlan_id: u16,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -52,6 +53,7 @@ pub(super) fn source_nat_decision_for_flow(
     source_nat_decision_with_holder(
         forwarding,
         ingress_ifindex,
+        ingress_vlan_id,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -69,6 +71,12 @@ pub(super) fn source_nat_decision_for_flow(
 fn source_nat_decision_with_holder(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    // #9956 F-052: threaded to the scope choke point so the SNAT
+    // `from interface` / `from routing-instance` match resolves the LOGICAL
+    // ingress unit. (This scope feeds only the static-NAT reverse match,
+    // which reads the EGRESS half; the pool/interface scope rebuilt inside
+    // `match_source_nat_for_flow_result_at` is the load-bearing consumer.)
+    ingress_vlan_id: u16,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -97,6 +105,7 @@ fn source_nat_decision_with_holder(
     let scope = super::super::forwarding::nat_scope_ctx_for_flow(
         forwarding,
         ingress_ifindex,
+        ingress_vlan_id,
         egress_ifindex,
         // #9062: the session layer's own domain, not a value re-derived here.
         flow.forward_key.routing_domain,
@@ -124,6 +133,7 @@ fn source_nat_decision_with_holder(
     match match_source_nat_for_flow_result_at(
         forwarding,
         ingress_ifindex,
+        ingress_vlan_id,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -166,6 +176,7 @@ fn source_nat_decision_with_holder(
 pub(super) fn source_nat_would_translate_fragment(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    ingress_vlan_id: u16,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -176,6 +187,7 @@ pub(super) fn source_nat_would_translate_fragment(
     match source_nat_decision_with_holder(
         forwarding,
         ingress_ifindex,
+        ingress_vlan_id,
         from_zone,
         to_zone,
         egress_ifindex,

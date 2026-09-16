@@ -2254,7 +2254,7 @@ fn post_dnat_source_nat_matches_translated_destination() {
         translated_flow.forward_key.dst_port, 8443,
         "the flow handed to the source-NAT matcher must carry the translated port"
     );
-    let snat = match_source_nat_for_flow(&state, 0, "wan", "lan", 24, &translated_flow)
+    let snat = match_source_nat_for_flow(&state, 0, 0, "wan", "lan", 24, &translated_flow)
         .expect("snat after dnat");
     assert_eq!(
         snat.rewrite_src,
