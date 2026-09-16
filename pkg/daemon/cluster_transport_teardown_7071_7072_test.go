@@ -61,7 +61,7 @@ func TestBootstrapRollbackThenCorrectedCommitRecovers_7072(t *testing.T) {
 
 	moved := store.ActiveConfig()
 	moved.Chassis.Cluster.PeerAddress = "10.99.0.9"
-	_ = d.applyTailReconciles(moved, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(moved, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	if restarts != 1 {
 		t.Errorf("a corrected commit after a bootstrap rollback did not restart comms "+
@@ -106,7 +106,7 @@ func TestStepTwentyIgnoresANeverStartedNode_7072(t *testing.T) {
 
 	cfg := store.ActiveConfig()
 	cfg.Chassis.Cluster.PeerAddress = "10.99.0.9"
-	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	if restarts != 0 {
 		t.Errorf("step 20 acted for a node whose comms have never started "+
@@ -289,7 +289,7 @@ func TestStepTwentyRestartsWhenATeardownOwesOne_7901(t *testing.T) {
 			"(started=%+v corrected=%+v); otherwise it re-tests the key-moved row "+
 			"the #7072 cell already covers", started, got)
 	}
-	_ = d.applyTailReconciles(corrected, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(corrected, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	if restarts != 1 {
 		t.Errorf("comms stayed DOWN after a corrected commit with an identical "+
@@ -306,7 +306,7 @@ func TestStepTwentyRestartsWhenATeardownOwesOne_7901(t *testing.T) {
 	// live "are comms down?" predicate, which fires on every apply and breaks
 	// #5078 (a key commit must not restart comms) and #6878 (an unchanged
 	// transport must not restart) — measured, three cells across those two.
-	_ = d.applyTailReconciles(corrected, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(corrected, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	if restarts != 1 {
 		t.Errorf("a SECOND apply restarted comms again (restarts=%d, want 1). The "+
 			"owed restart must be consumed, not re-read: a live down-predicate fires "+

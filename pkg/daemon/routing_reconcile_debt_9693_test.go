@@ -223,7 +223,7 @@ func TestRoutingReconcileRetryOwnerIsWired9693(t *testing.T) {
 		t.Error("applyRoutingRules must share applyPolicyRoutingRules with the retry owner")
 	}
 	retry := selectorsIn("routing_reconcile_debt_9693.go")
-	for _, forbidden := range []string{"applyRoutingRules", "applyFRRConfig", "assembleFRRConfig"} {
+	for _, forbidden := range []string{"applyRoutingRules", "applyFRRFull", "applyFRRConfig", "assembleFRRConfig"} {
 		if len(retry[forbidden]) != 0 {
 			t.Errorf("the routing reconcile retry owner must not call %s (FRR owns its own retry)", forbidden)
 		}

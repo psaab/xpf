@@ -94,7 +94,7 @@ func TestApplyTailReconcilesJoinsFabricErr_6791(t *testing.T) {
 	cfg := &config.Config{}
 	injected := errors.New("fabric-ipvlan-injected-6791")
 
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, injected)
+	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, injected, nil)
 	if err == nil {
 		t.Fatalf("applyTailReconciles returned nil; a terminal fabric IPVLAN " +
 			"failure must fail the commit closed, not be acknowledged as success")

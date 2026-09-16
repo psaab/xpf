@@ -139,7 +139,7 @@ func newCredentialTailFixture6790(t *testing.T) *credentialTailFixture6790 {
 // error nil, so the only operands that can be non-nil are the ones this
 // function's own steps produce.
 func (f *credentialTailFixture6790) tail() error {
-	return f.d.applyTailReconciles(f.cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return f.d.applyTailReconciles(f.cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 // breakMarkerRoots6790 makes all three ownership-marker roots unusable by

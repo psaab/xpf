@@ -152,7 +152,7 @@ func TestStepTwentyReadsTheTransportUnderTheLock_7066(t *testing.T) {
 			// The tail returns reconcile errors in this stripped-down harness;
 			// the access under test is step 20's read, which it performs
 			// regardless.
-			_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		}
 	}()
 	wg.Wait()

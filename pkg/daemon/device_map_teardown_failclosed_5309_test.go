@@ -262,7 +262,7 @@ func TestApplyTailReconcilesSurfacesDeviceMapTeardownError_5309(t *testing.T) {
 
 	teardownErr := fmt.Errorf("device-map teardown: %w",
 		errors.New("rename-back ge-0-0-9 -> enp99s0: EBUSY"))
-	err := d.applyTailReconciles(cfg, teardownErr, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	err := d.applyTailReconciles(cfg, teardownErr, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("applyTailReconciles must surface a device-map teardown failure carried " +
 			"in networkdErr (fail-closed); got nil")

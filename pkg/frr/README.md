@@ -1418,6 +1418,28 @@ step. Both are required — neither sees the other's case:
   shutdown) cancels in-flight process groups and reaps the retry
   goroutine; `DisableDegradedRetry()` is the one-shot (`xpfd cleanup`)
   configuration.
+- Degraded alerting contract (#9947 F-007): alert if
+  `xpf_frr_reload_degraded == 1` for more than 10 minutes (twice the
+  5-minute slow retry cadence, so a transient primary failure that the
+  fast rungs or the first slow tick converges never pages). A firing
+  alert means stale FRR config is still installed — a removal the
+  operator committed may not have taken effect. The exposure is bounded
+  by retry convergence for TRANSIENT failures; with frr-pythontools
+  missing it is INDEFINITE (the retry re-invokes the missing program
+  forever), which is why that state fails the commit closed rather than
+  certifying success. Every degraded or hard reload on the
+  operator-commit path fails the commit, so a firing alert is always
+  paired with a failed commit, never a silent success. Runbook:
+  (1) read the commit error / `xpfd` logs for the cause; (2) if
+  frr-pythontools is missing, install it; (3) retry the apply — after a
+  PLAIN failed commit, bare `commit` re-runs the full pipeline (the
+  store has no dirty gate); after a FAILED `commit confirmed`, do NOT
+  bare-`commit` (the #4000 confirm-only intercept cancels the rollback
+  WITHOUT re-applying — confirmation is not retry) — instead stage any
+  edit and `commit` (a dirty candidate falls through to a full
+  re-apply and clears the window), or `commit confirmed` again to
+  re-arm and re-apply (pinned by the pkg/cli 9947 retry cells);
+  (4) confirm the gauge clears.
 - Hard failure (#5109): when BOTH frr-reload.py AND the additive
   `vtysh -f` fallback fail, `reloadLocked` returns the underlying error
   (NOT the degraded sentinel) — nothing was applied, so live FRR keeps
@@ -1427,12 +1449,13 @@ step. Both are required — neither sees the other's case:
   same single-flight retry loop, which re-runs the primary reload against
   the on-disk SSOT until a full diff converges — so a hard failure
   self-heals without a restart. The error still propagates to the caller
-  (the daemon's full-apply path logs it and continues, #5109; the
-  ip-monitoring actuator uses it to avoid publishing a divergent snapshot,
-  #3757). Before #5109 a hard failure from a non-degraded state hit no
-  case in the outcome switch: the gauge stayed 0, no retry debt was armed,
-  and live FRR kept the stale forwarding state until the next commit or a
-  daemon restart while the operator's commit reported success.
+  (the daemon's full-apply path fails the commit closed on it, #9947
+  F-007; the ip-monitoring actuator uses it to avoid publishing a
+  divergent snapshot, #3757). Before #5109 a hard failure from a
+  non-degraded state hit no case in the outcome switch: the gauge
+  stayed 0, no retry debt was armed, and live FRR kept the stale
+  forwarding state until the next commit or a daemon restart while the
+  operator's commit reported success.
 
 **IS-IS redistribute uses isisd's grammar (#9666).** isisd installs only
 `redistribute <ipv4|ipv6> <proto> <level-1|level-2> [route-map X]`. The address

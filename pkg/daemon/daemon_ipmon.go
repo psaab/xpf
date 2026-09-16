@@ -221,27 +221,28 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 // shared post-ApplyFull consistent-hash sysctl. Both the full apply
 // path and the actuator go through here.
 //
-// Return contract (#3757): nil on success OR a DEGRADED reload (#1880,
-// additive vtysh -f applied — the new routes ARE live in the kernel
-// FIB and the frr manager's retry loop owns stale-config removal); the
-// underlying error on a HARD reload failure, where the frr manager
-// contract guarantees NOTHING converged and the kernel FIB still holds
-// the previous routes. The full apply path (an operator commit) ignores
-// the result — a transient FRR hiccup must not fail an otherwise-valid
-// commit, and a boot-time re-apply reconverges it — but the route-
-// overlay actuator uses it to avoid publishing a userspace snapshot on
-// top of an un-applied kernel FIB (which would split the FIB).
+// Return contract (#9947 F-007): the ApplyFull outcome verbatim — nil on
+// a full-diff convergence, ErrFRRReloadDegraded (errors.Is) on an
+// additive-fallback reload where the new lines ARE live but stale-config
+// removal is deferred to the in-manager retry, or a hard error where
+// NOTHING converged. Callers branch: the actuator treats degraded as
+// publishable success (new routes live — publishing keeps the kernel and
+// userspace FIBs in agreement, #3757/#1880) and aborts only on hard;
+// the operator-commit full path (applyFRRFull) fails the commit closed
+// on hard AND on transient degraded, tolerating only the persistent
+// pytools-missing degraded state (IsFRRReloadPyMissing) with gauge +
+// warn, so a removal that did not happen is never reported as an
+// unqualified success.
 func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 	if d.frr == nil {
 		return nil
 	}
-	var hardErr error
-	if err := d.frr.ApplyFull(fc); err != nil {
+	err := d.frr.ApplyFull(fc)
+	if err != nil {
 		if errors.Is(err, frr.ErrFRRReloadDegraded) {
 			slog.Warn("FRR reload degraded: additive vtysh -f applied; stale-config removal deferred to the in-manager retry", "err", err)
 		} else {
 			slog.Warn("failed to apply FRR config", "err", err)
-			hardErr = err
 		}
 	}
 
@@ -251,7 +252,7 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 	if fc.ConsistentHash {
 		setFibMultipathHashPolicy()
 	}
-	return hardErr
+	return err
 }
 
 // setFibMultipathHashPolicy enables L4 (5-tuple) ECMP hashing by writing
@@ -335,13 +336,20 @@ func (d *Daemon) actuateRouteOverlayLocked(cfg *config.Config) bool {
 	// route, dataplane on the new one. Abort WITHOUT publishing and
 	// report failure so the engine keeps the state dirty and retries on
 	// the next sweep; the prior consistent kernel+snapshot state is
-	// preserved. A DEGRADED reload (#1880) returns nil here — the new
-	// routes are live, so the matching snapshot publish keeps the two
-	// FIBs in agreement.
+	// preserved. A DEGRADED reload (#1880) is deliberately publishable:
+	// the new routes ARE live, so the matching snapshot publish keeps
+	// the two FIBs in agreement while the frr manager's own retry
+	// converges stale-config removal. (#9947: applyFRRConfig now
+	// returns the degraded sentinel verbatim so the commit path can
+	// fail closed on it; the actuator's contract is unchanged and is
+	// therefore branched explicitly here rather than via a nil return.)
 	if err := d.applyFRRConfig(d.assembleFRRConfig(cfg, overlay)); err != nil {
-		slog.Warn("ip-monitoring: FRR reload failed — NOT publishing the userspace snapshot (would split the FIB); staying dirty for retry",
-			"err", err)
-		return false
+		if !errors.Is(err, frr.ErrFRRReloadDegraded) {
+			slog.Warn("ip-monitoring: FRR reload failed — NOT publishing the userspace snapshot (would split the FIB); staying dirty for retry",
+				"err", err)
+			return false
+		}
+		// Degraded: fall through to publish (both FIBs agree on the new routes).
 	}
 
 	// 2. Publish the dataplane snapshot (routes-only partial republish,
