@@ -26,10 +26,15 @@ func natDelta9905() dpuserspace.SessionDeltaInfo {
 	return d
 }
 
-// TestV4ConvertFromDeltaAllocsBudget9905 pins the F-083 convert half: each NAT IP
-// must be parsed once per delta, not once per use (value + reverse key). Base
-// cost is 8 allocs/op (src+dst+2xNATSrc+2xNATDst+2xMAC); removing the reverse-key
-// re-parse brings the string leg to 6, and the binary leg to ~0.
+// TestV4ConvertFromDeltaAllocsBudget9905 is a general allocation guard on the
+// string-leg V4 convert (NAT+MAC populated): it measures heap allocations per
+// conversion and fails on growth. NOTE: it is NOT parse-once evidence —
+// net.ParseIP results do not escape, so even the unfixed double-parse
+// (value + reverse key) measured 2.0 allocs/op, already under the ceiling.
+// Parse-once is pinned structurally instead: NAT resolves once per FromDelta
+// into userspaceResolvedV4, and ReverseKey/ForwardWire take the resolved
+// carrier or the converted value (no delta re-parse — see
+// TestForwardWireAliasNeedsNoDelta9905 and the (key, val) signatures).
 func TestV4ConvertFromDeltaAllocsBudget9905(t *testing.T) {
 	delta := natDelta9905()
 	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
@@ -43,7 +48,7 @@ func TestV4ConvertFromDeltaAllocsBudget9905(t *testing.T) {
 	})
 	t.Logf("userspaceSessionFromDeltaV4 (string leg, NAT+MAC): %.1f allocs/op", allocs)
 	if allocs > 7 {
-		t.Fatalf("userspaceSessionFromDeltaV4 = %.1f allocs/op, want <= 7 (each NAT IP parsed once, #9905 F-083)", allocs)
+		t.Fatalf("userspaceSessionFromDeltaV4 = %.1f allocs/op, want <= 7 (allocation guard, #9905 F-083)", allocs)
 	}
 }
 
@@ -104,6 +109,12 @@ func TestHandleDeltaZoneMapCachedBudget9905(t *testing.T) {
 		t.Fatalf("handleEventStreamDelta = %.1f allocs/op, want <= 2 (zone map cached across deltas, #9905 F-152)", allocs)
 	}
 }
+
+// NOTE (tripwire, #9905 review): TestHandleDeltaZoneMapCachedBudget9905 lands
+// at exactly 2.0 allocs/op on go1.26.4 linux/amd64 — the two netip ParseAddr
+// error boxes on the empty-IP drop path. Zero headroom is INTENTIONAL: any
+// regression that adds even one allocation per delta fails loudly here. Do
+// not relax to ≤3 without a measured cause; see docs/log/9905.md.
 
 // binDelta9905 is the binary-leg twin of natDelta9905: the identical session,
 // but the strings are empty and the raw bytes ride the #9905 binary fields
@@ -370,6 +381,12 @@ func TestHandleDeltaZoneMapRebuildsOnCommit9905(t *testing.T) {
 	if e3.gen <= e1.gen {
 		t.Fatalf("gen %d -> %d, want monotonic increase", e1.gen, e3.gen)
 	}
+	// Retained-map: the SUPERSEDED entry must keep its old contents —
+	// misses build fresh and swap the pointer, never mutate in place.
+	// A fake that wrapped one mutated map would fail here (dmz gone).
+	if _, ok := e1.ids["dmz"]; !ok {
+		t.Fatal("superseded entry lost dmz: published map was mutated in place")
+	}
 	commitLines9905(t, store, []string{"set security zones security-zone quarantine"})
 	drive("quarantine")
 	e4 := d.userspaceZoneIDs.Load()
@@ -471,5 +488,101 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 	}
 	if _, _, ok := userspaceForwardWireAliasV6(key6, dataplane.SessionValueV6{}); ok {
 		t.Fatal("v6 alias without NAT flags, want none")
+	}
+}
+
+// TestNAT64SnatFlagGate9905 pins the per-leg NAT64 gating intent (#9905
+// review F2). Old-code evidence: pre-change convert did
+// ParseIP(delta.Nat64SnatV4) on BOTH legs, but the binary-leg string was
+// decode-gated (flag && nonzero at eventstream.go) while the JSON leg
+// carried whatever the producer sent. Post-change equivalence: binary
+// honors the flag (a flagless bin never stamps), string stays flag-blind
+// (legacy fallback).
+func TestNAT64SnatFlagGate9905(t *testing.T) {
+	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	// String leg, flag unset, snat present → stamps (flag-blind legacy).
+	s := transitOpenV6_9767()
+	s.Nat64 = false
+	s.Nat64SnatV4 = "203.0.113.5"
+	_, sv, ok := userspaceSessionFromDeltaV6(s, zoneIDs)
+	if !ok {
+		t.Fatal("string-leg NAT64 delta did not convert")
+	}
+	if sv.Nat64SnatV4 != [4]byte{203, 0, 113, 5} {
+		t.Fatalf("string-leg Nat64SnatV4 = %v, want 203.0.113.5 (flag-blind)", sv.Nat64SnatV4)
+	}
+	// Binary leg, flag unset, bin present → does NOT stamp (decode gate).
+	b := transitOpenV6_9767()
+	b.SrcIP, b.DstIP = "", ""
+	b.NeighborMAC, b.SrcMAC = "", ""
+	b.Nat64SnatV4 = ""
+	src := net.ParseIP("2001:559:8585:bf01::102").To16()
+	dst := net.ParseIP("2001:559:8585:80::200").To16()
+	if src == nil || dst == nil {
+		t.Fatal("fixture: v6 literals do not parse")
+	}
+	copy(b.SrcAddr[:], src)
+	copy(b.DstAddr[:], dst)
+	b.BinAddrLen = 16
+	b.Nat64 = false
+	b.Nat64SnatV4Bin = [4]byte{203, 0, 113, 5}
+	_, bv, ok := userspaceSessionFromDeltaV6(b, zoneIDs)
+	if !ok {
+		t.Fatal("binary-leg delta did not convert (addrs valid, want convert)")
+	}
+	if bv.Nat64SnatV4 != [4]byte{} {
+		t.Fatalf("binary-leg Nat64SnatV4 = %v, want zero (flag gate)", bv.Nat64SnatV4)
+	}
+}
+
+// TestForwardWireAliasFallsBackToBasePort9905 pins the subtlest from-value
+// equivalence (#9905 review F7): with NAT present but a zero raw NAT port,
+// the effective port falls back to the base port, and the forward-wire key
+// must carry that fallback — wire.SrcPort == htons(base SrcPort).
+// Present-but-zero-port NAT on a fabric delta exercises the full chain:
+// resolve (fallback) → value stamp → wire derivation, with no delta re-read.
+func TestForwardWireAliasFallsBackToBasePort9905(t *testing.T) {
+	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	d := transitOpen9767()
+	d.NATSrcIP = "192.0.2.7"
+	d.NATSrcPort = 0 // present address, zero raw port → fallback
+	d.FabricRedirect = true
+	key, val, ok := userspaceSessionFromDeltaV4(d, zoneIDs)
+	if !ok {
+		t.Fatal("address-only-NAT delta did not convert")
+	}
+	if val.NATSrcPort != userspaceHostToNetwork16(d.SrcPort) {
+		t.Fatalf("value NATSrcPort = %#x, want htons(%d) fallback", val.NATSrcPort, d.SrcPort)
+	}
+	wireKey, _, ok := userspaceForwardWireAliasV4(key, val)
+	if !ok {
+		t.Fatal("address-only-NAT delta produced no alias")
+	}
+	if wireKey.SrcIP != [4]byte{192, 0, 2, 7} {
+		t.Fatalf("wire SrcIP = %v, want NATSrc", wireKey.SrcIP)
+	}
+	if wireKey.SrcPort != userspaceHostToNetwork16(d.SrcPort) {
+		t.Fatalf("wire SrcPort = %#x, want htons(%d) fallback", wireKey.SrcPort, d.SrcPort)
+	}
+	// V6 mirror.
+	d6 := transitOpenV6_9767()
+	d6.NATSrcIP = "2001:db8:61::1"
+	d6.NATSrcPort = 0
+	d6.FabricRedirect = true
+	key6, val6, ok := userspaceSessionFromDeltaV6(d6, zoneIDs)
+	if !ok {
+		t.Fatal("v6 address-only-NAT delta did not convert")
+	}
+	wireKey6, _, ok := userspaceForwardWireAliasV6(key6, val6)
+	if !ok {
+		t.Fatal("v6 address-only-NAT delta produced no alias")
+	}
+	if wireKey6.SrcPort != userspaceHostToNetwork16(d6.SrcPort) {
+		t.Fatalf("v6 wire SrcPort = %#x, want htons(%d) fallback", wireKey6.SrcPort, d6.SrcPort)
+	}
+	var wantNAT [16]byte
+	copy(wantNAT[:], net.ParseIP("2001:db8:61::1").To16())
+	if wireKey6.SrcIP != wantNAT {
+		t.Fatalf("v6 wire SrcIP = %x, want NATSrc", wireKey6.SrcIP)
 	}
 }

@@ -787,8 +787,10 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	val.AppTimeout = delta.AppTimeout
 	// #4565: stamp the NAT64 translated pool SOURCE so the cluster wire + peer
 	// helper carry it, letting a peer-PROMOTED NAT64 session rebuild its reverse
-	// (v4->v6) BIB after failover. Non-empty delta.Nat64SnatV4 (decoded from the
-	// FLAG_NAT64 open frame) marks a NAT64 cross-family session.
+	// (v4->v6) BIB after failover. A resolved pool source marks a NAT64
+	// cross-family session: Nat64SnatV4Bin on the binary leg (#9905,
+	// decode-gated on the FLAG_NAT64 open frame) or ParseIP of
+	// delta.Nat64SnatV4 on the string leg (flag-blind legacy fallback).
 	if r.hasNat64Snat {
 		val.Nat64SnatV4 = r.nat64Snat
 	}

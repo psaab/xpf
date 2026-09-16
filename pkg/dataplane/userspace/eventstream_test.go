@@ -360,9 +360,6 @@ func TestDecodeSessionEventV4(t *testing.T) {
 	if d.SrcMACBin != [6]byte{0x02, 0xbf, 0x72, 0x00, 0x50, 0x08} {
 		t.Fatalf("SrcMACBin = %x, want 02:bf:72:00:50:08", d.SrcMACBin)
 	}
-	if d.NextHopAddr != [16]byte{172, 16, 80, 1} {
-		t.Fatalf("NextHopAddr = %v, want 172.16.80.1", d.NextHopAddr[:4])
-	}
 	if d.NeighborMAC != "" || d.SrcMAC != "" || d.NextHop != "" {
 		t.Fatalf("strings = %q/%q/%q, want all empty on the binary leg", d.NeighborMAC, d.SrcMAC, d.NextHop)
 	}
@@ -502,9 +499,6 @@ func TestDecodeSessionEventV4CarriesPolicyFields3301(t *testing.T) {
 	d, ok := decodeSessionEvent(payload)
 	if !ok {
 		t.Fatal("decodeSessionEvent returned false")
-	}
-	if d.NextHopAddr != [16]byte{172, 16, 80, 1} {
-		t.Fatalf("NextHopAddr = %v, want 172.16.80.1 (trailer must not corrupt prior fields)", d.NextHopAddr[:4])
 	}
 	if d.NextHop != "" {
 		t.Fatalf("NextHop = %q, want empty on the binary leg", d.NextHop)

@@ -1524,8 +1524,9 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 	copy(d.SrcMACBin[:], payload[off:off+6])
 	off += 6
 
-	// NextHop.
-	copy(d.NextHopAddr[:], payload[off:off+addrSize])
+	// NextHop: skipped, not carried — no Go consumer reads the binary
+	// leg's NextHop (the JSON leg's NextHop string is untouched), so
+	// decoding it would only cost a copy (#9905 review).
 	off += addrSize
 
 	// #3301: trailing firewall-metadata fields (length-gated; absent on an

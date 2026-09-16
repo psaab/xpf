@@ -316,14 +316,16 @@ type SessionDeltaInfo struct {
 	AppTimeout       uint32 `json:"app_timeout,omitempty"`
 	// #4565: NAT64 cross-family marker (open-frame flags bit 1<<5) + the
 	// translated pool SOURCE (trailing 4 bytes). Stamped onto the synced
-	// SessionValueV6 (SessFlagNAT64 + Nat64SnatV4) by daemon_ha_userspace.go so
-	// the cluster sync wire and the peer helper carry them, letting a
-	// peer-PROMOTED NAT64 session rebuild its reverse (v4->v6) BIB after
-	// failover. Nat64SnatV4 is the one datum not reconstructable from the synced
-	// forward v6 key (the orig v6 src/dst ARE the key; dst_v4 is the /96 low 32).
-	// Also mirrored on the JSON RPC-fallback delta since #6949; before that a
-	// NAT64 session promoted from that leg could not rebuild its reverse BIB at
-	// all — a translation failure after failover, not a mis-attribution.
+	// SessionValueV6 as Nat64SnatV4 ONLY (no flag is stamped — zero
+	// SessFlagNAT64 references in pkg/daemon) by
+	// daemon_ha_userspace_convert.go so the cluster sync wire and the peer
+	// helper carry it, letting a peer-PROMOTED NAT64 session rebuild its
+	// reverse (v4->v6) BIB after failover. Nat64SnatV4 is the one datum
+	// not reconstructable from the synced forward v6 key (the orig v6
+	// src/dst ARE the key; dst_v4 is the /96 low 32). Also mirrored on
+	// the JSON RPC-fallback delta since #6949; before that a NAT64
+	// session promoted from that leg could not rebuild its reverse BIB
+	// at all — a translation failure after failover, not a mis-attribution.
 	Nat64       bool   `json:"nat64,omitempty"`
 	Nat64SnatV4 string `json:"nat64_snat_v4,omitempty"`
 	// #5212: the ORIGINATING node's stable RT_FLOW session id, decoded from the
@@ -406,7 +408,7 @@ type SessionDeltaInfo struct {
 	// The leg gate is whole-struct: BinAddrLen==0 means the JSON leg (use
 	// the strings for every field); 4/16 means the binary leg (use the
 	// arrays, the strings stay empty). Zero-valued binary bytes mirror ""
-	// exactly: absent NAT/MAC/NextHop, and an unparseable (dropped) src/dst.
+	// exactly: absent NAT/MAC, and an unparseable (dropped) src/dst.
 	// Convert fails closed on any other BinAddrLen or a family/length
 	// mismatch. There is no per-field mixing: decoders set one leg, and no
 	// Go site remarshals or merges the two.
@@ -414,7 +416,6 @@ type SessionDeltaInfo struct {
 	DstAddr        [16]byte `json:"-"`
 	NATSrcAddr     [16]byte `json:"-"`
 	NATDstAddr     [16]byte `json:"-"`
-	NextHopAddr    [16]byte `json:"-"`
 	BinAddrLen     uint8    `json:"-"`
 	SrcMACBin      [6]byte  `json:"-"`
 	NeighborMACBin [6]byte  `json:"-"`
