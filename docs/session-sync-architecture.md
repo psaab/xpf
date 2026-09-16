@@ -2816,9 +2816,13 @@ reached the peer first. The stale install that followed drew a fresher
 generation and resurrected the session on the standby, because the #2221
 tombstone refuses only an older install. `handleEventStreamFullResync` now holds
 `userspaceDeltaSyncMu` across the export and its queueing, and both
-fallback-loop drains take it through `drainUserspaceSessionDeltasLocked`. The
-event stream's own delta frames cannot interleave, because the export runs on
-the reader goroutine.
+fallback-loop drains take it through `drainUserspaceSessionDeltasLocked`.
+The event-stream delta callback takes the same lock around its conversion and
+queueing, so it cannot interleave with the repayment export either. All three
+producers therefore share one sender-side ordering domain. The lock does not
+cover the pre-existing sweep, journal-flush, or bulk-apply paths; bulk windows
+reconcile their authoritative session set, while the paced repayment export
+now has the ordering protection the old reader-goroutine premise provided.
 
 The #5483 case closes a silent-divergence hole: the reader used to skip an
 undecodable session frame with `DecodeErrors.Add(1); continue`, leaving the
