@@ -1767,7 +1767,7 @@ fn run_control_request(
     let state_file = state_file.to_string();
     let handle = {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
         };
 
     serde_json::to_writer(&mut client, &request).expect("write request");
@@ -1962,7 +1962,7 @@ fn apply_snapshot_rejects_unsupported_protocol_version() {
         let running = running.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
         }
     };
 
@@ -2012,7 +2012,7 @@ fn apply_snapshot_for_test(
         let state_file = state_file.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
         }
     };
 
@@ -5274,7 +5274,7 @@ fn apply_snapshot_rejects_a_newer_protocol_version_too() {
         let running = running.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
         }
     };
 

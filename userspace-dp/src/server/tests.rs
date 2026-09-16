@@ -14,7 +14,7 @@ use super::helpers::{
     refresh_status, set_bindings_forwarding_armed, should_run_afxdp, take_pre_persist_lock_free,
     write_state,
 };
-use super::{handle_stream, ServerState};
+use super::{handle_stream, ServerState, SocketMode};
 use crate::state_writer::StateWriter;
 use crate::{
     afxdp, BindingControlRequest, BindingStatus, ControlRequest, ControlResponse, ForwardingControlRequest,
@@ -59,15 +59,18 @@ fn run_request(state: Arc<Mutex<ServerState>>, request: ControlRequest) -> Contr
     // derivation itself becomes the thing that blocks and the cell measures the
     // harness rather than the dispatcher.
     let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
-    run_request_with_domain(state, request, session_domain)
+    run_request_with_domain(state, request, session_domain, SocketMode::Main)
 }
 
 /// `run_request` with the session-domain handle supplied by the caller, for a
 /// cell that holds the `ServerState` mutex across the request (#7209).
+/// `mode` selects the accepting socket (`Main` preserves existing meaning;
+/// `Session` `update_ha_state` takes the #9629 fast path).
 fn run_request_with_domain(
     state: Arc<Mutex<ServerState>>,
     request: ControlRequest,
     session_domain: crate::afxdp::SessionDomain,
+    mode: SocketMode,
 ) -> ControlResponse {
     let state_file = unique_state_file(&request.request_type);
     let (mut client, server) =
@@ -76,7 +79,7 @@ fn run_request_with_domain(
     let handle = {
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            handle_stream(server, &state_file, state, running, session_domain)
+            handle_stream(server, &state_file, state, running, session_domain, mode)
         })
     };
 
@@ -108,7 +111,7 @@ fn run_request_on_file(
         let state_file = state_file.to_string();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
         }
     };
 
@@ -182,7 +185,7 @@ fn run_request_delivering_wg_secrets(
     let handle = {
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            handle_stream(server, &state_file, state, running, session_domain)
+            handle_stream(server, &state_file, state, running, session_domain, SocketMode::Main)
         })
     };
     serde_json::to_writer(&mut client, &payload).expect("write request");
@@ -207,7 +210,7 @@ fn run_raw(state: Arc<Mutex<ServerState>>, payload: &[u8]) -> Result<(), String>
         let state_file = state_file.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
         }
     };
     client.write_all(payload).expect("write raw payload");
@@ -394,6 +397,583 @@ fn update_ha_state_populates_status_ha_groups() {
     // exact status-field-parity surface #1642 regressed in.
     assert_eq!(status.ha_groups.len(), 1, "expected one HA group");
     assert_eq!(status.ha_groups[0].rg_id, 1);
+}
+
+/// #9629 acceptance: an `update_ha_state` refresh must LAND while another
+/// thread holds the global `ServerState` mutex past the REAL 10 s stale
+/// window, so the per-RG forwarding lease stays active across the hold.
+///
+/// Shape mirrors `sync_session_is_served_while_the_state_lock_is_held_7209`
+/// (stand-in holder, `holding` gate, bounded hold), but the oracle is SEMANTIC:
+/// the holder keeps the mutex for 12 s while a real Session refresh fires at
+/// ~t=5 s, and a lock-free sample at ~t=11.5 s — after the 10 s seed expired,
+/// before the 12 s release — must observe the lease active. Served within 1 s
+/// (never queued behind the holder).
+///
+/// Timing math (whole seconds: `until=trunc(now)+N`, lifetime `(N,N+1]s`):
+/// the 10 s seed lives `(10,11]s`, so the 11.5 s sample sits ≥0.5 s past its
+/// expiry (scheduler-slop-safe); the ~5 s refresh mints `(t+10,t+11]s`, active
+/// at the sample with ≥3 s margin. Firing at t≈0 would itself expire at t≈10 s
+/// — before the sample — and read inactive even when fixed, hence the ~5 s
+/// delay. `watchdog_timestamp: 0` still mints `now + 10 s`
+/// (`active_lease_until` takes `max(watchdog, now)`).
+///
+/// RED without the fix (refresh queues behind the holder: sample inactive,
+/// served after ~12 s). GREEN with it (session fast path lands off-lock).
+/// The 4 s `update_ha_state_fast_proxy_9629` below keeps the fast signal.
+#[test]
+fn update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const RG: i32 = 1;
+    const SEED_VALID_SECS: u64 = 10;
+    const HOLD_MS: u64 = 12_000;
+    const REFRESH_AT_MS: u64 = 5_000;
+    const SAMPLE_AT_MS: u64 = 11_500;
+    const SERVED_WITHIN_MS: u64 = 1_000;
+
+    let state = new_state(ProcessStatus::default());
+    // Taken BEFORE the holder acquires, as `lifecycle.rs` takes it before the
+    // daemon serves anything (#7209).
+    let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .store_ha_lease_for_test(RG, SEED_VALID_SECS);
+
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder_state = state.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = holder_state.lock().expect("state lock");
+        holding_tx.send(()).expect("signal holding");
+        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+    });
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the state lock");
+
+    // The measured request runs on its own thread: on RED it blocks behind
+    // the holder for the full hold, and the mid-hold sample below must be
+    // taken while it is still queued.
+    let (resp_tx, resp_rx) = mpsc::channel();
+    let client_state = state.clone();
+    let client_domain = session_domain.clone();
+    let client = std::thread::spawn(move || {
+        // Fire AFTER the hold begins (t≈5 s), not at t≈0: a t≈0 refresh would
+        // itself expire at t≈10 s — before the 11.5 s sample — and read inactive
+        // even when fixed. The ~5 s refresh stays valid well past the sample.
+        std::thread::sleep(Duration::from_millis(REFRESH_AT_MS));
+        let mut request = req("update_ha_state");
+        // `watchdog_timestamp: 0` still mints `now + 10 s`
+        // (`active_lease_until` takes `max(watchdog, now)`), per
+        // `update_ha_state_seeds_lease_for_active_group_without_watchdog`.
+        request.ha_state = Some(HAStateUpdateRequest {
+            groups: vec![HAGroupStatus {
+                rg_id: RG,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            }],
+        });
+        let t0 = Instant::now();
+        let resp =
+            run_request_with_domain(client_state, request, client_domain, SocketMode::Session);
+        resp_tx.send((resp, t0.elapsed())).expect("send response");
+    });
+
+    // Sample AFTER the seed expired but BEFORE the hold releases, through the
+    // lock-free handle — no mutex, exactly as the per-packet path observes it.
+    std::thread::sleep(Duration::from_millis(SAMPLE_AT_MS));
+    let mid_hold = session_domain.ha_group_status(RG);
+    let mid_hold_active = mid_hold
+        .as_ref()
+        .map(|status| status.forwarding_active)
+        .unwrap_or(false);
+
+    let (resp, elapsed) = resp_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("handler response");
+    let _ = release_tx.send(());
+    holder.join().expect("holder thread");
+    client.join().expect("client thread");
+
+    assert!(
+        resp.ok,
+        "update_ha_state must succeed while the mutex is held; error={}",
+        resp.error
+    );
+    assert!(
+        mid_hold_active,
+        "the per-RG forwarding lease EXPIRED behind a held snapshot mutex: the \
+         mid-hold sample (seed expired, hold ongoing, refresh in flight) \
+         observes the RG inactive (sample={mid_hold:?}). Served after \
+         {elapsed:?}; the refresh queued instead of landing (#9629)."
+    );
+    assert!(
+        elapsed < Duration::from_millis(SERVED_WITHIN_MS),
+        "an update_ha_state refresh waited {elapsed:?} behind a thread holding \
+         the global ServerState mutex. apply_snapshot holds that same mutex \
+         across a 10 s worker-readiness barrier while the daemon refreshes \
+         every 3 s against a 10 s stale window, so a hold past ~7 s expires \
+         the lease and the per-packet check reports an otherwise healthy RG \
+         inactive (#9629)."
+    );
+}
+
+/// #9629 fast proxy: same semantic oracle as the literal acceptance cell
+/// above (mid-hold lock-free sample active + ok + served <1s), with a 2 s
+/// seed / 4 s hold / 3 s sample for speed (~3 s instead of ~12 s).
+///
+/// Corrected math (`until=trunc(now)+2`, lifetime `(2,3]s` wall): the 3 s
+/// sample wall (`t0+3+ε`, `ε>0` spawn overhead) sits strictly past the expiry
+/// wall (`floor(t0)+3`), so the seed is deterministically expired at sample
+/// time (never flaky-false-green — GREEN still requires the refresh to land).
+/// The literal cell above carries the >10 s acceptance claim.
+#[test]
+fn update_ha_state_fast_proxy_9629() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const RG: i32 = 1;
+    const SEED_VALID_SECS: u64 = 2;
+    const HOLD_MS: u64 = 4_000;
+    const SAMPLE_AT_MS: u64 = 3_000;
+    const SERVED_WITHIN_MS: u64 = 1_000;
+
+    let state = new_state(ProcessStatus::default());
+    // Taken BEFORE the holder acquires, as `lifecycle.rs` takes it before the
+    // daemon serves anything (#7209).
+    let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .store_ha_lease_for_test(RG, SEED_VALID_SECS);
+
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder_state = state.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = holder_state.lock().expect("state lock");
+        holding_tx.send(()).expect("signal holding");
+        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+    });
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the state lock");
+
+    // The measured request runs on its own thread: on RED it blocks behind
+    // the holder for the full hold, and the mid-hold sample below must be
+    // taken while it is still queued.
+    let (resp_tx, resp_rx) = mpsc::channel();
+    let client_state = state.clone();
+    let client_domain = session_domain.clone();
+    let client = std::thread::spawn(move || {
+        let mut request = req("update_ha_state");
+        // `watchdog_timestamp: 0` still mints `now + 10 s`
+        // (`active_lease_until` takes `max(watchdog, now)`), per
+        // `update_ha_state_seeds_lease_for_active_group_without_watchdog`.
+        request.ha_state = Some(HAStateUpdateRequest {
+            groups: vec![HAGroupStatus {
+                rg_id: RG,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            }],
+        });
+        let t0 = Instant::now();
+        let resp =
+            run_request_with_domain(client_state, request, client_domain, SocketMode::Session);
+        resp_tx.send((resp, t0.elapsed())).expect("send response");
+    });
+
+    // Sample AFTER the seed expired but BEFORE the hold releases, through the
+    // lock-free handle — no mutex, exactly as the per-packet path observes it.
+    std::thread::sleep(Duration::from_millis(SAMPLE_AT_MS));
+    let mid_hold = session_domain.ha_group_status(RG);
+    let mid_hold_active = mid_hold
+        .as_ref()
+        .map(|status| status.forwarding_active)
+        .unwrap_or(false);
+
+    let (resp, elapsed) = resp_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("handler response");
+    let _ = release_tx.send(());
+    holder.join().expect("holder thread");
+    client.join().expect("client thread");
+
+    assert!(
+        resp.ok,
+        "update_ha_state must succeed while the mutex is held; error={}",
+        resp.error
+    );
+    assert!(
+        mid_hold_active,
+        "the per-RG forwarding lease EXPIRED behind a held snapshot mutex: the \
+         mid-hold sample (seed expired, hold ongoing, refresh in flight) \
+         observes the RG inactive (sample={mid_hold:?}). Served after \
+         {elapsed:?}; the refresh queued instead of landing (#9629)."
+    );
+    assert!(
+        elapsed < Duration::from_millis(SERVED_WITHIN_MS),
+        "an update_ha_state refresh waited {elapsed:?} behind a thread holding \
+         the global ServerState mutex. apply_snapshot holds that same mutex \
+         across a 10 s worker-readiness barrier while the daemon refreshes \
+         every 3 s against a 10 s stale window, so a hold past ~7 s expires \
+         the lease and the per-packet check reports an otherwise healthy RG \
+         inactive (#9629)."
+    );
+}
+
+/// #9629: the fast path serializes on `ha_mutex` — while a test holds the
+/// mutex (via the `ha_mutex_for_test` handle, the same `Arc` both production
+/// writers share), a lease refresh waits; after release it serves. Proves the
+/// µs race (stale refresh overwriting a just-landed transition) is
+/// unrepresentable by construction: production writers are exactly the locked
+/// path plus this fast path, and both hold `ha_mutex` across load→store
+/// (every other `rg_runtime.store` is `#[cfg(test)]`).
+#[test]
+fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let state = new_state(ProcessStatus::default());
+    // Seed one active RG via the locked path (realistic stored state).
+    {
+        let groups = vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }];
+        state
+            .lock()
+            .expect("state")
+            .afxdp
+            .update_ha_state(&groups)
+            .expect("seed");
+    }
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+    // Hold the leaf mutex (test handle clones the same Arc).
+    let held = domain.ha_mutex_for_test();
+    let _guard = held.lock().expect("ha mutex");
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let outcome = domain.try_refresh_ha_leases(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }]);
+        tx.send(outcome).expect("send outcome");
+    });
+    // While held, the refresh cannot complete (it needs the mutex).
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "fast path returned while ha_mutex was held — it does not serialize"
+    );
+    drop(_guard);
+    let outcome = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("outcome after release");
+    worker.join().expect("worker");
+    assert!(
+        matches!(outcome, crate::afxdp::HaRefreshOutcome::Served(1)),
+        "expected Served(1) after release, got {outcome:?}"
+    );
+}
+
+/// #9629: the Main `update_ha_state` path is behavior-identical after the
+/// `ha_mutex` + socket-mode refactor: an active flip lands (flags flip),
+/// status reflects it with a live lease, and the state file persists it (via
+/// `run_request_on_file`, the #3767 precedent). Pins `UpdateRGActive`-equivalence.
+#[test]
+fn update_ha_state_main_flip_persists_9629() {
+    let state = new_state(ProcessStatus::default());
+    let file = unique_state_file("ha-main-flip-9629");
+    // Seed inactive via Main.
+    let mut seed_req = req("update_ha_state");
+    seed_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let seed_resp = run_request_on_file(state.clone(), seed_req, &file);
+    assert!(seed_resp.ok, "seed: {}", seed_resp.error);
+    // Flip to active via Main.
+    let mut flip_req = req("update_ha_state");
+    flip_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let resp = run_request_on_file(state.clone(), flip_req, &file);
+    assert!(resp.ok, "flip: {}", resp.error);
+    let status = resp.status.expect("status");
+    assert_eq!(status.ha_groups.len(), 1);
+    assert!(status.ha_groups[0].active);
+    assert!(
+        status.ha_groups[0].forwarding_active,
+        "fresh active flip must hold a live lease: {:?}",
+        status.ha_groups[0]
+    );
+    // State file persists the flip (operator + restart surface).
+    let bytes = std::fs::read(&file).expect("read persisted state file");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("parse persisted state file");
+    let groups = persisted["status"]["ha_groups"]
+        .as_array()
+        .expect("ha_groups array");
+    let entry = groups
+        .iter()
+        .find(|g| g["rg_id"].as_i64() == Some(1))
+        .expect("rg 1");
+    assert_eq!(entry["active"].as_bool(), Some(true));
+    let _ = std::fs::remove_file(&file);
+}
+
+/// #9629: a Session fast-path refresh writes NO state file (no `persist_state`,
+/// same reason `sync_session` doesn't persist: `write_state` re-locks and
+/// would re-block). Pins fast-path purity.
+#[test]
+fn update_ha_state_session_refresh_writes_no_state_file_9629() {
+    // Seed one active RG via Main (uses a temp file, removed; no interference).
+    let state = new_state(ProcessStatus::default());
+    let mut seed_req = req("update_ha_state");
+    seed_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    assert!(run_request(state.clone(), seed_req).ok);
+    // Session refresh against a caller-owned file that does not exist.
+    let file = unique_state_file("ha-session-no-persist-9629");
+    assert!(
+        std::fs::metadata(&file).is_err(),
+        "fixture file must not exist yet"
+    );
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let running = Arc::new(AtomicBool::new(true));
+    let sd = state.lock().expect("state").afxdp.session_domain().clone();
+    let file_clone = file.clone();
+    let handle = std::thread::spawn(move || {
+        handle_stream(server, &file_clone, state, running, sd, SocketMode::Session)
+    });
+    serde_json::to_writer(&mut client, &request).expect("write request");
+    std::io::Write::write_all(&mut client, b"\n").expect("newline");
+    let response: ControlResponse =
+        serde_json::from_reader(std::io::BufReader::new(client)).expect("read response");
+    handle
+        .join()
+        .expect("handler thread")
+        .expect("handler result");
+    assert!(response.ok, "refresh: {}", response.error);
+    assert!(
+        std::fs::metadata(&file).is_err(),
+        "session fast path must not create a state file"
+    );
+}
+
+/// #9629: a Session refresh with a changed RG keeps STORED ownership with a
+/// fresh lease for the changed RG and refreshes the unchanged RG (Go-4 mint,
+/// not skip). Demotion pending on RG2 stays owned by main; liveness stays fresh.
+#[test]
+fn update_ha_state_session_transition_keeps_stored_ownership_9629() {
+    let state = new_state(ProcessStatus::default());
+    let mut seed_req = req("update_ha_state");
+    seed_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            },
+        ],
+    });
+    assert!(run_request(state.clone(), seed_req).ok);
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            },
+        ],
+    });
+    let resp = run_request_with_domain(state.clone(), request, domain.clone(), SocketMode::Session);
+    assert!(resp.ok, "refresh: {}", resp.error);
+    let rg1 = domain.ha_group_status(1).expect("rg 1");
+    let rg2 = domain.ha_group_status(2).expect("rg 2");
+    assert!(
+        rg1.active && rg1.forwarding_active,
+        "unchanged RG must stay fresh: {rg1:?}"
+    );
+    assert!(
+        rg2.active && rg2.forwarding_active,
+        "changed RG must keep STORED active ownership with a fresh lease (demotion owned by main): {rg2:?}"
+    );
+}
+
+/// #9629: a Session refresh with membership change (join) fails fast with the
+/// machine-readable NeedsLock prefix while `ServerState` is held — it never
+/// queues behind the snapshot mutex. Shape mirrors the 7209 timing cell.
+#[test]
+fn update_ha_state_session_membership_diff_needs_lock_while_held_9629() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const HOLD_MS: u64 = 1_200;
+    const SERVED_WITHIN_MS: u64 = 500;
+
+    let state = new_state(ProcessStatus::default());
+    let mut seed_req = req("update_ha_state");
+    seed_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    assert!(run_request(state.clone(), seed_req).ok);
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder_state = state.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = holder_state.lock().expect("state lock");
+        holding_tx.send(()).expect("signal holding");
+        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+    });
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the state lock");
+
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: true,
+                watchdog_timestamp: 0,
+                ..HAGroupStatus::default()
+            },
+        ],
+    });
+    let t0 = Instant::now();
+    let resp = run_request_with_domain(state.clone(), request, domain, SocketMode::Session);
+    let elapsed = t0.elapsed();
+    let _ = release_tx.send(());
+    holder.join().expect("holder thread");
+
+    assert!(!resp.ok, "membership diff must route to main (NeedsLock)");
+    assert!(
+        resp.error
+            .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
+        "NeedsLock must carry the machine-readable prefix Go classifies on, got {:?}",
+        resp.error
+    );
+    assert!(
+        elapsed < Duration::from_millis(SERVED_WITHIN_MS),
+        "session membership-diff waited {elapsed:?} behind the ServerState mutex; it must fail fast without the lock (#9629)"
+    );
+}
+
+/// #9629: stored-empty split — all-inactive inventory via Session is Served
+/// (side-effect-free, behavior-identical to locked), while any-active via
+/// Session is NeedsLock (activation needs epoch bumps + fan-out + prewarm).
+#[test]
+fn update_ha_state_session_empty_stored_split_9629() {
+    // All-inactive on empty stored: Served.
+    let state = new_state(ProcessStatus::default());
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![
+            HAGroupStatus {
+                rg_id: 1,
+                active: false,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                ..HAGroupStatus::default()
+            },
+        ],
+    });
+    let resp = run_request_with_domain(state.clone(), request, domain.clone(), SocketMode::Session);
+    assert!(
+        resp.ok,
+        "all-inactive on empty stored must serve: {}",
+        resp.error
+    );
+    assert_eq!(domain.ha_group_status(1).map(|s| s.active), Some(false));
+    // Any-active on empty stored: NeedsLock (fresh empty state isolates the case).
+    let state2 = new_state(ProcessStatus::default());
+    let domain2 = state2.lock().expect("state").afxdp.session_domain().clone();
+    let mut request2 = req("update_ha_state");
+    request2.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let resp2 = run_request_with_domain(state2, request2, domain2, SocketMode::Session);
+    assert!(!resp2.ok, "any-active on empty stored must route to main");
+    assert!(
+        resp2
+            .error
+            .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
+        "NeedsLock prefix missing: {:?}",
+        resp2.error
+    );
 }
 
 // --- set_forwarding_state ----------------------------------------------
@@ -975,7 +1555,7 @@ fn quarantined_state_refuses_requests_9900() {
         let running = running.clone();
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            handle_stream(server, &state_file, state, running, session_domain)
+            handle_stream(server, &state_file, state, running, session_domain, SocketMode::Main)
         })
     };
     let request = req("ping");
@@ -3312,7 +3892,7 @@ fn sync_session_is_served_while_the_state_lock_is_held_7209() {
         .expect("holder never acquired the state lock");
 
     let t0 = Instant::now();
-    let resp = run_request_with_domain(state.clone(), req("sync_session"), session_domain);
+    let resp = run_request_with_domain(state.clone(), req("sync_session"), session_domain, SocketMode::Main);
     let elapsed = t0.elapsed();
     let _ = release_tx.send(());
     holder.join().expect("holder thread");
@@ -3427,7 +4007,7 @@ fn sync_session_real_payload_is_served_while_the_state_lock_is_held_7209() {
             .expect("holder never acquired the state lock");
 
         let t0 = Instant::now();
-        let resp = run_request_with_domain(state.clone(), build(), session_domain);
+        let resp = run_request_with_domain(state.clone(), build(), session_domain, SocketMode::Main);
         let elapsed = t0.elapsed();
         let _ = release_tx.send(());
         holder.join().expect("holder thread");
@@ -4472,7 +5052,7 @@ fn drain_session_deltas_survive_write_state_failure_5294() {
         let bad = bad_state_file.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &bad, state, running, sd))
+            std::thread::spawn(move || handle_stream(server, &bad, state, running, sd, SocketMode::Main))
         }
     };
 
@@ -6452,7 +7032,7 @@ fn sync_session_import_is_applied_while_the_state_lock_is_held_7209() {
         let state = state.clone();
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            let result = handle_stream(server, &state_file, state, running, session_domain);
+            let result = handle_stream(server, &state_file, state, running, session_domain, SocketMode::Main);
             let _ = tx.send(());
             result
         })

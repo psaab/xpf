@@ -928,6 +928,7 @@
     "gre_decap_unsupported_version_refusals_total": 0,
     "gre_encap_df_oversize_drops_total": 0,
     "ha_groups": [],
+    "ha_session_refresh_supported": false,
     "ha_transition_demote_dropped": 0,
     "ha_transition_demote_stale_skipped": 0,
     "ha_transition_refresh_dropped": 0,

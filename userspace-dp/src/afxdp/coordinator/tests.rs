@@ -111,6 +111,30 @@ impl Coordinator {
             })
         })
     }
+
+    /// #9629 test seam: store an HA lease for one RG with an explicit
+    /// remaining validity, for a server-side cell that cannot reach `ha`.
+    ///
+    /// The contention cell needs a lease that EXPIRES mid-hold (validity
+    /// shorter than the mutex hold) so the hold extends beyond the stale
+    /// window, as the issue's acceptance requires. A real `update_ha_state`
+    /// always mints `now + 10 s`, which no fast test can out-wait — hence
+    /// the crafted store. Follows the `seed_live_local_session_for_test`
+    /// precedent above; `&self` (the store is an `ArcSwap`, no exclusive
+    /// access needed).
+    pub(crate) fn store_ha_lease_for_test(&self, rg_id: i32, valid_for_secs: u64) {
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        self.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+            rg_id,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: crate::afxdp::HAForwardingLease::ActiveUntil(
+                    now_secs.saturating_add(valid_for_secs),
+                ),
+            },
+        )])));
+    }
 }
 
 use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;
