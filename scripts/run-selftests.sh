@@ -50,7 +50,7 @@ run_bash() {
 	script=$1
 	shift
 	if [ ! -f "$script" ]; then
-		skipl "$script (not present)"
+		faill "$script (not present -- a registered leg that is gone)"
 		return
 	fi
 	if ! command -v bash >/dev/null 2>&1; then
@@ -73,7 +73,7 @@ run_shell() {
 	script=$1
 	shift
 	if [ ! -f "$script" ]; then
-		skipl "$script (not present)"
+		faill "$script (not present -- a registered leg that is gone)"
 		return
 	fi
 	out=$(sh "$script" "$@" 2>&1)
@@ -94,7 +94,7 @@ run_shell() {
 run_py() {
 	script=$1
 	if [ ! -f "$script" ]; then
-		skipl "$script (not present)"
+		faill "$script (not present -- a registered leg that is gone)"
 		return
 	fi
 	out=$(python3 "$script" 2>&1)
@@ -154,6 +154,8 @@ scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
 scripts/go-buildtag-census.sh
 test/incus/go-buildtag-census-selftest.sh
+scripts/selftest-census.sh
+test/incus/selftest-census-selftest.sh
 scripts/miri-census.sh
 scripts/miri-leg.sh
 test/incus/miri-census-selftest.sh
@@ -406,6 +408,11 @@ run_bash test/incus/miri-census-selftest.sh
 # complex constraints are loud NEEDS-REVIEW lines; blindness to the known
 # file FAILs closed. SKIP without go (hermetic-runner convention).
 run_bash test/incus/go-buildtag-census-selftest.sh
+# -- selftest census self-test (#9922 F-156): fixture pairs proving each
+# failure direction of the extracted #7296 census (unregistered, emptied
+# glob, unguarded python, odd-set drift both ways) plus the run_* missing
+# path, which is FAIL since the same member.
+run_bash test/incus/selftest-census-selftest.sh
 
 # -- harness reachability census (#8302) --
 #
@@ -490,37 +497,16 @@ else
 	passl "interpreter census ($interp_seen run_shell legs, none declaring bash)"
 fi
 
-# -- self-test census (#7296) --
+# -- self-test census (#7296, extracted #9922 F-156) --
 #
 # The defect was not "one script was forgotten" -- it was that NOTHING NOTICED.
-# Seven hermetic self-tests accumulated unreached because this runner carries a
-# hand-maintained list with no check that the list covers what is on disk.
-# Adding the seven without this census would leave the eighth to repeat it.
-#
-# Matches the `run_bash <path>` CALL form with comments stripped: a bare
-# filename mention would otherwise be satisfied by the comment block above that
-# names these very scripts -- the shape where a source-scanning gate passes on
-# its own documentation.
-census_missing=""
-census_seen=0
-runner_code=$(sed 's/#.*//' scripts/run-selftests.sh)
-for st in test/incus/*-selftest.sh; do
-	[ -f "$st" ] || continue
-	census_seen=$((census_seen + 1))
-	case "$runner_code" in
-	*"run_bash $st"*) ;;
-	*) census_missing="$census_missing $st" ;;
-	esac
-done
-if [ "$census_seen" -eq 0 ]; then
-	# A glob matching nothing would otherwise report a complete census over an
-	# empty set -- a clean pass that swept nothing.
-	faill "self-test census (matched NO test/incus/*-selftest.sh -- the glob is wrong)"
-elif [ -n "$census_missing" ]; then
-	faill "self-test census (not invoked by this runner:$census_missing)"
-else
-	passl "self-test census ($census_seen hermetic test/incus self-tests, all invoked)"
-fi
+# The inline block that used to live here globbed ONE location
+# (test/incus/*-selftest.sh); the extracted census covers all six self-test
+# locations plus the §4 odd-name exact set and the §3 __main__ guard, with
+# its own self-test (test/incus/selftest-census-selftest.sh) proving each
+# failure direction. `sh` is correct: the census declares #!/bin/sh and is
+# POSIX (the #8153 interpreter census above checks this).
+run_shell scripts/selftest-census.sh
 
 # ── 5. ledger lint (#8302 §4.1) ──
 #
