@@ -229,6 +229,11 @@ test-go: test-race-dp
 	# pkg/flowexport. An exception must be a named, reasoned carve-out,
 	# never a quiet re-narrowing of this scope.
 	$(GO) vet ./...
+	# #9922 F-159: build-tag census — every *_test.go with a pre-package
+	# //go:build constraint gets a `go vet -tags` compile leg, so a tagged
+	# file (today: functional1944) cannot rot outside the default gate.
+	# No 77-guard needed: `go vet` above already requires go.
+	sh scripts/go-buildtag-census.sh
 	# #8231: truncate the side file ONCE per invocation, before the first leg.
 	# The legs below APPEND (test-go has two), so without this a second
 	# `make test-go GOTESTJSON=x` would attribute over the union of both runs —

@@ -152,6 +152,8 @@ scripts/ignored-cell-census.sh
 test/incus/ignored-cell-census-selftest.sh
 scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
+scripts/go-buildtag-census.sh
+test/incus/go-buildtag-census-selftest.sh
 scripts/miri-census.sh
 scripts/miri-leg.sh
 test/incus/miri-census-selftest.sh
@@ -399,6 +401,11 @@ run_bash test/incus/go-skip-census-selftest.sh
 # cell that must flip the verdict, and the leg's scoring cells drive the real
 # scripts/miri-leg.sh over a stub cargo replaying fixture logs.
 run_bash test/incus/miri-census-selftest.sh
+# -- go-buildtag census self-test (#9922 F-159): the census below discovers
+# tagged files and vets each single-identifier tag (vet never executes);
+# complex constraints are loud NEEDS-REVIEW lines; blindness to the known
+# file FAILs closed. SKIP without go (hermetic-runner convention).
+run_bash test/incus/go-buildtag-census-selftest.sh
 
 # -- harness reachability census (#8302) --
 #
@@ -440,6 +447,12 @@ run_shell scripts/ignored-cell-census.sh --check-issues
 # coverage while no target ran Miri at all; this is what makes deleting a
 # registry line loud instead of quiet. Hermetic file scan, well under a second.
 run_shell scripts/miri-census.sh
+# -- go-buildtag census (#9922 F-159): a build-tagged *_test.go is invisible
+# to `go test ./...` AND `go vet ./...` (both silently exclude it), so the
+# census gives every pre-package //go:build constraint a compile leg. With
+# the other census legs, outside §4: it is a census, not a self-test.
+hdr "go-buildtag census"
+run_shell scripts/go-buildtag-census.sh
 
 # -- interpreter census (#8153) --
 #
