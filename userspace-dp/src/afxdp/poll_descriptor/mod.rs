@@ -2756,6 +2756,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         match source_nat_decision_for_flow(
                                             worker_ctx.forwarding,
                                             meta.ingress_ifindex as i32,
+                                            meta.ingress_vlan_id,
                                             &from_zone,
                                             &to_zone,
                                             decision.resolution.egress_ifindex,
@@ -6062,6 +6063,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             match source_nat_decision_for_flow(
                                                 worker_ctx.forwarding,
                                                 meta.ingress_ifindex as i32,
+                                                meta.ingress_vlan_id,
                                                 &from_zone,
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,

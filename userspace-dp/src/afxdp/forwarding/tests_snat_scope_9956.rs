@@ -188,35 +188,32 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
          which is the arm the escape needs"
     );
 
-    // Unit-B traffic as the CURRENT callers scope it: the raw physical
-    // ingress ifindex (poll_descriptor/mod.rs mainline sites and the
-    // frag_assoc.rs fragment probe all pass `meta.ingress_ifindex`).
-    let scope_physical = nat_scope_ctx_for_flow(&forwarding, 11, 24, DOMAIN_B);
+    // Unit-B traffic as the scope helper now resolves it: physical ingress 11
+    // + VID 50 → logical 13. RED on base: the helper took no vlan and read
+    // the physical parent, reporting unit-A's identity.
+    let scope_b = nat_scope_ctx_for_flow(&forwarding, 11, 50, 24, DOMAIN_B);
     assert_eq!(
-        scope_physical.ingress_ifname, "reth0.50",
-        "#9956 F-052: VID-50 traffic scoped on the physical parent reports \
-         unit-A's interface (RED on base)"
+        scope_b.ingress_ifname, "reth0.50",
+        "#9956 F-052: VID-50 traffic must scope to unit-B's interface"
     );
     assert_eq!(
-        scope_physical.ingress_routing_instance, "tenant-b",
-        "#9956 F-052: VID-50 traffic scoped on the physical parent reports \
-         unit-A's routing instance (RED on base)"
+        scope_b.ingress_routing_instance, "tenant-b",
+        "#9956 F-052: VID-50 traffic must scope to unit-B's routing instance"
     );
 
     // End to end: unit-B traffic must NOT match unit-A's scoped SNAT rule.
     let flow_b = unit_flow(Ipv4Addr::new(10, 0, 50, 100), DOMAIN_B);
     assert!(
-        match_source_nat_for_flow(&forwarding, 11, "lan", "wan", 24, &flow_b).is_none(),
+        match_source_nat_for_flow(&forwarding, 11, 50, "lan", "wan", 24, &flow_b).is_none(),
         "#9956 F-052: traffic from unit B must not match unit-A's \
-         `from interface reth0.0 / from routing-instance tenant-a` SNAT rule \
-         (RED on base: physical-keyed scope wrong-APPLYs it)"
+         `from interface reth0.0 / from routing-instance tenant-a` SNAT rule"
     );
 
-    // Positive control: unit-A's OWN traffic matches its rule under the same
-    // physical-keyed call shape (untagged unit0 resolves logical == physical).
+    // Positive control: unit-A's OWN traffic matches its rule (untagged unit0
+    // resolves logical == physical).
     let flow_a = unit_flow(Ipv4Addr::new(10, 0, 61, 100), DOMAIN_A);
     assert!(
-        match_source_nat_for_flow(&forwarding, 11, "lan", "wan", 24, &flow_a).is_some(),
+        match_source_nat_for_flow(&forwarding, 11, 0, "lan", "wan", 24, &flow_a).is_some(),
         "#9956 F-052 control: unit-A traffic must still match its own scoped rule"
     );
 }

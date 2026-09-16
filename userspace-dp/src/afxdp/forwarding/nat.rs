@@ -8,17 +8,30 @@ use super::*;
 /// forwarding maps for the lifetime of the match — no per-flow allocation. An
 /// ifindex absent from a map yields "" (unscoped / default VRF), so a
 /// zone-only or global rule-set is unaffected.
+///
+/// #9956 F-052: the INGRESS scope resolves on the LOGICAL unit
+/// (`resolve_ingress_logical_ifindex`), exactly like the zone / filter /
+/// pre-routing-NAT admission sites (#3021/#5802) — the scope maps are keyed by
+/// logical unit ifindex, and scoping on the raw physical parent lets one
+/// trunk unit match another unit's `from interface` / `from routing-instance`
+/// rule. An untagged port resolves logical == physical (byte-identical).
+/// `egress_ifindex` is already a resolved logical egress — connected routes
+/// carry their unit row's own ifindex (`forwarding_build/interfaces.rs`) and
+/// static next-hops resolve through the unit-name map — and is used as-is.
 pub(in crate::afxdp) fn nat_scope_ctx_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    ingress_vlan_id: u16,
     egress_ifindex: i32,
     // #9062: SessionKey.routing_domain, passed through rather than re-derived.
-    // Re-deriving it here would need the ingress VLAN id and the fabric-encoded
-    // zone, neither of which this function has -- and a value that disagreed
-    // with the session layer's would make the HA-synced reserve fail to match
-    // the flow the active reserved.
+    // Re-deriving it here would also need the fabric-encoded zone, and a value
+    // that disagreed with the session layer's would make the HA-synced reserve
+    // fail to match the flow the active reserved.
     routing_domain: u32,
 ) -> crate::nat::NatScopeCtx<'_> {
+    let logical_ingress =
+        resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
+            .unwrap_or(ingress_ifindex);
     let name = |ifindex: i32| -> &str {
         forwarding
             .ifindex_to_config_name
@@ -34,9 +47,9 @@ pub(in crate::afxdp) fn nat_scope_ctx_for_flow(
             .unwrap_or("")
     };
     crate::nat::NatScopeCtx {
-        ingress_ifname: name(ingress_ifindex),
+        ingress_ifname: name(logical_ingress),
         egress_ifname: name(egress_ifindex),
-        ingress_routing_instance: ri(ingress_ifindex),
+        ingress_routing_instance: ri(logical_ingress),
         egress_routing_instance: ri(egress_ifindex),
         routing_domain,
     }
@@ -49,14 +62,15 @@ pub(in crate::afxdp) fn nat_scope_ctx_for_flow(
 pub(in crate::afxdp) fn match_source_nat_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    ingress_vlan_id: u16,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
     flow: &SessionFlow,
 ) -> Option<NatDecision> {
     let egress = forwarding.egress.get(&egress_ifindex)?;
-    let scope = nat_scope_ctx_for_flow(forwarding, ingress_ifindex, egress_ifindex,
-        flow.forward_key.routing_domain);
+    let scope = nat_scope_ctx_for_flow(forwarding, ingress_ifindex, ingress_vlan_id,
+        egress_ifindex, flow.forward_key.routing_domain);
     match_source_nat(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -75,6 +89,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow(
 pub(in crate::afxdp) fn match_source_nat_for_flow_result(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    ingress_vlan_id: u16,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -84,6 +99,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result(
     match_source_nat_for_flow_result_at(
         forwarding,
         ingress_ifindex,
+        ingress_vlan_id,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -101,6 +117,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result(
 pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
+    ingress_vlan_id: u16,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -120,8 +137,8 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
         return SourceNatLookup::NoMatch;
     };
     // #3096: resolve the interface / routing-instance scope for this flow.
-    let scope = nat_scope_ctx_for_flow(forwarding, ingress_ifindex, egress_ifindex,
-        flow.forward_key.routing_domain);
+    let scope = nat_scope_ctx_for_flow(forwarding, ingress_ifindex, ingress_vlan_id,
+        egress_ifindex, flow.forward_key.routing_domain);
     crate::nat::match_source_nat_result_for_tuple(
         // #6751: interface-mode SNAT mints its translated identity here.
         &forwarding.iface_nat_allocators,
