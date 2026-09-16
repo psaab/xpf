@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-ledger-lint
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint
 
 all: generate build build-ctl
 
@@ -229,6 +229,11 @@ test-go: test-race-dp
 	# pkg/flowexport. An exception must be a named, reasoned carve-out,
 	# never a quiet re-narrowing of this scope.
 	$(GO) vet ./...
+	# #9922 F-159: build-tag census — every *_test.go with a pre-package
+	# //go:build constraint gets a `go vet -tags` compile leg, so a tagged
+	# file (today: functional1944) cannot rot outside the default gate.
+	# No 77-guard needed: `go vet` above already requires go.
+	sh scripts/go-buildtag-census.sh
 	# #8231: truncate the side file ONCE per invocation, before the first leg.
 	# The legs below APPEND (test-go has two), so without this a second
 	# `make test-go GOTESTJSON=x` would attribute over the union of both runs —
@@ -996,6 +1001,24 @@ harness-compare:
 	@test -n "$(GATE)" || { echo "usage: make harness-compare GATE=<gate> [ENV=<env>]" >&2; exit 2; }
 	@python3 ./test/incus/ledger_compare.py --gate $(GATE) $(if $(ENV),--env $(ENV),)
 
+# Compare the newest run of EVERY (gate, env) pair in the tracked ledger
+# (#9922 F-086). Exit 1 = a REGRESSION or a newest-FAIL anywhere; undetermined
+# pairs (VOID / thin baselines) are surfaced, not failed. STRICT: no
+# expected-red declarations — the loop/human entry point. `make selftest` runs
+# the same aggregate with test/incus/ledger-expected-red.txt; a red pair that
+# is not declared there fails the suite.
+harness-compare-all:
+	@python3 ./test/incus/ledger_compare.py --all
+
+# Census every Makefile --gate recipe against the tracked ledger (#9922
+# F-087). Exit 1 unless each wrapped gate has >= 1 PASS/FAIL row or a
+# declaration in test/incus/LEDGER_COVERAGE.unreached (shrink-only: a
+# declared gate that gains a measured row fails until the line is
+# removed). VOID-only counts as unreached. Also runs as a leg of `make
+# selftest`.
+harness-coverage:
+	@python3 ./test/incus/ledger_compare.py --coverage
+
 # Lint every row in the tracked ledger. FAILS on a zero-row ledger and names
 # the first unparseable line, so a committed conflict marker is a red gate
 # rather than silent corruption. Also runs as a leg of `make selftest`.
@@ -1104,13 +1127,13 @@ MODE ?= all
 PRIVATE_RG_MODE ?= $(if $(filter all,$(MODE)),full,$(MODE))
 test-connectivity:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-connectivity --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-connectivity.sh $(MODE)
 
 # On-wire properties test (PMTUD reflection + NPTv6 checksum neutrality)
 test-wire-properties:
 	./test/incus/harness-result.sh run \
-		--gate test-wire-properties --adapter ha-smoke --env $(HARNESS_ENV) --hermetic \
+		--gate test-wire-properties --adapter smoke-cells --env $(HARNESS_ENV) --hermetic \
 		-- ./test/incus/test-wire-properties.sh
 
 # Cluster failover test (iperf3 through reboot — requires cluster + iperf3 server)
@@ -1140,7 +1163,7 @@ test-stress-failover:
 # Hard-crash / hung-node HA test (force-stop + daemon stop + multi-cycle — requires cluster + iperf3 server)
 test-ha-crash:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-ha-crash --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-ha-crash --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-ha-crash.sh
 
 # #9729: persistent-NAT binding survives promotion (#7360). DESTRUCTIVE and
@@ -1148,7 +1171,7 @@ test-ha-crash:
 # and restores interface-mode SNAT on exit.
 test-persistent-nat-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-persistent-nat-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-persistent-nat-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/persistent-nat-failover.sh
 
 # #9729: a Kea lease survives a hard failover (#2261). DESTRUCTIVE and
@@ -1156,7 +1179,7 @@ test-persistent-nat-failover:
 # dhcp-local-server pool); without it the preflight refuses and the row is VOID.
 test-dhcp-lease-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-dhcp-lease-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-dhcp-lease-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/dhcp-lease-failover.sh
 
 # Chained hard-reset failover test (fw0 crash → fw1 crash → both rejoin — requires cluster + iperf3 server)
@@ -1168,13 +1191,13 @@ test-chained-crash:
 # Private RG election test (enable/disable private-rg-election, verify VRRP behavior)
 test-private-rg:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-private-rg --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-private-rg --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-private-rg.sh $(PRIVATE_RG_MODE)
 
 # Restart connectivity regression test (verify no transient loss during daemon restart — requires cluster + iperf3 server)
 test-restart-connectivity:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
-		--gate test-restart-connectivity --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--gate test-restart-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-restart-connectivity.sh
 
 # Canonical cluster HA test environment (isolated loss userspace cluster).

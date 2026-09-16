@@ -23,7 +23,12 @@ if ! incus list &>/dev/null 2>&1; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOCK_PATH="/tmp/xpf-cluster.lock"
+# #9922 F-158: this gate has NO lock interaction, deliberately. It samples
+# only hardcoded dedicated local instances (xpf-fw, trust-host,
+# untrust-host) — never the shared loss cluster — so there is no
+# contention to detect (the dead LOCK_PATH define this comment replaces
+# was never read). Corroborated by the Makefile, which wraps this gate
+# --hermetic rather than --cluster.
 
 PASS=0
 FAIL=0

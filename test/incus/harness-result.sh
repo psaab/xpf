@@ -67,7 +67,7 @@ HARNESS_RESULT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_RESULT_SCHEMA=1
 
 # The adapter table. A source not listed here is REFUSED, never defaulted.
-HARNESS_ADAPTERS="ha-smoke newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
+HARNESS_ADAPTERS="ha-smoke smoke-cells newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
 
 harness_result_root() {
 	if [[ -n "${XPF_REPO_ROOT:-}" ]]; then
@@ -128,11 +128,16 @@ harness_adapt() {
 	"harness_adapt_${adapter//-/_}" "$rc" "$log"
 }
 
-# ── ha-smoke ─────────────────────────────────────────────────────────
+# ── ha-smoke / smoke-cells ─────────────────────────────────────────────
 #
-# Covers all 8 destructive HA smokes AND test-connectivity.sh: they carry
-# byte-identical pass()/fail() definitions and all end with a
-# `<n> passed, <n> failed` summary.
+# The two HA-smoke adapters share one summary parse and differ ONLY in the
+# headline (#9922 F-155). Five smokes emit an iperf3 throughput cell
+# (failover, double, stress, chained, active-active) and keep ha-smoke;
+# seven emit cells only (connectivity, wire-properties, ha-crash,
+# persistent-nat, dhcp-lease, private-rg, restart-connectivity) and take
+# smoke-cells. The Makefile mapping is census-checked against "calls
+# iperf_throughput_verdict" in harness-result-selftest.sh, so a future
+# mis-mapping reds there instead of silently switching headline families.
 #
 # Match the NUMERIC TAIL, never the label prefix. The prefixes differ --
 # "Failover test:", "HA crash test:", "Double failover test:", "Stress
@@ -147,15 +152,15 @@ harness_adapt() {
 # before its summary prints no pair at all; today that is indistinguishable
 # from a clean run to anything reading only the tail. Here it is a VOID with a
 # reason, which is the one thing it must never be confused with.
-harness_adapt_ha_smoke() {
-	local rc="$1" log="$2"
+_ha_smoke_summary() {
+	local log="$1" rc="$2"
 	local line p f skipped=""
 	# LAST match: a smoke that prints an intermediate tally must not have it
 	# read as the result.
 	line=$(grep -oE '[0-9]+ passed, [0-9]+ failed' "$log" | tail -1)
 	if [[ -z "$line" ]]; then
 		printf 'VOID\tno "<n> passed, <n> failed" summary line in the output (rc=%s) — the smoke aborted before reaching its summary\t\t\t\n' "$rc"
-		return 0
+		return 1
 	fi
 	p=${line%% passed,*}
 	f=${line##*, }
@@ -166,30 +171,46 @@ harness_adapt_ha_smoke() {
 	f=$((10#$f))
 	if ((p + f == 0)); then
 		printf 'VOID\tsummary reports 0 passed and 0 failed — the smoke reached its summary but ran no assertions\t\t\t\n'
-		return 0
+		return 1
 	fi
 	skipped=$(grep -oE '[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped' "$log" | tail -1 |
 		sed -E 's/.*, ([0-9]+) skipped/\1/')
-
+	printf '%s %s %s' "$p" "$f" "$skipped"
+}
+harness_adapt_ha_smoke() {
+	local rc="$1" log="$2"
+	local summary p f skipped=""
+	if ! summary=$(_ha_smoke_summary "$log" "$rc"); then
+		printf '%s\n' "$summary"
+		return 0
+	fi
+	read -r p f skipped <<<"$summary"
+	# ANCHORED iperf extraction: Gbps comes ONLY from a pass()/fail() cell
+	# line -- `^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput` --
+	# LAST match; the figure is the FIRST `<n> Gbps` on it. Floor prose
+	# ("iperf3 throughput floor 5 Gbps") has no cell prefix and data-transfer
+	# prose ("iperf3 data transfer completed (2.5 Gbps)") has neither the
+	# prefix nor the phrase; both used to become banded measurements.
+	local cell="" gbps=""
+	cell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | tail -1)
+	if [[ -n "$cell" ]]; then
+		gbps=$(grep -oE '([0-9]+\.[0-9]+|[0-9]+) Gbps' <<<"$cell" | head -1 | sed 's/ Gbps//')
+	fi
 	# Invariant metrics beside the headline. The iperf3 throughput cell is the
 	# only continuous scalar these smokes produce; the cell counts are the
 	# discrete invariants that say whether a headline move came with a
 	# behaviour change (regression candidate) or alone (flake candidate).
-	local gbps
-	gbps=$(grep -oE 'iperf3 throughput[^0-9]*([0-9]+\.[0-9]+|[0-9]+) Gbps' "$log" | tail -1 |
-		grep -oE '([0-9]+\.[0-9]+|[0-9]+) Gbps' | sed 's/ Gbps//')
-
 	local metrics="cells_passed=$p cells_failed=$f"
 	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
-	local headline="cells_passed" direction="higher-better"
-	if [[ -n "$gbps" ]]; then
-		metrics="$metrics throughput_gbps=$gbps"
-		headline="throughput_gbps"
-		direction="higher-better"
-	fi
-
+	[[ -n "$gbps" ]] && metrics="$metrics throughput_gbps=$gbps"
 	if ((f > 0)); then
-		printf 'FAIL\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics"
+		# FAIL headlines are diagnostic-only: FAIL rows never enter bands,
+		# so the FAIL shape keeps throughput-when-present, cells otherwise.
+		if [[ -n "$gbps" ]]; then
+			printf 'FAIL\t\tthroughput_gbps\thigher-better\t%s\n' "$metrics"
+		else
+			printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
+		fi
 		return 0
 	fi
 	# 0 failed but the process still failed: the summary and the exit status
@@ -199,7 +220,36 @@ harness_adapt_ha_smoke() {
 		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree\t\t\t\n' "$rc"
 		return 0
 	fi
-	printf 'PASS\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics"
+	# A PASS summary with no anchored figure is a pass the throughput band
+	# cannot see -- VOID, never a cells-headlined PASS that would silently
+	# switch headline families mid-history.
+	if [[ -z "$gbps" ]]; then
+		printf 'VOID\tPASS summary but no anchored "PASS|FAIL iperf3 throughput" cell line carrying "<n> Gbps" — the iperf measurement is missing\t\t\t\n'
+		return 0
+	fi
+	printf 'PASS\t\tthroughput_gbps\thigher-better\t%s\n' "$metrics"
+}
+harness_adapt_smoke_cells() {
+	local rc="$1" log="$2"
+	local summary p f skipped=""
+	if ! summary=$(_ha_smoke_summary "$log" "$rc"); then
+		printf '%s\n' "$summary"
+		return 0
+	fi
+	read -r p f skipped <<<"$summary"
+	# NO iperf extraction by design: these smokes emit no throughput cell,
+	# so the headline is FIXED and iperf-looking prose is ignored.
+	local metrics="cells_passed=$p cells_failed=$f"
+	[[ -n "$skipped" ]] && metrics="$metrics cells_skipped=$skipped"
+	if ((f > 0)); then
+		printf 'FAIL\t\tcells_passed\thigher-better\t%s\n' "$metrics"
+		return 0
+	fi
+	if [[ "$rc" != "0" ]]; then
+		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree\t\t\t\n' "$rc"
+		return 0
+	fi
+	printf 'PASS\t\tcells_passed\thigher-better\t%s\n' "$metrics"
 }
 
 # ── newflow-ceiling ──────────────────────────────────────────────────
@@ -260,6 +310,13 @@ m["saturated_sites"] = len(doc.get("culprits") or [])
 if "new_flows_per_sec" not in m:
     emit("VOID", "analyzer reported VALID but no numeric new_flows_per_sec — "
                  "the headline metric is missing from the document")
+# #9922 F-160: a VALID document from a FAILED process is a summary the exit
+# status contradicts — VOID, not a pass. The ha-smoke adapter already encodes
+# this policy (0 failed + rc != 0 → VOID); a harness that analyzes fine and
+# then fails teardown must not bank a PASS for a run the gate itself failed.
+if rc != "0":
+    emit("VOID", f"analyzer reported VALID but the harness exited rc={rc} — "
+                 "the document and the exit status disagree")
 emit("PASS", "", "new_flows_per_sec", "higher-better",
      " ".join(f"{k}={v}" for k, v in m.items()))
 PY
@@ -888,10 +945,13 @@ PY
 # The one CHANGE in behaviour is deliberate and in the safe direction: a gate
 # that exits 0 without reaching its summary now exits 2 instead of 0.
 #
-# A failure to WRITE the row does not change the gate's own verdict -- reddening
-# a 30-minute cluster smoke because a disk was full would be a worse error than
-# the missing row. It prints a loud NO ROW WRITTEN marker instead; the absence
-# is what the ledger-coverage census reads.
+# A failure to WRITE the row demotes a PASS to 2 ("passed but unrecorded") and
+# prints a loud NO ROW WRITTEN marker; a measured FAIL keeps its rc (#9922
+# F-087). The old contract held that reddening a 30-minute smoke for a write
+# failure was worse than the missing row; the cohort reverses it, because every
+# refusal mode that degrades to 'gate exits normally, nothing recorded, all
+# aggregates green' is exactly the failure the assurance layer exists to catch.
+# The ledger-coverage census reads the absence either way.
 harness_result_run() {
 	local gate="" adapter="" env="" mode="cluster" node="" build_exe="" artifacts="" ledger=""
 	local peer_node_arg=""
@@ -1083,6 +1143,14 @@ harness_result_run() {
 
 	local ledger_arg=()
 	[[ -n "$ledger" ]] && ledger_arg=(--ledger "$ledger")
+	# #9922 F-087: a PASS whose row cannot be written is "passed but
+	# unrecorded", not a pass. Exit 0 claims "passed AND recorded"; 2 claims
+	# "could not record", which is the true one — every refusal mode that
+	# degrades to 'gate exits normally, nothing recorded, all aggregates
+	# green' is the defect. A measured FAIL is never demoted (rc preserved,
+	# mirroring the adapter-refusal path); only the PASS branch moves, and
+	# only from 0 to 2.
+	local emit_failed=0
 	if ! harness_result_emit \
 		--gate "$gate" --env "$env" --verdict "$verdict" \
 		--void-reason "$void_reason" --headline-metric "$headline" \
@@ -1094,6 +1162,7 @@ harness_result_run() {
 		--running-exe-sha256-peer "${peer_running_exe_sha:-}" \
 		--exe-scope "$exe_scope" "${ledger_arg[@]}"; then
 		_hr_warn "NO ROW WRITTEN for gate '$gate' (verdict was $verdict)"
+		emit_failed=1
 	else
 		printf 'harness-result: recorded %s %s verdict=%s\n' "$gate" "$env" "$verdict" >&2
 	fi
@@ -1103,7 +1172,7 @@ harness_result_run() {
 	case "$gate_verdict" in
 	VOID) return 2 ;;
 	FAIL) return $((rc == 0 ? 1 : rc)) ;;
-	*) return "$rc" ;;
+	*) ((emit_failed)) && return $((rc == 0 ? 2 : rc)); return "$rc" ;;
 	esac
 }
 

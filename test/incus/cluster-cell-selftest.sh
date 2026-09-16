@@ -160,6 +160,27 @@ if grep -q 'cluster-cell.sh' "${SCRIPT_DIR}/test-connectivity.sh"; then
 fi
 ok "static: read-only test-connectivity.sh stays lock-free"
 
+# #9922 F-158: lock-free does NOT mean lock-blind. When the read-only gate
+# samples the SHARED cluster it must probe lock idleness (fail-fast VOID
+# on contention) instead of holding the lock.
+if ! grep -q 'cluster-lock\.sh' "${SCRIPT_DIR}/test-connectivity.sh"; then
+	fail "static: test-connectivity.sh must source cluster-lock.sh for the F-158 idleness probe"
+fi
+ok "static: test-connectivity.sh sources cluster-lock.sh (idleness probe, not a lock cell)"
+# The probe must live in test_cluster (the shared-cluster sampler), not in
+# test_standalone (dedicated local instances need no probe).
+if ! sed -n '/^test_cluster() {/,/^}/p' "${SCRIPT_DIR}/test-connectivity.sh" | grep -q 'xpf_assert_cluster_lock_idle'; then
+	fail "static: test-connectivity.sh test_cluster must call the F-158 lock-idleness probe"
+fi
+ok "static: test-connectivity.sh test_cluster calls the lock-idleness probe"
+# The probe must NOT live in test_standalone (dedicated local instances
+# need no probe — pin probe-free so a copy-paste never adds contention
+# VOIDs to a lane that can never contend).
+if sed -n '/^test_standalone() {/,/^}/p' "${SCRIPT_DIR}/test-connectivity.sh" | grep -q 'xpf_assert_cluster_lock_idle'; then
+	fail "static: test-connectivity.sh test_standalone must not call the F-158 lock-idleness probe"
+fi
+ok "static: test-connectivity.sh test_standalone stays probe-free"
+
 # ── BEHAVIORAL: private lock path + fake incus, no cluster ────────────
 T=$(mktemp -d /tmp/xpf-cell-selftest.XXXXXX)
 trap 'rm -rf "$T"' EXIT
@@ -226,5 +247,105 @@ set -e
 [[ $C_RC -eq 0 ]] || fail "(c) reentrant fixture inside a cell failed/deadlocked (rc=$C_RC)"
 [[ -f "$T/c.start" ]] || fail "(c) reentrant fixture body did not run"
 ok "destructive run inside a with-cluster.sh cell runs lock-free (reentrant, no deadlock)"
+
+# ── BEHAVIORAL F-158: the idleness probe itself, not just its wiring ───
+# The static greps above pin that test_cluster CALLS
+# xpf_assert_cluster_lock_idle, but a `return 0` no-op passes every grep
+# (RED-demonstrated via a SCRIPT_DIR overlay: stubbed probe still ALL
+# PASS). These cells source the REAL cluster-lock.sh and eval-extract the
+# REAL probe from test-connectivity.sh, then exercise all four branches
+# hermetically against the PRIVATE $XPF_CLUSTER_LOCK.
+# shellcheck source=test/incus/cluster-lock.sh
+source "${SCRIPT_DIR}/cluster-lock.sh"
+_F158_SRC="$(sed -n '/^xpf_assert_cluster_lock_idle() {/,/^}/p' "${SCRIPT_DIR}/test-connectivity.sh")"
+[[ -n "$_F158_SRC" ]] || fail "F-158: could not extract xpf_assert_cluster_lock_idle from test-connectivity.sh (sed range empty — helper renamed?)"
+eval "$_F158_SRC"
+declare -F xpf_assert_cluster_lock_idle >/dev/null || fail "F-158: eval-extracted probe did not define xpf_assert_cluster_lock_idle"
+
+# waitfor expects its command to SUCCEED, so the lock-state predicates
+# are phrased as successes (held-now inverts the non-blocking flock).
+_xpf_lock_held_now() { ! flock -n "$XPF_CLUSTER_LOCK" true 2>/dev/null; }
+_xpf_lock_idle_now() { flock -n "$XPF_CLUSTER_LOCK" true 2>/dev/null; }
+# flock(1) FILE COMMAND forks the command as a child that inherits the
+# lock fd — killing the parent alone leaves the child holding (observed:
+# after `kill $flock_pid` the lock still reports held). Capture the child
+# BEFORE killing the parent (afterwards it reparents and `pgrep -P` finds
+# nothing), reap both, then wait for idle before the next cell runs.
+_xpf_kill_flock_holder() { # <flock-pid>
+	local _h="$1" _c _children
+	_children="$(pgrep -P "$_h" 2>/dev/null || true)"
+	kill "$_h" 2>/dev/null || true
+	for _c in $_children; do
+		kill "$_c" 2>/dev/null || true
+	done
+	wait "$_h" 2>/dev/null || true
+	waitfor 5 "flock holder released the lock" _xpf_lock_idle_now
+}
+
+touch "$XPF_CLUSTER_LOCK"
+unset XPF_CLUSTER_LOCK_HELD || true
+unset FW0 || true
+
+# F-158 (a): held lock + remote FW0 + no marker → VOID 77.
+flock "$XPF_CLUSTER_LOCK" sleep 30 </dev/null >/dev/null 2>&1 &
+_F158_HOLDER=$!
+waitfor 5 "F-158 (a) background holder holds the lock" _xpf_lock_held_now
+set +e
+( export FW0="loss:fw0"; xpf_assert_cluster_lock_idle "start" ) >"$T/f158-a.out" 2>&1
+_F158_RC=$?
+set -e
+_xpf_kill_flock_holder "$_F158_HOLDER"
+unset XPF_CLUSTER_LOCK_HELD || true
+[[ $_F158_RC -eq 77 ]] || fail "F-158 (a) held lock + remote FW0 expected VOID 77, got $_F158_RC (a no-op probe returns 0)"
+grep -q "VOID" "$T/f158-a.out" || fail "F-158 (a) VOID message missing from probe output"
+ok "F-158 (a) held lock + remote FW0 voids with 77"
+
+# F-158 (b): idle lock + remote FW0 → rc 0.
+unset XPF_CLUSTER_LOCK_HELD || true
+_xpf_lock_idle_now || fail "F-158 (b) lock not idle before probe (holder leaked?)"
+set +e
+( export FW0="loss:fw0"; xpf_assert_cluster_lock_idle "start" ) >"$T/f158-b.out" 2>&1
+_F158_RC=$?
+set -e
+unset XPF_CLUSTER_LOCK_HELD || true
+[[ $_F158_RC -eq 0 ]] || fail "F-158 (b) idle lock + remote FW0 expected 0, got $_F158_RC"
+ok "F-158 (b) idle lock + remote FW0 passes with 0"
+
+# F-158 (c): held lock + bare FW0 → rc 0 (dedicated local instance no
+# other lane touches — the probe must not fire).
+unset XPF_CLUSTER_LOCK_HELD || true
+flock "$XPF_CLUSTER_LOCK" sleep 30 </dev/null >/dev/null 2>&1 &
+_F158_HOLDER=$!
+waitfor 5 "F-158 (c) background holder holds the lock" _xpf_lock_held_now
+set +e
+( export FW0="xpf-fw0"; xpf_assert_cluster_lock_idle "start" ) >"$T/f158-c.out" 2>&1
+_F158_RC=$?
+set -e
+_xpf_kill_flock_holder "$_F158_HOLDER"
+unset XPF_CLUSTER_LOCK_HELD || true
+[[ $_F158_RC -eq 0 ]] || fail "F-158 (c) held lock + bare FW0 expected 0 (probe must not fire), got $_F158_RC"
+ok "F-158 (c) held lock + bare FW0 skips the probe with 0"
+
+# F-158 (d): held lock + VALID marker → rc 0 (own cell — probing our own
+# ancestor's lock must not self-report contention).
+unset XPF_CLUSTER_LOCK_HELD || true
+exec 9>"$XPF_CLUSTER_LOCK" || fail "F-158 (d) could not open private lock on fd 9"
+flock -n 9 || { exec 9>&-; fail "F-158 (d) could not acquire private lock for marker test"; }
+export XPF_CLUSTER_LOCK_HELD="${XPF_CLUSTER_LOCK}:$$"
+# Sanity: the marker must validate before the probe runs. $$ in the
+# probing subshell below is still this shell's pid, so the ancestry walk
+# matches on its first step — valid per xpf_cluster_lock_held's
+# self-inclusive check, mirroring a with-cluster.sh cell where the holder
+# is a live ancestor of the probing process.
+xpf_cluster_lock_held || { exec 9>&-; unset XPF_CLUSTER_LOCK_HELD || true; fail "F-158 (d) marker ${XPF_CLUSTER_LOCK_HELD:-?} did not validate as held"; }
+set +e
+( export FW0="loss:fw0"; xpf_assert_cluster_lock_idle "start" ) >"$T/f158-d.out" 2>&1
+_F158_RC=$?
+set -e
+exec 9>&-
+unset XPF_CLUSTER_LOCK_HELD || true
+unset FW0 || true
+[[ $_F158_RC -eq 0 ]] || fail "F-158 (d) held lock + valid marker expected 0 (own cell), got $_F158_RC"
+ok "F-158 (d) held lock + valid marker skips the probe with 0"
 
 echo "ALL ${PASS} CASES PASS"

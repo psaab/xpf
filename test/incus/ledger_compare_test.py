@@ -17,6 +17,8 @@ passing vacuously. On an empty input the cells assert NO-BASELINE explicitly —
 the empty set is never allowed to reach an assertion-free path.
 """
 
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -29,6 +31,8 @@ import uuid
 from ledger_compare import (
     BAND_REL_FLOOR,
     BAND_Z,
+    COVERAGE_POSITIVE_CONTROL,
+    COVERAGE_WINDOW,
     IMPROVED,
     LEDGER_CORRUPT,
     LEDGER_DIR_NAME,
@@ -40,9 +44,12 @@ from ledger_compare import (
     VOID,
     WITHIN_BAND,
     _sorted_rows,
+    all_exit_status,
     band,
     classify,
     compare,
+    compare_all,
+    coverage,
     exit_status,
     lint_ledger,
     lint_merge_completeness,
@@ -50,7 +57,13 @@ from ledger_compare import (
     lint_row,
     lint_shard_names,
     load_ledger_text,
+    main,
+    parse_coverage_declared,
+    parse_expected_red,
     parse_ledger,
+    render,
+    render_all,
+    render_coverage,
     run_ids,
     run_ids_at_rev,
     shard_paths,
@@ -357,6 +370,235 @@ class FlakeVersusRegressionSignal(unittest.TestCase):
         res = compare(self._rows(23.05, 21), GATE, ENV)
         self.assertEqual(res["outcome"], WITHIN_BAND)
         self.assertIsNone(res.get("signal"))
+
+
+class PinnedBaseline(unittest.TestCase):
+    """#9922 F-088: the rolling band absorbs slow decay; the pin must not."""
+
+    def test_slow_decay_sets_drift_with_cumulative_displacement(self):
+        # MUTATION: pin the LAST K greens instead of the FIRST K.
+        #
+        # A 4%-per-run geometric decay reads WITHIN-BAND at every step (the
+        # rolling window re-trusts each step) while the total displacement
+        # grows to -36%. The pinned baseline over genesis must surface it.
+        vals = [100.0 * (0.96**i) for i in range(12)]
+        rows = [
+            row(f"2026-09-01T00:{i:02d}:00Z", value=v)
+            for i, v in enumerate(vals)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertEqual(res["pinned_values"], vals[:3])
+        self.assertTrue(res["drift"])
+        self.assertLess(res["displacement"], -0.30)
+        self.assertIn("DRIFT", render(res))
+        self.assertIn("cumulative displacement", render(res))
+
+    def test_stable_history_has_no_drift(self):
+        rows = greens([100.0, 100.0, 100.0, 100.0]) + [
+            row("2026-09-01T00:05:00Z", value=100.0)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertFalse(res["drift"])
+        self.assertAlmostEqual(res["displacement"], 0.0)
+
+    def test_young_history_carries_no_pinned_section(self):
+        # Below the K floor there is no rolling band, so there is nothing to
+        # anchor beside it either: no pinned keys at all, not placeholders.
+        rows = greens([100.0]) + [row("2026-09-01T00:02:00Z", value=60.0)]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], NO_BASELINE)
+        self.assertNotIn("pinned_median", res)
+        self.assertNotIn("displacement", res)
+        self.assertNotIn("drift", res)
+
+    def test_zero_pinned_median_yields_no_ratio_and_no_crash(self):
+        # cells_failed pinned at 0 (the host-inbound shape): a ratio over a
+        # zero median is undefined, so displacement is None and drift stays
+        # False rather than crashing — while the rolling band still judges
+        zeros = [0, 0, 0, 0]
+        rows = [
+            row(
+                f"2026-09-01T00:{i:02d}:00Z",
+                value=float(v),
+                headline="cells_failed",
+                direction="lower-better",
+            )
+            for i, v in enumerate(zeros)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertIsNone(res["displacement"])
+        self.assertFalse(res["drift"])
+        rows1 = rows + [
+            row(
+                "2026-09-01T00:05:00Z",
+                value=1.0,
+                headline="cells_failed",
+                direction="lower-better",
+            )
+        ]
+        res1 = compare(rows1, GATE, ENV)
+        self.assertEqual(res1["outcome"], REGRESSION)
+        self.assertIsNone(res1["displacement"])
+        self.assertFalse(res1["drift"])
+
+    def test_drift_is_informational_not_failed(self):
+        # Drift attribution needs a human; the exit status must not move.
+        vals = [100.0 * (0.96**i) for i in range(12)]
+        rows = [
+            row(f"2026-09-01T00:{i:02d}:00Z", value=v)
+            for i, v in enumerate(vals)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertTrue(res["drift"])
+        self.assertEqual(exit_status(res), 0)
+
+
+class AggregateComparison(unittest.TestCase):
+    """#9922 F-086: the aggregate over every (gate, env)."""
+
+    def test_newest_fail_below_the_k_floor_exits_one(self):
+        # MUTATION: drop the FAIL-first branch from exit_status.
+        #
+        # The outcome stays NO-BASELINE (there is no band to judge by) but
+        # the exit is 1: a measured FAIL beats an undetermined band.
+        rows = greens([100.0]) + [
+            row("2026-09-01T00:02:00Z", verdict="FAIL", value=10.0)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], NO_BASELINE)
+        self.assertEqual(res["verdict"], "FAIL")
+        self.assertEqual(exit_status(res), 1)
+
+    def test_window_fails_are_surfaced_not_banded(self):
+        # MUTATION: drop the window_fails computation.
+        #
+        # A FAIL inside the window must neither enter the band nor vanish: it
+        # is counted, timestamped, and rendered.
+        rows = (
+            greens([100.0, 100.0, 100.0])
+            + [row("2026-09-01T00:03:00Z", verdict="FAIL", value=10.0)]
+            + [row("2026-09-01T00:04:00Z", value=100.0)]
+        )
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertEqual(res["baseline_values"], [100.0, 100.0, 100.0])
+        self.assertEqual(res["window_fails"], 1)
+        self.assertEqual(res["window_fail_ts"], ["2026-09-01T00:03:00Z"])
+        self.assertIn("FAIL rows inside the baseline window: 1", render(res))
+
+    def _mixed_rows(self):
+        green = [
+            row(f"2026-09-01T0{i}:00:00Z", value=100.0, gate="gate-green")
+            for i in range(5)
+        ]
+        regressed = [
+            row(f"2026-09-01T00:0{i}:00Z", value=100.0, gate="gate-reg")
+            for i in range(3)
+        ] + [row("2026-09-01T00:04:00Z", value=10.0, gate="gate-reg")]
+        # FAIL newest on a thin baseline: NO-BASELINE outcome, FAIL verdict.
+        failed = [row("2026-09-01T00:00:00Z", value=100.0, gate="gate-fail")] + [
+            row("2026-09-01T00:01:00Z", verdict="FAIL", value=10.0, gate="gate-fail")
+        ]
+        return green + regressed + failed
+
+    def test_compare_all_reds_on_regression_and_newest_fail(self):
+        # MUTATION: aggregate-ignores-fail-verdict (red on REGRESSION only).
+        # MUTATION: aggregate-never-red (red on nothing).
+        agg = compare_all(self._mixed_rows())
+        self.assertEqual(
+            sorted(agg["red"]), [("gate-fail", ENV), ("gate-reg", ENV)]
+        )
+        self.assertEqual(sorted(agg["green"]), [("gate-green", ENV)])
+        self.assertEqual(all_exit_status(agg), 1)
+
+    def test_compare_all_tolerates_undetermined(self):
+        # A thin-baseline pair is surfaced, not failed: the aggregate watches
+        # for red, it is not a baseline-completeness gate.
+        rows = greens([100.0]) + [row("2026-09-01T00:02:00Z", value=60.0)]
+        agg = compare_all(rows)
+        self.assertEqual(sorted(agg["undetermined"]), [(GATE, ENV)])
+        self.assertEqual(agg["red"], {})
+        self.assertEqual(all_exit_status(agg), 0)
+        self.assertIn("UNDETERMINED", render_all(agg))
+
+    def test_parse_expected_red(self):
+        declared, problems = parse_expected_red(
+            "# comment\n"
+            "\n"
+            "gate-fail loss-userspace-cluster newest-FAIL, tracked in #10122\n"
+        )
+        self.assertEqual(problems, [])
+        self.assertEqual(
+            declared,
+            {("gate-fail", "loss-userspace-cluster"): "newest-FAIL, tracked in #10122"},
+        )
+        _d2, problems2 = parse_expected_red("gate-only\n")
+        self.assertEqual(len(problems2), 1)
+        self.assertIn("line 1", problems2[0])
+
+    def test_all_exit_status_honors_declarations(self):
+        # MUTATION: expected-red-stale-check-dropped.
+        agg = compare_all(self._mixed_rows())
+        declared = {("gate-fail", ENV): "x", ("gate-reg", ENV): "y"}
+        self.assertEqual(all_exit_status(agg, declared), 0)
+        self.assertIn("expected-red: still red", render_all(agg, declared))
+        # A stale declaration (green now) fails so the file can only shrink.
+        # ALL live reds stay declared here: with an undeclared red present the
+        # first branch returns 1 regardless, and the cell could not kill a
+        # VALID stale-check removal (it would pass for the wrong reason).
+        stale = {("gate-fail", ENV): "x", ("gate-reg", ENV): "y",
+                 ("gate-green", ENV): "was red once"}
+        self.assertEqual(all_exit_status(agg, stale), 1)
+        self.assertIn("STALE", render_all(agg, stale))
+    def test_summary_carries_window_and_drift_warning_counts(self):
+        # The automation boundary (run-selftests.sh) prints tail -1 on success;
+        # without these counts a newest-PASS-after-FAILs and a DRIFT-flagged
+        # WITHIN-BAND render identically to a clean history — the defect
+        # recreated one layer up.
+        windowed = (
+            [row(f"2026-09-01T00:0{i}:00Z", value=100.0, gate="gate-win") for i in range(3)]
+            + [row("2026-09-01T00:03:00Z", verdict="FAIL", value=10.0, gate="gate-win")]
+            + [row("2026-09-01T00:04:00Z", value=100.0, gate="gate-win")]
+        )
+        drifted = [
+            row(f"2026-09-01T00:{i:02d}:00Z", value=100.0 * (0.96 ** i), gate="gate-drift")
+            for i in range(12)
+        ]
+        agg = compare_all(windowed + drifted)
+        text = render_all(agg)
+        self.assertIn("1 with window FAILs, 1 DRIFT-flagged", text.splitlines()[-1])
+
+    def test_main_all_over_a_fixture_ledger(self):
+        # End to end through main(): shards on disk, strict and declared runs,
+        # and the corrupt-ledger mapping. Hermetic (tmp dir, no git, no net).
+        work = tempfile.mkdtemp(prefix="xpf-compare-all.")
+        self.addCleanup(shutil.rmtree, work, True)
+        for r in self._mixed_rows():
+            with open(os.path.join(work, f"{r['run_id']}.json"), "w") as fh:
+                json.dump(r, fh)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--all", "--ledger", work])
+        self.assertEqual(rc, 1)
+        self.assertIn("gate-reg @ ", buf.getvalue())
+        decl = os.path.join(work, "expected.txt")
+        with open(decl, "w") as fh:
+            fh.write(f"gate-fail {ENV} tracked\n")
+            fh.write(f"gate-reg {ENV} tracked\n")
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rc2 = main(["--all", "--ledger", work, "--expected-red", decl])
+        self.assertEqual(rc2, 0)
+        with open(os.path.join(work, "broken.json"), "w") as fh:
+            fh.write("{not json\n")
+        buf3 = io.StringIO()
+        with contextlib.redirect_stdout(buf3):
+            rc3 = main(["--all", "--ledger", work])
+        self.assertEqual(rc3, 2)
+        self.assertIn("LEDGER-CORRUPT", buf3.getvalue())
 
 
 class ExitStatusMapping(unittest.TestCase):
@@ -809,6 +1051,170 @@ class MergeCompletenessSeesADroppedRow8346(unittest.TestCase):
         # existing at all: run the ROW linter over the damaged merge result
         # and watch it report clean.
         self.assertEqual(lint_ledger(self._led("a", "b")), [])
+
+
+class CoverageCensus(unittest.TestCase):
+    """#9922 F-087: every wrapped gate measured, or declared unreached."""
+    MAKE = "\trun --gate test-failover\n\trun --gate test-foo\n"
+
+    def test_void_only_does_not_count_as_reached(self):
+        # MUTATION: coverage-void-counts-as-measured (VOID in ever-measured).
+        # MUTATION: coverage-window-void-counts-as-measured (VOID in the window).
+        # A gate whose rows are all VOID never measured anything; counting
+        # them would let it read green here AND as undetermined (surfaced,
+        # non-failing) in the red-watch aggregate — green in both, measured
+        # in neither.
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)] + [
+            row("2026-09-01T00:01:00Z", verdict="VOID", value=None,
+                gate="test-foo", void_reason="no summary")
+        ]
+        cov = coverage(self.MAKE, rows, "test-foo needs a recorded run\n")
+        self.assertIn("test-foo", cov["void_only"])
+        self.assertNotIn("test-foo", cov["reached"])
+        self.assertTrue(cov["ok"])
+        self.assertIn("VOID-ONLY", render_coverage(cov))
+        # And without the declaration the same void-only gate fails.
+        cov2 = coverage(self.MAKE, rows, "")
+        self.assertEqual(cov2["missing"], ["test-foo"])
+        self.assertFalse(cov2["ok"])
+
+    def test_unreached_undeclared_is_missing(self):
+        # MUTATION: coverage-missing-check-dropped (missing = []).
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)]
+        cov = coverage(self.MAKE, rows, "")
+        self.assertEqual(cov["zero_row"], ["test-foo"])
+        self.assertEqual(cov["missing"], ["test-foo"])
+        self.assertFalse(cov["ok"])
+        self.assertIn("MISSING", render_coverage(cov))
+
+    def test_declared_but_reached_is_stale_shrink_only(self):
+        # MUTATION: coverage-stale-check-dropped (stale = []).
+        rows = [row("2026-09-01T00:00:00Z", value=100.0),
+                row("2026-09-01T00:01:00Z", value=100.0, gate="test-foo")]
+        cov = coverage(self.MAKE, rows, "test-foo was red once\n")
+        self.assertEqual(cov["stale"], ["test-foo"])
+        self.assertFalse(cov["ok"])
+        self.assertIn("STALE", render_coverage(cov))
+
+    def test_declared_unreached_is_ok_and_makefile_placeholders_excluded(self):
+        # $(GATE) is the harness-compare recipe's expansion, not a gate.
+        make = self.MAKE + "\trun --gate $(GATE)\n"
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)]
+        cov = coverage(make, rows, "test-foo needs a recorded run\n")
+        self.assertNotIn("$(GATE)", cov["wrapped"])
+        self.assertTrue(cov["ok"])
+
+    def test_comment_prose_is_not_a_wrapped_gate(self):
+        # MUTATION: coverage-recipe-filter-dropped (every line scanned).
+        # The harness-coverage target's own comment says "--gate recipe";
+        # without the tab-indented-recipe restriction the census adopts
+        # "recipe" as a wrapped gate and the target reds itself.
+        make = self.MAKE + "# Census every Makefile --gate recipe\n"
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)]
+        cov = coverage(make, rows, "test-foo needs a recorded run\n")
+        self.assertNotIn("recipe", cov["wrapped"])
+        self.assertTrue(cov["ok"])
+
+    def test_measurement_in_a_retired_env_does_not_satisfy_the_newest_env(self):
+        # MUTATION: coverage-env-check-dropped (newest-env conjunct removed).
+        # A gate measured long ago in env-retired whose newest rows (VOID) run
+        # in the current env is NOT covered: the old other-env measurement
+        # must not satisfy coverage forever.
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)] + [
+            row("2026-08-01T00:00:00Z", value=100.0, gate="test-foo", env="env-retired"),
+            row("2026-09-01T00:01:00Z", verdict="VOID", value=None,
+                gate="test-foo", void_reason="cluster down"),
+        ]
+        cov = coverage(self.MAKE, rows, "")
+        self.assertNotIn("test-foo", cov["reached"])
+        self.assertIn("test-foo", cov["window_stale"])
+        self.assertEqual(cov["missing"], ["test-foo"])
+        self.assertFalse(cov["ok"])
+        self.assertIn("STALE", render_coverage(cov))
+
+    def test_measurement_outside_the_trailing_window_is_stale(self):
+        # MUTATION: coverage-window-check-dropped (window = all rows).
+        # One PASS followed by COVERAGE_WINDOW consecutive VOIDs: the gate is
+        # not being measured anymore, and recency is ledger-relative (last K
+        # rows), never wall-clock, so no frozen time is needed.
+        olds = [row("2026-08-01T00:00:00Z", value=100.0, gate="test-foo")]
+        voids = [
+            row(f"2026-09-01T00:0{i}:00Z", verdict="VOID", value=None,
+                gate="test-foo", void_reason="cluster down")
+            for i in range(1, COVERAGE_WINDOW + 1)
+        ]
+        rows = [row("2026-09-01T00:00:00Z", value=100.0)] + olds + voids
+        cov = coverage(self.MAKE, rows, "")
+        self.assertNotIn("test-foo", cov["reached"])
+        self.assertIn("test-foo", cov["window_stale"])
+        self.assertFalse(cov["ok"])
+        # Twin: the same history with the PASS inside the window stays reached.
+        rows2 = [row("2026-09-01T00:00:00Z", value=100.0)] + voids + [
+            row("2026-09-02T00:00:00Z", value=100.0, gate="test-foo")
+        ]
+        cov2 = coverage(self.MAKE, rows2, "")
+        self.assertIn("test-foo", cov2["reached"])
+
+    def test_positive_control_wrapped_but_unreached(self):
+        # The :1054 branch: the control gate is wrapped but has no measured
+        # row in its newest-env window — the matcher trips by name instead of
+        # reporting a clean board.
+        rows = [row("2026-09-01T00:01:00Z", value=100.0, gate="test-foo")]
+        cov = coverage(self.MAKE, rows, "")
+        self.assertTrue(any("test-failover" in p and "unreached" in p for p in cov["problems"]))
+        self.assertFalse(cov["ok"])
+
+    def test_positive_control_and_empty_wrapped_fail_closed(self):
+        # A matcher that never reports REACHED must trip by name, not report
+        # a clean board over an inverted world.
+        cov = coverage("\trun --gate test-foo\n",
+                       [row("2026-09-01T00:00:00Z", value=100.0, gate="test-foo")],
+                       "")
+        self.assertTrue(any("positive control" in p for p in cov["problems"]))
+        self.assertFalse(cov["ok"])
+        cov2 = coverage("no gates here\n", [], "")
+        self.assertTrue(any("no --gate recipes" in p for p in cov2["problems"]))
+        self.assertFalse(cov2["ok"])
+        _d, problems = parse_coverage_declared("gate-only\n")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("line 1", problems[0])
+
+    def test_main_coverage_over_a_fixture_ledger(self):
+        # End to end through main(): shards on disk, strict rc 1 on the
+        # undeclared gate, rc 0 once declared, corrupt mapping to rc 2.
+        work = tempfile.mkdtemp(prefix="xpf-coverage.")
+        self.addCleanup(shutil.rmtree, work, True)
+        for r in [row("2026-09-01T00:00:00Z", value=100.0)]:
+            with open(os.path.join(work, f"{r['run_id']}.json"), "w") as fh:
+                json.dump(r, fh)
+        mk = os.path.join(work, "Makefile")
+        with open(mk, "w") as fh:
+            fh.write(self.MAKE)
+        decl = os.path.join(work, "declared.txt")
+        with open(decl, "w") as fh:
+            fh.write("test-foo needs a recorded run\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--coverage", "--ledger", work, "--makefile", mk,
+                       "--coverage-declared", decl])
+        self.assertEqual(rc, 0)
+        self.assertIn("coverage: OK", buf.getvalue())
+        empty = os.path.join(work, "empty.txt")
+        with open(empty, "w") as fh:
+            fh.write("")
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rc2 = main(["--coverage", "--ledger", work, "--makefile", mk,
+                        "--coverage-declared", empty])
+        self.assertEqual(rc2, 1)
+        self.assertIn("coverage: FAIL", buf2.getvalue())
+        with open(os.path.join(work, "broken.json"), "w") as fh:
+            fh.write("{not json\n")
+        buf3 = io.StringIO()
+        with contextlib.redirect_stdout(buf3):
+            rc3 = main(["--coverage", "--ledger", work, "--makefile", mk,
+                        "--coverage-declared", decl])
+        self.assertEqual(rc3, 2)
 
 
 if __name__ == "__main__":

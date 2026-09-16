@@ -1,0 +1,23 @@
+# Ledger-coverage declarations (#9922 F-087).
+#
+# The coverage census (`ledger_compare.py --coverage`, `make harness-coverage`)
+# requires every Makefile --gate recipe to have >= 1 PASS/FAIL row in the
+# tracked ledger, or a line HERE with a reason. VOID-only counts as unreached.
+# A declared gate that gains a measured row fails the census (shrink-only:
+# remove the line). Same contract shape as HARNESSES.unreached.
+#
+# Every line below is the same fact, stated per gate so each one is removable
+# independently: ZERO rows in test/results/ledger.d at #9922 filing time. The
+# tail of each line names what a recorded run needs.
+cc-rollback-arm-a no rows in the tracked ledger; needs a recorded run of the #1922 rollback gate arm A on the loss cluster
+cc-rollback-arm-b no rows in the tracked ledger; needs a recorded run of the #1922 rollback gate arm B on the loss cluster
+test-active-active no rows in the tracked ledger; needs a recorded per-RG failover run (cluster + iperf3 server)
+test-chained-crash no rows in the tracked ledger; needs a recorded chained-crash run (cluster + iperf3 server)
+test-connectivity no rows in the tracked ledger; needs a recorded run (read gate; F-158 lock-idle probe lands in #9922)
+test-double-failover no rows in the tracked ledger; needs a recorded double-failover run (cluster + iperf3 server)
+test-private-rg no rows in the tracked ledger; needs a recorded private-RG election run on the loss cluster
+test-restart-connectivity no rows in the tracked ledger; needs a recorded daemon-restart run (cluster + iperf3 server)
+test-stress-failover no rows in the tracked ledger; needs a recorded stress-failover run (cluster + iperf3 server)
+test-wire-properties no rows in the tracked ledger; needs a recorded run (read gate, hermetic wrap)
+wire_appmatch_twins no rows in the tracked ledger; needs a recorded run of the #9531 appmatch-twins gate on the loss cluster
+wire_policy_deny no rows in the tracked ledger; needs a recorded run of the #9531 wire-deny gate on the loss cluster

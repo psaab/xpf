@@ -67,80 +67,118 @@ expect_field() {
 	fi
 }
 
-# ── 1. The adapter census: all 8 HA smokes plus test-connectivity ─────
+# ── 1. The adapter census: 5 iperf smokes + 7 cells smokes ──────────
 #
-# The declared set is a CLAIM, and the discovery below is what tests it.
-DECLARED_HA_SMOKES=(
+# #9922 F-155: ONE adapter can no longer cover both classes. The five smokes
+# that emit an iperf3 throughput cell keep ha-smoke (PASS headline FIXED to
+# throughput_gbps, figure required); the seven that emit cells only take
+# smoke-cells (PASS/FAIL headline FIXED to cells_passed). The declared sets
+# below are CLAIMs; the discovery in 1b and the Makefile cross-check in 1f
+# test them.
+DECLARED_IPERF_SMOKES=(
 	test-failover
-	test-ha-crash
 	test-double-failover
 	test-stress-failover
 	test-chained-crash
 	test-active-active
+)
+DECLARED_CELLS_SMOKES=(
+	test-ha-crash
 	test-restart-connectivity
 	test-private-rg
+	test-connectivity
+	test-wire-properties
+	persistent-nat-failover
+	dhcp-lease-failover
 )
-DECLARED_OTHER_SUMMARY_GATES=(test-connectivity test-wire-properties)
 
-summary_echo_of() {
-	grep -oE 'echo "[^"]*passed, [^"]*failed[^"]*"' "$1" 2>/dev/null | head -1
-}
-
-declared_all=("${DECLARED_HA_SMOKES[@]}" "${DECLARED_OTHER_SUMMARY_GATES[@]}")
-
-# 1a. Every declared gate exists, carries EXACTLY one summary echo, and the
-#     adapter scores its rendered line.
+# 1a. Every declared gate exists, carries its summary echo(s), and its OWN
+#     adapter scores the rendered line. Iperf fixtures carry a synthetic
+#     canonical cell line because ha-smoke PASS requires a measured figure;
+#     cells fixtures are the bare summary because smoke-cells must ignore
+#     everything but the pair.
+IPERF_FIXTURE_LINE='  PASS  iperf3 throughput: 23.1 Gbps (>= 5 Gbps)'
 census_covered=0
-for g in "${declared_all[@]}"; do
-	f="$SCRIPT_DIR/$g.sh"
+census_total=0
+score_gate() {
+	local g="$1" adapter="$2"
+	census_total=$((census_total + 1))
+	local f="$SCRIPT_DIR/$g.sh"
 	if [[ ! -f "$f" ]]; then
 		bad "census: declared gate $g.sh does not exist (renamed or removed?)"
-		continue
+		return 0
 	fi
+	# dhcp-lease-failover.sh carries TWO summary echoes: an early-exit echo
+	# inside the no-promotion branch plus the canonical final echo. The
+	# runtime reads the LAST summary, so the census renders the LAST echo;
+	# any other count anywhere is a shape change, not coverage.
+	local want_echoes=1
+	[[ "$g" == "dhcp-lease-failover" ]] && want_echoes=2
+	local n
 	n=$(grep -cE 'echo "[^"]*passed, [^"]*failed[^"]*"' "$f")
-	if [[ "$n" != "1" ]]; then
-		bad "census: $g.sh has $n summary echo lines, expected exactly 1"
-		continue
+	if [[ "$n" != "$want_echoes" ]]; then
+		bad "census: $g.sh has $n summary echo lines, expected exactly $want_echoes"
+		return 0
 	fi
-	line=$(summary_echo_of "$f")
+	local line rendered
+	line=$(grep -oE 'echo "[^"]*passed, [^"]*failed[^"]*"' "$f" | tail -1)
 	rendered=$(PASS=7 FAIL=0 SKIP=2 eval "$line")
 	# Positive control on the FIXTURE itself: if the render produced something
 	# that does not contain the pair, the cell below would be testing an empty
 	# string and passing for the wrong reason.
 	if [[ "$rendered" != *"7 passed, 0 failed"* ]]; then
 		bad "census: $g.sh summary did not render the pair (got '$rendered')"
-		continue
+		return 0
 	fi
-	printf '%s\n' "$rendered" >"$LOG"
-	v=$(adapt_field ha-smoke 0 1)
-	m=$(adapt_field ha-smoke 0 5)
-	if [[ "$v" == "PASS" && "$m" == *"cells_passed=7"* && "$m" == *"cells_failed=0"* ]]; then
-		census_covered=$((census_covered + 1))
+	if [[ "$adapter" == "ha-smoke" ]]; then
+		printf '%s\n%s\n' "$IPERF_FIXTURE_LINE" "$rendered" >"$LOG"
 	else
-		bad "census: adapter did not score $g.sh's real summary line '$rendered' (verdict=$v metrics=$m)"
+		printf '%s\n' "$rendered" >"$LOG"
 	fi
-done
-if ((census_covered == ${#declared_all[@]})); then
-	ok "adapter census: one ha-smoke adapter covers all ${#declared_all[@]} declared gates (8 HA smokes + test-connectivity)"
+	local v m h
+	v=$(adapt_field "$adapter" 0 1)
+	m=$(adapt_field "$adapter" 0 5)
+	h=$(adapt_field "$adapter" 0 3)
+	if [[ "$adapter" == "ha-smoke" ]]; then
+		if [[ "$v" == "PASS" && "$m" == *"cells_passed=7"* && "$m" == *"throughput_gbps=23.1"* && "$h" == "throughput_gbps" ]]; then
+			census_covered=$((census_covered + 1))
+		else
+			bad "census: ha-smoke did not score $g.sh's real summary line '$rendered' (verdict=$v headline=$h metrics=$m)"
+		fi
+	else
+		if [[ "$v" == "PASS" && "$m" == *"cells_passed=7"* && "$m" == *"cells_failed=0"* && "$h" == "cells_passed" ]]; then
+			census_covered=$((census_covered + 1))
+		else
+			bad "census: smoke-cells did not score $g.sh's real summary line '$rendered' (verdict=$v headline=$h metrics=$m)"
+		fi
+	fi
+}
+for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
+for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
+if ((census_covered == census_total)); then
+	ok "adapter census: own adapter covers all $census_total declared gates (5 ha-smoke + 7 smoke-cells)"
 else
-	bad "adapter census: covered $census_covered of ${#declared_all[@]} declared gates"
+	bad "adapter census: covered $census_covered of $census_total declared gates"
 fi
 
 # 1b. The declared set must EQUAL the discovered set. A per-member check plus a
 #     count is satisfied by a NEW gate nobody declared -- the extra member a
-#     lower bound cannot see.
+#     lower bound cannot see. Two globs: test-*.sh plus *-failover.sh, because
+#     persistent-nat-failover.sh and dhcp-lease-failover.sh carry no test-
+#     prefix and a single-glob census cannot see them (they were wrapped but
+#     uncensused before #9922 F-155).
 discovered=$(
-	for f in "$SCRIPT_DIR"/test-*.sh; do
+	for f in "$SCRIPT_DIR"/test-*.sh "$SCRIPT_DIR"/*-failover.sh; do
 		[[ -f "$f" ]] || continue
 		b=$(basename "$f" .sh)
 		case "$b" in *-selftest | *-lib) continue ;; esac
-		[[ -n "$(summary_echo_of "$f")" ]] && printf '%s\n' "$b"
-	done | sort
+		grep -qE 'echo "[^"]*passed, [^"]*failed[^"]*"' "$f" && printf '%s\n' "$b"
+	done | sort -u
 )
 if [[ -z "$discovered" ]]; then
-	bad "census: the test-*.sh glob discovered ZERO gates with a summary line — the glob or the pattern is wrong (empty sweep)"
+	bad "census: the gate globs discovered ZERO gates with a summary line — the globs or the pattern are wrong (empty sweep)"
 else
-	want=$(printf '%s\n' "${declared_all[@]}" | sort)
+	want=$(printf '%s\n' "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}" | sort)
 	if [[ "$discovered" == "$want" ]]; then
 		ok "adapter census: the discovered gate set EQUALS the declared set ($(wc -l <<<"$discovered") gates)"
 	else
@@ -155,7 +193,7 @@ fi
 missing8=""
 for g in test-failover test-ha-crash test-double-failover test-stress-failover \
 	test-chained-crash test-active-active test-restart-connectivity test-private-rg; do
-	case " ${declared_all[*]} " in *" $g "*) ;; *) missing8="$missing8 $g" ;; esac
+	case " ${DECLARED_IPERF_SMOKES[*]} ${DECLARED_CELLS_SMOKES[*]} " in *" $g "*) ;; *) missing8="$missing8 $g" ;; esac
 done
 if [[ -z "$missing8" ]]; then
 	ok "adapter census: all 8 destructive HA smokes are declared"
@@ -163,21 +201,56 @@ else
 	bad "adapter census: HA smokes not declared:$missing8"
 fi
 
-# 1d. The label prefix must NOT be part of the match. Same numeric tail, every
-#     real prefix, plus one nobody has written yet.
-prefix_ok=1
-for prefix in "  Failover test:" "  HA crash test:" "  Results:" "  Stress failover:" \
-	"  Restart connectivity:" "  A prefix nobody has written yet:"; do
-	printf '%s 3 passed, 0 failed\n' "$prefix" >"$LOG"
-	[[ "$(adapt_field ha-smoke 0 1)" == "PASS" ]] || prefix_ok=0
+# 1f. The Makefile mapping must match the scripts: a gate calls
+#     iperf_throughput_verdict IFF it is wrapped with ha-smoke. A cells gate
+map_bad=""
+for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
+	# The two unprefixed scripts run under test- gates (Makefile wraps
+	# --gate test-persistent-nat-failover for persistent-nat-failover.sh).
+	gate="$g"
+	case "$g" in persistent-nat-failover | dhcp-lease-failover) gate="test-$g" ;; esac
+	mkline=$(grep -E -- "--gate $gate " "$SCRIPT_DIR/../../Makefile" | head -1)
+	case "$mkline" in
+	*"--adapter ha-smoke"*) mk_adapter="ha-smoke" ;;
+	*"--adapter smoke-cells"*) mk_adapter="smoke-cells" ;;
+	*) map_bad="$map_bad $g(no-makefile-wrap)"; continue ;;
+	esac
+	if grep -q "iperf_throughput_verdict" "$SCRIPT_DIR/$g.sh"; then
+		[[ "$mk_adapter" == "ha-smoke" ]] || map_bad="$map_bad $g(emits-iperf-but-wrapped-$mk_adapter)"
+	else
+		[[ "$mk_adapter" == "smoke-cells" ]] || map_bad="$map_bad $g(no-iperf-but-wrapped-$mk_adapter)"
+	fi
 done
-((prefix_ok)) && ok "ha-smoke matches the numeric tail, not the label prefix" ||
-	bad "ha-smoke is prefix-sensitive — it would silently cover a subset of the gates"
+if [[ -z "$map_bad" ]]; then
+	ok "adapter census: Makefile --adapter matches iperf emission for all 12 smoke gates"
+else
+	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
+fi
+
+# 1d. The label prefix must NOT be part of the match. Same numeric tail, every
+#     real prefix, plus one nobody has written yet. Both adapters: the summary
+#     parse is shared, and the property belongs to it.
+prefix_ok=1
+for adapter in ha-smoke smoke-cells; do
+	for prefix in "  Failover test:" "  HA crash test:" "  Results:" "  Stress failover:" \
+		"  Restart connectivity:" "  A prefix nobody has written yet:"; do
+		if [[ "$adapter" == "ha-smoke" ]]; then
+			printf '%s\n%s 3 passed, 0 failed\n' "$IPERF_FIXTURE_LINE" "$prefix" >"$LOG"
+		else
+			printf '%s 3 passed, 0 failed\n' "$prefix" >"$LOG"
+		fi
+		[[ "$(adapt_field "$adapter" 0 1)" == "PASS" ]] || prefix_ok=0
+	done
+done
+((prefix_ok)) && ok "both smoke adapters match the numeric tail, not the label prefix" ||
+	bad "a smoke adapter is prefix-sensitive — it would silently cover a subset of the gates"
 
 # 1e. The trailing ", <n> skipped" must not defeat the match (test-connectivity).
-printf '  Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
+printf '%s\n  Results: 7 passed, 0 failed, 2 skipped\n' "$IPERF_FIXTURE_LINE" >"$LOG"
 expect_field "ha-smoke tolerates a trailing skipped count (not anchored at EOL)" ha-smoke 0 1 PASS
-expect_field "ha-smoke records the skipped count as an invariant" ha-smoke 0 5 \
+printf '  Results: 7 passed, 0 failed, 2 skipped\n' >"$LOG"
+expect_field "smoke-cells tolerates a trailing skipped count (not anchored at EOL)" smoke-cells 0 1 PASS
+expect_field "smoke-cells records the skipped count as an invariant" smoke-cells 0 5 \
 	"cells_passed=7 cells_failed=0 cells_skipped=2"
 
 # ── 2. ha-smoke: the three states ────────────────────────────────────
@@ -189,6 +262,9 @@ expect_field "ha-smoke green carries cell counts as invariants" ha-smoke 0 5 \
 
 printf '  Failover test: 19 passed, 2 failed\n' >"$LOG"
 expect_field "ha-smoke with failed cells -> FAIL" ha-smoke 1 1 FAIL
+expect_field "ha-smoke FAIL without a figure keeps the cells headline (diagnostic-only)" ha-smoke 1 3 cells_passed
+printf '  FAIL  iperf3 throughput too low: 12.0 Gbps (expected >= 23 Gbps)\n  Failover test: 19 passed, 2 failed\n' >"$LOG"
+expect_field "ha-smoke FAIL with a figure keeps the throughput headline" ha-smoke 1 3 throughput_gbps
 
 # The VOID that pays for itself: a smoke that died at `set -e` before its
 # summary is indistinguishable from a clean run to anything reading only the
@@ -207,9 +283,35 @@ expect_field "ha-smoke with 0 passed and 0 failed -> VOID (ran no assertions)" h
 printf '  Failover test: 21 passed, 0 failed\n' >"$LOG"
 expect_field "ha-smoke summary says 0 failed but rc!=0 -> VOID (they disagree)" ha-smoke 1 1 VOID
 
-# A LAST-match, so an intermediate tally cannot be read as the result.
+# A LAST-match, so an intermediate tally cannot be read as the result. Both
+# adapters: the summary parse is shared.
 printf '  interim: 1 passed, 5 failed\n  Failover test: 21 passed, 0 failed\n' >"$LOG"
+expect_field "smoke-cells reads the LAST summary, not an interim tally" smoke-cells 0 1 PASS
+printf '%s\n  interim: 1 passed, 5 failed\n  Failover test: 21 passed, 0 failed\n' "$IPERF_FIXTURE_LINE" >"$LOG"
 expect_field "ha-smoke reads the LAST summary, not an interim tally" ha-smoke 0 1 PASS
+
+# ── 2b. #9922 F-155: the anchored iperf extraction ─────────────────────
+# Floor/threshold prose used to become a banded measurement: "iperf3
+# throughput floor 5 Gbps" anywhere in the log recorded throughput_gbps=5
+# on a PASS row. Gbps now comes ONLY from a pass()/fail() cell line.
+printf 'applying iperf3 throughput floor 5 Gbps for this lane\n  Failover test: 14 passed, 0 failed\n' >"$LOG"
+expect_field "ha-smoke: bare FLOOR prose is not a measurement -> VOID" ha-smoke 0 1 VOID
+printf '  PASS  iperf3 data transfer completed (2.5 Gbps) — control socket disrupted during failover\n  Failover test: 13 passed, 0 failed\n' >"$LOG"
+expect_field "ha-smoke: data-transfer prose is not a throughput cell -> VOID" ha-smoke 0 1 VOID
+expect_field "smoke-cells: the same log is a cells PASS (prose ignored)" smoke-cells 0 1 PASS
+expect_field "smoke-cells: headline stays cells_passed under iperf-looking prose" smoke-cells 0 3 cells_passed
+# LAST anchored cell wins; the figure is the FIRST <n> Gbps on that line.
+printf '  PASS  iperf3 throughput: 9.9 Gbps (>= 5 Gbps)\n  PASS  iperf3 throughput: 23.1 Gbps (>= 5 Gbps)\n  Failover test: 21 passed, 0 failed\n' >"$LOG"
+expect_field "ha-smoke reads the LAST throughput cell, not the first" ha-smoke 0 5 \
+	"cells_passed=21 cells_failed=0 throughput_gbps=23.1"
+# A FAIL cell without a figure (no measurement) keeps the cells headline.
+printf '  FAIL  iperf3 throughput: no [SUM] sender line in the iperf3 log\n  Failover test: 20 passed, 1 failed\n' >"$LOG"
+expect_field "ha-smoke: unmeasured FAIL keeps the cells headline" ha-smoke 1 3 cells_passed
+# smoke-cells headline constancy even when a canonical cell line IS present
+# (a mis-wrapped iperf log must not silently switch headline families).
+printf '%s\n  HA crash test: 7 passed, 0 failed\n' "$IPERF_FIXTURE_LINE" >"$LOG"
+expect_field "smoke-cells ignores even a canonical throughput cell line" smoke-cells 0 3 cells_passed
+expect_field "smoke-cells carries no throughput metric" smoke-cells 0 5 "cells_passed=7 cells_failed=0"
 
 # ── 3. iperf-throughput: recovering the void state the source lacks ──
 #
@@ -236,6 +338,10 @@ expect_field "iperf with no verdict line -> VOID" iperf-throughput 1 1 VOID
 printf '{"verdict":"VALID","reasons":[],"new_flows_per_sec":48000.0,"accept_ratio":0.98,"culprits":[],"elapsed_s":30.0,"active_workers":6}\n' >"$LOG"
 expect_field "newflow VALID -> PASS" newflow-ceiling 0 1 PASS
 expect_field "newflow VALID headline is the rate" newflow-ceiling 0 3 new_flows_per_sec
+# #9922 F-160: VALID from a failed process is a summary the exit status
+# contradicts — VOID (ha-smoke policy), never a PASS for a failed teardown.
+expect_field "newflow VALID with rc=1 -> VOID, NOT PASS" newflow-ceiling 1 1 VOID
+expect_field "newflow VALID rc=1 VOID reason names rc" newflow-ceiling 1 2 "analyzer reported VALID but the harness exited rc=1 — the document and the exit status disagree"
 printf '{"verdict":"INVALID","reasons":["zero pool allocations in the window"],"new_flows_per_sec":0.0}\n' >"$LOG"
 expect_field "newflow INVALID (exit 1) -> VOID, NOT FAIL" newflow-ceiling 1 1 VOID
 printf '{"verdict":"INCONCLUSIVE","reasons":["too few RX queues"],"new_flows_per_sec":9000.0}\n' >"$LOG"
@@ -499,7 +605,7 @@ mkfake <<'FAKE'
 echo "  Failover test: 19 passed, 2 failed"
 exit 1
 FAKE
-run_wrapper --gate fake-red --adapter ha-smoke -- "$WORK/fake-gate.sh"
+run_wrapper --gate fake-red --adapter smoke-cells -- "$WORK/fake-gate.sh"
 rc=$?
 [[ "$rc" == "1" ]] && ok "run wrapper: a failing gate still exits 1 (make test-failover keeps failing)" ||
 	bad "run wrapper: failing gate exited $rc, expected 1"
@@ -513,12 +619,52 @@ mkfake <<'FAKE'
 echo "starting"
 exit 0
 FAKE
-run_wrapper --gate fake-void --adapter ha-smoke -- "$WORK/fake-gate.sh"
+run_wrapper --gate fake-void --adapter smoke-cells -- "$WORK/fake-gate.sh"
 rc=$?
 [[ "$rc" == "2" ]] && ok "run wrapper: a gate that exits 0 without a summary exits 2 (VOID), not 0" ||
 	bad "run wrapper: silent-exit-0 gate exited $rc, expected 2"
 [[ "$(last_row_field verdict)" == "VOID" ]] && ok "run wrapper: silent gate wrote a VOID row" ||
 	bad "run wrapper: silent gate wrote $(last_row_field verdict)"
+
+# #9922 F-087: a PASS whose row cannot be written is "passed but unrecorded"
+# (exit 2 + NO ROW WRITTEN), never a silent 0. The ledger path is a regular
+# FILE here, so the emitter's mkdir fails deterministically and hermetically.
+# selftest adapter throughout: its verdict contract is untouched by the F-155
+# smoke split, so these cells are stable across it.
+touch "$WORK/not-a-ledger-dir"
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+echo "  passed=3  skipped=0  failed=0"
+FAKE
+out=$(harness_result_run --ledger "$WORK/not-a-ledger-dir" --hermetic --env testenv --gate fake-emitfail --adapter selftest -- "$WORK/fake-gate.sh" 2>&1)
+rc=$?
+[[ "$rc" == "2" ]] && ok "run wrapper: PASS + emit failure exits 2 (unrecorded), not 0" ||
+	bad "run wrapper: PASS + emit failure exited $rc, expected 2"
+[[ "$out" == *"NO ROW WRITTEN"* ]] && ok "run wrapper: emit failure prints NO ROW WRITTEN" ||
+	bad "run wrapper: emit failure printed no marker"
+# A measured FAIL is never demoted by a write failure: rc preserved.
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+echo "  passed=3  skipped=0  failed=1"
+exit 1
+FAKE
+out=$(harness_result_run --ledger "$WORK/not-a-ledger-dir" --hermetic --env testenv --gate fake-emitfail-red --adapter selftest -- "$WORK/fake-gate.sh" 2>&1)
+rc=$?
+[[ "$rc" == "1" ]] && ok "run wrapper: FAIL + emit failure keeps rc 1" ||
+	bad "run wrapper: FAIL + emit failure exited $rc, expected 1"
+[[ "$out" == *"NO ROW WRITTEN"* ]] && ok "run wrapper: FAIL + emit failure still prints the marker" ||
+	bad "run wrapper: FAIL + emit failure printed no marker"
+# rc preservation past 1 (the composite recipes distinguish 1/3/else): a PASS
+# verdict with a foreign rc keeps that rc, mirroring the adapter-refusal path.
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+echo "  passed=3  skipped=0  failed=0"
+exit 3
+FAKE
+out=$(harness_result_run --ledger "$WORK/not-a-ledger-dir" --hermetic --env testenv --gate fake-emitfail-rc3 --adapter selftest -- "$WORK/fake-gate.sh" 2>&1)
+rc=$?
+[[ "$rc" == "3" ]] && ok "run wrapper: PASS verdict + rc 3 + emit failure keeps rc 3" ||
+	bad "run wrapper: rc-3 emit failure exited $rc, expected 3"
 
 # ── Cluster mode. `incus` is mocked as a shell function, so this stays
 # hermetic: deploy_running_xpfd_sha256 calls `incus` and a function shadows the
@@ -534,7 +680,7 @@ FAKE
 #      claimed a clean pass -- of a binary nobody can name.
 incus() { return 1; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate fake-cluster \
-	--adapter ha-smoke --node fake:node --build-exe "$WORK/no-such-binary" \
+	--adapter smoke-cells --node fake:node --build-exe "$WORK/no-such-binary" \
 	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 rc=$?
 if [[ "$(last_row_field verdict)" == "VOID" ]]; then
@@ -569,7 +715,7 @@ printf 'pretend xpfd binary\n' >"$WORK/xpfd"
 fake_sha=$(sha256sum "$WORK/xpfd" | awk '{print $1}')
 incus() { echo "$fake_sha  /proc/1234/exe"; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate fake-cluster-ok \
-	--adapter ha-smoke --node fake:node --build-exe "$WORK/xpfd" \
+	--adapter smoke-cells --node fake:node --build-exe "$WORK/xpfd" \
 	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 rc=$?
 if [[ "$rc" == "0" && "$(last_row_field verdict)" == "PASS" && "$(last_row_field exe_check)" == "MATCH" ]]; then
@@ -587,7 +733,7 @@ fi
 #      stale-code condition deploy-lib.sh dies on (#2176).
 incus() { echo "$(printf 'f%.0s' {1..64})  /proc/1234/exe"; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate fake-cluster-stale \
-	--adapter ha-smoke --node fake:node --build-exe "$WORK/xpfd" \
+	--adapter smoke-cells --node fake:node --build-exe "$WORK/xpfd" \
 	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 if [[ "$(last_row_field verdict)" == "VOID" && "$(last_row_field exe_check)" == "MISMATCH" ]]; then
 	ok "run wrapper: a node running a DIFFERENT binary records exe_check=MISMATCH and a VOID row (#2176)"
@@ -626,7 +772,7 @@ _peer_incus_mock() {
 PEER_SHA=$(printf 'a%.0s' {1..64})
 incus() { _peer_incus_mock "$@"; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate fake-peer-stale \
-	--adapter ha-smoke --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+	--adapter smoke-cells --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
 	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 if [[ "$(last_row_field verdict)" == "VOID" && "$(last_row_field exe_check)" == "MISMATCH" ]]; then
 	ok "#9044: a peer running a DIFFERENT build makes the row VOID, not a clean MATCH"
@@ -650,7 +796,7 @@ fi
 PEER_SHA="$fake_sha"
 incus() { _peer_incus_mock "$@"; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate fake-peer-ok \
-	--adapter ha-smoke --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+	--adapter smoke-cells --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
 	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 if [[ "$(last_row_field verdict)" == "PASS" && "$(last_row_field exe_check)" == "MATCH" ]]; then
 	ok "#9044: both nodes on the build under test is still a clean MATCH/PASS (the NODE=all path)"
@@ -679,7 +825,7 @@ incus() {
 	echo "$fake_sha  /proc/1234/exe"
 }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate fake-peer-down \
-	--adapter ha-smoke --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+	--adapter smoke-cells --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
 	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 if [[ "$(last_row_field verdict)" == "PASS" && "$(last_row_field exe_check)" == "MATCH" ]]; then
 	ok "#9044: an unreadable peer does NOT void the row (the crash gates leave a node down on purpose)"

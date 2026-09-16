@@ -52,6 +52,13 @@ almost all the time by construction:
    have no dispersion to speak of and a band drawn through them is a number
    with the shape of evidence.
 
+Drift is IN scope, beside the rolling window rather than inside it (#9922
+F-088). The rolling band judges each step against the last K greens and so
+absorbs a slow decay one step at a time; the pinned baseline (the FIRST K
+greens) judges the newest run against genesis and the result carries the
+cumulative displacement plus a drift flag. Drift is reported, not failed:
+attribution needs a human.
+
 Flake vs. regression without re-running blindly
 -----------------------------------------------
 Every row carries invariant metrics beside its headline. When the headline
@@ -98,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import statistics
 import sys
@@ -684,6 +692,24 @@ def compare(
     result["baseline_n"] = len(baseline)
     result["baseline_ts"] = [r.get("ts") for r in baseline]
 
+    # #9922 F-086: FAIL rows inside the baseline window. They never ENTER the
+    # band (see above), but a comparator that judges only the newest row lets
+    # a gate failing every other run read as a clean WITHIN-BAND. Surfaced
+    # here so the aggregate and the render show them. The window starts at
+    # the oldest baseline member; below the K floor there is no baseline, so
+    # the window is the whole prior history at this env.
+    window_start = baseline[0].get("ts") if baseline else None
+    wfails = [
+        r
+        for r in prior
+        if r.get("verdict") == "FAIL"
+        and r.get("env") == resolved_env
+        and headline in (r.get("metrics") or {})
+        and (window_start is None or r.get("ts", "") >= window_start)
+    ]
+    result["window_fails"] = len(wfails)
+    result["window_fail_ts"] = [r.get("ts") for r in wfails]
+
     if len(baseline) < k:
         result["outcome"] = NO_BASELINE
         result["note"] = (
@@ -702,6 +728,39 @@ def compare(
             "band_lo": lo,
             "band_hi": hi,
             "outcome": classify(value, lo, hi, direction),
+        }
+    )
+
+    # #9922 F-088: the PINNED baseline. The rolling band above re-trusts every
+    # small step, so a slow geometric decay reads WITHIN-BAND at every step
+    # while the total displacement grows unboundedly. The pin is the FIRST K
+    # greens at this env (prior-only, so it is stable once K+1 greens exist),
+    # judged with the same band arithmetic. `drift` is newest-inside-rolling
+    # but outside-pinned: the step the rolling window just absorbed.
+    #
+    # Informational only: drift attribution needs a human (an intentional
+    # change and a regression have the same shape here). The layer's job is to
+    # surface the displacement, which today is invisible. A zero pinned median
+    # (e.g. cells_failed pinned at 0) carries no ratio: displacement is None
+    # and drift stays False rather than crashing — the rolling band still
+    # judges the step (0 -> 1 on a zero-width band is a REGRESSION there).
+    genesis = greens[:k]
+    pvals = [r["metrics"][headline] for r in genesis]
+    pmed, plo, phi = band(pvals)
+    result.update(
+        {
+            "pinned_values": pvals,
+            "pinned_median": pmed,
+            "pinned_lo": plo,
+            "pinned_hi": phi,
+            "pinned_n": len(genesis),
+            "pinned_ts": [r.get("ts") for r in genesis],
+            "displacement": (value - pmed) / abs(pmed) if pmed != 0 else None,
+            "drift": bool(
+                pmed != 0
+                and result["outcome"] == WITHIN_BAND
+                and not (plo <= value <= phi)
+            ),
         }
     )
 
@@ -753,6 +812,326 @@ def compare(
     return result
 
 
+def compare_all(
+    rows: Sequence[Dict],
+    k: int = MIN_BASELINE_RUNS,
+) -> Dict:
+    """Compare the newest row of EVERY (gate, env) pair against its band.
+
+    #9922 F-086: ``compare()`` over one gate needs a human ``GATE=`` and no
+    automation ever ran it over real rows, so a gate failing every run stayed
+    green everywhere. This is the aggregate that runs it over all of them.
+
+    A pair is RED when its outcome is REGRESSION or its newest verdict is
+    FAIL. VOID / NO-BASELINE pairs are SURFACED, not failed: the aggregate
+    is a red-watch, not a baseline-completeness gate (thin baselines are the
+    normal state of young gates; completeness of a different kind — zero-row
+    gates — is the coverage census's job, F-087).
+    """
+    pairs = sorted(
+        set(
+            (r.get("gate"), r.get("env"))
+            for r in rows
+            if r.get("gate") is not None
+        )
+    )
+    results = {pair: compare(rows, pair[0], pair[1], k) for pair in pairs}
+    red = {
+        pair: res
+        for pair, res in results.items()
+        if res.get("outcome") == REGRESSION or res.get("verdict") == "FAIL"
+    }
+    undetermined = {
+        pair: res
+        for pair, res in results.items()
+        if pair not in red and res.get("outcome") in (VOID, NO_BASELINE)
+    }
+    green = {
+        pair: res for pair, res in results.items() if pair not in red and pair not in undetermined
+    }
+    return {
+        "pairs": results,
+        "red": red,
+        "undetermined": undetermined,
+        "green": green,
+        "k_required": k,
+    }
+
+
+def parse_expected_red(text: str) -> Tuple[Dict[Tuple[str, str], str], List[str]]:
+    """Parse an expected-red declaration file.
+
+    One pair per line: ``gate env reason...`` — the reason is REQUIRED (it is
+    what makes a tolerated red reviewable; cite the tracking issue). Blank
+    lines and ``#`` comments are skipped. Returns (declared, problems);
+    problems is non-empty when any line is malformed.
+    """
+    declared: Dict[Tuple[str, str], str] = {}
+    problems: List[str] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            problems.append(
+                f"line {lineno}: expected `gate env reason...`, got {stripped!r}"
+            )
+            continue
+        declared[(parts[0], parts[1])] = parts[2]
+    return declared, problems
+
+
+def render_all(agg: Dict, declared: Optional[Dict[Tuple[str, str], str]] = None) -> str:
+    """Render the aggregate: every pair's full verdict, then the summary.
+
+    Each pair prints its complete single-gate render (band, pinned baseline,
+    window FAILs, invariants) — a one-line-per-pair summary would leave the
+    FAILs-inside-the-window and the drift flag automation-invisible again,
+    which is the defect being fixed.
+    """
+    declared = declared or {}
+    out: List[str] = []
+    pairs = agg.get("pairs") or {}
+    if not pairs:
+        return "ledger-compare-all: no (gate, env) pairs in the ledger"
+    for pair in sorted(pairs):
+        res = pairs[pair]
+        mark = (
+            "RED"
+            if pair in (agg.get("red") or {})
+            else ("UNDETERMINED" if pair in (agg.get("undetermined") or {}) else "green")
+        )
+        annotation = ""
+        if pair in declared:
+            annotation = (
+                "  [expected-red: still red]"
+                if pair in (agg.get("red") or {})
+                else "  [expected-red: STALE — no longer red, remove the declaration]"
+            )
+        out.append(f"=== {pair[0]} @ {pair[1]} [{mark}]{annotation}")
+        out.append(render(res))
+        out.append("")
+    red = agg.get("red") or {}
+    undet = agg.get("undetermined") or {}
+    green = agg.get("green") or {}
+    undeclared_red = sorted(p for p in red if p not in declared)
+    stale = sorted(p for p in declared if p not in red)
+    warn_window = sum(1 for res in pairs.values() if res.get("window_fails"))
+    warn_drift = sum(1 for res in pairs.values() if res.get("drift"))
+    out.append(
+        f"summary: {len(red)} red ({len(undeclared_red)} undeclared), "
+        f"{len(undet)} undetermined, {len(green)} green, "
+        f"{len(stale)} stale declaration(s), "
+        f"{warn_window} with window FAILs, {warn_drift} DRIFT-flagged"
+    )
+    for pair in undeclared_red:
+        out.append(f"  RED: {pair[0]} @ {pair[1]} — {red[pair].get('outcome')}/{red[pair].get('verdict')}")
+    for pair in stale:
+        out.append(f"  STALE: {pair[0]} @ {pair[1]} — declared red but no longer red ({declared[pair][:80]})")
+    return "\n".join(out)
+
+
+def all_exit_status(agg: Dict, declared: Optional[Dict[Tuple[str, str], str]] = None) -> int:
+    """1 = an undeclared red pair or a stale declaration, else 0.
+
+    Undetermined pairs never fail the aggregate (see compare_all): the
+    aggregate watches for red. A stale declaration fails so the file can only
+    shrink — a tolerated red that went green must be un-declared, loudly.
+    """
+    declared = declared or {}
+    red = agg.get("red") or {}
+    if any(p not in declared for p in red):
+        return 1
+    if any(p not in red for p in declared):
+        return 1
+    return 0
+
+
+def _jsonable_agg(agg: Dict, declared: Dict[Tuple[str, str], str]) -> Dict:
+    """The aggregate with string keys, for --json (JSON has no tuples)."""
+    def keyed(d: Dict) -> Dict:
+        return {f"{pair[0]} @ {pair[1]}": res for pair, res in d.items()}
+    return {
+        "pairs": keyed(agg.get("pairs") or {}),
+        "red": sorted(f"{p[0]} @ {p[1]}" for p in (agg.get("red") or {})),
+        "undetermined": sorted(f"{p[0]} @ {p[1]}" for p in (agg.get("undetermined") or {})),
+        "green": sorted(f"{p[0]} @ {p[1]}" for p in (agg.get("green") or {})),
+        "declared": {f"{p[0]} @ {p[1]}": reason for p, reason in declared.items()},
+        "k_required": agg.get("k_required"),
+    }
+
+
+#: A ledger-wrapped Makefile recipe names its gate `--gate <name>` on a
+#: TAB-indented recipe line. The tab requirement is load-bearing: prose
+#: (comments, help text) mentions `--gate <word>` too, and without it the
+#: census would adopt comment words as wrapped gates. Values containing
+#: `$` are make expansions (the `harness-compare` recipe's `$(GATE)`)
+#: rather than gates and are excluded by coverage().
+WRAPPED_GATE_RE = re.compile(r"--gate (\S+)")
+
+#: Trailing ledger-relative window for coverage(): reached needs a measured
+#: row in the gate's newest env among its last COVERAGE_WINDOW rows.
+COVERAGE_WINDOW = 5
+
+#: The positive control: this gate is wrapped AND has measured rows, so a
+#: coverage matcher that never reports REACHED trips here by name instead of
+#: reporting a clean board over an inverted world.
+COVERAGE_POSITIVE_CONTROL = "test-failover"
+
+
+def parse_coverage_declared(text: str) -> Tuple[Dict[str, str], List[str]]:
+    """Parse a coverage-declaration file: `gate reason...` per line.
+
+    Same shape as parse_expected_red but per GATE (coverage is per gate over
+    any env; the envs a gate was measured in are reported, not gated).
+    """
+    declared: Dict[str, str] = {}
+    problems: List[str] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) < 2:
+            problems.append(
+                f"line {lineno}: expected `gate reason...`, got {stripped!r}"
+            )
+            continue
+        declared[parts[0]] = parts[1]
+    return declared, problems
+
+
+def coverage(
+    makefile_text: str,
+    rows: Sequence[Dict],
+    declared_text: str,
+) -> Dict:
+    """Census: every ledger-wrapped gate measured, or declared unreached.
+
+    #9922 F-087: emitter refusal (rc 2, NO row) is the design's falsifiability
+    backstop, and its reader was never built — 12 of 18 wrapped gates have
+    ZERO rows while every aggregate stays green. This is that reader: the
+    wrapped set comes from the Makefile's `--gate` recipes, and anything
+    unreached must be declared with a reason.
+
+    Reached means a PASS or FAIL row in the gate's NEWEST env inside the
+    trailing COVERAGE_WINDOW ledger rows — not merely "measured once, ever".
+    Per-gate-any-env would let one old measurement in a retired env satisfy
+    coverage forever while every current run VOIDs; the window is ledger-
+    relative (last K rows), never wall-clock, so the census is deterministic
+    and fixtures need no frozen time.
+
+    VOID rows do NOT count as coverage: a gate whose rows are all VOID never
+    measured anything, and counting them would let it read green in both this
+    census and the red-watch aggregate (which surfaces undetermined pairs
+    without failing). Such gates report as void-only, distinctly from zero-row;
+    gates measured only outside the window/env report as stale.
+    """
+    recipe_text = "\n".join(
+        ln for ln in makefile_text.splitlines() if ln.startswith("\t")
+    )
+    wrapped = sorted(
+        {
+            m.group(1)
+            for m in WRAPPED_GATE_RE.finditer(recipe_text)
+            if "$" not in m.group(1)
+        }
+    )
+    declared, problems = parse_coverage_declared(declared_text)
+    problems = list(problems)
+    by_gate: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by_gate.setdefault(r.get("gate", ""), []).append(r)
+    per_gate = {}
+    for gate in wrapped:
+        grows = by_gate.get(gate, [])
+        ordered = sorted(grows, key=lambda r: (r.get("ts", ""), r.get("run_id", "")))
+        newest_env = ordered[-1].get("env") if ordered else None
+        window = ordered[-COVERAGE_WINDOW:]
+        measured_ever = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]
+        measured = [
+            r for r in window
+            if r.get("verdict") in ("PASS", "FAIL") and r.get("env") == newest_env
+        ]
+        per_gate[gate] = {
+            "rows": len(grows),
+            "measured_rows": len(measured),
+            "measured_ever": len(measured_ever),
+            "newest_env": newest_env,
+            "envs": sorted({str(r.get("env")) for r in grows}),
+            "newest_ts": max((r.get("ts", "") for r in grows), default=None),
+            "last_measured_ts": max((r.get("ts", "") for r in measured_ever), default=None),
+        }
+    reached = sorted(g for g in wrapped if per_gate[g]["measured_rows"] > 0)
+    void_only = sorted(
+        g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_ever"] == 0
+    )
+    window_stale = sorted(
+        g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_ever"] > 0 and per_gate[g]["measured_rows"] == 0
+    )
+    zero_row = sorted(g for g in wrapped if per_gate[g]["rows"] == 0)
+    unreached = sorted(set(wrapped) - set(reached))
+    missing = sorted(g for g in unreached if g not in declared)
+    stale = sorted(g for g in declared if g not in unreached)
+    if not wrapped:
+        problems.append("no --gate recipes found in the Makefile text — the parse is wrong")
+    control_ok = COVERAGE_POSITIVE_CONTROL in reached
+    if COVERAGE_POSITIVE_CONTROL in wrapped and not control_ok:
+        problems.append(
+            f"positive control: {COVERAGE_POSITIVE_CONTROL} is wrapped but unreached"
+        )
+    if COVERAGE_POSITIVE_CONTROL not in wrapped:
+        problems.append(
+            f"positive control: {COVERAGE_POSITIVE_CONTROL} is not wrapped anymore"
+        )
+    return {
+        "wrapped": wrapped,
+        "reached": reached,
+        "void_only": void_only,
+        "window_stale": window_stale,
+        "zero_row": zero_row,
+        "declared": declared,
+        "missing": missing,
+        "stale": stale,
+        "problems": problems,
+        "per_gate": per_gate,
+        "ok": not missing and not stale and not problems,
+    }
+
+
+def render_coverage(cov: Dict) -> str:
+    """Render the coverage census: every wrapped gate, then the verdict."""
+    out = [f"ledger-coverage: {len(cov.get('reached', []))} of {len(cov.get('wrapped', []))} wrapped gates measured"]
+    for gate in cov.get("wrapped", []):
+        pg = (cov.get("per_gate") or {}).get(gate, {})
+        if gate in (cov.get("reached") or []):
+            state = f"REACHED ({pg.get('measured_rows')} measured / {pg.get('rows')} rows)"
+        elif gate in (cov.get("void_only") or []):
+            state = f"VOID-ONLY ({pg.get('rows')} rows, none measured)"
+        elif gate in (cov.get("window_stale") or []):
+            state = f"STALE ({pg.get('measured_ever')} measured ever, none in the newest-env window)"
+        else:
+            state = "ZERO ROWS"
+        extra = ""
+        if gate in (cov.get("declared") or {}):
+            extra = (
+                "  [declared: still unreached]"
+                if gate not in (cov.get("reached") or [])
+                else "  [declared: STALE — measured now, remove the declaration]"
+            )
+        envs = ",".join(pg.get("envs") or []) or "-"
+        out.append(f"  {gate:<32} {state:<34} envs={envs}{extra}")
+    for gate in cov.get("missing", []):
+        out.append(f"  MISSING: {gate} — unreached and undeclared (add rows or declare it)")
+    for gate in cov.get("stale", []):
+        out.append(f"  STALE: {gate} — declared but measured now (remove the declaration)")
+    for prob in cov.get("problems", []):
+        out.append(f"  PROBLEM: {prob}")
+    out.append("coverage: OK" if cov.get("ok") else "coverage: FAIL")
+    return "\n".join(out)
+
+
 def render(result: Dict) -> str:
     out = [f"outcome: {result['outcome']}"]
     out.append(f"gate: {result['gate']}   env: {result['env']}")
@@ -781,6 +1160,21 @@ def render(result: Dict) -> str:
         # green run(s)" line with a placeholder invites reading a number that
         # was never computed; the note below says what happened instead.
         out.append(f"green runs available: {result['baseline_n']} (below the K floor)")
+    if "pinned_median" in result:
+        disp = result.get("displacement")
+        disp_s = f"{disp:+.1%}" if disp is not None else "n/a (pinned median is 0)"
+        flag = "  DRIFT — inside the rolling band, outside the pinned one" if result.get("drift") else ""
+        out.append(
+            f"pinned baseline over the first {result['pinned_n']} green run(s): "
+            f"[{result['pinned_lo']:.6g}, {result['pinned_hi']:.6g}] "
+            f"median {result['pinned_median']:.6g}  "
+            f"cumulative displacement {disp_s}{flag}"
+        )
+    if result.get("window_fails"):
+        out.append(
+            f"FAIL rows inside the baseline window: {result['window_fails']} "
+            f"({', '.join(result.get('window_fail_ts') or [])})"
+        )
     if result.get("note"):
         out.append(f"note: {result['note']}")
     inv = result.get("invariants") or {}
@@ -802,13 +1196,15 @@ def exit_status(result: Dict) -> int:
     Mirrors mouse_latency_aggregate.py's mapping on purpose. A FAIL row exits 1
     even when its headline sits inside the band: the band says the metric did
     not move, and the row says the gate was violated, and the second one wins.
+    The same win applies below the K floor (#9922 F-086): a FAIL newest with
+    a thin baseline is still a measured FAIL, not an undetermined one.
     """
     outcome = result.get("outcome")
+    if result.get("verdict") == "FAIL":
+        return 1
     if outcome in (VOID, NO_BASELINE, LEDGER_CORRUPT):
         return 2
     if outcome == REGRESSION:
-        return 1
-    if result.get("verdict") == "FAIL":
         return 1
     return 0
 
@@ -824,6 +1220,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--env", default=None, help="restrict to this env")
     p.add_argument("--k", type=int, default=MIN_BASELINE_RUNS, help="green runs required")
     p.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "compare EVERY (gate, env) pair in the ledger (#9922 F-086); exit 1 "
+            "on any REGRESSION or newest-FAIL. Undetermined pairs are surfaced, "
+            "not failed. Mutually exclusive with --gate/--env."
+        ),
+    )
+    p.add_argument(
+        "--expected-red",
+        default=None,
+        metavar="FILE",
+        help=(
+            "declaration file of tolerated-red pairs for --all, one `gate env "
+            "reason...` per line; undeclared red and stale declarations fail"
+        ),
+    )
+    p.add_argument(
+        "--coverage",
+        action="store_true",
+        help=(
+            "census every Makefile --gate recipe against the ledger (#9922 "
+            "F-087); exit 1 unless each wrapped gate is measured or declared"
+        ),
+    )
+    p.add_argument(
+        "--makefile",
+        default="Makefile",
+        help="Makefile to read --gate recipes from (default: Makefile)",
+    )
+    p.add_argument(
+        "--coverage-declared",
+        default="test/incus/LEDGER_COVERAGE.unreached",
+        metavar="FILE",
+        help="declaration file of unreached gates, one `gate reason...` per line",
+    )
     p.add_argument("--lint", action="store_true", help="lint the ledger and exit")
     p.add_argument(
         "--lint-merge",
@@ -941,8 +1374,78 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"ledger-lint: OK — {rows} row(s) in {ledger}")
         return 0
 
+    if args.all:
+        if args.gate or args.env:
+            p.error("--all is mutually exclusive with --gate/--env")
+        declared: Dict[Tuple[str, str], str] = {}
+        if args.expected_red:
+            try:
+                with open(args.expected_red, encoding="utf-8") as fh:
+                    declared_text = fh.read()
+            except OSError as exc:
+                print(
+                    f"LEDGER-CORRUPT: cannot read --expected-red "
+                    f"{args.expected_red}: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+            declared, decl_problems = parse_expected_red(declared_text)
+            if decl_problems:
+                print(
+                    f"ledger-compare-all: {len(decl_problems)} problem(s) in "
+                    f"{args.expected_red}:",
+                    file=sys.stderr,
+                )
+                for prob in decl_problems:
+                    print(f"  {prob}", file=sys.stderr)
+                return 1
+        try:
+            rows = parse_ledger(text)
+        except LedgerError as exc:
+            result = {"outcome": LEDGER_CORRUPT, "gate": None, "env": None, "note": str(exc)}
+            print(json.dumps(result, indent=2) if args.json else render(result))
+            return 2
+        agg = compare_all(rows, args.k)
+        if args.json:
+            print(json.dumps(_jsonable_agg(agg, declared), indent=2))
+        else:
+            print(render_all(agg, declared))
+        return all_exit_status(agg, declared)
+
+    if args.coverage:
+        if args.gate or args.env or args.all:
+            p.error("--coverage is mutually exclusive with --gate/--env/--all")
+        try:
+            with open(args.makefile, encoding="utf-8") as fh:
+                makefile_text = fh.read()
+        except OSError as exc:
+            print(f"LEDGER-CORRUPT: cannot read {args.makefile}: {exc}", file=sys.stderr)
+            return 2
+        try:
+            with open(args.coverage_declared, encoding="utf-8") as fh:
+                declared_text = fh.read()
+        except OSError as exc:
+            print(
+                f"LEDGER-CORRUPT: cannot read --coverage-declared "
+                f"{args.coverage_declared}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            rows = parse_ledger(text)
+        except LedgerError as exc:
+            result = {"outcome": LEDGER_CORRUPT, "gate": None, "env": None, "note": str(exc)}
+            print(json.dumps(result, indent=2) if args.json else render(result))
+            return 2
+        cov = coverage(makefile_text, rows, declared_text)
+        if args.json:
+            print(json.dumps(cov, indent=2))
+        else:
+            print(render_coverage(cov))
+        return 0 if cov.get("ok") else 1
+
     if not args.gate:
-        p.error("--gate is required unless --lint is given")
+        p.error("--gate is required unless --lint, --all or --coverage is given")
 
     try:
         rows = parse_ledger(text)

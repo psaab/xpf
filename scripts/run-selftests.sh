@@ -50,7 +50,7 @@ run_bash() {
 	script=$1
 	shift
 	if [ ! -f "$script" ]; then
-		skipl "$script (not present)"
+		faill "$script (not present -- a registered leg that is gone)"
 		return
 	fi
 	if ! command -v bash >/dev/null 2>&1; then
@@ -73,7 +73,7 @@ run_shell() {
 	script=$1
 	shift
 	if [ ! -f "$script" ]; then
-		skipl "$script (not present)"
+		faill "$script (not present -- a registered leg that is gone)"
 		return
 	fi
 	out=$(sh "$script" "$@" 2>&1)
@@ -94,7 +94,7 @@ run_shell() {
 run_py() {
 	script=$1
 	if [ ! -f "$script" ]; then
-		skipl "$script (not present)"
+		faill "$script (not present -- a registered leg that is gone)"
 		return
 	fi
 	out=$(python3 "$script" 2>&1)
@@ -152,6 +152,10 @@ scripts/ignored-cell-census.sh
 test/incus/ignored-cell-census-selftest.sh
 scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
+scripts/go-buildtag-census.sh
+test/incus/go-buildtag-census-selftest.sh
+scripts/selftest-census.sh
+test/incus/selftest-census-selftest.sh
 scripts/miri-census.sh
 scripts/miri-leg.sh
 test/incus/miri-census-selftest.sh
@@ -299,6 +303,11 @@ run_shell test/xsk-repro/selftest-multitoken-cc_6355.sh
 # the exact failure the reproducer exists to detect, reported as PASS. SKIPs
 # without cargo or offline-buildable deps.
 run_shell test/xsk-repro/selftest-probe-filter_6898.sh
+# The committed fixture negatives for the by-name asserts above (#9922
+# SPARK-MINOR-7): stub-cargo cells proving a deleted/renamed guarded cell
+# FAILs. Same file, so no discovery churn (already in the odd-set math as
+# discovered, not odd).
+run_shell test/xsk-repro/selftest-probe-filter_6898.sh --selftest
 # #7796: the FBF DSCP ip-rule APPLY LEG. The defect was invisible to every
 # compile-side test — the pre-fix code built a well-formed netlink.Rule and the
 # kernel rejected it (FRA_TOS masks to IPTOS_TOS_MASK, so DSCP<<2 is refused from
@@ -399,6 +408,16 @@ run_bash test/incus/go-skip-census-selftest.sh
 # cell that must flip the verdict, and the leg's scoring cells drive the real
 # scripts/miri-leg.sh over a stub cargo replaying fixture logs.
 run_bash test/incus/miri-census-selftest.sh
+# -- go-buildtag census self-test (#9922 F-159): the census below discovers
+# tagged files and vets each single-identifier tag (vet never executes);
+# complex constraints are loud NEEDS-REVIEW lines; blindness to the known
+# file FAILs closed. SKIP without go (hermetic-runner convention).
+run_bash test/incus/go-buildtag-census-selftest.sh
+# -- selftest census self-test (#9922 F-156): fixture pairs proving each
+# failure direction of the extracted #7296 census (unregistered, emptied
+# glob, unguarded python, odd-set drift both ways) plus the run_* missing
+# path, which is FAIL since the same member.
+run_bash test/incus/selftest-census-selftest.sh
 
 # -- harness reachability census (#8302) --
 #
@@ -440,6 +459,12 @@ run_shell scripts/ignored-cell-census.sh --check-issues
 # coverage while no target ran Miri at all; this is what makes deleting a
 # registry line loud instead of quiet. Hermetic file scan, well under a second.
 run_shell scripts/miri-census.sh
+# -- go-buildtag census (#9922 F-159): a build-tagged *_test.go is invisible
+# to `go test ./...` AND `go vet ./...` (both silently exclude it), so the
+# census gives every pre-package //go:build constraint a compile leg. With
+# the other census legs, outside §4: it is a census, not a self-test.
+hdr "go-buildtag census"
+run_shell scripts/go-buildtag-census.sh
 
 # -- interpreter census (#8153) --
 #
@@ -477,37 +502,16 @@ else
 	passl "interpreter census ($interp_seen run_shell legs, none declaring bash)"
 fi
 
-# -- self-test census (#7296) --
+# -- self-test census (#7296, extracted #9922 F-156) --
 #
 # The defect was not "one script was forgotten" -- it was that NOTHING NOTICED.
-# Seven hermetic self-tests accumulated unreached because this runner carries a
-# hand-maintained list with no check that the list covers what is on disk.
-# Adding the seven without this census would leave the eighth to repeat it.
-#
-# Matches the `run_bash <path>` CALL form with comments stripped: a bare
-# filename mention would otherwise be satisfied by the comment block above that
-# names these very scripts -- the shape where a source-scanning gate passes on
-# its own documentation.
-census_missing=""
-census_seen=0
-runner_code=$(sed 's/#.*//' scripts/run-selftests.sh)
-for st in test/incus/*-selftest.sh; do
-	[ -f "$st" ] || continue
-	census_seen=$((census_seen + 1))
-	case "$runner_code" in
-	*"run_bash $st"*) ;;
-	*) census_missing="$census_missing $st" ;;
-	esac
-done
-if [ "$census_seen" -eq 0 ]; then
-	# A glob matching nothing would otherwise report a complete census over an
-	# empty set -- a clean pass that swept nothing.
-	faill "self-test census (matched NO test/incus/*-selftest.sh -- the glob is wrong)"
-elif [ -n "$census_missing" ]; then
-	faill "self-test census (not invoked by this runner:$census_missing)"
-else
-	passl "self-test census ($census_seen hermetic test/incus self-tests, all invoked)"
-fi
+# The inline block that used to live here globbed ONE location
+# (test/incus/*-selftest.sh); the extracted census covers all six self-test
+# locations plus the §4 odd-name exact set and the §3 __main__ guard, with
+# its own self-test (test/incus/selftest-census-selftest.sh) proving each
+# failure direction. `sh` is correct: the census declares #!/bin/sh and is
+# POSIX (the #8153 interpreter census above checks this).
+run_shell scripts/selftest-census.sh
 
 # ── 5. ledger lint (#8302 §4.1) ──
 #
@@ -567,9 +571,46 @@ if command -v python3 >/dev/null 2>&1; then
 		faill "ledger-merge-completeness"
 		echo "$out" | sed 's/^/      /'
 	fi
+	# #9922 F-086: the aggregate. lint above checks the rows that are PRESENT
+	# are well-formed; this judges what they SAY — every (gate, env) pair's
+	# newest row against its band, red on REGRESSION or newest-FAIL, with
+	# FAILs inside the baseline window surfaced. Tolerated-red pairs live in
+	# test/incus/ledger-expected-red.txt (shrink-only: a declaration that is
+	# no longer red fails). The strict form (no declarations) is
+	# `make harness-compare-all`, the loop/human entry point.
+	out=$(python3 test/incus/ledger_compare.py --all --ledger test/results/ledger.d --expected-red test/incus/ledger-expected-red.txt 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		passl "ledger-compare-all ($(echo "$out" | tail -1))"
+		# The summary line above carries warning COUNTS, but a newest-PASS-
+		# after-FAILs and a DRIFT-flagged WITHIN-BAND must not render
+		# identically to a clean history in a successful run — that is the
+		# indistinguishability the CLI boundary fixed, recreated one layer
+		# up. Reprint the warning lines so success stays informative.
+		echo "$out" | grep -E "FAIL rows inside the baseline window|DRIFT —" | sed 's/^/      warn: /' || true
+	else
+		faill "ledger-compare-all"
+		echo "$out" | sed 's/^/      /'
+	fi
+	# #9922 F-087: the coverage census. The aggregate above judges what the
+	# rows SAY; this judges whether every wrapped gate has rows at all —
+	# 12 of 18 wrapped gates had ZERO rows while everything stayed green.
+	# Unreached gates live in test/incus/LEDGER_COVERAGE.unreached
+	# (shrink-only: a declared gate that gains a measured row fails until
+	# the line is removed). Same command as `make harness-coverage`.
+	out=$(python3 test/incus/ledger_compare.py --coverage --ledger test/results/ledger.d 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		passl "ledger-coverage ($(echo "$out" | tail -1))"
+	else
+		faill "ledger-coverage"
+		echo "$out" | sed 's/^/      /'
+	fi
 else
 	skipl "ledger-lint (python3 not installed)"
 	skipl "ledger-merge-completeness (python3 not installed)"
+	skipl "ledger-compare-all (python3 not installed)"
+	skipl "ledger-coverage (python3 not installed)"
 fi
 
 # ── summary ──

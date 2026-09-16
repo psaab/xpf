@@ -22,6 +22,7 @@ string, and how to read the comparison.
 | `test/incus/harness-result-selftest.sh` | hermetic cells for the adapters, the emitter and the wrapper |
 | `test/incus/ledger_compare_test.py` | hermetic cells for the comparator |
 | `test/incus/harness-ledger-mutation-selftest.sh` | the mutation gate over both |
+| `test/incus/LEDGER_COVERAGE.unreached`, `test/incus/ledger-expected-red.txt` | shrink-only declarations for `--coverage` and `--all` |
 
 Everything here is hermetic. No cluster, no lock, no network, seconds to run.
 
@@ -53,7 +54,7 @@ explicit row in an adapter table that is itself exercised by cells.
 
 | Source | → PASS | → FAIL | → VOID |
 |---|---|---|---|
-| the 9 cluster gates (`pass()`/`fail()`) | `failed == 0` | `failed > 0` | no summary line; `passed + failed == 0`; summary says 0 failed but the process exited non-zero |
+| the 12 smoke gates (`pass()`/`fail()`, `ha-smoke` or `smoke-cells`) | `failed == 0` (+ anchored figure for `ha-smoke` PASS) | `failed > 0` | no summary line; `passed + failed == 0`; summary says 0 failed but the process exited non-zero; `ha-smoke` PASS with no figure |
 | `newflow_ceiling_analyze.py` | `verdict=VALID` | *(never — it reports a rate, not a gate)* | `INVALID`, `INCONCLUSIVE`, no JSON document, VALID without the headline metric |
 | `mouse_latency_aggregate.py` | `verdict=PASS` | `verdict=FAIL` | `INSUFFICIENT-DATA`, no verdict line, a verdict without a ratio |
 | `run-selftests.sh` | `failed=0` | `failed>0` | no summary; `passed + failed == 0` (it swept an empty set) |
@@ -63,23 +64,34 @@ That last row is the table earning its keep. `iperf-throughput-lib.sh` has no
 void state to express, so it files a non-measurement as a regression; the
 adapter recovers the third state from the text.
 
-### One adapter covers all nine cluster gates
+### Two adapters cover the twelve smoke gates
 
-The eight destructive HA smokes plus `test-connectivity.sh` carry
-byte-identical `pass()`/`fail()` definitions and all end with a
-`<n> passed, <n> failed` summary. **The adapter matches the numeric tail, never
-the label prefix** — the prefixes differ (`Failover test:`, `HA crash test:`,
-`Double failover test:`, `Stress failover:`, `Chained crash test:`,
-`Restart connectivity:`, and a bare `Results:` on two of them), so a
-prefix-anchored adapter silently covers six of eight while looking complete.
-Nor is it anchored at end of line: `test-connectivity.sh` continues
-`, <n> skipped` after the pair.
+The eight destructive HA smokes plus `test-connectivity.sh`,
+`test-wire-properties.sh`, `persistent-nat-failover.sh` and
+`dhcp-lease-failover.sh` carry byte-identical `pass()`/`fail()` definitions
+and all end with a `<n> passed, <n> failed` summary. **The adapters match the
+numeric tail, never the label prefix** — the prefixes differ (`Failover test:`,
+`HA crash test:`, `Double failover test:`, `Stress failover:`,
+`Chained crash test:`, `Restart connectivity:`, and a bare `Results:` on two
+of them), so a prefix-anchored adapter silently covers six of eight while
+looking complete. Nor is it anchored at end of line: `test-connectivity.sh`
+continues `, <n> skipped` after the pair.
 
-Both mistakes are mutation cells, and the selftest's census does not invent its
-fixtures — it **extracts the real `echo` line from each of the nine scripts**
-and renders it. It also asserts that the *discovered* set of gates carrying the
-shape **equals** the declared set, so a tenth gate added later cannot
-accumulate uncovered.
+The summary parse is shared; the headline is not (#9922 F-155). The five smokes
+that emit an iperf3 throughput cell keep `ha-smoke`, whose PASS headline is
+FIXED to `throughput_gbps` and whose figure comes ONLY from a `PASS`/`FAIL`
+cell line (floor/threshold prose used to become a banded measurement). The
+seven that emit cells only take `smoke-cells`, whose headline is FIXED to
+cells_passed. A Makefile↔script cross-check asserts each gate's adapter
+matches whether its script calls `iperf_throughput_verdict`, so a mis-mapping
+reds instead of silently switching headline families.
+
+Both prefix mistakes are mutation cells, and the selftest's census does not
+invent its fixtures — it **extracts the real `echo` line from each of the
+twelve scripts** (the LAST one for `dhcp-lease-failover.sh`, which carries an
+early-exit echo plus the canonical final) and renders it. It also asserts that
+the *discovered* set of gates carrying the shape **equals** the declared set,
+so a thirteenth gate added later cannot accumulate uncovered.
 
 ## What a row records
 
@@ -181,9 +193,14 @@ when the smoke passed, 1 when a cell failed. Reddening the mandatory HA gate
 because `./xpfd` was never built in this worktree would be a loop layer
 breaking the gate it exists to measure.
 
-The one deliberate change is in the safe direction: a gate that **exits 0
+Two deliberate changes, both in the safe direction. A gate that **exits 0
 without reaching its summary** now exits 2. That state was previously
-indistinguishable from a clean run to anything reading only the tail.
+indistinguishable from a clean run to anything reading only the tail. And a
+PASS whose row the emitter refused now exits 2 as well (#9922 F-087) —
+"passed but unrecorded", with a `NO ROW WRITTEN` warning — instead of
+exiting 0 and leaving every aggregate green over a missing row. A measured
+FAIL keeps its rc; only the PASS branch moves, and only from 0 to 2. The
+adapter-refusal path has the same shape (`rc == 0 ? 2 : rc`).
 
 ### What the emitter refuses
 
@@ -216,7 +233,10 @@ the tree that got this right — and not `newflow_ceiling_analyze.py`, whose
 `exit 1` means the opposite: **0** = within band / improved and green, **1** =
 regression, or the newest row is a FAIL, **2** = undetermined (VOID,
 NO-BASELINE, LEDGER-CORRUPT). Act on the `outcome` string; the integer exists
-because a shell caller needs one.
+because a shell caller needs one. The FAIL half wins below the K floor too
+(#9922 F-086): a newest-FAIL on a thin baseline is outcome `NO-BASELINE`
+and exit 1 — measured-bad, not undetermined. The verdict is checked before
+the outcome.
 
 ### The band
 
@@ -247,6 +267,28 @@ Three rules carry the design:
 Rows from another env, another gate, a `FAIL` run, or a run whose headline
 metric was something else do not enter the baseline.
 
+FAIL rows inside the baseline window never enter the band, but they are
+counted and rendered (`window_fails` plus timestamps): a gate failing every
+other run must not read as a clean `WITHIN-BAND` (#9922 F-086). Below the K
+floor there is no baseline, so the window is the whole prior history at the
+env.
+
+### The pinned baseline: genesis judges the drift (#9922 F-088)
+
+The rolling band re-trusts every small step, so a slow geometric decay reads
+`WITHIN-BAND` at every step while the total displacement grows without bound.
+Beside it the comparator keeps a PINNED baseline: the FIRST K greens at the
+env (prior-only, so stable once K+1 greens exist), judged with the same band
+arithmetic. The result carries the cumulative `displacement` against the
+pinned median and a `drift` flag — inside the rolling band, outside the
+pinned one: the step the rolling window just absorbed.
+
+Drift is REPORTED, not failed: an intentional change and a regression have
+the same shape here, and attribution needs a human. The render names the
+pinned band, the displacement, and `DRIFT` when set. A zero pinned median
+(`cells_failed` pinned at 0) carries no ratio: displacement is `None`, drift
+stays false, and the rolling band still judges the step.
+
 ### Flake or regression, without re-running blindly
 
 Every row carries invariant metrics beside its headline. When the headline
@@ -261,6 +303,54 @@ leaves the band, each invariant that has a baseline of its own is banded too:
 The third is deliberately not folded into the first: "every invariant held" and
 "there were no invariants to check" are the same sentence only if you do not
 look.
+
+### The aggregate watches every pair for red (`--all`, #9922 F-086)
+
+`compare()` over one gate needs a human `GATE=`, and no automation ever ran
+it over real rows — so a gate failing every run stayed green everywhere.
+`make harness-compare-all` runs it over EVERY (gate, env) pair:
+
+```
+make harness-compare-all   # STRICT: no declarations
+python3 test/incus/ledger_compare.py --all --expected-red test/incus/ledger-expected-red.txt
+```
+
+A pair is RED when its outcome is `REGRESSION` or its newest verdict is
+`FAIL`. `VOID`/`NO-BASELINE` pairs are SURFACED, not failed: the aggregate
+is a red-watch, not a baseline-completeness gate — thin baselines are the
+normal state of young gates. Each pair prints its full single-gate render
+(band, pinned baseline, window FAILs, invariants), then a summary counts
+red / undetermined / green.
+
+`--expected-red` tolerates known reds, one `gate env reason...` per line
+(the reason is REQUIRED — it is what makes a tolerated red reviewable).
+Exit 1 on an undeclared red pair OR a stale declaration: a tolerated red
+that went green must be un-declared, loudly, so the file can only shrink.
+`--all` is mutually exclusive with `--gate`/`--env`.
+
+### The census: every wrapped gate measured or declared (`--coverage`, #9922 F-087)
+
+Emitter refusal is the design's falsifiability backstop, and its reader was
+never built: wrapped gates with zero rows stayed green in every aggregate.
+`make harness-coverage` is that reader. The wrapped set comes from the
+Makefile's `--gate` recipes — TAB-indented recipe lines only, so comment
+prose mentioning `--gate` is not adopted as a gate, and `$`-valued
+expansions (the `harness-compare` recipe's `$(GATE)`) are excluded. Reached
+means a PASS or FAIL row in the gate's NEWEST env inside the trailing
+COVERAGE_WINDOW (5) ledger rows — one old measurement in a retired env, or
+outside the window, reports as STALE, never as covered.
+
+VOID rows do NOT count: a gate whose rows are all VOID never measured
+anything, and counting them would let it read green here and in the
+red-watch at once. Such gates report as VOID-ONLY, distinctly from ZERO
+ROWS. Anything unreached must be declared in
+`test/incus/LEDGER_COVERAGE.unreached`, one `gate reason...` per line — and
+a declared gate that gains a measured row fails until the line is removed,
+so the file tracks only the still-unreached. Exit 0 iff nothing is
+missing, stale, or malformed; a Makefile with no `--gate` recipes is a
+problem, not a clean board. `test-failover` is the positive control:
+wrapped and measured, so a matcher that never reports REACHED trips by
+name.
 
 ## The ledger: one file per run
 
@@ -346,12 +436,39 @@ which removes one guard at a time and asserts the cell suite goes RED:
 | `unnameable-binary-accepted` | the #2176 refusal |
 | `row-void-degrades-the-gate-exit-status` | the row/gate separation |
 | `non-numeric-metric-accepted` | the numeric-metric contract |
+| `pinned-baseline-uses-last-k` | the genesis pin — a slow decay absorbed by both (F-088) |
+| `fail-newest-exits-undetermined` | the FAIL-first exit below the K floor (F-086) |
+| `aggregate-ignores-fail-verdict` | the verdict half of the aggregate's red condition (F-086) |
+| `aggregate-never-red` | the aggregate's red condition itself (F-086) |
+| `window-fails-dropped` | the FAILs-inside-the-window count (F-086) |
+| `expected-red-stale-check-dropped` | the shrink-only half of expected-red (F-086) |
+| `coverage-void-counts-as-measured` | the VOID exclusion from coverage (F-087) |
+| `coverage-missing-check-dropped` | the missing half of the coverage census (F-087) |
+| `coverage-stale-check-dropped` | the shrink-only half of the coverage census (F-087) |
+| `coverage-recipe-filter-dropped` | the recipe-line restriction on the wrapped set (F-087) |
+| `ha-iperf-cell-prefix-dropped` | the cell-line anchor on throughput cells (F-155) |
+| `ha-iperf-last-match-dropped` | the LAST-match on throughput cells (F-155) |
+| `ha-pass-without-figure-scored-as-a-pass` | the no-figure VOID on iperf PASS (F-155) |
+| `ha-fail-cells-headline-dropped` | the cells headline on unmeasured FAIL (F-155) |
+| `coverage-env-check-dropped` | the newest-env restriction on coverage (F-087) |
+| `coverage-window-check-dropped` | the trailing-window restriction on coverage (F-087) |
+| `coverage-window-void-counts-as-measured` | the VOID exclusion from the coverage window (F-087) |
+| `newflow-valid-ignores-rc` | the rc gate on VALID documents (F-160) |
+| `emit-failure-never-recorded` | the emit-failure flag behind exit 2 (F-087) |
 
-Three properties of the runner itself matter as much as the cells:
+The nineteen are the #9922 sweep (F-086/F-087/F-088/F-155/F-160); the review
+counted thirteen — off by six once the fold landed.
+
+Four properties of the runner itself matter as much as the cells:
 
 * **A positive control runs first.** The unmutated copies must be GREEN. A
   runner whose gate always reds would score every mutation as killed and report
   a perfect sweep of an inverted world.
+* **A red is a kill only when a named cell fails.** A mutant that breaks
+  collection (SyntaxError, ImportError) or aborts the shell selftest before
+  any assertion is an INVALID mutant — scoring it killed would claim a
+  distinguishing cell that never ran. Such reds are VOID, and the mutant
+  must be repaired to a valid no-op guard removal.
 * **A mutation that did not apply is a VOID, not a kill and not an escape.**
   "The measurement did not happen" is a third state here too.
 * **Zero cells is a failure, not a clean sweep.**
@@ -381,6 +498,10 @@ reason. A gate wired through `harness-result.sh run` satisfies it by
 construction — `harness-result.sh` itself classifies **reached** because those
 recipes invoke it — so the two layers do not need separate registration.
 
+A new `--gate` recipe also enters the `--coverage` census: it must gain a
+PASS/FAIL row or a line in `LEDGER_COVERAGE.unreached`, or `make
+harness-coverage` reds.
+
 ## Falsifiability summary
 
 | Component | If the property is FALSE | If the measurement did not happen | On an empty set |
@@ -390,4 +511,6 @@ recipes invoke it — so the two layers do not need separate registration.
 | `ledger_compare` | `REGRESSION` with the value, the band, K, and the build sha | `VOID` or `NO-BASELINE` — never `WITHIN-BAND` | zero matching rows → `NO-BASELINE` |
 | `ledger-lint` | names the first bad line or the mis-named shard | n/a | **FAIL** on a zero-row ledger (an empty `ledger.d/`) |
 | `ledger-merge-completeness` | names every `run_id` the merge dropped, and which parent had it | n/a — a pure git read | a non-merge HEAD reports "nothing to check", never "clean" |
+| `ledger_compare --all` | names every undeclared-red pair | undetermined pairs surfaced, never failed | no pairs → "no (gate, env) pairs", exit 0 |
+| `ledger_compare --coverage` | names every unreached-undeclared gate | VOID-only reported distinctly from zero-row | no `--gate` recipes → a problem, exit 1 |
 | mutation gate | reports the ESCAPED mutation by name | a cell whose mutation did not apply is a VOID and a failure | zero cells is a FAIL |

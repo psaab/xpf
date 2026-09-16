@@ -131,6 +131,97 @@ MUTATIONS = {
         "    if not (lo <= value <= hi):\n        return WITHIN_BAND",
         "the direction of the band test itself",
     ),
+    "pinned-baseline-uses-last-k": (
+        PY_FILE, "py",
+        "    genesis = greens[:k]",
+        "    genesis = greens[-k:]",
+        "the genesis pin: the pinned baseline becomes the rolling one and a "
+        "slow decay is absorbed by both (#9922 F-088)",
+    ),
+    "fail-newest-exits-undetermined": (
+        PY_FILE, "py",
+        '    if result.get("verdict") == "FAIL":\n        return 1',
+        '    if False:\n        return 1',
+        "the FAIL-first exit: a FAIL newest on a thin baseline reads "
+        "undetermined instead of measured-bad (#9922 F-086)",
+    ),
+    "aggregate-ignores-fail-verdict": (
+        PY_FILE, "py",
+        '        if res.get("outcome") == REGRESSION or res.get("verdict") == "FAIL"',
+        '        if res.get("outcome") == REGRESSION',
+        "the verdict half of the aggregate's red condition: newest-FAIL pairs "
+        "drop out of the red set (#9922 F-086)",
+    ),
+    "aggregate-never-red": (
+        PY_FILE, "py",
+        '        if res.get("outcome") == REGRESSION or res.get("verdict") == "FAIL"',
+        "        if False",
+        "the aggregate's red condition itself: every pair reads non-red "
+        "(#9922 F-086)",
+    ),
+    "window-fails-dropped": (
+        PY_FILE, "py",
+        '    result["window_fails"] = len(wfails)',
+        '    result["window_fails"] = 0',
+        "the FAILs-inside-the-window count: a gate failing every other run "
+        "reads as a clean WITHIN-BAND (#9922 F-086)",
+    ),
+    "expected-red-stale-check-dropped": (
+        PY_FILE, "py",
+        "    if any(p not in red for p in declared):\n        return 1",
+        "    if False:\n        return 1",
+        "the shrink-only half of expected-red: a tolerated red that went "
+        "green stays declared forever (#9922 F-086)",
+    ),
+    "coverage-void-counts-as-measured": (
+        PY_FILE, "py",
+        '        measured_ever = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]',
+        '        measured_ever = [r for r in grows if r.get("verdict") in ("PASS", "FAIL", "VOID")]',
+        "the VOID exclusion from ever-measured: a gate that never measured "
+        "leaves void-only for stale instead of unreached (#9922 F-087)",
+    ),
+    "coverage-window-void-counts-as-measured": (
+        PY_FILE, "py",
+        '            if r.get("verdict") in ("PASS", "FAIL") and r.get("env") == newest_env',
+        '            if r.get("verdict") in ("PASS", "FAIL", "VOID") and r.get("env") == newest_env',
+        "the VOID exclusion from the window: VOID rows in the newest env "
+        "count as coverage (#9922 F-087)",
+    ),
+    "coverage-missing-check-dropped": (
+        PY_FILE, "py",
+        "    missing = sorted(g for g in unreached if g not in declared)",
+        "    missing = []",
+        "the missing half of the coverage census: unreached-and-undeclared "
+        "gates read as covered (#9922 F-087)",
+    ),
+    "coverage-stale-check-dropped": (
+        PY_FILE, "py",
+        "    stale = sorted(g for g in declared if g not in unreached)",
+        "    stale = []",
+        "the shrink-only half of the coverage census: a declared gate that "
+        "gained rows stays declared forever (#9922 F-087)",
+    ),
+    "coverage-recipe-filter-dropped": (
+        PY_FILE, "py",
+        '        ln for ln in makefile_text.splitlines() if ln.startswith("\\t")',
+        "        ln for ln in makefile_text.splitlines()",
+        "the recipe-line restriction: comment prose mentioning --gate becomes "
+        "a wrapped gate (#9922 F-087)",
+    ),
+    "coverage-env-check-dropped": (
+        PY_FILE, "py",
+        '            if r.get("verdict") in ("PASS", "FAIL") and r.get("env") == newest_env',
+        '            if r.get("verdict") in ("PASS", "FAIL")',
+        "the newest-env restriction: a measurement in a retired env satisfies "
+        "coverage forever (#9922 F-087)",
+    ),
+    "coverage-window-check-dropped": (
+        PY_FILE, "py",
+        "        window = ordered[-COVERAGE_WINDOW:]",
+        "        window = ordered",
+        "the trailing-window restriction: a measurement from any point in "
+        "history satisfies coverage forever (#9922 F-087)",
+    ),
     "env-filter-dropped": (
         PY_FILE, "py",
         'prior = [r for r in matching[:-1] if r.get("env") == resolved_env]',
@@ -168,6 +259,34 @@ MUTATIONS = {
         """\tline=$(grep -oE '[0-9]+ passed, [0-9]+ failed$' "$log" | tail -1)""",
         "tolerance of a trailing field: test-connectivity.sh's summary stops matching",
     ),
+    "ha-iperf-cell-prefix-dropped": (
+        SH_FILE, "sh",
+        """\tcell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | tail -1)""",
+        """\tcell=$(grep -E 'iperf3 throughput' "$log" | tail -1)""",
+        "the cell-line anchor: bare floor/threshold prose becomes a banded "
+        "measurement again (#9922 F-155)",
+    ),
+    "ha-iperf-last-match-dropped": (
+        SH_FILE, "sh",
+        """\tcell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | tail -1)""",
+        """\tcell=$(grep -E '^[[:space:]]*(PASS|FAIL)[[:space:]]+iperf3 throughput' "$log" | head -1)""",
+        "the LAST-match on throughput cells: a stale first reading wins "
+        "(#9922 F-155)",
+    ),
+    "ha-pass-without-figure-scored-as-a-pass": (
+        SH_FILE, "sh",
+        """\tif [[ -z "$gbps" ]]; then\n\t\tprintf 'VOID\\tPASS summary but no anchored""",
+        """\tif false; then\n\t\tprintf 'VOID\\tPASS summary but no anchored""",
+        "the no-figure VOID: an iperf PASS with no measurement banks a "
+        "headline it never measured (#9922 F-155)",
+    ),
+    "ha-fail-cells-headline-dropped": (
+        SH_FILE, "sh",
+        """\t\t\tprintf 'FAIL\\t\\tcells_passed\\thigher-better\\t%s\\n' "$metrics\"""",
+        """\t\t\tprintf 'FAIL\\t\\tthroughput_gbps\\thigher-better\\t%s\\n' "$metrics\"""",
+        "the unmeasured-FAIL cells headline: a FAIL with no figure claims a "
+        "throughput it never measured (#9922 F-155)",
+    ),
     "missing-summary-scored-as-a-pass": (
         SH_FILE, "sh",
         '\t\tprintf \'VOID\\tno "<n> passed, <n> failed" summary line',
@@ -192,6 +311,20 @@ MUTATIONS = {
         '\tcase "$verdict" in\n\tVOID) return 2 ;;',
         "the separation of the ROW's verdict from the GATE's exit status: an "
         "unattributable row now reds `make test-failover`",
+    ),
+    "newflow-valid-ignores-rc": (
+        SH_FILE, "sh",
+        'if rc != "0":',
+        "if False:",
+        "the F-160 rc gate: a VALID document from a failed process banks a "
+        "PASS for a run the gate itself failed (#9922 F-160)",
+    ),
+    "emit-failure-never-recorded": (
+        SH_FILE, "sh",
+        "\t\temit_failed=1",
+        "\t\temit_failed=0",
+        "the F-087 emit-failure flag: a PASS whose row cannot be written "
+        "exits 0, 'passed AND recorded' (#9922 F-087)",
     ),
     "comparator-reads-a-single-path": (
         PY_FILE, "py",
@@ -325,6 +458,26 @@ run_gate() {
 	esac
 }
 
+# gate_failed_by_assertion <gate>: the red must be a NAMED cell failing, not
+# the harness failing to run. A mutant that breaks collection (SyntaxError,
+# IndentationError, ImportError) or aborts the shell selftest before any
+# assertion is an INVALID mutant — scoring it KILLED claims a distinguishing
+# cell that was never exercised. Such reds are VOID: the mutant must be
+# repaired (a valid no-op guard removal), never counted.
+gate_failed_by_assertion() {
+	case "$1" in
+	py)
+		grep -qE "SyntaxError|IndentationError|ImportError|ModuleNotFoundError" "$WORK/gate.out" && return 1
+		grep -qE "^(FAIL|ERROR): test" "$WORK/gate.out" || return 1
+		! grep -q "_FailedTest" "$WORK/gate.out" || return 1
+		return 0
+		;;
+	sh)
+		grep -q "^FAIL: " "$WORK/gate.out"
+		;;
+	esac
+}
+
 # ── Positive control: the UNMUTATED copies must be GREEN ─────────────
 #
 # A runner whose gate always reds scores every mutation as KILLED and reports a
@@ -389,6 +542,9 @@ while IFS=$'\t' read -r cell gate; do
 	if run_gate "$gate"; then
 		ESCAPED="$ESCAPED $cell"
 		echo "ESCAPED: $cell (removes: $what) — the gate stayed GREEN with the guard removed" >&2
+	elif ! gate_failed_by_assertion "$gate"; then
+		VOIDED="$VOIDED $cell"
+		echo "VOID: $cell — the gate went RED without a named assertion failure (invalid mutant, not a kill)" >&2
 	else
 		KILLED=$((KILLED + 1))
 		echo "KILLED:  $cell (removes: $what)"
