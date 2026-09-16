@@ -478,6 +478,26 @@ pub(crate) struct ProcessStatus {
     pub session_delete_replica_dropped: u64,
     #[serde(rename = "session_delete_replica_drop_repaired", default)]
     pub session_delete_replica_drop_repaired: u64,
+    /// #9720: the per-command split of `worker_command_queue_drops` for the
+    /// three RG-transition commands (`DemoteOwnerRGS`, `RefreshOwnerRGS`,
+    /// `VacateAllSharedExactSlots`), in PUSHES. Each refusal is recorded as
+    /// that worker's transition debt and dispatched positionally — or
+    /// filtered as stale (the two skip fields below), in RG APPLICATIONS.
+    /// Additive / defaulted for backward compatibility.
+    /// (Prometheus export is a follow-up; the JSON status carries them now.)
+    #[serde(rename = "ha_transition_demote_dropped", default)]
+    pub ha_transition_demote_dropped: u64,
+    #[serde(rename = "ha_transition_refresh_dropped", default)]
+    pub ha_transition_refresh_dropped: u64,
+    #[serde(rename = "ha_transition_vacate_dropped", default)]
+    pub ha_transition_vacate_dropped: u64,
+    /// #9720: debt RGs filtered as stale at dispatch (superseded by a newer
+    /// transition for the RG). Additive / defaulted for backward
+    /// compatibility.
+    #[serde(rename = "ha_transition_demote_stale_skipped", default)]
+    pub ha_transition_demote_stale_skipped: u64,
+    #[serde(rename = "ha_transition_refresh_stale_skipped", default)]
+    pub ha_transition_refresh_stale_skipped: u64,
     /// #9900 F-092: TX completions reaped beyond `outstanding_tx` (including
     /// completions drained at gauge 0, which are definitionally stale).
     /// Additive / defaulted for backward compatibility.

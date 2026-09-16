@@ -471,6 +471,69 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
     assert_eq!(legacy.server_handler_panics, 0);
 }
 
+// #9720: round-trip + backward-compat pin for the per-command split of the
+// worker-command-queue drops aggregate (RG-transition demote/refresh/vacate).
+// The JSON status carries these now; Prometheus export is a follow-up, so
+// there is no Go wire-lockstep twin yet — this end pins the serialize/decode
+// behaviour including that an older payload without the keys still decodes.
+#[test]
+fn process_status_ha_transition_dropped_roundtrip_9720() {
+    let status = ProcessStatus {
+        ha_transition_demote_dropped: 3,
+        ha_transition_refresh_dropped: 5,
+        ha_transition_vacate_dropped: 7,
+        ha_transition_demote_stale_skipped: 11,
+        ha_transition_refresh_stale_skipped: 13,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["ha_transition_demote_dropped"], 3);
+    assert_eq!(value["ha_transition_refresh_dropped"], 5);
+    assert_eq!(value["ha_transition_vacate_dropped"], 7);
+    assert_eq!(value["ha_transition_demote_stale_skipped"], 11);
+    assert_eq!(value["ha_transition_refresh_stale_skipped"], 13);
+    // The neighbouring aggregate must stay put: a rename aliasing a
+    // per-command field onto the aggregate key would double-count every
+    // transition refusal in the operator's top-line number.
+    assert_eq!(
+        value["worker_command_queue_drops"], 0,
+        "the per-command fields must not serialize onto the aggregate key"
+    );
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.ha_transition_demote_dropped, 3);
+    assert_eq!(back.ha_transition_refresh_dropped, 5);
+    assert_eq!(back.ha_transition_vacate_dropped, 7);
+    assert_eq!(back.ha_transition_demote_stale_skipped, 11);
+    assert_eq!(back.ha_transition_refresh_stale_skipped, 13);
+
+    // Pre-#9720 payload (keys absent) must decode with zero defaults.
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    {
+        let obj = legacy_value
+            .as_object_mut()
+            .expect("ProcessStatus serializes to an object");
+        obj.remove("ha_transition_demote_dropped")
+            .expect("new key present before strip");
+        obj.remove("ha_transition_refresh_dropped")
+            .expect("new key present before strip");
+        obj.remove("ha_transition_vacate_dropped")
+            .expect("new key present before strip");
+        obj.remove("ha_transition_demote_stale_skipped")
+            .expect("new key present before strip");
+        obj.remove("ha_transition_refresh_stale_skipped")
+            .expect("new key present before strip");
+    }
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("pre-#9720 payload decodes");
+    assert_eq!(legacy.ha_transition_demote_dropped, 0);
+    assert_eq!(legacy.ha_transition_refresh_dropped, 0);
+    assert_eq!(legacy.ha_transition_vacate_dropped, 0);
+    assert_eq!(legacy.ha_transition_demote_stale_skipped, 0);
+    assert_eq!(legacy.ha_transition_refresh_stale_skipped, 0);
+}
+
 // #2402/#6641: round-trip + backward-compat pin for the shared-session
 // poison-recovery counter. The wire key feeds
 // pkg/dataplane/userspace/protocol_status.go and the Prometheus counter

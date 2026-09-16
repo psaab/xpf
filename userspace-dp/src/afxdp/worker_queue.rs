@@ -111,6 +111,407 @@ pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_SHED_TOTAL: AtomicU64 = AtomicU
 #[cfg(test)]
 pub(crate) static SHED_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// #9720: RG-transition commands a full worker queue REFUSED, held out-of-band
+/// per worker until the worker's drain cursor reaches the refused command's
+/// logical position.
+///
+/// WHY OUT-OF-BAND. `update_ha_state` stores the new RG runtime BEFORE fanning
+/// out, so a later call diffs against the demoted state and never re-drives a
+/// refused `DemoteOwnerRGS` / `VacateAllSharedExactSlots` / `RefreshOwnerRGS`.
+/// The signal that must reach the worker cannot travel through the queue that
+/// refused it — the same shape as #8586's delete-drop epoch, but the payload
+/// here is a versioned op log rather than a tripwire.
+///
+/// POSITION (parent GPT-1/SPARK-F1; v2 got this backwards). `push_bounded`
+/// refuses the NEWEST command, so at refusal time the refused transition is
+/// NEWER than the full backlog but OLDER than every post-refusal arrival: its
+/// true FIFO position is after the backlog, before the arrivals. Dispatching
+/// ahead of the backlog installs transitions before older commands (v2: a
+/// queued stale reverse installs verbatim AFTER a debt-refresh missed); only
+/// dispatching AT the boundary is correct for both classes.
+///
+/// The boundary is positional, not temporal: each op records the backlog
+/// length observed under the queue guard at refusal (`remaining`), and every
+/// apply decrements it by the commands it drained. The op dispatches once its
+/// countdown reaches zero — i.e. once every pre-transition command has been
+/// dispatched — or when the queue drains fully, whichever comes first. The
+/// queue-empty clause is load-bearing, not a shortcut: the producer reads the
+/// length under the queue guard but records after releasing it (ABBA
+/// discipline below), so a worker drain or a producer deschedule in between
+/// overstates `remaining`; an empty queue means every pre-transition command
+/// was dispatched regardless, so the position is reached. Misplacement is
+/// bounded by ~1 slice either way, never by backlog depth or arrival rate.
+///
+/// ORDER + SUPERSESSION (parent SPARK-F2). The log is chronological (one op
+/// per refused push, appended in refusal order). Recording a transition for
+/// an RG strips that RG from ALL older ops first: an older entry for a
+/// re-transitioned RG is superseded by definition, so the log holds at most
+/// one pending op per RG per kind plus vacates, and same-RG flaps collapse
+/// to the latest transition. Cross-RG order is preserved in the log.
+///
+/// NET-EFFECT CHARACTERIZATION (parent O5 — read before touching dispatch).
+/// What the log replays is ordered; what it MEANS is net-effect under current
+/// state, and that rests on four facts: (1) the Refresh handler IGNORES its
+/// RG list beyond the any-positive gate and wide-scans every HA-managed
+/// session, so a Refresh subset is advisory (call/don't-call) with cross-RG
+/// blast radius, while a Demote subset is precise (narrow indexed walk) — a
+/// future narrow-refresh "optimization" must preserve debt semantics;
+/// (2) demote ops commute across RGs (disjoint per-RG flips) and refresh is
+/// idempotent within one tick, so same-tick replay order among survivors is
+/// behaviorally moot — the log order that MATTERS is debt-vs-backlog
+/// (position), not debt-vs-debt; (3) a fully-filtered op is a net no-change
+/// (skip implies back to pre-transition state, where pre-transition
+/// dispositions are correct); (4) every activation emits its own wide refresh
+/// in-band-or-debt, covering split-RG companions.
+///
+/// SCHEDULING (parent GPT-2). The epoch is bumped AFTER the slot write on
+/// every record; the worker loop samples it EVERY pass and calls
+/// `apply_worker_commands` when it changed — even with an empty queue — so
+/// a producer descheduled between refusal and record cannot strand debt:
+/// the next pass observes the bump and dispatches. Consumption is
+/// last-observed-after-apply (a record landing mid-apply refires the next
+/// pass; at most one spurious apply), plus a `transition_debt_pending` carry
+/// for the contended-with-empty pass, which the tunnel drain-wait makes real
+/// (`wait_for_local_tunnel_session_install` polls queues read-only).
+///
+/// LOCK DISCIPLINE (reviews A1/B2): the debt lock is a LEAF. `record` drops
+/// the queue guard BEFORE taking it; decrement/extract releases it before
+/// dispatching (handlers run with NO debt guard held). No path ever holds
+/// the debt lock and the queue lock together, in either order — there is no
+/// new lock-graph edge for a green suite to miss.
+///
+/// Indexed by worker id, bounded by `MAX_NAT_HOLDER_WORKERS` — the same
+/// ceiling the planner refuses to mint past. The per-command DROPPED counters
+/// count EVERY refusal (bumped by the caller before recording); the slot +
+/// epoch exist only for in-range ids, so an out-of-range refusal (a test-only
+/// shape in production) is counter-only, with no worker to wake.
+/// `register` clears the slot (no epoch reset needed: the worker seeds its
+/// last-observed from current, so a cleared slot plus a running epoch never
+/// spuriously fires), so a reused worker id never replays the previous
+/// generation's debt onto a fresh worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum TransitionDebtKind {
+    Demote,
+    Refresh,
+    Vacate,
+}
+
+/// One refused transition push, in chronological log order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct TransitionDebtOp {
+    kind: TransitionDebtKind,
+    /// RG set for Demote/Refresh (deduped, first-occurrence order); always
+    /// empty for Vacate.
+    rgs: Vec<i32>,
+    /// Pre-transition backlog still to drain before dispatch. Observed as the
+    /// queue length under the guard at refusal; decremented per drained
+    /// command; the queue-empty clause covers record-race overstatement.
+    remaining: usize,
+}
+
+impl TransitionDebtOp {
+    pub(in crate::afxdp) fn kind(&self) -> TransitionDebtKind {
+        self.kind
+    }
+
+    pub(in crate::afxdp) fn rgs(&self) -> &[i32] {
+        &self.rgs
+    }
+
+    pub(in crate::afxdp) fn remaining(&self) -> usize {
+        self.remaining
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct HaTransitionDebt {
+    ops: Vec<TransitionDebtOp>,
+}
+
+impl HaTransitionDebt {
+    const fn new() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    pub(in crate::afxdp) fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    pub(in crate::afxdp) fn ops(&self) -> &[TransitionDebtOp] {
+        &self.ops
+    }
+
+    /// Strip one RG from all older Demote/Refresh ops (record-time
+    /// supersession): a newer transition for the RG makes older pending ones
+    /// moot. Vacate ops are never stripped (vacate is unconditional).
+    fn supersede(&mut self, rg: i32) {
+        for op in self.ops.iter_mut() {
+            if op.kind != TransitionDebtKind::Vacate {
+                op.rgs.retain(|r| *r != rg);
+            }
+        }
+        self.ops
+            .retain(|op| op.kind == TransitionDebtKind::Vacate || !op.rgs.is_empty());
+    }
+
+    /// Append refused pushes in emission order (Demote, Vacate, Refresh is
+    /// `update_ha_state`'s own fan-out order), each positioned after the
+    /// `backlog` commands that were ahead of it at refusal. RG sets are tiny
+    /// (cluster RG count), so linear dedup/supersede scans are cheaper than
+    /// a set import — and `Vec::new` is `const`, which the static array
+    /// below needs.
+    fn record(&mut self, demote: &[i32], refresh: &[i32], vacate: bool, backlog: usize) {
+        for rg in demote.iter().chain(refresh.iter()) {
+            self.supersede(*rg);
+        }
+        let mut deduped = |rgs: &[i32]| {
+            let mut out = Vec::with_capacity(rgs.len());
+            for rg in rgs {
+                if !out.contains(rg) {
+                    out.push(*rg);
+                }
+            }
+            out
+        };
+        if !demote.is_empty() {
+            self.ops.push(TransitionDebtOp {
+                kind: TransitionDebtKind::Demote,
+                rgs: deduped(demote),
+                remaining: backlog,
+            });
+        }
+        if vacate {
+            self.ops.push(TransitionDebtOp {
+                kind: TransitionDebtKind::Vacate,
+                rgs: Vec::new(),
+                remaining: backlog,
+            });
+        }
+        if !refresh.is_empty() {
+            self.ops.push(TransitionDebtOp {
+                kind: TransitionDebtKind::Refresh,
+                rgs: deduped(refresh),
+                remaining: backlog,
+            });
+        }
+    }
+
+    /// Decrement every op by the commands just drained and extract the ops
+    /// whose position is reached: countdown at zero, or the queue fully
+    /// drained (the record-race backstop — see the header). Returns the ready
+    /// ops in log order; the rest stay queued with their updated countdowns.
+    fn step(&mut self, drained: usize, queue_empty: bool) -> Vec<TransitionDebtOp> {
+        for op in self.ops.iter_mut() {
+            op.remaining = op.remaining.saturating_sub(drained);
+        }
+        let mut ready = Vec::new();
+        self.ops.retain(|op| {
+            if op.remaining == 0 || queue_empty {
+                ready.push(op.clone());
+                false
+            } else {
+                true
+            }
+        });
+        ready
+    }
+}
+
+pub(in crate::afxdp) static HA_TRANSITION_DEBT: [Mutex<HaTransitionDebt>;
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
+    [const { Mutex::new(HaTransitionDebt::new()) }; crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
+
+/// #9720: per-worker transition-debt epoch, bumped on every record.
+///
+/// The out-of-band wakeup the #8586 delete-drop epoch is for deletes: the
+/// worker loop samples this EVERY pass and applies on change even with an
+/// empty queue, so debt recorded while the worker idles (or was descheduled
+/// past the drain) is dispatched on the next pass rather than stranded until
+/// the next enqueue. Same width/indexing/relaxed-ordering precedent as
+/// `SESSION_DELETE_DROP_EPOCH`; the mutex carries the payload, this atomic
+/// carries the hint. Bumped AFTER the slot write leaves the critical section
+/// (shorter hold; same-atomic coherence orders the hint).
+pub(in crate::afxdp) static HA_TRANSITION_DEBT_EPOCH: [AtomicU64;
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
+    [const { AtomicU64::new(0) }; crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
+
+/// Read one worker's transition-debt epoch. Out of range reads 0 (an id past
+/// the planner's ceiling can neither be recorded nor dispatched, so the pair
+/// is consistent) — mirrors `session_delete_drop_epoch`.
+#[inline]
+pub(in crate::afxdp) fn transition_debt_epoch(worker_id: u32) -> u64 {
+    HA_TRANSITION_DEBT_EPOCH
+        .get(worker_id as usize)
+        .map(|e| e.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// Whether the worker loop must call `apply_worker_commands` this pass.
+///
+/// The debt arms are what make stranded debt impossible: an epoch change
+/// fires the apply that dispatches debt on an otherwise idle worker, and the
+/// carried pending flag covers the contended-with-empty pass (real: the
+/// tunnel drain-wait polls queues read-only). The call site, the fresh epoch
+/// load, the post-apply consume, and the results-field carry are pinned by
+/// the source-scan wiring guard in `worker_queue_tests.rs` (#7201 pattern) —
+/// a truth table alone cannot pin production wiring.
+#[inline]
+pub(in crate::afxdp) fn should_apply_worker_commands(
+    has_commands: bool,
+    debt_epoch_changed: bool,
+    debt_pending: bool,
+) -> bool {
+    has_commands || debt_epoch_changed || debt_pending
+}
+
+/// Lock a transition-debt slot, recovering and CLEARING poison.
+///
+/// The uniform #1807 policy, verbatim: committed debt intact, fast path
+/// restored, one shared `WORKER_COMMAND_QUEUE_POISON_RECOVERIES` bump. The
+/// debt lock sits on the worker command delivery path (HA-enqueue record
+/// side, worker-apply step side), so it shares that counter rather than
+/// minting a fourth queue signal.
+#[inline]
+fn lock_debt_recover(m: &Mutex<HaTransitionDebt>) -> MutexGuard<'_, HaTransitionDebt> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            m.clear_poison();
+            WORKER_COMMAND_QUEUE_POISON_RECOVERIES.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "xpf-ha: transition-debt mutex poisoned; recovering committed debt and clearing poison"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Record refused RG-transition commands for one worker (the #9720 debt).
+///
+/// The caller MUST have dropped the queue guard first: this takes the debt
+/// lock, and any path holding both locks in queue→debt order would ABBA
+/// against a debt→queue holder. The step side holds the debt lock alone and
+/// releases it before dispatching, so no reverse edge exists — the discipline
+/// keeps it that way.
+///
+/// `backlog` is the queue length observed under the guard at refusal: every
+/// one of those commands predates the transition, so the op dispatches once
+/// the worker has drained that many. The epoch bumps after the slot write
+/// (S6: shorter critical section; the mutex already ordered the payload).
+#[inline]
+pub(in crate::afxdp) fn record_transition_debt(
+    worker_id: u32,
+    demote: &[i32],
+    refresh: &[i32],
+    vacate: bool,
+    backlog: usize,
+) {
+    if demote.is_empty() && refresh.is_empty() && !vacate {
+        return;
+    }
+    let Some(slot) = HA_TRANSITION_DEBT.get(worker_id as usize) else {
+        return;
+    };
+    lock_debt_recover(slot).record(demote, refresh, vacate, backlog);
+    if let Some(epoch) = HA_TRANSITION_DEBT_EPOCH.get(worker_id as usize) {
+        epoch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Step one worker's debt countdown by the commands just drained and extract
+/// the ops whose position is reached, returning them with whether debt
+/// remains for a future pass.
+///
+/// Takes and releases the debt lock around the step ONLY — handlers run with
+/// no debt guard held (reviews A1/B2), so a full-table demote scan never
+/// stretches a lock across BPF publishes and neighbor reads. `queue_empty`
+/// MUST be the drain's own emptiness observation from the slice critical
+/// section (S3): re-locking after dispatch would skip debt whenever arrivals
+/// landed mid-slice and starve it under sustained load.
+#[inline]
+pub(in crate::afxdp) fn take_ready_transition_debt(
+    worker_id: u32,
+    drained: usize,
+    queue_empty: bool,
+) -> (Vec<TransitionDebtOp>, bool) {
+    let Some(slot) = HA_TRANSITION_DEBT.get(worker_id as usize) else {
+        return (Vec::new(), false);
+    };
+    let mut debt = lock_debt_recover(slot);
+    let ready = debt.step(drained, queue_empty);
+    let pending = !debt.is_empty();
+    (ready, pending)
+}
+
+/// Whether one worker's debt slot is non-empty (the contended-path peek).
+///
+/// Used ONLY when the queue lock could not be acquired: the countdown cannot
+/// advance without a drain count, but the carry flag still needs a value.
+/// Blocking policy like every other debt access (held across `is_empty`
+/// only); out of range reads false.
+#[inline]
+pub(in crate::afxdp) fn has_transition_debt(worker_id: u32) -> bool {
+    HA_TRANSITION_DEBT
+        .get(worker_id as usize)
+        .map(|slot| !lock_debt_recover(slot).is_empty())
+        .unwrap_or(false)
+}
+
+/// Clear one worker's transition-debt slot.
+///
+/// Called from `WorkerManager::register`: worker ids are reused across
+/// generations, and a worker that died with undrained debt must not replay it
+/// onto its fresh successor. The epoch is deliberately NOT reset: the new
+/// worker seeds its last-observed from current, so clear-then-seed never
+/// spuriously fires, and any record after the clear bumps past the seed. The
+/// clear races spawn (the thread starts before its record publishes — review
+/// B6) but the race is benign: a fresh worker holds an empty session table
+/// and fresh CoS slots, so a replayed op is a no-op walk, and the clear still
+/// bounds staleness to one generation.
+#[inline]
+pub(in crate::afxdp) fn clear_transition_debt(worker_id: u32) {
+    if let Some(slot) = HA_TRANSITION_DEBT.get(worker_id as usize) {
+        *lock_debt_recover(slot) = HaTransitionDebt::new();
+    }
+}
+
+/// #9720: refused `DemoteOwnerRGS` / `RefreshOwnerRGS` /
+/// `VacateAllSharedExactSlots` pushes, per command type.
+///
+/// `WORKER_COMMAND_QUEUE_DROPS` (bumped by `push_bounded` on the same refusal)
+/// stays the aggregate; these three are the PER-COMMAND split the issue
+/// requires, so an operator can tell a lost transition from lost session
+/// churn. Units are PUSHES (one per refused fan-out leg).
+///
+/// A refusal counted here is recorded as transition debt (in-range ids) and
+/// dispatched positionally — or filtered as stale below. So
+/// `DEMOTE_DROPPED ≈ demote-RGs-applied-late + DEMOTE_STALE_SKIPPED` (and
+/// likewise Refresh), relating a push-level count to RG-level dispositions;
+/// a climbing DROPPED with flat applies means transitions are outrunning a
+/// live worker's drain, not that commands are being silently lost.
+pub(in crate::afxdp) static HA_TRANSITION_DEMOTE_DROPPED: AtomicU64 = AtomicU64::new(0);
+pub(in crate::afxdp) static HA_TRANSITION_REFRESH_DROPPED: AtomicU64 = AtomicU64::new(0);
+pub(in crate::afxdp) static HA_TRANSITION_VACATE_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// #9720: debt RGs filtered as stale at dispatch, per command type (parent
+/// O8). A demote RG whose group is currently active (failback landed first)
+/// or a refresh RG whose group is not active is superseded: dispatching it
+/// would corrupt post-transition state, so it is skipped — and the skip is
+/// counted here so `DROPPED climbs + slot empty + no effect` reads as
+/// documented behavior rather than a loss. Units are RG APPLICATIONS (one
+/// per filtered RG), not pushes. Vacate never skips (unconditional).
+pub(in crate::afxdp) static HA_TRANSITION_DEMOTE_STALE_SKIPPED: AtomicU64 = AtomicU64::new(0);
+pub(in crate::afxdp) static HA_TRANSITION_REFRESH_STALE_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// #9720 test seam: snapshot one worker's pending debt log.
+#[cfg(test)]
+pub(in crate::afxdp) fn transition_debt_for_test(worker_id: u32) -> HaTransitionDebt {
+    HA_TRANSITION_DEBT
+        .get(worker_id as usize)
+        .map(|slot| lock_debt_recover(slot).clone())
+        .unwrap_or_default()
+}
+
 /// Push a command onto a worker queue, refusing at the capacity bound (#6929).
 ///
 /// Returns whether the command was accepted. Callers that need to know a

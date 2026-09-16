@@ -72,7 +72,7 @@ impl crate::afxdp::Coordinator {
         self.ha.rg_runtime.store(Arc::new(state));
         if !demoted_rgs.is_empty() {
             // #6242: fan out demote commands via each worker's runtime record.
-            for rec in self.workers.records().values() {
+            for (worker_id, rec) in self.workers.records().iter() {
                 // #9900 F-093: shed dead workers (2 pushes skipped: demote + vacate).
                 if rec.shed_if_dead(2) {
                     continue;
@@ -85,18 +85,55 @@ impl crate::afxdp::Coordinator {
                 // demote commands, demote_shared_owner_rgs, and the
                 // rg_epochs bumps. lock_recover applies the uniform
                 // committed-prefix + clear_poison policy (worker_queue.rs).
-                let mut pending = worker_queue::lock_recover(&rec.handle.commands);
-                worker_queue::push_bounded(
-                    &mut pending,
-                    WorkerCommand::DemoteOwnerRGS {
-                        owner_rgs: demoted_rgs.clone(),
-                    },
-                );
-                // #941 Work item C: vacate V_min slots on demotion.
-                // Stale-low slot values would cause peer workers to
-                // throttle unnecessarily until the first post-settle
-                // publish from this worker after re-promotion.
-                worker_queue::push_bounded(&mut pending, WorkerCommand::VacateAllSharedExactSlots);
+                // #9720: a refused Demote/Vacate is recorded as that worker's
+                // transition debt, positioned after the backlog ahead of it —
+                // the stored runtime above already reflects the demotion, so
+                // without the debt a dropped pair would never run. The queue
+                // length at each refusal is the op's countdown (every queued
+                // command predates the transition); the queue guard is dropped
+                // BEFORE recording: the debt lock is a leaf (worker_queue.rs)
+                // and recording under the queue guard would invent a
+                // queue→debt lock edge.
+                let (demote_queued, demote_backlog, vacate_queued, vacate_backlog) = {
+                    let mut pending = worker_queue::lock_recover(&rec.handle.commands);
+                    let demote_queued = worker_queue::push_bounded(
+                        &mut pending,
+                        WorkerCommand::DemoteOwnerRGS {
+                            owner_rgs: demoted_rgs.clone(),
+                        },
+                    );
+                    let demote_backlog = pending.len();
+                    // #941 Work item C: vacate V_min slots on demotion.
+                    // Stale-low slot values would cause peer workers to
+                    // throttle unnecessarily until the first post-settle
+                    // publish from this worker after re-promotion.
+                    let vacate_queued = worker_queue::push_bounded(
+                        &mut pending,
+                        WorkerCommand::VacateAllSharedExactSlots,
+                    );
+                    let vacate_backlog = pending.len();
+                    (demote_queued, demote_backlog, vacate_queued, vacate_backlog)
+                };
+                if !demote_queued {
+                    worker_queue::HA_TRANSITION_DEMOTE_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    worker_queue::record_transition_debt(
+                        *worker_id,
+                        &demoted_rgs,
+                        &[],
+                        false,
+                        demote_backlog,
+                    );
+                }
+                if !vacate_queued {
+                    worker_queue::HA_TRANSITION_VACATE_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    worker_queue::record_transition_debt(
+                        *worker_id,
+                        &[],
+                        &[],
+                        true,
+                        vacate_backlog,
+                    );
+                }
             }
             demote_shared_owner_rgs(
                 &self.sessions.synced,
@@ -161,16 +198,42 @@ impl crate::afxdp::Coordinator {
         // prewarm ONLY live queues — it pushes to every queue it is given
         // with no shed check of its own, so a full list would feed dead
         // queues (bounded, then overflow-misattributed as DROPS).
-        let live_commands = Self::collect_live_worker_commands(&self.workers.records());
-        for commands in &live_commands {
+        // #9720 (review A3): ONE records snapshot feeds BOTH the live-queue
+        // collect and the id-keyed Refresh loop below — two snapshots could
+        // straddle a death or an id reuse and leave a worker refreshed but
+        // not prewarmed (or shed-counted but pushed).
+        let records = self.workers.records();
+        let live_commands = Self::collect_live_worker_commands(&records);
+        for (worker_id, rec) in records.iter() {
+            // Dead workers were already shed (and counted, Refresh share
+            // included) by the collect above — skip without counting again.
+            if rec.is_dead() {
+                continue;
+            }
             // #1790/#1807: uniform poison recovery (worker_queue.rs).
-            let mut pending = worker_queue::lock_recover(commands);
-            worker_queue::push_bounded(
-                &mut pending,
-                WorkerCommand::RefreshOwnerRGS {
-                    owner_rgs: activated_rgs.to_vec(),
-                },
-            );
+            // #9720: a refused Refresh is that worker's transition debt (same
+            // positional countdown as the demote pair); the queue guard drops
+            // before the record (leaf-lock discipline, worker_queue.rs).
+            let (refresh_queued, refresh_backlog) = {
+                let mut pending = worker_queue::lock_recover(&rec.handle.commands);
+                let refresh_queued = worker_queue::push_bounded(
+                    &mut pending,
+                    WorkerCommand::RefreshOwnerRGS {
+                        owner_rgs: activated_rgs.to_vec(),
+                    },
+                );
+                (refresh_queued, pending.len())
+            };
+            if !refresh_queued {
+                worker_queue::HA_TRANSITION_REFRESH_DROPPED.fetch_add(1, Ordering::Relaxed);
+                worker_queue::record_transition_debt(
+                    *worker_id,
+                    &[],
+                    activated_rgs,
+                    false,
+                    refresh_backlog,
+                );
+            }
         }
         let current = self.ha.rg_runtime.load();
         // #7209: hold the loaded set for as long as the raw fd is used below —
@@ -188,6 +251,16 @@ impl crate::afxdp::Coordinator {
         // but split-RG continuity depends on rewarming the derived reverse
         // entries and restoring any redirect aliases that were removed during
         // demotion. This is not the old worker-wide HA refresh scan.
+        // #9720 scope note (reviews A4/B5): the prewarm below pushes per-entry
+        // `UpsertSynced`s with the same ignored-refusal shape, and RG-list
+        // debt cannot hold per-entry payloads — so a full-queue activation
+        // still drops prewarms. That is the #8586 case, not this issue's:
+        // Upsert content survives in the shared maps (measured: 85,668
+        // establishment upserts discarded over 32,768 creates with zero
+        // deletes lost), the prewarm is a window optimization, and on-demand
+        // materialize heals the window. Extending debt to per-entry payloads
+        // is out of scope — the named members are the three transition
+        // commands only.
         prewarm_reverse_synced_sessions_for_owner_rgs(
             &self.sessions.synced,
             &self.sessions.nat,

@@ -458,6 +458,16 @@ pub(super) struct WorkerCommandResults {
     /// The budget would then have replaced a bounded 3.85 ms stall with ~16 ms
     /// of drain.
     pub commands_backlogged: bool,
+    /// #9720: transition-debt ops remain for a future pass.
+    ///
+    /// True when debt was skipped (queue lock contended — position unknown)
+    /// or is still counting down (backlog remains ahead of it). The worker
+    /// loop carries this across passes and applies while set, which is what
+    /// closes the contended-with-empty stranding window (the tunnel
+    /// drain-wait polls queues read-only, so that window is real). It is NOT
+    /// folded into `did_work`: unlike a backlog, pending debt needs no
+    /// immediate revisit for ring health — the next pass is one poll away.
+    pub transition_debt_pending: bool,
 }
 
 impl WorkerCommandResults {
@@ -475,6 +485,7 @@ impl WorkerCommandResults {
             shaped_tx_requests: Vec::new(),
             vacate_all_shared_exact_slots: false,
             commands_backlogged: false,
+            transition_debt_pending: false,
         }
     }
 }
@@ -1014,38 +1025,10 @@ pub(super) fn apply_worker_commands(
     // own. Entered empty and left empty — the dispatch loop below drains it.
     scratch: &mut VecDeque<WorkerCommand>,
 ) -> WorkerCommandResults {
-    // Hot path: try_lock avoids blocking on the mutex when another thread
-    // holds it (rare) and avoids the cost of lock+unlock on empty queues
-    // when there's nothing to do (common case during steady-state forwarding).
-    // #1807: a poisoned mutex is recovered (committed-prefix + clear_poison
-    // policy, worker_queue.rs) and the recovered deque is processed as
-    // normal — treating poison as absence-of-work made the worker
-    // permanently deaf to coordinator commands.
-    //
-    // #7201: this takes a BOUNDED PREFIX, not the whole deque. Every command is
-    // a session-table mutation plus a BPF-map publish syscall, and the worker
-    // does not touch its AF_XDP rings until the loop below finishes — so an
-    // unbounded drain is unserviced ring time. See
-    // `worker_queue::WORKER_COMMAND_DRAIN_BUDGET` for the measurement and the
-    // ring arithmetic that fix the slice size.
-    let commands_backlogged = match worker_queue::try_lock_recover(commands) {
-        Some(mut pending) => {
-            if pending.is_empty() {
-                return WorkerCommandResults::empty();
-            }
-            worker_queue::drain_bounded_into(&mut pending, scratch)
-        }
-        None => {
-            // Could not take the lock this pass. The queue is not known to be
-            // empty — a producer holds it — but reporting a backlog here would
-            // pin the loop to `did_work` on nothing more than lock contention,
-            // so leave it to the next pass, which is one poll away.
-            return WorkerCommandResults::empty();
-        }
-    };
     // Sample monotonic time ONCE per tick so every handler sees the same
     // `now_ns` / `now_secs` and there is no intra-tick clock skew between
     // session-table side effects (#1346 plan v2 invariant 3).
+    // (Sampled above the drain: the #9720 debt handlers below share the tick.)
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
     let mut cancelled_keys: Vec<SessionKey> = Vec::new();
@@ -1066,6 +1049,49 @@ pub(super) fn apply_worker_commands(
     let mut export_owner_rgs: Vec<i32> = Vec::new();
     let mut shaped_tx_requests = Vec::new();
     let mut vacate_all_shared_exact_slots = false;
+    // Hot path: try_lock avoids blocking on the mutex when another thread
+    // holds it (rare) and avoids the cost of lock+unlock on empty queues
+    // when there's nothing to do (common case during steady-state forwarding).
+    // #1807: a poisoned mutex is recovered (committed-prefix + clear_poison
+    // policy, worker_queue.rs) and the recovered deque is processed as
+    // normal — treating poison as absence-of-work made the worker
+    // permanently deaf to coordinator commands.
+    //
+    // #7201: this takes a BOUNDED PREFIX, not the whole deque. Every command is
+    // a session-table mutation plus a BPF-map publish syscall, and the worker
+    // does not touch its AF_XDP rings until the loop below finishes — so an
+    // unbounded drain is unserviced ring time. See
+    // `worker_queue::WORKER_COMMAND_DRAIN_BUDGET` for the measurement and the
+    // ring arithmetic that fix the slice size.
+    //
+    // #9720: no early returns — the debt step below must run on every path
+    // (an empty queue still steps a zero-countdown op ready; a contended one
+    // still reports the carry flag), so an empty or contended queue falls
+    // through with an empty scratch (a no-op dispatch) instead of returning.
+    // `scratch_len_before` deltas the drain: scratch enters empty by
+    // invariant, but the delta stays correct even for a test-reused buffer.
+    let scratch_len_before = scratch.len();
+    let (commands_backlogged, queue_lock_acquired) = match worker_queue::try_lock_recover(commands)
+    {
+        Some(mut pending) => {
+            if pending.is_empty() {
+                (false, true)
+            } else {
+                (
+                    worker_queue::drain_bounded_into(&mut pending, scratch),
+                    true,
+                )
+            }
+        }
+        None => {
+            // Could not take the lock this pass. The queue is not known to be
+            // empty — a producer holds it — but reporting a backlog here would
+            // pin the loop to `did_work` on nothing more than lock contention,
+            // so leave it to the next pass, which is one poll away.
+            (false, false)
+        }
+    };
+    let drained = scratch.len() - scratch_len_before;
     for cmd in scratch.drain(..) {
         match cmd {
             WorkerCommand::DemoteOwnerRGS { owner_rgs } => {
@@ -1270,6 +1296,41 @@ pub(super) fn apply_worker_commands(
             }
         }
     }
+    // #9720: step the refused-transition debt by the drained slice and
+    // dispatch the ops whose position is reached — AFTER the slice. The
+    // refused command is newer than the backlog it was refused by (v2's
+    // dispatch-ahead ran it first, which installs transitions before older
+    // queued mutations); the countdown restores its true FIFO position
+    // between pre-transition backlog and post-transition arrivals, bounded
+    // by ~1 slice however long the overload lasts. The emptiness below is
+    // the drain's own observation from the slice critical section (S3) —
+    // never a re-lock — and the debt lock is released before any handler
+    // runs (leaf discipline). Scope, apply-level only: on a contended pass
+    // the position is unknowable, so debt is left untouched and only the
+    // carry flag is reported; the PRODUCTION scheduling (calling apply on
+    // debt alone) lives in the worker loop gate, not here (SPARK-F3).
+    let transition_debt_pending = if queue_lock_acquired {
+        let (ready, pending) =
+            worker_queue::take_ready_transition_debt(worker_id, drained, !commands_backlogged);
+        for op in ready {
+            dispatch_transition_debt_op(
+                sessions,
+                session_map,
+                forwarding,
+                ha_state,
+                dynamic_neighbors,
+                op,
+                now_ns,
+                now_secs,
+                &mut cancelled_keys,
+                &mut cancelled_keys_seen,
+                &mut vacate_all_shared_exact_slots,
+            );
+        }
+        pending
+    } else {
+        worker_queue::has_transition_debt(worker_id)
+    };
     WorkerCommandResults {
         cancelled_keys,
         deleted_synced_keys,
@@ -1279,9 +1340,94 @@ pub(super) fn apply_worker_commands(
         shaped_tx_requests,
         vacate_all_shared_exact_slots,
         commands_backlogged,
+        transition_debt_pending,
     }
 }
 
+/// Dispatch one position-ready transition-debt op (the #9720 filter).
+///
+/// Each RG is filtered against CURRENT HA state with the same `.active`
+/// predicate transition detection uses (`forwarding/ha.rs`): a demote RG
+/// applies iff its group is not active (absent counts inactive, matching
+/// removal-demotes), a refresh RG iff active (absent skipped). A newer
+/// transition for the RG — in-band or a superseding debt op — already moved
+/// it on, so dispatching the stale op would corrupt post-transition state
+/// (parent GPT-2 failback: an unguarded demote flips newly established local
+/// origins without any ownership check); the skip is counted per RG (O8) so
+/// `DROPPED = applied-late + stale-skipped` stays reconcilable. Filtered
+/// debt is consumed, not requeued: the countdown already spent its position.
+///
+/// Vacate is unconditional: it is idempotent and the next organic publish
+/// heals the one-publish-cycle false-zero window (O4 notes vacate does not
+/// COMMUTE with publish — the countdown is what keeps it positioned like
+/// in-band rather than trailing the drain).
+///
+/// Refresh-subset advisory (parent O5): the handler wide-scans beyond the
+/// surviving list, so the filter is a call/don't-call gate for Refresh and
+/// a precise per-RG subset for Demote.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_transition_debt_op(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    op: worker_queue::TransitionDebtOp,
+    now_ns: u64,
+    now_secs: u64,
+    cancelled_keys: &mut Vec<SessionKey>,
+    cancelled_keys_seen: &mut rustc_hash::FxHashSet<SessionKey>,
+    vacate_all_shared_exact_slots: &mut bool,
+) {
+    use worker_queue::TransitionDebtKind;
+    let rg_is_active = |rg: &i32| ha_state.get(rg).map(|r| r.active).unwrap_or(false);
+    match op.kind() {
+        TransitionDebtKind::Demote => {
+            let surviving: Vec<i32> = op
+                .rgs()
+                .iter()
+                .copied()
+                .filter(|rg| !rg_is_active(rg))
+                .collect();
+            worker_queue::HA_TRANSITION_DEMOTE_STALE_SKIPPED
+                .fetch_add((op.rgs().len() - surviving.len()) as u64, Ordering::Relaxed);
+            if !surviving.is_empty() {
+                commands::handle_demote_owner_rgs(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    dynamic_neighbors,
+                    surviving,
+                    now_ns,
+                    now_secs,
+                    cancelled_keys,
+                    cancelled_keys_seen,
+                );
+            }
+        }
+        TransitionDebtKind::Refresh => {
+            let surviving: Vec<i32> = op.rgs().iter().copied().filter(rg_is_active).collect();
+            worker_queue::HA_TRANSITION_REFRESH_STALE_SKIPPED
+                .fetch_add((op.rgs().len() - surviving.len()) as u64, Ordering::Relaxed);
+            if !surviving.is_empty() {
+                commands::handle_refresh_owner_rgs(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    dynamic_neighbors,
+                    surviving,
+                    now_ns,
+                    now_secs,
+                );
+            }
+        }
+        TransitionDebtKind::Vacate => {
+            *vacate_all_shared_exact_slots = true;
+        }
+    }
+}
 
 /// #4800: calls to [`replicate_session_upsert`] (one per new flow), and the
 /// total number of `UpsertSynced` commands those calls enqueued — the

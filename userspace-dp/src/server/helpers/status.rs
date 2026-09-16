@@ -194,6 +194,17 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.session_delete_replica_dropped_total();
     state.status.session_delete_replica_drop_repaired =
         state.afxdp.session_delete_replica_drop_repaired_total();
+    // #9720: the per-command split of the drops aggregate for the three
+    // RG-transition commands (pushes), plus the stale-skip dispositions
+    // (RG applications). Each refusal was recorded as transition debt and
+    // dispatched positionally or filtered as stale.
+    state.status.ha_transition_demote_dropped = state.afxdp.ha_transition_demote_dropped_total();
+    state.status.ha_transition_refresh_dropped = state.afxdp.ha_transition_refresh_dropped_total();
+    state.status.ha_transition_vacate_dropped = state.afxdp.ha_transition_vacate_dropped_total();
+    state.status.ha_transition_demote_stale_skipped =
+        state.afxdp.ha_transition_demote_stale_skipped_total();
+    state.status.ha_transition_refresh_stale_skipped =
+        state.afxdp.ha_transition_refresh_stale_skipped_total();
     // #9048: the split-brain indicator. Surfaced here rather than parked in
     // UNSURFACED for the reason that allowlist documents — a counter nothing
     // assigns reaches no operator through status, gRPC or Prometheus.
