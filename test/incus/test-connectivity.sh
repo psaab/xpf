@@ -30,6 +30,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/cluster-lock.sh
+source "${SCRIPT_DIR}/cluster-lock.sh"
 
 PASS=0
 FAIL=0
@@ -42,6 +44,41 @@ info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 skip()  { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
+# xpf_assert_cluster_lock_idle <phase> — #9922 F-158 lock-IDLENESS probe.
+#
+# Tree policy forbids read-only gates from HOLDING the shared-cluster lock
+# (selftest-enforced: this script must never route through the destructive
+# lock cell), so instead of taking the lock we assert it is IDLE at the
+# START and END of the shared-cluster sampling window. Contention means a
+# destructive lane is mutating the nodes under us and every sample is
+# suspect → reason + exit 77 (no summary → the harness wrapper records
+# VOID and the results are discarded).
+#
+# STATED LIMITATION (TOCTOU): this is polling, not holding. A lane that
+# acquires the lock mid-window, between the two probes, slips through
+# undetected. What it DOES catch is steady-state contention — destructive
+# lanes hold the lock for minutes, so an overlap at either edge is the
+# common case. Today: zero detection.
+#
+# The probe fires only when FW0 is remote-qualified (contains ':'):
+# 'loss:xpf-userspace-fw0' samples the SHARED cluster, while a bare
+# 'xpf-fw0' (BPFRX_CLUSTER_ENV= local defaults) is a dedicated local
+# instance no other lane touches. Inside a held cell (valid
+# XPF_CLUSTER_LOCK_HELD marker from a live ancestor holder) the probe is
+# skipped — the cell already owns the cluster, and probing our own
+# ancestor's lock would self-report contention (wg-interop.sh inc()
+# precedent: skip the flock when xpf_cluster_lock_held).
+xpf_assert_cluster_lock_idle() {
+	local phase="$1"
+	[[ "$FW0" == *:* ]] || return 0
+	if xpf_cluster_lock_held; then
+		return 0
+	fi
+	if ! ( flock -n 9 || exit 1 ) 9>"$XPF_CLUSTER_LOCK"; then
+		echo "VOID: shared-cluster lock ${XPF_CLUSTER_LOCK} is held by another lane at connectivity ${phase} probe — samples taken under contention are discarded (no summary)" >&2
+		exit 77
+	fi
+}
 
 instance_running() {
 	local status
@@ -191,6 +228,9 @@ test_cluster() {
 		skip "${FW0} or ${FW1} not running — skipping cluster tests"
 		return
 	fi
+	# F-158 START probe (guarded 77): the running-check above passed, so the
+	# cluster is up and an exit 77 here means contention, not absence.
+	xpf_assert_cluster_lock_idle "start"
 
 	# Service health
 	service_check "$FW0" "cluster: xpfd service active on fw0"
@@ -267,6 +307,10 @@ test_cluster() {
 
 	# Internet from firewall directly
 	internet_test "$FW0" "cluster: fw0 → internet (1.1.1.1)"
+
+	# F-158 END probe: a lane that grabbed the lock mid-window leaves the
+	# samples above suspect (see the TOCTOU note on the probe helper).
+	xpf_assert_cluster_lock_idle "end"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────

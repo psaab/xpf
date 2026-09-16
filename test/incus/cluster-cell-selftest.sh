@@ -160,6 +160,20 @@ if grep -q 'cluster-cell.sh' "${SCRIPT_DIR}/test-connectivity.sh"; then
 fi
 ok "static: read-only test-connectivity.sh stays lock-free"
 
+# #9922 F-158: lock-free does NOT mean lock-blind. When the read-only gate
+# samples the SHARED cluster it must probe lock idleness (fail-fast VOID
+# on contention) instead of holding the lock.
+if ! grep -q 'cluster-lock\.sh' "${SCRIPT_DIR}/test-connectivity.sh"; then
+	fail "static: test-connectivity.sh must source cluster-lock.sh for the F-158 idleness probe"
+fi
+ok "static: test-connectivity.sh sources cluster-lock.sh (idleness probe, not a lock cell)"
+# The probe must live in test_cluster (the shared-cluster sampler), not in
+# test_standalone (dedicated local instances need no probe).
+if ! sed -n '/^test_cluster() {/,/^}/p' "${SCRIPT_DIR}/test-connectivity.sh" | grep -q 'xpf_assert_cluster_lock_idle'; then
+	fail "static: test-connectivity.sh test_cluster must call the F-158 lock-idleness probe"
+fi
+ok "static: test-connectivity.sh test_cluster calls the lock-idleness probe"
+
 # ── BEHAVIORAL: private lock path + fake incus, no cluster ────────────
 T=$(mktemp -d /tmp/xpf-cell-selftest.XXXXXX)
 trap 'rm -rf "$T"' EXIT
