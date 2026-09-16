@@ -2357,9 +2357,12 @@ impl SessionTable {
         // installer's CARRIED id: announcing with an id this worker minted would hand
         // the #9412 sender memo a foreign id, which drops the installer's record and
         // lets the next sweep resend class 0. Peer imports stay silent.
-        if forward.origin.is_peer_synced()
-            && !(forward.origin == SessionOrigin::WorkerLocalImport
-                && self.session_id_carried_from_another_worker(forward.session_id))
+        // #10038 item 5: TUN-origin stays silent too (the peer holds no copy
+        // — nothing Opened — so an Update would plant TUN-derived state).
+        if forward.origin.is_local_tun_origin()
+            || (forward.origin.is_peer_synced()
+                && !(forward.origin == SessionOrigin::WorkerLocalImport
+                    && self.session_id_carried_from_another_worker(forward.session_id)))
         {
             return;
         }

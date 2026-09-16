@@ -1184,6 +1184,39 @@ pub(super) fn host_inbound_gated_lo0_action(
     ))
 }
 
+/// #10038: lo0 host-bound filter WITHOUT the host-inbound service gate, for a
+/// solicited reply whose TUN-origin forward companion the HIT arm already
+/// proved (`tun_origin_reverse_exempt`). Argument threading is IDENTICAL to
+/// the lo0 tail of `host_inbound_gated_lo0_action` above (resolved LOGICAL
+/// ingress ifindex per #3609/#8321, zone override hint, policer now_ns per
+/// #5857) — only the admits check is skipped. The caller reuses the same
+/// `filter_terminal` + may_revoke-gated teardown + accounting block as the
+/// admitted arm, so lo0 discard/reject still drops solicited replies with a
+/// truthful log (#3615); host-inbound admission is what is bypassed, never
+/// the packet filter.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lo0_action_for_solicited_reply(
+    forwarding: &ForwardingState,
+    logical_ingress_ifindex: i32,
+    extra: TermMatchExtra<'_>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    lo0_ingress_zone_override: Option<u16>,
+    now_ns: u64,
+) -> (crate::filter::FilterAction, Option<PendingFilterLog>) {
+    apply_lo0_filter_action(
+        forwarding,
+        extra,
+        Some(flow),
+        meta,
+        logical_ingress_ifindex,
+        lo0_ingress_zone_override,
+        now_ns,
+    )
+}
+
 /// #3485: regression tests for the host-inbound-before-lo0 ordering on the
 /// local-delivery path. They drive `host_inbound_gated_lo0_action` directly —
 /// the single helper both the session-HIT and session-MISS call sites route

@@ -277,7 +277,10 @@ impl SessionTable {
             // install.
             self.session_limit_inc(key.src_ip, key.dst_ip);
         }
-        if counted && !origin.is_peer_synced() {
+        // #10038 item 5: TUN-origin never Opens (node-local provenance — the
+        // peer must never hold TUN-derived state, so it is neither bulk- nor
+        // live-synced; forwards still count toward per-IP limits above).
+        if counted && !origin.is_peer_synced() && !origin.is_local_tun_origin() {
             self.push_delta(SessionDelta {
                 kind: SessionDeltaKind::Open,
                 key,

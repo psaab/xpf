@@ -224,10 +224,17 @@ pub(super) fn host_bound_policy_dst(
 ///
 /// Both directions, unlike #9382's forward-only re-derivation: that rule exists
 /// because a reverse companion carries SWAPPED zones, which says nothing about a
-/// gate asking what the local listener receives. A host-bound reverse companion
-/// the AF_XDP path could hit does not arise in practice (the firewall's own
-/// replies leave through the kernel), so a direction branch here would be code no
-/// cell can reach.
+/// gate asking what the local listener receives.
+///
+/// #10038: a host-bound reverse companion the AF_XDP path hits DOES arise — a
+/// TUN-originated (firewall-self-originated via GRE/WG local-origin) flow's
+/// solicited reply HITS its reverse LocalDelivery entry. The exempt path never
+/// calls this helper (it skips both host-bound gates by design), so no
+/// direction branch is added here; but the old "does not arise in practice"
+/// claim is retired — a future caller MUST NOT assume forward-only. Note the
+/// NAT trap for any such caller: on a reversed NatDecision `rewrite_dst`
+/// carries the FORWARD direction's source translation, so judging it as the
+/// policy dst would name (e.g.) the SNAT pool address.
 #[inline]
 pub(super) fn session_host_bound_policy_dst(
     flow: &SessionFlow,

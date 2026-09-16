@@ -83,12 +83,16 @@ mod dispatch;
 pub(super) mod kernel_path;
 mod mtu;
 mod sock;
+// #10038: `pub(super)` so `coordinator/mod.rs` can re-export the two fns the
+// end-to-end cell in `wg/decap_tests.rs` drives (a parent cannot name a
+// private child module); the re-export carries the afxdp-wide visibility.
+pub(super) mod tun_origin;
 
 use attempt::{
     AttemptTrigger, HandshakeAttempt, drive_attempt_machine, pace_keepalive_skip, send_keepalive,
     start_attempt,
 };
-use dispatch::{InboundOutcome, dispatch_inbound, encap_and_send};
+use dispatch::{EncapOutcome, InboundOutcome, dispatch_inbound, encap_and_send};
 use sock::{
     PollWait, WgRecv, bind_wg_socket, canonicalize_endpoint, poll_timeout_ms, set_recv_tos_options,
     wg_poll_wait, wg_recvmsg,
@@ -150,6 +154,15 @@ pub(super) fn wg_control_loop(
     resolver_telemetry: Arc<crate::afxdp::wg::endpoint_resolver::WgEndpointResolverTelemetry>,
     recent_exceptions: Arc<Mutex<ExceptionEventRing>>,
     stop: Arc<AtomicBool>,
+    // #10038: TUN-origin session-publish handles (the GRE local-origin spawn
+    // template, minus worker_commands — shared-only by design). Appended last.
+    spawned_logical_ifindex: i32,
+    ha_state: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    dynamic_neighbors: Arc<ShardedNeighborMap>,
+    shared_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: SharedSessionOwnerRgIndexes,
 ) {
     // Bind the UDP socket. v6 dual-stack ([::]:port) accepts both v4 and
     // v6 peers where the kernel allows it; fall back to v4 if the v6
@@ -234,7 +247,7 @@ pub(super) fn wg_control_loop(
     // ingress and local-address maps. Built here, on the control thread that
     // uses it.
     let kernel_path_view =
-        kernel_path::ShimMapsKernelPathView::new(tunnel_name.clone(), shared_runtime);
+        kernel_path::ShimMapsKernelPathView::new(tunnel_name.clone(), shared_runtime.clone());
     run_wg_control_loop_with_kernel_path(
         &tunnel_name,
         &engine,
@@ -248,10 +261,18 @@ pub(super) fn wg_control_loop(
         &stop,
         kernel_transport,
         &kernel_path_view,
+        tunnel_endpoint_id,
+        spawned_logical_ifindex,
+        &shared_runtime,
+        &ha_state,
+        &dynamic_neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
     );
     // #1866 D3: clean stop-flag exit (teardown) — rare, one line.
     eprintln!("xpf-userspace-dp: WG control thread stopped tun={tunnel_name}");
-    let _ = tunnel_endpoint_id;
 }
 
 /// #9594: the loop with NO kernel-path posture view — every kernel-path record
@@ -273,6 +294,16 @@ fn run_wg_control_loop(
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     stop: &AtomicBool,
     kernel_transport: crate::afxdp::types::WgKernelTransport,
+    // #10038: forwarded to `run_wg_control_loop_with_kernel_path` unchanged.
+    tunnel_endpoint_id: u16,
+    spawned_logical_ifindex: i32,
+    shared_runtime: &crate::afxdp::types::RuntimeViewReader,
+    ha_state: &Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
 ) {
     run_wg_control_loop_with_kernel_path(
         tunnel_name,
@@ -287,6 +318,15 @@ fn run_wg_control_loop(
         stop,
         kernel_transport,
         &kernel_path::UncoveredKernelPathView,
+        tunnel_endpoint_id,
+        spawned_logical_ifindex,
+        shared_runtime,
+        ha_state,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
     );
 }
 
@@ -408,6 +448,17 @@ fn run_wg_control_loop_with_kernel_path(
     stop: &AtomicBool,
     kernel_transport: crate::afxdp::types::WgKernelTransport,
     kernel_path_view: &dyn kernel_path::WgKernelPathView,
+    // #10038: TUN-origin session-publish handles (appended last, like the
+    // GRE loop's spawn plumbing — deliberately no worker_commands).
+    tunnel_endpoint_id: u16,
+    spawned_logical_ifindex: i32,
+    shared_runtime: &crate::afxdp::types::RuntimeViewReader,
+    ha_state: &Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
 ) {
     use std::collections::HashMap;
     // #9594: ask the kernel for each datagram's receiving interface. Set HERE,
@@ -450,6 +501,22 @@ fn run_wg_control_loop_with_kernel_path(
     let mut next_deadline: u64 = 0;
     let mut last_timer_pass_ns: u64 = 0;
     let mut tun_fatal_reads: u32 = 0;
+    // #10038: TUN-origin session-publish state. The forwarding Arc starts as
+    // the currently-published one (the GRE loop's shape); the dedup map is
+    // thread-local (never shared — it only suppresses our own republishes).
+    let mut forwarding: Arc<ForwardingState> = shared_runtime.load().forwarding().clone();
+    let mut tun_origin_attached = tun_origin::wg_endpoint_attachment_valid(
+        &forwarding,
+        tunnel_endpoint_id,
+        spawned_logical_ifindex,
+        tunnel_name,
+    );
+    let mut tun_origin_sessions = FastMap::<SessionKey, u64>::default();
+    let mut tun_origin_last_prune_ns = 0u64;
+    // Parent-review items 2+4: tombstones (last-publish memory, swept at
+    // 300s) + the idle-sweep clock. Thread-local like the dedup map.
+    let mut tun_origin_tombstones = FastMap::<SessionKey, u64>::default();
+    let mut tun_origin_last_sweep_ns = 0u64;
 
     // Initial initiator bring-up: every peer with a configured endpoint
     // starts a real attempt window (BringUp class) so the REKEY_TIMEOUT/
@@ -476,6 +543,34 @@ fn run_wg_control_loop_with_kernel_path(
 
     while !stop.load(Ordering::Relaxed) {
         let mut did_work = false;
+        // #10038: ONE forwarding Arc + ONE HA snapshot per outer iteration,
+        // reused across the whole burst (the GRE loop's coherence shape).
+        // A validation-only publish rotates the view but not the inner
+        // forwarding Arc, so `load_forwarding_if_changed` correctly sees no
+        // change there; the attachment gate recomputes ONLY on rotation.
+        if let Some(new_forwarding) =
+            crate::afxdp::types::load_forwarding_if_changed(&forwarding, shared_runtime)
+        {
+            forwarding = new_forwarding;
+            tun_origin_attached = tun_origin::wg_endpoint_attachment_valid(
+                &forwarding,
+                tunnel_endpoint_id,
+                spawned_logical_ifindex,
+                tunnel_name,
+            );
+        }
+        let ha_runtime = ha_state.load();
+        // Parent-review item 2: publisher-owned idle sweep (throttled
+        // inside — one timestamp check per iteration when idle).
+        tun_origin::sweep_wg_tun_origin_idle(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &mut tun_origin_tombstones,
+            &mut tun_origin_last_sweep_ns,
+            monotonic_nanos(),
+        );
 
         // --- Inbound: kernel socket → engine → TUN ---
         for _ in 0..WG_RX_BURST {
@@ -631,7 +726,27 @@ fn run_wg_control_loop_with_kernel_path(
                     // (learned/roamed endpoint) falls back to the
                     // interface-level scalar — the pre-#5291 behaviour.
                     let peer_outer_mtu = per_peer_outer_mtu.get(&pk).copied().unwrap_or(outer_mtu);
-                    encap_and_send(
+                    // #10038: parse->dedup->encap->publish-on-Sent. The parse is
+                    // cheap (wrap + flow key); the full build (outer FIB resolve
+                    // + reverse synthesis) runs only on a dedup miss AND encap
+                    // success. Every skip arm still encapsulates — the publish is
+                    // gated, the encap never is.
+                    let now_ns = monotonic_nanos();
+                    let tun_origin_parsed = if tun_origin_attached {
+                        tun_origin::parse_wg_tun_origin_flow(inner, &forwarding, tunnel_endpoint_id)
+                    } else {
+                        None
+                    };
+                    let tun_origin_due = tun_origin_parsed.as_ref().is_some_and(|parsed| {
+                        tun_origin::wg_tun_origin_publish_due(
+                            &mut tun_origin_sessions,
+                            &mut tun_origin_last_prune_ns,
+                            &parsed.flow.forward_key,
+                            parsed.meta.protocol,
+                            now_ns,
+                        )
+                    });
+                    let encap_outcome = encap_and_send(
                         engine,
                         socket,
                         socket_is_v6,
@@ -643,6 +758,41 @@ fn run_wg_control_loop_with_kernel_path(
                         tunnel_name,
                         recent_exceptions,
                     );
+                    if tun_origin_due && matches!(encap_outcome, EncapOutcome::Sent)
+                        && let Some(parsed) = &tun_origin_parsed
+                    {
+                        match tun_origin::build_wg_tun_origin_entries(
+                            parsed,
+                            ep,
+                            tunnel_endpoint_id,
+                            &forwarding,
+                            ha_runtime.as_ref(),
+                            dynamic_neighbors,
+                            now_ns / 1_000_000_000,
+                        ) {
+                            Ok(entries) => tun_origin::publish_wg_tun_origin_entries(
+                                shared_sessions,
+                                shared_nat_sessions,
+                                shared_forward_wire_sessions,
+                                shared_owner_rg_indexes,
+                                &mut tun_origin_sessions,
+                                &mut tun_origin_tombstones,
+                                &entries,
+                                tun_origin::wg_tun_origin_packet_initiates(parsed),
+                                now_ns,
+                            ),
+                            Err(reason) => {
+                                #[cfg(not(feature = "debug-log"))]
+                                let _ = &reason;
+                                debug_log!(
+                                    "WG[{}]: TUN-origin publish skipped endpoint={} reason={}",
+                                    tunnel_name,
+                                    tunnel_endpoint_id,
+                                    reason
+                                );
+                            }
+                        }
+                    }
                 }
                 Ok(_) => break,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,

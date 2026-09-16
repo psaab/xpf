@@ -905,9 +905,33 @@ pub(super) fn build_reverse_session_from_forward_match(
     now_secs: u64,
     ha_startup_grace_until_secs: u64,
 ) -> SessionLookup {
+    build_reverse_session_from_forward_match_in_table(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        forward_match,
+        now_secs,
+        ha_startup_grace_until_secs,
+        None,
+    )
+}
+
+/// Table-scoped twin of `build_reverse_session_from_forward_match` (#10038
+/// item 6): threads `table` into the reply-target resolution. `None` is
+/// byte-identical to the untabled twin.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_reverse_session_from_forward_match_in_table(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    forward_match: ForwardSessionMatch,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+    table: Option<&str>,
+) -> SessionLookup {
     let requires_fabric_return = forward_match.metadata.fabric_ingress
         || forward_match.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
-    let resolution = reverse_resolution_for_session(
+    let resolution = reverse_resolution_for_session_in_table(
         forwarding,
         ha_state,
         dynamic_neighbors,
@@ -917,6 +941,7 @@ pub(super) fn build_reverse_session_from_forward_match(
         now_secs,
         forward_match.decision.resolution.tunnel_endpoint_id != 0
             && now_secs <= ha_startup_grace_until_secs,
+        table,
     );
     let metadata = SessionMetadata {
         // #7169: this zone pair comes from the STORED forward session, i.e.
@@ -1006,11 +1031,32 @@ pub(super) fn synthesized_synced_reverse_entry(
     entry: &SyncedSessionEntry,
     now_secs: u64,
 ) -> Option<SyncedSessionEntry> {
+    synthesized_synced_reverse_entry_in_table(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        entry,
+        now_secs,
+        None,
+    )
+}
+
+/// Table-scoped twin of `synthesized_synced_reverse_entry` (#10038 item 6):
+/// the reply-target resolution runs in `table`. `None` is byte-identical
+/// to the untabled twin; only the TUN-origin builders pass `Some`.
+pub(super) fn synthesized_synced_reverse_entry_in_table(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    entry: &SyncedSessionEntry,
+    now_secs: u64,
+    table: Option<&str>,
+) -> Option<SyncedSessionEntry> {
     if entry.metadata.is_reverse {
         return None;
     }
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
-    let reverse = build_reverse_session_from_forward_match(
+    let reverse = build_reverse_session_from_forward_match_in_table(
         forwarding,
         ha_state,
         dynamic_neighbors,
@@ -1021,6 +1067,7 @@ pub(super) fn synthesized_synced_reverse_entry(
         },
         now_secs,
         0,
+        table,
     );
     let metadata = reverse.metadata;
     Some(SyncedSessionEntry {
@@ -1052,9 +1099,46 @@ pub(super) fn reverse_resolution_for_session(
     now_secs: u64,
     allow_unseeded_tunnel_local: bool,
 ) -> ForwardingResolution {
+    reverse_resolution_for_session_in_table(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        target_ip,
+        ingress_zone,
+        fabric_ingress,
+        now_secs,
+        allow_unseeded_tunnel_local,
+        None,
+    )
+}
+
+/// Table-scoped twin of `reverse_resolution_for_session` (#10038 item 6):
+/// the reply-target FIB lookup (and the table-scoped local-delivery
+/// decision, #3769) runs in `table` instead of the default table, so a
+/// VRF reverse resolves against its instance's connected/local view.
+/// `None` is byte-identical to the untabled twin. Only the TUN-origin
+/// builders pass `Some` today; every other caller keeps default-table
+/// behavior (transit/HA VRF synthesis is a pre-existing gap, out of scope).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reverse_resolution_for_session_in_table(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target_ip: IpAddr,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+    table: Option<&str>,
+) -> ForwardingResolution {
     let resolved =
         super::interface_nat_local_resolution(forwarding, target_ip).unwrap_or_else(|| {
-            lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip)
+            super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                table,
+            )
         });
     let owner_rg_id = owner_rg_for_resolution(forwarding, resolved);
     if fabric_ingress
