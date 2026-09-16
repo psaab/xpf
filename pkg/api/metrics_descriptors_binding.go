@@ -106,6 +106,15 @@ func (c *xpfCollector) initBindingDescriptors() {
 			"HA/config skew worth investigating.",
 		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 	)
+	c.bindingTableUnavailablePackets = prometheus.NewDesc(
+		"xpf_userspace_binding_table_unavailable_packets_total",
+		"Frames observed with a TableUnavailable disposition on the fast path "+
+			"(#9752 round 5): every frame whose session resolved terminal. A "+
+			"superset of table_unavailable_drops (which counts only slow-path "+
+			"allow-list refusals); packets that resolve terminal but never "+
+			"reach the slow path appear here only.",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
 	c.bindingSlowPathLocalDeliveryPackets = prometheus.NewDesc(
 		"xpf_userspace_binding_slow_path_local_delivery_packets_total",
 		"Frames delivered to the local host stack via the slow path (#7409). "+

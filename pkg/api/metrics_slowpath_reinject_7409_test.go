@@ -53,6 +53,8 @@ func collectSlowPathSeries(t *testing.T, c *xpfCollector, status dpuserspace.Pro
 			"next_table_unsupported_drops_total",
 			// #9752: the installing-table-unresolvable fail-closed drop.
 			"table_unavailable_drops_total",
+			// #9752 round 5: the fast-path observation count.
+			"table_unavailable_packets_total",
 		} {
 			// Desc.String() embeds the HELP text as well as the fqName, and
 			// several of these help strings cross-reference the other
@@ -87,8 +89,8 @@ func TestSlowPathReinjectCountersAreEmittedEvenWhenZero(t *testing.T) {
 	// fail-closed drop. The zero-datapoint property matters MORE for the drops
 	// than for the reinjects: both drops' steady state is legitimately 0 and
 	// the series would otherwise never appear until the defect already existed.
-	if len(got) != 6 {
-		t.Fatalf("want all 6 slow-path allow-list series present at zero, got %d: %v", len(got), got)
+	if len(got) != 7 {
+		t.Fatalf("want all 7 slow-path allow-list series present at zero, got %d: %v", len(got), got)
 	}
 	for name, v := range got {
 		if v != 0 {
@@ -112,6 +114,7 @@ func TestSlowPathReinjectCountersMapToTheCorrectSeries(t *testing.T) {
 			SlowPathMissingNeighborPackets: 44,
 			NextTableUnsupportedDrops:      55,
 			TableUnavailableDrops:          66,
+			TableUnavailablePackets:        77,
 		}},
 	}
 
@@ -128,6 +131,9 @@ func TestSlowPathReinjectCountersMapToTheCorrectSeries(t *testing.T) {
 		// #9752: the installing-table-unresolvable fail-closed drop.
 		// Asserted by VALUE for the same reason as #6664 above.
 		"table_unavailable_drops_total": 66,
+		// #9752 round 5: the fast-path observation count (superset of the
+		// drops above). Asserted by VALUE for the same reason.
+		"table_unavailable_packets_total": 77,
 	} {
 		if got[name] != want {
 			t.Errorf("%s = %v, want %v", name, got[name], want)
@@ -158,7 +164,7 @@ func TestSlowPathReinjectCountersAreEmittedPerBinding(t *testing.T) {
 	// #6664 made this five: the four #7409 reinject counters plus the
 	// next_table fail-closed drop that replaced one of them. #9752 makes it
 	// six: plus the installing-table-unresolvable fail-closed drop.
-	if n != 12 {
-		t.Fatalf("want 6 series x 2 bindings = 12 metrics, got %d", n)
+	if n != 14 {
+		t.Fatalf("want 7 series x 2 bindings = 14 metrics, got %d", n)
 	}
 }

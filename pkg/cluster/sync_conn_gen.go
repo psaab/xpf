@@ -188,6 +188,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
 	}
 	stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
+		s.pbrAnnouncedForFence.Store(true)
+	}
 	// #9752 round 3 item 5: still (0,0)? This node may have RECEIVED the
 	// incarnation without ever sending it (standby after failover) — the
 	// receive record holds the true stamp. Restore from it (read-only).
@@ -232,6 +235,9 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
 	}
 	stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
+		s.pbrAnnouncedForFence.Store(true)
+	}
 	// #9752 round 3 item 5: v6 twin of the receive-record restore above.
 	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 && val.SessionID != 0 {
 		s.recvGenMu.Lock()
@@ -756,6 +762,9 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
 	}
 	restoreInstallTableLocked(s.installTableRecvV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
+		s.pbrAnnouncedForFence.Store(true)
+	}
 	s.recvGenMu.Unlock()
 	if err := s.sessions.PutClusterSyncedV4(key, val); err == nil {
 		// #6368: the check above and this write are not atomic. Re-read the
@@ -814,6 +823,9 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
 	}
 	restoreInstallTableLocked(s.installTableRecvV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
+		s.pbrAnnouncedForFence.Store(true)
+	}
 	s.recvGenMu.Unlock()
 	if err := s.sessions.PutClusterSyncedV6(key, val); err == nil {
 		// #6368: see the v4 twin — re-read the threshold after the write so a

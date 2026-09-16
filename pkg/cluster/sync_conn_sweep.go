@@ -201,12 +201,22 @@ func (s *SessionSync) syncSweep() int {
 			return true
 		}
 		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+			announced := s.installTableAnnouncedV4(key)
 			s.stampInstallGenV4(key, &val)
 			// #9752 round 4: the sweep is its own transmission path — it
 			// must judge the fence, not bypass it. A skip is intentional
-			// (never backpressure): no count, no overflow, retried by the
-			// next tick after discovery or upgrade.
+			// (never backpressure): no count, no overflow. Retried not by
+			// the next tick (round 5 item 5: the window advances past it)
+			// but by the caps-triggered bulk redrive, or the delta that
+			// announces it.
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v4") {
+				return true
+			}
+			// #9752 round 5 item 1: a mirror (0,0) this node never
+			// announced is suspect on a PBR-active node (in-race delta,
+			// foreign row, or post-cap) — withhold it the same way.
+			if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+				suppressUnannouncedForPBRActivePeer(s, announced, "sweep_v4") {
 				return true
 			}
 			msg := encodeSessionV4(key, val)
@@ -231,9 +241,15 @@ func (s *SessionSync) syncSweep() int {
 			return true
 		}
 		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+			announced := s.installTableAnnouncedV6(key)
 			s.stampInstallGenV6(key, &val)
 			// #9752 round 4: v6 twin of the sweep fence above.
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v6") {
+				return true
+			}
+			// #9752 round 5 item 1: v6 twin of the unannounced rule above.
+			if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+				suppressUnannouncedForPBRActivePeer(s, announced, "sweep_v6") {
 				return true
 			}
 			msg := encodeSessionV6(key, val)

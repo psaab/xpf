@@ -95,7 +95,17 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		req.InactivityTimeout = val.AppTimeout
 		// #5212: carry the originating node's stable RT_FLOW session id so the
 		// peer helper adopts it on import instead of minting a fresh local id.
+		// #9752 round 5 item 2: fall back to the mirror-preserved SessionID
+		// when RTFlow is absent (mirror-sourced sweep resends lose the
+		// sync-only tail). Post-convert SessionID is the adopted stable id
+		// (or a per-incarnation-unique mint), so the fallback preserves
+		// incarnation identity the helper's preserve rules key on — without
+		// it a reused tuple's new incarnation arrives id-less and the old
+		// PBR table is wrongly retained. Double-zero still omits (unknown).
 		req.RTFlowSessionID = val.RTFlowSessionID
+		if req.RTFlowSessionID == 0 {
+			req.RTFlowSessionID = val.SessionID
+		}
 		// #7188: carry the tunnel session-identity discriminator to the peer
 		// helper, which folds it into the key it reconstructs. Two RFC 2890 GRE
 		// tunnels between one pair of outer endpoints are ONE Go session key
@@ -211,6 +221,10 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		}
 		// #5212: carry the originating node's stable RT_FLOW session id (see V4).
 		req.RTFlowSessionID = val.RTFlowSessionID
+		// #9752 round 5 item 2: v6 twin of the SessionID fallback above.
+		if req.RTFlowSessionID == 0 {
+			req.RTFlowSessionID = val.SessionID
+		}
 		// #7188: carry the tunnel session-identity discriminator (see V4).
 		req.TunnelDiscriminator = val.TunnelDiscriminator
 		// #9412: forward the close class so the standby imports the close state.

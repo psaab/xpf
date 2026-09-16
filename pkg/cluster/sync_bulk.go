@@ -131,6 +131,12 @@ type bulkWalk struct {
 	// window captures for them there.
 	fence             uint64
 	readsDuringWindow bool
+	// stampsAuthoritative reports whether yielded values carry true stamps
+	// (#9752 round 5 item 1). A table-truth snapshot does (helper deltas);
+	// a store-mirror walk rebuilds sync-only fields as (0,0), so its
+	// unstamped values are suspect when unannounced (see
+	// suppressUnannouncedForPBRActivePeer) rather than genuine.
+	stampsAuthoritative bool
 }
 
 func (s *SessionSync) storeBulkWalk() *bulkWalk {
@@ -163,7 +169,7 @@ func (s *SessionSync) storeBulkWalk() *bulkWalk {
 }
 
 func snapshotBulkWalk(snap BulkSnapshot) *bulkWalk {
-	w := &bulkWalk{source: "table-truth"}
+	w := &bulkWalk{source: "table-truth", stampsAuthoritative: true}
 	w.forEachV4 = func(yield func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
 		for _, e := range snap.V4 {
 			if !yield(e.Key, e.Value) {
@@ -193,7 +199,16 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// BulkStart): retrying every tick would burn full-table walks that all
 	// abort at the first stamped session.
 	if s.bulkFencedForPeer.Load() {
-		return errBulkFencedForPeer
+		// #9752 round 5 item 4: revalidate on consume. A refuse→learn+
+		// clear→store-true interleave could otherwise latch a capable peer
+		// FOREVER (the caps-branch clear lands between the abort decision
+		// and the latch store, and ordinary retries keep hitting the
+		// stale latch). A peer that proves capable re-arms the bulk here.
+		if s.InstallTableIdentityCapable() {
+			s.bulkFencedForPeer.Store(false)
+		} else {
+			return errBulkFencedForPeer
+		}
 	}
 	s.bulkSendMu.Lock()
 	defer s.bulkSendMu.Unlock()
@@ -253,6 +268,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// Send owned v4 forward sessions.
 	fenced := false
 	err = walk.forEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
+		announced := s.installTableAnnouncedV4(key)
 		s.stampInstallGenV4(key, &val)
 		// #9752 round 4: the bulk is its own transmission path — it must
 		// judge the fence, not bypass it. A refusal ABORTS the window (no
@@ -260,6 +276,15 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		// window as successful, and the receiver would reconcile against
 		// it. Partial upserts already written are idempotent and safe.
 		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v4") {
+			fenced = true
+			return false
+		}
+		// #9752 round 5 item 1: on a mirror-sourced walk, an unstamped
+		// unannounced row is suspect (in-race delta, foreign row, or
+		// post-cap) — same abort. Helper-truth snapshots carry real
+		// stamps and never consult this.
+		if !walk.stampsAuthoritative && val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+			suppressUnannouncedForPBRActivePeer(s, announced, "bulk_v4") {
 			fenced = true
 			return false
 		}
@@ -301,9 +326,16 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	slog.Info("cluster sync: bulk sync iterating v6", "epoch", epoch, "source", walk.source, "sessions", count, "skipped", walk.skipped)
 	fenced = false
 	err = walk.forEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+		announced := s.installTableAnnouncedV6(key)
 		s.stampInstallGenV6(key, &val)
 		// #9752 round 4: v6 twin of the bulk fence above — refusal aborts.
 		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v6") {
+			fenced = true
+			return false
+		}
+		// #9752 round 5 item 1: v6 twin of the unannounced rule above.
+		if !walk.stampsAuthoritative && val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+			suppressUnannouncedForPBRActivePeer(s, announced, "bulk_v6") {
 			fenced = true
 			return false
 		}

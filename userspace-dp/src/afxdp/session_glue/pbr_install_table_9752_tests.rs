@@ -417,12 +417,15 @@ fn synced_import_reresolves_in_installing_table() {
         req_json.get("install_table_check").and_then(|v| v.as_u64()),
         Some(want_check as u64)
     );
-    // Production loss, pinned at the Go link: the mirror-sourced resend
-    // carries no RTFlowSessionID, so the request omits session_id and the
-    // import below must treat it as unknown (preserve), never default.
-    assert!(
-        req_json.get("session_id").is_none(),
-        "the request golden carries session_id; the chain's loss assumption changed — re-derive, don't delete"
+    // Round 5 item 2: the builder falls back to the mirror-preserved
+    // SessionID when RTFlow is absent, so the incarnation rides the
+    // request even for mirror-sourced resends (this also closes #10103).
+    // The resend leg below therefore exercises EXPLICIT same-incarnation
+    // preservation, not the unknown-id rule.
+    assert_eq!(
+        req_json.get("session_id").and_then(|v| v.as_u64()),
+        Some(77),
+        "the request golden must carry the incarnation id"
     );
     let req: SessionSyncRequest =
         serde_json::from_value(req_json.clone()).expect("request parses");
@@ -2244,4 +2247,67 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
         q.iter().any(|c| matches!(c, WorkerCommand::DeleteSynced(k) if k == &key)),
         "an ordinary close must replicate the forward delete, got {q:?}"
     );
+}
+
+/// Round 5 item 10: reverse imports normalize to (0,0) at the trust boundary.
+/// Defense-in-depth (Go never sends stamped reverses today): a stamped
+/// reverse would re-resolve a reply in a table chosen for the forward flow.
+#[test]
+fn reverse_import_normalizes_stamp_to_default() {
+    use crate::protocol::SessionSyncRequest;
+    use crate::server::helpers::build_synced_session_entry;
+    use rustc_hash::FxHashMap;
+
+    let (domain, check) = blue_stamp();
+    let req_json = serde_json::json!({
+        "operation": "upsert",
+        "addr_family": 2,
+        "protocol": 6,
+        "src_ip": "8.8.8.8",
+        "dst_ip": "10.0.61.102",
+        "src_port": 443,
+        "dst_port": 55068,
+        "ingress_zone": "wan",
+        "egress_zone": "lan",
+        "ingress_zone_id": 2,
+        "egress_zone_id": 1,
+        "owner_rg_id": 1,
+        "is_reverse": true,
+        "generation": 10,
+        "session_id": 77,
+        "tunnel_discriminator": 0,
+        "install_table_domain": domain,
+        "install_table_check": check,
+    });
+    let req: SessionSyncRequest =
+        serde_json::from_value(req_json).expect("request parses");
+    let zones = FxHashMap::from_iter([
+        ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
+        ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
+    ]);
+    let entry = build_synced_session_entry(&req, &zones, 0).expect("import");
+    assert_eq!(entry.decision.install_table_domain, 0);
+    assert_eq!(entry.decision.install_table_check, 0);
+}
+
+/// Round 5 item 2: a (0,0) re-import with the id OMITTED (double-zero: no
+/// identity from either field) preserves the stored stamp. Unknown means
+/// "cannot order", and nothing re-stamps to default — so keep known-good.
+/// (With the builder fallback, mirror-sourced resends carry the SessionID
+/// and take the explicit same/new-incarnation paths above; this cell pins
+/// the residual unknown rule, not the common case.)
+#[test]
+fn reimport_zero_stamp_omitted_id_preserves() {
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let mut first = synced_entry_for(&key, stamped_decision(unusable_resolution()), pbr_metadata());
+    first.session_id = 77;
+    assert!(sessions.upsert_synced_with_origin(first.into_session_install(NOW_NS), true));
+    let mut resend = synced_entry_for(&key, unstamped_decision(unusable_resolution()), pbr_metadata());
+    resend.session_id = 0;
+    assert!(sessions.upsert_synced_with_origin(resend.into_session_install(NOW_NS), true));
+    let (decision, _, _) = sessions.entry_with_origin(&key).expect("entry must exist");
+    let (domain, check) = blue_stamp();
+    assert_eq!(decision.install_table_domain, domain);
+    assert_eq!(decision.install_table_check, check);
 }

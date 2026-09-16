@@ -158,7 +158,7 @@ const (
 	capFlagPeerDeleteOwnership uint8 = 1 << 1
 
 	// capFlagPurgeRetirementForwardOnly: the sender understands a FORWARD-ONLY
-	// session delete (control protocol v18, #9752) and will retract exactly
+	// session delete (control protocol v22, #9752) and will retract exactly
 	// the named key, skipping companion deletes. Absent => the peer derives
 	// companions for every delete, so a purge-retirement close sent there
 	// would destroy sessions the purge deliberately preserved.
@@ -328,9 +328,14 @@ func (s *SessionSync) PurgeRetirementForwardOnlyCapable() bool {
 
 // InstallTableIdentityCapable reports whether the peer advertised that it
 // decodes the installing-table tail on session installs (#9752 round 3).
-// Same false-reading rule as PeerDeleteOwnershipCapable: callers MUST pair
-// this with peerCapabilitiesLearned, or installs are silently discarded on
-// every reconnect of a matched pair.
+//
+// The MUST-pair-with-peerCapabilitiesLearned rule stated on
+// PeerDeleteOwnershipCapable applies to DELETE suppressors (one-shot: gating
+// undiscovered deletes would discard them on every reconnect). It does NOT
+// apply to the install suppressor, which deliberately default-denies while
+// unlearned (round 4): installs repeat via sweep, so discovery-deny delays,
+// never drops — while pass-through would plant stamp-less installs on every
+// connect to an old peer.
 func (s *SessionSync) InstallTableIdentityCapable() bool {
 	if s == nil {
 		return false

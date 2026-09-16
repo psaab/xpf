@@ -1189,3 +1189,153 @@
                  never does, and the fallback cannot be distinguished from dead code"
         );
     }
+
+    /// Round 5 item 3 (+SPARK-F5): a buffered stamped packet whose table
+    /// VANISHED before neighbor resolution must be dropped on retry — not
+    /// served to the stale egress. The buffer-then-remove-then-learn order
+    /// is the production shape (table config commits while a neighbor is
+    /// still pending); C4 pins the session-hit path, this pins the replay
+    /// path. Production shape: the real `retry_pending_neigh` on a mirror
+    /// binding, neighbor via the dynamic map, table presence via the
+    /// forwarding registry.
+    fn stamped_pending_decision_9752(next_hop: IpAddr) -> SessionDecision {
+        let (domain, check) = crate::session::install_table_identity("blue");
+        let mut d = resolved_neighbor_decision(next_hop);
+        d.install_table_domain = domain;
+        d.install_table_check = check;
+        d
+    }
+
+    fn sweep_with_forwarding_9752(
+        bindings: &mut [BindingWorker],
+        forwarding: &ForwardingState,
+        dynamic_neighbors: &Arc<ShardedNeighborMap>,
+        now_ns: u64,
+    ) {
+        let lookup = WorkerBindingLookup::from_bindings(bindings);
+        let mirror_targets = MirrorTargetMap::default();
+        let mut shared_recycles = Vec::new();
+        let area = bindings[0].umem.area() as *const MmapArea;
+        let (left, rest) = bindings.split_at_mut(0);
+        let (binding, right) = rest.split_first_mut().expect("binding");
+        retry_pending_neigh(
+            binding, left, 0, right, &lookup, &mirror_targets, forwarding,
+            dynamic_neighbors, None, now_ns,
+            // SAFETY: same shape as sweep_7156 above.
+            unsafe { &*area },
+            &mut shared_recycles,
+            None,
+            &mut BatchCounters::default(),
+        );
+    }
+
+    fn blue_row_9752() -> super::super::types::InstallTables {
+        let (_, check) = crate::session::install_table_identity("blue");
+        super::super::types::InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        }
+    }
+
+    #[test]
+    fn replay_after_table_removal_drops_and_counts_9752() {
+        const QUEUED: u64 = 1_000_000_000;
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0)];
+        let frame = build_ipv4_test_packet(0);
+        let meta = pending_neighbor_meta(frame.len());
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 60, 1));
+        let flow_key = test_session_key(55068, 443);
+        push_pending(
+            &mut bindings[0],
+            PendingNeighPacket {
+                addr: 0,
+                desc: XdpDesc { addr: 0, len: frame.len() as u32, options: 0 },
+                meta,
+                decision: stamped_pending_decision_9752(nh),
+                flow_key: Some(flow_key),
+                queued_ns: QUEUED,
+                probe_attempts: 0,
+            },
+        );
+        // Blue is GONE from the registry (removed/re-homed while pending).
+        let forwarding = ForwardingState::default();
+        assert!(
+            !forwarding.install_tables.contains_key(
+                &crate::session::install_table_identity("blue").0
+            ),
+            "FIXTURE: blue must be absent or this cell cannot pin the drop"
+        );
+        // Drain any ambient purge flag so the arm below is this sweep's.
+        let _ = super::super::session_glue::take_install_table_purge_flag(0);
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        dynamic_neighbors.insert((80, nh), NeighborEntry { mac: [1, 2, 3, 4, 5, 6] });
+        let before = bindings[0].live.table_unavailable_packets.load(Ordering::Relaxed);
+        sweep_with_forwarding_9752(&mut bindings, &forwarding, &dynamic_neighbors, QUEUED + 100);
+        assert!(
+            bindings[0].pending_neigh.is_empty(),
+            "the stale buffered packet must leave pending_neigh (dropped, not served)"
+        );
+        assert_eq!(
+            bindings[0].live.table_unavailable_packets.load(Ordering::Relaxed),
+            before + 1,
+            "the stale-table retry must count exactly one observation"
+        );
+        assert!(
+            bindings[0].tx_pipeline.pending_fill_frames.contains(&0),
+            "the dropped frame must be recycled"
+        );
+        assert!(
+            super::super::session_glue::take_install_table_purge_flag(0),
+            "a terminal observation on retry must arm the purge walk (D8)"
+        );
+    }
+
+    #[test]
+    fn replay_with_table_present_serves_9752() {
+        const QUEUED: u64 = 1_000_000_000;
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0)];
+        let frame = build_ipv4_test_packet(0);
+        let meta = pending_neighbor_meta(frame.len());
+        let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 60, 1));
+        let flow_key = test_session_key(55068, 443);
+        push_pending(
+            &mut bindings[0],
+            PendingNeighPacket {
+                addr: 0,
+                desc: XdpDesc { addr: 0, len: frame.len() as u32, options: 0 },
+                meta,
+                decision: stamped_pending_decision_9752(nh),
+                flow_key: Some(flow_key),
+                queued_ns: QUEUED,
+                probe_attempts: 0,
+            },
+        );
+        // Blue present: the retry serves.
+        let mut forwarding = ForwardingState::default();
+        let (domain, _) = crate::session::install_table_identity("blue");
+        forwarding.install_tables.insert(domain, blue_row_9752());
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        dynamic_neighbors.insert((80, nh), NeighborEntry { mac: [1, 2, 3, 4, 5, 6] });
+        // Drain any ambient purge flag so a set below is this sweep's.
+        let _ = super::super::session_glue::take_install_table_purge_flag(0);
+        let before = bindings[0].live.table_unavailable_packets.load(Ordering::Relaxed);
+        sweep_with_forwarding_9752(&mut bindings, &forwarding, &dynamic_neighbors, QUEUED + 100);
+        assert!(
+            bindings[0].pending_neigh.is_empty(),
+            "a live-table retry must consume the buffered packet"
+        );
+        // The new check is the only bump/arm site on this path (the dispatch
+        // tail below it cannot terminalize), so unchanged counter + unset
+        // flag prove it did not false-fire. (Whether the tail then serves or
+        // recycles on this minimal fixture is tail behavior, not this check.)
+        assert_eq!(
+            bindings[0].live.table_unavailable_packets.load(Ordering::Relaxed),
+            before,
+            "a live-table retry must not count a terminal observation"
+        );
+        assert!(
+            !super::super::session_glue::take_install_table_purge_flag(0),
+            "a live-table retry must not arm the purge walk"
+        );
+    }

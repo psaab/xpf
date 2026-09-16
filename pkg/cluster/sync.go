@@ -1049,12 +1049,27 @@ type SessionSync struct {
 	// way. Same incarnation scoping (reset on full disconnect), plus an
 	// early clear when a capable capability frame lands.
 	bulkFencedForPeer atomic.Bool
-	lastNewCounter    uint64
-	lastClosedCounter uint64
-	lastSweepEmpty    bool
-	vrfDevice         string
-	peerClockOffset   atomic.Int64
-	clockSynced       atomic.Bool
+	// pbrAnnouncedForFence records that this node ANNOUNCED (sent) or
+	// INSTALLED (received) a stamped session this peer incarnation (#9752
+	// round 5 item 1). While set, a mirror-sourced (0,0) with NO memo
+	// record is suspect (in-race delta, foreign row, or post-cap) rather
+	// than genuinely-non-PBR, and the sweep/bulk fence withholds it from
+	// incapable peers. Same incarnation scoping (reset on full disconnect).
+	pbrAnnouncedForFence atomic.Bool
+	// installTableSuppressDebt records that this incarnation withheld ≥1
+	// install on the #9752 fence (#9752 round 5 item 5). Suppressed installs
+	// are never retried by the sweep (its window advances past them), so a
+	// capable discovery transfers this debt into a cold-prime re-arm (the
+	// redriven bulk snapshot carries them all). Distinct from the warn
+	// latch below it: that one must never clear (warn-once), this one is
+	// consumed by the re-arm. Same incarnation scoping.
+	installTableSuppressDebt atomic.Bool
+	lastNewCounter           uint64
+	lastClosedCounter        uint64
+	lastSweepEmpty           bool
+	vrfDevice                string
+	peerClockOffset          atomic.Int64
+	clockSynced              atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the

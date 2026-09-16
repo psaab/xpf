@@ -223,11 +223,57 @@ func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint3
 		return false
 	}
 	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
+	s.installTableSuppressDebt.Store(true)
 	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
 		slog.Warn("cluster sync: withholding stamped session installs — the peer has not advertised "+
 			"#9752 install-table identity (incapable or not yet discovered), so it would install them "+
 			"stamp-less and wrong-table after failover. That peer will miss these sessions until a miss "+
 			"re-establishes them or the upgrade completes on both nodes.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
+}
+
+// suppressUnannouncedForPBRActivePeer reports whether a mirror-sourced (0,0)
+// install must be WITHHELD because it was never announced on a node that
+// does PBR (#9752 round 5 item 1).
+//
+// A (0,0) rebuilt from the BPF mirror is AMBIGUOUS: genuinely-non-PBR, or a
+// PBR session whose memo record is missing (sweep raced the announcing
+// delta, foreign row, or post-cap). Sending it to an incapable peer
+// installs a possibly-PBR session stamp-less (default-table resolution).
+// On a node that announced stamps this incarnation, fail closed: withhold
+// it (the delta announces + records, the sweep retries, the bulk carries
+// helper truth). On a node that never announced (kernel dataplanes always
+// land here — only userspace convert stamps), (0,0) is genuine: send.
+//
+// ONLY for mirror-derived sends (sweep + store-walk bulk). Delta/queue
+// (0,0)s are authoritative (the helper said default) and helper-truth bulk
+// snapshots carry real stamps — neither consults this. Same counter and
+// one-shot warning as the stamped suppressor (one alarm per incarnation
+// for both withholding reasons).
+//
+// `announced` is memo membership captured BEFORE stamping: stamping records
+// (round 5 item 1 records everything announced), which would destroy the
+// miss signal if re-read after. A concurrent record landing between the
+// capture and this decision fails closed (a redundant withhold; the
+// announcing send carries the session anyway).
+func suppressUnannouncedForPBRActivePeer(s *SessionSync, announced bool, source string) bool {
+	if announced {
+		return false
+	}
+	if s == nil || !s.pbrAnnouncedForFence.Load() || s.InstallTableIdentityCapable() {
+		return false
+	}
+	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
+	s.installTableSuppressDebt.Store(true)
+	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding unannounced session installs — this node does PBR and "+
+			"these mirror-sourced (0,0)s were never announced (in-race delta, foreign row, or memo "+
+			"at cap), so the peer would install possibly-PBR sessions stamp-less. They flow once "+
+			"announced, or on upgrade.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))

@@ -1,5 +1,7 @@
 package cluster
 
+import "github.com/psaab/xpf/pkg/dataplane"
+
 // sentInstallTable is one session incarnation's last-sent installing-table
 // identity (#9752).
 type sentInstallTable struct {
@@ -37,6 +39,15 @@ type sentInstallTable struct {
 // frame with a nonzero stamp overwrites the record, and a matched frame
 // with (0,0) (a mirror-sourced resend) is restored from it.
 //
+// ROUND 5 ITEM 1: records EVERYTHING announced, including (0,0) — so
+// memo-membership means "announced" and a sweep/bulk (0,0) with NO record
+// is provably never-announced (in-race delta, foreign row, or post-cap),
+// never a forgotten genuine default. The fence withholds THOSE from
+// incapable peers on PBR-active nodes (see
+// suppressUnannouncedForPBRActivePeer). Recording a zero can never clobber
+// a stamp: the restore above runs first, so a same-incarnation (0,0)
+// arrives here already restored.
+//
 // The caller holds genSentMu. Generic over the two wire-key types.
 func stampInstallTableLocked[K comparable](m map[K]sentInstallTable, key K, sessionID uint64, domain, check *uint32) {
 	if sessionID == 0 {
@@ -51,14 +62,11 @@ func stampInstallTableLocked[K comparable](m map[K]sentInstallTable, key K, sess
 	if ok && *domain == 0 && *check == 0 && (rec.domain != 0 || rec.check != 0) {
 		*domain, *check = rec.domain, rec.check
 	}
-	if *domain == 0 && *check == 0 {
-		return
-	}
 	if !ok && len(m) >= genGuardMapCap {
-		// Skip-record-on-full, like putGenBounded: no memo for this key, which
-		// degrades to the pre-#9752 window, never to a wrong table for a
-		// stamped session the receiver already holds (the install guard keeps
-		// the recorded stamp there).
+		// Skip-record-on-full, like putGenBounded: no memo for this key.
+		// A sweep resend for it stays (0,0) and is fenced as unannounced
+		// on PBR-active nodes (fail-closed) instead of passing as
+		// genuine-default.
 		return
 	}
 	m[key] = sentInstallTable{sessionID: sessionID, domain: *domain, check: *check}
@@ -134,4 +142,23 @@ func lookupRecvInstallTableLocked[K comparable](m map[K]recvInstallTable, key K,
 		return 0, 0, false
 	}
 	return rec.domain, rec.check, rec.domain != 0 || rec.check != 0
+}
+
+// installTableAnnouncedV4 reports whether this node announced key (a memo
+// record exists, stamped or zero) (#9752 round 5 item 1). The sweep and the
+// store-walk bulk capture this BEFORE stamping: stamping records, which
+// would destroy the miss signal the unannounced fence judges.
+func (s *SessionSync) installTableAnnouncedV4(key dataplane.SessionKey) bool {
+	s.genSentMu.Lock()
+	defer s.genSentMu.Unlock()
+	_, ok := s.installTableSentV4[key]
+	return ok
+}
+
+// installTableAnnouncedV6 is the IPv6 twin.
+func (s *SessionSync) installTableAnnouncedV6(key dataplane.SessionKeyV6) bool {
+	s.genSentMu.Lock()
+	defer s.genSentMu.Unlock()
+	_, ok := s.installTableSentV6[key]
+	return ok
 }

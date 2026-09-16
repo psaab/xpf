@@ -375,8 +375,13 @@ pub(crate) fn build_synced_session_entry(
             // re-resolve runs where the flow was installed. An old peer omits
             // both fields (`serde(default)` 0 = default table), the pre-#9752
             // behavior (rolling-upgrade safe).
-            install_table_domain: req.install_table_domain,
-            install_table_check: req.install_table_check,
+            // Round 5 item 10: reverse imports normalize to (0,0) at the
+            // trust boundary (companions resolve unstamped, R1).
+            // Defense-in-depth: unreachable today since Go never sends
+            // stamped reverses — but a stamped reverse would re-resolve a
+            // reply in a table chosen for the forward direction.
+            install_table_domain: if req.is_reverse { 0 } else { req.install_table_domain },
+            install_table_check: if req.is_reverse { 0 } else { req.install_table_check },
         },
         metadata: crate::session::SessionMetadata {
             // #4983/#7095: a peer-imported session now carries an ingress

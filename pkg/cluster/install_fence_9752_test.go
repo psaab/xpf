@@ -97,3 +97,54 @@ func TestStampedInstallWithheldWhileUnlearnedThenFlows9752(t *testing.T) {
 		t.Fatalf("sendCh holds %d, want 1: post-discovery sends must flow", got)
 	}
 }
+
+// TestCapableDiscoveryRearmsColdPrimeAfterSuppression9752 pins round 5 item
+// 5: suppressed installs are never retried by the sweep (its window advances
+// past them), so a capable discovery with suppress debt re-arms the cold
+// prime — the redriven bulk snapshot (#82/#9626 machinery, pinned by its own
+// tests) heals every withheld install at once.
+func TestCapableDiscoveryRearmsColdPrimeAfterSuppression9752(t *testing.T) {
+	ss := fenceSync9752()
+	// Suppress while undiscovered.
+	ss.QueueSessionV4(rtflowKeyV4(42004), stampedVal9752())
+	if got := len(ss.sendCh); got != 0 {
+		t.Fatal("FIXTURE: undiscovered send must be withheld")
+	}
+	if !ss.installTableSuppressDebt.Load() {
+		t.Fatal("FIXTURE: suppression must record debt")
+	}
+	// Capable discovery transfers the debt into a re-arm.
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagPurgeRetirementForwardOnly|capFlagInstallTableIdentity))
+	if !ss.needColdPrime.Load() {
+		t.Fatal("capable discovery with suppress debt must re-arm the cold prime")
+	}
+	if ss.installTableSuppressDebt.Load() {
+		t.Error("re-arm must consume the debt (no double-pay on re-discovery)")
+	}
+}
+
+// TestCapableDiscoveryWithoutSuppressionDoesNotRearm9752: no debt, no bulk.
+func TestCapableDiscoveryWithoutSuppressionDoesNotRearm9752(t *testing.T) {
+	ss := fenceSync9752()
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagPurgeRetirementForwardOnly|capFlagInstallTableIdentity))
+	if ss.needColdPrime.Load() {
+		t.Error("capable discovery without suppressions must not re-arm (spurious bulk)")
+	}
+}
+
+// TestIncapableDiscoveryDoesNotRearm9752: the peer still cannot take the
+// sessions; no redrive until upgrade/reconnect.
+func TestIncapableDiscoveryDoesNotRearm9752(t *testing.T) {
+	ss := fenceSync9752()
+	ss.QueueSessionV4(rtflowKeyV4(42004), stampedVal9752())
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagPurgeRetirementForwardOnly))
+	if ss.needColdPrime.Load() {
+		t.Error("incapable discovery must not re-arm (peer cannot take a stamped snapshot)")
+	}
+	if !ss.installTableSuppressDebt.Load() {
+		t.Error("debt must survive an incapable discovery (still owed)")
+	}
+}

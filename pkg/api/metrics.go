@@ -685,6 +685,7 @@ type xpfCollector struct {
 	bindingSlowPathNextTablePackets       *prometheus.Desc
 	bindingNextTableUnsupportedDrops      *prometheus.Desc
 	bindingTableUnavailableDrops          *prometheus.Desc
+	bindingTableUnavailablePackets        *prometheus.Desc
 	bindingSlowPathLocalDeliveryPackets   *prometheus.Desc
 	bindingSlowPathMissingNeighborPackets *prometheus.Desc
 	// #1248: class-specific active flow distribution by egress CoS
@@ -1131,6 +1132,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.bindingSlowPathNextTablePackets
 	ch <- c.bindingNextTableUnsupportedDrops
 	ch <- c.bindingTableUnavailableDrops
+	ch <- c.bindingTableUnavailablePackets
 	ch <- c.bindingSlowPathLocalDeliveryPackets
 	ch <- c.bindingSlowPathMissingNeighborPackets
 	ch <- c.cosActiveFlowCount

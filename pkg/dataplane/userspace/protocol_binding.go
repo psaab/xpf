@@ -312,7 +312,13 @@ type BindingStatus struct {
 	// by the slow-path allow-list (#9752): the session's installing table is
 	// not resolvable in the current config (retired/unknown instance or owner
 	// change), so there is no table the kernel could correctly forward it in.
-	TableUnavailableDrops       uint64 `json:"table_unavailable_drops,omitempty"`
+	TableUnavailableDrops uint64 `json:"table_unavailable_drops,omitempty"`
+	// TableUnavailablePackets counts per-packet TableUnavailable
+	// dispositions observed on the fast path (#9752 round 5): every frame
+	// whose session resolved terminal, whether or not it later reached the
+	// slow-path allow-list (TableUnavailableDrops counts only the refused
+	// subset). Wire-dead before round 5 (Rust emitted it, Go dropped it).
+	TableUnavailablePackets     uint64 `json:"table_unavailable_packets,omitempty"`
 	SlowPathForwardBuildPackets uint64 `json:"slow_path_forward_build_packets,omitempty"`
 	SlowPathDrops               uint64 `json:"slow_path_drops,omitempty"`
 	SlowPathRateLimited         uint64 `json:"slow_path_rate_limited,omitempty"`

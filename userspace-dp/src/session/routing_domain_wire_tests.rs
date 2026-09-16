@@ -174,15 +174,21 @@ fn install_table_identity_matches_go_vectors_9752() {
             domain, want_domain,
             "name {name:?}: domain {domain} != Go {want_domain}"
         );
-        // H2 is helper-local (no Go counterpart): pin determinism + the
-        // u64-fold shape instead of agreement — same input, same check,
-        // and the check is the hash's high half (non-degenerate).
+        // H2 is helper-local (no Go counterpart): pin ONE literal plus
+        // determinism (round 5 item 12 — determinism alone would pass a
+        // constant function). The literal is the blue check the pbr cells
+        // stamp with; the loop keeps the per-vector shape check.
         assert_eq!(
             install_table_identity(name).1,
             check,
             "name {name:?}: H2 nondeterministic across calls"
         );
     }
+    assert_eq!(
+        install_table_identity("blue"),
+        (525590, 3318534811),
+        "H2 literal drift: the helper-local high half changed shape"
+    );
 }
 
 /// #9752: hashing the empty name is a caller bug (Go: `""` -> 106945,

@@ -79,9 +79,22 @@ func TestInstallTableProducerToResendEndToEnd9752(t *testing.T) {
 	// Receiver: real install apply over a lossy mirror.
 	ss2, dp2 := lossyRecvSync9752(t)
 	ss2.installClusterSyncedV4(key1, val1)
-	if got := lastSet9752(t, dp2); got.InstallTableDomain != 525590 || got.InstallTableCheck != 3318534811 {
+	// The FORWARD row (the install also writes the reverse companion,
+	// which is unstamped by rule R1 — asserting lastSet would read it).
+	var installedFwd dataplane.SessionValue
+	foundFwd := false
+	for _, w := range dp2.sets {
+		if w.IsReverse == 0 {
+			installedFwd, foundFwd = w, true
+			break
+		}
+	}
+	if !foundFwd {
+		t.Fatal("INSTALL: no forward row reached the mirror")
+	}
+	if installedFwd.InstallTableDomain != 525590 || installedFwd.InstallTableCheck != 3318534811 {
 		t.Fatalf("INSTALL: peer installed (%d,%d), want the announced stamp",
-			got.InstallTableDomain, got.InstallTableCheck)
+			installedFwd.InstallTableDomain, installedFwd.InstallTableCheck)
 	}
 	if mirror, _ := dp2.GetSessionV4(fwd); mirror.InstallTableDomain != 0 || mirror.InstallTableCheck != 0 {
 		t.Fatal("FIXTURE: the mirror must read back (0,0) or the resend leg is not lossy")

@@ -290,6 +290,7 @@ surfaces move to domain interfaces such as `RuntimeDataPlane`, `SessionStore`,
 | `pkg/cluster/sync_conn_read.go` | #5661 pure-motion split of `sync_conn.go` — receive/dispatch path still references legacy session types. |
 | `pkg/cluster/sync_conn_sweep.go` | #5661 pure-motion split of `sync_conn.go` — incremental sync sweep still references legacy session types. |
 | `pkg/cluster/sync_conn_write.go` | #5661 pure-motion split of `sync_conn.go` — send/queue/journal path still references legacy session types. |
+| `pkg/cluster/sync_install_table_9752.go` | #9752 round 5 — install-table send/recv memos name legacy session key/value types for the cluster sync path (same types as the `sync_conn_gen.go` guards); membership helpers only, no legacy enforcement path. |
 | `pkg/cluster/sync_protocol.go` | Wire protocol still carries legacy session records. |
 | `pkg/conntrack/gc.go` | GC still uses root package session-domain types until those move out of `pkg/dataplane`; constructors no longer accept `DataPlane`. |
 | `pkg/daemon/daemon.go` | Daemon owns `dataplane.RuntimeDataPlane`; `legacyDP()` accessor was deleted in #1519 (sub-#1451 S4). Only the `RuntimeDataPlane` field and `LastApplyResultOf` adapter remain. |
