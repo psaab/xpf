@@ -16,10 +16,11 @@ import (
 // #9947 F-007: a degraded or hard FRR reload used to report commit success —
 // degraded mapped to nil in applyFRRConfig, hard logged-and-continued in
 // applyRoutingRules — while stale config (a permit the operator removed)
-// stayed installed. The full path now fails the commit closed via its own
+// stayed installed, up to INDEFINITELY when frr-pythontools is missing
+// (the fallback cannot remove and the retry re-invokes the missing
+// program forever). The full path now fails the commit closed via its own
 // frrErr deferred slot (never via routingRuleErr, which the #9693 owner
-// would falsely discharge), tolerating only the persistent
-// pytools-missing degraded state.
+// would falsely discharge), with the persistent cause named distinctly.
 
 // TestApplyFRRFullFailsClosedOnHardFailure9947: both reload legs fail, so
 // NOTHING converged and live FRR keeps its previous config — the commit
@@ -65,23 +66,66 @@ func TestApplyFRRFullFailsClosedOnDegradedTransient9947(t *testing.T) {
 	}
 }
 
-// TestApplyFRRFullToleratesPytoolsMissing9947: without frr-pythontools
-// EVERY reload degrades until the package is installed — failing the
-// commit there would red every commit with no operator action short of
-// installing the package, so it stays warn-and-continue with gauge +
-// slow retry (the #1880 tolerated persistent state).
-func TestApplyFRRFullToleratesPytoolsMissing9947(t *testing.T) {
+// TestApplyFRRFullFailsClosedOnPytoolsMissing9947: without frr-pythontools
+// the fallback cannot remove anything and the retry re-invokes the missing
+// program forever, so the unenforced removal is INDEFINITE — returning nil
+// would stamp MarkActiveApplied certifying full convergence of a commit
+// whose permit removal never took effect. The commit must fail, with the
+// persistent cause named (install frr-pythontools).
+func TestApplyFRRFullFailsClosedOnPytoolsMissing9947(t *testing.T) {
 	conf := filepath.Join(t.TempDir(), "frr.conf")
 	if err := os.WriteFile(conf, []byte("log syslog informational\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	rec := &frr.RecordingExecutor{ReloadErr: os.ErrNotExist}
 	d := &Daemon{frr: frr.NewForTest(conf, rec)}
-	if err := d.applyFRRFull(&config.Config{}, nil); err != nil {
-		t.Fatalf("pytools-missing degraded must stay tolerated (nil), got %v", err)
+	err := d.applyFRRFull(&config.Config{}, nil)
+	if err == nil {
+		t.Fatal("pytools-missing degraded must fail the commit closed (indefinite unenforced removal); got nil")
+	}
+	if !errors.Is(err, frr.ErrFRRReloadDegraded) {
+		t.Fatalf("pytools-missing frrErr must wrap the degraded sentinel, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "frr-pythontools") {
+		t.Fatalf("pytools-missing frrErr must name the persistent cause, got %v", err)
 	}
 	if !d.frr.ReloadDegraded() {
-		t.Fatal("tolerated pytools-missing must still set the degraded gauge")
+		t.Fatal("pytools-missing must set the degraded gauge")
+	}
+}
+
+// TestApplyFRRFullFailsClosedOnRemovalUnderPytoolsMissing9947 is the
+// removal-bearing shape F-007 exists for: the operator's commit REMOVES a
+// static route (a permit-bearing stanza), the reload degrades with the
+// script missing, and live FRR keeps the stale route indefinitely. The
+// commit must fail rather than certify a removal that never took effect.
+func TestApplyFRRFullFailsClosedOnRemovalUnderPytoolsMissing9947(t *testing.T) {
+	conf := filepath.Join(t.TempDir(), "frr.conf")
+	if err := os.WriteFile(conf, []byte("log syslog informational\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rec := &frr.RecordingExecutor{ReloadErr: os.ErrNotExist}
+	d := &Daemon{frr: frr.NewForTest(conf, rec)}
+	oldCfg := &config.Config{}
+	oldCfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{{
+		Destination: "10.9.9.0/24",
+		NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+	}}
+	newCfg := &config.Config{}
+	// Removal-bearing control: the new assembly carries one fewer route.
+	if got := len(d.assembleFRRConfig(oldCfg, nil).StaticRoutes); got != 1 {
+		t.Fatalf("CONTROL FAILED: old assembly carries %d static routes, want 1", got)
+	}
+	if got := len(d.assembleFRRConfig(newCfg, nil).StaticRoutes); got != 0 {
+		t.Fatalf("CONTROL FAILED: new assembly carries %d static routes, want 0 (the removal)", got)
+	}
+	err := d.applyFRRFull(newCfg, nil)
+	if err == nil {
+		t.Fatal("a removal commit under pytools-missing must fail closed; got nil — " +
+			"the stale route stays live while the commit would be certified")
+	}
+	if !errors.Is(err, frr.ErrFRRReloadDegraded) {
+		t.Fatalf("removal frrErr must wrap the degraded sentinel, got %v", err)
 	}
 }
 

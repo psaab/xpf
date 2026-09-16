@@ -190,19 +190,24 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 // on the commit itself.
 //
 // Return contract (#9947 F-007, fail-closed): nil on a full-diff
-// convergence or on the persistent pytools-missing degraded state
-// (frr-reload.py not installed — every reload degrades until the
-// package is installed, so failing the commit would red every commit
-// with no operator action short of installing the package; tolerated
-// with gauge + warn-once + slow-cadence retry). A HARD reload failure
-// (NOTHING applied — live FRR keeps its previous config while frr.conf
-// on disk holds the new section) and a TRANSIENT degraded reload
-// (additive vtysh -f applied the new lines but deferred stale-config
-// removal) both return a non-nil error so the tail commit-error join
-// fails the commit instead of reporting an unqualified success for a
-// removal that did not happen. The in-manager degraded-retry loop
-// still owns convergence in both cases; the error is the operator
-// signal, not the convergence mechanism.
+// convergence; non-nil otherwise. A HARD reload failure (NOTHING
+// applied — live FRR keeps its previous config while frr.conf on disk
+// holds the new section) and ANY degraded reload (additive vtysh -f
+// applied the new lines but deferred stale-config removal) both return
+// an error so the tail commit-error join fails the commit instead of
+// reporting an unqualified success for a removal that did not happen.
+// There is deliberately NO pytools-missing exemption: without
+// frr-reload.py the fallback cannot remove anything and the retry
+// re-invokes the missing program forever, so the unenforced removal is
+// INDEFINITE — returning nil there would stamp MarkActiveApplied
+// (daemon_apply_commit.go) certifying full convergence of a commit
+// whose permit removal never took effect, the very false-success class
+// this fix closes. The message distinguishes the persistent cause
+// (install frr-pythontools) from a transient one. Failing the commit
+// does not brick boot or HA sync: background applies log the error
+// and continue (daemon_apply.go), and the in-manager degraded-retry
+// loop still owns convergence; the error is the operator signal, not
+// the convergence mechanism.
 //
 // This is deliberately a SEPARATE deferred slot (frrErr) from the
 // ip-rule routingRuleErr below: the #9693 routing-reconcile retry
@@ -222,10 +227,8 @@ func (d *Daemon) applyFRRFull(cfg *config.Config, commitOverlay []config.RouteOv
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, frr.ErrFRRReloadDegraded) && frr.IsFRRReloadPyMissing(err) {
-		// Persistent environmental degraded: tolerated (warn + gauge +
-		// slow retry already armed by the manager).
-		return nil
+	if frr.IsFRRReloadPyMissing(err) {
+		return fmt.Errorf("FRR reload degraded and cannot converge: frr-pythontools is not installed, so stale-config removal is NOT happening (permit removals unenforced until it is installed; degraded retry armed): %w", err)
 	}
 	return fmt.Errorf("FRR reload did not fully converge (change not yet fully in effect; degraded retry armed): %w", err)
 }

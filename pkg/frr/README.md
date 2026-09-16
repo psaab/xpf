@@ -1423,16 +1423,23 @@ step. Both are required — neither sees the other's case:
   5-minute slow retry cadence, so a transient primary failure that the
   fast rungs or the first slow tick converges never pages). A firing
   alert means stale FRR config is still installed — a removal the
-  operator committed may not have taken effect — and the in-manager
-  retry has not converged a full diff. Runbook: (1) check `xpfd` logs
-  for the `frr-reload.py reload failed` cause; (2) if the cause is a
-  missing script, install `frr-pythontools` (the tolerated persistent
-  degraded state — commits stay green there by design); (3) otherwise
-  re-commit (an identical commit re-runs the primary reload and
-  discharges the failed-commit debt) or wait for the retry to converge
-  and confirm the gauge clears. The operator-commit path fails the
-  commit closed on hard and transient-degraded reloads, so a firing
-  alert is always paired with a failed commit, never a silent success.
+  operator committed may not have taken effect. The exposure is bounded
+  by retry convergence for TRANSIENT failures; with frr-pythontools
+  missing it is INDEFINITE (the retry re-invokes the missing program
+  forever), which is why that state fails the commit closed rather than
+  certifying success. Every degraded or hard reload on the
+  operator-commit path fails the commit, so a firing alert is always
+  paired with a failed commit, never a silent success. Runbook:
+  (1) read the commit error / `xpfd` logs for the cause; (2) if
+  frr-pythontools is missing, install it; (3) retry the apply — after a
+  PLAIN failed commit, bare `commit` re-runs the full pipeline (the
+  store has no dirty gate); after a FAILED `commit confirmed`, do NOT
+  bare-`commit` (the #4000 confirm-only intercept cancels the rollback
+  WITHOUT re-applying — confirmation is not retry) — instead stage any
+  edit and `commit` (a dirty candidate falls through to a full
+  re-apply and clears the window), or `commit confirmed` again to
+  re-arm and re-apply (pinned by the pkg/cli 9947 retry cells);
+  (4) confirm the gauge clears.
 - Hard failure (#5109): when BOTH frr-reload.py AND the additive
   `vtysh -f` fallback fail, `reloadLocked` returns the underlying error
   (NOT the degraded sentinel) — nothing was applied, so live FRR keeps

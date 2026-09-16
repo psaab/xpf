@@ -30,6 +30,16 @@ import (
 // so the value here is a measured baseline: whoever takes the deny later gets a
 // green pin of what the chain does now, and any divergence is a diff against a
 // fact rather than against an argument.
+//
+// #9947 CORRECTION to the "UNREACHABLE" inference below (not to the cells —
+// they still pin today's render exactly). The inference assumed a trailing
+// deny APPENDED after the survivor's permit-10 (deny-20 behind a match-all).
+// The synthesis shape under discussion is a chain MEMBER with a terminating
+// default, and EMPTY contributes zero sequences: [EMPTY,SYNTH-DENY] renders
+// lone deny-10, reachable by every route (measured, not argued, in
+// TestEmptySurvivorSynthesizedDenyIsReachable9947). The shape flips
+// permit-all to deny-all — the maximum behavior change — so it belongs IN
+// any deny-affected denominator; excluding it would hide an outage case.
 
 func emptySurvivorPolicyOptions8369() *config.PolicyOptionsConfig {
 	return &config.PolicyOptionsConfig{
@@ -82,30 +92,20 @@ func TestEmptySurvivorStillClassifiesAsSuffixNarrowed8369(t *testing.T) {
 	}
 }
 
-// TestEmptySurvivorMakesASynthesizedDenyUNREACHABLE8369 is the finding, and
-// the reason #8369 cannot be sized from the gauge it proposes to size it on.
-//
-// An empty-but-defined surviving policy renders as ONE sequence:
+// TestEmptySurvivorMakesASynthesizedDenyUNREACHABLE8369 pins today's render
+// of the empty-survivor shape: ONE sequence, a match-all permit-10, with
+// the ghost changing nothing.
 //
 //	route-map E-xpf-chain permit 10
 //	exit
 //
-// A route-map sequence with `permit` and NO match clause matches EVERYTHING in
-// FRR. So every route is permitted at sequence 10 and nothing ever reaches a
-// later sequence — which makes a deny synthesized for the trailing ghost
-// PROVABLY INERT, not merely hard to observe.
-//
-// That matters beyond this one shape. #8369 names
-// xpf_frr_policy_chains_narrowed_deny_safe as the population to size the change
-// on, and this case is inside it: the ghosts form a suffix, so it counts as
-// deny-safe, while the deny it would license does nothing. The gauge therefore
-// OVER-COUNTS the population the change would actually affect, and a sizing
-// decision taken from it would overstate the benefit.
-//
-// This is the middle row the issue's own fixture requirements ask for: with a
-// populated survivor a trailing deny is reachable and meaningful; with an empty
-// one it is unreachable; and a fixture built only from the populated case
-// reports "the deny is appended" for both.
+// (Name retained for history; the "UNREACHABLE" inference it was filed
+// under is CORRECTED by #9947 — see the file header and
+// TestEmptySurvivorSynthesizedDenyIsReachable9947. A deny synthesized as
+// a chain member lands at deny-10 as the first and only sequence,
+// reachable by every route: the shape flips permit-all to deny-all.
+// The gauge therefore does NOT over-count here, and a sizing decision
+// must keep this highest-impact member of the denominator.)
 //
 // MUTATION: give EMPTY a term (so it renders a match line) and the
 // no-match-clause assertion reds — which is the populated case, and is exactly

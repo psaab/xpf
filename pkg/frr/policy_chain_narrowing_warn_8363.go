@@ -44,20 +44,24 @@ import (
 //     precondition ("Do not decide this from argument"). No fleet split has
 //     been collected.
 //
-//  3. THE GAUGE THAT WOULD SIZE IT OVER-COUNTS. A surviving policy statement
-//     that is DEFINED but carries no terms renders as one sequence with NO
-//     match clause — `route-map C permit 10` — which in FRR matches
-//     EVERYTHING. Every route is permitted there and nothing reaches a later
-//     sequence, so a deny synthesized for a trailing ghost is not merely hard
-//     to observe, it is UNREACHABLE. That shape counts as deny-safe
-//     (GhostsAreSuffix is true — the ghost is last), so
-//     xpf_frr_policy_chains_narrowed_deny_safe includes chains the change
-//     could not affect. Measured, not argued:
-//     TestEmptySurvivorMakesASynthesizedDenyUNREACHABLE8369.
+//  3. THE EMPTY-SURVIVOR SHAPE IS THE HIGHEST-IMPACT MEMBER, NOT AN
+//     OVER-COUNT. (Corrects the earlier "gauge over-counts" version of
+//     this reason — #9947.) A surviving policy statement that is DEFINED
+//     but carries no terms renders today as one match-all sequence,
+//     `route-map C permit 10`. The earlier inference was that a trailing
+//     deny would sit unreachable behind it. Measured against the actual
+//     synthesis shape — a chain MEMBER with a terminating default —
+//     EMPTY contributes zero sequences, so [EMPTY,SYNTH-DENY] renders
+//     lone deny-10, reachable by every route: the shape flips permit-all
+//     to deny-all (TestEmptySurvivorSynthesizedDenyIsReachable9947).
+//     xpf_frr_policy_chains_narrowed_deny_safe counts it correctly;
+//     excluding it would hide an outage case, not correct an over-count.
 //
-// What a future implementation still owes, beyond the issue's own list: sizing
-// must exclude the empty-survivor shape, or the benefit is overstated by
-// however common it is.
+// What a future implementation still owes, beyond the issue's own list: the
+// migration decision must weigh that the empty-survivor population flips
+// from permit-all to deny-all (not inert), and reachability must be
+// re-derived per survivor shape (terminating-default and match-all-final-
+// term survivors are code-read, not yet pinned — see the F-008 tracker).
 
 // narrowedChainSite is one attachment whose resolved chain is a strict, non-empty
 // subset of what the operator authored.

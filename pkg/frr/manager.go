@@ -1067,7 +1067,10 @@ func (m *Manager) reloadLocked() error {
 	defer fcancel()
 	output, err := m.executor().VtyshLoad(fctx, m.frrConf)
 	if err != nil {
-		return fmt.Errorf("vtysh reload: %w: %s", err, string(output))
+		// Preserve BOTH causes: dropping perr would hide a pytools-missing
+		// primary behind the fallback error, defeating IsFRRReloadPyMissing
+		// (slow-cadence retry + the daemon's persistent-cause message, #9947).
+		return fmt.Errorf("vtysh reload: %w (primary frr-reload.py also failed: %w): %s", err, perr, string(output))
 	}
 	slog.Warn("FRR config loaded via additive vtysh -f (degraded: stale-config removal deferred to retry)")
 	return fmt.Errorf("%w: %w", ErrFRRReloadDegraded, perr)
@@ -1082,13 +1085,13 @@ func isFrrReloadPyMissing(err error) bool {
 }
 
 // IsFRRReloadPyMissing reports whether err (usually an ErrFRRReloadDegraded
-// wrap from ApplyFull/Clear) is caused by a missing frr-reload.py
-// (frr-pythontools absent) rather than a transient reload failure. Exported
-// for the daemon commit path (#9947 F-007): a pytools-missing degraded
-// reload is a persistent environmental state with a slow-cadence retry, so
-// the commit tolerates it with gauge + warn-once; a transient degraded
-// reload (stale removal deferred on an otherwise-healthy box) fails the
-// commit closed so the operator does not get an unqualified success.
+// wrap from ApplyFull/Clear, or a hard-failure wrap whose primary cause is
+// preserved) is caused by a missing frr-reload.py (frr-pythontools absent)
+// rather than a transient reload failure. Exported for the daemon commit
+// path (#9947 F-007), which fails the commit closed in both cases but
+// names the persistent cause (install frr-pythontools) distinctly: without
+// the script the fallback cannot remove anything and the retry re-invokes
+// the missing program forever, so the unenforced removal is indefinite.
 func IsFRRReloadPyMissing(err error) bool {
 	return isFrrReloadPyMissing(err)
 }
