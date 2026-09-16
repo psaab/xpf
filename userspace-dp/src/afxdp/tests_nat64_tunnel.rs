@@ -1262,7 +1262,7 @@ fn nat64_committed_first_fragment_publishes_frag_assoc_and_nonfirst_inherits_514
 
     // NON-first fragment (offset 1, SAME ident) is flowless: it consults the
     // association and inherits the first fragment's NAT64 translation.
-    let non_first = nat64_v6_frag_frame(0x0008, 0x1234_5678, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, 0x1234_5678, src, dst, 0, 0);
     let (b2, dbg2) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1330,7 +1330,7 @@ fn nat64_rolled_back_first_fragment_publishes_no_frag_assoc_5146() {
     // translation. Cap is irrelevant to a flowless fragment (it installs no
     // session), so raise it to isolate the miss from any admission effect.
     sessions.set_max_sessions_for_test(16);
-    let non_first = nat64_v6_frag_frame(0x0008, 0x0bad_f00d, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, 0x0bad_f00d, src, dst, 0, 0);
     let (b2, dbg2) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1431,7 +1431,7 @@ fn nat64_cross_domain_nonfirst_fragment_does_not_inherit_5798() {
 
     // Domain B: SAME (src, dst, ident) — the whole pre-#5798 key — but a
     // different, fully-configured ingress interface/VLAN/zone.
-    let non_first = nat64_v6_frag_frame(0x0008, 0x5798_0042, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, 0x5798_0042, src, dst, 0, 0);
     let mut meta_b = nat64_v6_frag_meta(non_first.len(), src, dst);
     meta_b.ingress_ifindex = 12;
     meta_b.ingress_vlan_id = 80;
@@ -1542,7 +1542,7 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
         let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
         let ident: u32 = 0x5798_0002;
         let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-        let non_first = nat64_v6_frag_frame(0x0008, ident, src, dst, 0, 0);
+        let non_first = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
         let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
         // The shared NAT64 fragment fixture leaves `flow_{src,dst}_addr` at their
         // all-zero default. `l3_session_flow_from_meta` returns None for an
@@ -1733,7 +1733,7 @@ fn nat64_frag_authority_dimensions_are_threaded_end_to_end_5798() {
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
     let ident: u32 = 0x5798_0100;
     let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-    let non_first = nat64_v6_frag_frame(0x0008, ident, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
 
     let base_meta = nat64_v6_frag_meta(non_first.len(), src, dst);
     let ifindex_only = UserspaceDpMeta {
@@ -1881,8 +1881,8 @@ fn nat64_frag_authority_dimensions_are_threaded_end_to_end_5798() {
 // with three distinct fragment offsets, in order:
 //
 //   1. first-A   (offset 0, MF=1)  — domain A, installs the association
-//   2. middle-A  (offset 1, MF=1)  — domain A, HITS and forwards (positive)
-//   3. last-B    (offset 2, MF=0)  — domain B, must be REFUSED
+//   2. middle-A  (offset 3, MF=1)  — domain A, HITS and forwards (positive)
+//   3. last-B    (offset 6, MF=0)  — domain B, must be REFUSED
 //
 // Step 2 matters: it proves the refusal in step 3 is not just "the cache was
 // never usable", and it exercises the refusal AFTER a hit has already refreshed
@@ -1905,10 +1905,13 @@ fn nat64_third_fragment_from_another_domain_refused_after_a_same_domain_hit_5798
 
     // Three DISTINCT fragments of one datagram. The IPv6 Fragment Header
     // offset/flags word is `offset << 3 | MF`, so 0x0001 = offset 0 + MF,
-    // 0x0009 = offset 1 + MF, 0x0010 = offset 2, MF clear (the last fragment).
+    // 0x0019 = offset 3 + MF, 0x0030 = offset 6, MF clear (the last fragment).
+    // Spaced past the 20B first payload (#9950: 8/16-byte offsets would genuinely
+    // overlap 0..20 and trip the overlap detector instead of the association logic
+    // under test; association lookup is offset-blind, so spacing preserves intent).
     let frag1_first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-    let frag2_middle = nat64_v6_frag_frame(0x0009, ident, src, dst, 0, 0);
-    let frag3_last = nat64_v6_frag_frame(0x0010, ident, src, dst, 0, 0);
+    let frag2_middle = nat64_v6_frag_frame(0x0019, ident, src, dst, 0, 0);
+    let frag3_last = nat64_v6_frag_frame(0x0030, ident, src, dst, 0, 0);
     assert_ne!(
         frag2_middle, frag3_last,
         "the middle and last fragments must be DISTINCT descriptors, not the same bytes twice"
@@ -2113,7 +2116,7 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
     // owns the Accept-exit count — the same ownership the miss arm has. The
     // count still lands once per fragment; what changed is which evaluator
     // records it.
-    let non_first = nat64_v6_frag_frame(0x0008, ident, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
     let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
     // The shared NAT64 fragment fixture leaves `flow_{src,dst}_addr` zeroed;
     // `l3_session_flow_from_meta` returns None for an unspecified address and
@@ -2276,7 +2279,7 @@ fn nat64_frag_assoc_hit_applies_matching_pbr_discard_6927() {
     );
     assert_eq!(b1.nat64_translations, 1);
 
-    let non_first = nat64_v6_frag_frame(0x0008, ident, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
     let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
     meta.flow_src_addr = src.octets();
     meta.flow_dst_addr = dst.octets();
@@ -2366,7 +2369,7 @@ fn nat64_frag_assoc_hit_reenforces_owner_rg_6927() {
              association — the transition is modelled as happening AFTER it"
         );
 
-        let non_first = nat64_v6_frag_frame(0x0008, ident, src, dst, 0, 0);
+        let non_first = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
         let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
         meta.flow_src_addr = src.octets();
         meta.flow_dst_addr = dst.octets();
@@ -2438,7 +2441,7 @@ fn nat64_frag_assoc_miss_must_drop_with_default_route_6927() {
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
 
     // No first fragment: nothing installs an association, so this is a MISS.
-    let non_first = nat64_v6_frag_frame(0x0008, 0x6927_0004, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, 0x6927_0004, src, dst, 0, 0);
     let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
     meta.flow_src_addr = src.octets();
     meta.flow_dst_addr = dst.octets();
@@ -2481,7 +2484,7 @@ fn nat64_frag_assoc_miss_must_drop_with_default_route_6927() {
     // the gate. This one takes the `::/0` next hop, whose neighbor the fixture
     // declares reachable — the same path the Pref64 destination above took.
     let plain_dst: Ipv6Addr = "2606:4700:4700::1111".parse().expect("plain v6 dst");
-    let plain = nat64_v6_frag_frame(0x0008, 0x6927_0005, src, plain_dst, 0, 0);
+    let plain = nat64_v6_frag_frame(0x0018, 0x6927_0005, src, plain_dst, 0, 0);
     // #6836: the meta is constructed with the frame's OWN dst. Passing the
     // NAT64 `dst` here and repairing it on the next two lines worked, and it is
     // exactly the fixture/frame disagreement the parameterisation exists to
@@ -2699,7 +2702,7 @@ fn t_run_6836(
          (v4) family because it has a flow_key. Expected {want_first_events} event(s)."
     );
 
-    let non_first = nat64_v6_frag_frame(0x0008, 0x1234_5678, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, 0x1234_5678, src, dst, 0, 0);
     let (b2, dbg2, second_handle, _rx2) = txn_run_descriptor_capturing_events(
         &mut binding,
         &mut sessions,
@@ -2794,7 +2797,7 @@ fn nat64_frag_assoc_install_site_derives_the_owner_rg_6857() {
     // Ask the association which RG it carries, by recording what the fence
     // predicate is asked about. A hardcoded 0 never reaches the predicate at
     // all, because owner_rg 0 is deliberately not fenced.
-    let non_first = nat64_v6_frag_frame(0x0008, 0x1234_5678, src, dst, 0, 0);
+    let non_first = nat64_v6_frag_frame(0x0018, 0x1234_5678, src, dst, 0, 0);
     let key = crate::fragment_assoc::nonfirst_fragment_key(
         &non_first[14..],
         libc::AF_INET6,
@@ -3059,7 +3062,7 @@ fn nat64_flowless_fragment_output_filter_matches_the_postnat_tuple_7656() {
             "{label}: flow-bearing first fragment"
         );
 
-        let non_first = nat64_v6_frag_frame(0x0008, 0x1234_5678, src, dst, 0, 0);
+        let non_first = nat64_v6_frag_frame(0x0018, 0x1234_5678, src, dst, 0, 0);
         let (b2, dbg2, second_handle, _rx2) = txn_run_descriptor_capturing_events(
             &mut binding,
             &mut sessions,

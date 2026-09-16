@@ -318,6 +318,12 @@ pub(crate) struct Nat64State {
     /// Arc is threaded in `from_snapshots_with_previous`). NOT rebuilt from the
     /// snapshot — fragment associations are runtime state, not config.
     pub(crate) frag_assoc: crate::fragment_assoc::FragAssoc,
+    /// #9950 (F-035): fragment-overlap tracker. Drops overlapping fragments (RFC 5722
+    /// tear-drop semantics) so enforcement never runs on bytes a later fragment rewrites.
+    /// Family-neutral like `frag_assoc` post-#7899 (it was never NAT64-only either) — it
+    /// hangs here only to reuse the Arc-shared cross-worker + reload-threaded lifecycle
+    /// (`from_snapshots_with_previous` below); re-homing is a lifecycle change, not motion.
+    pub(crate) frag_overlap: crate::fragment_overlap::OverlapTracker,
     /// #5624: the config-snapshot generation THIS state was built under. The
     /// `frag_assoc` cache is Arc-shared across config reloads (so in-flight
     /// datagrams keep translating), but each association is a per-flow
@@ -1013,6 +1019,11 @@ impl Nat64State {
             // fresh (empty) cache.
             frag_assoc: previous
                 .map(|prev| prev.frag_assoc.clone())
+                .unwrap_or_default(),
+            // #9950: same Arc-threading for the overlap tracker so a commit does not
+            // open a 2s evasion window (in-flight datagrams keep their ranges).
+            frag_overlap: previous
+                .map(|prev| prev.frag_overlap.clone())
                 .unwrap_or_default(),
             // #5624: record the generation this state was built under. The
             // shared `frag_assoc` cache above persists across the reload, but

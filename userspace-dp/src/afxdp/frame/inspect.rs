@@ -101,6 +101,12 @@ pub(crate) struct ExtChainFragment {
     /// (that predicate matched on the declared type without reading the
     /// header).
     pub bytes: Option<[u8; 8]>,
+    /// #9950: absolute buffer offset of the Fragment header start (the `offset`
+    /// the walker held when it declared the header). Needed to size this
+    /// fragment's data contribution (`frag_data_off` + wire clamp) without a
+    /// second walk. `Some` whenever `fragment` is `Some` (declared), even when
+    /// `bytes` is `None` (truncated).
+    pub header_offset: usize,
 }
 
 /// Result of [`walk_ipv6_ext_chain`]: the terminal verdict plus the
@@ -230,6 +236,7 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                 if fragment.is_none() {
                     fragment = Some(ExtChainFragment {
                         bytes: header.and_then(|h| <[u8; 8]>::try_from(h).ok()),
+                        header_offset: offset,
                     });
                 }
                 if let Some(f) = header {

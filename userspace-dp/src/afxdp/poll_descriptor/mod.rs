@@ -376,6 +376,59 @@ pub(super) fn poll_binding_process_descriptor(
                         continue;
                     }
                 }
+                // #9950 (F-035): fragment-overlap CHECK — post-screen (preserves
+                // byte-for-byte drop precedence + malformation attribution), pre-IPsec-
+                // passthrough, pre-flow-cache (the 5-tuple cache key has no ident),
+                // post-decap (packet_frame/meta are the inner packet). Pure check: drops
+                // overlapping/empty/would-overflow fragments but RECORDS nothing, so refused
+                // traffic can never plant ranges (no cross-domain plant-then-duplicate
+                // poisoning). Recording happens post-commit at the TX site, which re-checks
+                // under the shard lock (closing the cross-worker race). Fragments AND
+                // Unreadable (truncated headers — not proven non-fragments) skip the cache.
+                // Residuals: the SYN-cookie-challenge path above `continue`s before this
+                // hook, and ESP/AH outer fragments are checked while their encrypted
+                // inner is unknowable — both documented, neither silently closed.
+                let (overlap_pre_9950, overlap_skip_cache_9950) = match packet_frame
+                    .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
+                    .map(|l3| {
+                        crate::fragment_overlap::overlap_parse(l3, meta.addr_family as i32)
+                    })
+                    .unwrap_or(crate::fragment_overlap::OverlapParse::Unreadable)
+                {
+                    crate::fragment_overlap::OverlapParse::NonFragment => (None, false),
+                    crate::fragment_overlap::OverlapParse::Unreadable => (None, true),
+                    crate::fragment_overlap::OverlapParse::Fragment(mut okey, start, end) => {
+                        // Routing domain from the same SSOT as session keys (the parsed
+                        // flow's stamped value when present, else the identical ingress
+                        // expression) so flow-backed and flowless agree by construction.
+                        okey.routing_domain = flow
+                            .as_ref()
+                            .map(|f| f.forward_key.routing_domain)
+                            .unwrap_or_else(|| {
+                                crate::afxdp::forwarding::ingress_routing_domain(
+                                    worker_ctx.forwarding,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    if packet_fabric_ingress {
+                                        ingress_zone_override
+                                    } else {
+                                        None
+                                    },
+                                )
+                            });
+                        if worker_ctx.forwarding.nat64.frag_overlap.check_overlap(
+                            okey,
+                            start,
+                            end,
+                            now_ns,
+                            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                        ) {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        (Some((okey, start, end)), true)
+                    }
+                };
                 // #946 Phase 1 stage 11: IPsec passthrough. ESP
                 // (proto 50), AH and the IPsec data plane reinject via
                 // the slow-path TUN; recycle the UMEM frame. #4323: a NEW
@@ -397,6 +450,19 @@ pub(super) fn poll_binding_process_descriptor(
                 ) {
                     IpsecPassthroughOutcome::NotClaimed => {}
                     IpsecPassthroughOutcome::Passthrough => {
+                        // #9950: plant admitted ranges — local delivery IS admission (the frame
+                        // was already reinjected above), so later tails of this datagram compare
+                        // against the first. Already overlap-checked pre-IPsec; the bool is moot
+                        // (a race-overlap counts but the frame recycles either way).
+                        if let Some((okey, start, end)) = overlap_pre_9950 {
+                            worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
+                                okey,
+                                start,
+                                end,
+                                now_ns,
+                                &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                            );
+                        }
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
                     }
@@ -430,7 +496,9 @@ pub(super) fn poll_binding_process_descriptor(
                 // lifetime ends at the previous line (last use was
                 // inside stage_ipsec_passthrough_check); it is rebound
                 // below the helper call for the slow-path code.
-                if FlowCacheEntry::packet_eligible(meta)
+                // #9950: proven fragments AND unreadable packets never consult the cache.
+                if !overlap_skip_cache_9950
+                    && FlowCacheEntry::packet_eligible(meta)
                     && let Some(flow) = flow.as_ref()
                 {
                     match stage_flow_cache_hit(
@@ -1317,6 +1385,54 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the original frame via desc.addr on the request.
                                 // The continue skips recycle_now handling.
                                 continue;
+                            }
+                        }
+                        // #9950 (F-036/F-053): install fragment association for session-hit
+                        // first fragments (forward hits of existing flows + reverse replies).
+                        // Post-gate (after revocation/TTL/host-inbound/input-filter above),
+                        // owner-only (foreign arrivals must not publish, #9519). Reuses the
+                        // commit-site helpers: they self-gate on first-fragment + rewrite +
+                        // ForwardCandidate + neighbor, and store the hit decision (which for a
+                        // reply is already the reverse via NatDecision::reverse). NAT64 gated
+                        // on v6 (v4 installs are never consulted, pure shard churn).
+                        if foreign_arrival_zone.is_none() && overlap_pre_9950.is_some() {
+                            if let Some(l3_packet) = packet_frame.get(
+                                verified_l3_or_stamp(
+                                    packet_frame,
+                                    meta.l3_offset,
+                                    meta.addr_family,
+                                )..
+                            ) {
+                                // Raw stage-9 override (mirrors the commit-site capture —
+                                // arm-scoped shadows below do not reach this tail).
+                                let frag_authority_zone_override = ingress_zone_override;
+                                let frag_authority = frag_ingress_authority(
+                                    worker_ctx.forwarding,
+                                    meta,
+                                    frag_authority_zone_override,
+                                );
+                                if meta.addr_family as i32 == libc::AF_INET6
+                                    && nat64_install_forward_fragment_assoc(
+                                        worker_ctx.forwarding,
+                                        l3_packet,
+                                        meta.addr_family as i32,
+                                        frag_authority,
+                                        &resolved.decision,
+                                        now_ns,
+                                    )
+                                {
+                                    telemetry.counters.record_nat64_frag_assoc_evicted();
+                                }
+                                if nat_install_forward_fragment_assoc(
+                                    worker_ctx.forwarding,
+                                    l3_packet,
+                                    meta.addr_family as i32,
+                                    frag_authority,
+                                    &resolved.decision,
+                                    now_ns,
+                                ) {
+                                    telemetry.counters.record_nat64_frag_assoc_evicted();
+                                }
                             }
                         }
                         resolved.decision
@@ -4427,6 +4543,20 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // #9950 residual — owned by #10130 (session-gated reverse
+                        // discriminator; this comment + docs/log/9950.md + the issue quote
+                        // each other). The #6122 check above sees FORWARD-direction rules
+                        // only, so a REPLY tail that misses its #9950 reply association
+                        // (reorder, TTL straddle, flood eviction, generation bump, HA
+                        // non-sync, LAG/ECMP split) forwards untranslated: DNAT-without-SNAT
+                        // discloses the internal source (F-036). SNAT-covered reply misses
+                        // already drop via `source_nat_would_translate_fragment`. Distinct-pool
+                        // misses resolve next-hop == pool: MissingNeighbor buffers/retries
+                        // (not a terminal drop) and, with a pool neighbor/route present, the
+                        // fragment forwards untranslated to the pool (misdelivery of the dst
+                        // field — demonstrated by the F-053 fixture — not topology disclosure).
+                        // Rules-only reverse arms over-drop (plain outbound from a DNAT target
+                        // matches naive src-in-pool checks), hence the session-gated design.
                     }
 
                     // #6835: the CROSS-FAMILY sibling of the #6122 gate above,
@@ -4942,6 +5072,58 @@ pub(super) fn poll_binding_process_descriptor(
                     if decision.nat.nat64 {
                         telemetry.counters.nat64_translations += 1;
                     }
+                    // #9950 post-commit overlap record + translated re-check (single site:
+                    // flow-backed and flowless decisions funnel through here). Only admitted
+                    // (ForwardCandidate) fragments record — refused traffic never plants ranges,
+                    // so a refused cross-domain tail cannot poison a later same-domain tail.
+                    // The pre-key re-check under the shard lock closes the cross-worker race
+                    // between the early check and this commit; the translated-key check covers
+                    // post-NAT reassembly identity (same-family re-addressing, NAT64 v6→v4
+                    // ident truncation). Ranges are identical pre/post (translation preserves
+                    // fragmentation geometry); identical keys skip (same key+range would
+                    // self-overlap — pure port-PAT needs no check).
+                    if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
+                        && let Some((pre_key, start, end)) = overlap_pre_9950
+                    {
+                        if worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
+                            pre_key,
+                            start,
+                            end,
+                            now_ns,
+                            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                        ) {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        let egress_domain = if worker_ctx.forwarding.has_routing_domains {
+                            worker_ctx
+                                .forwarding
+                                .ifindex_to_routing_domain
+                                .get(&decision.resolution.egress_ifindex)
+                                .copied()
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        if let Some(post_key) =
+                            crate::fragment_overlap::translated_overlap_key(
+                                &pre_key,
+                                &decision.nat,
+                                egress_domain,
+                            )
+                            && post_key != pre_key
+                            && worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
+                                post_key,
+                                start,
+                                end,
+                                now_ns,
+                                &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
+                            )
+                        {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                    }
                     if let Some(mut request) = build_live_forward_request_from_frame(
                         worker_ctx.binding_lookup,
                         binding_index,
@@ -5055,24 +5237,29 @@ pub(super) fn poll_binding_process_descriptor(
                         // (`flow_cache_hit`) so the eviction invariants review as
                         // one contract. Pure code-motion; `#[inline]` keeps the
                         // body in this CGU.
-                        stage_flow_cache_seed(
-                            &mut binding.flow.flow_cache,
-                            &flow,
-                            meta,
-                            validation,
-                            decision,
-                            request_target_binding_index,
-                            flow_cache_owner_rg_id,
-                            session_ingress_zone,
-                            flow_cache_install_failed,
-                            flow_cache_policy_counter_idx,
-                            &flow_cache_policy_counter,
-                            filter_match_extra,
-                            ingress_zone_override,
-                            apply_nat_on_fabric,
-                            &neighbor_epoch_snapshot,
-                            worker_ctx,
-                        );
+                        // #9950: fragments never seed the cache (same ident-less-key reason
+                        // as the lookup gate above — a seeded 5-tuple would serve later
+                        // datagrams' first fragments and bypass overlap + assoc installs).
+                        if !overlap_skip_cache_9950 {
+                            stage_flow_cache_seed(
+                                &mut binding.flow.flow_cache,
+                                &flow,
+                                meta,
+                                validation,
+                                decision,
+                                request_target_binding_index,
+                                flow_cache_owner_rg_id,
+                                session_ingress_zone,
+                                flow_cache_install_failed,
+                                flow_cache_policy_counter_idx,
+                                &flow_cache_policy_counter,
+                                filter_match_extra,
+                                ingress_zone_override,
+                                apply_nat_on_fabric,
+                                &neighbor_epoch_snapshot,
+                                worker_ctx,
+                            );
+                        }
                         // ── End flow cache population ────────────────
                     } else {
                         telemetry.dbg.build_fail += 1;
