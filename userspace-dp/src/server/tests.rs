@@ -573,6 +573,41 @@ fn sync_session_upsert_with_malformed_mac_is_rejected() {
 }
 
 #[test]
+fn sync_session_upsert_with_quarantine_sentinel_domain_is_refused_9956() {
+    // #9956 F-032: a session carrying the quarantine sentinel (wire 2,
+    // Unrecognized) must be REFUSED pre-operation — never imported under a
+    // live domain. The value agreement with Go's
+    // `QuarantinedRoutingInstanceDomain` is pinned in
+    // `the_quarantine_sentinel_decodes_unrecognized_9956`; this cell pins the
+    // handler half (refusal + token, no import).
+    let mut request = req("sync_session");
+    request.session_sync = Some(SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        routing_domain: 2,
+        ..SessionSyncRequest::default()
+    });
+    let response = run_request(new_state(ProcessStatus::default()), request);
+    assert!(
+        !response.ok,
+        "a quarantined-domain upsert must be refused, not imported"
+    );
+    assert!(
+        response.error.contains("routing-domain-unrecognized"),
+        "unexpected error: {}",
+        response.error
+    );
+}
+
+#[test]
 fn sync_session_delete_with_unparseable_ip_is_rejected() {
     let mut request = req("sync_session");
     request.session_sync = Some(SessionSyncRequest {

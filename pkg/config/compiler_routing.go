@@ -658,6 +658,9 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 					"routing-instance %q QUARANTINED: the name is reserved for %s — no VRF created,"+
 						" its members are not bound and its routes are not programmed until it is renamed (#9622)",
 					ri.Name, reservedRoutingInstanceNames[ri.Name]))
+				// #9956 F-032: record the evictee for the snapshot builders
+				// (APPEND — the #3855 pass below appends its own).
+				cfg.QuarantinedRoutingInstances = append(cfg.QuarantinedRoutingInstances, ri)
 				continue
 			}
 			kept = append(kept, ri)
@@ -689,6 +692,9 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 							" another instance's — no VRF created, its routes and inter-VRF"+
 							" leaks are not programmed until one instance is renamed (#3855)",
 						ri.Name, ri.TableID))
+					// #9956 F-032: record the evictee for the snapshot builders
+					// (APPEND — the #9622 pass above appended its own).
+					cfg.QuarantinedRoutingInstances = append(cfg.QuarantinedRoutingInstances, ri)
 					continue
 				}
 				kept = append(kept, ri)

@@ -787,9 +787,13 @@ type InterfaceSnapshot struct {
 	RoutingInstance string `json:"routing_instance,omitempty"`
 	// RoutingDomain is the #7160 (#2387) ROUTING DOMAIN id for
 	// RoutingInstance: `config.StableRoutingInstanceTableID(RoutingInstance)`
-	// for a named instance, and 0 for the default instance. It is the
-	// discriminator the Rust dataplane folds into `SessionKey.routing_domain`
-	// so two routing instances that share a 5-tuple do not collapse to one
+	// for a named instance, 0 for the default instance — except an interface
+	// no surviving instance claims but a quarantined one does, which ships
+	// QuarantinedRoutingInstanceDomain (2, #9956 F-032): nonzero so it never
+	// shares the default session space, outside the stable band so it never
+	// collides with a tenant, HA-refused on import. It is the discriminator
+	// the Rust dataplane folds into `SessionKey.routing_domain` so two
+	// routing instances that share a 5-tuple do not collapse to one
 	// conntrack entry.
 	//
 	// It is computed HERE, in Go, rather than hashed independently on the

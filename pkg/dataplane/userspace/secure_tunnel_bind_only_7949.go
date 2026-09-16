@@ -100,6 +100,7 @@ func appendBindInterfaceOnlySecureTunnelRows(
 	authored map[string]string,
 	zoneByInterface map[string]string,
 	ifaceRoutingInstance map[string]string,
+	quarantinedKeys map[string]struct{},
 	liveXfrm map[string]bool,
 ) ([]InterfaceSnapshot, []egressRowIdentity) {
 	if cfg == nil || len(authored) == 0 {
@@ -180,7 +181,7 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			IsUnit:          dotted && unit != "",
 			Zone:            zone,
 			RoutingInstance: ifaceRoutingInstance[ref],
-			RoutingDomain:   routingInstanceDomain(ifaceRoutingInstance[ref]),
+			RoutingDomain:   routingDomainForInterfaceKey(ref, ifaceRoutingInstance, quarantinedKeys),
 			LinuxName:       dev,
 			ParentLinuxName: parentLinux,
 			Ifindex:         ifindex,

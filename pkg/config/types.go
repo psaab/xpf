@@ -441,23 +441,33 @@ func (c *Config) DHCPLeaseKey(configRef string, unitNum int) (string, bool) {
 
 // Config is the top-level typed configuration, compiled from the AST.
 type Config struct {
-	Security          SecurityConfig
-	Interfaces        InterfacesConfig
-	Applications      ApplicationsConfig
-	RoutingOptions    RoutingOptionsConfig
-	Protocols         ProtocolsConfig
-	RoutingInstances  []*RoutingInstanceConfig
-	Firewall          FirewallConfig
-	ClassOfService    *ClassOfServiceConfig
-	Services          ServicesConfig
-	ForwardingOptions ForwardingOptionsConfig
-	System            SystemConfig
-	PolicyOptions     PolicyOptionsConfig
-	Schedulers        map[string]*SchedulerConfig
-	Chassis           ChassisConfig
-	EventOptions      []*EventPolicy
-	BridgeDomains     []*BridgeDomainConfig
-	Warnings          []string // non-fatal validation warnings
+	Security         SecurityConfig
+	Interfaces       InterfacesConfig
+	Applications     ApplicationsConfig
+	RoutingOptions   RoutingOptionsConfig
+	Protocols        ProtocolsConfig
+	RoutingInstances []*RoutingInstanceConfig
+	// QuarantinedRoutingInstances records the instances dropped from
+	// RoutingInstances by the #9622 (reserved name) and #3855 (stable table-id
+	// collision) quarantine passes in compileRoutingInstances, WITH their
+	// interface membership. The snapshot builders need the membership to bind
+	// (not drop) a quarantined member's interfaces: without it the domain map
+	// misses and the interface inherits the default session domain 0 (#9956
+	// F-032). Drop-time objects (later phases mutate survivors only; the
+	// binder reads Name/Interfaces, populated pre-filter), APPENDED at both
+	// drop sites, rebuilt per compile like Warnings.
+	QuarantinedRoutingInstances []*RoutingInstanceConfig
+	Firewall                    FirewallConfig
+	ClassOfService              *ClassOfServiceConfig
+	Services                    ServicesConfig
+	ForwardingOptions           ForwardingOptionsConfig
+	System                      SystemConfig
+	PolicyOptions               PolicyOptionsConfig
+	Schedulers                  map[string]*SchedulerConfig
+	Chassis                     ChassisConfig
+	EventOptions                []*EventPolicy
+	BridgeDomains               []*BridgeDomainConfig
+	Warnings                    []string // non-fatal validation warnings
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
 	// admitted despite validateNATTerminalActionCardinalityStrict rejecting it

@@ -96,3 +96,39 @@ fn routing_domain_wire_band_matches_go_7239() {
          RoutingInstanceTableIDSpan in pkg/config/routinginstanceid.go"
     );
 }
+
+/// #9956 F-032: Go's `QuarantinedRoutingInstanceDomain` must decode as
+/// Unrecognized, so a quarantined session synced to the HA peer is REFUSED
+/// (fail-closed) rather than filed under a domain — in particular never under
+/// the default domain (wire 1 decodes `Present(0)`, so a sentinel of 1 would
+/// reintroduce the exact aliasing on the peer). Pinned as an AGREEMENT like
+/// the band test: the value is read out of `routes.go`, so renumbering either
+/// side breaks loudly instead of silently aliasing.
+#[test]
+fn the_quarantine_sentinel_decodes_unrecognized_9956() {
+    let go = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("pkg/dataplane/userspace/routes.go"),
+    )
+    .expect("read routes.go");
+    let line = go
+        .lines()
+        .find(|l| l.contains("QuarantinedRoutingInstanceDomain uint32 = "))
+        .expect("routes.go must define QuarantinedRoutingInstanceDomain");
+    let value: u32 = line
+        .rsplit('=')
+        .next()
+        .expect("const has a value")
+        .trim()
+        .parse()
+        .expect("sentinel parses as u32");
+    assert_eq!(
+        routing_domain_from_wire(routing_domain_to_wire(value)),
+        WireRoutingDomain::Unrecognized,
+        "quarantine sentinel {value} must round-trip as Unrecognized (refused \
+         on import); Present(_) would file quarantined sessions under a live \
+         domain on the peer"
+    );
+}
