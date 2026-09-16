@@ -157,9 +157,10 @@ func runTimeout(ctx context.Context, name string, args ...string) error {
 // legitimately run longer than requestExecTimeout, so they size their
 // bound from the request instead of sharing the 15s constant. The same
 // formulas live in pkg/api/exec_timeout.go for the HTTP REST siblings
-// (pkg/api already imports pkg/grpcapi, so sharing via an exported
-// helper would be cycle-free; kept as unexported mirrors by choice —
-// see docs/log/9937.md); keep the two copies in sync.
+// (pkg/api already imports pkg/grpcapi, so api importing an exported
+// helper from grpcapi would be cycle-free — the reverse would cycle;
+// kept as unexported mirrors by choice — see docs/log/9937.md); keep
+// the two copies in sync.
 
 // diagPingPacketInterval is the per-packet budget for ping: the
 // handlers do not pass -i, so ping sends one packet per second

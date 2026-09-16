@@ -11,9 +11,10 @@ import (
 // for the 15s/5s constants. It cannot be imported from pkg/daemon:
 // pkg/daemon imports pkg/api (daemon_run_servers.go, management.go), so
 // that leg would create an import cycle. The pkg/grpcapi leg is not
-// cycle-blocked — pkg/api already imports pkg/grpcapi (dhcp.go) — so
-// sharing via an exported helper would be cycle-free; the two sides stay
-// unexported mirrors by choice (see docs/log/9937.md).
+// cycle-blocked in the api-imports-from-grpcapi direction — pkg/api
+// already imports pkg/grpcapi (dhcp.go) — so api importing an exported
+// helper from grpcapi would be cycle-free (the reverse would cycle);
+// the two sides stay unexported mirrors by choice (see docs/log/9937.md).
 // pkg/grpcapi/exec_timeout.go carries the Output/CombinedOutput variants;
 // this package's only raw exec sites are the deferred power actions, so
 // only the Run variant exists here — add the other variants from
