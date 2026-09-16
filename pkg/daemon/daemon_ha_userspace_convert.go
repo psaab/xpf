@@ -52,6 +52,11 @@ type userspaceZoneIDsCache struct {
 // order could pair an old map with a newer generation — permanent
 // staleness). A nil store or nil snapshot config yields nil (no config),
 // which the caller treats as a transient withhold like a nil ActiveConfig.
+// WARNING (stale-map zombie direction): a zone REMOVE fails OPEN here —
+// the deleted ID still resolves until the next delta rebuilds — while ADD
+// fails closed. Window bounded by next-delta rebuild; stable IDs for
+// surviving names only (see docs/log/9905.md; z174/z214 collide across
+// the boundary, so no cross-boundary aliasing guarantee).
 func (d *Daemon) cachedUserspaceZoneIDs() map[string]uint16 {
 	if d.store == nil {
 		return nil

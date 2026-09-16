@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -111,8 +112,9 @@ func TestHandleDeltaZoneMapCachedBudget9905(t *testing.T) {
 }
 
 // NOTE (tripwire, #9905 review): TestHandleDeltaZoneMapCachedBudget9905 lands
-// at exactly 2.0 allocs/op on go1.26.4 linux/amd64 — the two netip ParseAddr
-// error boxes on the empty-IP drop path. Zero headroom is INTENTIONAL: any
+// at exactly 2.0 allocs/op on go1.26.4 linux/amd64 — believed to be the
+// two netip ParseAddr error boxes on the empty-IP drop path
+// (profiler-attributed, not pinned in-repo). Zero headroom is INTENTIONAL: any
 // regression that adds even one allocation per delta fails loudly here. Do
 // not relax to ≤3 without a measured cause; see docs/log/9905.md.
 
@@ -533,6 +535,55 @@ func TestNAT64SnatFlagGate9905(t *testing.T) {
 	if bv.Nat64SnatV4 != [4]byte{} {
 		t.Fatalf("binary-leg Nat64SnatV4 = %v, want zero (flag gate)", bv.Nat64SnatV4)
 	}
+	// Resolver-level presence pins: a zero final value cannot distinguish
+	// absence from copying zero, so assert hasNat64Snat directly, both legs.
+	// Binary, flag true + zero bin → absent (zero means no pool source).
+	bz := transitOpenV6_9767()
+	bz.SrcIP, bz.DstIP = "", ""
+	bz.NeighborMAC, bz.SrcMAC = "", ""
+	bz.Nat64SnatV4 = ""
+	copy(bz.SrcAddr[:], src)
+	copy(bz.DstAddr[:], dst)
+	bz.BinAddrLen = 16
+	bz.Nat64 = true
+	bz.Nat64SnatV4Bin = [4]byte{}
+	rz := userspaceResolveV6(bz)
+	if !rz.ok {
+		t.Fatal("binary flag-true/zero delta did not resolve addrs")
+	}
+	if rz.hasNat64Snat {
+		t.Fatal("binary flag-true/zero must be absent (hasNat64Snat=false)")
+	}
+	// Binary, flag true + nonzero bin → present (positive control).
+	bp := bz
+	bp.Nat64SnatV4Bin = [4]byte{203, 0, 113, 5}
+	rp := userspaceResolveV6(bp)
+	if !rp.hasNat64Snat || rp.nat64Snat != [4]byte{203, 0, 113, 5} {
+		t.Fatalf("binary flag-true/nonzero presence = (%v,%v), want (true,203.0.113.5)", rp.hasNat64Snat, rp.nat64Snat)
+	}
+	// String, flag true + empty → absent.
+	se := transitOpenV6_9767()
+	se.Nat64 = true
+	se.Nat64SnatV4 = ""
+	re := userspaceResolveV6(se)
+	if !re.ok {
+		t.Fatal("string flag-true/empty delta did not resolve addrs")
+	}
+	if re.hasNat64Snat {
+		t.Fatal("string flag-true/empty must be absent (hasNat64Snat=false)")
+	}
+	// String present-but-zero ("0.0.0.0") → present with verbatim zero
+	// bytes: presence is ParseIP!=nil, not nonzero. This is the case that
+	// proves presence≠nonzero on the string leg.
+	sz := transitOpenV6_9767()
+	sz.Nat64SnatV4 = "0.0.0.0"
+	rz2 := userspaceResolveV6(sz)
+	if !rz2.hasNat64Snat {
+		t.Fatal(`string "0.0.0.0" must be present (hasNat64Snat=true)`)
+	}
+	if rz2.nat64Snat != [4]byte{} {
+		t.Fatalf("string zero snat bytes = %v, want verbatim zero", rz2.nat64Snat)
+	}
 }
 
 // TestForwardWireAliasFallsBackToBasePort9905 pins the subtlest from-value
@@ -541,6 +592,9 @@ func TestNAT64SnatFlagGate9905(t *testing.T) {
 // must carry that fallback — wire.SrcPort == htons(base SrcPort).
 // Present-but-zero-port NAT on a fabric delta exercises the full chain:
 // resolve (fallback) → value stamp → wire derivation, with no delta re-read.
+// FabricRedirect on the fixtures is context-only (walk reads it before
+// calling Alias; this cell drives Alias directly and passes identically
+// without it).
 func TestForwardWireAliasFallsBackToBasePort9905(t *testing.T) {
 	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
 	d := transitOpen9767()
@@ -584,5 +638,29 @@ func TestForwardWireAliasFallsBackToBasePort9905(t *testing.T) {
 	copy(wantNAT[:], net.ParseIP("2001:db8:61::1").To16())
 	if wireKey6.SrcIP != wantNAT {
 		t.Fatalf("v6 wire SrcIP = %x, want NATSrc", wireKey6.SrcIP)
+	}
+}
+
+// TestHandleDeltaWithholdsWithoutConfig9905 pins the daemon side of the
+// (gen, nil) snapshot shape: a store with no compiled config (fresh boot,
+// first-commit rollback target, failed recovery compile) withholds the
+// delta so the helper replays, instead of converting against a nil config.
+func TestHandleDeltaWithholdsWithoutConfig9905(t *testing.T) {
+	d := &Daemon{
+		cluster: clusterManagerPrimaryForRGs(0, 1),
+		store:   newConfigStore(t, filepath.Join(t.TempDir(), "config")),
+	}
+	ss := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:1", nil)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 0 || rgID == 1 }
+	ss.SetConnectedForTesting(true)
+	d.sessionSync = ss
+	if gen, cfg := d.store.ActiveSnapshot(); gen != 0 || cfg != nil {
+		t.Fatalf("fresh store snapshot = (%d,%v), want (0,nil)", gen, cfg)
+	}
+	delta := natDelta9905()
+	delta.IngressZone = "lan"
+	if d.handleEventStreamDelta(dpuserspace.EventTypeSessionOpen, delta) {
+		t.Fatal("delta with no compiled config was handled, want withhold (false)")
 	}
 }
