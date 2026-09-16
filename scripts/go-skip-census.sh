@@ -8,8 +8,8 @@
 #      as GOOD NEWS with an instruction to tighten.
 #   2. The PRIVILEGE-DEPENDENT set is reported separately, BY NAME, and SPLIT
 #      BY DIRECTION, because its absence is SYSTEMATIC rather than incidental.
-#      The split is the finding: 26 cells skip because privilege is ABSENT and
-#      10 skip because it is PRESENT, so NO SINGLE RUN EXAMINES ALL 36.
+#      The split is the finding: 40 cells skip because privilege is ABSENT and
+#      10 skip because it is PRESENT, so NO SINGLE RUN EXAMINES ALL 50.
 #      Running the suite as root does not close the gap — it trades one set of
 #      unexamined subjects for a different one. Folded into a single total that
 #      is invisible, and the obvious remedy ("just run it as root") looks like
@@ -37,10 +37,10 @@
 #
 #   `go test ./...` prints `ok` for a package whose cells all skipped. The
 #   summary line for "everything passed" and "nothing ran" is byte-identical,
-#   and no leg passes -v. 318 call sites across the tree are invisible to every
-#   gate in the repo — while censuses already exist for Rust `#[ignore]`
-#   (ignored-cell-census.sh), shell harnesses (harness-census.sh) and python
-#   (run-selftests.sh). This is the missing one, in their shape.
+#   and no leg passes -v. 366 call sites across the tree were invisible to every
+#   gate in the repo until #9812 folded this census into `make selftest` —
+#   while censuses already exist for Rust `#[ignore]` (ignored-cell-census.sh),
+#   shell harnesses (harness-census.sh) and python (run-selftests.sh).
 #
 # WHAT IT DELIBERATELY DOES NOT DO
 #
@@ -54,6 +54,16 @@
 #   sh scripts/go-skip-census.sh --list     # also list every skip by file:line
 #   GO_SKIP_DIRS="pkg cmd" sh scripts/...   # override the scan roots
 set -eu
+
+# python3 is the census engine (the classifier below is a heredoc). Without it
+# there is nothing to run, so SKIP rather than die under `set -eu` with
+# "python3: command not found". POSIX: the Makefile leaf and the census
+# self-test invoke this script via `sh` despite the bash shebang, so this
+# guard — like the rest of the script — must stay sh-compatible.
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "SKIP: python3 not installed — cannot run the skip census"
+	exit 77
+fi
 
 # GO_SKIP_ROOT exists so the census can be pointed at a FIXTURE tree. Without
 # it the script hard-cd'd to its own repo, so `GO_SKIP_DIRS=pkg` invoked from

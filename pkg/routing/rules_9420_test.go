@@ -197,9 +197,15 @@ func TestDefaultInstanceIngressIfaces_9420(t *testing.T) {
 // same, and so do "the leak is scoped" and "the topology has no route anyway".
 func TestNextTableIngressScopeOnRealKernel_9420(t *testing.T) {
 	if _, err := exec.LookPath("unshare"); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("unshare not available (XPF_REQUIRE_NETNS is set)")
+		}
 		t.Skip("unshare not available")
 	}
 	if _, err := exec.LookPath("ip"); err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("iproute2 not available (XPF_REQUIRE_NETNS is set)")
+		}
 		t.Skip("iproute2 not available")
 	}
 	script := `set -e

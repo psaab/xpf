@@ -803,6 +803,19 @@ test-mouse-elephant-lib:
 test-rule-dscp-lib:
 	sh ./test/routing/selftest-rule-dscp_7796.sh
 
+# Self-test the #9420 next-table ingress-scope and #9819 VRF-miss terminator
+# kernel cells. Both SKIP under a plain `go test` without a usable netns, and
+# a skipped cell reads identically to a passing one — so this target runs them
+# under `unshare -rn` with XPF_REQUIRE_NETNS=1, where a missing tool or a
+# failed namespace is a failure. It SKIPS as a whole (not fails) where user
+# namespaces are unavailable, matching the other tool-gated legs. The two
+# kernel cells are pinned BY NAME inside the script, so a rotted -run
+# predicate cannot report a clean pass over nothing.
+# Single-sourced with the `make selftest` leg: both run the SAME script, so the
+# target and the aggregate cannot drift into testing different things.
+test-routing-kernel-lib:
+	sh ./test/routing/selftest-routing-kernel_9812.sh
+
 # Self-test the #6936 FBF two-upstream steering verdicts. The defect this
 # guards is a NEGATIVE CELL THAT FAILS TO A HEALTHY VALUE: the main-table
 # pollution check counted matches, so "no leak" and "the probe returned

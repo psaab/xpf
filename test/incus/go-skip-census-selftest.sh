@@ -21,6 +21,12 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 	echo "      control below would pass on the missing file instead of on the census."
 	exit 1
 }
+# python3 is the census engine; without it the script under test exits 77, and
+# every cell below would fail on the harness rather than on the subject.
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "SKIP: python3 not installed — cannot run the census self-test"
+	exit 77
+fi
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/pkg/alpha" "$WORK/pkg/beta"
 

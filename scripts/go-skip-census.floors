@@ -10,20 +10,20 @@
 # commit message, the same rule the Rust ignored-cell census applies to a new
 # `#[ignore]`.
 
-total        = 318
+total        = 366
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 26
+priv-absent  = 40
 priv-present = 10
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 281
+other        = 314
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
 # with its own floor rather than a silent drop — a census that quietly shrinks
 # its own population is blind exactly where somebody wrote something unusual,
 # and "unusual" correlates with "worth looking at".
-unparsed     = 1
+unparsed     = 2

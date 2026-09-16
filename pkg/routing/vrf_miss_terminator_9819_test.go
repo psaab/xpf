@@ -335,6 +335,9 @@ func TestVRFMissTerminatorOnRealKernel9819(t *testing.T) {
 	}
 	for _, tool := range []string{"unshare", "ip"} {
 		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+				t.Fatalf("%s not available (XPF_REQUIRE_NETNS is set)", tool)
+			}
 			t.Skipf("%s not available", tool)
 		}
 	}
