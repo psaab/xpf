@@ -2,6 +2,8 @@ package frr
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,8 +22,9 @@ import (
 // incoherent (the #8363 suffix rule constrains deny SYNTHESIS, not rejection;
 // ghost-first/middle would still install the hole), strict already rejects every
 // narrowed candidate at store.Commit so commit-path loudness is unreachable and
-// 100% of firings are lenient log-and-continue (warm last-good narrowed persists;
-// cold boot fails OPEN to empty permit-all, worse than narrowed), and any reject
+// 100% of firings are lenient log-and-continue (warm keeps last-good narrowed —
+// hole persists loudly; cold boot with no prior managed section leaves FRR
+// without managed peers/routes — outage, not a filter), and any reject
 // wedges the ipmon failover actuator plus sync/rollback/feed divergence on an
 // unmeasured population. The parent constraint (migration-safe: no silent
 // load-time outage) kills the immediate-deny alternative for the same unmeasured
@@ -43,8 +46,11 @@ func policyOptions10129() *config.PolicyOptionsConfig {
 			"ACCEPTER": {Name: "ACCEPTER", Terms: []*config.PolicyTerm{
 				{Name: "t1", PrefixList: over(), Action: "accept"},
 			}},
+			// B is deliberately distinguishable from ACCEPTER (PL2, not PL): with
+			// identical bodies a swapped or duplicated survivor would still pass
+			// the composed order assertions below.
 			"B": {Name: "B", Terms: []*config.PolicyTerm{
-				{Name: "t1", PrefixList: over(), Action: "accept"},
+				{Name: "t1", PrefixList: []string{"PL2"}, Action: "accept"},
 			}},
 			// Empty survivor: defined, no terms, no default → match-all
 			// permit-10 today; [EMPTY,SYNTH-DENY] renders lone deny-10,
@@ -67,7 +73,10 @@ func policyOptions10129() *config.PolicyOptionsConfig {
 			// Stand-in for a member-synthesized suffix deny.
 			"SYNTH-DENY": {Name: "SYNTH-DENY", DefaultAction: "reject"},
 		},
-		PrefixLists: map[string]*config.PrefixList{"PL": {Name: "PL", Prefixes: []string{"10.0.0.0/8"}}},
+		PrefixLists: map[string]*config.PrefixList{
+			"PL":  {Name: "PL", Prefixes: []string{"10.0.0.0/8"}},
+			"PL2": {Name: "PL2", Prefixes: []string{"192.168.0.0/16"}},
+		},
 		Communities: map[string]*config.CommunityDef{},
 		ASPaths:     map[string]*config.ASPathDef{},
 	}
@@ -120,17 +129,56 @@ func TestNarrowedSuffixSafePopulatedSingleAttachesPermitTerminated10129(t *testi
 		t.Fatalf("must attach surviving ACCEPTER, got:\n%s", section)
 	}
 	headers := routeMapHeaders6807(section, "ACCEPTER")
-	if len(headers) == 0 {
-		t.Fatalf("no ACCEPTER route-map rendered:\n%s", section)
+	if len(headers) != 2 {
+		t.Fatalf("surviving single must render exactly [match, trailing], got %v:\n%s", headers, section)
 	}
-	last := headers[len(headers)-1]
-	if f := strings.Fields(last); f[2] != "permit" {
-		t.Fatalf("surviving single must be permit-terminated, last header %q:\n%s", last, section)
+	if !strings.HasSuffix(headers[1], " permit 20") {
+		t.Fatalf("surviving single must end in permit-20, got %q:\n%s", headers[1], section)
+	}
+	// The terminal permit must be UNCONDITIONAL (no match clause): deleting the
+	// BGP default-accept fallback would leave a conditional permit + FRR's
+	// implicit deny, which a last-header-says-permit check cannot tell apart.
+	if body := routeMapSeqBody10129(t, section, "ACCEPTER", 20); strings.Contains(body, "match ") {
+		t.Fatalf("trailing permit-20 must be unconditional (fall-through permitted):\n%s", section)
 	}
 	for _, h := range headers {
 		if f := strings.Fields(h); f[2] == "deny" {
 			t.Fatalf("warn-only baseline must render no deny in the survivor, got %q:\n%s", h, section)
 		}
+	}
+}
+
+// Kept pin guarding the KILL: narrowed warn-only still applies cleanly at the
+// ApplyFull boundary (no rejection shipped). A future render-level deny would
+// redden the permit-terminated baselines above; a future ApplyFull-level
+// rejection would redden THIS cell instead — the two guards cover the two
+// layers the hostile reviews distinguished.
+func TestNarrowedSuffixSafeStillAppliesCleanly10129(t *testing.T) {
+	po := policyOptions10129()
+	fc := &FullConfig{
+		PolicyOptions: po,
+		BGP: &config.BGPConfig{
+			LocalAS: 65001, RouterID: "1.1.1.1",
+			Neighbors: []*config.BGPNeighbor{
+				{Address: "10.0.2.1", PeerAS: 65002, FamilyInet: true, Import: []string{"ACCEPTER", "GHOST"}},
+			},
+		},
+	}
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "frr.conf")
+	if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{frrConf: confPath, exec: &fakeExecutor{}}
+	if err := m.ApplyFull(fc); err != nil {
+		t.Fatalf("warn-only narrowing must apply cleanly (no rejection shipped), got: %v", err)
+	}
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "neighbor 10.0.2.1 route-map ACCEPTER in\n") {
+		t.Fatalf("applied config must attach the surviving subset:\n%s", data)
 	}
 }
 
@@ -157,17 +205,24 @@ func TestNarrowedSuffixSafePopulatedComposedAttachesPermitTerminated10129(t *tes
 		t.Fatalf("must attach composed surviving subset %s, got:\n%s", composed, section)
 	}
 	headers := routeMapHeaders6807(section, composed)
-	if len(headers) == 0 {
-		t.Fatalf("no composed route-map %s rendered:\n%s", composed, section)
+	if len(headers) != 3 {
+		t.Fatalf("surviving composed must render exactly [A, B, trailing], got %v:\n%s", headers, section)
 	}
-	if f := strings.Fields(headers[len(headers)-1]); f[2] != "permit" {
-		t.Fatalf("surviving composed must be permit-terminated, last %q:\n%s", headers[len(headers)-1], section)
+	if !strings.HasSuffix(headers[2], " permit 30") {
+		t.Fatalf("surviving composed must end in unconditional permit-30, got %q:\n%s", headers[2], section)
 	}
-	// Both survivors' matches present, in chain order (nothing deleted today).
-	a := strings.Index(section, "route-map "+composed+" permit 10\n match ip address prefix-list PL")
-	b := strings.Index(section, "route-map "+composed+" permit 20\n match ip address prefix-list PL")
+	// Unconditional: deleting the fall-off-the-end fallback would leave
+	// conditional permits + FRR's implicit deny behind a last-header-says-permit
+	// check.
+	if body := routeMapSeqBody10129(t, section, composed, 30); strings.Contains(body, "match ") {
+		t.Fatalf("trailing permit-30 must be unconditional (fall-through permitted):\n%s", section)
+	}
+	// Both survivors' DISTINCT matches present, in chain order (nothing deleted
+	// today; PL vs PL2 tells a swap or duplication apart).
+	a := strings.Index(section, "route-map "+composed+" permit 10\n match ip address prefix-list PL\n")
+	b := strings.Index(section, "route-map "+composed+" permit 20\n match ip address prefix-list PL2")
 	if a < 0 || b < 0 || a > b {
-		t.Fatalf("both survivors must render in order in %s:\n%s", composed, section)
+		t.Fatalf("both survivors must render distinctly and in order in %s:\n%s", composed, section)
 	}
 }
 
@@ -207,8 +262,8 @@ func TestNarrowedGhostFirstMiddleSurvivorsNotDeleted10129(t *testing.T) {
 	if !strings.Contains(section, "neighbor 10.0.2.4 route-map "+composed+" in\n") {
 		t.Fatalf("ghost-middle must still attach surviving composed %s:\n%s", composed, section)
 	}
-	if !strings.Contains(section, "route-map "+composed+" permit 10\n match ip address prefix-list PL") ||
-		!strings.Contains(section, "route-map "+composed+" permit 20\n match ip address prefix-list PL") {
+	if !strings.Contains(section, "route-map "+composed+" permit 10\n match ip address prefix-list PL\n") ||
+		!strings.Contains(section, "route-map "+composed+" permit 20\n match ip address prefix-list PL2") {
 		t.Fatalf("ghost-middle survivors must both render (not deleted):\n%s", section)
 	}
 	// Gauges discriminate: both reported narrowed, neither deny-safe.
@@ -288,10 +343,12 @@ func TestMatchAllFinalTermShadowsSuffixDeny10129(t *testing.T) {
 	}
 }
 
-// Single-policy alias shape (issue: standalone alias, never mutating the shared
-// map): same body, deny trailing instead of permit. Reachability splits by
-// survivor: fall-through survivor → deny catches the rest; match-all-final-term
-// survivor → deny shadowed (inert). The shared map keeps its permit trailing.
+// Single-policy alias shape — direct-call PRIMITIVE, unattached (not an
+// attachment-site render): same body, deny trailing instead of permit.
+// Reachability splits by survivor: fall-through survivor → deny catches the
+// rest; match-all-final-term survivor → deny shadowed (inert). The shared map
+// keeps its permit trailing (re-render check is vacuous for the pure function;
+// attached alias behavior is still owed).
 func TestSingleAliasTrailingDenyShape10129(t *testing.T) {
 	po := policyOptions10129()
 	m := New()
@@ -329,6 +386,42 @@ func TestSingleAliasTrailingDenyShape10129(t *testing.T) {
 	}
 	if _, cont := seqAction8363(t, malias, "MATCHALL-alias", 20); cont {
 		t.Fatalf("t2 must terminate (deny-30 unreachable):\n%s", malias)
+	}
+}
+
+// Explicit-default standalone aliases: renderRouteMapForPolicy applies the
+// supplied trailing action UNCONDITIONALLY, so a blind "deny" alias on an
+// explicit-accept survivor FLIPS its terminating permit to deny (behavior
+// change — NOT deny-inert, unlike the member-synthesis break above). A future
+// alias must therefore preserve explicit defaults — policyTrailingAction(name,
+// ps, nil) is exactly that rule (explicit accept/reject preserved; no-default
+// resolves deny, the desired fall-through close) — instead of a blind "deny".
+func TestExplicitDefaultStandaloneAliasTrailing10129(t *testing.T) {
+	po := policyOptions10129()
+	m := New()
+	// TERMACCEPT: base permit-20 (explicit default), blind alias deny-20.
+	base := m.renderRouteMapForPolicy(po, "TERMACCEPT", po.PolicyStatements["TERMACCEPT"], "permit")
+	alias := m.renderRouteMapForPolicy(po, "TERMACCEPT-alias", po.PolicyStatements["TERMACCEPT"], "deny")
+	if !strings.Contains(base, "route-map TERMACCEPT permit 20") {
+		t.Fatalf("explicit-accept base must end in permit-20:\n%s", base)
+	}
+	if !strings.Contains(alias, "route-map TERMACCEPT-alias deny 20") {
+		t.Fatalf("blind deny alias flips the explicit default to deny-20:\n%s", alias)
+	}
+	// The preserve rule a future alias must use.
+	if got := policyTrailingAction("TERMACCEPT", po.PolicyStatements["TERMACCEPT"], nil); got != "permit" {
+		t.Fatalf("policyTrailingAction(TERMACCEPT, nil) must preserve permit, got %q", got)
+	}
+	if got := policyTrailingAction("TERMREJECT", po.PolicyStatements["TERMREJECT"], nil); got != "deny" {
+		t.Fatalf("policyTrailingAction(TERMREJECT, nil) must preserve deny, got %q", got)
+	}
+	if got := policyTrailingAction("ACCEPTER", po.PolicyStatements["ACCEPTER"], nil); got != "deny" {
+		t.Fatalf("policyTrailingAction(no-default, nil) must resolve deny (fall-through close), got %q", got)
+	}
+	// TERMREJECT: base and blind alias agree (deny-20) — inert there.
+	rbase := m.renderRouteMapForPolicy(po, "TERMREJECT", po.PolicyStatements["TERMREJECT"], "deny")
+	if !strings.Contains(rbase, "route-map TERMREJECT deny 20") {
+		t.Fatalf("explicit-reject base must end in deny-20:\n%s", rbase)
 	}
 }
 
@@ -425,6 +518,13 @@ func TestNarrowedVRFMatchesGlobal10129(t *testing.T) {
 	section := m.buildManagedSection(fc)
 	if !strings.Contains(section, "neighbor 10.0.3.1 route-map ACCEPTER in\n") {
 		t.Fatalf("VRF must attach the same surviving subset:\n%s", section)
+	}
+	headers := routeMapHeaders6807(section, "ACCEPTER")
+	if len(headers) != 2 || !strings.HasSuffix(headers[1], " permit 20") {
+		t.Fatalf("VRF survivor must be permit-terminated like global, got %v:\n%s", headers, section)
+	}
+	if body := routeMapSeqBody10129(t, section, "ACCEPTER", 20); strings.Contains(body, "match ") {
+		t.Fatalf("VRF trailing permit-20 must be unconditional:\n%s", section)
 	}
 	if got := m.NarrowedPolicyChains(); len(got) != 1 {
 		t.Fatalf("VRF site must feed the narrowed gauges, got %v", got)
