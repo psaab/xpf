@@ -456,7 +456,13 @@ type Config struct {
 	// F-032). Drop-time objects (later phases mutate survivors only; the
 	// binder reads Name/Interfaces, populated pre-filter), APPENDED at both
 	// drop sites, rebuilt per compile like Warnings.
-	QuarantinedRoutingInstances []*RoutingInstanceConfig
+	//
+	// `json:"-"` per the #9246 MalformedZonePairs precedent: a COMPILE-TIME
+	// record consumed only by the Go snapshot builders. Nothing transmits it
+	// (the quarantine itself is already reported via Warnings), so no helper
+	// of any vintage can observe it — the v21 STANDS entry in
+	// snapshot_shape_version_8892_test.go, not a version bump.
+	QuarantinedRoutingInstances []*RoutingInstanceConfig `json:"-"`
 	Firewall                    FirewallConfig
 	ClassOfService              *ClassOfServiceConfig
 	Services                    ServicesConfig
