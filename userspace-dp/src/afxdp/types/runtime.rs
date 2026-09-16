@@ -644,6 +644,13 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// transit security-policy deny in the periodic debug report.
     #[allow(dead_code)]
     pub(in crate::afxdp) host_inbound_deny: u64,
+    /// #10038: solicited TUN-origin replies admitted via the forward-companion
+    /// exemption (host-inbound + junos-host NEW-session gates skipped on a
+    /// reverse LocalDelivery HIT). Debug-only (no BatchCounters/prometheus
+    /// mapping: the mapping cost buys nothing — operators verify via delivery,
+    /// and abuse signal comes from the deny side, which still counts).
+    #[allow(dead_code)]
+    pub(in crate::afxdp) solicited_tun_origin_exempt: u64,
     /// #7212: established sessions REVOKED by a static interface INPUT filter
     /// revalidation — the operator attached or tightened a purely static
     /// address/protocol/port filter and an already-established flow is now

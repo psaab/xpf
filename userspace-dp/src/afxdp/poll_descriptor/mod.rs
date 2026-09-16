@@ -93,12 +93,13 @@ use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply};
 use resolver_enqueue::try_enqueue_resolver;
 
-use policy_revalidation::revalidate_zone_policy_on_session_hit;
+use policy_revalidation::{revalidate_zone_policy_on_session_hit, tun_origin_reverse_exempt};
 use filter::{
     collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit,
     evaluate_non_pbr_input_filter, evaluate_non_pbr_input_filter_counters_cached,
     evaluate_non_pbr_input_filter_log_only, filter_terminal, host_inbound_gated_lo0_action,
+    lo0_action_for_solicited_reply,
 };
 
 // Per-batch packet processing lifted from `poll_binding` (#678).
@@ -1116,6 +1117,25 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // #10038: solicited-reply exemption. A reverse
+                        // LocalDelivery HIT whose forward companion proves
+                        // TUN-origin (the firewall sent the request this reply
+                        // answers) skips the two NEW-session gates below
+                        // (host-inbound admission, junos-host policy) — Junos
+                        // runs neither on self-originated traffic nor its
+                        // solicited replies. lo0, TTL, and input-filter gates
+                        // still run. Short-circuit order matters: the companion
+                        // lookups (local + shared) run only for reverse
+                        // host-bound HITs, never the transit fast path.
+                        let solicited_exempt = resolved.metadata.is_reverse
+                            && resolved.decision.resolution.disposition
+                                == ForwardingDisposition::LocalDelivery
+                            && tun_origin_reverse_exempt(
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                &resolved.key,
+                                resolved.decision.nat,
+                            );
                         // #3070 + #3485: on the session-HIT local-delivery path,
                         // the host-inbound-traffic zone gate runs BEFORE the lo0
                         // host-bound filter. Re-checked on every hit (so a
@@ -1131,6 +1151,9 @@ pub(super) fn poll_binding_process_descriptor(
                         if resolved.decision.resolution.disposition
                             == ForwardingDisposition::LocalDelivery
                         {
+                            if solicited_exempt {
+                                telemetry.dbg.solicited_tun_origin_exempt += 1;
+                            }
                             // #3609: the per-interface host-inbound override is
                             // keyed by the LOGICAL unit ifindex; resolve the
                             // physical bind port + VLAN to it so a host-bound
@@ -1142,42 +1165,63 @@ pub(super) fn poll_binding_process_descriptor(
                                 meta.ingress_vlan_id,
                             )
                             .unwrap_or(meta.ingress_ifindex as i32);
-                            match host_inbound_gated_lo0_action(
-                                worker_ctx.forwarding,
-                                ingress_logical,
-                                authority_zone,
-                                // #9529: the service port after destination
-                                // translation; lo0 below stays on the wire frame.
-                                session_host_bound_policy_dst(
+                            // #10038: a solicited reply substitutes the lo0-only
+                            // evaluation for the gated one; both feed the SAME
+                            // match below (None is unreachable when exempt —
+                            // lo0 always answers — so the deny arm cannot fire
+                            // for it, and the accept arm runs unchanged).
+                            let gated = if solicited_exempt {
+                                Some(lo0_action_for_solicited_reply(
+                                    worker_ctx.forwarding,
+                                    ingress_logical,
+                                    crate::afxdp::frame::term_match_extra_from_frame(
+                                        packet_frame,
+                                        meta,
+                                    ),
                                     flow,
-                                    resolved.key.dst_port,
-                                    resolved.decision,
-                                )
-                                .1,
-                                matches!(flow.dst_ip, IpAddr::V6(_)),
-                                // #3171: first L4 byte = ICMP/ICMPv6 type, so an
-                                // error/PMTUD control message stays admitted on a
-                                // ping-less zone (mirrors the kernel chain). 0
-                                // for non-ICMP (ignored by host_inbound_admits).
-                                // #5140: read the INNER type via `packet_frame`
-                                // (= decapped frame post native-GRE, else
-                                // `raw_frame`); `meta.l4_offset` is inner-relative
-                                // after `stage_native_gre_decap`, so indexing the
-                                // outer `raw_frame` would read the wrong byte and
-                                // could admit an ordinary echo as an exempt error.
-                                packet_frame
-                                    .get(meta.l4_offset as usize)
-                                    .copied()
-                                    .unwrap_or(0),
-                                crate::afxdp::frame::term_match_extra_from_frame(
-                                    packet_frame,
                                     meta,
-                                ),
-                                flow,
-                                meta,
-                                Some(authority_zone),
-                                now_ns,
-                            ) {
+                                    Some(authority_zone),
+                                    now_ns,
+                                ))
+                            } else {
+                                host_inbound_gated_lo0_action(
+                                    worker_ctx.forwarding,
+                                    ingress_logical,
+                                    authority_zone,
+                                    // #9529: the service port after destination
+                                    // translation; lo0 below stays on the wire frame.
+                                    session_host_bound_policy_dst(
+                                        flow,
+                                        resolved.key.dst_port,
+                                        resolved.decision,
+                                    )
+                                    .1,
+                                    matches!(flow.dst_ip, IpAddr::V6(_)),
+                                    // #3171: first L4 byte = ICMP/ICMPv6 type, so an
+                                    // error/PMTUD control message stays admitted on a
+                                    // ping-less zone (mirrors the kernel chain). 0
+                                    // for non-ICMP (ignored by host_inbound_admits).
+                                    // #5140: read the INNER type via `packet_frame`
+                                    // (= decapped frame post native-GRE, else
+                                    // `raw_frame`); `meta.l4_offset` is inner-relative
+                                    // after `stage_native_gre_decap`, so indexing the
+                                    // outer `raw_frame` would read the wrong byte and
+                                    // could admit an ordinary echo as an exempt error.
+                                    packet_frame
+                                        .get(meta.l4_offset as usize)
+                                        .copied()
+                                        .unwrap_or(0),
+                                    crate::afxdp::frame::term_match_extra_from_frame(
+                                        packet_frame,
+                                        meta,
+                                    ),
+                                    flow,
+                                    meta,
+                                    Some(authority_zone),
+                                    now_ns,
+                                )
+                            };
+                            match gated {
                                 None => {
                                     // Host-inbound denied: silent drop, tear down
                                     // the established host-bound session.
@@ -1298,8 +1342,12 @@ pub(super) fn poll_binding_process_descriptor(
                         // already installed (with the miss-time permit metadata),
                         // so only the DROP verdict matters here — a permit /
                         // no-match leaves the established session untouched.
-                        if resolved.decision.resolution.disposition
-                            == ForwardingDisposition::LocalDelivery
+                        // #10038: solicited replies skip this gate too (see the
+                        // exemption above — self-originated runs no junos-host
+                        // policy either). Non-exempt HITs re-check unchanged.
+                        if !solicited_exempt
+                            && resolved.decision.resolution.disposition
+                                == ForwardingDisposition::LocalDelivery
                             && matches!(
                                 junos_host_local_policy(
                                     worker_ctx.forwarding,

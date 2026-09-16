@@ -26,6 +26,23 @@
 //! junos-host` policy, and the established-hit path re-evaluates both on every
 //! host-bound packet.
 //!
+//! # TUN-originated sessions (#10038)
+//!
+//! A FORWARD whose marker says the firewall itself originated it
+//! (`tun_origin_forward`: synced-family origin, no ingress identity, tunnel
+//! endpoint set, no admitting policy counter) is declined — on BOTH the
+//! forward arm and the #9604 reverse-companion arm. Junos runs no security
+//! policy on firewall-self-originated traffic (#6224), so there is no
+//! admitting pair to re-derive; judging the tunnel zone pair and revoking on
+//! the default deny is the #9563 error shape (a pair admission never
+//! consulted). Such sessions live by idle timeout, never by policy
+//! revocation — the documented tightening asymmetry (host-bound forward
+//! sessions still die on tighten; TUN-origin solicited flows survive).
+//! The marker ALSO gates the host-inbound/junos-host exemption on the
+//! LocalDelivery HIT arm (`tun_origin_reverse_exempt` below): the two share
+//! one predicate so #9604 and the HIT gate can never disagree about what
+//! "TUN-originated" means.
+//!
 //! # Fabric-redirected sessions (#7770, with #9604)
 //!
 //! A `FabricRedirect` entry is judged on its RECORDED egress zone. Its stored
@@ -185,11 +202,15 @@
 //! calls the routing evaluator). #8356 does not re-open #2620.
 
 use super::*;
+use crate::afxdp::FastMap;
+use crate::afxdp::worker::SyncedSessionEntry;
+use crate::nat::NatDecision;
 use crate::policy::evaluate_policy_result_without_counting;
 use crate::session::{
     PolicyRevalidationTarget, SessionDecision, SessionKey, SessionMetadata, SessionOrigin,
+    SessionTable,
 };
-use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 
 /// A zone-policy re-derivation that came back NON-PERMIT (`Deny` or `Reject`,
 /// #9381). Carries the CANONICAL key — the primary-index key, which on the NAT
@@ -357,7 +378,10 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // so re-deriving here asked `from -> the local interface's own zone`, a pair
     // host-inbound admission never consulted. The default policy then denied it and
     // the owner's own first ACK revoked the session. Declined before the revalidation
-    // lookup, so host-bound hits pay nothing for it.
+    // lookup, so host-bound hits pay nothing for it. (#10038: TUN-origin
+    // reverse hits additionally bypass the host-inbound/junos-host HIT
+    // re-checks themselves via the forward-companion exemption — the
+    // tightening asymmetry is deliberate and documented above.)
     if decision.resolution.disposition == super::ForwardingDisposition::LocalDelivery {
         return None;
     }
@@ -370,6 +394,19 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
         PolicyRevalidationTarget::NoLocalEntry => return None,
         PolicyRevalidationTarget::Stale(k) => k,
     };
+    // #10038 Part C (forward arm): a TUN-origin forward is declined — a
+    // tunnel-side forward-tuple packet (peer-spoofed or reflected) HITS the
+    // forward entry (#9519 Owner: arrival zone == tunnel zone) and must not
+    // revoke the pair post-commit, nor poison it. Genuine forward packets
+    // bypass the worker (WG socket TX, GRE direct enqueue), so this arm fires
+    // only on tunnel-side arrivals. Origin is loaded, not threaded (stale-only
+    // cost, no signature churn — the Revoke path below loads it the same way).
+    if let Some((canon_decision, canon_metadata, canon_origin)) =
+        sessions.entry_with_origin(&canonical_key)
+        && tun_origin_forward(&canon_decision, &canon_metadata, canon_origin)
+    {
+        return None;
+    }
     // The forward pair, judged as itself: the packet's tuple and protocol with
     // the from-zone resolved live from the packet's arrival interface (#9384),
     // except that a fabric arrival keeps the entry's recorded zone (the fabric
@@ -409,6 +446,88 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 origin,
             })
         }
+    }
+}
+
+/// #10038: is this FORWARD entry firewall-self-originated (TUN-originated)?
+///
+/// The single predicate shared by the #9604 decline (Part C, both arms below)
+/// and the LocalDelivery HIT exemption (`tun_origin_reverse_exempt`), so the
+/// two can never disagree about what "TUN-originated" means.
+///
+/// Each conjunct closes a spoof or alias class (all five must hold):
+/// - synced-family origin (incl. SharedPromote): the entry arrived via a
+///   coordinator-authoritative path (TUN-origin publish, HA sync, promote,
+///   materialize) — never via a local MISS install, which is how a spoofed
+///   plant's forward arrives (ForwardFlow). SharedPromote is included
+///   deliberately: a TUN-origin forward HIT promotes, and excluding it would
+///   let one tunnel-side forward-tuple packet poison the marker until expiry.
+/// - !is_reverse: the marker describes the forward half only.
+/// - ingress_ifindex == 0: TUN-origin has no ingress binding to record
+///   (#4983's HOST-OUTBOUND population). A wire-admitted forward stamps its
+///   arrival binding.
+/// - tunnel_endpoint_id != 0: the flow egresses a tunnel (GRE/WG local-origin
+///   builders set this; a host-bound or plain-transit forward does not).
+/// - policy_counter_idx == 0: self-originated runs no policy match, so no
+///   admitting counter was ever stamped (#6224). This is what excludes a
+///   degraded-ingress HA tunnel-TRANSIT forward (ingress folded to 0 by a
+///   legacy/unresolvable peer): transit is always policy-admitted (1-based
+///   handle, default-permit MAX), so it never carries 0.
+///
+/// Excluded origins and why: ForwardFlow/ReverseFlow (local MISS installs —
+/// the spoof-plant shape, must stay judged/gated), MissingNeighborSeed /
+/// LocalMiss / FabricPuntSeed (transient local seeds, never synced-family).
+pub(super) fn tun_origin_forward(
+    decision: &SessionDecision,
+    metadata: &SessionMetadata,
+    origin: SessionOrigin,
+) -> bool {
+    matches!(
+        origin,
+        SessionOrigin::SyncImport
+            | SessionOrigin::SharedMaterialize
+            | SessionOrigin::WorkerLocalImport
+            | SessionOrigin::SharedPromote
+    ) && !metadata.is_reverse
+        && metadata.ingress_ifindex == 0
+        && decision.resolution.tunnel_endpoint_id != 0
+        && metadata.policy_counter_idx == 0
+}
+
+/// #10038 Part B: may this reverse LocalDelivery HIT skip the host-inbound
+/// and junos-host NEW-session gates as a solicited reply?
+///
+/// True iff the hit entry's FORWARD companion exists and is TUN-originated
+/// (`tun_origin_forward`) — i.e. the firewall itself sent the request this
+/// reply answers. The companion key derivation is byte-identical to #9604's
+/// (`reverse_session_key` on the hit key + nat), and the lookup order is
+/// local-first (GRE UpsertLocal + pre-installed shapes) then shared
+/// (WG shared-only production shape, where the forward never materializes
+/// locally). A local hit DECIDES (a non-marker local forward fails closed
+/// without consulting shared — local shadows). Lone reverse (no forward
+/// anywhere) fails closed, per the #9604 lone-reverse philosophy.
+///
+/// Callers keep the lo0 packet filter, TTL, and input-filter gates: only the
+/// two NEW-session gates (host-inbound admission, junos-host policy) are
+/// skipped, matching Junos (self-originated + solicited replies run no
+/// policy). Precedence: revalidation runs BEFORE the HIT arm, so a C-revoke
+/// always wins over a B-exempt (fail-closed on any divergence).
+pub(super) fn tun_origin_reverse_exempt(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    rev_key: &SessionKey,
+    rev_nat: NatDecision,
+) -> bool {
+    let fwd_key = crate::session::reverse_session_key(rev_key, rev_nat);
+    if fwd_key == *rev_key {
+        return false;
+    }
+    if let Some((decision, metadata, origin)) = sessions.entry_with_origin(&fwd_key) {
+        return tun_origin_forward(&decision, &metadata, origin);
+    }
+    match crate::afxdp::shared_ops::lookup_shared_session(shared_sessions, &fwd_key) {
+        Some(entry) => tun_origin_forward(&entry.decision, &entry.metadata, entry.origin),
+        None => false,
     }
 }
 
@@ -464,6 +583,16 @@ fn reverse_hit_zone_policy(
         return None;
     }
     if fwd_decision.resolution.disposition == super::ForwardingDisposition::LocalDelivery {
+        return None;
+    }
+    // #10038 Part C (reverse arm): a TUN-origin forward companion is declined
+    // — self-originated runs no zone policy (#6224), so judging its tunnel
+    // pair revokes live solicited flows on the default deny (the #9563 error
+    // shape). Silent, like the LocalDelivery decline above. The lone-reverse
+    // arm above already declines the shared-only shape (forward never
+    // materializes locally); this covers a locally-present forward (GRE
+    // UpsertLocal, pre-installed pairs).
+    if tun_origin_forward(&fwd_decision, &fwd_metadata, fwd_origin) {
         return None;
     }
     // The JUDGED family's gate, after companion resolution — never the
@@ -757,4 +886,194 @@ fn zone_policy_deny_on_session_hit(
     }
     // DENY or REJECT: deliberately NOT re-stamped — see the header.
     ZonePolicyJudgment::Revoke
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marker_forward_10038() -> (SessionDecision, SessionMetadata, SessionOrigin) {
+        (
+            SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 400,
+                    tx_ifindex: 6,
+                    tunnel_endpoint_id: 1,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                },
+                nat: NatDecision::default(),
+            },
+            SessionMetadata {
+                ingress_zone: 5,
+                egress_zone: 5,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                owner_rg_id: 1,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            SessionOrigin::SyncImport,
+        )
+    }
+
+    /// #10038: the discriminator truth table — every conjunct load-bearing.
+    /// The base marker matches; flipping ANY single conjunct (each origin
+    /// outside the synced set, the reverse flag, an ingress identity, a zero
+    /// tunnel id, an admitting policy counter) fails.
+    #[test]
+    fn tun_origin_forward_table_10038() {
+        let (decision, metadata, origin) = marker_forward_10038();
+        assert!(tun_origin_forward(&decision, &metadata, origin));
+        // The synced-family origins all match (SharedPromote included: a
+        // TUN-origin forward HIT promotes, and excluding it would let one
+        // tunnel-side forward-tuple packet poison the marker until expiry).
+        for origin in [
+            SessionOrigin::SyncImport,
+            SessionOrigin::SharedMaterialize,
+            SessionOrigin::WorkerLocalImport,
+            SessionOrigin::SharedPromote,
+        ] {
+            assert!(
+                tun_origin_forward(&decision, &metadata, origin),
+                "{origin:?} must match"
+            );
+        }
+        // Every other origin fails — including ForwardFlow (the spoof-plant
+        // shape, which MISS-installs) and the transient local seeds.
+        for origin in [
+            SessionOrigin::ForwardFlow,
+            SessionOrigin::ReverseFlow,
+            SessionOrigin::LocalMiss,
+            SessionOrigin::MissingNeighborSeed,
+            SessionOrigin::FabricPuntSeed,
+        ] {
+            assert!(
+                !tun_origin_forward(&decision, &metadata, origin),
+                "{origin:?} must not match"
+            );
+        }
+        // Each remaining conjunct flipped alone.
+        let mut rev = metadata.clone();
+        rev.is_reverse = true;
+        assert!(!tun_origin_forward(&decision, &rev, origin));
+        let mut ingress = metadata.clone();
+        ingress.ingress_ifindex = 400;
+        assert!(!tun_origin_forward(&decision, &ingress, origin));
+        let mut untunneled = decision;
+        untunneled.resolution.tunnel_endpoint_id = 0;
+        assert!(!tun_origin_forward(&untunneled, &metadata, origin));
+        let mut admitted = metadata.clone();
+        admitted.policy_counter_idx = 1;
+        assert!(!tun_origin_forward(&decision, &admitted, origin));
+    }
+
+    /// #10038: the exemption's companion lookup — local-first (a non-marker
+    /// local forward DECIDES, shadowing a shared marker), shared-only marker
+    /// exempts (the WG production shape), lone reverse fails closed, and a
+    /// degenerate self-inverse key fails closed.
+    #[test]
+    fn tun_origin_reverse_exempt_lookup_10038() {
+        let nat = NatDecision::default();
+        let fwd_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 17,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 5)),
+            src_port: 5001,
+            dst_port: 5002,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        };
+        let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
+        assert_ne!(fwd_key, rev_key);
+        let (decision, metadata, _) = marker_forward_10038();
+        let install_local = |sessions: &mut SessionTable,
+                             origin: SessionOrigin,
+                             ingress: u32,
+                             policy_idx: u32| {
+            let mut meta = metadata.clone();
+            meta.ingress_ifindex = ingress;
+            meta.policy_counter_idx = policy_idx;
+            assert!(
+                sessions.install_with_protocol_with_origin(
+                    fwd_key.clone(),
+                    decision,
+                    meta,
+                    origin,
+                    122_000_000_000,
+                    17,
+                    0,
+                ),
+                "local forward must install"
+            );
+        };
+        let shared_entry = |origin: SessionOrigin| SyncedSessionEntry {
+            key: fwd_key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin,
+            protocol: 17,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        };
+        let fresh_shared = || Arc::new(Mutex::new(FastMap::default()));
+
+        // Local marker → exempt.
+        let mut sessions = SessionTable::new();
+        install_local(&mut sessions, SessionOrigin::SyncImport, 0, 0);
+        assert!(tun_origin_reverse_exempt(&sessions, &fresh_shared(), &rev_key, nat));
+
+        // Local non-marker + shared marker → DENY (local shadows shared).
+        let mut sessions = SessionTable::new();
+        install_local(&mut sessions, SessionOrigin::ForwardFlow, 400, 1);
+        let shared = fresh_shared();
+        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::SyncImport));
+        assert!(!tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
+
+        // Shared-only marker → exempt (WG production: the forward never
+        // materializes locally).
+        let sessions = SessionTable::new();
+        let shared = fresh_shared();
+        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::SyncImport));
+        assert!(tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
+
+        // Shared-only non-marker → deny.
+        let sessions = SessionTable::new();
+        let shared = fresh_shared();
+        shared
+            .lock()
+            .expect("shared map")
+            .insert(fwd_key.clone(), shared_entry(SessionOrigin::ForwardFlow));
+        assert!(!tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
+
+        // Lone reverse (no forward anywhere) → deny (fail-closed).
+        let sessions = SessionTable::new();
+        assert!(!tun_origin_reverse_exempt(&sessions, &fresh_shared(), &rev_key, nat));
+
+        // Degenerate self-inverse key (src==dst, ports equal) → deny.
+        let loop_key = SessionKey {
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            src_port: 5,
+            dst_port: 5,
+            ..fwd_key.clone()
+        };
+        assert_eq!(crate::session::reverse_session_key(&loop_key, nat), loop_key);
+        let sessions = SessionTable::new();
+        assert!(!tun_origin_reverse_exempt(&sessions, &fresh_shared(), &loop_key, nat));
+    }
 }
