@@ -38,15 +38,16 @@ func MonotonicNanos() int64 {
 
 // rebaseTimestamp adjusts a peer timestamp to the local monotonic clock domain.
 //
-// Saturating (#9915 F-118): a rebase that would overflow clamps to the far
-// future instead of wrapping into the past (instant reap), where explicit
-// deletes, bulk reconcile, and traffic-refresh bound the linger. Callers count
-// saturations via rebaseSaturates; this stays pure.
+// Saturating (#9915 F-118): a rebase whose result would fall outside the int64
+// range clamps to the far future instead of installing a corrupt-huge value
+// (before saturation it wrapped into the past and instantly reaped), where
+// explicit deletes, bulk reconcile, and traffic-refresh bound the linger.
+// Callers count saturations via rebaseSaturates; this stays pure.
 func rebaseTimestamp(peerTS uint64, offset int64) uint64 {
+	if rebaseSaturates(peerTS, offset) {
+		return ^uint64(0)
+	}
 	if offset >= 0 {
-		if rebaseSaturates(peerTS, offset) {
-			return ^uint64(0)
-		}
 		return peerTS + uint64(offset)
 	}
 	neg := uint64(-(offset + 1)) + 1
@@ -56,16 +57,23 @@ func rebaseTimestamp(peerTS uint64, offset int64) uint64 {
 	return peerTS - neg
 }
 
-// rebaseSaturates reports whether rebasing peerTS by offset would overflow a
-// uint64 (and thus saturate). It is the single overflow predicate shared by
+// rebaseSaturates reports whether rebasing peerTS by offset would leave the
+// int64 range (and thus saturate). It is the single range predicate shared by
 // the clamp above and the install-site counter, so counting and clamping can
-// never disagree. Only a nonnegative offset with a corrupt-huge timestamp
-// saturates; negative offsets clamp toward zero instead (exact above it).
+// never disagree. Nonnegative offsets saturate past MaxInt64; a negative
+// offset that underflows clamps toward zero instead (exact, uncounted).
 func rebaseSaturates(peerTS uint64, offset int64) bool {
-	if offset <= 0 {
+	if offset >= 0 {
+		if offset > math.MaxInt64 {
+			return true
+		}
+		return peerTS > uint64(math.MaxInt64)-uint64(offset)
+	}
+	neg := uint64(-(offset + 1)) + 1
+	if peerTS < neg {
 		return false
 	}
-	return peerTS > ^uint64(0)-uint64(offset)
+	return peerTS-neg > uint64(math.MaxInt64)
 }
 
 // writeFull loops until all bytes are written or an error occurs, handling

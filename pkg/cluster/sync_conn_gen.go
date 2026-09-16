@@ -22,24 +22,39 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 	slog.Debug("cluster sync: repeated synced-session helper mirror failure", "af", af, "err", err)
 }
 
-// genGuardMapCap is the ABSOLUTE CEILING for the sender-side echo maps, the
-// receiver-side stored-generation maps, and the #9412 close-class memos: half
-// of conntrack.MaxSessions, which counts forward+reverse entries while guard
-// keys are forward sessions (#9915 F-044).
+// genGuardMapCap is the ABSOLUTE CEILING for the per-side EFFECTIVE guard
+// caps: half of conntrack.MaxSessions, which counts forward+reverse entries
+// while guard keys are forward sessions (#9915 F-044). Nothing reads it
+// directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
+//
+// TEN map families share the two side caps. The sender side bounds SIX maps by
+// sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
+// installTableSentV4/V6 (#9752) — and the receiver side bounds FOUR by
+// recvCap() — recvGenV4/V6 (with their #9719 tombstone orders, which index the
+// same entries rather than adding new ones) and installTableRecvV4/V6. Every
+// family grows on full-of-live demand and skip-records at the cap.
 //
 // The EFFECTIVE cap starts at genGuardMapDefaultCap (the pre-#9915 static
-// value) and grows by doubling, per side (sender/receiver), whenever a map is
-// full of LIVE entries with nothing evictable — nondecreasing within an epoch
-// and reclaimed for the receiver at each bulk barrier (resetRecvGen); sender
-// maps self-drain on delete-echo so need no reset. All three map families are
-// evicted on delete; the cap is a safety valve for keys whose delete never
-// arrives (e.g. dropped close delta).
+// value) and grows by doubling, per side, whenever a map is full of LIVE
+// entries with nothing evictable. Cross-epoch ceiling shrinks clamp the stored
+// cap down (growGuardCapSide) and every read clamps to the ceiling in force
+// (sentCap/recvCap); the receiver side is additionally reclaimed at each bulk
+// barrier (resetRecvGen), while sender maps self-drain on delete-echo. All ten
+// families are evicted on delete; the cap is a safety valve for keys whose
+// delete never arrives (e.g. dropped close delta).
 //
-// Maps grow on demand, so the ceiling costs nothing until the table genuinely
-// fills: guard heap stays proportionate to the table it protects (~56B/entry
-// measured at 1M representative keys, plus 64B per tombstone order node;
-// worst case ~1.1GiB only at 100% single-family occupancy of a full 10M-entry
-// table — see docs/log/9915.md for the measurement and budget).
+// Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
+// genuinely fills, and per-map=wired is coverage-correct — one family can hold
+// every session (an all-v4 table fills genSentV4 alone), so each map must be
+// able to reach the full session count. The worst case is therefore ~10 maps ×
+// the effective cap: ~56B/entry measured at 1M representative keys, plus 64B
+// per tombstone order node, i.e. ≈2.8GB of guard heap plus tombstone nodes at
+// the 5M-entry absolute ceiling and 100% single-family occupancy of a full
+// 10M-entry table — see docs/log/9915.md for the measurement and budget. The
+// default 200k effective cap bounds the unwired case to ≈112MB plus
+// tombstones, and demand growth past it requires helper-attested provisioned
+// RAM via SetGenGuardSessionCap, so guard heap stays proportionate to the
+// table it protects.
 //
 // Honesty notes the ceiling does NOT promise: fabric-redirected sessions
 // consume TWO stamps (primary plus wire alias), so alias-heavy tables past
@@ -95,10 +110,22 @@ func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64, maxEntries i
 // sentCap/recvCap return the effective sender/receiver-side guard caps. Zero
 // means never grown: the default. Callers hold genSentMu/recvGenMu
 // respectively (plain ints, no atomics needed); every read and write runs
-// under those mutexes.
+// under those mutexes — except Stats, which takes the side mutex itself.
+//
+// Clamp-at-read (#9915 F-044 review): the stored cap is clamped to the CURRENT
+// maxCap on every read, so a wired-ceiling shrink (the setter tracks current)
+// takes effect immediately even though the stored ints only grow and the maps
+// never shrink. This closes the concurrent-shrink window structurally: no
+// interleaving of a lock-free setter store with a guard-path read can observe
+// an effective cap above the ceiling in force. "Nondecreasing within an epoch"
+// (see growGuardCapSide) holds per stable maxCap; across a ceiling change the
+// effective cap follows the ceiling down at once.
 func (s *SessionSync) sentCap() int {
 	if s == nil || s.sentGenGuardCap == 0 {
 		return genGuardMapDefaultCap
+	}
+	if max := s.maxCap(); s.sentGenGuardCap > max {
+		return max
 	}
 	return s.sentGenGuardCap
 }
@@ -106,6 +133,9 @@ func (s *SessionSync) sentCap() int {
 func (s *SessionSync) recvCap() int {
 	if s == nil || s.recvGenGuardCap == 0 {
 		return genGuardMapDefaultCap
+	}
+	if max := s.maxCap(); s.recvGenGuardCap > max {
+		return max
 	}
 	return s.recvGenGuardCap
 }
@@ -134,13 +164,17 @@ func (s *SessionSync) maxCap() int {
 
 // SetGenGuardSessionCap wires the helper-provisioned aggregate session
 // capacity (logical sessions, worker_count × 131072) into guard sizing.
-// Tracks the CURRENT backend: each nonzero report overwrites, so a
-// replacement reporting fewer workers shrinks the ceiling honestly instead of
-// pinning it at a stale larger value (side maps themselves stay
-// nonshrinking). Zero (unknown) retains previous. Lock-free by necessity:
-// read on guard paths under genSentMu/recvGenMu and written from the daemon
-// tick — a mutex here could invert lock order. Differs from the SetZoneRGMap
-// mutex shape deliberately, for that reason.
+//
+// Contract (reconciled #9915 review): a NONZERO report always overwrites, up
+// AND down — a replacement reporting fewer workers shrinks the ceiling
+// honestly instead of pinning it at a stale larger value. ZERO means
+// "unknown" (a missed daemon report), not "zero capacity", and retains the
+// last known value: a telemetry gap must not shrink live guards and
+// skip-record sessions that provisioned RAM still covers. The maps
+// themselves never shrink under either; only the growth ceiling moves.
+// Lock-free by necessity: read on guard paths under genSentMu/recvGenMu and
+// written from the daemon tick — a mutex here could invert lock order.
+// Differs from the SetZoneRGMap mutex shape deliberately, for that reason.
 func (s *SessionSync) SetGenGuardSessionCap(sessions uint64) {
 	if sessions == 0 {
 		return
@@ -151,9 +185,11 @@ func (s *SessionSync) SetGenGuardSessionCap(sessions uint64) {
 // growSentCap/growRecvCap double the side cap up to the ceiling; they report
 // whether the cap grew. Called only when a map is full of LIVE entries, so
 // churn (which always leaves evictable tombstones) never grows. Nondecreasing
-// within an epoch; the receiver side is reclaimed by resetRecvGen while the
-// sender side self-drains on delete-echo and needs no reset. Growths are
-// counted and logged — an operator-visible demand signal, not silent bloat.
+// within an epoch (one stable maxCap); across a ceiling shrink the stored cap
+// is clamped down instead of growing (see below). The receiver side is
+// additionally reclaimed by resetRecvGen while the sender side self-drains on
+// delete-echo and needs no reset. Growths AND clamp-downs are counted and
+// logged — an operator-visible demand signal, not silent bloat.
 func (s *SessionSync) growSentCap() bool {
 	return s.growGuardCapSide(true)
 }
@@ -163,22 +199,41 @@ func (s *SessionSync) growRecvCap() bool {
 }
 
 func (s *SessionSync) growGuardCapSide(sender bool) bool {
+	if s == nil {
+		return false
+	}
 	capPtr := &s.recvGenGuardCap
 	side := "receiver"
 	if sender {
 		capPtr = &s.sentGenGuardCap
 		side = "sender"
 	}
+	// One epoch-pinned ceiling read: maxCap is lock-free (atomic) and the
+	// setter may move it mid-call, so every decision below compares against
+	// THIS value rather than re-reading.
+	max := s.maxCap()
 	cur := *capPtr
 	if cur == 0 {
 		cur = genGuardMapDefaultCap
 	}
-	if cur >= s.maxCap() {
+	if cur > max {
+		// Cross-epoch shrink: the wired ceiling dropped below the stored cap.
+		// Clamp the stored cap down to the ceiling in force. Maps keep their
+		// entries (evicting live entries would reintroduce #2170); new
+		// inserts follow the smaller ceiling via clamp-at-read. Reports
+		// false: the cap did not grow.
+		*capPtr = max
+		n := s.stats.GenCapShrunk.Add(1)
+		slog.Info("cluster sync: generation-guard cap clamped down to a shrunken ceiling",
+			"side", side, "old", cur, "new", max, "shrunk_total", n)
+		return false
+	}
+	if cur >= max {
 		return false
 	}
 	grown := cur * 2
-	if grown > s.maxCap() {
-		grown = s.maxCap()
+	if grown > max {
+		grown = max
 	}
 	*capPtr = grown
 	n := s.stats.GenCapGrown.Add(1)
@@ -219,9 +274,41 @@ type fullSetSeqGuard struct {
 // mark. incarnation==0 || seq==0 marks a LEGACY (pre-#5706) sender that sends
 // no ordering trailer: admit-always and do NOT advance the mark, mirroring the
 // config-gen gen==0 accept-always compat. The caller holds recvSeqMu.
+//
+// Used by the IPsec and persistent-NAT arms, whose sets apply-or-drop without
+// a filter. The DHCP arms split the check from the advance (newer +
+// advanceIfNewer below): the #9915 F-117 identity filter can retain a set the
+// guard admitted, and an admitted-but-retained set must not wedge the mark
+// against honest lower-seq pushes.
 func (g *fullSetSeqGuard) admit(incarnation, seq uint64) bool {
+	if !g.newer(incarnation, seq) {
+		return false
+	}
+	g.advanceIfNewer(incarnation, seq)
+	return true
+}
+
+// newer reports whether (incarnation, seq) is strictly newer than the
+// high-water mark, without moving it. Legacy (0,0) is always newer. The caller
+// holds recvSeqMu.
+func (g *fullSetSeqGuard) newer(incarnation, seq uint64) bool {
 	if incarnation == 0 || seq == 0 {
 		return true // legacy sender — no sequence, accept-always
+	}
+	return g.incarnation == 0 ||
+		incarnation > g.incarnation ||
+		(incarnation == g.incarnation && seq > g.seq)
+}
+
+// advanceIfNewer moves the high-water mark to (incarnation, seq) iff it is
+// still strictly newer, reporting whether it advanced. Legacy (0,0) reports
+// true without touching the mark (admit-always, never advances). The caller
+// holds recvSeqMu; calling it at apply time (after decode+filter) lets a
+// duplicate-fabric twin that already applied win the race instead of
+// regressing the held set.
+func (g *fullSetSeqGuard) advanceIfNewer(incarnation, seq uint64) bool {
+	if incarnation == 0 || seq == 0 {
+		return true
 	}
 	if g.incarnation == 0 ||
 		incarnation > g.incarnation ||
@@ -310,7 +397,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	if s.installTableSentV4 == nil {
 		s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
 	}
-	stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if !stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap()) && s.growSentCap() {
+		stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap())
+	}
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
@@ -358,7 +447,9 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	if s.installTableSentV6 == nil {
 		s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
 	}
-	stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if !stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap()) && s.growSentCap() {
+		stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap())
+	}
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
@@ -894,9 +985,13 @@ func (s *SessionSync) rollBackStaleConfigInstallV6(key dataplane.SessionKeyV6, e
 		"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
 }
 
-func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val dataplane.SessionValue) {
+// installClusterSyncedV4 applies a received v4 install through the ordering
+// and config guards. It reports whether the install LANDED (dataplane write
+// accepted and kept); guard refusals, helper refusals, and rollbacks report
+// false so callers count only effects, not attempts (#9915 F-118 review).
+func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 	if s.sessions == nil {
-		return
+		return false
 	}
 	// #9715: guard, write and record are one apply across receive loops; see applyMu.
 	s.applyMu.Lock()
@@ -906,13 +1001,13 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		s.stats.InstallsStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v4 install",
 			"incoming_gen", val.Generation)
-		return
+		return false
 	}
 	if s.configEpochStale(val.ConfigEpoch) {
 		s.stats.SessionsStaleConfigIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-config-epoch v4 install (peer moved to a newer config that may deny this session)",
 			"session_config_epoch", val.ConfigEpoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
-		return
+		return false
 	}
 	// #9752 round 3: restore the received installing-table identity before
 	// the dataplane write (the BPF mirror cannot supply it on read-back).
@@ -920,7 +1015,9 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if s.installTableRecvV4 == nil {
 		s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
 	}
-	restoreInstallTableLocked(s.installTableRecvV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if !restoreInstallTableLocked(s.installTableRecvV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.recvCap()) && s.growRecvCap() {
+		restoreInstallTableLocked(s.installTableRecvV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.recvCap())
+	}
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
@@ -932,7 +1029,7 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		// behind it.
 		if s.configEpochStale(val.ConfigEpoch) {
 			s.rollBackStaleConfigInstallV4(key, val.ConfigEpoch)
-			return
+			return false
 		}
 		s.recordInstalledGenV4(key, record)
 		s.stats.SessionsInstalled.Add(1)
@@ -940,6 +1037,7 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
 			s.OnForwardSessionInstalled()
 		}
+		return true
 	} else if errors.Is(err, dataplane.ErrSyncedImportRefused) {
 		// #6785: the helper REFUSED this import on semantic grounds and Go has
 		// already rolled its BPF mirror row back, so there is no split truth and
@@ -954,11 +1052,14 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	} else {
 		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, err)
 	}
+	return false
 }
 
-func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
+// installClusterSyncedV6 applies a received v6 install through the ordering
+// and config guards. It reports whether the install LANDED, like the v4 twin.
+func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 	if s.sessions == nil {
-		return
+		return false
 	}
 	// #9715: see the v4 twin and applyMu.
 	s.applyMu.Lock()
@@ -968,20 +1069,22 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		s.stats.InstallsStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v6 install",
 			"incoming_gen", val.Generation)
-		return
+		return false
 	}
 	if s.configEpochStale(val.ConfigEpoch) {
 		s.stats.SessionsStaleConfigIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-config-epoch v6 install (peer moved to a newer config that may deny this session)",
 			"session_config_epoch", val.ConfigEpoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
-		return
+		return false
 	}
 	// #9752 round 3: v6 twin of the received-identity restore above.
 	s.recvGenMu.Lock()
 	if s.installTableRecvV6 == nil {
 		s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
 	}
-	restoreInstallTableLocked(s.installTableRecvV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
+	if !restoreInstallTableLocked(s.installTableRecvV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.recvCap()) && s.growRecvCap() {
+		restoreInstallTableLocked(s.installTableRecvV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.recvCap())
+	}
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
@@ -992,7 +1095,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		// leave the session behind it.
 		if s.configEpochStale(val.ConfigEpoch) {
 			s.rollBackStaleConfigInstallV6(key, val.ConfigEpoch)
-			return
+			return false
 		}
 		s.recordInstalledGenV6(key, record)
 		s.stats.SessionsInstalled.Add(1)
@@ -1000,6 +1103,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
 			s.OnForwardSessionInstalled()
 		}
+		return true
 	} else if errors.Is(err, dataplane.ErrSyncedImportRefused) {
 		// #6785: the helper REFUSED this import on semantic grounds and Go has
 		// already rolled its BPF mirror row back, so there is no split truth and
@@ -1014,6 +1118,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	} else {
 		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, err)
 	}
+	return false
 }
 
 func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen uint64, forwardOnly bool) {

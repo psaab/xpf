@@ -595,6 +595,16 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.GenCapGrown > 0 {
 			fmt.Fprintf(&b, "  Generation-guard cap growths: %d\n", syncStats.GenCapGrown)
 		}
+		// #9915 F-044 review: the wired ceiling shrank below a grown side cap
+		// (fewer helper workers) and the stored cap was clamped down to it.
+		if syncStats.GenCapShrunk > 0 {
+			fmt.Fprintf(&b, "  Generation-guard cap shrinks: %d\n", syncStats.GenCapShrunk)
+		}
+		// #9915 F-043 review: upgrade attempts refused on unresolvable LOCAL
+		// identity. Fix the node/cluster identity; the next commit retries.
+		if syncStats.AuthUpgradeIdentityErrors > 0 {
+			fmt.Fprintf(&b, "  Auth upgrade identity errors: %d\n", syncStats.AuthUpgradeIdentityErrors)
+		}
 		// #9915 F-118: same posture. A nonzero value means installs arrived
 		// with peer timestamps no honest clock can read; they were clamped
 		// to the far future instead of wrapping into the past.

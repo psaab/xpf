@@ -431,11 +431,13 @@ func (s *SessionSync) abortFenceAckWaiters() {
 }
 
 // abortFenceAckWaitersFor releases fence-ack waiters on a fabric drop (#9915
-// F-116): the ack returns on the receive loop's conn, so only waiters sent on
-// the dropped fabric — or tied to a conn no longer installed at all
-// (superseded/evicted) — can never be answered. An idle fabric flapping must
-// not degrade a confirmed fence whose ack path is healthy. Full disconnect
-// (!connected) releases everything.
+// F-116): the ack returns on the receive loop's conn — the fence-receive arm
+// answers with sendFenceAck(conn, …) on the conn that carried the fence
+// (sync_conn_read.go syncMsgFence case), and completion matches by seq — so
+// only waiters sent on the dropped fabric — or tied to a conn no longer
+// installed at all (superseded/evicted) — can never be answered. An idle
+// fabric flapping must not degrade a confirmed fence whose ack path is
+// healthy. Full disconnect (!connected) releases everything.
 //
 // Lock order: the caller (handleDisconnect) holds s.mu; this takes fenceAckMu
 // and reads only the slot variables (never getActiveConn/installConn — that
@@ -489,14 +491,23 @@ func (s *SessionSync) abortFenceAckWaitersFor(dropped net.Conn, connected bool) 
 //     This is the case a hard peer failure lands in when TCP has not yet
 //     noticed, and it is the only path that actually spends the timeout.
 func (s *SessionSync) SendFenceAwait(timeout time.Duration) (FenceAck, error) {
-	conn := s.getActiveConn()
+	// #9915 F-116 review: select the fabric AND register the waiter
+	// atomically under s.mu. getActiveConn-then-register without the lock
+	// lets a supersession/disconnect retire the conn between the two: the
+	// abort runs with no waiter to release, and the waiter registered
+	// afterwards on the dead conn strands to a full-timeout burn.
+	// Lock order s.mu -> fenceAckMu matches handleDisconnect/installConn;
+	// PeerFenceAckCapable is a lock-free atomic load.
+	s.mu.Lock()
+	conn := s.activeConnLocked()
 	if conn == nil {
+		s.mu.Unlock()
 		return FenceAck{}, fmt.Errorf("peer not connected")
 	}
 	if !s.PeerFenceAckCapable() {
+		s.mu.Unlock()
 		return FenceAck{}, fmt.Errorf("peer does not support fence acknowledgement")
 	}
-
 	// Sequences start at 1: seq 0 is reserved on the wire to mean "no ack
 	// requested", which is what a pre-#7147 SendFence's empty payload decodes
 	// to on a #7147 receiver.
@@ -508,6 +519,7 @@ func (s *SessionSync) SendFenceAwait(timeout time.Duration) (FenceAck, error) {
 	}
 	s.fenceAckWaiters[seq] = fenceAckWaiter{ch: waiter, conn: conn}
 	s.fenceAckMu.Unlock()
+	s.mu.Unlock()
 
 	unregister := func() {
 		s.fenceAckMu.Lock()

@@ -145,6 +145,16 @@ func (s *SessionSync) syncNoiseIdentity() (clusterID, nodeID int, err error) {
 				"the keyed handshake cannot bind identity and refuses to run — "+
 				"check /etc/xpf/node-id", node, cluster)
 	}
+	// #9915 F-043 review: the prologue binds the cluster id verbatim, so a
+	// corrupt cluster id diverges the two ends' prologues exactly like a bad
+	// node id — silent msg1 AEAD failure on both fabrics. The schema bounds it
+	// to 0..255 (one RETH MAC byte); anything else is corruption, failed loud.
+	if cluster < 0 || cluster > 255 {
+		return 0, 0, fmt.Errorf(
+			"cluster sync: local cluster id %d outside 0..255 (node %d); "+
+				"the keyed handshake cannot bind identity and refuses to run — "+
+				"check chassis cluster cluster-id", cluster, node)
+	}
 	return cluster, node, nil
 }
 

@@ -48,10 +48,15 @@ type sentInstallTable struct {
 // a stamp: the restore above runs first, so a same-incarnation (0,0)
 // arrives here already restored.
 //
-// The caller holds genSentMu. Generic over the two wire-key types.
-func stampInstallTableLocked[K comparable](m map[K]sentInstallTable, key K, sessionID uint64, domain, check *uint32) {
+// The caller holds genSentMu and supplies the sender-side effective cap
+// (SessionSync.sentCap), growing on full-of-live like the generation stamps —
+// the memo is a guard map like the rest (#9915 F-044), never bounded by the
+// raw absolute ceiling. Generic over the two wire-key types. Returns false
+// only when a new key was skip-recorded at the cap (the caller may grow and
+// retry); every other path — updated, restored, no identity — returns true.
+func stampInstallTableLocked[K comparable](m map[K]sentInstallTable, key K, sessionID uint64, domain, check *uint32, maxEntries int) bool {
 	if sessionID == 0 {
-		return
+		return true
 	}
 	rec, ok := m[key]
 	if ok && rec.sessionID != sessionID {
@@ -62,14 +67,15 @@ func stampInstallTableLocked[K comparable](m map[K]sentInstallTable, key K, sess
 	if ok && *domain == 0 && *check == 0 && (rec.domain != 0 || rec.check != 0) {
 		*domain, *check = rec.domain, rec.check
 	}
-	if !ok && len(m) >= genGuardMapCap {
+	if !ok && len(m) >= maxEntries {
 		// Skip-record-on-full, like putGenBounded: no memo for this key.
 		// A sweep resend for it stays (0,0) and is fenced as unannounced
 		// on PBR-active nodes (fail-closed) instead of passing as
 		// genuine-default.
-		return
+		return false
 	}
 	m[key] = sentInstallTable{sessionID: sessionID, domain: *domain, check: *check}
+	return true
 }
 
 // recvInstallTable is one session incarnation's last-RECEIVED installing-table
@@ -101,11 +107,15 @@ type recvInstallTable struct {
 //   - SessionID 0 means "no identity": nothing recorded or applied.
 //
 // The caller holds recvGenMu (taken under applyMu on the install path, under
-// genSentMu on the send-side delete path — both leaf-ward, no cycle).
-// Generic over the two wire-key types.
-func restoreInstallTableLocked[K comparable](m map[K]recvInstallTable, key K, sessionID uint64, domain, check *uint32) {
+// genSentMu on the send-side delete path — both leaf-ward, no cycle) and
+// supplies the receiver-side effective cap (SessionSync.recvCap), growing on
+// full-of-live like the generation records. Generic over the two wire-key
+// types. Returns false only on a skip-recorded new key (grow-and-retry, as
+// the sender memo); a zero-stamp frame records nothing by design and returns
+// true — there is no overflow to grow out of.
+func restoreInstallTableLocked[K comparable](m map[K]recvInstallTable, key K, sessionID uint64, domain, check *uint32, maxEntries int) bool {
 	if sessionID == 0 {
-		return
+		return true
 	}
 	rec, ok := m[key]
 	if ok && rec.sessionID != sessionID {
@@ -117,14 +127,15 @@ func restoreInstallTableLocked[K comparable](m map[K]recvInstallTable, key K, se
 		*domain, *check = rec.domain, rec.check
 	}
 	if *domain == 0 && *check == 0 {
-		return
+		return true
 	}
-	if !ok && len(m) >= genGuardMapCap {
+	if !ok && len(m) >= maxEntries {
 		// Skip-record-on-full, like the send memo: degrades to the pre-#9752
 		// window, never to a wrong table.
-		return
+		return false
 	}
 	m[key] = recvInstallTable{sessionID: sessionID, domain: *domain, check: *check}
+	return true
 }
 
 // lookupRecvInstallTableLocked (#9752 round 3 item 5) returns the received

@@ -508,6 +508,18 @@ type SyncStats struct {
 	// full of LIVE entries grew its side cap instead of skip-recording.
 	// Nonzero means live demand exceeded the starting default.
 	GenCapGrown atomic.Uint64
+	// GenCapShrunk counts generation-guard cap clamp-downs (#9915 F-044
+	// review): the wired ceiling dropped below a grown side cap and the stored
+	// cap was clamped to the ceiling in force. Nonzero means provisioned
+	// capacity shrank (fewer helper workers) after demand had grown past it.
+	GenCapShrunk atomic.Uint64
+	// AuthUpgradeIdentityErrors counts #6628/#7163 upgrade attempts refused
+	// because the LOCAL cluster/node identity could not be resolved (#9915
+	// F-043 review): every attempt fails the same way until the identity is
+	// fixed, so the count names a misconfiguration, not peer behavior. The
+	// connection is deliberately left as-is (see the upgrade handlers); the
+	// next commit retries and heals on repair.
+	AuthUpgradeIdentityErrors atomic.Uint64
 	// PreAuthRejected counts inbound sync connections dropped by the #5303
 	// pre-auth admission cap: a connection accepted while the pre-auth setup
 	// pool was saturated (a flood of connections that stall before
@@ -588,6 +600,8 @@ type SyncStatsSnapshot struct {
 	GenMapOverflow              uint64
 	GenTombstonesEvicted        uint64 // #9719
 	GenCapGrown                 uint64 // #9915 F-044
+	GenCapShrunk                uint64 // #9915 F-044 review
+	AuthUpgradeIdentityErrors   uint64 // #9915 F-043 review
 	PreAuthRejected             uint64
 	Connected                   bool
 	ActiveFabric                int
@@ -863,6 +877,9 @@ type SessionSync struct {
 	// OnDHCPLeasesReceived is called when a DHCP-server lease set arrives from
 	// the peer (#2239). family is 4 or 6; the standby holds these so it can
 	// seed Kea on takeover. Fires after the peer*DHCPLeases store is updated.
+	// Invoked synchronously within the DHCP apply mutex (commit order ==
+	// callback order, #9915 F-117 review): it must not reenter DHCP receive
+	// paths. No production consumer exists — the daemon flows via the held set.
 	OnDHCPLeasesReceived func(family int, leases []dhcpserver.SyncLease)
 	// OnPersistentNatLeasesReceived is called when a peer's full IDLE
 	// persistent-NAT lease set arrives (#8121). The daemon installs it into the
@@ -1332,6 +1349,11 @@ type SessionSync struct {
 	// 5M entries; the override keeps call-site coverage executed at unit-test
 	// volumes. Test-only; production never sets it. Same mutex as its side cap.
 	genGuardMapCeilingOverride int
+	// testClockNow overrides the local monotonic-seconds reading used by the
+	// ClockSync handler (nil = live clock). Test-only; production never sets
+	// it. Per-instance (not a package hook) so parallel test files cannot
+	// observe each other's frozen time. Set before driving handleMessage.
+	testClockNow func() uint64
 	// #9412: per tuple, the TCP close class this node last SENT for one session
 	// incarnation (matched on SessionID), so a mirror-sourced resend cannot
 	// regress it. Guarded by genSentMu, beside the generation maps it mirrors;
@@ -1570,6 +1592,14 @@ type SessionSync struct {
 	dhcpV4RecvSeq             fullSetSeqGuard
 	dhcpV6RecvSeq             fullSetSeqGuard
 	persistentNatLeaseRecvSeq fullSetSeqGuard
+	// dhcpApplyMu serializes each DHCP arm's commit (high-water advance +
+	// held-set store) with its callback (#9915 F-117 review), so commit order
+	// == callback order across the two fabric receiveLoops. It nests recvSeqMu
+	// (mark+store) inside and is released only after the callback; recvSeqMu
+	// is never held across the callback itself, so a consumer cannot deadlock
+	// on it. Taken only by the DHCP arms; the callback must not reenter DHCP
+	// receive paths (see OnDHCPLeasesReceived).
+	dhcpApplyMu sync.Mutex
 }
 
 // configApplyItem is one config-sync payload queued for ordered apply by the
@@ -1894,7 +1924,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		activeFabric = -1
 	}
 	s.mu.Unlock()
-	return SyncStatsSnapshot{SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(), SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(), DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(), BulkSyncs: s.stats.BulkSyncs.Load(), ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(), ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(), BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(), PeerBootIncarnation: s.PeerBootIncarnation().String(), ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(), BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(), ClockSyncsRefused: s.stats.ClockSyncsRefused.Load(), BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(), BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(), ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(), ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(), ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(), ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(), IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(), IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(), DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(), DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(), DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(), FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(), FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(), FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(), DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(), InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(), SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(), GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(), PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(), ActiveFabric: activeFabric, BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(), BulkSyncSessions: s.stats.BulkSyncSessions.Load(), LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(), LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load(), GenCapGrown: s.stats.GenCapGrown.Load(), RebaseSaturations: s.stats.RebaseSaturations.Load(), DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(), GenGuardSessionCap: s.genGuardSessionCap.Load()}
+	return SyncStatsSnapshot{SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(), SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(), DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(), BulkSyncs: s.stats.BulkSyncs.Load(), ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(), ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(), BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(), PeerBootIncarnation: s.PeerBootIncarnation().String(), ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(), BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(), ClockSyncsRefused: s.stats.ClockSyncsRefused.Load(), BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(), BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(), ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(), ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(), ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(), ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(), IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(), IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(), DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(), DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(), DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(), FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(), FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(), FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(), DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(), InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(), SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(), GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(), PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(), ActiveFabric: activeFabric, BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(), BulkSyncSessions: s.stats.BulkSyncSessions.Load(), LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(), LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load(), GenCapGrown: s.stats.GenCapGrown.Load(), GenCapShrunk: s.stats.GenCapShrunk.Load(), RebaseSaturations: s.stats.RebaseSaturations.Load(), AuthUpgradeIdentityErrors: s.stats.AuthUpgradeIdentityErrors.Load(), DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(), GenGuardSessionCap: s.genGuardSessionCap.Load()}
 }
 
 // IsConnected reports whether a peer sync connection is currently established.

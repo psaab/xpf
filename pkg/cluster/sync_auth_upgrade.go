@@ -320,6 +320,10 @@ func upgradeConfirmMAC(i2rKey, binding []byte) []byte {
 func (s *SessionSync) upgradeRoleIsInitiator() (bool, error) {
 	_, localNode, err := s.syncNoiseIdentity()
 	if err != nil {
+		// Centralized identity-error accounting (#9915 F-043 review): all
+		// three callers inherit it. Every attempt fails the same way until
+		// the identity is fixed, so the count names a misconfiguration.
+		s.stats.AuthUpgradeIdentityErrors.Add(1)
 		return false, err
 	}
 	return localNode < 1-localNode, nil
@@ -537,15 +541,22 @@ func (s *SessionSync) handleAuthUpgradeRequest(conn net.Conn, payload []byte) {
 		return
 	}
 	initiator, err := s.upgradeRoleIsInitiator()
-	if err != nil || !initiator {
+	if err != nil {
+		// LOCAL identity is corrupt (bad node/cluster id): every upgrade
+		// attempt fails the same way, and it is counted centrally
+		// (AuthUpgradeIdentityErrors). The connection is deliberately left
+		// as-is — disconnecting would flap (redial fails identically) and
+		// tear down working sync for a healable misconfiguration; fix the
+		// identity and the next commit retries and heals. Never escalate.
+		slog.Warn("cluster sync: cannot resolve local identity for an auth-upgrade request; leaving the connection as it is (#6628/#7163/#9915)", "err", err)
+		return
+	}
+	if !initiator {
 		// A Request from a peer that should itself be answering ours. Role is
 		// local knowledge on both sides, so this is a misconfiguration or an
-		// injection, never a state we should accommodate. NOTE (#9915 F-043):
-		// swallowing identity errors here (leave-as-is, plaintext sync
-		// continues) is INTENTIONAL — never escalate to a disconnect. A bad
-		// node id must fail new handshakes closed, not tear down working sync.
-		slog.Warn("cluster sync: ignoring an auth-upgrade request that arrived at the "+
-			"responder-role node (#6628/#7163)", "err", err)
+		// injection, never a state we should accommodate.
+		slog.Warn("cluster sync: ignoring an auth-upgrade request that arrived at the " +
+			"responder-role node (#6628/#7163)")
 		return
 	}
 	fabricIdx, ok := s.fabricIndexOf(conn)

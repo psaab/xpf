@@ -193,6 +193,11 @@ func (s *SessionSync) syncSweep() int {
 	}
 	threshold := s.lastSweepTime
 	now := monotonicSeconds()
+	// now is also the plausibility ceiling for Created in the filters below: a
+	// saturated (#9915 F-118, MaxUint64) or otherwise future-dated row must not
+	// re-queue every sweep — it was installed once via its delta and never ages
+	// into the window. Honest rows are always Created <= now (same-second
+	// granularity), so the conjunct only excludes corrupt-future rows.
 	var count int
 	var overflow bool
 	replaying := s.syncBackfillNeeded.Load()
@@ -200,7 +205,7 @@ func (s *SessionSync) syncSweep() int {
 		if val.IsReverse != 0 {
 			return true
 		}
-		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
 			announced := s.installTableAnnouncedV4(key)
 			s.stampInstallGenV4(key, &val)
 			// #9752 round 4: the sweep is its own transmission path — it
@@ -240,7 +245,7 @@ func (s *SessionSync) syncSweep() int {
 		if val.IsReverse != 0 {
 			return true
 		}
-		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
 			announced := s.installTableAnnouncedV6(key)
 			s.stampInstallGenV6(key, &val)
 			// #9752 round 4: v6 twin of the sweep fence above.

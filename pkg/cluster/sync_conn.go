@@ -263,6 +263,20 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.peerIncarnation++
 	s.peerHeartbeatAckEver.Store(false)
 	s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
+	// #9915 F-118 review: clear the kept connection's per-connection clock
+	// state HERE, before eviction and all other work. clockOffsetFor reads
+	// those atomics lock-free, so a concurrent session on the kept conn
+	// would otherwise use the retired offset in the window between the
+	// global clear above and a later clear. Anything stored before this
+	// switch is old-boot by definition; anything after re-syncs fresh.
+	// Evicted conns need no clearing: they are closed, and the publish gate
+	// rejects their in-flight frames by membership.
+	switch keepIdx {
+	case 0:
+		clearConnClockState(s.conn0)
+	case 1:
+		clearConnClockState(s.conn1)
+	}
 	// #7762: rebase the boot-epoch baseline onto THIS incarnation.
 	//
 	// This path retires an incarnation on #5084 boot-id evidence without going
@@ -309,7 +323,8 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.armColdPrimeLocked()
 	// Stamp AFTER the advance, exactly as installConn does, so the priming
 	// connection belongs to the incarnation it established rather than to the
-	// one just retired.
+	// one just retired. (Its clock state was already cleared at the top of
+	// this function, before eviction — see above.)
 	switch keepIdx {
 	case 0:
 		s.conn0Gen = s.peerIncarnation
@@ -561,6 +576,13 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int) bool {
 	// #9915 F-116: waiters tied to evicted conns can never be answered (their
 	// loops' late disconnects take the stale branch and release nothing) —
 	// abort the not-installed ones now. Caller holds s.mu.
+	//
+	// Review note: this holds with or without reboot evidence. An evicted
+	// socket is closed, and the peer answers a fence on the conn that carried
+	// it, so an ack (if the peer ever sends one) arrives on a socket this node
+	// closed and no receive loop reads. Prompt abort equals the timeout
+	// outcome, faster. Waiters on still-installed fabrics are untouched —
+	// that scoping is the F-116 fix.
 	s.abortFenceAckWaitersFor(nil, true)
 	return evicted
 }
@@ -1003,6 +1025,12 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	// #9915 F-116: a supersession replaced a live conn without any disconnect,
 	// so waiters tagged with the removed conn would otherwise survive to a
 	// full-timeout burn. Abort the not-installed ones now; still under s.mu.
+	//
+	// Review note: this holds even for a spurious (same-process) supersession.
+	// The replacement closes the old socket above, destroying its ACK path —
+	// the peer answers on the receiving conn, so the ack can only return to
+	// the closed socket. Prompt abort equals the timeout outcome, faster;
+	// waiters on the surviving fabric are untouched.
 	s.abortFenceAckWaitersFor(nil, true)
 	return d
 }
@@ -1225,12 +1253,16 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// a stale generation from being resurrected by a future edit that
 		// reuses the field before re-stamping it.
 		s.conn0Gen = 0
+		// #9915 F-118 review: the offset belongs to the connection's
+		// incarnation — a dead conn keeps no clock state behind.
+		clearConnClockState(conn)
 		slog.Info("cluster sync: fabric 0 disconnected")
 	case s.conn1 != nil && s.conn1 == conn:
 		s.conn1.Close()
 		s.conn1 = nil
 		s.configCrypto1 = nil
 		s.conn1Gen = 0
+		clearConnClockState(conn)
 		slog.Info("cluster sync: fabric 1 disconnected")
 	default:
 		slog.Debug("cluster sync: ignoring stale disconnect", "stale", fmt.Sprintf("%p", conn))
