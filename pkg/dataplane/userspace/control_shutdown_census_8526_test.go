@@ -179,7 +179,7 @@ func TestEveryControlCallerHoldsTheManagerMutex8526(t *testing.T) {
 //
 // The set is EXACT, not a lower bound: a new bypass appears as an extra
 // element rather than being absorbed. Each member is here for a stated reason;
-// adding a fourth is a decision someone has to make deliberately.
+// adding a sixth is a decision someone has to make deliberately.
 //
 // MUTATION: put `_ = conn.SetDeadline(...)` back in requestDetailedLocked
 // (the pre-#8526 shape) and this reds with requestDetailedLocked as an
@@ -195,14 +195,21 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	// requestSessionSyncLocked — the dedicated SESSION socket, not this one.
 	//                            Flat sessionSyncRoundtripDeadline (3s), already
 	//                            inside the stop budget by construction.
+	// requestHAWatchdogSessionLocked — same session socket + flat 3s deadline
+	//                            as its sync sibling, and it never takes m.mu
+	//                            (proven by
+	//                            TestRequestHAWatchdogSessionNeverTakesManagerMu9629),
+	//                            so there is no lock hold for the stop bound
+	//                            to cap. SessionMu-only by construction.
 	// ProbeStatus              — a standalone one-shot probe that stands up no
 	//                            Manager and holds no lock; its deadline is the
 	//                            caller's own timeout argument.
 	want := map[string]bool{
-		"armControlIO":               true,
-		"cutInFlightControlIOLocked": true,
-		"requestSessionSyncLocked":   true,
-		"ProbeStatus":                true,
+		"armControlIO":                   true,
+		"cutInFlightControlIOLocked":     true,
+		"requestSessionSyncLocked":       true,
+		"requestHAWatchdogSessionLocked": true,
+		"ProbeStatus":                    true,
 	}
 
 	facts := analyzeControlCalls8526(t, ".")
