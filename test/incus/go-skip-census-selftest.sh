@@ -21,6 +21,12 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 	echo "      control below would pass on the missing file instead of on the census."
 	exit 1
 }
+# python3 is the census engine; without it the script under test exits 77, and
+# every cell below would fail on the harness rather than on the subject.
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "SKIP: python3 not installed — cannot run the census self-test"
+	exit 77
+fi
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/pkg/alpha" "$WORK/pkg/beta"
 
@@ -96,12 +102,62 @@ echo "$out" | grep -q "no floor declared for 'unparsed'" &&
 	ok "the failure names the undeclared bucket" || bad "undeclared bucket not named"
 
 # ── 6. An EMPTY sweep is not a pass ──
+# Cell 5 left $FLOORS without an `unparsed` line; restore the complete floors
+# so this cell fails (or passes) on the EMPTY SWEEP, not on the missing
+# declaration.
+cat > "$FLOORS" <<'F'
+total = 5
+priv-absent = 1
+priv-present = 1
+other = 1
+unparsed = 2
+F
 mkdir -p "$WORK/empty"
 out=$( GO_SKIP_ROOT="$WORK" GO_SKIP_DIRS=empty GO_SKIP_FLOORS="$FLOORS" \
-	sh "$ROOT/scripts/go-skip-census.sh" 2>&1 )
+	sh "$ROOT/scripts/go-skip-census.sh" 2>&1 ); rc=$?
+[ "$rc" != "0" ] && ok "an empty sweep FAILS rather than passing over nothing" ||
+	bad "an empty sweep passed — a census that sweeps nothing and reports a clean board"
 echo "$out" | grep -q "0 skip call sites" &&
 	ok "an empty scan reports 0 rather than silently succeeding on a population it never found" ||
 	bad "empty scan output is not explicit: $out"
+echo "$out" | grep -q "GOOD NEWS" &&
+	ok "the empty sweep fails through the shrink branch" ||
+	bad "empty sweep did not report GOOD NEWS: $out"
+
+# ── 7. Comment prose is not a call site ──
+# A `t.Skip(` mentioned in `//` or `/* */` prose (or commented out) must not
+# count: the census was coupled to prose — rewording one memlockcensus comment
+# moved the total. Strings match first, so the URL one-liners below pin the
+# other direction: a `//` inside a literal must not hide a REAL call.
+mkdir -p "$WORK/pkg/gamma"
+cat > "$WORK/pkg/gamma/g_test.go" <<'GO'
+package gamma
+// t.Skip("line-comment prose is not a call") and t.SkipNow() neither
+/* t.Skip("block-comment prose is not a call") */
+/*
+t.Skip("a call inside a multi-line block is still prose")
+*/
+// func TestDead(t *testing.T) { t.Skip("commented-out code is not a call") }
+func TestG(t *testing.T) {
+	u := "http://example.com/x"
+	_ = u
+	t.Skip("needs the gamma fixture") // trailing prose: t.Skip("not a second call")
+}
+func TestH(t *testing.T) { _ = "http://x"; t.Skip("a same-line URL must not hide a real call") }
+GO
+cat > "$WORK/gfloors" <<'F'
+total = 2
+priv-absent = 0
+priv-present = 0
+other = 2
+unparsed = 0
+F
+out=$( GO_SKIP_ROOT="$WORK" GO_SKIP_DIRS=pkg/gamma GO_SKIP_FLOORS="$WORK/gfloors" \
+	sh "$ROOT/scripts/go-skip-census.sh" 2>&1 ); rc=$?
+[ "$rc" = "0" ] && ok "comment prose is not counted (//, /* */, commented-out code)" ||
+	bad "comment prose moved the census: $out"
+echo "$out" | grep -q "2 skip call sites" && ok "both real calls still counted" ||
+	bad "a real call went missing: $out"
 
 echo
 echo "  go-skip census selftest: $PASS passed, $FAIL failed"

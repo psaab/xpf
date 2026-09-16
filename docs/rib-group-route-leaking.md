@@ -274,7 +274,10 @@ Measured on a live kernel, with a control, and in the sharper case where the
 ingress VRF **has its own route for the same prefix** and still loses — the
 measurement is a test, `TestNextTableIngressScopeOnRealKernel_9420` in
 `pkg/routing/rules_9420_test.go`, which reproduces the defect (B1/B2) and the
-control (B3) in the same run as the fix.
+control (B3) in the same run as the fix. Since #9812 it runs under a forcing
+leg (`test/routing/selftest-routing-kernel_9812.sh`, in `make selftest` and
+`make test-routing-kernel-lib`); without that leg it skips silently where no
+netns is available.
 
 This is the same defect **#5117** fixed for the PBR/FBF band, in the same file;
 `nextTableManager.Apply` was not covered by that sweep. **#4073** closed the

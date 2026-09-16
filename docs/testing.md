@@ -141,7 +141,7 @@ no leg passes `-v`. So:
 | `make ignored-cell-census` | every Rust `#[ignore]`, including the third crate outside both workspaces |
 | `make test-cold-path-flooder` | 44 `#[test]`s in `test/incus/cold-path-flooder`, which was reached by nothing |
 | `make harness-census` | every runnable shell harness under `test/incus/` |
-| `make selftest` | the self-test layer, including all four censuses |
+| `make selftest` | the self-test layer: every hermetic self-test, plus the censuses (go-skip, harness, ignored-cell, go-buildtag, miri, interpreter, selftest) and the ledger legs |
 
 ### The go-skip census, and the thing it found
 
@@ -153,9 +153,9 @@ much room for the next regression to hide in.
 
 The buckets are the point:
 
-- **`priv-absent`** — shed when privilege is absent (26 at last census).
+- **`priv-absent`** — shed when privilege is absent (40 at last census).
 - **`priv-present`** — shed when privilege is **present** (10). This direction
-  is why the split exists: **no single run examines all 36.** Running the suite
+  is why the split exists: **no single run examines all 50.** Running the suite
   as root does not close the gap, it swaps which subjects go unexamined — and
   folded into one "root-gated" total that is invisible, making the obvious
   remedy look like a fix when it is a trade.

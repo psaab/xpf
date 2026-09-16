@@ -316,6 +316,17 @@ run_shell test/xsk-repro/selftest-probe-filter_6898.sh --selftest
 # one. This leg runs them under `unshare -rn`. SKIPs without go/unshare or where
 # unprivileged user namespaces are unavailable.
 run_shell test/routing/selftest-rule-dscp_7796.sh
+# #9812 (VAL-03/VAL-04): the routing real-kernel cells. The #9420 next-table
+# ingress-scope cell and the #9819 VRF-miss terminator cell are the kernel
+# halves of their fixes — both SKIP under a plain `go test` without a usable
+# netns, and a skipped cell reads identically to a passing one. This leg runs
+# them under `unshare -rn` with XPF_REQUIRE_NETNS=1, where a missing tool or a
+# failed namespace is a failure. SKIPs without go/unshare/ip or where
+# unprivileged user namespaces are unavailable.
+run_shell test/routing/selftest-routing-kernel_9812.sh
+# The leg's own probes, hermetically: missing go/unshare/ip/bash/netns must
+# SKIP (77), never false-FAIL under the forcing env. Six cells, fixtures only.
+run_shell test/routing/selftest-routing-probes_9812.sh
 # #6923: the chokepoint argument for the v6 conntrack publish path rests on
 # `refresh_bpf_conntrack_last_seen` being unable to CREATE a key, because it
 # updates with BPF_EXIST. "The flag is named EXIST" and "the kernel refuses
@@ -465,6 +476,22 @@ run_shell scripts/miri-census.sh
 # the other census legs, outside §4: it is a census, not a self-test.
 hdr "go-buildtag census"
 run_shell scripts/go-buildtag-census.sh
+
+# -- go-skip census (#9052 item 4, folded into this aggregate by #9812) --
+#
+# `go test ./...` prints `ok` for a package whose cells all skipped, so the
+# skip call sites were invisible to every gate until this census. It lived as a
+# manual `make go-skip-census` leaf while the floors drifted (318 -> 365 with
+# nothing noticing); running it here ratchets every new skip against
+# scripts/go-skip-census.floors on every `make selftest`.
+#
+# `run_bash` is correct: the script declares #!/usr/bin/env bash, and a
+# run_shell registration would be flagged by the #8153 interpreter census
+# below. (The Makefile leaf and the census self-test invoke it via `sh`, which
+# it tolerates; it must stay sh-compatible.) Without python3 the script exits
+# 77 itself, so this leg SKIPs on a minimal host.
+hdr "go-skip census"
+run_bash scripts/go-skip-census.sh
 
 # -- interpreter census (#8153) --
 #
