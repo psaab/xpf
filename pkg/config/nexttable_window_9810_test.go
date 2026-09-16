@@ -127,3 +127,35 @@ func TestStaticRouteExclusionsFamilyOrderMatchesApplier_9810(t *testing.T) {
 			"published, got %q", reason)
 	}
 }
+
+// TestStrictGateNoIngressEndToEnd_9810 pins the N=0 arm on the real commit
+// paths: a single leak with no interfaces is refused at strict commit (the
+// applier could install nothing) and downgraded to a warning on tolerant
+// load (#1960 no-brick). Companion to the N=1 overflow e2e cells in
+// compiler_routing_rules_test.go, which would otherwise silently cover N=0.
+func TestStrictGateNoIngressEndToEnd_9810(t *testing.T) {
+	sets := []string{
+		"set routing-instances vr instance-type virtual-router",
+		"set routing-options static route 10.9.0.0/24 next-table vr.inet.0",
+	}
+	t.Run("strict rejects", func(t *testing.T) {
+		tree := flatTreeFromSets(t, sets...)
+		_, err := CompileConfig(tree)
+		if err == nil || !strings.Contains(err.Error(), "next-table") {
+			t.Fatalf("strict commit must reject a leak with no ingress, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "0 default-instance ingress interfaces") {
+			t.Errorf("the refusal must name the N=0 cause, got %q", err)
+		}
+	})
+	t.Run("lenient warns", func(t *testing.T) {
+		tree := flatTreeFromSets(t, sets...)
+		cfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("tolerant load must NOT reject a leak with no ingress, got %v", err)
+		}
+		if !hasWarningContaining(cfg.Warnings, "next-table") {
+			t.Fatalf("tolerant load must record a next-table window warning, got %v", cfg.Warnings)
+		}
+	})
+}

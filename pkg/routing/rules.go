@@ -199,6 +199,12 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 	}
 
 	prio := nextTableRulePriority
+	// admitted counts SLOTS RESERVED by admitted leaks — the applier-side twin
+	// of the L*N the strict gate and StaticRouteExclusions compute. It advances
+	// once per admitted leak, independent of install/rollback outcome (see the
+	// admission check below). prio is only the install cursor: where the next
+	// leak's rules are programmed, reusing slots a rollback freed.
+	admitted := 0
 	for i, sr := range routes {
 		if sr == nil || sr.NextTable == "" {
 			continue
@@ -244,11 +250,23 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// interfaces — a partially-scoped leak would work on some ingress
 		// interfaces and silently not on others, which is harder to diagnose
 		// than a leak that is reported as not installed.
-		if prio+len(ingressIfaces) > nextTableRulePriority+maxNextTableRules {
+		// #9810 GPT-1: admission is INDEPENDENT of install/rollback accounting.
+		// The install cursor prio lags behind whenever a rollback frees slots,
+		// so gating overflow on prio would admit a verdict-EXCLUDED tail leak
+		// after any earlier fault (and live-rule ingestion would publish it
+		// too) — the previous implementation consumed the reservation. Gate on
+		// the admitted counter instead: exactly the verdict set is admitted,
+		// and a fault can only under-install it, never extend it.
+		// Window safety follows from the reservation: per-leak prio advance is
+		// N on success and survivors<N on failure, so prio never exceeds
+		// base+admitted, and this check keeps every emitted priority
+		// (prio+added, added<N) inside the window clear() scans.
+		if admitted+len(ingressIfaces) > maxNextTableRules {
 			// Count only ELIGIBLE routes past the cap — those the applier WOULD
 			// have installed (known instance + parseable CIDR). An
-			// unknown-instance or unparseable route is skipped above (no prio++),
-			// so it never consumes a window slot and is not a "dropped leak"; the
+			// unknown-instance or unparseable route is skipped above (no
+			// reservation), so it never consumes a window slot and is not a
+			// "dropped leak"; the
 			// tableIDs + net.ParseCIDR gates here mirror the per-route eligibility
 			// checks at the top of this loop so the "N not leaked" count is
 			// accurate rather than inflated by routes that would never install
@@ -274,6 +292,9 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 				maxNextTableRules, dropped, len(ingressIfaces)))
 			break
 		}
+		// The reservation is consumed here, before the install attempt, so a
+		// later fault/rollback cannot admit a further leak past it (GPT-1).
+		admitted += len(ingressIfaces)
 
 		// One rule per ingress interface of the authoring instance (#9420).
 		// ingressIfaces is pre-sorted and de-duplicated by
@@ -284,14 +305,23 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// with the next interface, leaving the leak installed on a subset of
 		// its interfaces while the userspace mirror follows it on all of them.
 		// Now the first failure stops this leak and rolls its partial install
-		// back, and prio is not consumed — except by rules the rollback itself
-		// cannot delete, which still occupy kernel slots the cursor must
-		// account for (or a later leak would be programmed beyond the window
-		// clear() scans and leak permanently). EEXIST-counted rules are NOT
-		// rolled back: that content pre-exists (stale survivor of a failed
-		// clear, owned by clear() which is already loud), and deleting
-		// converged content to satisfy atomicity purity only loses coverage.
+		// back; the freed slots are reused by the next leak, and prio advances
+		// only past slots still occupied — rollback survivors plus
+		// EEXIST-retained slots. Survivors can sit at ARBITRARY positions in
+		// the failed range (not a prefix), so a scalar cursor is approximate
+		// by construction: the next leak may pack at a priority an orphan
+		// still holds (duplicate priorities, which the kernel permits) or skip
+		// a freed slot (gap waste). Both desync the cursor from exact occupancy
+		// under delete faults; the joined error plus the #9693 retry heals it.
+		// Admission is unaffected — the reservation above is consumed
+		// regardless — so a fault can only under-install the verdict set,
+		// never admit beyond it. EEXIST-counted rules are NOT rolled back:
+		// that content pre-exists (a stale survivor of a failed clear at the
+		// attempted priority under the deterministic layout, owned by clear()
+		// which is already loud), and deleting converged content to satisfy
+		// atomicity purity only loses coverage.
 		added := 0
+		eexist := 0
 		leakFailed := false
 		var leakRules []*netlink.Rule
 		for _, iif := range ingressIfaces {
@@ -307,6 +337,7 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 					// EEXIST: the desired content is already in the kernel —
 					// converged, not a fault. Count the slot and continue.
 					added++
+					eexist++
 					continue
 				}
 				errs = append(errs, fmt.Errorf(
@@ -319,7 +350,10 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			added++
 		}
 		if leakFailed {
-			survivors := 0
+			// Rollback survivors still occupy kernel slots the cursor must
+			// skip; EEXIST-retained slots likewise (counted above, never
+			// deleted). Successfully-deleted slots are freed for reuse.
+			survivors := eexist
 			for _, rule := range leakRules {
 				if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
 					survivors++
@@ -1019,8 +1053,10 @@ func (p *pbrManager) clear() error {
 // could match the global rule and be steered into the wrong VRF. An attachment
 // whose ingress interface cannot be resolved fails CLOSED (the term is dropped
 // and the build degraded) rather than installing a global iif-less rule. A
-// loopback attachment (`interfaces lo0 unit N`, resolving detached, or `lo`,
-// the #9420 hijack) is likewise dropped LOUD per attachment (#9810 LEAD-O4).
+// loopback attachment carrying routing-instance terms is likewise dropped LOUD
+// per attachment (`interfaces lo0 unit N` resolves detached; `lo` is the #9420
+// hijack — #9810 LEAD-O4), while an ordinary accept/discard-only loopback
+// filter is skipped silently (it builds no rule on any ingress).
 //
 // Kernel-mirror support matrix (#3730). An `ip rule` can only express a subset
 // of a firewall-filter term's `from` predicates, so the mirror is exact for the
@@ -1043,9 +1079,9 @@ func (p *pbrManager) clear() error {
 //
 // The returned error is non-nil when the build is DEGRADED: a term carries an
 // ip-rule-unrepresentable predicate (per the matrix above), an attachment is
-// unresolvable or on loopback (#9810 LEAD-O4), or the expansion exceeds
-// maxPBRRules. The successfully-built rules are still returned so the caller
-// can install them and surface the degradation.
+// unresolvable or on loopback with routing-instance terms (#9810 LEAD-O4), or
+// the expansion exceeds maxPBRRules. The successfully-built rules are still
+// returned so the caller can install them and surface the degradation.
 func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	if cfg == nil {
 		return nil, nil
@@ -1060,7 +1096,6 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 
 	inetAttached, inet6Attached := collectAttachedInputFilters(cfg)
 	pls := cfg.PolicyOptions.PrefixLists
-
 	var rules []PBRRule
 	var errs []error
 	// #5683: once the running rule count reaches maxPBRRules no further term can
@@ -1099,9 +1134,17 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 				// unit N`) resolves to the nonexistent `lo0`/`lo0.N`, whose rules
 				// install detached and only burn PBR window slots — or, for a
 				// literal `lo` unit, to the live kernel `lo`, the #9420
-				// cross-VRF hijack. Drop the attachment LOUD (fail-safe
-				// under-steer to the main table); the userspace filter path
-				// still enforces the term exactly.
+				// cross-VRF hijack.
+				if !filterHasRoutingInstanceTerm(filter) {
+					// An ordinary accept/discard-only filter (the protect-RE
+					// idiom) builds no FBF rule on ANY ingress, so there is no
+					// steering to drop — skip silently rather than falsely
+					// reporting degraded PBR with nothing dropped (GPT-2).
+					continue
+				}
+				// The attachment carries steering that cannot install: drop it
+				// LOUD (fail-safe under-steer to the main table); the userspace
+				// filter path still enforces the term exactly.
 				errs = append(errs, fmt.Errorf(
 					"PBR filter %s: attachment on loopback ingress %q carries a "+
 						"routing-instance term, but loopback cannot steer kernel FBF "+
@@ -1156,7 +1199,8 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 //     unrepresentable `except` set, an unknown DSCP name, a contradictory
 //     `routing-instance` + `discard`/`reject` term (#4534), an
 //     ip-rule-unrepresentable L4/per-packet predicate (#3730), a loopback
-//     attachment (#9810 LEAD-O4, one per attachment, not per term), or the
+//     attachment carrying routing-instance terms (#9810 LEAD-O4, one per
+//     attachment, not per term), or the
 //     maxPBRRules overflow (#3430 M3, counted as one condition). A non-zero
 //     value means the kernel slow path under-steers vs the userspace fast path
 //     (which still enforces every term exactly).
@@ -1189,6 +1233,24 @@ func PBRBuildStats(cfg *config.Config) (installed, degraded int) {
 type pbrAttachment struct {
 	Filter string // firewall filter name
 	Iif    string // Linux ingress ifname (e.g. "ge-0-0-0", "ge-0-0-0.50")
+}
+
+// filterHasRoutingInstanceTerm reports whether any term of filter steers via
+// `then routing-instance` — i.e. whether the filter can produce any kernel FBF
+// rule at all (buildPBRFromFilter silently skips terms without one). The #9810
+// LEAD-O4 loopback arm consults it so an ordinary accept/discard-only lo0
+// filter (the protect-RE idiom) is skipped silently instead of falsely
+// reporting degraded PBR with nothing dropped.
+func filterHasRoutingInstanceTerm(filter *config.FirewallFilter) bool {
+	if filter == nil {
+		return false
+	}
+	for _, term := range filter.Terms {
+		if term != nil && term.RoutingInstance != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // collectAttachedInputFilters returns the ordered, de-duplicated set of

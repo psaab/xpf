@@ -42,9 +42,11 @@ const (
 
 // The count stays CONSERVATIVE: it includes leaks the applier would skip
 // (unknown target, unparseable CIDR). That is safe on the strict path because
-// #5693 rejects undefined targets and unparseable destinations cannot commit
-// there, so every counted leak is eligible; on the lenient path an over-count
-// only over-warns, the fail-safe direction.
+// #5693 rejects undefined targets ahead of this gate and ValidateRouteDestination
+// (#2448, via the #1319 schema gate, strict-before-compile on the store commit
+// and peer-pipeline paths for every static block) rejects unparseable
+// destinations ahead of it — so every counted leak is eligible; on the lenient
+// path an over-count only over-warns, the fail-safe direction.
 func nextTableRouteCount(cfg *Config) int {
 	if cfg == nil {
 		return 0

@@ -127,9 +127,13 @@ func TestRoutingRuleWindowsStrictGate_5854(t *testing.T) {
 // nextTableOverLimitSets returns flat `set` commands for 101 next-table static
 // routes (one over the 100-rule window) all pointing at a DEFINED routing-
 // instance, so the #5693 next-table definedness gate passes and the #5854
-// window gate is the one that fires.
+// window gate is the one that fires. One unclaimed unit (N=1, #9810) keeps
+// this a genuine overflow cell rather than an N=0 reject.
 func nextTableOverLimitSets() []string {
-	sets := []string{"set routing-instances vr instance-type virtual-router"}
+	sets := []string{
+		"set routing-instances vr instance-type virtual-router",
+		"set interfaces ge-0/0/0 unit 0",
+	}
 	for i := 0; i <= maxNextTableRules; i++ { // 0..100 => 101 distinct routes
 		sets = append(sets, fmt.Sprintf(
 			"set routing-options static route 10.%d.%d.0/24 next-table vr.inet.0", i/256, i%256))
