@@ -247,7 +247,7 @@ func TestApplyTailReconcilesSurfacesInterfaceReconcileError(t *testing.T) {
 	}
 
 	injected := errors.New("injected: interface reconcile (xfrmi create) failed")
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, injected, nil, nil, nil, nil, nil)
+	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, injected, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("applyTailReconciles must surface the interface-reconcile failure " +
 			"(fail-closed); got nil")

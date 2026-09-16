@@ -68,7 +68,7 @@ func TestRecoveredRollbackDoesNotPanicBeforeManagers6739(t *testing.T) {
 		t.Fatal("precondition: the store must exist — phase 1 armed the timer from it")
 	}
 
-	err := d.applyTailReconciles(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	err := d.applyTailReconciles(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// FAIL CLOSED, not "skip and report success". This site is already
 	// fail-closed one branch below, because reporting a successful apply while
@@ -93,7 +93,7 @@ func TestVRRPGuardDoesNotFireWhenTheManagerExists6739(t *testing.T) {
 	d := daemonAtRecoveryWindow6739(t)
 	d.vrrpMgr = vrrp.NewManager()
 
-	err := d.applyTailReconciles(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	err := d.applyTailReconciles(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil && strings.Contains(err.Error(), "VRRP manager not initialized") {
 		t.Fatalf("the #6739 guard fired with a live VRRP manager present — it would fail "+
 			"every ordinary apply: %v", err)

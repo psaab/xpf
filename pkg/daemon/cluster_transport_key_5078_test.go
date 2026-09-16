@@ -186,7 +186,7 @@ func TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078(t *testing.T) {
 		before := gen()
 		// The tail returns reconcile errors in this stripped-down harness; the
 		// assertion is on the comms decision, which step 20 makes regardless.
-		_ = d.applyTailReconciles(keyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(keyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if after := gen(); after != before {
 			t.Fatalf("committing authentication-key restarted cluster comms "+
 				"(clusterCommsGen %d -> %d): that drops the established session-sync "+
@@ -203,7 +203,7 @@ func TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078(t *testing.T) {
 		moved.Chassis.Cluster.PeerAddress = "10.99.0.9"
 
 		before := gen()
-		_ = d.applyTailReconciles(moved, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(moved, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if after := gen(); after == before {
 			t.Fatalf("a peer-address change did NOT restart cluster comms "+
 				"(clusterCommsGen stayed %d); the key-commit assertion above is "+
@@ -275,7 +275,7 @@ func TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078(t *testing.T) {
 		// active transport is unchanged — which is exactly the production shape
 		// after a key commit, since the key never entered the transport key.
 		before := gen()
-		_ = d.applyTailReconciles(movedKeyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(movedKeyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if after := gen(); after == before {
 			t.Fatalf("a peer-address change on a KEYED cluster did NOT restart "+
 				"cluster comms (clusterCommsGen stayed %d); step 20 must key its "+

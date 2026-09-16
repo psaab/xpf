@@ -16,7 +16,8 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 		"1 while the last applied FRR reload fell back to the additive "+
 			"vtysh -f path (full frr-reload.py diff failed) and the "+
 			"in-manager retry has not yet converged; stale-config "+
-			"removal is deferred while set (#1880).",
+			"removal is deferred while set (#1880). Alert if 1 for >10m "+
+			"(twice the 5m slow retry; paired with a failed commit, #9947).",
 		nil, nil,
 	)
 	c.frrPolicyChainsNarrowed = prometheus.NewDesc(

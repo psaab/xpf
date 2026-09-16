@@ -94,7 +94,7 @@ func TestConfigApplyReconcilesConnectionAuth6628(t *testing.T) {
 	// The tail returns reconcile errors in this stripped-down harness; the
 	// assertion is on what step 20 puts on the wire.
 	go func() {
-		_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	}()
 
 	select {

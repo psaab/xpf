@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -179,16 +180,68 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 	return ipsecErr, dhcpServerErr
 }
 
+// applyFRRFull applies all routes + dynamic protocols via FRR on the
+// operator-commit full path (step 3) and reports whether the reload fully
+// converged. assembleFRRConfig is the SOLE frr.FullConfig constructor,
+// shared with the ip-monitoring routes-only actuator (#1827) — the full
+// apply consumes the same (config-filtered) overlay computed in step
+// 1.95, so an operator commit while a policy is FAILED preserves a
+// still-valid injected failover route and drops removed/edited entries
+// on the commit itself.
+//
+// Return contract (#9947 F-007, fail-closed): nil on a full-diff
+// convergence or on the persistent pytools-missing degraded state
+// (frr-reload.py not installed — every reload degrades until the
+// package is installed, so failing the commit would red every commit
+// with no operator action short of installing the package; tolerated
+// with gauge + warn-once + slow-cadence retry). A HARD reload failure
+// (NOTHING applied — live FRR keeps its previous config while frr.conf
+// on disk holds the new section) and a TRANSIENT degraded reload
+// (additive vtysh -f applied the new lines but deferred stale-config
+// removal) both return a non-nil error so the tail commit-error join
+// fails the commit instead of reporting an unqualified success for a
+// removal that did not happen. The in-manager degraded-retry loop
+// still owns convergence in both cases; the error is the operator
+// signal, not the convergence mechanism.
+//
+// This is deliberately a SEPARATE deferred slot (frrErr) from the
+// ip-rule routingRuleErr below: the #9693 routing-reconcile retry
+// owner re-runs ONLY the ip-rule reconcile + snapshot republish and
+// is structurally forbidden from touching FRR, so routing an FRR
+// outcome through noteRoutingReconcileResult would latch debt a clean
+// ip-rule re-run then falsely discharges while FRR is still broken.
+// The actuator (daemon_ipmon.go) intentionally diverges: it treats the
+// same degraded state as publishable success because the new routes
+// ARE live and publishing keeps the kernel/userspace FIBs in
+// agreement — same state, different consumer contracts.
+func (d *Daemon) applyFRRFull(cfg *config.Config, commitOverlay []config.RouteOverlayEntry) error {
+	if d.frr == nil {
+		return nil
+	}
+	err := d.applyFRRConfig(d.assembleFRRConfig(cfg, commitOverlay))
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, frr.ErrFRRReloadDegraded) && frr.IsFRRReloadPyMissing(err) {
+		// Persistent environmental degraded: tolerated (warn + gauge +
+		// slow retry already armed by the manager).
+		return nil
+	}
+	return fmt.Errorf("FRR reload did not fully converge (change not yet fully in effect; degraded retry armed): %w", err)
+}
+
 // applyRoutingRules applies the routing-rules layer during a config apply:
-// the FRR config (static + dynamic protocols, best-effort — the error is
-// consumed only by the async reconciler), next-table policy-routing rules,
-// rib-group route-leaking rules, and firewall-filter policy-based routing (PBR)
-// rules. Extracted verbatim from applyConfigLocked (#4407); all steps are
-// idempotent ip-rule/FRR reconciles that log-and-continue, so the block has no
-// early return. commitOverlay is the ip-monitoring route overlay folded into
-// the FRR assembly. Runs in the same slot, after the dataplane apply / RETH-MAC
-// sequence and before proactive neighbor resolution.
+// next-table policy-routing rules, rib-group route-leaking rules, and
+// firewall-filter policy-based routing (PBR) rules. The FRR config
+// (static + dynamic protocols) is applied separately via applyFRRFull
+// (#9947 F-007, its own frrErr deferred slot — never through this
+// return, which the #9693 retry owner latches as ip-rule debt).
+// Extracted verbatim from applyConfigLocked (#4407); all steps are
+// idempotent ip-rule reconciles. Runs in the same slot, after the
+// dataplane apply / RETH-MAC sequence and before proactive neighbor
+// resolution.
 func (d *Daemon) applyRoutingRules(cfg *config.Config, commitOverlay []config.RouteOverlayEntry) error {
+	_ = commitOverlay // retained for call-site stability; the overlay feeds applyFRRFull.
 	// #5844: the kernel policy-routing (ip rule) reconciles below —
 	// next-table, rib-group, and PBR/filter-based-forwarding — each already
 	// RETURN a fail-closed error: a partial clear/add leaves stale-or-missing
@@ -202,34 +255,9 @@ func (d *Daemon) applyRoutingRules(cfg *config.Config, commitOverlay []config.Ro
 	// error surfaces (mirroring the #5310 ifaceErr / #5696 routeLeakErr pattern).
 	var routingErrs []error
 
-	// 3. Apply all routes + dynamic protocols via FRR.
-	// assembleFRRConfig is the SOLE frr.FullConfig constructor, shared
-	// with the ip-monitoring routes-only actuator (#1827) — the full
-	// apply consumes the same (config-filtered) overlay computed in
-	// step 1.95, so an operator commit while a policy is FAILED
-	// preserves a still-valid injected failover route and drops
-	// removed/edited entries on the commit itself.
-	if d.frr != nil {
-		// The full apply path deliberately warns-and-continues on an FRR
-		// reload error (a transient FRR hiccup must not fail an
-		// otherwise-valid operator commit; the in-manager degraded-retry
-		// loop reconverges FRR without waiting for a restart).
-		// applyFRRConfig returns nil on a DEGRADED reload (#1880, the new
-		// routes are already live); a non-nil return is a HARD reload
-		// failure where NOTHING was applied. We do not fail the commit on
-		// it, but we no longer discard it silently (#5109): the frr
-		// manager has marked the generation degraded and armed its retry
-		// debt (surfaced via the ReloadDegraded() health gauge), so log it
-		// and continue rather than reporting an unqualified success.
-		if err := d.applyFRRConfig(d.assembleFRRConfig(cfg, commitOverlay)); err != nil {
-			slog.Warn("FRR full apply hit a hard reload failure; commit continues, frr manager armed degraded retry debt",
-				"err", err)
-		}
-	}
-
 	// #9693: the kernel policy-routing (ip rule) reconciles live in
 	// applyPolicyRoutingRules so the routing reconcile retry owner re-runs
-	// exactly these, and never the FRR apply above (the FRR manager owns its own
+	// exactly these, and never the FRR apply (the FRR manager owns its own
 	// degraded retry).
 	if err := d.applyPolicyRoutingRules(cfg); err != nil {
 		routingErrs = append(routingErrs, err)

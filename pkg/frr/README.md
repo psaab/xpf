@@ -1418,6 +1418,21 @@ step. Both are required — neither sees the other's case:
   shutdown) cancels in-flight process groups and reaps the retry
   goroutine; `DisableDegradedRetry()` is the one-shot (`xpfd cleanup`)
   configuration.
+- Degraded alerting contract (#9947 F-007): alert if
+  `xpf_frr_reload_degraded == 1` for more than 10 minutes (twice the
+  5-minute slow retry cadence, so a transient primary failure that the
+  fast rungs or the first slow tick converges never pages). A firing
+  alert means stale FRR config is still installed — a removal the
+  operator committed may not have taken effect — and the in-manager
+  retry has not converged a full diff. Runbook: (1) check `xpfd` logs
+  for the `frr-reload.py reload failed` cause; (2) if the cause is a
+  missing script, install `frr-pythontools` (the tolerated persistent
+  degraded state — commits stay green there by design); (3) otherwise
+  re-commit (an identical commit re-runs the primary reload and
+  discharges the failed-commit debt) or wait for the retry to converge
+  and confirm the gauge clears. The operator-commit path fails the
+  commit closed on hard and transient-degraded reloads, so a firing
+  alert is always paired with a failed commit, never a silent success.
 - Hard failure (#5109): when BOTH frr-reload.py AND the additive
   `vtysh -f` fallback fail, `reloadLocked` returns the underlying error
   (NOT the degraded sentinel) — nothing was applied, so live FRR keeps
@@ -1427,12 +1442,13 @@ step. Both are required — neither sees the other's case:
   same single-flight retry loop, which re-runs the primary reload against
   the on-disk SSOT until a full diff converges — so a hard failure
   self-heals without a restart. The error still propagates to the caller
-  (the daemon's full-apply path logs it and continues, #5109; the
-  ip-monitoring actuator uses it to avoid publishing a divergent snapshot,
-  #3757). Before #5109 a hard failure from a non-degraded state hit no
-  case in the outcome switch: the gauge stayed 0, no retry debt was armed,
-  and live FRR kept the stale forwarding state until the next commit or a
-  daemon restart while the operator's commit reported success.
+  (the daemon's full-apply path fails the commit closed on it, #9947
+  F-007; the ip-monitoring actuator uses it to avoid publishing a
+  divergent snapshot, #3757). Before #5109 a hard failure from a
+  non-degraded state hit no case in the outcome switch: the gauge
+  stayed 0, no retry debt was armed, and live FRR kept the stale
+  forwarding state until the next commit or a daemon restart while the
+  operator's commit reported success.
 
 **IS-IS redistribute uses isisd's grammar (#9666).** isisd installs only
 `redistribute <ipv4|ipv6> <proto> <level-1|level-2> [route-map X]`. The address

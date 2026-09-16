@@ -48,7 +48,7 @@ func TestApplyTailReconcilesSurfacesVRRPIdentityCollision(t *testing.T) {
 		},
 	}
 
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("VRRP identity collision must fail the commit, got nil")
 	}

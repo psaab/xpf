@@ -524,6 +524,17 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		return d.closeoutHostAuthOnCancel(err, cfg)
 	}
 
+	// #9947 F-007: apply the FRR managed section (step 3) on the full path
+	// and capture a NON-CONVERGED reload as its own deferred error. A hard
+	// failure (nothing applied) or a transient degraded reload (new lines
+	// live, stale removal deferred) fails the commit closed via the tail
+	// join so a removal that did not happen is never reported as an
+	// unqualified success; the persistent pytools-missing degraded state
+	// is tolerated (nil) with gauge + retry. This slot is NEVER latched
+	// into noteRoutingReconcileResult below — the #9693 owner re-runs
+	// only ip-rules + snapshot and is forbidden from touching FRR.
+	frrErr := d.applyFRRFull(cfg, commitOverlay)
+
 	// #5844: applyRoutingRules RETURNS the joined next-table / rib-group / PBR
 	// ip-rule reconcile failures (a partial clear/add left stale-or-missing
 	// cross-VRF policy in the kernel). Capture it as a DEFERRED error — the
@@ -546,13 +557,13 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// this reconcile has no dirty-retry owner, so a swallowed failure would keep
 	// the stale leak on a "successful" commit.
 	routeLeakErr := d.reconcileRouteLeakSnapshot(cfg, commitOverlay)
-
 	// #9693: latch (or discharge) the routing reconcile debt. The two errors
 	// above fail the commit closed, but nothing RE-RAN the reconcile: a transient
 	// ip-rule or republish failure left stale cross-VRF policy in the kernel and
 	// the userspace FIB until an unrelated apply, and applies nobody waits on
 	// (boot, DHCP lease, feed, config-poll) only logged it at Warn.
 	// routingReconcileReassertLoop re-runs both until they succeed.
+	// (frrErr is deliberately NOT latched here — FRR owns its own retry.)
 	d.noteRoutingReconcileResult(routingRuleErr, routeLeakErr)
 
 	ipsecErr, dhcpServerErr := d.applyServicesReconcile(cfg)
@@ -562,20 +573,23 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// Extracted into applyTailReconciles (#4407 Phase A). The head above
 	// is decomposed into named phase methods (#4407): the decoupled
 	// setup/reconcile phases (loadable independently) — applyVRFReconcile,
-	// applyInterfaceReconcile, applyFabricIPVLAN, applyRoutingRules,
-	// applyServicesReconcile — and the ordering-entangled dataplane-apply /
-	// RETH-MAC core that stays inline (it threads applyResult / rethMACPending
-	// / the deferred errors). The tail is independent per-subsystem dispatch
-	// reading only cfg (+ nil-guarded managers), so grouping it here is a
-	// behavior-preserving mechanical move. The five head-produced deferred
-	// errors (networkdErr/applyErr/dhcpServerErr/ipsecErr/ifaceErr) are threaded
+	// applyInterfaceReconcile, applyFabricIPVLAN, applyFRRFull,
+	// applyRoutingRules, applyServicesReconcile — and the
+	// ordering-entangled dataplane-apply / RETH-MAC core that stays inline
+	// (it threads applyResult / rethMACPending / the deferred errors).
+	// The tail is independent per-subsystem dispatch reading only cfg (+
+	// nil-guarded managers), so grouping it here is a behavior-preserving
+	// mechanical move. The head-produced deferred errors
+	// (networkdErr/applyErr/dhcpServerErr/ipsecErr/ifaceErr) are threaded
 	// in — applyErr is the #5679 ordinary (non-abort) dataplane-apply failure
 	// that must fail the commit without disarming/aborting; routeLeakErr is the
 	// #5696 route-leak republish/FIB-bump failure; routingRuleErr is the #5844
 	// next-table/rib-group/PBR ip-rule reconcile failure (a partial kernel
-	// policy-routing clear/add); the helper creates lo0Err/hostInboundErr and
-	// returns the joined errors.
-	return d.applyTailReconciles(cfg, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr)
+	// policy-routing clear/add); frrErr is the #9947 F-007 FRR reload
+	// non-convergence (hard or transient degraded — stale config may still
+	// be installed while the in-manager retry converges it); the helper
+	// creates lo0Err/hostInboundErr and returns the joined errors.
+	return d.applyTailReconciles(cfg, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr, frrErr)
 }
 
 // applyHostAuthorizationCloseout runs ONLY the security-critical host-

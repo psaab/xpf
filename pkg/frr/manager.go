@@ -1081,6 +1081,18 @@ func isFrrReloadPyMissing(err error) bool {
 	return errors.Is(err, os.ErrNotExist) || errors.Is(err, exec.ErrNotFound)
 }
 
+// IsFRRReloadPyMissing reports whether err (usually an ErrFRRReloadDegraded
+// wrap from ApplyFull/Clear) is caused by a missing frr-reload.py
+// (frr-pythontools absent) rather than a transient reload failure. Exported
+// for the daemon commit path (#9947 F-007): a pytools-missing degraded
+// reload is a persistent environmental state with a slow-cadence retry, so
+// the commit tolerates it with gauge + warn-once; a transient degraded
+// reload (stale removal deferred on an otherwise-healthy box) fails the
+// commit closed so the operator does not get an unqualified success.
+func IsFRRReloadPyMissing(err error) bool {
+	return isFrrReloadPyMissing(err)
+}
+
 // warnPytoolsOnce logs the frr-pythontools-missing warning once per
 // manager lifetime (the degraded retry would otherwise repeat it every
 // 5 minutes forever).

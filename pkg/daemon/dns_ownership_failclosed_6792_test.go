@@ -240,7 +240,7 @@ func TestApplyTailReconcilesSurfacesTheDNSError6792(t *testing.T) {
 		return injected
 	}
 
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	if called == 0 {
 		t.Fatal("applyTailReconciles never ran the DNS reconcile, so this cell " +
 			"cannot distinguish a joined error from a dropped one")
@@ -285,7 +285,7 @@ func TestApplyTailReconcilesIsCleanWhenDNSSucceeds6792(t *testing.T) {
 	}
 	d.reconcileDNSFn = func(*config.Config, bool) error { return nil }
 
-	if err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("applyTailReconciles returned %v with a SUCCEEDING DNS "+
 			"reconcile — every commit would now fail closed on DNS", err)
 	}

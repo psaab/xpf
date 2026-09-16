@@ -37,12 +37,14 @@ import (
 // vrrpErr originates in step 8 below when runtime identity validation rejects
 // the desired set (#5083); vrfErr is the #5700 VRF-device-setup (ReconcileVRFs)
 // failure and routingRuleErr/mgmtRouteErr are threaded from the caller;
+// frrErr is the #9947 F-007 FRR reload non-convergence (hard or transient
+// degraded) threaded from the caller — never latched as routing debt (#9693);
 // lo0Err/hostInboundErr originate in step 9.5, dnsErr in step 9 (#6792), and
 // the five host-credential errors (loginErr/sudoersErr/absentUsersErr/
 // sshConfigErr/rootAuthErr) in steps 11–13 (#6790). The returned errors.Join
 // preserves the explicit operand order
-// (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792).
-func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr error, fabricErr error) error {
+// (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947).
+func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr error, fabricErr error, frrErr error) error {
 	// 8. Apply VRRP config — merge user VRRP + RETH VRRP instances
 	var vrrpErr error
 	vrrpInstances := vrrp.CollectInstances(cfg)
@@ -492,7 +494,7 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 	// not a successful commit. All are joined so none masks the other.
 	return errors.Join(networkdErr, applyErr, dhcpServerErr, hostInboundErr, lo0Err, dnsErr,
 		loginErr, sudoersErr, absentUsersErr, sshConfigErr, rootAuthErr,
-		ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr, vrrpErr)
+		ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr, vrrpErr, frrErr)
 }
 
 // reconcileDHCPRelay re-applies the DHCP relay config on every commit (#2348).

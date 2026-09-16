@@ -110,7 +110,7 @@ func TestStep20RestartsCommsToCompletion_6878(t *testing.T) {
 		moved := baseTransport()
 		moved.Chassis.Cluster.PeerAddress = "10.99.0.9"
 
-		_ = d.applyTailReconciles(moved, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(moved, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 		if *starts != 1 {
 			t.Fatalf("step 20 started cluster comms %d times, want exactly 1 — a "+
@@ -128,7 +128,7 @@ func TestStep20RestartsCommsToCompletion_6878(t *testing.T) {
 		keyed := baseTransport()
 		keyed.Chassis.Cluster.ControlLinkAuthKey = config.Secret("a-real-cluster-psk-6878")
 
-		_ = d.applyTailReconciles(keyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(keyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 		if *starts != 0 {
 			t.Fatalf("committing an authentication key restarted cluster comms "+
@@ -144,7 +144,7 @@ func TestStep20RestartsCommsToCompletion_6878(t *testing.T) {
 		// would satisfy the completion cell above.
 		d, starts := newDaemon(t)
 
-		_ = d.applyTailReconciles(baseTransport(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		_ = d.applyTailReconciles(baseTransport(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 		if *starts != 0 {
 			t.Fatalf("an unchanged transport restarted cluster comms (%d starts) — "+
