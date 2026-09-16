@@ -184,6 +184,34 @@ type Daemon struct {
 	// gate. Withholding silently would replace a silent zero-fill with a
 	// silently dead HA sync, which is worse; this is the observable.
 	userspaceDeltaSchemaWithheld atomic.Uint64
+	// #9631: session-delta opens/updates dropped while the HA sync peer is
+	// down. The reconnect path's authoritative reconciliation normally
+	// re-derives live sessions (cold-prime bulk is the normal authoritative
+	// path), but this counter alone does not prove that reconciliation
+	// completed; answering them not-ready instead queues one pending frame per
+	// delta and storms the event stream on the 4096 cap for the whole outage.
+	// Closes are NOT counted here: they fall through to the normal queue path
+	// and journal for replay like the drain fallback's. Surfaced via
+	// UserspaceDeltaPeerDownDroppedCount.
+	userspaceDeltaPeerDownDropped atomic.Uint64
+	// #9631: monotonic, lock-free warning deadline for peer-down shedding.
+	// Keep the full time.Time (including its monotonic reading) so a wall-clock
+	// step cannot turn a sustained outage into warning churn.
+	userspaceDeltaPeerDownWarn userspaceWarnThrottle
+	// #9631: helper FullResync resyncs shed while the peer is down — wire
+	// barriers plus refusal-triggered resyncs (gap/decode paths invoke the
+	// callback directly). Each shed barrier latches
+	// userspaceFullResyncOwedWhileDown for post-reconnect repayment instead
+	// of wedging the pending queue head. Surfaced via
+	// UserspaceFullResyncPeerDownDroppedCount.
+	userspaceFullResyncPeerDownDropped atomic.Uint64
+	// #9631/F4: connected-state readiness gaps are visible but dampened.
+	userspaceFullResyncWarn userspaceWarnThrottle
+	// #9631: a FullResync shed while down is owed a repayment export once
+	// the peer reconnects. Process restart clears this in-memory latch; the
+	// cold-start bulk is an authoritative, broader recovery window that also
+	// reconciles stale receiver entries, rather than the same paced export.
+	userspaceFullResyncOwedWhileDown atomic.Bool
 
 	networkd *networkd.Manager
 	routing  *routing.Manager
@@ -1445,10 +1473,23 @@ type Daemon struct {
 	// 5s reconciliation when connected, 100ms fast-poll when disconnected.
 	eventStreamConnected atomic.Bool
 
-	// userspaceDeltaSyncMu serializes helper delta draining between the
-	// event-stream fallback loop and the background polling loop, and holds
-	// that drain off a FullResync's export-and-queue transaction (#9766).
+	// userspaceDeltaSyncMu serializes every helper delta producer — the
+	// event-stream callback and fallback drain — and holds both off a
+	// FullResync's export-and-queue transaction (#9766). The callback takes it
+	// at the queue boundary, so repayment cannot snapshot live session K and
+	// then enqueue its stale install behind K's stream close. If a close is
+	// observed before the snapshot, convergence instead relies on the helper's
+	// snapshot/event coherence; this mutex does not supply that premise.
 	userspaceDeltaSyncMu sync.Mutex
+	// userspaceDeltaBeforeLockForTest, userspaceDeltaAfterLockForTest, and
+	// userspaceDeltaAfterQueueForTest are test-only seams for the deterministic
+	// #9766 stream-vs-repayment ordering cell. The cell wires the real
+	// installEventStreamCallbacks callback; its AST companion enforces this
+	// mutex's lock/queue/unlock bracket, so the seams cannot make an unbound
+	// helper look serialized. They are nil in production.
+	userspaceDeltaBeforeLockForTest func()
+	userspaceDeltaAfterLockForTest  func()
+	userspaceDeltaAfterQueueForTest func()
 	// fullResyncRetryAt and fullResyncInstallWaitForTest: see
 	// full_resync_transaction_9767.go.
 	fullResyncRetryAt            atomic.Int64
