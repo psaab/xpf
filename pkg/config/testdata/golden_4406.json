@@ -1124,6 +1124,7 @@
           "InterfaceRoutesRibGroupV6": ""
         }
       ],
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": {
           "sfmix-pbr": {
@@ -2554,6 +2555,7 @@
           "InterfaceRoutesRibGroupV6": ""
         }
       ],
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": {
           "sfmix-pbr": {
@@ -3983,6 +3985,7 @@
           "InterfaceRoutesRibGroupV6": ""
         }
       ],
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": {
           "sfmix-pbr": {
@@ -5412,6 +5415,7 @@
           "InterfaceRoutesRibGroupV6": ""
         }
       ],
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": {
           "sfmix-pbr": {
@@ -6843,6 +6847,7 @@
           "InterfaceRoutesRibGroupV6": ""
         }
       ],
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": {
           "sfmix-pbr": {
@@ -8273,6 +8278,7 @@
           "InterfaceRoutesRibGroupV6": ""
         }
       ],
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": {
           "sfmix-pbr": {
@@ -9411,6 +9417,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -10477,6 +10484,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -11542,6 +11550,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -12607,6 +12616,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -13674,6 +13684,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -14740,6 +14751,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -15162,6 +15174,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -15445,6 +15458,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -15728,6 +15742,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -16076,6 +16091,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -16413,6 +16429,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
@@ -16750,6 +16767,7 @@
         "LLDP": null
       },
       "RoutingInstances": null,
+      "QuarantinedRoutingInstances": null,
       "Firewall": {
         "FiltersInet": null,
         "FiltersInet6": null,
