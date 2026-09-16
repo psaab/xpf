@@ -801,6 +801,12 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			[]string{"pool", "rule"},
 			nil,
 		),
+		userspaceSNATPoolMaxTrackedFlows: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_max_tracked_flows",
+			"max tracked flows",
+			[]string{"pool", "rule"},
+			nil,
+		),
 		userspaceSNATPoolUsedPorts: prometheus.NewDesc(
 			"xpf_userspace_source_nat_pool_used_ports",
 			"used ports",
@@ -863,6 +869,7 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			PoolName:         "pool-a",
 			RuleName:         "snat-a",
 			LiveFlows:        2,
+			MaxTrackedFlows:  64,
 			UsedPorts:        1,
 			PersistentLeases: 1,
 			AllocationsTotal: 3,
@@ -890,13 +897,15 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 		got = append(got, m)
 	}
 	// 6 pre-#4800 series + the live-lock (denominator, contended) pair
-	// + the #8447 persistent-NAT (admitted, declined) pair.
-	if len(got) != 10 {
-		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 10 metrics, got %d", len(got))
+	// + the #8447 persistent-NAT (admitted, declined) pair + the #9896
+	// max-tracked-flows denominator for the live gauge.
+	if len(got) != 11 {
+		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 11 metrics, got %d", len(got))
 	}
 
 	labels := map[string]string{"pool": "pool-a", "rule": "snat-a"}
 	assertGaugeClose(t, got, c.userspaceSNATPoolLiveFlows, labels, 2)
+	assertGaugeClose(t, got, c.userspaceSNATPoolMaxTrackedFlows, labels, 64)
 	assertGaugeClose(t, got, c.userspaceSNATPoolUsedPorts, labels, 1)
 	assertGaugeClose(t, got, c.userspaceSNATPoolPersistentLeases, labels, 1)
 	assertCounterClose(t, got, c.userspaceSNATPoolAllocationsTotal, labels, 3)

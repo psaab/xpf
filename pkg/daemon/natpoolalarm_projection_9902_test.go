@@ -21,6 +21,7 @@ func TestProjectNATPoolView9902(t *testing.T) {
 				PoolName: "p1", AddressCount: 2,
 				PortLow: 10, PortHigh: 20, UsedPorts: 5,
 				ExhaustionTotal: 7, AllocatorID: 9,
+				LiveFlows: 23, MaxTrackedFlows: 29, PersistentLeases: 31,
 			},
 		},
 		AppliedGeneration: 3,
@@ -54,6 +55,15 @@ func TestProjectNATPoolView9902(t *testing.T) {
 	}
 	if p.AllocatorID != 9 {
 		t.Errorf("AllocatorID = %d, want 9", p.AllocatorID)
+	}
+	if p.LiveFlows != 23 {
+		t.Errorf("LiveFlows = %d, want 23", p.LiveFlows)
+	}
+	if p.MaxTrackedFlows != 29 {
+		t.Errorf("MaxTrackedFlows = %d, want 29", p.MaxTrackedFlows)
+	}
+	if p.PersistentLeases != 31 {
+		t.Errorf("PersistentLeases = %d, want 31", p.PersistentLeases)
 	}
 }
 

@@ -49,7 +49,9 @@ func TestAppliedNATViewCoherent(t *testing.T) {
 	m.lastStatus = ProcessStatus{
 		LastSnapshotGeneration: 7,
 		SourceNATPools: []SourceNATPoolStatus{
-			{PoolName: "p1", AddressCount: 1, PortLow: 1, PortHigh: 100, UsedPorts: 42},
+			// #9896: the tracked-flow counters must ride the view — they are
+			// the binding constraint the alarm evaluates.
+			{PoolName: "p1", AddressCount: 1, PortLow: 1, PortHigh: 100, UsedPorts: 42, LiveFlows: 7, MaxTrackedFlows: 100, PersistentLeases: 3},
 		},
 	}
 	v := m.AppliedNATView()
@@ -60,7 +62,8 @@ func TestAppliedNATViewCoherent(t *testing.T) {
 		t.Fatalf("config/gen wrong: %+v", v)
 	}
 	p, ok := v.Pools["p1"]
-	if !ok || p.UsedPorts != 42 || p.AddressCount != 1 || p.PortHigh != 100 {
+	if !ok || p.UsedPorts != 42 || p.AddressCount != 1 || p.PortHigh != 100 ||
+		p.LiveFlows != 7 || p.MaxTrackedFlows != 100 || p.PersistentLeases != 3 {
 		t.Fatalf("pool sample wrong: %+v", v.Pools)
 	}
 }

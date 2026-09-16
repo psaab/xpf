@@ -42,7 +42,7 @@ package userspace
 // `UsedPorts`, so summing across rules multiplies the occupancy by the number
 // of referencing rules. Among same-name rows the CONSTRUCTED allocator wins
 // (`MaxTrackedFlows>0`, tie → first) — a poisoned rule (#9874) keeps its
-// pool_mode but builds no allocator, and its default-zeros row must not
+// pool_mode but builds no allocator, and its MaxTrackedFlows==0 row must not
 // shadow the live one. This is the same contract `AppliedNATView.Pools`
 // documents (#9902 F-026 keeps the two in lockstep); both exist because the
 // alarm monitor needs the cached applied view while the reporting surfaces

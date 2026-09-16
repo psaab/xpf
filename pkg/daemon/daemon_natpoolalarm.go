@@ -50,13 +50,16 @@ func projectNATPoolView(v dpuserspace.AppliedNATView) natpoolalarm.View {
 	pools := make(map[string]natpoolalarm.PoolStatus, len(v.Pools))
 	for name, p := range v.Pools {
 		pools[name] = natpoolalarm.PoolStatus{
-			PoolName:        p.PoolName,
-			AddressCount:    p.AddressCount,
-			PortLow:         p.PortLow,
-			PortHigh:        p.PortHigh,
-			UsedPorts:       p.UsedPorts,
-			ExhaustionTotal: p.ExhaustionTotal,
-			AllocatorID:     p.AllocatorID,
+			PoolName:         p.PoolName,
+			AddressCount:     p.AddressCount,
+			PortLow:          p.PortLow,
+			PortHigh:         p.PortHigh,
+			UsedPorts:        p.UsedPorts,
+			ExhaustionTotal:  p.ExhaustionTotal,
+			AllocatorID:      p.AllocatorID,
+			LiveFlows:        p.LiveFlows,
+			MaxTrackedFlows:  p.MaxTrackedFlows,
+			PersistentLeases: p.PersistentLeases,
 		}
 	}
 	return natpoolalarm.View{
