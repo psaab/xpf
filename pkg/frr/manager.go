@@ -831,7 +831,7 @@ func (m *Manager) writeManagedSection(section string) error {
 	// so a crash or disk-full can never leave frr.conf half-written (which is
 	// what creates the orphaned-begin-marker state handled above in the first
 	// place). rename(2) within a filesystem is atomic.
-	if err := atomicWriteFile(m.frrConf, []byte(content), 0640); err != nil {
+	if err := atomicWriteFile(m.frrConf, []byte(content), 0640, true); err != nil {
 		return fmt.Errorf("write frr.conf: %w", err)
 	}
 	return nil
@@ -904,9 +904,40 @@ func stripManagedSection(content string) (string, bool) {
 // byte-for-byte untouched (changed=false ⇒ no rewrite), so a purely
 // operator-managed frr.conf is never modified. An absent file is not an error
 // (nothing to strip). The rewrite is atomic and preserves the existing file's
-// mode/symlink (atomicWriteFile), so a crash mid-strip cannot leave a
-// half-written frr.conf.
+// mode (atomicWriteFile, no-resolve on this path), so a crash mid-strip cannot
+// leave a half-written frr.conf.
+//
+// #10100 R-2: a symlinked path is REFUSED (non-nil, no read-through, no write)
+// — ReadFile+WithResolveSymlinks would otherwise replace content AT THE TARGET,
+// a privileged modification of a victim file carrying managed markers. The
+// grpcapi zeroize pre-check reports the typed Skipped entry; this Lstat guard
+// is defense-in-depth for direct callers (plain error naming path+target).
+// Re-Lstat after ReadFile so a swap between the checks still refuses without
+// writing victim-derived content over the link.
+//
+// Residual window, stated in full: the re-Lstat is NOT atomic with the write.
+// A namespace swap after the second Lstat and before the rename publishes —
+// spanning strip, tempfile create, write, chmod/chown, fsync, close, rename,
+// and the parent-dir fsync — still races. No-resolve stops VICTIM
+// WRITE-THROUGH (the rename replaces the link, never the target), but a swap
+// in this window can still leave the erasure INCOMPLETE (the swapped-aside
+// original keeps its secrets, unreported). Closing it needs O_NOFOLLOW /
+// descriptor-relative publication. What it takes is write permission on the
+// frr.conf PARENT dir (/etc/frr, root-only in production) during the strip —
+// accepted, like #9013 Lstat-then-act. Deterministic plants (link in place
+// when the strip runs) ARE closed above.
 func StripManagedSectionFile(path string) error {
+	if fi, lerr := os.Lstat(path); lerr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			target, rerr := os.Readlink(path)
+			if rerr != nil {
+				target = "<unreadable link target>"
+			}
+			return fmt.Errorf("frr.conf is a symlink; refusing to strip through it (would modify the target): %s -> %s", path, target)
+		}
+	} else if !os.IsNotExist(lerr) {
+		return fmt.Errorf("lstat frr.conf: %w", lerr)
+	}
 	existing, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -914,11 +945,26 @@ func StripManagedSectionFile(path string) error {
 		}
 		return fmt.Errorf("read frr.conf: %w", err)
 	}
+	// Re-check: a regular-to-symlink swap after the first Lstat made ReadFile
+	// follow the link. Refuse without writing — never publish victim-derived
+	// text over the link path while the victim keeps its secrets.
+	if fi, lerr := os.Lstat(path); lerr != nil {
+		if os.IsNotExist(lerr) {
+			return nil
+		}
+		return fmt.Errorf("lstat frr.conf: %w", lerr)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		target, rerr := os.Readlink(path)
+		if rerr != nil {
+			target = "<unreadable link target>"
+		}
+		return fmt.Errorf("frr.conf became a symlink during strip; refusing to write: %s -> %s", path, target)
+	}
 	stripped, changed := stripManagedSection(string(existing))
 	if !changed {
 		return nil
 	}
-	if err := atomicWriteFile(path, []byte(stripped), 0640); err != nil {
+	if err := atomicWriteFile(path, []byte(stripped), 0640, false); err != nil {
 		return fmt.Errorf("strip frr.conf managed section: %w", err)
 	}
 	return nil
@@ -930,14 +976,17 @@ func StripManagedSectionFile(path string) error {
 // half-written file is what creates the orphaned-begin-marker state
 // handled in writeManagedSection).
 //
-// The two base options reproduce this function's pre-#1894 semantics
-// verbatim (they were lifted from here, see pkg/fsatomic):
+// The base options reproduce this function's pre-#1894 semantics verbatim
+// (they were lifted from here, see pkg/fsatomic):
 //   - WithPreserveExisting: an existing target's mode/ownership is
 //     reapplied on the temp fd (fchmod/fchown before rename, no
 //     path race; chown only when the owner differs, failure surfaced),
 //     falling back to perm for a new file.
-//   - WithResolveSymlinks: a symlinked frr.conf is resolved and
-//     replaced at its target, preserving the operator's symlink.
+//   - WithResolveSymlinks (resolveSymlinks=true only): a symlinked frr.conf
+//     is resolved and replaced at its target, preserving the operator's
+//     symlink. The normal apply path (writeManagedSection) keeps this; the
+//     zeroize strip path (#10100 R-2) passes false so a TOCTOU-swapped link
+//     is replaced, never followed to modify a victim file.
 //
 // On top of the previous behavior the durable writer adds the
 // parent-directory fsync that was missing here, making the rename
@@ -952,10 +1001,12 @@ func StripManagedSectionFile(path string) error {
 // read it. See atomicWriteOwnerOpt for the fresh-only + best-effort
 // resolution rules that keep this from ever stranding a running FRR or
 // restamping an operator-owned file.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+func atomicWriteFile(path string, data []byte, perm os.FileMode, resolveSymlinks bool) error {
 	opts := []fsatomic.Option{
 		fsatomic.WithPreserveExisting(),
-		fsatomic.WithResolveSymlinks(),
+	}
+	if resolveSymlinks {
+		opts = append(opts, fsatomic.WithResolveSymlinks())
 	}
 	if owner, ok := atomicWriteOwnerOpt(path); ok {
 		opts = append(opts, owner)

@@ -157,35 +157,61 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			"destroy master.key through the link and leave the config body",
 			"dir", sk.Path, "target", sk.Target)
 		skipped = append(skipped, sk)
-	} else if sk, isLink := configstore.SymlinkTarget(filepath.Join(dbDir, "master.key")); isLink {
-		// The INVERSE shape: a real .configdb holding a symlinked key. os.Remove
-		// unlinks the LINK, so the real key survives while the body below is
-		// erased — cryptographic erasure defeated in the other direction, since
-		// against a backup of the encrypted DB a surviving key is the whole
-		// secret. The body erase still proceeds: the key cannot be destroyed (the
-		// link may point at a volume xpf does not own), but removing the
-		// ciphertext leaves nothing on this box for it to decrypt.
-		slog.Warn("zeroize: .configdb/master.key is a symlink; NOT erasing it — removing "+
-			"it would unlink the link and leave the real key material",
-			"path", sk.Path, "target", sk.Target)
-		skipped = append(skipped, sk)
-		fail(os.RemoveAll(dbDir))
 	} else {
-		// KEY-FIRST (#4576): master.key before the encrypted DB body. Make the key
-		// unlink DURABLE before the ciphertext is removed (#5197) — fsync .configdb
-		// so the key removal is on stable storage before RemoveAll begins.
-		// Otherwise a power cut could persist the ciphertext removal while losing
-		// the key removal, defeating the key-first cryptographic-erasure guarantee.
-		keyErr := os.Remove(filepath.Join(dbDir, "master.key"))
-		fail(keyErr)
-		if keyErr == nil {
-			// The key existed and was unlinked: make that unlink durable before the
-			// ciphertext body removal. Absent .configdb → ErrNotExist, excluded by fail().
-			fail(zeroizeSyncDir(dbDir))
+		// #10100 R-1: census ANY interior symlink BEFORE the master.key
+		// check, excluding exactly the root-child master.key the
+		// inverse-shape branch owns. Runs in BOTH the link and key-first
+		// paths (the link branch still RemoveAlls the body). A root-link
+		// result here is a TOCTOU swap after the check above: skip the
+		// whole DB block closed.
+		dbKeyPath := filepath.Join(dbDir, "master.key")
+		interior, cerr := configstore.CollectInteriorSymlinks(dbDir, dbKeyPath)
+		if len(interior) == 1 && interior[0].Path == dbDir {
+			slog.Warn("zeroize: .configdb is a symlink; NOT erasing it — removing it would "+
+				"destroy master.key through the link and leave the config body",
+				"dir", interior[0].Path, "target", interior[0].Target)
+			skipped = append(skipped, interior...)
+		} else {
+			for _, sk := range interior {
+				slog.Warn("zeroize: .configdb interior is a symlink; the link will be "+
+					"unlinked but the target bytes survive — report, don't trust the wipe",
+					"path", sk.Path, "target", sk.Target)
+			}
+			skipped = append(skipped, interior...)
+			if cerr != nil {
+				fail(cerr)
+			}
+			if sk, isLink := configstore.SymlinkTarget(dbKeyPath); isLink {
+				// The INVERSE shape: a real .configdb holding a symlinked key. os.Remove
+				// unlinks the LINK, so the real key survives while the body below is
+				// erased — cryptographic erasure defeated in the other direction, since
+				// against a backup of the encrypted DB a surviving key is the whole
+				// secret. The body erase still proceeds: the key cannot be destroyed (the
+				// link may point at a volume xpf does not own), but removing the
+				// ciphertext leaves nothing on this box for it to decrypt.
+				slog.Warn("zeroize: .configdb/master.key is a symlink; NOT erasing it — removing "+
+					"it would unlink the link and leave the real key material",
+					"path", sk.Path, "target", sk.Target)
+				skipped = append(skipped, sk)
+				fail(os.RemoveAll(dbDir))
+			} else {
+				// KEY-FIRST (#4576): master.key before the encrypted DB body. Make the key
+				// unlink DURABLE before the ciphertext is removed (#5197) — fsync .configdb
+				// so the key removal is on stable storage before RemoveAll begins.
+				// Otherwise a power cut could persist the ciphertext removal while losing
+				// the key removal, defeating the key-first cryptographic-erasure guarantee.
+				keyErr := os.Remove(dbKeyPath)
+				fail(keyErr)
+				if keyErr == nil {
+					// The key existed and was unlinked: make that unlink durable before the
+					// ciphertext body removal. Absent .configdb → ErrNotExist, excluded by fail().
+					fail(zeroizeSyncDir(dbDir))
+				}
+				// The config SSOT (active.json, candidate.json, rollback.N.json + any
+				// residual key). RemoveAll erases the whole tree and is nil on absent.
+				fail(os.RemoveAll(dbDir))
+			}
 		}
-		// The config SSOT (active.json, candidate.json, rollback.N.json + any
-		// residual key). RemoveAll erases the whole tree and is nil on absent.
-		fail(os.RemoveAll(dbDir))
 	}
 
 	// #9236 (censused, not reported): the rollback path stages a full DB copy
@@ -220,13 +246,34 @@ func zeroizeConfigDir(configDir, configBase string) error {
 	// #9013: a symlinked tls/ leaves key.pem — the device HTTPS PRIVATE KEY — on
 	// the target volume. Not a shape the issue named; found by censusing every
 	// path this function erases rather than only the two reported.
-	if sk, isLink := configstore.SymlinkTarget(filepath.Join(configDir, "tls")); isLink {
+	tlsDir := filepath.Join(configDir, "tls")
+	if sk, isLink := configstore.SymlinkTarget(tlsDir); isLink {
 		slog.Warn("zeroize: tls/ is a symlink; NOT erasing it — removing it would "+
 			"unlink the link and leave the REST-API private key",
 			"dir", sk.Path, "target", sk.Target)
 		skipped = append(skipped, sk)
 	} else {
-		fail(os.RemoveAll(filepath.Join(configDir, "tls")))
+		// #10100 R-1: a real tls/ holding a symlinked key.pem/cert.pem has
+		// the link unlinked while the private key survives. Census ANY
+		// interior link (no exclusion: tls has no master.key shape), still
+		// RemoveAll regulars. Root-link here is a TOCTOU swap: skip whole.
+		if interior, cerr := configstore.CollectInteriorSymlinks(tlsDir, ""); len(interior) == 1 && interior[0].Path == tlsDir {
+			slog.Warn("zeroize: tls/ is a symlink; NOT erasing it — removing it would "+
+				"unlink the link and leave the REST-API private key",
+				"dir", interior[0].Path, "target", interior[0].Target)
+			skipped = append(skipped, interior...)
+		} else {
+			for _, sk := range interior {
+				slog.Warn("zeroize: tls/ interior is a symlink; the link will be unlinked "+
+					"but the target bytes survive — report, don't trust the wipe",
+					"path", sk.Path, "target", sk.Target)
+			}
+			skipped = append(skipped, interior...)
+			if cerr != nil {
+				fail(cerr)
+			}
+			fail(os.RemoveAll(tlsDir))
+		}
 	}
 
 	// Top-level artifacts in a single ReadDir pass. #5768: match ONLY names xpf
@@ -380,16 +427,50 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 			firstErr = err
 		}
 	}
+	// #10100 R-2: rendered file legs that turned out to be SYMLINKS and were
+	// therefore NOT erased (left, not unlinked — unlike R-1 report-and-unlink).
+	// os.Remove on a link unlinks it and returns nil while the IKE/Kea/FRR
+	// secrets survive on the target volume. Order pinned: frr, swanctl,
+	// kea4, kea6, then per-dir temp sweeps in dedup slice order.
+	var skipped []configstore.SymlinkedTarget
 	// FRR: strip only the xpf-managed section (the routing-auth secrets); the
 	// file may carry operator content outside the markers. StripManagedSectionFile
 	// already treats an absent file as a no-op (nil) and leaves an unmanaged
 	// frr.conf untouched.
-	fail(frr.StripManagedSectionFile(frrConf))
-	// swanctl snippet + Kea configs: xpf owns these whole files, remove them.
-	fail(os.Remove(swanctlSnippet))
-	fail(os.Remove(kea4))
-	fail(os.Remove(kea6))
-
+	if sk, isLink := configstore.SymlinkTarget(frrConf); isLink {
+		slog.Warn("zeroize: frr.conf is a symlink; NOT stripping it — stripping would "+
+			"modify the target through the link",
+			"path", sk.Path, "target", sk.Target)
+		skipped = append(skipped, sk)
+	} else if serr := frr.StripManagedSectionFile(frrConf); serr != nil {
+		// TOCTOU upgrade: clean at pre-check, link at Strip (or direct-Strip
+		// race). Re-Lstat so the typed #9013 contract (Path+Target in
+		// Skipped) holds even for the swap window; otherwise the plain
+		// Strip error lands in firstErr (still fail-closed, just untyped).
+		if sk, isLink := configstore.SymlinkTarget(frrConf); isLink {
+			slog.Warn("zeroize: frr.conf became a symlink during strip; NOT stripping it",
+				"path", sk.Path, "target", sk.Target)
+			skipped = append(skipped, sk)
+		} else {
+			fail(serr)
+		}
+	}
+	// swanctl snippet + Kea configs: xpf owns these whole files, remove them —
+	// unless the final component is a link (refuse, leave the link).
+	for _, leg := range []struct{ what, path string }{
+		{"swanctl snippet", swanctlSnippet},
+		{"kea4 config", kea4},
+		{"kea6 config", kea6},
+	} {
+		if sk, isLink := configstore.SymlinkTarget(leg.path); isLink {
+			slog.Warn("zeroize: rendered config is a symlink; NOT erasing it — removing "+
+				"it would unlink the link and leave the rendered secrets",
+				"what", leg.what, "path", sk.Path, "target", sk.Target)
+			skipped = append(skipped, sk)
+			continue
+		}
+		fail(os.Remove(leg.path))
+	}
 	// Sweep crash-leaked fsatomic write temps (#5509). The exact-path removals
 	// above miss a ".<base>.tmp-<rand>" temp a hard-killed daemon left mid-write
 	// — each temp still holds the full cleartext render. Sweep every directory
@@ -405,7 +486,20 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 			continue
 		}
 		swept[dir] = true
-		sweepFsatomicTemps(dir, fail)
+		skipped = append(skipped, sweepFsatomicTemps(dir, fail)...)
+	}
+	// #10100 R-2: a SKIPPED erase outranks a FAILED one (same doctrine as
+	// zeroizeConfigDir #9013): an erasure that did not happen AT ALL is
+	// strictly worse than one that failed. Joined so a real I/O failure is
+	// not swallowed; errors.As finds either. performZeroizeWipe Join-aggregates
+	// every leg's error, so this leg's Skipped set is never dropped when
+	// another leg also fails.
+	if len(skipped) > 0 {
+		symErr := &configstore.FactoryResetSymlinkError{Skipped: skipped}
+		if firstErr != nil {
+			return errors.Join(symErr, firstErr)
+		}
+		return symErr
 	}
 	return firstErr
 }
@@ -419,17 +513,35 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 // directory the appliance does not run (no FRR / strongSwan / Kea installed)
 // never errors the whole zeroize. A real ReadDir error IS surfaced via fail so
 // a silently-incomplete sweep is not reported as a clean factory reset.
-func sweepFsatomicTemps(dir string, fail func(error)) {
+//
+// #10100 R-2: a temp-shaped SYMLINK is refused (recorded in the returned
+// Skipped, left not unlinked) rather than Removed — unlinking it returns nil
+// while the cleartext render survives on the target volume. ReadDir failures
+// stay on fail (never Skipped); per-entry ReadDir→Lstat→Remove keeps the
+// classic swap-after-Lstat residual (accepted, like #9013 Lstat-then-act).
+// A symlinked sweep DIR itself follows (intermediate doctrine, parent-write
+// root-only) — out of scope per #10100 bounded R-2 file legs.
+func sweepFsatomicTemps(dir string, fail func(error)) []configstore.SymlinkedTarget {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		fail(err)
-		return
+		return nil
 	}
+	var skipped []configstore.SymlinkedTarget
 	for _, e := range entries {
 		if name := e.Name(); isFsatomicTemp(name) {
-			fail(os.Remove(filepath.Join(dir, name)))
+			full := filepath.Join(dir, name)
+			if sk, isLink := configstore.SymlinkTarget(full); isLink {
+				slog.Warn("zeroize: rendered temp is a symlink; NOT erasing it — removing "+
+					"it would unlink the link and leave the cleartext render",
+					"path", sk.Path, "target", sk.Target)
+				skipped = append(skipped, sk)
+				continue
+			}
+			fail(os.Remove(full))
 		}
 	}
+	return skipped
 }
 
 // zeroize login-account teardown paths (#4598). These mirror the production
@@ -1167,24 +1279,36 @@ func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
+	// #10100 GPT-2: every security-critical leg runs unconditionally and
+	// EVERY leg error is kept — the legs are errors.Join'ed, never
+	// first-wins. Dropping a later leg's FactoryResetSymlinkError when an
+	// earlier leg already failed loses diagnostics that are UNDISCOVERABLE
+	// on re-run: for report-and-unlink legs (R-1 interior, snapshots) the
+	// discovery link is already unlinked, so the surviving target is
+	// log-only after the first pass. Leg order is preserved (config state
+	// first), so errors.As still finds the earliest failure first; a
+	// single failing leg returns its error unwrapped, exactly as before.
+	var legErrs []error
 	// Config state FIRST — the security-critical erasure. A failure here can
 	// leave prior-tenant config/secrets on disk, so it is surfaced to the
 	// caller (#4576).
-	err := zeroizeConfigDir(configDir, configBase)
+	if e := zeroizeConfigDir(configDir, configBase); e != nil {
+		legErrs = append(legErrs, e)
+	}
 
 	// Rendered service configs (#4585): also security-critical — routing-auth
 	// keys in a world-readable frr.conf, IKE PSKs, Kea configs. A post-zeroize
 	// boot enters bootstrap / nil-active-config normal boot and SKIPS the
-	// reconcile that would clear them, so the wipe must erase them itself. Fold
-	// its first error into the surfaced result (the .configdb error takes
-	// priority) so a partial wipe is never reported as a clean factory reset.
+	// reconcile that would clear them, so the wipe must erase them itself. Its
+	// error is appended to the surfaced result so a partial wipe is never
+	// reported as a clean factory reset.
 	if e := zeroizeRenderedConfigs(
 		zeroizeFRRConf,
 		zeroizeSwanctlSnippet,
 		zeroizeKea4Conf,
 		zeroizeKea6Conf,
-	); e != nil && err == nil {
-		err = e
+	); e != nil {
+		legErrs = append(legErrs, e)
 	}
 
 	// Provisioned login accounts (#4598): the OS users xpf created — their
@@ -1194,9 +1318,9 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// a re-tenanted device would otherwise grant the prior tenant interactive
 	// login + passwordless sudo. Marker-aware teardown (UID-keyed provenance
 	// marker, #1944) so a non-xpf admin/system/operator account is NEVER touched.
-	// Also security-critical, so fold its first error into the surfaced result.
-	if e := zeroizeLoginAccounts(); e != nil && err == nil {
-		err = e
+	// Also security-critical, so its error is appended to the surfaced result.
+	if e := zeroizeLoginAccounts(); e != nil {
+		legErrs = append(legErrs, e)
 	}
 
 	// Local config archive (#5186): /var/lib/xpf/archive holds
@@ -1206,18 +1330,18 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// pre-#5186 zeroize LEFT it behind, so a re-tenanted device kept the prior
 	// tenant's archived secrets. Ownership-guarded (FactoryResetArchiveDir):
 	// erases ONLY the xpf-owned default path, never a custom/remote/compliance
-	// archive destination. Also security-critical, so fold its first error into
+	// archive destination. Also security-critical, so its error is appended to
 	// the surfaced result.
 	//
 	// #7173: the CONFIGURED dir. A skip is reported as an
-	// *configstore.ArchiveDirSkippedError and folded into the surfaced result
+	// *configstore.ArchiveDirSkippedError and appended to the surfaced result
 	// like any other secret-bearing failure — the reset genuinely is incomplete
 	// and the operator has a directory to erase by hand. It is NOT a reason to
-	// stop: everything else must still be wiped, which is why it is folded in
+	// stop: everything else must still be wiped, which is why it is appended
 	// rather than returned early.
 	if archiveDir != "" {
-		if e := configstore.FactoryResetArchiveDir(archiveDir); e != nil && err == nil {
-			err = e
+		if e := configstore.FactoryResetArchiveDir(archiveDir); e != nil {
+			legErrs = append(legErrs, e)
 		}
 	}
 
@@ -1229,11 +1353,11 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// box, not an in-flight window. This primitive knew /var/lib/xpf/archive and
 	// /var/lib/xpf/provisioned-users and had zero occurrences of "versions",
 	// which is what made the omission an oversight rather than a decision.
-	// Security-critical, so its first error is folded into the surfaced result:
-	// a busy upgrade lock or a failed unlink means the reset is INCOMPLETE and
+	// Security-critical, so its error is appended to the surfaced result: a
+	// busy upgrade lock or a failed unlink means the reset is INCOMPLETE and
 	// must not be reported as a clean factory reset.
-	if e := zeroizeUpgradeDBSnapshots(zeroizeVersionsDir); e != nil && err == nil {
-		err = e
+	if e := zeroizeUpgradeDBSnapshots(zeroizeVersionsDir); e != nil {
+		legErrs = append(legErrs, e)
 	}
 
 	// BPF pins + managed networkd files carry no secret material, so their
@@ -1251,5 +1375,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 			}
 		}
 	}
-	return err
+	// Zero legs failed → clean wipe (nil, exactly as before). One leg failed
+	// → its error unwrapped (identity preserved). Several failed → joined in
+	// leg order; errors.As/Is find every leg's diagnostics.
+	switch len(legErrs) {
+	case 0:
+		return nil
+	case 1:
+		return legErrs[0]
+	default:
+		return errors.Join(legErrs...)
+	}
 }

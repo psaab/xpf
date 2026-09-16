@@ -99,20 +99,42 @@ func zeroizeDBCopyDir(dir, what string, fail func(error)) []configstore.Symlinke
 			"dir", sk.Path, "target", sk.Target)
 		return []configstore.SymlinkedTarget{sk}
 	}
-	if sk, isLink := configstore.SymlinkTarget(filepath.Join(dir, "master.key")); isLink {
+	// #10100 R-1: census ANY interior symlink BEFORE the master.key check
+	// (same placement rule as the live .configdb blocks). The key-link
+	// branch still RemoveAlls the body, so a combo must report both. A
+	// root-link result is a TOCTOU swap: skip whole.
+	keyPath := filepath.Join(dir, "master.key")
+	interior, cerr := configstore.CollectInteriorSymlinks(dir, keyPath)
+	if len(interior) == 1 && interior[0].Path == dir {
+		slog.Warn("zeroize: "+what+" is a symlink; NOT erasing it — removing it would "+
+			"destroy master.key through the link and leave the config body",
+			"dir", interior[0].Path, "target", interior[0].Target)
+		return interior
+	}
+	var skipped []configstore.SymlinkedTarget
+	for _, sk := range interior {
+		slog.Warn("zeroize: "+what+" interior is a symlink; the link will be unlinked "+
+			"but the target bytes survive — report, don't trust the wipe",
+			"path", sk.Path, "target", sk.Target)
+	}
+	skipped = append(skipped, interior...)
+	if cerr != nil {
+		fail(cerr)
+	}
+	if sk, isLink := configstore.SymlinkTarget(keyPath); isLink {
 		slog.Warn("zeroize: "+what+"/master.key is a symlink; NOT erasing it — removing "+
 			"it would unlink the link and leave the real key material",
 			"path", sk.Path, "target", sk.Target)
 		fail(os.RemoveAll(dir))
-		return []configstore.SymlinkedTarget{sk}
+		return append(skipped, sk)
 	}
-	keyErr := os.Remove(filepath.Join(dir, "master.key"))
+	keyErr := os.Remove(keyPath)
 	fail(keyErr)
 	if keyErr == nil {
 		fail(zeroizeSyncDir(dir))
 	}
 	fail(os.RemoveAll(dir))
-	return nil
+	return skipped
 }
 
 // zeroizeUpgradeDBSnapshots erases every upgrade config-DB snapshot under
