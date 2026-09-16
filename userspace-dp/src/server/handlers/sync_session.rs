@@ -80,11 +80,26 @@ pub(super) fn handle(
             view.synced_routing_domain(sync_req.ingress_ifindex, sync_req.ingress_vlan_id)
         }
         crate::session::WireRoutingDomain::Unrecognized => {
-            domain.note_unknown_routing_domain_import();
-            response.ok = false;
-            response.error =
-                format!("{SYNCED_IMPORT_REFUSED_PREFIX}routing-domain-unrecognized");
-            return;
+            // #9956 GPT-1: upsert refuses (it would PUBLISH an identity under
+            // a domain this build cannot reproduce); delete proceeds by EXACT
+            // key (it only RETRACTS what the 5-tuple+domain names — the #7160
+            // / #7188 rule: fail closed where an identity is published, fail
+            // open where one is only retracted). A refused delete LEAKS an
+            // authoritative session while Go already removed its mirrors and
+            // discards the helper error on the singular/batch paths — so a
+            // refused domain-2 delete keeps forwarding after "successful"
+            // deletion. The wire value IS the raw domain here (`to_wire` is
+            // identity for every Unrecognized value — only 0 maps to the
+            // marker 1 — and no other raw domain maps onto one), so resolving
+            // it is exact, not a guess.
+            if sync_req.operation.as_str() != "delete" {
+                domain.note_unknown_routing_domain_import();
+                response.ok = false;
+                response.error =
+                    format!("{SYNCED_IMPORT_REFUSED_PREFIX}routing-domain-unrecognized");
+                return;
+            }
+            Some(sync_req.routing_domain)
         }
     };
     match sync_req.operation.as_str() {
