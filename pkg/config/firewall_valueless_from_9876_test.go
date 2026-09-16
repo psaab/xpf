@@ -186,3 +186,77 @@ func TestValuelessFirewallFromBracedLenientWarns9876(t *testing.T) {
 		t.Fatalf("the tolerant path must WARN, not swallow; warnings: %v", cfg.Warnings)
 	}
 }
+
+// TestValuelessFirewallFromSkipsQuarantinedMembers9876 pins the #9883
+// integration of the gate: members the compiler quarantines (an undeclared
+// family token, or a structured member carrying residue) compile to NOTHING,
+// so there are no compiled terms to check and the gate must skip them —
+// exactly like the compiler skips them. Without the skip the gate warns
+// #8480 for a term that enforces no rule at all.
+//
+// Strict cannot carry this cell: the #9017 token gate rejects unknown
+// families earlier in the prewalk, so the lenient path proves it. One
+// fixture in document order — quarantined filters first (a plain unknown
+// token, then a malformed-residue member), declared-family valueless term
+// last — proving the skip continues the walk instead of aborting it.
+func TestValuelessFirewallFromSkipsQuarantinedMembers9876(t *testing.T) {
+	const src = `firewall { family inett { filter Q { term TQ { from { source-prefix-list; } then { discard; } } } } family { inett inet { filter R { term TR { from { source-prefix-list; } then { discard; } } } } } family inet { filter F { term T { from { source-prefix-list; } then { discard; } } } } }`
+	t.Run("strict rejects via the token gate", func(t *testing.T) {
+		_, err := CompileConfig(fwTree9876(t, src))
+		if err == nil {
+			t.Fatal("control failed: strict must reject the unknown family")
+		}
+		if !strings.Contains(err.Error(), "9017") {
+			t.Fatalf("strict must reject through #9017 (which is why this cell rides lenient), got: %v", err)
+		}
+	})
+	lenient := func(t *testing.T) *Config {
+		t.Helper()
+		cfg, err := CompileConfigLenient(fwTree9876(t, src))
+		if err != nil {
+			t.Fatalf("the tolerant path must not brick the node: %v", err)
+		}
+		return cfg
+	}
+	t.Run("9017 warning remains", func(t *testing.T) {
+		for _, w := range lenient(t).Warnings {
+			if strings.Contains(w, "9017") && strings.Contains(w, "inett") {
+				return
+			}
+		}
+		t.Fatalf("the #9017 quarantine warning must remain; warnings: %v", lenient(t).Warnings)
+	})
+	t.Run("no 8480 warning names a quarantined term", func(t *testing.T) {
+		for _, w := range lenient(t).Warnings {
+			if !strings.Contains(w, "8480") {
+				continue
+			}
+			for _, quarantined := range []string{`"Q"`, `"TQ"`, `"R"`, `"TR"`, "inett"} {
+				if strings.Contains(w, quarantined) {
+					t.Fatalf("gate checked a quarantined term: %v", w)
+				}
+			}
+		}
+	})
+	t.Run("quarantined filters install into neither pool", func(t *testing.T) {
+		cfg := lenient(t)
+		for _, pool := range []map[string]*FirewallFilter{cfg.Firewall.FiltersInet, cfg.Firewall.FiltersInet6} {
+			for _, name := range []string{"Q", "R"} {
+				if _, ok := pool[name]; ok {
+					t.Fatalf("quarantined filter %q must compile to NOTHING", name)
+				}
+			}
+		}
+		if cfg.Firewall.FiltersInet["F"] == nil {
+			t.Fatal("control failed: the declared filter F must install, or the absences above prove nothing")
+		}
+	})
+	t.Run("declared valueless term still warns 8480", func(t *testing.T) {
+		for _, w := range lenient(t).Warnings {
+			if strings.Contains(w, "8480") && strings.Contains(w, `filter "F" term "T"`) {
+				return
+			}
+		}
+		t.Fatalf("the skip must continue the walk, not abort it; warnings: %v", lenient(t).Warnings)
+	})
+}
