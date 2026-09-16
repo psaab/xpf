@@ -1093,7 +1093,7 @@ fn f035_overlap_v6_denied_both_orders_9950() {
             ingress_ifindex: 24,
             addr_family: libc::AF_INET6 as u8,
             protocol: PROTO_TCP,
-            pkt_len: (frame.len() - 14) as u16, // v6 convention (txn_meta_v6): L3+ bytes, excl. eth.
+            pkt_len: frame.len() as u16, // #6883: shim stamps the FULL frame length.
             l3_offset: 14,
             l4_offset: 62,
             flow_src_port: 33333,

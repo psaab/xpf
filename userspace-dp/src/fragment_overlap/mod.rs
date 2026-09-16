@@ -35,14 +35,13 @@
 //!     flood — FNV-1a is unkeyed and computable), which would invert this control's
 //!     direction and contradict the range-overflow fail-closed policy. Flood-time
 //!     availability loss is the correct trade for a security control.
-//!   * Record-on-everything (first AND non-first) is required for tail-then-first
-//!     order, and recording happens pre-admission (before policy/NAT verdicts). So
-//!     DENIED traffic plants ranges with no permit needed — a state-poisoning
-//!     amplifier, stated plainly: an attacker matching a victim's
-//!     (family,src,dst,ident,proto,domain) within the 30s window can sacrifice one
-//!     victim datagram. This is strictly weaker than the status-quo primitive on the
-//!     same segment (spoofing the victim's fragments corrupts reassembly with no
-//!     state at all), and cross-VRF planting is closed by the domain key.
+//!   * Check/record SPLIT (no refused-traffic planting): the early hook only CHECKS
+//!     (pure — drops overlaps before enforcement verdicts are earned); recording happens
+//!     post-commit at the TX site, so only ADMITTED fragments plant ranges. A refused
+//!     cross-domain tail therefore cannot poison a later same-domain tail, and dropped
+//!     flood traffic leaves no residue. Admitted same-key fragments reach the same
+//!     receiver anyway, so planting adds no capability beyond direct corruption;
+//!     cross-VRF planting is closed by the domain key regardless.
 //!   * 16-bit ident wrap (RFC 6864): near-1Gbps fragmented flows wrap idents inside
 //!     the 30s window, turning strict-overlap into self-inflicted drops for a
 //!     conformant sender that reuses an ident while its earlier datagram's ranges
@@ -70,13 +69,16 @@
 //! the v6 addrs derive injectively from the v4 session, so a post-collision implies a
 //! pre-collision (fixed pool) — the pre-check already covers it.
 //!
-//! Hook: ONE pre-site post-screen, pre-IPsec-passthrough, pre-flow-cache, post-decap
-//! (inner). Post-screen preserves byte-for-byte drop precedence + malformation
-//! attribution; pre-IPsec so locally-terminated first fragments (IKE) still plant
-//! ranges for later flowless tails; pre-cache because the 5-tuple cache key has no
-//! ident. Residuals: the SYN-cookie-challenge path (inside `stage_screen_check`)
-//! `continue`s before the hook, and ESP/AH outer fragments are recorded while their
-//! encrypted inner is unknowable — both documented, neither silently closed.
+//! Hook: a pure CHECK pre-site (post-screen, pre-IPsec-passthrough, pre-flow-cache,
+//! post-decap inner) plus recording post-commit at the common TX site (which re-checks
+//! under the shard lock) and in the IPsec-passthrough arm (local delivery IS admission).
+//! Post-screen preserves byte-for-byte drop precedence + malformation attribution;
+//! pre-cache because the 5-tuple cache key has no ident. Residuals, all explicit: the
+//! SYN-cookie-challenge path `continue`s before the hook (challenged SYNs plant nothing —
+//! recording unproven SYNs would let spoofed floods squat shards); ESP/AH outers are
+//! checked (and planted only when Passthrough-delivered) while their encrypted inner is
+//! unknowable; non-IPsec LocalDelivery fragments are checked but never recorded (host
+//! stack reassembles; screens still inspect their firsts).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
@@ -208,6 +210,51 @@ fn overlap_entry_live(e: &OverlapEntry, now_ns: u64) -> bool {
     idle_live && absolutely_live
 }
 
+/// Dry-run merge of `new` into `len` ranges: sort by start, coalesce adjacency
+/// (`nxt.0 <= cur.1`), return the merged set — or `Err(())` on would-overflow.
+/// Shared by [`OverlapTracker::check_overlap`] (discards) and
+/// [`OverlapTracker::check_and_record`] (commits) so their verdicts agree by construction.
+fn merge_ranges(
+    ranges: &[(u32, u32); OVERLAP_MAX_RANGES],
+    len: usize,
+    new: (u32, u32),
+) -> Result<([(u32, u32); OVERLAP_MAX_RANGES], u8), ()> {
+    let mut tmp = [(0u32, 0u32); OVERLAP_MAX_RANGES + 1];
+    tmp[..len].copy_from_slice(&ranges[..len]);
+    tmp[len] = new;
+    let n = len + 1;
+    // Insertion sort by start (n <= 17, tiny).
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 && tmp[j].0 < tmp[j - 1].0 {
+            tmp.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+    let mut out = [(0u32, 0u32); OVERLAP_MAX_RANGES];
+    let mut out_len = 0usize;
+    let mut cur = tmp[0];
+    for &nxt in tmp.iter().take(n).skip(1) {
+        if nxt.0 <= cur.1 {
+            if nxt.1 > cur.1 {
+                cur.1 = nxt.1;
+            }
+        } else {
+            if out_len >= OVERLAP_MAX_RANGES {
+                return Err(());
+            }
+            out[out_len] = cur;
+            out_len += 1;
+            cur = nxt;
+        }
+    }
+    if out_len >= OVERLAP_MAX_RANGES {
+        return Err(());
+    }
+    out[out_len] = cur;
+    Ok((out, (out_len + 1) as u8))
+}
+
 impl OverlapTracker {
     pub(crate) fn new() -> Self {
         let mut shards = Vec::with_capacity(OVERLAP_SHARDS);
@@ -219,12 +266,54 @@ impl OverlapTracker {
         }
     }
 
-    /// Check `(start, end)` against prior ranges for `key`; on no overlap, record it
-    /// (coalescing adjacency, refreshing the idle deadline, LRU-refreshing) and return
-    /// `false`. Returns `true` (drop, entry left byte-identical — no record, no refresh,
-    /// no LRU move) on: strict overlap, empty range (counted to `drop_counter`), range-cap
-    /// overflow (`OVERFLOW`), or shard-full (`SHARD_FULL`). The caller selects
-    /// `drop_counter` (`DROPPED` pre-NAT, `POST_NAT_DROPPED` at the TX site).
+    /// Pure overlap CHECK: same verdict [`Self::check_and_record`] would return, but
+    /// records nothing, refreshes nothing, allocates nothing (no shard-full condition).
+    /// The early (pre-enforcement) hook uses this — dropping an overlap before policy/NAT
+    /// verdicts are earned — while recording happens post-commit at the TX site, so
+    /// refused traffic never plants ranges (no cross-domain plant-then-duplicate
+    /// poisoning, no flood-driven squat behind drops).
+    pub(crate) fn check_overlap(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> bool {
+        if start >= end {
+            drop_counter.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        let idx = overlap_shard_index(&key);
+        let mut shard = self.shards[idx]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shard.retain(|e| overlap_entry_live(e, now_ns));
+        let Some(pos) = shard.iter().position(|e| e.key == key) else {
+            return false;
+        };
+        for i in 0..(shard[pos].len as usize) {
+            let (rs, re) = shard[pos].ranges[i];
+            if start.max(rs) < end.min(re) {
+                drop_counter.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+        }
+        if merge_ranges(&shard[pos].ranges, shard[pos].len as usize, (start, end)).is_err() {
+            FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    /// Late (post-commit) check AND record: re-checks `(start, end)` under the shard lock
+    /// (closing the cross-worker race between the early [`Self::check_overlap`] and the
+    /// commit), then records on pass (coalescing adjacency, refreshing the idle deadline,
+    /// LRU-refreshing). Returns `true` (drop, entry left byte-identical) on: strict
+    /// overlap, empty range (counted to `drop_counter`), range-cap overflow (`OVERFLOW`),
+    /// or shard-full (`SHARD_FULL`). Only admitted (forwarding) fragments reach this —
+    /// refused traffic never plants ranges. The caller selects `drop_counter`
+    /// (`DROPPED` for the pre-translation key, `POST_NAT_DROPPED` for the translated key).
     pub(crate) fn check_and_record(
         &self,
         key: OverlapKey,
@@ -250,54 +339,23 @@ impl OverlapTracker {
                     return true;
                 }
             }
-            // No overlap: merge into a scratch copy first so the overflow drop leaves
-            // the live entry untouched (no MRU move, no deadline refresh).
-            let e = shard[pos];
-            let mut tmp = [(0u32, 0u32); OVERLAP_MAX_RANGES + 1];
-            tmp[..(e.len as usize)].copy_from_slice(&e.ranges[..(e.len as usize)]);
-            tmp[e.len as usize] = (start, end);
-            let n = e.len as usize + 1;
-            // Insertion sort by start (n <= 17, tiny).
-            for i in 1..n {
-                let mut j = i;
-                while j > 0 && tmp[j].0 < tmp[j - 1].0 {
-                    tmp.swap(j, j - 1);
-                    j -= 1;
+            // No overlap: merge via the shared dry-run, then commit. The overflow drop
+            // leaves the live entry untouched (no MRU move, no deadline refresh).
+            match merge_ranges(&shard[pos].ranges, shard[pos].len as usize, (start, end)) {
+                Err(()) => {
+                    FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                Ok((ranges, len)) => {
+                    let mut e = shard.remove(pos);
+                    e.ranges = ranges;
+                    e.len = len;
+                    e.deadline_ns = now_ns.saturating_add(OVERLAP_TTL_NS);
+                    // created_ns NEVER refreshed (absolute bound from first sighting).
+                    shard.push(e);
+                    return false;
                 }
             }
-            let mut out = [(0u32, 0u32); OVERLAP_MAX_RANGES];
-            let mut out_len = 0usize;
-            let mut cur = tmp[0];
-            for &nxt in tmp.iter().take(n).skip(1) {
-                if nxt.0 <= cur.1 {
-                    if nxt.1 > cur.1 {
-                        cur.1 = nxt.1;
-                    }
-                } else {
-                    if out_len >= OVERLAP_MAX_RANGES {
-                        FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
-                        return true;
-                    }
-                    out[out_len] = cur;
-                    out_len += 1;
-                    cur = nxt;
-                }
-            }
-            if out_len >= OVERLAP_MAX_RANGES {
-                FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
-                return true;
-            }
-            out[out_len] = cur;
-            out_len += 1;
-            // `out_len` is now the merged count (post-increment) — assign directly;
-            // `+1` here would inflate `len` past the written slots (OOB on next scan).
-            let mut e = shard.remove(pos);
-            e.ranges = out;
-            e.len = out_len as u8;
-            e.deadline_ns = now_ns.saturating_add(OVERLAP_TTL_NS);
-            // created_ns NEVER refreshed (absolute bound from first sighting).
-            shard.push(e);
-            return false;
         }
         if shard.len() >= OVERLAP_CAP_PER_SHARD {
             // Fail CLOSED: evicting a live entry would let a flood erase the anchor
@@ -807,4 +865,39 @@ mod tests {
         };
         assert!(translated_overlap_key(&v4pre, &nat64v4, 0).is_none());
     }
+    #[test]
+    fn check_is_pure_and_agrees_with_record_9950() {
+        // check_overlap mutates nothing: repeated checks never self-overlap and len stays
+        // 0; after a record, the same inputs fire. RED-on-revert: recording inside check
+        // makes the second check overlap (and reintroduces refused-traffic planting).
+        let t = OverlapTracker::new();
+        assert!(!t.check_overlap(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.check_overlap(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert_eq!(t.len(), 0);
+        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.check_overlap(v4_key(), 8, 24, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.check_overlap(v4_key(), 16, 24, 2_000, &FRAG_OVERLAP_DROPPED));
+    }
+
+    #[test]
+    fn check_catches_would_overflow_without_mutating_9950() {
+        // 16 disjoint recorded; check() of a 17th reports the overflow-drop while leaving
+        // the anchor ranges intact (an overlapping check still fires as overlap, not miss).
+        let t = OverlapTracker::new();
+        for i in 0..16u32 {
+            let s = i * 24;
+            assert!(!t.check_and_record(v4_key(), s, s + 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        }
+        let o0 = FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed);
+        assert!(t.check_overlap(v4_key(), 16 * 24, 16 * 24 + 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert_eq!(
+            FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed).wrapping_sub(o0),
+            1
+        );
+        let d = dropped_delta(|| {
+            assert!(t.check_overlap(v4_key(), 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
+        });
+        assert_eq!(d, 1);
+    }
+
 }
