@@ -435,11 +435,11 @@ func sweepFsatomicTemps(dir string, fail func(error)) {
 // zeroize login-account teardown paths (#4598). These mirror the production
 // paths the daemon provisions OS login accounts under (pkg/daemon:
 // provisionedUsersDir, sudoersDir/sudoersPrefix, passwdPath, /home/<user>).
-// They cannot be imported — pkg/daemon imports pkg/grpcapi (daemon_run.go),
-// so a shared symbol would create an import cycle, the same reason the exec
-// timeout helper is duplicated here. They are package vars only so a test can
-// point the teardown at a throwaway tree instead of the real /etc + /home +
-// /var/lib.
+// They cannot be imported — pkg/daemon imports pkg/grpcapi (daemon.go,
+// daemon_run_servers.go), so a shared symbol would create an import cycle,
+// the same reason the exec timeout helper is duplicated here. They are
+// package vars only so a test can point the teardown at a throwaway tree
+// instead of the real /etc + /home + /var/lib.
 var (
 	// zeroizeProvisionedUsersDir is the per-account provenance-marker directory
 	// (pkg/daemon.provisionedUsersDir). Each file is named for an xpf-created

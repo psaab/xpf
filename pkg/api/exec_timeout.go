@@ -8,13 +8,16 @@ import (
 
 // Request-path exec bounding (#1805). This mirrors the apply-path helper
 // in pkg/daemon/exec_timeout.go (#1794), which is the contract reference
-// for the 15s/5s constants. It cannot be imported here: pkg/daemon
-// imports pkg/api (daemon_run.go), so a shared helper would create an
-// import cycle. pkg/grpcapi carries the sibling copy with the
-// Output/CombinedOutput variants; this package's only raw exec sites
-// are the deferred power actions, so only the Run variant exists here —
-// add the other variants from pkg/grpcapi/exec_timeout.go if a future
-// handler needs command output.
+// for the 15s/5s constants. It cannot be imported from pkg/daemon:
+// pkg/daemon imports pkg/api (daemon_run_servers.go, management.go), so
+// that leg would create an import cycle. The pkg/grpcapi leg is not
+// cycle-blocked — pkg/api already imports pkg/grpcapi (dhcp.go) — so
+// sharing via an exported helper would be cycle-free; the two sides stay
+// unexported mirrors by choice (see docs/log/9937.md).
+// pkg/grpcapi/exec_timeout.go carries the Output/CombinedOutput variants;
+// this package's only raw exec sites are the deferred power actions, so
+// only the Run variant exists here — add the other variants from
+// pkg/grpcapi/exec_timeout.go if a future handler needs command output.
 
 // requestExecTimeout bounds the child process runtime; on expiry the
 // process is killed and the error reflects the context deadline.
@@ -29,10 +32,10 @@ const requestExecWaitDelay = 5 * time.Second
 
 // Diag budgets (#1819). The ping/traceroute handlers legitimately run
 // longer than requestExecTimeout, so they size their bound from the
-// request instead of sharing the 15s constant. These formulas are the
-// REST-side copy of the diag-stream budget block in
-// pkg/grpcapi/exec_timeout.go (same import-cycle constraint as above);
-// keep the two copies in sync.
+// request instead of sharing the 15s constant. These formulas manually
+// mirror the diag-stream budget block in pkg/grpcapi/exec_timeout.go —
+// no cross-package test enforces equality, so update both
+// TestPingExecTimeout tables together; keep the two copies in sync.
 
 // diagPingPacketInterval is the per-packet budget for ping: the
 // handlers do not pass -i, so ping sends one packet per second
