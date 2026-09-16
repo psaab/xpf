@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/upgrade/lock"
 )
 
 // R-1: interior symlinks under wiped trees survive silently (#10100).
@@ -19,6 +20,12 @@ import (
 // survive, nil returned. Each cell plants one interior link and requires the
 // wipe to report the surviving target path via FactoryResetSymlinkError,
 // never nil. Regulars must still be erased.
+//
+// Hermeticity (#10100 GPT-1): these cells drive zeroizeConfigDir — the bounded
+// config-root primitive — NOT PerformZeroizeWipe, which would also visit the
+// rendered, login-account, snapshot, BPF and networkd legs at real system
+// paths on a privileged run. The full-wipe path is covered hermetically by
+// TestZeroizeKeepsEveryLegSkipped10100 below.
 
 const interiorSecret10100 = "SECRET-10100-INTERIOR-DO-NOT-SURVIVE-SILENTLY"
 
@@ -41,7 +48,7 @@ func TestZeroizeReportsInteriorTLSLink10100(t *testing.T) {
 	mustSymlink(t, target, filepath.Join(tlsDir, "key.pem"))
 	mustWrite(t, filepath.Join(tlsDir, "cert.pem"), []byte("CERT "+interiorSecret10100))
 
-	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	err := zeroizeConfigDir(configDir, "xpf.conf")
 	var symErr *configstore.FactoryResetSymlinkError
 	if !errors.As(err, &symErr) {
 		t.Fatalf("R-1 tls interior: expected FactoryResetSymlinkError, got %v; "+
@@ -93,7 +100,7 @@ func TestZeroizeReportsInteriorConfigDBLink10100(t *testing.T) {
 	mustWrite(t, target, []byte("config-text "+interiorSecret10100))
 	mustSymlink(t, target, filepath.Join(dbDir, "active.json"))
 
-	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	err := zeroizeConfigDir(configDir, "xpf.conf")
 	var symErr *configstore.FactoryResetSymlinkError
 	if !errors.As(err, &symErr) {
 		t.Fatalf("R-1 .configdb interior: expected FactoryResetSymlinkError, got %v; "+
@@ -142,7 +149,7 @@ func TestZeroizeReportsInteriorDBCopyLink10100(t *testing.T) {
 	mustWrite(t, target, []byte("copy-text "+interiorSecret10100))
 	mustSymlink(t, target, filepath.Join(copyDir, "active.json"))
 
-	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	err := zeroizeConfigDir(configDir, "xpf.conf")
 	var symErr *configstore.FactoryResetSymlinkError
 	if !errors.As(err, &symErr) {
 		t.Fatalf("R-1 .old interior: expected FactoryResetSymlinkError, got %v; "+
@@ -186,7 +193,7 @@ func TestZeroizeReportsInteriorRestorePartialLink10100(t *testing.T) {
 	target := filepath.Join(real, "partial-active-real.json")
 	mustWrite(t, target, []byte("partial-text "+interiorSecret10100))
 	mustSymlink(t, target, filepath.Join(copyDir, "active.json"))
-	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	err := zeroizeConfigDir(configDir, "xpf.conf")
 	var symErr *configstore.FactoryResetSymlinkError
 	if !errors.As(err, &symErr) {
 		t.Fatalf("R-1 .restore.partial interior: expected FactoryResetSymlinkError, got %v", err)
@@ -224,7 +231,7 @@ func TestZeroizeReportsNestedInteriorLink10100(t *testing.T) {
 	target := filepath.Join(real, "nested-key-real")
 	mustWrite(t, target, []byte("nested-key "+interiorSecret10100))
 	mustSymlink(t, target, filepath.Join(sub, "master.key"))
-	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	err := zeroizeConfigDir(configDir, "xpf.conf")
 	var symErr *configstore.FactoryResetSymlinkError
 	if !errors.As(err, &symErr) {
 		t.Fatalf("R-1 nested interior: expected FactoryResetSymlinkError, got %v; "+
@@ -263,7 +270,7 @@ func TestZeroizeReportsMasterKeyPlusInteriorCombo10100(t *testing.T) {
 	bodyTarget := filepath.Join(real, "combo-active-real.json")
 	mustWrite(t, bodyTarget, []byte("combo-body "+interiorSecret10100))
 	mustSymlink(t, bodyTarget, filepath.Join(dbDir, "active.json"))
-	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	err := zeroizeConfigDir(configDir, "xpf.conf")
 	var symErr *configstore.FactoryResetSymlinkError
 	if !errors.As(err, &symErr) {
 		t.Fatalf("R-1 combo: expected FactoryResetSymlinkError, got %v", err)
@@ -280,6 +287,159 @@ func TestZeroizeReportsMasterKeyPlusInteriorCombo10100(t *testing.T) {
 	if sawKey != 1 || sawBody != 1 {
 		t.Fatalf("R-1 combo: want master.key x1 + active.json x1, got key x%d body x%d in %v",
 			sawKey, sawBody, symErr.Skipped)
+	}
+}
+
+func TestZeroizeReportsDanglingInteriorLink10100(t *testing.T) {
+	// A DANGLING interior link (Lstat succeeds, target absent) is still a
+	// link, not an absence — "ANY interior symlink" is reported, mirroring
+	// the #9897 dangling-final-link doctrine.
+	root := t.TempDir()
+	configDir := filepath.Join(root, "etc", "xpf")
+	real := filepath.Join(root, "elsewhere")
+	for _, d := range []string{configDir, real} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tlsDir := filepath.Join(configDir, "tls")
+	if err := os.MkdirAll(tlsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, filepath.Join(real, "no-such-key.pem"), filepath.Join(tlsDir, "key.pem"))
+	mustWrite(t, filepath.Join(tlsDir, "cert.pem"), []byte("CERT "+interiorSecret10100))
+	err := zeroizeConfigDir(configDir, "xpf.conf")
+	var symErr *configstore.FactoryResetSymlinkError
+	if !errors.As(err, &symErr) {
+		t.Fatalf("R-1 dangling interior: expected FactoryResetSymlinkError, got %v", err)
+	}
+	found := false
+	for _, sk := range symErr.Skipped {
+		if strings.Contains(sk.Target, "no-such-key.pem") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("R-1 dangling interior: Skipped %v does not name the dangling link", symErr.Skipped)
+	}
+	if _, serr := os.Lstat(filepath.Join(tlsDir, "cert.pem")); !os.IsNotExist(serr) {
+		t.Fatal("R-1 dangling interior: regular cert.pem was not erased")
+	}
+}
+
+func TestZeroizeReportsInteriorDirLink10100(t *testing.T) {
+	// A symlinked SUBDIRECTORY inside .configdb: WalkDir must report the link
+	// WITHOUT descending (symmetric with RemoveAll unlinking without
+	// descending), while the target tree's secrets survive and are named.
+	root := t.TempDir()
+	configDir := filepath.Join(root, "etc", "xpf")
+	real := filepath.Join(root, "elsewhere")
+	for _, d := range []string{configDir, real} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbDir := filepath.Join(configDir, ".configdb")
+	if err := os.MkdirAll(dbDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dbDir, "master.key"), []byte("keymaterial"))
+	mustWrite(t, filepath.Join(dbDir, "active.json"), []byte(`{"live":true}`))
+	targetDir := filepath.Join(real, "shadow-tree")
+	secretBody := "shadow-config-text " + interiorSecret10100
+	mustWrite(t, filepath.Join(targetDir, "active.json"), []byte(secretBody))
+	mustSymlink(t, targetDir, filepath.Join(dbDir, "shadow"))
+	err := zeroizeConfigDir(configDir, "xpf.conf")
+	var symErr *configstore.FactoryResetSymlinkError
+	if !errors.As(err, &symErr) {
+		t.Fatalf("R-1 dir-link interior: expected FactoryResetSymlinkError, got %v; "+
+			"dir link unlinked while %s survives silently", err, targetDir)
+	}
+	found := false
+	for _, sk := range symErr.Skipped {
+		if sk.Target == targetDir || strings.Contains(sk.Target, "shadow-tree") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("R-1 dir-link interior: Skipped %v does not name %s", symErr.Skipped, targetDir)
+	}
+	got, rerr := os.ReadFile(filepath.Join(targetDir, "active.json"))
+	if rerr != nil || string(got) != secretBody {
+		t.Fatalf("R-1 dir-link interior: surviving target lost or altered: %v", rerr)
+	}
+}
+
+// hermeticWipe10100 points EVERY PerformZeroizeWipe leg at a throwaway tree so
+// the full-wipe integration cell below never touches real system paths (#10100
+// GPT-1): rendered configs, BPF pins, networkd, the versions dir + upgrade
+// lock, and all login-account paths + destructive callbacks. The archive leg
+// is disabled by passing "" (nothing to erase). Returns the versions dir for
+// snapshot planting.
+func hermeticWipe10100(t *testing.T, root string) (versionsDir string) {
+	t.Helper()
+	origFRR, origSwan, origK4, origK6 := zeroizeFRRConf, zeroizeSwanctlSnippet, zeroizeKea4Conf, zeroizeKea6Conf
+	origBPF, origND, origVer := zeroizeBPFPinDir, zeroizeNetworkdDir, zeroizeVersionsDir
+	t.Cleanup(func() {
+		zeroizeFRRConf, zeroizeSwanctlSnippet, zeroizeKea4Conf, zeroizeKea6Conf = origFRR, origSwan, origK4, origK6
+		zeroizeBPFPinDir, zeroizeNetworkdDir, zeroizeVersionsDir = origBPF, origND, origVer
+	})
+	zeroizeFRRConf = filepath.Join(root, "rendered", "frr", "frr.conf")
+	zeroizeSwanctlSnippet = filepath.Join(root, "rendered", "swanctl", "xpf.conf")
+	zeroizeKea4Conf = filepath.Join(root, "rendered", "kea", "kea-dhcp4.conf")
+	zeroizeKea6Conf = filepath.Join(root, "rendered", "kea", "kea-dhcp6.conf")
+	zeroizeBPFPinDir = filepath.Join(root, "bpf")
+	zeroizeNetworkdDir = filepath.Join(root, "networkd")
+	versionsDir = filepath.Join(root, "versions")
+	zeroizeVersionsDir = versionsDir
+	origLock := zeroizeAcquireUpgradeLock
+	t.Cleanup(func() { zeroizeAcquireUpgradeLock = origLock })
+	lockPath := filepath.Join(root, "upgrade.lock")
+	zeroizeAcquireUpgradeLock = func() (interface{ Release() error }, error) {
+		return lock.AcquireAt(lockPath, "zeroize", "")
+	}
+	login := filepath.Join(root, "login")
+	setZeroizeLoginPaths(t, filepath.Join(login, "provisioned-users"),
+		filepath.Join(login, "sudoers.d"), filepath.Join(login, "home"),
+		filepath.Join(login, "passwd"))
+	setZeroizeRootPaths(t, filepath.Join(login, "root-ssh"), nil)
+	return versionsDir
+}
+
+func TestZeroizeKeepsEveryLegSkipped10100(t *testing.T) {
+	// GPT-2: the config-root leg AND the snapshot leg each plant an interior
+	// link. BOTH Skipped sets must surface in the one returned error — a
+	// first-wins fold would drop the snapshot set while its discovery link
+	// is already unlinked, stranding the surviving target undiscoverable
+	// (log-only) on re-run.
+	root := t.TempDir()
+	configDir := filepath.Join(root, "etc", "xpf")
+	real := filepath.Join(root, "elsewhere")
+	versionsDir := hermeticWipe10100(t, root)
+	// Leg A: tls interior link under the config root.
+	mustWrite(t, filepath.Join(real, "a-key-real.pem"), []byte("PRIVATE KEY "+interiorSecret10100))
+	mustSymlink(t, filepath.Join(real, "a-key-real.pem"), filepath.Join(configDir, "tls", "key.pem"))
+	mustWrite(t, filepath.Join(configDir, "tls", "cert.pem"), []byte("CERT "+interiorSecret10100))
+	// Leg B: interior link inside an upgrade DB snapshot.
+	snap := filepath.Join(versionsDir, ".9.9.9.dbsnap")
+	mustWrite(t, filepath.Join(snap, "master.key"), []byte("keymaterial"))
+	mustWrite(t, filepath.Join(real, "b-snap-real.json"), []byte("snap-body "+interiorSecret10100))
+	mustSymlink(t, filepath.Join(real, "b-snap-real.json"), filepath.Join(snap, "active.json"))
+	err := PerformZeroizeWipe(configDir, "xpf.conf", "")
+	if err == nil {
+		t.Fatal("GPT-2 multi-leg: expected a joined error naming both legs, got nil")
+	}
+	for _, want := range []string{"a-key-real.pem", "b-snap-real.json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("GPT-2 multi-leg: joined error omits %s (a leg's Skipped set was dropped): %v", want, err)
+		}
+	}
+	var symErr *configstore.FactoryResetSymlinkError
+	if !errors.As(err, &symErr) {
+		t.Fatalf("GPT-2 multi-leg: expected FactoryResetSymlinkError in the join, got %T: %v", err, err)
+	}
+	if len(symErr.Skipped) == 0 {
+		t.Fatal("GPT-2 multi-leg: joined symlink error carries no paths")
 	}
 }
 

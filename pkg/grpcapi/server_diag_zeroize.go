@@ -491,10 +491,9 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 	// #10100 R-2: a SKIPPED erase outranks a FAILED one (same doctrine as
 	// zeroizeConfigDir #9013): an erasure that did not happen AT ALL is
 	// strictly worse than one that failed. Joined so a real I/O failure is
-	// not swallowed; errors.As finds either. Cross-leg collapse (configDir
-	// Skipped + rendered Skipped → first wins in performZeroizeWipe) is
-	// accepted pre-existing since snapshots gained Skipped; re-run reveals
-	// the second set.
+	// not swallowed; errors.As finds either. performZeroizeWipe Join-aggregates
+	// every leg's error, so this leg's Skipped set is never dropped when
+	// another leg also fails.
 	if len(skipped) > 0 {
 		symErr := &configstore.FactoryResetSymlinkError{Skipped: skipped}
 		if firstErr != nil {
@@ -1280,24 +1279,36 @@ func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
+	// #10100 GPT-2: every security-critical leg runs unconditionally and
+	// EVERY leg error is kept — the legs are errors.Join'ed, never
+	// first-wins. Dropping a later leg's FactoryResetSymlinkError when an
+	// earlier leg already failed loses diagnostics that are UNDISCOVERABLE
+	// on re-run: for report-and-unlink legs (R-1 interior, snapshots) the
+	// discovery link is already unlinked, so the surviving target is
+	// log-only after the first pass. Leg order is preserved (config state
+	// first), so errors.As still finds the earliest failure first; a
+	// single failing leg returns its error unwrapped, exactly as before.
+	var legErrs []error
 	// Config state FIRST — the security-critical erasure. A failure here can
 	// leave prior-tenant config/secrets on disk, so it is surfaced to the
 	// caller (#4576).
-	err := zeroizeConfigDir(configDir, configBase)
+	if e := zeroizeConfigDir(configDir, configBase); e != nil {
+		legErrs = append(legErrs, e)
+	}
 
 	// Rendered service configs (#4585): also security-critical — routing-auth
 	// keys in a world-readable frr.conf, IKE PSKs, Kea configs. A post-zeroize
 	// boot enters bootstrap / nil-active-config normal boot and SKIPS the
-	// reconcile that would clear them, so the wipe must erase them itself. Fold
-	// its first error into the surfaced result (the .configdb error takes
-	// priority) so a partial wipe is never reported as a clean factory reset.
+	// reconcile that would clear them, so the wipe must erase them itself. Its
+	// error is appended to the surfaced result so a partial wipe is never
+	// reported as a clean factory reset.
 	if e := zeroizeRenderedConfigs(
 		zeroizeFRRConf,
 		zeroizeSwanctlSnippet,
 		zeroizeKea4Conf,
 		zeroizeKea6Conf,
-	); e != nil && err == nil {
-		err = e
+	); e != nil {
+		legErrs = append(legErrs, e)
 	}
 
 	// Provisioned login accounts (#4598): the OS users xpf created — their
@@ -1307,9 +1318,9 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// a re-tenanted device would otherwise grant the prior tenant interactive
 	// login + passwordless sudo. Marker-aware teardown (UID-keyed provenance
 	// marker, #1944) so a non-xpf admin/system/operator account is NEVER touched.
-	// Also security-critical, so fold its first error into the surfaced result.
-	if e := zeroizeLoginAccounts(); e != nil && err == nil {
-		err = e
+	// Also security-critical, so its error is appended to the surfaced result.
+	if e := zeroizeLoginAccounts(); e != nil {
+		legErrs = append(legErrs, e)
 	}
 
 	// Local config archive (#5186): /var/lib/xpf/archive holds
@@ -1319,18 +1330,18 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// pre-#5186 zeroize LEFT it behind, so a re-tenanted device kept the prior
 	// tenant's archived secrets. Ownership-guarded (FactoryResetArchiveDir):
 	// erases ONLY the xpf-owned default path, never a custom/remote/compliance
-	// archive destination. Also security-critical, so fold its first error into
+	// archive destination. Also security-critical, so its error is appended to
 	// the surfaced result.
 	//
 	// #7173: the CONFIGURED dir. A skip is reported as an
-	// *configstore.ArchiveDirSkippedError and folded into the surfaced result
+	// *configstore.ArchiveDirSkippedError and appended to the surfaced result
 	// like any other secret-bearing failure — the reset genuinely is incomplete
 	// and the operator has a directory to erase by hand. It is NOT a reason to
-	// stop: everything else must still be wiped, which is why it is folded in
+	// stop: everything else must still be wiped, which is why it is appended
 	// rather than returned early.
 	if archiveDir != "" {
-		if e := configstore.FactoryResetArchiveDir(archiveDir); e != nil && err == nil {
-			err = e
+		if e := configstore.FactoryResetArchiveDir(archiveDir); e != nil {
+			legErrs = append(legErrs, e)
 		}
 	}
 
@@ -1342,11 +1353,11 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// box, not an in-flight window. This primitive knew /var/lib/xpf/archive and
 	// /var/lib/xpf/provisioned-users and had zero occurrences of "versions",
 	// which is what made the omission an oversight rather than a decision.
-	// Security-critical, so its first error is folded into the surfaced result:
-	// a busy upgrade lock or a failed unlink means the reset is INCOMPLETE and
+	// Security-critical, so its error is appended to the surfaced result: a
+	// busy upgrade lock or a failed unlink means the reset is INCOMPLETE and
 	// must not be reported as a clean factory reset.
-	if e := zeroizeUpgradeDBSnapshots(zeroizeVersionsDir); e != nil && err == nil {
-		err = e
+	if e := zeroizeUpgradeDBSnapshots(zeroizeVersionsDir); e != nil {
+		legErrs = append(legErrs, e)
 	}
 
 	// BPF pins + managed networkd files carry no secret material, so their
@@ -1364,5 +1375,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 			}
 		}
 	}
-	return err
+	// Zero legs failed → clean wipe (nil, exactly as before). One leg failed
+	// → its error unwrapped (identity preserved). Several failed → joined in
+	// leg order; errors.As/Is find every leg's diagnostics.
+	switch len(legErrs) {
+	case 0:
+		return nil
+	case 1:
+		return legErrs[0]
+	default:
+		return errors.Join(legErrs...)
+	}
 }

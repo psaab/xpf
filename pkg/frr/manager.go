@@ -913,9 +913,19 @@ func stripManagedSection(content string) (string, bool) {
 // grpcapi zeroize pre-check reports the typed Skipped entry; this Lstat guard
 // is defense-in-depth for direct callers (plain error naming path+target).
 // Re-Lstat after ReadFile so a swap between the checks still refuses without
-// writing victim-derived content over the link; only an in-rename race remains
-// (accepted, like #9013 Lstat-then-act; needs /etc/frr parent write, root-only
-// in production).
+// writing victim-derived content over the link.
+//
+// Residual window, stated in full: the re-Lstat is NOT atomic with the write.
+// A namespace swap after the second Lstat and before the rename publishes —
+// spanning strip, tempfile create, write, chmod/chown, fsync, close, rename,
+// and the parent-dir fsync — still races. No-resolve stops VICTIM
+// WRITE-THROUGH (the rename replaces the link, never the target), but a swap
+// in this window can still leave the erasure INCOMPLETE (the swapped-aside
+// original keeps its secrets, unreported). Closing it needs O_NOFOLLOW /
+// descriptor-relative publication. What it takes is write permission on the
+// frr.conf PARENT dir (/etc/frr, root-only in production) during the strip —
+// accepted, like #9013 Lstat-then-act. Deterministic plants (link in place
+// when the strip runs) ARE closed above.
 func StripManagedSectionFile(path string) error {
 	if fi, lerr := os.Lstat(path); lerr == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {

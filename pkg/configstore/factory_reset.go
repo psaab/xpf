@@ -172,6 +172,14 @@ func SymlinkTarget(path string) (SymlinkedTarget, bool) {
 // The recorded Target is Readlink as-is (possibly relative); resolve it
 // against Dir(Path) (a known string even after unlink) like #9013.
 //
+// NARROWED contract (#10100 GPT-4): this census covers SYMLINKS only. A
+// same-filesystem HARDLINK (nlink>1) to interior content survives RemoveAll
+// via its other name and is NOT reported — presence is detectable but the
+// other names are not enumerable, so there is nothing actionable to hand the
+// operator. The wipe therefore certifies MANAGED-NAME removal only;
+// pre-existing extra hardlinks are out of scope. Link-count attestation is
+// follow-up #10135, not this change.
+//
 // Accepted residual: the validated census is a pathname walk, not a pinned
 // handle — a concurrent plant DURING the wipe (dbDir/tls write while the
 // walk + key fsync + RemoveAll run) could add a link after the census and
@@ -304,7 +312,29 @@ func FactoryResetArchiveDir(archiveDir string) error {
 			"dir", sk.Path, "target", sk.Target)
 		return &FactoryResetSymlinkError{Skipped: []SymlinkedTarget{sk}}
 	}
-
+	// #10100 GPT-3: a real archive dir holding a symlinked
+	// config-<ts>.<seq>.conf snapshot has the link unlinked while the full
+	// cleartext config survives on the target volume — the same R-1 shape as
+	// tls/.configdb interior. Census ANY interior link (no exclusion: the
+	// archive has no master.key shape), still RemoveAll regulars. A root-link
+	// result here is a TOCTOU swap after the check above: refuse whole.
+	var skipped []SymlinkedTarget
+	if interior, cerr := CollectInteriorSymlinks(archiveDir, ""); len(interior) == 1 && interior[0].Path == archiveDir {
+		slog.Warn("zeroize: config archive directory is a symlink; NOT erasing it — "+
+			"removing it would unlink the link and leave the archived config text",
+			"dir", interior[0].Path, "target", interior[0].Target)
+		return &FactoryResetSymlinkError{Skipped: interior}
+	} else {
+		for _, sk := range interior {
+			slog.Warn("zeroize: config archive interior is a symlink; the link will be "+
+				"unlinked but the target bytes survive — report, don't trust the wipe",
+				"path", sk.Path, "target", sk.Target)
+		}
+		skipped = append(skipped, interior...)
+		if cerr != nil {
+			fail(cerr)
+		}
+	}
 	// Erase the whole archive tree — every config-<ts>.<seq>.conf snapshot of
 	// the prior tenant's config text. RemoveAll is nil on an absent dir.
 	fail(os.RemoveAll(archiveDir))
@@ -315,6 +345,16 @@ func FactoryResetArchiveDir(archiveDir string) error {
 	// reported as a clean zeroize. ErrNotExist (parent absent → nothing was
 	// removed) is excluded by fail().
 	fail(rbSyncDir(filepath.Dir(archiveDir)))
+	// A SKIPPED erase outranks a FAILED one (the #7173/#9013 doctrine: an
+	// erasure that did not happen AT ALL is strictly worse than one that
+	// failed). Joined so a real I/O failure is not swallowed.
+	if len(skipped) > 0 {
+		symErr := &FactoryResetSymlinkError{Skipped: skipped}
+		if firstErr != nil {
+			return errors.Join(symErr, firstErr)
+		}
+		return symErr
+	}
 	return firstErr
 }
 

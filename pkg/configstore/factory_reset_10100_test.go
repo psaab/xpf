@@ -64,3 +64,59 @@ func TestFactoryResetReportsInteriorConfigDBLink10100(t *testing.T) {
 		t.Fatalf("R-1 twin: surviving target lost: %v", rerr)
 	}
 }
+
+func TestFactoryResetArchiveReportsInteriorLink10100(t *testing.T) {
+	// GPT-3: a real archive dir holding a symlinked config-<ts>.<seq>.conf
+	// snapshot (full cleartext config) had the link unlinked while the target
+	// survived, nil returned — the R-1 interior shape in a file the cohort
+	// touches but did not name. The ownership guard is undisturbed: the dir
+	// here IS the (repointed) default.
+	root := t.TempDir()
+	archiveDir := filepath.Join(root, "xpf", "archive")
+	real := filepath.Join(root, "bigvolume")
+	for _, d := range []string{archiveDir, real} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(real, "config-1757000000.9.conf")
+	secretBody := "security ike policy p1 pre-shared-key ascii-text \"PSK-10100-ARCHIVE\";\n"
+	if err := os.WriteFile(target, []byte(secretBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(archiveDir, "config-1757000000.9.conf")); err != nil {
+		t.Fatal(err)
+	}
+	regular := filepath.Join(archiveDir, "config-1757000000.1.conf")
+	if err := os.WriteFile(regular, []byte("regular snapshot\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := DefaultArchiveDir
+	DefaultArchiveDir = archiveDir
+	t.Cleanup(func() { DefaultArchiveDir = old })
+	err := FactoryResetArchiveDir(archiveDir)
+	var symErr *FactoryResetSymlinkError
+	if !errors.As(err, &symErr) {
+		t.Fatalf("GPT-3 archive interior: expected FactoryResetSymlinkError, got %v; "+
+			"link unlinked while %s survives silently", err, target)
+	}
+	found := false
+	for _, sk := range symErr.Skipped {
+		if sk.Target == target || strings.Contains(sk.Target, "config-1757000000.9.conf") {
+			found = true
+		}
+		if !bytes.Contains([]byte(symErr.Error()), []byte(sk.Target)) {
+			t.Fatalf("GPT-3 archive interior: error text omits target %q: %v", sk.Target, symErr)
+		}
+	}
+	if !found {
+		t.Fatalf("GPT-3 archive interior: Skipped %v does not name %s", symErr.Skipped, target)
+	}
+	got, rerr := os.ReadFile(target)
+	if rerr != nil || string(got) != secretBody {
+		t.Fatalf("GPT-3 archive interior: surviving target lost or altered: %v", rerr)
+	}
+	if _, serr := os.Lstat(regular); !os.IsNotExist(serr) {
+		t.Fatal("GPT-3 archive interior: regular snapshot was not erased")
+	}
+}

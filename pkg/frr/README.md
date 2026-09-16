@@ -10,11 +10,13 @@ kernel routes — and it doesn't, directly. It writes config and reloads
 FRR, which then owns the kernel route table.
 
 `frr.conf` is DurableState (#1894): `atomicWriteFile` delegates to
-`fsatomic.WriteFileDurable` with `WithPreserveExisting` +
-`WithResolveSymlinks` (the #1883 mode/owner/symlink semantics were
-lifted into that package), gaining the parent-dir fsync the local
-writer lacked. The file carries operator content outside the managed
-section, so it must survive power loss.
+`fsatomic.WriteFileDurable` with `WithPreserveExisting` (the #1883
+mode/owner/symlink semantics were lifted into that package), gaining the
+parent-dir fsync the local writer lacked. `WithResolveSymlinks` is passed on
+the normal apply path only; the zeroize strip path (#10100 R-2) writes
+no-resolve so a swapped-in link is replaced, never followed into a victim
+file. The file carries operator content outside the managed section, so it
+must survive power loss.
 
 **File mode (#4484 L-6):** the managed section carries routing-auth
 secrets (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so `frr.conf` must not be
