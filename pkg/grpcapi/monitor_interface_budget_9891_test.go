@@ -2,16 +2,21 @@ package grpcapi
 
 import (
 	"context"
+	"net"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // #9891: MonitorInterface was the one monitor stream with no subscriber budget
@@ -595,4 +600,599 @@ func TestMonitorInterfaceSlowDoesNotHeadOfLineHealthy_9891(t *testing.T) {
 		t.Fatal("healthy stream did not exit after cancel")
 	}
 	waitForInFlight9891(t, 0, 5*time.Second)
+}
+
+// immediateMonitorStream9891 succeeds every Send without blocking: with a zero
+// send budget the worker publishes success just as the timer fires, so each
+// call races completion against the timeout and exercises the boundary.
+type immediateMonitorStream9891 struct {
+	ctx context.Context
+}
+
+func (m *immediateMonitorStream9891) Send(*pb.MonitorInterfaceResponse) error { return nil }
+func (m *immediateMonitorStream9891) Context() context.Context                { return m.ctx }
+func (m *immediateMonitorStream9891) SetHeader(metadata.MD) error             { return nil }
+func (m *immediateMonitorStream9891) SendHeader(metadata.MD) error            { return nil }
+func (m *immediateMonitorStream9891) SetTrailer(metadata.MD)                  {}
+func (m *immediateMonitorStream9891) SendMsg(any) error                       { return nil }
+func (m *immediateMonitorStream9891) RecvMsg(any) error                       { return nil }
+
+// TestSendBoundaryContinuationHoldsAdmission_9891 pins the GPT-1 ownership
+// invariant on both deterministic paths: a stream that CONTINUES (nil, false)
+// always holds its slot (InFlight==1, probe fails), and a severed
+// (transferred) stream always frees it (InFlight drains to 0, probe
+// succeeds). Phase 1 uses a zero budget (timer always wins → all severed,
+// 500 trials prove no leak at scale); phase 2 uses a long budget with an
+// immediate Send (completion always wins → all continued, each holding
+// admission). The exact timer-wins-with-done-ready interleaving is pinned
+// deterministically by TestSendBoundarySeversOnConcurrentSuccess_9891 via the
+// Store-to-drain seam; together they cover the handoff with no timing luck.
+//
+// FAIL-ON-REVERT: restoring `return err, false` on the timer-with-done path
+// is caught by the seam test below (continued-without-slot fires RED there).
+func TestSendBoundaryContinuationHoldsAdmission_9891(t *testing.T) {
+	lim := diagcmd.NewLimiter(1)
+	ctx := context.Background()
+	st := &immediateMonitorStream9891{ctx: ctx}
+	resp := &pb.MonitorInterfaceResponse{Frame: "x"}
+
+	t.Run("severedFrees", func(t *testing.T) {
+		origTimeout := monitorInterfaceSendTimeout
+		monitorInterfaceSendTimeout = 0
+		t.Cleanup(func() { monitorInterfaceSendTimeout = origTimeout })
+
+		for i := range 500 {
+			release, err := lim.Acquire()
+			if err != nil {
+				t.Fatalf("iter %d: acquire: %v (a leaked slot from a prior iter)", i, err)
+			}
+			sendErr, xfer := sendMonitorInterfaceFrame(st, resp, release)
+			if sendErr == nil && !xfer {
+				// Completion won despite the zero budget: continuation
+				// must hold the slot.
+				if got := lim.InFlight(); got != 1 {
+					release()
+					t.Fatalf("iter %d: continued stream InFlight = %d, want 1 (continuation without admission defeats the cap)", i, got)
+				}
+				release()
+				continue
+			}
+			if !xfer {
+				release()
+				t.Fatalf("iter %d: unexpected (err=%v, xfer=false) with an always-succeeding Send", i, sendErr)
+			}
+			// Severed: transferred, so the caller must not release. The
+			// worker frees it as the immediate Send completes — poll for
+			// the drain (no timing assumption), then prove no leak.
+			deadline := time.Now().Add(5 * time.Second)
+			for lim.InFlight() != 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := lim.InFlight(); got != 0 {
+				t.Fatalf("iter %d: severed InFlight = %d, want 0 (slot leaked)", i, got)
+			}
+			if probe, perr := lim.Acquire(); perr != nil {
+				t.Fatalf("iter %d: probe acquire after severed: %v (slot leaked)", i, perr)
+			} else {
+				probe()
+			}
+			if got := lim.InFlight(); got != 0 {
+				t.Fatalf("iter %d: end-of-iter InFlight = %d, want 0", i, got)
+			}
+		}
+	})
+
+	t.Run("continuedHolds", func(t *testing.T) {
+		origTimeout := monitorInterfaceSendTimeout
+		monitorInterfaceSendTimeout = 30 * time.Second
+		t.Cleanup(func() { monitorInterfaceSendTimeout = origTimeout })
+
+		for i := range 100 {
+			release, err := lim.Acquire()
+			if err != nil {
+				t.Fatalf("iter %d: acquire: %v", i, err)
+			}
+			sendErr, xfer := sendMonitorInterfaceFrame(st, resp, release)
+			if sendErr != nil || xfer {
+				if xfer {
+					deadline := time.Now().Add(5 * time.Second)
+					for lim.InFlight() != 0 && time.Now().Before(deadline) {
+						time.Sleep(time.Millisecond)
+					}
+				} else {
+					release()
+				}
+				t.Fatalf("iter %d: fast Send with a long budget returned (err=%v, xfer=%v), want (nil, false)", i, sendErr, xfer)
+			}
+			if got := lim.InFlight(); got != 1 {
+				release()
+				t.Fatalf("iter %d: continued stream InFlight = %d, want 1 (continuation must hold admission)", i, got)
+			}
+			if probe, perr := lim.Acquire(); perr == nil {
+				probe()
+				release()
+				t.Fatalf("iter %d: continued stream's slot acquirable — it holds no admission", i)
+			}
+			release()
+		}
+	})
+}
+
+// delayedSuccessStream9891 succeeds its Send after delay: with the
+// Store-to-drain seam widened past the delay, the completion lands inside the
+// timer branch deterministically, pinning the exact boundary interleaving.
+type delayedSuccessStream9891 struct {
+	ctx   context.Context
+	delay time.Duration
+}
+
+func (m *delayedSuccessStream9891) Send(*pb.MonitorInterfaceResponse) error {
+	time.Sleep(m.delay)
+	return nil
+}
+func (m *delayedSuccessStream9891) Context() context.Context     { return m.ctx }
+func (m *delayedSuccessStream9891) SetHeader(metadata.MD) error  { return nil }
+func (m *delayedSuccessStream9891) SendHeader(metadata.MD) error { return nil }
+func (m *delayedSuccessStream9891) SetTrailer(metadata.MD)       {}
+func (m *delayedSuccessStream9891) SendMsg(any) error            { return nil }
+func (m *delayedSuccessStream9891) RecvMsg(any) error            { return nil }
+
+// TestSendBoundarySeversOnConcurrentSuccess_9891 pins the GPT-1 boundary
+// DETERMINISTICALLY: the timer wins (zero budget) while Send succeeds 10ms
+// later, landing inside the 200ms Store-to-drain seam window — so the inner
+// drain finds done ready with nil. The fixed handoff severs anyway
+// (DeadlineExceeded, transferred): the worker owns the release via the flag,
+// so continuing would run without admission. The test asserts sever + slot
+// freed with no leak, and would assert continued-holds if the handoff ever
+// continued — it must never continue here.
+//
+// FAIL-ON-REVERT: restoring `return err, false` on the timer-with-done path
+// returns (nil, false) with InFlight==0 — the continued-without-slot
+// assertion fires RED, deterministically, on every run.
+func TestSendBoundarySeversOnConcurrentSuccess_9891(t *testing.T) {
+	origTimeout := monitorInterfaceSendTimeout
+	monitorInterfaceSendTimeout = 0
+	t.Cleanup(func() { monitorInterfaceSendTimeout = origTimeout })
+
+	origSeam := sendBoundaryDelay9891
+	sendBoundaryDelay9891 = 200 * time.Millisecond
+	t.Cleanup(func() { sendBoundaryDelay9891 = origSeam })
+
+	lim := diagcmd.NewLimiter(1)
+	ctx := context.Background()
+	st := &delayedSuccessStream9891{ctx: ctx, delay: 10 * time.Millisecond}
+	resp := &pb.MonitorInterfaceResponse{Frame: "x"}
+
+	release, err := lim.Acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	sendErr, xfer := sendMonitorInterfaceFrame(st, resp, release)
+	if sendErr == nil && !xfer {
+		if got := lim.InFlight(); got != 1 {
+			release()
+			t.Fatalf("boundary continued with InFlight = %d, want 1 (continuation without admission defeats the cap)", got)
+		}
+		release()
+		t.Fatal("boundary continued (nil, false) — timeout ownership must be terminal, sever even on concurrent success")
+	}
+	if !xfer {
+		release()
+		t.Fatalf("boundary returned (err=%v, xfer=false), want severed with transfer", sendErr)
+	}
+	if status.Code(sendErr) != codes.DeadlineExceeded {
+		t.Fatalf("boundary err code = %v, want DeadlineExceeded (err=%v)", status.Code(sendErr), sendErr)
+	}
+	// Transferred: the boundary releases synchronously (Send completed), so
+	// InFlight is already 0 — but poll briefly to tolerate the worker's own
+	// release racing the handler's (idempotent either way).
+	deadline := time.Now().Add(5 * time.Second)
+	for lim.InFlight() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := lim.InFlight(); got != 0 {
+		t.Fatalf("boundary InFlight = %d, want 0 (slot leaked)", got)
+	}
+	if probe, perr := lim.Acquire(); perr != nil {
+		t.Fatalf("probe acquire after boundary: %v (slot leaked)", perr)
+	} else {
+		probe()
+	}
+}
+
+// TestMonitorInterfacePeerEstablishmentBound_9891 pins the GPT-3 fix: a peer
+// that never grants stream quota (wedged NewStream) must not pin the proxy's
+// slot past the establishment budget, while a healthy establishment must not
+// be lifetime-limited by it. Phase 1 drives a NewStream that blocks until ctx
+// done (exactly as the http2_client quota wait does under
+// SETTINGS_MAX_CONCURRENT_STREAMS=0): with a compressed 200ms budget the
+// helper returns Unavailable promptly. Phase 2 drives an immediately
+// succeeding NewStream, then waits past the budget and proves the established
+// context is still alive (timer stopped on success) until the parent cancels.
+//
+// FAIL-ON-REVERT: calling newStream with the parent ctx directly (no
+// establishment timer) parks phase 1 until the test timeout — RED.
+func TestMonitorInterfacePeerEstablishmentBound_9891(t *testing.T) {
+	orig := monitorInterfacePeerEstablishTimeout
+	monitorInterfacePeerEstablishTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { monitorInterfacePeerEstablishTimeout = orig })
+
+	t.Run("wedged", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		wedged := func(estCtx context.Context) (monitorInterfacePeerStream, error) {
+			<-estCtx.Done()
+			return nil, estCtx.Err()
+		}
+		start := time.Now()
+		peer, estCtx, estCancel, err := establishMonitorInterfacePeerStream(ctx, wedged)
+		elapsed := time.Since(start)
+		if err == nil || status.Code(err) != codes.Unavailable {
+			if estCancel != nil {
+				estCancel()
+			}
+			t.Fatalf("wedged NewStream err code = %v, want Unavailable (err=%v)", status.Code(err), err)
+		}
+		if peer != nil || estCtx != nil || estCancel != nil {
+			t.Fatal("wedged NewStream returned a stream context on failure — must be all nil")
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("wedged NewStream parked for %v (no establishment bound)", elapsed)
+		}
+		t.Logf("wedged peer establishment severed after %v (budget %v)", elapsed, monitorInterfacePeerEstablishTimeout)
+	})
+
+	t.Run("healthyNotLifetimeLimited", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		healthy := func(estCtx context.Context) (monitorInterfacePeerStream, error) {
+			return &oneShotPeerStream9891{frame: "ok"}, nil
+		}
+		peer, estCtx, estCancel, err := establishMonitorInterfacePeerStream(ctx, healthy)
+		if err != nil {
+			t.Fatalf("healthy NewStream err = %v, want nil", err)
+		}
+		if peer == nil || estCtx == nil || estCancel == nil {
+			t.Fatal("healthy NewStream returned nil stream/context/cancel on success")
+		}
+		defer estCancel()
+		// Wait well past the establishment budget: the stream must still be
+		// alive (the success path stops the timer rather than arming a
+		// lifetime).
+		select {
+		case <-estCtx.Done():
+			t.Fatalf("established stream context done after %v without parent cancel (budget lifetime-limits healthy monitoring)", monitorInterfacePeerEstablishTimeout)
+		case <-time.After(600 * time.Millisecond):
+		}
+		// Parent cancel still propagates to the established stream.
+		cancel()
+		select {
+		case <-estCtx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("established stream context survived parent cancel")
+		}
+	})
+}
+
+// frameThenStallPeerStream9891 yields toYield frames and then stalls exactly
+// as a wedged peer does (Recv blocks until ctx done). calls/exits prove the
+// Recv workers ran and exited; forwarded counts yielded frames.
+type frameThenStallPeerStream9891 struct {
+	ctx       context.Context
+	toYield   int
+	calls     atomic.Int64
+	exits     atomic.Int64
+	forwarded atomic.Int64
+}
+
+func (m *frameThenStallPeerStream9891) Recv() (*pb.MonitorInterfaceResponse, error) {
+	m.calls.Add(1)
+	defer m.exits.Add(1)
+	if int(m.forwarded.Add(1)) <= m.toYield {
+		return &pb.MonitorInterfaceResponse{Frame: "peer-frame"}, nil
+	}
+	<-m.ctx.Done()
+	return nil, m.ctx.Err()
+}
+
+// TestMonitorInterfaceProxyForwardingLoop_9891 pins the proxy forwarding loop
+// (forwardMonitorInterfaceFrames): a peer that yields a frame and then stalls
+// severs with Unavailable after forwarding what it yielded (no slot transfer
+// — conn close unblocks Recv), while a slow local consumer severs with
+// DeadlineExceeded and transfers its slot to the parked Send worker. The two
+// phases share the loop's two sites (:Recv then :Send) with opposite stalls.
+//
+// FAIL-ON-REVERT: an unbounded proxy Recv parks phase 1 past the test
+// timeout; a Send path without transfer reds the InFlight==1 assertion in
+// phase 2 (0 while the worker is still parked).
+func TestMonitorInterfaceProxyForwardingLoop_9891(t *testing.T) {
+	t.Run("peerStall", func(t *testing.T) {
+		origIdle := monitorInterfacePeerIdleTimeout
+		monitorInterfacePeerIdleTimeout = 200 * time.Millisecond
+		t.Cleanup(func() { monitorInterfacePeerIdleTimeout = origIdle })
+
+		lim := diagcmd.NewLimiter(1)
+		release, err := lim.Acquire()
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		defer release()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		peer := &frameThenStallPeerStream9891{ctx: ctx, toYield: 1}
+		local := &capMonitorStream9891{ctx: ctx, cancel: cancel}
+
+		start := time.Now()
+		fwdErr, xfer := forwardMonitorInterfaceFrames(peer, local, ctx, release)
+		elapsed := time.Since(start)
+
+		if fwdErr == nil || status.Code(fwdErr) != codes.Unavailable {
+			t.Fatalf("peer-stall forward code = %v, want Unavailable (err=%v)", status.Code(fwdErr), fwdErr)
+		}
+		if xfer {
+			t.Fatal("peer-stall forward transferred the slot — Recv stalls must free, not transfer (conn close unblocks Recv)")
+		}
+		if got := local.frames.Load(); got != 1 {
+			t.Fatalf("peer-stall local frames = %d, want 1 (the yielded frame must forward before the stall severs)", got)
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("peer-stall forward parked for %v (no peer-idle bound in the loop)", elapsed)
+		}
+		if got := lim.InFlight(); got != 1 {
+			t.Fatalf("peer-stall InFlight = %d, want 1 (no transfer: caller still holds the slot)", got)
+		}
+		t.Logf("peer stall severed after %v (budget %v) with 1 frame forwarded", elapsed, monitorInterfacePeerIdleTimeout)
+
+		cancel()
+		deadline := time.Now().Add(5 * time.Second)
+		for peer.exits.Load() < peer.calls.Load() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if peer.exits.Load() < peer.calls.Load() {
+			t.Fatalf("Recv workers exits = %d, calls = %d (a stalled Recv worker leaked)", peer.exits.Load(), peer.calls.Load())
+		}
+	})
+
+	t.Run("slowConsumer", func(t *testing.T) {
+		origSend := monitorInterfaceSendTimeout
+		monitorInterfaceSendTimeout = 200 * time.Millisecond
+		t.Cleanup(func() { monitorInterfaceSendTimeout = origSend })
+
+		lim := diagcmd.NewLimiter(1)
+		release, err := lim.Acquire()
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		transferred := false
+		defer func() {
+			if !transferred {
+				release()
+			}
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		peer := &frameThenStallPeerStream9891{ctx: ctx, toYield: 1}
+		slow := &blockingMonitorStream9891{ctx: ctx}
+
+		start := time.Now()
+		fwdErr, xfer := forwardMonitorInterfaceFrames(peer, slow, ctx, release)
+		elapsed := time.Since(start)
+
+		if fwdErr == nil || status.Code(fwdErr) != codes.DeadlineExceeded {
+			t.Fatalf("slow-consumer forward code = %v, want DeadlineExceeded (err=%v)", status.Code(fwdErr), fwdErr)
+		}
+		if !xfer {
+			t.Fatal("slow-consumer forward did not transfer the slot — the parked Send worker holds it")
+		}
+		transferred = true
+		if slow.calls.Load() < 1 {
+			t.Fatal("slow-consumer forward never reached Send, so this proves nothing about the send bound")
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("slow-consumer forward parked for %v (no send bound in the loop)", elapsed)
+		}
+		if got := slow.exits.Load(); got != 0 {
+			t.Fatalf("slow Send exits at forward return = %d, want 0 (worker still parked)", got)
+		}
+		if got := lim.InFlight(); got != 1 {
+			t.Fatalf("slow-consumer InFlight at forward return = %d, want 1 (slot transferred to the parked worker)", got)
+		}
+		t.Logf("slow consumer severed after %v (budget %v) with slot transferred", elapsed, monitorInterfaceSendTimeout)
+
+		cancel()
+		deadline := time.Now().Add(5 * time.Second)
+		for slow.exits.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if slow.exits.Load() < 1 {
+			t.Fatal("Send worker never exited after cancel (leaked)")
+		}
+		deadline = time.Now().Add(5 * time.Second)
+		for lim.InFlight() != 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := lim.InFlight(); got != 0 {
+			t.Fatalf("InFlight after worker exit = %d, want 0 (transferred slot leaked)", got)
+		}
+		if probe, perr := lim.Acquire(); perr != nil {
+			t.Fatalf("probe acquire after worker exit: %v (slot leaked)", perr)
+		} else {
+			probe()
+		}
+	})
+}
+
+// flowSvc9891 is a minimal server-streaming service whose handler drives the
+// REAL grpc-go H2 transport through sendMonitorInterfaceFrame: large frames
+// fill the 64KB stream quota while the client holds its window shut, so a
+// later Send blocks on writeQuota.get exactly as a stalled MonitorInterface
+// consumer blocks. done carries the handler outcome for the test's assertions.
+type flowSvc9891Iface interface {
+	Stream(grpc.ServerStream) error
+}
+
+type flowSvc9891 struct {
+	lim  *diagcmd.Limiter
+	done chan flowResult9891
+}
+
+type flowResult9891 struct {
+	err           error
+	xfer          bool
+	succeeded     int
+	inFlightAtRet int
+}
+
+type flowServerStream9891 struct {
+	grpc.ServerStream
+}
+
+func (w *flowServerStream9891) Send(resp *pb.MonitorInterfaceResponse) error {
+	return w.ServerStream.SendMsg(resp)
+}
+
+func (s *flowSvc9891) Stream(stream grpc.ServerStream) error {
+	var req pb.MonitorInterfaceRequest
+	_ = stream.RecvMsg(&req)
+	w := &flowServerStream9891{ServerStream: stream}
+	release, err := s.lim.Acquire()
+	if err != nil {
+		resErr := status.Error(codes.ResourceExhausted, "test budget exhausted")
+		s.done <- flowResult9891{err: resErr, succeeded: 0, inFlightAtRet: s.lim.InFlight()}
+		return resErr
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+	large := &pb.MonitorInterfaceResponse{Frame: strings.Repeat("x", 200*1024)}
+	succeeded := 0
+	for range 10 {
+		sendErr, xfer := sendMonitorInterfaceFrame(w, large, release)
+		if sendErr != nil {
+			if xfer {
+				transferred = true
+			}
+			res := flowResult9891{err: sendErr, xfer: xfer, succeeded: succeeded, inFlightAtRet: s.lim.InFlight()}
+			s.done <- res
+			return sendErr
+		}
+		succeeded++
+	}
+	res := flowResult9891{succeeded: succeeded, inFlightAtRet: s.lim.InFlight()}
+	s.done <- res
+	return nil
+}
+
+// TestMonitorInterfaceRealFlowControlUnblocksOnReturn_9891 is the REAL H2
+// counterpart to the blocking-Send fake: over bufconn with real grpc-go
+// v1.78.0 transport, a client that never reads fills the server's stream
+// quota, the handler's Send times out and severs, and then — with the client
+// STILL CONNECTED and never cancelled — the Send worker exits on the
+// handler-return stream cancel (server.go WriteStatus → http2_server
+// finishStream s.cancel → flowcontrol writeQuota.get errStreamDone) and frees
+// the transferred slot, while the queued DATA + trailer stay retained until
+// the client drains (controlbuf.go queues the trailer behind pending DATA).
+// The test proves both halves: InFlight drains to 0 with no test cancel (the
+// fake would stay parked at 1), and the client's first read AFTER the drain
+// still receives the queued DATA frame ahead of the DeadlineExceeded trailer.
+//
+// FAIL-ON-REVERT: without the send bound the handler parks in Send until the
+// test timeout; without the transfer the InFlight==1 at-return assertion reds.
+func TestMonitorInterfaceRealFlowControlUnblocksOnReturn_9891(t *testing.T) {
+	origTimeout := monitorInterfaceSendTimeout
+	monitorInterfaceSendTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { monitorInterfaceSendTimeout = origTimeout })
+
+	lim := diagcmd.NewLimiter(1)
+	svc := &flowSvc9891{lim: lim, done: make(chan flowResult9891, 1)}
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	srv.RegisterService(&grpc.ServiceDesc{
+		ServiceName: "test9891.Monitor",
+		HandlerType: (*flowSvc9891Iface)(nil),
+		Streams: []grpc.StreamDesc{{
+			StreamName:    "Stream",
+			ServerStreams: true,
+			Handler: func(srv any, stream grpc.ServerStream) error {
+				return srv.(*flowSvc9891).Stream(stream)
+			},
+		}},
+	}, svc)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial bufconn: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, "/test9891.Monitor/Stream")
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := stream.SendMsg(&pb.MonitorInterfaceRequest{}); err != nil {
+		t.Fatalf("SendMsg request: %v", err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
+	}
+	// Hold the window shut: no Recv until the server has severed AND the slot
+	// has drained, proving the worker exited without any client read/cancel.
+	var res flowResult9891
+	select {
+	case res = <-svc.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("server handler never returned (no send bound over real H2)")
+	}
+	if res.err == nil || status.Code(res.err) != codes.DeadlineExceeded {
+		t.Fatalf("handler err code = %v, want DeadlineExceeded (err=%v, succeeded=%d)", status.Code(res.err), res.err, res.succeeded)
+	}
+	if !res.xfer {
+		t.Fatal("handler did not transfer the slot on real-H2 timeout")
+	}
+	if res.succeeded < 1 {
+		t.Fatalf("succeeded = %d, want >= 1 (no DATA queued, so flow control never engaged)", res.succeeded)
+	}
+	if res.inFlightAtRet != 1 {
+		t.Fatalf("InFlight at handler return = %d, want 1 (slot transferred to the parked worker)", res.inFlightAtRet)
+	}
+	t.Logf("real-H2 handler severed after %d queued frames; InFlight==1 at return", res.succeeded)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for lim.InFlight() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := lim.InFlight(); got != 0 {
+		t.Fatalf("InFlight = %d after handler return with client still connected, want 0 (the worker must exit on the handler-return cancel, not linger until client cancel)", got)
+	}
+	t.Log("slot freed with client still connected — worker exited on handler-return cancel")
+
+	// Transport still retained: the first read delivers the queued DATA frame
+	// (written before the timeout), and only after the DATA drains does the
+	// queued trailer surface as DeadlineExceeded.
+	var first pb.MonitorInterfaceResponse
+	if err := stream.RecvMsg(&first); err != nil {
+		t.Fatalf("first RecvMsg err = %v, want the queued DATA frame (transport must retain DATA past slot release)", err)
+	}
+	if got := len(first.GetFrame()); got != 200*1024 {
+		t.Fatalf("first RecvMsg frame len = %d, want %d (not the queued large frame)", got, 200*1024)
+	}
+	var second pb.MonitorInterfaceResponse
+	recvErr := stream.RecvMsg(&second)
+	if recvErr == nil || status.Code(recvErr) != codes.DeadlineExceeded {
+		t.Fatalf("second RecvMsg code = %v, want DeadlineExceeded trailer behind DATA (err=%v)", status.Code(recvErr), recvErr)
+	}
 }

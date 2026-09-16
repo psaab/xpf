@@ -936,14 +936,23 @@ contract.
   dial, so a refused subscriber costs no goroutine, ticker, or connection
   and validation failures (`NotFound`) cost no slot. Each downstream frame
   carries a 30s handler-side send bound: a client that cannot accept one
-  frame in 30s is severed with `DeadlineExceeded` (handler returns; trailers
-  still queue behind pending DATA until the window opens or the connection
-  closes). The timed-out slot TRANSFERS to the Send worker, which holds it
-  until the transport unblocks — so the 64 bounds active handlers PLUS
-  retained timeout workers and slow-consumer churn cannot accumulate outside
-  the budget. The proxy leg carries a 10s peer-idle bound (the peer ticks 1s
-  by construction): a stalled peer severs with `Unavailable` and frees its
-  slot instead of parking the proxy in `Recv` until the local client leaves.
+  frame in 30s is severed with `DeadlineExceeded` (handler returns; the Send
+  worker unblocks on the handler-return stream cancel and releases promptly,
+  while trailers still queue behind pending DATA until the window opens or
+  the connection closes). The timed-out slot TRANSFERS to the Send worker,
+  which holds it until Send unblocks on that cancel — so the 64 bounds
+  active handlers PLUS in-flight timeout workers (goroutine/slot lifetime),
+  while retained H2 transport (queued DATA + trailers + stream state)
+  outlives the slot until the client drains or disconnects, bounded
+  per-connection by `MaxConcurrentStreams` (256) and the 64KB stream windows,
+  not by the 64; timeout ownership is terminal (a timeout never returns
+  success) so a continuing stream always holds admission. The proxy leg
+  carries a 10s peer-idle bound per frame plus a separate 10s establishment
+  bound on peer-stream creation (the peer ticks 1s by construction): a stalled
+  peer severs with `Unavailable` and frees its slot instead of parking the
+  proxy in `Recv` — or in `NewStream` waiting for quota — until the local
+  client leaves, and the establishment timer stops on success so healthy
+  monitoring is never lifetime-limited by it.
 
   Not an injection surface, stated because it reads like one: nine of
   the ten sites pass only compile-time string literals to
