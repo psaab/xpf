@@ -88,6 +88,11 @@ RUNTIME_PACKAGES = [
     # cloud-guest-utils. e2fsprogs (resize2fs) is a base package, listed
     # belt-and-suspenders so a future base change can't orphan it either.
     "cloud-guest-utils", "e2fsprogs",
+    # #9921 F-147: perl-base backs xpf-day0-config's O_NOFOLLOW medium read
+    # (safe_read_medium; Fcntl ships inside perl-base). Essential, so present
+    # by packaging invariant — listed explicitly so the boot path's dependency
+    # is declared, in the e2fsprogs spirit above.
+    "perl-base",
 ]
 
 SYSCTL_CONF = (
@@ -698,8 +703,19 @@ def validation_gate_step(skip_validate, qcow_out, meta_out):
         die("validation gate FAILED — artifacts are NOT publishable")
 
 
-def sign_manifest_step(out_dir, sums, ver):
-    """Sign the checksum manifest with minisign (#1924 §5.1).
+def render_snapshot_manifest(snapshot):
+    """Render sha256sum-format manifest text from the in-memory `snapshot`
+    (#9921 F-068). Line format matches sign.write_manifest
+    (`<hex>  <basename>`, two spaces); order is the snapshot's insertion
+    order, which snapshot_manifest_inputs sets to the hashed-files order —
+    so these bytes are identical to a hash-time write_manifest over the same
+    inputs.
+    """
+    return "".join(f"{digest}  {base}\n" for base, digest in snapshot.items())
+
+
+def sign_manifest_step_from_snapshot(out_dir, sums, ver, snapshot, work):
+    """Sign the in-memory `snapshot` via a PRIVATE manifest file (#1924 §5.1).
 
     #4017: the signature is a TRUST artifact — downstream publish and
     operators read a signed image as a validated one — so this step is
@@ -712,6 +728,17 @@ def sign_manifest_step(out_dir, sums, ver):
     pinned public key is copied into dist/ so the published tree is
     self-describing (its trust root remains the in-repo checked-in copy,
     not this convenience copy).
+
+    #9921 F-068 (parent review): the signed bytes MUST come from memory,
+    never from reopening the writable live manifest. The pre-sign assert
+    parses the live sums and re-hashes multi-GB artifacts over SECONDS, and
+    minisign would then reopen the live pathname for signing — a writer
+    swapping the sums file in that window gets their bytes signed while every
+    assertion passed on the good bytes. So: render the snapshot to a manifest
+    inside a private 0700 dir, minisign THAT file, and os.replace() the pair over
+    the live sums + .minisig. A crash between the two renames leaves new
+    sums beside a stale-or-absent sig, which publish refuses (fail-closed;
+    same shape as sign.write_and_sign_manifest).
     """
     seckey = os.environ.get("XPF_SIGN_SECKEY")
     if not seckey:
@@ -722,9 +749,17 @@ def sign_manifest_step(out_dir, sums, ver):
         return
     try:
         sign.require_minisign()
-        sig = sign.sign_manifest(sums, seckey,
+        stage = os.path.join(work, "signing")
+        os.makedirs(stage, mode=0o700, exist_ok=True)
+        os.chmod(stage, 0o700)
+        priv = os.path.join(stage, os.path.basename(sums))
+        with open(priv, "w") as f:
+            f.write(render_snapshot_manifest(snapshot))
+        sig = sign.sign_manifest(priv, seckey,
                                  comment=f"xpf image {ver} sha256sums")
-        info(f"signed manifest: {os.path.basename(sig)}")
+        os.replace(priv, sums)
+        os.replace(sig, sums + ".minisig")
+        info(f"signed manifest: {os.path.basename(sums + '.minisig')}")
         pub_src = sign.DEFAULT_IMAGE_PUBKEY
         if os.path.isfile(pub_src):
             shutil.copyfile(pub_src, os.path.join(out_dir, "xpf-image.pub"))
@@ -746,6 +781,80 @@ def finalize_artifacts(*, validate_step, sign_step):
     """
     validate_step()
     sign_step()
+
+
+def stage_artifacts_for_gate(work, qcow_out, meta_out):
+    """Copy the exported qcow2 + metadata into private 0700 staging inside
+    `work` (#9921 F-068 verify-then-freeze). Returns {live_path: staged_path}.
+
+    The gate (validate.py) runs for minutes on these paths while the bake's
+    checksum manifest is hashed pre-gate and signed post-gate: without a
+    freeze, a concurrent host writer during the gate window could make the
+    signed `validated: true` attest to never-validated bytes. The manifest is
+    hashed over the STAGED bytes (basenames preserved, so manifest lines are
+    unchanged), the gate runs on the staged paths, and
+    assert_live_matches_manifest re-asserts live-vs-snapshot immediately
+    before signing. Staging lives under `work`, so it is cleaned with the
+    work dir (or retained under --keep-work for forensics).
+    """
+    stage = os.path.join(work, "frozen")
+    os.makedirs(stage, mode=0o700, exist_ok=True)
+    os.chmod(stage, 0o700)
+    mapping = {}
+    for live in (qcow_out, meta_out):
+        staged = os.path.join(stage, os.path.basename(live))
+        if os.path.exists(staged) or os.path.islink(staged):
+            die(f"staging collision for {live}: {staged} already exists — "
+                "refusing to bake an ambiguous artifact set (#9921)")
+        shutil.copyfile(live, staged)
+        mapping[live] = staged
+    return mapping
+
+
+def snapshot_manifest_inputs(files):
+    """Snapshot {basename: sha256} for `files` IN MEMORY (#9921 F-068).
+
+    This is the ground truth assert_live_matches_manifest compares against:
+    capturing it from bytes already in hand (staged copies plus just-written
+    sidecars) — rather than re-reading the live tree later — is what binds
+    the signed manifest to the validated bytes even if a concurrent writer
+    rewrites the live sums file itself between hashing and signing.
+    """
+    snap = {}
+    for path in files:
+        base = os.path.basename(path)
+        if base in snap:
+            die(f"duplicate basename in manifest set: {base}")
+        snap[base] = sign.sha256_file(path)
+    return snap
+
+
+def assert_live_matches_manifest(live_files, sums_path, snapshot):
+    """Fail-fast drift check immediately before signing (#9921 F-068). Dies
+    on ANY drift: a rewritten live sums file (parsed map != snapshot) or a
+    swapped live artifact (re-hash != snapshot). Call this INSIDE sign_step
+    so the #4017 validate-before-sign ordering binds it.
+
+    Defense in depth, not the security boundary: a race winning between this
+    check and signing cannot corrupt the signature, because
+    sign_manifest_step_from_snapshot signs bytes rendered from the in-memory
+    snapshot (never reopened from the live tree) and installs them over the
+    live pair. This assert exists to fail fast with a clear bake-time error
+    instead of shipping a tree publish would refuse.
+    """
+    try:
+        live_map = sign.parse_manifest(sums_path)
+    except sign.SignError as e:
+        die(f"pre-sign re-assert FAILED: cannot parse live "
+            f"{os.path.basename(sums_path)}: {e}")
+    if live_map != snapshot:
+        die(f"pre-sign re-assert FAILED: live {os.path.basename(sums_path)} "
+            "drifted from its hash-time snapshot — refusing to sign (#9921)")
+    for path in live_files:
+        actual = sign.sha256_file(path)
+        if actual != snapshot[os.path.basename(path)]:
+            die(f"pre-sign re-assert FAILED: live {path} drifted from its "
+                "hash-time snapshot — refusing to sign (#9921)")
 
 
 def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
@@ -1012,8 +1121,18 @@ def main():
         sums = os.path.join(a.out, f"xpf-{ver}.SHA256SUMS")
         # #9920 F-063: the signed set is sign.bake_set_basenames() (SSOT shared
         # with the strict sign-manifest gate) — same four files, same order.
-        sign.write_manifest(
-            sums, [os.path.join(a.out, n) for n in sign.bake_set_basenames(ver)])
+        # #9921 F-068 verify-then-freeze: the gate below runs for minutes on
+        # these paths. Freeze the gate-consumed artifacts into private staging
+        # NOW, hash the STAGED bytes into the manifest (same basenames, so the
+        # same manifest lines), snapshot the digests in memory, run the gate
+        # on the staged paths, and re-assert live-vs-snapshot inside sign_step
+        # before the signature (a TRUST artifact) is produced.
+        staged_map = stage_artifacts_for_gate(work, qcow_out, meta_out)
+        live_inputs = [os.path.join(a.out, n)
+                       for n in sign.bake_set_basenames(ver)]
+        manifest_inputs = [staged_map.get(p, p) for p in live_inputs]
+        snapshot = snapshot_manifest_inputs(manifest_inputs)
+        sign.write_manifest(sums, manifest_inputs)
         info("checksums:")
         print(open(sums).read(), end="")
 
@@ -1024,10 +1143,14 @@ def main():
         # finalize_artifacts enforces validate-before-sign: the gate runs
         # first and signing happens ONLY on success. A gate failure aborts
         # (die(), exit non-zero) BEFORE any .minisig is written.
+        def sign_step():
+            assert_live_matches_manifest(live_inputs, sums, snapshot)
+            sign_manifest_step_from_snapshot(a.out, sums, ver, snapshot, work)
+
         finalize_artifacts(
             validate_step=lambda: validation_gate_step(
-                a.skip_validate, qcow_out, meta_out),
-            sign_step=lambda: sign_manifest_step(a.out, sums, ver),
+                a.skip_validate, staged_map[qcow_out], staged_map[meta_out]),
+            sign_step=sign_step,
         )
 
         info(f"bake complete: {qcow_out}")

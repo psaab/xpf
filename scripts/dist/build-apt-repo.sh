@@ -52,6 +52,40 @@ while [ $# -gt 0 ]; do
 done
 
 case "$SUITE" in stable|edge) ;; *) die "suite must be stable|edge (got $SUITE)";; esac
+# F-066/#9921: COMPONENT/ARCH/ORIGIN are interpolated into repo WRITE paths
+# (POOL/DISTDIR below) and signed metadata (apt-ftparchive -o values, reprepro
+# distributions). SUITE alone was allowlisted. Validate the rest with the same
+# fail-closed discipline BEFORE any write: COMPONENT/ARCH admit no `/` (no
+# traversal out of --out) and no newline (no Release-field injection); ORIGIN
+# is single-line printable (it lands in single-line field values verbatim —
+# quotes/semicolons included — so only a line break could inject a field).
+case "$COMPONENT" in ""|*/*|*[!A-Za-z0-9._+-]*|[!A-Za-z0-9]*)
+    die "component must match [A-Za-z0-9][A-Za-z0-9._+-]* (got '$COMPONENT')" ;;
+esac
+case "$ARCH" in ""|*/*|*[!A-Za-z0-9._+-]*|[!A-Za-z0-9]*)
+    die "arch must match [A-Za-z0-9][A-Za-z0-9._+-]* (got '$ARCH')" ;;
+esac
+case "${LC_ALL+set}" in set) _lc_had=1; _lc_saved=$LC_ALL;; *) _lc_had=0;; esac
+LC_ALL=C
+case "$ORIGIN" in ""|*[![:print:]]*)
+    die "origin must be non-empty single-line printable text (got '$ORIGIN')" ;;
+esac
+if [ "$_lc_had" = "1" ]; then LC_ALL=$_lc_saved; else unset LC_ALL; fi
+# F-066c/#9921 (parent review): VALID_DAYS and XPF_GPG_KEY interpolate into
+# the reprepro distributions file (ValidFor/SignWith) and the flat Release
+# knob (ValidTime). A newline-bearing VALID_DAYS injects a config line, so
+# VALID_DAYS is digits-only (1-5 digits; 0 is allowed and fails closed
+# downstream as an immediately-stale horizon). XPF_GPG_KEY flows into argv
+# (flat gpg --local-user: immune) and a line-based file, so only a newline
+# could inject there — reject newlines alone so key IDs, fingerprints, and
+# space/unicode UID strings keep working.
+case "$VALID_DAYS" in ""|*[!0-9]*|??????*)
+    die "valid-days must be 1-5 digits (got '$VALID_DAYS')" ;;
+esac
+case "${XPF_GPG_KEY-}" in
+    *'
+'*) die "gpg key id must be single-line" ;;
+esac
 
 # Default deb set: the freshly built binary + appliance packages.
 if [ -z "$DEBS" ]; then
@@ -69,9 +103,35 @@ APT="$OUT/apt"
 POOL="$APT/pool/$SUITE/$COMPONENT/x/xpf"
 DISTDIR="$APT/dists/$SUITE/$COMPONENT/binary-$ARCH"
 mkdir -p "$POOL" "$DISTDIR"
+# F-066b/#9921 (parent review): lexical validation cannot see a PRE-PLANTED
+# symlink: $OUT/apt/dists/stable/<escape> -> /external makes a lexically
+# VALID COMPONENT=escape resolve outside --out, and mkdir -p happily creates
+# binary-$ARCH through it. Resolve both COMPONENT-derived sinks and verify
+# containment within the resolved --out; die loudly on escape. (Static
+# subpaths like conf/ are the operator's exclusive-dir responsibility; only
+# validated-input-derived sinks are pinned here. A planter racing mkdir
+# itself is narrowed to microseconds by this ordering, not closed — shell
+# cannot mkdir with O_NOFOLLOW.)
+_out_resolved=$(cd "$OUT" && pwd -P) || die "cannot resolve --out $OUT"
+for _d in "$POOL" "$DISTDIR"; do
+    _r=$(cd "$_d" 2>/dev/null && pwd -P) || _r=""
+    case "${_r:-MISSING}" in
+        "$_out_resolved"|"$_out_resolved"/*) : ;;
+        *) die "repo path escapes --out ($_d resolves outside $OUT) — refusing to write" ;;
+    esac
+done
+unset _d _r _out_resolved
 
 info "apt repo tool: $TOOL, suite: $SUITE, arch: $ARCH, out: $APT"
 
+# NOTE(F-066/#9921): the COMPONENT/ARCH/ORIGIN/VALID_DAYS/GPG_KEY gate above
+# also covers this path's distributions file (allowlisted/digit/single-line
+# values cannot inject fields), but the Valid-Until count+value assert below
+# is flat-path-only: reprepro synthesizes its Release from its own database
+# plus the ValidFor knob and exits here. The reprepro operator (persistent
+# publisher holding the signing key) is the trusted actor for that synthesis;
+# post-hoc verification of reprepro's own emission is defense-in-depth tracked
+# in #10123 (needs a reprepro binary to verify the emission format).
 if [ "$TOOL" = "reprepro" ]; then
     command -v reprepro >/dev/null 2>&1 || die "reprepro not found (apt-get install reprepro)"
     [ -n "${XPF_GPG_KEY:-}" ] || die "reprepro path requires XPF_GPG_KEY (signs Release)"
@@ -145,11 +205,22 @@ NOWSTR=$(date -u -d "@$NOW" +"%a, %d %b %Y %H:%M:%S UTC" 2>/dev/null \
     -o "APT::FTPArchive::Release::Date=$NOWSTR" \
     -o "APT::FTPArchive::Release::ValidTime=$VALID_SECONDS" \
     release "dists/$SUITE" > "dists/$SUITE/Release" )
-# Assert the freshness field actually landed (a silent apt-ftparchive knob
-# rename must FAIL the build, never ship a repo without Valid-Until).
-grep -q "^Valid-Until:" "$APT/dists/$SUITE/Release" \
-    || die "apt-ftparchive did not emit Valid-Until (ValidTime knob may have changed)"
-info "wrote Release ($(grep '^Valid-Until:' "$APT/dists/$SUITE/Release"))"
+# Assert the freshness field actually landed EXACTLY ONCE with the exact
+# ValidTime-derived value (F-066/#9921). A silent apt-ftparchive knob rename
+# must FAIL the build, never ship a repo without Valid-Until — and an injected
+# duplicate (e.g. via a newline-bearing Origin, now rejected above) must fail
+# it too. apt computes Valid-Until as Date + ValidTime, both second-precision
+# and both fixed above, so the epoch comparison is exact (no tolerance); the
+# epoch form also tolerates apt's +0000-vs-UTC suffix normalization.
+_vu_count=$(grep -c "^Valid-Until:" "$APT/dists/$SUITE/Release" 2>/dev/null || true)
+[ "$_vu_count" = "1" ] || die "Release has $_vu_count Valid-Until fields, want exactly 1 \
+(a duplicate means field injection — refusing to sign/publish)"
+_vu_line=$(grep "^Valid-Until:" "$APT/dists/$SUITE/Release")
+_vu_epoch=$(LC_ALL=C date -u -d "${_vu_line#Valid-Until: }" +%s 2>/dev/null) \
+    || die "cannot parse Release Valid-Until '$_vu_line' (need GNU date)"
+[ "$_vu_epoch" = "$((NOW + VALID_SECONDS))" ] || die "Release Valid-Until '$_vu_line' != \
+ValidTime-derived value (want epoch $((NOW + VALID_SECONDS)), got $_vu_epoch)"
+info "wrote Release ($_vu_line)"
 
 # Sign Release -> InRelease (inline) + Release.gpg (detached).
 if [ -n "${XPF_GPG_KEY:-}" ]; then

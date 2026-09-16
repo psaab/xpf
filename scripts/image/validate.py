@@ -820,6 +820,12 @@ class Harness:
         # verify_sig: True = verify if a .minisig is present (default),
         # "force" = require one, False = never (dev escape hatch).
         self.verify_sig = verify_sig
+        # Live source paths, kept for signed-manifest lookup (the *.SHA256SUMS
+        # sit next to the live files, not the staging dir). freeze_artifacts()
+        # repoints self.qcow2/self.metadata at the staged copies; _frozen
+        # guards its idempotence.
+        self.qcow2_src, self.metadata_src = qcow2, metadata
+        self._frozen = False
         self.created_net = False
         self.instances = []
         # #7347: the skip LEDGER. Before this, a scenario that skipped and one
@@ -885,22 +891,66 @@ class Harness:
             incus("network", "set", self.net, "dns.mode=none", check=False,
                   capture=True)
 
+    def freeze_artifacts(self):
+        """Copy the qcow2 + metadata into private 0700 staging and repoint
+        every consumer at the staged copies (#9921 F-068 verify-then-freeze).
+
+        Before this, verify_signatures hashed the LIVE paths while import,
+        the seal probes, and the QEMU leg re-opened those same re-openable
+        paths minutes later — so a concurrent host writer during the gate
+        window could make `validated: true` attest to never-validated bytes
+        (the TOCTOU #5817/#7347 already closed for fetch's
+        `_verified_private_artifacts`, which this mirrors). Now the gate
+        verifies and boots exactly the bytes frozen here: a post-freeze live
+        swap is invisible to every consumer below.
+
+        Idempotent (flag-guarded): main() calls it before the first read, and
+        assert_image_sealed()/verify_signatures() call it defensively first,
+        so every entry freezes even if the main wiring regresses. Basenames
+        are preserved so the signed-manifest {basename: hash} binding still
+        applies; the manifests themselves are looked up next to the LIVE
+        files (self.*_src), verified TOCTOU-safe by sign.verify_manifest_map.
+        """
+        if self._frozen:
+            return
+        os.chmod(self.work, 0o700)
+        for attr, src in (("qcow2", self.qcow2_src),
+                          ("metadata", self.metadata_src)):
+            if not os.path.isfile(src):
+                fail(f"cannot freeze {src}: not a regular file — refusing to "
+                     "validate an artifact the gate cannot pin down (#9921)")
+            dst = os.path.join(self.work, os.path.basename(src))
+            if os.path.exists(dst) or os.path.islink(dst):
+                fail(f"staging collision for {src}: {dst} already exists — "
+                     "refusing to validate an ambiguous artifact set (#9921)")
+            shutil.copyfile(src, dst)
+            setattr(self, attr, dst)
+        info(f"froze gate inputs in {self.work}: "
+             f"{os.path.basename(self.qcow2)} "
+             f"sha256:{sign.sha256_file(self.qcow2)} "
+             f"{os.path.basename(self.metadata)} "
+             f"sha256:{sign.sha256_file(self.metadata)}")
+        self._frozen = True
+
     def verify_signatures(self):
         """Verify the EXACT qcow2 + metadata files against the signed
         per-version manifest sitting next to them (#1924 §5.2). Per-file:
         each artifact's hash is checked against the signed manifest entry for
         its basename. Default ON when a .minisig is present; --no-verify-sig
         opts out for a local dev bake that skipped signing."""
+        # Freeze FIRST, before the no-verify early return: import and the
+        # scenarios consume these paths in every mode (#9921 F-068).
+        self.freeze_artifacts()
         if not self.verify_sig:
             return
-        sigdir = os.path.dirname(os.path.abspath(self.qcow2))
+        sigdir = os.path.dirname(os.path.abspath(self.qcow2_src))
         import glob
         manifests = sorted(glob.glob(os.path.join(sigdir, "*.SHA256SUMS")))
         sigs = [m for m in manifests if os.path.isfile(m + ".minisig")]
         if not sigs:
             if self.verify_sig == "force":
                 fail("--verify-sig forced but no signed *.SHA256SUMS.minisig "
-                     f"found next to {self.qcow2}")
+                     f"found next to {self.qcow2_src}")
             info("no signed manifest next to the artifacts — skipping "
                  "signature verification (dev bake; use --verify-sig to force)")
             return
@@ -942,6 +992,8 @@ class Harness:
         libguestfs-tools), and a security gate that skips itself when its tool
         is absent is the vacuous-gate shape this check exists to remove.
         """
+        # Freeze before the first artifact read (#9921 F-068); idempotent.
+        self.freeze_artifacts()
         info("verifying image seal (no per-device identity in the artifact)...")
         for tool in ("virt-ls", "virt-cat"):
             if shutil.which(tool) is None:
@@ -1842,6 +1894,9 @@ def main():
     net = os.environ.get("XPF_VALIDATE_NETWORK", "xpf-image-net")
     h = Harness(a.qcow2, a.metadata, net, a.keep, a.verify_sig)
     try:
+        # #9921 F-068: freeze the gate inputs before ANY artifact read (seal
+        # is first). Idempotent; seal/verify also freeze defensively.
+        h.freeze_artifacts()
         # #6547: the seal is verified on the EXPORTED ARTIFACT, before the
         # image is imported or any scenario boots. First, because it is the
         # only point at which a per-device identity is observable; second, so a

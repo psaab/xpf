@@ -192,9 +192,12 @@ class InventoryWiringTests(unittest.TestCase):
         # Outside the signed set it is unauthenticated metadata — exactly the
         # gap #5042 closed for the .manifest sidecar. #9920: the set is the
         # SSOT shared with the strict sign-manifest gate (its four members are
-        # pinned in scripts/dist/test_dist_resign_9920.py).
+        # pinned in scripts/dist/test_dist_resign_9920.py). #9921: the hashed
+        # list is the staged mapping over that SSOT set (staging semantics
+        # pinned behaviorally in test_bake_freeze_9921.py).
         self.assertIn("sign.write_manifest(", self.SRC)
         self.assertIn("sign.bake_set_basenames(ver)", self.SRC)
+        self.assertIn("staged_map.get(", self.SRC)
 
     def test_a_bad_inventory_aborts_the_bake(self):
         self.assertIn("image_inventory.InventoryError", self.SRC)

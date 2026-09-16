@@ -112,6 +112,80 @@ is_placeholder_key() {
     printf '%s' "$ARCHIVE_KEY" | grep -q "PLACEHOLDER-xpf-archive-keyring"
 }
 
+# ── apt base URL validation (F-065 / #9921) ─────────────────────────────────
+# Mirror of publish.py validate_apt_url (#5685/M40): the URL is interpolated
+# into the deb822 `URIs:` line of a root-owned apt source
+# (/etc/apt/sources.list.d/xpf.sources), so anything but a strict https URL
+# with no shell metacharacter / whitespace / control byte / userinfo / query /
+# fragment / percent-escape is refused with die() BEFORE any host mutation.
+# The env override and the baked marker flow through the same variable, so this
+# one call covers both. Structural edge behavior is pinned against publish.py
+# by scripts/dist/test_install_url_validate_9921.py (dual-drive parity
+# battery): the two validators must agree accept/reject on every case.
+validate_apt_url() {
+    _url="$1"
+    [ -n "$_url" ] || die "XPF_APT_BASE_URL is required."
+    # Diagnostics echo a control-stripped copy (publish.py's !r discipline):
+    # the operator's own value must not launder terminal control bytes through
+    # our error message. Validation below always runs on the raw value.
+    _safe_url=$(printf '%s' "$_url" | LC_ALL=C tr -d '[:cntrl:]')
+    # 1. No control, whitespace, or DEL byte may survive into the deb822 line
+    #    (newline/CR/tab included — the F-065 injection vector). Non-ASCII
+    #    bytes that pass [:print:] under a UTF-8 locale still die at the ASCII
+    #    structural allowlist below. LC_ALL=C is best-effort (dash only honors
+    #    the startup locale): soundness does not depend on it, because no
+    #    metacharacter, slash, colon, control, or whitespace byte can ever
+    #    match the alpha/numeric ranges below in any locale.
+    case "${LC_ALL+set}" in set) _lc_had=1; _lc_saved=$LC_ALL;; *) _lc_had=0;; esac
+    LC_ALL=C
+    case "$_url" in *[![:print:]]*)
+        die "XPF_APT_BASE_URL '$_safe_url' contains a forbidden control/whitespace byte — \
+it is interpolated into a root-owned apt source; refusing (#9921)." ;;
+    esac
+    # 2. Per-character denylist (single-char arms: no bracket-expression quoting
+    #    subtleties): shell metacharacters, quoting characters, and %/=+, plus
+    #    space (a %% pair would also defeat the unsubstituted-marker guard).
+    #    ?/#/@ dying here enforces no-query/no-fragment/no-userinfo.
+    case "$_url" in
+        *'$'*|*'"'*|*"'"*|*'\\'*|*'`'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'('*|*')'*|*'*'*|*'?'*|*'!'*|*'#'*|*'@'*|*'%'*|*'='*|*'+'*|*','*|*' '*)
+            die "XPF_APT_BASE_URL '$_safe_url' contains a forbidden character (shell \
+metacharacter, whitespace, or %/=+,) — refusing (#9921)." ;;
+    esac
+    # 3. Structural allowlist: https scheme (matched case-insensitively —
+    #    publish.py's urlsplit lowercases the scheme, so a stamped uppercase
+    #    URL must keep installing), a bare host[:port], and an allowlisted
+    #    path. userinfo/query/fragment cannot be present (arm 2).
+    case "$_url" in
+        [Hh][Tt][Tt][Pp][Ss]://*) _rest=${_url#*://} ;;
+        *) die "XPF_APT_BASE_URL '$_safe_url' must use the https scheme (#9921)." ;;
+    esac
+    case "$_rest" in
+        */*) _hostport=${_rest%%/*}; _path=/${_rest#*/} ;;
+        *) _hostport=$_rest; _path= ;;
+    esac
+    case "$_hostport" in
+        *:*)
+            _h=${_hostport%%:*}; _p=${_hostport#*:}
+            case "$_p" in ""|*[!0-9]*|??????*)
+                die "XPF_APT_BASE_URL '$_safe_url' has an invalid port — expected 1-5 digits (#9921)." ;;
+            esac
+            ;;
+        *) _h=$_hostport ;;
+    esac
+    case "$_h" in ""|[!A-Za-z0-9]*|*[!A-Za-z0-9])
+        die "XPF_APT_BASE_URL '$_safe_url' has an invalid host — expected a bare host[:port] \
+with no userinfo (#9921)." ;;
+    esac
+    case "$_h" in *[!A-Za-z0-9.-]*)
+        die "XPF_APT_BASE_URL '$_safe_url' has an invalid host — expected [A-Za-z0-9.-] (#9921)." ;;
+    esac
+    case "$_path" in *[!/A-Za-z0-9._~-]*)
+        die "XPF_APT_BASE_URL '$_safe_url' has an invalid path — allow only '/'-\
+separated [A-Za-z0-9._~-] components (#9921)." ;;
+    esac
+    if [ "$_lc_had" = "1" ]; then LC_ALL=$_lc_saved; else unset LC_ALL; fi
+}
+
 # ── 1. preflight ─────────────────────────────────────────────────────────
 preflight() {
     info "preflight: arch, distro, kernel, networkd"
@@ -159,6 +233,13 @@ in, but verify the host can run networkd (xpfd owns all interfaces)."
 # with a keyring written but no working apt source.
 validate() {
     [ "$(id -u)" = "0" ] || [ "$DRY" = "1" ] || die "run as root (or sudo)."
+    # Pure input checks BEFORE host probes (F-065/#9921): a malformed URL or
+    # channel dies identically on every host without reaching preflight.
+    [ -n "${XPF_APT_BASE_URL:-}" ] || die "XPF_APT_BASE_URL is required (the \
+apt repo base URL — a dists/+pool/ directory host). It is baked into install.sh \
+at publish time; set it explicitly to override, or when running an unbaked copy."
+    validate_apt_url "$XPF_APT_BASE_URL"
+    case "$CHANNEL" in stable|edge) ;; *) die "XPF_CHANNEL must be stable|edge";; esac
     preflight
     # archive key must be the real one (a release build substitutes it).
     if is_placeholder_key; then
@@ -170,10 +251,6 @@ real install would fail at apt update until the release key is issued (OQ-2)."
 keyring that cannot verify the repo. A release build substitutes the real key."
         fi
     fi
-    [ -n "${XPF_APT_BASE_URL:-}" ] || die "XPF_APT_BASE_URL is required (the \
-apt repo base URL — a dists/+pool/ directory host). It is baked into install.sh \
-at publish time; set it explicitly to override, or when running an unbaked copy."
-    case "$CHANNEL" in stable|edge) ;; *) die "XPF_CHANNEL must be stable|edge";; esac
 }
 
 # ── 2. keyring ─────────────────────────────────────────────────────────────
@@ -248,4 +325,11 @@ main() {
     next_steps
 }
 
-main "$@"
+# Sourcing hook for hermetic unit tests
+# (scripts/dist/test_install_url_validate_9921.py): with
+# XPF_INSTALL_SOURCE_ONLY=1 the real functions can be sourced without running
+# the installer. Same idiom as xpf-day0-config's XPF_DAY0_SOURCE_ONLY, but
+# WITHOUT its `exit 0` — install.sh must propagate main's status (#9921).
+if [ "${XPF_INSTALL_SOURCE_ONLY:-}" != "1" ]; then
+    main "$@"
+fi

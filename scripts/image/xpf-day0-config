@@ -36,9 +36,11 @@
 #
 # Security posture: the config drive is UNTRUSTED operator input. It is
 # mounted ro,nosuid,nodev,noexec; only two fixed filenames at the volume
-# root are considered; the config is size-capped (here and again inside
-# `xpfd check-config`); node-id must be literally `0` or `1`; validation
-# runs under a timeout. Nothing on the medium is ever executed.
+# root are considered, each opened ONCE with O_NOFOLLOW and fstat-checked on
+# the fd (a symlink/fifo/swap fails the read, never the guard — #9921 F-147);
+# the config is size-capped (here and again inside `xpfd check-config`);
+# node-id must be literally `0` or `1`; medium reads and validation run under
+# timeouts. Nothing on the medium is ever executed.
 #
 # Retriability: a medium that fails validation does NOT write the stamp,
 # so the operator can fix the config and reboot — the system is still
@@ -56,6 +58,56 @@ CHECK_TIMEOUT=60
 
 log()  { echo "xpf-day0: $*"; }
 warn() { echo "xpf-day0: WARNING: $*" >&2; }
+
+# safe_read_medium <path> <cap> — read a medium file onto stdout with
+# O_NOFOLLOW + an fstat type check on the SAME fd (#9921 F-147). The old
+# `[ -f ] && [ ! -L ]` guard and the `head -c` read were separate syscalls
+# against a medium whose backing store the hypervisor can mutate, so a
+# mid-probe swap defeated the guard: a symlink redirected the read to a
+# host-side path and a fifo stalled the copy. Opening once with O_NOFOLLOW
+# and fstat()ing the fd (not the path) closes both: a symlink fails the open
+# with ELOOP, and anything not a regular file (fifo, dir, socket) fails the
+# fstat check — before a single byte is read. Output is capped at <cap> bytes
+# (callers pass max+1 to detect oversize) and the whole read runs under a
+# small timeout as a backstop against a wedged backing device.
+# Exit: 0 ok / 10 ENOENT / 11 ELOOP (symlink) / 12 non-regular /
+# 13 read error / 14 perl missing / 124 timeout. Missing perl fails CLOSED
+# (skip the device, never fail the boot): there is deliberately no `head`
+# fallback, which would preserve the hole. perl-base (with Fcntl) is
+# Essential on the Ubuntu base and pinned in RUNTIME_PACKAGES + the
+# xpf-appliance Depends, so absence means a broken system, not a regression.
+safe_read_medium() {
+	if [ $# -ne 2 ]; then
+		echo "xpf-day0: WARNING: safe_read_medium called without <path> <cap>" >&2
+		return 13
+	fi
+	command -v perl >/dev/null 2>&1 || return 14
+	timeout 10 perl -e '
+use strict;
+use warnings;
+use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK);
+my ($p, $cap) = @ARGV;
+my $fh;
+if (!sysopen($fh, $p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) {
+	if ($!{ENOENT}) { exit 10; }
+	if ($!{ELOOP}) { exit 11; }
+	exit 13;
+}
+if (!-f $fh) { exit 12; }
+binmode($fh);
+binmode(STDOUT);
+my $n = 0;
+while ($n < $cap) {
+	my $want = $cap - $n;
+	$want = 65536 if $want > 65536;
+	my $r = sysread($fh, my $chunk, $want);
+	if (!defined $r) { exit 13; }
+	last if $r == 0;
+	print $chunk;
+	$n += $r;
+}
+' -- "$1" "$2"
+}
 
 cleanup() {
 	umount "$MNT" 2>/dev/null || true
@@ -107,7 +159,7 @@ probe_devices() {
 
 # try_device <dev> — returns 0 if a config was validated and installed.
 try_device() {
-	local dev="$1" conf="" nodeid="" nodearg=() out rc tmpconf=""
+	local dev="$1" conf="" nodeid="" nodearg=() out rc tmpconf="" nodeid_raw=""
 	log "probing config medium $dev"
 	mkdir -p "$MNT"
 	# timeout: a hung backing device (e.g. a host-side network share
@@ -117,30 +169,34 @@ try_device() {
 		return 1
 	fi
 
-	local f
-	for f in xpf.conf juniper.conf; do
-		if [ -f "$MNT/$f" ] && [ ! -L "$MNT/$f" ]; then
-			conf="$MNT/$f"
-			break
-		fi
-	done
-	if [ -z "$conf" ]; then
-		log "$dev carries no xpf.conf/juniper.conf at its root — skipping"
-		umount "$MNT"
-		return 1
-	fi
-
-	# Copy ONCE to a private root-only temp file, then size-check,
-	# validate, and install that same copy: a mutable backing store
-	# (hypervisor-side swap of an attached disk) must not be able to
-	# change the bytes between validation and install.
+	# Copy ONCE per candidate through the O_NOFOLLOW helper into a private
+	# root-only temp file, then size-check, validate, and install that same
+	# copy: a mutable backing store (hypervisor-side swap of an attached
+	# disk) must not be able to change the bytes between validation and
+	# install. There is deliberately no -f/! -L pre-check: it was the racy
+	# half of the old check-then-read (#9921 F-147). mktemp runs AFTER a
+	# good mount: every return below this point removes the temp file.
 	tmpconf=$(mktemp /run/xpf-day0-conf.XXXXXX) || {
 		warn "mktemp failed — skipping $dev"
 		umount "$MNT"
 		return 1
 	}
-	if ! head -c "$((MAX_CONF_BYTES + 1))" "$conf" >"$tmpconf" 2>/dev/null; then
-		warn "failed to read $conf — skipping $dev"
+	local f
+	for f in xpf.conf juniper.conf; do
+		# rc capture WITHOUT `!` (`if !` would negate $?): ENOENT(10)
+		# tries the alias silently; any other failure warns and tries it.
+		safe_read_medium "$MNT/$f" "$((MAX_CONF_BYTES + 1))" >"$tmpconf" 2>/dev/null
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			conf="$MNT/$f"
+			break
+		fi
+		if [ "$rc" -ne 10 ]; then
+			warn "$MNT/$f could not be safely read (rc=$rc) — trying next"
+		fi
+	done
+	if [ -z "$conf" ]; then
+		log "$dev carries no readable xpf.conf/juniper.conf at its root — skipping"
 		rm -f "$tmpconf"
 		umount "$MNT"
 		return 1
@@ -154,14 +210,23 @@ try_device() {
 		return 1
 	fi
 
-	if [ -f "$MNT/node-id" ] && [ ! -L "$MNT/node-id" ]; then
-		nodeid=$(head -c 16 "$MNT/node-id" | tr -d '[:space:]')
+	# node-id is optional: absent is fine, anything unreadable is ignored
+	# with a warning (the config stands on its own). Two-step rc capture —
+	# no pipefail in this script, so piping the helper into tr would report
+	# tr's status and conflate every failure mode.
+	nodeid_raw=""
+	rc=0
+	nodeid_raw=$(safe_read_medium "$MNT/node-id" 16 2>/dev/null) || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		nodeid=$(printf '%s' "$nodeid_raw" | tr -d '[:space:]')
 		if [ "$nodeid" != "0" ] && [ "$nodeid" != "1" ]; then
 			warn "node-id on $dev is not 0 or 1 (got '$nodeid') — ignoring node-id"
 			nodeid=""
 		else
 			nodearg=(-node-id "$nodeid")
 		fi
+	elif [ "$rc" -ne 10 ]; then
+		warn "node-id on $dev could not be safely read (rc=$rc) — ignoring node-id"
 	fi
 
 	log "validating $(basename "$conf") from $dev with the strict commit-check gate"
