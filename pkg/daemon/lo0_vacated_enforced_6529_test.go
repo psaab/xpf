@@ -22,24 +22,41 @@ import (
 // nftInstaller.InstallLo0(spec) (which now reports the RENDERED rule count from
 // nlPlan.rules) -> the lo0Enforced decision -> the `!lo0Enforced` fence gate on
 // the next failed install.
+//
+// #9883: a DANGLING lo0 filter name (configured but not defined — a quarantined
+// unknown-family filter on the tolerant path, or any typo'd hook) NO LONGER
+// reaches the zero-rules branch: the dangling pre-check in applyLo0Filter fails
+// it closed WITHOUT installing (fence on cold-start, retain on existing-state).
+// These proofs therefore use a DEFINED-but-empty vacated shape (filters present
+// with no terms) — the zero-rules door that CAN occur on a clean commit and must
+// still clear the gate without fencing. Dangling fail-closed is proven in
+// lo0_quarantined_failclosed_9883_test.go.
 
-// vacatedLo0Config returns a config whose lo0 input filter NAME is configured
-// but resolves to no filter — the shape opts.lenientFirewallRefs admits on
-// Store.Load at boot and Store.SyncApply on HA peer-sync (the dangling
-// firewall-ref reject is downgraded to a warning there). toNftLo0Spec's map
-// lookup silently yields no terms, so the installed xpf_lo0 table is an empty
-// `policy accept` shell.
+// vacatedLo0Config returns a config whose lo0 input filters are DEFINED but carry
+// no terms, so toNftLo0Spec yields no terms and the installed xpf_lo0 table is an
+// empty `policy accept` shell. This is the #6529 zero-rules shape that survives
+// #9883: strict ACCEPTS an empty filter, so it CAN occur on a clean commit and
+// must clear the gate without fencing (unlike a DANGLING name, which strict
+// rejects and #9883 fails closed before installing).
 func vacatedLo0Config() *config.Config {
 	cfg := hostInboundTestConfig()
 	cfg.System.Lo0FilterInputV4 = "protect-re"
 	cfg.System.Lo0FilterInputV6 = "protect-re6"
-	// Deliberately no cfg.Firewall.FiltersInet / FiltersInet6 entries.
+	// Defined-but-empty: the filters EXIST (so the #9883 dangling pre-check
+	// passes) but carry no terms (so the install renders zero rules).
+	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+		"protect-re": {Name: "protect-re"},
+	}
+	cfg.Firewall.FiltersInet6 = map[string]*config.FirewallFilter{
+		"protect-re6": {Name: "protect-re6"},
+	}
 	return cfg
 }
 
 // TestVacatedLo0FilterDoesNotClaimEnforcement6529 is the primary proof and the
-// issue's first acceptance criterion: a dangling filter name on the lenient path
-// must NOT set lo0Enforced.
+// issue's first acceptance criterion: a DEFINED-but-empty filter (no terms) must
+// NOT set lo0Enforced. (#9883: a DANGLING name no longer reaches this branch —
+// it fails closed before installing; see lo0_quarantined_failclosed_9883_test.go.)
 func TestVacatedLo0FilterDoesNotClaimEnforcement6529(t *testing.T) {
 	cfg := vacatedLo0Config()
 
@@ -60,8 +77,10 @@ func TestVacatedLo0FilterDoesNotClaimEnforcement6529(t *testing.T) {
 	}
 	// Precondition: this really is the vacated shape — the install went through
 	// with an empty spec, not with a filter that happened to render something.
+	// (Defined-but-empty lowers to no terms, exactly as a dangling name did
+	// before #9883 moved dangling to the fail-closed pre-check.)
 	if len(got.V4Terms)+len(got.V6Terms) != 0 {
-		t.Fatalf("precondition: a dangling filter name must lower to NO terms, got v4=%d v6=%d",
+		t.Fatalf("precondition: a defined-but-empty filter must lower to NO terms, got v4=%d v6=%d",
 			len(got.V4Terms), len(got.V6Terms))
 	}
 	if d.lo0Enforced.Load() {
@@ -117,11 +136,13 @@ func TestVacatedLo0ThenFailedInstallStillFences6529(t *testing.T) {
 }
 
 // TestVacatedLo0ClearsAPriorRealFilter6529 pins the half a "don't Store(true)"
-// fix would miss. On an HA peer-sync a vacated generation atomically REPLACES a
-// real filter that is already live, so the kernel loses its rules. Leaving the
-// flag at its stale true would keep suppressing the fence — the same hole
-// through a different door. The vacated branch must Store(FALSE), mirroring the
-// no-filter teardown (#5790 parity).
+// fix would miss. On an HA peer-sync a DEFINED-but-empty vacated generation
+// atomically REPLACES a real filter that is already live, so the kernel loses
+// its rules. Leaving the flag at its stale true would keep suppressing the
+// fence — the same hole through a different door. The vacated branch must
+// Store(FALSE), mirroring the no-filter teardown (#5790 parity). (#9883: a
+// DANGLING generation does NOT replace — the pre-check retains the prior real
+// filter and keeps the flag true; see lo0_quarantined_failclosed_9883_test.go.)
 func TestVacatedLo0ClearsAPriorRealFilter6529(t *testing.T) {
 	real := lo0FenceTestConfig()
 	vacated := vacatedLo0Config()
@@ -148,10 +169,11 @@ func TestVacatedLo0ClearsAPriorRealFilter6529(t *testing.T) {
 }
 
 // TestZeroRenderedRulesClearsEnforcement6529 pins the decision on the RENDERED
-// rule count rather than on "the spec had terms". The third door into a
-// zero-rule install is a filter whose every term lowers to zero kernel rules — a
-// Junos match-nothing scope, e.g. an unresolved `from source-prefix-list` on the
-// lenient path. pkg/nftables/netlink_lo0_zero_render_6529_test.go proves that
+// rule count rather than on "the spec had terms". The second remaining door into
+// a zero-rule install (the dangling-name door moved to the #9883 fail-closed
+// pre-check) is a DEFINED filter whose every term lowers to zero kernel rules —
+// a Junos match-nothing scope, e.g. an unresolved `from source-prefix-list` on
+// the lenient path. pkg/nftables/netlink_lo0_zero_render_6529_test.go proves that
 // door is real against the production builder; this pins the consequence, with
 // the fake reporting the count the real builder would.
 func TestZeroRenderedRulesClearsEnforcement6529(t *testing.T) {
@@ -173,7 +195,7 @@ func TestZeroRenderedRulesClearsEnforcement6529(t *testing.T) {
 	// Precondition: the spec DID carry terms, so a term-count gate would have
 	// wrongly recorded enforcement here.
 	if len(got.V4Terms)+len(got.V6Terms) == 0 {
-		t.Fatal("precondition: this case must have terms; otherwise it is the dangling-name case")
+		t.Fatal("precondition: this case must have terms; otherwise it is the defined-empty case")
 	}
 	if d.lo0Enforced.Load() {
 		t.Fatal("terms that render NO kernel rules enforce nothing; the gate must key on the " +

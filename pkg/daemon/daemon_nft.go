@@ -167,6 +167,49 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) error {
 		d.lo0Enforced.Store(false)
 		return nil
 	}
+	// #9883 GPT-HIGH: a lo0 hook naming a filter that is NOT DEFINED must NOT
+	// install an empty `policy accept` shell. toNftLo0Spec's map lookup silently
+	// yields no terms for a missing filter (a quarantined unknown-family filter
+	// on the tolerant boot/peer-sync path, or any typo'd hook downgraded by
+	// opts.lenientFirewallRefs), and InstallLo0 commits that empty shell
+	// SUCCESSFULLY — atomically REPLACING a live real filter (existing-state) or
+	// leaving cold-boot open. The #6529 zero-rules branch below cannot recover
+	// from that: it clears the gate but the kernel is already open until the NEXT
+	// failure. Fail closed WITHOUT touching the kernel table (the #3296 userspace
+	// backstop's kernel analogue — prior state kept, never degrades to Accept):
+	//   - existing-state (lo0Enforced true): retain the prior real filter by NOT
+	//     installing, and surface an error so the commit fails.
+	//   - cold-start (!enforced): install the #6476 fence from the current
+	//     snapshot, then surface the error (boot logs+discards, but the fence
+	//     remains as the only protection).
+	// A DEFINED-but-empty filter (no terms, or every term match-nothing) still
+	// takes the #6529 path — that CAN occur on a clean commit, where fencing
+	// would deny host-bound traffic. Only a DANGLING name (which strict rejects,
+	// so it only arrives via lenient boot/peer-sync) fences here.
+	if (filterV4 != "" && !lo0FilterDefined(cfg, filterV4, false)) ||
+		(filterV6 != "" && !lo0FilterDefined(cfg, filterV6, true)) {
+		var missing []string
+		if filterV4 != "" && !lo0FilterDefined(cfg, filterV4, false) {
+			missing = append(missing, fmt.Sprintf("v4 %q", filterV4))
+		}
+		if filterV6 != "" && !lo0FilterDefined(cfg, filterV6, true) {
+			missing = append(missing, fmt.Sprintf("v6 %q", filterV6))
+		}
+		err := fmt.Errorf("lo0 input filter %s not defined (dangling reference — refusing to install an empty policy-accept shell)", strings.Join(missing, ", "))
+		slog.Warn("lo0 input filter dangles; refusing to install an empty policy-accept shell",
+			"missing", strings.Join(missing, ", "),
+			"v4", filterV4, "v6", filterV6,
+			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
+			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
+		if !d.lo0Enforced.Load() {
+			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
+			wgListenPorts := cfg.WireGuardListenPorts()
+			if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+				return errors.Join(err, fenceErr)
+			}
+		}
+		return err
+	}
 
 	// #6387 PR-3: install via netlink (the google/nftables Installer) instead of
 	// exec-`nft`. toNftLo0Spec re-derives the SAME per-term inputs buildLo0Filter
@@ -212,15 +255,13 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) error {
 		// alone, because a peer-sync that atomically replaces a REAL filter with a
 		// vacated one would otherwise keep the stale true.
 		//
-		// Zero rules is reachable through several doors and they are not
-		// distinguishable from a boolean: a filter NAME that resolves to no filter
-		// (toNftLo0Spec's map lookup silently yields no terms), a filter with no
-		// terms, and a filter whose every term lowers to zero rules — a Junos
-		// match-nothing scope, e.g. an unresolved `from source-prefix-list`. All
-		// three arrive here through opts.lenientFirewallRefs on Store.Load at boot
-		// or Store.SyncApply on HA peer-sync, which downgrades the dangling-
-		// firewall-ref reject to a warning.
-		//
+		// Zero rules is reachable through two remaining doors (a third — a filter
+		// NAME that resolves to no filter — no longer arrives here: the #9883
+		// dangling pre-check above fails it closed without installing): a DEFINED
+		// filter with no terms, and a DEFINED filter whose every term lowers to zero
+		// rules — a Junos match-nothing scope, e.g. an unresolved `from
+		// source-prefix-list`. Both CAN occur on a clean commit (strict accepts an
+		// empty or match-nothing filter), which is why this branch must NOT fence.
 		// This does NOT install a fence: fencing on a SUCCESSFUL install would deny
 		// host-bound traffic on a clean commit. The gate being false is what
 		// matters — the next failed install fences from the current snapshot.
