@@ -23,7 +23,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 	exit 77
 fi
 
-if ! out=$(cargo test --offline --quiet 2>&1); then
+if ! out=$(cargo test --offline 2>&1); then
 	case "$out" in
 	*"no matching package"*|*"failed to download"*|*"offline"*)
 		echo "SKIP: cargo cannot build offline (deps unavailable)"
@@ -41,5 +41,16 @@ if ! echo "$out" | grep -qE "test result: ok\. [1-9][0-9]* passed"; then
 	echo "$out"
 	exit 1
 fi
+
+# Guard against guarded-cell deletion: the summary line above is satisfied by ANY
+# passing test, so assert each behavioural cell by name. By-name WITHOUT an
+# exact count — future added cells must not break this gate.
+for cell in probe_frame_is_recognised_at_any_offset foreign_traffic_is_not_counted_as_a_probe short_frames_do_not_panic generator_and_matcher_share_one_marker; do
+	if ! echo "$out" | grep -qE "^test tests::${cell} \.\.\. ok\$"; then
+		echo "FAIL: expected cell tests::${cell} did not pass (deleted, renamed, or failing)"
+		echo "$out"
+		exit 1
+	fi
+done
 echo "PASS: xsk-repro probe-filter tests"
 exit 0
