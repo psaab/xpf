@@ -508,6 +508,34 @@ impl super::Coordinator {
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed)
     }
 
+    /// #9720: RG-transition `DemoteOwnerRGS` pushes a full worker queue refused.
+    ///
+    /// The PER-COMMAND split of `worker_command_queue_drops_total` for the
+    /// demote half of an RG transition. Every refusal counted here was ALSO
+    /// recorded as that worker's transition debt and re-driven on its next
+    /// drain — a climbing count means transitions are outrunning a live
+    /// worker's drain, not that demotions are being lost.
+    pub fn ha_transition_demote_dropped_total(&self) -> u64 {
+        crate::afxdp::worker_queue::HA_TRANSITION_DEMOTE_DROPPED.load(Ordering::Relaxed)
+    }
+
+    /// #9720: RG-transition `RefreshOwnerRGS` pushes a full worker queue refused.
+    ///
+    /// Same per-command split for the activation half. See
+    /// `ha_transition_demote_dropped_total` for the debt argument.
+    pub fn ha_transition_refresh_dropped_total(&self) -> u64 {
+        crate::afxdp::worker_queue::HA_TRANSITION_REFRESH_DROPPED.load(Ordering::Relaxed)
+    }
+
+    /// #9720: RG-transition `VacateAllSharedExactSlots` pushes a full worker
+    /// queue refused.
+    ///
+    /// Same per-command split for the CoS-slot vacate. See
+    /// `ha_transition_demote_dropped_total` for the debt argument.
+    pub fn ha_transition_vacate_dropped_total(&self) -> u64 {
+        crate::afxdp::worker_queue::HA_TRANSITION_VACATE_DROPPED.load(Ordering::Relaxed)
+    }
+
     /// #8586: cross-worker `DeleteSynced` replicas a full sibling queue refused.
     /// Surfaced as `xpf_userspace_session_delete_replica_dropped_total`.
     ///

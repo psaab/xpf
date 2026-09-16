@@ -111,6 +111,199 @@ pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_SHED_TOTAL: AtomicU64 = AtomicU
 #[cfg(test)]
 pub(crate) static SHED_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// #9720: RG-transition commands a full worker queue REFUSED, held out-of-band
+/// per worker until that worker's next `apply_worker_commands` dispatches them
+/// ahead of its drained slice.
+///
+/// WHY OUT-OF-BAND. `update_ha_state` stores the new RG runtime BEFORE fanning
+/// out, so a later call diffs against the demoted state and never re-drives a
+/// refused `DemoteOwnerRGS` / `VacateAllSharedExactSlots` / `RefreshOwnerRGS`.
+/// The signal that must reach the worker cannot travel through the queue that
+/// refused it — the same shape as #8586's delete-drop epoch, but the payload
+/// here is RG sets rather than a tripwire, and the redrive is prompt (next
+/// drain) rather than a reconciling sweep.
+///
+/// WHY DISPATCH-AHEAD, NOT TAIL-REQUEUE (review A2). Debt is OLDER than every
+/// queued command. Re-queueing it at the tail would dispatch the demotion
+/// AFTER debt-window arrivals installed, cancelling live flows that post-date
+/// the transition. `apply_worker_commands` takes the debt and runs it BEFORE
+/// the drained slice, preserving true chronological order.
+///
+/// DEBT NEVER SPANS TRANSITIONS (review B1 staleness argument). A record
+/// implies the queue was at the 4096 cap; the ONLY production drain is
+/// `apply_worker_commands` (`drain_bounded_into`'s single caller), which takes
+/// the debt before it drains. So debt lives ~1 pass (µs–ms) while HA
+/// transitions are watchdog-paced (seconds apart): debt always carries a
+/// single transition, dispatched in emission order (Demote, Vacate, Refresh —
+/// `update_ha_state`'s own fan-out order), with the newest queued command
+/// keeping the last word. No staleness guard is needed.
+///
+/// LOCK DISCIPLINE (reviews A1/B2): the debt lock is a LEAF. `record` drops
+/// the queue guard BEFORE taking it; `take` releases it before dispatching
+/// (handlers run with NO debt guard held). No path ever holds the debt lock
+/// and the queue lock together, in either order — there is no new lock-graph
+/// edge for a green suite to miss.
+///
+/// Indexed by worker id, bounded by `MAX_NAT_HOLDER_WORKERS` — the same
+/// ceiling the planner refuses to mint past. An out-of-range record is
+/// dropped (its per-command counter below already counted it); an out-of-range
+/// take reads empty. `register` clears the slot, so a reused worker id never
+/// replays the previous generation's debt onto a fresh worker.
+#[derive(Default)]
+pub(in crate::afxdp) struct HaTransitionDebt {
+    demote: Vec<i32>,
+    refresh: Vec<i32>,
+    vacate: bool,
+}
+
+impl HaTransitionDebt {
+    const fn new() -> Self {
+        Self {
+            demote: Vec::new(),
+            refresh: Vec::new(),
+            vacate: false,
+        }
+    }
+
+    pub(in crate::afxdp) fn is_empty(&self) -> bool {
+        self.demote.is_empty() && self.refresh.is_empty() && !self.vacate
+    }
+
+    pub(in crate::afxdp) fn demote_rgs(&self) -> &[i32] {
+        &self.demote
+    }
+
+    pub(in crate::afxdp) fn refresh_rgs(&self) -> &[i32] {
+        &self.refresh
+    }
+
+    pub(in crate::afxdp) fn vacate(&self) -> bool {
+        self.vacate
+    }
+
+    /// Merge, deduplicating RG ids. RG sets are tiny (cluster RG count), so a
+    /// linear scan beats a set import — and `Vec::new` is `const`, which is
+    /// what the static array below needs.
+    fn record(&mut self, demote: &[i32], refresh: &[i32], vacate: bool) {
+        for rg in demote {
+            if !self.demote.contains(rg) {
+                self.demote.push(*rg);
+            }
+        }
+        for rg in refresh {
+            if !self.refresh.contains(rg) {
+                self.refresh.push(*rg);
+            }
+        }
+        self.vacate |= vacate;
+    }
+}
+
+pub(in crate::afxdp) static HA_TRANSITION_DEBT: [Mutex<HaTransitionDebt>;
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
+    [const { Mutex::new(HaTransitionDebt::new()) }; crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
+
+/// Lock a transition-debt slot, recovering and CLEARING poison.
+///
+/// The uniform #1807 policy, verbatim: committed debt intact, fast path
+/// restored, one shared `WORKER_COMMAND_QUEUE_POISON_RECOVERIES` bump. The
+/// debt lock sits on the worker command delivery path (HA-enqueue record
+/// side, worker-apply take side), so it shares that counter rather than
+/// minting a fourth queue signal.
+#[inline]
+fn lock_debt_recover(m: &Mutex<HaTransitionDebt>) -> MutexGuard<'_, HaTransitionDebt> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            m.clear_poison();
+            WORKER_COMMAND_QUEUE_POISON_RECOVERIES.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "xpf-ha: transition-debt mutex poisoned; recovering committed debt and clearing poison"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Record refused RG-transition commands for one worker (the #9720 debt).
+///
+/// The caller MUST have dropped the queue guard first: this takes the debt
+/// lock, and any path holding both locks in queue→debt order would ABBA
+/// against a debt→queue holder. The take side holds the debt lock alone and
+/// releases it before dispatching, so no reverse edge exists today — the
+/// discipline keeps it that way.
+#[inline]
+pub(in crate::afxdp) fn record_transition_debt(
+    worker_id: u32,
+    demote: &[i32],
+    refresh: &[i32],
+    vacate: bool,
+) {
+    let Some(slot) = HA_TRANSITION_DEBT.get(worker_id as usize) else {
+        return;
+    };
+    lock_debt_recover(slot).record(demote, refresh, vacate);
+}
+
+/// Take one worker's pending transition debt, leaving the slot empty.
+///
+/// Takes and releases the debt lock around the take ONLY — handlers run with
+/// no debt guard held (reviews A1/B2), so a full-table demote scan never
+/// stretches a lock across BPF publishes and neighbor reads.
+#[inline]
+pub(in crate::afxdp) fn take_transition_debt(worker_id: u32) -> HaTransitionDebt {
+    let Some(slot) = HA_TRANSITION_DEBT.get(worker_id as usize) else {
+        return HaTransitionDebt::new();
+    };
+    core::mem::take(&mut *lock_debt_recover(slot))
+}
+
+/// Clear one worker's transition-debt slot.
+///
+/// Called from `WorkerManager::register`: worker ids are reused across
+/// generations, and a worker that died with undrained debt must not replay it
+/// onto its fresh successor. The clear races spawn (the thread starts before
+/// its record publishes — review B6) but the race is benign: a fresh worker
+/// holds an empty session table and fresh CoS slots, so a replayed Demote /
+/// Refresh / Vacate is a no-op walk, and the clear still bounds staleness to
+/// one generation.
+#[inline]
+pub(in crate::afxdp) fn clear_transition_debt(worker_id: u32) {
+    if let Some(slot) = HA_TRANSITION_DEBT.get(worker_id as usize) {
+        *lock_debt_recover(slot) = HaTransitionDebt::new();
+    }
+}
+
+/// #9720: refused `DemoteOwnerRGS` / `RefreshOwnerRGS` /
+/// `VacateAllSharedExactSlots` pushes, per command type.
+///
+/// `WORKER_COMMAND_QUEUE_DROPS` (bumped by `push_bounded` on the same refusal)
+/// stays the aggregate; these three are the PER-COMMAND split the issue
+/// requires, so an operator can tell a lost transition from lost session
+/// churn. Every refusal counted here is ALSO recorded as transition debt for
+/// the refusing worker — the debt redrives on the next drain, so a climbing
+/// count means transitions are outrunning a live worker's drain, not that
+/// commands are being lost.
+pub(in crate::afxdp) static HA_TRANSITION_DEMOTE_DROPPED: AtomicU64 = AtomicU64::new(0);
+pub(in crate::afxdp) static HA_TRANSITION_REFRESH_DROPPED: AtomicU64 = AtomicU64::new(0);
+pub(in crate::afxdp) static HA_TRANSITION_VACATE_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// #9720 test seam: snapshot one worker's pending debt.
+#[cfg(test)]
+pub(crate) fn transition_debt_for_test(worker_id: u32) -> (Vec<i32>, Vec<i32>, bool) {
+    HA_TRANSITION_DEBT
+        .get(worker_id as usize)
+        .map(|slot| {
+            let debt = lock_debt_recover(slot);
+            (
+                debt.demote_rgs().to_vec(),
+                debt.refresh_rgs().to_vec(),
+                debt.vacate(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 /// Push a command onto a worker queue, refusing at the capacity bound (#6929).
 ///
 /// Returns whether the command was accepted. Callers that need to know a

@@ -6398,3 +6398,618 @@ fn authoritative_shared_install_new_incarnation_applies_zero_9752() {
         "a new incarnation stating (0,0) must apply it, not inherit"
     );
 }
+/// #9720 STEP-0: drain a worker queue through `apply_worker_commands` until
+/// empty, returning the OR of every pass's vacate flag plus all cancelled keys.
+///
+/// Bounded at 64 passes (4096 fillers / 256 budget = 16); exceeding it means
+/// the queue is not draining. The loop condition is the QUEUE only — no
+/// redrive helper — so these cells compile on the base revision (RED) and flip
+/// green once the drain itself re-queues recorded transition debt.
+fn drain_worker_commands_9720(
+    commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    worker_id: u32,
+) -> (bool, Vec<SessionKey>) {
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let mut vacated = false;
+    let mut cancelled = Vec::new();
+    for _ in 0..64 {
+        if commands.lock().expect("commands").is_empty() {
+            break;
+        }
+        let results = apply_worker_commands(
+            commands,
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            forwarding,
+            ha_state,
+            &dynamic_neighbors,
+            worker_id,
+            &mut scratch,
+        );
+        vacated |= results.vacate_all_shared_exact_slots;
+        cancelled.extend(results.cancelled_keys);
+    }
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "fixture: the drain loop must empty the queue within 64 passes"
+    );
+    (vacated, cancelled)
+}
+
+/// #9720 STEP-0: fill one worker's queue with an inert filler, so the RG
+/// transition fan-out below is REFUSED rather than queued.
+///
+/// `ForgetPptpCall` on an unknown handle is a no-op remove: it advances the
+/// drain without touching sessions, origins or the vacate flag, so any
+/// demote/vacate effect observed after the drain came from the transition
+/// commands, not the filler.
+fn fill_worker_queue_9720(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
+    let mut pending = commands.lock().expect("commands");
+    pending.clear();
+    for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+        pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+    }
+}
+
+/// #9720 (DemoteOwnerRGS + VacateAllSharedExactSlots): an RG demotion applied
+/// while the worker queue is at capacity must still flip the worker-local
+/// origin and vacate the CoS slots once the queue drains.
+///
+/// RED on base: `update_ha_state` ignores the `push_bounded` refusal, the
+/// stored state already reflects the demotion, and nothing re-drives the
+/// dropped pair — the worker keeps a ForwardFlow origin and its stale slots.
+#[test]
+fn rg_demotion_at_full_queue_flips_origin_and_vacates_9720() {
+    // #9720 review B4: worker ids 101+ are surveyed-free across the suite
+    // (the 6961 transpose test registers 11, which this cell first used —
+    // post-fix `register` clears the debt slot, so a shared id would flake).
+    const W: u32 = 101;
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        W,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Clear-on-entry hygiene (review B6): this process runs 6100+ tests and
+    // the debt array is process-global. The id is surveyed-free, so this is
+    // belt-and-braces, not load-bearing.
+    crate::afxdp::worker_queue::clear_transition_debt(W);
+
+    // Worker-local session owned by RG 1 (mirrors
+    // `apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect`).
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+
+    // Seed RG 1 active, THEN fill: the seed's own activation fan-out must not
+    // occupy the queue the demotion is refused by.
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("seed active HA state");
+    fill_worker_queue_9720(&commands);
+
+    let drops_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
+    let demote_before =
+        crate::afxdp::worker_queue::HA_TRANSITION_DEMOTE_DROPPED.load(Ordering::Relaxed);
+    let vacate_before =
+        crate::afxdp::worker_queue::HA_TRANSITION_VACATE_DROPPED.load(Ordering::Relaxed);
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            ..HAGroupStatus::default()
+        }])
+        .expect("demote RG 1");
+    assert!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed)
+            > drops_before,
+        "fixture: the demotion fan-out must actually have been DROPPED at the \
+         full queue — if it was queued, this cell tests the ordinary path"
+    );
+    // Post-fix pins: the refusal was counted per command type AND recorded
+    // as this worker's debt (exact content — the id is surveyed-free, so no
+    // other test can record into this slot concurrently).
+    assert!(
+        crate::afxdp::worker_queue::HA_TRANSITION_DEMOTE_DROPPED.load(Ordering::Relaxed)
+            > demote_before,
+        "the refused Demote must be counted per command type (#9720)"
+    );
+    assert!(
+        crate::afxdp::worker_queue::HA_TRANSITION_VACATE_DROPPED.load(Ordering::Relaxed)
+            > vacate_before,
+        "the refused Vacate must be counted per command type (#9720)"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (vec![1], Vec::new(), true),
+        "the refused pair must be recorded as this worker's debt (#9720)"
+    );
+
+    let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_ns / 1_000_000_000))]);
+    let (vacated, cancelled) = drain_worker_commands_9720(
+        &commands,
+        &mut sessions,
+        &coordinator.forwarding,
+        &ha_state,
+        W,
+    );
+
+    assert_eq!(
+        cancelled,
+        vec![key.clone()],
+        "the worker must have run the dropped DemoteOwnerRGS for RG 1 (#9720)"
+    );
+    assert!(
+        vacated,
+        "the worker must have run the dropped VacateAllSharedExactSlots (#9720)"
+    );
+    // The issue's contract is origin-flipped + slot-vacated (above): the
+    // re-resolved DISPOSITION is a forwarding-policy detail of this fixture
+    // (ha_tests metadata rides fabric_ingress=true, unlike the session_glue
+    // mirror that pins FabricRedirect) and is pinned for its own fixture by
+    // `apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect`.
+    let (_, origin) = sessions
+        .lookup_with_origin(&key, now_ns, 0x10)
+        .expect("demoted session");
+    assert!(
+        origin.is_peer_synced(),
+        "demotion must flip the worker-local origin (#9720)"
+    );
+    // Redrive-once (review B10): the drain consumed the debt; nothing
+    // lingers to replay onto a later pass.
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), Vec::new(), false),
+        "the drain must consume the debt exactly once (#9720)"
+    );
+}
+
+/// #9720 (RefreshOwnerRGS): an RG activation applied while the worker queue is
+/// at capacity must still refresh the worker's sessions once the queue drains.
+///
+/// RED on base: the `RefreshOwnerRGS` refusal is ignored and the activation is
+/// never re-driven, so the split-RG reverse entry keeps its stale
+/// FabricRedirect instead of rewriting to ForwardCandidate.
+#[test]
+fn rg_activation_at_full_queue_refreshes_worker_9720() {
+    // #9720 review B4: surveyed-free worker id (see demote cell).
+    const W: u32 = 102;
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        W,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Clear-on-entry hygiene (review B6; see demote cell).
+    crate::afxdp::worker_queue::clear_transition_debt(W);
+
+    // Split-RG reverse entry owned by RG 2 (mirrors
+    // `apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_candidate`).
+    let mut sessions = SessionTable::new();
+    let forward_key = test_key();
+    let reverse_key = reverse_session_key(&forward_key, test_decision().nat);
+    let now_ns = monotonic_nanos();
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::FabricRedirect,
+                local_ifindex: 0,
+                egress_ifindex: 21,
+                tx_ifindex: 21,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+                neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+                tx_vlan_id: 0,
+            },
+            nat: test_decision().nat.reverse(
+                forward_key.src_ip,
+                forward_key.dst_ip,
+                forward_key.src_port,
+                forward_key.dst_port,
+            ),
+        },
+        SessionMetadata {
+            ingress_zone: 2,
+            egress_zone: 1,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 2,
+            fabric_ingress: false,
+            is_reverse: true,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        SessionOrigin::SyncImport,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+
+    // Seed RG 2 inactive (no fan-out from empty), THEN fill.
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 2,
+            active: false,
+            ..HAGroupStatus::default()
+        }])
+        .expect("seed inactive HA state");
+    fill_worker_queue_9720(&commands);
+
+    let drops_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
+    let refresh_before =
+        crate::afxdp::worker_queue::HA_TRANSITION_REFRESH_DROPPED.load(Ordering::Relaxed);
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 2,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 2");
+    assert!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed)
+            > drops_before,
+        "fixture: the activation fan-out must actually have been DROPPED at the \
+         full queue — if it was queued, this cell tests the ordinary path"
+    );
+    // Post-fix pins: counted per command type AND recorded as debt.
+    assert!(
+        crate::afxdp::worker_queue::HA_TRANSITION_REFRESH_DROPPED.load(Ordering::Relaxed)
+            > refresh_before,
+        "the refused Refresh must be counted per command type (#9720)"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), vec![2], false),
+        "the refused Refresh must be recorded as this worker's debt (#9720)"
+    );
+
+    let ha_state = BTreeMap::from([(2, active_ha_runtime(now_ns / 1_000_000_000))]);
+    let _ = drain_worker_commands_9720(
+        &commands,
+        &mut sessions,
+        &coordinator.forwarding,
+        &ha_state,
+        W,
+    );
+
+    let (lookup, origin) = sessions
+        .lookup_with_origin(&reverse_key, now_ns, 0x10)
+        .expect("refreshed reverse session");
+    assert!(origin.is_peer_synced());
+    assert_eq!(
+        lookup.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the worker must have run the dropped RefreshOwnerRGS for RG 2 (#9720)"
+    );
+    assert_eq!(lookup.decision.resolution.egress_ifindex, 6);
+    // Redrive-once (review B10).
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), Vec::new(), false),
+        "the drain must consume the debt exactly once (#9720)"
+    );
+}
+
+/// #9720 control: with room in the queue the demotion fan-out is queued
+/// (not dropped) and the drain applies it — the fix must leave this path
+/// unchanged.
+#[test]
+fn rg_transition_with_room_is_unchanged_9720() {
+    // #9720 review B4: surveyed-free worker id (see demote cell).
+    const W: u32 = 103;
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        W,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("seed active HA state");
+    commands.lock().expect("commands").clear();
+
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            ..HAGroupStatus::default()
+        }])
+        .expect("demote RG 1");
+
+    // Control: nothing dropped — both commands are IN the queue.
+    {
+        let pending = commands.lock().expect("commands");
+        assert!(
+            pending.iter().any(|command| matches!(
+                command,
+                WorkerCommand::DemoteOwnerRGS { owner_rgs } if owner_rgs == &vec![1]
+            )),
+            "control: DemoteOwnerRGS must be queued when the queue has room"
+        );
+        assert!(
+            pending
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::VacateAllSharedExactSlots)),
+            "control: VacateAllSharedExactSlots must be queued when the queue has room"
+        );
+    }
+
+    let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_ns / 1_000_000_000))]);
+    let (vacated, cancelled) = drain_worker_commands_9720(
+        &commands,
+        &mut sessions,
+        &coordinator.forwarding,
+        &ha_state,
+        W,
+    );
+    assert_eq!(cancelled, vec![key.clone()]);
+    assert!(vacated);
+    let (_, origin) = sessions
+        .lookup_with_origin(&key, now_ns, 0x10)
+        .expect("demoted session");
+    assert!(origin.is_peer_synced());
+    // Post-fix pin: the room path records NO debt — the commands travelled
+    // in-band, so the out-of-band slot must stay empty.
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), Vec::new(), false),
+        "control: no debt may be recorded when the queue has room (#9720)"
+    );
+}
+
+/// #9720 (partial fan-out, 9560-style): with EXACTLY ONE slot free the demotion
+/// pair splits — `DemoteOwnerRGS` takes the last slot and
+/// `VacateAllSharedExactSlots` is refused. The queued half must apply AND the
+/// refused half must be re-driven.
+///
+/// RED on base in the vacate half only: the refused Vacate is silently lost
+/// while the queued Demote applies. A fix that redrove Demote but not Vacate
+/// would still fail here, which the full-queue cell cannot distinguish.
+#[test]
+fn rg_demotion_with_one_slot_free_splits_and_redrives_9720() {
+    // #9720 review B4: surveyed-free worker id (see demote cell).
+    const W: u32 = 104;
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        W,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Clear-on-entry hygiene (review B6; see demote cell).
+    crate::afxdp::worker_queue::clear_transition_debt(W);
+
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("seed active HA state");
+    // EXACTLY ONE slot free, so the Demote half is queued and only the Vacate
+    // half is refused. Filling completely would drop both, and then a fix
+    // that redrove only Demote would still pass — the cell would not test
+    // what it names.
+    {
+        let mut pending = commands.lock().expect("commands");
+        pending.clear();
+        for _ in 0..(crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS - 1) {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+
+    let drops_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
+    let vacate_before =
+        crate::afxdp::worker_queue::HA_TRANSITION_VACATE_DROPPED.load(Ordering::Relaxed);
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            ..HAGroupStatus::default()
+        }])
+        .expect("demote RG 1");
+    assert!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed)
+            > drops_before,
+        "fixture: the Vacate half must actually have been DROPPED"
+    );
+    // Fixture shape: the Demote half took the last slot; the Vacate half is
+    // nowhere in the queue.
+    {
+        let pending = commands.lock().expect("commands");
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "fixture: the Demote half must have taken the last slot"
+        );
+        assert!(
+            pending.iter().any(|command| matches!(
+                command,
+                WorkerCommand::DemoteOwnerRGS { owner_rgs } if owner_rgs == &vec![1]
+            )),
+            "fixture: the queued half must be the Demote"
+        );
+        assert!(
+            !pending
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::VacateAllSharedExactSlots)),
+            "fixture: the refused half (Vacate) must NOT be in the queue"
+        );
+    }
+    // Post-fix pins: only the Vacate half was refused — counted, and the
+    // ONLY debt recorded (no Demote debt: that half travelled in-band).
+    assert!(
+        crate::afxdp::worker_queue::HA_TRANSITION_VACATE_DROPPED.load(Ordering::Relaxed)
+            > vacate_before,
+        "the refused Vacate half must be counted per command type (#9720)"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), Vec::new(), true),
+        "only the refused Vacate half may be recorded as debt (#9720)"
+    );
+
+    let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_ns / 1_000_000_000))]);
+    let (vacated, cancelled) = drain_worker_commands_9720(
+        &commands,
+        &mut sessions,
+        &coordinator.forwarding,
+        &ha_state,
+        W,
+    );
+
+    assert_eq!(
+        cancelled,
+        vec![key.clone()],
+        "the queued Demote half must apply"
+    );
+    assert!(vacated, "the refused Vacate half must be re-driven (#9720)");
+    let (_, origin) = sessions
+        .lookup_with_origin(&key, now_ns, 0x10)
+        .expect("demoted session");
+    assert!(origin.is_peer_synced());
+    // Redrive-once (review B10).
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), Vec::new(), false),
+        "the drain must consume the debt exactly once (#9720)"
+    );
+}
+
+/// #9720 white-box (review B7): debt dispatches even when the queue is EMPTY.
+///
+/// A record implies a full queue and the take precedes the drain, so
+/// debt-with-empty-queue is unreachable in production — but `apply_worker_commands`
+/// takes the debt BEFORE its queue lock, so the debt path does not depend on
+/// that proof. Record directly, leave the queue empty, run ONE apply: the
+/// debt dispatches and the slot is empty afterwards.
+#[test]
+fn empty_queue_with_debt_dispatches_ahead_9720() {
+    // #9720 review B4: surveyed-free worker id (see demote cell).
+    const W: u32 = 105;
+    crate::afxdp::worker_queue::clear_transition_debt(W);
+
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let now_ns = monotonic_nanos();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    crate::afxdp::worker_queue::record_transition_debt(W, &[1], &[], true);
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "fixture: the queue stays empty — only the out-of-band slot is set"
+    );
+
+    let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_ns / 1_000_000_000))]);
+    let results = apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &test_forwarding_state_with_fabric(),
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        W,
+        &mut VecDeque::new(),
+    );
+
+    assert_eq!(
+        results.cancelled_keys,
+        vec![key.clone()],
+        "debt Demote must dispatch on an empty queue (#9720)"
+    );
+    assert!(
+        results.vacate_all_shared_exact_slots,
+        "debt Vacate must dispatch on an empty queue (#9720)"
+    );
+    assert!(
+        !results.commands_backlogged,
+        "no slice was taken, so no backlog may be reported"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::transition_debt_for_test(W),
+        (Vec::new(), Vec::new(), false),
+        "one apply must consume the debt exactly once (#9720)"
+    );
+    let (_, origin) = sessions
+        .lookup_with_origin(&key, now_ns, 0x10)
+        .expect("demoted session");
+    assert!(origin.is_peer_synced());
+}

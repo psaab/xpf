@@ -309,6 +309,11 @@ impl WorkerManager {
         record: WorkerRuntimeRecord,
         join: Option<std::thread::JoinHandle<()>>,
     ) {
+        // #9720: clear the (possibly reused) worker id's transition-debt slot
+        // BEFORE publishing the record — a transition racing this registration
+        // can only record debt for W after the insert below, so clear-first
+        // never eats fresh debt, only the previous generation's stale slot.
+        crate::afxdp::worker_queue::clear_transition_debt(worker_id);
         let mut next = (**self.records.load()).clone();
         next.insert(worker_id, Arc::new(record));
         self.records.store(Arc::new(next));
