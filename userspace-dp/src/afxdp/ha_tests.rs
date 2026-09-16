@@ -6662,6 +6662,8 @@ fn rg_activation_at_full_queue_refreshes_worker_9720() {
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -7104,6 +7106,8 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: 2,
@@ -7447,6 +7451,8 @@ fn split_debt_supersedes_and_dispatches_per_rg_9720() {
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
