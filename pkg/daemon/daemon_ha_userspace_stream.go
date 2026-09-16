@@ -76,12 +76,18 @@ func (d *Daemon) shouldSyncUserspaceDelta(ss *cluster.SessionSync, delta dpusers
 	//     covers the helper event-stream path.
 	// See #315 for discussion.
 	if strings.EqualFold(delta.Disposition, "local_delivery") {
-		slog.Debug("userspace delta: filtered (local_delivery)", "src", delta.SrcIP, "dst", delta.DstIP)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: filtered (local_delivery)", "src", src, "dst", dst)
+		}
 		return false
 	}
 	if isTransientLocalSeedOrigin(delta.Origin) {
-		slog.Debug("userspace delta: filtered (transient local seed)",
-			"origin", delta.Origin, "src", delta.SrcIP, "dst", delta.DstIP)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: filtered (transient local seed)",
+				"origin", delta.Origin, "src", src, "dst", dst)
+		}
 		return false
 	}
 	// A fabric redirect means the PEER owns the flow's egress side, so
@@ -115,20 +121,29 @@ func (d *Daemon) shouldSyncUserspaceDelta(ss *cluster.SessionSync, delta dpusers
 	if delta.FabricRedirect && !delta.FabricIngress {
 		ok := ss != nil && ss.ShouldSyncZone(ingressZone)
 		if !ok {
-			slog.Debug("userspace delta: filtered (fabric redirect from a zone this node does not own)", "zone", ingressZone, "rg", delta.OwnerRGID, "src", delta.SrcIP, "dst", delta.DstIP)
+			if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+				src, dst := userspaceDeltaFlowStrings(delta)
+				slog.Debug("userspace delta: filtered (fabric redirect from a zone this node does not own)", "zone", ingressZone, "rg", delta.OwnerRGID, "src", src, "dst", dst)
+			}
 		}
 		return ok
 	}
 	if delta.OwnerRGID > 0 && ss != nil && ss.IsPrimaryForRGFn != nil {
 		ok := ss.IsPrimaryForRGFn(delta.OwnerRGID)
 		if !ok {
-			slog.Debug("userspace delta: filtered (not primary for owner RG)", "rg", delta.OwnerRGID, "src", delta.SrcIP, "dst", delta.DstIP)
+			if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+				src, dst := userspaceDeltaFlowStrings(delta)
+				slog.Debug("userspace delta: filtered (not primary for owner RG)", "rg", delta.OwnerRGID, "src", src, "dst", dst)
+			}
 		}
 		return ok
 	}
 	ok := ss != nil && ss.ShouldSyncZone(ingressZone)
 	if !ok {
-		slog.Debug("userspace delta: filtered (zone not synced)", "zone", ingressZone, "src", delta.SrcIP, "dst", delta.DstIP)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: filtered (zone not synced)", "zone", ingressZone, "src", src, "dst", dst)
+		}
 	}
 	return ok
 }
@@ -349,11 +364,10 @@ func (d *Daemon) handleEventStreamDelta(eventType uint8, delta dpuserspace.Sessi
 		slog.Debug("userspace delta: dropped (sync not connected)", "type", eventType)
 		return false
 	}
-	cfg := d.store.ActiveConfig()
-	if cfg == nil {
+	zoneIDs := d.cachedUserspaceZoneIDs()
+	if zoneIDs == nil {
 		return false
 	}
-	zoneIDs := buildZoneIDs(cfg)
 
 	// Map binary event type to the string event expected by queueUserspaceSessionDeltas.
 	switch eventType {
@@ -709,17 +723,23 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 			case dataplane.AFInet:
 				key, val, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)
 				if !ok {
-					slog.Debug("userspace delta: V4 conversion failed", "src", delta.SrcIP, "dst", delta.DstIP, "disposition", delta.Disposition)
+					if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+						src, dst := userspaceDeltaFlowStrings(delta)
+						slog.Debug("userspace delta: V4 conversion failed", "src", src, "dst", dst, "disposition", delta.Disposition)
+					}
 					continue
 				}
 				if !d.shouldSyncUserspaceDelta(ss, delta, val.IngressZone) {
 					continue
 				}
 				sink.openV4(key, val)
-				slog.Debug("userspace delta: admitted V4", "src", delta.SrcIP, "dst", delta.DstIP, "ownerRG", delta.OwnerRGID)
+				if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+					src, dst := userspaceDeltaFlowStrings(delta)
+					slog.Debug("userspace delta: admitted V4", "src", src, "dst", dst, "ownerRG", delta.OwnerRGID)
+				}
 				n++
 				if delta.FabricRedirect && !delta.FabricIngress {
-					if wireKey, wireVal, ok := userspaceForwardWireAliasV4(key, val, delta); ok {
+					if wireKey, wireVal, ok := userspaceForwardWireAliasV4(key, val); ok {
 						sink.openV4(wireKey, wireVal)
 						n++
 					}
@@ -732,7 +752,7 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 				sink.openV6(key, val)
 				n++
 				if delta.FabricRedirect && !delta.FabricIngress {
-					if wireKey, wireVal, ok := userspaceForwardWireAliasV6(key, val, delta); ok {
+					if wireKey, wireVal, ok := userspaceForwardWireAliasV6(key, val); ok {
 						sink.openV6(wireKey, wireVal)
 						n++
 					}
@@ -746,7 +766,7 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 					sink.deleteV4(key, val)
 					n++
 					if delta.FabricRedirect && !delta.FabricIngress {
-						wireKey := userspaceForwardWireKeyV4(key, delta)
+						wireKey := userspaceForwardWireKeyV4(key, val)
 						if wireKey != key {
 							sink.deleteV4(wireKey, val)
 							n++
@@ -759,7 +779,7 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 					sink.deleteV6(key, val)
 					n++
 					if delta.FabricRedirect && !delta.FabricIngress {
-						wireKey := userspaceForwardWireKeyV6(key, delta)
+						wireKey := userspaceForwardWireKeyV6(key, val)
 						if wireKey != key {
 							sink.deleteV6(wireKey, val)
 							n++

@@ -1449,6 +1449,16 @@ type Daemon struct {
 	// event-stream fallback loop and the background polling loop, and holds
 	// that drain off a FullResync's export-and-queue transaction (#9766).
 	userspaceDeltaSyncMu sync.Mutex
+	// userspaceZoneIDs caches the stable zone-id map across event-stream
+	// deltas (#9905, F-152): the map is a pure function of the active
+	// config, so it is rebuilt only when the store's active generation
+	// moves. The warm path is one atomic generation load plus one atomic
+	// pointer load — no store RLock, no map build. Misses serialize on
+	// userspaceZoneIDsMu (leaf lock: only cachedUserspaceZoneIDs takes it).
+	// The published map is immutable: misses always build fresh and swap
+	// the pointer, never mutate in place.
+	userspaceZoneIDs   atomic.Pointer[userspaceZoneIDsCache]
+	userspaceZoneIDsMu sync.Mutex
 	// fullResyncRetryAt and fullResyncInstallWaitForTest: see
 	// full_resync_transaction_9767.go.
 	fullResyncRetryAt            atomic.Int64

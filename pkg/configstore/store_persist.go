@@ -126,6 +126,7 @@ func (s *Store) Load() error {
 
 	s.active = tree
 	s.compiled = compiled
+	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.loadRollbackHistory()
 	// #6538: the recovery can leave the store with a nil compiled config (its
 	// rollback target failed even the lenient compile). Load MUST NOT report
@@ -269,6 +270,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 			// persist committed=0 and clear everCommitted so a later restart
 			// re-classifies into bootstrap, not operator-committed-empty.
 			s.compiled = nil
+			s.publishActiveLocked() // #9905: publish the new active snapshot
 			s.persistMarkerCommitted = false
 			s.everCommitted = false
 			perr = s.writeActiveMarker(prevTree, false)
@@ -293,6 +295,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 					ErrConfigCompile, cerr)
 			}
 			s.compiled = compiled
+			s.publishActiveLocked() // #9905: publish the new active snapshot
 			s.persistMarkerCommitted = true
 			s.everCommitted = true
 			perr = s.writeActive(prevTree)

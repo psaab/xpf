@@ -361,7 +361,7 @@ func TestUserspaceForwardWireAliasSharesBaseSessionID6198(t *testing.T) {
 	if !ok {
 		t.Fatal("expected v4 delta to convert")
 	}
-	_, aliasValV4, ok := userspaceForwardWireAliasV4(baseKeyV4, baseValV4, deltaV4)
+	_, aliasValV4, ok := userspaceForwardWireAliasV4(baseKeyV4, baseValV4)
 	if !ok {
 		t.Fatal("expected v4 forward-wire alias")
 	}
@@ -376,7 +376,7 @@ func TestUserspaceForwardWireAliasSharesBaseSessionID6198(t *testing.T) {
 	if !ok {
 		t.Fatal("expected v6 delta to convert")
 	}
-	_, aliasValV6, ok := userspaceForwardWireAliasV6(baseKeyV6, baseValV6, deltaV6)
+	_, aliasValV6, ok := userspaceForwardWireAliasV6(baseKeyV6, baseValV6)
 	if !ok {
 		t.Fatal("expected v6 forward-wire alias")
 	}

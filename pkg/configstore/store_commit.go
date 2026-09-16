@@ -258,6 +258,7 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 	s.candidate = s.active.Clone()
 	s.bumpCandidateGenLocked() // #5848: fresh candidate — advance the generation
 	s.compiled = compiled
+	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.dirty = false
 	s.touchConfigLockLocked()          // #4476: a commit is activity — refresh the lease
 	s.noteLocalActivePromotionLocked() // #9530
@@ -636,6 +637,7 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	s.candidate = s.active.Clone()
 	s.bumpCandidateGenLocked() // #5848: fresh candidate — advance the generation
 	s.compiled = compiled
+	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.dirty = false
 	s.touchConfigLockLocked()          // #4476: a commit is activity — refresh the lease
 	s.noteLocalActivePromotionLocked() // #9530
@@ -1166,6 +1168,7 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 
 	s.active = s.confirmPrevTree
 	s.compiled = s.confirmPrevCfg
+	s.publishActiveLocked() // #9905: publish the new active snapshot
 	if s.candidate != nil {
 		s.candidate = s.active.Clone()
 		s.bumpCandidateGenLocked() // #5848: candidate reset on auto-rollback

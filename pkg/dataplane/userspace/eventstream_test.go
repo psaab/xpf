@@ -189,7 +189,7 @@ func readFrame(r io.Reader) (typ uint8, seq uint64, payload []byte, err error) {
 // #4565: decodeSessionEvent must read the FLAG_NAT64 marker (bit 1<<5) and the
 // trailing snat_v4 (4 bytes after the #3301 metadata) so a peer-PROMOTED NAT64
 // session can rebuild its reverse (v4->v6) BIB after failover. RED-on-revert:
-// dropping the eventstream.go decode leaves d.Nat64 false / d.Nat64SnatV4 empty.
+// dropping the eventstream.go decode leaves d.Nat64 false / d.Nat64SnatV4Bin zero.
 func TestDecodeSessionEventNat64_4565(t *testing.T) {
 	// Minimal v6 SESSION_OPEN payload. Layout: fixed 32 bytes, then 5 v6
 	// addresses (16 each) + 2 MACs (6 each) = 92, reaching off=124; then the
@@ -208,8 +208,14 @@ func TestDecodeSessionEventNat64_4565(t *testing.T) {
 	if !d.Nat64 {
 		t.Fatal("d.Nat64 = false, want true for a FLAG_NAT64 frame")
 	}
-	if d.Nat64SnatV4 != "203.0.113.5" {
-		t.Fatalf("d.Nat64SnatV4 = %q, want 203.0.113.5", d.Nat64SnatV4)
+	if d.Nat64SnatV4Bin != [4]byte{203, 0, 113, 5} {
+		t.Fatalf("d.Nat64SnatV4Bin = %v, want 203.0.113.5", d.Nat64SnatV4Bin)
+	}
+	if d.Nat64SnatV4 != "" {
+		t.Fatalf("d.Nat64SnatV4 = %q, want empty on the binary leg", d.Nat64SnatV4)
+	}
+	if d.BinAddrLen != 16 {
+		t.Fatalf("d.BinAddrLen = %d, want 16", d.BinAddrLen)
 	}
 
 	// A legacy frame that omits the trailing snat_v4 (and the flag) decodes to
@@ -223,6 +229,12 @@ func TestDecodeSessionEventNat64_4565(t *testing.T) {
 	}
 	if dl.Nat64 || dl.Nat64SnatV4 != "" {
 		t.Fatalf("legacy frame: Nat64=%v snat=%q, want false/empty", dl.Nat64, dl.Nat64SnatV4)
+	}
+	if dl.Nat64SnatV4Bin != [4]byte{} {
+		t.Fatalf("legacy frame: snat bin = %v, want zero", dl.Nat64SnatV4Bin)
+	}
+	if dl.BinAddrLen != 16 {
+		t.Fatalf("legacy frame: BinAddrLen = %d, want 16", dl.BinAddrLen)
 	}
 }
 
@@ -309,17 +321,23 @@ func TestDecodeSessionEventV4(t *testing.T) {
 	if d.OwnerRGID != 1 {
 		t.Fatalf("OwnerRGID = %d, want 1", d.OwnerRGID)
 	}
-	if d.SrcIP != "10.0.1.102" {
-		t.Fatalf("SrcIP = %q, want 10.0.1.102", d.SrcIP)
+	if d.BinAddrLen != 4 {
+		t.Fatalf("BinAddrLen = %d, want 4", d.BinAddrLen)
 	}
-	if d.DstIP != "172.16.80.200" {
-		t.Fatalf("DstIP = %q, want 172.16.80.200", d.DstIP)
+	if d.SrcAddr != [16]byte{10, 0, 1, 102} {
+		t.Fatalf("SrcAddr = %v, want 10.0.1.102", d.SrcAddr[:4])
 	}
-	if d.NATSrcIP != "172.16.80.8" {
-		t.Fatalf("NATSrcIP = %q, want 172.16.80.8", d.NATSrcIP)
+	if d.DstAddr != [16]byte{172, 16, 80, 200} {
+		t.Fatalf("DstAddr = %v, want 172.16.80.200", d.DstAddr[:4])
 	}
-	if d.NATDstIP != "" {
-		t.Fatalf("NATDstIP = %q, want empty (zero)", d.NATDstIP)
+	if d.NATSrcAddr != [16]byte{172, 16, 80, 8} {
+		t.Fatalf("NATSrcAddr = %v, want 172.16.80.8", d.NATSrcAddr[:4])
+	}
+	if d.NATDstAddr != [16]byte{} {
+		t.Fatalf("NATDstAddr = %v, want zero", d.NATDstAddr[:4])
+	}
+	if d.SrcIP != "" || d.DstIP != "" || d.NATSrcIP != "" || d.NATDstIP != "" {
+		t.Fatalf("strings = %q/%q/%q/%q, want all empty on the binary leg", d.SrcIP, d.DstIP, d.NATSrcIP, d.NATDstIP)
 	}
 	if !d.FabricRedirect {
 		t.Fatal("FabricRedirect should be true")
@@ -336,14 +354,17 @@ func TestDecodeSessionEventV4(t *testing.T) {
 	if d.TXVLANID != 80 {
 		t.Fatalf("TXVLANID = %d, want 80", d.TXVLANID)
 	}
-	if d.NeighborMAC != "aa:bb:cc:dd:ee:ff" {
-		t.Fatalf("NeighborMAC = %q, want aa:bb:cc:dd:ee:ff", d.NeighborMAC)
+	if d.NeighborMACBin != [6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff} {
+		t.Fatalf("NeighborMACBin = %x, want aa:bb:cc:dd:ee:ff", d.NeighborMACBin)
 	}
-	if d.SrcMAC != "02:bf:72:00:50:08" {
-		t.Fatalf("SrcMAC = %q, want 02:bf:72:00:50:08", d.SrcMAC)
+	if d.SrcMACBin != [6]byte{0x02, 0xbf, 0x72, 0x00, 0x50, 0x08} {
+		t.Fatalf("SrcMACBin = %x, want 02:bf:72:00:50:08", d.SrcMACBin)
 	}
-	if d.NextHop != "172.16.80.1" {
-		t.Fatalf("NextHop = %q, want 172.16.80.1", d.NextHop)
+	if d.NextHopAddr != [16]byte{172, 16, 80, 1} {
+		t.Fatalf("NextHopAddr = %v, want 172.16.80.1", d.NextHopAddr[:4])
+	}
+	if d.NeighborMAC != "" || d.SrcMAC != "" || d.NextHop != "" {
+		t.Fatalf("strings = %q/%q/%q, want all empty on the binary leg", d.NeighborMAC, d.SrcMAC, d.NextHop)
 	}
 }
 
@@ -482,8 +503,14 @@ func TestDecodeSessionEventV4CarriesPolicyFields3301(t *testing.T) {
 	if !ok {
 		t.Fatal("decodeSessionEvent returned false")
 	}
-	if d.NextHop != "172.16.80.1" {
-		t.Fatalf("NextHop = %q, want 172.16.80.1 (trailer must not corrupt prior fields)", d.NextHop)
+	if d.NextHopAddr != [16]byte{172, 16, 80, 1} {
+		t.Fatalf("NextHopAddr = %v, want 172.16.80.1 (trailer must not corrupt prior fields)", d.NextHopAddr[:4])
+	}
+	if d.NextHop != "" {
+		t.Fatalf("NextHop = %q, want empty on the binary leg", d.NextHop)
+	}
+	if d.BinAddrLen != 4 {
+		t.Fatalf("BinAddrLen = %d, want 4", d.BinAddrLen)
 	}
 	if d.PolicyID != 42 {
 		t.Fatalf("PolicyID = %d, want 42", d.PolicyID)
@@ -552,11 +579,17 @@ func TestDecodeSessionCloseEventV4(t *testing.T) {
 	if d.SrcPort != 12345 || d.DstPort != 443 {
 		t.Fatalf("ports = %d/%d, want 12345/443", d.SrcPort, d.DstPort)
 	}
-	if d.SrcIP != "10.0.1.102" {
-		t.Fatalf("SrcIP = %q, want 10.0.1.102", d.SrcIP)
+	if d.BinAddrLen != 4 {
+		t.Fatalf("BinAddrLen = %d, want 4", d.BinAddrLen)
 	}
-	if d.DstIP != "172.16.80.200" {
-		t.Fatalf("DstIP = %q, want 172.16.80.200", d.DstIP)
+	if d.SrcAddr != [16]byte{10, 0, 1, 102} {
+		t.Fatalf("SrcAddr = %v, want 10.0.1.102", d.SrcAddr[:4])
+	}
+	if d.DstAddr != [16]byte{172, 16, 80, 200} {
+		t.Fatalf("DstAddr = %v, want 172.16.80.200", d.DstAddr[:4])
+	}
+	if d.SrcIP != "" || d.DstIP != "" {
+		t.Fatalf("strings = %q/%q, want empty on the binary leg", d.SrcIP, d.DstIP)
 	}
 	if d.OwnerRGID != 1 {
 		t.Fatalf("OwnerRGID = %d, want 1", d.OwnerRGID)

@@ -1505,24 +1505,27 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 	}
 
 	// IP addresses start at offset 32 (#3075: was 30 before the u16 zone widen).
+	// #9905: the raw bytes are carried through in the binary fields; the
+	// string legs stay empty so no format/parse round trip remains.
 	off := 32
-	d.SrcIP = formatIP(payload[off:off+addrSize], af)
+	copy(d.SrcAddr[:], payload[off:off+addrSize])
 	off += addrSize
-	d.DstIP = formatIP(payload[off:off+addrSize], af)
+	copy(d.DstAddr[:], payload[off:off+addrSize])
 	off += addrSize
-	d.NATSrcIP = formatIP(payload[off:off+addrSize], af)
+	copy(d.NATSrcAddr[:], payload[off:off+addrSize])
 	off += addrSize
-	d.NATDstIP = formatIP(payload[off:off+addrSize], af)
+	copy(d.NATDstAddr[:], payload[off:off+addrSize])
 	off += addrSize
+	d.BinAddrLen = uint8(addrSize)
 
 	// MACs.
-	d.NeighborMAC = formatMAC(payload[off : off+6])
+	copy(d.NeighborMACBin[:], payload[off:off+6])
 	off += 6
-	d.SrcMAC = formatMAC(payload[off : off+6])
+	copy(d.SrcMACBin[:], payload[off:off+6])
 	off += 6
 
 	// NextHop.
-	d.NextHop = formatIP(payload[off:off+addrSize], af)
+	copy(d.NextHopAddr[:], payload[off:off+addrSize])
 	off += addrSize
 
 	// #3301: trailing firewall-metadata fields (length-gated; absent on an
@@ -1551,7 +1554,7 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 	// standby cannot reconstruct from the synced forward v6 key.
 	if off+4 <= len(payload) {
 		if d.Nat64 && (payload[off] != 0 || payload[off+1] != 0 || payload[off+2] != 0 || payload[off+3] != 0) {
-			d.Nat64SnatV4 = net.IP(payload[off : off+4]).String()
+			copy(d.Nat64SnatV4Bin[:], payload[off:off+4])
 		}
 		off += 4
 	}
@@ -1654,10 +1657,11 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 	}
 
 	off := 6
-	d.SrcIP = formatIP(payload[off:off+addrSize], af)
+	copy(d.SrcAddr[:], payload[off:off+addrSize])
 	off += addrSize
-	d.DstIP = formatIP(payload[off:off+addrSize], af)
+	copy(d.DstAddr[:], payload[off:off+addrSize])
 	off += addrSize
+	d.BinAddrLen = uint8(addrSize)
 	// #2467: int32 LE (was int16).
 	d.OwnerRGID = int(int32(binary.LittleEndian.Uint32(payload[off : off+4])))
 	off += 4
@@ -1748,46 +1752,4 @@ func dataplaneEventAction(payload []byte) uint8 {
 		return dataplane.ActionDeny
 	}
 	return payload[dataplaneEventActionOffset]
-}
-
-// formatIP converts raw IP bytes to a string representation.
-func formatIP(b []byte, af uint8) string {
-	if af == 4 {
-		if len(b) < 4 {
-			return ""
-		}
-		// Check if zero.
-		if b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 {
-			return ""
-		}
-		return fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3])
-	}
-	if len(b) < 16 {
-		return ""
-	}
-	// Check if all zero.
-	allZero := true
-	for _, v := range b[:16] {
-		if v != 0 {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
-		return ""
-	}
-	ip := make(net.IP, 16)
-	copy(ip, b[:16])
-	return ip.String()
-}
-
-// formatMAC converts 6 raw bytes to a MAC address string, or "" if all zero.
-func formatMAC(b []byte) string {
-	if len(b) < 6 {
-		return ""
-	}
-	if b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", b[0], b[1], b[2], b[3], b[4], b[5])
 }

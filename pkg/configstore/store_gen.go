@@ -40,6 +40,30 @@ func (s *Store) bumpCandidateGenLocked() {
 	s.candidateGen++
 }
 
+// activeSnapshot is one immutable publication of the active generation +
+// compiled config (#9905). Readers load it with a single atomic read and
+// therefore observe exactly one publication — never a new token with an old
+// pointer or vice versa — which a separately-loaded generation + RLock-read
+// pointer cannot guarantee (the pair can straddle a commit).
+type activeSnapshot struct {
+	gen uint64
+	cfg *config.Config
+}
+
+// publishActiveLocked publishes the current active generation + compiled
+// config. It MUST be called under s.mu.Lock immediately after EVERY
+// `s.compiled = …` swap (commit, commit-confirmed, auto-rollback, peer sync,
+// load, boot recovery): the structural invariant is that no compiled swap
+// lacks a publication, verified by grepping `s\.compiled\s*=` against
+// publish call sites. Missing a site would let a cached per-commit
+// derivation (daemon zone-id map, #9905) go permanently stale. The
+// swap-then-publish order is load-bearing: the snapshot captures the
+// just-swapped pointer with a fresh generation, so no publication ever
+// pairs an old pointer with a newer generation.
+func (s *Store) publishActiveLocked() {
+	s.activeSnap.Store(&activeSnapshot{gen: s.activeGen.Add(1), cfg: s.compiled})
+}
+
 // CandidateGeneration returns the current candidate generation token. Used by
 // the daemon's commit transaction (paired with CompileCandidateGen) and by
 // tests asserting that mutating ops advance the token.
@@ -47,6 +71,22 @@ func (s *Store) CandidateGeneration() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.candidateGen
+}
+
+// ActiveSnapshot returns the published active generation + compiled config
+// (#9905): (0, nil) on a fresh store, advanced by every compiled-active
+// swap. Lock-free (one atomic load of an immutable pair) — the warm-path
+// probe that lets a caller reuse a cached per-commit derivation with zero
+// store locks. An unchanged generation means the cached derivation is
+// current; any change means rebuild from the returned config (no ActiveConfig
+// call needed — the snapshot already carries the exact pointer published at
+// that generation). A nil config means "no compiled config", matching
+// ActiveConfig-nil semantics (bootstrap reset, failed recovery compile).
+func (s *Store) ActiveSnapshot() (uint64, *config.Config) {
+	if snap := s.activeSnap.Load(); snap != nil {
+		return snap.gen, snap.cfg
+	}
+	return 0, nil
 }
 
 // CompileCandidateGen atomically compiles the current candidate AND reads the
