@@ -63,6 +63,8 @@ func TestNextTableUndefinedTargetRejected_5693(t *testing.T) {
 func TestNextTableDefinedTargetAccepted_5693(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
+		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leak.
+		"set interfaces ge-0/0/0 unit 0",
 		"set routing-options static route 0.0.0.0/0 next-table Comcast-GigabitPro.inet.0",
 	)
 	cfg, err := CompileConfig(tree)

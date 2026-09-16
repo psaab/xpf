@@ -27,6 +27,10 @@ func TestStaticRouteExclusionsAgreeWithTheBuilder_7357(t *testing.T) {
 	perInstance := &config.StaticRoute{Destination: "10.4.0.0/16", NextTable: "vrf-a"}
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so the control leak publishes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{installed, undefinedTarget, badCIDR, plain}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
 		{Name: "vrf-a", StaticRoutes: []*config.StaticRoute{perInstance}},
@@ -94,6 +98,10 @@ func TestStaticRouteWindowExclusionsAgreeWithTheBuilder_7357(t *testing.T) {
 		})
 	}
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot, as the window boundary assumes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingOptions.StaticRoutes = global
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "vrf-a"}}
 

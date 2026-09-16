@@ -47,8 +47,12 @@ func mkLeakingInstance(n int, family string) *Config {
 // next-table VRF-leak target, for the direct window-gate unit test. The target
 // value is non-empty (what the applier counts toward its ip-rule window); the
 // gate under test only counts next-table routes and does not resolve the target.
+// One unclaimed unit (N=1, #9810) preserves the 100-pass/101-reject boundary.
 func mkNextTableCfg(n int) *Config {
 	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
 	routes := make([]*StaticRoute, n)
 	for i := range routes {
 		routes[i] = &StaticRoute{Destination: "10.0.0.0/8", NextTable: "vr"}
@@ -75,6 +79,9 @@ func TestRoutingRuleWindowsStrictGate_5854(t *testing.T) {
 	t.Run("next-table over limit rejected", func(t *testing.T) {
 		// Split across inet + inet6 to prove both lists count toward the window.
 		cfg := &Config{}
+		cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+			"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+		}
 		cfg.RoutingOptions.StaticRoutes = mkNextTableCfg(60).RoutingOptions.StaticRoutes
 		cfg.RoutingOptions.Inet6StaticRoutes = mkNextTableCfg(41).RoutingOptions.StaticRoutes
 		err := validateRoutingRuleWindowsStrict(cfg)

@@ -154,6 +154,8 @@ func TestStaticNextHopFamilyAccepted_9820(t *testing.T) {
 func TestStaticNextHopFamilyNextTablePasses_9820(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-instances target instance-type virtual-router",
+		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leak.
+		"set interfaces ge-0/0/0 unit 0",
 		"set routing-options static route 2001:db8::/32 next-table target.inet6.0",
 	)
 	assertCommitAccepts(t, tree)

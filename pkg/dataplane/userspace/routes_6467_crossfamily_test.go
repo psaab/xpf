@@ -65,6 +65,10 @@ func TestBuildRouteSnapshotsNextTableCapIsSharedAcrossFamilies_6467(t *testing.T
 	}
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot, as the window boundary assumes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", TableID: 100}}
 	for i := 0; i < v4Count; i++ {
 		cfg.RoutingOptions.StaticRoutes = append(cfg.RoutingOptions.StaticRoutes,
@@ -142,6 +146,10 @@ func TestBuildRouteSnapshotsV6OnlyNextTableCapped_6467(t *testing.T) {
 	const n = config.NextTableRuleWindow + 50
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot, as the window boundary assumes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", TableID: 100}}
 	for i := 0; i < n; i++ {
 		cfg.RoutingOptions.Inet6StaticRoutes = append(cfg.RoutingOptions.Inet6StaticRoutes,

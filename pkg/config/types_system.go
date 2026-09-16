@@ -1046,9 +1046,11 @@ const (
 	// (pkg/routing maxNextTableRules), the commit-time over-subscription gate
 	// (pkg/config maxNextTableRules, #5854), and the number of config-static
 	// next-table leaks the userspace FIB mirror publishes
-	// (pkg/dataplane/userspace/routes.go). Capping all three at this single
-	// value keeps the kernel ip-rule table and the userspace dataplane FIB from
-	// disagreeing on which leaks survive truncation.
+	// (pkg/dataplane/userspace/routes.go). Since #9420 one leak costs one slot
+	// per default-instance ingress interface (#9810), so all three sides cap
+	// LEAKS at floor(window/N) with N from the shared resolver — capping all
+	// three at that single value keeps the kernel ip-rule table and the
+	// userspace dataplane FIB from disagreeing on which leaks survive truncation.
 	NextTableRuleWindow = 100
 )
 

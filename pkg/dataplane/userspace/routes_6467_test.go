@@ -33,6 +33,10 @@ func TestBuildRouteSnapshotsCapsConfigStaticNextTableLeaks(t *testing.T) {
 	const n = config.NextTableRuleWindow + over // 150 global next-table routes
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot, as the window boundary assumes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", TableID: 100}}
 	for i := 0; i < n; i++ {
 		cfg.RoutingOptions.StaticRoutes = append(cfg.RoutingOptions.StaticRoutes,
@@ -75,6 +79,10 @@ func TestBuildRouteSnapshotsUncappedBelowWindow(t *testing.T) {
 
 	const n = 10 // well under config.NextTableRuleWindow
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", TableID: 100}}
 	for i := 0; i < n; i++ {
 		cfg.RoutingOptions.StaticRoutes = append(cfg.RoutingOptions.StaticRoutes,
@@ -129,6 +137,10 @@ func TestBuildRouteSnapshotsFIBEligibilityMirrorsApplier(t *testing.T) {
 	const valid = config.NextTableRuleWindow + 20 // exceeds the window, so the cap fires on valid routes
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot, as the window boundary assumes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", TableID: 100}}
 	// M dangling next-table routes BEFORE the boundary (unknown instance).
 	for i := 0; i < ghosts; i++ {
@@ -192,6 +204,10 @@ func TestBuildRouteSnapshotsSkipsMalformedCIDRNextTable(t *testing.T) {
 	ruleListFn = func(family int) ([]netlink.Rule, error) { return nil, nil }
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so the well-formed leaks publish.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", TableID: 100}}
 	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
 		{Destination: "10.1.0.0/16", NextTable: "blue"}, // valid → published

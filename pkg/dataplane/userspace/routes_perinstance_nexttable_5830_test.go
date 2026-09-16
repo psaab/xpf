@@ -78,6 +78,10 @@ func TestBuildRouteSnapshotsKeepsGlobalNextTable_5830(t *testing.T) {
 	ruleListFn = func(family int) ([]netlink.Rule, error) { return nil, nil }
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so the global leak publishes.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
 		{Destination: "0.0.0.0/0", NextTable: "Comcast", NextTableRaw: "Comcast.inet.0"},
 	}

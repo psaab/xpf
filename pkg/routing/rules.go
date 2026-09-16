@@ -36,17 +36,20 @@ type ruleOps interface {
 // rules. The base + window are the SSOT in pkg/config (NextTableRulePriorityBase
 // / NextTableRuleWindow) so the install cap here, the commit-time gate
 // (pkg/config maxNextTableRules), and the userspace FIB mirror
-// (pkg/dataplane/userspace/routes.go) all cap at the same boundary (#6467).
+// (pkg/dataplane/userspace/routes.go) all cap at the same boundary (#6467) —
+// floor(window/N) LEAKS with N from the shared ingress resolver (#9810).
 const nextTableRulePriority = config.NextTableRulePriorityBase
 
 // maxNextTableRules bounds the number of next-table inter-VRF leak ip rules the
 // applier installs, matching the nextTableRulePriority window clear() scans
-// ([nextTableRulePriority, nextTableRulePriority+maxNextTableRules)). A larger
-// next-table set is truncated and reported as a degraded apply (mirroring
-// maxPBRRules / maxRibGroupLeakRules) rather than silently dropping later leaks
-// with a bare Warn (#6467). The userspace FIB config-static mirror caps at the
-// SAME value (config.NextTableRuleWindow) so the kernel ip-rule table and the
-// userspace dataplane FIB agree on which leaks survive truncation.
+// ([nextTableRulePriority, nextTableRulePriority+maxNextTableRules)). One leak
+// costs one rule per default-instance ingress interface (#9420), so a larger
+// leak set is truncated LEAK-ATOMICALLY and reported as a degraded apply
+// (mirroring maxPBRRules / maxRibGroupLeakRules) rather than silently dropping
+// later leaks with a bare Warn (#6467). The userspace FIB config-static mirror
+// caps LEAKS at floor(window/N) of the SAME window (config.NextTableRuleWindow
+// via the shared verdict) so the kernel ip-rule table and the userspace
+// dataplane FIB agree on which leaks survive truncation (#9810).
 const maxNextTableRules = config.NextTableRuleWindow
 
 // ribGroupRulePriority is the LEGACY base priority for the pre-#3876
@@ -276,7 +279,21 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// ingressIfaces is pre-sorted and de-duplicated by
 		// DefaultInstanceIngressIfaces so the priorities are stable across
 		// applies despite Go map-iteration order.
+		// #9810 SYN-C-LEAK-05: the per-ingress expansion is FAULT-ATOMIC. A
+		// RuleAdd failure used to still count the slot (added++) and continue
+		// with the next interface, leaving the leak installed on a subset of
+		// its interfaces while the userspace mirror follows it on all of them.
+		// Now the first failure stops this leak and rolls its partial install
+		// back, and prio is not consumed — except by rules the rollback itself
+		// cannot delete, which still occupy kernel slots the cursor must
+		// account for (or a later leak would be programmed beyond the window
+		// clear() scans and leak permanently). EEXIST-counted rules are NOT
+		// rolled back: that content pre-exists (stale survivor of a failed
+		// clear, owned by clear() which is already loud), and deleting
+		// converged content to satisfy atomicity purity only loses coverage.
 		added := 0
+		leakFailed := false
+		var leakRules []*netlink.Rule
 		for _, iif := range ingressIfaces {
 			rule := netlink.NewRule()
 			rule.Dst = dst
@@ -286,11 +303,33 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			rule.IifName = iif
 
 			if err := n.ops.RuleAdd(rule); err != nil {
+				if isRuleAlreadyPresent(err) {
+					// EEXIST: the desired content is already in the kernel —
+					// converged, not a fault. Count the slot and continue.
+					added++
+					continue
+				}
 				errs = append(errs, fmt.Errorf(
 					"add next-table rule destination %s instance %s table %d iif %s: %w",
 					sr.Destination, sr.NextTable, tableID, iif, err))
+				leakFailed = true
+				break
 			}
+			leakRules = append(leakRules, rule)
 			added++
+		}
+		if leakFailed {
+			survivors := 0
+			for _, rule := range leakRules {
+				if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
+					survivors++
+					errs = append(errs, fmt.Errorf(
+						"roll back next-table rule destination %s instance %s table %d iif %s: %w",
+						sr.Destination, sr.NextTable, tableID, rule.IifName, err))
+				}
+			}
+			prio += survivors
+			continue
 		}
 		slog.Info("next-table rule added",
 			"destination", sr.Destination, "instance", sr.NextTable, "table", tableID,
@@ -344,66 +383,20 @@ func hasEligibleNextTableRoute(routes []*config.StaticRoute, tableIDs map[string
 // members. An unresolvable unit contributes nothing rather than an empty
 // ifname, so a rule is never emitted with an empty FRA_IIFNAME.
 //
-// Loopback is deliberately EXCLUDED. An `iif lo` rule matches locally
-// generated traffic — measured, including traffic from a socket bound to
-// ANOTHER VRF, which is the first exposed path #9420 names. Including lo to
-// keep host-originated default-instance traffic following the leak would
-// therefore reintroduce the cross-VRF hijack for every VRF-bound daemon (FRR
-// peering, DHCP relay, syslog, RPM probes, IPsec). The narrowing is recorded
-// in docs/rib-group-route-leaking.md and pkg/routing/README.md.
+// Loopback is deliberately EXCLUDED — and since #9810 actually excluded, in
+// the shared implementation: an `iif lo` rule matches locally generated
+// traffic — measured, including traffic from a socket bound to ANOTHER VRF,
+// which is the first exposed path #9420 names. Including lo to keep
+// host-originated default-instance traffic following the leak would therefore
+// reintroduce the cross-VRF hijack for every VRF-bound daemon (FRR peering,
+// DHCP relay, syslog, RPM probes, IPsec). The narrowing is recorded in
+// docs/rib-group-route-leaking.md and pkg/routing/README.md.
 func DefaultInstanceIngressIfaces(cfg *config.Config) []string {
-	if cfg == nil {
-		return nil
-	}
-	claimed := make(map[string]struct{})
-	for _, inst := range cfg.RoutingInstances {
-		if inst == nil {
-			continue
-		}
-		for _, ref := range inst.Interfaces {
-			claimed[ref] = struct{}{}
-			// An instance may claim the base interface ("ge-0/0/0") or a unit
-			// ref ("ge-0/0/0.0"). Record the resolved kernel name too so a
-			// claim written in either spelling excludes the same device.
-			if k := cfg.ResolveKernelIfName(ref); k != "" {
-				claimed[k] = struct{}{}
-			}
-		}
-	}
-
-	seen := make(map[string]struct{})
-	var out []string
-	for _, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		if _, taken := claimed[ifc.Name]; taken {
-			continue
-		}
-		for _, unit := range ifc.Units {
-			if unit == nil {
-				continue
-			}
-			ref := fmt.Sprintf("%s.%d", ifc.Name, unit.Number)
-			if _, taken := claimed[ref]; taken {
-				continue
-			}
-			iif := cfg.ResolveKernelIfName(ref)
-			if iif == "" {
-				continue
-			}
-			if _, taken := claimed[iif]; taken {
-				continue
-			}
-			if _, dup := seen[iif]; dup {
-				continue
-			}
-			seen[iif] = struct{}{}
-			out = append(out, iif)
-		}
-	}
-	sort.Strings(out)
-	return out
+	// #9810: the single shared implementation lives in pkg/config so the
+	// strict commit gate and the FIB/show verdict count the same set the
+	// applier installs per. This wrapper keeps the established call sites
+	// (daemon apply, tests) stable.
+	return config.DefaultInstanceIngressIfaces(cfg)
 }
 
 // nextTableFamilyOrdered returns routes stably partitioned IPv4-first, so the
@@ -491,6 +484,14 @@ func (n *nextTableManager) clear() error {
 // that exists but cannot be removed is a genuine stale-rule failure (#5118).
 func isRuleAlreadyGone(err error) bool {
 	return errors.Is(err, unix.ENOENT) || os.IsNotExist(err)
+}
+
+// isRuleAlreadyPresent reports whether a RuleAdd failure means the desired
+// rule content is already in the kernel (EEXIST — a stale survivor of a
+// failed clear). Symmetric to isRuleAlreadyGone for deletes (#9810
+// SYN-C-LEAK-05): such content counts as installed, not as a fault.
+func isRuleAlreadyPresent(err error) bool {
+	return errors.Is(err, unix.EEXIST)
 }
 
 // ribGroupManager reconciles rib-group route-leak ip rules. Stateless
@@ -844,7 +845,7 @@ func (r *PBRPortRange) String() string {
 
 // maxPBRRules bounds the number of ip rules the PBR builder/applier will
 // install, matching the pbrRulePriority window (clear() scans
-// [pbrRulePriority, pbrRulePriority+1000)). A larger DSCP×src×dst expansion
+// [pbrRulePriority, pbrRulePriority+maxPBRRules)). A larger DSCP×src×dst expansion
 // is truncated and reported as a degraded build (#3430 M3) rather than
 // silently dropping later terms' steering. Window size is the SSOT in
 // pkg/config (PBRRuleWindow) so the install cap and the userspace snapshot
@@ -981,7 +982,7 @@ func (p *pbrManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+1000 {
+			if r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules {
 				if err := p.ops.RuleDel(&r); err != nil {
 					// #3430 H3: a RuleDel failure leaves a STALE PBR rule in the
 					// kernel. Join it into the returned error so Apply does not
@@ -1017,7 +1018,9 @@ func (p *pbrManager) clear() error {
 // filter, so a slow-path (XDP_PASS) packet arriving on a DIFFERENT interface
 // could match the global rule and be steered into the wrong VRF. An attachment
 // whose ingress interface cannot be resolved fails CLOSED (the term is dropped
-// and the build degraded) rather than installing a global iif-less rule.
+// and the build degraded) rather than installing a global iif-less rule. A
+// loopback attachment (`interfaces lo0 unit N`, resolving detached, or `lo`,
+// the #9420 hijack) is likewise dropped LOUD per attachment (#9810 LEAD-O4).
 //
 // Kernel-mirror support matrix (#3730). An `ip rule` can only express a subset
 // of a firewall-filter term's `from` predicates, so the mirror is exact for the
@@ -1039,9 +1042,10 @@ func (p *pbrManager) clear() error {
 //     and the userspace filter path still enforces the term exactly.
 //
 // The returned error is non-nil when the build is DEGRADED: a term carries an
-// ip-rule-unrepresentable predicate (per the matrix above) or the expansion
-// exceeds maxPBRRules. The successfully-built rules are still returned so the
-// caller can install them and surface the degradation.
+// ip-rule-unrepresentable predicate (per the matrix above), an attachment is
+// unresolvable or on loopback (#9810 LEAD-O4), or the expansion exceeds
+// maxPBRRules. The successfully-built rules are still returned so the caller
+// can install them and surface the degradation.
 func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	if cfg == nil {
 		return nil, nil
@@ -1090,6 +1094,23 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 					att.Filter))
 				continue
 			}
+			if config.IsLoopbackIngress(att.Iif) {
+				// #9810 LEAD-O4: a filter attached on loopback (`interfaces lo0
+				// unit N`) resolves to the nonexistent `lo0`/`lo0.N`, whose rules
+				// install detached and only burn PBR window slots — or, for a
+				// literal `lo` unit, to the live kernel `lo`, the #9420
+				// cross-VRF hijack. Drop the attachment LOUD (fail-safe
+				// under-steer to the main table); the userspace filter path
+				// still enforces the term exactly.
+				errs = append(errs, fmt.Errorf(
+					"PBR filter %s: attachment on loopback ingress %q carries a "+
+						"routing-instance term, but loopback cannot steer kernel FBF "+
+						"rules (detached `iif lo0`, or the `iif lo` cross-VRF "+
+						"hijack); steering for this attachment is dropped (fail-safe "+
+						"under-steer)",
+					att.Filter, att.Iif))
+				continue
+			}
 			// Budget the remaining priority window for this attachment so a term
 			// whose Cartesian product would overrun the cap is dropped BEFORE it
 			// is expanded (#5683), not materialized-then-truncated.
@@ -1134,7 +1155,8 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 //     kernel FBF mirror (fail-closed under-steer to the main table) — an
 //     unrepresentable `except` set, an unknown DSCP name, a contradictory
 //     `routing-instance` + `discard`/`reject` term (#4534), an
-//     ip-rule-unrepresentable L4/per-packet predicate (#3730), or the
+//     ip-rule-unrepresentable L4/per-packet predicate (#3730), a loopback
+//     attachment (#9810 LEAD-O4, one per attachment, not per term), or the
 //     maxPBRRules overflow (#3430 M3, counted as one condition). A non-zero
 //     value means the kernel slow path under-steers vs the userspace fast path
 //     (which still enforces every term exactly).

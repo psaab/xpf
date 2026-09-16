@@ -50,6 +50,8 @@ func TestStaticRouteDispositionConflictRejected_5633(t *testing.T) {
 	t.Run("nexttable-plus-nexthop", func(t *testing.T) {
 		tree := flatTreeFromSets(t,
 			"set routing-instances secret instance-type virtual-router",
+			// #9810: one unclaimed unit (N=1) so the window gate passes and the disposition gate is the one that fires.
+			"set interfaces ge-0/0/0 unit 0",
 			"set routing-options static route 172.16.0.0/12 next-table secret.inet.0",
 			"set routing-options static route 172.16.0.0/12 next-hop 10.0.0.1",
 		)
@@ -154,6 +156,8 @@ func TestStaticRouteLegitMultipathAccepted_5633(t *testing.T) {
 	t.Run("single-dispositions", func(t *testing.T) {
 		tree := flatTreeFromSets(t,
 			"set routing-instances secret instance-type virtual-router",
+			// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leak.
+			"set interfaces ge-0/0/0 unit 0",
 			"set routing-options static route 10.1.0.0/16 discard",
 			"set routing-options static route 10.2.0.0/16 reject",
 			"set routing-options static route 10.3.0.0/16 next-hop 10.0.0.1",

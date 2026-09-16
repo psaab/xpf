@@ -223,6 +223,8 @@ func TestNextTableStaticRoutes(t *testing.T) {
 		// The next-table target routing-instance must be defined or the
 		// #5693 definedness gate rejects the commit.
 		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
+		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leak.
+		"set interfaces ge-0/0/0 unit 0",
 		"set routing-options static route 0.0.0.0/0 next-table Comcast-GigabitPro.inet.0",
 		"set routing-options static route 10.1.10.0/24 next-hop 50.247.115.22",
 	}
@@ -261,6 +263,11 @@ func TestNextTableStaticRoutes(t *testing.T) {
 	hierInput := `routing-instances {
     Comcast-GigabitPro {
         instance-type virtual-router;
+    }
+}
+interfaces {
+    ge-0/0/0 {
+        unit 0;
     }
 }
 routing-options {
@@ -2881,6 +2888,8 @@ func TestIPv6NextTableStaticRoutes(t *testing.T) {
 		// #5693 definedness gate rejects the commit.
 		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
 		"set routing-instances ATT instance-type virtual-router",
+		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leaks.
+		"set interfaces ge-0/0/0 unit 0",
 		"set routing-options rib inet6.0 static route ::/0 next-table Comcast-GigabitPro.inet6.0",
 		"set routing-options rib inet6.0 static route 2001:db8::/32 next-table ATT.inet6.0",
 		"set routing-options static route 0.0.0.0/0 next-table Comcast-GigabitPro.inet.0",
