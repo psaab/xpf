@@ -782,12 +782,22 @@ func (tc *TunnelConfig) WgHasEndpoint() bool {
 
 // RoutingInstanceConfig represents a VRF-based routing instance.
 type RoutingInstanceConfig struct {
-	Name              string
-	Description       string
-	InstanceType      string         // "virtual-router" or "vrf"
-	Interfaces        []string       // interfaces belonging to this instance
-	StaticRoutes      []*StaticRoute // per-instance static routes
-	Inet6StaticRoutes []*StaticRoute // per-instance rib inet6.0 static routes
+	Name         string
+	Description  string
+	InstanceType string // instance-type: "forwarding" (no VRF device, statics-only FBF table), "virtual-router" or "vrf" (VRF); "" (omitted) means VRF — every consumer treats non-"forwarding" as a VRF (#9814)
+	// instanceTypeExplicit9814 records whether `instance-type` was AUTHORED
+	// for this instance (#9814 round 2). The compiler sets it in
+	// `case "instance-type"` alongside the value — including when the value
+	// is empty — so the strict gate can distinguish a genuinely OMITTED type
+	// (silent VRF default) from an explicitly-EMPTY one (malformed: an
+	// `instance-type "";` spelling, a valueless `instance-type;`, or a stray
+	// nested under an untyped leaf and hoisted by #9792, any of which would
+	// otherwise overwrite a valid value with "" and skip the gate). Unexported:
+	// same-package use only, invisible to encoding/json (golden-safe).
+	instanceTypeExplicit9814 bool
+	Interfaces               []string       // interfaces belonging to this instance
+	StaticRoutes             []*StaticRoute // per-instance static routes
+	Inet6StaticRoutes        []*StaticRoute // per-instance rib inet6.0 static routes
 	// UnhandledRibs mirrors RoutingOptionsConfig.UnhandledRibs for this
 	// instance (#7512). compileRoutingInstances copies the fields it wants off
 	// the per-instance RoutingOptionsConfig one by one, so this must be carried
