@@ -6,9 +6,17 @@ import (
 )
 
 // natPoolAlarmInapplicableWarnings reports every source-NAT pool whose
-// configured `pool-utilization-alarm` can NEVER fire (deterministic pools,
-// #9902 F-026) or measures only a PARTIAL signal (address-only pools, #7361
-// as narrowed by #9896).
+// configured `pool-utilization-alarm` measures only a PARTIAL signal:
+// address-only pools (#7361 as narrowed by #9896) and deterministic pools
+// (#9902 F-026 as narrowed by the #9896 fold 2).
+//
+// DETERMINISTIC NARROWING. Deterministic arms enforce the same tracked-flow
+// cap as PAT pools, so the TRACKED-FLOW leg fires for this class on a helper
+// reporting max_tracked_flows (nothing at all on an older helper). What stays
+// true: the ports leg is excluded — aggregate utilization cannot predict
+// per-block exhaustion — so a subscriber hitting its own block budget is
+// silent to this alarm, and per-block fullness is watched only by the
+// exhaustion-event half of the monitor.
 //
 // THE DEFECT. `used_ports` is a popcount over the allocator's occupancy
 // bitmaps. `reserve_address_only` never touches occupancy — it records
@@ -85,9 +93,12 @@ func natPoolAlarmInapplicableWarnings(cfg *Config) []string {
 			out = append(out, fmt.Sprintf(
 				"security nat source pool %q is deterministic (per-subscriber "+
 					"blocks), so the configured `pool-utilization-alarm "+
-					"raise-threshold %d` can NEVER fire for it: aggregate "+
-					"utilization cannot predict per-block exhaustion. The alarm "+
-					"still applies to port-bearing pools",
+					"raise-threshold %d` evaluates only the tracked-flow leg "+
+					"for it — nothing at all on a helper predating the flow-cap "+
+					"counters: aggregate port utilization cannot predict per-block "+
+					"exhaustion, and a subscriber hitting its own block budget "+
+					"is silent to this alarm. The alarm still applies fully to "+
+					"port-bearing PAT pools",
 				name, cfg.Security.NAT.PoolUtilizationAlarm.RaiseThreshold))
 			continue
 		}

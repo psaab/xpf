@@ -122,7 +122,7 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 		EventStreamSessionCloseSent: 90, EventStreamSessionCloseDropped: 3,
 		EventStreamSessionCreateSent: 12, EventStreamSessionCreateDropped: 1,
 		SourceNATPools: []userspace.SourceNATPoolStatus{
-			{PoolName: "pool-a", RuleName: "rule-a", PersistentNAT: true, PersistentNATPermit: "target-host", LiveFlows: 3, UsedPorts: 30, PersistentLeases: 2, AllocationsTotal: 10, ReusesTotal: 4, ExhaustionTotal: 1},
+			{PoolName: "pool-a", RuleName: "rule-a", PersistentNAT: true, PersistentNATPermit: "target-host", LiveFlows: 3, MaxTrackedFlows: 64, UsedPorts: 30, PersistentLeases: 2, AllocationsTotal: 10, ReusesTotal: 4, ExhaustionTotal: 1},
 		},
 		CoSInterfaces: []userspace.CoSInterfaceStatus{
 			{

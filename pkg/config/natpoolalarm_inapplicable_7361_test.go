@@ -143,13 +143,13 @@ func TestAdvisoryReachesValidateConfig7361(t *testing.T) {
 	}
 }
 
-// DETERMINISTIC pools cannot fire the utilization alarm either (#9902 F-026):
-// aggregate utilization cannot predict per-block exhaustion. They get their
-// OWN sentence — never the address-only one, even when the pool is ALSO
-// address-only (the block structure, not the port mode, is the operative
-// cause). This replaces the #7361-era "not flagged" contract: silence about
-// a threshold that cannot fire is the harm #7361 exists to end, and it
-// applies to this class identically.
+// DETERMINISTIC pools measure only a partial signal (#9902 F-026, narrowed by
+// the #9896 fold 2): the ports leg is excluded — aggregate utilization cannot
+// predict per-block exhaustion — while the tracked-flow leg fires for this
+// class. They get their OWN sentence — never the address-only one, even when
+// the pool is ALSO address-only (the block structure, not the port mode, is
+// the operative cause). Silence about a threshold that fires only partially
+// is the harm #7361 exists to end, and it applies to this class identically.
 func TestDeterministicPoolFlagged9902(t *testing.T) {
 	w := warnFor7361(t,
 		"set security nat source pool det address 203.0.113.40",

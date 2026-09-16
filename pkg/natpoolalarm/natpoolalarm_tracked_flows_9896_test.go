@@ -60,16 +60,18 @@ func TestDualThresholdCrossingSingleSyslog_9896(t *testing.T) {
 }
 
 // TestFlowLegMissingFallsBackToPorts_9896: MaxTrackedFlows==0 (helper predates
-// the counters) makes the flow leg inapplicable — LiveFlows must be ignored
-// and the ports ratio alone decides.
+// the counters) makes the flow leg inapplicable — LiveFlows AND
+// PersistentLeases must be ignored and the ports ratio alone decides.
 func TestFlowLegMissingFallsBackToPorts_9896(t *testing.T) {
 	m, rec, vb := newMon()
 	cfg := cfgWith(80, 70, false)
-	// Absurd LiveFlows with no cap: must NOT raise (ports 10%).
-	vb.set(coherentView(cfg, poolStatusFlows("p1", 1, 1, 100, 10, 1<<60, 0)))
+	// Absurd LiveFlows + leases with no cap: must NOT raise (ports 10%).
+	s := poolStatusFlows("p1", 1, 1, 100, 10, 1<<60, 0)
+	s.PersistentLeases = 1 << 60
+	vb.set(coherentView(cfg, s))
 	m.evaluate()
 	if len(m.ActiveAlarms()) != 0 || len(rec.snapshot()) != 0 {
-		t.Fatalf("unknown cap must ignore LiveFlows; alarms=%+v lines=%+v",
+		t.Fatalf("unknown cap must ignore LiveFlows and leases; alarms=%+v lines=%+v",
 			m.ActiveAlarms(), rec.snapshot())
 	}
 	// And the ports leg still raises on its own with no flow data.
@@ -236,5 +238,145 @@ func TestAddressOnlyAbsentSampleHolds_9896(t *testing.T) {
 	}
 	if reason := m.InapplicableReason("p1"); reason != "" {
 		t.Fatalf("HOLD must not touch the record, got %q", reason)
+	}
+}
+
+// TestDeterministicFlowLegRaises_9896 (fold 2): deterministic arms enforce
+// the SAME tracked-flow cap (allocate_deterministic_v4/v6 at
+// allocator.rs:2930,3088; reserve_address_only_maybe_persistent at :3731 via
+// match_rules.rs:678-682), so the flow leg is evaluated independently of
+// deterministic classification. The concrete case: one address, a /28 of
+// subscribers, 64,512 tracked flows and zero used ports — refusing while the
+// ports leg reads 0%. Must raise at 100%, and the pool must NOT be recorded
+// inapplicable (its alarm can fire).
+func TestDeterministicFlowLegRaises_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, true)
+	vb.set(coherentView(cfg,
+		poolStatusFlows("p1", 1, 1024, 65535, 0, 64_512, 64_512)))
+	m.evaluate()
+	if got := countMatch(rec.snapshot(), raisedTag); got != 1 {
+		t.Fatalf("deterministic at-cap pool must raise exactly once, got %d", got)
+	}
+	alarms := m.ActiveAlarms()
+	if len(alarms) != 1 || alarms[0].CurrentPct != 100 {
+		t.Fatalf("expected active alarm at 100%%, got %+v", alarms)
+	}
+	if reason := m.InapplicableReason("p1"); reason != "" {
+		t.Fatalf("flow-measurable pool must not be inapplicable, got %q", reason)
+	}
+}
+
+// TestDeterministicPortsLegExcluded_9896 (fold 2): the PORTS leg stays
+// excluded for deterministic pools — aggregate utilization cannot predict
+// per-block exhaustion. 95% ports with a healthy flow leg must NOT raise
+// (a PAT pool raises on this sample).
+func TestDeterministicPortsLegExcluded_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, true)
+	vb.set(coherentView(cfg, poolStatusFlows("p1", 1, 1, 100, 95, 5, 100)))
+	m.evaluate()
+	if len(m.ActiveAlarms()) != 0 || len(rec.snapshot()) != 0 {
+		t.Fatalf("ports pressure alone must not raise a deterministic pool; alarms=%+v lines=%+v",
+			m.ActiveAlarms(), rec.snapshot())
+	}
+	if reason := m.InapplicableReason("p1"); reason != "" {
+		t.Fatalf("flow-measurable pool must not be inapplicable, got %q", reason)
+	}
+}
+
+// TestDeterministicHealthyNoRaise_9896 (fold 2): a deterministic pool with a
+// healthy flow leg stays silent AND stays measurable (no inapplicable
+// record — silence must read as headroom, not as cannot-fire).
+func TestDeterministicHealthyNoRaise_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, true)
+	vb.set(coherentView(cfg, poolStatusFlows("p1", 1, 1024, 65535, 0, 1000, 64_512)))
+	m.evaluate()
+	if len(m.ActiveAlarms()) != 0 || len(rec.snapshot()) != 0 {
+		t.Fatalf("healthy pool must stay silent; alarms=%+v lines=%+v",
+			m.ActiveAlarms(), rec.snapshot())
+	}
+	if reason := m.InapplicableReason("p1"); reason != "" {
+		t.Fatalf("healthy pool must not be inapplicable, got %q", reason)
+	}
+}
+
+// TestDeterministicFlowLegRecovers_9896 (fold 2): a deterministic alarm
+// raised by the flow leg clears — with exactly one clear line — when live
+// flows drop below the clear threshold.
+func TestDeterministicFlowLegRecovers_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, true)
+	vb.set(coherentView(cfg, poolStatusFlows("p1", 1, 1024, 65535, 0, 64_512, 64_512)))
+	m.evaluate() // raise via flow leg
+	if len(m.ActiveAlarms()) != 1 {
+		t.Fatal("precondition: flow-leg raise")
+	}
+	rec.reset()
+	vb.set(coherentView(cfg, poolStatusFlows("p1", 1, 1024, 65535, 0, 1000, 64_512)))
+	m.evaluate()
+	if len(m.ActiveAlarms()) != 0 {
+		t.Fatal("flow leg below clear must clear the alarm")
+	}
+	if got := countMatch(rec.snapshot(), clearedTag); got != 1 {
+		t.Fatalf("recovery must emit exactly one clear, got %d", got)
+	}
+}
+
+// TestDeterministicNoCapStaysInapplicable_9896 (fold 2): deterministic + no
+// flow-cap data (MaxTrackedFlows == 0) has NEITHER leg measurable — the
+// alarm cannot fire, so the pool is recorded inapplicable and nothing
+// raises. The reason keeps the per-block sentence (pinned by the #9902
+// exhaustion cell) and adds the missing-cap cause.
+func TestDeterministicNoCapStaysInapplicable_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, true)
+	vb.set(coherentView(cfg, poolStatusFlows("p1", 1, 1, 100, 95, 1<<60, 0)))
+	m.evaluate()
+	if len(m.ActiveAlarms()) != 0 || len(rec.snapshot()) != 0 {
+		t.Fatalf("unmeasurable pool must not raise; alarms=%+v lines=%+v",
+			m.ActiveAlarms(), rec.snapshot())
+	}
+	if reason := m.InapplicableReason("p1"); reason == "" {
+		t.Fatal("unmeasurable deterministic pool must be recorded inapplicable")
+	}
+}
+
+// TestLeaseLegRaisesAtCap_9896 (fold 2): fresh-lease admission refuses at
+// the same cap (allocator.rs:2209,2215,4511,4514), so the flow leg is
+// max(live, leases). Idle-lease accumulation at the cap with a healthy live
+// leg and a low ports ratio must still raise.
+func TestLeaseLegRaisesAtCap_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, false)
+	s := poolStatusFlows("p1", 5, 1024, 65535, 10_000, 1000, 262_144)
+	s.PersistentLeases = 262_144
+	vb.set(coherentView(cfg, s))
+	m.evaluate()
+	if got := countMatch(rec.snapshot(), raisedTag); got != 1 {
+		t.Fatalf("lease-at-cap pool must raise exactly once, got %d", got)
+	}
+	alarms := m.ActiveAlarms()
+	if len(alarms) != 1 || alarms[0].CurrentPct != 100 {
+		t.Fatalf("expected active alarm at 100%%, got %+v", alarms)
+	}
+}
+
+// TestLeaseLegBelowLiveDefersToLive_9896 (fold 2): the lease leg joins the
+// max — it never LOWERS the utilization. Leases below live leave the live
+// percentage in force.
+func TestLeaseLegBelowLiveDefersToLive_9896(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, false)
+	s := poolStatusFlows("p1", 5, 1024, 65535, 10_000, 262_144, 262_144)
+	s.PersistentLeases = 1000
+	vb.set(coherentView(cfg, s))
+	m.evaluate()
+	if got := countMatch(rec.snapshot(), raisedTag); got != 1 {
+		t.Fatalf("live-at-cap pool must raise exactly once, got %d", got)
+	}
+	if alarms := m.ActiveAlarms(); len(alarms) != 1 || alarms[0].CurrentPct != 100 {
+		t.Fatalf("expected active alarm at 100%%, got %+v", alarms)
 	}
 }

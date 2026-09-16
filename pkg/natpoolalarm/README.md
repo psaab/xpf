@@ -12,12 +12,12 @@ that behaviour entirely in the Go control plane.
 ## What it does
 
 A slow (10s) daemon-resident loop (`Monitor.run`) samples the helper's
-LAST-APPLIED NAT pool snapshot and, for each rule-referenced non-deterministic
-source pool, computes utilization as the max of the ports leg
+LAST-APPLIED NAT pool snapshot and, for each rule-referenced source pool,
+computes utilization as the max of the ports leg
 `UsedPorts * 100 / (AddressCount * (PortHigh - PortLow + 1))` and the
-tracked-flow leg `LiveFlows * 100 / MaxTrackedFlows` (#9896 — the cap that
-actually refuses new flows; address-only pools evaluate the flow leg alone),
-and applies hysteresis:
+tracked-flow leg `max(LiveFlows, PersistentLeases) * 100 / MaxTrackedFlows`
+(#9896 — the cap that actually refuses new flows; deterministic and
+address-only pools evaluate the flow leg alone), and applies hysteresis:
 
 - **RAISE** when utilization `>= raise-threshold` (record an active alarm).
 - **CLEAR** when it drops `< clear-threshold` (strict less-than).
@@ -53,8 +53,8 @@ provable fixed point between two wrong sources:
 When the view is `!Available` (helper down) or `!HelperCoherent` (mid-apply,
 status gen != applied gen), the monitor HOLDs ALL alarms — no clear — because no
 data is not a decision to clear. Config-derived clears (rule un-reference, pool
-removal, deterministic-convert, feature-disabled, nil-config) DO fire once a
-coherent applied config is available.
+removal, feature-disabled, nil-config — plus a convert to a class whose legs
+are unmeasurable) DO fire once a coherent applied config is available.
 
 ## Constraints honoured
 
@@ -76,20 +76,25 @@ coherent applied config is available.
   never sums (summing would double/triple-count → false alarms). Among
   same-name rows the CONSTRUCTED allocator wins (`MaxTrackedFlows>0`, tie →
   first): a poisoned rule (#9874) keeps its pool_mode but builds no allocator,
-  and its default-zeros row must not shadow the live one (#9902 F-026).
-- Deterministic pools are INAPPLICABLE for utilization (aggregate utilization
-  cannot predict per-block exhaustion) and marked as such at runtime and at
-  commit time — but their allocator-reported exhaustion events ARE watched
-  (see below). Same for address-only pools.
+  and its `MaxTrackedFlows==0` row must not shadow the live one (#9902 F-026).
+- Deterministic pools evaluate the flow leg alone: their arms enforce the same
+  tracked-flow cap (`allocator.rs:2930,3088,3731` — a deterministic pool at the
+  cap refuses while port utilization reads healthy), so the flow leg is
+  evaluated independently of deterministic classification. The ports leg stays
+  excluded (aggregate utilization cannot predict per-block exhaustion); with no
+  flow-cap data the pool is recorded inapplicable. Commit time warns the
+  narrowed partial-signal claim. Allocator-reported exhaustion events ARE
+  watched for every class (see below).
 - Persistent-NAT pools use raw `UsedPorts` for the ports leg; the tracked-flow
-  leg (#9896) covers their divergence (many live flows per translated tuple).
+  leg (#9896) covers both their divergence (many live flows per translated
+  tuple) and their idle-lease accumulation (fresh-lease admission refuses at
+  the same cap — the leg is `max(live, leases)`).
 - Address-only (`port no-translation`) pools have no ports leg (`UsedPorts` is
   permanently 0) but raise/clear on the tracked-flow leg; with no flow-cap
   data the pool is recorded inapplicable (#7361, narrowed by #9896).
 
-## Exhaustion-event alarm (#9902 F-026)
-
-Utilization cannot see every pool class, so the same monitor also watches the
+Utilization cannot see every exhaustion mode (per-subscriber block fullness,
+reverse-identity collision), so the same monitor also watches the
 allocator's cumulative `exhaustion_total` per pool — "allocator-REPORTED
 exhaustion events" (block/pool/cap fullness, deterministic bounds,
 address-only collision; config-error/drift refusals reusing the reason string
@@ -128,9 +133,10 @@ raise=0/clear=0 is an always-firing alarm). See `docs/config-schema.md` #2079.
 - `natpoolalarm_test.go` — raise-once, clear-once, hysteresis no-flap, boundary
   comparators, registry populate/clear, rule-referenced eligibility +
   prune-on-unreference, eligible-but-absent HOLD, transient-uncomputable HOLD,
-  deterministic skip + det-convert clear, no-double-count, nil-config / feature-
-  disabled clear-all, unavailable / not-coherent HOLD-all, updatePct-no-syslog,
-  syslog severity/shape, start/stop. Mutation-verified non-tautological.
+  deterministic flow-leg (ports exclusion preserved) + det-convert clear,
+  no-double-count, nil-config / feature-disabled clear-all, unavailable /
+  not-coherent HOLD-all, updatePct-no-syslog, syslog severity/shape, start/stop.
+  Mutation-verified non-tautological.
 - `natpoolalarm_exhaustion_9902_test.go` — exhaustion first-sight silence,
   raise/refresh/clear-3, id×{below,equal,above} + procGen×{below,equal,above}
   silent rebase, same-key below/equal/above, rebase-no-clear-credit,
@@ -140,16 +146,19 @@ raise=0/clear=0 is an always-firing alarm). See `docs/config-schema.md` #2079.
   unavailable/incoherent HOLD, severity/shape.
 - `natpoolalarm_tracked_flows_9896_test.go` — at-cap fixture raises, dual-leg
   crossing emits one line, `MaxTrackedFlows==0` falls back to ports-only,
-  flow-leg clear + hysteresis-band hold.
+  flow-leg clear + hysteresis-band hold, address-only flow-leg cells,
+  deterministic flow-leg raise / ports-exclusion / healthy / recovery /
+  no-cap cells, lease-leg raise + defer-to-live.
 - `render_test.go` — shared `show security alarms` render (detail/summary/empty,
   numbering continuation), utilization + exhaustion.
 - `../dataplane/userspace/applied_nat_view_test.go` — coherency, the FIB-bump
   fixed point, dedup, unavailable-before-apply.
 - `../dataplane/userspace/applied_nat_view_9902_test.go` — constructed-first
   selection (both orders, import-only vs poisoned, identical dedup),
-  exhaustion-identity projection, allocator_id wire lockstep, status-sequence
-  publish/fail/clear semantics.
+  exhaustion-identity + flow-leg projection, allocator_id and flow-cap wire
+  lockstep, status-sequence publish/fail/clear semantics.
 - `../daemon/natpoolalarm_projection_9902_test.go` — sampler field projection.
 - `../config/compiler_nat_pool_alarm_test.go` — commit-time threshold validation.
 - `../config/natpoolalarm_inapplicable_7361_test.go` — address-only advisory +
-  deterministic sentence (#9902).
+  deterministic sentence (narrowed to the partial-signal claim, #9896).
+- `../../api/metrics_test.go` — `max_tracked_flows` denominator emission.

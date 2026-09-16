@@ -47,6 +47,11 @@ type AppliedNATPoolStatus struct {
 	// inapplicable downstream.
 	LiveFlows       uint64
 	MaxTrackedFlows uint64
+	// PersistentLeases is the pool's idle-lease table occupancy (#9896 fold
+	// 2): fresh-lease admission refuses at the same cap, so the alarm's
+	// flow leg evaluates max(LiveFlows, PersistentLeases). Meaningful only
+	// when MaxTrackedFlows > 0.
+	PersistentLeases uint64
 }
 
 // AppliedNATView is a single generation-coherent snapshot for the NAT
@@ -153,10 +158,12 @@ func (m *Manager) AppliedNATView() AppliedNATView {
 		}
 		// Dedup by pool name, preferring CONSTRUCTED allocators (#9902
 		// F-026): a poisoned rule (#9874) keeps its pool_mode but builds no
-		// allocator, and its status row reports a default allocator's
-		// zeros — first-wins would take the poisoned row whenever it sorts
-		// first. Constructed ⟺ MaxTrackedFlows>0 is airtight (the gate
-		// requires total_pool>0 + no failure + !poisoned, and a constructed
+		// allocator, and its status row reports MaxTrackedFlows == 0 — the
+		// signal is the zero CAP, not a zeroed row (a default allocator
+		// still mints a nonzero allocator_id at allocator.rs:1412) — so
+		// first-wins would take the poisoned row whenever it sorts first.
+		// Constructed ⟺ MaxTrackedFlows>0 is airtight (the gate requires
+		// total_pool>0 + no failure + !poisoned, and a constructed
 		// capacity≥1 always yields max≥1; the default is 0), so a
 		// constructed row displaces a default one; ties keep the first.
 		// NEVER sum. This fixes selection for UsedPorts too (same rows).
@@ -167,15 +174,16 @@ func (m *Manager) AppliedNATView() AppliedNATView {
 		}
 		selectedMax[p.PoolName] = p.MaxTrackedFlows
 		pools[p.PoolName] = AppliedNATPoolStatus{
-			PoolName:        p.PoolName,
-			AddressCount:    p.AddressCount,
-			PortLow:         p.PortLow,
-			PortHigh:        p.PortHigh,
-			UsedPorts:       p.UsedPorts,
-			ExhaustionTotal: p.ExhaustionTotal,
-			AllocatorID:     p.AllocatorID,
-			LiveFlows:       p.LiveFlows,
-			MaxTrackedFlows: p.MaxTrackedFlows,
+			PoolName:         p.PoolName,
+			AddressCount:     p.AddressCount,
+			PortLow:          p.PortLow,
+			PortHigh:         p.PortHigh,
+			UsedPorts:        p.UsedPorts,
+			ExhaustionTotal:  p.ExhaustionTotal,
+			AllocatorID:      p.AllocatorID,
+			LiveFlows:        p.LiveFlows,
+			MaxTrackedFlows:  p.MaxTrackedFlows,
+			PersistentLeases: p.PersistentLeases,
 		}
 	}
 

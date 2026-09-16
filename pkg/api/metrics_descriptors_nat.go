@@ -41,6 +41,15 @@ func (c *xpfCollector) initNATDescriptors() {
 		"Live source NAT pool flow allocations tracked by the userspace dataplane.",
 		[]string{"pool", "rule"}, nil,
 	)
+	// #9896 fold 2: the DENOMINATOR for the live gauge above. A live count
+	// without its cap cannot tell "pool nearly refusing" from "pool idle",
+	// and the pair is what the pool-utilization alarm's tracked-flow leg
+	// evaluates — export it so PromQL can alarm identically.
+	c.userspaceSNATPoolMaxTrackedFlows = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_max_tracked_flows",
+		"Source NAT pool tracked-flow cap enforced by the userspace dataplane allocator.",
+		[]string{"pool", "rule"}, nil,
+	)
 	c.userspaceSNATPoolUsedPorts = prometheus.NewDesc(
 		"xpf_userspace_source_nat_pool_used_ports",
 		"Source NAT pool translated ports currently owned by the userspace dataplane allocator.",

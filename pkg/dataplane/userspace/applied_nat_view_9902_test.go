@@ -12,8 +12,9 @@ import (
 )
 
 // poisonedRow9902 is a #9874-poisoned rule's status row: the rule keeps its
-// pool_mode but builds no allocator, so the row reports a default
-// allocator's zeros (MaxTrackedFlows == 0).
+// pool_mode but builds no allocator, so the row reports MaxTrackedFlows == 0
+// (the signal is the zero CAP — a default allocator still mints a nonzero
+// allocator_id, so "zeros" would be the wrong word for the row).
 func poisonedRow9902(rule string) SourceNATPoolStatus {
 	return SourceNATPoolStatus{RuleName: rule, PoolName: "p1"}
 }
@@ -27,6 +28,7 @@ func constructedRow9902(rule string, allocations uint64) SourceNATPoolStatus {
 		RuleName: "r-" + rule, PoolName: "p1",
 		AddressCount: 1, PortLow: 1, PortHigh: 100,
 		UsedPorts: 50, MaxTrackedFlows: 90,
+		LiveFlows: 43, PersistentLeases: 13,
 		AllocationsTotal: allocations,
 		ExhaustionTotal:  3, AllocatorID: 9,
 	}
@@ -65,6 +67,9 @@ func TestAppliedNATViewSelectsConstructed9902(t *testing.T) {
 			if p.UsedPorts != 50 || p.ExhaustionTotal != 3 || p.AllocatorID != 9 {
 				t.Fatalf("constructed row must win, got %+v", p)
 			}
+			if p.LiveFlows != 43 || p.MaxTrackedFlows != 90 || p.PersistentLeases != 13 {
+				t.Fatalf("constructed row's flow leg must project, got %+v", p)
+			}
 		})
 	}
 }
@@ -89,6 +94,9 @@ func TestAppliedNATViewImportOnlyBeatsPoisoned9902(t *testing.T) {
 			if p.UsedPorts != 50 || p.ExhaustionTotal != 3 || p.AllocatorID != 9 {
 				t.Fatalf("import-only row must win, got %+v", p)
 			}
+			if p.LiveFlows != 43 || p.MaxTrackedFlows != 90 || p.PersistentLeases != 13 {
+				t.Fatalf("import-only row's flow leg must project, got %+v", p)
+			}
 		})
 	}
 }
@@ -104,6 +112,8 @@ func TestAppliedNATViewIdenticalRowsDedup9902(t *testing.T) {
 	}
 	if p := v.Pools["p1"]; p.UsedPorts != 50 || p.ExhaustionTotal != 3 {
 		t.Fatalf("deduped row must keep one value, got %+v", p)
+	} else if p.LiveFlows != 43 || p.MaxTrackedFlows != 90 || p.PersistentLeases != 13 {
+		t.Fatalf("deduped row's flow leg must keep one value, got %+v", p)
 	}
 }
 
@@ -134,6 +144,9 @@ func TestAppliedNATViewCarriesExhaustionIdentity9902(t *testing.T) {
 	p := v.Pools["p1"]
 	if p.ExhaustionTotal != 3 || p.AllocatorID != 9 {
 		t.Fatalf("selected row's identity must project, got %+v", p)
+	}
+	if p.LiveFlows != 43 || p.MaxTrackedFlows != 90 || p.PersistentLeases != 13 {
+		t.Fatalf("selected row's flow leg must project, got %+v", p)
 	}
 }
 
@@ -174,6 +187,56 @@ func TestAllocatorIDWireKeysLockstepWithRust9902(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"`+rustKey+`"`) {
 		t.Fatalf("%s does not contain the key %q — regenerate the fixture", fixture, rustKey)
+	}
+}
+
+// Go/Rust wire-key lockstep for the #9896 flow-cap pair, extending the
+// allocator_id lockstep above to live_flows/max_tracked_flows
+// (protocol/nat.rs:428-435 <-> protocol_counters.go:17,20). Same failure
+// being guarded: both fields are additive (`default` on the Rust side,
+// `omitempty` on the Go side), so a key mismatch never fails a decode — it
+// reads 0 forever. A drifted max reads as "helper predating the counters"
+// and silently kills the flow leg; a drifted live reads as an idle pool and
+// holds every flow alarm at 0%.
+func TestFlowCapWireKeysLockstepWithRust9896(t *testing.T) {
+	for _, tc := range []struct {
+		rustField string
+		goField   string
+		want      uint64
+	}{
+		{"live_flows", "LiveFlows", 43},
+		{"max_tracked_flows", "MaxTrackedFlows", 90},
+	} {
+		rustKey := rustSourceNATPoolRename9392(t, tc.rustField)
+		field, ok := reflect.TypeOf(SourceNATPoolStatus{}).FieldByName(tc.goField)
+		if !ok {
+			t.Fatalf("SourceNATPoolStatus has no field %s — the guard cannot run", tc.goField)
+		}
+		goKey, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if goKey != rustKey {
+			t.Fatalf("wire-key drift: Go decodes %q, Rust emits %q (#9896 %s)", goKey, rustKey, tc.goField)
+		}
+
+		var pool SourceNATPoolStatus
+		payload := []byte(`{"` + rustKey + `":` + itoa9392(tc.want) + `}`)
+		if err := json.Unmarshal(payload, &pool); err != nil {
+			t.Fatalf("unmarshal %s: %v", payload, err)
+		}
+		got := reflect.ValueOf(pool).FieldByName(tc.goField).Uint()
+		if got != tc.want {
+			t.Fatalf("%s = %d after decoding %s, want %d", tc.goField, got, payload, tc.want)
+		}
+
+		// Byte-level leg: neither key has skip_serializing_if, so the
+		// committed default specimen carries both.
+		fixture := filepath.Join("..", "..", "..", "userspace-dp", "tests", "fixtures", "protocol_wire_v1.json")
+		raw, err := os.ReadFile(fixture)
+		if err != nil {
+			t.Fatalf("read %s: %v", fixture, err)
+		}
+		if !strings.Contains(string(raw), `"`+rustKey+`"`) {
+			t.Fatalf("%s does not contain the key %q — regenerate the fixture", fixture, rustKey)
+		}
 	}
 }
 

@@ -547,15 +547,16 @@ func writeSourceNATPoolsSection(b *strings.Builder, status userspace.ProcessStat
 		return rows[i].RuleName < rows[j].RuleName
 	})
 	fmt.Fprintln(b, "Source NAT pools:")
-	fmt.Fprintf(b, "  %-20s %-20s %-6s %-16s %-11s %-10s %-10s %-10s %-10s %-10s\n",
-		"Pool", "Rule", "Persist", "Permit", "LiveFlows", "UsedPorts", "Leases", "Alloc", "Reuse", "Exhaust")
+	fmt.Fprintf(b, "  %-20s %-20s %-6s %-16s %-11s %-11s %-10s %-10s %-10s %-10s %-10s\n",
+		"Pool", "Rule", "Persist", "Permit", "LiveFlows", "MaxFlows", "UsedPorts", "Leases", "Alloc", "Reuse", "Exhaust")
 	for _, row := range rows {
-		fmt.Fprintf(b, "  %-20s %-20s %-6t %-16s %-11d %-10d %-10d %-10d %-10d %-10d\n",
+		fmt.Fprintf(b, "  %-20s %-20s %-6t %-16s %-11d %-11d %-10d %-10d %-10d %-10d %-10d\n",
 			row.PoolName,
 			row.RuleName,
 			row.PersistentNAT,
 			persistentNATPermitMode(row),
 			row.LiveFlows,
+			row.MaxTrackedFlows,
 			row.UsedPorts,
 			row.PersistentLeases,
 			row.AllocationsTotal,

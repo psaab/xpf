@@ -371,6 +371,12 @@ func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Me
 			labels...,
 		)
 		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolMaxTrackedFlows,
+			prometheus.GaugeValue,
+			float64(pool.MaxTrackedFlows),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
 			c.userspaceSNATPoolUsedPorts,
 			prometheus.GaugeValue,
 			float64(pool.UsedPorts),

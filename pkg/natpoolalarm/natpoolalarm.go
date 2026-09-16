@@ -69,6 +69,13 @@ type PoolStatus struct {
 	// LiveFlows is the helper's live tracked-flow count for the pool
 	// (live_by_flow.len()). Meaningful only when MaxTrackedFlows > 0.
 	LiveFlows uint64
+	// PersistentLeases is the helper's idle-lease table occupancy for the
+	// pool (persistent_by_source.len()). Fresh-lease admission refuses at
+	// the SAME cap as live flows (allocator.rs:2209,2215,4511,4514), so
+	// the flow leg evaluates max(LiveFlows, PersistentLeases) — idle-lease
+	// accumulation otherwise refuses with the live leg healthy. Meaningful
+	// only when MaxTrackedFlows > 0.
+	PersistentLeases uint64
 	// MaxTrackedFlows is the pool's tracked-flow cap — the constraint that
 	// actually refuses new flows (#9896). Zero from a helper predating the
 	// counters, which makes the flow leg inapplicable (ports-only alarm).
@@ -306,11 +313,14 @@ func (m *Monitor) evaluate() {
 	}
 
 	// Eligibility is RULE-REFERENCED config: a pool is eligible only if a
-	// configured source-NAT rule references it AND the pool exists AND it is
-	// non-deterministic. The status producer is rule-derived, so a pool with
-	// no referencing rule never appears in the snapshot — iterating
-	// SourcePools directly would HOLD its alarm forever (the prune never
-	// fires). Mirror buildSourceNATSnapshots' defensive nil skips.
+	// configured source-NAT rule references it AND the pool exists. Every
+	// class is eligible for the tracked-flow leg (deterministic arms enforce
+	// the same cap — only the PORTS leg is class-excluded); a flow-only pool
+	// with no flow-cap data is recorded inapplicable below instead. The
+	// status producer is rule-derived, so a pool with no referencing rule
+	// never appears in the snapshot — iterating SourcePools directly would
+	// HOLD its alarm forever (the prune never fires). Mirror
+	// buildSourceNATSnapshots' defensive nil skips.
 	referenced := map[string]bool{}
 	for _, rs := range cfg.Security.NAT.Source {
 		if rs == nil {
@@ -332,50 +342,32 @@ func (m *Monitor) evaluate() {
 		if !ok || p == nil {
 			continue // rule references a missing pool → not eligible
 		}
-		if p.Deterministic != nil {
-			// #9902 F-026: deterministic pools stay ineligible for
-			// utilization (a per-subscriber block pool has no meaningful
-			// aggregate percentage), but say so explicitly instead of
-			// silently skipping: clear-then-mark. The clear preserves the
-			// det-convert 1-clear contract (no-op unless raised; the prune
-			// below then finds nothing to clear); the mark records WHY the
-			// configured threshold can never fire. Exhaustion events ARE
-			// watched for this class (see the exhaustion pass below).
-			m.clear(poolName, "pool no longer eligible")
-			m.markInapplicable(poolName, "deterministic pool (per-subscriber blocks): "+
-				"aggregate utilization cannot predict per-block exhaustion")
-			continue
-		}
-		// #7361 + #9896: an ADDRESS-ONLY pool (`port no-translation`) has no
-		// PORT-utilization to measure — but it DOES have tracked-flow
-		// utilization, evaluated independently of port translation below.
-		//
-		// The allocator's `used_ports` is a popcount over the occupancy
-		// bitmaps; `reserve_address_only` never touches occupancy — it records
-		// ownership in `live.address_only_owners`. So UsedPorts is permanently
-		// 0 and the ports leg can never cross the raise threshold. #7361's
-		// address-count redefinition stays rejected for the reason it gives:
-		// addresses are handed out round-robin and freely REUSED across flows
-		// with different destination tuples, so a one-address pool would
-		// report 100% after its first flow and stay there while serving
-		// thousands more — an alarm that fires on the first packet and never
-		// clears.
-		//
-		// The tracked-flow leg has no such pathology: address-only tokens LIVE
-		// in `live_by_flow` and admission refuses at the same cap
-		// (reserve_address_only_maybe_persistent at allocator.rs:3608,
-		// roundrobin at :4076, persistent at :4223 — `live_by_flow.len() >=
-		// max_tracked_flows → AllocatorExhausted`). Live proof:
-		// tests_addr_only_sibling_9131.rs:418-419 reports used_ports == 0
-		// with live_flows == 2 — refusing while the ports leg reads healthy.
-		// And live/max is monotonic in the resource that actually refuses.
-		// Hence address-only pools raise/clear on the flow leg alone; only a
-		// pool with NEITHER leg measurable (address-only + MaxTrackedFlows ==
-		// 0, a helper predating the counters) is structurally inapplicable.
+		// #9896 (fold 2): the flow leg is evaluated INDEPENDENTLY of the
+		// pool class. Deterministic arms enforce the SAME tracked-flow cap
+		// (allocate_deterministic_v4/v6 at allocator.rs:2930,3088;
+		// reserve_address_only_maybe_persistent at :3731, reached via the
+		// deterministic address-only route at match_rules.rs:678-682), so
+		// a deterministic pool at the cap — e.g. one address, a /28 of
+		// subscribers, 64,512 tracked flows and zero used ports — REFUSES
+		// the next flow while aggregate port utilization reads healthy.
+		// Only the PORTS leg stays class-excluded: for deterministic pools
+		// aggregate utilization cannot predict per-block exhaustion, and
+		// for address-only pools (`port no-translation`) UsedPorts is
+		// permanently 0 (`reserve_address_only` never touches occupancy —
+		// it records ownership in `live.address_only_owners`). #7361's
+		// address-count redefinition stays rejected for the reason it
+		// gives: addresses are handed out round-robin and freely REUSED
+		// across flows with different destination tuples, so a one-address
+		// pool would report 100% after its first flow and stay there while
+		// serving thousands more — an alarm that fires on the first packet
+		// and never clears. The tracked-flow leg has no such pathology:
+		// live/max is monotonic in the resource that actually refuses.
+		flowOnly := p.Deterministic != nil || p.PortNoTranslation
 		eligible[poolName] = true
-		if !p.PortNoTranslation {
-			// Port-bearing pools are structurally measurable; a transiently
-			// bad/absent sample HOLDs below without touching this record.
+		if !flowOnly {
+			// Port-bearing PAT pools are structurally measurable; a
+			// transiently bad/absent sample HOLDs below without touching
+			// this record.
 			m.clearInapplicable(poolName)
 		}
 
@@ -385,15 +377,8 @@ func (m *Monitor) evaluate() {
 		}
 
 		var pct uint64
-		if p.PortNoTranslation {
-			if s.MaxTrackedFlows == 0 {
-				m.markInapplicable(poolName, "address-only pool (port no-translation) "+
-					"has no port utilization to measure and reports no tracked-flow cap")
-				continue
-			}
-			m.clearInapplicable(poolName)
-			pct = s.LiveFlows * 100 / s.MaxTrackedFlows
-		} else {
+		measurable := false
+		if !flowOnly {
 			if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow) {
 				continue // bad sample → HOLD
 			}
@@ -404,24 +389,66 @@ func (m *Monitor) evaluate() {
 				continue // uncomputable → HOLD (NOT a clear)
 			}
 			pct = s.UsedPorts * 100 / capacity
-			// #9896: the tracked-flow cap is the constraint that actually
-			// refuses new flows (allocator.rs:2036: live_by_flow.len() >=
-			// max_tracked_flows → AllocatorExhausted), and for large pools it
-			// sits BELOW the nominal capacity (per-pool min(nominal, 262144)
-			// at allocator.rs:1387). A pool at the cap with a low ports ratio
-			// is refusing while the ports leg reports healthy — so
-			// utilization is the max of both legs. The single raise/clear
-			// state machine below is unchanged: one transition still emits
-			// one line even when both legs cross (no double-syslog).
-			//
-			// MaxTrackedFlows == 0 (a helper predating the counters — serde
-			// `default`) makes the flow leg inapplicable: LiveFlows is
-			// ignored and the ports ratio alone decides.
-			if s.MaxTrackedFlows > 0 {
-				if flowPct := s.LiveFlows * 100 / s.MaxTrackedFlows; flowPct > pct {
-					pct = flowPct
-				}
+			measurable = true
+		}
+		// #9896: the tracked-flow cap is the constraint that actually
+		// refuses new flows (allocator.rs:2036: live_by_flow.len() >=
+		// max_tracked_flows → AllocatorExhausted), and for large pools it
+		// sits BELOW the nominal capacity (per-pool min(nominal, 262144)
+		// at allocator.rs:1387). A pool at the cap with a low ports ratio
+		// is refusing while the ports leg reports healthy — so
+		// utilization is the max of both legs. The single raise/clear
+		// state machine below is unchanged: one transition still emits
+		// one line even when both legs cross (no double-syslog).
+		//
+		// The leg is max(live, leases): fresh-lease admission refuses at
+		// the SAME cap (allocator.rs:2209,2215,4511,4514), so idle-lease
+		// accumulation otherwise refuses with the live leg healthy. Both
+		// tables drain through the same pressure-GC pass before a refusal
+		// counts, so a sampled table near max is genuine pressure, not an
+		// unreaped-expired artifact (bounded skew at most).
+		//
+		// MaxTrackedFlows == 0 (a helper predating the counters — serde
+		// `default`) makes the flow leg inapplicable: LiveFlows and
+		// PersistentLeases are ignored and the ports ratio alone decides —
+		// or nothing at all for flow-only pools (see below).
+		if s.MaxTrackedFlows > 0 {
+			tracked := s.LiveFlows
+			if s.PersistentLeases > tracked {
+				tracked = s.PersistentLeases
 			}
+			if flowPct := tracked * 100 / s.MaxTrackedFlows; !measurable || flowPct > pct {
+				pct = flowPct
+			}
+			measurable = true
+			m.clearInapplicable(poolName)
+		}
+		if !measurable {
+			// A flow-only (deterministic or address-only) pool with no
+			// flow-cap data has NEITHER leg measurable, so the threshold
+			// can never fire — record WHY instead of a healthy-looking
+			// 0%. (A port-bearing pool always has its ports leg here —
+			// bad samples HOLDed above — so this arm is flow-only pools
+			// only.) Exhaustion events ARE watched for these classes (see
+			// the exhaustion pass below).
+			//
+			// Deterministic keeps the #7361-era clear-then-mark (the clear
+			// preserves the det-convert 1-clear contract — no-op unless
+			// raised); address-only keeps the fold-1 silent unlatch (the
+			// mark drops the state without a clear syslog — utilization
+			// did not fall below the threshold, the measurement is gone).
+			// The monitor keeps no measurability history to tell a convert
+			// from a flap, and the convert contract is the pinned one.
+			if p.Deterministic != nil {
+				m.clear(poolName, "utilization no longer measurable")
+				m.markInapplicable(poolName, "deterministic pool (per-subscriber blocks): "+
+					"aggregate port utilization cannot predict per-block exhaustion, "+
+					"and no tracked-flow cap reported")
+			} else {
+				m.markInapplicable(poolName, "address-only pool (port no-translation) "+
+					"has no port utilization to measure and reports no tracked-flow cap")
+			}
+			continue
 		}
 
 		raised := m.isRaised(poolName)
@@ -436,12 +463,12 @@ func (m *Monitor) evaluate() {
 		}
 	}
 
-	// Prune alarms for any pool no longer ELIGIBLE (rule-unreferenced,
-	// config-removed, or converted to deterministic). Snapshot the key set
-	// under the mutex first, then emit clears WITHOUT holding the mutex across
-	// the (blocking) syslog write. This runs unconditionally (eligibility is
-	// config-derived) — but here it is already gated behind Available +
-	// HelperCoherent, which makes cfg the applied config.
+	// Prune alarms for any pool no longer ELIGIBLE (rule-unreferenced or
+	// config-removed). Snapshot the key set under the mutex first, then emit
+	// clears WITHOUT holding the mutex across the (blocking) syslog write.
+	// This runs unconditionally (eligibility is config-derived) — but here it
+	// is already gated behind Available + HelperCoherent, which makes cfg the
+	// applied config.
 	for _, poolName := range m.activeKeys() {
 		if !eligible[poolName] {
 			m.clear(poolName, "pool no longer eligible")
@@ -452,9 +479,10 @@ func (m *Monitor) evaluate() {
 	// rule-referenced + pool-exists, CLASS-AGNOSTIC: a deterministic pool's
 	// block-full and an address-only pool's reverse-identity collision ARE
 	// allocator-reported exhaustion events, even though neither class has a
-	// meaningful utilization percentage. The prune sets MUST stay dual: the
-	// utilization prune above would instantly clear a deterministic /
-	// address-only exhaustion alarm (those pools are never util-eligible).
+	// meaningful PORTS percentage. The passes stay separate because
+	// utilization and exhaustion are independent state machines with
+	// independent clear semantics (threshold hysteresis vs 3-clean-tick
+	// hysteresis), not because the sets differ.
 	exhEligible := map[string]bool{}
 	for poolName := range referenced {
 		p, ok := cfg.Security.NAT.SourcePools[poolName]
@@ -781,7 +809,8 @@ func (m *Monitor) markInapplicable(poolName, reason string) {
 
 // clearInapplicable drops any inapplicability record for a pool that is now
 // measurable again (#7361), e.g. `port no-translation` removed on a commit —
-// or, since #9896, an address-only pool whose helper reports the flow cap.
+// or, since #9896, a flow-only (deterministic or address-only) pool whose
+// helper reports the flow cap.
 func (m *Monitor) clearInapplicable(poolName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
