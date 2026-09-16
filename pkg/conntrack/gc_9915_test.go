@@ -88,3 +88,37 @@ func TestGCDeadlinesSaturatedCountedOnce_9915(t *testing.T) {
 		t.Fatalf("wrapped sessions reaped: v4=%v v6=%v", dp.deleted, dp.deletedV6)
 	}
 }
+
+// F-118 review (spark-MAJOR-6): the cluster install path lands exactly
+// MaxUint64 (not MaxUint64-10) — the exact saturated value must survive a
+// real GC sweep, counted once.
+func TestGCDeadlineExactMaxUint64SurvivesSweep_9915(t *testing.T) {
+	fwdKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 9, 11}, DstIP: [4]byte{10, 0, 9, 12},
+		Protocol: 6, SrcPort: 3000, DstPort: 80,
+	}
+	fwdKey6 := dataplane.SessionKeyV6{
+		SrcIP: [16]byte{15: 11}, DstIP: [16]byte{15: 12},
+		Protocol: 6, SrcPort: 3000, DstPort: 80,
+	}
+	dp := &mockGCDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			fwdKey: {LastSeen: math.MaxUint64, Timeout: 100},
+		},
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			fwdKey6: {LastSeen: math.MaxUint64, Timeout: 100},
+		},
+	}
+	gc := NewGC(dp, 10*time.Second)
+	gc.SetSessionLimitEnabled(true)
+	if gc.sessionCount == nil {
+		t.Fatal("FIXTURE: session-count publisher not retained; count path would not run")
+	}
+	gc.sweep()
+	if len(dp.deleted) != 0 || len(dp.deletedV6) != 0 {
+		t.Fatalf("exact-MaxUint64 rows reaped: v4=%v v6=%v (F-118 review)", dp.deleted, dp.deletedV6)
+	}
+	if got := gc.Stats().DeadlinesSaturated; got != 2 {
+		t.Fatalf("DeadlinesSaturated = %d, want exactly 2 (one per saturated row)", got)
+	}
+}

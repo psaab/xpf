@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,10 +48,13 @@ func TestSyncNoiseIdentityRejectsNodeIdOutside01_9915(t *testing.T) {
 // (which counts forward+reverse). A static 200k cap at 2% of the table leaves a
 // full-of-LIVE skip-record degradation for any table past 200k sessions.
 func TestGenGuardCapCoversMaxLiveSessions_9915(t *testing.T) {
-	want := conntrack.MaxSessions / 2
-	if genGuardMapCap < want {
-		t.Fatalf("genGuardMapCap = %d, want >= %d (conntrack.MaxSessions/2 forward entries); "+
-			"a table past the cap degrades every new session to gen-0 (F-044)", genGuardMapCap, want)
+	// Behavioral (spark-MINOR-13): with a full table's sessions wired, the
+	// effective ceiling must bind at the forward-entries count — asserted
+	// through the setter→maxCap path, not by restating the constant.
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.SetGenGuardSessionCap(uint64(conntrack.MaxSessions))
+	if got, want := ss.maxCap(), conntrack.MaxSessions/2; got != want {
+		t.Fatalf("maxCap with a full table wired = %d, want %d forward entries (F-044)", got, want)
 	}
 }
 
@@ -97,17 +101,6 @@ func TestFenceSurvivesIdleFabricFlap_9915(t *testing.T) {
 	}
 	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
 
-	// Drain the fence frame the SENd path writes on fab0.
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		for {
-			if _, _, err := readSyncFrameRaw(f0b); err != nil {
-				return
-			}
-		}
-	}()
-
 	type fenceOutcome struct {
 		ack FenceAck
 		err error
@@ -118,13 +111,13 @@ func TestFenceSurvivesIdleFabricFlap_9915(t *testing.T) {
 		out <- fenceOutcome{ack: ack, err: err}
 	}()
 
-	dl := time.Now().Add(2 * time.Second)
-	for ss.fenceSeq.Load() == 0 {
-		if time.Now().After(dl) {
-			t.Fatal("FIXTURE: SendFenceAwait never registered its waiter")
-		}
-		time.Sleep(5 * time.Millisecond)
+	// Wait for the fence frame itself on the peer end: registration precedes
+	// the write, so an observed frame proves the waiter exists.
+	_, fencePayload := waitForFenceFrame9915(t, f0b)
+	if len(fencePayload) < 8 {
+		t.Fatalf("FIXTURE: fence payload is %d bytes, want >= 8 (seq)", len(fencePayload))
 	}
+	seq := binary.LittleEndian.Uint64(fencePayload[:8])
 
 	// The idle fabric flaps while the fence is outstanding on fab0.
 	ss.handleDisconnect(f1a)
@@ -137,7 +130,6 @@ func TestFenceSurvivesIdleFabricFlap_9915(t *testing.T) {
 	}
 
 	// The peer answers on the healthy path; the fence must confirm.
-	seq := ss.fenceSeq.Load()
 	ss.completeFenceAckWait(FenceAck{Seq: seq, Status: FenceAckOK, RGsFenced: 1, RGsTotal: 1})
 	select {
 	case got := <-out:
@@ -168,26 +160,15 @@ func TestFenceAbortsWhenItsOwnFabricDrops_9915(t *testing.T) {
 		t.Fatal("FIXTURE: fab0 must be the active conn")
 	}
 	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
-	go func() {
-		for {
-			if _, _, err := readSyncFrameRaw(f0b); err != nil {
-				return
-			}
-		}
-	}()
 
 	out := make(chan error, 1)
 	go func() {
 		_, err := ss.SendFenceAwait(3 * time.Second)
 		out <- err
 	}()
-	dl := time.Now().Add(2 * time.Second)
-	for ss.fenceSeq.Load() == 0 {
-		if time.Now().After(dl) {
-			t.Fatal("FIXTURE: SendFenceAwait never registered its waiter")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Wait for the fence frame itself: proves the waiter is registered
+	// (registration precedes the write); see the survive cell.
+	waitForFenceFrame9915(t, f0b)
 
 	ss.handleDisconnect(f0a)
 	select {
@@ -286,12 +267,9 @@ func TestClockOffsetResetOnFullDisconnect_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	c0 := pipeConn(t)
 	ss.installConn(0, c0)
-	peerMono := monotonicSeconds() / 2
-	if peerMono < 1 {
-		peerMono = 1
-	}
+	ss.testClockNow = func() uint64 { return 1000000 }
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], peerMono)
+	binary.LittleEndian.PutUint64(buf[:], 500000) // offset +500000, deterministic
 	ss.handleMessage(nil, syncMsgClockSync, buf[:])
 	before := ss.peerClockOffset.Load()
 	if before == 0 {
@@ -315,12 +293,9 @@ func TestClockOffsetKeepsOnPartialDisconnect_9915(t *testing.T) {
 	c1 := pipeConn(t)
 	ss.installConn(0, c0)
 	ss.installConn(1, c1)
-	peerMono := monotonicSeconds() / 2
-	if peerMono < 1 {
-		peerMono = 1
-	}
+	ss.testClockNow = func() uint64 { return 1000000 }
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], peerMono)
+	binary.LittleEndian.PutUint64(buf[:], 500000) // offset +500000, deterministic
 	ss.handleMessage(nil, syncMsgClockSync, buf[:])
 	before := ss.peerClockOffset.Load()
 	if before == 0 {
@@ -431,11 +406,12 @@ func TestRebaseSaturationCountedAtInstall_9915(t *testing.T) {
 	}
 	clockSync := func(ss *SessionSync, peerMono uint64) {
 		t.Helper()
+		ss.testClockNow = func() uint64 { return 1000000 }
 		var buf [8]byte
 		binary.LittleEndian.PutUint64(buf[:], peerMono)
 		ss.handleMessage(nil, syncMsgClockSync, buf[:])
 	}
-	local := monotonicSeconds()
+	local := uint64(1000000)
 
 	// Positive offset + huge timestamp: the rebase overflows, saturates, counts.
 	ss, dp := newTestSync()
@@ -498,25 +474,14 @@ func TestFenceAbortsWhenItsFabricIsSuperseded_9915(t *testing.T) {
 		t.Fatal("FIXTURE: fab0 must be the active conn")
 	}
 	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
-	go func() {
-		for {
-			if _, _, err := readSyncFrameRaw(f0b); err != nil {
-				return
-			}
-		}
-	}()
 	out := make(chan error, 1)
 	go func() {
 		_, err := ss.SendFenceAwait(3 * time.Second)
 		out <- err
 	}()
-	dl := time.Now().Add(2 * time.Second)
-	for ss.fenceSeq.Load() == 0 {
-		if time.Now().After(dl) {
-			t.Fatal("FIXTURE: SendFenceAwait never registered its waiter")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Wait for the fence frame itself: proves the waiter is registered;
+	// see the survive cell.
+	waitForFenceFrame9915(t, f0b)
 
 	// Supersede fab0: the replacement lands without any disconnect.
 	f0c, f0d := net.Pipe()
@@ -552,25 +517,14 @@ func TestFenceAbortsWhenItsFabricIsEvicted_9915(t *testing.T) {
 		t.Fatal("FIXTURE: fab0 must be the active conn")
 	}
 	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
-	go func() {
-		for {
-			if _, _, err := readSyncFrameRaw(f0b); err != nil {
-				return
-			}
-		}
-	}()
 	out := make(chan error, 1)
 	go func() {
 		_, err := ss.SendFenceAwait(3 * time.Second)
 		out <- err
 	}()
-	dl := time.Now().Add(2 * time.Second)
-	for ss.fenceSeq.Load() == 0 {
-		if time.Now().After(dl) {
-			t.Fatal("FIXTURE: SendFenceAwait never registered its waiter")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Wait for the fence frame itself: proves the waiter is registered;
+	// see the survive cell.
+	waitForFenceFrame9915(t, f0b)
 
 	// Advance the incarnation and evict the retired fabric-0 conn.
 	ss.mu.Lock()
@@ -591,4 +545,455 @@ func TestFenceAbortsWhenItsFabricIsEvicted_9915(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("evicting the fence fabric did not release the waiter promptly (F-116)")
 	}
+}
+
+// F-044 review (spark-MAJOR-2/gpt-Medium-2): the installing-table sender memo
+// is a guard map like the rest — unwired it refuses past the default, with no
+// growth and no provisioning proof. Pins the unwired boundary for the memo
+// family, not only recvGenV4.
+func TestInstallTableMemoUnwiredBoundary_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.genSentMu.Lock()
+	ss.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable, genGuardMapDefaultCap)
+	for i := 0; len(ss.installTableSentV4) < genGuardMapDefaultCap; i++ {
+		k := synthKeyV4(0x500000 + i)
+		ss.installTableSentV4[k] = sentInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
+	}
+	ss.genSentMu.Unlock()
+	newKey := dataplane.SessionKey{Protocol: 6, SrcPort: 0xBEEF, DstPort: 0xCAFE}
+	val := dataplane.SessionValue{SessionID: 0x9915}
+	ss.stampInstallGenV4(newKey, &val)
+	ss.genSentMu.Lock()
+	_, stored := ss.installTableSentV4[newKey]
+	ss.genSentMu.Unlock()
+	if stored {
+		t.Fatal("unwired sender memo recorded past the default without provisioned capacity (F-044 review)")
+	}
+	if got := ss.stats.GenCapGrown.Load(); got != 0 {
+		t.Fatalf("GenCapGrown = %d, want 0 unwired (F-044 review)", got)
+	}
+	if got := ss.sentCap(); got != genGuardMapDefaultCap {
+		t.Fatalf("sentCap = %d, want default %d unwired", got, genGuardMapDefaultCap)
+	}
+}
+
+// F-044 review (spark-MAJOR-3): a wired ceiling that shrinks below a grown cap
+// clamps the stored cap down — the sender never outruns provisioned RAM
+// forever. Clamp-at-read makes the effective cap follow immediately; the grow
+// path persists the clamp and counts it.
+func TestGenGuardCapClampsOnShrink_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.genSentMu.Lock()
+	ss.sentGenGuardCap = 800000 // as if demand-grown under a larger ceiling
+	ss.genSentMu.Unlock()
+	ss.SetGenGuardSessionCap(200000) // replacement reports fewer workers
+	ss.genSentMu.Lock()
+	if got := ss.sentCap(); got != 200000 {
+		ss.genSentMu.Unlock()
+		t.Fatalf("sentCap = %d, want 200000 clamped-at-read to the shrunken ceiling (F-044 review)", got)
+	}
+	grew := ss.growSentCap()
+	stored := ss.sentGenGuardCap
+	ss.genSentMu.Unlock()
+	if grew {
+		t.Fatal("grow reported growth while clamping down (F-044 review)")
+	}
+	if stored != 200000 {
+		t.Fatalf("stored sent cap = %d, want 200000 clamped down (F-044 review)", stored)
+	}
+	if got := ss.Stats().GenCapShrunk; got != 1 {
+		t.Fatalf("Stats().GenCapShrunk = %d, want 1 (F-044 review)", got)
+	}
+}
+
+// F-044 review (spark-MINOR-16): reconciled contract — nonzero always tracks
+// current (up AND down); zero means "unknown" (missed report), retaining
+// last-known-good so a telemetry gap never shrinks live guards.
+func TestGenGuardSessionCapZeroRetainsAfterWired_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.SetGenGuardSessionCap(600000)
+	ss.SetGenGuardSessionCap(0)
+	if got := ss.maxCap(); got != 600000 {
+		t.Fatalf("maxCap after Set(0) = %d, want 600000 retained (unknown retains last-known, F-044 review)", got)
+	}
+	ss.SetGenGuardSessionCap(500000)
+	if got := ss.maxCap(); got != 500000 {
+		t.Fatalf("maxCap after Set(500000) = %d, want 500000 (nonzero tracks current down)", got)
+	}
+}
+
+// F-044 review (spark-MINOR-17): grow is nil-safe like its sentCap/recvCap/
+// maxCap siblings.
+func TestGrowGuardCapSideNilSafe_9915(t *testing.T) {
+	var ss *SessionSync
+	if ss.growSentCap() || ss.growRecvCap() {
+		t.Fatal("nil SessionSync grow reported growth (F-044 review)")
+	}
+}
+
+// F-118 review (spark-MAJOR-8): the spec counts installs "outside int64
+// range" — the predicate and clamp agree with it, including the offset-0
+// case the uint64-overflow-only predicate missed.
+func TestRebaseSaturateBeyondInt64_9915(t *testing.T) {
+	huge := uint64(math.MaxInt64) + 1 // 2^63+1
+	if !rebaseSaturates(huge, 0) {
+		t.Fatal("rebaseSaturates(2^63+1, 0) = false, want true: outside int64 range (F-118 review)")
+	}
+	if got := rebaseTimestamp(huge, 0); got != math.MaxUint64 {
+		t.Fatalf("rebaseTimestamp(2^63+1, 0) = %d, want saturated MaxUint64 (F-118 review)", got)
+	}
+	if rebaseSaturates(uint64(math.MaxInt64), 0) {
+		t.Fatal("rebaseSaturates(MaxInt64, 0) = true, want false: in range (F-118 review)")
+	}
+	if got := rebaseTimestamp(100, 50); got != 150 {
+		t.Fatalf("CONTROL: rebaseTimestamp(100, 50) = %d, want 150", got)
+	}
+}
+
+// F-118 review (spark-MAJOR-8): the counter counts LANDED applies — a
+// saturated install refused by the ordering guard must not count.
+func TestRebaseSaturationCountsLandedOnly_9915(t *testing.T) {
+	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	key := dataplane.SessionKey{Protocol: 6, SrcPort: 0x9918, DstPort: 80}
+	key.SrcIP = [4]byte{192, 0, 2, 118}
+	// Generation 9 lands first (small timestamps, no saturation).
+	fresh := dataplane.SessionValue{State: dataplane.SessStateEstablished, IngressZone: 1, EgressZone: 2,
+		Created: 100, LastSeen: 100, Generation: 9}
+	ss.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(key, fresh))
+	// Saturated (2^63+1, offset 0) but generation-stale: refused, uncounted.
+	stale := dataplane.SessionValue{State: dataplane.SessStateEstablished, IngressZone: 1, EgressZone: 2,
+		Created: (uint64(1) << 63) + 1, LastSeen: (uint64(1) << 63) + 1, Generation: 1}
+	ss.handleMessage(nil, syncMsgSessionV4, encodeSessionV4Payload(key, stale))
+	if got := ss.stats.RebaseSaturations.Load(); got != 0 {
+		t.Fatalf("RebaseSaturations = %d, want 0: the saturated install was refused stale, never landed (F-118 review)", got)
+	}
+	if got := ss.stats.InstallsStaleIgnored.Load(); got != 1 {
+		t.Fatalf("InstallsStaleIgnored = %d, want 1 (fixture: saturated install must refuse stale)", got)
+	}
+	got, ok := dp.v4sessions[key]
+	if !ok {
+		t.Fatal("fixture: the gen-9 install did not land")
+	}
+	if got.Created != 100 {
+		t.Fatalf("landed Created = %d, want 100 (stale install must not regress the row)", got.Created)
+	}
+}
+
+// F-118 review (gpt-Medium-3): a ClockSync frame already read off a conn that
+// retires before publication must not republish the dead incarnation's
+// offset. Disconnect variant: sync, disconnect (clears), redeliver same bytes.
+func TestClockSyncRetiredConnDisconnectRejected_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.testClockNow = func() uint64 { return 1000000 }
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	ac := &authConn{Conn: local}
+	ss.installConn(0, ac)
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], 900000) // offset +100000
+	ss.handleMessage(ac, syncMsgClockSync, buf[:])
+	if got := ss.peerClockOffset.Load(); got != 100000 {
+		t.Fatalf("FIXTURE: offset = %d, want +100000", got)
+	}
+	ss.handleDisconnect(ac)
+	if got := ss.peerClockOffset.Load(); got != 0 {
+		t.Fatalf("FIXTURE: offset = %d after disconnect, want 0", got)
+	}
+	// The already-read frame resumes after retirement: must drop.
+	ss.handleMessage(ac, syncMsgClockSync, buf[:])
+	if got := ss.peerClockOffset.Load(); got != 0 {
+		t.Fatalf("peerClockOffset = %d after redelivering on a retired conn, want 0 (F-118 review)", got)
+	}
+	// A replacement conn falls back to the cleared global, not the retired value.
+	local2, remote2 := net.Pipe()
+	defer local2.Close()
+	defer remote2.Close()
+	ac2 := &authConn{Conn: local2}
+	ss.installConn(0, ac2)
+	if got := ss.clockOffsetFor(ac2); got != 0 {
+		t.Fatalf("replacement clockOffsetFor = %d, want 0 (F-118 review)", got)
+	}
+}
+
+// F-118 review (gpt-Medium-3): supersession variant — an incarnation switch
+// evicts the conn; its in-flight ClockSync must not republish.
+func TestClockSyncRetiredConnSwitchRejected_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.testClockNow = func() uint64 { return 1000000 }
+	local0, remote0 := net.Pipe()
+	defer local0.Close()
+	defer remote0.Close()
+	local1, remote1 := net.Pipe()
+	defer local1.Close()
+	defer remote1.Close()
+	ac0 := &authConn{Conn: local0}
+	ac1 := &authConn{Conn: local1}
+	ss.installConn(0, ac0)
+	ss.installConn(1, ac1)
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], 900000)
+	ss.handleMessage(ac0, syncMsgClockSync, buf[:])
+	if got := ss.peerClockOffset.Load(); got != 100000 {
+		t.Fatalf("FIXTURE: offset = %d, want +100000", got)
+	}
+	// Incarnation switch keeping fabric 1: evicts fabric 0, clears global.
+	ss.mu.Lock()
+	ss.applyPeerIncarnationSwitchLocked(1)
+	ss.mu.Unlock()
+	if got := ss.peerClockOffset.Load(); got != 0 {
+		t.Fatalf("FIXTURE: offset = %d after switch, want 0", got)
+	}
+	ss.handleMessage(ac0, syncMsgClockSync, buf[:])
+	if got := ss.peerClockOffset.Load(); got != 0 {
+		t.Fatalf("peerClockOffset = %d after redelivering on an evicted conn, want 0 (F-118 review)", got)
+	}
+}
+
+// F-118 review (spark-MAJOR-7): incarnation advance clears the kept
+// connection's per-conn offset too — clockOffsetFor must fall back to the
+// cleared global, not the dead incarnation's offset. Asserts the replacement
+// path, not just the global.
+func TestClockOffsetPerConnClearedOnSwitch_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.testClockNow = func() uint64 { return 1000000 }
+	local0, remote0 := net.Pipe()
+	defer local0.Close()
+	defer remote0.Close()
+	local1, remote1 := net.Pipe()
+	defer local1.Close()
+	defer remote1.Close()
+	ac0 := &authConn{Conn: local0}
+	ac1 := &authConn{Conn: local1}
+	ss.installConn(0, ac0)
+	ss.installConn(1, ac1)
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], 900000)
+	ss.handleMessage(ac1, syncMsgClockSync, buf[:])
+	if off, synced := ac1.clockOffset.Load(), ac1.clockSynced.Load(); !synced || off != 100000 {
+		t.Fatalf("FIXTURE: kept conn offset = %d synced=%v, want 100000 true", off, synced)
+	}
+	ss.mu.Lock()
+	ss.applyPeerIncarnationSwitchLocked(1)
+	ss.mu.Unlock()
+	if ac1.clockSynced.Load() {
+		t.Fatal("kept conn still synced after incarnation switch (F-118 review)")
+	}
+	if got := ss.clockOffsetFor(ac1); got != 0 {
+		t.Fatalf("clockOffsetFor(kept) = %d, want 0 fallback to cleared global (F-118 review)", got)
+	}
+}
+
+// F-043 review (spark-MAJOR-11): a corrupt cluster id diverges prologues
+// exactly like a bad node id — rejected loud at identity resolution. The
+// schema bounds cluster-id to 0..255 (one RETH MAC byte).
+func TestSyncNoiseIdentityRejectsBadClusterId_9915(t *testing.T) {
+	key := []byte("shared-control-link-secret-key")
+	for _, cluster := range []int{-1, 256, 1 << 30} {
+		s := NewSessionSync(":0", ":0", nil)
+		s.SetAuthProvider(&fakeSyncAuthProvider{key: key, node: 0, cluster: cluster})
+		if _, err := s.newSyncNoiseState(key, true, syncNoisePhaseConnect, 0); err == nil {
+			t.Errorf("cluster id %d: newSyncNoiseState succeeded, want a loud identity error (F-043 review)", cluster)
+		} else if !strings.Contains(err.Error(), "cluster") {
+			t.Errorf("cluster id %d: error %q does not name the cluster identity", cluster, err)
+		}
+	}
+	for _, cluster := range []int{0, 22, 255} {
+		s := NewSessionSync(":0", ":0", nil)
+		s.SetAuthProvider(&fakeSyncAuthProvider{key: key, node: 0, cluster: cluster})
+		if _, err := s.newSyncNoiseState(key, true, syncNoisePhaseConnect, 0); err != nil {
+			t.Errorf("CONTROL: cluster id %d must still handshake, got %v", cluster, err)
+		}
+	}
+}
+
+// F-043 review (spark-MAJOR-11): identity failures in the upgrade-role path
+// are counted centrally (all three callers inherit), so a bad node/cluster id
+// is operator-visible instead of silently leave-as-is.
+func TestUpgradeRoleIdentityErrorCounted_9915(t *testing.T) {
+	key := []byte("shared-control-link-secret-key")
+	bad := newAuthSyncNode(t, key, 5)
+	if _, err := bad.upgradeRoleIsInitiator(); err == nil {
+		t.Fatal("bad node id: upgradeRoleIsInitiator succeeded, want an identity error")
+	}
+	if got := bad.Stats().AuthUpgradeIdentityErrors; got != 1 {
+		t.Fatalf("Stats().AuthUpgradeIdentityErrors = %d, want 1 (F-043 review)", got)
+	}
+	good := newAuthSyncNode(t, key, 0)
+	if _, err := good.upgradeRoleIsInitiator(); err != nil {
+		t.Fatalf("CONTROL: valid identity must resolve role, got %v", err)
+	}
+	if got := good.Stats().AuthUpgradeIdentityErrors; got != 0 {
+		t.Fatalf("CONTROL: counter = %d, want 0", got)
+	}
+}
+
+// F-117 review (spark-MAJOR-12): an injected all-bad high-seq set is retained
+// WITHOUT advancing the mark, so an honest lower-seq push still applies. No
+// legacy bypass exists: every decoded set is filtered (see the F-117 drops
+// test); the wedge closes via mark-after-apply.
+func TestDHCPHighSeqAllBadDoesNotWedgeHonestPush_9915(t *testing.T) {
+	good := dhcpserver.SyncLease{Family: 4, Address: "10.0.0.5", HWAddress: "aa:bb:cc:dd:ee:05",
+		SubnetID: 1, ValidLife: 3600, Remaining: 1800}
+	bad1 := dhcpserver.SyncLease{Family: 4, Address: "10.0.0.9",
+		SubnetID: 1, ValidLife: 3600, Remaining: 1800}
+	bad2 := dhcpserver.SyncLease{Family: 6, Address: "2001:db8::9", DUID: "00:01:xx",
+		LeaseType: "IA_NA", SubnetID: 2, ValidLife: 3600, Remaining: 1800}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	var got []dhcpserver.SyncLease
+	ss.OnDHCPLeasesReceived = func(_ int, leases []dhcpserver.SyncLease) { got = leases }
+	// Injected: trailered all-bad set at a high seq. Retained, mark unmoved.
+	ss.handleMessage(nil, syncMsgDHCPLeaseV4,
+		appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{bad1, bad2}), 7, 100))
+	if held := ss.PeerDHCPLeases4(); len(held) != 0 {
+		t.Fatalf("injected all-bad set held %d leases, want 0 retained-empty", len(held))
+	}
+	if got := ss.Stats().DHCPLeasesDroppedNoIdentity; got != 2 {
+		t.Fatalf("DHCPLeasesDroppedNoIdentity = %d, want 2", got)
+	}
+	// Honest lower-seq push still applies: the mark never wedged.
+	ss.handleMessage(nil, syncMsgDHCPLeaseV4,
+		appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{good}), 7, 50))
+	if len(got) != 1 || got[0].Address != "10.0.0.5" {
+		t.Fatalf("honest lower-seq push applied %d leases (%v), want the good lease: mark wedged (F-117 review)", len(got), got)
+	}
+	ss.recvSeqMu.Lock()
+	inc, seq := ss.dhcpV4RecvSeq.incarnation, ss.dhcpV4RecvSeq.seq
+	ss.recvSeqMu.Unlock()
+	if inc != 7 || seq != 50 {
+		t.Fatalf("guard mark = (%d,%d), want (7,50): the retained set must not advance it", inc, seq)
+	}
+}
+
+// F-117 review (blocker advisory): duplicate-fabric twins racing through the
+// atomic commit must converge on the higher-seq set in BOTH the held set and
+// the callback order — never [B,A], never a stale held set. Probabilistic RED
+// pre-commit (the interleaving must land); deterministic GREEN post-commit.
+func TestDHCPConcurrentSetsConvergeOnNewer_9915(t *testing.T) {
+	mkLease := func(addr string) dhcpserver.SyncLease {
+		return dhcpserver.SyncLease{Family: 4, Address: addr, HWAddress: "aa:bb:cc:dd:ee:01",
+			SubnetID: 1, ValidLife: 3600, Remaining: 1800}
+	}
+	for i := 0; i < 50; i++ {
+		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+		var mu sync.Mutex
+		var calls []string
+		ss.OnDHCPLeasesReceived = func(_ int, leases []dhcpserver.SyncLease) {
+			mu.Lock()
+			defer mu.Unlock()
+			if len(leases) == 1 {
+				calls = append(calls, leases[0].Address)
+			} else {
+				calls = append(calls, "BADLEN")
+			}
+		}
+		payloadA := appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{mkLease("10.0.0.10")}), 9, 20)
+		payloadB := appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{mkLease("10.0.0.11")}), 9, 21)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; ss.handleMessage(nil, syncMsgDHCPLeaseV4, payloadA) }()
+		go func() { defer wg.Done(); <-start; ss.handleMessage(nil, syncMsgDHCPLeaseV4, payloadB) }()
+		close(start)
+		wg.Wait()
+		held := ss.PeerDHCPLeases4()
+		if len(held) != 1 || held[0].Address != "10.0.0.11" {
+			t.Fatalf("iter %d: held set = %v, want the seq-21 set (regressed)", i, held)
+		}
+		mu.Lock()
+		got := append([]string(nil), calls...)
+		mu.Unlock()
+		if len(got) == 1 && got[0] == "10.0.0.11" {
+			continue // B committed first; A lost advanceIfNewer. Correct.
+		}
+		if len(got) == 2 && got[0] == "10.0.0.10" && got[1] == "10.0.0.11" {
+			continue // A committed first, B superseded. Correct.
+		}
+		t.Fatalf("iter %d: callback sequence = %v, want [B] or [A B] (never stale-after-fresh)", i, got)
+	}
+}
+
+// F-118 review (spark-MAJOR-6): a saturated Created (MaxUint64) must not
+// re-queue every sweep — it was installed once via its delta and never ages
+// into the window. Honest-queues direction is pinned by the 9752 sweep tests.
+func TestSweepSkipsSaturatedCreated_9915(t *testing.T) {
+	key := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 9, 9}, DstIP: [4]byte{10, 0, 9, 10},
+		Protocol: 6, SrcPort: 9000, DstPort: 80}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {State: dataplane.SessStateEstablished, Created: math.MaxUint64, SessionID: 9915, RTFlowSessionID: 9915},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.stats.Connected.Store(true)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = 0 // threshold 0: recency alone would queue everything
+	ss.syncSweep()
+	if got := len(ss.sendCh); got != 0 {
+		t.Fatalf("sweep queued %d frames for a saturated-Created session; MaxUint64 must never re-queue (F-118 review)", got)
+	}
+}
+
+// waitForFenceFrame9915 blocks until the peer end observes the fence frame
+// SendFenceAwait wrote — which proves the waiter is registered (registration
+// precedes the write), unlike polling fenceSeq (allocated before
+// registration). A pre-registration disruption aborts nothing even on broken
+// code and fakes green (gpt-Medium-4a); the observed frame closes the escape.
+func waitForFenceFrame9915(t *testing.T, peer net.Conn) (uint8, []byte) {
+	t.Helper()
+	if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("FIXTURE: set read deadline: %v", err)
+	}
+	typ, payload, err := readSyncFrameRaw(peer)
+	if err != nil {
+		t.Fatalf("FIXTURE: SendFenceAwait never wrote its fence frame: %v", err)
+	}
+	if typ != syncMsgFence {
+		t.Fatalf("FIXTURE: first frame type = %d, want syncMsgFence (%d)", typ, syncMsgFence)
+	}
+	return typ, payload
+}
+
+// F-116 review (spark-MAJOR-9): the scoping premise, pinned behaviorally —
+// the fence-receive arm answers with sendFenceAck on the conn that carried
+// the fence, so a waiter's ack path is exactly its own fabric.
+func TestFenceAckAnswersOnReceivingConn_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	f0a, f0b := net.Pipe()
+	defer f0a.Close()
+	defer f0b.Close()
+	f1a, f1b := net.Pipe()
+	defer f1a.Close()
+	defer f1b.Close()
+	ss.installConn(0, f0a)
+	ss.installConn(1, f1a)
+	ss.OnFenceReceived = func() FenceResult { return FenceResult{} }
+	const wantSeq = 77
+	var payload [8]byte
+	binary.LittleEndian.PutUint64(payload[:], wantSeq)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ss.handleMessage(f0a, syncMsgFence, payload[:])
+	}()
+	if err := f0b.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("FIXTURE: set read deadline: %v", err)
+	}
+	typ, ackPayload, err := readSyncFrameRaw(f0b)
+	if err != nil {
+		t.Fatalf("fence received on fab0 was not answered on fab0: %v (F-116)", err)
+	}
+	if typ != syncMsgFenceAck {
+		t.Fatalf("answer frame type = %d, want syncMsgFenceAck (%d) (F-116)", typ, syncMsgFenceAck)
+	}
+	ack, ok := decodeFenceAckPayload(ackPayload)
+	if !ok {
+		t.Fatal("answer frame did not decode as a fence ack (F-116)")
+	}
+	if ack.Seq != wantSeq {
+		t.Fatalf("answer seq = %d, want %d (F-116)", ack.Seq, wantSeq)
+	}
+	<-done
 }

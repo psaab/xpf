@@ -478,11 +478,11 @@ func TestDisconnectClearsFenceAckCapability7147(t *testing.T) {
 			"fence-ack bit, and every takeover against it would wait out the full " +
 			"timeout for an ack it can never send.")
 	}
-	if !sourceContainsFlat(src, "s.abortFenceAckWaitersFor(conn, connected)") {
-		t.Error("the disconnect path does not release pending fence-ack waiters " +
-			"(#9915 F-116: scoped release), so a fence sent moments before the " +
-			"fabric dropped holds the takeover for the whole timeout")
-	}
+	// NOTE (#9915 F-116 review): the disconnect path's scoped waiter release
+	// was asserted here by source grep; it is pinned behaviorally instead by
+	// TestFenceSurvivesIdleFabricFlap_9915 /
+	// TestFenceAbortsWhenItsOwnFabricDrops_9915 (source grep cannot tell a
+	// scoped release from abort-all).
 	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(0)") {
 		t.Error("the #6650 clear these are anchored beside has moved; re-verify both " +
 			"#7147 clears are still on the FULL-disconnect path")
