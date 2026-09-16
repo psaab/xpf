@@ -376,6 +376,60 @@ pub(super) fn poll_binding_process_descriptor(
                         continue;
                     }
                 }
+                // #9950 (F-035): fragment-overlap check — post-screen (preserves
+                // byte-for-byte drop precedence + malformation attribution), pre-IPsec-
+                // passthrough (a locally-terminated first fragment, e.g. IKE, still
+                // plants its ranges for later flowless tails), pre-flow-cache (the
+                // 5-tuple cache key has no ident), post-decap (packet_frame/meta are
+                // the inner packet). Drops overlapping/empty/overflow/shard-full
+                // fragments; benign fragments record and continue.
+                // Residuals: the SYN-cookie-challenge path above `continue`s before this
+                // hook, and ESP/AH outer fragments are recorded while their encrypted
+                // inner is unknowable — both documented, neither silently closed.
+                // Tri-state: proven fragments record; proven non-fragments flow on;
+                // Unreadable (truncated headers) skips the table AND the cache — an
+                // unreadable packet is not a proven non-fragment.
+                let (overlap_pre_9950, overlap_skip_cache_9950) = match packet_frame
+                    .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
+                    .map(|l3| {
+                        crate::fragment_overlap::overlap_parse(l3, meta.addr_family as i32)
+                    })
+                    .unwrap_or(crate::fragment_overlap::OverlapParse::Unreadable)
+                {
+                    crate::fragment_overlap::OverlapParse::NonFragment => (None, false),
+                    crate::fragment_overlap::OverlapParse::Unreadable => (None, true),
+                    crate::fragment_overlap::OverlapParse::Fragment(mut okey, start, end) => {
+                        // Routing domain from the same SSOT as session keys (the parsed
+                        // flow's stamped value when present, else the identical ingress
+                        // expression) so flow-backed and flowless agree by construction.
+                        okey.routing_domain = flow
+                            .as_ref()
+                            .map(|f| f.forward_key.routing_domain)
+                            .unwrap_or_else(|| {
+                                crate::afxdp::forwarding::ingress_routing_domain(
+                                    worker_ctx.forwarding,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    if packet_fabric_ingress {
+                                        ingress_zone_override
+                                    } else {
+                                        None
+                                    },
+                                )
+                            });
+                        if worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
+                            okey,
+                            start,
+                            end,
+                            now_ns,
+                            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                        ) {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        (Some((okey, start, end)), true)
+                    }
+                };
                 // #946 Phase 1 stage 11: IPsec passthrough. ESP
                 // (proto 50), AH and the IPsec data plane reinject via
                 // the slow-path TUN; recycle the UMEM frame. #4323: a NEW
@@ -422,41 +476,16 @@ pub(super) fn poll_binding_process_descriptor(
                         continue;
                     }
                 }
-                // #9950 (F-035): fragment-overlap check — post-screen + IPsec (preserves
-                // byte-for-byte drop precedence + malformation attribution), pre-flow-cache
-                // (cached first fragments would otherwise bypass detection), post-decap
-                // (packet_frame/meta are the inner packet). Drops overlapping/empty/overflow
-                // fragments; benign adjacent fragments record and continue. Fragments skip
-                // the flow-cache entirely (the 5-tuple cache key has no ident, so a later
-                // datagram's first fragment would Consume and bypass both overlap and the
-                // reply-assoc installs below).
-                let overlap_frag_skips_cache = packet_frame
-                    .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
-                    .and_then(|l3| {
-                        crate::fragment_overlap::overlap_fragment_range(l3, meta.addr_family as i32)
-                    })
-                    .map(|(okey, start, end)| {
-                        worker_ctx
-                            .forwarding
-                            .nat64
-                            .frag_overlap
-                            .check_and_record(okey, start, end, now_ns)
-                    });
-                if overlap_frag_skips_cache == Some(true) {
-                    binding.scratch.scratch_recycle.push(desc.addr);
-                    continue;
-                }
-                let is_fragment_9950 = overlap_frag_skips_cache.is_some();
                 // ── Flow cache fast path (#1327 Step 1) ────────────────
                 // Extracted to poll_descriptor/flow_cache_hit.rs. The
                 // helper owns ALL recycle/forward pushes on Consumed;
                 // caller MUST `continue` without touching desc.addr.
                 // The original L477 `packet_frame` binding's NLL
                 // lifetime ends at the previous line (last use was
-                // inside the #9950 overlap check above); it is rebound
+                // inside stage_ipsec_passthrough_check); it is rebound
                 // below the helper call for the slow-path code.
-                // #9950: fragments never consult the cache (see above).
-                if !is_fragment_9950
+                // #9950: proven fragments AND unreadable packets never consult the cache.
+                if !overlap_skip_cache_9950
                     && FlowCacheEntry::packet_eligible(meta)
                     && let Some(flow) = flow.as_ref()
                 {
@@ -1354,7 +1383,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // ForwardCandidate + neighbor, and store the hit decision (which for a
                         // reply is already the reverse via NatDecision::reverse). NAT64 gated
                         // on v6 (v4 installs are never consulted, pure shard churn).
-                        if foreign_arrival_zone.is_none() && is_fragment_9950 {
+                        if foreign_arrival_zone.is_none() && overlap_pre_9950.is_some() {
                             if let Some(l3_packet) = packet_frame.get(
                                 verified_l3_or_stamp(
                                     packet_frame,
@@ -4502,21 +4531,20 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        // #9950 residual (tracked follow-up, see docs/log/9950.md): the #6122
-                        // discriminator above sees FORWARD-direction rules only (src SNAT/NPTv6-out,
-                        // dst DNAT/NPTv6-in/static-DNAT). A REPLY non-first fragment that misses
-                        // its #9950 reply association (reorder ahead of its first, TTL straddle,
-                        // shard-cap eviction under flood, config-generation bump, HA non-sync,
-                        // LAG/ECMP L4-hash split) matches none of the five arms and forwards.
-                        // In-order (first-then-tail, µs spacing, the realistic case) is fixed by
-                        // the hit-tail install and wire-asserted by the #9950 cells; the miss
-                        // windows remain: DNAT-without-SNAT reorder discloses the internal src
-                        // (F-036's leak), SNAT-covered reply misses already drop via
-                        // `source_nat_would_translate_fragment`, and distinct-pool misses already
-                        // drop via MissingNeighbor (next-hop == pool dst, no neighbor). A sound
-                        // session-gated reverse discriminator needs a new L3 index + hot-path
-                        // cost — rules-only reverse arms over-drop (plain outbound from a DNAT
-                        // target's IP would match a naive src-in-pool check).
+                        // #9950 residual — owned by #10130 (session-gated reverse
+                        // discriminator; this comment + docs/log/9950.md + the issue quote
+                        // each other). The #6122 check above sees FORWARD-direction rules
+                        // only, so a REPLY tail that misses its #9950 reply association
+                        // (reorder, TTL straddle, flood eviction, generation bump, HA
+                        // non-sync, LAG/ECMP split) forwards untranslated: DNAT-without-SNAT
+                        // discloses the internal source (F-036). SNAT-covered reply misses
+                        // already drop via `source_nat_would_translate_fragment`. Distinct-pool
+                        // misses resolve next-hop == pool: MissingNeighbor buffers/retries
+                        // (not a terminal drop) and, with a pool neighbor/route present, the
+                        // fragment forwards untranslated to the pool (misdelivery of the dst
+                        // field — demonstrated by the F-053 fixture — not topology disclosure).
+                        // Rules-only reverse arms over-drop (plain outbound from a DNAT target
+                        // matches naive src-in-pool checks), hence the session-gated design.
                     }
 
                     // #6835: the CROSS-FAMILY sibling of the #6122 gate above,
@@ -5032,6 +5060,42 @@ pub(super) fn poll_binding_process_descriptor(
                     if decision.nat.nat64 {
                         telemetry.counters.nat64_translations += 1;
                     }
+                    // #9950 post-translation overlap check (parent review): the pre-hook keys
+                    // the ARRIVAL identity, but the downstream receiver reassembles the
+                    // TRANSLATED packet — same-family NAT re-addresses, and NAT64 v6→v4
+                    // truncates the ident to 16 bits, so distinct pre-keys can share one
+                    // post-key. Re-check under the translated key (same byte ranges —
+                    // translation preserves fragmentation geometry); identical keys skip
+                    // (same key+range would self-overlap — pure port-PAT needs no check).
+                    // Single site: flow-backed and flowless decisions funnel through here.
+                    if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
+                        && let Some((pre_key, start, end)) = overlap_pre_9950
+                        && let Some(post_key) = crate::fragment_overlap::translated_overlap_key(
+                            &pre_key,
+                            &decision.nat,
+                            if worker_ctx.forwarding.has_routing_domains {
+                                worker_ctx
+                                    .forwarding
+                                    .ifindex_to_routing_domain
+                                    .get(&decision.resolution.egress_ifindex)
+                                    .copied()
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            },
+                        )
+                        && post_key != pre_key
+                        && worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
+                            post_key,
+                            start,
+                            end,
+                            now_ns,
+                            &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
+                        )
+                    {
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
                     if let Some(mut request) = build_live_forward_request_from_frame(
                         worker_ctx.binding_lookup,
                         binding_index,
@@ -5148,7 +5212,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // #9950: fragments never seed the cache (same ident-less-key reason
                         // as the lookup gate above — a seeded 5-tuple would serve later
                         // datagrams' first fragments and bypass overlap + assoc installs).
-                        if !is_fragment_9950 {
+                        if !overlap_skip_cache_9950 {
                             stage_flow_cache_seed(
                                 &mut binding.flow.flow_cache,
                                 &flow,

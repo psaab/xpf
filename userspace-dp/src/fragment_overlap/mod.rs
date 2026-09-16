@@ -1,57 +1,82 @@
 //! #9950 (F-035): stateful IPv4/IPv6 fragment-overlap tracker.
 //!
 //! The stateless screens (`screen/stateless.rs`) inspect only the FIRST fragment's
-//! L4 flags (`check_tcp_flag_screens` skips non-first) and explicitly state they
-//! are NOT overlap detectors. Enforcement (zone policy `application any`, screens,
-//! NAT) therefore runs on bytes a later overlapping fragment can rewrite before the
-//! receiver reassembles — an IDS/enforcement-evasion primitive.
+//! L4 flags (`check_tcp_flag_screens` skips non-first) and state they are NOT overlap
+//! detectors. Enforcement (zone policy `application any`, screens, NAT) therefore runs
+//! on bytes a later overlapping fragment can rewrite before the receiver reassembles —
+//! an IDS/enforcement-evasion primitive. This tracker closes the ordering gap by dropping
+//! overlapping fragments (RFC 5722 / Juniper `tear-drop` semantics).
 //!
-//! This tracker closes the ordering gap by dropping overlapping fragments (RFC 5722 /
-//! Juniper `tear-drop` semantics: "when the sum of the offset and size of one
-//! fragmented packet differs from that of the next, the packets overlap").
+//! Key is the receiver's reassembly key plus the routing domain:
+//! `(family, src, dst, ident, proto, routing_domain)` for IPv4, with `protocol` pinned
+//! to 0 for IPv6 (the receiver reassembles on src/dst/ident only, RFC 8200 §4.5, while
+//! the Fragment Header's Next Header is vary-able — keying it would let an attacker
+//! split overlap keys the receiver still reassembles together). WITHOUT ingress
+//! interface/zone/authority (ECMP/LAG L4-hash routinely splits one datagram's fragments
+//! across ingresses; authority-scoping would under-drop the threat itself), but WITH the
+//! routing domain: overlapping tenant tuples in isolated VRFs never share a receiver,
+//! so a domain-free key would let tenant A drop tenant B's fragments (cross-VRF
+//! poisoning). The domain is stamped by the caller from the same SSOT as session keys
+//! (`forwarding::ingress_routing_domain`, or the parsed flow's stamped domain).
 //!
-//! Key is the RECEIVER's reassembly key — `(family, src, dst, ident, proto)` for IPv4,
-//! `(family, src, dst, ident)` for IPv6 (protocol pinned to 0, since the receiver
-//! reassembles on src/dst/ident only, RFC 8200 §4.5, while the Fragment Header's Next
-//! Header is vary-able) — WITHOUT `FragAuthority`. Including the ingress domain would
-//! miss ECMP/LAG-split same-datagram fragments that still reassemble together at the
-//! receiver. The cost is a documented squat residual: any ingress can plant ranges
-//! under a victim key (strictly weaker than status-quo reassembly corruption, which
-//! needs no state; alias fails CLOSED here — one datagram dropped — vs fail-OPEN for
-//! `FragAssoc` permit-inherit).
+//! Lifetimes cover realistic reassembly windows, not packet spacing. Linux holds
+//! incomplete datagrams up to `ipfrag_time` (30s); a 2s tracker TTL would reopen the
+//! evasion by WAITING (fragments 3s apart share no tracker entry yet reassemble
+//! together). Hence: 30s idle TTL (refreshed on record) + 60s absolute bound (never
+//! refreshed; reclaims sustained same-key streams). Memory is cap-bounded, not
+//! TTL-bounded: ≈48B key + 128B ranges (16×8B) + stamps ≈ 200B/entry × 1024 entries
+//! (16 shards × 64) ≈ 200KB fixed. The TTL only sets how long attack residue squats,
+//! which the absolute bound + shard caps contain.
 //!
-//! Design (mirrors `fragment_assoc` where the failure direction matches, diverges
-//! where it does not):
-//!   * SHARDED LRU, fixed cap (16 x 64 = 1024 datagrams), prune-expired-first on
-//!     insert (#5447), cross-worker Arc-shared via `Nat64State` (threaded across
-//!     reloads so a commit does not open a 2s evasion window).
-//!   * TTL: 2s idle (refreshed on record) + 10s absolute (never refreshed by a
-//!     record for the SAME datagram? No — a record IS a new fragment of the same
-//!     datagram re-admitted through enforcement, so it MAY extend? See below).
-//!     Actually: absolute is measured from FIRST sighting (`created_ns`), never
-//!     refreshed by later fragments of the same datagram (unlike `FragAssoc` where
-//!     a re-install is a fresh admission — here every fragment is already admitted,
-//!     so refreshing would let a sustained fragment stream hold the entry open).
-//!     Hmm — but a legitimate 44-fragment datagram arrives within ms, far under 10s,
-//!     so absolute never fires benignly. Attack residue (sustained same-key stream)
-//!     is reclaimed at 10s.
-//!   * DROP-ONLY: entries never inherit permit/translation, so NO config-generation
-//!     or owner-RG fence is needed (unlike `FragAssoc`). Overlap is a wire property,
-//!     not a verdict.
-//!   * RANGES: inline `[(u32,u32); 8]` (no per-packet alloc, #2211), coalesced on
-//!     insert (in-order datagrams hold 1 range, so 44-fragment benign flows never
-//!     overflow). Overflow (9th disjoint range) fails CLOSED (drop + counter) —
-//!     evict-oldest would be a 9-fragment bypass.
-//!   * RECORD-ON-EVERYTHING (first AND non-first): required for tail-then-first order
-//!     (the tail must plant its range so the later head overlaps it). This breaks the
-//!     `FragAssoc` first-only-install DoS bound by design; the bound here is the shard
-//!     cap + TTL + coalescing, with flood-evict documented as a transient under-detect
-//!     window (same class as #7054).
+//! Failure directions (explicit — they differ from `fragment_assoc`):
+//!   * Overlap/empty/overflow/shard-full all fail CLOSED (drop). In particular a FULL
+//!     shard drops the new datagram's fragment rather than evicting a live entry:
+//!     evict-then-miss would FORWARD (fail-open evasion via a 65-packet same-shard
+//!     flood — FNV-1a is unkeyed and computable), which would invert this control's
+//!     direction and contradict the range-overflow fail-closed policy. Flood-time
+//!     availability loss is the correct trade for a security control.
+//!   * Record-on-everything (first AND non-first) is required for tail-then-first
+//!     order, and recording happens pre-admission (before policy/NAT verdicts). So
+//!     DENIED traffic plants ranges with no permit needed — a state-poisoning
+//!     amplifier, stated plainly: an attacker matching a victim's
+//!     (family,src,dst,ident,proto,domain) within the 30s window can sacrifice one
+//!     victim datagram. This is strictly weaker than the status-quo primitive on the
+//!     same segment (spoofing the victim's fragments corrupts reassembly with no
+//!     state at all), and cross-VRF planting is closed by the domain key.
+//!   * 16-bit ident wrap (RFC 6864): near-1Gbps fragmented flows wrap idents inside
+//!     the 30s window, turning strict-overlap into self-inflicted drops for a
+//!     conformant sender that reuses an ident while its earlier datagram's ranges
+//!     persist. Same inherent hazard `fragment_assoc` documents (RFC 8200 §4.5 unique
+//!     ident per (src,dst) assumed); the blast radius here is wider (all fragmented
+//!     traffic, not just NAT'd). The drop counter makes the rate observable; sustained
+//!     wrap-window drops indicate a sender outpacing reassembly-safe ident spacing.
 //!
-//! Hook: ONE site post-screen + IPsec, pre-flow-cache, post-decap (inner), with a cheap
-//! `is_any_fragment` gate so unfragmented packets pay only a frag-word check (v4) or a
-//! base-next-header pre-gate + bounded walk for ext-header packets (v6, via the shared
-//! `#6435` walker). Atomic fragments (v4 `0x3FFF==0`, v6 offset==0&M==0) skip the table.
+//! Ranges are inline `[(u32,u32); 16]` (no per-packet alloc, #2211), coalesced on
+//! insert: in-order datagrams hold 1 range (a 44-fragment 64KB datagram never
+//! overflows), and a 17-fragment even/odd reordered interleave peaks at 9 disjoint
+//! ranges (≤16) before coalescing as the gaps fill. The 17th disjoint range fails
+//! closed (evict-oldest would be a bypass: N disjoint plants evicting the anchor).
+//!
+//! Post-translation identity (parent review): the pre-translation key is the ARRIVAL
+//! identity, but the receiver downstream reassembles the TRANSLATED packet. Same-family
+//! NAT changes addresses (two pre-keys can share one post-key), and NAT64 v6→v4
+//! truncates the 32-bit ident to 16 bits (`nat64.rs`: `(frag.ident & 0xFFFF)`), so
+//! `0x00010001`/`0x00020001` share a post-key. The TX-site hook therefore re-checks
+//! [`translated_overlap_key`] (same byte ranges — translation preserves fragmentation
+//! geometry) and drops post-collisions. Pure port-PAT (no addr change, same domain)
+//! yields an identical key and is SKIPPED by the caller (same key+range would
+//! self-overlap — a false positive, not a finding). NAT64 v4→v6 needs no post-check:
+//! the v6 ident is the zero-extended v4 ident (`nat64.rs`: `u32::from(v4_ident)`) and
+//! the v6 addrs derive injectively from the v4 session, so a post-collision implies a
+//! pre-collision (fixed pool) — the pre-check already covers it.
+//!
+//! Hook: ONE pre-site post-screen, pre-IPsec-passthrough, pre-flow-cache, post-decap
+//! (inner). Post-screen preserves byte-for-byte drop precedence + malformation
+//! attribution; pre-IPsec so locally-terminated first fragments (IKE) still plant
+//! ranges for later flowless tails; pre-cache because the 5-tuple cache key has no
+//! ident. Residuals: the SYN-cookie-challenge path (inside `stage_screen_check`)
+//! `continue`s before the hook, and ESP/AH outer fragments are recorded while their
+//! encrypted inner is unknowable — both documented, neither silently closed.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
@@ -59,23 +84,34 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-/// Overlap drops (strict overlap `max(starts) < min(ends)`). Read as a delta in tests.
+use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6};
+use crate::nat::NatDecision;
+
+/// Overlap drops (strict overlap `max(starts) < min(ends)`, plus empty ranges).
+/// Read as a delta in tests; the post-NAT hook counts to POST_NAT instead.
 pub(crate) static FRAG_OVERLAP_DROPPED: AtomicU64 = AtomicU64::new(0);
-/// Range-cap overflow drops (9th disjoint range, fail-closed). Separate from overlap
-/// so a benign-large-datagram regression is distinguishable from attack overlap.
+/// Range-cap overflow drops (17th disjoint range, fail-closed).
 pub(crate) static FRAG_OVERLAP_OVERFLOW_DROPPED: AtomicU64 = AtomicU64::new(0);
-/// Absolute-lifetime evictions (sustained same-key streams). Mirrors
-/// `FRAG_MAX_LIFETIME_EVICTIONS` semantics: only idle-fresh entries pruned for age count.
+/// Shard-full drops (fail-closed; no live eviction — see module docs).
+pub(crate) static FRAG_OVERLAP_SHARD_FULL_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Post-translation overlap drops (TX-site hook, translated key).
+pub(crate) static FRAG_OVERLAP_POST_NAT_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Absolute-lifetime evictions (sustained same-key streams).
 pub(crate) static FRAG_OVERLAP_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const OVERLAP_SHARDS: usize = 16;
 pub(crate) const OVERLAP_CAP_PER_SHARD: usize = 64;
-pub(crate) const OVERLAP_TTL_NS: u64 = 2_000_000_000;
-pub(crate) const OVERLAP_MAX_LIFETIME_NS: u64 = 10_000_000_000;
-pub(crate) const OVERLAP_MAX_RANGES: usize = 8;
+/// 30s idle TTL — covers the Linux `ipfrag_time` reassembly window (see docs).
+pub(crate) const OVERLAP_TTL_NS: u64 = 30_000_000_000;
+/// 60s absolute bound from first sighting — never refreshed by later fragments.
+pub(crate) const OVERLAP_MAX_LIFETIME_NS: u64 = 60_000_000_000;
+/// Max disjoint ranges per datagram; the 17th fails closed.
+pub(crate) const OVERLAP_MAX_RANGES: usize = 16;
 
-/// Receiver's reassembly key. `protocol` is the IPv4 Protocol byte; for IPv6 it is
-/// always 0 (dropped from the key — see module docs).
+/// Receiver's reassembly key + routing domain. `protocol` is the IPv4 Protocol byte;
+/// for IPv6 it is always 0 (dropped from the key — see module docs). `routing_domain`
+/// is stamped by the caller (flow's stamped domain, else the ingress SSOT); parse
+/// leaves it 0.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct OverlapKey {
     pub(crate) addr_family: u8,
@@ -83,6 +119,7 @@ pub(crate) struct OverlapKey {
     pub(crate) dst: IpAddr,
     pub(crate) ident: u32,
     pub(crate) protocol: u8,
+    pub(crate) routing_domain: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +129,17 @@ struct OverlapEntry {
     len: u8,
     deadline_ns: u64,
     created_ns: u64,
+}
+
+/// Tri-state L3 parse: proven-non-fragment and proven-fragment drive the table,
+/// while `Unreadable` (truncated headers) must skip the table AND the flow-cache —
+/// an unreadable packet is not a proven non-fragment, so caching it would let a
+/// fragment ride the ident-less 5-tuple fast path past both overlap and assoc installs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverlapParse {
+    NonFragment,
+    Fragment(OverlapKey, u32, u32),
+    Unreadable,
 }
 
 /// Cross-worker overlap tracker. Cheap to `Clone` (Arc-backed shards).
@@ -125,9 +173,9 @@ fn ip_octets(ip: IpAddr, out: &mut [u8; 16]) -> usize {
     }
 }
 
-/// FNV-1a over the coarse `(family, src, dst, ident)` digest (protocol deliberately
-/// excluded so v4 same-datagram candidates with varying proto — hostile — still
-/// co-locate; membership is by full-key equality). Same shape as `frag_shard_index`.
+/// FNV-1a over the coarse `(family, src, dst, ident)` digest. Protocol and routing
+/// domain are deliberately excluded so same-datagram candidates (hostile proto-varying
+/// v4, cross-domain floods) co-locate in one shard; membership is by full-key equality.
 pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |b: u8| {
@@ -171,20 +219,22 @@ impl OverlapTracker {
         }
     }
 
-    /// Check `new_range` against prior ranges for `key`; on no overlap, record it
-    /// (coalescing adjacency) and return `false`. On strict overlap OR range-cap
-    /// overflow OR empty range, return `true` (drop) without recording.
+    /// Check `(start, end)` against prior ranges for `key`; on no overlap, record it
+    /// (coalescing adjacency, refreshing the idle deadline, LRU-refreshing) and return
+    /// `false`. Returns `true` (drop, entry left byte-identical — no record, no refresh,
+    /// no LRU move) on: strict overlap, empty range (counted to `drop_counter`), range-cap
+    /// overflow (`OVERFLOW`), or shard-full (`SHARD_FULL`). The caller selects
+    /// `drop_counter` (`DROPPED` pre-NAT, `POST_NAT_DROPPED` at the TX site).
     pub(crate) fn check_and_record(
         &self,
         key: OverlapKey,
         start: u32,
         end: u32,
         now_ns: u64,
+        drop_counter: &AtomicU64,
     ) -> bool {
-        // Empty (or inverted) ranges carry no data; fail closed (teardrop screens
-        // already drop zero-payload non-firsts when armed — this covers screens-off).
         if start >= end {
-            FRAG_OVERLAP_DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_counter.fetch_add(1, Ordering::Relaxed);
             return true;
         }
         let idx = overlap_shard_index(&key);
@@ -193,21 +243,21 @@ impl OverlapTracker {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shard.retain(|e| overlap_entry_live(e, now_ns));
         if let Some(pos) = shard.iter().position(|e| e.key == key) {
-            // Strict overlap: max(starts) < min(ends). Adjacency (end==start) is NOT overlap.
             for i in 0..(shard[pos].len as usize) {
                 let (rs, re) = shard[pos].ranges[i];
                 if start.max(rs) < end.min(re) {
-                    FRAG_OVERLAP_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    drop_counter.fetch_add(1, Ordering::Relaxed);
                     return true;
                 }
             }
-            // No overlap: insert + coalesce adjacency.
-            let mut e = shard.remove(pos);
+            // No overlap: merge into a scratch copy first so the overflow drop leaves
+            // the live entry untouched (no MRU move, no deadline refresh).
+            let e = shard[pos];
             let mut tmp = [(0u32, 0u32); OVERLAP_MAX_RANGES + 1];
             tmp[..(e.len as usize)].copy_from_slice(&e.ranges[..(e.len as usize)]);
             tmp[e.len as usize] = (start, end);
             let n = e.len as usize + 1;
-            // Insertion sort by start (n <= 9, tiny).
+            // Insertion sort by start (n <= 17, tiny).
             for i in 1..n {
                 let mut j = i;
                 while j > 0 && tmp[j].0 < tmp[j - 1].0 {
@@ -215,23 +265,17 @@ impl OverlapTracker {
                     j -= 1;
                 }
             }
-            // Merge adjacent (end==start). No overlaps remain (checked above).
             let mut out = [(0u32, 0u32); OVERLAP_MAX_RANGES];
             let mut out_len = 0usize;
             let mut cur = tmp[0];
             for &nxt in tmp.iter().take(n).skip(1) {
                 if nxt.0 <= cur.1 {
-                    // Adjacent (==) or subsumed (should not happen post-overlap-check,
-                    // but clamp defensively): extend.
                     if nxt.1 > cur.1 {
                         cur.1 = nxt.1;
                     }
                 } else {
                     if out_len >= OVERLAP_MAX_RANGES {
-                        // Overflow: fail closed, do NOT record (evict-oldest would be bypassable).
                         FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
-                        // Restore the entry (without the new range) to preserve LRU position.
-                        shard.push(e);
                         return true;
                     }
                     out[out_len] = cur;
@@ -241,11 +285,13 @@ impl OverlapTracker {
             }
             if out_len >= OVERLAP_MAX_RANGES {
                 FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
-                shard.push(e);
                 return true;
             }
             out[out_len] = cur;
             out_len += 1;
+            // `out_len` is now the merged count (post-increment) — assign directly;
+            // `+1` here would inflate `len` past the written slots (OOB on next scan).
+            let mut e = shard.remove(pos);
             e.ranges = out;
             e.len = out_len as u8;
             e.deadline_ns = now_ns.saturating_add(OVERLAP_TTL_NS);
@@ -253,9 +299,11 @@ impl OverlapTracker {
             shard.push(e);
             return false;
         }
-        // New datagram: prune-first already done; evict oldest live only if still at cap.
         if shard.len() >= OVERLAP_CAP_PER_SHARD {
-            shard.remove(0);
+            // Fail CLOSED: evicting a live entry would let a flood erase the anchor
+            // ranges and forward an overlap the screens never saw together.
+            FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
         let mut ranges = [(0u32, 0u32); OVERLAP_MAX_RANGES];
         ranges[0] = (start, end);
@@ -282,27 +330,25 @@ impl OverlapTracker {
     }
 }
 
-/// Parse the overlap `(key, start, end)` from an L3-relative packet slice.
-/// Returns `None` for unfragmented/atomic/truncated packets (no table ops).
-/// Clamps declared lengths to wire bytes; reads addrs from the slice, never meta.
-pub(crate) fn overlap_fragment_range(
-    l3_packet: &[u8],
-    addr_family: i32,
-) -> Option<(OverlapKey, u32, u32)> {
+/// Parse the overlap decision from an L3-relative packet slice. `addr_family` selects
+/// the arm; the IP version nibble is verified against the wire (a family/wire mismatch
+/// yields `Unreadable`, never a bogus key — and a bogus key could not alias real
+/// entries anyway since addrs come from the slice). `routing_domain` is left 0 for the
+/// caller to stamp. Declared lengths are clamped to wire bytes.
+pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse {
     match addr_family {
         libc::AF_INET => {
-            if l3_packet.len() < 20 {
-                return None;
+            if l3_packet.len() < 20 || l3_packet[0] >> 4 != 4 {
+                return OverlapParse::Unreadable;
             }
             let ihl = ((l3_packet[0] & 0x0F) as usize) * 4;
             if ihl < 20 || l3_packet.len() < ihl {
-                return None;
+                return OverlapParse::Unreadable;
             }
             let total_len = u16::from_be_bytes([l3_packet[2], l3_packet[3]]) as usize;
             let frag_off = u16::from_be_bytes([l3_packet[6], l3_packet[7]]);
-            // Atomic (MF=0, offset=0) or unfragmented: skip.
             if (frag_off & 0x3FFF) == 0 {
-                return None;
+                return OverlapParse::NonFragment;
             }
             let ident = u16::from_be_bytes([l3_packet[4], l3_packet[5]]) as u32;
             let proto = l3_packet[9];
@@ -311,32 +357,39 @@ pub(crate) fn overlap_fragment_range(
             let start = ((frag_off & 0x1FFF) as u32) << 3;
             let declared = total_len.saturating_sub(ihl);
             let wire = l3_packet.len().saturating_sub(ihl);
-            let len = declared.min(wire) as u32;
-            let end = start.saturating_add(len);
-            Some((
+            let end = start.saturating_add(declared.min(wire) as u32);
+            OverlapParse::Fragment(
                 OverlapKey {
                     addr_family: libc::AF_INET as u8,
                     src: IpAddr::V4(src),
                     dst: IpAddr::V4(dst),
                     ident,
                     protocol: proto,
+                    routing_domain: 0,
                 },
                 start,
                 end,
-            ))
+            )
         }
         libc::AF_INET6 => {
-            if l3_packet.len() < 40 {
-                return None;
+            if l3_packet.len() < 40 || l3_packet[0] >> 4 != 6 {
+                return OverlapParse::Unreadable;
             }
             let walk = crate::afxdp::frame::walk_ipv6_ext_chain(l3_packet, 0);
-            let frag = walk.fragment?;
-            let bytes = frag.bytes?;
+            let Some(frag) = walk.fragment else {
+                return OverlapParse::NonFragment;
+            };
+            let Some(bytes) = frag.bytes else {
+                return OverlapParse::Unreadable;
+            };
             let frag_off = u16::from_be_bytes([bytes[2], bytes[3]]);
-            // Atomic (offset==0, M==0): whole datagram, skip.
             if (frag_off & 0xFFF9) == 0 {
-                return None;
+                return OverlapParse::NonFragment;
             }
+            // Byte offset, not units: the 13-bit unit count occupies bits 15..3, so
+            // masking the low 3 (Res+M) yields units*8 directly. (v4 shifts because its
+            // units sit in the LOW 13 bits; do not "fix" this into a >>3 — that is the
+            // identity here, and *8 after it would 8x the offset.)
             let start = (frag_off & 0xFFF8) as u32;
             let ident = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
             let mut src_b = [0u8; 16];
@@ -344,25 +397,76 @@ pub(crate) fn overlap_fragment_range(
             src_b.copy_from_slice(&l3_packet[8..24]);
             dst_b.copy_from_slice(&l3_packet[24..40]);
             let payload_len = u16::from_be_bytes([l3_packet[4], l3_packet[5]]) as usize;
-            // frag_data_off: payload-region bytes consumed up to + including frag header.
             let frag_data_off = (frag.header_offset + 8).saturating_sub(40);
             let declared = payload_len.saturating_sub(frag_data_off);
             let wire = l3_packet.len().saturating_sub(frag.header_offset + 8);
-            let len = declared.min(wire) as u32;
-            let end = start.saturating_add(len);
-            Some((
+            let end = start.saturating_add(declared.min(wire) as u32);
+            OverlapParse::Fragment(
                 OverlapKey {
                     addr_family: libc::AF_INET6 as u8,
                     src: IpAddr::V6(Ipv6Addr::from(src_b)),
                     dst: IpAddr::V6(Ipv6Addr::from(dst_b)),
                     ident,
                     protocol: 0,
+                    routing_domain: 0,
                 },
                 start,
                 end,
-            ))
+            )
         }
-        _ => None,
+        _ => OverlapParse::NonFragment,
+    }
+}
+
+/// Map the IPv6 upper-layer protocol to its post-NAT64 v4 value (ICMPv6↔ICMP).
+const fn map_v6_to_v4_proto(p: u8) -> u8 {
+    if p == PROTO_ICMPV6 {
+        PROTO_ICMP
+    } else {
+        p
+    }
+}
+
+/// Compute the POST-translation overlap key for a fragment whose pre-translation key
+/// is `pre` under NAT decision `nat`. Returns `None` when no translation applies
+/// (caller skips — the pre-check sufficed) or when the translated key is identical to
+/// `pre` (pure port-PAT: same key+range would self-overlap — the caller MUST skip the
+/// post-check on key equality). Returns `None` for NAT64 v4→v6 by the injectivity proof
+/// in the module docs. `egress_domain` is the post-translation routing domain (the
+/// downstream receiver's domain, resolved from the egress interface).
+pub(crate) fn translated_overlap_key(
+    pre: &OverlapKey,
+    nat: &NatDecision,
+    egress_domain: u32,
+) -> Option<OverlapKey> {
+    if nat.nat64 {
+        if pre.addr_family as i32 == libc::AF_INET6 {
+            // v6→v4: pool + server addrs from the decision, ident truncated to 16 bits.
+            Some(OverlapKey {
+                addr_family: libc::AF_INET as u8,
+                src: nat.rewrite_src?,
+                dst: nat.rewrite_dst?,
+                ident: pre.ident & 0xFFFF,
+                protocol: map_v6_to_v4_proto(pre.protocol),
+                routing_domain: egress_domain,
+            })
+        } else {
+            // v4→v6: post-key is injective in the pre-key (zero-extended ident +
+            // injectively-derived v6 addrs under a fixed pool), so a post-collision
+            // implies a pre-collision the pre-check already caught. No post-check.
+            None
+        }
+    } else if nat.rewrite_src.is_some() || nat.rewrite_dst.is_some() {
+        Some(OverlapKey {
+            addr_family: pre.addr_family,
+            src: nat.rewrite_src.unwrap_or(pre.src),
+            dst: nat.rewrite_dst.unwrap_or(pre.dst),
+            ident: pre.ident,
+            protocol: pre.protocol,
+            routing_domain: egress_domain,
+        })
+    } else {
+        None
     }
 }
 
@@ -378,14 +482,21 @@ mod tests {
             dst: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             ident: 0xBEEF,
             protocol: 6,
+            routing_domain: 0,
         }
+    }
+
+    fn dropped_delta(f: impl FnOnce()) -> u64 {
+        let d0 = FRAG_OVERLAP_DROPPED.load(Ordering::Relaxed);
+        f();
+        FRAG_OVERLAP_DROPPED.load(Ordering::Relaxed).wrapping_sub(d0)
     }
 
     #[test]
     fn adjacent_ranges_do_not_overlap_9950() {
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000));
-        assert!(!t.check_and_record(v4_key(), 16, 24, 2_000));
+        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.check_and_record(v4_key(), 16, 24, 2_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(t.len(), 1);
     }
 
@@ -393,39 +504,40 @@ mod tests {
     fn strict_overlap_drops_both_orders_9950() {
         for (a, b) in [((0u32, 16u32), (8u32, 24u32)), ((8, 24), (0, 16))] {
             let t = OverlapTracker::new();
-            FRAG_OVERLAP_DROPPED.store(0, Ordering::Relaxed);
-            assert!(!t.check_and_record(v4_key(), a.0, a.1, 1_000));
-            assert!(t.check_and_record(v4_key(), b.0, b.1, 2_000));
-            assert_eq!(FRAG_OVERLAP_DROPPED.load(Ordering::Relaxed), 1);
+            let d = dropped_delta(|| {
+                assert!(!t.check_and_record(v4_key(), a.0, a.1, 1_000, &FRAG_OVERLAP_DROPPED));
+                assert!(t.check_and_record(v4_key(), b.0, b.1, 2_000, &FRAG_OVERLAP_DROPPED));
+            });
+            assert_eq!(d, 1);
         }
     }
 
     #[test]
     fn identical_retransmit_drops_9950() {
-        // A byte-identical retransmit is strict overlap (max==min fails only for
-        // adjacency). Dropping the duplicate is harmless (single delivery); TCP
+        // Byte-identical retransmit is strict overlap. Harmless (single delivery); TCP
         // retransmits mint new idents, so this never fires benignly for TCP.
+        // RED-on-revert: adjacency-only comparison (`<=`) would pass the duplicate.
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000));
-        assert!(t.check_and_record(v4_key(), 0, 16, 2_000));
+        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.check_and_record(v4_key(), 0, 16, 2_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
     fn empty_range_drops_fail_closed_9950() {
         let t = OverlapTracker::new();
-        assert!(t.check_and_record(v4_key(), 8, 8, 1_000));
-        assert!(t.check_and_record(v4_key(), 16, 8, 1_000));
+        assert!(t.check_and_record(v4_key(), 8, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.check_and_record(v4_key(), 16, 8, 1_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
     fn large_in_order_datagram_coalesces_to_one_range_9950() {
         // 44-fragment 64KB datagram, in-order adjacent 1480B chunks: coalescing keeps
-        // 1 range, never overflows. Without coalescing this would need 44 slots.
+        // 1 range. RED-on-revert: without coalescing this needs 44 slots → overflow.
         let t = OverlapTracker::new();
         let mut off = 0u32;
         for _ in 0..44 {
             assert!(
-                !t.check_and_record(v4_key(), off, off + 1480, 1_000),
+                !t.check_and_record(v4_key(), off, off + 1480, 1_000, &FRAG_OVERLAP_DROPPED),
                 "off={off}"
             );
             off += 1480;
@@ -434,23 +546,102 @@ mod tests {
     }
 
     #[test]
-    fn sparse_disjoint_overflow_drops_fail_closed_9950() {
-        // 8 disjoint 8B ranges with 16B gaps (no adjacency to coalesce): fills the 8
-        // slots. The 9th disjoint range overflows -> drop + counter (evict-oldest
-        // would be a 9-fragment bypass).
+    fn benign_reordered_interleave_forwards_9950() {
+        // 17-fragment even/odd reordered interleave (the GPT-6 availability case): evens
+        // arrive disjoint (peak 9 ranges ≤ 16), odds fill gaps and coalesce. All forward.
+        // RED-on-revert: an 8-range cap drops the 9th even (valid traffic blackholed).
         let t = OverlapTracker::new();
-        FRAG_OVERLAP_OVERFLOW_DROPPED.store(0, Ordering::Relaxed);
-        for i in 0..8u32 {
-            let s = i * 24;
-            assert!(!t.check_and_record(v4_key(), s, s + 8, 1_000), "i={i}");
+        for i in (0..17u32).step_by(2) {
+            assert!(
+                !t.check_and_record(v4_key(), i * 8, i * 8 + 8, 1_000, &FRAG_OVERLAP_DROPPED),
+                "even i={i}"
+            );
         }
-        assert!(t.check_and_record(v4_key(), 8 * 24, 8 * 24 + 8, 1_000));
-        assert_eq!(FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed), 1);
+        for i in (1..17u32).step_by(2) {
+            assert!(
+                !t.check_and_record(v4_key(), i * 8, i * 8 + 8, 2_000, &FRAG_OVERLAP_DROPPED),
+                "odd i={i}"
+            );
+        }
+        assert_eq!(t.len(), 1);
     }
 
     #[test]
-    fn v4_parse_clamps_to_wire_and_skips_atomic_9950() {
-        // Atomic (MF=0, offset=0): None.
+    fn sparse_disjoint_overflow_drops_fail_closed_9950() {
+        // 16 disjoint 8B ranges with 16B gaps fill the slots; the 17th fails closed.
+        // RED-on-revert: evict-oldest would drop the anchor and forward the 17th.
+        let t = OverlapTracker::new();
+        let o0 = FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed);
+        for i in 0..16u32 {
+            let s = i * 24;
+            assert!(
+                !t.check_and_record(v4_key(), s, s + 8, 1_000, &FRAG_OVERLAP_DROPPED),
+                "i={i}"
+            );
+        }
+        assert!(t.check_and_record(v4_key(), 16 * 24, 16 * 24 + 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert_eq!(
+            FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed).wrapping_sub(o0),
+            1
+        );
+        // The live entry is untouched by the overflow drop (no MRU move, still 16).
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn shard_full_drops_without_evicting_live_9950() {
+        // Fill one shard (64 entries, same-shard brute-forced idents — FNV-1a is
+        // unkeyed so the attacker computes this too), then prove the 65th drops
+        // fail-closed AND the first entry's ranges still detect overlap (no eviction).
+        // RED-on-revert: evict-oldest would admit the 65th and blind the first key.
+        let t = OverlapTracker::new();
+        let target = overlap_shard_index(&v4_key());
+        let mut idents = Vec::new();
+        for ident in 0u32.. {
+            let mut k = v4_key();
+            k.ident = ident;
+            if overlap_shard_index(&k) == target {
+                idents.push(ident);
+                if idents.len() == 65 {
+                    break;
+                }
+            }
+        }
+        for &ident in &idents[..64] {
+            let mut k = v4_key();
+            k.ident = ident;
+            assert!(!t.check_and_record(k, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        }
+        let s0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
+        let mut klast = v4_key();
+        klast.ident = idents[64];
+        assert!(t.check_and_record(klast, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert_eq!(
+            FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed).wrapping_sub(s0),
+            1
+        );
+        let mut kfirst = v4_key();
+        kfirst.ident = idents[0];
+        assert!(t.check_and_record(kfirst, 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
+    }
+
+    #[test]
+    fn routing_domain_separates_tenants_9950() {
+        // Same wire tuple in two routing domains must not false-overlap (cross-VRF).
+        // RED-on-revert: a domain-free key drops the second tenant's fragment.
+        let t = OverlapTracker::new();
+        let mut a = v4_key();
+        a.routing_domain = 1;
+        let mut b = v4_key();
+        b.routing_domain = 2;
+        assert!(!t.check_and_record(a, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.check_and_record(b, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.check_and_record(a, 8, 24, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn v4_parse_clamps_atomic_and_tristate_9950() {
         let mut ip = vec![0u8; 20];
         ip[0] = 0x45;
         ip[2..4].copy_from_slice(&28u16.to_be_bytes());
@@ -461,24 +652,31 @@ mod tests {
         ip[16..20].copy_from_slice(&[172, 16, 80, 200]);
         let mut pkt = ip.clone();
         pkt.extend_from_slice(&[0u8; 8]);
-        assert!(overlap_fragment_range(&pkt, libc::AF_INET).is_none());
-        // First fragment (MF=1, offset=0) with lying declared len (100) but only 8
-        // wire bytes: clamped to 8 (0..8).
-        let mut first = ip;
+        assert_eq!(overlap_parse(&pkt, libc::AF_INET), OverlapParse::NonFragment);
+        // Lying declared len (120) with 8 wire bytes → clamped 0..8.
+        let mut first = ip.clone();
         first[2..4].copy_from_slice(&120u16.to_be_bytes());
         first[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
         let mut pkt = first;
         pkt.extend_from_slice(&[0u8; 8]);
-        let (k, s, e) = overlap_fragment_range(&pkt, libc::AF_INET).expect("first");
-        assert_eq!((s, e), (0, 8));
-        assert_eq!(k.ident, 0xBEEF);
-        assert_eq!(k.protocol, 6);
+        match overlap_parse(&pkt, libc::AF_INET) {
+            OverlapParse::Fragment(k, s, e) => {
+                assert_eq!((s, e), (0, 8));
+                assert_eq!(k.ident, 0xBEEF);
+                assert_eq!(k.protocol, 6);
+            }
+            other => panic!("expected Fragment, got {other:?}"),
+        }
+        // Truncated (<20B) and version-mismatched slices are Unreadable, never keys.
+        assert_eq!(overlap_parse(&pkt[..10], libc::AF_INET), OverlapParse::Unreadable);
+        let mut wrongver = pkt.clone();
+        wrongver[0] = 0x60;
+        assert_eq!(overlap_parse(&wrongver, libc::AF_INET), OverlapParse::Unreadable);
+        assert_eq!(overlap_parse(&pkt, 99), OverlapParse::NonFragment);
     }
 
     #[test]
-    fn v6_parse_drops_proto_and_sizes_via_shared_walker_9950() {
-        // Base(40) + frag header(8): next=TCP(6), offset 0 M=1, ident 0x01020304,
-        // payload 16B. Protocol in key must be 0 (dropped), range 0..16.
+    fn v6_parse_drops_proto_and_tristate_9950() {
         let mut pkt = vec![0u8; 40 + 8 + 16];
         pkt[0] = 0x60;
         pkt[4..6].copy_from_slice(&24u16.to_be_bytes());
@@ -489,24 +687,124 @@ mod tests {
         pkt[40] = 6;
         pkt[42..44].copy_from_slice(&0x0001u16.to_be_bytes());
         pkt[44..48].copy_from_slice(&0x01020304u32.to_be_bytes());
-        let (k, s, e) = overlap_fragment_range(&pkt, libc::AF_INET6).expect("v6 first");
+        let (k, s, e) = match overlap_parse(&pkt, libc::AF_INET6) {
+            OverlapParse::Fragment(k, s, e) => (k, s, e),
+            other => panic!("expected Fragment, got {other:?}"),
+        };
         assert_eq!((s, e), (0, 16));
         assert_eq!(k.protocol, 0);
         assert_eq!(k.ident, 0x01020304);
-        // Same datagram with different Next Header (UDP=17) must build the SAME key
-        // (proto dropped) so the overlap is still detected.
+        // Same datagram, different Next Header (UDP=17): SAME key (proto dropped).
+        // RED-on-revert: keying Next Header would split overlap detection.
         let mut pkt2 = pkt.clone();
         pkt2[40] = 17;
         pkt2[42..44].copy_from_slice(&0x0009u16.to_be_bytes());
-        let (k2, s2, e2) = overlap_fragment_range(&pkt2, libc::AF_INET6).expect("v6 tail");
+        let (k2, s2, e2) = match overlap_parse(&pkt2, libc::AF_INET6) {
+            OverlapParse::Fragment(k, s, e) => (k, s, e),
+            other => panic!("expected Fragment, got {other:?}"),
+        };
         assert_eq!(k2, k);
         assert_eq!((s2, e2), (8, 24));
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(k, s, e, 1_000));
-        assert!(t.check_and_record(k2, s2, e2, 2_000));
-        // Atomic (offset 0 M 0): None.
-        let mut atomic = pkt;
+        assert!(!t.check_and_record(k, s, e, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.check_and_record(k2, s2, e2, 2_000, &FRAG_OVERLAP_DROPPED));
+        // Atomic → NonFragment; truncated header → Unreadable; no frag header → NonFragment.
+        let mut atomic = pkt.clone();
         atomic[42..44].copy_from_slice(&0x0000u16.to_be_bytes());
-        assert!(overlap_fragment_range(&atomic, libc::AF_INET6).is_none());
+        assert_eq!(overlap_parse(&atomic, libc::AF_INET6), OverlapParse::NonFragment);
+        assert_eq!(
+            overlap_parse(&pkt[..44], libc::AF_INET6),
+            OverlapParse::Unreadable
+        );
+        let mut nofrag = pkt;
+        nofrag[6] = 6;
+        assert_eq!(overlap_parse(&nofrag, libc::AF_INET6), OverlapParse::NonFragment);
+    }
+
+    #[test]
+    fn translated_key_same_family_collision_9950() {
+        // Two internal hosts, same ident+dst, interface-SNAT to one pool addr: distinct
+        // pre-keys share one post-key, and overlapping post-ranges must drop.
+        // RED-on-revert: pre-only checking forwards both (downstream reassembly).
+        let pool = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+        let ext = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let nat = NatDecision {
+            rewrite_src: Some(pool),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            nat64: false,
+            nptv6: false,
+        };
+        let mut a = v4_key();
+        a.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100));
+        a.dst = ext;
+        let mut b = v4_key();
+        b.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
+        b.dst = ext;
+        assert_ne!(a, b);
+        let pa = translated_overlap_key(&a, &nat, 0).expect("post");
+        let pb = translated_overlap_key(&b, &nat, 0).expect("post");
+        assert_eq!(pa, pb);
+        assert_eq!(pa.src, pool);
+        let t = OverlapTracker::new();
+        assert!(!t.check_and_record(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        let p0 = FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed);
+        assert!(t.check_and_record(pb, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert_eq!(
+            FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed).wrapping_sub(p0),
+            1
+        );
+        // No rewrite → None (pre-check sufficed).
+        assert!(translated_overlap_key(&a, &NatDecision::default(), 0).is_none());
+        // Pure port-PAT (no addr rewrite) → identical key → caller must skip.
+        let port_only = NatDecision {
+            rewrite_src_port: Some(40000),
+            ..NatDecision::default()
+        };
+        // (No addr rewrite at all → None; addr-preserving covered by equality rule.)
+        assert!(translated_overlap_key(&a, &port_only, 0).is_none());
+    }
+
+    #[test]
+    fn translated_key_nat64_truncation_collision_9950() {
+        // v6 idents 0x00010001/0x00020001 truncate to the same v4 ident 1 with the same
+        // translated addrs: distinct pre-keys, one post-key, overlapping post-ranges drop.
+        let v4src = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 50));
+        let v4dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let nat = NatDecision {
+            rewrite_src: Some(v4src),
+            rewrite_dst: Some(v4dst),
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            nat64: true,
+            nptv6: false,
+        };
+        let mk = |ident: u32| OverlapKey {
+            addr_family: libc::AF_INET6 as u8,
+            src: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            dst: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ident,
+            protocol: 0,
+            routing_domain: 0,
+        };
+        let a = mk(0x0001_0001);
+        let b = mk(0x0002_0001);
+        let pa = translated_overlap_key(&a, &nat, 0).expect("post");
+        let pb = translated_overlap_key(&b, &nat, 0).expect("post");
+        assert_eq!(pa, pb);
+        assert_eq!(pa.ident, 1);
+        assert_eq!(pa.addr_family, libc::AF_INET as u8);
+        let t = OverlapTracker::new();
+        assert!(!t.check_and_record(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(t.check_and_record(pb, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        // v4→v6 direction needs no post-check (injectivity proof in module docs).
+        let mut v4pre = v4_key();
+        v4pre.routing_domain = 0;
+        let nat64v4 = NatDecision {
+            nat64: true,
+            ..NatDecision::default()
+        };
+        assert!(translated_overlap_key(&v4pre, &nat64v4, 0).is_none());
     }
 }

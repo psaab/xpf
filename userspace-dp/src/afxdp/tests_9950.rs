@@ -121,6 +121,8 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
         ("overlap-tail-then-first", 0x0001u16, 0x2000u16, 0),
         // Positive control: adjacent, no overlap (0..16 then 16..24).
         ("benign-adjacent", 0x2000u16, 0x0002u16, 1),
+        // Benign out-of-order disjoint: tail (16..24) arrives before the head.
+        ("benign-adjacent-reversed", 0x0002u16, 0x2000u16, 1),
     ] {
         let mut snapshot = policy_deny_snapshot();
         snapshot.default_policy = "permit".to_string();
@@ -132,19 +134,17 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
         let mut sessions = SessionTable::new();
         let ha_state = BTreeMap::new();
 
-        // First fragment payload: 16 bytes (TCP header worth of bytes).
+        // First fragment payload: 16 bytes (8B-aligned for MF=1 — wire-valid).
         let payload_first = [0xAAu8; 16];
-        // Second fragment payload: 16 bytes for overlap case, 8 for adjacent.
-        let payload_second: Vec<u8> = if expect_second_forward == 1 && label == "benign-adjacent" {
+        // Second fragment payload: 16 bytes for overlap cases, 8 for benign.
+        let payload_second: Vec<u8> = if expect_second_forward == 1 {
             vec![0xBBu8; 8]
         } else {
             vec![0xBBu8; 16]
         };
         let id = 0xBEEF;
-        let frame_a = ipv4_frag_frame_9950(src, dst, PROTO_TCP, id, first_off, &payload_first);
-        // For the reverse-order case the "first arrival" is the tail: it needs
-        // the tail payload, not the head payload. Rebuild accordingly.
-        let (frame_first_arrival, frame_second_arrival) = if label == "overlap-tail-then-first" {
+        // When the first arrival is a tail (offset != 0), it takes the tail payload.
+        let (frame_first_arrival, frame_second_arrival) = if first_off != 0x2000 {
             let tail = ipv4_frag_frame_9950(src, dst, PROTO_TCP, id, first_off, &payload_second);
             let head = ipv4_frag_frame_9950(src, dst, PROTO_TCP, id, second_off, &payload_first);
             (tail, head)
@@ -182,6 +182,8 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
             dbg1.forward, 1,
             "{label}: first arrival must forward (otherwise the overlap signal is vacuous)"
         );
+        let d0 = crate::fragment_overlap::FRAG_OVERLAP_DROPPED
+            .load(std::sync::atomic::Ordering::Relaxed);
         let (_b2, dbg2) = txn_run_descriptor(
             &mut binding,
             &mut sessions,
@@ -193,6 +195,16 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
         assert_eq!(
             dbg2.forward, expect_second_forward,
             "{label}: second arrival forward must be {expect_second_forward} (overlap denied, benign forwarded)"
+        );
+        // The drop (if any) is the overlap detector's — the fixture permits everything
+        // else (default-permit, no screens, neighbor present), so attribution is exact.
+        let want_drops = if expect_second_forward == 0 { 1u64 } else { 0 };
+        assert_eq!(
+            crate::fragment_overlap::FRAG_OVERLAP_DROPPED
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .wrapping_sub(d0),
+            want_drops,
+            "{label}: overlap-drop counter delta"
         );
     }
 }
@@ -309,8 +321,8 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     // reply fragment association.
     let mut binding_lan = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding_lan.interface = Arc::<str>::from("reth1.0");
-    // TCP header 20 bytes: sport 8443, dport 54321, flags ACK.
-    let mut tcp = vec![0u8; 20];
+    // TCP header (20B) + 4 pad = 24B: 8B-aligned for MF=1 (wire-valid).
+    let mut tcp = vec![0u8; 24];
     tcp[0..2].copy_from_slice(&internal_port.to_be_bytes());
     tcp[2..4].copy_from_slice(&client_port.to_be_bytes());
     tcp[12] = 0x50;
@@ -351,7 +363,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     );
 
     // (3) Reply non-first fragment: same datagram, offset 3 (24 bytes), 16 bytes
-    // payload (24..40, adjacent past the 20-byte TCP header — NOT overlapping, so
+    // payload (24..40, adjacent past the 24-byte first — NOT overlapping, so
     // the #9950 overlap tracker lets it through). Must inherit the reverse
     // translation: wire src == public.
     let tail_payload = [0xCCu8; 16];
@@ -526,7 +538,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
     // offset 0 MF=1 with TCP header. Hits reverse, dst -> internal.
     let mut binding_wan = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding_wan.interface = Arc::<str>::from("reth0.80");
-    let mut tcp = vec![0u8; 20];
+    let mut tcp = vec![0u8; 24];
     tcp[0..2].copy_from_slice(&external_port.to_be_bytes());
     tcp[2..4].copy_from_slice(&pool_port.to_be_bytes());
     tcp[12] = 0x50;
@@ -565,7 +577,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
     );
 
     // (3) Reply non-first: same datagram, offset 3 (24..40, adjacent past the
-    // 20-byte TCP header — NOT overlapping). Wire dst must be the internal host,
+    // 24-byte first — NOT overlapping). Wire dst must be the internal host,
     // not the pool address.
     let tail_payload = [0xDDu8; 16];
     let reply_tail =
@@ -718,7 +730,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
     let mut binding_wan = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding_wan.interface = Arc::<str>::from("reth0.80");
     for (label, reply_id) in [("datagram-1", 0xD001u16), ("datagram-2", 0xD002u16)] {
-        let mut tcp = vec![0u8; 20];
+        let mut tcp = vec![0u8; 24];
         tcp[0..2].copy_from_slice(&external_port.to_be_bytes());
         tcp[2..4].copy_from_slice(&pool_port.to_be_bytes());
         tcp[12] = 0x50;
@@ -841,7 +853,7 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
     assert_eq!(dbg0.forward, 1, "premise: SYN must forward");
     // (2) Later fragmented datagram on the SAME 5-tuple: first hits the session (not a
     // new-flow commit) and must install; tail inherits interface-SNAT (172.16.80.8).
-    let mut tcp = vec![0u8; 20];
+    let mut tcp = vec![0u8; 24];
     tcp[0..2].copy_from_slice(&33333u16.to_be_bytes());
     tcp[2..4].copy_from_slice(&443u16.to_be_bytes());
     tcp[12] = 0x50;
@@ -911,4 +923,192 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
         Ipv4Addr::new(172, 16, 80, 8),
         "wire src must be the SNAT interface address"
     );
+}
+
+/// F-035 enforcement order with an ARMED `syn-fin` screen: the first fragment's benign
+/// flags (ACK) pass the screen — the verdict the datagram "earns" — while the overlapping
+/// tail, whose reassembled bytes would carry SYN+FIN, never reaches L4 verdicts (a
+/// non-first fragment skips TCP-flag screens by construction, #1137) and is dropped by
+/// the overlap tracker instead. RED-on-revert: without the tracker the tail forwards and
+/// the receiver reassembles attacker flags the screens never saw.
+#[test]
+fn f035_enforcement_order_armed_screen_9950() {
+    use crate::screen::{ScreenPacketInfo, ScreenProfile, ScreenState, ScreenVerdict};
+    let mut zones = rustc_hash::FxHashMap::default();
+    zones.insert(
+        "lan".to_string(),
+        ScreenProfile {
+            syn_fin: true,
+            ..ScreenProfile::default()
+        },
+    );
+    let mut state = ScreenState::new();
+    state.update_profiles(zones);
+    let base = ScreenPacketInfo {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10, // ACK: benign.
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 33333,
+        dst_port: 443,
+        tcp_seq: 1,
+        tcp_ack: 0,
+        tcp_mss: 0,
+        pkt_len: 60,
+        is_fragment: true,
+        is_first_fragment: true,
+        ip_ihl: 5,
+        ip_frag_off: 0x2000,
+        ip_total_len: 40,
+        ip_payload_len: 0,
+        frag_data_off: 0,
+        saw_ipv4_source_route: false,
+        saw_ipv6_routing_header: false,
+    };
+    assert_eq!(
+        state.check_packet("lan", &base, 1),
+        ScreenVerdict::Pass,
+        "benign first fragment earns the screen verdict"
+    );
+    // The overlapping tail: payload bytes spell SYN+FIN, but as a non-first fragment
+    // the TCP-flag screens never see them.
+    let tail = ScreenPacketInfo {
+        tcp_flags: 0x03, // SYN|FIN smuggled in the overlapping bytes.
+        is_first_fragment: false,
+        ip_frag_off: 0x0001,
+        ..base.clone()
+    };
+    assert_eq!(
+        state.check_packet("lan", &tail, 1),
+        ScreenVerdict::Pass,
+        "non-first skips TCP screens — screens alone cannot stop the smuggle"
+    );
+    // The overlap tracker closes it: first planted 0..20, tail 8..28 overlaps.
+    let t = crate::fragment_overlap::OverlapTracker::new();
+    let key = crate::fragment_overlap::OverlapKey {
+        addr_family: libc::AF_INET as u8,
+        src: base.src_ip,
+        dst: base.dst_ip,
+        ident: 0xBEEF,
+        protocol: PROTO_TCP,
+        routing_domain: 0,
+    };
+    assert!(!t.check_and_record(key, 0, 20, 1_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED));
+    assert!(
+        t.check_and_record(key, 8, 28, 2_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED),
+        "overlapping tail dropped despite passing screens"
+    );
+}
+
+/// Build eth(14) + IPv6(40) + Fragment header(8) + payload.
+fn ipv6_frag_frame_9950(
+    src: std::net::Ipv6Addr,
+    dst: std::net::Ipv6Addr,
+    frag_off: u16,
+    ident: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut f = vec![
+        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x86, 0xDD,
+    ];
+    let mut ip = vec![0u8; 40];
+    ip[0] = 0x60;
+    let plen = (8 + payload.len()) as u16;
+    ip[4..6].copy_from_slice(&plen.to_be_bytes());
+    ip[6] = 44; // Fragment header.
+    ip[7] = 64;
+    ip[8..24].copy_from_slice(&src.octets());
+    ip[24..40].copy_from_slice(&dst.octets());
+    let mut frag = [0u8; 8];
+    frag[0] = PROTO_TCP;
+    frag[2..4].copy_from_slice(&frag_off.to_be_bytes());
+    frag[4..8].copy_from_slice(&ident.to_be_bytes());
+    f.extend_from_slice(&ip);
+    f.extend_from_slice(&frag);
+    f.extend_from_slice(payload);
+    f
+}
+
+/// F-035 over IPv6 on the real poll path (parent review: unit tests alone do not prove
+/// the v6 poll wiring): overlapping v6 fragments denied, benign adjacent forwarded.
+/// RED-on-revert: without the v6 hook wiring both overlap orders forward.
+#[test]
+fn f035_overlap_v6_denied_both_orders_9950() {
+    use std::net::Ipv6Addr;
+    let lan_src: Ipv6Addr = "2001:559:8585:ef00::100".parse().unwrap();
+    let wan_dst: Ipv6Addr = "2001:559:8585:80::200".parse().unwrap();
+    for (label, first_off, second_off, first_len, second_len, expect_second) in [
+        ("v6-overlap-first-then-tail", 0x0001u16, 0x0009u16, 24usize, 16usize, 0),
+        ("v6-overlap-tail-then-first", 0x0009u16, 0x0001u16, 24usize, 16usize, 0),
+        ("v6-benign-adjacent", 0x0001u16, 0x0018u16, 24usize, 8usize, 1),
+    ] {
+        let mut snapshot = nat_snapshot();
+        // Default-permit (mirrors the v4 F-035 cell): nat_snapshot's allow-all does not
+        // reliably cover v6 here, and default-deny drops without a dbg counter.
+        snapshot.default_policy = "permit".to_string();
+        snapshot.policies.clear();
+        snapshot.source_nat_rules.clear();
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-0.80".to_string(),
+            ifindex: 12,
+            family: "inet6".to_string(),
+            ip: "2001:559:8585:80::200".to_string(),
+            mac: "00:aa:bb:cc:dd:ee".to_string(),
+            state: "reachable".to_string(),
+            router: false,
+            link_local: false,
+        });
+        let forwarding = build_forwarding_state(&snapshot);
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        // nat_snapshot interfaces carry redundancy groups — an empty HA map would park
+        // every resolution HAInactive. Use the active txn HA state like all nat_snapshot cells.
+        let ha_state = txn_ha_state();
+        let ident = 0x0BEEF00D;
+        // Head payload: real 20B TCP SYN header + pad (8B-aligned for M=1); the miss
+        // path validates L4 shape, so dummy bytes would die before forwarding.
+        let mk_head = |len: usize| {
+            let mut h = vec![0u8; len];
+            h[0..2].copy_from_slice(&33333u16.to_be_bytes());
+            h[2..4].copy_from_slice(&443u16.to_be_bytes());
+            h[12] = 0x50;
+            h[13] = 0x02; // SYN.
+            h
+        };
+        // First arrival takes the first length, second arrival the second.
+        let is_tail_first = first_off != 0x0001;
+        let (pay_a, pay_b, flags_a) = if is_tail_first {
+            (vec![0xBBu8; second_len], mk_head(first_len), 0x10u8)
+        } else {
+            (mk_head(first_len), vec![0xBBu8; second_len], 0x02u8)
+        };
+        let frame_a = ipv6_frag_frame_9950(lan_src, wan_dst, first_off, ident, &pay_a);
+        let frame_b = ipv6_frag_frame_9950(lan_src, wan_dst, second_off, ident, &pay_b);
+        let meta_for = |frame: &Vec<u8>, flags: u8| UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            ingress_ifindex: 24,
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            pkt_len: (frame.len() - 14) as u16, // v6 convention (txn_meta_v6): L3+ bytes, excl. eth.
+            l3_offset: 14,
+            l4_offset: 62,
+            flow_src_port: 33333,
+            flow_dst_port: 443,
+            flow_src_addr: lan_src.octets(),
+            flow_dst_addr: wan_dst.octets(),
+            tcp_flags: flags,
+            config_generation: 7,
+            fib_generation: 9,
+            ..UserspaceDpMeta::default()
+        };
+        let flags_b = if is_tail_first { 0x02u8 } else { 0x10u8 };
+        let (_b1, dbg1) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_a, meta_for(&frame_a, flags_a));
+        assert_eq!(dbg1.forward, 1, "{label}: first arrival must forward");
+        let (_b2, dbg2) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_b, meta_for(&frame_b, flags_b));
+        assert_eq!(dbg2.forward, expect_second, "{label}: second arrival");
+    }
 }
