@@ -324,6 +324,9 @@ run_shell test/routing/selftest-rule-dscp_7796.sh
 # failed namespace is a failure. SKIPs without go/unshare/ip or where
 # unprivileged user namespaces are unavailable.
 run_shell test/routing/selftest-routing-kernel_9812.sh
+# The leg's own probes, hermetically: missing go/unshare/ip/bash/netns must
+# SKIP (77), never false-FAIL under the forcing env. Six cells, fixtures only.
+run_shell test/routing/selftest-routing-probes_9812.sh
 # #6923: the chokepoint argument for the v6 conntrack publish path rests on
 # `refresh_bpf_conntrack_last_seen` being unable to CREATE a key, because it
 # updates with BPF_EXIST. "The flag is named EXIST" and "the kernel refuses
@@ -478,7 +481,7 @@ run_shell scripts/go-buildtag-census.sh
 #
 # `go test ./...` prints `ok` for a package whose cells all skipped, so the
 # skip call sites were invisible to every gate until this census. It lived as a
-# manual `make go-skip-census` leaf while the floors drifted (318 -> 366 with
+# manual `make go-skip-census` leaf while the floors drifted (318 -> 365 with
 # nothing noticing); running it here ratchets every new skip against
 # scripts/go-skip-census.floors on every `make selftest`.
 #

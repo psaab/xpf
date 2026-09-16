@@ -811,10 +811,13 @@ test-rule-dscp-lib:
 # namespaces are unavailable, matching the other tool-gated legs. The two
 # kernel cells are pinned BY NAME inside the script, so a rotted -run
 # predicate cannot report a clean pass over nothing.
-# Single-sourced with the `make selftest` leg: both run the SAME script, so the
-# target and the aggregate cannot drift into testing different things.
+# Single-sourced with the `make selftest` legs: each script here is the SAME
+# script the aggregate runs, so the target and the aggregate cannot drift into
+# testing different things. The probes script pins the leg's missing-tool
+# contract hermetically (six cells, fixtures only).
 test-routing-kernel-lib:
 	sh ./test/routing/selftest-routing-kernel_9812.sh
+	sh ./test/routing/selftest-routing-probes_9812.sh
 
 # Self-test the #6936 FBF two-upstream steering verdicts. The defect this
 # guards is a NEGATIVE CELL THAT FAILS TO A HEALTHY VALUE: the main-table

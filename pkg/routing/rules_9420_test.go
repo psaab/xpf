@@ -245,15 +245,39 @@ echo "F1C_SCOPED_VRFC_OWNROUTE=$(g 10.9.0.1 from 10.30.0.77 iif dumc)"
 			got[k] = v
 		}
 	}
+	// Every observation the script emits must be present and non-empty: a
+	// missing key reads as "", and "" lacks "table 200", so without this an
+	// empty output, a truncated script, or an unrelated error satisfies every
+	// negative assertion below while measuring nothing.
+	for _, k := range []string{
+		"A_BASELINE_VRFC", "B1_UNSCOPED_VRFC", "B2_UNSCOPED_VRFC_OWNROUTE",
+		"B1B_UNSCOPED_DEFAULT", "B3_CONTROL_NORULE_VRFC", "F1A_SCOPED_DEFAULT",
+		"F1B_SCOPED_VRFC", "F1C_SCOPED_VRFC_OWNROUTE",
+	} {
+		if strings.TrimSpace(got[k]) == "" {
+			t.Fatalf("missing or empty observation %s (full output: %q) — refusing to score a negative against nothing", k, out)
+		}
+	}
 	leaked := func(k string) bool { return strings.Contains(got[k], "table 200") }
+	// A negative result is recognized ONLY as an unreachable verdict. "Does
+	// not contain table 200" is also satisfied by "Invalid argument" (the
+	// wrong probe shape — see docs/log/9420.md), an empty string, or any
+	// unrelated error, and none of those is a measurement.
+	terminated := func(k string) bool { return strings.Contains(strings.ToLower(got[k]), "unreachable") }
 
 	// Controls first: the probe reaches the FIB at all, and the diversion is
 	// not an artifact of the topology.
 	if leaked("A_BASELINE_VRFC") {
 		t.Fatalf("A: VRF-C must not reach table 200 with no rule installed: %q", got["A_BASELINE_VRFC"])
 	}
+	if !terminated("A_BASELINE_VRFC") {
+		t.Fatalf("A: VRF-C with no rule installed must be unreachable, got %q — an unrecognized observation satisfies nothing", got["A_BASELINE_VRFC"])
+	}
 	if leaked("B3_CONTROL_NORULE_VRFC") {
 		t.Fatalf("B3 control: removing the rule must remove the diversion: %q", got["B3_CONTROL_NORULE_VRFC"])
+	}
+	if !terminated("B3_CONTROL_NORULE_VRFC") {
+		t.Fatalf("B3 control: removing the rule must restore unreachable, got %q — an unrecognized observation satisfies nothing", got["B3_CONTROL_NORULE_VRFC"])
 	}
 	// The defect, reproduced.
 	if !leaked("B1_UNSCOPED_VRFC") {
@@ -273,6 +297,9 @@ echo "F1C_SCOPED_VRFC_OWNROUTE=$(g 10.9.0.1 from 10.30.0.77 iif dumc)"
 	}
 	if leaked("F1B_SCOPED_VRFC") {
 		t.Fatalf("F1b: an iif-scoped rule must NOT divert VRF-C ingress: %q", got["F1B_SCOPED_VRFC"])
+	}
+	if !terminated("F1B_SCOPED_VRFC") {
+		t.Fatalf("F1b: VRF-C under an iif-scoped rule must be unreachable, got %q — an unrecognized observation satisfies nothing", got["F1B_SCOPED_VRFC"])
 	}
 	if leaked("F1C_SCOPED_VRFC_OWNROUTE") {
 		t.Fatalf("F1c: VRF-C with its own route must use it: %q", got["F1C_SCOPED_VRFC_OWNROUTE"])

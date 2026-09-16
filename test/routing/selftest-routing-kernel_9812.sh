@@ -42,6 +42,11 @@ if ! command -v ip >/dev/null 2>&1; then
 	exit 77
 fi
 
+if ! command -v bash >/dev/null 2>&1; then
+	echo "SKIP: bash not found — the 9420 kernel cell drives its netns script through bash"
+	exit 77
+fi
+
 # Probe the capability rather than assuming it: unprivileged user namespaces are
 # disabled on some hosts, and running as a non-root user without them cannot
 # create a netns. A probe that cannot distinguish "denied" from "works" would

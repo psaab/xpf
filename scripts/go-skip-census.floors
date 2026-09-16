@@ -10,7 +10,7 @@
 # commit message, the same rule the Rust ignored-cell census applies to a new
 # `#[ignore]`.
 
-total        = 366
+total        = 365
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
@@ -26,4 +26,4 @@ other        = 314
 # with its own floor rather than a silent drop — a census that quietly shrinks
 # its own population is blind exactly where somebody wrote something unusual,
 # and "unusual" correlates with "worth looking at".
-unparsed     = 2
+unparsed     = 1

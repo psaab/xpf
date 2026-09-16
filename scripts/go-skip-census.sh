@@ -37,7 +37,7 @@
 #
 #   `go test ./...` prints `ok` for a package whose cells all skipped. The
 #   summary line for "everything passed" and "nothing ran" is byte-identical,
-#   and no leg passes -v. 366 call sites across the tree were invisible to every
+#   and no leg passes -v. 365 call sites across the tree were invisible to every
 #   gate in the repo until #9812 folded this census into `make selftest` —
 #   while censuses already exist for Rust `#[ignore]` (ignored-cell-census.sh),
 #   shell harnesses (harness-census.sh) and python (run-selftests.sh).
@@ -90,6 +90,22 @@ CALL = re.compile(r'\b(?:t|tb|b|f)\.(Skipf|SkipNow|Skip)\s*\(')
 # A literal first argument, single or back-quoted, possibly concatenated.
 LITERAL = re.compile(r'^\s*(?:"((?:[^"\\]|\\.)*)"|`([^`]*)`)')
 
+# Comments are not call sites. A `t.Skip(` mentioned in `//` or `/* */` prose
+# (or commented out) must not count: without this the census is coupled to
+# prose — rewording a comment flips the total. Strings match FIRST so a `//`
+# inside a literal (a URL before a real call on the same line) cannot hide the
+# call. Comments blank to same-length spaces with newlines kept, so reported
+# line numbers are unchanged. Rune literals match exactly one char/escape so a
+# stray apostrophe cannot swallow code.
+STRIP = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`|\'(?:[^\'\\\n]|\\.)\'|//[^\n]*|/\*.*?\*/', re.S)
+
+
+def _blank(m):
+    s = m.group(0)
+    if s.startswith('//') or s.startswith('/*'):
+        return ''.join('\n' if ch == '\n' else ' ' for ch in s)
+    return s
+
 ROOT_WORDS = re.compile(
     r'\broot\b|privileg|CAP_[A-Z_]+|euid|geteuid|\bsudo\b|unshare|netns|'
     r'network namespace', re.I)
@@ -111,6 +127,7 @@ for d in scan_dirs:
                 src = open(path, encoding="utf-8").read()
             except OSError:
                 continue
+            src = STRIP.sub(_blank, src)
             for m in CALL.finditer(src):
                 line = src.count("\n", 0, m.start()) + 1
                 site = f"{path}:{line}"
