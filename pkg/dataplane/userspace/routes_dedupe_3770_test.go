@@ -64,6 +64,10 @@ func TestRouteSnapshotDedupeKeepsDistinctPreference(t *testing.T) {
 	ruleListFn = func(family int) ([]netlink.Rule, error) { return nil, nil }
 
 	cfg := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so the leaks publish.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	// The target instance must be DEFINED and named by its bare instance name:
 	// the compiler stores route.NextTable as the bare name (parseNextTableInstance
 	// strips the ".inet[6].0" suffix), and the #6467 eligibility gate now skips a
@@ -110,12 +114,20 @@ func TestRouteSnapshotSortIsDeterministic(t *testing.T) {
 	// applier). The dedupe/sort mechanics under test are unchanged.
 	instances := []*config.RoutingInstanceConfig{{Name: "aaa", TableID: 100}, {Name: "bbb", TableID: 101}}
 	forward := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so the leaks publish.
+	forward.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	forward.RoutingInstances = instances
 	forward.RoutingOptions.StaticRoutes = []*config.StaticRoute{
 		{Destination: "10.5.0.0/16", NextTable: "aaa"},
 		{Destination: "10.5.0.0/16", NextTable: "bbb"},
 	}
 	reverse := &config.Config{}
+	// #9810: one unclaimed unit (N=1) so the leaks publish.
+	reverse.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
 	reverse.RoutingInstances = instances
 	reverse.RoutingOptions.StaticRoutes = []*config.StaticRoute{
 		{Destination: "10.5.0.0/16", NextTable: "bbb"},

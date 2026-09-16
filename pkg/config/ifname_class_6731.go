@@ -96,6 +96,33 @@ func IsTunnelOrLoopbackIfName(base string) bool {
 	return false
 }
 
+// IsLoopbackIfName reports whether base names a loopback interface: `lo<N>`
+// (`lo0`, `lo1`, ...) or the bare kernel `lo`.
+
+// It is deliberately loopback-ONLY. Do NOT substitute IsTunnelOrLoopbackIfName
+// here: that predicate also matches GRE / IP-IP / flexible-tunnel /
+// secure-tunnel names, which ARE legitimate policy-routing ingress interfaces,
+// and using it would silently drop their steering (#9810 LEAD-O4 / SYN-LO0-02).
+
+// The bare-`lo` arm deliberately diverges from the DHCP predicate, which pins
+// {"lo", false}: DHCP asks "may a client live here", while policy routing asks
+// "may an `iif` scope name this device" — and an `iif lo` rule matches traffic
+// from sockets bound to ANOTHER VRF (the #9420 cross-VRF hijack). The two
+// predicates must never be unified; see TestDefaultInstanceIngressIfacesExcludesLoopback_9810.
+func IsLoopbackIfName(base string) bool {
+	return base == "lo" || ifNameNumericSuffix(base, "lo")
+}
+
+// IsLoopbackIngress reports whether a configured interface name or a resolved
+// kernel ingress name denotes loopback. Unit suffixes are stripped first: a
+// configured `lo0` unit 5 resolves to `lo0.5`, which is loopback as much as
+// `lo0` is (#9810 lo0.5 hole). The single shared test keeps the next-table
+// scoping set and the PBR builder identical.
+func IsLoopbackIngress(name string) bool {
+	base, _, _ := strings.Cut(name, ".")
+	return IsLoopbackIfName(base)
+}
+
 // IsManagementIfName reports whether name is in the MANAGEMENT interface class —
 // the names the daemon binds to `vrf-mgmt`.
 //

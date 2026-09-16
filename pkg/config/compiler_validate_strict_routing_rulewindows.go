@@ -14,7 +14,9 @@ import "fmt"
 //     derives from the exported NextTableRuleWindow SSOT (types_system.go) so
 //     the commit gate here, the runtime applier, AND the userspace FIB mirror
 //     (pkg/dataplane/userspace/routes.go) share one window value (#6467) —
-//     no lockstep drift possible.
+//     no lockstep drift possible. Since #9420 each leak costs one slot per
+//     default-instance ingress interface (#9810), so the LEAK capacity is
+//     floor(window/N), not window leaks.
 //   - rib-group:  [ribGroupLeakRulePriority, +maxRibGroupLeakRules) — a
 //     1000-rule window (pkg/routing/rules.go const maxRibGroupLeakRules = 1000,
 //     the `prio >= ribGroupLeakRulePriority+maxRibGroupLeakRules` cap). This
@@ -32,9 +34,19 @@ const (
 )
 
 // nextTableRouteCount counts the static routes (global inet + inet6) that carry
-// a next-table VRF-leak target. This is exactly what the applier
-// (pkg/routing.nextTableManager) feeds into its ip-rule window, one rule per
-// next-table route.
+// a next-table VRF-leak target. Since #9420 the applier
+// (pkg/routing.nextTableManager) feeds each of these into its ip-rule window
+// once per default-instance ingress interface — one RULE per (leak, interface),
+// drawn down leak-atomically — so the window cost of a config is this count
+// times len(DefaultInstanceIngressIfaces(cfg)) (#9810 SYN-WIN-01).
+
+// The count stays CONSERVATIVE: it includes leaks the applier would skip
+// (unknown target, unparseable CIDR). That is safe on the strict path because
+// #5693 rejects undefined targets ahead of this gate and ValidateRouteDestination
+// (#2448, via the #1319 schema gate, strict-before-compile on the store commit
+// and peer-pipeline paths for every static block) rejects unparseable
+// destinations ahead of it — so every counted leak is eligible; on the lenient
+// path an over-count only over-warns, the fail-safe direction.
 func nextTableRouteCount(cfg *Config) int {
 	if cfg == nil {
 		return 0
@@ -71,7 +83,8 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 // more next-table or interface-routes rib-group ip rules than the runtime's
 // FIXED priority windows can hold (#5854).
 //
-// The applier programs next-table leaks into a 100-rule window and rib-group
+// The applier programs next-table leaks into a 100-rule window at one slot per
+// default-instance ingress interface per leak (#9810), and rib-group
 // connected-prefix leaks into a 1000-rule window (pkg/routing/rules.go), and
 // HARD-CAPS at each boundary — a route beyond the window is never installed. So
 // a config that exceeds a window commits green but the reconciler silently
@@ -97,14 +110,38 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	if n := nextTableRouteCount(cfg); n > maxNextTableRules {
-		return fmt.Errorf(
-			"routing-options: %d static routes use next-table, but only %d can be "+
-				"programmed as kernel ip rules; routes beyond the limit would be "+
-				"silently dropped at apply time (the committed routes are not "+
-				"programmed — blackhole / asymmetric routing). Reduce the number of "+
-				"next-table routes to at most %d.",
-			n, maxNextTableRules, maxNextTableRules)
+	if n := nextTableRouteCount(cfg); n > 0 {
+		// #9810 SYN-WIN-01: each leak costs one ip-rule slot per default-instance
+		// ingress interface (per-ingress rules since #9420), drawn down
+		// leak-atomically: what fits is floor(window/N) LEAKS, with N from the
+		// shared resolver the applier consumes.
+		ingress := len(DefaultInstanceIngressIfaces(cfg))
+		if ingress == 0 {
+			// The applier installs nothing without an ingress interface (#9420
+			// fail-closed), so no leak fits; fail fast here instead of committing
+			// green and erroring at apply time. This arm also fires before the
+			// #5633 disposition gate for interface-less configs (accepted: the
+			// operator fixes ingress first, then the disposition — two commit
+			// cycles; do NOT reorder the gates to "fix" the attribution).
+			return fmt.Errorf(
+				"routing-options: %d static routes use next-table, but only 0 can be "+
+					"programmed as kernel ip rules with 0 default-instance ingress "+
+					"interfaces (each leak costs one rule per ingress interface and no "+
+					"interface resolves to scope to — the applier installs nothing "+
+					"without ingress scope).",
+				n)
+		}
+		if capacity := maxNextTableRules / ingress; n > capacity {
+			return fmt.Errorf(
+				"routing-options: %d static routes use next-table, but only %d can be "+
+					"programmed as kernel ip rules with %d default-instance ingress "+
+					"interfaces (each leak costs one rule per ingress interface: %d "+
+					"slots of the %d-rule window); routes beyond the limit would be "+
+					"dropped at apply time (the committed routes are not "+
+					"programmed — blackhole / asymmetric routing). Reduce the number of "+
+					"next-table routes to at most %d.",
+				n, capacity, ingress, n*ingress, maxNextTableRules, capacity)
+		}
 	}
 	if n := ribGroupLeakPrefixCount(cfg); n > maxRibGroupLeakRules {
 		return fmt.Errorf(

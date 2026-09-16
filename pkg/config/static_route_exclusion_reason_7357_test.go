@@ -12,6 +12,10 @@ import (
 
 func srExclCfg7357(global, globalV6 []*StaticRoute, instances []*RoutingInstanceConfig) *Config {
 	cfg := &Config{}
+	// #9810: one unclaimed unit (N=1) so each leak costs one slot, as the window boundary below assumes.
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
 	cfg.RoutingOptions.StaticRoutes = global
 	cfg.RoutingOptions.Inet6StaticRoutes = globalV6
 	cfg.RoutingInstances = instances

@@ -69,16 +69,19 @@ func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstanc
 // `cfg` that buildRouteSnapshots drops, keyed by the route pointer.
 //
 // It exists for the ORDER-DEPENDENT fourth reason. The kernel programs global
-// next-table leaks as ip rules capped at NextTableRuleWindow entries, and the
-// applier advances that counter only for an ELIGIBLE route — so whether a given
-// route falls outside the window depends on how many eligible ones came before
-// it, in the builder's own order.
+// next-table leaks as ip rules capped at NextTableRuleWindow entries — one
+// slot per default-instance ingress interface per leak since #9420 (#9810) —
+// and the applier advances that counter only for an ELIGIBLE route, drawn down
+// leak-atomically in parsed-CIDR v4-first order. So whether a given route falls
+// outside the window depends on how many eligible ones came before it, in the
+// applier's own order, times the shared ingress count.
 //
 // That order is reproduced exactly and it is narrower than it looks: the window
 // counter advances ONLY on the global path (`perInstance == false`), so
 // per-instance routes cannot affect it and the walk below only needs the two
-// global lists, v4 then v6, matching routes.go's two `addRoutes(..., false)`
-// calls. Per-instance routes are still classified, just not counted.
+// global lists, stably partitioned v4-first by parsed CIDR exactly like the
+// applier (a v6 CIDR under `static` is legal, #9820). Per-instance routes are
+// still classified, just not counted.
 func StaticRouteExclusions(cfg *Config) map[*StaticRoute]string {
 	out := make(map[*StaticRoute]string)
 	if cfg == nil {
@@ -91,28 +94,40 @@ func StaticRouteExclusions(cfg *Config) map[*StaticRoute]string {
 		}
 	}
 
-	// GLOBAL, v4 then v6 — the only routes that consume window slots.
+	// GLOBAL — the only routes that consume window slots, drawn in the
+	// applier's parsed-CIDR v4-first order (nextTableWindowOrder).
+	// #9810: each eligible leak costs one slot per default-instance ingress
+	// interface (N from the shared resolver), leak-atomically: a leak whose
+	// full expansion does not fit is excluded whole. With no ingress
+	// interface the applier installs nothing (#9420 fail-closed), so every
+	// eligible leak is excluded.
+	ingress := len(DefaultInstanceIngressIfaces(cfg))
 	window := 0
-	for _, routes := range [][]*StaticRoute{cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes} {
-		for _, sr := range routes {
-			if sr == nil {
-				continue
-			}
-			if reason := StaticRouteExcludedReason(sr, false, defined); reason != "" {
-				out[sr] = reason
-				continue
-			}
-			if sr.NextTable == "" {
-				continue // not a leak; consumes no slot
-			}
-			if window >= NextTableRuleWindow {
-				out[sr] = fmt.Sprintf(
-					"beyond the %d-entry next-table ip-rule window — the kernel installs no rule for it",
-					NextTableRuleWindow)
-				continue
-			}
-			window++
+	for _, sr := range nextTableWindowOrder(cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes) {
+		if sr == nil {
+			continue
 		}
+		if reason := StaticRouteExcludedReason(sr, false, defined); reason != "" {
+			out[sr] = reason
+			continue
+		}
+		if sr.NextTable == "" {
+			continue // not a leak; consumes no slot
+		}
+		if ingress == 0 {
+			out[sr] = "beyond the next-table ip-rule window: no default-instance " +
+				"ingress interface resolves, so the kernel installs no rule for it"
+			continue
+		}
+		if window+ingress > NextTableRuleWindow {
+			out[sr] = fmt.Sprintf(
+				"beyond the %d-entry next-table ip-rule window with %d default-instance "+
+					"ingress interfaces (each leak costs one rule per ingress interface) "+
+					"— the kernel installs no rule for it",
+				NextTableRuleWindow, ingress)
+			continue
+		}
+		window += ingress
 	}
 
 	// PER-INSTANCE: classified, never counted.
@@ -132,4 +147,30 @@ func StaticRouteExclusions(cfg *Config) map[*StaticRoute]string {
 		}
 	}
 	return out
+}
+
+// nextTableWindowOrder returns the global statics stably partitioned v4-first
+// by PARSED CIDR — the same draw order the applier uses
+// (pkg/routing.nextTableFamilyOrdered, #6583). A v6 CIDR under `static` is
+// legal (#9820); drawing it in list position would pick different truncation
+// survivors than the kernel (#9810).
+func nextTableWindowOrder(v4, v6 []*StaticRoute) []*StaticRoute {
+	combined := make([]*StaticRoute, 0, len(v4)+len(v6))
+	combined = append(combined, v4...)
+	combined = append(combined, v6...)
+	out := make([]*StaticRoute, 0, len(combined))
+	var v6group []*StaticRoute
+	for _, sr := range combined {
+		if sr == nil {
+			out = append(out, sr)
+			continue
+		}
+		_, dst, err := net.ParseCIDR(sr.Destination)
+		if err != nil || dst.IP.To4() != nil {
+			out = append(out, sr)
+			continue
+		}
+		v6group = append(v6group, sr)
+	}
+	return append(out, v6group...)
 }
