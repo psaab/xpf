@@ -137,6 +137,93 @@ func SymlinkTarget(path string) (SymlinkedTarget, bool) {
 	return SymlinkedTarget{Path: path, Target: target}, true
 }
 
+// CollectInteriorSymlinks censuses every symlink UNDER root for the zeroize
+// wipe (#10100 R-1). The #9013 guards check only the top paths (.configdb +
+// master.key, tls/, .old/.restore.partial dir+key) then RemoveAll: a real dir
+// holding a symlinked interior file has the link unlinked while the target
+// bytes survive, nil returned. This pre-walk collects ANY interior symlink
+// (flat, nested, symlink-to-dir, dangling, chain — WalkDir reports the link
+// itself and does not descend into symlinked dirs, symmetric with RemoveAll
+// unlinking without descending) so the caller can report them via
+// FactoryResetSymlinkError while still erasing regulars.
+//
+// exclude, when non-empty, is ONE exact cleaned path to skip (the
+// root-child master.key the caller's inverse-shape branch already owns).
+// Comparison is by filepath.Clean equality, never basename: a nested
+// subdir/master.key link MUST still be reported.
+//
+// Contract:
+//   - absent root (Lstat ENOENT, incl. dangling INTERMEDIATE) → nil,nil;
+//     absence is the goal, matching RemoveAll's nil-on-absent.
+//   - root itself a symlink → [{root}],nil, no walk. The caller MUST treat
+//     this as skip-whole-block (don't RemoveAll), mirroring the existing
+//     .configdb whole-block skip; it closes a root-swap TOCTOU between the
+//     caller's dir check and this census.
+//   - file-not-dir root → nil,nil (WalkDir yields root only, skipped).
+//   - non-ENOENT Lstat failure → nil,err; the caller fail()s it but still
+//     attempts the erasure best-effort.
+//   - per-entry walk error → (partial, wrapped census-incomplete err naming
+//     root). The walk ABORTS (never skips a subtree); partial Skipped is
+//     kept (a lower bound, never complete) and the error states coverage
+//     is unknown.
+//
+// R-1 Skipped means link-unlinked-target-survives (RemoveAll still runs,
+// like the master.key inverse-shape precedent), unlike R-2 leave-the-link.
+// The recorded Target is Readlink as-is (possibly relative); resolve it
+// against Dir(Path) (a known string even after unlink) like #9013.
+//
+// Accepted residual: the validated census is a pathname walk, not a pinned
+// handle — a concurrent plant DURING the wipe (dbDir/tls write while the
+// walk + key fsync + RemoveAll run) could add a link after the census and
+// report clean while it survives unlinked-but-unreported. Deterministic
+// plants (link in place when zeroize runs — the modeled attack) ARE closed.
+// Full closure needs descriptor-relative traversal (see
+// ResolveFactoryResetRoot), excluded like every path-based guard.
+func CollectInteriorSymlinks(root, exclude string) ([]SymlinkedTarget, error) {
+	fi, err := os.Lstat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, rerr := os.Readlink(root)
+		if rerr != nil {
+			target = "<unreadable link target>"
+		}
+		return []SymlinkedTarget{{Path: root, Target: target}}, nil
+	}
+	if !fi.IsDir() {
+		return nil, nil
+	}
+	var out []SymlinkedTarget
+	cleanExclude := ""
+	if exclude != "" {
+		cleanExclude = filepath.Clean(exclude)
+	}
+	walkErr := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if p == root {
+			return nil
+		}
+		_ = d
+		if cleanExclude != "" && filepath.Clean(p) == cleanExclude {
+			return nil
+		}
+		if sk, isLink := SymlinkTarget(p); isLink {
+			out = append(out, sk)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return out, fmt.Errorf("census interior symlinks under %s incomplete: %w", root, walkErr)
+	}
+	return out, nil
+}
+
 // ArchiveDirSkippedError reports that the config archive was NOT erased because
 // its directory could not be proven to be xpf-owned (#7173).
 //
@@ -600,7 +687,29 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 // key-first ordering and its #5197 durability argument are unchanged.
 func eraseConfigDB(dbDir string, fail func(error)) []SymlinkedTarget {
 	var skipped []SymlinkedTarget
-
+	keyPath := filepath.Join(dbDir, "master.key")
+	// #10100 R-1: census ANY interior symlink BEFORE the master.key check,
+	// excluding exactly the root-child master.key the inverse-shape branch
+	// below owns (cleaned-path equality, never basename). Runs in BOTH the
+	// master.key-link and key-first paths: the link branch still RemoveAlls
+	// the body, so a master.key-link + active.json-link combo must report
+	// both. Partial Skipped kept even when the census itself errors.
+	if interior, cerr := CollectInteriorSymlinks(dbDir, keyPath); len(interior) == 1 && interior[0].Path == dbDir {
+		slog.Warn("zeroize: .configdb is a symlink; NOT erasing it — removing it would "+
+			"destroy master.key through the link and leave the config body",
+			"dir", interior[0].Path, "target", interior[0].Target)
+		return append(skipped, interior...)
+	} else {
+		for _, sk := range interior {
+			slog.Warn("zeroize: .configdb interior is a symlink; the link will be unlinked "+
+				"but the target bytes survive — report, don't trust the wipe",
+				"path", sk.Path, "target", sk.Target)
+		}
+		skipped = append(skipped, interior...)
+		if cerr != nil {
+			fail(cerr)
+		}
+	}
 	// #9013, the INVERSE shape: .configdb is a real directory but master.key
 	// inside it is a symlink. rbRemove unlinks the LINK and returns nil, so the
 	// real key survives on the target volume while the RemoveAll below erases
@@ -612,7 +721,6 @@ func eraseConfigDB(dbDir string, fail func(error)) []SymlinkedTarget {
 	// point at a volume xpf does not own), but removing the ciphertext leaves
 	// nothing for the surviving key to decrypt ON THIS BOX, and the operator is
 	// handed the key's real path. Skipping the body instead would leave BOTH.
-	keyPath := filepath.Join(dbDir, "master.key")
 	if sk, isLink := SymlinkTarget(keyPath); isLink {
 		slog.Warn("zeroize: master.key is a symlink; NOT erasing it — removing it "+
 			"would unlink the link and leave the real key material",
