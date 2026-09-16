@@ -29,6 +29,9 @@ The primary deliverable is out-of-process wire verification across live Incus en
 | **CoS & Pacing** *(cluster)* | Concurrent high-priority (voice, DSCP EF, ≥10k pps) and best-effort elephants (calibration per §7) | p99 voice latency within calibrated floor; best-effort throttles under contention; no corruption | `FAIL: cos_starvation (best-effort HoL blocking)` | `wire_cos_fairness` |
 | **HA Failover** *(cluster)* | Kill/isolate primary under steady permitted flow | VIP answers from exactly one node within the calibrated window (GARP watch from both sides); established TCP survives; no dual-primary second GARP source | `FAIL: ha_dual_primary` or `FAIL: ha_session_drop` or `FAIL: ha_failover_timeout` | `wire_ha_failover` |
 | **Conntrack Lifecycle** | Session open → idle past timeout → re-probe; mid-stream pickup attempt; ICMP-error relay for an open flow | Expiry drops and evicts; mid-stream without SYN drops; related ICMP relayed, unrelated dropped | `FAIL: conntrack_stale` or `FAIL: conntrack_midstream_leak` or `FAIL: conntrack_icmp_mishandle` | `wire_conntrack_lifecycle` |
+| **Routing-Instance Separation (Deny)** | VRF-scoped probe toward a prefix leaked only into another table (rib-group / next-table / VRF-miss shape) with no permit path | 100% frame drop on wire (>= 1,000 frames); near-miss control in the leaking table captured in the same window | `FAIL: routing_separation_leak (VRF miss transited another table)` | `wire_routing_separation` |
+
+The Routing-Instance Separation row's live gate is owed in #10136; its hermetic half (the 9420/9819 netns cells) runs in `make selftest` via #9812.
 
 ## 4. Adversarial Fault Injection & Landing Witnesses
 Only faults with an observable *landing witness* are admitted. Invariants are evaluated strictly after the fault is proven to have landed. Fault rows run under §2 oracles and §6 isolation.
