@@ -422,15 +422,42 @@ pub(super) fn poll_binding_process_descriptor(
                         continue;
                     }
                 }
+                // #9950 (F-035): fragment-overlap check — post-screen + IPsec (preserves
+                // byte-for-byte drop precedence + malformation attribution), pre-flow-cache
+                // (cached first fragments would otherwise bypass detection), post-decap
+                // (packet_frame/meta are the inner packet). Drops overlapping/empty/overflow
+                // fragments; benign adjacent fragments record and continue. Fragments skip
+                // the flow-cache entirely (the 5-tuple cache key has no ident, so a later
+                // datagram's first fragment would Consume and bypass both overlap and the
+                // reply-assoc installs below).
+                let overlap_frag_skips_cache = packet_frame
+                    .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
+                    .and_then(|l3| {
+                        crate::fragment_overlap::overlap_fragment_range(l3, meta.addr_family as i32)
+                    })
+                    .map(|(okey, start, end)| {
+                        worker_ctx
+                            .forwarding
+                            .nat64
+                            .frag_overlap
+                            .check_and_record(okey, start, end, now_ns)
+                    });
+                if overlap_frag_skips_cache == Some(true) {
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
+                let is_fragment_9950 = overlap_frag_skips_cache.is_some();
                 // ── Flow cache fast path (#1327 Step 1) ────────────────
                 // Extracted to poll_descriptor/flow_cache_hit.rs. The
                 // helper owns ALL recycle/forward pushes on Consumed;
                 // caller MUST `continue` without touching desc.addr.
                 // The original L477 `packet_frame` binding's NLL
                 // lifetime ends at the previous line (last use was
-                // inside stage_ipsec_passthrough_check); it is rebound
+                // inside the #9950 overlap check above); it is rebound
                 // below the helper call for the slow-path code.
-                if FlowCacheEntry::packet_eligible(meta)
+                // #9950: fragments never consult the cache (see above).
+                if !is_fragment_9950
+                    && FlowCacheEntry::packet_eligible(meta)
                     && let Some(flow) = flow.as_ref()
                 {
                     match stage_flow_cache_hit(
@@ -1317,6 +1344,54 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the original frame via desc.addr on the request.
                                 // The continue skips recycle_now handling.
                                 continue;
+                            }
+                        }
+                        // #9950 (F-036/F-053): install fragment association for session-hit
+                        // first fragments (forward hits of existing flows + reverse replies).
+                        // Post-gate (after revocation/TTL/host-inbound/input-filter above),
+                        // owner-only (foreign arrivals must not publish, #9519). Reuses the
+                        // commit-site helpers: they self-gate on first-fragment + rewrite +
+                        // ForwardCandidate + neighbor, and store the hit decision (which for a
+                        // reply is already the reverse via NatDecision::reverse). NAT64 gated
+                        // on v6 (v4 installs are never consulted, pure shard churn).
+                        if foreign_arrival_zone.is_none() && is_fragment_9950 {
+                            if let Some(l3_packet) = packet_frame.get(
+                                verified_l3_or_stamp(
+                                    packet_frame,
+                                    meta.l3_offset,
+                                    meta.addr_family,
+                                )..
+                            ) {
+                                // Raw stage-9 override (mirrors the commit-site capture —
+                                // arm-scoped shadows below do not reach this tail).
+                                let frag_authority_zone_override = ingress_zone_override;
+                                let frag_authority = frag_ingress_authority(
+                                    worker_ctx.forwarding,
+                                    meta,
+                                    frag_authority_zone_override,
+                                );
+                                if meta.addr_family as i32 == libc::AF_INET6
+                                    && nat64_install_forward_fragment_assoc(
+                                        worker_ctx.forwarding,
+                                        l3_packet,
+                                        meta.addr_family as i32,
+                                        frag_authority,
+                                        &resolved.decision,
+                                        now_ns,
+                                    )
+                                {
+                                    telemetry.counters.record_nat64_frag_assoc_evicted();
+                                }
+                                if nat_install_forward_fragment_assoc(
+                                    worker_ctx.forwarding,
+                                    l3_packet,
+                                    meta.addr_family as i32,
+                                    frag_authority,
+                                    &resolved.decision,
+                                    now_ns,
+                                ) {
+                                    telemetry.counters.record_nat64_frag_assoc_evicted();
+                                }
                             }
                         }
                         resolved.decision
@@ -4427,6 +4502,21 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // #9950 residual (tracked follow-up, see docs/log/9950.md): the #6122
+                        // discriminator above sees FORWARD-direction rules only (src SNAT/NPTv6-out,
+                        // dst DNAT/NPTv6-in/static-DNAT). A REPLY non-first fragment that misses
+                        // its #9950 reply association (reorder ahead of its first, TTL straddle,
+                        // shard-cap eviction under flood, config-generation bump, HA non-sync,
+                        // LAG/ECMP L4-hash split) matches none of the five arms and forwards.
+                        // In-order (first-then-tail, µs spacing, the realistic case) is fixed by
+                        // the hit-tail install and wire-asserted by the #9950 cells; the miss
+                        // windows remain: DNAT-without-SNAT reorder discloses the internal src
+                        // (F-036's leak), SNAT-covered reply misses already drop via
+                        // `source_nat_would_translate_fragment`, and distinct-pool misses already
+                        // drop via MissingNeighbor (next-hop == pool dst, no neighbor). A sound
+                        // session-gated reverse discriminator needs a new L3 index + hot-path
+                        // cost — rules-only reverse arms over-drop (plain outbound from a DNAT
+                        // target's IP would match a naive src-in-pool check).
                     }
 
                     // #6835: the CROSS-FAMILY sibling of the #6122 gate above,
@@ -5055,24 +5145,29 @@ pub(super) fn poll_binding_process_descriptor(
                         // (`flow_cache_hit`) so the eviction invariants review as
                         // one contract. Pure code-motion; `#[inline]` keeps the
                         // body in this CGU.
-                        stage_flow_cache_seed(
-                            &mut binding.flow.flow_cache,
-                            &flow,
-                            meta,
-                            validation,
-                            decision,
-                            request_target_binding_index,
-                            flow_cache_owner_rg_id,
-                            session_ingress_zone,
-                            flow_cache_install_failed,
-                            flow_cache_policy_counter_idx,
-                            &flow_cache_policy_counter,
-                            filter_match_extra,
-                            ingress_zone_override,
-                            apply_nat_on_fabric,
-                            &neighbor_epoch_snapshot,
-                            worker_ctx,
-                        );
+                        // #9950: fragments never seed the cache (same ident-less-key reason
+                        // as the lookup gate above — a seeded 5-tuple would serve later
+                        // datagrams' first fragments and bypass overlap + assoc installs).
+                        if !is_fragment_9950 {
+                            stage_flow_cache_seed(
+                                &mut binding.flow.flow_cache,
+                                &flow,
+                                meta,
+                                validation,
+                                decision,
+                                request_target_binding_index,
+                                flow_cache_owner_rg_id,
+                                session_ingress_zone,
+                                flow_cache_install_failed,
+                                flow_cache_policy_counter_idx,
+                                &flow_cache_policy_counter,
+                                filter_match_extra,
+                                ingress_zone_override,
+                                apply_nat_on_fabric,
+                                &neighbor_epoch_snapshot,
+                                worker_ctx,
+                            );
+                        }
                         // ── End flow cache population ────────────────
                     } else {
                         telemetry.dbg.build_fail += 1;

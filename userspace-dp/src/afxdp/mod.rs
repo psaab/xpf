@@ -654,6 +654,9 @@ mod tests_fragment;
 #[cfg(test)]
 #[path = "tests_session_delta_json.rs"]
 mod tests_session_delta_json;
+#[cfg(test)]
+#[path = "tests_9950.rs"]
+mod tests_9950;
 #[path = "worker/mod.rs"]
 mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /

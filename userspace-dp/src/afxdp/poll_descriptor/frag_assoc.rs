@@ -79,18 +79,20 @@ pub(in crate::afxdp) fn frag_ingress_authority(
 /// drops fail-closed. Only a first fragment (offset 0, MF=1) installs; a
 /// non-first fragment can never populate the table.
 ///
-/// #5146: called ONLY at the POST-COMMIT install site (after `can_admit` passes
-/// AND the forward session install succeeds), NOT at NAT64 source-allocation
-/// time. Publishing pre-commit left the association LIVE behind every rollback
-/// arm (hop-limit ICMP-TE bounce, admission refusal, install-partial), and the
-/// rollback releases only the pool port — so a non-first fragment of a
+/// #5146: called ONLY at POST-COMMIT sites — the new-flow commit (after `can_admit`
+/// passes AND the forward session install succeeds) AND the #9950 session-hit tail
+/// (after revocation/TTL/host-inbound/input-filter, owner-only) — NOT at NAT64
+/// source-allocation time. Publishing pre-commit left the association LIVE behind
+/// every rollback arm (hop-limit ICMP-TE bounce, admission refusal, install-partial),
+/// and the rollback releases only the pool port — so a non-first fragment of a
 /// rolled-back first fragment inherited a rolled-back verdict AND a now-reusable
-/// translation (cross-flow NAT64 fragment ambiguity under port reuse). Moving
-/// the install to the commit point makes the association visible ONLY on the
-/// outcome the anchor fragment actually authorized. Self-gated on
-/// `decision.nat.nat64` so it is safe to call unconditionally at the shared
-/// commit site next to `nat_install_forward_fragment_assoc`; the two are
-/// mutually exclusive (NAT64 vs ordinary same-family), so exactly one fires.
+/// translation (cross-flow NAT64 fragment ambiguity under port reuse). Moving the
+/// install to the commit points makes the association visible ONLY on the outcome the
+/// anchor fragment actually authorized. Self-gated on `decision.nat.nat64` so it is
+/// safe to call unconditionally at the shared sites next to
+/// `nat_install_forward_fragment_assoc`; the two are mutually exclusive (NAT64 vs
+/// ordinary same-family), so exactly one fires. #9950: the hit tail gates NAT64 on
+/// AF_INET6 (v4 installs are never consulted — pure shard churn).
 #[inline]
 pub(super) fn nat64_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
@@ -138,8 +140,10 @@ pub(super) fn nat64_install_forward_fragment_assoc(
 /// return that decision (resolution + `decision.nat` carrying snat_v4/dst_v4) so
 /// the flowless arm inherits the first fragment's permitted verdict + egress and
 /// the TX path L3-translates the fragment. A miss returns `None` and the caller
-/// falls through to the ordinary flowless drop (fail-closed, #4617). The reverse
-/// (v4->v6) consult/install is the deferred increment (see the #2562 PR notes).
+/// falls through to the ordinary flowless drop (fail-closed, #4617). #9950: the
+/// v6-side forward-hit install now exists (session-hit tail); the v4->v6 reverse
+/// remains the deferred increment (see the #2562 PR notes) — v4 installs are gated
+/// off as dead (never consulted).
 #[inline]
 pub(super) fn nat64_consult_forward_fragment_assoc(
     forwarding: &ForwardingState,
@@ -192,6 +196,10 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
 /// shared cache is stamped with `build_generation` — which advances on EVERY
 /// config commit (`snapshot.generation`), not only NAT64 changes — so a SNAT /
 /// DNAT rule change invalidates a stale ordinary-NAT association on lookup.
+/// #9950: fires at BOTH the new-flow commit AND the session-hit tail (forward hits
+/// of existing flows + reverse replies, owner-only, post-gate). The hit decision for
+/// a reply is already the reverse via `NatDecision::reverse`, keyed by the reply's
+/// own tuple + authority — the "forward" in the name means "same-tuple".
 ///
 /// Only a first fragment (offset 0, MF=1) carrying a same-family address
 /// rewrite whose resolution is a ForwardCandidate with a resolved neighbor
@@ -213,10 +221,14 @@ pub(super) fn nat_install_forward_fragment_assoc(
     // #7899: this used to read "(which also stamps the reverse info)". It does
     // not, and has not: BOTH installs pass `reverse: None`, no caller anywhere
     // in the tree passes `Some(..)`, and both consults bind `_reverse` and
-    // discard it. The reverse (v4->v6) direction is the deferred increment
-    // documented on the consult helpers above. The sentence was the stated
-    // reason the cache's entry type was "already shared enough to move"
-    // (#7899), so it was load-bearing for a design argument while being false.
+    // discard it. #9950: `reverse: None` stays None BY DESIGN for same-family —
+    // a reply's reverse translation lives in the reply entry's own `decision`
+    // (via `NatDecision::reverse` at the hit tail), not in `Nat64ReverseInfo`
+    // (which is NAT64-only: original v6 addrs for v4->v6 rebuild). The v4->v6
+    // NAT64 reverse remains the deferred increment documented on the consult
+    // helpers above. The #7899 sentence was the stated reason the cache's entry
+    // type was "already shared enough to move", so it was load-bearing for a
+    // design argument while being false.
     if decision.nat.nat64
         || (decision.nat.rewrite_src.is_none() && decision.nat.rewrite_dst.is_none())
     {
@@ -245,7 +257,9 @@ pub(super) fn nat_install_forward_fragment_assoc(
 }
 
 /// #5689: consult the fragment association for a NON-first ORDINARY same-family
-/// NAT / NPTv6 forward fragment. On a hit whose cached decision carries a
+/// NAT / NPTv6 fragment (forward OR reply — #9950 installs reply entries at the
+/// session-hit tail, keyed by the reply's own tuple + authority, so the "forward"
+/// in the name means "same-tuple"). On a hit whose cached decision carries a
 /// same-family address rewrite (SNAT / DNAT / static-NAT / NPTv6, NOT NAT64),
 /// return that decision so the flowless arm inherits the first fragment's
 /// permitted verdict + egress resolution and the forward-build path
@@ -253,8 +267,7 @@ pub(super) fn nat_install_forward_fragment_assoc(
 /// skip the L4-checksum + port rewrite for a non-first fragment). A miss returns
 /// `None` and the caller falls through to the flowless L3 enforcement (default
 /// policy). Unlike the NAT64 forward consult (v6-only) this works for BOTH IPv4
-/// and IPv6. The reverse-direction (reply) association is a deferred increment,
-/// mirroring the NAT64 forward-only wiring.
+/// and IPv6.
 ///
 /// FAIL-CLOSED MISS (#6122, closing the #5689 residual). On a consult MISS —
 /// fragment reorder (non-first before first), TTL straddle (> the ~2s

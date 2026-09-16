@@ -13,6 +13,7 @@ mod io_uring_write;
 mod ip_proto;
 mod nat;
 mod fragment_assoc;
+mod fragment_overlap;
 mod nat64;
 mod nptv6;
 mod policy;
