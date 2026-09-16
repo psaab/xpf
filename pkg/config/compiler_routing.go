@@ -573,6 +573,26 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 				ri.Description = nodeVal(prop)
 			case "instance-type":
 				ri.InstanceType = nodeVal(prop)
+				// #9814 round 2: mark authored presence even when the value
+				// is empty, so the strict gate can tell explicitly-EMPTY
+				// (malformed, incl. a stray hoisted by #9792 that overwrote
+				// a valid value) from genuinely OMITTED (silent VRF).
+				ri.instanceTypeExplicit9814 = true
+			case "vrf-target", "vrf-table-label", "route-distinguisher":
+				// #9814: accepted and inert, by the deliberate #9323 decision —
+				// say so #9374-style on BOTH paths rather than compiling to
+				// nothing in silence. Never rejected: Junos L3VPN configs
+				// migrated as-is carry these, and they boot and forward today.
+				// Keyword-only, per occurrence (repeats with distinct values
+				// are legitimate Junos; values are shape-complex — bracket
+				// lists, block forms, multi-token — and the inert STATEMENT
+				// is the actionable signal). prop.Name() matches every shape
+				// including the valueless flag and `vrf-target { ...; }`.
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+					"routing-instance %q %s is ACCEPTED but NOT APPLIED: xpf compiles "+
+						"no BGP/MPLS VPN state from it — the statement is stored and "+
+						"displayed but configures nothing (#9814)",
+					instanceName, prop.Name()))
 			case "interface":
 				// Multi-value leaf (#3904): `interface [ i1 i2 ]` collapses
 				// onto Keys[1:] (this is an opaque implicit leaf) and/or child
