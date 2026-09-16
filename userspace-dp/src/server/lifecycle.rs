@@ -415,6 +415,8 @@ pub(crate) fn run() -> Result<(), String> {
             ha_transition_demote_dropped: 0,
             ha_transition_refresh_dropped: 0,
             ha_transition_vacate_dropped: 0,
+            ha_transition_demote_stale_skipped: 0,
+            ha_transition_refresh_stale_skipped: 0,
             peer_delete_refused_local_owned: 0,
             shared_session_poison_recoveries: 0,
             tx_completion_skew: 0,

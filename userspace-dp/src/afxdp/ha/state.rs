@@ -86,13 +86,15 @@ impl crate::afxdp::Coordinator {
                 // rg_epochs bumps. lock_recover applies the uniform
                 // committed-prefix + clear_poison policy (worker_queue.rs).
                 // #9720: a refused Demote/Vacate is recorded as that worker's
-                // transition debt and re-driven on its next drain — the stored
-                // runtime above already reflects the demotion, so without the
-                // debt a dropped pair would never run. The queue guard is
-                // dropped BEFORE recording: the debt lock is a leaf
-                // (worker_queue.rs) and recording under the queue guard would
-                // invent a queue→debt lock edge.
-                let (demote_queued, vacate_queued) = {
+                // transition debt, positioned after the backlog ahead of it —
+                // the stored runtime above already reflects the demotion, so
+                // without the debt a dropped pair would never run. The queue
+                // length at each refusal is the op's countdown (every queued
+                // command predates the transition); the queue guard is dropped
+                // BEFORE recording: the debt lock is a leaf (worker_queue.rs)
+                // and recording under the queue guard would invent a
+                // queue→debt lock edge.
+                let (demote_queued, demote_backlog, vacate_queued, vacate_backlog) = {
                     let mut pending = worker_queue::lock_recover(&rec.handle.commands);
                     let demote_queued = worker_queue::push_bounded(
                         &mut pending,
@@ -100,6 +102,7 @@ impl crate::afxdp::Coordinator {
                             owner_rgs: demoted_rgs.clone(),
                         },
                     );
+                    let demote_backlog = pending.len();
                     // #941 Work item C: vacate V_min slots on demotion.
                     // Stale-low slot values would cause peer workers to
                     // throttle unnecessarily until the first post-settle
@@ -108,15 +111,28 @@ impl crate::afxdp::Coordinator {
                         &mut pending,
                         WorkerCommand::VacateAllSharedExactSlots,
                     );
-                    (demote_queued, vacate_queued)
+                    let vacate_backlog = pending.len();
+                    (demote_queued, demote_backlog, vacate_queued, vacate_backlog)
                 };
                 if !demote_queued {
                     worker_queue::HA_TRANSITION_DEMOTE_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    worker_queue::record_transition_debt(*worker_id, &demoted_rgs, &[], false);
+                    worker_queue::record_transition_debt(
+                        *worker_id,
+                        &demoted_rgs,
+                        &[],
+                        false,
+                        demote_backlog,
+                    );
                 }
                 if !vacate_queued {
                     worker_queue::HA_TRANSITION_VACATE_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    worker_queue::record_transition_debt(*worker_id, &[], &[], true);
+                    worker_queue::record_transition_debt(
+                        *worker_id,
+                        &[],
+                        &[],
+                        true,
+                        vacate_backlog,
+                    );
                 }
             }
             demote_shared_owner_rgs(
@@ -196,20 +212,27 @@ impl crate::afxdp::Coordinator {
             }
             // #1790/#1807: uniform poison recovery (worker_queue.rs).
             // #9720: a refused Refresh is that worker's transition debt (same
-            // re-drive as the demote pair); the queue guard drops before the
-            // record (leaf-lock discipline, worker_queue.rs).
-            let refresh_queued = {
+            // positional countdown as the demote pair); the queue guard drops
+            // before the record (leaf-lock discipline, worker_queue.rs).
+            let (refresh_queued, refresh_backlog) = {
                 let mut pending = worker_queue::lock_recover(&rec.handle.commands);
-                worker_queue::push_bounded(
+                let refresh_queued = worker_queue::push_bounded(
                     &mut pending,
                     WorkerCommand::RefreshOwnerRGS {
                         owner_rgs: activated_rgs.to_vec(),
                     },
-                )
+                );
+                (refresh_queued, pending.len())
             };
             if !refresh_queued {
                 worker_queue::HA_TRANSITION_REFRESH_DROPPED.fetch_add(1, Ordering::Relaxed);
-                worker_queue::record_transition_debt(*worker_id, &[], activated_rgs, false);
+                worker_queue::record_transition_debt(
+                    *worker_id,
+                    &[],
+                    activated_rgs,
+                    false,
+                    refresh_backlog,
+                );
             }
         }
         let current = self.ha.rg_runtime.load();

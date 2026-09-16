@@ -511,12 +511,21 @@ impl super::Coordinator {
     /// #9720: RG-transition `DemoteOwnerRGS` pushes a full worker queue refused.
     ///
     /// The PER-COMMAND split of `worker_command_queue_drops_total` for the
-    /// demote half of an RG transition. Every refusal counted here was ALSO
-    /// recorded as that worker's transition debt and re-driven on its next
-    /// drain — a climbing count means transitions are outrunning a live
-    /// worker's drain, not that demotions are being lost.
+    /// demote half of an RG transition, in PUSHES. Each refusal is recorded
+    /// as that worker's transition debt and dispatched positionally — or
+    /// filtered as stale (see `ha_transition_demote_stale_skipped_total`).
     pub fn ha_transition_demote_dropped_total(&self) -> u64 {
         crate::afxdp::worker_queue::HA_TRANSITION_DEMOTE_DROPPED.load(Ordering::Relaxed)
+    }
+
+    /// #9720: debt demote RGs filtered as stale at dispatch (parent O8).
+    ///
+    /// A demote RG whose group is currently active was superseded (failback
+    /// landed first); dispatching it would corrupt post-transition state, so
+    /// it is skipped and counted here, in RG APPLICATIONS. `demote_dropped`
+    /// (pushes) ≈ applied-late + this.
+    pub fn ha_transition_demote_stale_skipped_total(&self) -> u64 {
+        crate::afxdp::worker_queue::HA_TRANSITION_DEMOTE_STALE_SKIPPED.load(Ordering::Relaxed)
     }
 
     /// #9720: RG-transition `RefreshOwnerRGS` pushes a full worker queue refused.
@@ -527,11 +536,19 @@ impl super::Coordinator {
         crate::afxdp::worker_queue::HA_TRANSITION_REFRESH_DROPPED.load(Ordering::Relaxed)
     }
 
+    /// #9720: debt refresh RGs filtered as stale at dispatch (parent O8).
+    ///
+    /// The Refresh half of `ha_transition_demote_stale_skipped_total`.
+    pub fn ha_transition_refresh_stale_skipped_total(&self) -> u64 {
+        crate::afxdp::worker_queue::HA_TRANSITION_REFRESH_STALE_SKIPPED.load(Ordering::Relaxed)
+    }
+
     /// #9720: RG-transition `VacateAllSharedExactSlots` pushes a full worker
     /// queue refused.
     ///
-    /// Same per-command split for the CoS-slot vacate. See
-    /// `ha_transition_demote_dropped_total` for the debt argument.
+    /// Same per-command split for the CoS-slot vacate (never stale-skipped:
+    /// vacate is unconditional). See `ha_transition_demote_dropped_total`
+    /// for the debt argument.
     pub fn ha_transition_vacate_dropped_total(&self) -> u64 {
         crate::afxdp::worker_queue::HA_TRANSITION_VACATE_DROPPED.load(Ordering::Relaxed)
     }

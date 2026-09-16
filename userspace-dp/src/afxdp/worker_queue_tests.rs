@@ -873,11 +873,93 @@ fn worker_queue_7201_did_work_consumes_the_backlog_signal() {
     // The destructure must actually bind the field — a `..` rest pattern would
     // compile, leave `commands_backlogged` unbound, and take the seed line with
     // it, so pinning the seed alone is not enough.
+    // #9720: `transition_debt_pending` joined the destructure after
+    // `commands_backlogged` — pin the pair verbatim (a `..` rest pattern
+    // would compile and silently drop either field; the 9720 guard below
+    // pins the carry the new field feeds).
     assert!(
-        code.contains("commands_backlogged,\n        } = command_results;")
-            || code.contains("commands_backlogged,\n    } = command_results;"),
-        "`commands_backlogged` must be destructured out of WorkerCommandResults \
-         at the call site, not dropped by a `..` rest pattern"
+        code.contains(
+            "commands_backlogged,\n            transition_debt_pending: transition_debt_pending_now,\n        } = command_results;"
+        ),
+        "`commands_backlogged` and `transition_debt_pending` must be \
+         destructured out of WorkerCommandResults at the call site, not \
+         dropped by a `..` rest pattern"
+    );
+}
+
+#[test]
+fn worker_queue_9720_gate_truth_table() {
+    // The apply gate: queue work OR debt work. Debt work is an epoch change
+    // (a record landed, possibly while the queue sat empty) OR the carried
+    // pending flag (a contended pass deferred the debt step). Exhaustive —
+    // the wiring guard below pins that production actually calls this.
+    // (`use super::*` at the top already brings the helper into scope.)
+    for has in [false, true] {
+        for changed in [false, true] {
+            for pending in [false, true] {
+                assert_eq!(
+                    should_apply_worker_commands(has, changed, pending),
+                    has || changed || pending,
+                    "gate truth table diverged at has={has} changed={changed} pending={pending}"
+                );
+            }
+        }
+    }
+    // The two load-bearing rows, named: debt alone (empty queue, no carry)
+    // must schedule an apply, and so must a carried pending flag with a
+    // quiet epoch.
+    assert!(should_apply_worker_commands(false, true, false));
+    assert!(should_apply_worker_commands(false, false, true));
+    assert!(!should_apply_worker_commands(false, false, false));
+}
+
+#[test]
+fn worker_queue_9720_loop_gate_wiring() {
+    // The gate helper is only worth having if the worker loop calls it with
+    // a FRESH epoch load, consumes last-observed AFTER apply returns, and
+    // carries the pending flag — and that consumer is locals inside a
+    // 3000-line function no unit fixture can reach, so the wiring is bound
+    // as a source-level agreement (the #7201 pattern above). Without it, a
+    // helper-tested-but-unwired loop strands debt exactly like v2 while
+    // every behavioral cell stays green (cells drive `apply_worker_commands`
+    // directly and never pass through the loop gate).
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/worker/loop_body/mod.rs");
+    let src = std::fs::read_to_string(&path).expect("read worker loop_body");
+    let code = blank_comments_and_strings(&src);
+    for token in [
+        "should_apply_worker_commands",
+        "transition_debt_epoch(worker_id)",
+        "last_transition_debt_epoch",
+        "transition_debt_pending",
+    ] {
+        assert!(
+            code.contains(token),
+            "precondition: the guard read a tree with no `{token}` in it at all, \
+             so its agreement checks below would pass vacuously"
+        );
+    }
+    // Fresh load sampled into a local every pass (not hoisted, not reused).
+    assert!(
+        code.contains("let transition_debt_epoch =")
+            && code.contains("transition_debt_epoch(worker_id)"),
+        "the loop must sample a fresh transition-debt epoch every pass"
+    );
+    // The gate call itself.
+    assert!(
+        code.contains("should_apply_worker_commands("),
+        "the loop must gate `apply_worker_commands` on `should_apply_worker_commands`"
+    );
+    // Post-apply consume: last-observed is assigned the sampled epoch only
+    // on passes that applied (a record landing mid-apply refires next pass).
+    assert!(
+        code.contains("last_transition_debt_epoch = transition_debt_epoch;"),
+        "last-observed must be consumed from the sampled epoch after apply"
+    );
+    // Pending carry across passes.
+    assert!(
+        code.contains("transition_debt_pending = transition_debt_pending_now;"),
+        "the loop must carry `transition_debt_pending` across passes"
     );
 }
 

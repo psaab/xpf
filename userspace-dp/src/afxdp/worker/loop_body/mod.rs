@@ -425,6 +425,14 @@ pub(crate) fn worker_loop(
     // #9752: the installing-table purge walk is resumable and budgeted, like
     // the sweep above. Armed by re-resolve terminal observations.
     let mut install_table_purge = crate::afxdp::session_glue::InstallTablePurge::default();
+    // #9720: the transition-debt epoch this worker has already applied
+    // against, plus the carried pending flag. Seeded from CURRENT (same
+    // no-spurious-first-pass argument as the delete-drop epoch above);
+    // `register` clears the slot but not the epoch, so a reused worker id
+    // starts quiet and any record after the seed bumps past it.
+    let mut last_transition_debt_epoch =
+        crate::afxdp::worker_queue::transition_debt_epoch(worker_id);
+    let mut transition_debt_pending = false;
     let mut dbg_last_report_ns = monotonic_nanos();
     // #1776: the per-interval cfg(debug-log) dbg_* counters are
     // consolidated into debug_report::DbgCounters (single-line
@@ -913,7 +921,25 @@ pub(crate) fn worker_loop(
         let has_commands = crate::afxdp::worker_queue::try_lock_recover(&commands)
             .map(|q| !q.is_empty())
             .unwrap_or(false);
-        let command_results = if has_commands {
+        // #9720: debt arms. The transition-debt epoch is sampled EVERY pass
+        // (one relaxed load): a record that landed while the queue sat empty
+        // — the producer records after releasing the queue lock, so a
+        // deschedule in between lets the worker drain-all first — must still
+        // schedule an apply, or the debt strands until the next enqueue
+        // (parent GPT-2). The carried pending flag covers the
+        // contended-with-empty pass. Consumption is last-observed AFTER
+        // apply returns, so a record landing mid-apply refires the next
+        // pass; the carry is worker-overwrite from the results. Call site +
+        // fresh load + post-apply consume + destructure are pinned by the
+        // source-scan wiring guard in worker_queue_tests.rs (#7201 pattern).
+        let transition_debt_epoch = crate::afxdp::worker_queue::transition_debt_epoch(worker_id);
+        let debt_epoch_changed = transition_debt_epoch != last_transition_debt_epoch;
+        let should_apply = crate::afxdp::worker_queue::should_apply_worker_commands(
+            has_commands,
+            debt_epoch_changed,
+            transition_debt_pending,
+        );
+        let command_results = if should_apply {
             apply_worker_commands(
                 &commands,
                 &mut sessions,
@@ -929,6 +955,9 @@ pub(crate) fn worker_loop(
         } else {
             WorkerCommandResults::empty()
         };
+        if should_apply {
+            last_transition_debt_epoch = transition_debt_epoch;
+        }
         let WorkerCommandResults {
             cancelled_keys,
             deleted_synced_keys,
@@ -938,7 +967,9 @@ pub(crate) fn worker_loop(
             shaped_tx_requests,
             vacate_all_shared_exact_slots,
             commands_backlogged,
+            transition_debt_pending: transition_debt_pending_now,
         } = command_results;
+        transition_debt_pending = transition_debt_pending_now;
         // #941 Work item C: HA-demotion vacate. The
         // VacateAllSharedExactSlots WorkerCommand cannot be processed
         // inside `apply_worker_commands` (no BindingWorker access);
