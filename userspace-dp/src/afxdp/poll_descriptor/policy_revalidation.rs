@@ -455,40 +455,34 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
 /// and the LocalDelivery HIT exemption (`tun_origin_reverse_exempt`), so the
 /// two can never disagree about what "TUN-originated" means.
 ///
-/// Each conjunct closes a spoof or alias class (all five must hold):
-/// - synced-family origin (incl. SharedPromote): the entry arrived via a
-///   coordinator-authoritative path (TUN-origin publish, HA sync, promote,
-///   materialize) — never via a local MISS install, which is how a spoofed
-///   plant's forward arrives (ForwardFlow). SharedPromote is included
-///   deliberately: a TUN-origin forward HIT promotes, and excluding it would
-///   let one tunnel-side forward-tuple packet poison the marker until expiry.
+/// Positive provenance (parent-review item 5): the load-bearing conjunct is
+/// `origin == TunOrigin`, stamped ONLY by the two local TUN publishers (WG
+/// `tun_origin.rs`, GRE `tunnel.rs`) and preserved across materialize /
+/// replica. HA imports hardcode `SyncImport` (`session_sync.rs`), so a
+/// legacy-peer transit import — zeroed ingress, zeroed counter, tunnel
+/// egress, even a preserved admitting PolicyID — can NEVER match, no
+/// matter how closely its metadata aliases. The remaining conjuncts are
+/// defense-in-depth over the stamped shape (all must hold):
 /// - !is_reverse: the marker describes the forward half only.
 /// - ingress_ifindex == 0: TUN-origin has no ingress binding to record
-///   (#4983's HOST-OUTBOUND population). A wire-admitted forward stamps its
-///   arrival binding.
-/// - tunnel_endpoint_id != 0: the flow egresses a tunnel (GRE/WG local-origin
-///   builders set this; a host-bound or plain-transit forward does not).
-/// - policy_counter_idx == 0: self-originated runs no policy match, so no
-///   admitting counter was ever stamped (#6224). This is what excludes a
-///   degraded-ingress HA tunnel-TRANSIT forward (ingress folded to 0 by a
-///   legacy/unresolvable peer): transit is always policy-admitted (1-based
-///   handle, default-permit MAX), so it never carries 0.
+///   (#4983's HOST-OUTBOUND population).
+/// - tunnel_endpoint_id != 0: the flow egresses a tunnel.
+/// - policy_counter_idx == 0: self-originated runs no policy match (#6224).
 ///
-/// Excluded origins and why: ForwardFlow/ReverseFlow (local MISS installs —
-/// the spoof-plant shape, must stay judged/gated), MissingNeighborSeed /
-/// LocalMiss / FabricPuntSeed (transient local seeds, never synced-family).
+/// Lifecycle notes: TUN-origin never promotes (refused — promotion would
+/// re-tag the marker away) and a demote flips it to `SyncImport`
+/// (fail-closed: judged/gated thereafter). Every other origin —
+/// ForwardFlow/ReverseFlow (MISS installs, the spoof-plant shape),
+/// SyncImport/SharedMaterialize/WorkerLocalImport/SharedPromote (HA-synced
+/// family, incl. the legacy alias), LocalMiss/seeds (transient local) —
+/// fails closed.
 pub(super) fn tun_origin_forward(
     decision: &SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
 ) -> bool {
-    matches!(
-        origin,
-        SessionOrigin::SyncImport
-            | SessionOrigin::SharedMaterialize
-            | SessionOrigin::WorkerLocalImport
-            | SessionOrigin::SharedPromote
-    ) && !metadata.is_reverse
+    origin == SessionOrigin::TunOrigin
+        && !metadata.is_reverse
         && metadata.ingress_ifindex == 0
         && decision.resolution.tunnel_endpoint_id != 0
         && metadata.policy_counter_idx == 0
@@ -640,6 +634,10 @@ fn reverse_hit_zone_policy(
         | SessionOrigin::SharedMaterialize
         | SessionOrigin::SharedPromote
         | SessionOrigin::WorkerLocalImport
+        // #10038 item 5: zero-ingress origins take the recorded zone (a
+        // TUN-origin companion is declined before this match is reached,
+        // so this arm is defense-in-depth, not a live path).
+        | SessionOrigin::TunOrigin
         | SessionOrigin::FabricPuntSeed => {
             FromZoneSource::RecordedZone(fwd_metadata.ingress_zone)
         }
@@ -907,6 +905,8 @@ mod tests {
                     tx_vlan_id: 0,
                 },
                 nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
             },
             SessionMetadata {
                 ingress_zone: 5,
@@ -924,35 +924,29 @@ mod tests {
                 policy_counter_idx: 0,
                 policy_counter: None,
             },
-            SessionOrigin::SyncImport,
+            SessionOrigin::TunOrigin,
         )
     }
 
-    /// #10038: the discriminator truth table — every conjunct load-bearing.
-    /// The base marker matches; flipping ANY single conjunct (each origin
-    /// outside the synced set, the reverse flag, an ingress identity, a zero
-    /// tunnel id, an admitting policy counter) fails.
+    /// #10038: the discriminator truth table — positive provenance. ONLY
+    /// `TunOrigin` matches; every other origin (the full HA-synced family
+    /// included — a `SyncImport` is NEVER TUN-origin, however closely its
+    /// metadata aliases) fails, as does flipping any shape conjunct alone.
     #[test]
     fn tun_origin_forward_table_10038() {
         let (decision, metadata, origin) = marker_forward_10038();
         assert!(tun_origin_forward(&decision, &metadata, origin));
-        // The synced-family origins all match (SharedPromote included: a
-        // TUN-origin forward HIT promotes, and excluding it would let one
-        // tunnel-side forward-tuple packet poison the marker until expiry).
+        // Every other origin fails — including the whole HA-synced family:
+        // SyncImport (the legacy-transit alias — see the dedicated cell
+        // below), SharedMaterialize, WorkerLocalImport, SharedPromote (TUN
+        // never promotes, so a promoted entry is by definition not TUN),
+        // ForwardFlow/ReverseFlow (MISS installs, the spoof-plant shape),
+        // LocalMiss and the transient seeds.
         for origin in [
             SessionOrigin::SyncImport,
             SessionOrigin::SharedMaterialize,
             SessionOrigin::WorkerLocalImport,
             SessionOrigin::SharedPromote,
-        ] {
-            assert!(
-                tun_origin_forward(&decision, &metadata, origin),
-                "{origin:?} must match"
-            );
-        }
-        // Every other origin fails — including ForwardFlow (the spoof-plant
-        // shape, which MISS-installs) and the transient local seeds.
-        for origin in [
             SessionOrigin::ForwardFlow,
             SessionOrigin::ReverseFlow,
             SessionOrigin::LocalMiss,
@@ -1034,21 +1028,21 @@ mod tests {
 
         // Local marker → exempt.
         let mut sessions = SessionTable::new();
-        install_local(&mut sessions, SessionOrigin::SyncImport, 0, 0);
+        install_local(&mut sessions, SessionOrigin::TunOrigin, 0, 0);
         assert!(tun_origin_reverse_exempt(&sessions, &fresh_shared(), &rev_key, nat));
 
         // Local non-marker + shared marker → DENY (local shadows shared).
         let mut sessions = SessionTable::new();
         install_local(&mut sessions, SessionOrigin::ForwardFlow, 400, 1);
         let shared = fresh_shared();
-        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::SyncImport));
+        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
         assert!(!tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
 
         // Shared-only marker → exempt (WG production: the forward never
         // materializes locally).
         let sessions = SessionTable::new();
         let shared = fresh_shared();
-        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::SyncImport));
+        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
         assert!(tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
 
         // Shared-only non-marker → deny.
@@ -1075,5 +1069,72 @@ mod tests {
         assert_eq!(crate::session::reverse_session_key(&loop_key, nat), loop_key);
         let sessions = SessionTable::new();
         assert!(!tun_origin_reverse_exempt(&sessions, &fresh_shared(), &loop_key, nat));
+    }
+
+    /// Parent-review item 5: the legacy-HA-transit alias is closed. A
+    /// legacy-peer's transit import — `SyncImport`, tunnel egress, folded
+    /// zero ingress, zeroed counter (`session_sync.rs` defaults missing
+    /// fields to 0), even a PRESERVED admitting PolicyID (per
+    /// `sync_gen_guard_test.go`) — satisfies every shape conjunct yet must
+    /// NOT match: only positive `TunOrigin` provenance matches. Pinned at
+    /// both the predicate and the exemption-lookup level.
+    #[test]
+    fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
+        let (decision, mut metadata, _) = marker_forward_10038();
+        // The legacy import shape: admitting PolicyID preserved, counter
+        // zeroed by wire truncation.
+        metadata.policy_id = 41;
+        assert!(
+            !tun_origin_forward(&decision, &metadata, SessionOrigin::SyncImport),
+            "a legacy transit import must not match, PolicyID or not"
+        );
+        // And through the exemption lookup: a shared SyncImport alias-shape
+        // forward must not exempt its reverse.
+        let nat = NatDecision::default();
+        let fwd_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 17,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 5)),
+            src_port: 5001,
+            dst_port: 5002,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        };
+        let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
+        let sessions = SessionTable::new();
+        let shared = Arc::new(Mutex::new(FastMap::default()));
+        shared.lock().expect("shared map").insert(
+            fwd_key.clone(),
+            SyncedSessionEntry {
+                key: fwd_key.clone(),
+                decision,
+                metadata,
+                origin: SessionOrigin::SyncImport,
+                protocol: 17,
+                tcp_flags: 0,
+                generation: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+        );
+        assert!(
+            !tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat),
+            "a legacy alias-shape forward must not exempt"
+        );
+        // Provenance lifecycle: local (never peer-synced, never promoted),
+        // preserved across materialize/replica (else the first HIT would
+        // re-tag the marker away).
+        assert!(SessionOrigin::TunOrigin.is_local_tun_origin());
+        assert!(!SessionOrigin::TunOrigin.is_peer_synced());
+        assert!(!SessionOrigin::TunOrigin.is_promotable_synced());
+        assert_eq!(
+            SessionOrigin::TunOrigin.materialized_shared_hit_origin(),
+            SessionOrigin::TunOrigin
+        );
+        assert_eq!(
+            SessionOrigin::TunOrigin.worker_replica_origin(),
+            SessionOrigin::TunOrigin
+        );
     }
 }

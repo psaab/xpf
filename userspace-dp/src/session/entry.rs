@@ -423,6 +423,20 @@ pub(crate) enum SessionOrigin {
     SharedPromote,
     #[allow(dead_code)] // enum variant for completeness
     WorkerLocalImport,
+    /// #10038 (parent-review item 5): firewall-SELF-originated via a local
+    /// TUN publisher (WG `tun_origin.rs`, GRE `tunnel.rs`). POSITIVE
+    /// provenance — stamped ONLY by those two publishers — so the
+    /// TUN-origin discriminator keys on THIS, never on the absence of
+    /// accounting metadata (a legacy-peer transit import defaults
+    /// `policy_counter_idx` to 0 and would otherwise alias).
+    ///
+    /// Node-local, never crosses HA: excluded from bulk export, live-Open,
+    /// Close, and Update-announce (see `is_local_tun_origin` callers), so a
+    /// peer can never hold TUN-derived state. NOT peer-synced (local
+    /// provenance: demote flips it to `SyncImport`, fail-closed) and NOT
+    /// promotable (promotion would re-tag the marker away; a TUN forward
+    /// HIT keeps its origin). Materialize/replica preserve it.
+    TunOrigin,
 }
 
 impl SessionOrigin {
@@ -437,7 +451,15 @@ impl SessionOrigin {
             Self::SharedMaterialize => "shared_materialize",
             Self::SharedPromote => "shared_promote",
             Self::WorkerLocalImport => "worker_local_import",
+            Self::TunOrigin => "tun_origin",
         }
+    }
+
+    /// #10038 item 5: node-local TUN provenance — the per-entry predicate
+    /// every HA-crossing gate calls (bulk export, live-Open, Close,
+    /// Update-announce). Shared so the set cannot drift apart.
+    pub(crate) fn is_local_tun_origin(self) -> bool {
+        matches!(self, Self::TunOrigin)
     }
 
     /// Returns true for origins that represent peer-synced sessions.
@@ -455,6 +477,11 @@ impl SessionOrigin {
     }
 
     pub(crate) fn worker_replica_origin(self) -> Self {
+        // #10038 item 5: TUN provenance survives replication (a replica of a
+        // TUN-origin entry is TUN-origin); anything else keeps the old map.
+        if self.is_local_tun_origin() {
+            return Self::TunOrigin;
+        }
         if self.is_promotable_synced() {
             Self::SyncImport
         } else {
@@ -463,6 +490,12 @@ impl SessionOrigin {
     }
 
     pub(crate) fn materialized_shared_hit_origin(self) -> Self {
+        // #10038 item 5: a materialized TUN-origin hit keeps TUN-origin (else
+        // the first reply would re-tag the marker away and the exemption
+        // would die on its own success path).
+        if self.is_local_tun_origin() {
+            return Self::TunOrigin;
+        }
         if self.is_promotable_synced() {
             Self::SharedMaterialize
         } else {

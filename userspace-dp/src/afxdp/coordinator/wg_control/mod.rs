@@ -513,6 +513,10 @@ fn run_wg_control_loop_with_kernel_path(
     );
     let mut tun_origin_sessions = FastMap::<SessionKey, u64>::default();
     let mut tun_origin_last_prune_ns = 0u64;
+    // Parent-review items 2+4: tombstones (last-publish memory, swept at
+    // 300s) + the idle-sweep clock. Thread-local like the dedup map.
+    let mut tun_origin_tombstones = FastMap::<SessionKey, u64>::default();
+    let mut tun_origin_last_sweep_ns = 0u64;
 
     // Initial initiator bring-up: every peer with a configured endpoint
     // starts a real attempt window (BringUp class) so the REKEY_TIMEOUT/
@@ -556,6 +560,17 @@ fn run_wg_control_loop_with_kernel_path(
             );
         }
         let ha_runtime = ha_state.load();
+        // Parent-review item 2: publisher-owned idle sweep (throttled
+        // inside — one timestamp check per iteration when idle).
+        tun_origin::sweep_wg_tun_origin_idle(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &mut tun_origin_tombstones,
+            &mut tun_origin_last_sweep_ns,
+            monotonic_nanos(),
+        );
 
         // --- Inbound: kernel socket → engine → TUN ---
         for _ in 0..WG_RX_BURST {
@@ -761,7 +776,9 @@ fn run_wg_control_loop_with_kernel_path(
                                 shared_forward_wire_sessions,
                                 shared_owner_rg_indexes,
                                 &mut tun_origin_sessions,
+                                &mut tun_origin_tombstones,
                                 &entries,
+                                tun_origin::wg_tun_origin_packet_initiates(parsed),
                                 now_ns,
                             ),
                             Err(reason) => {

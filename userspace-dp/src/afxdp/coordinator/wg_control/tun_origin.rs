@@ -66,6 +66,18 @@ pub(in crate::afxdp) fn parse_wg_tun_origin_flow(
     meta.l4_offset = meta.l4_offset.saturating_add(14);
     meta.payload_offset = meta.payload_offset.saturating_add(14);
     let mut flow = parse_session_flow_from_bytes(&frame, meta)?;
+    // Parent-review (GPT-3 + SPARK-A1): TUN-read provenance. The kernel
+    // routes ANYTHING onto a wgN TUN — including, under misconfig,
+    // peer-originated transit an Uncovered-ingress TUN write looped back
+    // (`dispatch_inbound` writes AllowedIPs-gated but possibly non-local-src
+    // plaintext the kernel may route out this or another TUN). Only a
+    // firewall-LOCAL inner source is self-originated; anything else is
+    // encap-only (None), never published as TUN-origin. `owns_configured_ip`
+    // covers tunnel + physical + SNAT-WAN + NAT-external addrs (local_v*
+    // alone would miss SNAT-sourced packets).
+    if !forwarding.owns_configured_ip(flow.forward_key.src_ip) {
+        return None;
+    }
     let endpoint = forwarding.tunnel_endpoints.get(&tunnel_endpoint_id)?;
     flow.forward_key.routing_domain = crate::afxdp::forwarding::ingress_routing_domain(
         forwarding,
@@ -236,9 +248,14 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             tx_vlan_id: outer.tx_vlan_id,
         },
     );
+    // #9752 fields are inert here (0,0): Part C declines TUN-origin before
+    // any re-resolve could run in an install table (same as the synthesized
+    // precedent in `shared_ops.rs`).
     let decision = SessionDecision {
         resolution,
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     // The tunnel's zone, both directions — same as GRE (`egress_zone_id` on
     // the tunnel logical: "what zone is this tunnel in").
@@ -258,9 +275,9 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             // Self-originated: no admitting policy/application (Junos runs no
             // security policy on firewall-self-originated traffic, #6224), so
             // zeroed policy fields + the global per-protocol idle timeout
-            // (`None`), exactly like the GRE local-origin builder. `SyncImport`
-            // is the same install-path plumbing artifact (uncapped
-            // coordinator-authoritative install), NOT a peer wire import.
+            // (`None`), exactly like the GRE local-origin builder.
+            // `TunOrigin` (item 5) is POSITIVE provenance — stamped only
+            // here and in the GRE builder — never a peer wire import.
             log_session_init: false,
             log_session_close: false,
             policy_id: 0,
@@ -268,7 +285,7 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             policy_counter_idx: 0,
             policy_counter: None,
         },
-        origin: SessionOrigin::SyncImport,
+        origin: SessionOrigin::TunOrigin,
         protocol: parsed.meta.protocol,
         tcp_flags: if parsed.meta.protocol == PROTO_TCP {
             extract_tcp_flags_and_window(&parsed.frame)
@@ -281,19 +298,85 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
         session_id: 0,
         tcp_close_class: 0,
     };
-    let reverse = synthesized_synced_reverse_entry(
+    // Table-scoped synthesis (item 6): the reply target resolves in the
+    // tunnel's instance table, so a VRF reverse finds its connected/local
+    // view instead of NoRoute-ing against inet.0.
+    let table = crate::afxdp::tunnel::tun_origin_reverse_route_table(forwarding, logical_ifindex);
+    let mut reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
         forwarding,
         ha_runtime,
         dynamic_neighbors,
         &forward,
         now_secs,
+        Some(table.as_str()),
     );
+    if let Some(rev) = reverse.as_mut() {
+        rev.origin = SessionOrigin::TunOrigin;
+    }
     Ok(WgTunOriginEntries { forward, reverse })
 }
 
+/// Parent-review item 2: publisher-owned idle sweep. A TUN-published pair
+/// whose flow sees no TUN traffic for this long is deleted from the shared
+/// maps — the publisher that created the authorization revokes it, so
+/// unanswered/idle flows never accumulate (shared maps have no TTL of their
+/// own). A worker holding a materialized copy is unaffected (local shadows
+/// shared, so established flows continue); a late reply on a stateless
+/// worker MISSES and faces the normal gates. Well under the 30s refresh
+/// prune horizon with 5s sweep cadence, so the stamp is always present when
+/// the sweep reads it.
+const WG_TUN_ORIGIN_DELETE_IDLE_NS: u64 = 20_000_000_000;
+/// Parent-review item 4: tombstone horizon. Last-publish memory per flow —
+/// a response-shaped resume within this window republishes (the flow was
+/// recently outbound), past it the flow is forgotten and a response-shaped
+/// packet creates nothing. Covers TCP keepalives (75s) and BGP holds.
+const WG_TUN_ORIGIN_TOMBSTONE_IDLE_NS: u64 = 300_000_000_000;
+/// Sweep cadence throttle (mirrors the 5s prune interval, separate clock).
+const WG_TUN_ORIGIN_SWEEP_INTERVAL_NS: u64 = 5_000_000_000;
+/// Tombstone memory bound (scan/sweep cost); past it the oldest go first.
+const WG_TUN_ORIGIN_TOMBSTONE_CAP: usize = 16384;
+const WG_TUN_ORIGIN_TOMBSTONE_RETAIN: usize = 8192;
+
+/// Parent-review item 4: does this TUN packet INITIATE (vs respond)?
+///
+/// The kernel reads TUN packets for BOTH directions: genuine outbound
+/// requests AND responses to admitted inbound (peer→firewall request
+/// admitted worker-locally, kernel answers firewall→peer). Stamping a
+/// response as a TUN-origin FORWARD would synthesize its request tuple
+/// as an exempt LocalDelivery reverse — admitting future peer requests
+/// as "solicited replies" past tightening. So creation requires an
+/// initiating shape: TCP SYN-without-ACK, ICMP echo/timestamp request
+/// (v4 8/13, v6 128/133). UDP and everything else carry no direction
+/// signal and always create (documented residual: a UDP response to
+/// inbound creates a pair — narrow: needs a fw UDP service + WG +
+/// entry loss or tightening-after-publish).
+pub(in crate::afxdp) fn wg_tun_origin_packet_initiates(parsed: &WgTunOriginParsed) -> bool {
+    match parsed.meta.protocol {
+        PROTO_TCP => crate::afxdp::frame::extract_tcp_flags_and_window(&parsed.frame)
+            .map(|(flags, _)| {
+                (flags & crate::tcp_flags::TCP_SYN) != 0 && (flags & crate::tcp_flags::TCP_ACK) == 0
+            })
+            .unwrap_or(false),
+        PROTO_ICMP => {
+            let ty = parsed.frame.get(parsed.meta.l4_offset as usize).copied();
+            match parsed.meta.addr_family as i32 {
+                libc::AF_INET => matches!(ty, Some(8) | Some(13)),
+                _ => matches!(ty, Some(128) | Some(133)),
+            }
+        }
+        _ => true,
+    }
+}
+
 /// Publish the TUN-origin pair to the shared maps (forward + reverse when
-/// synthesized) and mark the flow published in the thread-local dedup map.
-/// Shared-only by design: no `worker_commands` UpsertLocal (see module doc).
+/// synthesized) and mark the flow published in the thread-local dedup map +
+/// tombstones. Shared-only by design (no `worker_commands` UpsertLocal).
+///
+/// Parent-review item 4 (inbound-orientation preservation): a
+/// response-shaped packet (`initiates == false`) must not CREATE — it
+/// publishes only as refresh (forward already shared) or resume
+/// (tombstone = published within 300s). A skip marks nothing, so the
+/// flow stays forgotten and every response re-decides the same way.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -301,9 +384,18 @@ pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     local_sessions: &mut FastMap<SessionKey, u64>,
+    tombstones: &mut FastMap<SessionKey, u64>,
     entries: &WgTunOriginEntries,
+    initiates: bool,
     now_ns: u64,
 ) {
+    if !initiates
+        && crate::afxdp::shared_ops::lookup_shared_session(shared_sessions, &entries.forward.key)
+            .is_none()
+        && !tombstones.contains_key(&entries.forward.key)
+    {
+        return;
+    }
     publish_shared_session(
         shared_sessions,
         shared_nat_sessions,
@@ -321,6 +413,56 @@ pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
         );
     }
     local_sessions.insert(entries.forward.key.clone(), now_ns);
+    tombstones.insert(entries.forward.key.clone(), now_ns);
+}
+
+/// Parent-review item 2: publisher-owned idle sweep (throttled; call every
+/// outer iteration). Deletes shared pairs idle past `DELETE_IDLE` and
+/// forgets tombstones past `TOMBSTONE_IDLE`. Removal is idempotent, so a
+/// re-delete between the idle read and the next sweep is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn sweep_wg_tun_origin_idle(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    tombstones: &mut FastMap<SessionKey, u64>,
+    last_sweep_ns: &mut u64,
+    now_ns: u64,
+) {
+    if now_ns.saturating_sub(*last_sweep_ns) < WG_TUN_ORIGIN_SWEEP_INTERVAL_NS {
+        return;
+    }
+    *last_sweep_ns = now_ns;
+    for (key, last) in tombstones.iter() {
+        if now_ns.saturating_sub(*last) > WG_TUN_ORIGIN_DELETE_IDLE_NS {
+            let rev_key =
+                crate::session::reverse_session_key(key, crate::nat::NatDecision::default());
+            crate::afxdp::shared_ops::remove_shared_session(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                shared_owner_rg_indexes,
+                key,
+            );
+            crate::afxdp::shared_ops::remove_shared_session(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                shared_owner_rg_indexes,
+                &rev_key,
+            );
+        }
+    }
+    tombstones.retain(|_, last| now_ns.saturating_sub(*last) <= WG_TUN_ORIGIN_TOMBSTONE_IDLE_NS);
+    if tombstones.len() > WG_TUN_ORIGIN_TOMBSTONE_CAP {
+        let mut ordered: Vec<(u64, SessionKey)> =
+            tombstones.iter().map(|(k, t)| (*t, k.clone())).collect();
+        ordered.sort_by_key(|(t, _)| core::cmp::Reverse(*t));
+        for (_, k) in ordered.into_iter().skip(WG_TUN_ORIGIN_TOMBSTONE_RETAIN) {
+            tombstones.remove(&k);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -388,7 +530,7 @@ mod tests {
         // The marker: synced-family origin, forward half, no ingress identity,
         // tunnel endpoint set, no admitting policy counter.
         let fwd = &entries.forward;
-        assert_eq!(fwd.origin, SessionOrigin::SyncImport);
+        assert_eq!(fwd.origin, SessionOrigin::TunOrigin);
         assert!(!fwd.metadata.is_reverse);
         assert_eq!(fwd.metadata.ingress_ifindex, 0);
         assert_eq!(fwd.decision.resolution.tunnel_endpoint_id, 1);
@@ -441,7 +583,7 @@ mod tests {
             rev.key,
             crate::session::reverse_session_key(&fwd.key, fwd.decision.nat)
         );
-        assert_eq!(rev.origin, SessionOrigin::SyncImport);
+        assert_eq!(rev.origin, SessionOrigin::TunOrigin);
         assert_eq!(rev.metadata.policy_counter_idx, 0);
     }
 
@@ -449,7 +591,20 @@ mod tests {
     /// selected v4 peer endpoint — WG transports either family).
     #[test]
     fn wg_tun_origin_builder_parses_inner_v6_10038() {
-        let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+        // fd00::1 must be a CONFIGURED addr (else the provenance gate drops
+        // it — see the nonlocal test below): extend the stock snapshot.
+        let mut snap = wg_outer_mtu_snapshot();
+        snap.interfaces
+            .iter_mut()
+            .find(|i| i.ifindex == 400)
+            .expect("wg0.0 row")
+            .addresses
+            .push(crate::InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "fd00::1/64".to_string(),
+                scope: 0,
+            });
+        let forwarding = build_forwarding_state(&snap);
         let neighbors = Arc::new(ShardedNeighborMap::new());
         let ha = txn_ha_state();
         let peer_ep: SocketAddr = "203.0.113.7:51820".parse().unwrap();
@@ -465,8 +620,35 @@ mod tests {
         let entries =
             build_wg_tun_origin_entries(&parsed, peer_ep, 1, &forwarding, &ha, &neighbors, 123)
                 .expect("v6 build must succeed");
-        assert_eq!(entries.forward.origin, SessionOrigin::SyncImport);
+        assert_eq!(entries.forward.origin, SessionOrigin::TunOrigin);
         assert!(entries.reverse.is_some(), "v6 reverse must synthesize");
+    }
+
+    /// Parent-review (GPT-3 + SPARK-A1): TUN-read provenance. A parseable
+    /// inner whose source is NOT firewall-local (the Uncovered-ingress
+    /// producer's output shape: AllowedIPs-gated peer src, kernel-looped
+    /// onto a TUN under misconfig) parses to None — encap-only, never
+    /// published. v4 + v6; the local-src controls are the marker/v6 cells.
+    #[test]
+    fn wg_tun_origin_nonlocal_src_skips_publish_10038() {
+        let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+        // Peer-net src (AllowedIPs, but not ours): the looped-transit shape.
+        let looped = inner_udp_v4(PEER, [10, 123, 0, 9], 5001, 5002);
+        assert!(
+            parse_wg_tun_origin_flow(&looped, &forwarding, 1).is_none(),
+            "a non-local inner src must not parse for publish"
+        );
+        // Unconfigured v6 src: same gate, other family.
+        let looped_v6 = inner_udp_v6(
+            "fd00::9".parse().unwrap(),
+            "fd00::2".parse().unwrap(),
+            5001,
+            5002,
+        );
+        assert!(
+            parse_wg_tun_origin_flow(&looped_v6, &forwarding, 1).is_none(),
+            "a non-local inner v6 src must not parse for publish"
+        );
     }
 
     /// #10038: the #9032 routing-domain stamp. On the stock snapshot the
@@ -650,5 +832,273 @@ mod tests {
             map.is_empty(),
             "the shared GRE sweep must prune 5000 stale entries, else this call is not wired to it"
         );
+    }
+
+    /// A bare inner IPv4 TCP packet (TUN-shaped: no L2) with explicit flags.
+    fn inner_tcp_v4(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, flags: u8) -> Vec<u8> {
+        let mut p = vec![0u8; 20 + 20];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&40u16.to_be_bytes());
+        p[8] = 64;
+        p[9] = PROTO_TCP;
+        p[12..16].copy_from_slice(&src);
+        p[16..20].copy_from_slice(&dst);
+        p[20..22].copy_from_slice(&sport.to_be_bytes());
+        p[22..24].copy_from_slice(&dport.to_be_bytes());
+        p[32] = 0x50;
+        p[33] = flags;
+        p
+    }
+
+    /// A bare inner IPv4 ICMP packet (TUN-shaped: no L2) with explicit type.
+    fn inner_icmp_v4(icmp_type: u8, src: [u8; 4], dst: [u8; 4], ident: u16) -> Vec<u8> {
+        let mut p = vec![0u8; 20 + 8];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&28u16.to_be_bytes());
+        p[8] = 64;
+        p[9] = PROTO_ICMP;
+        p[12..16].copy_from_slice(&src);
+        p[16..20].copy_from_slice(&dst);
+        p[20] = icmp_type;
+        p[24..26].copy_from_slice(&ident.to_be_bytes());
+        p
+    }
+
+    /// Parent-review item 4: the initiates table. TCP SYN-only and ICMP
+    /// echo/timestamp requests initiate; SYN-ACK/ACK/RST/FIN, echo replies,
+    /// and errors do not; UDP always does (no direction signal).
+    #[test]
+    fn wg_tun_origin_packet_initiates_table_10038() {
+        let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+        let initiates = |packet: &[u8]| {
+            parse_wg_tun_origin_flow(packet, &forwarding, 1)
+                .map(|parsed| wg_tun_origin_packet_initiates(&parsed))
+        };
+        use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+        // TCP: only SYN-without-ACK opens.
+        assert_eq!(
+            initiates(&inner_tcp_v4(FW, PEER, 5001, 80, TCP_SYN)),
+            Some(true)
+        );
+        assert_eq!(
+            initiates(&inner_tcp_v4(FW, PEER, 5001, 80, TCP_SYN | TCP_ACK)),
+            Some(false)
+        );
+        assert_eq!(
+            initiates(&inner_tcp_v4(FW, PEER, 5001, 80, TCP_ACK)),
+            Some(false)
+        );
+        assert_eq!(
+            initiates(&inner_tcp_v4(FW, PEER, 5001, 80, TCP_RST | TCP_ACK)),
+            Some(false)
+        );
+        assert_eq!(
+            initiates(&inner_tcp_v4(FW, PEER, 5001, 80, TCP_FIN | TCP_ACK)),
+            Some(false)
+        );
+        // ICMPv4: echo/timestamp requests only.
+        assert_eq!(initiates(&inner_icmp_v4(8, FW, PEER, 1)), Some(true));
+        assert_eq!(initiates(&inner_icmp_v4(13, FW, PEER, 1)), Some(true));
+        assert_eq!(initiates(&inner_icmp_v4(0, FW, PEER, 1)), Some(false));
+        // ICMP errors never even parse (#3067 query-only keying) — skipped at
+        // parse, before this gate is reachable.
+        assert_eq!(initiates(&inner_icmp_v4(3, FW, PEER, 1)), None);
+        // UDP: directionless, always initiates.
+        assert_eq!(initiates(&inner_udp_v4(FW, PEER, 5001, 5002)), Some(true));
+    }
+
+    type SharedMaps10038 = (
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        SharedSessionOwnerRgIndexes,
+    );
+
+    fn fresh_shared_10038() -> SharedMaps10038 {
+        (
+            Arc::new(Mutex::new(FastMap::default())),
+            Arc::new(Mutex::new(FastMap::default())),
+            Arc::new(Mutex::new(FastMap::default())),
+            SharedSessionOwnerRgIndexes::default(),
+        )
+    }
+
+    /// Parent-review item 4: the create gate decision table, through the
+    /// production publish. Response-shaped + absent-everywhere skips (marks
+    /// nothing); refresh (shared hit) and resume (tombstone) publish;
+    /// initiating always publishes.
+    #[test]
+    fn wg_tun_origin_create_gate_table_10038() {
+        let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha = txn_ha_state();
+        let peer_ep: SocketAddr = "203.0.113.7:51820".parse().unwrap();
+        let request = inner_udp_v4(FW, PEER, 5001, 5002);
+        let parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("parse must succeed");
+        let entries =
+            build_wg_tun_origin_entries(&parsed, peer_ep, 1, &forwarding, &ha, &neighbors, 123)
+                .expect("build must succeed");
+        let fwd_key = entries.forward.key.clone();
+        let (shared, nat, wire, indexes) = fresh_shared_10038();
+        let mut dedup = FastMap::<SessionKey, u64>::default();
+        let mut tombstones = FastMap::<SessionKey, u64>::default();
+        let publish = |shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                       nat: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                       wire: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                       indexes: &SharedSessionOwnerRgIndexes,
+                       dedup: &mut FastMap<SessionKey, u64>,
+                       tombstones: &mut FastMap<SessionKey, u64>,
+                       initiates: bool| {
+            publish_wg_tun_origin_entries(
+                shared,
+                nat,
+                wire,
+                indexes,
+                dedup,
+                tombstones,
+                &entries,
+                initiates,
+                1_000_000_000,
+            )
+        };
+        // Response-shaped + absent everywhere: skip, marks nothing.
+        publish(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            false,
+        );
+        assert!(shared.lock().expect("shared").is_empty());
+        assert!(dedup.is_empty() && tombstones.is_empty());
+        // Initiating + absent: create (marks both).
+        publish(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            true,
+        );
+        assert!(shared.lock().expect("shared").contains_key(&fwd_key));
+        assert!(dedup.contains_key(&fwd_key) && tombstones.contains_key(&fwd_key));
+        // Response-shaped + shared hit: refresh (republish over present pair).
+        publish(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            false,
+        );
+        assert!(shared.lock().expect("shared").contains_key(&fwd_key));
+        // Resume: pair swept away but tombstone remembered → republish.
+        shared.lock().expect("shared").clear();
+        publish(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            false,
+        );
+        assert!(shared.lock().expect("shared").contains_key(&fwd_key));
+        // Forgotten: pair swept + tombstone gone → skip again, marks nothing.
+        shared.lock().expect("shared").clear();
+        tombstones.clear();
+        dedup.clear();
+        publish(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            false,
+        );
+        assert!(shared.lock().expect("shared").is_empty());
+        assert!(dedup.is_empty() && tombstones.is_empty());
+    }
+
+    /// Parent-review item 2: publisher-owned idle sweep. A published pair
+    /// idle past 20s is deleted from shared (both halves); the tombstone
+    /// survives to 300s (resume grace); past that it is forgotten. Fake
+    /// time throughout; the sweep throttle is defeated by driving it once
+    /// per case with a fresh clock.
+    #[test]
+    fn wg_tun_origin_idle_sweep_bounds_lifetime_10038() {
+        let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha = txn_ha_state();
+        let peer_ep: SocketAddr = "203.0.113.7:51820".parse().unwrap();
+        let request = inner_udp_v4(FW, PEER, 5001, 5002);
+        let parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("parse must succeed");
+        let entries =
+            build_wg_tun_origin_entries(&parsed, peer_ep, 1, &forwarding, &ha, &neighbors, 123)
+                .expect("build must succeed");
+        let fwd_key = entries.forward.key.clone();
+        let rev_key = crate::session::reverse_session_key(&fwd_key, entries.forward.decision.nat);
+        let (shared, nat, wire, indexes) = fresh_shared_10038();
+        let mut dedup = FastMap::<SessionKey, u64>::default();
+        let mut tombstones = FastMap::<SessionKey, u64>::default();
+        let mut last_sweep = 0u64;
+        const T0: u64 = 100_000_000_000;
+        publish_wg_tun_origin_entries(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            &entries,
+            true,
+            T0,
+        );
+        assert!(shared.lock().expect("shared").contains_key(&fwd_key));
+        // Fresh (5s): sweep keeps everything.
+        sweep_wg_tun_origin_idle(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut tombstones,
+            &mut last_sweep,
+            T0 + 5_000_000_000,
+        );
+        assert!(shared.lock().expect("shared").contains_key(&fwd_key));
+        assert!(tombstones.contains_key(&fwd_key));
+        // Idle 21s: pair deleted (both halves), tombstone kept (resume grace).
+        last_sweep = 0;
+        sweep_wg_tun_origin_idle(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut tombstones,
+            &mut last_sweep,
+            T0 + 21_000_000_000,
+        );
+        assert!(!shared.lock().expect("shared").contains_key(&fwd_key));
+        assert!(!shared.lock().expect("shared").contains_key(&rev_key));
+        assert!(tombstones.contains_key(&fwd_key));
+        // Idle 301s: tombstone forgotten.
+        last_sweep = 0;
+        sweep_wg_tun_origin_idle(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut tombstones,
+            &mut last_sweep,
+            T0 + 301_000_000_000,
+        );
+        assert!(!tombstones.contains_key(&fwd_key));
     }
 }

@@ -23,7 +23,10 @@ use super::super::*;
 use super::super::tests_support::{txn_ha_state, txn_run_descriptor, txn_run_descriptor_inner};
 use super::tests::established_pair;
 use super::{WgEngine, WgWorkerScratch};
-use crate::afxdp::coordinator::{build_wg_tun_origin_entries, parse_wg_tun_origin_flow};
+use crate::afxdp::coordinator::{
+    build_wg_tun_origin_entries, parse_wg_tun_origin_flow, publish_wg_tun_origin_entries,
+    sweep_wg_tun_origin_idle, wg_tun_origin_packet_initiates,
+};
 
 const TUNNEL_LOGICAL_IFINDEX: i32 = 400;
 const WG_PORT: u16 = 51820;
@@ -1009,6 +1012,8 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
             tx_vlan_id: 0,
         },
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let rev_decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1023,6 +1028,8 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
             tx_vlan_id: 0,
         },
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mk_meta = |is_reverse: bool| SessionMetadata {
         ingress_zone: TEST_SFMIX_ZONE_ID,
@@ -1046,7 +1053,7 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
                 fwd_key.clone(),
                 fwd_decision,
                 mk_meta(false),
-                SessionOrigin::SyncImport,
+                SessionOrigin::TunOrigin,
                 122_000_000_000,
                 PROTO_ICMP,
                 0,
@@ -1058,7 +1065,7 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
                 rev_key.clone(),
                 rev_decision,
                 mk_meta(true),
-                SessionOrigin::SyncImport,
+                SessionOrigin::TunOrigin,
                 122_000_000_000,
                 PROTO_ICMP,
                 0,
@@ -1188,7 +1195,7 @@ fn wg_tun_origin_builder_to_shared_to_delivery_10038() {
     let entries =
         build_wg_tun_origin_entries(&parsed, peer_ep, tun_id, &forwarding, &ha, &neighbors, 123)
             .expect("build must succeed");
-    assert_eq!(entries.forward.origin, SessionOrigin::SyncImport);
+    assert_eq!(entries.forward.origin, SessionOrigin::TunOrigin);
     assert_eq!(entries.forward.metadata.ingress_ifindex, 0);
     assert_eq!(
         entries.forward.decision.resolution.tunnel_endpoint_id,
@@ -1203,19 +1210,22 @@ fn wg_tun_origin_builder_to_shared_to_delivery_10038() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    publish_shared_session(
+    // Production publish (not raw shared inserts): the request initiates,
+    // so the item-4 gate allows and the pair lands exactly as the burst
+    // would publish it.
+    assert!(wg_tun_origin_packet_initiates(&parsed));
+    let mut dedup_ns = FastMap::<SessionKey, u64>::default();
+    let mut tombstones = FastMap::<SessionKey, u64>::default();
+    publish_wg_tun_origin_entries(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
-        &entries.forward,
-    );
-    publish_shared_session(
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        reverse,
+        &mut dedup_ns,
+        &mut tombstones,
+        &entries,
+        true,
+        122_000_000_000,
     );
 
     // The reply through the worker with an EMPTY local table.
@@ -1310,6 +1320,8 @@ fn install_solicited_pair_10038(
             tx_vlan_id: 0,
         },
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let rev_decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1324,6 +1336,8 @@ fn install_solicited_pair_10038(
             tx_vlan_id: 0,
         },
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mk_meta = |is_reverse: bool, ingress: u32, policy_idx: u32| SessionMetadata {
         ingress_zone: TEST_SFMIX_ZONE_ID,
@@ -1388,6 +1402,34 @@ fn drive_solicited_inner_10038(
     txn_run_descriptor(&mut binding, sessions, forwarding, &ha_state, &frame, meta)
 }
 
+/// Drive `inner` (an echo reply 5-tuple) as a PLAIN frame arriving on the
+/// underlay (reth0.80/wan, ifindex 12) — no WG encap, no decap, so the meta
+/// keeps the arrival interface and the packet is FOREIGN to the sfmix
+/// TUN-origin pair it HITS by 5-tuple. Fresh binding per call (no flow-cache
+/// carryover — the #9519 discipline).
+fn drive_spoofed_plain_10038(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    inner: &[u8],
+) -> (BatchCounters, DebugPollCounters) {
+    let ha_state = txn_ha_state();
+    // Exact-size wrap (byte-identical to `inner_flow_key`): the frame parser
+    // validates against the IP-declared length, so padding breaks the parse.
+    let mut frame = vec![0u8; 14 + inner.len()];
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    frame[14..].copy_from_slice(inner);
+    // From `wiring_meta` (same fence/generation/rx fields as every working
+    // drive), re-pointed at the plain inner: same arrival interface, ICMP.
+    let mut meta = wiring_meta(frame.len());
+    meta.l4_offset = 34;
+    meta.payload_offset = 34;
+    meta.protocol = PROTO_ICMP;
+    meta.tcp_flags = 0;
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    txn_run_descriptor(&mut binding, sessions, forwarding, &ha_state, &frame, meta)
+}
+
 fn session_row_count_10038(sessions: &SessionTable) -> usize {
     let mut rows = 0usize;
     sessions.iter_with_origin(|_, _, _, _| rows += 1);
@@ -1417,10 +1459,10 @@ fn wg_solicited_reply_lo0_still_filters_10038() {
         &fwd_key,
         &rev_key,
         tun_id,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         0,
         0,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         true,
     );
     let (batch, dbg) =
@@ -1515,10 +1557,10 @@ fn wg_solicited_reply_skips_junos_host_10038() {
         &fwd_key,
         &rev_key,
         tun_id,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         0,
         0,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         true,
     );
     let (batch, dbg) =
@@ -1576,6 +1618,8 @@ fn wg_host_bound_forward_still_faces_host_inbound_10038() {
                     tx_vlan_id: 0,
                 },
                 nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
             },
             SessionMetadata {
                 ingress_zone: TEST_SFMIX_ZONE_ID,
@@ -1641,10 +1685,10 @@ fn wg_lone_reverse_without_forward_denies_10038() {
         &fwd_key,
         &rev_key,
         tun_id,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         0,
         0,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         false,
     );
     let (batch, dbg) =
@@ -1683,10 +1727,10 @@ fn wg_fragmented_solicited_reply_stays_denied_10038() {
         &fwd_key,
         &rev_key,
         tun_id,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         0,
         0,
-        SessionOrigin::SyncImport,
+        SessionOrigin::TunOrigin,
         true,
     );
     // The reply with a non-zero fragment offset (bytes 6..8 of the inner IP
@@ -1828,5 +1872,604 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
     assert!(
         dbg.local >= 1 || batch.local_delivery_packets >= 1,
         "the GRE solicited reply must be delivered"
+    );
+}
+
+/// Parent-review item 6 (GRE twin): the REAL GRE builder on a VRF stamps
+/// domain 7 AND synthesizes a LocalDelivery reverse against the tunnel's
+/// instance table (not NoRoute against inet.0); the pair installs via
+/// UpsertLocal and the reply delivers with no tunnel permit. RED without
+/// the table-scoped synthesis (NoRoute reverse → no LocalDelivery HIT).
+#[test]
+fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    const GRE_TUN_ID: u16 = 2;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces
+        .iter_mut()
+        .find(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
+        .expect("wg0.0 row")
+        .routing_instance = "cust".to_string();
+    snap.interfaces
+        .iter_mut()
+        .find(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
+        .expect("wg0.0 row")
+        .routing_domain = 7;
+    snap.neighbors.push(crate::NeighborSnapshot {
+        interface: "reth0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.1".to_string(),
+        mac: "00:11:22:33:44:55".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        ..Default::default()
+    });
+    let mut forwarding = build_forwarding_state(&snap);
+    let wg_id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
+    forwarding
+        .wg_engines
+        .insert(wg_id, std::sync::Arc::new(resp));
+    let mut gre_row = forwarding
+        .tunnel_endpoints
+        .get(&wg_id)
+        .expect("wg row")
+        .clone();
+    gre_row.id = GRE_TUN_ID;
+    gre_row.mode = "gre".to_string();
+    gre_row.source = "172.16.80.8".parse().unwrap();
+    gre_row.destination = "203.0.113.7".parse().unwrap();
+    forwarding.tunnel_endpoints.insert(GRE_TUN_ID, gre_row);
+    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
+    let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+        },
+    )]);
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = crate::afxdp::tunnel::build_local_origin_tunnel_tx_request(
+        &request,
+        GRE_TUN_ID,
+        &forwarding,
+        &ha,
+        &neighbors,
+        &ike,
+    )
+    .expect("GRE builder must succeed");
+    assert_eq!(
+        plan.session_entry.key.routing_domain, 7,
+        "the GRE builder must stamp the VRF domain"
+    );
+    let gre_reverse = plan.reverse_session_entry.clone().expect("GRE reverse");
+    assert_eq!(
+        gre_reverse.decision.resolution.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "the VRF reverse must resolve LocalDelivery against the instance table"
+    );
+    let mut sessions = SessionTable::new();
+    let now_ns = 122_000_000_000u64;
+    assert!(
+        sessions.upsert_synced_with_origin(
+            plan.session_entry.clone().into_session_install(now_ns),
+            true,
+        ),
+        "GRE forward must install via the UpsertLocal path"
+    );
+    assert!(
+        sessions.upsert_synced_with_origin(gre_reverse.into_session_install(now_ns), true),
+        "GRE reverse must install via the UpsertLocal path"
+    );
+    let (batch, dbg) =
+        drive_solicited_inner_10038(&forwarding, &mut sessions, &init, &rpub, &reply);
+    assert!(dbg.session_hit >= 1, "the reply must HIT the reverse");
+    assert_eq!(
+        dbg.policy_revoked_sessions, 0,
+        "the VRF GRE TUN-origin forward must be declined, not revoked"
+    );
+    assert_eq!(
+        batch.host_inbound_denied_packets, 0,
+        "the VRF solicited HIT must bypass host-inbound admission"
+    );
+    assert!(
+        dbg.local >= 1 || batch.local_delivery_packets >= 1,
+        "the VRF GRE solicited reply must be delivered"
+    );
+}
+
+/// #10038 parent-review (GPT-1 + SPARK-B1): the exemption is Owner-only. A
+/// foreign arrival spoofing a live TUN-origin reply 5-tuple HITS the reverse
+/// (the session lookup is zoneless) but must NOT bypass host-inbound — no WG
+/// decap ever authenticated it. Control leg (owner, via decap) delivers;
+/// subject leg (same 5-tuple, plain, wan arrival) dies at host-inbound with
+/// the pair intact. RED without the `foreign_arrival_zone.is_none()` conjunct
+/// (the spoof delivers).
+#[test]
+fn wg_foreign_spoof_reply_gets_no_exemption_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let (forwarding, tun_id) = tun_origin_forwarding_opts(resp, true, false, false);
+    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
+    let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
+    let fwd_key = inner_flow_key(&request, PROTO_ICMP).forward_key;
+    let rev_key = inner_flow_key(&reply, PROTO_ICMP).forward_key;
+    let mut sessions = SessionTable::new();
+    install_solicited_pair_10038(
+        &mut sessions,
+        &fwd_key,
+        &rev_key,
+        tun_id,
+        SessionOrigin::TunOrigin,
+        0,
+        0,
+        SessionOrigin::TunOrigin,
+        true,
+    );
+    // Control: the decapped (owner) reply is exempt and delivered.
+    let (batch_o, dbg_o) =
+        drive_solicited_inner_10038(&forwarding, &mut sessions, &init, &rpub, &reply);
+    assert!(dbg_o.session_hit >= 1, "control must HIT the reverse");
+    assert_eq!(
+        batch_o.host_inbound_denied_packets, 0,
+        "control: the owner reply must bypass host-inbound admission"
+    );
+    assert!(
+        dbg_o.local >= 1 || batch_o.local_delivery_packets >= 1,
+        "control: the owner reply must be delivered"
+    );
+    // Subject: the same 5-tuple, plain, arriving foreign (wan).
+    let (batch_f, dbg_f) = drive_spoofed_plain_10038(&forwarding, &mut sessions, &reply);
+    assert!(
+        dbg_f.session_hit >= 1,
+        "the spoof must HIT the reverse (zoneless lookup) — no HIT means this cell is vacuous"
+    );
+    assert_eq!(
+        batch_f.host_inbound_denied_packets, 1,
+        "a foreign arrival must face host-inbound admission, never the exemption"
+    );
+    assert_eq!(
+        batch_f.local_delivery_packets, 0,
+        "the unauthenticated spoof must not deliver"
+    );
+    assert_eq!(
+        session_row_count_10038(&sessions),
+        2,
+        "the refusal drops the packet, not the session"
+    );
+}
+
+/// Parent-review item 4 (through-Part-A tightening): a kernel echo RESPONSE
+/// (firewall→peer type 0) run through the PRODUCTION parse+build+publish
+/// must create NO exempting state — and a subsequent peer echo REQUEST on a
+/// stateless worker (empty local table, production shared maps wired) must
+/// MISS and face host-inbound admission, never ride a solicited exemption.
+/// RED without the create gate (the response publishes a TUN-origin pair
+/// whose reverse admits the request).
+#[test]
+fn wg_tun_origin_response_creates_no_exempting_state_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let (forwarding, tun_id) = tun_origin_forwarding(resp, true);
+    // The kernel's answer to an admitted inbound request, read from the TUN.
+    let response = icmp_echo_inner_v4(0, FW, PEER, IDENT, 1);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let ha = txn_ha_state();
+    let parsed =
+        parse_wg_tun_origin_flow(&response, &forwarding, tun_id).expect("response must parse");
+    assert!(
+        !wg_tun_origin_packet_initiates(&parsed),
+        "an echo reply is response-shaped"
+    );
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    let entries =
+        build_wg_tun_origin_entries(&parsed, peer_ep, tun_id, &forwarding, &ha, &neighbors, 123)
+            .expect("build must succeed");
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut dedup = FastMap::<SessionKey, u64>::default();
+    let mut tombstones = FastMap::<SessionKey, u64>::default();
+    publish_wg_tun_origin_entries(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &mut dedup,
+        &mut tombstones,
+        &entries,
+        false,
+        122_000_000_000,
+    );
+    assert!(
+        shared_sessions.lock().expect("shared map").is_empty(),
+        "a response must not create shared TUN-origin state"
+    );
+    // The peer's next echo REQUEST on a stateless worker: MISS + deny.
+    let request = icmp_echo_inner_v4(8, PEER, FW, IDENT, 1);
+    let mut wire = vec![0u8; 2048];
+    let enc = init
+        .try_encap(&rpub, &request, &mut wire)
+        .expect("encap request");
+    let frame = outer_frame(&wire[..enc.len], WG_PORT);
+    let meta = wiring_meta(frame.len());
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (batch, dbg) = txn_run_descriptor_inner(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+    );
+    assert_eq!(
+        batch.host_inbound_denied_packets, 1,
+        "with no TUN-origin state, the inbound request must face host-inbound admission"
+    );
+    assert_eq!(
+        batch.local_delivery_packets, 0,
+        "the inbound request must not deliver as a solicited reply"
+    );
+    assert_eq!(
+        dbg.session_hit, 0,
+        "nothing to HIT — the response created nothing"
+    );
+}
+
+/// Parent-review item 2 (post-idle lifecycle): a TUN-origin pair published
+/// through production publish delivers its reply; after the publisher-owned
+/// idle sweep (21s, fake clock) the pair is gone and a late reply on a
+/// stateless worker MISSES and faces host-inbound admission. RED without
+/// the sweep's delete (the late reply still HITS shared and delivers).
+#[test]
+fn wg_tun_origin_swept_pair_faces_gates_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    const T0: u64 = 100_000_000_000;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let (forwarding, tun_id) = tun_origin_forwarding(resp, true);
+    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
+    let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let ha = txn_ha_state();
+    let parsed =
+        parse_wg_tun_origin_flow(&request, &forwarding, tun_id).expect("request must parse");
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    let entries =
+        build_wg_tun_origin_entries(&parsed, peer_ep, tun_id, &forwarding, &ha, &neighbors, 123)
+            .expect("build must succeed");
+    let fwd_key = entries.forward.key.clone();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut dedup = FastMap::<SessionKey, u64>::default();
+    let mut tombstones = FastMap::<SessionKey, u64>::default();
+    let mut last_sweep = 0u64;
+    publish_wg_tun_origin_entries(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &mut dedup,
+        &mut tombstones,
+        &entries,
+        true,
+        T0,
+    );
+    assert!(
+        shared_sessions
+            .lock()
+            .expect("shared map")
+            .contains_key(&fwd_key)
+    );
+    // Pre-sweep control: the reply HITS shared and delivers.
+    let drive_reply = |sessions: &mut SessionTable| {
+        let mut wire = vec![0u8; 2048];
+        let enc = init
+            .try_encap(&rpub, &reply, &mut wire)
+            .expect("encap reply");
+        let frame = outer_frame(&wire[..enc.len], WG_PORT);
+        let meta = wiring_meta(frame.len());
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+        binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+        let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+        txn_run_descriptor_inner(
+            &mut binding,
+            sessions,
+            &forwarding,
+            &ha,
+            &frame,
+            meta,
+            &local_tunnel_deliveries,
+            &shared_sessions,
+        )
+    };
+    let mut sessions = SessionTable::new();
+    let (batch_pre, dbg_pre) = drive_reply(&mut sessions);
+    assert!(dbg_pre.session_hit >= 1, "control must HIT the shared pair");
+    assert!(
+        dbg_pre.local >= 1 || batch_pre.local_delivery_packets >= 1,
+        "control: the reply must deliver before the sweep"
+    );
+    // Idle 21s: the sweep deletes the pair (tombstone kept for resume).
+    sweep_wg_tun_origin_idle(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &mut tombstones,
+        &mut last_sweep,
+        T0 + 21_000_000_000,
+    );
+    assert!(shared_sessions.lock().expect("shared map").is_empty());
+    // Late reply on a stateless worker (fresh table — never materialized):
+    // MISS + host-inbound deny, never a solicited delivery.
+    let mut cold_sessions = SessionTable::new();
+    let (batch_post, dbg_post) = drive_reply(&mut cold_sessions);
+    assert_eq!(dbg_post.session_hit, 0, "the swept pair must not HIT");
+    assert_eq!(
+        batch_post.host_inbound_denied_packets, 1,
+        "the late reply must face host-inbound admission"
+    );
+    assert_eq!(
+        batch_post.local_delivery_packets, 0,
+        "the late reply must not deliver"
+    );
+}
+
+/// #10038 Part C forward arm: a tunnel-side forward-tuple packet
+/// (peer-spoofed or reflected — same 5-tuple as the TUN-origin forward)
+/// HITS the forward entry and must be DECLINED, not judged-and-revoked:
+/// self-originated runs no zone policy, so there is no admitting pair to
+/// re-derive. No-permit box (the V1 posture); the pair must survive
+/// intact. RED with only the forward arm reverted (revoke + teardown).
+#[test]
+fn wg_tun_origin_forward_tuple_hit_declines_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let (forwarding, tun_id) = tun_origin_forwarding(resp, false);
+    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
+    let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
+    let fwd_key = inner_flow_key(&request, PROTO_ICMP).forward_key;
+    let rev_key = inner_flow_key(&reply, PROTO_ICMP).forward_key;
+    let mut sessions = SessionTable::new();
+    install_solicited_pair_10038(
+        &mut sessions,
+        &fwd_key,
+        &rev_key,
+        tun_id,
+        SessionOrigin::TunOrigin,
+        0,
+        0,
+        SessionOrigin::TunOrigin,
+        true,
+    );
+    // The forward tuple itself, arriving tunnel-side (decap): HITS forward.
+    let (batch, dbg) =
+        drive_solicited_inner_10038(&forwarding, &mut sessions, &init, &rpub, &request);
+    assert!(
+        dbg.session_hit >= 1,
+        "the forward tuple must HIT the forward entry"
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 0,
+        "a TUN-origin forward HIT must decline revalidation, not revoke"
+    );
+    assert_eq!(
+        session_row_count_10038(&sessions),
+        2,
+        "the decline must leave the pair intact (no teardown, no poison)"
+    );
+    let _ = batch;
+}
+
+/// Parent-review item 5 (preservation): the shared-only twin of the
+/// forward-arm cell. The pair comes from the PRODUCTION build+publish;
+/// the tunnel-side forward tuple HITS shared, materializes locally, and
+/// the materialized forward must KEEP `TunOrigin` (else the decline
+/// below stops matching and the HIT revokes). Pins
+/// `materialized_shared_hit_origin` preservation behaviorally.
+#[test]
+fn wg_tun_origin_shared_forward_hit_keeps_provenance_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let (forwarding, tun_id) = tun_origin_forwarding(resp, false);
+    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
+    let fwd_key = inner_flow_key(&request, PROTO_ICMP).forward_key;
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let ha = txn_ha_state();
+    let parsed =
+        parse_wg_tun_origin_flow(&request, &forwarding, tun_id).expect("request must parse");
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    let entries =
+        build_wg_tun_origin_entries(&parsed, peer_ep, tun_id, &forwarding, &ha, &neighbors, 123)
+            .expect("build must succeed");
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut dedup = FastMap::<SessionKey, u64>::default();
+    let mut tombstones = FastMap::<SessionKey, u64>::default();
+    publish_wg_tun_origin_entries(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &mut dedup,
+        &mut tombstones,
+        &entries,
+        true,
+        122_000_000_000,
+    );
+    // The forward tuple through the worker with an EMPTY local table.
+    let mut wire = vec![0u8; 2048];
+    let enc = init
+        .try_encap(&rpub, &request, &mut wire)
+        .expect("encap forward tuple");
+    let frame = outer_frame(&wire[..enc.len], WG_PORT);
+    let meta = wiring_meta(frame.len());
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (batch, dbg) = txn_run_descriptor_inner(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+    );
+    assert!(dbg.session_hit >= 1, "the forward tuple must HIT shared");
+    assert_eq!(
+        dbg.policy_revoked_sessions, 0,
+        "the materialized forward HIT must decline, not revoke"
+    );
+    let (_, _, fwd_origin) = sessions
+        .entry_with_origin(&fwd_key)
+        .expect("the forward must materialize locally");
+    assert_eq!(
+        fwd_origin,
+        SessionOrigin::TunOrigin,
+        "materialization must preserve TUN provenance"
+    );
+    let _ = batch;
+}
+
+/// Parent-review item 6 (SPARK-A2): the fix works end-to-end on a VRF, not
+/// just domain 0. The tunnel egress interface sits in routing domain 7;
+/// the builder stamps 7 (unit-pinned), the worker stamps 7 at stage 9b,
+/// and the reply HITS the shared domain-7 pair and delivers. Any stamp
+/// divergence (either side 0) key-mismatches into a MISS and reds — the
+/// domain asserts below are what make that non-vacuous. (Mismatch
+/// fails closed by key construction; this cell pins the positive path.)
+#[test]
+fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
+    const FW: [u8; 4] = [10, 123, 0, 1];
+    const PEER: [u8; 4] = [10, 123, 0, 5];
+    const IDENT: u16 = 0x3857;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    // Domain-bearing forwarding: wg0.0 in routing instance cust/domain 7.
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces
+        .iter_mut()
+        .find(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
+        .expect("wg0.0 row")
+        .routing_instance = "cust".to_string();
+    snap.interfaces
+        .iter_mut()
+        .find(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
+        .expect("wg0.0 row")
+        .routing_domain = 7;
+    let mut forwarding = build_forwarding_state(&snap);
+    let tun_id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
+    forwarding
+        .wg_engines
+        .insert(tun_id, std::sync::Arc::new(resp));
+    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
+    let reply = icmp_echo_inner_v4(0, PEER, FW, IDENT, 1);
+    // Production parse + build + publish (the loop's path, minus the loop).
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let ha = txn_ha_state();
+    let parsed =
+        parse_wg_tun_origin_flow(&request, &forwarding, tun_id).expect("request must parse");
+    assert_eq!(
+        parsed.flow.forward_key.routing_domain, 7,
+        "the builder must stamp the tunnel egress interface's domain"
+    );
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    let entries =
+        build_wg_tun_origin_entries(&parsed, peer_ep, tun_id, &forwarding, &ha, &neighbors, 123)
+            .expect("build must succeed");
+    let fwd_key = entries.forward.key.clone();
+    let rev_key = crate::session::reverse_session_key(&fwd_key, entries.forward.decision.nat);
+    assert_eq!(rev_key.routing_domain, 7, "the pair must live in domain 7");
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut dedup = FastMap::<SessionKey, u64>::default();
+    let mut tombstones = FastMap::<SessionKey, u64>::default();
+    publish_wg_tun_origin_entries(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &mut dedup,
+        &mut tombstones,
+        &entries,
+        true,
+        122_000_000_000,
+    );
+    // The reply through the worker with an EMPTY local table.
+    let mut wire = vec![0u8; 2048];
+    let enc = init
+        .try_encap(&rpub, &reply, &mut wire)
+        .expect("encap reply");
+    let frame = outer_frame(&wire[..enc.len], WG_PORT);
+    let meta = wiring_meta(frame.len());
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (batch, dbg) = txn_run_descriptor_inner(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+    );
+    assert!(
+        dbg.session_hit >= 1,
+        "the reply must HIT the shared domain-7 reverse (a stamp divergence MISSes here)"
+    );
+    assert_eq!(
+        batch.host_inbound_denied_packets, 0,
+        "the VRF solicited HIT must bypass host-inbound admission"
+    );
+    assert!(
+        dbg.local >= 1 || batch.local_delivery_packets >= 1,
+        "the VRF solicited reply must be delivered host-bound"
+    );
+    let mut local_keys = Vec::new();
+    sessions.iter_with_origin(|key, _, _, _| local_keys.push(key.clone()));
+    assert!(
+        local_keys.contains(&rev_key),
+        "the domain-7 reverse must materialize locally"
     );
 }

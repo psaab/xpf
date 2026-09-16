@@ -359,9 +359,12 @@ impl SessionTable {
                                 decision.nat.rewrite_dst,
                             );
                         }
+                        // #10038 item 5: TUN-origin never Closes (it never
+                        // Opened — node-local, bounded by the publisher sweep).
                         if !metadata.is_reverse
                             && !removed.origin.is_peer_synced()
                             && !removed.origin.is_transient_local_seed()
+                            && !removed.origin.is_local_tun_origin()
                         {
                             self.push_delta(SessionDelta {
                                 kind: SessionDeltaKind::Close,

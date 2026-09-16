@@ -70,7 +70,8 @@ pub(in crate::afxdp) use session_manager::SessionManager;
 use supervisor::spawn_supervised_aux;
 #[cfg(test)]
 pub(in crate::afxdp) use wg_control::tun_origin::{
-    build_wg_tun_origin_entries, parse_wg_tun_origin_flow,
+    build_wg_tun_origin_entries, parse_wg_tun_origin_flow, publish_wg_tun_origin_entries,
+    sweep_wg_tun_origin_idle, wg_tun_origin_packet_initiates,
 };
 pub(in crate::afxdp) use worker_manager::WorkerManager;
 pub(in crate::afxdp) use worker_manager::WorkerRecordsReader;

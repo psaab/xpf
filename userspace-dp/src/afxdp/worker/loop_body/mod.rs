@@ -2004,10 +2004,14 @@ fn count_local_session_expiries(
             // session_expires` wraps.
             SessionOrigin::FabricPuntSeed => false,
             // Synced-derived, never create-counted: must NOT be expire-counted.
+            // #10038 item 5: TUN-origin joins them (shared-hit `created` is
+            // false, publish bumps nothing — counting its expiry would wrap
+            // the Current-sessions gauge the same way).
             SessionOrigin::SyncImport
             | SessionOrigin::SharedMaterialize
             | SessionOrigin::SharedPromote
-            | SessionOrigin::WorkerLocalImport => false,
+            | SessionOrigin::WorkerLocalImport
+            | SessionOrigin::TunOrigin => false,
         })
         .count() as u64
 }
@@ -2427,13 +2431,15 @@ mod expiry_count_tests {
         // #2428: the standby (and any node) reaps synced-derived sessions it
         // never create-counted. None of these may bump session_expires, or
         // the Go-derived `session_creates - session_expires` underflows to a
-        // wrapped u64. ALL FOUR synced-derived origins must be excluded —
-        // including SharedPromote, whose is_peer_synced() returns false.
+        // wrapped u64. ALL FIVE uncounted origins must be excluded —
+        // including SharedPromote, whose is_peer_synced() returns false,
+        // and TunOrigin (#10038 item 5: publish bumps nothing).
         let origins = [
             SessionOrigin::SyncImport,
             SessionOrigin::SharedMaterialize,
             SessionOrigin::WorkerLocalImport,
             SessionOrigin::SharedPromote,
+            SessionOrigin::TunOrigin,
         ];
         assert_eq!(
             count_local_session_expiries(origins.into_iter()),
@@ -2469,18 +2475,20 @@ mod expiry_count_tests {
             SessionOrigin::SharedMaterialize, // synced: 0
             SessionOrigin::WorkerLocalImport, // synced: 0
             SessionOrigin::SharedPromote,     // synced: 0
+            SessionOrigin::TunOrigin,         // tun-local: 0
         ];
         assert_eq!(count_local_session_expiries(origins.into_iter()), 2);
     }
 
     #[test]
-    fn taxonomy_is_eight_variants() {
-        // #2428: pin the SessionOrigin taxonomy at 8. The exhaustive match in
-        // count_local_session_expiries (no wildcard) already forces a
-        // compile-time decision on a new variant; this enumerates every
-        // variant and asserts it classifies exactly once into local (4) or
-        // synced-derived (4). A 9th variant breaks BOTH the match (compile
-        // error) and this count (8 -> 9) — a loud double signal.
+    fn taxonomy_is_nine_variants() {
+        // #2428: pin the SessionOrigin taxonomy at 9 (#10038 item 5 adds
+        // TunOrigin). The exhaustive match in count_local_session_expiries
+        // (no wildcard) already forces a compile-time decision on a new
+        // variant; this enumerates every variant and asserts it classifies
+        // exactly once into local (4) or uncounted (5). A 10th variant
+        // breaks BOTH the match (compile error) and this count (9 -> 10)
+        // — a loud double signal.
         let all = [
             SessionOrigin::ForwardFlow,
             SessionOrigin::ReverseFlow,
@@ -2490,8 +2498,9 @@ mod expiry_count_tests {
             SessionOrigin::SharedMaterialize,
             SessionOrigin::SharedPromote,
             SessionOrigin::WorkerLocalImport,
+            SessionOrigin::TunOrigin,
         ];
-        assert_eq!(all.len(), 8, "SessionOrigin taxonomy is 8 variants");
+        assert_eq!(all.len(), 9, "SessionOrigin taxonomy is 9 variants");
         // Exactly the four create-counted locals are counted.
         assert_eq!(count_local_session_expiries(all.into_iter()), 4);
     }

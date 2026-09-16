@@ -1127,7 +1127,17 @@ pub(super) fn poll_binding_process_descriptor(
                         // still run. Short-circuit order matters: the companion
                         // lookups (local + shared) run only for reverse
                         // host-bound HITs, never the transit fast path.
-                        let solicited_exempt = resolved.metadata.is_reverse
+                        // Owner-only (#9519): the session lookup is zoneless,
+                        // so any interface spoofing a live TUN-origin reply
+                        // 5-tuple HITS the reverse — and LocalDelivery foreign
+                        // hits are deliberately passed onward BECAUSE the two
+                        // gates below enforce arrival-zone authority
+                        // (`foreign_hit_verdict`). Skipping both for a foreign
+                        // packet would admit unauthenticated spoofs no WG
+                        // decap ever validated. Legitimate replies always
+                        // arrive via tunnel decap (tunnel/fabric zone = Owner).
+                        let solicited_exempt = foreign_arrival_zone.is_none()
+                            && resolved.metadata.is_reverse
                             && resolved.decision.resolution.disposition
                                 == ForwardingDisposition::LocalDelivery
                             && tun_origin_reverse_exempt(

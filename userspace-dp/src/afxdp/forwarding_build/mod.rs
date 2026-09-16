@@ -48,7 +48,9 @@ pub(in crate::afxdp) use fib::{
     infer_connected_route_target_v4, infer_connected_route_target_v6, parse_route_next_hop,
     parse_route_next_hop_v6, resolve_ifindex, resolve_route_next_hops_v4, resolve_route_next_hops_v6,
 };
-pub(in crate::afxdp) use interfaces::{pick_interface_v4, pick_interface_v6};
+pub(in crate::afxdp) use interfaces::{
+    connected_route_tables, pick_interface_v4, pick_interface_v6,
+};
 // #1866: WG row-identity hydration shared with the coordinator's
 // tombstone-respawn coherence check + defer-branch prune. (The
 // `WgRowIdentity` type itself is only named inside `tunnels`.)

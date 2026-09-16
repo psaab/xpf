@@ -951,9 +951,12 @@ pub(crate) fn forward_export_candidates_for_owner_rgs(
         let Some((decision, metadata, origin)) = sessions.entry_with_origin(&key) else {
             continue;
         };
+        // #10038 item 5: TUN-origin never exports (per-entry predicate —
+        // node-local provenance must not cross HA in either direction).
         if metadata.is_reverse
             || origin.is_peer_synced()
             || origin.is_transient_local_seed()
+            || origin.is_local_tun_origin()
             || metadata.fabric_ingress
         {
             continue;

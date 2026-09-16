@@ -1582,6 +1582,36 @@ fn tun_origin_inner_10038(sport: u16) -> Vec<u8> {
     p
 }
 
+/// A bare inner IPv4 UDP packet with explicit addrs (the Uncovered-ingress
+/// producer's output shape: peer-net src the kernel looped onto a TUN).
+fn tun_origin_inner_with_addrs_10038(src: [u8; 4], dst: [u8; 4], sport: u16) -> Vec<u8> {
+    let mut p = vec![0u8; 20 + 8];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&28u16.to_be_bytes());
+    p[8] = 64;
+    p[9] = 17;
+    p[12..16].copy_from_slice(&src);
+    p[16..20].copy_from_slice(&dst);
+    p[20..22].copy_from_slice(&sport.to_be_bytes());
+    p[22..24].copy_from_slice(&5002u16.to_be_bytes());
+    p[24..26].copy_from_slice(&8u16.to_be_bytes());
+    p
+}
+
+/// A bare inner IPv4 ICMP packet (TUN-shaped: no L2) with explicit type.
+fn tun_origin_icmp_inner_10038(icmp_type: u8, src: [u8; 4], dst: [u8; 4], ident: u16) -> Vec<u8> {
+    let mut p = vec![0u8; 20 + 8];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&28u16.to_be_bytes());
+    p[8] = 64;
+    p[9] = 1;
+    p[12..16].copy_from_slice(&src);
+    p[16..20].copy_from_slice(&dst);
+    p[20] = icmp_type;
+    p[24..26].copy_from_slice(&ident.to_be_bytes());
+    p
+}
+
 /// Poll a shared map for `key` (the loop runs on another thread). `None` on
 /// timeout — the caller fails with a message naming the missing key.
 fn poll_shared_for_key_10038(
@@ -1726,7 +1756,7 @@ fn wg_tun_burst_publishes_pair_on_sent_10038() {
         saw_transport,
         "flow A's encapped transport record must be emitted"
     );
-    assert_eq!(fwd_a.origin, SessionOrigin::SyncImport);
+    assert_eq!(fwd_a.origin, SessionOrigin::TunOrigin);
     assert!(!fwd_a.metadata.is_reverse);
     assert_eq!(fwd_a.metadata.ingress_ifindex, 0);
     assert_eq!(fwd_a.decision.resolution.tunnel_endpoint_id, 1);
@@ -1883,6 +1913,245 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
             && test_wire.lock().expect("wire map").is_empty(),
         "a non-Sent encap must publish nothing"
     );
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("join");
+}
+
+/// Parent-review (GPT-3 + SPARK-A1): TUN-read provenance through the real
+/// burst. A peer-src'd (AllowedIPs, non-local) inner with a live session is
+/// still ENCAPSULATED (the transport record reaches the wire — encap is never
+/// gated) but publishes NOTHING (the provenance gate drops it at parse). The
+/// fw-src'd control half then publishes, proving the loop can publish and
+/// this cell is not vacuous. RED without the `owns_configured_ip` gate (the
+/// looped flow publishes a TUN-origin pair).
+#[test]
+fn wg_tun_burst_nonlocal_src_encaps_without_publish_10038() {
+    use std::io::Write;
+    let rx = UdpSocket::bind("127.0.0.1:0").expect("bind rx");
+    rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let peer_ep: SocketAddr = rx.local_addr().unwrap();
+    let (engine, _resp_pub) =
+        established_initiator_with_endpoint_10038(vec!["10.123.0.0/24".parse().unwrap()], peer_ep);
+    let forwarding = Arc::new(build_forwarding_state(
+        &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+    ));
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+        crate::afxdp::types::ValidationState::default(),
+        forwarding.clone(),
+    )));
+    let reader = channel.reader();
+    let mut ha_map = BTreeMap::new();
+    for rg in [1, 2] {
+        ha_map.insert(
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 123,
+                lease: HAGroupRuntime::active_lease_until(123, 123),
+            },
+        );
+    }
+    let ha_state = Arc::new(ArcSwap::from_pointee(ha_map));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let test_shared = shared_sessions.clone();
+    let test_nat = shared_nat_sessions.clone();
+    let test_wire = shared_forward_wire_sessions.clone();
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    socket.set_nonblocking(true).unwrap();
+    let (tun, mut tun_test) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (stop_t, exc_t) = (stop.clone(), exceptions.clone());
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop(
+            "wg0",
+            &engine,
+            &socket,
+            false,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            crate::afxdp::types::WgKernelTransport::Deliver,
+            1,
+            400,
+            &reader,
+            &ha_state,
+            &dynamic_neighbors,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+        );
+    });
+    std::thread::sleep(Duration::from_millis(150)); // reach the idle poll
+    // The looped-transit shape: peer-net src (non-local), peer-claimed dst
+    // (so cryptokey routing selects the live peer and the encap Sends).
+    let looped = tun_origin_inner_with_addrs_10038([10, 123, 0, 5], [10, 123, 0, 9], 5001);
+    tun_test.write_all(&looped).expect("write looped packet");
+    // Sent proof first: a transport record must reach the wire (else empty
+    // maps below mean "never encapsulated", not "gated at parse").
+    let mut datagram = [0u8; 2048];
+    let mut saw_transport = false;
+    for _ in 0..10 {
+        match rx.recv_from(&mut datagram) {
+            Ok((n, _)) if n > 0 && datagram[0] == 4 => {
+                saw_transport = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_transport,
+        "the looped packet must be encapsulated and sent"
+    );
+    // A publish (if the gate were missing) lands synchronously in the same
+    // burst iteration, so the settle sleep closes the race.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        test_shared.lock().expect("shared map").is_empty()
+            && test_nat.lock().expect("nat map").is_empty()
+            && test_wire.lock().expect("wire map").is_empty(),
+        "a non-local inner src must publish nothing"
+    );
+    // Control: the firewall-src'd flow publishes through the same loop.
+    let flow_b = tun_origin_inner_10038(5003);
+    tun_test.write_all(&flow_b).expect("write control flow");
+    let key_b = super::tun_origin::parse_wg_tun_origin_flow(&flow_b, &forwarding, 1)
+        .expect("control flow must parse")
+        .flow
+        .forward_key;
+    poll_shared_for_key_10038(&test_shared, &key_b)
+        .expect("the control flow must publish (else this cell is vacuous)");
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("join");
+}
+
+/// Parent-review item 4: inbound orientation through the real burst. A
+/// kernel echo RESPONSE (firewall→peer type 0 — the shape of an answer to
+/// admitted inbound) is still ENCAPSULATED (the peer must receive it) but
+/// publishes NOTHING (it must not become a forward that exempts future
+/// requests); a redelivery still publishes nothing (a skip marks nothing).
+/// The echo-REQUEST control half then publishes, proving the loop can
+/// publish. Distinct idents keep the two flows keyed apart.
+#[test]
+fn wg_tun_burst_response_shaped_skips_create_10038() {
+    use std::io::Write;
+    let rx = UdpSocket::bind("127.0.0.1:0").expect("bind rx");
+    rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let peer_ep: SocketAddr = rx.local_addr().unwrap();
+    let (engine, _resp_pub) =
+        established_initiator_with_endpoint_10038(vec!["10.123.0.0/24".parse().unwrap()], peer_ep);
+    let forwarding = Arc::new(build_forwarding_state(
+        &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+    ));
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+        crate::afxdp::types::ValidationState::default(),
+        forwarding.clone(),
+    )));
+    let reader = channel.reader();
+    let mut ha_map = BTreeMap::new();
+    for rg in [1, 2] {
+        ha_map.insert(
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 123,
+                lease: HAGroupRuntime::active_lease_until(123, 123),
+            },
+        );
+    }
+    let ha_state = Arc::new(ArcSwap::from_pointee(ha_map));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let test_shared = shared_sessions.clone();
+    let test_nat = shared_nat_sessions.clone();
+    let test_wire = shared_forward_wire_sessions.clone();
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    socket.set_nonblocking(true).unwrap();
+    let (tun, mut tun_test) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (stop_t, exc_t) = (stop.clone(), exceptions.clone());
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop(
+            "wg0",
+            &engine,
+            &socket,
+            false,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            crate::afxdp::types::WgKernelTransport::Deliver,
+            1,
+            400,
+            &reader,
+            &ha_state,
+            &dynamic_neighbors,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+        );
+    });
+    std::thread::sleep(Duration::from_millis(150)); // reach the idle poll
+    // Kernel echo response (firewall→peer, type 0): must be Sent but not
+    // published.
+    let response = tun_origin_icmp_inner_10038(0, [10, 123, 0, 1], [10, 123, 0, 5], 0x3857);
+    tun_test.write_all(&response).expect("write response");
+    let mut datagram = [0u8; 2048];
+    let mut saw_transport = false;
+    for _ in 0..10 {
+        match rx.recv_from(&mut datagram) {
+            Ok((n, _)) if n > 0 && datagram[0] == 4 => {
+                saw_transport = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(saw_transport, "the response must be encapsulated and sent");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        test_shared.lock().expect("shared map").is_empty()
+            && test_nat.lock().expect("nat map").is_empty()
+            && test_wire.lock().expect("wire map").is_empty(),
+        "a response-shaped TUN packet must publish nothing"
+    );
+    // Redelivery: a skip marks nothing, so it skips again (no tombstone, no
+    // pair — never escalates into an exempting forward).
+    tun_test.write_all(&response).expect("redeliver response");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        test_shared.lock().expect("shared map").is_empty(),
+        "a redelivered response must still publish nothing"
+    );
+    // Control: the echo request through the same loop publishes.
+    let request = tun_origin_icmp_inner_10038(8, [10, 123, 0, 1], [10, 123, 0, 5], 0x3858);
+    tun_test.write_all(&request).expect("write control request");
+    let key_c = super::tun_origin::parse_wg_tun_origin_flow(&request, &forwarding, 1)
+        .expect("control request must parse")
+        .flow
+        .forward_key;
+    poll_shared_for_key_10038(&test_shared, &key_c)
+        .expect("the control request must publish (else this cell is vacuous)");
     stop.store(true, Ordering::Relaxed);
     handle.join().expect("join");
 }

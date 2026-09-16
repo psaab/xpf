@@ -523,6 +523,23 @@ fn wait_for_local_tunnel_event(
     LocalTunnelPollOutcome::Ready
 }
 
+/// #10038 item 6: the route table whose connected/local view resolves a
+/// TUN-origin reverse's reply target (the firewall's own tunnel addr):
+/// the TUNNEL's instance table (v4 name — the FIB canonicalizes per
+/// family). Default instance → `inet.0`, i.e. exactly the pre-item-6
+/// default-table behavior. Shared by the WG + GRE builders.
+pub(super) fn tun_origin_reverse_route_table(
+    forwarding: &ForwardingState,
+    tunnel_logical_ifindex: i32,
+) -> String {
+    let instance = forwarding
+        .ifindex_to_routing_instance
+        .get(&tunnel_logical_ifindex)
+        .cloned()
+        .unwrap_or_default();
+    connected_route_tables(&instance).0
+}
+
 pub(super) fn build_local_origin_tunnel_tx_request(
     packet: &[u8],
     tunnel_endpoint_id: u16,
@@ -652,9 +669,9 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             // to the per-protocol default) are the correct values for
             // self-originated traffic; a per-app timeout would only differ if an
             // admitting application existed, which it does not. The
-            // `origin: SessionOrigin::SyncImport` tag below is an install-path
-            // plumbing artifact (it reaches the uncapped coordinator-authoritative
-            // install path, see session_glue/mod.rs), NOT a peer wire import.
+            // `origin: SessionOrigin::TunOrigin` tag below is POSITIVE
+            // provenance (#10038 item 5 — stamped only here and in the WG
+            // builder), NOT a peer wire import.
             //
             // (The earlier #2508/#3056/#3227/#3073 comments here mis-described
             // this path as "peer-seeded import ... does not cross the HA wire
@@ -668,7 +685,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             policy_counter_idx: 0,
             policy_counter: None,
         },
-        origin: SessionOrigin::SyncImport,
+        origin: SessionOrigin::TunOrigin,
         protocol: meta.protocol,
         tcp_flags: if meta.protocol == PROTO_TCP {
             extract_tcp_flags_and_window(&inner_frame)
@@ -682,13 +699,22 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         session_id: 0,
         tcp_close_class: 0,
     };
-    let reverse_session_entry = synthesized_synced_reverse_entry(
-        forwarding,
-        ha_runtime,
-        dynamic_neighbors,
-        &session_entry,
-        monotonic_nanos() / 1_000_000_000,
-    );
+    // Table-scoped synthesis (#10038 item 6, the WG twin): VRF reverses
+    // resolve against the tunnel's instance table instead of NoRoute-ing
+    // against inet.0.
+    let table = tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
+    let mut reverse_session_entry =
+        crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
+            forwarding,
+            ha_runtime,
+            dynamic_neighbors,
+            &session_entry,
+            monotonic_nanos() / 1_000_000_000,
+            Some(table.as_str()),
+        );
+    if let Some(rev) = reverse_session_entry.as_mut() {
+        rev.origin = SessionOrigin::TunOrigin;
+    }
     let now_ns = monotonic_nanos();
     // #2362 fold B: local tunnel-origin path — the inner-frame L3/L4 offsets in
     // `meta` describe the pre-encap packet, so use the meta-only extra
