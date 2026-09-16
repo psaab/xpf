@@ -559,9 +559,13 @@ func (d *Daemon) startClusterSyncAuxLoops(commsCtx context.Context, cc *config.C
 	// #2239: start the DHCP-server lease-sync push loop if enabled.
 	// The loop is gated on the RG-MASTER node-level gate internally;
 	// on the BACKUP it pushes nothing and the standby holds the peer
-	// set via OnDHCPLeasesReceived. Routed through the idempotent
-	// starter (#4647) so a later `dhcp-lease-synchronization` knob
-	// toggle from the apply path shares this same launch/stop path
+	// set in SessionSync.peerDHCPLeases{4,6} (read back aged via
+	// PeerDHCPLeases* and seeded on takeover by preSeedDHCPLeaseMemfile
+	// and seedDHCPLeasesFromPeer) — not via OnDHCPLeasesReceived, which
+	// has no non-test assignment as of origin/master 05b99ba80 (the read
+	// loop stores first, then notifies only if non-nil). Routed through
+	// the idempotent starter (#4647) so a later `dhcp-lease-synchronization`
+	// knob toggle from the apply path shares this same launch/stop path
 	// (and cannot double-launch).
 	d.ensureDHCPLeaseSyncLoop(cc.DHCPLeaseSync)
 

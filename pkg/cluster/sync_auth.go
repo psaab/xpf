@@ -63,12 +63,19 @@ import (
 )
 
 const (
-	// syncMsgAuthHello and syncMsgAuthProof are the two handshake message
-	// types. They are ABOVE the legacy message set (<= 26) so a peer that
-	// predates F23 hits the (implicit) default receive case and ignores them —
-	// the same additive-type discipline as the #2239 DHCP-lease messages.
-	syncMsgAuthHello = 27 // {version:u8, keyed:u8, nonce[32]}
-	syncMsgAuthProof = 28 // HMAC-SHA256 proof over the peer's HELLO nonce
+	// syncMsgAuthHello and syncMsgAuthProof are the two PRE-INSTALL handshake
+	// message types, read by readSyncFrameRaw before the connection is wired
+	// up. They sit above the pre-F23 message set (which ran to 26 when F23
+	// landed) so a peer that predates F23 hits the (implicit) default receive
+	// case and ignores them — the same additive-type discipline as the #2239
+	// DHCP-lease messages. Post-install, 27 is REUSED as syncMsgConfigApplyNack
+	// (phase-separated, not a live collision — see the NOTE in sync.go); the
+	// post-install set runs to 38 (syncMsgPersistentNatLease) as of
+	// origin/master 05b99ba80, 28 has no post-install receive arm, and 34 is
+	// reserved-unused. See liveSyncMessageTypesExcept and
+	// TestLiveSyncMessageCensusIsComplete7163 for the current census.
+	syncMsgAuthHello = 27 // Noise_NNpsk0 handshake msg1 (raw; see performNoiseHandshake)
+	syncMsgAuthProof = 28 // Noise_NNpsk0 handshake msg2 (raw; see performNoiseHandshake)
 )
 
 const (

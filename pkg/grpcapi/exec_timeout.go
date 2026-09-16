@@ -12,12 +12,12 @@ import (
 
 // Request-path exec bounding (#1805). This mirrors the apply-path helper
 // in pkg/daemon/exec_timeout.go (#1794), which is the contract reference
-// for the 15s/5s constants. It cannot be imported here: pkg/daemon
-// imports pkg/grpcapi (daemon_run.go), so a shared helper would create
-// an import cycle. The gRPC handlers below external-exec on the request
-// path (ps/df/ss/journalctl/chronyc/ntpq/timedatectl/tail/ip neigh
-// flush/systemctl); without a bound, a wedged binary pins the handler
-// goroutine and its gRPC stream indefinitely.
+// for the 15s/5s constants. It cannot be imported from pkg/daemon:
+// pkg/daemon imports pkg/grpcapi (daemon.go, daemon_run_servers.go), so
+// that leg would create an import cycle. The gRPC handlers below
+// external-exec on the request path (ps/df/ss/journalctl/chronyc/ntpq/
+// timedatectl/tail/ip neigh flush/systemctl); without a bound, a wedged
+// binary pins the handler goroutine and its gRPC stream indefinitely.
 //
 // requestExecTimeout bounds the child process runtime; on expiry the
 // process is killed and the error reflects the context deadline.
@@ -157,8 +157,10 @@ func runTimeout(ctx context.Context, name string, args ...string) error {
 // legitimately run longer than requestExecTimeout, so they size their
 // bound from the request instead of sharing the 15s constant. The same
 // formulas live in pkg/api/exec_timeout.go for the HTTP REST siblings
-// (not importable either way without an import cycle / a layering
-// inversion); keep the two copies in sync.
+// (pkg/api already imports pkg/grpcapi, so api importing an exported
+// helper from grpcapi would be cycle-free — the reverse would cycle;
+// kept as unexported mirrors by choice — see docs/log/9937.md); keep
+// the two copies in sync.
 
 // diagPingPacketInterval is the per-packet budget for ping: the
 // handlers do not pass -i, so ping sends one packet per second
