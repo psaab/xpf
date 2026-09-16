@@ -182,17 +182,17 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // field could not achieve, and which is the entire discriminator between
 // answering this guard and defeating it. `size_of` did NOT move — still 2368 —
 // the FOURTH time the "tail padding is full" prediction has not held.
-// #9752 re-measured the two OFFSETS again (2200 -> 2216, 2328 -> 2344) when
+// #9752 re-measured the two OFFSETS again (2224 -> 2240, 2352 -> 2368) when
 // the unconditional `table_unavailable_packets` and `table_unavailable_drops`
-// counters joined the cold run. Same lockstep, verified the way the paragraph
-// above requires: BOTH build configurations report the same two shifts, by the
-// same 16 bytes, so one set of literals makes both green. `size_of` did NOT
-// move — still 2368 — the FIFTH time the "tail padding is full" prediction has
-// not held.
+// counters joined the cold run, and `size_of` GREW 2368 -> 2432 — the first
+// time the "tail padding is full" prediction has HELD (the F-149 + F-051 +
+// #9752 fields together exceed the #7156 unit's slack). Same lockstep,
+// verified the way the paragraph above requires: BOTH build configurations
+// report the same size and shifts, so one set of literals makes both green.
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
     assert_eq!(
         std::mem::size_of::<BindingLiveState>(),
-        2368,
+        2432,
         "#6304: the `cfg(test)` admission-attempt instrument must not change \
          `BindingLiveState`'s SIZE — the same literal is asserted at compile \
          time in `binding_state/mod.rs`, which is where the production build \
@@ -207,16 +207,18 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     // offsets +8 in BOTH builds (unconditional field), matching the updated
     // compile-time literals in `binding_state/mod.rs`. #9956 F-051:
     // `flowless_forward_packets/bytes` move both +16 more (2224/2352).
+    // #9752: `table_unavailable_packets/drops` move both +16 more
+    // (2240/2368); `size_of` grows to 2432 (new 64-byte unit).
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2224,
+        2240,
         "#6304/#6114: ...nor the OFFSET of the admission counter whose \
          cacheline this is all about. A `cfg(test)` field ahead of it moves \
          this to 2160 while leaving the size assert above satisfied"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2352,
+        2368,
         "#6304: ...nor the offset of the last-declared field, which is the \
          sentinel for a `cfg(test)` member appended at the END of the struct — \
          that shape moves this to 2288 and trips nothing else"

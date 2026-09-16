@@ -24,6 +24,8 @@ fn copy_decision(nat: crate::nat::NatDecision) -> SessionDecision {
             tx_vlan_id: 0,
         },
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 

@@ -10072,7 +10072,7 @@ fn session_delete_fan_out_sheds_dead_workers_9900() {
 
     let shed_before =
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(f4_key());
+    coordinator.delete_synced_session(f4_key(), false);
     assert_eq!(
         live_commands.lock().unwrap().len(),
         1,

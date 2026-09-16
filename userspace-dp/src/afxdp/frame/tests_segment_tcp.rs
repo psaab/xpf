@@ -1652,6 +1652,8 @@ fn segment_forwarded_tcp_frames_refuses_cross_frame_span_9900() {
             tx_vlan_id: 0,
         },
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let forwarding = ForwardingState::default();
     assert!(

@@ -6218,6 +6218,8 @@ fn n9901_floor_fixture() -> (
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -6381,6 +6383,8 @@ fn n9901_install_snat_session(
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,

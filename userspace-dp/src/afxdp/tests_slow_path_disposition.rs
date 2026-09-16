@@ -1397,6 +1397,8 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
                 tx_vlan_id: 0,
             },
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         maybe_reinject_slow_path_from_frame(
             &binding,

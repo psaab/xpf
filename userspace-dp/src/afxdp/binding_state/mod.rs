@@ -959,16 +959,17 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // both.
 // #9956 F-051 repeats it once more: `flowless_forward_packets/bytes` move
 // both offsets 2208 -> 2224 and 2336 -> 2352 while `size_of` stays 2368.
-// #9752 added `table_unavailable_packets` and `table_unavailable_drops` and
-// hit #8670's case twice over: `size_of` stayed 2368 (the 64-byte alignment
-// unit #7156 opened still has room) while both offsets moved 2200 -> 2216
-// and 2328 -> 2344 (two unconditional u64s ahead of both sentinels). Same
-// legitimate case as #6664: both builds shift by the same 16 bytes and one
-// pair of literals makes both green — verified by building BOTH the
-// production (`cargo check`) and test (`--all-targets`) configurations.
-const _: [(); 2368] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2224] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2352] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #9752 adds `table_unavailable_packets` and `table_unavailable_drops` (two
+// unconditional u64s ahead of both sentinels): both offsets move 2224 -> 2240
+// and 2352 -> 2368, and `size_of` grows 2368 -> 2432 — the #7156 alignment
+// unit is finally full (the F-149 + F-051 + #9752 fields together exceed its
+// slack), so the struct takes a new 64-byte unit. Same legitimate case as
+// #6664: both builds shift identically and one triple of literals makes both
+// green — verified by building BOTH the production (`cargo check`) and test
+// (`--all-targets`) configurations.
+const _: [(); 2432] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2240] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2368] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {

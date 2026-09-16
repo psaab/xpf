@@ -6259,6 +6259,9 @@ fn activation_fan_out_collects_live_queues_only_9900() {
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed),
         shed_before + 2,
         "one dead worker sheds two fan-outs (Refresh + prewarm)"
+    );
+}
+
 /// #9752 round 3 item 4: a forward-only peer delete retires exactly the named
 /// key — the reverse shared entry survives and no reverse `DeleteSynced` is
 /// queued. The sender (a purge-retirement close) already decided every

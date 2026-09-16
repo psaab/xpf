@@ -10482,6 +10482,9 @@ fn cancelled_shared_recycle_unknown_slot_rescues_in_single_region_9904() {
             .tx_shared_recycle_unknown_slot_rescued
             .load(std::sync::atomic::Ordering::Relaxed),
         1
+    );
+}
+
 /// #9752 (R1): synthesized reverse companions stamp (0,0) — the reverse
 /// direction resolves the client in the default table by construction
 /// (`reverse_resolution_for_session`), never in the forward's PBR table.

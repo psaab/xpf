@@ -137,6 +137,8 @@ fn the_quarantine_sentinel_decodes_unrecognized_9956() {
          on import); Present(_) would file quarantined sessions under a live \
          domain on the peer"
     );
+}
+
 /// #9752: the Rust name→domain hash agrees with Go's
 /// `config.StableRoutingInstanceTableID` on pinned literals. Vectors computed
 /// via `go run` at base `9184222dd` (see `docs/pr/9752/fnv-vectors.txt`,
