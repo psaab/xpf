@@ -196,6 +196,34 @@ fn poll_loop_fixture() -> (
     (engine, socket, tun, pipe_w, exceptions, stop)
 }
 
+/// #10038: session-publish handles for loop cells that do not test publish.
+/// An empty runtime (no endpoint row → detached → parse/publish skipped, so
+/// encap behavior is bit-identical) plus fresh maps. Moved into the loop
+/// thread's closure; the loop borrows them.
+struct TunOriginLoopTestHandles {
+    reader: crate::afxdp::types::RuntimeViewReader,
+    ha: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    neighbors: Arc<ShardedNeighborMap>,
+    shared: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    nat: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forward_wire: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    indexes: SharedSessionOwnerRgIndexes,
+}
+
+impl TunOriginLoopTestHandles {
+    fn detached() -> Self {
+        Self {
+            reader: crate::afxdp::types::RuntimeViewChannel::default().reader(),
+            ha: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            neighbors: Arc::new(ShardedNeighborMap::new()),
+            shared: Arc::new(Mutex::new(FastMap::default())),
+            nat: Arc::new(Mutex::new(FastMap::default())),
+            forward_wire: Arc::new(Mutex::new(FastMap::default())),
+            indexes: SharedSessionOwnerRgIndexes::default(),
+        }
+    }
+}
+
 fn spawn_poll_loop(
     engine: std::sync::Arc<crate::afxdp::wg::WgEngine>,
     socket: UdpSocket,
@@ -203,6 +231,7 @@ fn spawn_poll_loop(
     exceptions: std::sync::Arc<Mutex<ExceptionEventRing>>,
     stop: std::sync::Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
+    let tun_origin = TunOriginLoopTestHandles::detached();
     std::thread::spawn(move || {
         run_wg_control_loop(
             "wg-test",
@@ -221,6 +250,16 @@ fn spawn_poll_loop(
             &exceptions,
             &stop,
             crate::afxdp::types::WgKernelTransport::Deliver,
+            // #10038: detached publish handles (empty runtime → no publish).
+            1,
+            400,
+            &tun_origin.reader,
+            &tun_origin.ha,
+            &tun_origin.neighbors,
+            &tun_origin.shared,
+            &tun_origin.nat,
+            &tun_origin.forward_wire,
+            &tun_origin.indexes,
         );
     })
 }
@@ -368,6 +407,7 @@ fn wg_tun_origin_egress_uses_per_peer_outer_mtu_5291() {
 
     let counters_engine = engine.clone();
     let stop_thread = stop.clone();
+    let tun_origin = TunOriginLoopTestHandles::detached();
     let handle = std::thread::spawn(move || {
         run_wg_control_loop(
             "wg-test-5291",
@@ -384,6 +424,16 @@ fn wg_tun_origin_egress_uses_per_peer_outer_mtu_5291() {
             &exceptions,
             &stop_thread,
             crate::afxdp::types::WgKernelTransport::Deliver,
+            // #10038: detached publish handles (empty runtime → no publish).
+            1,
+            400,
+            &tun_origin.reader,
+            &tun_origin.ha,
+            &tun_origin.neighbors,
+            &tun_origin.shared,
+            &tun_origin.nat,
+            &tun_origin.forward_wire,
+            &tun_origin.indexes,
         );
     });
     std::thread::sleep(Duration::from_millis(120)); // reach the idle poll
@@ -1049,6 +1099,7 @@ fn observe_one_record_9521(
     let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let (engine_t, stop_t, exc_t) = (resp.clone(), stop.clone(), exceptions.clone());
+    let tun_origin = TunOriginLoopTestHandles::detached();
     let handle = std::thread::spawn(move || {
         run_wg_control_loop(
             "wg-test-9521",
@@ -1062,6 +1113,16 @@ fn observe_one_record_9521(
             &exc_t,
             &stop_t,
             kernel_transport,
+            // #10038: detached publish handles (empty runtime → no publish).
+            1,
+            400,
+            &tun_origin.reader,
+            &tun_origin.ha,
+            &tun_origin.neighbors,
+            &tun_origin.shared,
+            &tun_origin.nat,
+            &tun_origin.forward_wire,
+            &tun_origin.indexes,
         );
     });
 
@@ -1229,6 +1290,7 @@ fn observe_one_record_9594(
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let raw_fd = socket.as_raw_fd();
     let (engine_t, stop_t, exc_t, view_t) = (resp.clone(), stop.clone(), exceptions.clone(), view.clone());
+    let tun_origin = TunOriginLoopTestHandles::detached();
     let handle = std::thread::spawn(move || {
         run_wg_control_loop_with_kernel_path(
             "wg-test-9594",
@@ -1243,6 +1305,16 @@ fn observe_one_record_9594(
             &stop_t,
             kernel_transport,
             &*view_t,
+            // #10038: detached publish handles (empty runtime → no publish).
+            1,
+            400,
+            &tun_origin.reader,
+            &tun_origin.ha,
+            &tun_origin.neighbors,
+            &tun_origin.shared,
+            &tun_origin.nat,
+            &tun_origin.forward_wire,
+            &tun_origin.indexes,
         );
     });
     // The loop enables pktinfo on its first line, and a datagram queued before
@@ -1428,4 +1500,389 @@ fn bind_wg_socket_requests_pktinfo_before_any_datagram_9594() {
          (v6={is_v6}): records queued before the loop enables it would be counted as \
          degraded-transit drops on a healthy box"
     );
+}
+
+// =======================================================================
+// #10038: the TUN-burst publish wiring (parse->dedup->encap->publish-on-Sent),
+// driven through the real loop on a TUN stand-in. The builder units pin the
+// entries; these cells pin that the BURST calls the builder at the right time
+// (after a Sent encap, never after a drop) and honors the dedup map.
+// =======================================================================
+
+/// An established initiator engine WITH a configured peer endpoint (what
+/// `established_pair` cannot express — its endpoints are `None`, which leaves
+/// the loop's effective-endpoint map empty and every TUN packet dropped before
+/// encap). Same handshake drive; only the initiator side is installed (the
+/// loop under test encaps from it).
+fn established_initiator_with_endpoint_10038(
+    allowed: Vec<ipnet::IpNet>,
+    endpoint: SocketAddr,
+) -> (std::sync::Arc<crate::afxdp::wg::WgEngine>, [u8; 32]) {
+    let (init_priv, init_pub) = crate::afxdp::wg::tests::keypair();
+    let (resp_priv, resp_pub) = crate::afxdp::wg::tests::keypair();
+    let init_engine = crate::afxdp::wg::WgEngine::new(crate::afxdp::wg::WgEngineConfig {
+        local_private_key: init_priv.into(),
+        listen_port: 0,
+        peers: vec![crate::afxdp::wg::WgPeerConfig {
+            pubkey: resp_pub,
+            endpoint: Some(endpoint),
+            persistent_keepalive: 0,
+            allowed_ips: allowed,
+            preshared_key: [0u8; 32].into(),
+        }],
+    });
+    let _ = init_pub;
+    let resp_engine = crate::afxdp::wg::WgEngine::new(crate::afxdp::wg::WgEngineConfig {
+        local_private_key: resp_priv.into(),
+        listen_port: 0,
+        peers: vec![crate::afxdp::wg::WgPeerConfig {
+            pubkey: init_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![],
+            preshared_key: [0u8; 32].into(),
+        }],
+    });
+    let mut init_hs = init_engine.build_initiator_handshake(&resp_pub).unwrap();
+    let mut resp_hs = resp_engine.build_responder_handshake().unwrap();
+    let mut buf = [0u8; 1024];
+    let n1 = init_hs.write_message(&[], &mut buf).unwrap();
+    let mut sink = [0u8; 1024];
+    resp_hs.read_message(&buf[..n1], &mut sink).unwrap();
+    let n2 = resp_hs.write_message(&[], &mut buf).unwrap();
+    init_hs.read_message(&buf[..n2], &mut sink).unwrap();
+    let init_xport = init_hs.into_stateless_transport_mode().unwrap();
+    let init_session = std::sync::Arc::new(crate::afxdp::wg::session::WgSession::new_with_role(
+        init_xport,
+        0xaaaa_1038,
+        0xbbbb_1038,
+        resp_pub,
+        crate::afxdp::wg::session::SessionRole::Initiator,
+        crate::afxdp::wg::counters::monotonic_now_ns(),
+    ));
+    init_engine
+        .install_session(&resp_pub, init_session)
+        .unwrap();
+    (std::sync::Arc::new(init_engine), resp_pub)
+}
+
+/// A bare inner IPv4 UDP packet 10.123.0.1:sport -> 10.123.0.5:5002
+/// (the firewall's WG address toward the peer — the TUN-origin shape).
+fn tun_origin_inner_10038(sport: u16) -> Vec<u8> {
+    let mut p = vec![0u8; 20 + 8];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&28u16.to_be_bytes());
+    p[8] = 64;
+    p[9] = 17;
+    p[12..16].copy_from_slice(&[10, 123, 0, 1]);
+    p[16..20].copy_from_slice(&[10, 123, 0, 5]);
+    p[20..22].copy_from_slice(&sport.to_be_bytes());
+    p[22..24].copy_from_slice(&5002u16.to_be_bytes());
+    p[24..26].copy_from_slice(&8u16.to_be_bytes());
+    p
+}
+
+/// Poll a shared map for `key` (the loop runs on another thread). `None` on
+/// timeout — the caller fails with a message naming the missing key.
+fn poll_shared_for_key_10038(
+    shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> Option<SyncedSessionEntry> {
+    for _ in 0..100 {
+        if let Some(entry) = shared.lock().expect("shared map").get(key).cloned() {
+            return Some(entry);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// #10038 (pins A3): a TUN packet the loop encap-successfully (`Sent`)
+/// publishes its forward + reverse to the shared maps with the TUN-origin
+/// marker — and a redelivery within the refresh window does NOT republish
+/// (proven by poisoning the published forward and showing the poison intact
+/// after a redelivery the loop provably consumed: the datagram pair is FIFO,
+/// so the later flow-B publish proves the earlier redelivery was read).
+#[test]
+fn wg_tun_burst_publishes_pair_on_sent_10038() {
+    use std::io::Write;
+    // The peer endpoint MUST be sendable from the sandbox (loopback): the
+    // publish is gated on `Sent`, and a UDP send to an unroutable address
+    // fails (SendFailed → no publish — correct behavior, wrong fixture).
+    // The bound socket also observes the emission half of
+    // session-implies-emission below.
+    let rx = UdpSocket::bind("127.0.0.1:0").expect("bind rx");
+    rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let peer_ep: SocketAddr = rx.local_addr().unwrap();
+    let (engine, _resp_pub) =
+        established_initiator_with_endpoint_10038(vec!["10.123.0.0/24".parse().unwrap()], peer_ep);
+    let forwarding = Arc::new(build_forwarding_state(
+        &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+    ));
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+        crate::afxdp::types::ValidationState::default(),
+        forwarding.clone(),
+    )));
+    let reader = channel.reader();
+    let mut ha_map = BTreeMap::new();
+    for rg in [1, 2] {
+        ha_map.insert(
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 123,
+                lease: HAGroupRuntime::active_lease_until(123, 123),
+            },
+        );
+    }
+    let ha_state = Arc::new(ArcSwap::from_pointee(ha_map));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // The test thread keeps clones: the loop publishes through the moved
+    // originals, this thread polls through these.
+    let test_shared = shared_sessions.clone();
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    socket.set_nonblocking(true).unwrap();
+    // SOCK_DGRAM socketpair, not a pipe: the A-redelivery + B sequence below
+    // needs packet boundaries (a pipe would coalesce the back-to-back writes
+    // into one read and flow B would never publish).
+    let (tun, mut tun_test) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (stop_t, exc_t) = (stop.clone(), exceptions.clone());
+    let engine_probe = engine.clone();
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop(
+            "wg0",
+            &engine,
+            &socket,
+            false,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            crate::afxdp::types::WgKernelTransport::Deliver,
+            1,
+            400,
+            &reader,
+            &ha_state,
+            &dynamic_neighbors,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+        );
+    });
+    std::thread::sleep(Duration::from_millis(150)); // reach the idle poll
+
+    // Fixture pre-checks (fail here, not in the poll below, when the harness
+    // is miswired rather than the burst).
+    assert!(
+        super::tun_origin::wg_endpoint_attachment_valid(&forwarding, 1, 400, "wg0"),
+        "the test runtime must attach tunnel 1 to wg0/400 or the burst skips parsing"
+    );
+    let probe = tun_origin_inner_10038(5001);
+    let mut probe_out = vec![0u8; 2048];
+    let probe_ep = engine_probe
+        .peer_endpoints()
+        .into_iter()
+        .find_map(|(pk, ep)| if pk == _resp_pub { ep } else { None });
+    assert_eq!(probe_ep, Some(peer_ep), "the peer endpoint must be seeded");
+    engine_probe
+        .try_encap(&_resp_pub, &probe, &mut probe_out)
+        .expect("the fixture engine must encap (else no Sent is possible)");
+    let flow_a = tun_origin_inner_10038(5001);
+    tun_test.write_all(&flow_a).expect("write flow A");
+    let key_a = super::tun_origin::parse_wg_tun_origin_flow(&flow_a, &forwarding, 1)
+        .expect("flow A must parse")
+        .flow
+        .forward_key;
+    let fwd_a = poll_shared_for_key_10038(&test_shared, &key_a).expect(
+        "the loop must publish flow A's forward after a Sent encap (revert the burst \
+         publish call and this times out)",
+    );
+    // Emission half of session-implies-emission: a WG transport record (type
+    // byte 4) for flow A must have reached the peer socket. (The BringUp
+    // initiation arrives first — drain past non-transport records.)
+    let mut datagram = [0u8; 2048];
+    let mut saw_transport = false;
+    for _ in 0..10 {
+        match rx.recv_from(&mut datagram) {
+            Ok((n, _)) if n > 0 && datagram[0] == 4 => {
+                saw_transport = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_transport,
+        "flow A's encapped transport record must be emitted"
+    );
+    assert_eq!(fwd_a.origin, SessionOrigin::SyncImport);
+    assert!(!fwd_a.metadata.is_reverse);
+    assert_eq!(fwd_a.metadata.ingress_ifindex, 0);
+    assert_eq!(fwd_a.decision.resolution.tunnel_endpoint_id, 1);
+    assert_eq!(fwd_a.metadata.policy_counter_idx, 0);
+    let rev_key_a = crate::session::reverse_session_key(&key_a, fwd_a.decision.nat);
+    let rev_a = poll_shared_for_key_10038(&test_shared, &rev_key_a)
+        .expect("the loop must publish flow A's reverse alongside the forward");
+    assert!(rev_a.metadata.is_reverse);
+    assert_eq!(
+        rev_a.decision.resolution.disposition,
+        ForwardingDisposition::LocalDelivery
+    );
+
+    // Poison the published forward, redeliver A (dedup-hit: no republish),
+    // then deliver B (dedup-miss: publishes). B's appearance proves the loop
+    // consumed the redelivery (FIFO datagrams), so the intact poison proves
+    // the redelivery did not republish.
+    test_shared
+        .lock()
+        .expect("shared map")
+        .get_mut(&key_a)
+        .expect("flow A forward")
+        .metadata
+        .policy_counter_idx = 99;
+    tun_test.write_all(&flow_a).expect("redeliver flow A");
+    let flow_b = tun_origin_inner_10038(5003);
+    tun_test.write_all(&flow_b).expect("write flow B");
+    let key_b = super::tun_origin::parse_wg_tun_origin_flow(&flow_b, &forwarding, 1)
+        .expect("flow B must parse")
+        .flow
+        .forward_key;
+    assert_ne!(key_a, key_b, "the two flows must key differently");
+    poll_shared_for_key_10038(&test_shared, &key_b)
+        .expect("flow B must publish (dedup-miss on a new flow)");
+    assert_eq!(
+        test_shared
+            .lock()
+            .expect("shared map")
+            .get(&key_a)
+            .expect("flow A forward")
+            .metadata
+            .policy_counter_idx,
+        99,
+        "the consumed redelivery must NOT have republished flow A (a republish \
+         restamps policy_counter_idx 0 over the poison)"
+    );
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("join");
+}
+
+/// #10038 (pins the Sent gate through the real burst): with no confirmed
+/// session the encap takes the NoSession arm (handshake requested, packet
+/// dropped) and NOTHING is published — the shared maps stay empty. Proves the
+/// publish is gated on encap success, not merely on reaching the burst.
+#[test]
+fn wg_tun_burst_skips_publish_without_session_10038() {
+    use std::io::Write;
+    let pk = [0x51u8; 32];
+    let engine = std::sync::Arc::new(crate::afxdp::wg::WgEngine::new(
+        crate::afxdp::wg::WgEngineConfig {
+            local_private_key: [7u8; 32].into(),
+            listen_port: 0,
+            peers: vec![crate::afxdp::wg::WgPeerConfig {
+                pubkey: pk,
+                endpoint: Some("127.0.0.1:9".parse().unwrap()),
+                persistent_keepalive: 0,
+                allowed_ips: vec!["10.123.0.0/24".parse().unwrap()],
+                preshared_key: [0u8; 32].into(),
+            }],
+        },
+    ));
+    let forwarding = Arc::new(build_forwarding_state(
+        &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+    ));
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+        crate::afxdp::types::ValidationState::default(),
+        forwarding.clone(),
+    )));
+    let reader = channel.reader();
+    let mut ha_map = BTreeMap::new();
+    for rg in [1, 2] {
+        ha_map.insert(
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: 123,
+                lease: HAGroupRuntime::active_lease_until(123, 123),
+            },
+        );
+    }
+    let ha_state = Arc::new(ArcSwap::from_pointee(ha_map));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let test_shared = shared_sessions.clone();
+    let test_nat = shared_nat_sessions.clone();
+    let test_wire = shared_forward_wire_sessions.clone();
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    socket.set_nonblocking(true).unwrap();
+    let (tun, mut tun_test) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (stop_t, exc_t) = (stop.clone(), exceptions.clone());
+    let engine_t = engine.clone();
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop(
+            "wg0",
+            &engine_t,
+            &socket,
+            false,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            crate::afxdp::types::WgKernelTransport::Deliver,
+            1,
+            400,
+            &reader,
+            &ha_state,
+            &dynamic_neighbors,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+        );
+    });
+    std::thread::sleep(Duration::from_millis(150)); // reach the idle poll
+
+    tun_test
+        .write_all(&tun_origin_inner_10038(5001))
+        .expect("write inner packet");
+    // The handshake request proves the packet REACHED encap and took the
+    // NoSession arm — so empty maps below mean "gated on Sent", not "never
+    // arrived". A publish (if the gate were missing) lands synchronously in
+    // the same burst iteration, so the extra settle sleep closes the race.
+    let mut requested = false;
+    for _ in 0..100 {
+        if engine.take_handshake_request(&pk) {
+            requested = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(requested, "the NoSession encap must request a handshake");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        test_shared.lock().expect("shared map").is_empty()
+            && test_nat.lock().expect("nat map").is_empty()
+            && test_wire.lock().expect("wire map").is_empty(),
+        "a non-Sent encap must publish nothing"
+    );
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("join");
 }

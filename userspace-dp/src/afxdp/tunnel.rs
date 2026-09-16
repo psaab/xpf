@@ -814,7 +814,11 @@ pub(super) fn maybe_enqueue_local_tunnel_session(
     wait_for_local_tunnel_session_install(worker_commands, now_ns + 1_000_000);
 }
 
-fn prune_local_tunnel_sessions(
+/// #10038: shared with the WG TUN-origin publisher (`wg_control/tun_origin.rs`),
+/// which runs the same dedup map + sweep (same constants/thresholds, one SSOT).
+/// The name stays: both callers prune a thread-local "sessions I published"
+/// map for locally-originated tunnel traffic.
+pub(super) fn prune_local_tunnel_sessions(
     local_sessions: &mut FastMap<SessionKey, u64>,
     last_prune_ns: &mut u64,
     now_ns: u64,

@@ -50,6 +50,9 @@ pub(crate) use cos_state::SharedCoSState;
 pub(crate) use cos_state::PrePublishSiblings;
 pub(in crate::afxdp) use ha_state::HaState;
 pub(in crate::afxdp) use routing_domain::{configured_routing_domains, synced_routing_domain_in};
+// #10038: the WG TUN-origin builder, re-exported (the `HaState` precedent)
+// so the end-to-end cell in `wg/decap_tests.rs` can drive production code
+// without widening `mod wg_control` itself.
 pub(crate) use neighbor_manager::NeighborManager;
 /// #7413: re-exported so `main_tests.rs` — the one `neigh-monitor` spawner
 /// outside `coordinator/tests.rs` — can take the same guard. `mod
@@ -65,6 +68,10 @@ pub(in crate::afxdp) use neighbor_manager::{
 };
 pub(in crate::afxdp) use session_manager::SessionManager;
 use supervisor::spawn_supervised_aux;
+#[cfg(test)]
+pub(in crate::afxdp) use wg_control::tun_origin::{
+    build_wg_tun_origin_entries, parse_wg_tun_origin_flow,
+};
 pub(in crate::afxdp) use worker_manager::WorkerManager;
 pub(in crate::afxdp) use worker_manager::WorkerRecordsReader;
 // #6242: the per-worker transactional runtime record. Named by `bringup.rs`

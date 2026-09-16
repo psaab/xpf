@@ -317,6 +317,22 @@ pub(super) fn dispatch_inbound(
     }
 }
 
+/// #10038: what `encap_and_send` did with one TUN-read inner packet.
+///
+/// The caller publishes the TUN-origin session pair ONLY on `Sent`: every
+/// other arm drops the packet after the decision point (MTU guard,
+/// no-session handshake request, encap/sent failure), and a session for a
+/// request that never left the box would admit replies with no causally-prior
+/// outbound packet (GRE's session-implies-emission invariant — its builder
+/// encapsulates BEFORE publishing).
+pub(super) enum EncapOutcome {
+    Sent,
+    NoSession,
+    MtuDrop,
+    EncapFailed,
+    SendFailed,
+}
+
 /// Encap one inner IP packet read from the TUN and send it to the peer.
 /// NoSession arms the (control-thread) initiation timer; a single
 /// round-trip increments the WG egress counter exactly once (telemetry
@@ -333,7 +349,7 @@ pub(super) fn encap_and_send(
     outer_mtu: usize,
     tunnel_name: &str,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
-) {
+) -> EncapOutcome {
     // Exact pad-aware MTU guard (plan §4.3 / AGY H1) — symmetric with the
     // transit-egress guard in frame/wg.rs, AND against the SAME MTU model
     // (#2300): `outer_mtu` is the real underlay-egress MTU, not the old
@@ -356,7 +372,7 @@ pub(super) fn encap_and_send(
             inner_ip.len(),
             outer_mtu
         );
-        return;
+        return EncapOutcome::MtuDrop;
     }
     // #7758: RFC 6040 §4.1 ingress + uniform DSCP (RFC 2983 §3) -- copy the
     // inner DS byte onto the outer header, exactly as the TRANSIT encap path
@@ -399,15 +415,20 @@ pub(super) fn encap_and_send(
                     tunnel_name,
                     format!("wg_socket_send:{e}"),
                 );
+                EncapOutcome::SendFailed
+            } else {
+                EncapOutcome::Sent
             }
         }
         Err(crate::afxdp::wg::EncapError::NoSession) => {
             // No confirmed session yet — request a handshake for THIS peer
             // (rate-limited, #5164) and drop this packet.
             engine.request_handshake(peer_pubkey, monotonic_nanos());
+            EncapOutcome::NoSession
         }
         Err(_e) => {
             debug_log!("WG[{}]: encap drop reason={:?}", tunnel_name, _e);
+            EncapOutcome::EncapFailed
         }
     }
 }

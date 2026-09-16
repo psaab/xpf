@@ -897,6 +897,17 @@ impl super::Coordinator {
             .and_then(|e| e.resolver_telemetry.clone())
             .unwrap_or_default();
         let thread_resolver_telemetry = Arc::clone(&resolver_telemetry);
+        // #10038: TUN-origin session-publish handles — the same live handles
+        // the GRE local-tunnel source threads receive (`spawn_one_local_tunnel_source`),
+        // minus worker_commands (shared-only publish by design) and minus the
+        // GRE-only delivery plumbing. All live Arcs, no spawn-time snapshots,
+        // so no #2921-style restart gate is needed for them.
+        let thread_ha_state = self.ha.rg_runtime.clone();
+        let thread_dynamic_neighbors = self.neighbors.dynamic.clone();
+        let thread_shared_sessions = self.sessions.synced.clone();
+        let thread_shared_nat_sessions = self.sessions.nat.clone();
+        let thread_shared_forward_wire_sessions = self.sessions.forward_wire.clone();
+        let thread_shared_owner_rg_indexes = self.sessions.owner_rg_indexes.clone();
         eprintln!(
             "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} kernel_transport={kernel_transport:?}"
         );
@@ -916,6 +927,13 @@ impl super::Coordinator {
                     thread_resolver_telemetry,
                     recent_exceptions,
                     stop_clone,
+                    spawned_ifindex,
+                    thread_ha_state,
+                    thread_dynamic_neighbors,
+                    thread_shared_sessions,
+                    thread_shared_nat_sessions,
+                    thread_shared_forward_wire_sessions,
+                    thread_shared_owner_rg_indexes,
                 );
             },
         );
