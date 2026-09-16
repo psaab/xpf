@@ -149,7 +149,12 @@ func TestPolicerThenSpellingMatrix_9882(t *testing.T) {
 		// silent discard. Tolerant ThenAction stays "discard" (the pre-gate
 		// behavior — no worse off).
 		{"typo — rejected", "discrad;", false, "discard"},
-		{"discard+forwarding-class — rejected by #8445", "discard; forwarding-class af11;", false, "forwarding-class af11"},
+		// GPT-1 (review fold): the FC arm is LONE-ONLY — a discard+FC conflict
+		// keeps discard on the tolerant path (the base behavior in both orders,
+		// both families, measured on 92bf892c2), so a persisted rate limit
+		// still drops after upgrade instead of flipping to meter-only.
+		{"discard+forwarding-class — rejected, tolerant keeps discard", "discard; forwarding-class af11;", false, "discard"},
+		{"forwarding-class+discard — rejected, tolerant keeps discard", "forwarding-class af11; discard;", false, "discard"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := polCommit9882(t, pol9882(tc.then))
@@ -313,6 +318,31 @@ func TestThreeColorPolicerThenSpellingMatrix_9882(t *testing.T) {
 	}
 }
 
+// GPT-1 three-color twin: discard+FC in both orders rejects strict and keeps
+// discard (enforcing, base-matching) on the tolerant path — never meter-only.
+func TestThreeColorPolicerThenConflictFencesToDiscard_9882(t *testing.T) {
+	for _, then := range []string{
+		"discard; forwarding-class af11;",
+		"forwarding-class af11; discard;",
+	} {
+		if _, err := polCommit9882(t, tcp9882(then)); err == nil {
+			t.Errorf("three-color `then { %s }` committed CLEAN, want #8445 rejection", then)
+			continue
+		}
+		cfg, err := polLenientHier9882(t, tcp9882(then))
+		if err != nil {
+			t.Errorf("tolerant must boot `then { %s }` (#1960 no-brick), got: %v", then, err)
+			continue
+		}
+		if got := cfg.Firewall.ThreeColorPolicers["t1"].ThenAction; got != "discard" {
+			t.Errorf("tolerant ThenAction for `then { %s }` = %q, want %q (lone-only fence)", then, got, "discard")
+		}
+		if len(cfg.Warnings) == 0 {
+			t.Errorf("tolerant must WARN about `then { %s }`", then)
+		}
+	}
+}
+
 // PACKED PARITY. The hierarchical unbraced spellings compile exactly like
 // their braced twins. The compact fold only fires when the head names a
 // DECLARED child (normalizeCompactNodes), so `then foo;` stays a leaf with no
@@ -383,8 +413,13 @@ func TestPolicerThenPackedParity_9882(t *testing.T) {
 	// The forwarding-class-head multi-statement run folds (FC is declared) and
 	// is refused by the #8437 fused-statement guard — a different gate than the
 	// braced twin's #8445, but the same outcome: never a silent commit.
+	// (O1 measured: the packed refuser IS #8437 — the fold packs discard past
+	// FC's arity and SchemaValidate names it as a fused sibling — while the
+	// braced twin rejects via #8445. Pinned below so a gate change reds loud.)
 	if _, err := polCommit9882(t, pol9882packed("then forwarding-class af11 discard;")); err == nil {
 		t.Fatalf("packed `then forwarding-class af11 discard;` committed CLEAN")
+	} else if !strings.Contains(err.Error(), "#8437") {
+		t.Errorf("packed FC-head rejection must name #8437, got: %v", err)
 	}
 }
 
@@ -704,5 +739,149 @@ func TestThreeColorPolicerThenReviewShapes_9882(t *testing.T) {
 		t.Fatalf("three-color flat-set valueless loss-priority committed CLEAN (M1)")
 	} else if !strings.Contains(err.Error(), "requires a value") {
 		t.Errorf("rejection must name the missing value, got: %v", err)
+	}
+}
+
+// GPT-2 (review fold): evidence accumulates across firewall ROOTS, not just
+// across `then` blocks under one root. parseStatements APPENDS a repeated
+// top-level block rather than merging it (parser.go: parseStatements appends
+// each node; compiler_dispatch.go dispatches every `firewall` root into the
+// same map), and mergeDuplicateBlocks9023 walks per-root, so two `firewall`
+// roots each defining p1 reach compileFirewall as two calls. A name-keyed
+// overwrite between them erases the first root's ThenActions/UnknownActions
+// before the gates run — discard in root1 + FC in root2 compiled to lone FC
+// (meter-only, no conflict) and a typo in root2 vanished. The policer loop
+// now reuses the entry like the three-color loop does, so split-root
+// conflicts and unknowns reject.
+func TestPolicerThenSplitRootAccumulates_9882(t *testing.T) {
+	splitCommit := func(t *testing.T, fw1, fw2 string) (*config.Config, error) {
+		t.Helper()
+		text := polBase9882 + "firewall {\n" + fw1 + "\n}\nfirewall {\n" + fw2 + "\n}\n"
+		// Precondition: two firewall roots survive the parse (no merge). If a
+		// future parser starts merging duplicate roots, this fails loud rather
+		// than letting the cells below pass vacuously.
+		tree, perrs := config.NewParser(text).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v", perrs[0])
+		}
+		n := 0
+		for _, c := range tree.Children {
+			if c.Name() == "firewall" {
+				n++
+			}
+		}
+		if n != 2 {
+			t.Fatalf("precondition: want 2 firewall roots, got %d", n)
+		}
+		return CheckText(text, 0)
+	}
+	splitLenient := func(t *testing.T, fw1, fw2 string) *config.Config {
+		t.Helper()
+		text := polBase9882 + "firewall {\n" + fw1 + "\n}\nfirewall {\n" + fw2 + "\n}\n"
+		tree, perrs := config.NewParser(text).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v", perrs[0])
+		}
+		cfg, err := config.CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("tolerant must boot split-root (#1960 no-brick), got: %v", err)
+		}
+		return cfg
+	}
+	rate := "if-exceeding { bandwidth-limit 10m; burst-size-limit 15k; }"
+	// Conflict split across roots, both orders — strict rejects, tolerant keeps
+	// discard (lone-only fence + accumulation).
+	for _, tc := range []struct{ name, fw1, fw2 string }{
+		{"discard in root1, FC in root2",
+			"policer p1 { " + rate + " then { discard; } }",
+			"policer p1 { " + rate + " then { forwarding-class af11; } }"},
+		{"FC in root1, discard in root2",
+			"policer p1 { " + rate + " then { forwarding-class af11; } }",
+			"policer p1 { " + rate + " then { discard; } }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := splitCommit(t, tc.fw1, tc.fw2); err == nil {
+				t.Fatalf("split-root discard+FC committed CLEAN, want #8445 rejection")
+			}
+			cfg := splitLenient(t, tc.fw1, tc.fw2)
+			if got := cfg.Firewall.Policers["p1"].ThenAction; got != "discard" {
+				t.Errorf("tolerant ThenAction = %q, want %q", got, "discard")
+			}
+			if len(cfg.Warnings) == 0 {
+				t.Errorf("tolerant must WARN about split-root conflict")
+			}
+		})
+	}
+	// Unknown split across roots — strict names the typo, tolerant warns. The
+	// typo lives in ROOT1 (the erased half under overwrite): root2's clean
+	// discard would otherwise win and the commit would go clean.
+	t.Run("unknown in root1", func(t *testing.T) {
+		fw1 := "policer p1 { " + rate + " then { foo; } }"
+		fw2 := "policer p1 { " + rate + " then { discard; } }"
+		if _, err := splitCommit(t, fw1, fw2); err == nil {
+			t.Fatalf("split-root unknown committed CLEAN, want #9882 rejection")
+		} else if !strings.Contains(err.Error(), "foo") {
+			t.Errorf("rejection must name the split-root token, got: %v", err)
+		}
+		cfg := splitLenient(t, fw1, fw2)
+		if len(cfg.Warnings) == 0 {
+			t.Errorf("tolerant must WARN about split-root unknown")
+		}
+	})
+	// Three-color twin: split-root conflict rejects (already accumulated via
+	// reuse, pinned here so a regression to overwrite reds).
+	t.Run("three-color split-root conflict", func(t *testing.T) {
+		sr := "single-rate { committed-information-rate 10m; committed-burst-size 15k; excess-burst-size 15k; }"
+		fw1 := "three-color-policer t1 { " + sr + " then { discard; } }"
+		fw2 := "three-color-policer t1 { " + sr + " then { forwarding-class af11; } }"
+		if _, err := splitCommit(t, fw1, fw2); err == nil {
+			t.Fatalf("three-color split-root discard+FC committed CLEAN")
+		}
+		cfg := splitLenient(t, fw1, fw2)
+		if got := cfg.Firewall.ThreeColorPolicers["t1"].ThenAction; got != "discard" {
+			t.Errorf("tolerant ThenAction = %q, want %q", got, "discard")
+		}
+	})
+}
+
+// GPT-3 (review fold): a non-leaf `then` tail is read, not skipped. `then foo
+// { discard; }` parses to Keys=["then","foo"] with a discard child (IsLeaf
+// false); the leaf-only walk skipped the tail while the child processed
+// discard, so foo bypassed UnknownActions on both paths. The normalizer
+// declines the fold (foo names no declared child) and the schema walker
+// ignores leftover container keys, so nothing else catches it. Legitimate
+// elided block-values (`then loss-priority { high; }`) are folded before this
+// runs and keep compiling to the marking.
+func TestPolicerThenNonLeafTail_9882(t *testing.T) {
+	// Unknown tail with a child — strict names foo, lenient warns.
+	if _, err := polCommit9882(t, pol9882packed("then foo { discard; }")); err == nil {
+		t.Fatalf("`then foo { discard; }` committed CLEAN, want #9882 rejection naming foo")
+	} else if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("rejection must name the non-leaf tail token, got: %v", err)
+	}
+	cfg, err := polLenientHier9882(t, pol9882packed("then foo { discard; }"))
+	if err != nil {
+		t.Fatalf("tolerant must boot non-leaf tail (#1960 no-brick), got: %v", err)
+	}
+	if len(cfg.Warnings) == 0 {
+		t.Errorf("tolerant must WARN about `then foo { discard; }`")
+	}
+	// Known tail + conflicting child — the conflict is visible (both halves read).
+	if _, err := polCommit9882(t, pol9882packed("then discard { forwarding-class af11; }")); err == nil {
+		t.Fatalf("`then discard { forwarding-class af11; }` committed CLEAN, want #8445 rejection")
+	}
+	// Legitimate elided block-value still marks (normalizer folds before compile).
+	cfg, err = polCommit9882(t, pol9882packed("then loss-priority { high; }"))
+	if err != nil {
+		t.Fatalf("elided `then loss-priority { high; }` must commit, got: %v", err)
+	}
+	if got := cfg.Firewall.Policers["p1"].ThenAction; got != "loss-priority high" {
+		t.Errorf("elided block-value ThenAction = %q, want %q", got, "loss-priority high")
+	}
+	// Three-color twin.
+	if _, err := polCommit9882(t, tcp9882packed("then foo { discard; }")); err == nil {
+		t.Fatalf("three-color `then foo { discard; }` committed CLEAN")
+	} else if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("three-color rejection must name foo, got: %v", err)
 	}
 }

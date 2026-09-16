@@ -516,6 +516,14 @@ var notAValueList = map[string]string{
 	// zzqaaa1), and loosening either bound would diverge from the filter-term
 	// treatment both bounds were built for. The leaf is not a list; the
 	// divergence is which unheard token a loud rejection names second.
+	// GPT-4: the "keep" above is DIAGNOSTIC, not retention — UnknownActions is
+	// the deferred-reject channel (like Warnings, which gateMarshal clears),
+	// not installed config. The installed policer (ThenAction="discard",
+	// DiscardExcess=true) is byte-identical for the one- and two-token forms;
+	// only the rejection record grows. Comparing installed config alone, every
+	// spelling drops.
+	// O2: `then { foo bar; }` skips bar the same way — foo is recorded, bar
+	// rides under the unknown head and is skipped by the unknown-head bound.
 	"firewall policer <*> then discard": "args:0 flag; extra tokens land in UnknownActions (strict rejects / lenient warns naming the first) — D-shape second token rides under the unknown head, verified above (#9882)",
 }
 

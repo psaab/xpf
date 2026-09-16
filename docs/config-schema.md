@@ -12373,7 +12373,10 @@ characterized, so it is reported first (same order as #2399 before #4375 on
 the filter side). A new `forwarding-class` arm writes
 `ThenAction = "forwarding-class <class>"` (the loss-priority arm verbatim),
 so lone marking compiles to meter-only — `DiscardExcess` stays false —
-exactly what #8445 promises. The schema now declares `forwarding-class`
+exactly what #8445 promises. The arm is LONE-ONLY (GPT-1): it never overwrites
+an authored `discard`, so a discard+FC conflict keeps discard on the tolerant
+path (the base behavior in both orders, both families) instead of flipping a
+persisted rate limit to meter-only. The schema now declares `forwarding-class`
 under both `then` maps (the loss-priority declaration verbatim); no
 `closedWorld` — the compiler-side gate is the #2399/#9017 doctrine.
 
@@ -12402,13 +12405,18 @@ are covered through render + replay + deletion.
 
 **Valueless marking is malformed (M1).** `then forwarding-class;` without a
 class records `forwarding-class (missing value)` into UnknownActions and the
-gate renders the requires-a-value message (one channel, two presentations).
-Hierarchical strict already rejects at SchemaValidate arity; the compiler
-record covers flat-set strict (reject) and lenient (warn + pre-gate
 discard). **Duplicate `then` blocks accumulate (M2, #3850 mirror):** both
 loops iterate `FindChildren("then")`, so a second block's unknown token or
 conflict is gated instead of dropped; a terminal resolves last-wins in block
 order and repetition stays redundancy.
+
+**Second fold (GPT-1/2/3).** Policer entries accumulate across firewall ROOTS
+(GPT-2): two `firewall` roots defining p1 reuse the entry like the three-color
+loop does, so a split-root conflict/unknown rejects instead of overwriting to
+a lone action. Non-leaf `then` tails are read (GPT-3): `then foo { discard; }`
+records foo even though the node carries children (legitimate elided
+block-values are folded before this runs, so a surviving tail+children is
+malformed).
 
 **Three-color coordination** (the #9503 pattern). The three-color `ThenAction`
 crosses to the helper as a string guarded on BOTH sides, so admitting the
@@ -12431,13 +12439,18 @@ boot with a warning. Valueless marking (`then forwarding-class;`) and
 cross-block conflicts (`then {discard;} then {loss-priority high;}`) are
 newly rejected the same way (the hierarchical valueless spelling already
 was, at SchemaValidate arity); block-form values (`loss-priority { high; }`)
-compile exactly as before.
+compile exactly as before. A discard+FC conflict keeps discard on the tolerant
+path (lone-only fence, GPT-1) — a persisted rate limit still drops after
+upgrade, matching base in both orders.
 
 **Residuals (deliberately out of scope).** The one remaining swallow is a
-second token nested UNDER an unknown head (`set … then discard [ v1 v2 ]`),
-where the hoist keeps the unresolvable head whole — the commit still rejects
-naming the first token, and the site is registered in `notAValueList` with
-the verified landing. LP/FC *values* are unvalidated, mirroring
+second token nested UNDER an unknown head (`set … then discard [ v1 v2 ]`,
+and `then { foo bar; }` skipping bar — O2), where the hoist keeps the
+unresolvable head whole — the commit still rejects naming the first token,
+and the site is registered in `notAValueList` with the verified landing. The
+kept token there is DIAGNOSTIC (GPT-4: UnknownActions, like Warnings, is the
+rejection record, not installed config — the installed policer is identical
+for one- and two-token forms). LP/FC *values* are unvalidated, mirroring
 loss-priority. Deleting a block-form marking leaf is refused by the
 pre-existing #8992 packed-run guard (a schema-leaf node with children reads
 as an elided run there); deleting the whole `then` block works — both

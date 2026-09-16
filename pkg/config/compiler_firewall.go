@@ -43,6 +43,23 @@ func policerThenExtras9882(child *Node, container *schemaNode) []string {
 	return append([]string(nil), child.Keys[start:]...)
 }
 
+// policerThenSawDiscard9882 reports whether `discard` was already authored in
+// this policer's `then` (the ThenActions accumulated so far, across blocks and
+// across firewall roots). The forwarding-class arm is LONE-ONLY: it must not
+// overwrite an authored discard, or a discard+FC conflict downgraded to a
+// warning on the lenient path stops dropping (base compiled discard+FC to
+// discard in both orders, both families — measured on 92bf892c2 — while an
+// unconditional arm meters when FC is last). ThenActions still records the FC
+// so the #8445 gate fires; only the ThenAction survivor is fenced.
+func policerThenSawDiscard9882(actions []string) bool {
+	for _, a := range actions {
+		if a == "discard" {
+			return true
+		}
+	}
+	return false
+}
+
 // shieldPolicerThenValues9882 folds block-form values back into their head's
 // Keys before hoistAndSplitRun8939 runs. A leaf whose declared arity is
 // UNSATISFIED by its own Keys carries its values as children — the nodeVal
@@ -172,11 +189,24 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		fw.Policers = make(map[string]*PolicerConfig)
 	}
 
-	// Compile policer definitions
+	// Compile policer definitions. Reuses the existing entry when the same
+	// policer is defined across two `firewall` roots (GPT-2): parseStatements
+	// APPENDS a repeated top-level block rather than merging it, and
+	// compileSections dispatches every root into this same map, so a fresh
+	// struct per root would overwrite the first root's ThenActions/UnknownActions
+	// and erase the conflict/unknown evidence before the gates run. The
+	// three-color loop below already reuses; this mirrors it. Rates overwrite
+	// per-field when present (Junos merge), the flag ORs, actions accumulate,
+	// and ThenAction resolves last-wins in author order (with the lone-only FC
+	// fence).
 	for _, polInst := range namedInstances(node.FindChildren("policer")) {
-		pol := &PolicerConfig{
-			Name:       polInst.name,
-			ThenAction: "discard", // default action
+		pol := fw.Policers[polInst.name]
+		if pol == nil {
+			pol = &PolicerConfig{
+				Name:       polInst.name,
+				ThenAction: "discard", // default action
+			}
+			fw.Policers[polInst.name] = pol
 		}
 
 		ifExceeding := polInst.node.FindChild("if-exceeding")
@@ -215,11 +245,15 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			// typo would bypass UnknownActions exactly as before the fix.
 			// Walk the Keys tail like compileFilterThen's leaf path does
 			// (#2399), with the same arg consumption and the same default
-			// arm. A leaf carries no children so the loop below is a no-op
-			// for this shape; a hypothetical merged leaf-with-children is
-			// read by BOTH, which is correct — both halves are authored
-			// intent (the #3842 accumulate-everything philosophy).
-			if thenNode.IsLeaf && len(thenNode.Keys) >= 2 {
+			// arm. GPT-3: read the tail EVEN WHEN the node carries children
+			// (`then foo { discard; }` is Keys=["then","foo"] with a child —
+			// IsLeaf false — and skipping it lets foo bypass while the child
+			// processes discard). A merged tail-with-children is read by BOTH
+			// halves, which is correct — both are authored intent (the #3842
+			// accumulate-everything philosophy). Legitimate elided shapes
+			// (`then loss-priority { high; }`) are folded by the normalizer
+			// before this runs, so a surviving tail+children is malformed.
+			if len(thenNode.Keys) >= 2 {
 				keys := thenNode.Keys[1:]
 				for i := 0; i < len(keys); i++ {
 					k := keys[i]
@@ -244,7 +278,11 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					case "forwarding-class":
 						pol.ThenActions = append(pol.ThenActions, "forwarding-class")
 						if v := arg(); v != "" {
-							pol.ThenAction = "forwarding-class " + v
+							// LONE-ONLY (GPT-1): never overwrite an authored discard —
+							// see policerThenSawDiscard9882.
+							if !policerThenSawDiscard9882(pol.ThenActions) {
+								pol.ThenAction = "forwarding-class " + v
+							}
 						} else {
 							pol.UnknownActions = append(pol.UnknownActions, "forwarding-class"+policerMissingValueSuffix9882)
 						}
@@ -301,8 +339,12 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// statement was recorded but never acted on, so ThenAction
 					// kept the "discard" default and the policer dropped traffic
 					// the operator asked to be marked and forwarded.
+					// LONE-ONLY (GPT-1): never overwrite an authored discard —
+					// see policerThenSawDiscard9882.
 					if v := nodeVal(child); v != "" {
-						pol.ThenAction = "forwarding-class " + v
+						if !policerThenSawDiscard9882(pol.ThenActions) {
+							pol.ThenAction = "forwarding-class " + v
+						}
 					} else {
 						// M1: see loss-priority above.
 						pol.UnknownActions = append(pol.UnknownActions, "forwarding-class"+policerMissingValueSuffix9882)
@@ -320,12 +362,13 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			}
 		}
 
-		// Check for logical-interface-policer flag
+		// Check for logical-interface-policer flag (ORs across roots — see above).
 		if polInst.node.FindChild("logical-interface-policer") != nil {
 			pol.LogicalInterfacePolicer = true
 		}
-
-		fw.Policers[pol.Name] = pol
+		// Already in fw.Policers (set at creation above); no trailing write —
+		// the three-color shape. A name-keyed overwrite here is what erased
+		// cross-root evidence before the gates (GPT-2).
 	}
 
 	// Compile three-color policer definitions
@@ -412,7 +455,8 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		for _, thenNode := range tcpInst.node.FindChildren("then") {
 			// #9882: leaf form — see the policer loop above. `then foo;` never
 			// folds, so without this walk the typo bypasses UnknownActions.
-			if thenNode.IsLeaf && len(thenNode.Keys) >= 2 {
+			// GPT-3: tail read even when non-leaf — see the policer loop above.
+			if len(thenNode.Keys) >= 2 {
 				keys := thenNode.Keys[1:]
 				for i := 0; i < len(keys); i++ {
 					k := keys[i]
@@ -437,7 +481,10 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					case "forwarding-class":
 						tcp.ThenActions = append(tcp.ThenActions, "forwarding-class")
 						if v := arg(); v != "" {
-							tcp.ThenAction = "forwarding-class " + v
+							// LONE-ONLY (GPT-1): see the policer loop above.
+							if !policerThenSawDiscard9882(tcp.ThenActions) {
+								tcp.ThenAction = "forwarding-class " + v
+							}
 						} else {
 							tcp.UnknownActions = append(tcp.UnknownActions, "forwarding-class"+policerMissingValueSuffix9882)
 						}
@@ -475,8 +522,11 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// meter-only on this dataplane. The Go capability gate and
 					// the Rust shape check both admit the marking (the #9503
 					// pattern), and the #9503 advisory already warns it is inert.
+					// LONE-ONLY (GPT-1): see the policer loop above.
 					if v := nodeVal(child); v != "" {
-						tcp.ThenAction = "forwarding-class " + v
+						if !policerThenSawDiscard9882(tcp.ThenActions) {
+							tcp.ThenAction = "forwarding-class " + v
+						}
 					} else {
 						// M1: see the policer loop above.
 						tcp.UnknownActions = append(tcp.UnknownActions, "forwarding-class"+policerMissingValueSuffix9882)
