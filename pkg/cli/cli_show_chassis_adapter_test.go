@@ -2,7 +2,9 @@ package cli
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -123,11 +125,26 @@ type forwardingStatusCLICrashTestDP struct {
 	rec        dpuserspace.HelperCrashRecord
 	known      bool
 	crashCalls int
+
+	// #10007: the healthy-after-crash history half. The same backend carries
+	// both accessors because production does: the daemon publishes ONE
+	// *LegacyDataPlaneAdapter and fwdstatus.Build asserts the two lifetimes
+	// independently.
+	episodes  []dpuserspace.HelperCrashEpisode
+	histTotal int
+	histCalls int
 }
 
 func (f *forwardingStatusCLICrashTestDP) HelperCrashState() (dpuserspace.HelperCrashRecord, bool) {
 	f.crashCalls++
 	return f.rec, f.known
+}
+
+// HelperCrashHistory answers the #8397 accessor the #10007 adapter method
+// probes for.
+func (f *forwardingStatusCLICrashTestDP) HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int) {
+	f.histCalls++
+	return f.episodes, f.histTotal
 }
 
 func TestForwardingStatusCLIAdapterExposesTheCrashAccessor7250(t *testing.T) {
@@ -173,5 +190,90 @@ func TestForwardingStatusCLIAdapterExposesTheCrashAccessor7250(t *testing.T) {
 	}
 	if dp.crashCalls == 0 {
 		t.Error("adapter never called through to the backend")
+	}
+}
+
+// --- #10007: the crash HISTORY accessor must be WIRED on the CLI side -----
+//
+// pkg/fwdstatus's own cells exercise Build + Format directly, so every one of
+// them stays green if this adapter loses its HelperCrashHistory method — they
+// assert a property of the renderer, not of the wiring. This is the cell that
+// reds on that deletion. (gRPC twin:
+// TestForwardingStatusServerAdapterExposesTheCrashHistory10007.)
+func TestForwardingStatusCLIAdapterExposesTheCrashHistory10007(t *testing.T) {
+	oldest := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	latest := time.Date(2026, 9, 16, 12, 30, 0, 0, time.UTC)
+	base := &forwardingStatusCLITestDP{loaded: true}
+	dp := &forwardingStatusCLICrashTestDP{
+		forwardingStatusCLIUserspaceTestDP: &forwardingStatusCLIUserspaceTestDP{
+			forwardingStatusCLITestDP: base,
+		},
+		// Healthy NOW: the recovery wipe zeroed the episode record, while the
+		// manager stays reachable so the state is known.
+		known: true,
+		rec:   dpuserspace.HelperCrashRecord{},
+		// ...meanwhile four episodes recovered in this daemon, of which the
+		// ring still holds two. Total intentionally exceeds len(episodes):
+		// the "2 crashes" vs "at least 2 crashes" distinction is the answer.
+		episodes: []dpuserspace.HelperCrashEpisode{
+			{At: oldest, ExitCode: 101, Detail: "exit status 101", PID: 4242, Restarts: 3, RecoveredAt: oldest.Add(2 * time.Second)},
+			{At: latest, ExitCode: -1, Signal: "killed", Detail: "killed by signal killed", PID: 4311, Restarts: 1, RecoveredAt: latest.Add(time.Second)},
+		},
+		histTotal: 4,
+	}
+
+	c := &CLI{dp: dp}
+	acc := c.forwardingStatusDataplane()
+	if acc == nil {
+		t.Fatal("forwardingStatusDataplane returned nil for a userspace backend")
+	}
+
+	// The accessor fwdstatus.Build probes for. If the adapter does not
+	// satisfy this, Build silently leaves HelperCrashEpisodes zero and the
+	// history row never renders — with no compile error anywhere.
+	probe, ok := acc.(interface {
+		HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int)
+	})
+	if !ok {
+		t.Fatal("the CLI forwarding-status adapter does not expose HelperCrashHistory, so " +
+			"fwdstatus.Build's probe misses and `show chassis forwarding` renders no " +
+			"crash history however healthy the renderer is (#10007)")
+	}
+
+	got, total := probe.HelperCrashHistory()
+	if total != 4 {
+		t.Errorf("history total = %d, want 4 — the monotonic count must survive the ring wrapping", total)
+	}
+	if len(got) != 2 || !got[0].At.Equal(oldest) || got[1].PID != 4311 {
+		t.Errorf("adapter did not pass the episodes through unchanged: %+v", got)
+	}
+	if dp.histCalls == 0 {
+		t.Error("adapter never called through to the backend")
+	}
+
+	// End to end through the REAL Build: history must land on the status
+	// while the current-episode half stays a healthy zero.
+	fs, out := buildForwardingCLI6743(t, c)
+	if fs.HelperCrashEpisodes != 4 {
+		t.Errorf("HelperCrashEpisodes = %d, want 4", fs.HelperCrashEpisodes)
+	}
+	if !fs.HelperCrashEpisodesOldest.Equal(oldest) {
+		t.Errorf("HelperCrashEpisodesOldest = %v, want %v", fs.HelperCrashEpisodesOldest, oldest)
+	}
+	// CONTROLS on the premise: known + healthy now. If the state half were
+	// unknown the render gate would hide the row and this cell would pass
+	// without the wiring doing anything.
+	if !fs.HelperCrashKnown {
+		t.Error("HelperCrashKnown = false for a backend that answers the state accessor")
+	}
+	if fs.LastExitWasCrash || fs.RestartPending {
+		t.Errorf("current-episode half must be a healthy zero; got LastExitWasCrash=%v RestartPending=%v",
+			fs.LastExitWasCrash, fs.RestartPending)
+	}
+	if !strings.Contains(out, "Helper crash episodes") {
+		t.Errorf("rendered output lacks the history row:\n%s", out)
+	}
+	if !strings.Contains(out, "4 recovered in this daemon") {
+		t.Errorf("rendered output lacks the recovered count:\n%s", out)
 	}
 }

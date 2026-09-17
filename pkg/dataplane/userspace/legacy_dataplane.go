@@ -670,6 +670,19 @@ func (a *LegacyDataPlaneAdapter) HelperCrashState() (HelperCrashRecord, bool) {
 	return m.HelperCrashState(), true
 }
 
+// HelperCrashHistory returns the manager's recovered helper episodes (#8397).
+//
+// The production runtime publishes this adapter rather than the bare Manager,
+// so this delegate is the capability that makes the history observable through
+// CLI and gRPC. A missing manager fails closed with an empty history.
+func (a *LegacyDataPlaneAdapter) HelperCrashHistory() ([]HelperCrashEpisode, int) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, 0
+	}
+	return m.HelperCrashHistory()
+}
+
 // CachedStatus returns the last control-socket-captured ProcessStatus
 // without issuing a new request (#3970). Returns ok=false when the
 // manager is unavailable or no status has been captured yet.

@@ -77,6 +77,18 @@ func (a forwardingStatusServerUserspaceDataPlane) HelperCrashState() (dpuserspac
 	return provider.HelperCrashState()
 }
 
+// HelperCrashHistory feeds fwdstatus's #8397 recovered-episode summary.
+// Resolve the backend directly: unlike the current crash record, history is
+// deliberately still present after a successful restart has wiped the live
+// episode state.
+func (a forwardingStatusServerUserspaceDataPlane) HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int) {
+	provider, ok := a.server.dpProbe().(userspaceCrashHistoryProvider)
+	if !ok {
+		return nil, 0
+	}
+	return provider.HelperCrashHistory()
+}
+
 func (s *Server) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 	if s == nil {
 		return nil
