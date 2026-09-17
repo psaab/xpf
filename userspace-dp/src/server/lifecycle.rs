@@ -314,11 +314,14 @@ pub(crate) fn run() -> Result<(), String> {
         .set_nonblocking(true)
         .map_err(|e| format!("set nonblocking session listener: {e}"))?;
     eprintln!("xpf-userspace-dp: session socket at {}", session_socket);
-    // #9726: name the libraries this binary linked, once.
+    // #9726/#9931: name every static library this binary linked, once.
     eprintln!(
-        "xpf-userspace-dp: linked libxdp {} and vendored libbpf {}; the build host's libbpf (pkg-config) was {}",
+        "xpf-userspace-dp: linked libxdp {} and vendored libbpf {}; linked libelf {}, zlib {} and zstd {}; the build host's libbpf (pkg-config) was {}",
         env!("XPF_LINKED_LIBXDP_VERSION"),
         env!("XPF_LINKED_LIBBPF_VERSION"),
+        env!("XPF_LINKED_LIBELF_VERSION"),
+        env!("XPF_LINKED_ZLIB_VERSION"),
+        env!("XPF_LINKED_ZSTD_VERSION"),
         env!("XPF_BUILD_HOST_LIBBPF_VERSION"),
     );
 
@@ -335,6 +338,9 @@ pub(crate) fn run() -> Result<(), String> {
                 crate::protocol::session_delta_schema::session_delta_schema_fingerprint(),
             linked_libxdp_version: env!("XPF_LINKED_LIBXDP_VERSION").to_string(),
             linked_libbpf_version: env!("XPF_LINKED_LIBBPF_VERSION").to_string(),
+            linked_libelf_version: env!("XPF_LINKED_LIBELF_VERSION").to_string(),
+            linked_zlib_version: env!("XPF_LINKED_ZLIB_VERSION").to_string(),
+            linked_zstd_version: env!("XPF_LINKED_ZSTD_VERSION").to_string(),
             build_host_libbpf_version: env!("XPF_BUILD_HOST_LIBBPF_VERSION").to_string(),
             started_at: Utc::now(),
             control_socket: args.control_socket.clone(),

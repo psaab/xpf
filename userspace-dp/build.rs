@@ -8,14 +8,78 @@ use std::process::Command;
 #[path = "build_support/libversions.rs"]
 mod libversions;
 
-// #9726: the snapshots this build links, each under a name no other directory on
-// any search path supplies. See snapshot_libxdp_archive.
+// #9726/#9931: snapshots this build links, each under a name no other
+// directory on any search path supplies. See snapshot_libxdp_archive and
+// snapshot_host_archive.
 const LINKED_LIBXDP_LINK_NAME: &str = "xpfxdp";
 const LINKED_LIBXDP_ARCHIVE: &str = "libxpfxdp.a";
 const LINKED_LIBBPF_LINK_NAME: &str = "xpfbpf";
 const LINKED_LIBBPF_ARCHIVE: &str = "libxpfbpf.a";
+const LINKED_LIBELF_LINK_NAME: &str = "xpfelf";
+const LINKED_LIBELF_ARCHIVE: &str = "libxpfelf.a";
+const LINKED_ZLIB_LINK_NAME: &str = "xpfz";
+const LINKED_ZLIB_ARCHIVE: &str = "libxpfz.a";
+const LINKED_ZSTD_LINK_NAME: &str = "xpfzstd";
+const LINKED_ZSTD_ARCHIVE: &str = "libxpfzstd.a";
+
+#[derive(Clone, Copy)]
+struct HostLibrarySpec {
+    label: &'static str,
+    pkg_config: &'static str,
+    source_archive_name: &'static str,
+    snapshot_archive_name: &'static str,
+    link_name: &'static str,
+}
+
+const HOST_LIBRARY_SPECS: [HostLibrarySpec; 3] = [
+    HostLibrarySpec {
+        label: "libelf",
+        pkg_config: "libelf",
+        source_archive_name: "libelf.a",
+        snapshot_archive_name: LINKED_LIBELF_ARCHIVE,
+        link_name: LINKED_LIBELF_LINK_NAME,
+    },
+    HostLibrarySpec {
+        label: "zlib",
+        pkg_config: "zlib",
+        source_archive_name: "libz.a",
+        snapshot_archive_name: LINKED_ZLIB_ARCHIVE,
+        link_name: LINKED_ZLIB_LINK_NAME,
+    },
+    HostLibrarySpec {
+        label: "zstd",
+        pkg_config: "libzstd",
+        source_archive_name: "libzstd.a",
+        snapshot_archive_name: LINKED_ZSTD_ARCHIVE,
+        link_name: LINKED_ZSTD_LINK_NAME,
+    },
+];
+
+struct HostLibrary {
+    spec: HostLibrarySpec,
+    version: String,
+    archive: PathBuf,
+    header: Option<PathBuf>,
+    pcfile: Option<PathBuf>,
+    pkg_configured: bool,
+    search_dirs: Vec<PathBuf>,
+}
 
 fn main() {
+    // #9931: discover and range-check the three host-supplied static
+    // libraries before the C bridge compile. A missing archive or a stale
+    // `-dev` install must name the library and the package it needs.
+    let linker_dirs = linker_search_dirs();
+    let include_dirs = include_search_dirs();
+    let host_libraries = HOST_LIBRARY_SPECS
+        .iter()
+        .map(|spec| discover_host_library(spec, &linker_dirs, &include_dirs))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| panic!("{e}"));
+    for library in &host_libraries {
+        guard_host_library(library).unwrap_or_else(|e| panic!("{e}"));
+    }
+
     // #9726: bound libxdp first, before this script compiles against it or copies
     // its archive. A libxdp outside the range can fail the C compile, or ship
     // no libxdp.a, and either failure would hide the version that caused it.
@@ -41,6 +105,9 @@ fn main() {
     let snapshot_dir = prepare_snapshot_dir();
     let libxdp_version = snapshot_libxdp_archive(&snapshot_dir, &libxdp_libdir, &libxdp_version);
     snapshot_libbpf_archive(&snapshot_dir);
+    for library in &host_libraries {
+        snapshot_host_archive(&snapshot_dir, library);
+    }
 
     // Compile the C bridge that wraps libxdp's inline xsk helpers.
     cc::Build::new()
@@ -54,32 +121,23 @@ fn main() {
     // Statically link libxdp and its transitive dependencies so the
     // binary is self-contained (no libxdp.so.1 needed on target VMs).
     //
-    // #9726: libxdp is linked as `static=xpfxdp` and libbpf as `static=xpfbpf`, so
-    // the linker looks for the file names libxpfxdp.a and libxpfbpf.a and finds
-    // them ONLY in this build's snapshot directory. No system, SDK or dependency
-    // directory holds either, so no `-L` from anywhere — RUSTFLAGS,
-    // `cargo rustc -- -L...`, a rustc wrapper, a dependency build script — can
-    // supply one, and a snapshot that is missing fails the link instead of falling
-    // through to another archive.
+    // #9726/#9931: every archive this build records is linked under a unique
+    // name from this build's snapshot directory. No system, SDK, dependency or
+    // RUSTFLAGS `-L` directory can supply one of these names, so a missing
+    // snapshot fails the link instead of falling through to another archive.
     //
-    // The emission ORDER below is load-bearing: libxdp's undefined libbpf symbols
-    // are resolved by the libbpf that FOLLOWS it, so the snapshot must come before
-    // the bare `bpf` below.
+    // The emission ORDER below is load-bearing: each archive's undefined
+    // symbols are resolved by the dependency that FOLLOWS it. The trailing
+    // bare `bpf`, `elf` and `z` names are emitted by libbpf-sys; by the time
+    // they are reached the uniquely named snapshots have already resolved
+    // every member they can satisfy, so those flags extract no host members.
     println!("cargo:rustc-link-search=native={}", snapshot_dir.display());
     println!("cargo:rustc-link-lib=static={LINKED_LIBXDP_LINK_NAME}");
     println!("cargo:rustc-link-lib=static={LINKED_LIBBPF_LINK_NAME}");
-    // #9726: this bare `bpf` is what libbpf-sys itself emits, and it resolves along
-    // the whole search path — including any system directory a `-L` puts ahead of
-    // this crate's, where a HOST libbpf.a (1.7.0 on the development host) would
-    // satisfy it while the build records the vendored 1.6.3. It is kept because
-    // libbpf-sys emits it in any case, but it can no longer decide anything: by the
-    // time the linker reaches it, the snapshot above has already resolved libbpf's
-    // symbols, and a -Wl,-Map link trace taken with -Lnative=/usr/lib/x86_64-linux-gnu
-    // shows it extracting no members at all.
+    for library in &host_libraries {
+        println!("cargo:rustc-link-lib=static={}", library.spec.link_name);
+    }
     println!("cargo:rustc-link-lib=static=bpf");
-    println!("cargo:rustc-link-lib=static=elf");
-    println!("cargo:rustc-link-lib=static=z");
-    println!("cargo:rustc-link-lib=static=zstd");
     println!("cargo:rerun-if-changed=csrc/xsk_bridge.c");
     // #4976: an in-place libxdp header upgrade that reorders/resizes the ring
     // structs must re-run the C `_Static_assert`s in xsk_bridge.c. Cargo would
@@ -90,24 +148,413 @@ fn main() {
     // includedir, which the bridge compiles against).
     println!("cargo:rerun-if-changed={libxdp_include}/xdp/xsk.h");
 
-    record_library_versions(&libxdp_libdir, &libxdp_version);
+    record_library_versions(&libxdp_libdir, &libxdp_version, &host_libraries);
 }
 
-// #9726: the directory both snapshots live in, emptied of everything else.
-//
-// It is on the link's search path, and an OUT_DIR outlives a build, so anything
-// left here from an earlier revision of this script — a snapshot named libxdp.a,
-// before the unique names — would stay for an `-lxdp` to find. The directory is
-// this build unit's own (Cargo scopes OUT_DIR per package, per profile, per
-// target, and serializes work in a target directory), and only immediate entries
-// are removed: a directory here is not recursed into but fails the build, and a
-// symlink is unlinked rather than followed.
+
+fn env_path_list(name: &str) -> Vec<PathBuf> {
+    env::var_os(name)
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(':')
+                .filter(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn parse_library_search_dirs(flags: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut after_l = false;
+    for token in flags.split(|ch: char| ch.is_whitespace() || ch == '\u{1f}') {
+        if token.is_empty() {
+            continue;
+        }
+        if after_l {
+            push_unique_path(&mut dirs, PathBuf::from(token));
+            after_l = false;
+            continue;
+        }
+        if token == "-L" || token == "-Lnative" {
+            after_l = true;
+        } else if let Some(path) = token.strip_prefix("-Lnative=") {
+            push_unique_path(&mut dirs, PathBuf::from(path));
+        } else if let Some(path) = token.strip_prefix("-L") {
+            if !path.is_empty() {
+                push_unique_path(&mut dirs, PathBuf::from(path));
+            }
+        }
+    }
+    dirs
+}
+
+fn target_rustflags_name(suffix: &str) -> Option<String> {
+    let target = env::var("TARGET").ok()?;
+    Some(format!(
+        "CARGO_TARGET_{}_{}",
+        target.replace('-', "_").to_ascii_uppercase(),
+        suffix
+    ))
+}
+
+fn linker_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    // `LD_LIBRARY_PATH` only affects runtime shared-library lookup; it cannot
+    // shadow a static archive selected by the linker's `-L`/`LIBRARY_PATH`.
+    for path in env_path_list("LIBRARY_PATH") {
+        push_unique_path(&mut dirs, path);
+    }
+    println!("cargo:rerun-if-env-changed=LIBRARY_PATH");
+    for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        if let Ok(flags) = env::var(name) {
+            for path in parse_library_search_dirs(&flags) {
+                push_unique_path(&mut dirs, path);
+            }
+        }
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    if let Some(name) = target_rustflags_name("RUSTFLAGS") {
+        if let Ok(flags) = env::var(&name) {
+            for path in parse_library_search_dirs(&flags) {
+                push_unique_path(&mut dirs, path);
+            }
+        }
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    let target = env::var("TARGET").unwrap_or_default();
+    for name in [
+        "LIBBPF_SYS_LIBRARY_PATH".to_string(),
+        format!("LIBBPF_SYS_LIBRARY_PATH_{target}"),
+        format!(
+            "LIBBPF_SYS_LIBRARY_PATH_{}",
+            target.replace('-', "_")
+        ),
+    ] {
+        for path in env_path_list(&name) {
+            push_unique_path(&mut dirs, path);
+        }
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    dirs
+}
+
+fn include_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for name in ["C_INCLUDE_PATH", "CPATH", "CPLUS_INCLUDE_PATH"] {
+        for path in env_path_list(name) {
+            push_unique_path(&mut dirs, path);
+        }
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    for path in [PathBuf::from("/usr/local/include"), PathBuf::from("/usr/include")] {
+        push_unique_path(&mut dirs, path);
+    }
+    dirs
+}
+
+fn default_library_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(target_arch) = env::var("CARGO_CFG_TARGET_ARCH") {
+        push_unique_path(
+            &mut dirs,
+            PathBuf::from(format!("/usr/lib/{target_arch}-linux-gnu")),
+        );
+    }
+    for path in [
+        PathBuf::from("/usr/local/lib"),
+        PathBuf::from("/usr/lib64"),
+        PathBuf::from("/usr/lib"),
+    ] {
+        push_unique_path(&mut dirs, path);
+    }
+    dirs
+}
+
+fn parse_header_version(spec: HostLibrarySpec, text: &str) -> Option<String> {
+    match spec.label {
+        "libelf" => libversions::header_define(text, "_ELFUTILS_VERSION")
+            .map(libversions::elfutils_version_string),
+        "zlib" => Some(libversions::dotted_version(
+            libversions::header_define(text, "ZLIB_VER_MAJOR")?,
+            libversions::header_define(text, "ZLIB_VER_MINOR")?,
+            libversions::header_define(text, "ZLIB_VER_REVISION")?,
+        )),
+        "zstd" => Some(libversions::dotted_version(
+            libversions::header_define(text, "ZSTD_VERSION_MAJOR")?,
+            libversions::header_define(text, "ZSTD_VERSION_MINOR")?,
+            libversions::header_define(text, "ZSTD_VERSION_RELEASE")?,
+        )),
+        _ => None,
+    }
+}
+
+fn header_version(
+    spec: HostLibrarySpec,
+    include_dirs: &[PathBuf],
+) -> Option<(String, PathBuf)> {
+    for include in include_dirs {
+        let relative = match spec.label {
+            "libelf" => "elfutils/version.h",
+            "zlib" => "zlib.h",
+            "zstd" => "zstd.h",
+            _ => return None,
+        };
+        let path = include.join(relative);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(version) = parse_header_version(spec, &text) {
+            return Some((version, path));
+        }
+    }
+    None
+}
+
+fn find_archive(spec: HostLibrarySpec, dirs: &[PathBuf]) -> Option<PathBuf> {
+    for dir in dirs {
+        let archive = dir.join(spec.source_archive_name);
+        if archive.is_file() {
+            return Some(archive);
+        }
+    }
+    None
+}
+
+fn installation_prefix(path: &Path, is_library_dir: bool) -> Option<PathBuf> {
+    let canonical = fs::canonicalize(path).ok()?;
+    let mut prefix = PathBuf::new();
+    let mut last_marker_prefix = None;
+    for component in canonical.components() {
+        let name = component.as_os_str().to_string_lossy();
+        let marker = if is_library_dir {
+            matches!(name.as_ref(), "lib" | "lib32" | "lib64")
+        } else {
+            name == "include"
+        };
+        if marker {
+            // A custom install prefix may itself contain a marker directory
+            // (for example, /var/lib/xpf); use the innermost layout marker.
+            last_marker_prefix = Some(prefix.clone());
+        }
+        prefix.push(component.as_os_str());
+    }
+    last_marker_prefix
+}
+
+fn require_same_static_install(
+    spec: HostLibrarySpec,
+    header: &Path,
+    archive: &Path,
+) -> Result<(), String> {
+    let header_prefix = installation_prefix(header, false);
+    let archive_dir = archive.parent().unwrap_or_else(|| Path::new(""));
+    let archive_prefix = installation_prefix(archive_dir, true);
+    if header_prefix.is_some() && header_prefix == archive_prefix {
+        return Ok(());
+    }
+    Err(format!(
+        "#9931: static-only {} header {} (prefix {:?}) and archive {} (prefix {:?}) \
+         come from different installation prefixes; provide matching C_INCLUDE_PATH and \
+         LIBRARY_PATH entries for {}",
+        spec.label,
+        header.display(),
+        header_prefix,
+        archive.display(),
+        archive_prefix,
+        spec.pkg_config,
+    ))
+}
+
+fn discover_host_library(
+    spec: &HostLibrarySpec,
+    linker_dirs: &[PathBuf],
+    include_dirs: &[PathBuf],
+) -> Result<HostLibrary, String> {
+    let explicit_dirs = linker_dirs.to_vec();
+    let pkg_error = match pkg_config_version(spec.pkg_config) {
+        Ok(version) => {
+            let mut pkg_dirs = Vec::new();
+            if let Ok(libdir) = pkg_config_variable(spec.pkg_config, "libdir") {
+                push_unique_path(&mut pkg_dirs, PathBuf::from(libdir));
+            }
+            let flags = pkg_config(&["--libs", "--static", spec.pkg_config]).map_err(|e| {
+                format!(
+                    "#9931: cannot read static link flags for {}: {e}; install {}",
+                    spec.label, spec.pkg_config
+                )
+            })?;
+            for path in parse_library_search_dirs(&flags) {
+                push_unique_path(&mut pkg_dirs, path);
+            }
+            let archive = find_archive(*spec, &pkg_dirs).ok_or_else(|| {
+                format!(
+                    "#9931: {} has no readable {}; install the static development archive \
+                     from {}",
+                    spec.label, spec.source_archive_name, spec.pkg_config
+                )
+            })?;
+            check_host_version(*spec, &version)?;
+            let mut package_include_dirs = Vec::new();
+            if let Ok(includedir) = pkg_config_variable(spec.pkg_config, "includedir") {
+                push_unique_path(&mut package_include_dirs, PathBuf::from(includedir));
+            }
+            for path in include_dirs.iter().cloned() {
+                push_unique_path(&mut package_include_dirs, path);
+            }
+            let header = header_version(*spec, &package_include_dirs);
+            if let Some((header_version, _)) = &header {
+                if libversions::parse_version(header_version)
+                    != libversions::parse_version(&version)
+                {
+                    return Err(format!(
+                        "#9931: {} pkg-config reports {}, but its version header reports {}; \
+                         install matching {} headers and archive",
+                        spec.label, version, header_version, spec.pkg_config
+                    ));
+                }
+            }
+            let header = header.map(|(_, path)| path);
+            let pcfile = pkg_config_variable(spec.pkg_config, "pcfiledir")
+                .ok()
+                .map(|dir| PathBuf::from(dir).join(format!("{}.pc", spec.pkg_config)));
+            let mut search_dirs = explicit_dirs;
+            for path in pkg_dirs {
+                push_unique_path(&mut search_dirs, path);
+            }
+            for path in default_library_dirs() {
+                push_unique_path(&mut search_dirs, path);
+            }
+            return Ok(HostLibrary {
+                spec: *spec,
+                pkg_configured: true,
+                version,
+                archive,
+                header,
+                pcfile,
+                search_dirs,
+            });
+        }
+        Err(error) => error,
+    };
+
+    // #9931: static-only installs need not ship a .pc file. The installed
+    // public headers are the fallback source of a version, and LIBRARY_PATH /
+    // the normal multiarch directories locate the matching archive.
+    let mut search_dirs = explicit_dirs;
+    for path in default_library_dirs() {
+        push_unique_path(&mut search_dirs, path);
+    }
+    let (version, header) = header_version(*spec, &include_dirs).ok_or_else(|| {
+        format!(
+            "#9931: cannot discover {}: pkg-config failed ({pkg_error}) and no usable \
+             version header was found; install {} (including its static archive)",
+            spec.label, spec.pkg_config
+        )
+    })?;
+    check_host_version(*spec, &version)?;
+    let archive = find_archive(*spec, &search_dirs).ok_or_else(|| {
+        format!(
+            "#9931: discovered {} {} from {}, but found no readable {} in {:?}; \
+             install the static development archive from {}",
+            spec.label,
+            version,
+            header.display(),
+            spec.source_archive_name,
+            search_dirs,
+            spec.pkg_config
+        )
+    })?;
+    require_same_static_install(*spec, &header, &archive)?;
+    Ok(HostLibrary {
+        spec: *spec,
+        version,
+        pkg_configured: false,
+        archive,
+        header: Some(header),
+        pcfile: None,
+        search_dirs,
+    })
+}
+
+fn check_host_version(spec: HostLibrarySpec, version: &str) -> Result<(), String> {
+    match spec.label {
+        "libelf" => libversions::check_libelf_version(version),
+        "zlib" => libversions::check_zlib_version(version),
+        "zstd" => libversions::check_zstd_version(version),
+        _ => Err(format!("#9931: unknown host library {}", spec.label)),
+    }
+}
+
+fn canonical(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path)
+        .map_err(|e| format!("#9931: canonicalize {}: {e}", path.display()))
+}
+
+fn guard_host_library(library: &HostLibrary) -> Result<(), String> {
+    let selected = canonical(&library.archive)?;
+    let mut searched = Vec::new();
+    for dir in &library.search_dirs {
+        let candidate = dir.join(library.spec.source_archive_name);
+        if !candidate.is_file() {
+            continue;
+        }
+        let candidate = canonical(&candidate)?;
+        searched.push(candidate.display().to_string());
+        if candidate == selected {
+            return Ok(());
+        }
+        return Err(format!(
+            "#9931: unexpected {} archive {} appears before the selected {} in the \
+             linker search set; recorded {} from {}; remove the shadow or use the \
+             intended package path. Searched {:?}",
+            library.spec.label,
+            candidate.display(),
+            selected.display(),
+            library.version,
+            library.archive.display(),
+            library.search_dirs
+        ));
+    }
+    Err(format!(
+        "#9931: selected {} archive {} is outside the searched linker set; recorded {}. \
+         Searched {:?} (observed {:?})",
+        library.spec.label,
+        selected.display(),
+        library.version,
+        library.search_dirs,
+        searched
+    ))
+}
+
+
+// #9726/#9931: the directory all snapshots live in, emptied of everything
+// else. It is on the link's search path, and an OUT_DIR outlives a build, so
+// anything left here from an earlier revision of this script cannot become a
+// candidate under a bare library name. The directory is this build unit's own
+// (Cargo scopes OUT_DIR per package, per profile, per target, and serializes
+// work in a target directory), and only immediate entries are removed: a
+// directory here is not recursed into but fails the build, and a symlink is
+// unlinked rather than followed.
 fn prepare_snapshot_dir() -> PathBuf {
     let out_dir = env::var_os("OUT_DIR")
         .unwrap_or_else(|| panic!("#9726: Cargo set no OUT_DIR for this build script"));
     let dir = PathBuf::from(&out_dir).join("xpf-linked-libxdp");
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("#9726: create {}: {e}", dir.display()));
-    let keep = [LINKED_LIBXDP_ARCHIVE, LINKED_LIBBPF_ARCHIVE];
+    let keep = [
+        LINKED_LIBXDP_ARCHIVE,
+        LINKED_LIBBPF_ARCHIVE,
+        LINKED_LIBELF_ARCHIVE,
+        LINKED_ZLIB_ARCHIVE,
+        LINKED_ZSTD_ARCHIVE,
+    ];
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if keep.iter().any(|name| entry.file_name() == *name) {
@@ -119,6 +566,122 @@ fn prepare_snapshot_dir() -> PathBuf {
         }
     }
     dir
+}
+fn verify_host_version_source(library: &HostLibrary) {
+    // #9931: the version source is read after the snapshot is written. This
+    // closes the window in which a package upgrade could leave old metadata
+    // beside new archive bytes.
+    let version_after = if library.pkg_configured {
+        pkg_config_version(library.spec.pkg_config).unwrap_or_else(|e| {
+            panic!(
+                "#9931: {}'s pkg-config version became unreadable while snapshotting: {e}",
+                library.spec.label
+            )
+        })
+    } else {
+        let header = library.header.as_ref().unwrap_or_else(|| {
+            panic!(
+                "#9931: {} has no version header to re-read after snapshotting",
+                library.spec.label
+            )
+        });
+        let text = fs::read_to_string(header).unwrap_or_else(|e| {
+            panic!(
+                "#9931: re-read the {} version header {} after snapshotting: {e}",
+                library.spec.label,
+                header.display()
+            )
+        });
+        parse_header_version(library.spec, &text).unwrap_or_else(|| {
+            panic!(
+                "#9931: {} version header {} became unparseable while snapshotting",
+                library.spec.label,
+                header.display()
+            )
+        })
+    };
+    check_host_version(library.spec, &version_after).unwrap_or_else(|e| panic!("{e}"));
+    if version_after != library.version {
+        panic!(
+            "#9931: {} version changed from {} to {} while snapshotting {}; \
+             finish the install and build again",
+            library.spec.label,
+            library.version,
+            version_after,
+            library.archive.display()
+        );
+    }
+    if library.pkg_configured {
+        if let Some(header) = &library.header {
+            let text = fs::read_to_string(header).unwrap_or_else(|e| {
+                panic!(
+                    "#9931: re-read the {} version header {} after snapshotting: {e}",
+                    library.spec.label,
+                    header.display()
+                )
+            });
+            let header_after = parse_header_version(library.spec, &text).unwrap_or_else(|| {
+                panic!(
+                    "#9931: {} version header {} became unparseable while snapshotting",
+                    library.spec.label,
+                    header.display()
+                )
+            });
+            if libversions::parse_version(&header_after)
+                != libversions::parse_version(&version_after)
+            {
+                panic!(
+                    "#9931: {} pkg-config reports {} after snapshotting, but its version \
+                     header reports {}; finish the install and build again",
+                    library.spec.label, version_after, header_after
+                );
+            }
+        }
+    }
+}
+
+fn snapshot_host_archive(dir: &Path, library: &HostLibrary) {
+    let snapshot = dir.join(library.spec.snapshot_archive_name);
+    // #9931: hold the bytes that will be linked while copying, then re-read
+    // both the version source and archive. An upgrade racing this build must
+    // fail rather than leave recorded metadata beside different archive bytes.
+    let bytes = fs::read(&library.archive).unwrap_or_else(|e| {
+        panic!(
+            "#9931: read the {} archive {}, to snapshot it: {e}",
+            library.spec.label,
+            library.archive.display()
+        )
+    });
+    fs::write(&snapshot, &bytes).unwrap_or_else(|e| {
+        panic!(
+            "#9931: write the {} snapshot {}: {e}",
+            library.spec.label,
+            snapshot.display()
+        )
+    });
+    verify_host_version_source(library);
+    let after = fs::read(&library.archive).unwrap_or_else(|e| {
+        panic!(
+            "#9931: re-read the {} archive {} after snapshotting: {e}",
+            library.spec.label,
+            library.archive.display()
+        )
+    });
+    if after != bytes {
+        panic!(
+            "#9931: {} changed while this build was snapshotting {}; finish the \
+             install and build again",
+            library.spec.label,
+            library.archive.display()
+        );
+    }
+    println!("cargo:rerun-if-changed={}", library.archive.display());
+    if let Some(header) = &library.header {
+        println!("cargo:rerun-if-changed={}", header.display());
+    }
+    if let Some(pcfile) = &library.pcfile {
+        println!("cargo:rerun-if-changed={}", pcfile.display());
+    }
 }
 
 // #9726: THE SIBLING. libbpf is linked the same way and for the same reason.
@@ -258,8 +821,8 @@ fn snapshot_libxdp_archive(dir: &Path, libdir: &str, version_before: &str) -> St
     version
 }
 
-// #9726: nothing used to record which libraries went into a helper binary. The
-// build now exports them for ProcessStatus and the startup log:
+// #9726/#9931: nothing used to record which libraries went into a helper
+// binary. The build now exports them for ProcessStatus and the startup log:
 //   - XPF_LINKED_LIBXDP_VERSION: the build host's libxdp — the pkg-config version
 //     snapshot_libxdp_archive read against the bytes it copied into OUT_DIR, which
 //     are the bytes this build links as libxpfxdp.a;
@@ -267,8 +830,15 @@ fn snapshot_libxdp_archive(dir: &Path, libdir: &str, version_before: &str) -> St
 //     libbpf-sys that Cargo.lock pins, checked against its libbpf_version.h;
 //   - XPF_BUILD_HOST_LIBBPF_VERSION: the build host's libbpf (pkg-config). It is
 //     not linked, and it does not identify the libbpf headers the prebuilt
-//     libxdp.a was compiled with.
-fn record_library_versions(libxdp_libdir: &str, libxdp: &str) {
+//     libxdp.a was compiled with;
+//   - XPF_LINKED_LIBELF_VERSION, XPF_LINKED_ZLIB_VERSION and
+//     XPF_LINKED_ZSTD_VERSION: the versions of the static archives copied into
+//     this build's private snapshot directory.
+fn record_library_versions(
+    libxdp_libdir: &str,
+    libxdp: &str,
+    host_libraries: &[HostLibrary],
+) {
     // Re-record, and so relink, when an installed library changes in place. xsk.h
     // is tracked in main, but an upgrade can leave the header alone. These are
     // mtime checks; XPF_LINKED_LIBS_STAMP (main) covers a content change under
@@ -287,6 +857,15 @@ fn record_library_versions(libxdp_libdir: &str, libxdp: &str) {
     }
 
     println!("cargo:rustc-env=XPF_LINKED_LIBXDP_VERSION={libxdp}");
+    for library in host_libraries {
+        let variable = match library.spec.label {
+            "libelf" => "XPF_LINKED_LIBELF_VERSION",
+            "zlib" => "XPF_LINKED_ZLIB_VERSION",
+            "zstd" => "XPF_LINKED_ZSTD_VERSION",
+            _ => panic!("#9931: unknown host library {}", library.spec.label),
+        };
+        println!("cargo:rustc-env={variable}={}", library.version);
+    }
 
     let include = env::var("DEP_BPF_INCLUDE")
         .unwrap_or_else(|_| panic!("#9726: libbpf-sys did not export DEP_BPF_INCLUDE"));
