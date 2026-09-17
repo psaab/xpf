@@ -149,7 +149,7 @@ func TestClosedWorldIPsecProposal_LenientDoesNotBrick(t *testing.T) {
 // operator is not silently misled into believing volume-based rekey is
 // enforced.
 func TestClosedWorldIPsecProposal_LifetimeKilobytesAdvisory(t *testing.T) {
-	tree := buildTree(t, ipsecProposalSet("lifetime-kilobytes 100000"))
+	tree := buildTree(t, ipsecProposalSet("lifetime-kilobytes 100000", "authentication-algorithm hmac-sha-256-128"))
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)

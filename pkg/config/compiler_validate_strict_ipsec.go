@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/ipsecname"
 )
 
 // validateIPsecPolicyProposalReferencesStrict hard-rejects an IPsec
@@ -324,6 +326,86 @@ func validateIPsecProposalProtocolStrict(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// IsSafeIPsecAlgorithmValue is the shared allowlist predicate for algorithm
+// leaves that reach swanctl's unquoted proposal lists. Empty means the leaf
+// was omitted and is therefore safe for this predicate; callers that require
+// an algorithm (such as non-AEAD ESP integrity) enforce presence separately.
+func IsSafeIPsecAlgorithmValue(value string) bool {
+	if value == "" {
+		return true
+	}
+	return ipsecname.SectionSafe(value)
+}
+
+// validateIPsecProposalAlgorithmsStrict rejects algorithm values that are not
+// safe to interpolate into swanctl's unquoted proposal lists. SectionSafe is
+// an allowlist (ASCII letters, digits, '-' and '_'), rather than a denylist:
+// strongSwan parses '#' as a comment and '{', '}', '=' as structure, so an
+// operator or peer-synced algorithm must never carry those bytes into the
+// rendered `proposals` or `esp_proposals` value.
+//
+// A non-AEAD ESP proposal also requires an authentication algorithm. Without
+// one, buildESPProposal emits only the cipher (and optional PFS), leaving
+// integrity absent. Empty encryption means the renderer's default aes256,
+// which is non-AEAD and therefore requires authentication too. AH proposals
+// have no ESP render path and are handled by validateIPsecProposalProtocolStrict.
+//
+// The tolerant load path downgrades this error to a warning, while the
+// renderer independently skips each affected proposal so legacy/persisted
+// values cannot reach swanctl.
+func validateIPsecProposalAlgorithmsStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	var bad []string
+	check := func(scope, name, field, value string) {
+		if !IsSafeIPsecAlgorithmValue(value) {
+			bad = append(bad, fmt.Sprintf(
+				"%s proposal %q %s %q contains a character outside letters, digits, '-' and '_'",
+				scope, name, field, value))
+		}
+	}
+	ikeNames := make([]string, 0, len(cfg.Security.IPsec.IKEProposals))
+	for name := range cfg.Security.IPsec.IKEProposals {
+		ikeNames = append(ikeNames, name)
+	}
+	sort.Strings(ikeNames)
+	for _, name := range ikeNames {
+		p := cfg.Security.IPsec.IKEProposals[name]
+		if p == nil {
+			continue
+		}
+		check("security ike", name, "encryption-algorithm", p.EncryptionAlg)
+		check("security ike", name, "authentication-algorithm", p.AuthAlg)
+	}
+
+	espNames := make([]string, 0, len(cfg.Security.IPsec.Proposals))
+	for name := range cfg.Security.IPsec.Proposals {
+		espNames = append(espNames, name)
+	}
+	sort.Strings(espNames)
+	for _, name := range espNames {
+		p := cfg.Security.IPsec.Proposals[name]
+		if p == nil {
+			continue
+		}
+		check("security ipsec", name, "encryption-algorithm", p.EncryptionAlg)
+		check("security ipsec", name, "authentication-algorithm", p.AuthAlg)
+		if !strings.EqualFold(p.Protocol, "ah") &&
+			!strings.Contains(p.EncryptionAlg, "gcm") && p.AuthAlg == "" {
+			bad = append(bad, fmt.Sprintf(
+				"security ipsec proposal %q is non-AEAD ESP without authentication-algorithm "+
+					"(set authentication-algorithm for integrity)",
+				name))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("%s", strings.Join(bad, "; "))
 }
 
 // validateIPsecManualKeyStrict hard-rejects an IPsec VPN that carries a

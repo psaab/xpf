@@ -548,6 +548,12 @@ type compileOpts struct {
 	// renderConfig skips the VPN) keeps the fabricated ESP tunnel out of the
 	// generated swanctl.conf. Same doctrine as lenientIKEPolicyChainRef.
 	lenientIPsecProposalProtocol bool
+	// lenientIPsecProposalAlgorithms (#9906/#9907) downgrades the IPsec/IKE
+	// proposal algorithm allowlist and the non-AEAD ESP integrity requirement
+	// from a hard commit error to a warning on tolerant load / peer-sync paths.
+	// The renderer independently skips affected proposals, so legacy values
+	// remain boot-safe without emitting a metacharacter or bare cipher.
+	lenientIPsecProposalAlgorithms bool
 
 	// lenientIPsecManualKey (#4300, V-4) downgrades the IPsec VPN
 	// manual-key SA reject (validateIPsecManualKeyStrict) from a hard error
@@ -2905,6 +2911,7 @@ func lenientCompileOpts() compileOpts {
 		lenientLoginPackedStatements:           true,
 		lenientLoginClassShadowsBuiltin:        true,
 		lenientIPsecProposalProtocol:           true,
+		lenientIPsecProposalAlgorithms:         true,
 		lenientIPsecManualKey:                  true,
 		lenientIPsecSANameDisplay:              true,
 		lenientIPsecSectionName:                true,

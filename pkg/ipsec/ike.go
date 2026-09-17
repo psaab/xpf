@@ -63,6 +63,59 @@ var errESPChainUnresolved = errors.New(
 var errDHGroupUnresolved = errors.New(
 	"proposal carries a Diffie-Hellman group that cannot be rendered")
 
+// errProposalUnresolved signals that every proposal available to a VPN was
+// rejected by the render-side crypto safety belt. The commit-time validator
+// names the authored value, while this sentinel lets tolerant loads skip the
+// affected VPN instead of emitting an unsafe or incomplete proposal list.
+var errProposalUnresolved = errors.New(
+	"IPsec proposal cannot be rendered safely")
+
+// renderAlgorithmValueSafe is the renderer's second belt for already-persisted
+// values. It uses the same SectionSafe allowlist as the strict commit gate so
+// no swanctl-significant byte can reach an unquoted proposal slot.
+func renderAlgorithmValueSafe(value string) bool {
+	return config.IsSafeIPsecAlgorithmValue(value)
+}
+
+func algorithmValuesBad(kind, name, encryption, auth string) (bool, string) {
+	if !renderAlgorithmValueSafe(encryption) {
+		return true, fmt.Sprintf("%s %q encryption-algorithm %q contains "+
+			"a swanctl-significant character", kind, name, encryption)
+	}
+	if !renderAlgorithmValueSafe(auth) {
+		return true, fmt.Sprintf("%s %q authentication-algorithm %q contains "+
+			"a swanctl-significant character", kind, name, auth)
+	}
+	return false, ""
+}
+
+func ikeProposalBad(name string, prop *config.IKEProposal) (bool, string) {
+	return algorithmValuesBad("ike-proposal", name, prop.EncryptionAlg, prop.AuthAlg)
+}
+
+func espProposalBad(name string, prop *config.IPsecProposal) (bool, string) {
+	if bad, detail := algorithmValuesBad("ipsec-proposal", name, prop.EncryptionAlg, prop.AuthAlg); bad {
+		return true, detail
+	}
+	if !strings.EqualFold(prop.Protocol, "ah") &&
+		!strings.Contains(prop.EncryptionAlg, "gcm") && prop.AuthAlg == "" {
+		return true, fmt.Sprintf("ipsec-proposal %q is non-AEAD ESP without "+
+			"authentication-algorithm", name)
+	}
+	return false, ""
+}
+
+func renderedProposalBad(kind, name, proposal string) (bool, string) {
+	if proposal == "" {
+		return true, fmt.Sprintf("%s proposal %q rendered an empty proposal", kind, name)
+	}
+	if !renderAlgorithmValueSafe(proposal) {
+		return true, fmt.Sprintf("%s proposal %q rendered %q with a "+
+			"swanctl-significant character", kind, name, proposal)
+	}
+	return false, ""
+}
+
 // dhGroupBad reports whether a DH value is unusable: a recorded InvalidSpec
 // (the compiler saw a token it could not store — unparseable, unspellable
 // numeric, or present-but-empty), or a non-zero numeric the renderer cannot
@@ -118,6 +171,7 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 		var firstLifetime int
 		authResolved := false
 		var dhSkipped []string
+		var proposalSkipped []string
 		for _, ref := range ikePol.Proposals {
 			ikeProp, ok := cfg.IKEProposals[ref]
 			if !ok || ikeProp == nil {
@@ -130,6 +184,17 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 				dhSkipped = append(dhSkipped, fmt.Sprintf("ike-proposal %q %s", ref, detail))
 				continue
 			}
+			if bad, detail := ikeProposalBad(ref, ikeProp); bad {
+				proposalSkipped = append(proposalSkipped, detail)
+				slog.Warn("skipping IPsec IKE proposal during render", "proposal", ref, "detail", detail)
+				continue
+			}
+			builtProposal := buildIKEProposalFromIKE(ikeProp)
+			if bad, detail := renderedProposalBad("IKE", ref, builtProposal); bad {
+				proposalSkipped = append(proposalSkipped, detail)
+				slog.Warn("skipping IPsec IKE proposal during render", "proposal", ref, "detail", detail)
+				continue
+			}
 			if !authResolved {
 				authMethod, err = authMethodToSwan(ikeProp.AuthMethod)
 				if err != nil {
@@ -138,10 +203,14 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 				firstLifetime = ikeProp.LifetimeSeconds
 				authResolved = true
 			}
-			built = append(built, buildIKEProposalFromIKE(ikeProp))
+			built = append(built, builtProposal)
 		}
 		if len(built) > 0 {
 			return authMethod, strings.Join(built, ","), firstLifetime, aggressive, nil
+		}
+		if len(proposalSkipped) > 0 {
+			return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q (%s)",
+				errProposalUnresolved, gw.IKEPolicy, strings.Join(proposalSkipped, "; "))
 		}
 		// Nothing renderable: a bad-DH entry is a more actionable
 		// diagnosis than a dangling chain, so name it when present.
@@ -159,10 +228,18 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 				return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q names proposal %q with %s",
 					errDHGroupUnresolved, gw.IKEPolicy, gw.IKEPolicy, detail)
 			}
-			return authMethod, buildIKEProposal(prop), prop.LifetimeSeconds, aggressive, nil
+			if bad, detail := algorithmValuesBad("ike-proposal", gw.IKEPolicy, prop.EncryptionAlg, prop.AuthAlg); bad {
+				return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q names proposal %q with %s",
+					errProposalUnresolved, gw.IKEPolicy, gw.IKEPolicy, detail)
+			}
+			builtProposal := buildIKEProposal(prop)
+			if bad, detail := renderedProposalBad("IKE", gw.IKEPolicy, builtProposal); bad {
+				return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q names proposal %q with %s",
+					errProposalUnresolved, gw.IKEPolicy, gw.IKEPolicy, detail)
+			}
+			return authMethod, builtProposal, prop.LifetimeSeconds, aggressive, nil
 		}
 	}
-
 	// gw.IKEPolicy is set but neither the ike-policy -> ike-proposal chain
 	// nor the legacy direct-proposal fallback resolves. Fail closed: do NOT
 	// return an empty proposal with a nil error (#2270).
@@ -265,6 +342,7 @@ func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, 
 		var built []string
 		var firstLifetime int
 		var dhSkipped []string
+		var proposalSkipped []string
 		for _, r := range good {
 			if pfsGroup == 0 {
 				if bad, detail := dhGroupBad(r.prop.DHGroup, r.prop.DHGroupInvalidSpec); bad {
@@ -272,13 +350,28 @@ func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, 
 					continue
 				}
 			}
+			if bad, detail := espProposalBad(r.ref, r.prop); bad {
+				proposalSkipped = append(proposalSkipped, detail)
+				slog.Warn("skipping IPsec ESP proposal during render", "proposal", r.ref, "detail", detail)
+				continue
+			}
+			builtProposal := buildESPProposal(r.prop, pfsGroup)
+			if bad, detail := renderedProposalBad("ESP", r.ref, builtProposal); bad {
+				proposalSkipped = append(proposalSkipped, detail)
+				slog.Warn("skipping IPsec ESP proposal during render", "proposal", r.ref, "detail", detail)
+				continue
+			}
 			if len(built) == 0 {
 				firstLifetime = r.prop.LifetimeSeconds
 			}
-			built = append(built, buildESPProposal(r.prop, pfsGroup))
+			built = append(built, builtProposal)
 		}
 		if len(built) > 0 {
 			return strings.Join(built, ","), firstLifetime, nil
+		}
+		if len(proposalSkipped) > 0 {
+			return "", 0, fmt.Errorf("%w: ipsec-policy %q (%s)",
+				errProposalUnresolved, vpn.IPsecPolicy, strings.Join(proposalSkipped, "; "))
 		}
 		return "", 0, fmt.Errorf("%w: ipsec-policy %q (%s)",
 			errDHGroupUnresolved, vpn.IPsecPolicy, strings.Join(dhSkipped, "; "))
@@ -292,7 +385,16 @@ func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, 
 			return "", 0, fmt.Errorf("%w: ipsec-policy %q names a proposal with %s",
 				errDHGroupUnresolved, vpn.IPsecPolicy, detail)
 		}
-		return buildESPProposal(prop, 0), prop.LifetimeSeconds, nil
+		if bad, detail := espProposalBad(vpn.IPsecPolicy, prop); bad {
+			return "", 0, fmt.Errorf("%w: ipsec-policy %q names a proposal with %s",
+				errProposalUnresolved, vpn.IPsecPolicy, detail)
+		}
+		builtProposal := buildESPProposal(prop, 0)
+		if bad, detail := renderedProposalBad("ESP", vpn.IPsecPolicy, builtProposal); bad {
+			return "", 0, fmt.Errorf("%w: ipsec-policy %q names a proposal with %s",
+				errProposalUnresolved, vpn.IPsecPolicy, detail)
+		}
+		return builtProposal, prop.LifetimeSeconds, nil
 	}
 
 	// Dangling POLICY reference — vpn.IPsecPolicy names neither a defined

@@ -462,6 +462,7 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"either way, so the config is legitimate and only the elided form was losing it. " +
 			"This gate was written to catch exactly this drop class, so the pass repairing the " +
 			"drop and the gate then passing is the intended interaction, not a disarm.",
+		"security ipsec proposal xpfarg authentication-algorithm": "the #9907 non-AEAD ESP integrity gate rejects the elided form because the compact spelling drops the authored authentication leaf before compilation. Measured: pass disabled yields an empty AuthAlg and the new strict gate rejects the proposal; pass enabled preserves the authentication leaf and the same proposal is accepted. The gate is refusing the CONSEQUENCE of the drop, not the packed spelling, so this is a benign normalizer repair rather than a disarm.",
 		// The three sites admitted with the #8690 `open` residue. All three were
 		// re-measured HERE with the pair ADMITTED, which is the only state in
 		// which the measurement means anything: for an EXCLUDED pair the pass
