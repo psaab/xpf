@@ -384,34 +384,127 @@ func TestWireguardForwardingMemberLenientQuarantine9909(t *testing.T) {
 // TestWireguardUndeclaredUnitMemberUnaffected9909 prevents a fabricated
 // parent-device match for a nonzero unit ref the config never declared.
 func TestWireguardUndeclaredUnitMemberUnaffected9909(t *testing.T) {
-	lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
+	for _, member := range []string{"wg0.99", "wg0.999"} {
+		t.Run(member, func(t *testing.T) {
+			lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
+				"set routing-instances blue instance-type virtual-router",
+				"set routing-instances blue interface "+member,
+			)
+			if cfg, err := CompileConfig(buildTree4953(t, lines)); err != nil {
+				t.Fatalf("undeclared unit member falsely rejected on strict compile: %v", err)
+			} else if len(wgVRF9909Warnings(cfg)) != 0 {
+				t.Fatalf("undeclared unit member drew strict #9909 warnings: %v", wgVRF9909Warnings(cfg))
+			}
+			cfg, err := CompileConfigLenient(buildTree4953(t, lines))
+			if err != nil {
+				t.Fatalf("undeclared unit member tolerant load rejected: %v", err)
+			}
+			if len(wgVRF9909Warnings(cfg)) != 0 {
+				t.Fatalf("undeclared unit member drew tolerant #9909 warnings: %v", wgVRF9909Warnings(cfg))
+			}
+			ifc := cfg.Interfaces.Interfaces["wg0"]
+			if ifc == nil || ifc.Tunnel == nil {
+				t.Fatalf("unscoped wg0 was removed because of undeclared unit member")
+			}
+			var endpointFound bool
+			for _, ep := range EmitTunnelEndpointNames(cfg) {
+				if ep.Tunnel != nil && ep.Tunnel.Mode == "wireguard" && ep.Tunnel.Name == "wg0" {
+					endpointFound = true
+					break
+				}
+			}
+			if !endpointFound {
+				t.Fatalf("unscoped wg0 endpoint disappeared for undeclared member %q", member)
+			}
+			for _, ri := range cfg.RoutingInstances {
+				if ri != nil && ri.Name == "blue" {
+					if len(ri.Interfaces) != 1 || ri.Interfaces[0] != member {
+						t.Fatalf("undeclared unit member changed during tolerant load: %v", ri.Interfaces)
+					}
+					return
+				}
+			}
+			t.Fatal("routing-instance blue disappeared during undeclared-unit control")
+		})
+	}
+}
+
+// TestWireguardBareMemberNarrowingDeduplicatesExplicit9909 ensures generated
+// survivor refs do not duplicate an already-authored explicit unit member.
+func TestWireguardBareMemberNarrowingDeduplicatesExplicit9909(t *testing.T) {
+	lines := []string{
+		"set interfaces gr-0/0/0 unit 0 tunnel mode wireguard",
+		"set interfaces gr-0/0/0 unit 0 tunnel wireguard listen-port 51820",
+		"set interfaces gr-0/0/0 unit 0 tunnel wireguard private-key " + wgKeyA,
+		"set interfaces gr-0/0/0 unit 0 tunnel wireguard peer " + wgKeyB + " allowed-ips 10.1.0.0/24",
+		"set interfaces gr-0/0/0 unit 1 tunnel source 10.0.0.1",
+		"set interfaces gr-0/0/0 unit 1 tunnel destination 10.0.0.2",
 		"set routing-instances blue instance-type virtual-router",
-		"set routing-instances blue interface wg0.99",
-	)
-	if cfg, err := CompileConfig(buildTree4953(t, lines)); err != nil {
-		t.Fatalf("undeclared unit member falsely rejected on strict compile: %v", err)
-	} else if len(wgVRF9909Warnings(cfg)) != 0 {
-		t.Fatalf("undeclared unit member drew strict #9909 warnings: %v", wgVRF9909Warnings(cfg))
+		"set routing-instances blue interface gr-0/0/0",
+		"set routing-instances blue interface gr-0/0/0.1",
+		"set system dataplane-type userspace",
 	}
 	cfg, err := CompileConfigLenient(buildTree4953(t, lines))
 	if err != nil {
-		t.Fatalf("undeclared unit member tolerant load rejected: %v", err)
+		t.Fatalf("tolerant duplicate-member load rejected: %v", err)
 	}
-	if len(wgVRF9909Warnings(cfg)) != 0 {
-		t.Fatalf("undeclared unit member drew tolerant #9909 warnings: %v", wgVRF9909Warnings(cfg))
-	}
-	if ifc := cfg.Interfaces.Interfaces["wg0"]; ifc == nil || ifc.Tunnel == nil {
-		t.Fatalf("unscoped wg0 was removed because of undeclared unit member")
-	}
+	var blue *RoutingInstanceConfig
 	for _, ri := range cfg.RoutingInstances {
 		if ri != nil && ri.Name == "blue" {
-			if len(ri.Interfaces) != 1 || ri.Interfaces[0] != "wg0.99" {
-				t.Fatalf("undeclared unit member changed during tolerant load: %v", ri.Interfaces)
-			}
-			return
+			blue = ri
+			break
 		}
 	}
-	t.Fatal("routing-instance blue disappeared during undeclared-unit control")
+	if blue == nil {
+		t.Fatal("routing-instance blue disappeared during duplicate-member quarantine")
+	}
+	if len(blue.Interfaces) != 1 || blue.Interfaces[0] != "gr-0/0/0.1" {
+		t.Fatalf("bare narrowing duplicated or lost explicit GRE member: %v", blue.Interfaces)
+	}
+}
+
+// TestWireguardBareMemberVLANUnitZeroNarrowing9909 ensures a VLAN-ID unit
+// survives as its VLAN device instead of being redirected to Base.0.
+func TestWireguardBareMemberVLANUnitZeroNarrowing9909(t *testing.T) {
+	lines := []string{
+		"set interfaces gr-0/0/9 flexible-vlan-tagging",
+		"set interfaces gr-0/0/9 unit 0 vlan-id 100",
+		"set interfaces gr-0/0/9 unit 0 family inet address 192.0.2.1/24",
+		"set interfaces gr-0/0/9 unit 1 tunnel mode wireguard",
+		"set interfaces gr-0/0/9 unit 1 tunnel wireguard listen-port 51826",
+		"set interfaces gr-0/0/9 unit 1 tunnel wireguard private-key " + wgKeyA,
+		"set interfaces gr-0/0/9 unit 1 tunnel wireguard peer " + wgKeyB + " allowed-ips 10.1.0.0/24",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface gr-0/0/9",
+		"set system dataplane-type userspace",
+	}
+	cfg, err := CompileConfigLenient(buildTree4953(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant VLAN-member load rejected: %v", err)
+	}
+	ifc := cfg.Interfaces.Interfaces["gr-0/0/9"]
+	if ifc == nil || ifc.Units[0] == nil || ifc.Units[0].VlanID != 100 ||
+		ifc.Units[1] == nil || ifc.Units[1].Tunnel != nil {
+		t.Fatalf("VLAN unit or WG quarantine is wrong: %+v", ifc)
+	}
+	var blue *RoutingInstanceConfig
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil && ri.Name == "blue" {
+			blue = ri
+			break
+		}
+	}
+	if blue == nil {
+		t.Fatal("routing-instance blue disappeared during VLAN-member quarantine")
+	}
+	if len(blue.Interfaces) != 1 || blue.Interfaces[0] != "gr-0/0/9.0" {
+		t.Fatalf("VLAN unit survivor was redirected or duplicated: %v", blue.Interfaces)
+	}
+	for _, ep := range EmitTunnelEndpointNames(cfg) {
+		if ep.Tunnel != nil && ep.Tunnel.Mode == "wireguard" {
+			t.Fatalf("quarantined WG endpoint survived VLAN-member narrowing: %q", ep.Name)
+		}
+	}
 }
 
 // TestWireguardWithoutRoutingInstanceUnaffected9909 pins the common cases
