@@ -39,12 +39,112 @@ var ruleListFn = netlink.RuleList
 // mirror of the kernel's. When the cap declines the import wholesale, NoRoute
 // stops meaning "there is no route" and starts meaning "we did not tell you" —
 // so the caller must put the fact on the wire.
+func routeSnapshotDedupeKey(snap RouteSnapshot) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%t|%d|%d",
+		snap.Table, snap.Family, snap.Destination,
+		strings.Join(snap.NextHops, ","), snap.NextTable,
+		snap.Discard, snap.Preference, snap.RulePriority)
+}
+
+// routeSnapshotLeakIdentity canonicalizes only the target-table spelling and
+// CIDR masking used to compare the config-static mirror with a live ip-rule
+// mirror. Config stores a global next-table target as a bare routing-instance
+// name, while a live rule is emitted with its family-qualified table. They
+// are the same kernel rule identity and the live row must replace the config
+// mirror if their priorities differ. This helper does not participate in
+// dedupe: two live rows with distinct priorities remain distinct candidates.
+func routeSnapshotLeakIdentity(snap RouteSnapshot) string {
+	if snap.NextTable == "" {
+		return ""
+	}
+	target := snap.NextTable
+	suffix := ".inet.0"
+	if snap.Family == "inet6" {
+		suffix = ".inet6.0"
+	}
+	if target == "inet.0" || target == "inet6.0" {
+		target = suffix
+	} else if strings.HasSuffix(target, ".inet.0") || strings.HasSuffix(target, ".inet6.0") {
+		target = target[:strings.LastIndex(target, ".inet")] + suffix
+	} else {
+		target += suffix
+	}
+	destination := snap.Destination
+	if canonical := canonicalRoutePrefix(destination); canonical != "" {
+		destination = canonical
+	}
+	return fmt.Sprintf("%s|%s|%s|%s", snap.Table, snap.Family, destination, target)
+}
+
+// configNextTableRulePriorities mirrors nextTableManager.Apply's one shared
+// priority cursor for global static next-table leaks. The applier receives the
+// global v4 and v6 lists as one slice, stably partitions parsed IPv4 ahead of
+// parsed IPv6, and reserves one priority slot per default-instance ingress
+// interface for each eligible leak. The snapshot has one row per leak rather
+// than one row per ingress interface, so RulePriority is the FIRST slot
+// reserved for that route. StaticRouteExclusions is the shared eligibility and
+// cap verdict; consulting it here prevents the mirror from assigning a
+// priority to a route the kernel did not install.
+func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.StaticRoute]string) map[*config.StaticRoute]uint32 {
+	out := make(map[*config.StaticRoute]uint32)
+	if cfg == nil {
+		return out
+	}
+	ingress := len(config.DefaultInstanceIngressIfaces(cfg))
+	if ingress == 0 {
+		return out
+	}
+
+	// Match pkg/routing.nextTableFamilyOrdered and
+	// config.nextTableWindowOrder without importing either unexported helper:
+	// all non-v6 entries (including nil and malformed destinations, which do
+	// not consume a kernel slot) retain their relative order, followed by the
+	// parsed IPv6 entries. The two config lists are one kernel sequence.
+	combined := make([]*config.StaticRoute, 0,
+		len(cfg.RoutingOptions.StaticRoutes)+len(cfg.RoutingOptions.Inet6StaticRoutes))
+	combined = append(combined, cfg.RoutingOptions.StaticRoutes...)
+	combined = append(combined, cfg.RoutingOptions.Inet6StaticRoutes...)
+	ordered := make([]*config.StaticRoute, 0, len(combined))
+	v6 := make([]*config.StaticRoute, 0)
+	for _, route := range combined {
+		if route == nil {
+			ordered = append(ordered, route)
+			continue
+		}
+		_, dst, err := net.ParseCIDR(route.Destination)
+		if err != nil || dst.IP.To4() != nil {
+			ordered = append(ordered, route)
+			continue
+		}
+		v6 = append(v6, route)
+	}
+	ordered = append(ordered, v6...)
+
+	priority := uint32(config.NextTableRulePriorityBase)
+	for _, route := range ordered {
+		if route == nil || route.NextTable == "" || exclusions[route] != "" {
+			continue
+		}
+		// Keep this local cap guard beside the cursor as a defence against a
+		// future caller passing a verdict map that was built from a different
+		// route sequence. Under the shared verdict it is redundant by design.
+		if uint64(priority-uint32(config.NextTableRulePriorityBase))+uint64(ingress) >
+			uint64(config.NextTableRuleWindow) {
+			break
+		}
+		out[route] = priority
+		priority += uint32(ingress)
+	}
+	return out
+}
+
 func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, overlay []config.RouteOverlayEntry) ([]RouteSnapshot, bool, error) {
 	if cfg == nil {
 		return nil, false, nil
 	}
 	out := make([]RouteSnapshot, 0)
 	seen := make(map[string]struct{})
+	configLeakSnapshotKeys := make(map[string]struct{})
 	addSnapshot := func(snap RouteSnapshot) {
 		// #6568 (member 1): the destination must reach the wire as something
 		// the Rust FIB can PARSE. `populate_routes` (forwarding_build/fib.rs)
@@ -78,29 +178,71 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				"family", snap.Family, "discard", snap.Discard)
 			return
 		}
-		// #3770 (H8): the dedupe key MUST include Discard and Preference.
-		// A discard (blackhole) route and a normal route to the same prefix
-		// are DISTINCT forwarding decisions — omitting Discard let one
-		// silently hide the other. Two routes differing only in preference
-		// (e.g. a static next-table route at its configured preference and
-		// the kernel ip-rule mirror at preference 0) collided on the old key
-		// and the second was dropped before the Rust FIB could apply its
-		// preference tie-break (fib.rs sort_routes).
-		key := fmt.Sprintf("%s|%s|%s|%s|%s|%t|%d",
-			snap.Table, snap.Family, snap.Destination,
-			strings.Join(snap.NextHops, ","), snap.NextTable,
-			snap.Discard, snap.Preference)
+		// #3770 (H8): the dedupe key MUST include Discard, Preference, and
+		// RulePriority. A discard (blackhole) route and a normal route to the
+		// same prefix are DISTINCT forwarding decisions — omitting Discard let
+		// one silently hide the other. Two routes differing only in preference
+		// (e.g. a static next-table route at its configured preference and the
+		// kernel ip-rule mirror at preference 0) likewise remain distinct.
+		// RulePriority is the kernel rule identity for a NextTable leak:
+		// collapsing rows that share a prefix and target but have different
+		// priorities would discard one stage-1 candidate and make the helper
+		// disagree with first-match kernel rule evaluation.
+		key := routeSnapshotDedupeKey(snap)
 		if _, ok := seen[key]; ok {
 			return
 		}
 		seen[key] = struct{}{}
 		out = append(out, snap)
 	}
+	// Config-global static next-table rows are added before the live netlink
+	// mirror. Track their exact dedupe keys so a live row can remove only its
+	// matching config identity, while leaving every live row whose actual
+	// priority is distinct.
+	addConfigSnapshot := func(snap RouteSnapshot) {
+		if snap.NextTable != "" {
+			// addSnapshot normalises bare host destinations before deriving its
+			// dedupe key. Mirror that normalisation here so live-wins removal
+			// still finds a config leak written with a bare address.
+			if destination, ok := routeDestinationForWire(snap.Destination); ok {
+				snap.Destination = destination
+			}
+			configLeakSnapshotKeys[routeSnapshotDedupeKey(snap)] = struct{}{}
+		}
+		addSnapshot(snap)
+	}
+	removeConfigLeak := func(snap RouteSnapshot) {
+		identity := routeSnapshotLeakIdentity(snap)
+		if identity == "" {
+			return
+		}
+		kept := out[:0]
+		for _, existing := range out {
+			key := routeSnapshotDedupeKey(existing)
+			_, isConfigLeak := configLeakSnapshotKeys[key]
+			if isConfigLeak && routeSnapshotLeakIdentity(existing) == identity {
+				delete(seen, key)
+				delete(configLeakSnapshotKeys, key)
+				continue
+			}
+			kept = append(kept, existing)
+		}
+		out = kept
+	}
+	addLiveSnapshot := func(snap RouteSnapshot) {
+		// A netlink rule is authoritative for the same leak identity. This
+		// matters when a synthetic/config fixture and a live dump disagree:
+		// retaining the config row at an invented lower priority would make
+		// the Rust stage-1 index select it before the actual kernel rule.
+		removeConfigLeak(snap)
+		addSnapshot(snap)
+	}
 	// #7357: the shared drop verdict for every static route in this config,
 	// computed once. See config.StaticRouteExclusions — it owns the
 	// order-dependent #6467 next-table ip-rule window as well as the three
 	// per-route causes, and the show surfaces consult the same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
+	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
 	addRoutes := func(table, family string, routes []*config.StaticRoute, perInstance bool) {
 		for _, route := range routes {
 			if route == nil {
@@ -134,9 +276,10 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				// distinction (reject vs discard) is emitted by the kernel/FRR
 				// reject route today; a userspace-generated ICMP unreachable is a
 				// follow-up that would need a dedicated RouteSnapshot field.
-				Discard:    route.Discard || route.Reject,
-				NextTable:  route.NextTable,
-				Preference: route.Preference,
+				Discard:      route.Discard || route.Reject,
+				NextTable:    route.NextTable,
+				RulePriority: nextTableRulePriorities[route],
+				Preference:   route.Preference,
 			}
 			// #5678: group next-hops by their EFFECTIVE preference. A
 			// qualified-next-hop carries its own admin distance (#3871
@@ -192,14 +335,14 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				// every next-hop had an empty target): emit the base
 				// disposition unchanged so the negative-route / leak entry is
 				// preserved.
-				addSnapshot(base)
+				addConfigSnapshot(base)
 				continue
 			}
 			for _, pref := range order {
 				snap := base
 				snap.Preference = groups[pref].preference
 				snap.NextHops = groups[pref].nextHops
-				addSnapshot(snap)
+				addConfigSnapshot(snap)
 			}
 		}
 	}
@@ -322,11 +465,12 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				mainTable = "inet6.0"
 				nextTable = instName + ".inet6.0"
 			}
-			addSnapshot(RouteSnapshot{
-				Table:       mainTable,
-				Family:      familyStr,
-				Destination: rule.Dst.String(),
-				NextTable:   nextTable,
+			addLiveSnapshot(RouteSnapshot{
+				Table:        mainTable,
+				Family:       familyStr,
+				Destination:  rule.Dst.String(),
+				NextTable:    nextTable,
+				RulePriority: uint32(rule.Priority),
 			})
 		}
 	}
@@ -379,9 +523,15 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// and their relative order followed the non-deterministic build input
 	// order (map iteration, kernel ip-rule order) under an UNSTABLE sort —
 	// producing spurious snapshot-to-snapshot diffs and ECMP-member churn
-	// that re-installed the FIB for no config change. Tie-break on
-	// next-hops, next-table, discard, then preference so the wire order is
-	// a deterministic function of content alone.
+	// that re-installed the FIB for no config change. Leak rows are stage-1
+	// rules, so RulePriority is their first tie-break after table/family/
+	// destination; ordinary rows keep the existing next-hop/next-table/
+	// discard/preference order.
+	//
+	// A NextTable row is always a leak; an ordinary route never competes with
+	// it in this priority comparison. The Rust consumer builds a separate
+	// priority-ordered leak index and performs ordinary LPM only after a leak
+	// target misses.
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Table != b.Table {
@@ -392,6 +542,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		}
 		if a.Destination != b.Destination {
 			return a.Destination < b.Destination
+		}
+		if a.NextTable != "" && b.NextTable != "" && a.RulePriority != b.RulePriority {
+			return a.RulePriority < b.RulePriority
 		}
 		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
 		if an != bn {
@@ -410,10 +563,11 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 }
 
 // applyRouteOverlay folds the winner-resolved ip-monitoring overlay
-// into the route set: for each entry, every existing snapshot for the
-// same (table, family, canonical prefix) is REMOVED (whole-entry
-// replacement, including all ECMP next-hops) and the single overlay
-// route is appended.
+// into the route set: for each entry, every existing ORDINARY snapshot for the
+// same (table, family, canonical prefix) is REMOVED (whole-entry replacement,
+// including all ECMP next-hops) and the single overlay route is appended.
+// NextTable snapshots are priority-ordered stage-1 leak rules and are retained
+// even when their prefix matches an overlay entry.
 func applyRouteOverlay(routes []RouteSnapshot, overlay []config.RouteOverlayEntry) []RouteSnapshot {
 	if len(overlay) == 0 {
 		return routes
@@ -441,6 +595,14 @@ func applyRouteOverlay(routes []RouteSnapshot, overlay []config.RouteOverlayEntr
 	}
 	out := make([]RouteSnapshot, 0, len(routes)+len(replaced))
 	for _, snap := range routes {
+		// A NextTable row is a priority-ordered ip-rule leak, not an
+		// ordinary table route. The monitoring overlay replaces an ordinary
+		// route entry only; letting it remove a leak would erase a stage-1
+		// rule and silently change the kernel's resolution order.
+		if snap.NextTable != "" {
+			out = append(out, snap)
+			continue
+		}
 		k := key{snap.Table, snap.Family, canonicalRoutePrefix(snap.Destination)}
 		if _, gone := replaced[k]; gone {
 			continue
@@ -801,12 +963,14 @@ const learnedRouteMainTableID = 254
 // that fill a genuine gap to addSnapshot.
 //
 // `existing` is the config-derived snapshot set built so far; it is read to
-// compute the gap-fill key and never mutated. The key is built from the
-// SAME (table, family, destination) triple the caller's dedupe uses, and
-// the imported destination is normalised through routeDestinationForWire
-// first so a kernel rendering can never miss a config route it is
-// semantically identical to (which would let a duplicate through and hand
-// the Rust FIB two routes for one prefix to tie-break).
+// compute the gap-fill key and never mutated. Only ORDINARY table routes count
+// as covered. A NextTable row is a priority-ordered stage-1 rule, not an
+// answer from a table's LPM; if its target table misses, kernel evaluation
+// falls through and the ordinary main-table route must still be imported.
+// The key is built from the SAME (table, family, destination) triple the
+// caller's dedupe uses, and the imported destination is normalised through
+// routeDestinationForWire first so a kernel rendering can never miss an
+// ordinary config route it is semantically identical to.
 //
 // A failure from the importer is returned, not swallowed: same #3772 M9
 // reasoning as the ip-rule enumeration above — a snapshot silently missing
@@ -848,6 +1012,13 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 
 	covered := make(map[string]struct{}, len(existing))
 	for _, snap := range existing {
+		// A NextTable row is a stage-1 rule, not a table route. Its presence
+		// must not make the helper believe the ordinary main-table answer is
+		// covered: if the leak target misses, lookup continues to the next
+		// rule and eventually reaches this ordinary fallback.
+		if snap.NextTable != "" {
+			continue
+		}
 		covered[learnedRouteGapKey(snap.Table, snap.Family, snap.Destination)] = struct{}{}
 	}
 

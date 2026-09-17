@@ -695,6 +695,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     // No neighbors: the tunnel's OUTER destination (203.0.113.9 via the
     // 172.16.80.1 default gateway) is unresolved -> MissingNeighbor

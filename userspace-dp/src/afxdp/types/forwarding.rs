@@ -108,6 +108,12 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
     pub(in crate::afxdp) routes_v6: FastMap<String, Vec<RouteEntryV6>>,
+    /// #9955: synthetic next-table entries are kernel ip rules, not peers
+    /// in the destination table's FIB. Keep a priority-ordered per-source-
+    /// table collection so lookup can perform the kernel's rule stage before
+    /// the table-local longest-prefix match.
+    pub(in crate::afxdp) leak_rules_v4: FastMap<String, Vec<LeakRuleV4>>,
+    pub(in crate::afxdp) leak_rules_v6: FastMap<String, Vec<LeakRuleV6>>,
     /// #9752: installing-table registry: stable domain id → the instance's
     /// canonical per-family route tables + owner check. Re-resolve looks the
     /// session's `install_table_domain` up here to recover the table string;
@@ -917,8 +923,24 @@ pub(in crate::afxdp) struct ConnectedRouteV6 {
     pub(in crate::afxdp) prefix: PrefixV6,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
-    /// #2388: canonical routing-table name. See `ConnectedRouteV4::table`.
+    /// #2388: canonical routing-table name this connected route belongs to.
     pub(in crate::afxdp) table: String,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::afxdp) struct LeakRuleV4 {
+    pub(in crate::afxdp) prefix: PrefixV4,
+    pub(in crate::afxdp) next_table: String,
+    /// #9955: lower kernel ip-rule priorities are evaluated first.
+    pub(in crate::afxdp) rule_priority: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::afxdp) struct LeakRuleV6 {
+    pub(in crate::afxdp) prefix: PrefixV6,
+    pub(in crate::afxdp) next_table: String,
+    /// #9955: lower kernel ip-rule priorities are evaluated first.
+    pub(in crate::afxdp) rule_priority: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -935,6 +957,9 @@ pub(in crate::afxdp) struct RouteEntryV4 {
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
+    /// #9955: kernel ip-rule priority for a next-table leak. Zero for
+    /// ordinary routes and legacy snapshots.
+    pub(in crate::afxdp) rule_priority: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -946,6 +971,9 @@ pub(in crate::afxdp) struct RouteEntryV6 {
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
+    /// #9955: kernel ip-rule priority for a next-table leak. Zero for
+    /// ordinary routes and legacy snapshots.
+    pub(in crate::afxdp) rule_priority: u32,
 }
 
 impl RouteEntryV4 {
@@ -1005,6 +1033,7 @@ impl RouteEntryV4 {
             discard,
             next_table,
             preference,
+            rule_priority: 0,
         }
     }
 }
@@ -1030,6 +1059,7 @@ impl RouteEntryV6 {
             discard,
             next_table,
             preference,
+            rule_priority: 0,
         }
     }
 }

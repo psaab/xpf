@@ -80,6 +80,23 @@ pub(in crate::afxdp) fn canonical_route_table(table: &str, is_ipv6: bool) -> Cow
     }
     Cow::Borrowed(table)
 }
+/// #9955: synthetic leak snapshots from config statics may carry a bare
+/// routing-instance name (the Go config builder preserves that existing
+/// representation), while `routes_v[46]` is keyed by family-qualified table
+/// names. Canonicalize those targets once during FIB construction; live
+/// ip-rule snapshots already carry the qualified spelling.
+pub(in crate::afxdp) fn canonical_next_table(table: &str, is_ipv6: bool) -> Cow<'_, str> {
+    if table == DEFAULT_V4_TABLE || table == DEFAULT_V6_TABLE || table.ends_with(".inet.0") || table.ends_with(".inet6.0") {
+        return canonical_route_table(table, is_ipv6);
+    }
+    if table.is_empty() {
+        return Cow::Borrowed(table);
+    }
+    Cow::Owned(format!(
+        "{table}.{}",
+        if is_ipv6 { "inet6.0" } else { "inet.0" }
+    ))
+}
 
 pub(in crate::afxdp) fn parse_packet_destination(
     area: &MmapArea,
@@ -238,76 +255,6 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
             let table = table
                 .map(|table| canonical_route_table(table, false))
                 .unwrap_or(Cow::Borrowed(DEFAULT_V4_TABLE));
-            if state.local_v4.contains(&ip) {
-                // #3151: local-delivery (to-self) attribution is table-scoped,
-                // exactly like the route-path connected scan (#2388). When the
-                // same local IP exists in more than one routing-instance, a
-                // to-self packet in VRF A must NOT resolve its
-                // local/egress/tx ifindex to VRF B's connected entry — that
-                // would mis-attribute zone/security-policy and HA RG ownership
-                // (owner_rg_for_flow(egress_ifindex)) across VRFs. Filter the
-                // connected scan by the canonical ingress table; the default
-                // routing-instance (inet.0) case still matches default-table
-                // connected routes.
-                // #3769: the local-delivery DECISION is now table-scoped too,
-                // not just the #3151 ifindex attribution. `local_v4` is a
-                // GLOBAL membership set, so a NAT/DNAT external IP owned in
-                // VRF B (or an interface IP owned only in another
-                // routing-instance) would otherwise short-circuit a VRF-A
-                // packet to LocalDelivery, bypassing the VRF-A FIB +
-                // zone/policy + HA-RG owner check. `local_tables_v4` records,
-                // per local address, the tables that own it (paired with every
-                // `local_v4` insert); deliver locally only when the RESOLVING
-                // table is one of them. NOTE: the membership DECISION cannot
-                // use the connected scan — `ConnectedRouteV4` stores the MASKED
-                // network address, so `prefix.addr() == host` matches only a
-                // /32 (and never a NAT-only IP, which has no connected route).
-                // #3769: an UNSCOPED NAT/DNAT external (`local_nat_any_table_v4`)
-                // is table-agnostic (mirrors `scope_ok`'s empty-instance
-                // wildcard); a named-VRF / interface address must match the
-                // resolving table exactly.
-                let owned_here = state.local_nat_any_table_v4.contains(&ip)
-                    || state
-                        .local_tables_v4
-                        .get(&ip)
-                        .is_some_and(|tables| tables.contains(table.as_ref()));
-                if !owned_here {
-                    // Owned in a DIFFERENT table only (cross-VRF) — fall
-                    // through to the VRF-A route lookup instead of leaking to
-                    // LocalDelivery.
-                } else {
-                    // #3151: ifindex attribution stays via the table-scoped
-                    // connected scan (the /32-HA case). A NAT-only external IP
-                    // or a non-/32 interface host IP has no exact connected
-                    // match → ifindex 0 (unchanged pre-#3769 behaviour), now
-                    // reached only when the table genuinely owns the address.
-                    let local_ifindex = state
-                        .connected_v4
-                        .iter()
-                        .find(|entry| entry.table == table && entry.prefix.addr() == ip)
-                        .map(|entry| entry.ifindex)
-                        .unwrap_or(0);
-                    if local_ifindex == 0 {
-                        // #3769 L5: table-owned local target with no interface
-                        // ifindex (NAT-only, or a non-/32 interface IP whose
-                        // ingress-interface path was bypassed). Gated on table
-                        // ownership; counted for diagnostics.
-                        LOCAL_DELIVERY_IFINDEX0
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    return ForwardingResolution {
-                        disposition: ForwardingDisposition::LocalDelivery,
-                        local_ifindex,
-                        egress_ifindex: local_ifindex,
-                        tx_ifindex: local_ifindex,
-                        tunnel_endpoint_id: 0,
-                        next_hop: None,
-                        neighbor_mac: None,
-                        src_mac: None,
-                        tx_vlan_id: 0,
-                    };
-                }
-            }
             lookup_forwarding_resolution_v4(
                 state,
                 dynamic_neighbors,
@@ -322,53 +269,6 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
             let table = table
                 .map(|table| canonical_route_table(table, true))
                 .unwrap_or(Cow::Borrowed(DEFAULT_V6_TABLE));
-            if state.local_v6.contains(&ip) {
-                // #3151: table-scoped local-delivery attribution (see the v4
-                // branch above and the #2388 route-path connected scan).
-                // #3769: table-scoped local-delivery DECISION (see the v4
-                // branch). A NAT/DNAT external IP owned in another VRF, or an
-                // interface IP owned only in another routing-instance, must not
-                // short-circuit a VRF-A packet to LocalDelivery. `local_v6`
-                // membership alone is global; gate on `local_tables_v6` (plus
-                // the unscoped-wildcard `local_nat_any_table_v6`, see the v4
-                // branch).
-                let owned_here = state.local_nat_any_table_v6.contains(&ip)
-                    || state
-                        .local_tables_v6
-                        .get(&ip)
-                        .is_some_and(|tables| tables.contains(table.as_ref()));
-                if !owned_here {
-                    // Owned in a DIFFERENT table only (cross-VRF) — fall
-                    // through to the route lookup.
-                } else {
-                    // #3151: ifindex attribution via the table-scoped connected
-                    // scan (matches a /128 host; a NAT-only or non-/128 IP →
-                    // ifindex 0, now reached only when this table owns the IP).
-                    let local_ifindex = state
-                        .connected_v6
-                        .iter()
-                        .find(|entry| entry.table == table && entry.prefix.addr() == ip)
-                        .map(|entry| entry.ifindex)
-                        .unwrap_or(0);
-                    if local_ifindex == 0 {
-                        // #3769 L5: table-owned local target, no interface
-                        // ifindex; gated on table ownership, counted.
-                        LOCAL_DELIVERY_IFINDEX0
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    return ForwardingResolution {
-                        disposition: ForwardingDisposition::LocalDelivery,
-                        local_ifindex,
-                        egress_ifindex: local_ifindex,
-                        tx_ifindex: local_ifindex,
-                        tunnel_endpoint_id: 0,
-                        next_hop: None,
-                        neighbor_mac: None,
-                        src_mac: None,
-                        tx_vlan_id: 0,
-                    };
-                }
-            }
             lookup_forwarding_resolution_v6(
                 state,
                 dynamic_neighbors,
@@ -391,39 +291,104 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v4(
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingResolution {
-    // #3768 (M6): each top-level resolution starts a fresh visited-table
-    // chain for A->B->A next-table cycle detection. The tunnel-underlay
-    // sub-resolution (resolve_tunnel_outer) also enters through this public
-    // wrapper, so it correctly starts its own independent chain.
-    // #7204 (A1-b7-F5), the visited half: MEASURED AND DELIBERATELY LEFT.
-    //
-    // #7204 proposes a fixed `[TableId; MAX_NEXT_TABLE_DEPTH]` stack here. It is
-    // not worth it, for the reason that decided the ECMP fanout in #8083: do not
-    // pay the worst case on every call to remove a cost the common path never
-    // incurs.
-    //
-    //   * `Vec::new()` does not allocate. A resolution that never traverses a
-    //     next-table -- the overwhelming majority -- pays nothing here.
-    //   * The clones happen only on an actual next-table hop, and
-    //     MAX_NEXT_TABLE_DEPTH bounds them at 8: bounded work on a configured,
-    //     non-default feature path.
-    //   * An inline `[_; 8]` stack would cost ~192 bytes on EVERY resolution,
-    //     including all the ones that never push.
-    //
-    // The allocation this item is really about was in `canonical_route_table`,
-    // which copied its own argument on every same-family lookup to satisfy a
-    // `'static` return. That one is fixed, and it was on the common path.
-    let mut visited: Vec<String> = Vec::new();
+    // #9955: this wrapper enters the two-stage resolver with the rule stage
+    // enabled. Leak-selected targets call the same table resolver with that
+    // stage disabled, matching kernel ip-rule semantics.
     lookup_forwarding_resolution_v4_inner(
         state,
         dynamic_neighbors,
         ip,
         table,
         depth,
+        true,
         allow_tunnels,
         ecmp_flow_hash,
-        &mut visited,
     )
+}
+
+#[inline]
+fn local_v4_owned_by_table(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> bool {
+    state.local_v4.contains(&ip)
+        && (state.local_nat_any_table_v4.contains(&ip)
+            || state
+                .local_tables_v4
+                .get(&ip)
+                .is_some_and(|tables| tables.contains(table)))
+}
+
+#[inline]
+fn table_has_v4_route(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> bool {
+    state.routes_v4.get(table).is_some_and(|routes| {
+        routes
+            .iter()
+            .any(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
+    }) || state
+        .connected_v4
+        .iter()
+        .any(|entry| entry.table == table && entry.prefix.contains(ip))
+        || local_v4_owned_by_table(state, ip, table)
+}
+
+#[inline]
+fn local_delivery_resolution_v4(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+) -> Option<ForwardingResolution> {
+    if !local_v4_owned_by_table(state, ip, table) {
+        return None;
+    }
+    let local_ifindex = state
+        .connected_v4
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.addr() == ip)
+        .map(|entry| entry.ifindex)
+        .unwrap_or(0);
+    if local_ifindex == 0 {
+        LOCAL_DELIVERY_IFINDEX0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    Some(ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex,
+        egress_ifindex: local_ifindex,
+        tx_ifindex: local_ifindex,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    })
+}
+
+#[inline]
+fn local_delivery_resolution_v6(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+) -> Option<ForwardingResolution> {
+    if !local_v6_owned_by_table(state, ip, table) {
+        return None;
+    }
+    let local_ifindex = state
+        .connected_v6
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.addr() == ip)
+        .map(|entry| entry.ifindex)
+        .unwrap_or(0);
+    if local_ifindex == 0 {
+        LOCAL_DELIVERY_IFINDEX0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    Some(ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex,
+        egress_ifindex: local_ifindex,
+        tx_ifindex: local_ifindex,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    })
 }
 
 fn lookup_forwarding_resolution_v4_inner(
@@ -432,10 +397,16 @@ fn lookup_forwarding_resolution_v4_inner(
     ip: Ipv4Addr,
     table: &str,
     depth: usize,
+    evaluate_leaks: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
-    visited: &mut Vec<String>,
 ) -> ForwardingResolution {
+    // Target-table lookups must retain the local/NAT decision that the outer
+    // entry point makes for the source table. This is also before the depth
+    // guard, matching the existing outer local-delivery precedence.
+    if let Some(resolution) = local_delivery_resolution_v4(state, ip, table) {
+        return resolution;
+    }
     if depth >= MAX_NEXT_TABLE_DEPTH {
         return ForwardingResolution {
             disposition: ForwardingDisposition::NextTableUnsupported,
@@ -449,10 +420,40 @@ fn lookup_forwarding_resolution_v4_inner(
             tx_vlan_id: 0,
         };
     }
+    if evaluate_leaks {
+        // #9955: stage one is the kernel's priority-ordered ip-rule walk. A
+        // matching leak whose target table has no route is a miss, not a
+        // terminal NoRoute; continue to the next leak and then to this
+        // table's LPM stage. The target call disables this stage: an ip-rule
+        // action performs LPM in its selected table and does not restart the
+        // rule list.
+        if let Some(leaks) = state.leak_rules_v4.get(table) {
+            for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
+                let next_table_name = canonical_next_table(&leak.next_table, false);
+                if !table_has_v4_route(state, ip, next_table_name.as_ref()) {
+                    continue;
+                }
+                return lookup_forwarding_resolution_v4_inner(
+                    state,
+                    dynamic_neighbors,
+                    ip,
+                    next_table_name.as_ref(),
+                    depth + 1,
+                    false,
+                    allow_tunnels,
+                    ecmp_flow_hash,
+                );
+            }
+        }
+    }
     let static_match = state
         .routes_v4
         .get(table)
-        .and_then(|routes| routes.iter().find(|entry| entry.prefix.contains(ip)));
+        .and_then(|routes| {
+            routes
+                .iter()
+                .find(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
+        });
     // #2388: connected routes are table-scoped — only consider a connected
     // prefix that belongs to the table being resolved, so a per-VRF /
     // next-table lookup never matches another routing-instance's connected
@@ -512,46 +513,10 @@ fn lookup_forwarding_resolution_v4_inner(
                     tx_vlan_id: 0,
                 };
             }
-            if !route.next_table.is_empty() {
-                // #3768 (M5): canonicalize the recursive next-table name for
-                // THIS address family before loop detection and recursion.
-                // routes_v4 is keyed by canonical_route_table(table, false),
-                // so a v4 next-table string is already canonical here; the
-                // canonicalization is defense-in-depth (a stale/mis-derived
-                // "<inst>.inet6.0" on the v4 side would otherwise miss). The
-                // symmetric v6 site is where this actually rewrites (see the
-                // Go #3768 H6 fix + the v6 lookup below).
-                let next_table_name = canonical_route_table(&route.next_table, false);
-                // #3768 (M6): reject a next-table that revisits the current
-                // table (direct self-loop) OR any table already on this
-                // resolution's chain (A->B->A cross-table cycle). Without the
-                // visited set an A->B->A cycle burned to MAX_NEXT_TABLE_DEPTH
-                // on every packet and masked the config defect.
-                if next_table_name == table || visited.iter().any(|t| t == &next_table_name) {
-                    return ForwardingResolution {
-                        disposition: ForwardingDisposition::NextTableUnsupported,
-                        local_ifindex: 0,
-                        egress_ifindex: 0,
-                        tx_ifindex: 0,
-                        tunnel_endpoint_id: 0,
-                        next_hop: Some(IpAddr::V4(ip)),
-                        neighbor_mac: None,
-                        src_mac: None,
-                        tx_vlan_id: 0,
-                    };
-                }
-                visited.push(table.to_string());
-                return lookup_forwarding_resolution_v4_inner(
-                    state,
-                    dynamic_neighbors,
-                    ip,
-                    &next_table_name,
-                    depth + 1,
-                    allow_tunnels,
-                    ecmp_flow_hash,
-                    visited,
-                );
-            }
+            // #9955: next-table entries are removed from the table-local FIB
+            // during build and are handled by the priority-ordered rule stage
+            // above. Keeping this branch absent is what prevents a target
+            // table miss from being selected again by the source-table LPM.
             // #2389/#2734: select one equal-cost next-hop, skipping a dead
             // one. Spread by the per-flow 5-tuple hash when supplied,
             // else fall back to the per-destination hash.
@@ -643,19 +608,39 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingResolution {
-    // #3768 (M6): fresh visited-table chain per top-level resolution (see
-    // the v4 wrapper).
-    let mut visited: Vec<String> = Vec::new();
     lookup_forwarding_resolution_v6_inner(
         state,
         dynamic_neighbors,
         ip,
         table,
         depth,
+        true,
         allow_tunnels,
         ecmp_flow_hash,
-        &mut visited,
     )
+}
+
+#[inline]
+fn local_v6_owned_by_table(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> bool {
+    state.local_v6.contains(&ip)
+        && (state.local_nat_any_table_v6.contains(&ip)
+            || state
+                .local_tables_v6
+                .get(&ip)
+                .is_some_and(|tables| tables.contains(table)))
+}
+
+#[inline]
+fn table_has_v6_route(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> bool {
+    state.routes_v6.get(table).is_some_and(|routes| {
+        routes
+            .iter()
+            .any(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
+    }) || state
+        .connected_v6
+        .iter()
+        .any(|entry| entry.table == table && entry.prefix.contains(ip))
+        || local_v6_owned_by_table(state, ip, table)
 }
 
 fn lookup_forwarding_resolution_v6_inner(
@@ -664,10 +649,13 @@ fn lookup_forwarding_resolution_v6_inner(
     ip: Ipv6Addr,
     table: &str,
     depth: usize,
+    evaluate_leaks: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
-    visited: &mut Vec<String>,
 ) -> ForwardingResolution {
+    if let Some(resolution) = local_delivery_resolution_v6(state, ip, table) {
+        return resolution;
+    }
     if depth >= MAX_NEXT_TABLE_DEPTH {
         return ForwardingResolution {
             disposition: ForwardingDisposition::NextTableUnsupported,
@@ -681,10 +669,37 @@ fn lookup_forwarding_resolution_v6_inner(
             tx_vlan_id: 0,
         };
     }
+    if evaluate_leaks {
+        // #9955: perform the rule stage once. The target lookup disables
+        // `evaluate_leaks`, so a target-table miss resumes this same rule
+        // list rather than restarting it from the selected table.
+        if let Some(leaks) = state.leak_rules_v6.get(table) {
+            for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
+                let next_table_name = canonical_next_table(&leak.next_table, true);
+                if !table_has_v6_route(state, ip, next_table_name.as_ref()) {
+                    continue;
+                }
+                return lookup_forwarding_resolution_v6_inner(
+                    state,
+                    dynamic_neighbors,
+                    ip,
+                    next_table_name.as_ref(),
+                    depth + 1,
+                    false,
+                    allow_tunnels,
+                    ecmp_flow_hash,
+                );
+            }
+        }
+    }
     let static_match = state
         .routes_v6
         .get(table)
-        .and_then(|routes| routes.iter().find(|entry| entry.prefix.contains(ip)));
+        .and_then(|routes| {
+            routes
+                .iter()
+                .find(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
+        });
     // #2388: connected routes are table-scoped (see the v4 lookup).
     let connected_match = state
         .connected_v6
@@ -740,42 +755,10 @@ fn lookup_forwarding_resolution_v6_inner(
                     tx_vlan_id: 0,
                 };
             }
-            if !route.next_table.is_empty() {
-                // #3768 (M5): canonicalize the recursive next-table name for
-                // the v6 family before loop detection + recursion. routes_v6
-                // is keyed by canonical_route_table(table, true) =
-                // "<inst>.inet6.0"; canonicalizing here rewrites a
-                // "<inst>.inet.0" next-table string (e.g. a pre-#3768-H6 Go
-                // snapshot, or a next_table authored in v4 form) onto the v6
-                // table so the lookup hits instead of blackholing.
-                let next_table_name = canonical_route_table(&route.next_table, true);
-                // #3768 (M6): self-loop + A->B->A cross-table cycle guard
-                // (see the v4 site).
-                if next_table_name == table || visited.iter().any(|t| t == &next_table_name) {
-                    return ForwardingResolution {
-                        disposition: ForwardingDisposition::NextTableUnsupported,
-                        local_ifindex: 0,
-                        egress_ifindex: 0,
-                        tx_ifindex: 0,
-                        tunnel_endpoint_id: 0,
-                        next_hop: Some(IpAddr::V6(ip)),
-                        neighbor_mac: None,
-                        src_mac: None,
-                        tx_vlan_id: 0,
-                    };
-                }
-                visited.push(table.to_string());
-                return lookup_forwarding_resolution_v6_inner(
-                    state,
-                    dynamic_neighbors,
-                    ip,
-                    &next_table_name,
-                    depth + 1,
-                    allow_tunnels,
-                    ecmp_flow_hash,
-                    visited,
-                );
-            }
+            // #9955: next-table entries are handled by the priority-ordered
+            // rule stage before this table-local LPM; they are not ordinary
+            // routes and cannot turn a target-table miss into a second
+            // recursive lookup.
             // #2389/#2734: select one equal-cost next-hop, skipping a dead
             // one. Spread by the per-flow 5-tuple hash when supplied,
             // else fall back to the per-destination hash.

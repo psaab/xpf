@@ -52,6 +52,7 @@ fn instance_names_with_presence(state: &ForwardingState) -> (Vec<String>, Vec<St
             .routes_v4
             .keys()
             .map(String::as_str)
+            .chain(state.leak_rules_v4.keys().map(String::as_str))
             .chain(state.connected_v4.iter().map(|entry| entry.table.as_str()))
             .chain(
                 state
@@ -65,6 +66,7 @@ fn instance_names_with_presence(state: &ForwardingState) -> (Vec<String>, Vec<St
             .routes_v6
             .keys()
             .map(String::as_str)
+            .chain(state.leak_rules_v6.keys().map(String::as_str))
             .chain(state.connected_v6.iter().map(|entry| entry.table.as_str()))
             .chain(
                 state

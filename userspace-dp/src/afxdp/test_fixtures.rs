@@ -154,6 +154,7 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
             RouteSnapshot {
                 table: "inet6.0".to_string(),
@@ -163,6 +164,7 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
         ],
         neighbors: if include_neighbor {
@@ -285,6 +287,7 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
             RouteSnapshot {
                 table: "sfmix.inet.0".to_string(),
@@ -294,6 +297,7 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
         ],
         neighbors: if include_neighbor {
@@ -406,6 +410,7 @@ pub(super) fn wg_outer_mtu_snapshot() -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 0,
+            rule_priority: 0,
         }],
         ..Default::default()
     })
@@ -451,6 +456,7 @@ pub(super) fn wg_two_peer_dnat_snapshot() -> ConfigSnapshot {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     // Mirror peer B in the endpoint hydration so `endpoint.wg_peers` matches the
     // live two-peer engine the test inserts (the dispatch path selects via the
@@ -586,6 +592,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: "blue.inet.0".to_string(),
                 preference: 0,
+                rule_priority: 0,
             },
             RouteSnapshot {
                 table: "blue.inet.0".to_string(),
@@ -595,6 +602,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
             RouteSnapshot {
                 table: "inet6.0".to_string(),
@@ -604,6 +612,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: "blue.inet6.0".to_string(),
                 preference: 0,
+                rule_priority: 0,
             },
             RouteSnapshot {
                 table: "blue.inet6.0".to_string(),
@@ -613,6 +622,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
         ],
         neighbors: if include_neighbor {
@@ -655,6 +665,7 @@ pub(super) fn forwarding_snapshot_with_next_table_loop() -> ConfigSnapshot {
             discard: false,
             next_table: "inet.0".to_string(),
             preference: 0,
+            rule_priority: 0,
         }],
         ..Default::default()
     })
@@ -741,6 +752,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
             RouteSnapshot {
                 table: "inet6.0".to_string(),
@@ -750,6 +762,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
+                rule_priority: 0,
             },
         ],
         source_nat_rules: vec![
@@ -993,6 +1006,7 @@ pub(super) fn static_nat_snapshot() -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 0,
+            rule_priority: 0,
         }],
         static_nat_rules: vec![StaticNATRuleSnapshot {
             source_addresses: Vec::new(),
@@ -1193,6 +1207,7 @@ fn tunnel_routes_6722() -> Vec<RouteSnapshot> {
             discard: false,
             next_table: String::new(),
             preference: 5,
+            rule_priority: 0,
         })
         .collect()
 }

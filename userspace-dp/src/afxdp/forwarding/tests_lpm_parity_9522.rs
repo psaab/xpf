@@ -288,9 +288,8 @@ fn discard_never_falls_back_to_ancestor_9522() {
     assert_eq!(r.egress_ifindex, 0);
 }
 
-/// LPM-novel angle only: a LONGER direct route beats a next-table route in the
-/// same table. (Recursion/self-loop/cycle terminals already covered at
-/// `tests.rs:2717,3071,3090,3123` — cited, not duplicated.)
+/// A target-table miss lets a more-specific ordinary main-table route win:
+/// stage 1 misses the next-table rule, then stage 2 performs ordinary LPM.
 #[test]
 fn next_table_loses_longest_match_9522() {
     let mut snap = base_snapshot();
@@ -310,12 +309,10 @@ fn next_table_loses_longest_match_9522() {
     );
 }
 
-/// Unresolvable recursion terminates as `NextTableUnsupported` — and, per the
-/// review constraint, this cell claims terminal disposition ONLY (a self-loop
-/// and depth exhaustion produce the same asserted pair, so no
-/// early-cycle-detection claim is made).
+/// An unresolvable next-table target is a rule miss, not a synthetic recursion
+/// terminal. The source table's ordinary LPM remains available.
 #[test]
-fn next_table_unresolvable_chain_is_unsupported_9522() {
+fn next_table_unresolvable_chain_is_noroute_9522() {
     let mut snap = base_snapshot();
     snap.routes = vec![crate::RouteSnapshot {
         next_table: "inet.0".into(),
@@ -325,8 +322,8 @@ fn next_table_unresolvable_chain_is_unsupported_9522() {
     let r = resolve_v4(&state, Ipv4Addr::new(10, 5, 1, 1));
     assert_eq!(
         r.disposition,
-        ForwardingDisposition::NextTableUnsupported,
-        "a next-table chain that cannot resolve must terminate, not recurse forever"
+        ForwardingDisposition::NoRoute,
+        "a rule target with no ordinary route must fall through as a miss"
     );
 }
 

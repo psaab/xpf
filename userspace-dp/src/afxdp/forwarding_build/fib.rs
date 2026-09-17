@@ -70,7 +70,7 @@ pub(super) fn populate_routes(
             // its egress ifindex ONLY from a connected prefix in its OWN
             // table (mirrors the #2388 lookup-site connected filter, but at
             // BUILD time so the correct ifindex is baked into RouteEntryV4).
-            let table = canonical_route_table(&route.table, false);
+            let table = canonical_route_table(&route.table, false).into_owned();
             let next_hops = resolve_route_next_hops_v4(
                 route,
                 &iface_ctx.name_to_ifindex,
@@ -78,17 +78,31 @@ pub(super) fn populate_routes(
                 state,
                 &table,
             );
-            state
-                .routes_v4
-                .entry(table.into_owned())
-                .or_default()
-                .push(RouteEntryV4 {
-                    prefix: PrefixV4::from_net(prefix),
-                    next_hops,
-                    discard: route.discard,
-                    next_table: route.next_table.clone(),
-                    preference: route.preference,
-                });
+            let prefix = PrefixV4::from_net(prefix);
+            if !route.next_table.is_empty() {
+                state
+                    .leak_rules_v4
+                    .entry(table)
+                    .or_default()
+                    .push(LeakRuleV4 {
+                        prefix,
+                        next_table: canonical_next_table(&route.next_table, false).into_owned(),
+                        rule_priority: route.rule_priority,
+                    });
+            } else {
+                state
+                    .routes_v4
+                    .entry(table)
+                    .or_default()
+                    .push(RouteEntryV4 {
+                        prefix,
+                        next_hops,
+                        discard: route.discard,
+                        next_table: String::new(),
+                        preference: route.preference,
+                        rule_priority: route.rule_priority,
+                    });
+            }
             continue;
         }
         if let Ok(prefix) = route.destination.parse::<Ipv6Net>() {
@@ -104,7 +118,7 @@ pub(super) fn populate_routes(
             // #4446: canonical install table computed before next-hop
             // resolution (see the v4 arm) so the connected-prefix inference
             // is scoped to the route's own table.
-            let table = canonical_route_table(&route.table, true);
+            let table = canonical_route_table(&route.table, true).into_owned();
             let next_hops = resolve_route_next_hops_v6(
                 route,
                 &iface_ctx.name_to_ifindex,
@@ -112,17 +126,31 @@ pub(super) fn populate_routes(
                 state,
                 &table,
             );
-            state
-                .routes_v6
-                .entry(table.into_owned())
-                .or_default()
-                .push(RouteEntryV6 {
-                    prefix: PrefixV6::from_net(prefix),
-                    next_hops,
-                    discard: route.discard,
-                    next_table: route.next_table.clone(),
-                    preference: route.preference,
-                });
+            let prefix = PrefixV6::from_net(prefix);
+            if !route.next_table.is_empty() {
+                state
+                    .leak_rules_v6
+                    .entry(table)
+                    .or_default()
+                    .push(LeakRuleV6 {
+                        prefix,
+                        next_table: canonical_next_table(&route.next_table, true).into_owned(),
+                        rule_priority: route.rule_priority,
+                    });
+            } else {
+                state
+                    .routes_v6
+                    .entry(table)
+                    .or_default()
+                    .push(RouteEntryV6 {
+                        prefix,
+                        next_hops,
+                        discard: route.discard,
+                        next_table: String::new(),
+                        preference: route.preference,
+                        rule_priority: route.rule_priority,
+                    });
+            }
             continue;
         }
         // #6568 (member 1): the destination parses as NEITHER family. Before
@@ -159,12 +187,12 @@ fn route_family_mismatch(family: &str, is_ipv6: bool) -> bool {
 }
 
 pub(super) fn sort_routes(state: &mut ForwardingState) {
-    // #2390: order each table by descending prefix length (longest-match
-    // first), then ASCENDING preference (lower = more preferred per Junos),
-    // so `routes.iter().find(prefix.contains)` returns the most-specific
-    // and, among same-prefix routes, the operator-preferred one — NOT the
-    // insertion-order first. `sort_by` is stable, so same-prefix /
-    // same-preference routes keep their relative (insertion) order.
+    // #2390: order each ordinary table by descending prefix length (longest-
+    // match first), then ASCENDING preference (lower = more preferred per
+    // Junos), so `routes.iter().find(prefix.contains)` returns the most-
+    // specific and, among same-prefix routes, the operator-preferred one.
+    // `sort_by` is stable, so same-prefix / same-preference routes keep their
+    // relative (insertion) order.
     for routes in state.routes_v4.values_mut() {
         routes.sort_by(|a, b| {
             b.prefix
@@ -180,6 +208,14 @@ pub(super) fn sort_routes(state: &mut ForwardingState) {
                 .cmp(&a.prefix.prefix_len())
                 .then(a.preference.cmp(&b.preference))
         });
+    }
+    // #9955: leaks are ip rules, not FIB routes. Their priority is the only
+    // ordering key in stage one; prefix length is deliberately ignored.
+    for leaks in state.leak_rules_v4.values_mut() {
+        leaks.sort_by_key(|leak| leak.rule_priority);
+    }
+    for leaks in state.leak_rules_v6.values_mut() {
+        leaks.sort_by_key(|leak| leak.rule_priority);
     }
 }
 

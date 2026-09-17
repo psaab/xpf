@@ -1,0 +1,1130 @@
+[
+  {
+    "name": "config_order_inet6_blue_then_red_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "blue",
+        "rule_priority": 100
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "red",
+        "rule_priority": 101
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "config_order_inet_red_then_blue_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "red",
+        "rule_priority": 100
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "blue",
+        "rule_priority": 101
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "empty_target_fallback_inet6_9955",
+    "routes": [
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:52::1@ge-0/0/14.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 14
+  },
+  {
+    "name": "empty_target_fallback_inet_9955",
+    "routes": [
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.52.1@ge-0/0/14.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 14
+  },
+  {
+    "name": "leak_versus_ordinary_inet6_9955",
+    "routes": [
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/64",
+        "next_hops": [
+          "2001:db8:52::1@ge-0/0/14.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "leak_versus_ordinary_inet_9955",
+    "routes": [
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "next_hops": [
+          "172.16.52.1@ge-0/0/14.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "next_rule_fallback_inet6_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 200
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "next_rule_fallback_inet_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 200
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet6_32_48_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet6_32_48_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet6_32_64_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/64",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet6_32_64_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/64",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet6_32_96_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/96",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet6_32_96_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/96",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet6_40_80_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/80",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/40",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet6_40_80_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/80",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/40",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet6_48_64_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/64",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet6_48_64_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:51::1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/64",
+        "discard": false,
+        "next_table": "blue.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet_12_28_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/12",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/28",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet_12_28_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/12",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/28",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet_16_24_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.0.0/16",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet_16_24_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.0.0/16",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet_8_16_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.0.0/16",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet_8_16_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.0.0/16",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet_8_24_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet_8_24_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "overlap_inet_8_32_next-table-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.5/32",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "overlap_inet_8_32_rib-group-first_9955",
+    "routes": [
+      {
+        "table": "blue.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.51.1@ge-0/0/13.50"
+        ],
+        "discard": false
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 30500
+      },
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.5/32",
+        "discard": false,
+        "next_table": "blue.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 13
+  },
+  {
+    "name": "single_leak_inet6_9955",
+    "routes": [
+      {
+        "table": "inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8:1::/48",
+        "discard": false,
+        "next_table": "red.inet6.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet6.0",
+        "family": "inet6",
+        "destination": "2001:db8::/32",
+        "next_hops": [
+          "2001:db8:50::1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "2001:db8:1::5",
+    "want_ifindex": 12
+  },
+  {
+    "name": "single_leak_inet_9955",
+    "routes": [
+      {
+        "table": "inet.0",
+        "family": "inet",
+        "destination": "10.1.2.0/24",
+        "discard": false,
+        "next_table": "red.inet.0",
+        "rule_priority": 150
+      },
+      {
+        "table": "red.inet.0",
+        "family": "inet",
+        "destination": "10.0.0.0/8",
+        "next_hops": [
+          "172.16.50.1@ge-0/0/12.50"
+        ],
+        "discard": false
+      }
+    ],
+    "destination": "10.1.2.5",
+    "want_ifindex": 12
+  }
+]

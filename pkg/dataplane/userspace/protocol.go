@@ -302,12 +302,12 @@ const (
 	// `inet.0` — and that IS the defect the fields close. The session-sync
 	// messages are not snapshot structs, so the #8892 digest did not move.
 	//
-	// v22 -> v23 BUMPED (issue 9553), and this one DID move the digest above:
-	// the DHCPv6 relay configuration now crosses the ConfigSnapshot (real,
-	// transmitted rows). An old helper ignores the rows and never configures
-	// the relay — silent missing feature on a mixed pairing — so exact
-	// equality refuses it until both sides upgrade.
-	ProtocolVersion = 23
+	// v23 -> v24 BUMPED (#9955): RouteSnapshot.RulePriority is a real
+	// transmitted field added on top of the v23 DHCPv6 relay contract (#9553).
+	// An old helper silently retains the one-list prefix-length leak model and
+	// cannot fall through a target-table miss. Exact equality refuses the mixed
+	// pairing, and the #8892 shape digest moves with this new field.
+	ProtocolVersion = 24
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
