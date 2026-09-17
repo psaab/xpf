@@ -94,11 +94,12 @@ func (m *Manager) SetFeedSnapshots(overlay map[string][]string) {
 // duplicate-skip would churn established-flow route caches for
 // nothing (Codex PR #1843 MED).
 //
-// A non-nil schedulerState both updates the manager's cached scheduler
-// view AND rebuilds this publish's Policies / AddressBooks from it in the
-// SAME snapshot (#5328 A6-b2-F4), so the helper never enforces stale
-// schedule bits between overlay publishes; nil keeps the current view and
-// the inherited (last-compiled) policy sections.
+// A non-nil schedulerState stages the desired active-state map and rebuilds
+// this publish's Policies / AddressBooks from it in the SAME snapshot
+// (#5328 A6-b2-F4), so the helper never enforces stale schedule bits between
+// overlay publishes. The applied/show cache advances only after that snapshot
+// is accepted; nil keeps the current desired state and the inherited
+// (last-compiled) policy sections.
 func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (published bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -123,8 +124,10 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 		}
 	}()
 
+	schedulerCopy := copyPolicySchedulerActiveState(schedulerState)
 	if schedulerState != nil {
-		m.policySchedulerActive = copyPolicySchedulerActiveState(schedulerState)
+		m.policySchedulerDesired = schedulerCopy
+		m.policySchedulerDesiredSet = true
 	}
 
 	if cfg == nil {
@@ -212,23 +215,28 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 
 	// #5328 (A6-b2-F4): when the caller supplies a policy-scheduler active-state
 	// map, refresh the policy snapshot's inactive bits from that map in THIS
-	// publish — the doc contract above promised it, and daemon_ipmon.go passes a
-	// live scheduler.ActiveState() here. Before this fix only m.policySchedulerActive
-	// was cached (above) while `next := *m.lastSnapshot` inherited the PRIOR
-	// compiled Policies / AddressBooks verbatim, so the helper enforced stale
-	// schedule bits while this publish reported success — until the dedicated
+	// publish — the doc contract above promised it, and daemon_ipmon.go passes
+	// a live scheduler.ActiveState() here. The desired map is staged above;
+	// m.policySchedulerActive remains the APPLIED/show view until this snapshot
+	// succeeds. Before this fix only m.policySchedulerActive was cached (above)
+	// while `next := *m.lastSnapshot` inherited the PRIOR compiled
+	// Policies / AddressBooks verbatim, so the helper enforced stale schedule
+	// bits while this publish reported success — until the dedicated
 	// UpdatePolicyScheduleState callback next fired. Rebuild exactly as the
-	// scheduler-only republish does, via the shared rebuildScheduledPolicySectionsLocked
-	// (which reuses the cached feed overlay AND re-applies the StableZoneID zone
-	// quarantine's policy scrub so a rebuilt policy never dangles against the
-	// inherited, already-reduced next.Zones — #6480). Placed BEFORE the
-	// duplicate-skip hash below so a scheduler-only bit flip on unchanged routes is
-	// not falsely deduped. A nil schedulerState leaves the inherited policy sections
-	// untouched (the route-apply caller that never carries scheduler state).
+	// scheduler-only republish does, via the shared
+	// rebuildScheduledPolicySectionsLocked (which reuses the cached feed overlay
+	// AND re-applies the StableZoneID zone quarantine's policy scrub so a rebuilt
+	// policy never dangles against the inherited, already-reduced next.Zones —
+	// #6480). Placed BEFORE the duplicate-skip hash below so a scheduler-only
+	// bit flip on unchanged routes is not falsely deduped. A nil schedulerState
+	// leaves the inherited policy sections untouched (the route-apply caller that
+	// never carries scheduler state).
 	if schedulerState != nil {
-		if err := m.rebuildScheduledPolicySectionsLocked(&next, cfg, m.policySchedulerActive); err != nil {
+		if err := m.rebuildScheduledPolicySectionsLocked(&next, cfg, schedulerCopy); err != nil {
 			return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
 		}
+		next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
+		next.schedulerActiveStateSet = true
 	}
 
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
@@ -239,6 +247,11 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
 		slog.Debug("userspace: route overlay publish skipped (content unchanged)")
+		// No wire change was needed; the helper already enforces content
+		// equivalent to next, so commit scheduler metadata as converged.
+		if schedulerState != nil {
+			m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
+		}
 		return false, nil
 	}
 
@@ -252,6 +265,10 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
+	// The helper accepted the overlay snapshot, so commit any scheduler state
+	// it carries to the applied/show cache. Error returns above leave that
+	// cache at the previous enforced state.
+	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "route-overlay")
 	// #9520: commit the generation apply_snapshot carried, which a content-conflict
 	// republish moves past nextGeneration.

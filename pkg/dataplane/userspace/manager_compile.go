@@ -205,23 +205,55 @@ func (m *Manager) policySchedulerActiveStateSnapshot() map[string]bool {
 	return copyPolicySchedulerActiveState(m.policySchedulerActive)
 }
 
+func (m *Manager) policySchedulerDesiredStateSnapshot() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.policySchedulerDesiredSet {
+		// Preserve the historical direct-Compile behavior for callers such as
+		// the CLI that do not have the daemon's pre-apply seeding step: an
+		// already-applied scheduler view remains the build baseline until a
+		// desired state is explicitly staged.
+		return copyPolicySchedulerActiveState(m.policySchedulerActive)
+	}
+	return copyPolicySchedulerActiveState(m.policySchedulerDesired)
+}
+
+// commitPolicySchedulerActiveStateLocked advances the applied/show scheduler
+// view only after the snapshot carrying this state has landed in the helper.
+// Callers hold m.mu. Keeping this separate from the desired/build cache is
+// what prevents a failed publication from making show surfaces claim a state
+// the dataplane never accepted.
+func (m *Manager) commitPolicySchedulerActiveStateLocked(activeState map[string]bool) {
+	m.policySchedulerActive = copyPolicySchedulerActiveState(activeState)
+}
+
+func (m *Manager) commitPolicySchedulerActiveStateFromSnapshotLocked(snap *ConfigSnapshot) {
+	if snap == nil || !snap.schedulerActiveStateSet {
+		return
+	}
+	m.commitPolicySchedulerActiveStateLocked(snap.schedulerActiveState)
+}
+
 // PolicySchedulerActiveState returns a copy of the daemon-maintained
 // per-scheduler active-state map (scheduler name -> currently active).
 // Read-only show surfaces (#3062 CLI/gRPC policy detail) consult it via
 // PolicyInactive to render runtime scheduler-driven policy state without
 // recomputing wall-clock schedule windows. A nil result means no
-// scheduler state has been published yet.
+// scheduler-state snapshot has been applied yet.
 func (m *Manager) PolicySchedulerActiveState() map[string]bool {
 	return m.policySchedulerActiveStateSnapshot()
 }
 
-// SetPolicySchedulerActiveState seeds the active-state map used by the next
-// full snapshot build. The daemon calls this while holding applySem so config
-// commits and scheduler flips cannot publish hybrid policy snapshots.
+// SetPolicySchedulerActiveState stages the active-state map used by the next
+// full snapshot build or partial republish. The daemon calls this while
+// holding applySem so config commits and scheduler flips cannot publish hybrid
+// policy snapshots. It deliberately does not update the applied/show cache:
+// that cache advances only after the helper accepts the resulting snapshot.
 func (m *Manager) SetPolicySchedulerActiveState(activeState map[string]bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.policySchedulerActive = copyPolicySchedulerActiveState(activeState)
+	m.policySchedulerDesired = copyPolicySchedulerActiveState(activeState)
+	m.policySchedulerDesiredSet = true
 }
 
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
@@ -245,7 +277,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, err
 	}
 	ucfg := deriveUserspaceConfig(cfg)
-	activeState := m.policySchedulerActiveStateSnapshot()
+	activeState := m.policySchedulerDesiredStateSnapshot()
 	// #1827: include the cached ip-monitoring route overlay so a full
 	// apply (operator commit) while a policy is FAILED preserves the
 	// injected route instead of reverting traffic to the dead uplink.
@@ -549,6 +581,10 @@ func (m *Manager) applyCompiledSnapshot(
 	if err := m.publishSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh); err != nil {
 		return result, err
 	}
+	// apply_snapshot succeeded, so the scheduler state carried by this full
+	// snapshot is now the state the helper enforces. Keep the applied/show cache
+	// behind every pre-publish failure and advance it only at this boundary.
+	m.commitPolicySchedulerActiveStateFromSnapshotLocked(snap)
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "apply")
 	// #9520: a content-conflict republish moves the snapshot to a fresh generation.
 	m.adoptPublishedGenerationLocked(snap, publishSnap.Generation)
@@ -864,14 +900,15 @@ func (m *Manager) retainPreviousClassifierPlanLocked(publishSnap *ConfigSnapshot
 // quarantine re-application can never drift between them. It mutates next in
 // place and must be called with m.mu held.
 //
-// activeState is the policy-scheduler active-state map to build the inactive
-// bits from (both callers set m.policySchedulerActive to it first, so it equals
-// m.policySchedulerActive). #2049: the cached dynamic-address feed overlay is
-// threaded through so a scheduler-state flip does not drop feed enforcement
-// until the next full apply (m.mu is held, so read m.feedOverlay directly via
-// cloneFeedOverlay rather than feedSnapshotOverlay(), which re-locks m.mu). A
-// build error is returned wrapped; both callers retain the prior snapshot
-// (fail-closed) and surface a retry.
+// activeState is the desired scheduler-state map to build the inactive bits
+// from. It is passed explicitly by both callers and is committed to the
+// applied/show cache only after the resulting snapshot lands successfully.
+// #2049: the cached dynamic-address feed overlay is threaded through so a
+// scheduler-state flip does not drop feed enforcement until the next full apply
+// (m.mu is held, so read m.feedOverlay directly via cloneFeedOverlay rather
+// than feedSnapshotOverlay(), which re-locks m.mu). A build error is returned
+// wrapped; both callers retain the prior snapshot (fail-closed) and surface a
+// retry.
 func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg *config.Config, activeState map[string]bool) error {
 	// #6480 (config-skew fail-open guard): this helper rebuilds next.Policies
 	// from cfg and scrubs them against cfg's StableZoneID quarantine set, but
@@ -942,7 +979,8 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.policySchedulerActive = activeCopy
+	m.policySchedulerDesired = activeCopy
+	m.policySchedulerDesiredSet = true
 	if cfg == nil {
 		if m.lastSnapshot == nil {
 			// #3780: no snapshot ever published — nothing to
@@ -979,6 +1017,8 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
+	next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
+	next.schedulerActiveStateSet = true
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #6480: rebuild the schedule-affected policy + address-book sections
 	// (threading the cached feed overlay, #2049) and re-apply the StableZoneID
@@ -1012,6 +1052,10 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		// retries autonomously on the next scheduler tick.
 		return fmt.Errorf("userspace: publish policy scheduler snapshot: %w", err)
 	}
+	// The helper accepted the snapshot, so its scheduler bits now match the
+	// desired state carried by this snapshot. Commit the applied/show cache only
+	// at this success boundary; every return above leaves it unchanged.
+	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "policy-scheduler")
 	// #9520: commit the generation apply_snapshot carried, which a content-conflict
 	// republish moves past nextGeneration.
