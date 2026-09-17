@@ -3632,19 +3632,19 @@ fn syn_cookie_ack_validation_marks_next_syn_bypass_without_session_creation() {
 }
 
 #[test]
-fn syn_cookie_validated_syn_bypasses_flood_gate_and_passes() {
+fn syn_cookie_validated_syn_charges_flood_gate_and_passes() {
     // #2134: this test used to prove "a SYN-cookie-validated SYN still
     // runs the LATER screen checks" by asserting the session-limit drop
     // fires on the validated tuple. That check moved out of the screen
     // stage (it now enforces at the new-flow decision in
     // poll_descriptor), and the only remaining later stateful checks
     // (port-scan / ip-sweep) key on tuple-uniqueness — which conflicts
-    // with the validated cache, that bypasses the flood gate only for the
-    // validated CLIENT (src_ip, dst_ip, dst_port — #9419). So we prove the
-    // load-bearing property
-    // directly: a cookie-validated SYN bypasses the SYN-flood gate and
-    // traverses the rest of `check_packet_with_zone_id` to a clean Pass,
-    // whereas the identical un-validated SYN is challenged at the gate.
+    // with the validated cache, whose hit now charges the aggregate and
+    // per-destination SYN-flood gate while skipping only the source-scoped
+    // limiter (#9945). So we prove the load-bearing property directly: a
+    // cookie-validated SYN charges the gate, then retains the
+    // `SynCookieBypass` fast-path verdict when no cap trips, whereas the
+    // identical un-validated SYN is challenged at the gate.
     let mut profile = ScreenProfile::default();
     profile.syn_flood_threshold = 1;
     profile.syn_cookie = true;
@@ -3677,11 +3677,12 @@ fn syn_cookie_validated_syn_bypasses_flood_gate_and_passes() {
         SynCookieAckVerdict::Validated
     );
 
-    // The client's next SYN, now cookie-validated, bypasses the SYN-flood
-    // gate and runs to completion: SynCookieBypass (a Pass-equivalent that
-    // records the bypass), NOT another challenge or drop. #9419: the entry
-    // survives the hit (see `syn_cookie_retry_from_new_ephemeral_port_...`),
-    // so the cache still holds it afterwards.
+    // The client's next SYN, now cookie-validated, still charges the
+    // aggregate/per-destination gate while skipping only per-source, then runs
+    // to completion: SynCookieBypass (a Pass-equivalent that records the
+    // bypass), NOT another challenge or drop. #9419: the entry survives the
+    // hit (see `syn_cookie_retry_from_new_ephemeral_port_...`), so the cache
+    // still holds it afterwards.
     assert_eq!(
         state.check_packet_with_zone_id("trust", 7, &syn, 128),
         ScreenVerdict::SynCookieBypass
@@ -4461,12 +4462,11 @@ fn syn_cookie_validated_cache_invalidated_on_profile_change() {
     let mut profiles = FxHashMap::default();
     profiles.insert("trust".to_string(), changed);
     state.update_profiles(profiles);
-
     // The same SYN that produced the validated ACK now arrives. Under the
-    // bug it would be a validated-cache HIT (SynCookieBypass) and skip the
-    // new profile's SYN-flood counter. With the fix it is a MISS, so the
-    // packet is counted as a normal SYN under the new threshold (Pass at
-    // count 1, below the new threshold of 5).
+    // bug it would remain a validated-cache HIT (SynCookieBypass), so the
+    // changed profile would not re-validate the client under its new cookie
+    // generation. With the fix it is a MISS, so the packet is counted as a
+    // normal SYN under the new threshold (Pass at count 1, below 5).
     let syn = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
@@ -4518,8 +4518,8 @@ fn syn_cookie_validated_cache_invalidated_on_disable_reenable() {
     );
     // Within the entry's TTL (insert at 128, 64s TTL → expires 192) so the
     // only reason this is not a HIT is the stale generation. A stale HIT
-    // would return SynCookieBypass and skip the SYN-flood counter; with the
-    // fix it is a MISS, counted as the first SYN under threshold 1 → Pass.
+    // would return SynCookieBypass and bypass generation invalidation; with
+    // the fix it is a MISS, counted as the first SYN under threshold 1 → Pass.
     assert_eq!(
         state.check_packet_with_zone_id("trust", 7, &syn, 150),
         ScreenVerdict::Pass,
@@ -4551,9 +4551,9 @@ fn syn_cookie_validated_cache_hit_within_same_generation() {
     profiles.insert("trust".to_string(), unrelated);
     state.update_profiles(profiles);
 
-    // The matching SYN is a validated-cache HIT → SynCookieBypass (it does
-    // NOT count toward the SYN-flood threshold), proving the cache still
-    // works normally within a generation.
+    // The matching SYN is a validated-cache HIT → SynCookieBypass after it
+    // charges the aggregate and per-destination gate (while skipping only
+    // per-source), proving the cache still works normally within a generation.
     let syn = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
@@ -7759,12 +7759,12 @@ fn syn_cookie_zones_whose_ids_collide_share_neither_cookies_nor_whitelist_9740()
     assert_eq!(
         node.check_packet_with_zone_id("z174", 7, &retry, 128),
         ScreenVerdict::SynCookieBypass,
-        "control: the whitelisted client bypasses the gate in its own zone"
+        "control: the whitelisted client keeps its validated fast-path verdict in its own zone"
     );
     assert_ne!(
         node.check_packet_with_zone_id("z214", 7, &retry, 128),
         ScreenVerdict::SynCookieBypass,
-        "a client whitelisted in z174 must not bypass the SYN-flood gate in z214"
+        "a client whitelisted in z174 must not be treated as validated in z214"
     );
 }
 
@@ -7772,7 +7772,7 @@ fn syn_cookie_zones_whose_ids_collide_share_neither_cookies_nor_whitelist_9740()
 fn syn_cookie_a_removed_and_recreated_zone_does_not_inherit_its_whitelist_9740() {
     // The validated cache outlives a removed zone for up to one cookie epoch, and
     // a re-created zone used to start at generation 1 again, so a client
-    // whitelisted in the old zone bypassed the new zone's gate.
+    // whitelisted in the old zone was treated as validated in the new zone.
     let epoch = RING_FIRST_EPOCH_9173 + 3;
     let mut node = zones_state_9740(&["trust", "dmz"], epoch);
     let ack = ack_for_isn_9173(mint_in_zone_9740(&mut node, "trust"));
@@ -7786,7 +7786,7 @@ fn syn_cookie_a_removed_and_recreated_zone_does_not_inherit_its_whitelist_9740()
     assert_eq!(
         node.check_packet_with_zone_id("trust", 7, &retry, 128),
         ScreenVerdict::SynCookieBypass,
-        "control: the whitelisted client bypasses the gate while its zone exists"
+        "control: the whitelisted client keeps its validated fast-path verdict while the zone exists"
     );
 
     let profiles = |zones: &[&str]| {
@@ -7805,7 +7805,7 @@ fn syn_cookie_a_removed_and_recreated_zone_does_not_inherit_its_whitelist_9740()
     assert_ne!(
         node.check_packet_with_zone_id("trust", 7, &retry, 128),
         ScreenVerdict::SynCookieBypass,
-        "a client whitelisted before its zone was removed must not bypass the re-created zone's gate"
+        "a client whitelisted before its zone was removed must not be treated as validated in the re-created zone"
     );
 }
 
@@ -8271,4 +8271,337 @@ fn syn_cookie_standby_spend_leaves_active_budget_full_9902() {
         state.syn_cookie_active_ack_available("trust"),
         SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC as u64 - 1
     );
+}
+
+// ===== #9945: a validated client must still charge per-dest + aggregates =====
+//
+// A SYN-cookie-validated client used to skip `syn_flood_gate` entirely, so one
+// non-spoofed source that completed a genuine cookie round trip could flood its
+// victim unmetered for the validated-cache lifetime with no per-destination cap
+// and no aggregate accounting. The validated path now charges the per-destination
+// cap + every aggregate (attack/alarm measurement and alarm cadence), leaves any
+// existing cookie-active deadline unchanged, and only skips the per-source
+// limiter — source-scoped, so a client that proved liveness skipping it is
+// defensible — plus the already-solved cookie challenge.
+//
+// Exposure window, STATED not assumed: the validated cache lives one cookie
+// epoch (`SynCookieCodec::EPOCH_SECS`, 64s), 4-way set-associative, capacity 4096
+// (see `syncookie.rs`). Each cell pins the 64s TTL so a future TTL change fails
+// loudly instead of silently widening the unmetered window the fix closes.
+
+/// #9945 helper — install one validated-client entry for (`src`, `dst`,
+/// `dst_port`) WITHOUT disturbing the SYN-flood aggregates: a manual
+/// standby-path mint+validate, not a threshold-crossing challenge (which would
+/// pre-charge the very counters the test measures). Caller must have installed
+/// the master key and pinned the cookie epoch via
+/// `set_syn_cookie_full_epoch_for_test`. `now_secs` is the validation second;
+/// the entry lives `SynCookieCodec::EPOCH_SECS` (64s) after it.
+fn install_validated_9945(
+    state: &mut ScreenState,
+    src: IpAddr,
+    dst: IpAddr,
+    src_port: u16,
+    dst_port: u16,
+    epoch: u64,
+    now_secs: u64,
+) {
+    let syn = tcp_pkt(src, dst, src_port, dst_port, TCP_SYN);
+    let cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        epoch,
+        syn.tcp_mss,
+    );
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_seq = 2;
+    ack.tcp_ack = cookie.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, now_secs * NS, now_secs),
+        SynCookieAckVerdict::Validated,
+        "manual standby mint+validate must install the #9945 validated entry"
+    );
+}
+
+/// #9945: a validated burst charges the per-destination cap and trips it with the
+/// SAME verdict + counter as an unvalidated flood. RED on master: the 4th
+/// validated SYN is still `SynCookieBypass` and `syn_flood_dst_drops` stays 0.
+#[test]
+fn syn_cookie_validated_charges_per_dest_cap_9945() {
+    // Exposure window: one cookie epoch. If this moves, the window the fix
+    // closes moves with it — fail loudly.
+    assert_eq!(
+        SynCookieCodec::EPOCH_SECS,
+        64,
+        "#9945 exposure window: validated-cache TTL must stay one 64s epoch"
+    );
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 100_000; // aggregate never trips here
+    profile.syn_cookie = true;
+    profile.syn_flood_dst_threshold = 3;
+    // Per-source + alarm disabled to isolate the per-destination cap.
+    let mut state = make_state("trust", profile.clone());
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let victim = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+    install_validated_9945(&mut state, client, victim, 49152, 443, 41, 128);
+    assert_eq!(state.syn_cookie_validated_len(), 1);
+    // 3 validated SYNs (new ephemeral ports, same validated client key) are
+    // admitted as bypasses.
+    for i in 0..3u16 {
+        let pkt = tcp_pkt(client, victim, 5000 + i, 443, TCP_SYN);
+        assert_eq!(
+            state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+            ScreenVerdict::SynCookieBypass,
+            "validated SYN {} under the per-dest cap must bypass",
+            i + 1
+        );
+    }
+    // The 4th validated SYN to the same victim trips the per-destination cap.
+    let pkt = tcp_pkt(client, victim, 5003, 443, TCP_SYN);
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::Drop("syn-flood"),
+        "validated burst over per-dest threshold must hard-drop the victim"
+    );
+    assert_eq!(
+        state.syn_flood_dst_drops(),
+        1,
+        "validated per-dest trip must bump the same counter as unvalidated"
+    );
+    assert_eq!(state.syn_flood_src_drops(), 0);
+    // Positive control in the same run: an unvalidated flood to the same victim
+    // trips the same cap with the same counter.
+    let mut control = make_state("trust", profile);
+    control.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    control.set_syn_cookie_full_epoch_for_test(41);
+    for i in 0..3u8 {
+        let pkt = tcp_pkt(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 1, i + 1)),
+            victim,
+            1234,
+            443,
+            TCP_SYN,
+        );
+        assert_eq!(
+            control.check_packet_with_zone_id("trust", 3, &pkt, 128),
+            ScreenVerdict::Pass
+        );
+    }
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 99)),
+        victim,
+        1234,
+        443,
+        TCP_SYN,
+    );
+    assert_eq!(
+        control.check_packet_with_zone_id("trust", 3, &pkt, 128),
+        ScreenVerdict::Drop("syn-flood"),
+        "control: unvalidated flood must still trip the per-dest cap"
+    );
+    assert_eq!(control.syn_flood_dst_drops(), 1);
+}
+
+/// #9945 aggregate attack: validated SYNs count toward the zone aggregate, so a
+/// validated burst pushes a LATER unvalidated SYN into a cookie challenge sooner.
+/// RED on master: the trailing unvalidated SYN still passes (validated counted 0).
+#[test]
+fn syn_cookie_validated_charges_aggregate_attack_9945() {
+    assert_eq!(
+        SynCookieCodec::EPOCH_SECS,
+        64,
+        "#9945 exposure window: validated-cache TTL must stay one 64s epoch"
+    );
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 3; // low attack threshold
+    profile.syn_cookie = true;
+    // Per-dest / per-source / alarm all disabled: only the aggregate can fire.
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let victim = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+    install_validated_9945(&mut state, client, victim, 49152, 443, 41, 128);
+    // Keep a short pre-existing active window so the validated over-attack
+    // path can prove it does not extend the deadline (#9945).
+    state.force_syn_cookie_active_for_test("trust", 150);
+    // 4 validated SYNs: counts 1..=4. The 4th is over attack (4 > 3) yet must
+    // STILL bypass — a validated client never re-solves a challenge — while its
+    // count stays in the aggregate for everyone else.
+    for i in 0..4u16 {
+        let pkt = tcp_pkt(client, victim, 5000 + i, 443, TCP_SYN);
+        assert_eq!(
+            state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+            ScreenVerdict::SynCookieBypass,
+            "validated SYN {} must bypass even when the aggregate is over attack",
+            i + 1
+        );
+    }
+    assert_eq!(
+        state.syn_cookie_active_until_for_test("trust"),
+        150,
+        "validated over-attack charging must not extend the existing cookie window"
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 1);
+    // The next unvalidated SYN (count 5 > 3) must be challenged because the
+    // validated burst counted. On master the validated burst counted 0, so this
+    // is count 1 and wrongly passes.
+    let fresh = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        victim,
+        6000,
+        443,
+        TCP_SYN,
+    );
+    assert!(
+        matches!(
+            state.check_packet_with_zone_id("trust", 7, &fresh, 128),
+            ScreenVerdict::SynCookieChallenge(_)
+        ),
+        "unvalidated SYN after a 4-packet validated burst (attack=3) must be \
+         challenged: the validated burst must count toward the aggregate"
+    );
+}
+
+/// #9945 aggregate alarm: a validated burst in the warning band raises the same
+/// log-only alarm (same cadence, same counter) as an unvalidated one. RED on
+/// master: no alarm ever fires for validated traffic.
+#[test]
+fn syn_cookie_validated_charges_aggregate_alarm_9945() {
+    assert_eq!(
+        SynCookieCodec::EPOCH_SECS,
+        64,
+        "#9945 exposure window: validated-cache TTL must stay one 64s epoch"
+    );
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 100_000; // attack never trips
+    profile.syn_cookie = true;
+    profile.syn_flood_alarm_threshold = 3; // alarm (below attack)
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let victim = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+    install_validated_9945(&mut state, client, victim, 49152, 443, 41, 128);
+    // Counts 1..=3: under alarm (3 > 3 is false). No alarm, all bypass.
+    for i in 0..3u16 {
+        let pkt = tcp_pkt(client, victim, 5000 + i, 443, TCP_SYN);
+        assert_eq!(
+            state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+            ScreenVerdict::SynCookieBypass
+        );
+        assert!(
+            !state.take_syn_alarm_event(),
+            "validated SYN {} under alarm threshold must not alarm",
+            i + 1
+        );
+    }
+    // Count 4: 4 > 3 alarm, < 100k attack → alarm pending, verdict bypass.
+    let pkt = tcp_pkt(client, victim, 5003, 443, TCP_SYN);
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::SynCookieBypass
+    );
+    assert!(
+        state.take_syn_alarm_event(),
+        "validated burst crossing alarm threshold must raise an event"
+    );
+    assert_eq!(state.syn_flood_alarm_events(), 1);
+    // Same second: still over but the ≤1/sec/zone cadence suppresses a second
+    // event — the cadence mutation itself proves the aggregate charged.
+    let pkt = tcp_pkt(client, victim, 5004, 443, TCP_SYN);
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::SynCookieBypass
+    );
+    assert!(
+        !state.take_syn_alarm_event(),
+        "validated alarm must also honour the ≤1/sec/zone cadence"
+    );
+    // Next second: a fresh alarm is allowed.
+    let pkt = tcp_pkt(client, victim, 5005, 443, TCP_SYN);
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 129),
+        ScreenVerdict::SynCookieBypass
+    );
+    assert!(
+        state.take_syn_alarm_event(),
+        "a new second must admit a fresh validated alarm"
+    );
+    assert_eq!(state.syn_flood_alarm_events(), 2);
+}
+
+/// #9945 per-source skip: a validated source that proved liveness still skips the
+/// per-source limiter (defensible: source-scoped), while an unvalidated source
+/// from the SAME address to other destinations still trips it. GREEN both before
+/// and after the fix — it guards against a naive fix that charges per-source too.
+#[test]
+fn syn_cookie_validated_still_skips_per_source_9945() {
+    assert_eq!(
+        SynCookieCodec::EPOCH_SECS,
+        64,
+        "#9945 exposure window: validated-cache TTL must stay one 64s epoch"
+    );
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 100_000; // aggregate never trips
+    profile.syn_cookie = true;
+    profile.syn_flood_src_threshold = 2; // low per-source cap
+    // Per-dest + alarm disabled to isolate per-source.
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let victim = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+    install_validated_9945(&mut state, client, victim, 49152, 443, 41, 128);
+    // 5 validated SYNs from the same source: far over the per-source cap of 2,
+    // yet all bypass — per-source is skipped for a proven source. A fix that
+    // charged per-source would drop the 3rd here.
+    for i in 0..5u16 {
+        let pkt = tcp_pkt(client, victim, 5000 + i, 443, TCP_SYN);
+        assert_eq!(
+            state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+            ScreenVerdict::SynCookieBypass,
+            "validated SYN {} from a proven source must skip per-source",
+            i + 1
+        );
+    }
+    assert_eq!(
+        state.syn_flood_src_drops(),
+        0,
+        "validated traffic must never bump per-source drops"
+    );
+    assert_eq!(state.syn_flood_dst_drops(), 0);
+    // Control in the same run: the SAME source to OTHER destinations is
+    // unvalidated (key binds dst) and still trips per-source — and the count
+    // starts cold, proving the validated burst left the sketch untouched.
+    for i in 0..2u8 {
+        let pkt = tcp_pkt(
+            client,
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21 + i)),
+            6000 + i as u16,
+            443,
+            TCP_SYN,
+        );
+        assert_eq!(
+            state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+            ScreenVerdict::Pass,
+            "control unvalidated SYN {} under per-source cap must pass",
+            i + 1
+        );
+    }
+    let pkt = tcp_pkt(
+        client,
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30)),
+        6002,
+        443,
+        TCP_SYN,
+    );
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &pkt, 128),
+        ScreenVerdict::Drop("syn-flood"),
+        "control: same source unvalidated must still trip per-source"
+    );
+    assert_eq!(state.syn_flood_src_drops(), 1);
 }
