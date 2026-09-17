@@ -3065,9 +3065,12 @@ func compileChassis(node *Node, ch *ChassisConfig) error {
 	// ids is preserved so the compiled slice stays deterministic.
 	byID := make(map[int]*RedundancyGroup)
 	for _, rgInst := range namedInstances(clusterNode.FindChildren("redundancy-group")) {
-		rgID := 0
-		if n, err := strconv.Atoi(rgInst.name); err == nil {
-			rgID = n
+		rgID, err := strconv.Atoi(rgInst.name)
+		if err != nil {
+			// The AST identity gate reports this malformed token. On the
+			// tolerant path, drop the whole instance rather than let the
+			// Atoi failure's old zero default alias redundancy-group 0.
+			continue
 		}
 
 		rg, ok := byID[rgID]
@@ -3534,10 +3537,20 @@ func isRedundancyGroupStatement(tok string) bool {
 func compileRGNodePriority(rg *RedundancyGroup, child *Node) {
 	// node <id> priority <value>
 	nodeID := 0
-	if v := nodeVal(child); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			nodeID = n
+	v := nodeVal(child)
+	if v == "" && len(child.Keys) >= 2 {
+		// A quoted-empty identity has an explicit empty second key. The
+		// AST identity gate reports it; never let it default to node 0.
+		return
+	}
+	if v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			// The AST identity gate reports this malformed token. Do not
+			// let its old zero default overwrite node 0's real priority.
+			return
 		}
+		nodeID = n
 	}
 	// Look for "priority" in inline keys or children
 	for i := 2; i < len(child.Keys)-1; i++ {

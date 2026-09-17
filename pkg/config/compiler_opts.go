@@ -449,13 +449,15 @@ type compileOpts struct {
 	// malformed chassis-cluster identity gate
 	// (validateChassisClusterIdentitiesAST) from a hard compile error to a
 	// cfg.Warnings entry on the tolerant load / peer-sync paths. A
-	// `redundancy-group <name>` or per-RG `node <id>` whose raw token is not a
-	// non-negative integer collapses to id 0 in compileChassis (Atoi-then-
-	// default), aliasing redundancy-group / node 0 and silently mis-assigning
-	// cluster ownership. Commit / commit-check stay strict so a new operator
-	// edit is rejected; an already-persisted or peer-synced config an older
-	// binary accepted must still BOOT (warn) per the #1960 fail-closed-on-load
-	// doctrine — compileChassis keeps the stable zero coercion, now flagged.
+	// non-numeric or explicitly empty `redundancy-group <name>` is DROPPED by
+	// compileChassis; a non-numeric or explicitly empty per-RG `node <id>` is
+	// IGNORED by compileRGNodePriority instead of aliasing redundancy-group /
+	// node 0. Negative redundancy-group ids remain handled by the #9723
+	// tolerant drop, while negative per-RG node ids retain their prior
+	// NodePriorities[-1] behavior. Strict commit / commit-check stay strict so a
+	// new operator edit is rejected. An already-persisted or peer-synced config
+	// an older binary accepted must still BOOT (warn) per the #1960
+	// fail-closed-on-load doctrine.
 	// Same doctrine as lenientReservedProposalSetNames.
 	lenientChassisClusterIdentities bool
 

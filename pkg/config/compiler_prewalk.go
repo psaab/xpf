@@ -624,17 +624,18 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 
 	// #5694 (codex-182 M15) chassis-cluster identity gate. compileChassis parses
 	// a `redundancy-group <name>` instance id and a per-RG `node <id>` with
-	// strconv.Atoi and, on parse failure, LEAVES the field at its zero default —
-	// a non-numeric identity silently becomes redundancy-group / node 0,
-	// aliasing a valid id 0 and mis-assigning cluster ownership / priority. The
-	// schema leaves these instance-name slots unvalidated (schema_chassis.go);
-	// the top-level `cluster node <id>` value leaf is already schema-typed.
-	// Strict (commit / commit-check): the first malformed identity hard-rejects
-	// naming the token. Lenient (load / peer-sync): warn so an already-persisted
-	// or peer-synced config an older binary silently accepted still BOOTS
-	// (#1960). Runs on the raw AST because the malformed token has collapsed to
-	// 0 by the time the typed ClusterConfig exists — only the AST distinguishes
-	// a malformed token from a real 0.
+	// strconv.Atoi. On a non-numeric or explicitly empty token, the tolerant
+	// compiler now DROPS the RG instance or ignores the per-RG node statement
+	// instead of allowing the old zero default to alias a valid id 0 and
+	// mis-assign cluster ownership / priority. The schema leaves these
+	// instance-name slots unvalidated (schema_chassis.go); the top-level
+	// `cluster node <id>` value leaf is already schema-typed. Strict (commit /
+	// commit-check): the first malformed identity hard-rejects naming the token.
+	// Lenient (load / peer-sync): warn so an already-persisted or peer-synced
+	// config an older binary silently accepted still BOOTS (#1960). Runs on the
+	// raw AST because only that walk retains malformed tokens—including a
+	// quoted-empty token—for the warning/rejection before tolerant compilation
+	// drops or ignores them; a valid numeric zero remains distinguishable.
 	chassisIdentityWarnings, err := validateChassisClusterIdentitiesAST(
 		tree.Children, opts.lenientChassisClusterIdentities)
 	if err != nil {

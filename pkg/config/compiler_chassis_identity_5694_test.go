@@ -5,15 +5,17 @@ import (
 	"testing"
 )
 
-// Tests for #5694 (codex-182 M15): a malformed chassis-cluster
+// Tests for #5694 (codex-182 M15): before the fix, a malformed chassis-cluster
 // redundancy-group / per-RG node IDENTITY parsed to a DEFAULT of 0 in
 // compileChassis (`rgID := 0; if n, err := Atoi(name); err == nil { rgID = n }`,
 // same for the RG-scoped `node <id>`), so a non-numeric identity silently
 // aliased a valid id 0 and mis-assigned cluster ownership / priority instead of
 // being rejected. The sibling validateChassisClusterStrict only sees the
-// COMPILED int (already collapsed to 0, which passes its 0..255 range check), so
-// the new gate validateChassisClusterIdentitiesAST runs on the RAW AST and
-// REJECTS a malformed identity at strict commit / WARNS on tolerant load.
+// COMPILED int (already collapsed to 0, which passes its 0..255 range check).
+// The validateChassisClusterIdentitiesAST gate runs on the RAW AST and
+// REJECTS a malformed identity at strict commit / WARNS on tolerant load;
+// #10002 additionally pins that tolerant compilation drops the malformed RG
+// instance / node statement rather than retaining the old zero coercion.
 //
 // The TOP-LEVEL `chassis cluster node <id>` is a typed value leaf
 // (ValidateInteger(0,1)) already rejected by SchemaValidate, so it is out of
@@ -111,22 +113,14 @@ func TestChassisIdentity5694_MalformedLenientWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfigLenient rejected a malformed identity (want warn): %v", err)
 	}
-	found := false
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "reth0") && strings.Contains(w, "chassis cluster") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("lenient compile produced no malformed-identity warning; got %v", cfg.Warnings)
-	}
+	assertWarns(t, cfg.Warnings, `"reth0"`, "redundancy-group instance is dropped")
 }
 
 // TestChassisIdentity5694_PackedOneLinerCovered proves the AST gate catches the
 // hierarchical packed one-liner `node <id> priority <v>;` shape that the schema
 // walker bypasses (the known residual noted in docs/config-schema.md) — a
-// malformed node id there still Atoi-coerces to 0 in compileChassis.
+// malformed node id there is reported and ignored on tolerant compilation,
+// rather than retaining the old Atoi-to-zero alias.
 func TestChassisIdentity5694_PackedOneLinerCovered(t *testing.T) {
 	tree := hierTree(t, `chassis {
     cluster {

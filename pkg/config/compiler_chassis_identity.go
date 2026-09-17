@@ -9,29 +9,29 @@ import (
 // commit gate for MALFORMED chassis-cluster REDUNDANCY-GROUP and per-RG NODE
 // identities.
 //
-// compileChassis (compiler_system.go) parses each identity with strconv.Atoi
-// and, on parse FAILURE, LEAVES the field at its zero default rather than
-// erroring:
+// compileChassis (compiler_system.go) parses each identity with strconv.Atoi:
 //
-//   - `redundancy-group <name>`: `rgID := 0; if n, err := Atoi(name); err ==
-//     nil { rgID = n }` — a non-numeric name (a typo like `redundancy-group
-//     reth0`) skips the assignment and the group is built with ID 0, ALIASING a
-//     valid redundancy-group 0.
-//   - the RG-scoped `node <id> priority <v>`: same Atoi-then-default pattern,
-//     so a malformed node token assigns the priority to node 0, overriding
-//     node 0's real priority.
+//   - `redundancy-group <name>`: a non-numeric or explicitly empty name (a typo
+//     like `redundancy-group reth0`) is reported by this gate and DROPPED on
+//     the tolerant path, rather than being assigned the old zero default and
+//     ALIASING a valid redundancy-group 0.
+//   - the RG-scoped `node <id> priority <v>`: a non-numeric or explicitly empty
+//     node token is reported by this gate and contributes NO priority on the
+//     tolerant path, rather than assigning that priority to node 0 and
+//     overriding node 0's real priority.
 //
-// A malformed identity therefore silently mis-assigns cluster OWNERSHIP /
-// priority instead of being rejected. (A negative numeric token is the one
-// exception to "defaults to 0": Atoi accepts it, so compileChassis keeps the
-// negative id; see validID below and #9723.) This is DISTINCT from the sibling
-// validateChassisClusterStrict (compiler_validate_strict_chassis.go), which
-// gates the COMPILED int (RG count, RG id range 0..255, node-priority range) —
-// by the time that runs the malformed token has already collapsed to 0, which
-// passes its range check (0 is valid). Only the RAW AST still distinguishes a
-// malformed token from a real 0, so this gate is an AST pre-walk (mirrors
-// validateApplicationNameCollisionsAST and the other reject-at-commit AST
-// gates in runPreWalkGates).
+// A malformed identity used to silently mis-assign cluster OWNERSHIP /
+// priority instead of being rejected. (A negative numeric token is accepted by
+// Atoi and remains negative; the tolerant path drops a negative RG through
+// dropNegativeRedundancyGroups, while a negative node token remains a negative
+// priority as before. This issue's drop covers Atoi failures, including
+// explicitly empty tokens.) This is DISTINCT from the sibling
+// validateChassisClusterStrict
+// (compiler_validate_strict_chassis.go), which gates the COMPILED int (RG
+// count, RG id range 0..255, node-priority range). Only the RAW AST
+// distinguishes a malformed token from a real 0, so this gate is an AST
+// pre-walk (mirrors validateApplicationNameCollisionsAST and the other
+// reject-at-commit AST gates in runPreWalkGates).
 //
 // SCOPE: only the two INSTANCE-NAME identity slots the schema explicitly leaves
 // unvalidated (schema_chassis.go: "Instance-name slots (redundancy-group <id>,
@@ -42,39 +42,55 @@ import (
 //
 // Strict path (commit / commit-check, lenient=false): the first malformed
 // identity is a hard compile error naming the offending token. Lenient path
-// (load / peer-sync, lenient=true): every malformed identity is a warning and
-// compilation continues with the existing zero-coercion, so an already-
-// persisted or peer-synced config an older binary silently accepted still
-// BOOTS (#1960 fail-closed-on-load doctrine). compileChassis is unchanged — the
-// lenient path deliberately keeps producing the (arbitrary but stable) zero
-// coercion it always did.
-
+// (load / peer-sync, lenient=true): malformed identities are warnings and
+// compilation continues. A non-numeric or explicitly empty RG identity is
+// dropped by compileChassis; a non-numeric or explicitly empty per-RG node
+// identity is ignored by compileRGNodePriority before either can alias RG/node
+// 0. Negative RG/node identities follow the existing handling described above.
+// An already-persisted or peer-synced config an older binary silently accepted
+// still BOOTS (#1960 fail-closed-on-load doctrine), while the invalid
+// non-numeric/empty identity has no effect on valid records around it.
 // validateChassisClusterIdentitiesAST walks the chassis cluster subtree and
 // rejects (strict) or warns (lenient) a redundancy-group or per-RG node
-// identity whose raw token is not a well-formed non-negative integer. See the
-// file-level comment for the doctrine.
+// identity whose raw token is not a well-formed non-negative integer,
+// including an explicitly quoted-empty token. See the file-level comment for
+// the doctrine.
 func validateChassisClusterIdentitiesAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	emit := func(what, token string) error {
 		msg := fmt.Sprintf(
-			"chassis cluster %s %q is not a valid non-negative integer id; a "+
-				"malformed identity silently defaults to 0 and aliases "+
-				"redundancy-group / node 0, mis-assigning cluster ownership — use "+
+			"chassis cluster %s %q is not a valid non-negative integer id; use "+
 				"a numeric id (#5694)", what, token)
-		if !lenient {
-			return fmt.Errorf("%s", msg)
+		if lenient {
+			if _, err := strconv.Atoi(token); err != nil {
+				action := "this malformed identity is ignored"
+				switch what {
+				case "redundancy-group":
+					action = "this malformed redundancy-group instance is dropped"
+				case "redundancy-group node":
+					action = "this malformed redundancy-group node statement is ignored"
+				}
+				msg = fmt.Sprintf(
+					"chassis cluster %s %q is not a valid non-negative integer id; on "+
+						"the tolerant path %s instead of silently defaulting to 0 and "+
+						"aliasing redundancy-group / node 0, mis-assigning cluster "+
+						"ownership — use a numeric id (#5694)",
+					what, token, action)
+			}
+			warnings = append(warnings, msg)
+			return nil
 		}
-		warnings = append(warnings, msg)
-		return nil
+		return fmt.Errorf("%s", msg)
 	}
-	// validID accepts what compileChassis reads as a usable id: a token Atoi
-	// parses to a non-negative integer. A non-numeric or empty token collapses
-	// to the zero default and aliases id 0. A NEGATIVE numeric token does not
-	// collapse: Atoi succeeds, so compileChassis keeps the negative value
-	// (#9723). For a redundancy group that value saturates to heartbeat wire
-	// byte 0 and aliases RG0 anyway, so the tolerant path drops it
-	// (dropNegativeRedundancyGroups); a negative RG-scoped node token is kept as
-	// a priority for a node that does not exist.
+	// validID accepts what the identity readers can use as an id: a token Atoi
+	// parses to a non-negative integer. A non-numeric or explicitly empty token
+	// is reported here and dropped by compileChassis /
+	// compileRGNodePriority instead of being allowed to alias id 0. A NEGATIVE
+	// numeric token does not collapse: Atoi succeeds, so compileChassis keeps
+	// the negative value (#9723). For a redundancy group that value saturates
+	// to heartbeat wire byte 0 and aliases RG0 anyway, so the tolerant path
+	// drops it (dropNegativeRedundancyGroups); a negative RG-scoped node token
+	// is kept as a priority for a node that does not exist, as before.
 	validID := func(tok string) bool {
 		n, err := strconv.Atoi(tok)
 		return err == nil && n >= 0
@@ -95,7 +111,12 @@ func validateChassisClusterIdentitiesAST(nodes []*Node, lenient bool) ([]string,
 					if child.Name() != "node" {
 						continue
 					}
-					if v := nodeVal(child); v != "" && !validID(v) {
+					v := nodeVal(child)
+					// A quoted-empty identity is a real second key whose
+					// text is empty; do not confuse it with a node shape that
+					// has no identity slot at all.
+					if (v == "" && len(child.Keys) >= 2) ||
+						(v != "" && !validID(v)) {
 						if err := emit("redundancy-group node", v); err != nil {
 							return err
 						}
