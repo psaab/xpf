@@ -64,7 +64,7 @@ pub(crate) enum HaRefreshOutcome {
     /// membership.
     Served(usize),
     /// The refresh needs the locked main path (CLEAR, membership change,
-    /// stored-empty activation, or pure no-op). Caller must NOT store.
+    /// stored-empty inventory creation, or pure no-op). Caller must NOT store.
     NeedsLock,
 }
 
@@ -218,15 +218,15 @@ impl SessionDomain {
     /// Contract build-map-then-diff-then-maybe-store: the incoming map last-wins
     /// (exactly like the locked insert loop) is built BEFORE the lock (local
     /// input parsing, no shared state); under the hold: incoming empty →
-    /// NeedsLock (CLEAR owned by main); stored empty: any incoming active →
-    /// NeedsLock (activation needs side effects), else store all-inactive
-    /// Served; stored nonempty: key-set inequality → NeedsLock (join/leave);
-    /// per-RG match → fresh `active_lease_until` from incoming watchdog;
-    /// mismatch + stored active → fresh lease for STORED active and watchdog
-    /// (liveness only, ownership stays); mismatch + stored inactive → keep
-    /// stored (activation pending, owned by main); zero refreshed → NeedsLock
-    /// (pure no-op never recorded as publish), else store + Served(count).
-    /// Never changes active flags or membership off-lock.
+    /// NeedsLock (CLEAR owned by main); stored empty + any nonempty incoming
+    /// → NeedsLock (watchdog must never create inventory — CLEAR-undo race);
+    /// stored nonempty: key-set inequality → NeedsLock (join/leave); per-RG
+    /// match → fresh `active_lease_until` from incoming watchdog; mismatch +
+    /// stored active + VALID lease → fresh lease for STORED active/watchdog
+    /// (liveness only, ownership stays); mismatch + stored inactive OR
+    /// EXPIRED stored-active → keep stored (owned by main); zero refreshed →
+    /// NeedsLock (pure no-op never recorded as publish), else store +
+    /// Served(count). Never changes active flags or membership off-lock.
     pub(crate) fn try_refresh_ha_leases(
         &self,
         groups: &[crate::HAGroupStatus],
@@ -250,36 +250,21 @@ impl SessionDomain {
             return HaRefreshOutcome::NeedsLock;
         }
         let stored = self.rg_runtime.load();
-        // Stored-empty special-case BEFORE general key-set equality (which
-        // would otherwise make the all-inactive Served branch unreachable:
-        // `{}` vs `{1}` always differs). Empty/empty already returned above.
+        // Stored-empty check BEFORE key-set equality: with inventory creation
+        // refused, ANY nonempty incoming on empty stored needs the main path
+        // (transitions, joins AND first-inventory creation alike).
+        // Stored empty + ANY nonempty incoming → NeedsLock: refuse inventory
+        // creation on the refresh-only path. A standby watchdog snapshots
+        // inactive inventory, a cluster→standalone apply then clears
+        // successfully — and an outstanding session refresh arriving after the
+        // clear must NOT restore the obsolete inventory (it would strand
+        // standalone transit HAInactive until another clear/apply). The leaf
+        // mutex serializes concurrent writers but cannot judge obsolescence,
+        // so creation is owned exclusively by the main path. (An earlier
+        // revision served stored-empty/all-inactive as side-effect-free; dual
+        // review identified the CLEAR-undo race, hence this rule.)
         if stored.is_empty() {
-            if incoming.values().any(|entry| entry.0) {
-                // Any-active on empty stored IS an activation on the locked
-                // path (`activated_owner_rgs` None-arm), needing epoch bumps,
-                // fan-out, prewarm, republish and neighbor warm — none of
-                // which run here, and a store would steal them permanently
-                // (next main same-state diffs empty). Route to main.
-                return HaRefreshOutcome::NeedsLock;
-            }
-            // All-inactive on empty stored is side-effect-free on the locked
-            // path (neither demote nor activate arms fire), so serving it
-            // here is behavior-identical.
-            let mut state = std::collections::BTreeMap::new();
-            for (&rg_id, &(active, watchdog)) in &incoming {
-                debug_assert!(!active);
-                state.insert(
-                    rg_id,
-                    crate::afxdp::HAGroupRuntime {
-                        active,
-                        watchdog_timestamp: watchdog,
-                        lease: crate::afxdp::HAForwardingLease::Inactive,
-                    },
-                );
-            }
-            let served = state.len();
-            self.rg_runtime.store(Arc::new(state));
-            return HaRefreshOutcome::Served(served);
+            return HaRefreshOutcome::NeedsLock;
         }
         // Stored nonempty: membership must match exactly (join/leave owned by
         // main, with side effects).
@@ -314,21 +299,36 @@ impl SessionDomain {
                 refreshed += 1;
             } else if stored_runtime.active {
                 // Mismatch, stored active (demotion pending, blocked on main):
-                // mint a fresh receipt-anchored lease for STORED ownership so
-                // the lease never starves while the transition waits. Lease
-                // only — active + watchdog stay stored.
-                state.insert(
-                    *rg_id,
-                    crate::afxdp::HAGroupRuntime {
-                        active: true,
-                        watchdog_timestamp: stored_runtime.watchdog_timestamp,
-                        lease: crate::afxdp::HAGroupRuntime::active_lease_until(
-                            stored_runtime.watchdog_timestamp,
-                            now_secs,
-                        ),
-                    },
-                );
-                refreshed += 1;
+                // mint a fresh receipt-anchored lease for STORED ownership —
+                // but ONLY while the stored lease is still valid. An already
+                // EXPIRED stored-active is never resurrected (fail-closed):
+                // the demotion it was waiting on may have partially landed
+                // elsewhere, and minting on a dead lease would re-arm
+                // forwarding for an owner the control plane already dropped.
+                //
+                // Dual-active bound (≈12s): each mint extends stored ownership
+                // by ≤11s wall; the old owner keeps forwarding only while its
+                // own lease stays valid via ticks, and a landed main demotion
+                // flips stored immediately. Persistent dual-active needs
+                // persistent main-path failure, bounded separately by the
+                // UpdateRGActive + 2s-reconcile retry and the 30-poll
+                // helper-wedge recovery — not by this path.
+                if stored_runtime.is_forwarding_active(now_secs) {
+                    state.insert(
+                        *rg_id,
+                        crate::afxdp::HAGroupRuntime {
+                            active: true,
+                            watchdog_timestamp: stored_runtime.watchdog_timestamp,
+                            lease: crate::afxdp::HAGroupRuntime::active_lease_until(
+                                stored_runtime.watchdog_timestamp,
+                                now_secs,
+                            ),
+                        },
+                    );
+                    refreshed += 1;
+                } else {
+                    state.insert(*rg_id, *stored_runtime);
+                }
             } else {
                 // Mismatch, stored inactive (activation pending): keep stored
                 // untouched (no mint — inactive stays `Inactive`). Owned by
@@ -487,8 +487,8 @@ mod session_domain_tests_7209 {
 /// #9629: timing-free decision table for `try_refresh_ha_leases`.
 ///
 /// Each cell pins one rule of the build-map-then-diff-then-maybe-store
-/// contract (stored-empty special-case before key equality, last-wins
-/// duplicates, stored-active mint on mismatch, zero-refreshed → NeedsLock).
+/// contract (stored-empty refuse-all, last-wins duplicates, valid-lease mint
+/// vs expired never-resurrect, zero-refreshed → NeedsLock).
 /// No sleeps, no threads; the race-closer serialization cell lives in
 /// `server/tests.rs` with the `ha_mutex_for_test` handle.
 #[cfg(test)]
@@ -575,21 +575,20 @@ mod try_refresh_9629_tests {
         assert!(coordinator.ha.rg_runtime.load().is_empty());
     }
 
-    /// Stored empty + all incoming inactive is side-effect-free on the locked
-    /// path (neither arm fires), so serving it here is behavior-identical.
-    /// Reachable only because the stored-empty special-case precedes the
-    /// general key-set equality (`{}` vs `{1}` always differs).
+    /// Stored empty + all incoming inactive is REFUSED (verdict item 2): an
+    /// earlier revision served it as side-effect-free, but a standby watchdog
+    /// snapshot arriving after a cluster→standalone CLEAR would restore the
+    /// obsolete inventory and strand transit HAInactive. Watchdog refreshes
+    /// must never create inventory; first inventory always arrives via main.
     #[test]
-    fn empty_inactive_served_9629() {
+    fn empty_inactive_needs_lock_9629() {
         let coordinator = Coordinator::new();
         let domain = coordinator.session_domain().clone();
         assert_eq!(
             domain.try_refresh_ha_leases(&[group(1, false, 7), group(2, false, 8)]),
-            HaRefreshOutcome::Served(2)
+            HaRefreshOutcome::NeedsLock
         );
-        assert_eq!(stored_active(&coordinator, 1), Some(false));
-        assert_eq!(stored_active(&coordinator, 2), Some(false));
-        assert!(!stored_forwarding_active(&coordinator, 1));
+        assert!(coordinator.ha.rg_runtime.load().is_empty());
     }
 
     /// Duplicate `rg_id`s resolve last-wins exactly like the locked insert
@@ -678,5 +677,83 @@ mod try_refresh_9629_tests {
             HaRefreshOutcome::NeedsLock
         );
         assert_eq!(stored_active(&coordinator, 1), Some(false));
+    }
+
+    /// Expired stored-active + incoming-inactive is NEVER resurrected
+    /// (verdict item 3): the demotion it waited on may have partially landed
+    /// elsewhere, so minting on a dead lease would re-arm an owner the
+    /// control plane already dropped. Fail-closed: keep + NeedsLock.
+    #[test]
+    fn expired_stored_active_incoming_inactive_needs_lock_9629() {
+        let coordinator = Coordinator::new();
+        let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+        coordinator.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+            1,
+            crate::afxdp::HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs.saturating_sub(11),
+                lease: crate::afxdp::HAForwardingLease::ActiveUntil(
+                    now_secs.saturating_sub(1),
+                ),
+            },
+        )])));
+        assert!(!stored_forwarding_active(&coordinator, 1));
+        let domain = coordinator.session_domain().clone();
+        assert_eq!(
+            domain.try_refresh_ha_leases(&[group(1, false, 0)]),
+            HaRefreshOutcome::NeedsLock
+        );
+        assert!(!stored_forwarding_active(&coordinator, 1));
+    }
+
+    /// Mismatch on a VALID stored-active lease mints (Go-4): the post-call
+    /// `lease_until` strictly exceeds the seeded one, proving a mint rather
+    /// than a keep (a non-minting implementation would also read active on a
+    /// fresh seed, so activity alone cannot prove renewal). Seeded short
+    /// (`now+2`) vs minted (`now+10`): ≥8s apart, truncation-proof.
+    #[test]
+    fn mismatch_renews_valid_stored_active_lease_9629() {
+        let coordinator = Coordinator::new();
+        let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+        coordinator.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+            1,
+            crate::afxdp::HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: crate::afxdp::HAForwardingLease::ActiveUntil(
+                    now_secs.saturating_add(2),
+                ),
+            },
+        )])));
+        let before = coordinator
+            .ha
+            .rg_runtime
+            .load()
+            .get(&1)
+            .and_then(|runtime| match runtime.lease {
+                crate::afxdp::HAForwardingLease::ActiveUntil(until) => Some(until),
+                crate::afxdp::HAForwardingLease::Inactive => None,
+            })
+            .expect("seeded short active lease");
+        let domain = coordinator.session_domain().clone();
+        assert_eq!(
+            domain.try_refresh_ha_leases(&[group(1, false, 0)]),
+            HaRefreshOutcome::Served(1)
+        );
+        let after = coordinator
+            .ha
+            .rg_runtime
+            .load()
+            .get(&1)
+            .and_then(|runtime| match runtime.lease {
+                crate::afxdp::HAForwardingLease::ActiveUntil(until) => Some(until),
+                crate::afxdp::HAForwardingLease::Inactive => None,
+            })
+            .expect("minted active lease");
+        assert!(
+            after > before,
+            "refreshed lease_until ({after}) must strictly exceed seeded ({before}); equality would mean keep-not-mint"
+        );
+        assert_eq!(stored_active(&coordinator, 1), Some(true));
     }
 }

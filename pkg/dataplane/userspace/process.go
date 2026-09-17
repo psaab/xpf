@@ -182,6 +182,9 @@ func (m *Manager) drainAndClearSteeringRowsLocked(reason string) {
 	if m.sessionSocketPath() != "" {
 		m.sessionMu.Lock()
 		defer m.sessionMu.Unlock()
+		// #9629: this ping is served off-lock (the session allowlist serves
+		// ping without ServerState), so the fence holds even mid-apply — no
+		// 10s wedge stalling the session thread behind snapshot application.
 		ping := ControlRequest{Type: "ping", SuppressStatus: true}
 		if err := m.requestSessionSyncLocked(ping); err != nil {
 			slog.Warn("userspace: session drain failed; keeping possibly-orphaned steering rows",

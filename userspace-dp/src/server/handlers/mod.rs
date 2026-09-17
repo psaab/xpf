@@ -211,13 +211,31 @@ pub(crate) fn handle_stream(
         }
     }
 
-    if !served_off_lock && !session_ha {
+    // #9629 (verdict item 5): the session socket serves EXACTLY `ping`
+    // (below, off-lock), `sync_session` and session `update_ha_state`. Any
+    // other verb arriving here is misrouted: serving it would take
+    // `ServerState` on the session accept thread, wedging it behind a 10 s
+    // apply while session HAs queue and die on their 3 s deadline (the exact
+    // defect class this issue closes — the pre-fix `drainAndClear` ping wedge).
+    // Refuse fast instead. Old Go sends only session-sync + drain pings here
+    // (census-verified); new Go adds only HA refresh — no legitimate caller
+    // is refused. No machine-readable const: no Go sender can trigger this
+    // (all Go session verbs are allowlisted above), so tests pin the text.
+    let session_ping = mode == SocketMode::Session && request.request_type == "ping";
+    let session_refused =
+        mode == SocketMode::Session && !served_off_lock && !session_ha && !session_ping;
+    if session_refused {
+        response.ok = false;
+        response.error = "verb not served on session socket; use control socket".to_string();
+    }
+
+    if !served_off_lock && !session_ha && !session_ping && !session_refused {
         let mut guard = lock_server_state_recover(&state);
         // GPT-4: quarantined state serves nothing — a prior handler panic may
         // have torn it mid-mutation. Refuse and ensure shutdown is underway
         // (the panic arm already cleared `running`; this covers poison
-        // observed without a witnessed panic). `sync_session` above stays
-        // servable: it provably never touches `ServerState`.
+        // observed without a witnessed panic). `sync_session` and the session
+        // fast paths above stay servable: they provably never touch `ServerState`.
         if guard.quarantined_after_panic {
             running.store(false, Ordering::SeqCst);
             return Err("server state quarantined after a handler panic; restart required".to_string());

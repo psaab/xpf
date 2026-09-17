@@ -445,11 +445,16 @@ fn update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629() {
 
     let (holding_tx, holding_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let (released_tx, released_rx) = mpsc::channel();
     let holder_state = state.clone();
     let holder = std::thread::spawn(move || {
         let _guard = holder_state.lock().expect("state lock");
         holding_tx.send(()).expect("signal holding");
         let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+        // Hold witness (verdict item 6): the sampler below asserts this signal
+        // has NOT arrived, proving the sample landed inside the hold even if
+        // the scheduler slips either sleep.
+        released_tx.send(()).expect("signal released");
     });
     holding_rx
         .recv_timeout(Duration::from_secs(5))
@@ -487,6 +492,13 @@ fn update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629() {
     // Sample AFTER the seed expired but BEFORE the hold releases, through the
     // lock-free handle — no mutex, exactly as the per-packet path observes it.
     std::thread::sleep(Duration::from_millis(SAMPLE_AT_MS));
+    // Hold witness: fail LOUDLY (not as a lease FAIL) if scheduler slip moved
+    // the sample outside the hold — without this the timing margins below
+    // would be asserted on faith.
+    assert!(
+        released_rx.try_recv().is_err(),
+        "sample slipped past the mutex release (11.5s sleep outlasted the 12s hold?) — test timing broken, not the lease"
+    );
     let mid_hold = session_domain.ha_group_status(RG);
     let mid_hold_active = mid_hold
         .as_ref()
@@ -555,11 +567,16 @@ fn update_ha_state_fast_proxy_9629() {
 
     let (holding_tx, holding_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let (released_tx, released_rx) = mpsc::channel();
     let holder_state = state.clone();
     let holder = std::thread::spawn(move || {
         let _guard = holder_state.lock().expect("state lock");
         holding_tx.send(()).expect("signal holding");
         let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+        // Hold witness (verdict item 6): the sampler below asserts this signal
+        // has NOT arrived, proving the sample landed inside the hold even if
+        // the scheduler slips either sleep.
+        released_tx.send(()).expect("signal released");
     });
     holding_rx
         .recv_timeout(Duration::from_secs(5))
@@ -593,6 +610,13 @@ fn update_ha_state_fast_proxy_9629() {
     // Sample AFTER the seed expired but BEFORE the hold releases, through the
     // lock-free handle — no mutex, exactly as the per-packet path observes it.
     std::thread::sleep(Duration::from_millis(SAMPLE_AT_MS));
+    // Hold witness: fail LOUDLY (not as a lease FAIL) if scheduler slip moved
+    // the sample outside the hold — without this the timing margins below
+    // would be asserted on faith.
+    assert!(
+        released_rx.try_recv().is_err(),
+        "sample slipped past the mutex release (3s sleep outlasted the 4s hold?) — test timing broken, not the lease"
+    );
     let mid_hold = session_domain.ha_group_status(RG);
     let mid_hold_active = mid_hold
         .as_ref()
@@ -662,7 +686,12 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     let held = domain.ha_mutex_for_test();
     let _guard = held.lock().expect("ha mutex");
     let (tx, rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
     let worker = std::thread::spawn(move || {
+        // Race witness (verdict item 6): signal BEFORE the contended call so the
+        // test below waits for "blocked inside try_refresh" rather than
+        // assuming the spawn was fast.
+        started_tx.send(()).expect("signal started");
         let outcome = domain.try_refresh_ha_leases(&[HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -671,6 +700,12 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
         }]);
         tx.send(outcome).expect("send outcome");
     });
+    // Race witness: wait until the worker is provably INSIDE the contended
+    // call, THEN prove it cannot complete while held. Without the gate, a
+    // slow spawn (not a blocked call) could satisfy the 200 ms window.
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker never reached try_refresh_ha_leases");
     // While held, the refresh cannot complete (it needs the mutex).
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
@@ -923,11 +958,11 @@ fn update_ha_state_session_membership_diff_needs_lock_while_held_9629() {
     );
 }
 
-/// #9629: stored-empty split — all-inactive inventory via Session is Served
-/// (side-effect-free, behavior-identical to locked), while any-active via
-/// Session is NeedsLock (activation needs epoch bumps + fan-out + prewarm).
+/// #9629: the Session path refuses inventory creation (verdict item 2) — both
+/// all-inactive and any-active on empty stored route to main, so a stale
+/// watchdog snapshot can never populate or repopulate helper inventory.
 #[test]
-fn update_ha_state_session_empty_stored_split_9629() {
+fn update_ha_state_session_refuses_inventory_creation_9629() {
     // All-inactive on empty stored: Served.
     let state = new_state(ProcessStatus::default());
     let domain = state.lock().expect("state").afxdp.session_domain().clone();
@@ -947,12 +982,18 @@ fn update_ha_state_session_empty_stored_split_9629() {
         ],
     });
     let resp = run_request_with_domain(state.clone(), request, domain.clone(), SocketMode::Session);
+    assert!(!resp.ok, "all-inactive on empty stored must route to main");
     assert!(
-        resp.ok,
-        "all-inactive on empty stored must serve: {}",
+        resp
+            .error
+            .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
+        "NeedsLock prefix missing: {:?}",
         resp.error
     );
-    assert_eq!(domain.ha_group_status(1).map(|s| s.active), Some(false));
+    assert!(
+        domain.ha_group_status(1).is_none(),
+        "refused refresh must not create inventory"
+    );
     // Any-active on empty stored: NeedsLock (fresh empty state isolates the case).
     let state2 = new_state(ProcessStatus::default());
     let domain2 = state2.lock().expect("state").afxdp.session_domain().clone();
@@ -974,6 +1015,204 @@ fn update_ha_state_session_empty_stored_split_9629() {
         "NeedsLock prefix missing: {:?}",
         resp2.error
     );
+}
+
+/// #9629: a delayed session refresh cannot undo a Main CLEAR (verdict item 2).
+/// Inventory is seeded through the Main path (real transition), cleared
+/// through Main (real demote-to-empty), and only THEN is the stale pre-clear
+/// snapshot replayed on Session: it must refuse (NeedsLock) and the stored
+/// inventory must stay empty. Starting from fresh-empty would be a no-op
+/// duplicating the unit test — the seed-then-clear prefix is what makes this
+/// a regression for the undo race.
+#[test]
+fn update_ha_state_delayed_refresh_after_clear_9629() {
+    let state = new_state(ProcessStatus::default());
+    // Seed real inventory via Main (locked path, with side effects).
+    let mut seed_req = req("update_ha_state");
+    seed_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let seed_resp = run_request(state.clone(), seed_req);
+    assert!(seed_resp.ok, "seed: {}", seed_resp.error);
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+    assert_eq!(domain.ha_group_status(1).map(|s| s.active), Some(true));
+    // Main CLEAR (locked path): the transition whose undo we forbid.
+    let mut clear_req = req("update_ha_state");
+    clear_req.ha_state = Some(HAStateUpdateRequest { groups: vec![] });
+    let clear_resp = run_request(state.clone(), clear_req);
+    assert!(clear_resp.ok, "clear: {}", clear_resp.error);
+    assert!(domain.ha_group_status(1).is_none(), "CLEAR must empty stored");
+    // Stale pre-clear snapshot replayed on Session: must refuse, no restore.
+    let mut stale_req = req("update_ha_state");
+    stale_req.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let resp = run_request_with_domain(state, stale_req, domain.clone(), SocketMode::Session);
+    assert!(!resp.ok, "stale post-clear refresh must route to main");
+    assert!(
+        resp
+            .error
+            .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
+        "NeedsLock prefix missing: {:?}",
+        resp.error
+    );
+    assert!(
+        domain.ha_group_status(1).is_none(),
+        "stale refresh restored cleared inventory (CLEAR undo)"
+    );
+}
+
+/// #9629: an expired stored-active lease is NEVER resurrected by a session
+/// refresh with incoming-inactive (verdict item 3). The demotion it waited on
+/// may have partially landed elsewhere; minting on a dead lease would re-arm
+/// an owner the control plane already dropped. Single-RG mismatch-expired
+/// keeps with zero refreshed → NeedsLock (never recorded as publish).
+#[test]
+fn update_ha_state_session_expired_demotion_stays_expired_9629() {
+    let state = new_state(ProcessStatus::default());
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .store_expired_ha_lease_for_test(1);
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+    assert!(
+        !domain
+            .ha_group_status(1)
+            .map(|status| status.forwarding_active)
+            .unwrap_or(true),
+        "fixture must start expired"
+    );
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    let resp = run_request_with_domain(state, request, domain.clone(), SocketMode::Session);
+    assert!(!resp.ok, "expired mismatch must route to main (zero refreshed)");
+    assert!(
+        resp
+            .error
+            .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
+        "NeedsLock prefix missing: {:?}",
+        resp.error
+    );
+    assert!(
+        !domain
+            .ha_group_status(1)
+            .map(|status| status.forwarding_active)
+            .unwrap_or(true),
+        "expired lease resurrected by session refresh"
+    );
+}
+
+/// #9629: `ping` on the session socket is served off-lock (verdict item 5):
+/// no `ServerState`, no status attach, fast even mid-apply. This is what
+/// keeps the Go `drainAndClearSteeringRowsLocked` sessionMu+ping fence from
+/// wedging behind snapshot application.
+#[test]
+fn update_ha_state_session_ping_served_while_locked_9629() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const HOLD_MS: u64 = 1_200;
+    const SERVED_WITHIN_MS: u64 = 500;
+
+    let state = new_state(ProcessStatus::default());
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder_state = state.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = holder_state.lock().expect("state lock");
+        holding_tx.send(()).expect("signal holding");
+        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+    });
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the state lock");
+
+    let t0 = Instant::now();
+    let resp = run_request_with_domain(state.clone(), req("ping"), domain, SocketMode::Session);
+    let elapsed = t0.elapsed();
+    let _ = release_tx.send(());
+    holder.join().expect("holder thread");
+
+    assert!(resp.ok, "session ping must succeed while locked; error={}", resp.error);
+    assert!(
+        resp.status.is_none(),
+        "session ping must not attach status (no refresh, no lock)"
+    );
+    assert!(
+        elapsed < Duration::from_millis(SERVED_WITHIN_MS),
+        "session ping waited {elapsed:?} behind the ServerState mutex; it must be served off-lock (#9629)"
+    );
+}
+
+/// #9629: locked verbs on the session socket are refused fast without touching
+/// `ServerState` (verdict item 5): `status` and `update_fabrics` here stand in
+/// for every non-allowlisted verb. Serving any of them would wedge the session
+/// accept thread behind a 10 s apply while session HAs die on 3 s deadlines.
+#[test]
+fn update_ha_state_session_locked_verbs_refused_while_locked_9629() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const HOLD_MS: u64 = 1_200;
+    const SERVED_WITHIN_MS: u64 = 500;
+
+    let state = new_state(ProcessStatus::default());
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
+
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder_state = state.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = holder_state.lock().expect("state lock");
+        holding_tx.send(()).expect("signal holding");
+        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
+    });
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder never acquired the state lock");
+
+    for verb in ["status", "update_fabrics"] {
+        let t0 = Instant::now();
+        let resp = run_request_with_domain(
+            state.clone(),
+            req(verb),
+            domain.clone(),
+            SocketMode::Session,
+        );
+        let elapsed = t0.elapsed();
+        assert!(!resp.ok, "{verb} on session socket must be refused");
+        assert!(
+            resp.error.contains("session socket"),
+            "{verb} refusal must name the session socket, got {:?}",
+            resp.error
+        );
+        assert!(
+            elapsed < Duration::from_millis(SERVED_WITHIN_MS),
+            "{verb} on session socket waited {elapsed:?} behind the mutex; refusal must not take the lock (#9629)"
+        );
+    }
+    let _ = release_tx.send(());
+    holder.join().expect("holder thread");
 }
 
 // --- set_forwarding_state ----------------------------------------------

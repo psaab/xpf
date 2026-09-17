@@ -135,6 +135,27 @@ impl Coordinator {
             },
         )])));
     }
+
+    /// #9629 test seam: store an EXPIRED active HA lease (verdict item 3).
+    ///
+    /// Models a demotion that never landed: `active` still true but the lease
+    /// already fails `is_forwarding_active`. Internally consistent (as if
+    /// minted 11 s ago: watchdog `now-11`, lease until `now-1`). Timing-free
+    /// expired fixture — no sleep can produce this deterministically.
+    pub(crate) fn store_expired_ha_lease_for_test(&self, rg_id: i32) {
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        debug_assert!(now_secs > 11);
+        self.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+            rg_id,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs.saturating_sub(11),
+                lease: crate::afxdp::HAForwardingLease::ActiveUntil(
+                    now_secs.saturating_sub(1),
+                ),
+            },
+        )])));
+    }
 }
 
 use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;
