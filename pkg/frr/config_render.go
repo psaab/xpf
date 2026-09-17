@@ -23,6 +23,93 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// DeclaredNetdevsForConfig builds the authored-interface → kernel-device map
+// consumed by static-route rendering. In addition to interface declarations,
+// it resolves every static-route interface reference and VPN bind spelling
+// through Config.SecureTunnelUnitNetdev. That resolver must see the authored
+// bind-interface because a bare st0 and explicit st0.0 can derive one if_id
+// under different device names (#9942).
+//
+// Both daemon and standalone CLI FRR assembly paths use this constructor so
+// their managed sections cannot disagree about secure-tunnel route devices.
+func DeclaredNetdevsForConfig(cfg *config.Config, inferredIPv6 map[string]map[string]string) map[string]string {
+	declared := make(map[string]string)
+	if cfg == nil {
+		return declared
+	}
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		linuxName := config.LinuxIfName(name)
+		declared[name] = linuxName
+		declared[linuxName] = linuxName
+	}
+
+	refs := make([]string, 0)
+	appendRouteIfaces := func(routes []*config.StaticRoute) {
+		for _, sr := range routes {
+			if sr == nil {
+				continue
+			}
+			for _, nh := range sr.NextHops {
+				if nh.Interface != "" {
+					refs = append(refs, nh.Interface)
+				}
+			}
+		}
+	}
+	appendRouteIfaces(cfg.RoutingOptions.StaticRoutes)
+	appendRouteIfaces(cfg.RoutingOptions.Inet6StaticRoutes)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		appendRouteIfaces(ri.StaticRoutes)
+		appendRouteIfaces(ri.Inet6StaticRoutes)
+	}
+	for _, byGateway := range inferredIPv6 {
+		for _, iface := range byGateway {
+			if iface != "" {
+				refs = append(refs, iface)
+			}
+		}
+	}
+	for _, vpn := range cfg.Security.IPsec.VPNs {
+		if vpn != nil && vpn.BindInterface != "" {
+			refs = append(refs, vpn.BindInterface)
+		}
+	}
+	addSecureTunnelNetdevs(declared, refs, cfg.SecureTunnelUnitNetdev)
+	return declared
+}
+
+// addSecureTunnelNetdevs installs resolver results under both authored and
+// Linux spellings. A map entry is added only when the config owns the secure
+// tunnel reference, preserving ordinary interfaces' legacy `.0` behavior.
+func addSecureTunnelNetdevs(declared map[string]string, refs []string, resolve func(string) (string, bool)) {
+	if declared == nil || resolve == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		dev, ok := resolve(ref)
+		if !ok || dev == "" {
+			continue
+		}
+		declared[ref] = dev
+		declared[config.LinuxIfName(ref)] = dev
+		declared[dev] = dev
+	}
+}
+
 // generateInterfaceSettings emits FRR interface blocks for bandwidth and
 // point-to-point network type. These are emitted before protocol config so
 // OSPF auto-cost picks up the correct bandwidth.
@@ -201,18 +288,13 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 	// One line per next-hop → FRR creates ECMP.
 	var b strings.Builder
 	for _, nh := range sr.NextHops {
-		// #9821 (#15v3 + D7): a DECLARED interface name renders its kernel
-		// device. The map holds every declaration in BOTH spellings
-		// (authored + linux) → linux device, so authored `ge-0/0/5.0`
-		// renders `ge-0-0-5.0` (a device) instead of being mis-stripped to
-		// the slash-broken `ge-0/0/5`, and authored slash-spelled UNDOTTED
-		// operands (`ge-0/0/1`) newly render kernel names instead of
-		// FRR-choking verbatim slashes (intended repair — no config can
-		// depend on output FRR cannot parse). Inferred operands and
-		// undeclared names miss the map and keep legacy behavior below.
-		// Junos UNIT refs (`ge-0/0/1.0`) are NOT declarations, so they keep
-		// the legacy strip (still slash-broken — pre-existing, follow-up,
-		// not fixed here).
+		// #9821/#9942: a declared interface or resolver-owned secure-tunnel
+		// reference renders its kernel device before the generic `.0` strip.
+		// The daemon's assembler feeds secure-tunnel route refs through
+		// Config.SecureTunnelUnitNetdev while the authored bind spelling is
+		// still available; this map probe is the render-side install guard.
+		// For ordinary undeclared interfaces, preserve the legacy unit-zero
+		// collapse below.
 		ifName := nh.Interface
 		if isV6 && ifName == "" && nh.Address != "" {
 			ifName = ipv6NextHopInterfaces[vrfName][nh.Address]

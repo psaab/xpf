@@ -430,13 +430,12 @@ type FullConfig struct {
 	// Used to translate RETH interface names in static routes to kernel names.
 	RethMap map[string]string
 
-	// DeclaredNetdevs maps every DECLARED interface name in BOTH spellings
-	// (authored Junos + linux) to its kernel device (#9821 #15v3 + D7).
-	// Static-route render probes it before the legacy `.0` strip so an
-	// authored dotted declaration (`ge-0/0/5.0`) renders its device
-	// (`ge-0-0-5.0`) instead of being mis-stripped, and authored
-	// slash-spelled undotted operands (`ge-0/0/1`) render kernel names
-	// instead of FRR-choking slashes. nil → legacy behavior throughout.
+	// DeclaredNetdevs maps every declared interface name in BOTH spellings
+	// (authored Junos + Linux) to its kernel device (#9821), plus every
+	// resolver-owned secure-tunnel route reference (#9942). Static-route
+	// rendering probes it before the legacy `.0` strip, so an authored
+	// `bind-interface st0.0` route names its real `st0.0` device. Ordinary
+	// undeclared unit refs retain the legacy behavior.
 	DeclaredNetdevs map[string]string
 
 	// IPv6NextHopInterfaces maps VRF name -> IPv6 next-hop -> interface for
