@@ -50,6 +50,33 @@ type physDesired struct {
 	skipAddrs bool
 }
 
+// fabricOwnedNetdevs returns the resolved Linux netdev names whose MTU is
+// managed by fabric setup rather than by the zone-interface reconciler.
+//
+// A local fabric interface owns its resolved physical member: the daemon
+// creates the IPVLAN on that member and sets the parent MTU. A fabric bond
+// owns the bond netdev itself, but routing/bond.go passes the authored name
+// directly to netlink. Therefore a bond name is included only when it is
+// already a valid Linux spelling; a slash-bearing authored name resolves to a
+// different Linux key and cannot be the device that bond setup creates.
+func fabricOwnedNetdevs(cfg *config.Config) map[string]bool {
+	owned := make(map[string]bool)
+	for _, ifCfg := range cfg.Interfaces.Interfaces {
+		if ifCfg == nil {
+			continue
+		}
+		if ifCfg.LocalFabricMember != "" {
+			owned[config.LinuxIfName(ifCfg.LocalFabricMember)] = true
+		}
+		if len(ifCfg.FabricMembers) > 0 &&
+			len(ifCfg.Name) <= 15 &&
+			ifCfg.Name != "" && ifCfg.Name == config.LinuxIfName(ifCfg.Name) {
+			owned[config.LinuxIfName(ifCfg.Name)] = true
+		}
+	}
+	return owned
+}
+
 // planPhysDesired merges every zone interface reference into one desired state
 // per physical netdev.
 //
@@ -67,6 +94,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 	if cfg == nil {
 		return out
 	}
+	fabricOwned := fabricOwnedNetdevs(cfg)
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
@@ -104,17 +132,15 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				// used to skip the whole reference, so a vlan-tagging interface
 				// whose zone references were all tagged got no plan, and its
 				// interface-level mtu was never written. Two tagged references
-				// plan nothing, as on master, because another component owns the
-				// MTU of the device they resolve to (resolveInterfaceRef): a fabric
-				// interface resolves to the local fabric member, whose MTU the
-				// fabric setup owns, and a per-unit tunnel resolves to its tunnel
-				// device, whose MTU the tunnel manager owns, even when a WireGuard
-				// unit shares the interface's own device (#6941). #9872: the fabric
-				// half keys on CONFIGURED membership, not the local-node
-				// derivation -- with members but no local member the reference
-				// resolves to fab0 itself (the bond ApplyBonds creates), whose MTU
-				// the bond setup owns.
-				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil && ifCfg.MTU > 0 && ifCfg.LocalFabricMember == "" && len(ifCfg.FabricMembers) == 0 {
+				// plan nothing when their resolved netdev is fabric-owned or a
+				// per-unit tunnel owns the child device. Fabric ownership is
+				// decided once for the resolved netdev before this zone walk,
+				// so direct references to a local fabric member cannot contest
+				// the fabric interface's MTU. A canonical bond name is included
+				// as an owner; a slash-bearing authored bond name is not, because
+				// bond.go passes that raw name to netlink and cannot create it.
+				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil &&
+					ifCfg.MTU > 0 && !fabricOwned[physName] {
 					if unit := ifCfg.Units[unitNum]; unit != nil && unit.Tunnel != nil {
 						continue
 					}
@@ -134,7 +160,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 			if ifCfg.RedundancyGroup > 0 || ifCfg.LocalFabricMember != "" {
 				pd.skipAddrs = true
 			}
-			if ifCfg.MTU > 0 && mtuUnit[physName] == -2 {
+			if ifCfg.MTU > 0 && !fabricOwned[physName] && mtuUnit[physName] == -2 {
 				pd.mtu = ifCfg.MTU
 				mtuUnit[physName] = -1
 			}
@@ -152,7 +178,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				seenAddr[physName][a] = true
 				pd.addrs = append(pd.addrs, a)
 			}
-			if unit.MTU > 0 {
+			if unit.MTU > 0 && !fabricOwned[physName] {
 				// Unit overrides interface level; lowest unit number wins
 				// between units.
 				if cur := mtuUnit[physName]; cur < 0 || unitNum < cur {
