@@ -404,9 +404,11 @@ The abandoned backlog is ACCOUNTED for, not silently discarded (C180-026): on
 stop the worker (the sole queue reader) counts every dequeued-but-unsent job
 plus every job still buffered in the queue into `trapsDropped` exactly once via
 `countAbandonedTraps`, so the drop total covers shutdown-abandoned link-state
-traps — not just queue-full and post-Stop-enqueue drops. Before this,
-`trapsDropped` reported zero for a shutdown that discarded a queued backlog.
-Fail-on-revert guard: `TestStop_CountsAbandonedTrapBacklog`.
+traps — not just queue-full and post-Stop-enqueue drops. A worker send failure
+is also counted in `trapsDropped`; only a sender that returns nil is counted as
+delivered. Before this, `trapsDropped` reported zero for a shutdown that
+discarded a queued backlog. Fail-on-revert guard:
+`TestStop_CountsAbandonedTrapBacklog`.
 
 This accounting is **exact** — `accepted == delivered + trapsDropped` with no
 residual — because `enqueueTrap` publishes to the queue under the same `a.mu`
