@@ -1,9 +1,11 @@
 package flowexport
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -114,18 +116,84 @@ type collectorConns struct {
 // net.Conn (not *net.UDPConn) so tests can substitute a recording fake
 // and assert that connections opened before a mid-loop failure are
 // closed.
+//
+// The context-aware seams are the production path. The legacy seams remain
+// for narrow tests that inject a fake UDP socket; test helpers adapt them to
+// contexts without changing the production timeout contract.
 var (
 	dialUDP = func(network string, laddr, raddr *net.UDPAddr) (net.Conn, error) {
 		return net.DialUDP(network, laddr, raddr)
 	}
-	resolveUDPAddr = net.ResolveUDPAddr
+	resolveUDPAddr        = net.ResolveUDPAddr
+	dialUDPContext        = dialUDPWithContext
+	resolveUDPAddrContext = resolveUDPAddrWithContext
 )
+
+// collectorDialTimeout bounds each collector's resolve plus dial operation.
+// A flow-export reconcile builds exporters while holding its family mutex, so
+// a resolver outage must not park the commit indefinitely (#9913). Keep this
+// aligned with the syslog transport bound from #9326.
+var collectorDialTimeout = 5 * time.Second
+
+// resolveUDPAddrWithContext resolves a UDP endpoint while honoring ctx. The
+// standard net.ResolveUDPAddr helper has no context and performs an unbounded
+// hostname lookup, so literals take its fast parser path while hostnames use
+// Resolver.LookupIPAddr with the caller's deadline.
+func resolveUDPAddrWithContext(ctx context.Context, network, address string) (*net.UDPAddr, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if host == "" {
+		return net.ResolveUDPAddr(network, address)
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return net.ResolveUDPAddr(network, address)
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, ip := range ips {
+		ipHost := ip.IP.String()
+		if ip.Zone != "" {
+			ipHost += "%" + ip.Zone
+		}
+		resolved, err := net.ResolveUDPAddr(network, net.JoinHostPort(ipHost, port))
+		if err == nil {
+			return resolved, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("lookup %s: no suitable address", host)
+}
+
+// dialUDPWithContext opens a UDP connection while honoring ctx. The dialer
+// receives the original destination string so its resolver can try every
+// address returned by DNS, matching net.Dial's behavior. A non-nil LocalAddr
+// preserves source-address binding.
+func dialUDPWithContext(ctx context.Context, network string, laddr *net.UDPAddr, address string) (net.Conn, error) {
+	dialer := &net.Dialer{LocalAddr: laddr}
+	return dialer.DialContext(ctx, network, address)
+}
 
 // dialCollectors opens a UDP connection to every collector in the list.
 // When a collector specifies a SourceAddress the local bind address is
 // pinned; otherwise the OS selects it. On any resolve or dial error all
 // already opened connections are closed and the error is returned, so a
 // partial failure mid-loop never leaks the connections opened before it.
+//
+// Every collector gets a fresh context with collectorDialTimeout. This keeps
+// the existing fatal-on-build-error behavior while making both DNS lookup and
+// socket dial finite on the reconcile path (#9913).
 func dialCollectors(collectors []CollectorConfig) (*collectorConns, error) {
 	cc := &collectorConns{}
 	// fail closes every connection opened so far and returns err as-is
@@ -137,27 +205,29 @@ func dialCollectors(collectors []CollectorConfig) (*collectorConns, error) {
 		return nil, err
 	}
 	for _, c := range collectors {
+		ctx, cancel := context.WithTimeout(context.Background(), collectorDialTimeout)
 		var conn net.Conn
 		var err error
 		if c.SourceAddress != "" {
 			// A misconfigured SourceAddress must be surfaced, not
-			// silently dropped to a nil local bind (which would let the
-			// OS pick an arbitrary source and mask the misconfiguration).
-			// JoinHostPort brackets an IPv6 source-address literal so
-			// resolveUDPAddr can parse it; "addr:0" leaves an IPv6
-			// address unbracketed and unparseable (sibling of #2183).
-			laddr, err2 := resolveUDPAddr("udp", net.JoinHostPort(c.SourceAddress, "0"))
+			// silently dropped to a nil local bind (which would let
+			// the OS pick an arbitrary source and mask the
+			// misconfiguration). JoinHostPort brackets an IPv6
+			// source-address literal so the context-aware resolver can
+			// parse it; "addr:0" leaves an IPv6 address unbracketed
+			// and unparseable (sibling of #2183).
+			laddr, err2 := resolveUDPAddrContext(ctx, "udp", net.JoinHostPort(c.SourceAddress, "0"))
 			if err2 != nil {
+				cancel()
 				return fail(fmt.Errorf("resolve collector %s source-address %s: %w", c.Address, c.SourceAddress, err2))
 			}
-			raddr, err2 := resolveUDPAddr("udp", c.Address)
-			if err2 != nil {
-				return fail(fmt.Errorf("resolve collector %s: %w", c.Address, err2))
-			}
-			conn, err = dialUDP("udp", laddr, raddr)
+			conn, err = dialUDPContext(ctx, "udp", laddr, c.Address)
 		} else {
-			conn, err = net.Dial("udp", c.Address)
+			// Pass the hostname directly to DialContext so the net
+			// package retains its candidate-list fallback behavior.
+			conn, err = dialUDPContext(ctx, "udp", nil, c.Address)
 		}
+		cancel()
 		if err != nil {
 			return fail(fmt.Errorf("dial collector %s: %w", c.Address, err))
 		}
