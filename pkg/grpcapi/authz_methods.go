@@ -68,17 +68,16 @@ const unmappedMethodPermission = config.PermAll
 // TestEveryServiceMethodHasAPermission_5278.
 var methodPermissions = map[string]config.LoginClassPermission{
 	// --- Config lifecycle: `configure` and everything inside it. -----------
-	"EnterConfigure":      config.PermConfig,
-	"ExitConfigure":       config.PermConfig,
-	"GetConfigModeStatus": config.PermConfig,
-	"Set":                 config.PermConfig,
-	"Delete":              config.PermConfig,
-	"Load":                config.PermConfig,
-	"Commit":              config.PermConfig,
-	"CommitCheck":         config.PermConfig,
-	"CommitConfirmed":     config.PermConfig,
-	"ConfirmCommit":       config.PermConfig,
-	"Rollback":            config.PermConfig,
+	"EnterConfigure":  config.PermConfig,
+	"ExitConfigure":   config.PermConfig,
+	"Set":             config.PermConfig,
+	"Delete":          config.PermConfig,
+	"Load":            config.PermConfig,
+	"Commit":          config.PermConfig,
+	"CommitCheck":     config.PermConfig,
+	"CommitConfirmed": config.PermConfig,
+	"ConfirmCommit":   config.PermConfig,
+	"Rollback":        config.PermConfig,
 
 	// Config RENDER paths. `show configuration`, `show | compare`, `show system
 	// rollback` and `show system commit` are all `show` in the CLI's table, and
@@ -95,6 +94,7 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"ListHistory":  config.PermView,
 
 	// --- Operational show RPCs: the `show` family. -------------------------
+	"GetConfigModeStatus":      config.PermView,
 	"GetStatus":                config.PermView,
 	"GetGlobalStats":           config.PermView,
 	"GetZones":                 config.PermView,
