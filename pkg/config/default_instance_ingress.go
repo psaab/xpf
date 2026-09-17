@@ -29,6 +29,7 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 		return nil
 	}
 	claimed := make(map[string]struct{})
+	claimedBare := make(map[string]struct{})
 	// #9810: hoist the tunnel-name map once — ResolveKernelIfName rebuilds it
 	// per call, and this resolver now runs per commit (gate), per FIB build
 	// and per show render, which would triple the #8854/#8862 quadratic.
@@ -38,7 +39,15 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 			continue
 		}
 		for _, ref := range inst.Interfaces {
+			s := cfg.SplitInterfaceUnitRef(ref)
 			claimed[ref] = struct{}{}
+			// A bare claim owns the whole stanza. Keep its raw linux
+			// spelling in a separate partition so a dash/slash alias skips
+			// the declared stanza without changing unit-claim rules. The
+			// resolved name remains in claimed below; it can differ for reth.
+			if !s.HasUnit {
+				claimedBare[LinuxIfName(s.Base)] = struct{}{}
+			}
 			// An instance may claim the base interface ("ge-0/0/0") or a unit
 			// ref ("ge-0/0/0.0"). Record the resolved kernel name too so a
 			// claim written in either spelling excludes the same device.
@@ -59,7 +68,12 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 		if IsLoopbackIngress(ifc.Name) {
 			continue
 		}
+		// #9815: claimedBare is the bare-origin partition layered on
+		// #9810's resolved claim set. Unit claims stay per-device below.
 		if _, taken := claimed[ifc.Name]; taken {
+			continue
+		}
+		if _, taken := claimedBare[LinuxIfName(ifc.Name)]; taken {
 			continue
 		}
 		for _, unit := range ifc.Units {

@@ -1,5 +1,7 @@
 package config
 
+import "sort"
+
 // Nil-safe interface/unit iterators for read-only presenters (#5813).
 //
 // REACHABILITY, corrected in #6780. The comments here and at ~12 call sites
@@ -28,6 +30,9 @@ package config
 // unit := range ifc.Units { unit.Number … } }` nil-derefs and panics the
 // in-process daemon during a routine `show`. Routing every such walk through
 // these two helpers keeps the guard in ONE place so this class stops recurring.
+// LookupInterfaceByLinuxName ALSO serves the commit path (#9815): the
+// kernel-name resolver and the default-instance scoping set resolve a
+// possibly cross-spelled member base through it.
 
 // RangeInterfaces calls fn for every (name, *InterfaceConfig) in cfg's interface
 // map, SKIPPING any present-but-nil InterfaceConfig value. A nil cfg (or nil
@@ -75,6 +80,55 @@ func LookupInterface(cfg *Config, name string) (*InterfaceConfig, bool) {
 		return nil, false
 	}
 	return ifc, true
+}
+
+// LookupInterfaceByLinuxName returns the declared stanza for a possibly
+// cross-spelled interface base (#9815): the exact LookupInterface hit first,
+// else the first-sorted stanza whose LinuxIfName equals LinuxIfName(base).
+// The contract, each load-bearing:
+//
+//   - the return includes the matched DECLARED KEY (not just the stanza):
+//     the tunnel-alias probes reconstruct the same-spelling twin's tunMap
+//     key from it, and assuming ifc.Name equals the map key is unstated.
+//   - exact-first: a same-spelling caller resolves byte-identically to the
+//     direct map index, so #8994/#9821 pins and every same-spelling consumer
+//     are unreachable by the fallback.
+//   - first-sorted over a copied name list: a lenient config may declare
+//     both spellings, and map order must not pick the winner (the
+//     resolveMemberDeclaredBase level-2 twin in pkg/daemon pins the same
+//     order).
+//   - nil-safe (#5886 doctrine): nil cfg, nil map, and present-but-nil slots
+//     (exact and scan paths alike) are a miss, never a panic.
+//
+// Placement rule: call sites stay strictly inside a HasUnit arm (for a bare
+// ref base==member, so a helper call there WOULD be whole-member alias
+// matching) — with ONE exception, the daemon bind's bare fan-down, which
+// deliberately alias-matches a bare member onto a stanza in the daemon layer
+// that owns linux-name matching (#8829 precedent). The shared resolver's
+// bare arm never consults this helper.
+func LookupInterfaceByLinuxName(cfg *Config, base string) (string, *InterfaceConfig, bool) {
+	if ifc, ok := LookupInterface(cfg, base); ok {
+		return base, ifc, true
+	}
+	if cfg == nil {
+		return "", nil, false
+	}
+	want := LinuxIfName(base)
+	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ifc := cfg.Interfaces.Interfaces[name]
+		if ifc == nil {
+			continue
+		}
+		if LinuxIfName(name) == want {
+			return name, ifc, true
+		}
+	}
+	return "", nil, false
 }
 
 // LookupUnit returns ifc's InterfaceUnit for num and true ONLY when the unit is
