@@ -44,6 +44,7 @@ const (
 	cmdPublishGeneration
 	cmdVerifyDataplane
 	cmdCheckConfig
+	cmdTransitBarrier
 	cmdUnknown
 )
 
@@ -115,6 +116,8 @@ func classifyCommand(argv []string) xpfdCommand {
 		return cmdVerifyDataplane
 	case "check-config":
 		return cmdCheckConfig
+	case "transit-barrier":
+		return cmdTransitBarrier
 	}
 	// Reject unknown positional arguments — prevents accidentally starting
 	// a second daemon when running "xpfd show ..." outside the CLI. Use the
@@ -176,6 +179,13 @@ func main() {
 		fmt.Printf("session-sync-protocol-version=%d\n", cluster.SessionSyncWireVersion)
 		fmt.Printf("configdb-envelope-version=%d\n", configstore.EnvelopeFormatVersion)
 		fmt.Printf("configdb-min-reader-version=%d\n", configstore.EnvelopeMinReaderVersion)
+		return
+
+	case cmdTransitBarrier:
+		code := runTransitBarrierSubcommand(os.Args[2:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
 		return
 
 	case cmdCleanup:

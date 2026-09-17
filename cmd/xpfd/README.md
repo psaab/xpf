@@ -45,8 +45,22 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
 ## Subcommands
 
 - `xpfd version` — prints version and commit.
-- `xpfd cleanup` — removes pinned BPF state and FRR-managed routes.
-  Runs on uninstall.
+- `xpfd protocol-versions` — prints embedded HA, session-sync, and
+  config-database protocol compatibility values.
+- `xpfd cleanup` — closes kernel transit, removes pinned BPF state, and clears
+  FRR-managed routes. Runs on uninstall.
+- `xpfd upgrade` — runs the verified binary or kernel upgrade workflow.
+- `xpfd seed-runtime` — seeds the versioned runtime layout on first install.
+- `xpfd publish-generation` — publishes a complete staged binary generation.
+- `xpfd verify-dataplane` — verifies the embedded userspace shim without
+  touching production dataplane state.
+- `xpfd check-config <config-file>` — runs strict config validation and the
+  device-map management-stranding preflight.
+- `xpfd transit-barrier close` — installs the inet and bridge forward-hook DROP
+  barrier without loading configuration or taking the daemon lock. The early
+  boot unit runs it before `systemd-networkd.service`.
+- A kernel without bridge nf_tables reports degraded success with a warning
+  when the inet barrier is active; inet failures and real bridge errors fail.
 
 ## TTY detection
 

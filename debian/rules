@@ -65,6 +65,10 @@ override_dh_auto_build:
 	grep -q '^ExecStartPre=/usr/local/sbin/xpfd verify-dataplane$$' debian/xpf.xpfd.service || \
 	    { echo "FATAL: ExecStartPre verify-dataplane injection failed (xpfd.service ExecStart line not matched)" >&2; exit 1; }
 	cp scripts/image/xpf-day0-config.service debian/xpf.xpf-day0-config.service
+	@# #9852: stage the boot transit fence. Its RequiredBy= dependency is
+	@# enabled below so networkd cannot create bridge forwarding if the
+	@# barrier install fails.
+	cp scripts/image/xpf-transit-closed.service debian/xpf.xpf-transit-closed.service
 	@# #1930 LANE-1 kernel channel: stage the two oneshot units under the
 	@# package-canonical names so dh_installsystemd enables them. These ship in
 	@# the .deb (not only the bake) so foreign-host / manual installs get the
@@ -150,6 +154,11 @@ override_dh_auto_install:
 override_dh_installsystemd:
 	dh_installsystemd --no-stop-on-upgrade --name=xpfd
 	dh_installsystemd --no-stop-on-upgrade --name=xpf-day0-config
+	@# #9852: enable the required boot fence, including its reverse
+	@# RequiredBy=systemd-networkd.service dependency. --no-start is
+	@# essential: a package upgrade must not inject a DROP barrier into an
+	@# already armed live daemon; the next boot runs it before networkd.
+	dh_installsystemd --no-start --no-stop-on-upgrade --name=xpf-transit-closed
 	@# #1930: enable the two LANE-1 oneshots. They are best-effort + non-fatal
 	@# (degrade to "LANE 1 unavailable" on non-UEFI / read-only NVRAM) and are
 	@# NOT ordered Before=xpfd, so enabling them cannot block the daemon.
@@ -164,7 +173,8 @@ override_dh_installsystemd:
 
 override_dh_clean:
 	rm -f debian/xpf.xpfd.service debian/xpf.xpf-day0-config.service \
-	      debian/xpf.xpf-uefi-slots.service debian/xpf.xpf-kernel-promote.service \
+	      debian/xpf.xpf-transit-closed.service debian/xpf.xpf-uefi-slots.service \
+	      debian/xpf.xpf-kernel-promote.service \
 	      debian/xpf.xpf-kernel-promote-failed.service
 	dh_clean
 

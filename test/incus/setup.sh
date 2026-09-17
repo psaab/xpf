@@ -662,10 +662,15 @@ cmd_deploy() {
 		incus exec "$INSTANCE_NAME" -- rm -rf /etc/xpf/.configdb
 	fi
 
-	# Install systemd unit file
-	info "Installing systemd service..."
+	# Install systemd units
+	info "Installing systemd services..."
 	incus file push "${SCRIPT_DIR}/xpfd.service" "$INSTANCE_NAME/etc/systemd/system/xpfd.service"
+	# #9852: the raw-binary test VM must carry the same early bridge barrier
+	# as the packaged image; RequiredBy=systemd-networkd.service protects the
+	# next boot, while --now closes the current VM before xpfd starts.
+	incus file push "${PROJECT_ROOT}/scripts/image/xpf-transit-closed.service" "$INSTANCE_NAME/etc/systemd/system/xpf-transit-closed.service"
 	incus exec "$INSTANCE_NAME" -- systemctl daemon-reload
+	incus exec "$INSTANCE_NAME" -- systemctl enable --now xpf-transit-closed.service
 	incus exec "$INSTANCE_NAME" -- systemctl enable --now xpfd
 
 	# Backstop (#2176): assert the LIVE xpfd is the binary we just pushed and the

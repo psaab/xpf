@@ -1,0 +1,40 @@
+# xpf #9852 boot bridge-transit fence.
+#
+# networkd recreates configured bridge devices from the persisted 10-xpf-*.netdev
+# files before xpfd starts. Bridged frames do not consult ip_forward, so the
+# nftables xpf_transit_barrier must be installed before networkd is allowed to
+# bring up any bridge. xpfd's bring-up later re-installs the same barrier
+# idempotently, then removes it only after the #9725 arm gate proves a live XDP
+# link. A box whose daemon never starts therefore stays bridge-transit-closed.
+#
+# This is a REQUIRED dependency of systemd-networkd (via RequiredBy below), not
+# merely an ordering hint: if the barrier command fails, systemd-networkd is
+# not started and cannot create bridge forwarding. Management and loopback are
+# unaffected on the normal success path because the barrier has only a forward
+# hook; INPUT/OUTPUT are never touched.
+#
+# The unit deliberately owns NO forwarding sysctl. Those knobs belong to the
+# #9725 daemon gate; this unit is scoped to the bridged-transit nftables leg.
+# The xpfd subcommand reads no config and takes no daemon lock.
+[Unit]
+DefaultDependencies=no
+After=nftables.service
+Before=network-pre.target systemd-networkd.service frr.service xpfd.service
+Wants=network-pre.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+# Do not prefix this command with `-`: failure MUST fail this required unit,
+# and therefore prevent systemd-networkd from creating bridge forwarding.
+ExecStart=/usr/local/sbin/xpfd transit-barrier close
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xpf-transit-closed
+
+[Install]
+WantedBy=sysinit.target
+RequiredBy=systemd-networkd.service

@@ -580,6 +580,14 @@ def virt_customize(work_qcow, xpf_deb):
         #     Kernels stay in /boot, NEVER on the ESP (r4 AGY F3).
         "--copy-in", f"{HERE}/grub.d/09_xpf:/etc/grub.d",
         "--run-command", "chmod 0755 /etc/grub.d/09_xpf",
+        # #9852: re-stage the boot transit fence after apt installs the .deb.
+        # The package already carries/enables this unit; copying the canonical
+        # source here keeps the baked image explicit and makes the dependency
+        # available even when the package was built for a foreign host.
+        # `RequiredBy=systemd-networkd.service` makes a failed barrier close
+        # prevent networkd from creating bridge forwarding.
+        "--copy-in", f"{HERE}/xpf-transit-closed.service:/usr/lib/systemd/system",
+        "--run-command", "systemctl enable xpf-transit-closed.service",
         "--copy-in", f"{HERE}/xpf-uefi-slots:/usr/local/sbin",
         "--copy-in", f"{HERE}/xpf-uefi-slots.service:/usr/lib/systemd/system",
         "--run-command", "chmod 0755 /usr/local/sbin/xpf-uefi-slots",

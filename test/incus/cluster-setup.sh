@@ -909,10 +909,14 @@ deploy_vm() {
 	# Disable radvd — embedded RA sender in xpfd replaces it
 	incus exec "$rinst" -- systemctl disable --now radvd 2>/dev/null || true
 
-	# Install systemd unit
-	info "Installing systemd service on $vm..."
+	# Install systemd units
+	info "Installing systemd services on $vm..."
 	incus file push "${SCRIPT_DIR}/xpfd.service" "${rinst}/etc/systemd/system/xpfd.service"
+	# #9852: stage and start the barrier before raw xpfd; its RequiredBy=
+	# systemd-networkd.service dependency protects every subsequent reboot.
+	incus file push "${PROJECT_ROOT}/scripts/image/xpf-transit-closed.service" "${rinst}/etc/systemd/system/xpf-transit-closed.service"
 	incus exec "$rinst" -- systemctl daemon-reload
+	incus exec "$rinst" -- systemctl enable --now xpf-transit-closed.service
 	incus exec "$rinst" -- systemctl enable --now xpfd
 
 	# Backstop (#2176): assert the LIVE xpfd is the binary we just pushed and the
