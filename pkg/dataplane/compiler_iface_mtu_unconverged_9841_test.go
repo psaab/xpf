@@ -475,9 +475,9 @@ func TestChildMTUAbovePlanGradesImpossible9841(t *testing.T) {
 	}
 }
 
-// A unit want above the parent's live MTU with no parent plan at all is
-// likewise impossible: nothing will ever raise the parent.
-func TestChildMTUAboveLiveWithoutPlanGradesImpossible9841(t *testing.T) {
+// A unit want above the parent's live MTU is impossible when the planner
+// materialises the explicit Linux-default parent target.
+func TestChildMTUAboveLiveWithDefaultParentPlanGradesImpossible9841(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
 	cfg.Interfaces.Interfaces[taggedParent9761].MTU = 0
 	cfg.Interfaces.Interfaces[taggedParent9761].Units[80].MTU = 9000
@@ -505,13 +505,13 @@ func TestChildMTUAboveLiveWithoutPlanGradesImpossible9841(t *testing.T) {
 
 	recs := d.records()
 	if len(recs) != 1 {
-		t.Fatalf("records = %+v, want only the child's (no parent plan, no parent attempt)", recs)
+		t.Fatalf("records = %+v, want only the child's record", recs)
 	}
 	if recs[0].Grade != MTUGradeConfigImpossible {
 		t.Errorf("record = %+v, want config-impossible", recs[0])
 	}
-	if !strings.Contains(recs[0].Detail, "no parent MTU is planned") {
-		t.Errorf("detail %q must say no parent MTU is planned", recs[0].Detail)
+	if !strings.Contains(recs[0].Detail, "parent's planned MTU 1500") {
+		t.Errorf("detail %q must name the explicit default parent plan", recs[0].Detail)
 	}
 }
 
