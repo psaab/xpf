@@ -1368,6 +1368,7 @@ fn synced_entry_for(
         key: key.clone(),
         decision,
         metadata,
+        leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,

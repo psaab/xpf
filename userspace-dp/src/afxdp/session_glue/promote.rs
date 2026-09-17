@@ -123,6 +123,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
             key: key.clone(),
             decision,
             metadata: promoted.clone(),
+            leak_incarnation: sessions.leak_incarnation(key).unwrap_or(0),
             origin: SessionOrigin::SharedPromote,
             protocol,
             tcp_flags,

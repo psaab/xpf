@@ -562,6 +562,13 @@ What happens to ESTABLISHED sessions when ip-monitoring fails over:
    fast path. The pinning above is the ordinary direct-uplink case the
    SNAT recipes produce.)
 
+**Scope note (#9951):** removing an inter-VRF route leak is a tenancy
+revocation, not a WAN next-hop preference change. Sessions whose cached
+resolution used the removed leak are re-resolved (and denied when no
+replacement path exists) using that leak's exact incarnation. A next-hop
+change inside the leak's target table retains the incarnation and therefore
+keeps the established-flow pin; removing an unrelated leak has no effect.
+
 This is Junos parity in substance: SRX likewise does not re-route or
 re-NAT established sessions on a route change by default. Junos
 ip-monitoring has no session-clear action, and neither does xpf's

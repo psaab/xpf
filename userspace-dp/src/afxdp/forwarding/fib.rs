@@ -220,6 +220,80 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow_in_ta
     )
 }
 
+/// #9951: identify the exact inter-VRF leak selected by the immutable FIB
+/// walk. This deliberately does not re-run neighbor/ECMP/HA resolution:
+/// those mutable inputs can change between the session lookup and provenance
+/// stamping, which must never turn a valid leak match into an unstamped one.
+/// The first matching leak whose target table has a route is the same
+/// precedence-ordered rule selected by the forwarding walk.
+pub(in crate::afxdp) fn leak_incarnation_for_resolution(
+    state: &ForwardingState,
+    target: IpAddr,
+    source_table: Option<&str>,
+) -> Option<u64> {
+    match target {
+        IpAddr::V4(ip) => {
+            let table = source_table
+                .map(|name| canonical_route_table(name, false))
+                .unwrap_or(Cow::Borrowed(DEFAULT_V4_TABLE));
+            if local_v4_owned_by_table(state, ip, table.as_ref()) {
+                return None;
+            }
+            state.leak_rules_v4.get(table.as_ref()).and_then(|rules| {
+                rules
+                    .iter()
+                    .filter(|leak| leak.prefix.contains(ip))
+                    .find_map(|leak| {
+                        let next_table = canonical_next_table(&leak.next_table, false);
+                        table_has_v4_route(state, ip, next_table.as_ref())
+                            .then_some(leak.incarnation)
+                    })
+            })
+        }
+        IpAddr::V6(ip) => {
+            let table = source_table
+                .map(|name| canonical_route_table(name, true))
+                .unwrap_or(Cow::Borrowed(DEFAULT_V6_TABLE));
+            if local_v6_owned_by_table(state, ip, table.as_ref()) {
+                return None;
+            }
+            state.leak_rules_v6.get(table.as_ref()).and_then(|rules| {
+                rules
+                    .iter()
+                    .filter(|leak| leak.prefix.contains(ip))
+                    .find_map(|leak| {
+                        let next_table = canonical_next_table(&leak.next_table, true);
+                        table_has_v6_route(state, ip, next_table.as_ref())
+                            .then_some(leak.incarnation)
+                    })
+            })
+        }
+    }
+}
+
+/// #9951: an old session is valid only while the exact leak incarnation it
+/// recorded still owns this destination. A removed and re-added rule has a
+/// fresh incarnation and therefore fails closed rather than passing an ABA
+/// check.
+pub(in crate::afxdp) fn leak_incarnation_is_live(
+    state: &ForwardingState,
+    target: IpAddr,
+    incarnation: u64,
+) -> bool {
+    if incarnation == 0 {
+        return true;
+    }
+    match target {
+        IpAddr::V4(ip) => state
+            .leak_incarnations_v4
+            .get(&incarnation)
+            .is_some_and(|prefixes| prefixes.iter().any(|prefix| prefix.contains(ip))),
+        IpAddr::V6(ip) => state
+            .leak_incarnations_v6
+            .get(&incarnation)
+            .is_some_and(|prefixes| prefixes.iter().any(|prefix| prefix.contains(ip))),
+    }
+}
 pub(in crate::afxdp) fn lookup_forwarding_resolution_in_table_with_dynamic(
     state: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,

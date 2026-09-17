@@ -122,6 +122,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
         key: key.clone(),
         decision,
         metadata,
+        leak_incarnation: 0,
         origin,
         protocol,
         tcp_flags,

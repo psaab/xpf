@@ -25,6 +25,74 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_LEAK_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
+fn leak_identity_matches_v4(a: &LeakRuleV4, b: &LeakRuleV4) -> bool {
+    a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+}
+
+fn leak_identity_matches_v6(a: &LeakRuleV6, b: &LeakRuleV6) -> bool {
+    a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+}
+
+/// #9951: retain a leak's incarnation across a config rebuild when the exact
+/// rule remains. A rule absent from the previous state receives a fresh
+/// process-local incarnation, so remove -> re-add cannot resurrect sessions
+/// that still carry the removed rule's stamp.
+pub(super) fn assign_leak_incarnations(
+    state: &mut ForwardingState,
+    previous: Option<&ForwardingState>,
+) {
+    for (table, leaks) in &mut state.leak_rules_v4 {
+        let old = previous.and_then(|prev| prev.leak_rules_v4.get(table));
+        for leak in leaks {
+            leak.incarnation = old
+                .and_then(|rules| rules.iter().find(|candidate| leak_identity_matches_v4(candidate, leak)))
+                .map(|candidate| candidate.incarnation)
+                .unwrap_or_else(|| NEXT_LEAK_INCARNATION.fetch_add(1, Ordering::Relaxed));
+        }
+    }
+    for (table, leaks) in &mut state.leak_rules_v6 {
+        let old = previous.and_then(|prev| prev.leak_rules_v6.get(table));
+        for leak in leaks {
+            leak.incarnation = old
+                .and_then(|rules| rules.iter().find(|candidate| leak_identity_matches_v6(candidate, leak)))
+                .map(|candidate| candidate.incarnation)
+                .unwrap_or_else(|| NEXT_LEAK_INCARNATION.fetch_add(1, Ordering::Relaxed));
+        }
+    }
+}
+
+/// #9951: build the per-incarnation liveness index once per forwarding
+/// snapshot so established-session hits do not scan every source-table rule.
+pub(super) fn rebuild_leak_incarnation_indexes(state: &mut ForwardingState) {
+    state.leak_incarnations_v4.clear();
+    state.leak_incarnations_v6.clear();
+    for leaks in state.leak_rules_v4.values() {
+        for leak in leaks {
+            if leak.incarnation != 0 {
+                state
+                    .leak_incarnations_v4
+                    .entry(leak.incarnation)
+                    .or_default()
+                    .push(leak.prefix);
+            }
+        }
+    }
+    for leaks in state.leak_rules_v6.values() {
+        for leak in leaks {
+            if leak.incarnation != 0 {
+                state
+                    .leak_incarnations_v6
+                    .entry(leak.incarnation)
+                    .or_default()
+                    .push(leak.prefix);
+            }
+        }
+    }
+}
 pub(super) fn sort_connected(state: &mut ForwardingState) {
     state
         .connected_v4
@@ -88,6 +156,7 @@ pub(super) fn populate_routes(
                         prefix,
                         next_table: canonical_next_table(&route.next_table, false).into_owned(),
                         rule_priority: route.rule_priority,
+                        incarnation: 0,
                     });
             } else {
                 state
@@ -136,6 +205,7 @@ pub(super) fn populate_routes(
                         prefix,
                         next_table: canonical_next_table(&route.next_table, true).into_owned(),
                         rule_priority: route.rule_priority,
+                        incarnation: 0,
                     });
             } else {
                 state

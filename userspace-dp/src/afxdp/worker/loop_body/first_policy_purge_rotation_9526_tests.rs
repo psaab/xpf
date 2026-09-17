@@ -121,6 +121,7 @@ fn entry(key: SessionKey, is_reverse: bool, counter: Option<Arc<PolicyRuleCounte
         },
         // `UpsertLocal` requires a sync-family origin; the purge does not look
         // at origin, only at the forward half's bound rule handle.
+        leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,

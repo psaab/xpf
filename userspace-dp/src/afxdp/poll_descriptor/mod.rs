@@ -2049,6 +2049,16 @@ pub(super) fn poll_binding_process_descriptor(
                                 resolved_in_table,
                                 resolution,
                             );
+                        // #9951: keep routing-leak provenance independent of
+                        // the PBR installing-table stamp. A target-table
+                        // next-hop change keeps this incarnation and therefore
+                        // preserves deliberate WAN-failover pinning.
+                        let leak_incarnation =
+                            crate::afxdp::forwarding::leak_incarnation_for_resolution(
+                                worker_ctx.forwarding,
+                                effective_resolution_target,
+                                route_table_override.as_deref(),
+                            );
                         let mut decision = SessionDecision {
                             resolution,
                             nat: nptv6_nat.or(pre_routing_dnat).unwrap_or_default(),
@@ -3215,6 +3225,14 @@ pub(super) fn poll_binding_process_descriptor(
                                             meta.protocol,
                                             meta.tcp_flags,
                                         );
+                                    if forward_installed {
+                                        if let Some(incarnation) = leak_incarnation {
+                                            sessions.stamp_leak_incarnation(
+                                                &flow.forward_key,
+                                                incarnation,
+                                            );
+                                        }
+                                    }
                                     if track_in_userspace && !forward_installed {
                                         // #1861 §5.2 residual: impossible by
                                         // construction after a passing
@@ -3356,6 +3374,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             key: flow.forward_key.clone(),
                                             decision,
                                             metadata: forward_metadata,
+                                            leak_incarnation: leak_incarnation.unwrap_or(0),
                                             origin: SessionOrigin::ForwardFlow,
                                             protocol: meta.protocol,
                                             tcp_flags: meta.tcp_flags,
@@ -3640,6 +3659,12 @@ pub(super) fn poll_binding_process_descriptor(
                                         (flow.reverse_key_with_nat(decision.nat), meta.protocol)
                                     };
                                     let _ = reverse_protocol; // used below for install
+                                    let reverse_leak_incarnation =
+                                        crate::afxdp::forwarding::leak_incarnation_for_resolution(
+                                            worker_ctx.forwarding,
+                                            reverse_key.dst_ip,
+                                            None,
+                                        );
                                     let reverse_metadata = SessionMetadata {
                                         ingress_zone: to_zone_id,
                                         egress_zone: from_zone_id,
@@ -3725,6 +3750,12 @@ pub(super) fn poll_binding_process_descriptor(
                                         flow_cache_install_failed = true;
                                     }
                                     if reverse_installed {
+                                        if let Some(incarnation) = reverse_leak_incarnation {
+                                            sessions.stamp_leak_incarnation(
+                                                &reverse_key,
+                                                incarnation,
+                                            );
+                                        }
                                         // #1789: count failed reverse-key
                                         // publishes (was `let _ =`; the
                                         // debug-only verify below re-reads
@@ -3827,6 +3858,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             key: reverse_key,
                                             decision: reverse_decision,
                                             metadata: reverse_metadata,
+                                            leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
                                             origin: SessionOrigin::ReverseFlow,
                                             protocol: meta.protocol,
                                             tcp_flags: meta.tcp_flags,
@@ -6455,6 +6487,21 @@ pub(super) fn poll_binding_process_descriptor(
                                             }
                                         }
                                     }
+                                    let pending_resolution_target =
+                                        crate::afxdp::session_glue::resolution_target_for_session(
+                                            flow,
+                                            pending_decision,
+                                        );
+                                    let pending_leak_incarnation =
+                                        crate::afxdp::forwarding::leak_incarnation_for_resolution(
+                                            worker_ctx.forwarding,
+                                            pending_resolution_target,
+                                            crate::afxdp::session_glue::install_table_name_for_session(
+                                                worker_ctx.forwarding,
+                                                pending_decision,
+                                                pending_resolution_target,
+                                            ),
+                                        );
                                     let sess_meta = build_missing_neighbor_session_metadata(
                                         worker_ctx.forwarding,
                                         from_zone_id,
@@ -6486,6 +6533,14 @@ pub(super) fn poll_binding_process_descriptor(
                                         meta.tcp_flags,
                                     );
                                     if pending_installed {
+                                        if let Some(incarnation) = pending_leak_incarnation {
+                                            sessions.stamp_leak_incarnation(
+                                                &flow.forward_key,
+                                                incarnation,
+                                            );
+                                        }
+                                    }
+                                    if pending_installed {
                                         // #2218: the seed install is the
                                         // committed translation for this
                                         // missing-neighbor flow (a refused seed
@@ -6504,6 +6559,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             key: flow.forward_key.clone(),
                                             decision: pending_decision,
                                             metadata: sess_meta,
+                                            leak_incarnation: pending_leak_incarnation.unwrap_or(0),
                                             origin: SessionOrigin::MissingNeighborSeed,
                                             protocol: meta.protocol,
                                             tcp_flags: meta.tcp_flags,

@@ -285,6 +285,7 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        leak_incarnation: 0,
         origin: SessionOrigin::TunOrigin,
         protocol: parsed.meta.protocol,
         tcp_flags: if parsed.meta.protocol == PROTO_TCP {

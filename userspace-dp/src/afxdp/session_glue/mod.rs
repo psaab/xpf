@@ -178,6 +178,23 @@ pub(super) fn lookup_forwarding_resolution_for_session(
         flow,
         decision,
         true,
+        true,
+    )
+}
+
+pub(super) fn lookup_forwarding_resolution_for_session_without_cache(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    decision: SessionDecision,
+) -> ForwardingResolution {
+    lookup_forwarding_resolution_for_session_with_cache(
+        forwarding,
+        dynamic_neighbors,
+        flow,
+        decision,
+        false,
+        false,
     )
 }
 
@@ -202,6 +219,7 @@ fn lookup_forwarding_resolution_for_session_with_cache(
     flow: &SessionFlow,
     decision: SessionDecision,
     allow_cached_fast_path: bool,
+    allow_cached_fallback: bool,
 ) -> ForwardingResolution {
     // #9752: validate a stamped installing table BEFORE any stored-resolution
     // shortcut (Codex-r2-F2/F5: cached reuse, the lookup fallback, and the
@@ -270,7 +288,9 @@ fn lookup_forwarding_resolution_for_session_with_cache(
             0,
         );
         return match resolved.disposition {
-            ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor => {
+            ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
+                if allow_cached_fallback =>
+            {
                 cached_session_resolution(forwarding, decision.resolution).unwrap_or(resolved)
             }
             _ => resolved,
@@ -308,7 +328,9 @@ fn lookup_forwarding_resolution_for_session_with_cache(
         ),
     };
     match resolved.disposition {
-        ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor => {
+        ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
+            if allow_cached_fallback =>
+        {
             cached_session_resolution(forwarding, decision.resolution).unwrap_or(resolved)
         }
         _ => resolved,
@@ -327,6 +349,7 @@ fn lookup_forwarding_resolution_for_synced_session(
         flow,
         decision,
         false,
+        true,
     )
 }
 
@@ -2134,11 +2157,40 @@ pub(super) fn pending_forward_matches_flow(
 fn materialize_shared_session_hit(
     sessions: &mut SessionTable,
     resolved: &mut ResolvedSessionLookup,
+    forwarding: &ForwardingState,
     now_ns: u64,
     tcp_flags: u8,
 ) -> SessionLookup {
     if let Some(shared) = resolved.shared_entry.take() {
-        let replica = synced_replica_entry(&shared);
+        let mut replica = synced_replica_entry(&shared);
+        // A zero token carries no leak provenance and is recomputed locally
+        // for peer-synced rows. A nonzero token was computed before this
+        // shared row was published (and survives demotion), so preserve it as
+        // revocation evidence.
+        if shared.origin.is_peer_synced() && replica.leak_incarnation == 0 {
+            let target = if replica.metadata.is_reverse {
+                replica.key.dst_ip
+            } else {
+                let flow = SessionFlow {
+                    src_ip: replica.key.src_ip,
+                    dst_ip: replica.key.dst_ip,
+                    forward_key: replica.key.clone(),
+                };
+                resolution_target_for_session(&flow, replica.decision)
+            };
+            let source_table = if replica.metadata.is_reverse {
+                None
+            } else {
+                install_table_name_for_session(forwarding, replica.decision, target)
+            };
+            replica.leak_incarnation =
+                super::forwarding::leak_incarnation_for_resolution(
+                    forwarding,
+                    target,
+                    source_table,
+                )
+                .unwrap_or(0);
+        }
         sessions.upsert_synced_with_origin(
             SessionInstall {
                 key: replica.key.clone(),
@@ -2159,6 +2211,14 @@ fn materialize_shared_session_hit(
             },
             false,
         );
+        // Local entries preserve their published stamp; peer entries above
+        // recompute it from this worker's forwarding state before reaching
+        // this point, so no remote numeric token is trusted.
+        if let Some(incarnation) = (replica.leak_incarnation != 0)
+            .then_some(replica.leak_incarnation)
+        {
+            sessions.stamp_leak_incarnation(&replica.key, incarnation);
+        }
         return SessionLookup {
             decision: replica.decision,
             metadata: replica.metadata,
@@ -2250,12 +2310,42 @@ pub(super) fn resolve_flow_session_decision(
         let resolved = if keep_transient {
             hit.lookup.clone()
         } else {
-            materialize_shared_session_hit(sessions, &mut hit, now_ns, tcp_flags)
+            materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags)
         };
         let resolved_key = hit.key.as_ref(&flow.forward_key);
         let mut decision = resolved.decision;
         let resolution_target = resolution_target_for_session(flow, decision);
-        let looked_up_resolution = if hit_origin.is_peer_synced() {
+        let leak_incarnation = sessions.leak_incarnation(&resolved_key);
+        let leak_revoked = leak_incarnation.is_some_and(|incarnation| {
+            !super::forwarding::leak_incarnation_is_live(
+                forwarding,
+                resolution_target,
+                incarnation,
+            )
+        });
+        let looked_up_resolution = if let Some(stamped_incarnation) =
+            leak_incarnation.filter(|_| leak_revoked)
+        {
+            // #9951: a revoked provenance stamp bypasses every cached arm,
+            // including the synced-session fallback (which intentionally
+            // keeps cached fallback for ordinary peer imports).
+            let refreshed = lookup_forwarding_resolution_for_session_without_cache(
+                forwarding,
+                dynamic_neighbors,
+                flow,
+                decision,
+            );
+            let current_incarnation = super::forwarding::leak_incarnation_for_resolution(
+                forwarding,
+                resolution_target,
+                install_table_name_for_session(forwarding, decision, resolution_target),
+            );
+            if current_incarnation.is_some_and(|current| current != stamped_incarnation) {
+                super::no_route_resolution(None)
+            } else {
+                refreshed
+            }
+        } else if hit_origin.is_peer_synced() {
             lookup_forwarding_resolution_for_synced_session(
                 forwarding,
                 dynamic_neighbors,
@@ -2523,6 +2613,10 @@ mod pbr_install_table_9752_tests;
 #[cfg(test)]
 #[path = "newflow_contention_tests.rs"]
 mod newflow_contention_tests;
+// #9951: established-session routing revocation regression and controls.
+#[cfg(test)]
+#[path = "leak_revoke_9951_tests.rs"]
+mod leak_revoke_9951_tests;
 // #9517: the worker publish path's routing-domain WIRING, driven against the
 // `bpf_map` write recorder. Its own file for the same reason as the one above.
 #[cfg(test)]

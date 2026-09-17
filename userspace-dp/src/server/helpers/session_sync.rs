@@ -484,6 +484,7 @@ pub(crate) fn build_synced_session_entry(
             policy_counter_idx: req.policy_counter_idx,
             policy_counter: None,
         },
+        leak_incarnation: 0,
         origin: crate::session::SessionOrigin::SyncImport,
         // #2170: carry the peer's install generation onto the helper entry.
         generation: req.generation,

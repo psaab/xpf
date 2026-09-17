@@ -14,6 +14,10 @@ pub(crate) struct SyncedSessionEntry {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    /// #9951: exact inter-VRF leak incarnation used by the cached resolution.
+    /// This is an in-process worker/shared-map stamp, not HA wire data; a peer
+    /// import re-resolves locally before forwarding.
+    pub(crate) leak_incarnation: u64,
     pub(crate) origin: SessionOrigin,
     pub(crate) protocol: u8,
     pub(crate) tcp_flags: u8,
