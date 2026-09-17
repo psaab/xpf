@@ -36,8 +36,8 @@ func TestGCDeadlineNeverWrapsToExpired_9915(t *testing.T) {
 		t.Fatalf("v6 wrapped deadline expired a live session: deleted=%v (F-118)", dp.deletedV6)
 	}
 
-	// Control: a genuinely expired session is still reaped.
-	now := monotonicSeconds()
+	// Control: a genuinely expired session is still reaped at a fixed clock.
+	const now uint64 = 5000
 	oldKey := dataplane.SessionKey{
 		SrcIP: [4]byte{10, 0, 9, 3}, DstIP: [4]byte{10, 0, 9, 4},
 		Protocol: 6, SrcPort: 2000, DstPort: 80,
@@ -48,6 +48,7 @@ func TestGCDeadlineNeverWrapsToExpired_9915(t *testing.T) {
 		},
 	}
 	gc2 := NewGC(dp2, 10*time.Second)
+	gc2.testNow = func() uint64 { return now }
 	gc2.sweep()
 	if len(dp2.deleted) != 1 {
 		t.Fatalf("CONTROL: expired session reaped %d keys, want 1", len(dp2.deleted))

@@ -64,9 +64,6 @@ func rebaseTimestamp(peerTS uint64, offset int64) uint64 {
 // offset that underflows clamps toward zero instead (exact, uncounted).
 func rebaseSaturates(peerTS uint64, offset int64) bool {
 	if offset >= 0 {
-		if offset > math.MaxInt64 {
-			return true
-		}
 		return peerTS > uint64(math.MaxInt64)-uint64(offset)
 	}
 	neg := uint64(-(offset + 1)) + 1

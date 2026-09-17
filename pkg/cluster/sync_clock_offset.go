@@ -58,6 +58,9 @@ func (s *SessionSync) publishClockSyncIfCurrent(conn net.Conn, offset int64) boo
 		(conn == s.conn1 && s.conn1Gen == s.peerIncarnation)) {
 		return false
 	}
+	if s.testClockPublishBeforeStore != nil {
+		s.testClockPublishBeforeStore()
+	}
 	if ac, ok := conn.(*authConn); ok {
 		ac.clockOffset.Store(offset)
 		ac.clockSynced.Store(true)

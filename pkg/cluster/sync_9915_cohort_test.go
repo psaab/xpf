@@ -577,6 +577,62 @@ func TestInstallTableMemoUnwiredBoundary_9915(t *testing.T) {
 	}
 }
 
+// F-044 review (gpt-MAJOR-2/minor-4): receiver install-table memos use the
+// same effective unwired cap as generation maps, for both address families.
+// The real receive apply path must skip a new memo entry at the default
+// boundary until helper capacity is wired.
+func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
+	dp := &mockSweepDP{
+		v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue),
+		v6sessions: make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6),
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.recvGenMu.Lock()
+	ss.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable, genGuardMapDefaultCap)
+	for i := range genGuardMapDefaultCap {
+		ss.installTableRecvV4[synthKeyV4(0x600000+i)] = recvInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
+	}
+	ss.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable, genGuardMapDefaultCap)
+	for i := range genGuardMapDefaultCap {
+		var key dataplane.SessionKeyV6
+		binary.LittleEndian.PutUint32(key.SrcIP[:4], uint32(i))
+		key.DstIP = [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1}
+		key.Protocol = 6
+		key.SrcPort = uint16(i)
+		key.DstPort = 443
+		ss.installTableRecvV6[key] = recvInstallTable{sessionID: uint64(i + 1), domain: 1, check: 2}
+	}
+	ss.recvGenMu.Unlock()
+
+	key4 := dataplane.SessionKey{Protocol: 6, SrcPort: 0xA401, DstPort: 443}
+	key4.SrcIP = [4]byte{192, 0, 2, 41}
+	if landed := ss.installClusterSyncedV4(key4, dataplane.SessionValue{
+		SessionID: 0x9915, InstallTableDomain: 7, InstallTableCheck: 8,
+	}); !landed {
+		t.Fatal("receiver v4 install did not land while testing memo boundary")
+	}
+	ss.recvGenMu.Lock()
+	_, stored4 := ss.installTableRecvV4[key4]
+	ss.recvGenMu.Unlock()
+	if stored4 {
+		t.Fatal("receiver v4 memo recorded past the default without provisioned capacity (F-044 review)")
+	}
+	key6 := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 0xA402, DstPort: 443}
+	key6.SrcIP = [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 2}
+	key6.DstIP = [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 3}
+	if landed := ss.installClusterSyncedV6(key6, dataplane.SessionValueV6{
+		SessionID: 0x9916, InstallTableDomain: 7, InstallTableCheck: 8,
+	}); !landed {
+		t.Fatal("receiver v6 install did not land while testing memo boundary")
+	}
+	ss.recvGenMu.Lock()
+	_, stored6 := ss.installTableRecvV6[key6]
+	ss.recvGenMu.Unlock()
+	if stored6 {
+		t.Fatal("receiver v6 memo recorded past the default without provisioned capacity (F-044 review)")
+	}
+}
+
 // F-044 review (spark-MAJOR-3): a wired ceiling that shrinks below a grown cap
 // clamps the stored cap down — the sender never outruns provisioned RAM
 // forever. Clamp-at-read makes the effective cap follow immediately; the grow
@@ -619,6 +675,52 @@ func TestGenGuardSessionCapZeroRetainsAfterWired_9915(t *testing.T) {
 	ss.SetGenGuardSessionCap(500000)
 	if got := ss.maxCap(); got != 500000 {
 		t.Fatalf("maxCap after Set(500000) = %d, want 500000 (nonzero tracks current down)", got)
+	}
+}
+
+// F-044 review (gpt item 2): deterministically shrink the wired ceiling after
+// growGuardCapSide snapshots it. The call may finish the current epoch's
+// growth using its pinned ceiling, but the effective cap must immediately clamp
+// at the new ceiling and the next growth call must persist that clamp. A
+// double-read mutant either grows against the second value or misses the
+// pinned-epoch decision.
+func TestGenGuardCapConcurrentShrinkInterleave_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.SetGenGuardSessionCap(400000)
+	ss.genSentMu.Lock()
+	ss.sentGenGuardCap = 200000
+	shrunk := false
+	ss.testGenCapAfterCeilingRead = func() {
+		if !shrunk {
+			shrunk = true
+			ss.SetGenGuardSessionCap(200000)
+		}
+	}
+	grew := ss.growSentCap()
+	storedAfterGrow := ss.sentGenGuardCap
+	effectiveAfterGrow := ss.sentCap()
+	ss.genSentMu.Unlock()
+	if !grew {
+		t.Fatal("pinned 400000 ceiling did not grow the 200000 sender cap")
+	}
+	if storedAfterGrow != 400000 {
+		t.Fatalf("stored cap after pinned-epoch growth = %d, want 400000", storedAfterGrow)
+	}
+	if effectiveAfterGrow != 200000 {
+		t.Fatalf("effective cap after concurrent shrink = %d, want 200000", effectiveAfterGrow)
+	}
+	ss.genSentMu.Lock()
+	if ss.growSentCap() {
+		ss.genSentMu.Unlock()
+		t.Fatal("growth reported while the current ceiling is 200000")
+	}
+	storedAfterClamp := ss.sentGenGuardCap
+	ss.genSentMu.Unlock()
+	if storedAfterClamp != 200000 {
+		t.Fatalf("stored cap after clamp = %d, want 200000", storedAfterClamp)
+	}
+	if got := ss.Stats().GenCapShrunk; got != 1 {
+		t.Fatalf("GenCapShrunk = %d, want 1 after deterministic shrink", got)
 	}
 }
 
@@ -805,6 +907,61 @@ func TestSyncNoiseIdentityRejectsBadClusterId_9915(t *testing.T) {
 		if _, err := s.newSyncNoiseState(key, true, syncNoisePhaseConnect, 0); err != nil {
 			t.Errorf("CONTROL: cluster id %d must still handshake, got %v", cluster, err)
 		}
+	}
+}
+
+// F-118 review (gpt item 6): publication and retirement must be one
+// membership-checked transaction. The hook pauses a current publication while
+// it holds s.mu; a disconnect is requested at that exact point and can only
+// clear the offset after publication unlocks. A check-unlock-store mutant
+// lets the disconnect clear first and then republishes the retired offset.
+func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.testClockNow = func() uint64 { return 1000000 }
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	ac := &authConn{Conn: local}
+	ss.installConn(0, ac)
+	var payload [8]byte
+	binary.LittleEndian.PutUint64(payload[:], 900000)
+	checked := make(chan struct{})
+	continuePublish := make(chan struct{})
+	ss.testClockPublishBeforeStore = func() {
+		close(checked)
+		<-continuePublish
+	}
+	published := make(chan struct{})
+	go func() {
+		ss.handleMessage(ac, syncMsgClockSync, payload[:])
+		close(published)
+	}()
+	select {
+	case <-checked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ClockSync did not reach the membership-checked publication gate")
+	}
+	disconnected := make(chan struct{})
+	go func() {
+		ss.handleDisconnect(ac)
+		close(disconnected)
+	}()
+	close(continuePublish)
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ClockSync publication did not complete")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retirement did not complete after publication")
+	}
+	if got := ss.peerClockOffset.Load(); got != 0 {
+		t.Fatalf("peerClockOffset = %d after publication/retirement interleave, want 0", got)
+	}
+	if ac.clockSynced.Load() {
+		t.Fatal("retired connection remained clock-synced after interleave")
 	}
 }
 
@@ -1069,8 +1226,63 @@ func TestClockOffsetPreservedOnPrimedSwitch_9915(t *testing.T) {
 	if !ok {
 		t.Fatal("session on kept conn did not land after switch")
 	}
+
 	if got.Created != 100100 || got.LastSeen != 100100 {
 		t.Fatalf("installed Created/LastSeen = %d/%d, want 100100/100100 (offset erased — HIGH-1)", got.Created, got.LastSeen)
+	}
+}
+
+// HIGH-2 v6 twin: the reset epoch fences both DHCP family commit paths.
+func TestDHCPV6CommitSpanningResetIsDropped_9915(t *testing.T) {
+	mkLease := func(addr string) dhcpserver.SyncLease {
+		return dhcpserver.SyncLease{Family: 6, Address: addr, HWAddress: "aa:bb:cc:dd:ee:06",
+			SubnetID: 6, ValidLife: 3600, Remaining: 1800, DUID: "00:01:00:01:00:06"}
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	oldPayload := appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{mkLease("2001:db8::10")}), 9000, 20)
+	newPayload := appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{mkLease("2001:db8::11")}), 100, 1)
+	reached := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	ss.testDHCPPreCommit = func() {
+		select {
+		case reached <- struct{}{}:
+		default:
+		}
+		<-resume
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ss.handleMessage(nil, syncMsgDHCPLeaseV6, oldPayload)
+	}()
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old-boot v6 handler never reached pre-commit")
+	}
+	ss.resetRecvGen()
+	ss.testDHCPPreCommit = nil
+	ss.handleMessage(nil, syncMsgDHCPLeaseV6, newPayload)
+	if held := ss.PeerDHCPLeases6(); len(held) != 1 || held[0].Address != "2001:db8::11" {
+		t.Fatalf("FIXTURE: v6 replacement did not apply cleanly: %v", held)
+	}
+	close(resume)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old-boot v6 handler never resumed")
+	}
+	if held := ss.PeerDHCPLeases6(); len(held) != 1 || held[0].Address != "2001:db8::11" {
+		t.Fatalf("v6 held set = %v, want replacement: old boot resurrected across reset (HIGH-2)", held)
+	}
+	ss.recvSeqMu.Lock()
+	inc, seq := ss.dhcpV6RecvSeq.incarnation, ss.dhcpV6RecvSeq.seq
+	ss.recvSeqMu.Unlock()
+	if inc != 100 || seq != 1 {
+		t.Fatalf("v6 guard mark = (%d,%d), want (100,1): dead high-water restored", inc, seq)
+	}
+	if got := ss.Stats().DHCPLeasesStaleIgnored; got != 1 {
+		t.Fatalf("v6 DHCPLeasesStaleIgnored = %d, want 1", got)
 	}
 }
 
@@ -1133,5 +1345,49 @@ func TestDHCPCommitSpanningResetIsDropped_9915(t *testing.T) {
 	}
 	if got := ss.Stats().DHCPLeasesStaleIgnored; got != 1 {
 		t.Fatalf("DHCPLeasesStaleIgnored = %d, want 1 (fenced commit must count as stale)", got)
+	}
+}
+
+// Fold-2 HIGH-3: a non-saturated row born after sweep enumeration starts must
+// not make an empty sweep advance its watermark past the row. The fixed clock
+// drives the exact second-boundary sequence: first scan at 100 observes a row
+// with Created=101 and retains the old window; the next scan at 101 queues it.
+// The upper-bound mutant marks the first scan empty and the unchanged-counter
+// fast path then skips the row forever.
+func TestSweepRetainsWindowForSessionBornDuringEnumeration_9915(t *testing.T) {
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 9, 21}, DstIP: [4]byte{10, 0, 9, 22},
+		Protocol: 6, SrcPort: 9021, DstPort: 80,
+	}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State:     dataplane.SessStateEstablished,
+				Created:   101,
+				LastSeen:  101,
+				SessionID: 9921,
+			},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.stats.Connected.Store(true)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = 0
+	now := uint64(100)
+	ss.testSweepNow = func() uint64 { return now }
+
+	if got := ss.syncSweep(); got != 0 {
+		t.Fatalf("first sweep queued %d sessions, want 0 before Created=101", got)
+	}
+	if ss.lastSweepEmpty {
+		t.Fatal("first sweep marked empty after seeing a non-saturated future row; fast path could skip it permanently")
+	}
+	now = 101
+	if got := ss.syncSweep(); got != 1 {
+		t.Fatalf("second sweep queued %d sessions, want the row born during the prior enumeration", got)
+	}
+	if got := len(ss.sendCh); got != 1 {
+		t.Fatalf("send queue length = %d, want 1 recovered session", got)
 	}
 }

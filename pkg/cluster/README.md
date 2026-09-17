@@ -3839,9 +3839,10 @@ outside the monitor loop:
       pre-#9412 window), never toward an early reap.
   - **Not the generation.** The generation cannot key it, because every send draws
     a fresh one.
-  - **Lifetime and locking.** Evicted in `takeDeleteGenV4/V6`. Bounded by
-    `genGuardMapCap`, where a new record skip-records at the cap. Held under
-    `genSentMu`, inside the sections that already took it.
+- **Lifetime and locking.** Evicted in `takeDeleteGenV4/V6`. Bounded by the
+  effective sender cap (`sentCap()`), which starts at the default and grows only
+  on full-of-live demand; held under `genSentMu`, inside the sections that
+  already took it.
   - **The one arrival order identity cannot see.** An old incarnation's own
     closing frame can land after a reused tuple's newer frame. The install guard
     above refuses it (`TestLateOldIncarnationCloseFrameIsRefused9412`).

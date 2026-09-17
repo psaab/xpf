@@ -110,7 +110,8 @@ func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64, maxEntries i
 // sentCap/recvCap return the effective sender/receiver-side guard caps. Zero
 // means never grown: the default. Callers hold genSentMu/recvGenMu
 // respectively (plain ints, no atomics needed); every read and write runs
-// under those mutexes — except Stats, which takes the side mutex itself.
+// under those mutexes. Stats reports cap-change counters separately and does
+// not read either side cap.
 //
 // Clamp-at-read (#9915 F-044 review): the stored cap is clamped to the CURRENT
 // maxCap on every read, so a wired-ceiling shrink (the setter tracks current)
@@ -212,6 +213,9 @@ func (s *SessionSync) growGuardCapSide(sender bool) bool {
 	// setter may move it mid-call, so every decision below compares against
 	// THIS value rather than re-reading.
 	max := s.maxCap()
+	if s.testGenCapAfterCeilingRead != nil {
+		s.testGenCapAfterCeilingRead()
+	}
 	cur := *capPtr
 	if cur == 0 {
 		cur = genGuardMapDefaultCap
@@ -635,7 +639,7 @@ func (s *SessionSync) installGenGuardV6(key dataplane.SessionKeyV6, incoming uin
 }
 
 // recordInstalledGenV4 stores the per-key generation after a successful
-// install-apply, bounded by genGuardMapCap.
+// install-apply, bounded by the effective receiver cap.
 func (s *SessionSync) recordInstalledGenV4(key dataplane.SessionKey, gen uint64) {
 	if gen == 0 {
 		return
@@ -703,9 +707,10 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 // incarnation re-established and re-stamped by a later sweep carries a higher
 // generation and still applies (incoming > tombstone). A gen-0 (legacy) delete
 // evicts (no tombstone to record) — the legacy unconditional path is unchanged.
-// Tombstones are bounded by genGuardMapCap and cleared by the bulk barrier
-// (resetRecvGen), so a churning workload cannot grow the map without limit and
-// a cross-boot generation regression is handled at BulkStart.
+// Tombstones are bounded by the effective receiver cap (and the absolute
+// genGuardMapCap ceiling) and cleared by the bulk barrier (resetRecvGen), so a
+// churning workload cannot grow the map without limit and a cross-boot
+// generation regression is handled at BulkStart.
 //
 // #9719: a tombstone never frees its entry, so between bulks the map used to
 // fill with tombstones of closed sessions and then skip-record every NEW key.
@@ -854,11 +859,11 @@ func (s *SessionSync) resetRecvGen() {
 	for _, g := range s.fullSetGuardsLocked() {
 		g.reset()
 	}
-		// Fold-2 HIGH-2: bump the commit epoch with the guard resets (same
-		// critical section): a DHCP commit that checked newer() before this
-		// reset must fail its re-verification instead of restoring the dead
-		// boot's high-water over the replacement's.
-		s.recvEpoch++
+	// Fold-2 HIGH-2: bump the commit epoch with the guard resets (same
+	// critical section): a DHCP commit that checked newer() before this
+	// reset must fail its re-verification instead of restoring the dead
+	// boot's high-water over the replacement's.
+	s.recvEpoch++
 	s.recvSeqMu.Unlock()
 }
 

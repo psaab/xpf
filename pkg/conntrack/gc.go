@@ -99,6 +99,9 @@ type GC struct {
 	// see accurate idle times.  The helper owns session lifetime;
 	// GC expiry is intentionally bypassed.  See #333.
 	SkipSweep func() bool
+	// testNow overrides the monotonic clock used by sweep and next-sweep
+	// calculations (nil = live clock). Test-only; production never sets it.
+	testNow func() uint64
 }
 
 // NewGC creates a new session garbage collector from runtime-domain providers.
@@ -236,7 +239,14 @@ func saturatingDeadline(lastSeen, timeout uint64, saturated *int) uint64 {
 	if saturated != nil {
 		*saturated++
 	}
+
 	return ^uint64(0)
+}
+func (gc *GC) monotonicNow() uint64 {
+	if gc != nil && gc.testNow != nil {
+		return gc.testNow()
+	}
+	return monotonicSeconds()
 }
 
 func (gc *GC) sweep() time.Duration {
@@ -273,8 +283,7 @@ func (gc *GC) sweep() time.Duration {
 		newCtr, err1 := gc.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsNew)
 		closedCtr, err2 := gc.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsClosed)
 		if err1 == nil && err2 == nil &&
-			newCtr == gc.lastSessionCounter &&
-			closedCtr == gc.lastClosedCounter {
+			newCtr == gc.lastSessionCounter && closedCtr == gc.lastClosedCounter {
 			return gc.nextSweepDelay(0, false, false, 0, agingActive, earlyAgeout)
 		}
 		// Counters changed — fall through to full sweep.
@@ -283,7 +292,7 @@ func (gc *GC) sweep() time.Duration {
 	}
 
 	sweepStart := time.Now()
-	now := monotonicSeconds()
+	now := gc.monotonicNow()
 
 	// When in cluster mode and this node is secondary, skip session
 	// expiry — the primary owns session lifetime and syncs deletes.
@@ -529,7 +538,7 @@ func (gc *GC) sweep() time.Duration {
 }
 
 func (gc *GC) nextSweepDelay(earliestDeadline uint64, countSessions, isPrimary bool, total int, agingActive bool, earlyAgeout uint64) time.Duration {
-	return gc.nextSweepDelayAt(monotonicSeconds(), earliestDeadline, countSessions, isPrimary, total, agingActive, earlyAgeout)
+	return gc.nextSweepDelayAt(gc.monotonicNow(), earliestDeadline, countSessions, isPrimary, total, agingActive, earlyAgeout)
 }
 
 func (gc *GC) nextSweepDelayAt(now, earliestDeadline uint64, countSessions, isPrimary bool, total int, agingActive bool, earlyAgeout uint64) time.Duration {

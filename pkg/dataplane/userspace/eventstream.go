@@ -684,10 +684,20 @@ func (es *EventStream) readLoop(ctx context.Context) {
 
 		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog,
 			EventFrameTypeSessionClose, EventFrameTypeSessionCreate:
+			// The event stream sequence is global across session and telemetry
+			// frames. Detect the hole before validating this frame: malformed
+			// telemetry must not advance the baseline past a missing
+			// session-sync frame without spending the dedicated telemetry-gap
+			// resync budget.
+			telemetryGap := seq > prevSeq+1 && prevSeq > 0
+			if telemetryGap {
+				es.SeqGaps.Add(1)
+				es.triggerTelemetryGapResync(seq)
+			}
 			if !dataplaneEventPayloadMatchesFrame(typ, payload) {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
-				if !es.markDroppedFrameApplied(seq, &prevSeq) {
+				if !es.markDroppedFrameAppliedNoGap(seq, &prevSeq) {
 					es.backoffCallbackNotReady(ctx)
 					return
 				}
@@ -697,22 +707,13 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			if !ok {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
-				if !es.markDroppedFrameApplied(seq, &prevSeq) {
+				if !es.markDroppedFrameAppliedNoGap(seq, &prevSeq) {
 					es.backoffCallbackNotReady(ctx)
 					return
 				}
 				continue
 			}
 			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
-			if seq > prevSeq+1 && prevSeq > 0 {
-				es.SeqGaps.Add(1)
-				slog.Debug("event stream: sequence gap", "expected", prevSeq+1, "got", seq)
-				// #9915 F-046: the seq space is global across frame types, so a
-				// gap observed here may hide a session open/close. Trigger the
-				// resync path (debounced, dedicated budget) but keep the stream
-				// alive — telemetry stays lossy, no reconnect.
-				es.triggerTelemetryGapResync(seq)
-			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueDataplaneFrame(typ, seq, payload, rec, onRawDataplaneEvent, onDataplaneEvent) {
@@ -761,9 +762,16 @@ func (es *EventStream) markDroppedFrameApplied(seq uint64, prevSeq *uint64) bool
 	if seq > *prevSeq+1 && *prevSeq > 0 {
 		es.SeqGaps.Add(1)
 	}
+	return es.markDroppedFrameAppliedNoGap(seq, prevSeq)
+}
+
+// markDroppedFrameAppliedNoGap advances the receive watermark without
+// classifying a gap. Telemetry paths classify the gap before decoding so a
+// malformed frame cannot advance the baseline without triggering F-046's
+// dedicated resync budget.
+func (es *EventStream) markDroppedFrameAppliedNoGap(seq uint64, prevSeq *uint64) bool {
 	*prevSeq = seq
 	es.lastRecvSeq.Store(seq)
-
 	return es.applyRefusedFrameInOrder(seq)
 }
 

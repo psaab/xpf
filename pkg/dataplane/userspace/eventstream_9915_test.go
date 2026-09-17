@@ -117,6 +117,82 @@ func TestEventStreamTelemetryGapForcesRateLimitedResync_9915(t *testing.T) {
 	}
 }
 
+// F-046: a malformed telemetry frame can sit on a global-sequence hole just
+// before a valid telemetry frame. Resync must trigger before the malformed
+// frame advances prevSeq; otherwise the following valid frame is contiguous
+// and the missing session delta is never backstopped.
+func TestEventStreamMalformedTelemetryGapForcesResync_9915(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test-events.sock")
+
+	es := NewEventStream(sockPath)
+	es.SetOnRawDataplaneEvent(func(uint64, []byte) {})
+	var resyncCalled atomic.Bool
+	es.SetOnFullResync(func() bool {
+		resyncCalled.Store(true)
+		return true
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	es.Start(ctx)
+	defer es.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !es.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("not connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	payload := buildDataplaneEventV4Payload(
+		6, 1111, 443,
+		[4]byte{10, 0, 1, 5}, [4]byte{172, 16, 80, 200},
+		[4]byte{172, 16, 80, 8},
+		40000,
+		1, 2,
+		0, 77,
+		0,
+	)
+	malformed := append([]byte(nil), payload...)
+	malformed[52] = 0 // not a policy-deny event; frame is present but undecodable
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 1, payload); err != nil {
+		t.Fatalf("write seq 1: %v", err)
+	}
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 3, malformed); err != nil {
+		t.Fatalf("write malformed seq 3: %v", err)
+	}
+	if err := writeFrame(conn, EventFrameTypePolicyDeny, 4, payload); err != nil {
+		t.Fatalf("write seq 4: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for !resyncCalled.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("malformed telemetry gap did not trigger a resync")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := es.SeqGaps.Load(); got != 1 {
+		t.Fatalf("SeqGaps = %d, want 1", got)
+	}
+	if got := es.telemetryGapResyncs.Load(); got != 1 {
+		t.Fatalf("TelemetryGapResyncs = %d, want 1", got)
+	}
+	if got := es.DecodeErrors.Load(); got != 1 {
+		t.Fatalf("DecodeErrors = %d, want 1 for malformed telemetry", got)
+	}
+	if got := es.lastRecvSeq.Load(); got != 4 {
+		t.Fatalf("lastRecvSeq = %d, want 4 after loop-break", got)
+	}
+}
+
 // F-046 control: contiguous telemetry (no gap) must NOT trigger any resync —
 // the gap is the trigger, not the telemetry itself. Passes on base and post-fix.
 func TestEventStreamContiguousTelemetryTriggersNoResync_9915(t *testing.T) {

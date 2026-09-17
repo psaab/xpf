@@ -1103,9 +1103,21 @@ type SessionSync struct {
 	lastNewCounter           uint64
 	lastClosedCounter        uint64
 	lastSweepEmpty           bool
-	vrfDevice                string
-	peerClockOffset          atomic.Int64
-	clockSynced              atomic.Bool
+	// testSweepNow overrides the monotonic-seconds reading the sweep
+	// watermarks against (nil = live clock). Test-only; production never
+	// sets it. Per-instance (not a package hook) so parallel tests cannot
+	// observe each other's frozen time. Set before driving syncSweep.
+	testSweepNow func() uint64
+	// testGenCapAfterCeilingRead runs after growGuardCapSide snapshots its
+	// ceiling and before it decides/stores the next cap. Test-only seam for a
+	// deterministic ceiling-shrink interleaving; production never sets it.
+	testGenCapAfterCeilingRead func()
+	// testClockPublishBeforeStore pauses a current ClockSync publication while
+	// s.mu is held. Test-only interleaving seam; production never sets it.
+	testClockPublishBeforeStore func()
+	vrfDevice                   string
+	peerClockOffset             atomic.Int64
+	clockSynced                 atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the
