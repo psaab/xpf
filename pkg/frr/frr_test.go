@@ -5083,40 +5083,36 @@ func TestDHCPRoutesIPv4NoInterfaceUnbound(t *testing.T) {
 	}
 }
 
-// TestDHCPClasslessRoutesNotSuppressedByStaticDefault locks in the #4118 fix:
-// an RFC 3442 classless static route (option 121, carried on a DHCPRoute with a
-// non-empty Destination) is MORE-SPECIFIC and must be emitted even when a
-// configured static default exists — only the DHCP default route is suppressed
-// by a static default. RED-on-revert: without the Destination field the
-// classless route would be rendered as (or suppressed like) the default route.
-func TestDHCPClasslessRoutesNotSuppressedByStaticDefault(t *testing.T) {
+// TestDHCPClasslessOutsideStaticPrefixInstalls locks in the legitimate half
+// of the #4118 behavior: an RFC 3442 classless static route whose destination
+// is outside every configured static prefix still installs. Covered classless
+// routes are pinned by TestDHCPClasslessCoveredByStaticDefaultIsSuppressed_9943.
+func TestDHCPClasslessOutsideStaticPrefixInstalls(t *testing.T) {
 	m := New()
 	m.frrConf = filepath.Join(t.TempDir(), "frr.conf")
 	os.WriteFile(m.frrConf, []byte(""), 0644)
 
 	fc := &FullConfig{
 		StaticRoutes: []*config.StaticRoute{
-			{Destination: "0.0.0.0/0", NextHops: []config.NextHopEntry{{Address: "172.16.50.1"}}},
+			{Destination: "10.0.0.0/8", NextHops: []config.NextHopEntry{{Address: "172.16.50.1"}}},
 		},
 		DHCPRoutes: []DHCPRoute{
-			// DHCP default — suppressed by the static default.
 			{Gateway: "192.0.2.1", Interface: "ge-0-0-3"},
-			// Classless static route — must survive.
-			{Destination: "10.20.0.0/16", Gateway: "192.0.2.9", Interface: "ge-0-0-3"},
+			{Destination: "192.168.0.0/16", Gateway: "192.0.2.9", Interface: "ge-0-0-3"},
 		},
 	}
 	_ = m.ApplyFull(fc)
 	data, _ := os.ReadFile(m.frrConf)
 	got := string(data)
 
-	if !strings.Contains(got, "ip route 10.20.0.0/16 192.0.2.9 ge-0-0-3 200\n") {
-		t.Errorf("classless static route missing (must not be suppressed by static default), got:\n%s", got)
+	if !strings.Contains(got, "ip route 192.168.0.0/16 192.0.2.9 ge-0-0-3 200\n") {
+		t.Errorf("uncovered classless static route missing, got:\n%s", got)
 	}
-	if strings.Contains(got, "ip route 0.0.0.0/0 192.0.2.1") {
-		t.Errorf("DHCP default should be suppressed by the static default, got:\n%s", got)
+	if !strings.Contains(got, "ip route 0.0.0.0/0 192.0.2.1 ge-0-0-3 200\n") {
+		t.Errorf("DHCP default without a static default should install, got:\n%s", got)
 	}
-	if !strings.Contains(got, "ip route 0.0.0.0/0 172.16.50.1") {
-		t.Errorf("static default route missing, got:\n%s", got)
+	if !strings.Contains(got, "ip route 10.0.0.0/8 172.16.50.1") {
+		t.Errorf("configured static route missing, got:\n%s", got)
 	}
 }
 
