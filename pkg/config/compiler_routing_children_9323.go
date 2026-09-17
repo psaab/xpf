@@ -97,6 +97,10 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 	for _, tok := range declared {
 		permitted[tok] = true
 	}
+	ri := setSchema.children["routing-instances"]
+	if ri == nil || ri.wildcard == nil {
+		return nil, nil
+	}
 
 	var warnings []string
 	for _, riNode := range nodes {
@@ -162,6 +166,53 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 				}
 				return warnings, fmt.Errorf("%s", msg)
 			}
+			properties := routingInstancePropertyNodes9323(inst)
+			for _, prop := range properties {
+				if prop == nil || len(prop.Keys) == 0 {
+					continue
+				}
+				kw := prop.Keys[0]
+				leaf := ri.wildcard.children[kw]
+				if leaf == nil || routingInstanceApplyMetaKeyword9323(kw) {
+					continue
+				}
+				if leaf.children != nil || leaf.wildcard != nil || leaf.multi ||
+					(leaf.nodeValidator == nil && leaf.isTypedLeaf()) {
+					continue
+				}
+				if leaf.nodeValidator == nil && leaf.isScalarValueLeaf() && !prop.IsLeaf {
+					// A scalar's authored block is compiler-owned nested
+					// structure (the #9814 nested-empty control relies on its
+					// existing typed gate); only statement leaves belong to
+					// this #9736 check.
+					continue
+				}
+				// For fixed-arity RI leaves whose packed tails were previously
+				// ignored by the #9323 keyword gate (#9736).
+				var leafErr error
+				switch {
+				case leaf.nodeValidator != nil:
+					leafErr = leaf.nodeValidator(prop, ri.wildcard)
+				case leaf.tailValidator != nil:
+					leafErr = validateTailLeaf(prop, leaf, []string{"routing-instances", instName}, nil)
+				case leaf.isScalarValueLeaf():
+					leafErr = validateScalarValueLeaf(prop, leaf, []string{"routing-instances", instName})
+				default:
+					continue
+				}
+				if leaf.nodeValidator != nil && leafErr != nil {
+					leafErr = fmt.Errorf("routing-instances %s %s: %v", instName, kw, leafErr)
+				}
+				if leafErr == nil {
+					continue
+				}
+				msg := fmt.Sprintf("%v (#9736)", leafErr)
+				if lenient {
+					warnings = append(warnings, msg)
+					continue
+				}
+				return warnings, fmt.Errorf("%s", msg)
+			}
 		}
 	}
 	return warnings, nil
@@ -205,6 +256,28 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 // tail is a packed/elided instance keyword and its Children belong to that
 // keyword; only a bare `[<name>]` node has Children that are the instance's own
 // properties.
+//
+// routingInstancePropertyNodes9323 returns the statement nodes whose packed
+// tails need a leaf-grammar check. The normal compile path has already run
+// normalizeCompactStanzas, so an instance is normally bare with one child per
+// statement. Keep the packed fallback for direct callers of this gate and for
+// the unnormalized shape documented by routingInstanceChildTokensOf9323.
+func routingInstancePropertyNodes9323(inst *Node) []*Node {
+	if inst == nil {
+		return nil
+	}
+	if len(inst.Keys) >= 2 {
+		return []*Node{{
+			Keys:          append([]string(nil), inst.Keys[1:]...),
+			KeysQuoted:    maskSlice8921(inst.KeysQuoted, 1, len(inst.Keys)),
+			KeysBracketed: maskSlice8921(inst.KeysBracketed, 1, len(inst.Keys)),
+			Children:      inst.Children,
+			IsLeaf:        inst.IsLeaf,
+		}}
+	}
+	return inst.Children
+}
+
 func routingInstanceChildTokensOf9323(inst *Node) []string {
 	// Packed or brace-elided: `[VRF-A security]`, `[VRF-A instance-type vrf]`.
 	// The instance keyword is the first tail token. Children, if any, are that

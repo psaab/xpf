@@ -189,6 +189,12 @@ func (vc *walkContext) collectedRefs() *schemaRefs {
 // same commit validate atomically.
 type treeLeafValidator func(raw string, refs *schemaRefs) error
 
+// leafNodeValidator validates a complete leaf node, retaining AST provenance
+// such as bracketed-list masks and hierarchical block children. The resolved
+// parent schema is supplied so validators can reuse schema-aware ownership
+// predicates without referring to globals during schema initialization.
+type leafNodeValidator func(node *Node, parent *schemaNode) error
+
 // leafTailValidator validates the whole value/modifier tail of a leaf as a
 // unit (#4228 Gap 2). tokens are the flattened tail of the leaf node;
 // siblingTails are the flattened tails of the same-keyword sibling nodes at
@@ -421,6 +427,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 
 	exactMatch := parent.children != nil && parent.children[keyword] == childSchema
 
+	if childSchema.nodeValidator != nil && exactMatch {
+		if err := childSchema.nodeValidator(node, parent); err != nil {
+			leafPath := append(append([]string(nil), path...), keyword)
+			return typedLeafErrorf(leafPath, "%v", err)
+		}
+	}
 	// exactMatch is computed here rather than at its original site further
 	// down, because the TYPED-LEAF branch below now needs it too and that
 	// branch returns before the old declaration was reached. Same single

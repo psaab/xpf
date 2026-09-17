@@ -57,6 +57,7 @@ func isAdmissionHead9156(n *schemaNode) bool {
 		!n.multi &&
 		n.valueType == ValueAny &&
 		n.validator == nil &&
+		n.nodeValidator == nil &&
 		n.tailValidator == nil &&
 		n.treeValidator == nil
 }

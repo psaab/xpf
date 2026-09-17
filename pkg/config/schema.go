@@ -242,6 +242,12 @@ type schemaNode struct {
 	// always nil in production — validation runs BEFORE compile. A
 	// typed leaf sets EITHER validator OR treeValidator, never both.
 	treeValidator treeLeafValidator
+	// nodeValidator validates a leaf's complete AST node when a grammar needs
+	// provenance (for example, a bracketed list or a hierarchical block) that
+	// leafTailValidator's flattened token slice cannot retain. It runs only on
+	// an exact schema-key match and is also reused by routing-instance's
+	// closed-world prewalk (#9736).
+	nodeValidator leafNodeValidator
 
 	// tailValidator, when non-nil, validates the ENTIRE value/modifier tail
 	// of a leaf as a unit instead of token-by-token (#4228 Gap 2). It exists
