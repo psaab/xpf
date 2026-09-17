@@ -260,6 +260,7 @@ func (s *SessionSync) connIsCurrentIncarnationLocked(conn net.Conn) bool {
 // keepIdx names the priming connection's slot; it is re-stamped and never
 // evicted. Returns whether anything was evicted, for the caller's log.
 func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
+	retiredIdentity := s.peerIdentity
 	s.peerIncarnation++
 	s.peerHeartbeatAckEver.Store(false)
 	// Clock provenance (fold-2 HIGH-1): the kept conn primed the new boot —
@@ -312,7 +313,10 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	if !epochSeen {
 		s.awaitRebootEvidenceLocked(rebootAwaitingEpoch)
 	}
-	evicted := s.evictStaleIncarnationConnsLocked(keepIdx)
+	evicted := s.evictStaleIncarnationConnsLocked(keepIdx, retiredIdentity)
+	if installed := s.installedPeerIdentityLocked(retiredIdentity); installed.known() {
+		s.peerIdentity = installed
+	}
 	// #9618: retiring an incarnation on boot-id evidence OWES the replacement a
 	// cold prime, exactly as installConn's epoch arm does since #9174 V014. The
 	// two classifiers see the same reboot in opposite orders, and #9174 armed
@@ -437,6 +441,11 @@ func (s *SessionSync) classifyPrimeLocked(conn net.Conn, switched, priorKnown bo
 		// The boot id is unchanged, or this is the first incarnated prime. Either
 		// way the recorded boot id is now the current incarnation's, and no
 		// boot-id change is coming for it.
+		if !priorKnown {
+			if id, known := s.connPeerIdentityLocked(conn); known {
+				s.peerIdentity = id
+			}
+		}
 		if s.rebootAwaitingLocked(rebootAwaitingBootID) {
 			s.settleRebootEvidenceLocked()
 		}
@@ -525,8 +534,118 @@ func (s *SessionSync) fabricIdxForConnLocked(conn net.Conn) int {
 		return -1
 	}
 }
+func (s *SessionSync) connPeerIdentityLocked(conn net.Conn) (peerProcessIdentity, bool) {
+	ac, ok := conn.(*authConn)
+	if !ok || !ac.peerIdentity.known() {
+		return peerProcessIdentity{}, false
+	}
+	return ac.peerIdentity, true
+}
+func (s *SessionSync) markPeerCapabilitiesInFlight(conn net.Conn) {
+	ac, ok := conn.(*authConn)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	ac.peerCapabilitiesExpected = true
+	s.mu.Unlock()
+}
 
-func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int) bool {
+func (s *SessionSync) noteConnPeerCapabilities(conn net.Conn, id peerProcessIdentity) {
+	ac, ok := conn.(*authConn)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	ac.peerCapabilitiesSeen = true
+	ac.peerCapabilitiesExpected = false
+	if id.known() {
+		ac.peerIdentity = id
+	}
+	drop := s.resolvePendingPeerIdentityLocked(ac)
+	s.mu.Unlock()
+	if drop {
+		s.handleDisconnect(ac)
+	}
+}
+
+func (s *SessionSync) resolvePendingPeerIdentityLocked(ac *authConn) bool {
+	if !ac.pendingRetirement {
+		return false
+	}
+	ac.pendingRetirement = false
+	if ac.pendingRetirementTimer != nil {
+		ac.pendingRetirementTimer.Stop()
+		ac.pendingRetirementTimer = nil
+	}
+	if ac.pendingRetirementGen != s.peerIncarnation {
+		return true
+	}
+	idKnown := ac.peerIdentity.known()
+	if idKnown && (!ac.retiredIdentity.known() || !ac.peerIdentity.sameProcess(ac.retiredIdentity)) {
+		switch {
+		case s.conn0 == ac:
+			s.peerIdentity = ac.peerIdentity
+			s.conn0Gen = s.peerIncarnation
+		case s.conn1 == ac:
+			s.peerIdentity = ac.peerIdentity
+			s.conn1Gen = s.peerIncarnation
+		default:
+			return false
+		}
+		return false
+	}
+	return true
+}
+
+func (s *SessionSync) expirePendingPeerIdentity(ac *authConn, gen uint64) {
+	s.mu.Lock()
+	if !ac.pendingRetirement || ac.pendingRetirementGen != gen ||
+		s.peerIncarnation != gen {
+		s.mu.Unlock()
+		return
+	}
+	ac.pendingRetirement = false
+	ac.pendingRetirementTimer = nil
+	s.mu.Unlock()
+	ac.Close()
+	s.handleDisconnect(ac)
+}
+
+const peerIdentityGrace = 750 * time.Millisecond
+
+type staleConnDisposition uint8
+
+const (
+	staleConnEvict staleConnDisposition = iota
+	staleConnPreserve
+	staleConnPending
+)
+
+// installedPeerIdentityLocked chooses the known identity that remains after a
+// retirement. It deliberately scans both slots: the keep connection may have
+// installed before its capabilities frame arrived, while its sibling may
+// already have announced the replacement identity.
+func (s *SessionSync) installedPeerIdentityLocked(retired peerProcessIdentity) peerProcessIdentity {
+	for _, conn := range []net.Conn{s.conn0, s.conn1} {
+		id, known := s.connPeerIdentityLocked(conn)
+		if known && (!retired.known() || !id.sameProcess(retired)) {
+			return id
+		}
+	}
+	return peerProcessIdentity{}
+}
+
+// evictStaleIncarnationConnsLocked retires stale slots while preserving a
+// connection that announced a DIFFERENT process identity before the retirement
+// evidence arrived (#9818). An unattributed connection keeps the old stamp-based
+// behavior and is evicted as a genuine corpse.
+func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int, identities ...peerProcessIdentity) bool {
+	retiredIdentity := s.peerIdentity
+	if len(identities) != 0 {
+		retiredIdentity = identities[0]
+	}
+
 	// #5718 fold r6: "this can never empty the registry" is the ENTIRE
 	// justification for exempting this function from
 	// TestOnlyHandleDisconnectEmptiesTheRegistry_5718, so it has to be a
@@ -566,22 +685,53 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int) bool {
 			"keep_idx", keepIdx, "peer_incarnation", s.peerIncarnation)
 		return false
 	}
+	shouldEvict := func(conn net.Conn) staleConnDisposition {
+		id, known := s.connPeerIdentityLocked(conn)
+		if !known {
+			if ac, ok := conn.(*authConn); ok &&
+				ac.peerCapabilitiesExpected && !ac.peerCapabilitiesSeen {
+				ac.pendingRetirement = true
+				ac.pendingRetirementGen = s.peerIncarnation
+				ac.retiredIdentity = retiredIdentity
+				gen := s.peerIncarnation
+				ac.pendingRetirementTimer = time.AfterFunc(peerIdentityGrace, func() {
+					s.expirePendingPeerIdentity(ac, gen)
+				})
+				return staleConnPending
+			}
+			return staleConnEvict
+		}
+		if retiredIdentity.known() && id.sameProcess(retiredIdentity) {
+			return staleConnEvict
+		}
+		return staleConnPreserve
+	}
 	evicted := false
 	if keepIdx != 0 && s.conn0 != nil && s.conn0Gen != s.peerIncarnation {
-		slog.Warn("cluster sync: evicting fabric 0 connection from a retired peer incarnation",
-			"remote", connRemoteAddrString(s.conn0), "conn_incarnation", s.conn0Gen, "peer_incarnation", s.peerIncarnation)
-		s.conn0.Close()
-		s.conn0 = nil
-		s.conn0Gen = 0
-		evicted = true
+		switch shouldEvict(s.conn0) {
+		case staleConnEvict:
+			slog.Warn("cluster sync: evicting fabric 0 connection from a retired peer incarnation",
+				"remote", connRemoteAddrString(s.conn0), "conn_incarnation", s.conn0Gen, "peer_incarnation", s.peerIncarnation)
+			s.conn0.Close()
+			s.conn0 = nil
+			s.conn0Gen = 0
+			evicted = true
+		case staleConnPreserve:
+			s.conn0Gen = s.peerIncarnation
+		}
 	}
 	if keepIdx != 1 && s.conn1 != nil && s.conn1Gen != s.peerIncarnation {
-		slog.Warn("cluster sync: evicting fabric 1 connection from a retired peer incarnation",
-			"remote", connRemoteAddrString(s.conn1), "conn_incarnation", s.conn1Gen, "peer_incarnation", s.peerIncarnation)
-		s.conn1.Close()
-		s.conn1 = nil
-		s.conn1Gen = 0
-		evicted = true
+		switch shouldEvict(s.conn1) {
+		case staleConnEvict:
+			slog.Warn("cluster sync: evicting fabric 1 connection from a retired peer incarnation",
+				"remote", connRemoteAddrString(s.conn1), "conn_incarnation", s.conn1Gen, "peer_incarnation", s.peerIncarnation)
+			s.conn1.Close()
+			s.conn1 = nil
+			s.conn1Gen = 0
+			evicted = true
+		case staleConnPreserve:
+			s.conn1Gen = s.peerIncarnation
+		}
 	}
 	// #9915 F-116: waiters tied to evicted conns can never be answered (their
 	// loops' late disconnects take the stale branch and release nothing) —
@@ -661,7 +811,6 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// bricks a keyed↔keyed reconnect during failover (both nodes are up and
 	// keyed → the handshake completes in milliseconds).
 	mode, keys, err := s.performSyncHandshake(conn, initiator, fabricIdx)
-	// #5303: release the pre-auth admission slot (and the setup-tracking entry)
 	// the moment the handshake resolves — an admitted slot must cover only the
 	// brief pre-auth window, never the subsequent bulk sync. Post-auth the
 	// connection is tracked for shutdown by conn0/conn1 instead.
@@ -679,6 +828,7 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 	// Wrap so writeFull seals and receiveLoop verifies per-frame auth when the
 	// connection authenticated; an unauthenticated wrapper is a pass-through.
 	conn = s.wrapSyncConn(fabricIdx, conn, mode, keys)
+	s.markPeerCapabilitiesInFlight(conn)
 	// #4962: install the connection and DECIDE cold-prime atomically under
 	// s.mu. Computing the decision after unlock (the pre-#4962 shape) let a
 	// racing same-fabric accept supersede this connection between the unlock and
@@ -816,6 +966,18 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	d.activeBefore = s.preferredFabricLocked()
 	d.hadConn0 = s.conn0 != nil
 	d.hadConn1 = s.conn1 != nil
+	retiredIdentityForInstall := s.peerIdentity
+	if !retiredIdentityForInstall.known() {
+		var old net.Conn
+		if fabricIdx == 0 {
+			old = s.conn0
+		} else if fabricIdx == 1 {
+			old = s.conn1
+		}
+		if id, known := s.connPeerIdentityLocked(old); known {
+			retiredIdentityForInstall = id
+		}
+	}
 	// #5718 C01a (fold F1): a SUPERSESSION is the incarnation edge
 	// handleDisconnect structurally cannot see. Classify it here, where the
 	// slot still holds the outgoing connection AND its incarnation stamp.
@@ -827,48 +989,23 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	// would strand the connection that legitimately proved the capability at a
 	// stale stamp, so it could never re-arm.
 	//
-	// LIMIT OF THIS CLASSIFICATION (#6910). wasDisconnected and
-	// supersededCurrent between them detect a reboot only when it lands on an
-	// OCCUPIED slot or an empty registry. A reboot whose replacement dials the
-	// EMPTY alternate slot, while the dead process's socket sits ESTABLISHED in
-	// the other one, satisfies NEITHER — so it advances no incarnation, evicts
-	// nothing, clears no capability and arms no cold prime, and the replacement
-	// is stamped current alongside the corpse (which then wins fab0 preference
-	// if it holds slot 0). Nothing observable LOCALLY separates that from the
-	// same peer bringing up its second fabric after a link flap, so do NOT add
-	// a heuristic here. Full sequence in pkg/cluster/README.md under
-	// "ACCEPTED RESIDUAL".
+	// A replacement entering the EMPTY alternate slot still cannot be
+	// classified from local slot shape alone: the same shape is a routine
+	// second-fabric link after a flap. That remains deliberately non-heuristic.
 	//
-	// THIS COMMENT USED TO SAY "blocked on #6669". THAT WAS WRONG IN A WAY THAT
-	// SENDS THE NEXT READER AT THE WRONG SIGNAL, so it is corrected here rather
-	// than deleted. #6669 MERGED (2026-08-12). Two distinct peer-boot signals
-	// now exist and they are NOT interchangeable:
+	// #9818 closes the consequence once either positive reboot signal arrives.
+	// Every installed connection advertises the peer process identity in the
+	// capabilities exchange before that process's BulkStart. Retirement uses
+	// the identity attached to each slot: a connection from the retired process
+	// (or one that announced nothing) is a corpse, while a connection proving a
+	// different process is re-stamped into the new incarnation and kept.
+	// The sender carries both its boot id and ordered daemon boot epoch, so a
+	// daemon restart that keeps the OS boot id remains distinguishable.
 	//
-	//   - bootIncarnation (#5084) — an opaque /proc boot_id compared for
-	//     EQUALITY ONLY ("Never order two boot ids", sync_boot_incarnation.go),
-	//     carried in the syncMsgBulkStart PAYLOAD;
-	//   - the heartbeat boot epoch (#6669) — an ORDERED uint64 floor, latched
-	//     on Manager.hbAuth from the independent UDP heartbeat.
-	//
-	// NEITHER is reachable here, and the root fact is one line: SessionSync's
-	// whole view of the outside world is `clusterRuntime`, which exposes
-	// Sessions() and Telemetry() and nothing else — there is no Manager handle,
-	// so the heartbeat epoch cannot be consulted at all. And the config-sync
-	// incarnation arrives only on BulkStart, i.e. strictly AFTER this install.
-	//
-	// Nor can it simply be applied later for THIS case: connBootIncarnation
-	// documents that a connection which never received an incarnated prime —
-	// "including the second fabric, which may carry config without having
-	// primed" — keeps the ZERO value, and zero is deliberately the never-dropped
-	// fail-open class. The empty-slot connection this limit is about is exactly
-	// such a connection, so #5084's incarnation is structurally unable to
-	// classify it. Closing this needs the heartbeat epoch plumbed through
-	// clusterRuntime, which is a contract change plus a latch race (see #7762).
-	//
-	// What IS now actionable is the case where the replacement DOES prime:
-	// notePeerBootIncarnation's `switched` return is positive peer-supplied
-	// evidence of a reboot, and applyPeerIncarnationSwitchLocked below acts on
-	// it.
+	// The identity is advisory for old peers: a legacy connection has no
+	// identity and therefore follows the old stamp-based eviction rule. This
+	// preserves corpse eviction rather than making absence of the new field an
+	// exemption.
 	supersededCurrent := false
 	switch fabricIdx {
 	case 0:
@@ -959,10 +1096,14 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 		epochReboot = false
 	}
 	if supersededCurrent || epochReboot {
+		retiredIdentity := retiredIdentityForInstall
 		s.peerIncarnation++
 		s.peerHeartbeatAckEver.Store(false)
 		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
-		s.evictStaleIncarnationConnsLocked(fabricIdx)
+		s.evictStaleIncarnationConnsLocked(fabricIdx, retiredIdentity)
+		if installed := s.installedPeerIdentityLocked(retiredIdentity); installed.known() {
+			s.peerIdentity = installed
+		}
 		if epochReboot {
 			// A changed boot id on this reboot's BulkStart is this reboot too.
 			s.awaitRebootEvidenceLocked(rebootAwaitingBootID)
@@ -1249,6 +1390,14 @@ func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peer
 func (s *SessionSync) handleDisconnect(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ac, ok := conn.(*authConn); ok {
+		ac.pendingRetirement = false
+		ac.peerCapabilitiesExpected = false
+		if ac.pendingRetirementTimer != nil {
+			ac.pendingRetirementTimer.Stop()
+			ac.pendingRetirementTimer = nil
+		}
+	}
 	switch {
 	case s.conn0 != nil && s.conn0 == conn:
 		s.conn0.Close()

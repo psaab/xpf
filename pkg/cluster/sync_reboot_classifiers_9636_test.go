@@ -57,7 +57,7 @@ func newRebootEnv9636(t *testing.T) *rebootEnv9636 {
 
 // connect runs the production handleNewConnection for a new peer socket on
 // fabric idx and returns the connection it stored.
-func (e *rebootEnv9636) connect(idx int, name string) net.Conn {
+func (e *rebootEnv9636) connect(idx int, name string, announce ...bool) net.Conn {
 	e.t.Helper()
 	raw := newBulkCaptureConn()
 	e.t.Cleanup(func() { raw.Close() })
@@ -70,6 +70,13 @@ func (e *rebootEnv9636) connect(idx int, name string) net.Conn {
 	e.s.mu.Unlock()
 	if ac, ok := stored.(*authConn); !ok || ac.Conn != raw {
 		e.t.Fatalf("setup: fabric %d does not hold the connection handleNewConnection was given", idx)
+	}
+	// Existing classifier fixtures model peers that predate the incarnation
+	// extension. Deliver a real short capability frame so the production
+	// in-flight grace resolves immediately as legacy, rather than leaving the
+	// fixture socket pending until the timer fires.
+	if len(announce) == 0 || announce[0] {
+		e.s.handleMessage(stored, syncMsgPeerCapabilities, make([]byte, 5))
 	}
 	e.names[stored] = name
 	return stored
