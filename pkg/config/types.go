@@ -375,6 +375,16 @@ func (c *Config) resolveKernelIfNameWith(ref string, tunMap map[string]string) s
 		if linuxName, ok := tunMap[s.Literal]; ok && linuxName != "" {
 			return linuxName
 		}
+		// #9815: a cross-spelled unit ref misses the declared-spelling
+		// tunnel-map key. Probe the matched stanza's exact key before
+		// deriving a VLAN/base device, preserving interface-level tunnels.
+		if stanzaKey, _, ok := LookupInterfaceByLinuxName(c, s.Base); ok && stanzaKey != s.Base {
+			if suffix, ok := strings.CutPrefix(s.Literal, s.Base); ok {
+				if linuxName, ok := tunMap[stanzaKey+suffix]; ok && linuxName != "" {
+					return linuxName
+				}
+			}
+		}
 	}
 
 	// Bail to fallback if the suffix isn't numeric (malformed ref
@@ -386,8 +396,10 @@ func (c *Config) resolveKernelIfNameWith(ref string, tunMap map[string]string) s
 	if c.Interfaces.Interfaces == nil {
 		return LinuxIfName(c.ResolveReth(ref))
 	}
-	if ifc, ok := c.Interfaces.Interfaces[base]; ok && ifc != nil {
-		if unit, ok := ifc.Units[unitNum]; ok && unit != nil {
+	if _, ifc, ok := LookupInterfaceByLinuxName(c, base); ok {
+		// #9815: resolve unit members by linux-spelled stanza identity,
+		// while retaining the existing exact-first dotted and tunnel arms.
+		if unit, ok := LookupUnit(ifc, unitNum); ok {
 			if unit.Tunnel != nil && unit.Tunnel.Name != "" {
 				return unit.Tunnel.Name
 			}

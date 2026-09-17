@@ -192,10 +192,12 @@ func logicalUnitDeviceKeyForRef(cfg *config.Config, ref string) string {
 		return config.LinuxIfName(s.Literal)
 	}
 	var unit *config.InterfaceUnit
-	if cfg != nil && cfg.Interfaces.Interfaces != nil {
-		if ifc, ok := cfg.Interfaces.Interfaces[s.Base]; ok && ifc != nil {
-			unit = ifc.Units[unitNum]
-		}
+	// #9815: resolve the stanza by linux name (exact-first) so a unit
+	// member spelled differently from its stanza still finds its vlan-id.
+	// base is unchanged: LinuxIfName(s.Base) equals the matched stanza's
+	// linux name by construction.
+	if _, ifc, ok := config.LookupInterfaceByLinuxName(cfg, s.Base); ok {
+		unit = ifc.Units[unitNum]
 	}
 	return logicalUnitDeviceKey(base, unitNum, unit)
 }
@@ -228,6 +230,20 @@ func riMemberLinuxName(cfg *config.Config, tunMap map[string]string, ifaceName s
 	}
 	if name, ok := tunMap[s.Literal]; ok && name != "" {
 		return name
+	}
+	// #9815: a cross-spelled unit member misses the tunnel map under its
+	// own spelling (keys are declared-spelling), so re-probe under the
+	// matched stanza key + the canonical Literal suffix — the exact key
+	// the same-spelling twin probes. Unit path only (for a bare ref
+	// base==member, a helper call would be whole-member alias matching).
+	if s.HasUnit {
+		if stanzaKey, _, ok := config.LookupInterfaceByLinuxName(cfg, s.Base); ok && stanzaKey != s.Base {
+			if suffix, ok := strings.CutPrefix(s.Literal, s.Base); ok {
+				if name, ok := tunMap[stanzaKey+suffix]; ok && name != "" {
+					return name
+				}
+			}
+		}
 	}
 	// #8597 K85: derive the device the same way the connected-prefix producer
 	// does. This was config.LinuxIfName + a ".0" strip, which names a tagged
