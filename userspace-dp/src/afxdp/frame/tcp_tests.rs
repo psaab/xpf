@@ -397,6 +397,43 @@ fn clamp_tcp_mss_walks_past_nop_and_timestamp_to_find_mss() {
 }
 
 #[test]
+fn clamp_tcp_mss_single_nop_odd_offset_checksum_valid_9954() {
+    // Single NOP pushes the MSS kind to TCP offset 21 (odd), so the
+    // two MSS value bytes straddle two checksum words. The 1460->1300
+    // clamp must still fold to a valid checksum (delta-review oracle).
+    let opts = [1, 2, 4, 0x05, 0xb4]; // NOP, MSS=1460
+    let (mut packet, src, dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
+
+    assert!(clamp_tcp_mss(&mut packet, 1300));
+    let tcp = tcp_segment_v4(&packet);
+    // MSS kind at TCP offset 21; value at 23..25.
+    assert_eq!(u16::from_be_bytes([tcp[23], tcp[24]]), 1300);
+    assert_eq!(
+        checksum_tcp_v4(src, dst, tcp),
+        0xFFFF,
+        "odd-offset MSS clamp must independently fold to 0xFFFF"
+    );
+}
+
+#[test]
+fn clamp_tcp_mss_double_nop_even_offset_control_9954() {
+    // Even-offset control: two NOPs put the MSS kind at TCP offset 22,
+    // so the value is one aligned checksum word. Same 1460->1300 clamp.
+    let opts = [1, 1, 2, 4, 0x05, 0xb4]; // 2x NOP, MSS=1460
+    let (mut packet, src, dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
+
+    assert!(clamp_tcp_mss(&mut packet, 1300));
+    let tcp = tcp_segment_v4(&packet);
+    // MSS kind at TCP offset 22; value at 24..26.
+    assert_eq!(u16::from_be_bytes([tcp[24], tcp[25]]), 1300);
+    assert_eq!(
+        checksum_tcp_v4(src, dst, tcp),
+        0xFFFF,
+        "even-offset MSS clamp must independently fold to 0xFFFF"
+    );
+}
+
+#[test]
 fn clamp_tcp_mss_eol_before_mss_is_no_op() {
     // EOL (kind=0) terminates options before MSS — clamp must skip.
     let opts = [

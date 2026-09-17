@@ -160,6 +160,7 @@ fn rewrite_forwarded_frame_in_place_keeps_ipv6_tcp_ports_after_vlan_snat() {
         &decision,
         false,
         Some((54688, 5201)),
+        0,
     )
     .expect("rewrite in place");
     let out = area

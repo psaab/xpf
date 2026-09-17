@@ -320,6 +320,7 @@ fn pool_snat_pat_survives_expected_ports_9782() {
         &fwd.decision,
         false,
         Some((client_port, 5201)),
+        0,
     )
     .expect("TX rewrite must succeed");
     let out = area
@@ -406,6 +407,7 @@ fn interface_pat_collider_both_complete_9782() {
             &fwd.decision,
             false,
             Some((sport, 5201)),
+            0,
         )
         .expect("rewrite must succeed");
         let out = area
@@ -510,6 +512,7 @@ fn interface_preserve_control_unchanged_9782() {
         &fwd.decision,
         false,
         Some((50001, 5201)),
+        0,
     )
     .expect("rewrite ok");
     let out = area
@@ -540,7 +543,7 @@ fn unit_rewrite_case(
         options: 0,
     };
     let result = crate::afxdp::frame::rewrite_forwarded_frame_in_place(
-        &area, desc, meta, decision, false, expected,
+        &area, desc, meta, decision, false, expected, 0,
     )
     .expect("unit rewrite must succeed");
     area.slice(result.offset as usize, result.len as usize)

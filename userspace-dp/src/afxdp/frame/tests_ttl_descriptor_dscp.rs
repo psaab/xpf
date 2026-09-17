@@ -192,6 +192,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_snat() {
         }, install_table_domain: 0, install_table_check: 0 },
         false,
         None,
+        0,
     )
     .expect("rewrite in place");
 
@@ -267,6 +268,7 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_dnat() {
         }, install_table_domain: 0, install_table_check: 0 },
         false,
         None,
+        0,
     )
     .expect("rewrite in place");
 
@@ -333,6 +335,7 @@ fn rewrite_forwarded_frame_in_place_applies_nat_for_fabric_redirect_when_enabled
         }, install_table_domain: 0, install_table_check: 0 },
         true,
         None,
+        0,
     )
     .expect("rewrite in place");
 
@@ -407,6 +410,7 @@ fn rewrite_forwarded_frame_in_place_skips_nat_for_fabric_redirect_when_disabled(
         }, install_table_domain: 0, install_table_check: 0 },
         false, // apply_nat_on_fabric = false
         None,
+        0,
     )
     .expect("rewrite in place");
 
@@ -530,6 +534,7 @@ fn rewrite_forwarded_frame_in_place_skips_ttl_when_fabric_ingress_flag_set() {
             }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
             false,
             None,
+            0,
         )
         .unwrap_or_else(|| panic!("[{}] rewrite_in_place returned None", label));
 
