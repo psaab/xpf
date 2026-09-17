@@ -44,7 +44,10 @@
 //!
 //! An owner is the ONLY packet that re-derives the entry (#8356), which is what
 //! makes the generation-only policy stamp sound: every packet that can consult
-//! or write it judges from the entry's own zone.
+//! or write it judges from the entry's own zone. An owner-hit ICMP packet whose
+//! policy may depend on its type takes a separate packet-informed check before
+//! that generation gate; the session remains the owner's and is never relabeled
+//! as foreign.
 //!
 //! ## What a FOREIGN packet gets
 //!
@@ -118,7 +121,9 @@ use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HitAuthority {
     /// Arrived in the admitting zone, or over the fabric. The ordinary hit path
-    /// applies unchanged, revalidation included.
+    /// applies unchanged, revalidation included. A forward ICMP packet whose
+    /// policy is type-dependent is checked separately by
+    /// [`owner_hit_icmp_verdict`] without changing this authority.
     Owner,
     /// Arrived in a different zone. `arrival_zone` is the live zone the packet
     /// is judged by (0 when the arrival resolves to none);
@@ -183,6 +188,69 @@ pub(super) enum ForeignHitVerdict {
     /// The session's own admitting interface now sits in a zone that denies the
     /// flow (#9384): revoke it, through the same teardown #8356 uses.
     Revoke(PolicyRevocation),
+}
+
+/// What the type-informed OWNER packet check does.
+///
+/// `None` means this check does not apply: the policy is type-blind, the hit is
+/// a reverse companion (whose forward policy is protected by GATE 1), or the
+/// resolution is host-bound (whose authority is checked by the host-inbound /
+/// `junos-host` path below). `Some` is only returned for a forward packet on a
+/// type-dependent ICMP policy. It deliberately does not mutate the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OwnerHitIcmpVerdict {
+    Forward,
+    Drop,
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn owner_hit_icmp_verdict(
+    forwarding: &ForwardingState,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    packet_frame: &[u8],
+    packet_fabric_ingress: bool,
+) -> Option<OwnerHitIcmpVerdict> {
+    // Reverse companions are never independently adjudicated (#9604/GATE 1):
+    // their forward entry is the policy authority. Host-bound packets have a
+    // different authority plane (`junos-host`), and the existing hit path
+    // re-evaluates that plane on every packet. Fabric ingress is also exempt:
+    // the peer already adjudicated the packet before it crossed the fabric.
+    // Keep all three paths untouched.
+    if metadata.is_reverse
+        || decision.resolution.disposition == ForwardingDisposition::LocalDelivery
+        || packet_fabric_ingress
+        || !forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(meta.protocol)
+    {
+        return None;
+    }
+    let dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
+    let dst_port = decision
+        .nat
+        .rewrite_dst_port
+        .unwrap_or(flow.forward_key.dst_port);
+    let result = evaluate_policy_result_without_counting(
+        &forwarding.policy,
+        metadata.ingress_zone,
+        metadata.egress_zone,
+        flow.src_ip,
+        dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        dst_port,
+        policy_packet_icmp(packet_frame, meta),
+    );
+    Some(if matches!(result.action, crate::policy::PolicyAction::Permit) {
+        OwnerHitIcmpVerdict::Forward
+    } else {
+        OwnerHitIcmpVerdict::Drop
+    })
 }
 
 #[cold]

@@ -77,7 +77,8 @@ use nat64_icmp_error::try_translate_nat64_icmp_error;
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow};
 use session_hit_authority::{
-    ForeignHitVerdict, HitAuthority, foreign_hit_verdict, session_hit_authority,
+    ForeignHitVerdict, HitAuthority, OwnerHitIcmpVerdict, foreign_hit_verdict,
+    owner_hit_icmp_verdict, session_hit_authority,
 };
 
 use super::poll_stages::{
@@ -1027,6 +1028,30 @@ pub(super) fn poll_binding_process_descriptor(
                         // and revokes only from the session's own admitting
                         // interface (#9384). Either way the revocation takes the
                         // one teardown below.
+                        // #9949: SessionKey deliberately remains typeless for
+                        // ICMP, so an OWNER hit can carry a cached PERMIT from
+                        // one type to another. Recheck the packet type only
+                        // when the policy says that type can affect a PERMIT.
+                        // FOREIGN and fabric paths keep their existing
+                        // authority/revalidation semantics below.
+                        if foreign_arrival_zone.is_none()
+                            && matches!(
+                                owner_hit_icmp_verdict(
+                                    worker_ctx.forwarding,
+                                    &resolved.metadata,
+                                    resolved.decision,
+                                    flow,
+                                    meta,
+                                    packet_frame,
+                                    packet_fabric_ingress,
+                                ),
+                                Some(OwnerHitIcmpVerdict::Drop)
+                            )
+                        {
+                            telemetry.dbg.policy_deny += 1;
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         let zone_policy_revocation = match foreign_arrival_zone {
                             None => revalidate_zone_policy_on_session_hit(
                                     worker_ctx.forwarding,
