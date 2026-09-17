@@ -118,6 +118,7 @@ func (a *LegacyDataPlaneAdapter) Start(ctx context.Context) error {
 	}
 	return m.Start(ctx)
 }
+
 // AttachedXDPLinkCount forwards the kernel-truth census through the runtime
 // adapter published to the daemon.
 func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
@@ -136,6 +137,18 @@ func (a *LegacyDataPlaneAdapter) SetAttachedLinksObserver(fn func()) {
 		return
 	}
 	m.SetAttachedLinksObserver(fn)
+}
+
+// ArmCoverageSummary forwards the #7191 post-attach proof through the
+// production adapter published to the daemon. A nil adapter or manager has no
+// proof yet, so preserve the manager's fail-closed unknown tuple rather than
+// manufacturing a complete verdict.
+func (a *LegacyDataPlaneAdapter) ArmCoverageSummary() (uncovered, total int, ran, seen bool) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0, 0, false, false
+	}
+	return m.ArmCoverageSummary()
 }
 
 func (a *LegacyDataPlaneAdapter) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {
