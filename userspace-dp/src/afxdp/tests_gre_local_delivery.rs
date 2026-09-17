@@ -784,6 +784,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         key: flow_key.clone(),
         decision: local_decision,
         metadata: local_metadata,
+        leak_incarnation: 0,
         origin: SessionOrigin::LocalMiss,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,

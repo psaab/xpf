@@ -110,6 +110,35 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             }
         }
     }
+    // #9951: a zero token carries no leak provenance and is recomputed locally
+    // for peer-synced rows (wire imports always arrive as zero). A nonzero
+    // token was computed before this row was published (sibling fan-out and
+    // bring-up replay preserve it), so keep it as revocation evidence instead
+    // of discarding it — recomputing after removal would install an unstamped
+    // session the resolver arms can never revoke.
+    if entry.origin.is_peer_synced() && entry.leak_incarnation == 0 {
+        let target = if entry.metadata.is_reverse {
+            entry.key.dst_ip
+        } else {
+            let flow = SessionFlow {
+                src_ip: entry.key.src_ip,
+                dst_ip: entry.key.dst_ip,
+                forward_key: entry.key.clone(),
+            };
+            resolution_target_for_session(&flow, entry.decision)
+        };
+        let source_table = if entry.metadata.is_reverse {
+            None
+        } else {
+            install_table_name_for_session(forwarding, entry.decision, target)
+        };
+        entry.leak_incarnation = crate::afxdp::forwarding::leak_incarnation_for_resolution(
+            forwarding,
+            target,
+            source_table,
+        )
+        .unwrap_or(0);
+    }
 
     let metadata = entry.metadata.clone();
     // #6979 F3: the REPLACED session's reservation identity, captured before
@@ -133,8 +162,13 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     // #9412: the Copy fields read after the install, captured before
     // `into_session_install` consumes the entry. It carries the peer's stable
     // RT_FLOW id (#5212) and close class (#9412) onto the install.
-    let (entry_origin, entry_decision) = (entry.origin, entry.decision);
+    let (entry_origin, entry_decision, leak_incarnation) =
+        (entry.origin, entry.decision, entry.leak_incarnation);
+    let leak_key = entry.key.clone();
     if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
+        if leak_incarnation != 0 {
+            sessions.stamp_leak_incarnation(&leak_key, leak_incarnation);
+        }
         // #6979 F3: release the replaced session's reservation when the new
         // entry will NOT re-reserve this flow. Mirrors `handle_delete_synced`'s
         // teardown exactly — same helpers, same holder id — because it is the

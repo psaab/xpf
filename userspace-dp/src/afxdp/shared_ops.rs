@@ -1215,6 +1215,7 @@ pub(super) fn synthesized_synced_reverse_entry_in_table(
         key: reverse_key,
         decision: reverse.decision,
         metadata,
+        leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: entry.protocol,
         tcp_flags: entry.tcp_flags,
@@ -1330,6 +1331,8 @@ pub(super) fn install_reverse_session_from_forward_match(
         now_secs,
         ha_startup_grace_until_secs,
     );
+    let reverse_leak_incarnation =
+        leak_incarnation_for_resolution(forwarding, reverse_key.dst_ip, None).unwrap_or(0);
     // #1861 §5.4: the synthesized decision is returned EVEN when the
     // install fails (max_sessions) so the reply keeps forwarding — but
     // the caller must know the outcome: `created` telemetry and the
@@ -1346,6 +1349,9 @@ pub(super) fn install_reverse_session_from_forward_match(
         tcp_flags,
     );
     if installed {
+        if reverse_leak_incarnation != 0 {
+            sessions.stamp_leak_incarnation(reverse_key, reverse_leak_incarnation);
+        }
         // #1789: count failed reverse-install publishes (was `let _ =`).
         // No binding context in this shared-ops path — shared counter.
         if publish_live_session_entry(session_map, reverse_key, reverse.decision.nat, true).is_err()
@@ -1356,6 +1362,7 @@ pub(super) fn install_reverse_session_from_forward_match(
             key: reverse_key.clone(),
             decision: reverse.decision,
             metadata: reverse.metadata.clone(),
+            leak_incarnation: reverse_leak_incarnation,
             origin: SessionOrigin::ReverseFlow,
             protocol,
             tcp_flags,

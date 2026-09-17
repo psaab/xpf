@@ -114,6 +114,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// the table-local longest-prefix match.
     pub(in crate::afxdp) leak_rules_v4: FastMap<String, Vec<LeakRuleV4>>,
     pub(in crate::afxdp) leak_rules_v6: FastMap<String, Vec<LeakRuleV6>>,
+    /// #9951: O(1)-candidate liveness indexes for stamped session hits.
+    /// Values retain the prefix needed for the final destination check; the
+    /// incarnation key avoids scanning every source-table rule on each packet.
+    pub(in crate::afxdp) leak_incarnations_v4: FastMap<u64, Vec<PrefixV4>>,
+    pub(in crate::afxdp) leak_incarnations_v6: FastMap<u64, Vec<PrefixV6>>,
     /// #9752: installing-table registry: stable domain id → the instance's
     /// canonical per-family route tables + owner check. Re-resolve looks the
     /// session's `install_table_domain` up here to recover the table string;
@@ -933,6 +938,9 @@ pub(in crate::afxdp) struct LeakRuleV4 {
     pub(in crate::afxdp) next_table: String,
     /// #9955: lower kernel ip-rule priorities are evaluated first.
     pub(in crate::afxdp) rule_priority: u32,
+    /// #9951: stable per-incarnation identity. A removed and later re-added
+    /// leak gets a new value, so an old session cannot pass an ABA check.
+    pub(in crate::afxdp) incarnation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -941,6 +949,8 @@ pub(in crate::afxdp) struct LeakRuleV6 {
     pub(in crate::afxdp) next_table: String,
     /// #9955: lower kernel ip-rule priorities are evaluated first.
     pub(in crate::afxdp) rule_priority: u32,
+    /// #9951: stable per-incarnation identity (see `LeakRuleV4`).
+    pub(in crate::afxdp) incarnation: u64,
 }
 
 #[derive(Clone, Debug)]

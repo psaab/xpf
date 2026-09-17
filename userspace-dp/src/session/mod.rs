@@ -1076,6 +1076,11 @@ pub(crate) struct SessionTable {
     /// #964 Step 1: forward-key → handle. Replaces the
     /// `sessions` HashMap's key-to-entry mapping.
     key_to_handle: SeededKeyMap<u32>,
+    /// #9951: per-session inter-VRF leak incarnation, kept outside
+    /// `SessionDecision` so the WAN-pinning decision and its wire shape remain
+    /// unchanged. Only sessions created on this worker are stamped; peer
+    /// imports are re-resolved on receipt before they can forward.
+    leak_incarnations: SeededKeyMap<u64>,
     /// #964 Step 1: secondary indices map to u32 handles, not full keys.
     /// #4399: `nat_reverse_index` is a 1:N multimap (`SeededReverseIndex`) —
     /// a bucket of handles per reverse key — so a reverse-key collision keeps
@@ -1358,6 +1363,19 @@ impl SessionTable {
         &self.pptp
     }
 
+    /// #9951: record the incarnation of the inter-VRF leak used by a local
+    /// session's creation-time resolution. Zero means the resolution did not
+    /// ride a leak and is deliberately not stored.
+    pub(crate) fn stamp_leak_incarnation(&mut self, key: &SessionKey, incarnation: u64) {
+        if incarnation != 0 {
+            self.leak_incarnations.insert(key.clone(), incarnation);
+        }
+    }
+
+    /// #9951: return the leak incarnation recorded for a local session.
+    pub(crate) fn leak_incarnation(&self, key: &SessionKey) -> Option<u64> {
+        self.leak_incarnations.get(key).copied()
+    }
     /// Mutable access, for the `WorkerCommand` drain that installs and forgets
     /// associations and for the unassociated counter.
     pub(crate) fn pptp_mut(&mut self) -> &mut crate::session::pptp::PptpAssociations {
@@ -1393,6 +1411,7 @@ impl SessionTable {
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),
+            leak_incarnations: HashMap::with_hasher(state.clone()),
             // owner_rg_sessions is keyed by i32 RG/ifindex (not an
             // attacker-chosen 5-tuple) with inner sets of internally
             // allocated u32 handles — neither is the hash-flood surface, so
@@ -3083,6 +3102,7 @@ impl SessionTable {
     /// push time by the worker loop via
     /// `ExpiredSession::in_export_window`.
     fn remove_entry(&mut self, key: &SessionKey, kind: RemovalKind) -> Option<SessionEntry> {
+        self.leak_incarnations.remove(key);
         let handle = self.key_to_handle.remove(key)?;
         // Read the record (still in slab) to learn what to clean.
         // `.get` not `.remove` — we'll remove from slab last.

@@ -114,6 +114,7 @@ fn entry(src_port: u16) -> SyncedSessionEntry {
             install_table_check: 0,
         },
         metadata: metadata(),
+        leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
         protocol: PROTO_TCP_LOCAL,
         tcp_flags: TCP_FLAG_ACK_LOCAL,

@@ -1288,6 +1288,7 @@ impl crate::afxdp::ha::SessionDomain {
                 install_table_check: 0,
             },
             metadata,
+            leak_incarnation: 0,
             origin: SessionOrigin::ForwardFlow,
             protocol: PROTO_TCP,
             tcp_flags: 0,

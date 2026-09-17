@@ -2438,6 +2438,7 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         key: key.clone(),
         decision,
         metadata: metadata.clone(),
+        leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
         tcp_flags: 0x10,

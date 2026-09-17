@@ -597,6 +597,8 @@ fn build_fallible_forwarding_state(
     // tie-break.
     fib::populate_routes(snapshot, &mut state, &iface_ctx)?;
     fib::sort_routes(&mut state);
+    fib::assign_leak_incarnations(&mut state, previous);
+    fib::rebuild_leak_incarnation_indexes(&mut state);
     // #3771 (M11): fail the snapshot CLOSED on a neighbor whose `family`
     // contradicts its IP; unknown/failed states are skipped inside.
     fib::populate_neighbors(snapshot, &mut state)?;

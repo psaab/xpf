@@ -685,6 +685,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        leak_incarnation: 0,
         origin: SessionOrigin::TunOrigin,
         protocol: meta.protocol,
         tcp_flags: if meta.protocol == PROTO_TCP {
