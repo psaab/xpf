@@ -56,13 +56,17 @@ func TestTaggedOnlyInterfacePlansTheInterfaceMTUOnTheParent_9761(t *testing.T) {
 	}
 }
 
-// Without an interface-level mtu a tagged-only parent has nothing to plan, so it
-// still gets no plan at all.
-func TestTaggedOnlyInterfaceWithoutAnInterfaceMTUPlansNothing_9761(t *testing.T) {
+// Without an interface-level mtu a tagged-only parent still plans the explicit
+// Linux default, so deleting a previous mtu converges the live parent.
+func TestTaggedOnlyInterfaceWithoutAnInterfaceMTUPlansLinuxDefault_9761(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
 	cfg.Interfaces.Interfaces[taggedParent9761].MTU = 0
-	if pd := planPhysDesired(cfg)[taggedParent9761]; pd != nil {
-		t.Errorf("plan for %s = %+v, want none: there is nothing to write on the parent", taggedParent9761, *pd)
+	pd := planPhysDesired(cfg)[taggedParent9761]
+	if pd == nil {
+		t.Fatalf("no plan for %s: deleting the interface-level mtu must materialize the Linux default", taggedParent9761)
+	}
+	if pd.mtu != defaultPhysicalMTU9985 {
+		t.Errorf("plan for %s = %+v, want explicit default mtu %d", taggedParent9761, *pd, defaultPhysicalMTU9985)
 	}
 }
 
@@ -282,7 +286,7 @@ func TestATaggedTunnelUnitPlansNoMTU_9761(t *testing.T) {
 		"ge-0/0/3": {
 			Name: "ge-0/0/3", MTU: 1400, VlanTagging: true,
 			Units: map[int]*config.InterfaceUnit{
-				5: {Number: 5, VlanID: 105, MTU: 1300, Tunnel: &config.TunnelConfig{Name: "gr-0-0-5", Mode: "gre"}},
+				5: {Number: 5, VlanID: 105, MTU: 1300, Tunnel: &config.TunnelConfig{Name: "gr-0-0-5", Mode: "gre", Source: "192.0.2.1", Destination: "192.0.2.2"}},
 			},
 		},
 	}
@@ -313,7 +317,7 @@ func TestATaggedUnitWhoseNumberIsNotItsVLANPlansTheParent_9761(t *testing.T) {
 			Name: "ge-0/0/4", MTU: 1400, VlanTagging: true,
 			Units: map[int]*config.InterfaceUnit{
 				6:   {Number: 6, VlanID: 106},
-				106: {Number: 106, VlanID: 206, Tunnel: &config.TunnelConfig{Name: "gr-0-0-106", Mode: "gre"}},
+				106: {Number: 106, VlanID: 206, Tunnel: &config.TunnelConfig{Name: "gr-0-0-106", Mode: "gre", Source: "192.0.2.1", Destination: "192.0.2.2"}},
 			},
 		},
 	}
@@ -451,7 +455,7 @@ func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T)
 							label := fmt.Sprintf("%s%s (unit %d, vlan %d, mtu %d, %s, %s, %s, tunnel %q)", name, nv.suffix, nv.unit, nv.vlan, nv.mtu, fabric.label, tagging, u.label, mode)
 							unit := u.unit(nv.unit, nv.vlan)
 							if mode != "" {
-								unit.Tunnel = &config.TunnelConfig{Name: fmt.Sprintf("tun%d-9761", nv.unit), Mode: mode}
+								unit.Tunnel = &config.TunnelConfig{Name: fmt.Sprintf("tun%d-9761", nv.unit), Mode: mode, Source: "192.0.2.1", Destination: "192.0.2.2"}
 							}
 							ifCfg := &config.InterfaceConfig{
 								Name: name, MTU: nv.mtu, VlanTagging: !flex, FlexibleVlanTagging: flex,
@@ -695,7 +699,7 @@ func TestTaggedParentsPlanWhateverTheZoneAndReferenceOrder_9761(t *testing.T) {
 	interfaces := map[string]*config.InterfaceConfig{
 		"ge-0/0/4": {Name: "ge-0/0/4", MTU: 1400, VlanTagging: true, Units: map[int]*config.InterfaceUnit{
 			20:  {Number: 20, VlanID: 20},
-			106: {Number: 106, VlanID: 206, Tunnel: &config.TunnelConfig{Name: "ip-0-0-4u106", Mode: "ipip"}},
+			106: {Number: 106, VlanID: 206, Tunnel: &config.TunnelConfig{Name: "ip-0-0-4u106", Mode: "ipip", Source: "192.0.2.1", Destination: "192.0.2.2"}},
 		}},
 		"ge-0/0/5": {Name: "ge-0/0/5", MTU: 9000, VlanTagging: true, Units: map[int]*config.InterfaceUnit{
 			30: {Number: 30, VlanID: 30},

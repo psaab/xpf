@@ -40,7 +40,10 @@ type physDesired struct {
 	// it is DECIDED — the old behaviour was decided by map iteration order,
 	// which is not the same thing as unspecified, it is different per run.
 	// A TAGGED unit contributes only the interface-level value (#9761): its own
-	// unit MTU belongs to its VLAN sub-interface, not to the parent.
+	// unit MTU belongs to its VLAN sub-interface, not to the parent. When no
+	// configured value exists and this netdev is not owned by another
+	// component, mtu is the explicit Linux default (#9985), so deleting a
+	// statement converges the live device instead of yielding.
 	mtu int
 	// skipAddrs suppresses address reconciliation when any unit on the netdev
 	// is DHCP-managed, or the interface is a RETH member or fabric parent.
@@ -48,6 +51,45 @@ type physDesired struct {
 	// VRRP, or the IPVLAN overlay, and a union that included them would let
 	// this path fight the real owner.
 	skipAddrs bool
+}
+
+const defaultPhysicalMTU9985 = 1500
+
+// mtuOwnedNetdevs returns resolved Linux netdev names whose MTU is reconciled
+// by another component. Ownership is collected once, before any reference is
+// planned, so a tagged and an untagged reference cannot disagree about the
+// same device (#9985).
+//
+// Fabric ownership is already keyed by the resolved Linux name
+// (#9927). Tunnel ownership uses the same key: the compiler-assigned tunnel
+// device names are the routing owner's actual netdevs, so every configured
+// interface/unit tunnel is collected even when it is not itself zoned. Only a
+// tunnel that passes config.TunnelHasUsableEndpoints (the routing owner's
+// admission predicate) is an owner. An unusable tunnel stays planner-owned,
+// rather than yielding to a device no component will create.
+func mtuOwnedNetdevs(cfg *config.Config) map[string]bool {
+	if cfg == nil {
+		return map[string]bool{}
+	}
+	owned := fabricOwnedNetdevs(cfg)
+	for _, ifCfg := range cfg.Interfaces.Interfaces {
+		if ifCfg == nil {
+			continue
+		}
+		if tunnel := ifCfg.Tunnel; tunnel != nil &&
+			tunnel.Name != "" && config.TunnelHasUsableEndpoints(tunnel) {
+			owned[config.LinuxIfName(tunnel.Name)] = true
+		}
+		for _, unit := range ifCfg.Units {
+			if unit == nil || unit.Tunnel == nil ||
+				unit.Tunnel.Name == "" ||
+				!config.TunnelHasUsableEndpoints(unit.Tunnel) {
+				continue
+			}
+			owned[config.LinuxIfName(unit.Tunnel.Name)] = true
+		}
+	}
+	return owned
 }
 
 // fabricOwnedNetdevs returns the resolved Linux netdev names whose MTU is
@@ -94,7 +136,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 	if cfg == nil {
 		return out
 	}
-	fabricOwned := fabricOwnedNetdevs(cfg)
+	mtuOwned := mtuOwnedNetdevs(cfg)
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
@@ -139,14 +181,15 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				// the fabric interface's MTU. A canonical bond name is included
 				// as an owner; a slash-bearing authored bond name is not, because
 				// bond.go passes that raw name to netlink and cannot create it.
-				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil &&
-					ifCfg.MTU > 0 && !fabricOwned[physName] {
-					if unit := ifCfg.Units[unitNum]; unit != nil && unit.Tunnel != nil {
-						continue
-					}
+				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil && !mtuOwned[physName] {
+					// A tunnel owner is included in the pre-pass above, so
+					// every reference to its resolved netdev yields here.
 					pd := planFor(physName)
 					if mtuUnit[physName] == -2 {
 						pd.mtu = ifCfg.MTU
+						if pd.mtu <= 0 {
+							pd.mtu = defaultPhysicalMTU9985
+						}
 						mtuUnit[physName] = -1
 					}
 				}
@@ -160,8 +203,14 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 			if ifCfg.RedundancyGroup > 0 || ifCfg.LocalFabricMember != "" {
 				pd.skipAddrs = true
 			}
-			if ifCfg.MTU > 0 && !fabricOwned[physName] && mtuUnit[physName] == -2 {
+			if ifCfg.MTU > 0 && !mtuOwned[physName] && mtuUnit[physName] == -2 {
 				pd.mtu = ifCfg.MTU
+				mtuUnit[physName] = -1
+			}
+			if !mtuOwned[physName] && mtuUnit[physName] == -2 {
+				// Materialise absence so deleting an interface-level mtu
+				// converges the physical netdev to Linux's default.
+				pd.mtu = defaultPhysicalMTU9985
 				mtuUnit[physName] = -1
 			}
 			unit, ok := ifCfg.Units[unitNum]
@@ -178,7 +227,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				seenAddr[physName][a] = true
 				pd.addrs = append(pd.addrs, a)
 			}
-			if unit.MTU > 0 && !fabricOwned[physName] {
+			if unit.MTU > 0 && !mtuOwned[physName] {
 				// Unit overrides interface level; lowest unit number wins
 				// between units.
 				if cur := mtuUnit[physName]; cur < 0 || unitNum < cur {
