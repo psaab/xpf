@@ -136,49 +136,59 @@ func writeTransitForwardSysctls(on bool) {
 func (d *Daemon) DataplaneArmed() bool { return d.dataplaneArmed.Load() }
 
 // markDataplaneArmed records a successful Start. It deliberately leaves the
-// transit gate closed until the same gate predicate proves a live XDP link;
-// first ApplyConfig or the periodic tick opens it once the kernel reports one.
+// transit gate and RG bid closed until the same predicate proves a live XDP
+// link; first ApplyConfig or the periodic tick opens both once the kernel
+// reports one.
 func (d *Daemon) markDataplaneArmed(stage string) {
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(true)
-	d.writeTransitGateLocked(stage)
+	ready := d.attachedXDPLinks() > 0
+	d.writeTransitGateLocked(stage, ready)
+	d.applyDataplaneReadyTrack(ready)
 	d.transitGateMu.Unlock()
-	d.applyDataplaneArmTrack(true)
 	slog.Info("dataplane armed; transit gate re-evaluated", "stage", stage,
 		"kernel_transit_open", d.transitOpen())
 }
 
-// applyDataplaneArmTrack mirrors the arm state into redundancy-group weight so
-// a node that cannot forward stops outbidding a peer that can (#7178).
+// applyDataplaneReadyTrack mirrors the ready-to-serve predicate into
+// redundancy-group weight so a node that cannot forward stops outbidding a
+// peer that can (#7178).
 //
-// Before this, a failed arm left the node fully eligible: it could win or retain
-// RG mastership, take the RETH VIPs from a peer with a WORKING dataplane, and go
-// on attracting traffic it then drops (#5275 closes kernel transit forwarding,
-// so the node is a black hole rather than an unpoliced forwarder). "Let the peer
-// have it" is the obvious answer on a cluster, and this is the mechanism that
-// expresses it.
+// The predicate is deliberately stricter than Start success: a node is ready
+// only when the dataplane is armed AND the kernel has proven at least one live
+// XDP link (#9842). This is the same verdict used by the transit gate, so a
+// node can never bid full weight while the gate is closed, or shed a servable
+// dataplane.
 //
-// It rides the EXISTING interface-monitor debt path rather than adding a rule to
-// the election. The alternative — refusing MASTER outright — has to interact
-// with priority-0 takeover and the ungated masterDownTimer, which is where the
-// ~60ms failover budget lives; a synthetic monitor adds a debt CONTRIBUTOR and
-// no new path into electRG.
+// It rides the EXISTING interface-monitor debt path rather than adding a rule
+// to the election. The cost is sub-total ON PURPOSE (see
+// cluster.DataplaneArmMonitorCost): the node lands at weight 1, not 0, so an
+// attached peer at 255 wins while a standalone node stays primary.
 //
-// The cost is sub-total ON PURPOSE (see cluster.DataplaneArmMonitorCost): the
-// node lands at weight 1, not 0, so an armed peer at 255 wins while a STANDALONE
-// unarmed node stays primary. Demoting a lone node would not make it safe, only
-// absent — nothing else takes the VIPs, and the operator may be reaching the box
-// on one.
+// The snapshot check makes repeated 1s kernel-truth ticks a read-only fast
+// path: only a sentinel transition takes the Manager write lock and re-runs
+// elections.
 //
 // Idempotent and safe with no cluster configured: SetMonitorWeight is a no-op
 // for an unknown RG, and a nil manager short-circuits here.
-func (d *Daemon) applyDataplaneArmTrack(armed bool) {
+func (d *Daemon) applyDataplaneReadyTrack(ready bool) {
 	if d.cluster == nil {
 		return
 	}
 	for _, rg := range d.cluster.GroupStates() {
+		hasDebt := false
+		for _, iface := range rg.MonitorFails {
+			if iface == cluster.DataplaneArmMonitorIface {
+				hasDebt = true
+				break
+			}
+		}
+		wantDebt := !ready
+		if hasDebt == wantDebt {
+			continue
+		}
 		d.cluster.SetMonitorWeight(rg.GroupID, cluster.DataplaneArmMonitorIface,
-			!armed, cluster.DataplaneArmMonitorCost)
+			wantDebt, cluster.DataplaneArmMonitorCost)
 	}
 }
 
@@ -194,9 +204,9 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 	d.dataplaneArmed.Store(false)
 	// #7191: install the nft barrier FIRST on the closing path. Both legs
 	// close, so the order only affects how early closure is complete.
-	d.writeTransitGateLocked(stage)
+	d.writeTransitGateLocked(stage, false)
+	d.applyDataplaneReadyTrack(false)
 	d.transitGateMu.Unlock()
-	d.applyDataplaneArmTrack(false)
 	slog.Error("dataplane arm FAILED; kernel transit forwarding DISABLED (fail-closed, degraded): "+
 		"nothing adjudicates transit on this node, so it forwards none — management (SSH/CLI/gRPC/REST) "+
 		"stays up so the config can be corrected in-band",
@@ -223,15 +233,15 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(false)
-	d.writeTransitGateLocked(stage)
-	d.transitGateMu.Unlock()
+	d.writeTransitGateLocked(stage, false)
 	// #7178: DELIBERATE and FAILED are the same fact to a peer — this node
 	// forwards no transit either way, so it must not outbid one that does. The
 	// distinction is why this logs at Info while the failure path logs at Error;
 	// it is not a reason to keep mastership. On a bootstrap boot there is no
-	// cluster yet and applyDataplaneArmTrack is a no-op; the case this covers is
-	// config-only mode on a node that already has a cluster configured.
-	d.applyDataplaneArmTrack(false)
+	// cluster yet and applyDataplaneReadyTrack is a no-op; the case this covers
+	// is config-only mode on a node that already has a cluster configured.
+	d.applyDataplaneReadyTrack(false)
+	d.transitGateMu.Unlock()
 	slog.Info("dataplane not armed; kernel transit forwarding disabled (fail-closed)",
 		"stage", stage, "reason", reason)
 }

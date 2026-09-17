@@ -53,13 +53,13 @@ func (d *Daemon) transitOpen() bool {
 	return d != nil && d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
 }
 
-// writeTransitGateLocked re-reads the arm bit and the kernel-reported XDP-link
-// count, then drives both transit legs to that single predicate. The caller
-// holds transitGateMu. Closing installs the barrier before writing zero;
-// opening writes the knobs before removing the barrier, so either leg by itself
-// remains fail-closed during a transition.
-func (d *Daemon) writeTransitGateLocked(stage string) {
-	open := d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
+// writeTransitGateLocked drives both transit legs from the single ready
+// predicate computed by the caller. The caller holds transitGateMu and must
+// derive open from dataplaneArmed && AttachedXDPLinkCount > 0. Closing
+// installs the barrier before writing zero; opening writes the knobs before
+// removing the barrier, so either leg by itself remains fail-closed during a
+// transition.
+func (d *Daemon) writeTransitGateLocked(stage string, open bool) {
 	if open {
 		writeTransitForwardSysctls(true)
 		d.applyTransitBarrier(true)
@@ -72,14 +72,18 @@ func (d *Daemon) writeTransitGateLocked(stage string) {
 }
 
 // reassertTransitGate is the one authoritative actuation path for both the
-// event wake and the periodic tick. It never trusts a writer-supplied count.
+// event wake and the periodic tick. It reads kernel truth once under
+// transitGateMu, then drives the transit gate and RG weight from that same
+// ready-to-serve verdict.
 func (d *Daemon) reassertTransitGate(stage string) {
 	if d == nil {
 		return
 	}
 	d.transitGateMu.Lock()
 	defer d.transitGateMu.Unlock()
-	d.writeTransitGateLocked(stage)
+	ready := d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
+	d.writeTransitGateLocked(stage, ready)
+	d.applyDataplaneReadyTrack(ready)
 }
 
 // closeTransitUntilAttached establishes the boot fence without changing the
