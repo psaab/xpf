@@ -25,9 +25,11 @@ and the staged copy 0644.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -46,12 +48,48 @@ class _RealBuildRunner:
         self.dry = False
 
 
+class _DryBuildRunner:
+    """Runner that plans the ISO build without executing it."""
+
+    def __init__(self):
+        self.dry = True
+
+
 def _appliance(base_dir, name="fw-secret"):
     return {
         "name": name, "mode": "standalone", "node_id": None,
         "image": "xpf-appliance", "cpu": 2, "memory": "4G",
         "config": "day0.conf", "base_dir": base_dir, "interfaces": [],
     }
+
+
+def _capture_config_drive_output(runner):
+    """Build a temporary day-0 drive and return its operator output."""
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, "day0.conf"), "w") as f:
+            f.write("system {}\n")
+        ap = _appliance(td, name="fw-validation")
+        old_cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            output = io.StringIO()
+
+            def fake_run_capture(argv, dry=False):
+                out = argv[argv.index("-o") + 1]
+                with open(out, "wb") as f:
+                    f.write(b"\x00" * 2048)
+                return ""
+
+            with redirect_stdout(output), \
+                    mock.patch.object(xpf_deploy.shutil, "which",
+                                      return_value="/usr/bin/xorriso"), \
+                    mock.patch.object(xpf_deploy, "run_capture",
+                                      side_effect=fake_run_capture):
+                xpf_deploy.build_config_drive(ap, runner)
+            return output.getvalue()
+        finally:
+            os.chdir(old_cwd)
+
 
 
 class Day0IsoModeTests(unittest.TestCase):
@@ -114,6 +152,26 @@ class Day0IsoModeTests(unittest.TestCase):
         self.assertEqual(
             staged[0] & 0o077, 0,
             f"staged xpf.conf must be owner-only, got {oct(staged[0])} (#4586)")
+
+
+class Day0ValidationMessageTests(unittest.TestCase):
+    def test_dry_run_does_not_claim_check_config_validation(self):
+        # RED on revert: the old message says "check-config validated" even
+        # though the dry-run returns before probing or invoking xpfd.
+        with mock.patch.object(
+                xpf_deploy, "find_xpfd",
+                side_effect=AssertionError("dry-run must not probe xpfd")):
+            output = _capture_config_drive_output(_DryBuildRunner())
+        self.assertIn("not validated (dry-run)", output)
+        self.assertNotIn("check-config validated", output)
+
+    def test_missing_xpfd_warns_that_config_was_not_validated(self):
+        # RED on revert: "skipping build-host validation" does not state the
+        # config's validation status alongside the generated drive.
+        with mock.patch.object(xpf_deploy, "find_xpfd", return_value=None):
+            output = _capture_config_drive_output(_RealBuildRunner())
+        self.assertIn("day-0 config not validated on build host", output)
+        self.assertNotIn("check-config validated", output)
 
 
 if __name__ == "__main__":

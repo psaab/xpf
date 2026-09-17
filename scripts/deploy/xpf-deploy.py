@@ -470,8 +470,11 @@ def build_config_drive(ap, runner):
     cfg_path = cfg if os.path.isabs(cfg) else os.path.join(ap["base_dir"], cfg)
     iso = day0_iso_path(ap["name"])
     if runner.dry:
+        # Dry-run deliberately does not invoke xpfd or read the config, so
+        # state the validation status instead of promising a check that did
+        # not run.
         print(f"==> (dry-run) would build day-0 drive {iso} from {cfg_path} "
-              f"(label xpf-config, check-config validated)")
+              f"(label xpf-config, not validated (dry-run))")
         return iso
     if not os.path.isfile(cfg_path):
         die(f"config not found: {cfg_path}")
@@ -484,8 +487,8 @@ def build_config_drive(ap, runner):
             die(f"day-0 config REJECTED by check-config:\n{r.stdout}{r.stderr}")
         print(f"==> day-0 config validated ({os.path.basename(cfg_path)})")
     else:
-        print("WARNING: no xpfd binary found — skipping build-host validation "
-              "(the appliance still validates at first boot).")
+        print("WARNING: no xpfd binary found — day-0 config not validated on "
+              "build host (the appliance still validates at first boot).")
     mkiso = next((t for t in ("xorriso", "genisoimage", "mkisofs") if shutil.which(t)), None)
     if not mkiso:
         die("need xorriso/genisoimage/mkisofs to build the config drive (apt install xorriso)")
