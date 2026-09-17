@@ -3,17 +3,19 @@ package termsafe
 import (
 	"io"
 	"sync"
+	"unicode/utf8"
 )
 
 // maxBufferedLine bounds how much a SanitizingWriter will hold waiting for a
-// newline before emitting anyway.
+// newline before emitting anyway. At the bound, it may retain at most
+// utf8.UTFMax-1 bytes when they are a valid but incomplete trailing rune.
 //
 // #7389: the motivating caller is `monitor traffic` (tcpdump), whose output is
 // unbounded and interactive. A writer that buffered until a newline would grow
-// without limit on a stream that never emits one -- a remote party choosing
-// the packet bytes chooses whether a newline ever arrives, so "wait for the
-// line to end" is an attacker-controlled allocation. Emitting a partial line
-// is a cosmetic wrap; holding it is a memory defect.
+// without limit on a stream that never emits one -- a remote party choosing the
+// packet bytes chooses whether a newline ever arrives, so "wait for the line to
+// end" is an attacker-controlled allocation. Emitting a partial line is a
+// cosmetic wrap; holding it is a memory defect.
 const maxBufferedLine = 64 * 1024
 
 // SanitizingWriter wraps an io.Writer and sanitizes everything passing through
@@ -71,15 +73,48 @@ func (s *SanitizingWriter) Write(p []byte) (int, error) {
 		}
 	}
 
-	// #7389: bound the hold. See maxBufferedLine.
 	if len(s.buf) >= maxBufferedLine {
-		line := s.buf
-		s.buf = nil
-		if err := s.emit(line); err != nil {
-			return 0, err
+		// #7389: bound the hold. Keep a valid but incomplete trailing rune
+		// together for the next Write; escaping it here would make the render
+		// depend on the upstream write boundary. Invalid trailing bytes are not
+		// a prefix of any rune and remain in line for immediate escaping.
+		suffixStart := incompleteUTF8Suffix(s.buf)
+		line := s.buf[:suffixStart]
+		s.buf = append([]byte(nil), s.buf[suffixStart:]...)
+		if len(line) > 0 {
+			if err := s.emit(line); err != nil {
+				return 0, err
+			}
 		}
 	}
 	return len(p), nil
+}
+
+func (s *SanitizingWriter) emit(line []byte) error {
+	_, err := io.WriteString(s.w, SanitizeBlockForDisplay(string(line)))
+	return err
+}
+
+// incompleteUTF8Suffix returns the start of a trailing byte sequence that is
+// a valid prefix of a UTF-8 rune but is missing one or more bytes. Invalid
+// sequences return len(b), so they are emitted and escaped immediately.
+//
+// A UTF-8 rune is at most utf8.UTFMax bytes long, so only its final
+// utf8.UTFMax-1 bytes can be an incomplete suffix. utf8.FullRune treats
+// malformed encodings as complete invalid runes; combined with RuneStart that
+// makes this distinguish a valid incomplete prefix from invalid input without
+// retaining attacker-controlled data.
+func incompleteUTF8Suffix(b []byte) int {
+	start := len(b) - (utf8.UTFMax - 1)
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(b); i++ {
+		if utf8.RuneStart(b[i]) && !utf8.FullRune(b[i:]) {
+			return i
+		}
+	}
+	return len(b)
 }
 
 // Flush emits any buffered partial line. Callers must call it once the command
@@ -95,11 +130,6 @@ func (s *SanitizingWriter) Flush() error {
 	line := s.buf
 	s.buf = nil
 	return s.emit(line)
-}
-
-func (s *SanitizingWriter) emit(line []byte) error {
-	_, err := io.WriteString(s.w, SanitizeBlockForDisplay(string(line)))
-	return err
 }
 
 func indexByte(b []byte, c byte) int {
