@@ -199,10 +199,19 @@ just steer flows one-per-queue?" It has two answers, measured
 separately. No *static* rule set beats the RSS floor for uncoordinated
 ephemeral source ports (#1649, below).
 Re-placing *established* flows does beat it at HEAD (#9488, "Re-placement
-measured at HEAD" below). Whether moving an established flow is
-*safe* is an open architectural question, #9778. #1649's findings
-(verbatim ethtool evidence in issue #1649, research plan at commit
-`36fcd1b8`):
+measured at HEAD" below), but an established-flow move is **not safe at HEAD**
+without the unlanded #1749 barriered ownership-transfer protocol. For example,
+if both directions are moved to one new worker (or a one-way flow is moved),
+the old owner's GC can emit Close, remove shared state, and broadcast
+`DeleteSynced` to the new worker's `WorkerLocalImport` replica (#9778; full
+code-cited analysis in [`log/9778.md`](log/9778.md)). The standing #1765
+forbidden verdict therefore stands on lifecycle-safety grounds, not on the
+obsolete claim that placement cannot help. This is a session-ownership
+failure, not a per-queue UMEM freeing failure; cross-queue `XDP_REDIRECT`
+remains separately forbidden by the queue-bound AF_XDP check.
+
+- **#1649's findings** (verbatim ethtool evidence in issue #1649, research plan at commit
+  `36fcd1b8`):
 
 - **The #937/#840-named prerequisite EXISTS.** The mlx5 VF accepts
   exact-5-tuple → RX-queue ntuple rules
@@ -229,12 +238,14 @@ measured at HEAD" below). Whether moving an established flow is
   dependence** — steering each new flow *away from* already-occupied
   queues. The SYN is RSS-placed before any exact rule can exist (the
   ephemeral port is unknowable in advance), so any occupancy-aware
-  correction *moves an established flow*. #1765 ended with that move
-  adjudicated architecturally forbidden. The verdict stands until
-  #9778 answers whether the move is actually unsafe under AF_XDP
-  per-queue UMEM ownership, given #1748's barriered
-  ownership-transfer protocol. The measurement below shows the move
-  *works*; it says nothing about whether it is safe.
+  correction *moves an established flow*. #1765's forbidden verdict remains
+  **because the established-flow move is unsafe at HEAD**: when both
+  directions move (or the flow is one-way), the old owner's GC can emit Close,
+  remove the shared session, and broadcast `DeleteSynced` to the new worker's
+  replica. #9778's analysis cites the exact interleaving and shows that
+  per-queue UMEM ownership is not the ntuple hazard; the barriered #1749
+  protocol is unlanded. The measurement below shows the move *works*; it says
+  nothing about whether it is safe.
 
 Two external reviewers (Codex + Antigravity) independently
 reproduced the Monte-Carlo, and that half of #1649's kill stands.
