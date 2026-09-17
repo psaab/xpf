@@ -197,6 +197,8 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		NATPoolAlarmsFn: d.natPoolAlarms,
 		// #9902 F-026: active NAT pool-exhaustion alarms.
 		NATPoolExhaustionAlarmsFn: d.natPoolExhaustionAlarms,
+		// #10025: active pre-break fabric-auth clock alarms.
+		ClockSkewAlarmsFn: d.clockSkewAlarms,
 		FeedsFn: func() map[string]feeds.FeedInfo {
 			if d.feeds != nil {
 				return d.feeds.AllFeeds()

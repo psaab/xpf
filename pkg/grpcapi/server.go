@@ -20,6 +20,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/bootstrapshow"
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/config"
@@ -107,7 +108,10 @@ type Config struct {
 	// alarms for `show security alarms` (#9902 F-026). nil when no monitor
 	// is wired.
 	NATPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
-	FeedsFn                   func() map[string]feeds.FeedInfo // returns live feed status
+	// ClockSkewAlarmsFn returns daemon-resident pre-break fabric-auth clock
+	// alarms for `show security alarms` and cluster status (#10025).
+	ClockSkewAlarmsFn func() []clockskew.ActiveAlarm
+	FeedsFn           func() map[string]feeds.FeedInfo // returns live feed status
 	// FeedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#2049) — an address-name -> union-of-feed-CIDRs map for the active
 	// config — consulted by the `match-policies` simulator (#3042) so a
@@ -225,6 +229,7 @@ type Server struct {
 	ipmonStatusFn             func() []ipmon.PolicyStatus
 	natPoolAlarmsFn           func() []natpoolalarm.ActiveAlarm
 	natPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
+	clockSkewAlarmsFn         func() []clockskew.ActiveAlarm
 	feedsFn                   func() map[string]feeds.FeedInfo
 	feedOverlayFn             func() map[string][]string
 	lldpNeighborsFn           func() []*lldp.Neighbor
@@ -379,6 +384,7 @@ func NewServer(addr string, cfg Config) *Server {
 		ipmonStatusFn:             cfg.IPMonStatusFn,
 		natPoolAlarmsFn:           cfg.NATPoolAlarmsFn,
 		natPoolExhaustionAlarmsFn: cfg.NATPoolExhaustionAlarmsFn,
+		clockSkewAlarmsFn:         cfg.ClockSkewAlarmsFn,
 		feedsFn:                   cfg.FeedsFn,
 		feedOverlayFn:             cfg.FeedOverlayFn,
 		lldpNeighborsFn:           cfg.LLDPNeighborsFn,
