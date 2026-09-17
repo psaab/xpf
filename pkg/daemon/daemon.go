@@ -125,6 +125,12 @@ type Daemon struct {
 	// torn-down backend published on purpose (#6741), so a non-nil cell is
 	// not proof of an armed forwarding path.
 	dataplaneArmed atomic.Bool
+	// transitGateMu serializes every sysctl/barrier actuation with the periodic
+	// kernel-truth census. A wake callback can arrive from any dataplane writer,
+	// while the tick is the completeness guarantee for writers no observer sees.
+	transitGateMu sync.Mutex
+	transitGateWakeOnce sync.Once
+	transitGateWake     chan struct{}
 
 	// #9239: whether the LAST DHCP lease-change pass saw a delegated prefix
 	// mapped to an RA interface.
@@ -1719,6 +1725,15 @@ func (d *Daemon) dataplane() dataplane.RuntimeDataPlane {
 // (pkg/dataplane/dataplane.go) returns arbitrary constructor results
 // unchecked, so the guard covers every nillable kind.
 func (d *Daemon) setDataplane(dp dataplane.RuntimeDataPlane) {
+	// Publication and the gate census share this exclusion: otherwise a gate
+	// read could count the old runtime while a concurrent replacement was
+	// already publishing a new one, and briefly open from stale proof.
+	d.transitGateMu.Lock()
+	defer d.transitGateMu.Unlock()
+
+	// The wake callback follows the published runtime. Clear it before
+	// replacement so a retired runtime cannot keep signalling this daemon.
+	d.clearAttachedLinksObserver()
 	if dp == nil {
 		d.dpCell.Store(nil)
 		return
@@ -1733,6 +1748,7 @@ func (d *Daemon) setDataplane(dp dataplane.RuntimeDataPlane) {
 		}
 	}
 	d.dpCell.Store(&dpSlot{v: dp})
+	d.registerAttachedLinksObserver()
 }
 
 func (d *Daemon) applyResult() *dataplane.ApplyResult {

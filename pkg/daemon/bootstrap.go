@@ -643,6 +643,13 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 		}
 	}
 
+	// Close before teardown: Teardown may destroy the final XDP link and no
+	// daemon-side writer is complete enough to make that ordering safe. The
+	// periodic census still covers unknown kernel changes, but rollback should
+	// not deliberately enter the teardown with transit open.
+	d.markDataplaneNotArmed("bootstrap rollback",
+		"dataplane detaching; first commit confirmed timed out")
+
 	// (4) Detach the dataplane (inverse of Start). Keep the object so a later
 	// confirmed commit re-arms it via runBootstrapExitStartup.
 	if rt := d.dataplane(); rt != nil {
@@ -650,16 +657,6 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 			steps = append(steps, bootstrapTeardownStep{name: "dataplane teardown", err: err})
 		}
 	}
-	// #5275: the detach above UN-ARMS this node — the shim is no longer
-	// attached, so nothing adjudicates transit. Close the kernel transit
-	// path to match, and drop the armed flag so the next apply tail
-	// (applyKernelTuning) does not re-open it. Unconditional: a rollback
-	// that found no published backend is equally unarmed, and the write is
-	// a no-op when the knobs are already closed. Reversed by the
-	// bootstrap-exit arm when a corrected commit re-arms the retained
-	// object.
-	d.markDataplaneNotArmed("bootstrap rollback",
-		"dataplane detached; first commit confirmed timed out")
 
 	return steps
 }

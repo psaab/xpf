@@ -57,6 +57,10 @@ type Manager struct {
 	// the range loop outside any lock the accessor could take, which is how the
 	// race survived the #2114 A3 registry rule.
 	xdpLinks        map[int]link.Link
+	// attachedLinksObserver is a wake-only callback. It never carries a count:
+	// callers must re-read kernel link truth through AttachedXDPLinkCount.
+	// Access is serialized by m.mu and callbacks run after m.mu is released.
+	attachedLinksObserver func()
 	tcLinks         map[int]link.Link
 	lastCompile     *CompileResult
 	applyMu         sync.Mutex

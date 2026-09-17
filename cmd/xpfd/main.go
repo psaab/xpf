@@ -187,6 +187,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "cleanup: %v\n", err)
 			os.Exit(1)
 		}
+		// #9725: cleanup destroys pinned XDP links and runs without the daemon's
+		// periodic kernel-truth tick. Close and VERIFY transit BEFORE that
+		// destructive operation; on uncertainty leave the pins for the daemon's
+		// next start rather than knowingly opening a window.
+		if err := daemon.CloseKernelTransitForCleanup(); err != nil {
+			fmt.Fprintf(os.Stderr, "cleanup transit: %v\n", err)
+			os.Exit(1)
+		}
 		if err := dataplane.Cleanup(); err != nil {
 			fmt.Fprintf(os.Stderr, "cleanup BPF: %v\n", err)
 			os.Exit(1)

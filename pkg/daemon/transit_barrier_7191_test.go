@@ -40,8 +40,8 @@ func lastBarrierCall(f *fakeNftInstaller) string {
 func TestArmedStateRemovesTheBarrier7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
-
 	d := &Daemon{}
+	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
 
 	if got := lastBarrierCall(f); got != "remove" {
@@ -57,8 +57,8 @@ func TestArmedStateRemovesTheBarrier7191(t *testing.T) {
 func TestApplyTailKeepsTheBarrierOffWhileArmed7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
-
 	d := &Daemon{}
+	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
 	f.barrierCalls = nil // isolate the tail's own decision
 
@@ -110,6 +110,7 @@ func TestBarrierRemoveFailureDoesNotDisarm7191(t *testing.T) {
 	f.barrierRemove = func() error { return errors.New("kernel says no") }
 
 	d := &Daemon{}
+	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
 
 	if !d.DataplaneArmed() {
@@ -130,6 +131,10 @@ type fakeCoverageDP struct {
 func (f *fakeCoverageDP) ArmCoverageSummary() (int, int, bool, bool) {
 	return f.uncovered, f.total, f.ran, f.seen
 }
+
+func (f *fakeCoverageDP) AttachedXDPLinkCount() int { return 1 }
+
+func (f *fakeCoverageDP) SetAttachedLinksObserver(func()) {}
 
 func TestArmCoverageVerdictIsThreeState7191(t *testing.T) {
 	for _, tc := range []struct {

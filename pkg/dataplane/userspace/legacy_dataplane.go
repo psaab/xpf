@@ -118,6 +118,25 @@ func (a *LegacyDataPlaneAdapter) Start(ctx context.Context) error {
 	}
 	return m.Start(ctx)
 }
+// AttachedXDPLinkCount forwards the kernel-truth census through the runtime
+// adapter published to the daemon.
+func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0
+	}
+	return m.AttachedXDPLinkCount()
+}
+
+// SetAttachedLinksObserver forwards the wake-only link-change notification.
+// It carries no state; the daemon re-reads the count when woken.
+func (a *LegacyDataPlaneAdapter) SetAttachedLinksObserver(fn func()) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return
+	}
+	m.SetAttachedLinksObserver(fn)
+}
 
 func (a *LegacyDataPlaneAdapter) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {
 	m, err := a.managerOrErr()
