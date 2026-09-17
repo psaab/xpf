@@ -320,25 +320,27 @@ forward-direction collision.
   `instance-type forwarding` instance with no member interfaces stay domain
   0 in both directions, and #7924's strict-path rejection of overlap + PBR
   remains what covers that shape.
-- **Forward isolation is exact; reverse matching is domain-PREFERRING.**
-  The collision #7160 exists to close is a forward-direction one — tenant
-  B's packets hitting tenant A's conntrack entry and inheriting its cached
-  egress, NAT and **policy** verdict. Forward lookups go through
-  `key_to_handle` on the full key, so two tenants now hold two entries.
-  The reverse side cannot be keyed the same way: this dataplane's transit
-  route lookup is **not** VRF-isolated (see the PBR bullet below), so a flow
-  that ingresses on a routing-instance member interface and egresses out of
-  the default instance is a real, working configuration whose reply resolves
-  a DIFFERENT domain. `reverse_wire_key` / `reverse_canonical_key`
-  therefore build the reverse-match index with `routing_domain: 0`, and
-  `find_forward_nat_match` walks the (1:N) bucket in two passes — preferring
-  a candidate whose forward session carries the reply's own domain, and
-  falling back to a domain-agnostic match only when none does. Two
-  contained tenants demux exactly; a non-contained flow keeps forwarding as
-  it did before the field existed. `forward_wire_key`,
-  `translated_session_key` and `reverse_session_key` still PRESERVE the
-  domain — they name another key of the same direction, or navigate between
-  the two halves of one flow.
+- **Forward isolation is exact; reverse matching is domain-PREFERRING and
+  fail-closed across non-zero domains.** The collision #7160 exists to close
+  is a forward-direction one — tenant B's packets hitting tenant A's
+  conntrack entry and inheriting its cached egress, NAT and **policy** verdict.
+  Forward lookups go through `key_to_handle` on the full key, so two tenants
+  now hold two entries. The reverse side cannot be keyed the same way: this
+  dataplane's transit route lookup is **not** VRF-isolated (see the PBR bullet
+  below), so a flow that ingresses on a routing-instance member interface and
+  egresses out of the default instance is a real, working configuration whose
+  reply resolves a DIFFERENT domain. `reverse_wire_key` /
+  `reverse_canonical_key` therefore build the reverse-match index with
+  `routing_domain: 0`, and `find_forward_nat_match` walks the (1:N) bucket in
+  two passes — preferring a candidate whose forward session carries the
+  reply's own domain, then allowing a pass-2 candidate only when either the
+  reply or candidate is domain 0. A validating candidate from a different
+  non-zero domain is refused, including through the shared NAT-map second
+  probe. Two contained tenants demux exactly; a non-contained flow keeps
+  forwarding when its two directions are the legitimate mixed-zero shape.
+  `forward_wire_key`, `translated_session_key` and `reverse_session_key` still
+  PRESERVE the domain — they name another key of the same direction, or
+  navigate between the two halves of one flow.
 - **HA import DERIVES the domain; it is not carried as its own wire field.**
   The domain is a pure function of the flow's ingress interface and the
   config, both nodes run identical config, and #7095 already resolves the

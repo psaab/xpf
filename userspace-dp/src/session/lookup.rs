@@ -304,10 +304,15 @@ impl SessionTable {
         //            routing instances land in one bucket and demux exactly
         //            here, which is what keeps the reverse direction isolated
         //            once the forward direction is.
-        //   pass 2 — any validating candidate. This is the pre-#7160 answer
-        //            verbatim, and it is what keeps a flow whose reply arrives
-        //            in another domain (the common non-contained VRF shape)
-        //            forwarding instead of blackholing.
+        //   pass 2 — a validating candidate from the default domain (0) is
+        //            still a legitimate fallback for a reply in a tenant
+        //            domain, and vice versa. A candidate from a DIFFERENT
+        //            non-zero domain is refused: accepting it would inject a
+        //            zone-matching tenant reply into this flow.
+        //
+        // The reverse index remains domain-agnostic so non-contained VRF
+        // flows keep forwarding, but no two non-zero domains can cross via
+        // pass 2.
         //
         // In a deployment with no routing-instance interface membership every
         // key is domain 0, so pass 1 accepts exactly what pass 2 would and the
@@ -336,17 +341,27 @@ impl SessionTable {
             {
                 continue;
             }
+            if record.key.routing_domain == reply_key.routing_domain {
+                return Some(ForwardSessionMatch {
+                    key: record.key.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                });
+            }
+            // A zero-domain endpoint is the legitimate non-contained fallback:
+            // preserve it when either side is the default instance. But a
+            // validating candidate from another non-zero domain is a
+            // cross-tenant collision and must not be remembered as pass 2.
+            // Reject before cloning the candidate, since this is the only
+            // candidate class that can never be returned.
+            if reply_key.routing_domain != 0 && record.key.routing_domain != 0 {
+                continue;
+            }
             let matched = ForwardSessionMatch {
                 key: record.key.clone(),
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
             };
-            if record.key.routing_domain == reply_key.routing_domain {
-                return Some(matched);
-            }
-            // First validating candidate from another domain — remembered, not
-            // returned, so a same-domain candidate later in the bucket still
-            // wins. Bucket order is install order and carries no meaning.
             if fallback.is_none() {
                 fallback = Some(matched);
             }
