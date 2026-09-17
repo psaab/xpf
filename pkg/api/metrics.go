@@ -510,6 +510,9 @@ type xpfCollector struct {
 	// #1789: total failed USERSPACE_SESSIONS BPF-map publishes — the
 	// cause-side signal for rising XDP-shim NO_SESSION fallbacks.
 	userspaceSessionPublishErrors *prometheus.Desc
+	// #10021: cumulative established-session revocations by live zone policy.
+	// This is a session-count signal, not a packet-drop component.
+	userspacePolicyRevokedSessions *prometheus.Desc
 
 	// #2244: total failed dnat_table reverse-SNAT BPF-map publishes — the
 	// cause-side signal for dnat_table map-capacity pressure that silently
@@ -1049,6 +1052,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceNatReverseKeyCollisions
 	ch <- c.userspaceNatReverseKeyCollisionsDistinctSrc
 	ch <- c.userspaceSessionPublishErrors
+	ch <- c.userspacePolicyRevokedSessions
 	ch <- c.userspaceDnatPublishErrors
 	ch <- c.userspaceSyncedImportCapDrops
 	ch <- c.userspaceNatReverseKeySharedDisplacements

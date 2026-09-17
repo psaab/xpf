@@ -792,11 +792,18 @@ routing evaluation on the established-hit path, which is exactly what #2620
 forbids — that path is the sole counter for its packet precisely because it
 never calls the routing evaluator. #8356 does not re-open #2620.
 
-Operator-visible signal: `policy_revoked_sessions`, the sibling of
-`filter_revoked_sessions`. Its #9519 neighbour `foreign_authority_drops` counts
-PACKETS refused because they hit a session from a zone that did not admit it and
-their own zone's policy does not permit them; it revokes nothing. A non-zero value right after a commit is the
-expected, intended reading — it is what the operator's narrowed policy did.
+Production operator signal: the helper publishes the cumulative
+`policy_revoked_sessions_total` field in `ProcessStatus`, and the Go control
+plane exports it as Prometheus
+`xpf_userspace_policy_revoked_sessions_total`. It counts REVOKED SESSIONS,
+not dropped packets, and is intentionally separate from the packet-counted
+`Packets dropped` total. The debug-log-only `DBG` report also includes the
+per-interval `policy_revoked_sessions` row when `debug-log` is enabled.
+Its #9519 neighbour `foreign_authority_drops` counts PACKETS refused because
+they hit a session from a zone that did not admit it and their own zone's
+policy does not permit them; it revokes nothing. A non-zero value right after
+a commit is the expected, intended reading — it is what the operator's
+narrowed policy did.
 
 Regression coverage: `session/policy_revalidation_8356_tests.rs` (stamp
 lifecycle, generation-only keying, and the two stamps' mutual independence) and

@@ -94,6 +94,13 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.SessionPublishErrorsTotal),
 	)
+	// #10021: established-session revocations are a standalone session
+	// signal, not part of the packet-counted "Packets dropped" total.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspacePolicyRevokedSessions,
+		prometheus.CounterValue,
+		float64(status.PolicyRevokedSessionsTotal),
+	)
 	// #4800: the publish + replication legs of the new-flow-install
 	// contention surface. Emitted unconditionally and always as complete
 	// (denominator, contended) pairs — a missing series would be

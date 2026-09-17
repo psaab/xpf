@@ -4690,3 +4690,73 @@ fn fabric_ingress_forward_flow_permit_kept_on_reverse_9604() {
     );
     assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
 }
+
+/// #10021: the release-visible half of the revoke signal. The cells above pin
+/// `dbg.policy_revoked_sessions`; this one pins the per-binding live atomic
+/// the status wire and Prometheus read. Same default-reject revoke scenario
+/// as `a_default_policy_of_reject_still_revokes_the_established_session_9381`.
+/// RED-on-revert: dropping the `fetch_add` leaves the atomic at 0.
+#[test]
+fn a_revoked_session_bumps_the_release_visible_live_atomic_10021() {
+    let forwarding = {
+        let mut snapshot = policy_deny_snapshot();
+        snapshot.generation = 7;
+        snapshot.fib_generation = 9;
+        snapshot.default_policy = "reject".to_string();
+        snapshot.policies.clear();
+        build_forwarding_state(&snapshot)
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        flow_key_to(DST),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    assert_eq!(
+        binding
+            .live
+            .policy_revoked_sessions
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "a fresh binding starts at 0, so the increment below comes from this poll"
+    );
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the packet must HIT the session, or the assertions below are vacuous"
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 1,
+        "control: the debug counter still observes the revocation"
+    );
+    assert_eq!(
+        binding
+            .live
+            .policy_revoked_sessions
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the revocation must publish to the release-visible live atomic, not \
+         only the debug counter"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "the session must be torn down, not merely counted"
+    );
+}

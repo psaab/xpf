@@ -1038,6 +1038,13 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		// #10021: policy-revoked-sessions total emitted unconditionally.
+		userspacePolicyRevokedSessions: prometheus.NewDesc(
+			"xpf_userspace_policy_revoked_sessions_total",
+			"policy revoked sessions",
+			nil,
+			nil,
+		),
 		// #4800: publish + replication legs of the new-flow-install
 		// contention surface.
 		userspaceSharedSessionPublishes: prometheus.NewDesc(
@@ -1346,6 +1353,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		MaxSessions:                    100,
 		// #1789: publish-error counter emitted unconditionally.
 		SessionPublishErrorsTotal: 6,
+		// #10021: revoked-sessions total emitted unconditionally. Distinct
+		// from every sibling so a crossed wire fails the assertion below.
+		PolicyRevokedSessionsTotal: 18,
 		// #4800: publish + replication contention surface. Seven values,
 		// all distinct from one another and from every other field in this
 		// fixture, so a collector that crossed two of these wires (emitting
@@ -1546,13 +1556,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// +7 for the #9900 frame-ownership violation counters.
 	// +4 for the #9901 packet-identity quartet (frag absolute-lifetime
 	// evictions + unknown-MTU forwards + subminimal-quote refusals +
-	// per-session error suppressions) = 71.
+	// per-session error suppressions) +1 for the #10021 policy-revoked-session
+	// total = 72.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
-	// an unverified metric. The eleven new series ARE asserted below, so the
+	// an unverified metric. The twelve new series ARE asserted below, so the
 	// original claim still holds and the number moves with the population.
-	if len(got) != 71 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 71 metrics, got %d", len(got))
+	if len(got) != 72 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 72 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1589,6 +1600,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceInterfaceSNATRegistryCap, nil, 23)
 	// #1789: publish-error counter emitted unconditionally.
 	assertCounterClose(t, got, c.userspaceSessionPublishErrors, nil, 6)
+	// #10021: revoked-sessions total emitted unconditionally.
+	assertCounterClose(t, got, c.userspacePolicyRevokedSessions, nil, 18)
 	// #4800: every leg of the new-flow-install contention surface reaches
 	// Prometheus carrying ITS OWN value. Both halves of each pair are
 	// asserted separately — a denominator that silently went missing (or

@@ -382,6 +382,7 @@ pub(crate) fn run() -> Result<(), String> {
             neighbor_warm_disconnected_total: 0,
             neg_neigh_fast_fail_total: 0,
             pending_neigh_duplicate_drops_total: 0,
+            policy_revoked_sessions_total: 0,
             pending_neigh_decap_drops_total: 0,
             source_nat_match_consulted_total: 0,
             source_nat_match_matched_total: 0,

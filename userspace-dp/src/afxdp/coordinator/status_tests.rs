@@ -603,3 +603,31 @@ fn wg_tunnel_status_reports_zeros_without_a_resolver_7936() {
     assert_eq!(rows[0].endpoint_family_mismatch, 0);
     assert!(rows[0].endpoint_last_error.is_empty());
 }
+
+/// #10021: the release-visible counter must cross the real status refresh
+/// boundary, not merely exist on `BindingLiveState` or in the wire struct.
+/// Distinct seeded data makes a deleted or duplicated assignment observable.
+#[test]
+fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
+    let mut coordinator = Coordinator::new();
+    let live = Arc::new(BindingLiveState::new());
+    live.policy_revoked_sessions.store(37, Ordering::Relaxed);
+    coordinator.workers.live.insert(0, live);
+
+    let mut state = crate::server::state::ServerState {
+        status: Default::default(),
+        snapshot: None,
+        afxdp: coordinator,
+        state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
+    };
+    assert_eq!(state.status.policy_revoked_sessions_total, 0);
+
+    crate::server::helpers::status::refresh_status(&mut state);
+
+    assert_eq!(
+        state.status.policy_revoked_sessions_total, 37,
+        "refresh_status must publish the live per-binding revocation sum onto \
+         ProcessStatus (#10021)"
+    );
+}

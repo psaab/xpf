@@ -71,6 +71,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.neg_neigh_fast_fail_total = state.afxdp.neg_neigh_fast_fail_total();
     state.status.pending_neigh_duplicate_drops_total =
         state.afxdp.pending_neigh_duplicate_drops_total();
+    // #10021: release-visible policy-revocation signal. This counts
+    // established SESSIONS torn down by live zone policy, not dropped
+    // packets, so it is exported separately from packet-drop totals.
+    state.status.policy_revoked_sessions_total = state.afxdp.policy_revoked_sessions_total();
     // #1902: decap-refusal gate at pending_neigh admission (the
     // outer-frame/inner-meta pairing must never reach the in-place
     // retry TX path).

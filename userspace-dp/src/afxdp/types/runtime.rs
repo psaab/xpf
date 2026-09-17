@@ -673,7 +673,6 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// intended signal — it is what the operator's narrowed policy did.
     ///
     /// Counted once per revoked session, not per dropped packet.
-    #[allow(dead_code)]
     pub(in crate::afxdp) policy_revoked_sessions: u64,
     /// #9519: packets DROPPED because they hit an established session from a
     /// zone other than the one that admitted it, and their own zone's policy
