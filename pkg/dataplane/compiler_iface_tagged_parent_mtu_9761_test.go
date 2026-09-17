@@ -365,9 +365,9 @@ func TestATaggedInterfaceNamedLikeAFabricStillPlansItsMTU_9761(t *testing.T) {
 //   - the interface name, including tunnel and fabric lookalikes;
 //   - fabric membership, three ways for the same name: none; configured members
 //     with a derived local member, as a compiled vSRX fabric does; and configured
-//     members with NO local member, the #9872 bond shape the planner exception
-//     keys on (a table with only the first two would pass a planner that still
-//     tested the local derivation alone);
+//     members with NO local member, the #9872 bond shape. A canonical authored
+//     name is the bond's owned netdev; a slash-bearing authored name is the
+//     ownerless control because bond.go passes that raw name to netlink.
 //   - vlan-tagging and flexible-vlan-tagging (#9872): the latter leaves
 //     VlanTagging false, so a planner that additionally required it fails here;
 //   - the unit's addressing: static, its own MTU, DHCPv4 or DHCPv6;
@@ -381,9 +381,11 @@ func TestATaggedInterfaceNamedLikeAFabricStillPlansItsMTU_9761(t *testing.T) {
 //     lexical ref by deliberate #9873 doctrine (see the skip below);
 //   - the interface-level mtu itself: a standard 1400 and a jumbo 9000.
 //
-// The expectation reads only the two real exceptions. A fabric reference and a
-// per-unit tunnel plan no MTU anywhere. Every other tagged reference plans the
-// interface-level mtu on the interface's own netdev and on nothing else.
+// The expectation reads the resolved ownership, not just the reference's
+// configured membership. A fabric reference whose resolved netdev is owned by
+// either the local IPVLAN setup or a canonical bond, and a per-unit tunnel,
+// plan no MTU anywhere. Every other tagged reference plans the interface-level
+// mtu on the interface's own netdev and on nothing else.
 func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T) {
 	names := []string{"ge-0/0/4", "gr-eenwich", "ip-lookalike", "wg-lookalike", "fab0", "fab1", "fab9", "fabric-uplink", "st10"} // #9873: st10 exercises the lexical st<N> fallback against a configured vlan-id
 	units := []struct {
@@ -469,7 +471,9 @@ func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T)
 
 							plan := planPhysDesired(cfg)
 							own := config.LinuxIfName(name)
-							exception := fabric.members || mode != ""
+							bondOwned := fabric.members &&
+								name != "" && name == config.LinuxIfName(name)
+							exception := fabric.local || bondOwned || mode != ""
 							ok := true
 							for dev, pd := range plan {
 								if pd.mtu != 0 && (exception || dev != own) {
