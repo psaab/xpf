@@ -52,8 +52,10 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 		}
 		ports, unusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, overBudget)
 		totalPorts := int(ports)
-		ch <- prometheus.MustNewConstMetric(c.natPoolTotalPorts, prometheus.GaugeValue,
-			float64(totalPorts), name)
+		if !pool.PortNoTranslation || unusable != "" {
+			ch <- prometheus.MustNewConstMetric(c.natPoolTotalPorts, prometheus.GaugeValue,
+				float64(totalPorts), name)
+		}
 
 		// #7473: a disarmed pool still HAS a PoolID — `compiler_nat.go` assigns
 		// them without consulting any disarm predicate — so this lookup
@@ -79,11 +81,12 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 		// judgement the paragraph above reaches for a disarmed pool: a missing
 		// series says "not installed", a 0 says "measured, and nothing is
 		// used", and monitoring cannot tell the second from health.
-		if rp, ok := poolOccupancy[name]; ok && unusable == "" {
-			ch <- prometheus.MustNewConstMetric(c.natPoolUsedPorts, prometheus.GaugeValue,
-				float64(rp.UsedPorts), name)
+		if !pool.PortNoTranslation {
+			if rp, ok := poolOccupancy[name]; ok && unusable == "" {
+				ch <- prometheus.MustNewConstMetric(c.natPoolUsedPorts, prometheus.GaugeValue,
+					float64(rp.UsedPorts), name)
+			}
 		}
-
 		if pool.Deterministic != nil {
 			ch <- prometheus.MustNewConstMetric(c.natPoolDeterministicInfo, prometheus.GaugeValue,
 				1.0, name,

@@ -229,14 +229,26 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 		// there is no measurement, and rendering 0.0% would be a fabricated
 		// healthy reading. Utilization is already a string on this message, so
 		// the unknown case is expressible without a wire change.
+		// #9995: `port no-translation` preserves the source port and its
+		// PortLow/PortHigh fields are irrelevant. The helper's structurally
+		// zero UsedPorts is not a port-utilization measurement, so gate all
+		// port-capacity/usage fields instead of reporting a healthy-looking
+		// full-availability and 0.0% view.
 		util := "unknown"
-		switch {
-		case !usedKnown:
-			util = "unknown"
-		case totalPorts64 > 0:
-			util = fmt.Sprintf("%.1f%%", float64(used64)/float64(totalPorts64)*100)
-		default:
-			util = "0.0%"
+		if pool.PortNoTranslation && poolDisarm == "" {
+			totalPorts64 = 0
+			used64 = 0
+			avail64 = 0
+			util = "NOT APPLICABLE"
+		} else {
+			switch {
+			case !usedKnown:
+				util = "unknown"
+			case totalPorts64 > 0:
+				util = fmt.Sprintf("%.1f%%", float64(used64)/float64(totalPorts64)*100)
+			default:
+				util = "0.0%"
+			}
 		}
 
 		// #7473: the reason was computed above for the capacity and discarded

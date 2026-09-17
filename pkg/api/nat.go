@@ -325,14 +325,24 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 		// healthy reading -- the same fake zero #7473 removed elsewhere on
 		// this object. `used_ports_known` false marks it; the numeric fields
 		// stay zero-valued so existing consumers keep their shape.
+		// #9995: `port no-translation` preserves the source port and its
+		// PortLow/PortHigh fields are irrelevant. The helper's structurally
+		// zero UsedPorts is not a port-utilization measurement, so gate all
+		// port-capacity/usage fields instead of reporting a healthy-looking
+		// full-availability and 0.0% view.
 		util := "unknown"
-		if usedKnown {
+		if pool.PortNoTranslation && poolDisarm == "" {
+			totalPorts = 0
+			used = 0
+			usedKnown = false
+			avail = 0
+			util = "NOT APPLICABLE"
+		} else if usedKnown {
 			util = "0.0%"
 			if totalPorts > 0 {
 				util = fmt.Sprintf("%.1f%%", float64(used)/float64(totalPorts)*100)
 			}
 		}
-
 		// #7473: the reason was already computed above for the capacity
 		// fallback and discarded; binding it carries the builder's verdict onto
 		// the object instead of leaving a consumer to infer it from a zero
