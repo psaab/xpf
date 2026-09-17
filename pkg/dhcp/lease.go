@@ -34,14 +34,25 @@ type Lease struct {
 	// serverID is the DHCPv4 server-identifier (option 54) from the ACK
 	// that granted this lease. It is the unicast destination for the
 	// RFC 2131 §4.3.6 RENEWING DHCPREQUEST at T1. Unexported: internal
-	// renewal state, not part of the public lease surface and never
-	// compared by leaseContentChanged (#2994).
+	// renewal state, not part of the public lease surface. A change is
+	// included in leaseContentChanged so a rebinding server transition is
+	// visible to downstream consumers.
 	serverID netip.Addr
 
 	// v6ServerDUID is the DHCPv6 Server-Identifier (DUID) from the Reply
 	// that granted this lease, echoed in the RFC 8415 §18.2.4 RENEW so
-	// the original server matches the binding. Unexported (#2994).
+	// the original server matches the binding. Unexported; a change is
+	// included in leaseContentChanged for the same reason as serverID.
 	v6ServerDUID dhcpv6.DUID
+}
+
+// sameDUID compares DHCPv6 DUID values without relying on interface
+// comparability: DUID implementations contain byte slices.
+func sameDUID(a, b dhcpv6.DUID) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(b)
 }
 
 // LeaseRoute is one RFC 3442 classless static route (destination prefix

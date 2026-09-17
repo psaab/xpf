@@ -285,6 +285,13 @@ type dhcpv6Result struct {
 // prev / prevPDs (#2994). Stateless mode ignores the mode (no binding to
 // renew — every refresh is an Information-Request).
 func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExchangeMode, prev *Lease, prevPDs []DelegatedPrefix) (*dhcpv6Result, error) {
+	if mode != exchangeAcquire && !leaseInterfaceMatches(ifaceName, prev) {
+		if prev == nil {
+			return nil, fmt.Errorf("DHCPv6 %s without a prior lease", mode)
+		}
+		return nil, fmt.Errorf("DHCPv6 %s lease belongs to interface %q, not %q",
+			mode, prev.Interface, ifaceName)
+	}
 	client, err := nclient6.New(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("create DHCPv6 client: %w", err)
@@ -362,7 +369,7 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 			return nil, fmt.Errorf("DHCPv6 build %s: %w", mode, err)
 		}
 		adv, err = client.SendAndRead(exCtx, nclient6.AllDHCPRelayAgentsAndServers, msg,
-			nclient6.IsMessageType(dhcpv6.MessageTypeReply))
+			v6RenewMatcher(m, msg, prev, rebind))
 		if err != nil {
 			return nil, fmt.Errorf("DHCPv6 %s: %w", mode, err)
 		}

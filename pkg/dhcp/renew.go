@@ -1,6 +1,7 @@
 package dhcp
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"time"
@@ -8,7 +9,81 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
+	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
 )
+
+// leaseInterfaceMatches binds a renewal to the interface that owns the
+// committed lease. The nclient sockets are also opened on ifaceName, but the
+// ownership check prevents a stale lease from one interface being renewed by
+// another client instance.
+func leaseInterfaceMatches(ifaceName string, prev *Lease) bool {
+	return prev != nil && prev.Interface == ifaceName
+}
+
+// v4RenewMatcher accepts only a reply tied to req's transaction and client
+// hardware identity. nclient4's receive loop also filters packets by the
+// interface-bound socket and client hardware address; repeat the transaction
+// and hardware checks here so the acceptance predicate is explicit and
+// testable. During both RENEWING and REBINDING, ACK and NAK must identify the
+// granting server. A non-nil manager records server-identity rejections.
+func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, _ bool) nclient4.Matcher {
+	var expectedServer net.IP
+	if prev != nil && prev.serverID.IsValid() {
+		expectedServer = net.IP(prev.serverID.AsSlice())
+	}
+	typeMatch := nclient4.IsMessageType(dhcpv4.MessageTypeAck, dhcpv4.MessageTypeNak)
+	return func(resp *dhcpv4.DHCPv4) bool {
+		if req == nil || resp == nil ||
+			resp.TransactionID != req.TransactionID ||
+			len(req.ClientHWAddr) == 0 ||
+			!bytes.Equal(resp.ClientHWAddr, req.ClientHWAddr) ||
+			!typeMatch(resp) {
+			return false
+		}
+		serverID := resp.ServerIdentifier()
+		if len(serverID) == 0 || serverID.To4() == nil || expectedServer == nil ||
+			!nclient4.IsCorrectServer(expectedServer)(resp) {
+			if m != nil {
+				m.renewV4ServerIdentityRejects.Add(1)
+			}
+			return false
+		}
+		return true
+	}
+}
+
+// v6RenewMatcher accepts only a Reply tied to req's transaction, client DUID,
+// and the granting server DUID. nclient6 receives from the
+// interface-bound socket and keys its queue by transaction ID; the explicit
+// transaction/client checks keep the acceptance predicate testable. A non-nil
+// manager records server-identity rejections.
+func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, _ bool) nclient6.Matcher {
+	var expectedServer dhcpv6.DUID
+	if prev != nil {
+		expectedServer = prev.v6ServerDUID
+	}
+	var clientID dhcpv6.DUID
+	if req != nil {
+		clientID = req.Options.ClientID()
+	}
+	return func(resp *dhcpv6.Message) bool {
+		if req == nil || resp == nil ||
+			resp.TransactionID != req.TransactionID ||
+			clientID == nil ||
+			!sameDUID(resp.Options.ClientID(), clientID) ||
+			resp.MessageType != dhcpv6.MessageTypeReply {
+			return false
+		}
+		serverID := resp.Options.ServerID()
+		if serverID == nil || expectedServer == nil || !sameDUID(serverID, expectedServer) {
+			if m != nil {
+				m.renewV6ServerIdentityRejects.Add(1)
+			}
+			return false
+		}
+		return true
+	}
+}
 
 // This file holds the RFC-correct renewal path (#2994). Before #2994 the
 // run loops ran a full DORA (v4) / Rapid-Solicit (v6) at every T1/T2,
