@@ -72,8 +72,10 @@ func startPagingHelper9344(t *testing.T, path string, pages []pageReply9344) *pa
 				}
 				idx++
 				resp := ControlResponse{
-					OK:                true,
-					SessionExportMore: page.more,
+					OK:                       true,
+					SessionExportMore:        page.more,
+					SessionExportIncarnation: 1,
+					SessionExportSeq:         1,
 				}
 				for i := 0; i < page.deltas; i++ {
 					resp.SessionDeltas = append(resp.SessionDeltas, SessionDeltaInfo{
@@ -102,6 +104,9 @@ func pagingManager9344(t *testing.T, pagingVersion int) (*Manager, *pagingHelper
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.cfg.ControlSocket = sock
 	m.lastStatus.SessionExportPagingProtocolVersion = pagingVersion
+	if pagingVersion >= MinProtocolOwnerRGExportPaging {
+		m.lastStatus.SessionExportIncarnation = 1
+	}
 	return m, nil, sock
 }
 
@@ -180,6 +185,215 @@ func TestOwnerRGExportStopsAtOnePageWhenNothingRemains9344(t *testing.T) {
 	}
 }
 
+// TestOwnerRGExportEmptyOwnerRGSetReturnsWithoutAZeroToken9856 preserves the
+// empty-owner compatibility path while the paged contract rejects zero tokens.
+func TestOwnerRGExportEmptyOwnerRGSetReturnsWithoutAZeroToken9856(t *testing.T) {
+	m, _, _ := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	deltas, status, err := m.ExportOwnerRGSessionsPaged(nil)
+	if err != nil {
+		t.Fatalf("empty owner-RG export: %v", err)
+	}
+	if deltas != nil {
+		t.Fatalf("empty owner-RG export returned %d deltas", len(deltas))
+	}
+	if status.SessionExportPagingProtocolVersion != MinProtocolOwnerRGExportPaging {
+		t.Fatalf("status protocol = %d, want %d",
+			status.SessionExportPagingProtocolVersion, MinProtocolOwnerRGExportPaging)
+	}
+}
+
+// TestOwnerRGExportAllowsTerminalProbeAfterExactDataPageBudget9344 covers the
+// worker push-before-ACK seam: a full final data page can report more=true
+// before its ACK is visible, so the caller needs one empty terminal probe.
+func TestOwnerRGExportAllowsTerminalProbeAfterExactDataPageBudget9344(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	pages := make([]pageReply9344, maxOwnerRGExportPages)
+	for i := range maxOwnerRGExportDataPages {
+		pages[i] = pageReply9344{deltas: 1, more: true}
+	}
+	pages[maxOwnerRGExportDataPages] = pageReply9344{more: false}
+	h := startPagingHelper9344(t, sock, pages)
+
+	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
+	if err != nil {
+		t.Fatalf("ExportOwnerRGSessionsPaged: %v", err)
+	}
+	if len(deltas) != maxOwnerRGExportDataPages {
+		t.Fatalf("collected %d deltas, want %d data pages", len(deltas), maxOwnerRGExportDataPages)
+	}
+	if len(h.got) != maxOwnerRGExportPages {
+		t.Fatalf("helper saw %d requests, want %d data pages plus one terminal probe",
+			len(h.got), maxOwnerRGExportPages)
+	}
+	probe := h.got[maxOwnerRGExportDataPages].SessionExport
+	if probe == nil || !probe.Continuation {
+		t.Fatalf("terminal probe must continue the exact export window: %#v", probe)
+	}
+}
+
+// TestOwnerRGExportReleasesManagerLockWhilePageWaits9344 proves that paging
+// does not monopolize the Manager mutex during helper I/O. A stalled response
+// still lets another Manager operation acquire m.mu; the export revalidates
+// the helper/config generations before applying the response.
+func TestOwnerRGExportReleasesManagerLockWhilePageWaits9344(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen %s: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	requestRead := make(chan struct{})
+	release := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
+			serverDone <- err
+			return
+		}
+		close(requestRead)
+		<-release
+		resp := ControlResponse{
+			OK:                       true,
+			SessionExportIncarnation: 1,
+			SessionExportSeq:         1,
+		}
+		if err := json.NewEncoder(conn).Encode(&resp); err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+
+	exportDone := make(chan error, 1)
+	go func() {
+		_, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
+		exportDone <- err
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper did not receive export request")
+	}
+	if !m.mu.TryLock() {
+		t.Fatal("Manager mutex remained held while export response was stalled")
+	}
+	m.mu.Unlock()
+	close(release)
+	if err := <-exportDone; err != nil {
+		t.Fatalf("ExportOwnerRGSessionsPaged: %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("stalled helper: %v", err)
+	}
+}
+
+// TestOwnerRGExportRejectsResponseAfterHelperGenerationChange9344 proves that
+// releasing m.mu does not admit a response from a retired helper generation.
+func TestOwnerRGExportRejectsResponseAfterHelperGenerationChange9344(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen %s: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	requestRead := make(chan struct{})
+	release := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
+			serverDone <- err
+			return
+		}
+		close(requestRead)
+		<-release
+		resp := ControlResponse{
+			OK:                       true,
+			SessionExportIncarnation: 1,
+			SessionExportSeq:         1,
+		}
+		serverDone <- json.NewEncoder(conn).Encode(&resp)
+	}()
+
+	exportDone := make(chan error, 1)
+	go func() {
+		_, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
+		exportDone <- err
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper did not receive export request")
+	}
+	m.mu.Lock()
+	m.procGen++
+	m.mu.Unlock()
+	close(release)
+	if err := <-exportDone; !errors.Is(err, ErrOwnerRGExportIncomplete) {
+		t.Fatalf("err = %v, want ErrOwnerRGExportIncomplete after helper generation change", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("stalled helper: %v", err)
+	}
+}
+
+// TestOwnerRGExportRejectsOversizedDataPage9344 keeps the helper's per-response
+// contract fail closed: an oversized page must not be appended to the bounded
+// accumulator or treated as a valid terminal page.
+func TestOwnerRGExportRejectsOversizedDataPage9344(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	h := startPagingHelper9344(t, sock, []pageReply9344{
+		{deltas: ownerRGExportPageDeltas + 1, more: false},
+	})
+
+	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
+	if !errors.Is(err, ErrOwnerRGExportIncomplete) {
+		t.Fatalf("err = %v, want ErrOwnerRGExportIncomplete", err)
+	}
+	if deltas != nil {
+		t.Fatalf("returned %d deltas alongside oversized page", len(deltas))
+	}
+	if len(h.got) != 1 {
+		t.Fatalf("helper saw %d requests, want 1", len(h.got))
+	}
+}
+
+// TestOwnerRGExportRejectsAccumulatorBudget9344 prevents the multi-page
+// collector from turning a bounded response into an unbounded Go allocation.
+func TestOwnerRGExportRejectsAccumulatorBudget9344(t *testing.T) {
+	m, _, sock := pagingManager9344(t, MinProtocolOwnerRGExportPaging)
+	pages := make([]pageReply9344, maxOwnerRGExportAccumulatorPages+1)
+	for i := range maxOwnerRGExportAccumulatorPages + 1 {
+		pages[i] = pageReply9344{deltas: ownerRGExportPageDeltas, more: true}
+	}
+	h := startPagingHelper9344(t, sock, pages)
+
+	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
+	if !errors.Is(err, ErrOwnerRGExportIncomplete) {
+		t.Fatalf("err = %v, want ErrOwnerRGExportIncomplete", err)
+	}
+	if deltas != nil {
+		t.Fatalf("returned %d deltas alongside accumulator-budget error", len(deltas))
+	}
+	if len(h.got) != maxOwnerRGExportAccumulatorPages+1 {
+		t.Fatalf("helper saw %d requests, want %d before the budget refusal",
+			len(h.got), maxOwnerRGExportAccumulatorPages+1)
+	}
+}
+
 // TestOwnerRGExportFailsClosedWhenTheHelperNeverStops9344 pins the bound.
 //
 // "The answer is unbounded" is no better when the unboundedness is a page count
@@ -220,32 +434,16 @@ func TestOwnerRGExportFailsClosedWhenTheHelperNeverStops9344(t *testing.T) {
 // a LOUD failure (the 64 MiB cap, which #9322 made diagnosable) for a SILENT
 // one that deletes live sessions on the peer. The caller must therefore ask
 // such a helper for the unbounded set, exactly as it always did.
-func TestOwnerRGExportFallsBackToUnboundedWithoutThePagingContract9344(t *testing.T) {
+func TestOwnerRGExportRefusesWithoutThePagingContract9856(t *testing.T) {
 	m, _, sock := pagingManager9344(t, 0)
-	h := startPagingHelper9344(t, sock, []pageReply9344{{deltas: 7, more: false}})
+	startPagingHelper9344(t, sock, []pageReply9344{{deltas: 7, more: false}})
 
 	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
-	if err != nil {
-		t.Fatalf("ExportOwnerRGSessionsPaged: %v", err)
+	if !errors.Is(err, ErrOwnerRGExportIncomplete) {
+		t.Fatalf("err = %v, want ErrOwnerRGExportIncomplete for v1 helper", err)
 	}
-	if len(deltas) != 7 {
-		t.Errorf("collected %d deltas, want 7", len(deltas))
-	}
-	if len(h.got) != 1 {
-		t.Fatalf("helper saw %d requests, want 1", len(h.got))
-	}
-	req := h.got[0]
-	if req.SessionExport == nil {
-		t.Fatalf("no SessionExport in the fallback request")
-	}
-	if req.SessionExport.Max != 0 {
-		t.Errorf("fallback Max = %d, want 0 (UNBOUNDED). A helper without the paging "+
-			"contract TRUNCATES at Max and reports no more-bit, so a capped request "+
-			"here silently loses the remainder", req.SessionExport.Max)
-	}
-	if req.SessionExport.Continuation {
-		t.Errorf("fallback set Continuation — an old helper ignores the unknown field " +
-			"and would run a SECOND full phase-1 export")
+	if deltas != nil {
+		t.Fatalf("returned %d deltas alongside v1 refusal; a partial window must not escape", len(deltas))
 	}
 }
 
@@ -255,14 +453,18 @@ func TestOwnerRGExportFallsBackToUnboundedWithoutThePagingContract9344(t *testin
 // The worst case is built by REFLECTION over SessionDeltaInfo — every string
 // field a full-width IPv6 literal, every numeric at its type maximum — so a
 // field added to the wire schema moves this measurement instead of leaving a
-// stale number in a comment. That is the same construction #9344's issue body
-// used to get 1424 bytes.
+// stale number in a comment. The measured value is also the lower bound for
+// ownerRGExportEstimatedDeltaBytes, which sizes retained pages.
 func TestOwnerRGExportPageFitsTheResponseCap9344(t *testing.T) {
 	worst := worstCaseDeltaBytes9344(t)
 	if worst < 200 {
 		t.Fatalf("VOID: the worst-case delta measured %d bytes, which is too small to "+
 			"be a worst case — the synthesizer is not filling the struct and every "+
 			"comparison below would pass for the wrong reason", worst)
+	}
+	if ownerRGExportEstimatedDeltaBytes < worst {
+		t.Fatalf("estimated delta size %d is below reflected worst-case %d; the "+
+			"accumulator bound would undercount memory", ownerRGExportEstimatedDeltaBytes, worst)
 	}
 	page := ownerRGExportPageDeltas * worst
 	if page >= MaxControlResponseBytes {
