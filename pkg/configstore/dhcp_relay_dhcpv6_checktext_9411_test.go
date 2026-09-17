@@ -5,49 +5,42 @@ import (
 	"testing"
 )
 
-// #9411 on the OPERATOR channel: configstore.CheckText is compileTreeStrict, the
-// gate sequence every commit goes through.
-//
-// The elided spellings are asserted only as REFUSED, not refused-by-#9411: this
-// path runs the typed schema walk before the compiler, and that walk may refuse
-// a packed `dhcp-relay dhcpv6` run on its own first. Either way the operator is
-// told; what must never happen is a clean commit. The load-bearing rows are the
-// DHCPv4 relays, which must still commit.
+// #9553 on the OPERATOR channel: configstore.CheckText must accept the
+// implemented RFC 8415 subset and reject only unsupported/incomplete family
+// statements. The DHCPv4 controls remain load-bearing.
 func TestDHCPRelayDHCPv6RefusedAtCheckText9411(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		txt      string
-		refused  bool
-		need9411 bool
+		accepted bool
 	}{
-		{"braced nested", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }", true, true},
-		{"bare dhcpv6 leaf", "forwarding-options { dhcp-relay { dhcpv6; } }", true, true},
-		{"BESIDE a working v4 relay", "forwarding-options { dhcp-relay { group g1 { interface ge-0/0/0.0; } dhcpv6 { group g6 { interface ge-0/0/1.0; } } } }", true, true},
-		{"relay elided onto dhcpv6", "forwarding-options { dhcp-relay dhcpv6 { group g6 { interface ge-0/0/0.0; } } }", true, false},
-		{"fully elided", "forwarding-options dhcp-relay dhcpv6 group g6 interface ge-0/0/0.0;", true, false},
-		{"relay-elided dhcpv6 BEFORE a v4 relay block", "forwarding-options { dhcp-relay dhcpv6 { group g6 { interface ge-0/0/1.0; } } dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }", true, false},
-		{"injected via apply-groups", "groups { g1 { forwarding-options { dhcp-relay { dhcpv6 { group g6 { interface ge-0/0/0.0; } } } } } } apply-groups g1;", true, false},
-		{"inactive: dhcpv6 is NOT refused", "forwarding-options { dhcp-relay { inactive: dhcpv6 { group g6 { interface ge-0/0/0.0; } } } }", false, false},
-		{"CONTROL braced v4 relay", "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }", false, false},
-		{"v4 GROUP named dhcpv6", "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group dhcpv6 { active-server-group isp; interface ge-0/0/0.0; } } }", false, false},
+		{"braced nested", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }", true},
+		{"bare family Interface-ID", "forwarding-options { dhcp-relay { dhcpv6 { relay-agent-interface-id; server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }", true},
+		{"bare group Interface-ID", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; relay-agent-interface-id; } } } }", true},
+		{"bare family remains refused", "forwarding-options { dhcp-relay { dhcpv6; } }", false},
+		{"unknown direct child remains refused", "forwarding-options { dhcp-relay { dhcpv6 { unsupported-knob foo; server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }", false},
+		{"CONTROL braced v4 relay", "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CheckText(tc.txt, -1)
-			if !tc.refused {
+			cfg, err := CheckText(tc.txt, -1)
+			if tc.accepted {
 				if err != nil {
-					t.Fatalf("#9411 OVER-REJECTION at CheckText: a DHCPv4 relay no longer commits: %v", err)
+					t.Fatalf("#9553: implemented/configured relay was refused: %v", err)
+				}
+				if cfg == nil {
+					t.Fatal("#9553: accepted relay returned nil config")
+				}
+				if strings.Contains(strings.Join(cfg.Warnings, "\n"), "#9411") {
+					t.Fatalf("#9553: accepted relay carried obsolete #9411 warning: %v", cfg.Warnings)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatalf("#9411: CheckText COMMITTED the dhcpv6 relay stanza clean. It compiles to " +
-					"nothing, so the operator gets no relay and no complaint.")
+				t.Fatal("#9553: unsupported DHCPv6 relay committed clean")
 			}
-			if tc.need9411 && !strings.Contains(err.Error(), "#9411") {
-				t.Errorf("#9411: CheckText refused, but not for this reason, so this row says nothing "+
-					"about the #9411 gate: %v", err)
+			if !strings.Contains(err.Error(), "#9553") {
+				t.Fatalf("#9553: unsupported relay refused without the scoped remainder message: %v", err)
 			}
-			t.Logf("refused: %v", err)
 		})
 	}
 }

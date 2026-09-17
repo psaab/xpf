@@ -947,6 +947,10 @@ var gateParentPrereq = map[string]string{
 	// unreachable count goes 7 -> 0 and its compared count 1 -> 8. All seven
 	// are rescued; none is a flag in disguise.
 	"security log stream <*>": "host 10.211.199.1;",
+	// #9553: family-level active-server-group and relay-agent-interface-id
+	// are observable when a complete group is present. The prerequisite
+	// deliberately omits both family leaves under test.
+	"forwarding-options dhcp-relay dhcpv6": "server-group sg6 2001:db8::5; group g6 active-server-group sg6; group g6 interface ge-0/0/0.0;",
 }
 
 // gateLeafPrereq returns the parent prerequisite for this leaf as a brace body

@@ -1431,7 +1431,10 @@ func TestDepth2UnadmittedPopulation8929(t *testing.T) {
 	// drop and does not belong in knownDropping. The baseline row is what makes
 	// the SAME verdict non-vacuous: without it, "both spellings agree" would
 	// also be satisfied by both compiling to nothing.
-	wantPopulation = 25
+	// #9553 added `(dhcp-relay, dhcpv6)`. The dedicated DHCPv6 shape cell
+	// compares the braced and relay-elided spellings: both compile to the
+	// typed v6 relay, so this remains an unadmitted but non-dropping pair.
+	wantPopulation = 26
 
 	parentAdmitted := func(mid string) bool {
 		for stanza := range setSchema.children {
@@ -1496,6 +1499,7 @@ func TestDepth2UnadmittedPopulation8929(t *testing.T) {
 				"outlive its reason (#8938).", p)
 		}
 	}
+	// #9553's dedicated shape test measures the new pair's two spellings.
 	if got := len(pop); got != wantPopulation {
 		verb := "GREW"
 		if got < wantPopulation {

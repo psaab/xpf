@@ -432,4 +432,9 @@ var dupConservationSkipped8436 = []string{
 	"system syslog file",
 	"system syslog host",
 	"system syslog user",
+	// #9553: DHCPv6 `group` is a named container whose required
+	// `active-server-group` and `interface` children cannot be synthesized by
+	// this generic duplicate fixture without also constructing a valid
+	// server-group. The typed compiler and dedicated relay tests cover it.
+	"forwarding-options dhcp-relay dhcpv6 group",
 }
