@@ -188,18 +188,47 @@ func (m *Manager) refreshHAStateFromMapsLocked() error {
 	if len(merged) == 0 {
 		return nil
 	}
+	// Keep the map replay and its intent epoch in the same m.mu -> sessionMu
+	// critical section as UpdateRGActive. A sender that already owns
+	// sessionMu finishes before this replay; a queued sender sees the epoch
+	// change before it can send the old ownership bits.
+	m.sessionMu.Lock()
+	if haWatchdogIntentChanged(m.haGroups, merged) {
+		m.haWatchdogIntentGen.Add(1)
+	}
 	m.haGroups = merged
 	m.publishHAWatchdogSnapshotLocked()
+	m.sessionMu.Unlock()
 	return nil
+}
+func haWatchdogIntentChanged(before, after map[int]HAGroupStatus) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for rgID, prior := range before {
+		current, ok := after[rgID]
+		if !ok || current.Active != prior.Active {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) seedHAGroupInventoryLocked(cfg *config.Config) {
+	// Caller holds m.mu; serialize the inventory transition with the watchdog
+	// sender in canonical m.mu -> sessionMu order.
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		// #1928: a non-cluster config has no redundancy groups. Drop any HA
 		// groups retained from a prior clustered apply so the manager's view
 		// matches reality and the startup path does not re-publish phantom HA
 		// state to the helper (the source of the standalone transit-drop bug).
-		m.haGroups = make(map[int]HAGroupStatus)
+		cleared := make(map[int]HAGroupStatus)
+		if haWatchdogIntentChanged(m.haGroups, cleared) {
+			m.haWatchdogIntentGen.Add(1)
+		}
+		m.haGroups = cleared
 		m.publishHAWatchdogSnapshotLocked()
 		return
 	}
@@ -215,6 +244,9 @@ func (m *Manager) seedHAGroupInventoryLocked(cfg *config.Config) {
 		group := m.haGroups[rg.ID]
 		group.RGID = rg.ID
 		seeded[rg.ID] = group
+	}
+	if haWatchdogIntentChanged(m.haGroups, seeded) {
+		m.haWatchdogIntentGen.Add(1)
 	}
 	m.haGroups = seeded
 	m.publishHAWatchdogSnapshotLocked()
@@ -784,8 +816,13 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Update BPF rg_active UNDER the lock so the periodic poll can't
-	// read the new BPF value and sync to the helper before we do.
+	// Serialize the ownership linearization with the watchdog's final intent
+	// fence. Callers hold m.mu, so this is the canonical m.mu -> sessionMu
+	// order: an in-flight sender completes before this transition publishes,
+	// while a queued sender observes the incremented epoch and drops.
+	m.sessionMu.Lock()
+	// Update BPF rg_active UNDER both locks so the periodic poll can't read the
+	// new BPF value and sync to the helper before we do.
 	// This prevents the race where the poll eats the demotion delta.
 	var updateRGActive func(int, bool) error
 	if m.haRGActiveMapWrite != nil {
@@ -794,6 +831,7 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 		updateRGActive = m.bpfShim.UpdateRGActive
 	}
 	if err := updateRGActive(rgID, active); err != nil {
+		m.sessionMu.Unlock()
 		return err
 	}
 
@@ -802,7 +840,11 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	group.RGID = rgID
 	group.Active = active
 	m.haGroups[rgID] = group
+	if !known || prior.Active != active {
+		m.haWatchdogIntentGen.Add(1)
+	}
 	m.publishHAWatchdogSnapshotLocked()
+	m.sessionMu.Unlock()
 
 	// Only log on real transitions. The reconcile loop retries this
 	// call whenever applied != desired (see #757), so emitting INFO
@@ -902,6 +944,7 @@ type haWatchdogSnapshot struct {
 	sessionFastPath   bool
 	processLive       bool
 	processGen        uint64
+	intentGen         uint64
 	sessionSocketPath string
 }
 
@@ -963,11 +1006,13 @@ func (m *Manager) publishHAWatchdogSnapshotLocked() {
 		processLive &&
 		len(groups) != 0
 	processGen := m.haWatchdogProcessGen.Load()
+	intentGen := m.haWatchdogIntentGen.Load()
 	m.haWatchdogSnapshot.Store(&haWatchdogSnapshot{
 		groups:            groups,
 		sessionFastPath:   sessionFastPath,
 		processLive:       processLive,
 		processGen:        processGen,
+		intentGen:         intentGen,
 		sessionSocketPath: sessionSocketPathFor(m.cfg.ControlSocket),
 	})
 }
@@ -1095,9 +1140,10 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	}
 
 	err := m.requestHAWatchdogSessionAtPathForGeneration(
-		groups, snapshot.sessionSocketPath, snapshot.processGen)
+		groups, snapshot.sessionSocketPath, snapshot.processGen, snapshot.intentGen)
 	if errors.Is(err, errHARefreshNeedsControlSocket) ||
-		errors.Is(err, errHARefreshStaleProcess) {
+		errors.Is(err, errHARefreshStaleProcess) ||
+		errors.Is(err, errHARefreshStaleIntent) {
 		// A healthy helper refused a transition/clear, or the helper generation
 		// was retired while this request queued. The main path will retry it;
 		// both outcomes are throttle-success and never mark helper state as
@@ -1268,6 +1314,7 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	}
 	sessionSocketPath := m.sessionSocketPath()
 	processGen := m.haWatchdogProcessGen.Load()
+	intentGen := m.haWatchdogIntentGen.Load()
 	// Record the baseline BEFORE the send (same no-storm rationale as above).
 	// Marked ONCE here, never re-marked after the send (a stale snapshot
 	// overwriting a fresher UpdateRGActive baseline would fire one redundant
@@ -1278,12 +1325,13 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// m.mu never blocks the 3s watchdog backstop (G1). Transport errors return
 	// to the daemon caller, which Warn-and-continues per RG per tick
 	// (daemon_ha_comms_wiring) and retries next tick/backstop. The final
-	// generation check runs after sessionMu acquisition, so a queued sender
-	// cannot reach a replacement helper.
+	// generation and intent checks run after sessionMu acquisition, so a queued
+	// sender cannot reach a replacement helper or resurrect a demoted owner.
 	err := m.requestHAWatchdogSessionAtPathForGeneration(
-		groups, sessionSocketPath, processGen)
+		groups, sessionSocketPath, processGen, intentGen)
 	if errors.Is(err, errHARefreshNeedsControlSocket) ||
-		errors.Is(err, errHARefreshStaleProcess) {
+		errors.Is(err, errHARefreshStaleProcess) ||
+		errors.Is(err, errHARefreshStaleIntent) {
 		// Healthy helper, transition/CLEAR owned by the main path, or a
 		// retired helper generation. Treat both as throttle-success; neither
 		// should be reported as a watchdog transport failure.

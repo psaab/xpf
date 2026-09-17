@@ -117,6 +117,12 @@ var errHARefreshNeedsControlSocket = errors.New("ha refresh needs control socket
 // locked main path, never a stale request from the previous process.
 var errHARefreshStaleProcess = errors.New("ha refresh process generation changed")
 
+// errHARefreshStaleIntent marks a watchdog refresh queued behind sessionMu
+// whose captured Active/membership intent was superseded before send. It is a
+// successful no-op: the authoritative main path owns the transition, and an
+// old Active=true payload must never resurrect a demoted owner.
+var errHARefreshStaleIntent = errors.New("ha refresh active intent changed")
+
 // sessionSyncDialTimeout and sessionSyncRoundtripDeadline bound a single
 // session-socket round-trip so a hung helper fails one mirror request in a few
 // seconds instead of the OS default (which can be minutes). They match the
@@ -449,15 +455,20 @@ func (m *Manager) requestHAWatchdogSessionAtPath(groups []HAGroupStatus, sockPat
 }
 
 // requestHAWatchdogSessionAtPathForGeneration is the production watchdog
-// wrapper. The process generation is checked only AFTER sessionMu is acquired:
-// a sender that passed its initial immutable-snapshot check can queue behind
-// sessionMu while stopLocked retires the helper and starts a replacement.
-// stopLocked uses the same m.mu -> sessionMu order, so either the old sender
-// completes before retirement or this final check drops it before dial.
+// wrapper. The helper process generation and Go ownership-intent generation
+// are checked only AFTER sessionMu is acquired: a sender that passed its
+// initial immutable-snapshot check can queue behind sessionMu while stopLocked
+// retires the helper or UpdateRGActive publishes a demotion.
+//
+// stopLocked and every intent-changing m.mu path use the same m.mu -> sessionMu
+// order. The final check and request call stay in one sessionMu critical
+// section, so either the old sender completes before a transition publishes or
+// this final fence drops it before dial.
 func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 	groups []HAGroupStatus,
 	sockPath string,
 	processGen uint64,
+	intentGen uint64,
 ) error {
 	if m.haWatchdogSessionLockHook != nil {
 		m.haWatchdogSessionLockHook()
@@ -466,6 +477,12 @@ func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 	defer m.sessionMu.Unlock()
 	if m.haWatchdogProcessGen.Load() != processGen {
 		return errHARefreshStaleProcess
+	}
+	if m.haWatchdogIntentGen.Load() != intentGen {
+		return errHARefreshStaleIntent
+	}
+	if m.haWatchdogSessionFenceHook != nil {
+		m.haWatchdogSessionFenceHook()
 	}
 	return m.requestHAWatchdogSessionLockedAtPath(groups, sockPath)
 }

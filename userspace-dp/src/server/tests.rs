@@ -657,11 +657,10 @@ fn update_ha_state_fast_proxy_9629() {
 
 /// #9629: the fast path serializes on `ha_mutex` — while a test holds the
 /// mutex (via the `ha_mutex_for_test` handle, the same `Arc` both production
-/// writers share), a lease refresh waits; after release it serves. Proves the
-/// µs race (stale refresh overwriting a just-landed transition) is
-/// unrepresentable by construction: production writers are exactly the locked
-/// path plus this fast path, and both hold `ha_mutex` across load→store
-/// (every other `rg_runtime.store` is `#[cfg(test)]`).
+/// writers share), a lease refresh waits; after release it serves. The
+/// attempt/proceed/acquired rendezvous proves the worker reaches the
+/// post-lock signal only after the external guard is released, so deleting
+/// the production lock makes the acquired-signal assertion fail.
 #[test]
 fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     use std::sync::mpsc;
@@ -712,20 +711,24 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     proceed_tx
         .send(())
         .expect("allow worker to attempt the held HA mutex");
-    // While held, the refresh cannot complete (it needs the mutex). The
-    // acquisition witness below also fails if the production lock is removed.
+    // While held, neither the refresh outcome nor the post-lock acquisition
+    // signal can arrive. If the production lock is removed, that signal fires
+    // during this window and this assertion fails independently of scheduling
+    // after the guard is dropped.
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
         "fast path returned while ha_mutex was held — it does not serialize"
     );
-    drop(_guard);
-    let acquired_while_contended = acquired_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("worker never acquired the HA mutex");
     assert!(
-        acquired_while_contended,
-        "refresh acquired ha_mutex without observing the held guard"
+        acquired_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_err(),
+        "fast path acquired ha_mutex while the external guard was held"
     );
+    drop(_guard);
+    acquired_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker never acquired the HA mutex after release");
     let outcome = rx
         .recv_timeout(Duration::from_secs(5))
         .expect("outcome after release");

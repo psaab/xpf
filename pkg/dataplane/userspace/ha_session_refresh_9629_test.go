@@ -55,6 +55,101 @@ func sessionTestManager9629(t *testing.T, groups map[int]HAGroupStatus) *Manager
 	return m
 }
 
+// haRefreshOracle9629 is a small stateful mirror of Rust's lease-only
+// decision table. It deliberately models key-set equality, matching refreshes,
+// valid stored-active mismatch renewal, and expired stored-active preservation,
+// so the Go composition cells validate helper behavior rather than only
+// capturing a request payload.
+type haRefreshOutcome9629 uint8
+
+const (
+	haRefreshNeedsLock9629 haRefreshOutcome9629 = iota
+	haRefreshServed9629
+)
+
+type haRefreshOracle9629 struct {
+	now        uint64
+	groups     map[int]HAGroupStatus
+	leaseUntil map[int]uint64
+}
+
+func newHARefreshOracle9629(groups []HAGroupStatus, now uint64) *haRefreshOracle9629 {
+	oracle := &haRefreshOracle9629{
+		now:        now,
+		groups:     make(map[int]HAGroupStatus, len(groups)),
+		leaseUntil: make(map[int]uint64, len(groups)),
+	}
+	for _, group := range groups {
+		oracle.groups[group.RGID] = group
+		if group.Active {
+			oracle.leaseUntil[group.RGID] = now + 2
+		}
+	}
+	return oracle
+}
+
+func (o *haRefreshOracle9629) apply(groups []HAGroupStatus) haRefreshOutcome9629 {
+	incoming := make(map[int]HAGroupStatus, len(groups))
+	for _, group := range groups {
+		incoming[group.RGID] = group
+	}
+	if len(incoming) != len(o.groups) {
+		return haRefreshNeedsLock9629
+	}
+	for rgID := range o.groups {
+		if _, ok := incoming[rgID]; !ok {
+			return haRefreshNeedsLock9629
+		}
+	}
+
+	nextGroups := make(map[int]HAGroupStatus, len(o.groups))
+	for rgID, group := range o.groups {
+		nextGroups[rgID] = group
+	}
+	nextLeaseUntil := make(map[int]uint64, len(o.leaseUntil))
+	for rgID, leaseUntil := range o.leaseUntil {
+		nextLeaseUntil[rgID] = leaseUntil
+	}
+	refreshed := 0
+	for rgID, stored := range o.groups {
+		next := incoming[rgID]
+		if stored.Active == next.Active {
+			stored.WatchdogTimestamp = next.WatchdogTimestamp
+			if next.Active {
+				leaseBase := next.WatchdogTimestamp
+				if leaseBase < o.now {
+					leaseBase = o.now
+				}
+				nextLeaseUntil[rgID] = leaseBase + 10
+			} else {
+				nextLeaseUntil[rgID] = 0
+			}
+			nextGroups[rgID] = stored
+			refreshed++
+			continue
+		}
+		if stored.Active && nextLeaseUntil[rgID] > o.now {
+			leaseBase := stored.WatchdogTimestamp
+			if leaseBase < o.now {
+				leaseBase = o.now
+			}
+			nextLeaseUntil[rgID] = leaseBase + 10
+			refreshed++
+		}
+	}
+	if refreshed == 0 {
+		return haRefreshNeedsLock9629
+	}
+	o.groups = nextGroups
+	o.leaseUntil = nextLeaseUntil
+	return haRefreshServed9629
+}
+
+func (o *haRefreshOracle9629) forwardingActive(rgID int) bool {
+	stored, ok := o.groups[rgID]
+	return ok && stored.Active && o.leaseUntil[rgID] > o.now
+}
+
 // The session sender never takes m.mu: with m.mu held by the test, a session
 // HA round trip against a fake helper still completes. If the sender took
 // m.mu (revert), this deadlocks and the 5s bound fails instead of hanging.
@@ -208,6 +303,196 @@ func TestHARefreshQueuedOnSessionMuDropsAfterRestart9629(t *testing.T) {
 	}
 	if sent {
 		t.Fatal("queued old-generation refresh reached the session request hook")
+	}
+}
+
+// A refresh payload can be captured before an ownership transition and then
+// queue behind sessionMu. The final fence must reject that stale Active=true
+// payload after UpdateRGActive(false) publishes its intent, or Rust would
+// match the stored active entry and renew an expired owner.
+func TestHARefreshQueuedBeforeDemotionDropsStaleIntent9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 1},
+	})
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.xskLivenessProven = true
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	oracle := newHARefreshOracle9629([]HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+	}, 10)
+	oracle.leaseUntil[1] = 9
+	queued := make(chan struct{})
+	senderRelease := make(chan struct{})
+	m.haWatchdogSessionLockHook = func() {
+		close(queued)
+		<-senderRelease
+	}
+	sent := false
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = true
+			if oracle.apply(req.HAState.Groups) != haRefreshServed9629 {
+				return errors.New("HA refresh oracle rejected queued demotion payload")
+			}
+		}
+		return nil
+	}
+	mainEntered := make(chan struct{})
+	mainRelease := make(chan struct{})
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			close(mainEntered)
+			<-mainRelease
+			*status = *readyHelperStatus()
+		}
+		return nil
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- m.UpdateHAWatchdog(1, 100) }()
+	select {
+	case <-queued:
+	case <-time.After(5 * time.Second):
+		close(senderRelease)
+		<-refreshDone
+		t.Fatal("watchdog refresh never queued before its sessionMu acquisition")
+	}
+
+	demoteDone := make(chan error, 1)
+	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
+	select {
+	case <-mainEntered:
+	case <-time.After(5 * time.Second):
+		close(senderRelease)
+		close(mainRelease)
+		<-refreshDone
+		<-demoteDone
+		t.Fatal("authoritative demotion never reached its blocked main request")
+	}
+	close(senderRelease)
+
+	refreshErr := <-refreshDone
+	sentBeforeRelease := sent
+	oracleForwardingActive := oracle.forwardingActive(1)
+	oracleLeaseUntil := oracle.leaseUntil[1]
+	close(mainRelease)
+	demoteErr := <-demoteDone
+	if refreshErr != nil {
+		t.Fatalf("queued pre-demotion refresh: %v", refreshErr)
+	}
+	if sentBeforeRelease {
+		t.Fatal("queued pre-demotion refresh reached the session request hook")
+	}
+	if oracleForwardingActive || oracleLeaseUntil != 9 {
+		t.Fatalf("oracle queued-demotion state = active=%v lease_until=%d, want expired unchanged lease",
+			oracleForwardingActive, oracleLeaseUntil)
+	}
+	if demoteErr != nil {
+		t.Fatalf("authoritative demotion: %v", demoteErr)
+	}
+}
+
+// The final epoch check and the request hook are one sessionMu critical
+// section. Park the sender after the check, then start a demotion: the
+// demotion's m.mu -> sessionMu linearization must wait until the old send
+// completes, rather than changing intent in the check-to-send window.
+func TestHARefreshDemotionWaitsForPostFenceSend9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 1},
+	})
+	demoteMapWrite := make(chan struct{})
+	m.haRGActiveMapWrite = func(int, bool) error {
+		close(demoteMapWrite)
+		return nil
+	}
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.xskLivenessProven = true
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			*status = *readyHelperStatus()
+		}
+		return nil
+	}
+	fencePassed := make(chan struct{})
+	fenceRelease := make(chan struct{})
+	m.haWatchdogSessionFenceHook = func() {
+		close(fencePassed)
+		<-fenceRelease
+	}
+	sessionSent := make(chan struct{})
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			close(sessionSent)
+		}
+		return nil
+	}
+	oldIntent := m.haWatchdogIntentGen.Load()
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- m.UpdateHAWatchdog(1, 100) }()
+	select {
+	case <-fencePassed:
+	case <-time.After(5 * time.Second):
+		close(fenceRelease)
+		select {
+		case <-refreshDone:
+		case <-time.After(5 * time.Second):
+		}
+		t.Fatal("watchdog sender never reached the post-fence rendezvous")
+	}
+
+	demoteDone := make(chan error, 1)
+	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
+	demoteBeforeRelease := false
+	select {
+	case <-demoteMapWrite:
+		demoteBeforeRelease = true
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(fenceRelease)
+
+	if err := <-refreshDone; err != nil {
+		<-demoteDone
+		t.Fatalf("post-fence watchdog refresh: %v", err)
+	}
+	select {
+	case <-sessionSent:
+	case <-time.After(5 * time.Second):
+		<-demoteDone
+		t.Fatal("post-fence watchdog sender never reached the session request hook")
+	}
+	if err := <-demoteDone; err != nil {
+		t.Fatalf("authoritative demotion: %v", err)
+	}
+	if demoteBeforeRelease {
+		t.Fatal("demotion changed ownership before the post-fence sender completed")
+	}
+	if m.haWatchdogIntentGen.Load() <= oldIntent {
+		t.Fatalf("demotion intent epoch = %d, want greater than %d",
+			m.haWatchdogIntentGen.Load(), oldIntent)
 	}
 }
 
@@ -680,9 +965,19 @@ func TestSessionHAContendedDemotionIntentDoesNotRenewExpiredOwner9629(t *testing
 		return nil
 	}
 	var sent []HAGroupStatus
+	oracle := newHARefreshOracle9629(m.haWatchdogHelperInventory, 10)
+	oracle.leaseUntil[1] = 9
 	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
 		if req.HAState != nil {
 			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+			switch oracle.apply(req.HAState.Groups) {
+			case haRefreshServed9629:
+				return nil
+			case haRefreshNeedsLock9629:
+				return errHARefreshNeedsControlSocket
+			default:
+				return errors.New("HA refresh oracle returned unknown outcome")
+			}
 		}
 		return nil
 	}
@@ -705,6 +1000,10 @@ func TestSessionHAContendedDemotionIntentDoesNotRenewExpiredOwner9629(t *testing
 		sent[0].WatchdogTimestamp != 100 {
 		t.Fatalf("contended demotion payload = %+v, want RG1 inactive at timestamp 100", sent)
 	}
+	if oracle.forwardingActive(1) || oracle.leaseUntil[1] != 9 {
+		t.Fatalf("oracle demotion state = active=%v lease_until=%d, want expired unchanged lease",
+			oracle.forwardingActive(1), oracle.leaseUntil[1])
+	}
 	close(mainRelease)
 	if err := <-demoteDone; err != nil {
 		t.Fatalf("authoritative demotion: %v", err)
@@ -718,7 +1017,7 @@ func TestSessionHALockedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9629
 	helperGroups := make([]HAGroupStatus, 0, 16)
 	initial := make(map[int]HAGroupStatus, 16)
 	for rgID := range 16 {
-		group := HAGroupStatus{RGID: rgID, Active: rgID == 1}
+		group := HAGroupStatus{RGID: rgID, Active: rgID == 1 || rgID == 2}
 		initial[rgID] = group
 		helperGroups = append(helperGroups, group)
 	}
@@ -737,8 +1036,14 @@ func TestSessionHALockedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9629
 		},
 	})
 	var sent []HAGroupStatus
+	oracle := newHARefreshOracle9629(helperGroups, 10)
+	oracle.leaseUntil[2] = 9
+	rg1LeaseBefore := oracle.leaseUntil[1]
 	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
 		if req.HAState != nil {
+			if oracle.apply(req.HAState.Groups) != haRefreshServed9629 {
+				return errors.New("HA refresh oracle rejected locked reseed payload")
+			}
 			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
 		}
 		return nil
@@ -751,7 +1056,14 @@ func TestSessionHALockedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9629
 	if len(sent) != 16 || !sent[1].Active || sent[1].WatchdogTimestamp != 100 {
 		t.Fatalf("locked reseeded payload = %+v, want 16 entries with active RG1 timestamp 100", sent)
 	}
-
+	if !oracle.forwardingActive(1) || oracle.leaseUntil[1] <= rg1LeaseBefore {
+		t.Fatalf("oracle RG1 state = active=%v lease_until=%d, want advanced active lease",
+			oracle.forwardingActive(1), oracle.leaseUntil[1])
+	}
+	if oracle.forwardingActive(2) || oracle.leaseUntil[2] != 9 {
+		t.Fatalf("oracle removed RG2 state = active=%v lease_until=%d, want expired unchanged lease",
+			oracle.forwardingActive(2), oracle.leaseUntil[2])
+	}
 }
 
 // A config apply reseeds m.haGroups to the configured RGs before replaying the
@@ -786,8 +1098,14 @@ func TestSessionHAContendedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9
 	m.publishHAWatchdogSnapshotLocked()
 
 	var sent []HAGroupStatus
+	oracle := newHARefreshOracle9629(helperGroups, 10)
+	oracle.leaseUntil[2] = 9
+	rg1LeaseBefore := oracle.leaseUntil[1]
 	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
 		if req.HAState != nil {
+			if oracle.apply(req.HAState.Groups) != haRefreshServed9629 {
+				return errors.New("HA refresh oracle rejected contended reseed payload")
+			}
 			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
 		}
 		return nil
@@ -811,6 +1129,14 @@ func TestSessionHAContendedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9
 	}
 	if sent[1].WatchdogTimestamp != 100 {
 		t.Fatalf("RG1 watchdog timestamp = %d, want 100", sent[1].WatchdogTimestamp)
+	}
+	if !oracle.forwardingActive(1) || oracle.leaseUntil[1] <= rg1LeaseBefore {
+		t.Fatalf("oracle RG1 state = active=%v lease_until=%d, want advanced active lease",
+			oracle.forwardingActive(1), oracle.leaseUntil[1])
+	}
+	if oracle.forwardingActive(2) || oracle.leaseUntil[2] != 9 {
+		t.Fatalf("oracle removed RG2 state = active=%v lease_until=%d, want expired unchanged lease",
+			oracle.forwardingActive(2), oracle.leaseUntil[2])
 	}
 }
 

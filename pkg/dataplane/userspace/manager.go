@@ -289,6 +289,11 @@ type Manager struct {
 	// processLive=false snapshot, even though the restart timer still uses the
 	// dead helper's procGen. Every stop/crash/start also fences sessionMu.
 	haWatchdogProcessGen atomic.Uint64
+	// haWatchdogIntentGen advances whenever Go's desired HA ownership or
+	// membership changes. Session payloads capture this alongside the helper
+	// process epoch so a request queued on sessionMu cannot send stale Active
+	// bits after a demotion or config removal publishes a newer intent.
+	haWatchdogIntentGen atomic.Uint64
 
 	// haDegradedMu is a leaf held only across the degraded merge/throttle
 	// decision, never across socket I/O, so snapshot application cannot wedge
@@ -505,6 +510,10 @@ type Manager struct {
 	// the generation-fenced watchdog sender takes sessionMu. Production leaves
 	// it nil; it makes the queued-on-sessionMu restart fence deterministic.
 	haWatchdogSessionLockHook func()
+	// haWatchdogSessionFenceHook is a test-only rendezvous after the final
+	// process/intent checks and before the session request hook. It makes the
+	// check-to-send window observable for lock-order regression coverage.
+	haWatchdogSessionFenceHook func()
 
 	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
 	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate

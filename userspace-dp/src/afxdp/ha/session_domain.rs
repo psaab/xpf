@@ -106,12 +106,12 @@ pub(crate) struct SessionDomain {
     /// caller has established that the mutex is held.
     #[cfg(test)]
     pub(in crate::afxdp) ha_refresh_proceed: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
-    /// #9629 test-only witness sent immediately after acquiring ha_mutex.
-    /// The bool is true only when a same-mutex try_lock observes contention,
-    /// so removing the production lock cannot satisfy the race closer.
+    /// #9629 test-only signal sent immediately after acquiring ha_mutex.
+    /// The sender is reached only inside the production critical section, so
+    /// a lock-removal revert signals before the external test guard drops.
     #[cfg(test)]
     pub(in crate::afxdp) ha_refresh_acquired:
-        Arc<Mutex<Option<std::sync::mpsc::Sender<bool>>>>,
+        Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
 impl SessionDomain {
     /// #9629 test-only rendezvous: notify immediately before the fast path
@@ -147,7 +147,7 @@ impl SessionDomain {
     #[cfg(test)]
     pub(crate) fn set_ha_refresh_acquired_sender_for_test(
         &self,
-        sender: std::sync::mpsc::Sender<bool>,
+        sender: std::sync::mpsc::Sender<()>,
     ) {
         *self
             .ha_refresh_acquired
@@ -326,7 +326,6 @@ impl SessionDomain {
         let _held = lock_ha_recover(&self.ha_mutex);
         #[cfg(test)]
         {
-            let contended = self.ha_mutex.try_lock().is_err();
             if let Some(sender) = self
                 .ha_refresh_acquired
                 .lock()
@@ -334,7 +333,7 @@ impl SessionDomain {
                 .take()
             {
                 sender
-                    .send(contended)
+                    .send(())
                     .expect("signal HA refresh mutex acquisition");
             }
         }
