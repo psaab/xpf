@@ -333,8 +333,8 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.armColdPrimeLocked()
 	// Stamp AFTER the advance, exactly as installConn does, so the priming
 	// connection belongs to the incarnation it established rather than to the
-	// one just retired. (Its clock state was already cleared at the top of
-	// this function, before eviction — see above.)
+	// one just retired. Its clock state was handled at the top of this function
+	// according to its provenance (preserved only for the new boot).
 	switch keepIdx {
 	case 0:
 		s.conn0Gen = s.peerIncarnation

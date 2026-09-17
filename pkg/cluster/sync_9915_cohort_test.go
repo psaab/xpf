@@ -928,6 +928,10 @@ func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 	checked := make(chan struct{})
 	continuePublish := make(chan struct{})
 	ss.testClockPublishBeforeStore = func() {
+		if ss.mu.TryLock() {
+			ss.mu.Unlock()
+			t.Errorf("ClockSync publication gate ran without s.mu held")
+		}
 		close(checked)
 		<-continuePublish
 	}
@@ -942,10 +946,13 @@ func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 		t.Fatal("ClockSync did not reach the membership-checked publication gate")
 	}
 	disconnected := make(chan struct{})
+	disconnectStarted := make(chan struct{})
 	go func() {
+		close(disconnectStarted)
 		ss.handleDisconnect(ac)
 		close(disconnected)
 	}()
+	<-disconnectStarted
 	close(continuePublish)
 	select {
 	case <-published:

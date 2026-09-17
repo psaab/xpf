@@ -28,6 +28,7 @@ func TestGCDeadlineNeverWrapsToExpired_9915(t *testing.T) {
 		},
 	}
 	gc := NewGC(dp, 10*time.Second)
+	gc.testNow = func() uint64 { return 5000 }
 	gc.sweep()
 	if len(dp.deleted) != 0 {
 		t.Fatalf("v4 wrapped deadline expired a live session: deleted=%v (F-118)", dp.deleted)
@@ -77,6 +78,7 @@ func TestGCDeadlinesSaturatedCountedOnce_9915(t *testing.T) {
 		},
 	}
 	gc := NewGC(dp, 10*time.Second)
+	gc.testNow = func() uint64 { return 5000 }
 	gc.SetSessionLimitEnabled(true)
 	if gc.sessionCount == nil {
 		t.Fatal("FIXTURE: session-count publisher not retained; count path would not run")
@@ -111,6 +113,7 @@ func TestGCDeadlineExactMaxUint64SurvivesSweep_9915(t *testing.T) {
 		},
 	}
 	gc := NewGC(dp, 10*time.Second)
+	gc.testNow = func() uint64 { return 5000 }
 	gc.SetSessionLimitEnabled(true)
 	if gc.sessionCount == nil {
 		t.Fatal("FIXTURE: session-count publisher not retained; count path would not run")

@@ -179,6 +179,13 @@ func TestEventStreamMalformedTelemetryGapForcesResync_9915(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	deadline = time.Now().Add(2 * time.Second)
+	for es.lastAppliedSeq.Load() != 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("frame 4 was not processed/applied: lastAppliedSeq=%d", es.lastAppliedSeq.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := es.SeqGaps.Load(); got != 1 {
 		t.Fatalf("SeqGaps = %d, want 1", got)
 	}
