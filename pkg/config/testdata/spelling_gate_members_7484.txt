@@ -116,6 +116,7 @@ COMPARED	class-of-service traffic-control-profiles <*> scheduler-map
 COMPARED	class-of-service traffic-control-profiles <*> shaping-rate
 COMPARED	event-options policy <*> attributes-match
 COMPARED	event-options policy <*> events
+COMPARED	event-options policy <*> plant-class
 COMPARED	event-options policy <*> then change-configuration commands
 unreachable (leaf changed nothing)	event-options policy <*> within <*> trigger
 flag (read, but value-less)	firewall family any filter <*> interface-specific

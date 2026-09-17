@@ -58,7 +58,7 @@ func TestWindow_NoWithinClauseBounded_2216A(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	var tick int64
 	e.nowFn = func() time.Time { return base.Add(time.Duration(tick) * time.Second) }
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	const events = 1000
 	for tick = 0; tick < events; tick++ {
@@ -105,7 +105,7 @@ func TestWindow_BelowTriggerThresholdBounded_2216A(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	var tick int64
 	e.nowFn = func() time.Time { return base.Add(time.Duration(tick) * time.Second) }
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	const events = 1000
 	triggered := 0
@@ -158,7 +158,7 @@ func TestConcurrent_OneEventMatchesManyPolicies_2216B(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply(policies)
+	applyPolicies9984(e, policies)
 
 	// One event matches all three policies.
 	e.HandleEvent(rpm.Event{Name: "link_down", TestOwner: "o", TestName: "t"})

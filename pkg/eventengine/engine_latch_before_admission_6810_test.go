@@ -82,7 +82,7 @@ func TestQueueFullDropDoesNotConsumeTheCrossing6810(t *testing.T) {
 	e, at := newInertEngine6810(t)
 	const event = "ping_probe_failed"
 	pol := edgePolicy6810("remediate", event, 2)
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	saturateWithOtherPolicies6810(t, e)
 
@@ -133,7 +133,7 @@ func TestQueueFullDropDoesNotConsumeTheCrossing6810(t *testing.T) {
 func TestSustainedLevelStillFiresOnlyOnceWhenAdmitted6810(t *testing.T) {
 	e, at := newInertEngine6810(t)
 	const event = "ping_probe_failed"
-	e.Apply([]*config.EventPolicy{edgePolicy6810("remediate", event, 2)})
+	applyPolicies9984(e, []*config.EventPolicy{edgePolicy6810("remediate", event, 2)})
 
 	// Empty queue: every action is admitted.
 	for tick := int64(0); tick < 10; tick++ {
@@ -175,7 +175,7 @@ func TestSustainedLevelStillFiresOnlyOnceWhenAdmitted6810(t *testing.T) {
 func TestLatchRollbackIsRevisionGuarded6810(t *testing.T) {
 	e, at := newInertEngine6810(t)
 	const event = "ping_probe_failed"
-	e.Apply([]*config.EventPolicy{edgePolicy6810("remediate", event, 2)})
+	applyPolicies9984(e, []*config.EventPolicy{edgePolicy6810("remediate", event, 2)})
 
 	// Cross the threshold on an empty queue: admitted, latch legitimately armed.
 	at(0)
@@ -220,7 +220,7 @@ func TestClassifyRejectAndEmptyPlanKeepTheLatch6810(t *testing.T) {
 		const event = "ping_probe_failed"
 		bad := edgePolicy6810("broken", event, 2)
 		bad.ThenCommands = []string{"reboot the router"} // not set/delete → rejected
-		e.Apply([]*config.EventPolicy{bad})
+		applyPolicies9984(e, []*config.EventPolicy{bad})
 
 		at(0)
 		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
@@ -245,7 +245,7 @@ func TestClassifyRejectAndEmptyPlanKeepTheLatch6810(t *testing.T) {
 		const event = "ping_probe_failed"
 		empty := edgePolicy6810("noop", event, 2)
 		empty.ThenCommands = nil // classifies fine, yields zero ops
-		e.Apply([]*config.EventPolicy{empty})
+		applyPolicies9984(e, []*config.EventPolicy{empty})
 
 		at(0)
 		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})

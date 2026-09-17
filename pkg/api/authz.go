@@ -16,6 +16,12 @@ import (
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 )
+type authorizedMutationPrincipalKey struct{}
+
+func authorizedMutationPrincipal(r *http.Request) (authz.Principal, bool) {
+	p, ok := r.Context().Value(authorizedMutationPrincipalKey{}).(authz.Principal)
+	return p, ok
+}
 
 // authz.go enforces per-principal authorization on the REST mutation surface
 // (#5561).
@@ -1105,12 +1111,7 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 			deny(p, err)
 			return
 		}
-		// #9952: the operational command regexes, on the mutating side. The
-		// config-mode routes are DECLARED as having no operational command —
-		// they are governed by the `*-configuration` pair just above — so this
-		// charges the clear, diagnostic and system-action endpoints, which is
-		// exactly the matrix the issue names (POST /api/v1/system/action
-		// reaches reboot and halt).
+		// #9952: the operational command regexes, on the mutating side.
 		if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
 			deny(p, err)
 			return
@@ -1118,6 +1119,7 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 		slog.Debug("api: authorized mutating request",
 			"method", r.Method, "path", r.URL.Path,
 			"principal", p.String(), "required", authz.PermissionName(required))
+		r = r.WithContext(context.WithValue(r.Context(), authorizedMutationPrincipalKey{}, p))
 		next.ServeHTTP(w, r)
 	})
 }

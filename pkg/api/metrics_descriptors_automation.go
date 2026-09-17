@@ -76,6 +76,14 @@ func (c *xpfCollector) initAutomationDescriptors() {
 			"lenient load with a bad line — fix it on the next commit.",
 		nil, nil,
 	)
+	c.eventPlantClassInvalid = prometheus.NewDesc(
+		"xpf_event_plant_class_invalid_total",
+		"Total event-options remediation payloads refused because their "+
+			"recorded planting class was missing, unknown, or denied at "+
+			"fire time; nonzero means legacy or stale automation was "+
+			"quarantined (#9984).",
+		nil, nil,
+	)
 	c.eventActionQueueDepth = prometheus.NewDesc(
 		"xpf_event_action_queue_depth",
 		"Current number of event-options remediation actions queued "+

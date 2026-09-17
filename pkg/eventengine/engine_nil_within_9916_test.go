@@ -30,7 +30,7 @@ func TestNilWithinClauseFailsClosed9916(t *testing.T) {
 			defer e.Close()
 			// Apply before evaluate: without it the event index is empty and the
 			// cell passes vacuously (never evaluates).
-			e.Apply([]*config.EventPolicy{pol})
+			applyPolicies9984(e, []*config.EventPolicy{pol})
 
 			defer func() {
 				if r := recover(); r != nil {

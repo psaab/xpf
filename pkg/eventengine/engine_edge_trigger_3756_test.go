@@ -29,7 +29,7 @@ func feedEventsAtTicks(t *testing.T, pol *config.EventPolicy, ticks []int64) int
 	base := time.Unix(1_700_000_000, 0)
 	var cur int64
 	e.nowFn = func() time.Time { return base.Add(time.Duration(cur) * time.Second) }
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	triggered := 0
 	for _, cur = range ticks {
@@ -102,7 +102,7 @@ func TestEdgeTriggerOn_CooldownDoesNotConsumeCrossing_3756(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	var cur int64
 	e.nowFn = func() time.Time { return base.Add(time.Duration(cur) * time.Second) }
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// Pre-arm the cooldown anchor to base (as if a commit had just occurred),
 	// so the crossing at tick 1 lands inside the 30s cooldown and is suppressed.

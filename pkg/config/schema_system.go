@@ -1350,6 +1350,7 @@ var schemaEventOptions = &schemaNode{desc: "Event policies for automated configu
 			"trigger": {desc: "Trigger condition: on|until <count> (exactly one; count 1..1000000)", children: nil},
 		}},
 		"attributes-match": {desc: "Match event attributes (<event>.<attribute> matches <value>)", children: nil},
+		"plant-class":      {desc: "Login class that planted change-configuration commands", args: 1, placeholder: "<class>", children: nil},
 		"then": {desc: "Actions when the policy triggers", children: map[string]*schemaNode{
 			"change-configuration": {desc: "Apply configuration changes", children: map[string]*schemaNode{
 				"commands": {desc: "Configuration commands to apply (set/delete)", children: nil},

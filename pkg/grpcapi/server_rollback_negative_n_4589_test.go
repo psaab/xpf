@@ -1,7 +1,6 @@
 package grpcapi
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +27,7 @@ func TestRollbackRejectsNegativeN(t *testing.T) {
 	}
 	s := &Server{store: store}
 	for _, n := range []int32{-1, -5} {
-		_, err := s.Rollback(context.Background(), &pb.RollbackRequest{N: n})
+		_, err := s.Rollback(ctxWithPeerUID(0), &pb.RollbackRequest{N: n})
 		if err == nil {
 			t.Fatalf("n=%d: expected error, got nil", n)
 		}
@@ -52,7 +51,7 @@ func TestRollbackAcceptsZeroN(t *testing.T) {
 		t.Fatalf("EnterConfigure() error = %v", err)
 	}
 	s := &Server{store: store}
-	if _, err := s.Rollback(context.Background(), &pb.RollbackRequest{N: 0}); err != nil {
+	if _, err := s.Rollback(ctxWithPeerUID(0), &pb.RollbackRequest{N: 0}); err != nil {
 		t.Fatalf("n=0 (revert to active) rejected by the negative-n guard: %v", err)
 	}
 }

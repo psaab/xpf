@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
@@ -17,6 +18,7 @@ const testRESTConfigSessionID = "rest-00000000000000000000000000000001"
 
 func withRESTConfigSession(req *http.Request, sessionID string) *http.Request {
 	req.Header.Set(restConfigSessionHeader, sessionID)
+	*req = *req.WithContext(context.WithValue(req.Context(), authorizedMutationPrincipalKey{}, authz.Principal{Superuser: true}))
 	return req
 }
 

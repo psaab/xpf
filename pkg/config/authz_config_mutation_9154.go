@@ -238,11 +238,13 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
 			class, parts[0], configAuditRoot(path), decision.Reason)
 	}
-	// #9939: a `then change-configuration commands` PAYLOAD is data on the path
-	// above, and the daemon later applies it with INTERNAL (root) authority and
-	// no authorization at all. So the line that PLANTS it is the only place a
-	// class is in scope, and the payload is adjudicated here, against the
-	// planter's own regexes, as if they had typed it.
+	// #9939/#9984: a `then change-configuration commands` PAYLOAD is data on
+	// the path above. The planting class is stamped into the effective policy
+	// record, and the event engine later rechecks every embedded target under
+	// that class before touching a candidate; missing or denied metadata
+	// quarantines the payload rather than executing it with root authority.
+	// The line that PLANTS it is therefore still the first adjudication point,
+	// while fire-time revalidation closes the persistence and policy-churn gap.
 	return authorizeEmbeddedChangeConfig9939(cfg, class, parts, quoted, depth)
 }
 

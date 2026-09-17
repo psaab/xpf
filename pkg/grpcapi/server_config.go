@@ -103,30 +103,30 @@ func (s *Server) GetConfigModeStatus(_ context.Context, _ *pb.GetConfigModeStatu
 	}, nil
 }
 
+func (s *Server) mutationPlantClass(ctx context.Context) (string, error) {
+	p := principalFromContext(ctx, s.activeConfig())
+	if p.Superuser {
+		return config.EventPlantClassSuperuser, nil
+	}
+	if p.Class == "" {
+		return "", status.Error(codes.PermissionDenied, "authenticated principal has no login class")
+	}
+	return p.Class, nil
+}
+
 func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, error) {
-	// #5059: enforce config-lock ownership. connSessionID identifies this
-	// connection (the #5849 connection-scoped id); the store rejects a mutation
-	// whose caller is not the lock holder. An empty session (unit tests /
-	// internal) bypasses.
 	sessionID := connSessionID(ctx)
+	plantClass, err := s.mutationPlantClass(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
 	input := req.Input
 	if strings.HasPrefix(input, "copy ") || strings.HasPrefix(input, "rename ") {
-		return s.handleCopyRename(sessionID, input)
+		return s.handleCopyRename(sessionID, plantClass, input)
 	}
 	if strings.HasPrefix(input, "insert ") {
-		return s.handleInsert(sessionID, input)
+		return s.handleInsert(sessionID, plantClass, input)
 	}
-	// #2051: the remote CLI rides the Set RPC for activate/deactivate (no
-	// dedicated RPC). Prefix-route the verb to the store wrapper BEFORE the
-	// SetFromInput fall-through — otherwise the generic fall-through builds
-	// the junk path "set deactivate <path>" (a config node named after the
-	// verb) and the node is never marked inactive. The store wrappers strip
-	// the verb and route through applyEditLine (the centralized verb switch).
-	// Match the verb as the first whitespace-delimited token (not just an
-	// exact "deactivate "/"activate " prefix) so a tab separator or extra
-	// spaces still route, and a bare verb with no path returns an error
-	// instead of falling through to SetFromInput and creating a junk
-	// "deactivate"/"activate" node.
 	if fields := strings.Fields(input); len(fields) > 0 &&
 		(fields[0] == "deactivate" || fields[0] == "activate") {
 		verb := fields[0]
@@ -137,22 +137,22 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 		}
 		var err error
 		if verb == "deactivate" {
-			err = s.store.DeactivateFromInputAs(sessionID, rest)
+			err = s.store.DeactivateFromInputAsPlantClass(sessionID, plantClass, rest)
 		} else {
-			err = s.store.ActivateFromInputAs(sessionID, rest)
+			err = s.store.ActivateFromInputAsPlantClass(sessionID, plantClass, rest)
 		}
 		if err != nil {
 			return nil, configMutationStatus(err)
 		}
 		return &pb.SetResponse{}, nil
 	}
-	if err := s.store.SetFromInputAs(sessionID, input); err != nil {
+	if err := s.store.SetFromInputAsPlantClass(sessionID, plantClass, input); err != nil {
 		return nil, configMutationStatus(err)
 	}
 	return &pb.SetResponse{}, nil
 }
 
-func (s *Server) handleCopyRename(sessionID, input string) (*pb.SetResponse, error) {
+func (s *Server) handleCopyRename(sessionID, plantClass, input string) (*pb.SetResponse, error) {
 	parts := strings.Fields(input)
 	isRename := parts[0] == "rename"
 	toIdx := -1
@@ -169,9 +169,9 @@ func (s *Server) handleCopyRename(sessionID, input string) (*pb.SetResponse, err
 	dstPath := parts[toIdx+1:]
 	var err error
 	if isRename {
-		err = s.store.RenameAs(sessionID, srcPath, dstPath)
+		err = s.store.RenameAsPlantClass(sessionID, plantClass, srcPath, dstPath)
 	} else {
-		err = s.store.CopyAs(sessionID, srcPath, dstPath)
+		err = s.store.CopyAsPlantClass(sessionID, plantClass, srcPath, dstPath)
 	}
 	if err != nil {
 		return nil, configMutationStatus(err)
@@ -179,7 +179,7 @@ func (s *Server) handleCopyRename(sessionID, input string) (*pb.SetResponse, err
 	return &pb.SetResponse{}, nil
 }
 
-func (s *Server) handleInsert(sessionID, input string) (*pb.SetResponse, error) {
+func (s *Server) handleInsert(sessionID, plantClass, input string) (*pb.SetResponse, error) {
 	parts := strings.Fields(input)
 	kwIdx := -1
 	isBefore := false
@@ -204,37 +204,41 @@ func (s *Server) handleInsert(sessionID, input string) (*pb.SetResponse, error) 
 	}
 	parentPath := elemPath[:len(elemPath)-len(refTokens)]
 	refPath := append(append([]string{}, parentPath...), refTokens...)
-	if err := s.store.InsertAs(sessionID, elemPath, refPath, isBefore); err != nil {
+	if err := s.store.InsertAsPlantClass(sessionID, plantClass, elemPath, refPath, isBefore); err != nil {
 		return nil, configMutationStatus(err)
 	}
 	return &pb.SetResponse{}, nil
 }
 
 func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
-	if err := s.store.DeleteFromInputAs(connSessionID(ctx), req.Input); err != nil {
+	plantClass, err := s.mutationPlantClass(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
+	if err := s.store.DeleteFromInputAsPlantClass(connSessionID(ctx), plantClass, req.Input); err != nil {
 		return nil, configMutationStatus(err)
 	}
 	return &pb.DeleteResponse{}, nil
 }
 
+
 func (s *Server) Load(ctx context.Context, req *pb.LoadRequest) (*pb.LoadResponse, error) {
 	sessionID := connSessionID(ctx)
+	plantClass, err := s.mutationPlantClass(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
 	switch req.Mode {
 	case "override":
-		if err := s.store.LoadOverrideAs(sessionID, req.Content); err != nil {
+		if err := s.store.LoadOverrideAsPlantClass(sessionID, plantClass, req.Content); err != nil {
 			return nil, configMutationStatus(err)
 		}
 	case "merge", "":
-		if err := s.store.LoadMergeAs(sessionID, req.Content); err != nil {
+		if err := s.store.LoadMergeAsPlantClass(sessionID, plantClass, req.Content); err != nil {
 			return nil, configMutationStatus(err)
 		}
 	case "set":
-		// #2052: make `load set` a real service-mode op. LoadSet replays the
-		// flat command lines through applyEditLine, so a body containing
-		// `deactivate <path>` lines (emitted by `show | display set` for
-		// inactive nodes, #2008 H1) round-trips back to an inactive node.
-		// The applied-count is log-only (LoadResponse has no count field).
-		count, err := s.store.LoadSetAs(sessionID, req.Content)
+		count, err := s.store.LoadSetAsPlantClass(sessionID, plantClass, req.Content)
 		if err != nil {
 			return nil, configMutationStatus(err)
 		}
@@ -339,22 +343,19 @@ func (s *Server) ConfirmCommit(ctx context.Context, _ *pb.ConfirmCommitRequest) 
 }
 
 func (s *Server) Rollback(ctx context.Context, req *pb.RollbackRequest) (*pb.RollbackResponse, error) {
-	// #4589 A8-01: n==0 is the valid Junos `rollback 0` (revert to active);
-	// n>=1 selects history slot n. A negative n maps to history.Get(n-1) =
-	// history.Get(<-1>) → the opaque store error "history position -1 out of
-	// range". Reject it up front with a clear message. Unlike ShowRollback
-	// (#4556, n<=0) the mutation RPC keeps n==0 valid, so only n<0 is
-	// rejected. Fail-closed either way — no wrong rollback target.
 	if req.N < 0 {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"invalid n %d: rollback index must be non-negative (0 = revert to active)", req.N)
 	}
-	if err := s.store.RollbackAs(connSessionID(ctx), int(req.N)); err != nil {
+	plantClass, err := s.mutationPlantClass(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
+	if err := s.store.RollbackAsPlantClass(connSessionID(ctx), plantClass, int(req.N)); err != nil {
 		return nil, configMutationStatus(err)
 	}
 	return &pb.RollbackResponse{}, nil
 }
-
 func configWarnings(cfg *config.Config) []string {
 	if cfg == nil || len(cfg.Warnings) == 0 {
 		return nil

@@ -261,6 +261,11 @@ const inventoryNotes = `#
 # not fixture failures and no synthesiser should invent a pair for them; the
 # seventh, ` + "`security nat source interface port-overloading`" + `, declares one
 # example and a validator whose message does not enumerate.
+# #9984: ` + "`event-options policy <name> plant-class`" + ` is a new value-bearing
+# child under a policy. The canonical compact policy spelling still folds the
+# entire path onto the event-options node, which the existing event-options
+# compiler intentionally does not consume; keep this measured divergence in
+# the inventory rather than widening the unrelated compact-policy reader.
 #`
 
 func TestRegenerateCompactBlockInventory2419(t *testing.T) {

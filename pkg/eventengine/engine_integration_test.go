@@ -113,7 +113,7 @@ func TestBatch_PartialFailureRevertsWholeCandidate(t *testing.T) {
 	}
 	e := New(s, nil) // nil commitFn: store.Commit path
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 
@@ -164,7 +164,7 @@ func TestBatch_UnknownCommandMidBatchRevertsWholeCandidate(t *testing.T) {
 	}
 	e := New(s, nil) // nil commitFn: store.Commit path
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 
@@ -224,7 +224,7 @@ func TestCommit_CancelledOnEngineStop(t *testing.T) {
 	}
 
 	e := New(s, commitFn)
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 
@@ -317,7 +317,7 @@ func TestRetry_TimerStoppedOnEngineStop(t *testing.T) {
 	}
 	defer s.ExitConfigure()
 
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 	e.HandleEvent(eventFor("ping_test_failed"))
 
 	select {
@@ -379,7 +379,7 @@ func TestRemediation_CommitCarriesAuditDescription(t *testing.T) {
 
 	e := New(s, commitFn)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(rpm.Event{Name: "ping_test_failed", TestOwner: "Comcast", TestName: "wan"})
 	waitFor(t, "committed counter", func() bool { return e.Stats().Committed >= 1 })
@@ -411,7 +411,7 @@ func TestRemediation_StandaloneCommitDescription(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "committed counter", func() bool { return e.Stats().Committed >= 1 })
@@ -436,7 +436,7 @@ func TestBatch_ValidBatchCommits(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "committed counter", func() bool { return e.Stats().Committed >= 1 })
@@ -460,7 +460,7 @@ func TestBatch_DeleteMissingPathTolerated(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "committed counter", func() bool { return e.Stats().Committed >= 1 })
@@ -485,7 +485,7 @@ func TestCooldown_SurvivesApplyReload(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// First trigger commits and arms the cooldown.
 	e.HandleEvent(eventFor("ping_test_failed"))
@@ -493,7 +493,7 @@ func TestCooldown_SurvivesApplyReload(t *testing.T) {
 
 	// Simulate the self-triggered commit's Apply (and any unrelated commit):
 	// same policy set, so state must be reconciled (carried forward).
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// Second trigger with no time advance: cooldown must suppress it.
 	e.HandleEvent(eventFor("ping_test_failed"))
@@ -518,13 +518,13 @@ func TestCooldown_ReconcileIdentity(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "first commit", func() bool { return e.Stats().Committed >= 1 })
 
 	// Unrelated Apply: add an unrelated policy, leave p unchanged.
 	other := &config.EventPolicy{Name: "other", Events: []string{"x"}, ThenCommands: []string{"set system domain-name d"}}
-	e.Apply([]*config.EventPolicy{pol, other})
+	applyPolicies9984(e, []*config.EventPolicy{pol, other})
 	e.mu.Lock()
 	rt := e.runtime["p"]
 	preserved := rt != nil && !rt.lastTrigger.IsZero()
@@ -535,7 +535,7 @@ func TestCooldown_ReconcileIdentity(t *testing.T) {
 
 	// Semantic change: edit ThenCommands → revision changes → re-arm (reset).
 	changed := &config.EventPolicy{Name: "p", Events: []string{"ping_test_failed"}, ThenCommands: []string{"set system host-name v2"}}
-	e.Apply([]*config.EventPolicy{changed})
+	applyPolicies9984(e, []*config.EventPolicy{changed})
 	e.mu.Lock()
 	rt = e.runtime["p"]
 	reset := rt != nil && rt.lastTrigger.IsZero()
@@ -545,7 +545,7 @@ func TestCooldown_ReconcileIdentity(t *testing.T) {
 	}
 
 	// Removal: policy not in the new set → state dropped.
-	e.Apply([]*config.EventPolicy{other})
+	applyPolicies9984(e, []*config.EventPolicy{other})
 	e.mu.Lock()
 	_, present := e.runtime["p"]
 	e.mu.Unlock()
@@ -567,7 +567,7 @@ func TestQueue_HeldLockRetriesThenCommits(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// Hold the lock as "another user" before triggering.
 	if err := s.EnterConfigureSession("operator"); err != nil {
@@ -609,7 +609,7 @@ func TestQueue_HeldLockPastDeadlineDrops(t *testing.T) {
 	e.retryMax = time.Millisecond
 	e.retryDeadline = 20 * time.Millisecond
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	if err := s.EnterConfigureSession("operator"); err != nil {
 		t.Fatalf("hold lock: %v", err)
@@ -644,7 +644,7 @@ func TestQueue_ConcurrentProbesSerialize(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply(policies)
+	applyPolicies9984(e, policies)
 
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -685,7 +685,7 @@ func TestQueue_DedupByPolicy(t *testing.T) {
 	}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// Hold the lock so the worker is stuck retrying the first action.
 	if err := s.EnterConfigureSession("operator"); err != nil {

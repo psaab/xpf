@@ -194,7 +194,7 @@ func TestApplyOnceNilStoreDoesNotPanic(t *testing.T) {
 	}
 	e := New(nil, nil) // nil store
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// On the pre-fix code the worker goroutine nil-derefs e.store and panics,
 	// crashing the test process. The guard turns it into a counted rejection.
@@ -260,7 +260,7 @@ func TestBatchContainerMissDeleteIsTolerated(t *testing.T) {
 	}
 	e := New(s, nil) // nil commitFn: store.Commit path
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 

@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
-
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -20,11 +20,13 @@ import (
 // clientCtx returns a context carrying a distinct gRPC peer address, so
 // peerSessionID resolves to a distinct per-"client" session identifier.
 func clientCtx(port int) context.Context {
-	return peer.NewContext(context.Background(), &peer.Peer{
+	ctx := peer.NewContext(context.Background(), &peer.Peer{
 		Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port},
 	})
+	return context.WithValue(ctx, connPeerKey{}, &connPeer{
+		id: authz.PeerIdentity{UID: 0, OK: true, Local: true},
+	})
 }
-
 func wantCode(t *testing.T, err error, want codes.Code, what string) {
 	t.Helper()
 	if err == nil {
