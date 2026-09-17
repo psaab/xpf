@@ -164,12 +164,15 @@
 //! zone-local mutation (aggregate counter → per-destination cap → aggregate
 //! verdict → alarm cadence → per-source cap, the #3315/#4112 F19 order) and
 //! returns an owned `SynFloodGate`; this function's PHASE 2 applies the
-//! whole-`ScreenState` side effects (validated-cache consume is PHASE 0;
+//! whole-`ScreenState` side effects (validated-cache peek is PHASE 0; validated
+//! hits still charge aggregate/per-destination while skipping only per-source
+//! and preserving `SynCookieBypass` under #9945;
 //! diagnostic counters, `syn_alarm_pending`, and the cookie mint are PHASE 2)
 //! after the `zones` borrow is released. Drop precedence, reason strings (and
 //! therefore the `screen_reason_drop_index` ordinals), the count-min sketch
-//! semantics, the #3527 half-open `tcp_opening_ns` override consumers, and the
-//! SYN-cookie interaction are all unchanged — pure code motion.
+//! semantics, and the #3527 half-open `tcp_opening_ns` override consumers are
+//! unchanged; #9945 narrows the validated-client exception to per-source plus
+//! the recoverable challenge response.
 
 use rustc_hash::FxHashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -924,24 +927,26 @@ impl ScreenState {
         // per-destination → aggregate verdict → alarm cadence → per-source)
         // and returns an owned `SynFloodGate`; the match below is PHASE 2 and
         // applies the whole-`ScreenState` side effects. A validated returning
-        // SYN-cookie client bypasses the gate entirely.
+        // SYN-cookie client still charges the aggregate and per-destination
+        // gate, skips only the source-scoped limiter (it proved liveness), and
+        // retains its `SynCookieBypass` fast-path verdict (#9945).
         if syn_flood_threshold > 0 && pkt.protocol == PROTO_TCP {
             let tf = pkt.tcp_flags;
             if is_initial_syn(tf) {
-                // PHASE 0 — validated-cache consume. #4969: read the profile
+                // PHASE 0 — validated-cache peek. #4969: read the profile
                 // generation from the held `zstate` (not
                 // `self.syn_cookie_profile_gen(zone)`, which would borrow all
                 // of `self` and conflict with the live `zstate`). The
                 // validated cache is a DISJOINT `self` field, so
-                // `self.syn_cookie_validated.take_valid(..)` coexists with the
-                // `zstate` borrow.
+                // `self.syn_cookie_validated.contains_valid(..)` coexists with
+                // the `zstate` borrow.
                 //
                 // #9419: `contains_valid` (a PEEK on a source-scoped key),
                 // not the old `take_valid` on the full 4-tuple. The
                 // challenge path RSTs the client after a valid cookie ACK,
-                // so the retry that is supposed to consume this entry
-                // arrives from a NEW ephemeral port — a port-scoped,
-                // single-use entry could never match it.
+                // so the retry that is supposed to find this entry arrives
+                // from a NEW ephemeral port — a port-scoped, single-use entry
+                // could never match it.
                 let profile_gen = zstate.syn_cookie_profile_gen;
                 let zone_tag = zstate.syn_cookie_zone_tag;
                 let syn_cookie_validated = syn_cookie
@@ -951,72 +956,78 @@ impl ScreenState {
                         SynCookieClientKey::from_packet(pkt),
                         now_secs,
                     );
-                if syn_cookie_validated {
-                    syn_cookie_bypassed = true;
-                } else {
-                    // PHASE 1: the zone-local gate. `codec_available` snapshots
-                    // the DISJOINT `self.syn_cookie_codec` presence flag so the
-                    // gate can pick `MintChallenge` vs `DropCookieUnavailable`
-                    // without borrowing the codec; nothing mutates the codec
-                    // across the call, so a `MintChallenge` result still sees
-                    // `Some` below. The gate returns an OWNED enum, so NLL
-                    // releases the `zstate` borrow at the call — PHASE 2's
-                    // whole-`self` applications (diagnostic counters,
-                    // `syn_alarm_pending`, the `current_syn_cookie_full_epoch`
-                    // mint path) are then borrow-trivial.
-                    let codec_available = self.syn_cookie_codec.is_some();
-                    match zstate.syn_flood_gate(pkt, now_ns, now_secs, codec_available) {
-                        SynFloodGate::Admit { alarm } => {
-                            if alarm {
-                                self.syn_alarm_pending = true;
-                                self.syn_flood_alarm_events =
-                                    self.syn_flood_alarm_events.wrapping_add(1);
-                            }
+                // PHASE 1: every initial SYN charges the aggregate and
+                // per-destination gate. `validated_client` tells the gate to
+                // skip only the source-scoped limiter and to preserve the
+                // validated client's existing bypass instead of minting a
+                // second challenge. `codec_available` snapshots the DISJOINT
+                // `self.syn_cookie_codec` presence flag; nothing mutates the
+                // codec across the call. The gate returns an OWNED enum, so
+                // NLL releases the `zstate` borrow at the call — PHASE 2's
+                // whole-`self` applications (diagnostic counters,
+                // `syn_alarm_pending`, the `current_syn_cookie_full_epoch`
+                // mint path) are then borrow-trivial.
+                let codec_available = self.syn_cookie_codec.is_some();
+                match zstate.syn_flood_gate(
+                    pkt,
+                    now_ns,
+                    now_secs,
+                    codec_available,
+                    syn_cookie_validated,
+                ) {
+                    SynFloodGate::Admit { alarm } => {
+                        if alarm {
+                            self.syn_alarm_pending = true;
+                            self.syn_flood_alarm_events =
+                                self.syn_flood_alarm_events.wrapping_add(1);
                         }
-                        SynFloodGate::DropDst => {
-                            self.syn_flood_dst_drops =
-                                self.syn_flood_dst_drops.wrapping_add(1);
-                            return ScreenVerdict::Drop("syn-flood");
+                        if syn_cookie_validated {
+                            syn_cookie_bypassed = true;
                         }
-                        SynFloodGate::DropAggregate => {
-                            return ScreenVerdict::Drop("syn-flood");
+                    }
+                    SynFloodGate::DropDst => {
+                        self.syn_flood_dst_drops =
+                            self.syn_flood_dst_drops.wrapping_add(1);
+                        return ScreenVerdict::Drop("syn-flood");
+                    }
+                    SynFloodGate::DropAggregate => {
+                        return ScreenVerdict::Drop("syn-flood");
+                    }
+                    SynFloodGate::DropCookieUnavailable => {
+                        return ScreenVerdict::Drop("syn-cookie-unavailable");
+                    }
+                    SynFloodGate::DropSrc { alarm } => {
+                        if alarm {
+                            self.syn_alarm_pending = true;
+                            self.syn_flood_alarm_events =
+                                self.syn_flood_alarm_events.wrapping_add(1);
                         }
-                        SynFloodGate::DropCookieUnavailable => {
+                        self.syn_flood_src_drops =
+                            self.syn_flood_src_drops.wrapping_add(1);
+                        return ScreenVerdict::Drop("syn-flood");
+                    }
+                    SynFloodGate::MintChallenge => {
+                        let Some(legacy_codec) = self.syn_cookie_codec else {
                             return ScreenVerdict::Drop("syn-cookie-unavailable");
-                        }
-                        SynFloodGate::DropSrc { alarm } => {
-                            if alarm {
-                                self.syn_alarm_pending = true;
-                                self.syn_flood_alarm_events =
-                                    self.syn_flood_alarm_events.wrapping_add(1);
-                            }
-                            self.syn_flood_src_drops =
-                                self.syn_flood_src_drops.wrapping_add(1);
-                            return ScreenVerdict::Drop("syn-flood");
-                        }
-                        SynFloodGate::MintChallenge => {
-                            let Some(legacy_codec) = self.syn_cookie_codec else {
-                                return ScreenVerdict::Drop("syn-cookie-unavailable");
-                            };
-                            let full_epoch = self.current_syn_cookie_full_epoch(now_secs);
-                            // #9173: SynCookieKeyRing::mint_codec_or_legacy.
-                            let Some(codec) = self
-                                .syn_cookie_key_ring
-                                .mint_codec_or_legacy(full_epoch, legacy_codec)
-                            else {
-                                return ScreenVerdict::Drop("syn-cookie-unavailable");
-                            };
-                            let cookie_isn = codec.mint_isn(
-                                SynCookieTuple::from_packet(pkt),
-                                zone_tag,
-                                full_epoch,
-                                pkt.tcp_mss,
-                            );
-                            return ScreenVerdict::SynCookieChallenge(SynCookieChallenge {
-                                cookie_isn,
-                                peer_mss: pkt.tcp_mss,
-                            });
-                        }
+                        };
+                        let full_epoch = self.current_syn_cookie_full_epoch(now_secs);
+                        // #9173: SynCookieKeyRing::mint_codec_or_legacy.
+                        let Some(codec) = self
+                            .syn_cookie_key_ring
+                            .mint_codec_or_legacy(full_epoch, legacy_codec)
+                        else {
+                            return ScreenVerdict::Drop("syn-cookie-unavailable");
+                        };
+                        let cookie_isn = codec.mint_isn(
+                            SynCookieTuple::from_packet(pkt),
+                            zone_tag,
+                            full_epoch,
+                            pkt.tcp_mss,
+                        );
+                        return ScreenVerdict::SynCookieChallenge(SynCookieChallenge {
+                            cookie_isn,
+                            peer_mss: pkt.tcp_mss,
+                        });
                     }
                 }
             }
@@ -1510,6 +1521,16 @@ impl ScreenState {
         if let Some(z) = self.zones.get_mut(zone) {
             z.syn_cookie_active_until_secs = until_secs;
         }
+    }
+    /// #9945: test seam — read the current cookie-active deadline so a
+    /// validated SYN burst can prove it does not extend the zone's existing
+    /// flood window while charging the aggregate/per-destination gate.
+    #[cfg(test)]
+    fn syn_cookie_active_until_for_test(&self, zone: &str) -> u64 {
+        self.zones
+            .get(zone)
+            .map(|z| z.syn_cookie_active_until_secs)
+            .unwrap_or(0)
     }
 
     /// #4969: test seam — true iff a zone's per-DESTINATION / per-SOURCE

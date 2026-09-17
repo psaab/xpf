@@ -23,8 +23,9 @@
 //! verdict. The caller (`check_packet_with_zone_id_opts`) then runs PHASE 2 —
 //! diagnostic-counter bumps, the pending-alarm flag, and the cookie mint —
 //! after the gate call, when NLL has already released the `zones` borrow, so
-//! the whole-`self` applications are borrow-trivial. The validated-cache
-//! consume (a disjoint `ScreenState` field) stays in the caller as PHASE 0.
+//! the whole-`self` applications are borrow-trivial. The validated-cache peek
+//! (a disjoint `ScreenState` field) stays in the caller as PHASE 0; #9945
+//! validated hits still charge the aggregate and per-destination state.
 
 use std::net::IpAddr;
 
@@ -358,10 +359,15 @@ impl ZoneScreenState {
 
     /// #6437 PHASE 1 of the SYN-flood enforcement: every zone-local mutation of
     /// the historical inlined block, in the exact historical order, returning an
-    /// owned [`SynFloodGate`] for the caller's PHASE 2. Must be called ONLY in
-    /// the enforcement regime — an initial SYN (`syn && !ack`) on a TCP packet
-    /// for a zone with `syn_flood_threshold > 0` whose tuple was NOT consumed
-    /// from the validated-client cache (the caller's PHASE 0).
+    /// owned [`SynFloodGate`] for the caller's PHASE 2.
+    ///
+    /// The caller invokes this for every initial SYN while the zone's
+    /// `syn_flood_threshold` is enabled. `validated_client` is true only when
+    /// PHASE 0 found a current SYN-cookie validation for this source/service.
+    /// #9945: even that proven-live client MUST charge the aggregate and
+    /// per-destination cap. It skips only the per-source limiter (the source
+    /// proved liveness) and the aggregate's recoverable challenge response;
+    /// the caller preserves its `SynCookieBypass` fast-path verdict.
     ///
     /// #3315 + #4112 F19 enforcement order (aggregate counts first, per-dst
     /// authoritative over the aggregate cookie/Drop verdict, per-src additive):
@@ -372,15 +378,14 @@ impl ZoneScreenState {
     ///      the aggregate over-attack early-return (#4112 F19), so a per-dst
     ///      trip HARD-DROPS the flooded victim even while the zone is over
     ///      attack-threshold and minting cookies for validated clients. Runs
-    ///      even when cookie-active.
+    ///      even when cookie-active and for validated clients (#9945).
     ///   3. aggregate over-attack verdict — mint a SYN-cookie challenge (or
-    ///      Drop when cookies are disabled); UNCHANGED for the case where the
-    ///      per-dst cap did not trip.
+    ///      Drop when cookies are disabled) for an unvalidated client. A
+    ///      validated client keeps its existing bypass verdict after charging
+    ///      the aggregate (#9945).
     ///   4. per-SOURCE cap (secondary) — SKIPPED while the zone is cookie-
-    ///      active (the cookie governs the spoofed-flood regime; per-source is
-    ///      spoof-defeated there and the sketch would over-throttle).
-    /// A validated returning SYN-cookie client bypasses ALL of the above (the
-    /// caller never reaches this gate for one).
+    ///      active, or for a validated client (the client proved liveness; the
+    ///      source-scoped limiter is the one deliberate #9945 exception).
     ///
     /// `codec_available` is the caller-observed `self.syn_cookie_codec.is_some()`
     /// snapshot, taken immediately before the call — the codec cannot change
@@ -394,6 +399,7 @@ impl ZoneScreenState {
         now_ns: u64,
         now_secs: u64,
         codec_available: bool,
+        validated_client: bool,
     ) -> SynFloodGate {
         // Copy the small SYN scalar thresholds/flags out of the profile up
         // front so the immutable profile read is released before the mutable
@@ -446,7 +452,8 @@ impl ZoneScreenState {
         //     a sustained-at-threshold stream here would let `threshold`
         //     spoofed SYNs/s bypass the cookie AND the per-source cap — the
         //     round-1 BLOCKER — so the count-all latch is deliberately
-        //     retained.
+        //     retained. #9945: a validated client already proved liveness;
+        //     preserve its bypass after charging the aggregate.
         //   - `syn-cookie` OFF (#3607): there is no cookie to bypass, so a
         //     sustained-at-threshold legit SYN stream MUST be admitted. The
         //     per-zone `TokenBucket` is the SOLE drop authority, consulted on
@@ -455,6 +462,14 @@ impl ZoneScreenState {
         //     to capacity = `threshold`, preserving #2937.
         if syn_cookie {
             if over_attack {
+                // #9945: a validated client already solved a cookie challenge.
+                // Keep its fast-path SynCookieBypass verdict; the aggregate
+                // and per-destination charge above still take effect. Return
+                // BEFORE extending the zone's active window: a validated
+                // flood must not keep cookie-active alive indefinitely.
+                if validated_client {
+                    return SynFloodGate::Admit { alarm: false };
+                }
                 // In `alarm-without-drop` (audit) mode do NOT mark the zone
                 // SYN-cookie-active. The challenge minted by the caller is
                 // converted to a log-only alarm + Pass by the verdict consumer
@@ -508,11 +523,13 @@ impl ZoneScreenState {
             alarm_raised = true;
         }
         // (4) per-SOURCE cap — SECONDARY, skipped while the zone is SYN-cookie
-        // active (D3). The cookie-active window is the high-cardinality
-        // spoofed-flood regime where per-source is both spoof-defeated and
-        // prone to sketch over-throttling.
+        // active (D3) OR when the client is already validated (#9945). The
+        // cookie-active window is the high-cardinality spoofed-flood regime
+        // where per-source is both spoof-defeated and prone to sketch
+        // over-throttling; a validated client has separately proved liveness.
         let cookie_active = syn_cookie && self.syn_cookie_active_until_secs > now_secs;
         if syn_src_threshold > 0
+            && !validated_client
             && !cookie_active
             && let Some(sketch) = self.syn_src_sketch.as_mut()
             && sketch.increment(&pkt.src_ip, now_secs, syn_src_threshold)
