@@ -2206,6 +2206,16 @@ never lock an operator out of a remote box it manages.
     link's identity could not be read", so a readback fault disarms like a real
     attach failure — the conservative direction, recorded in
     `daemon_arm_coverage_7191.go`.
+    **#9804 classification.** A known raw-L3 refusal (the #8279 `gr-0-0-0`
+    shape) is reported as `CoverageSkipped` with an `Unshimmable` marker:
+    the Ethernet-only shim cannot safely attach, so this surface is excluded
+    from `Uncovered`/`WouldGate` while its `StillForwarding` state and exact
+    refusal reason remain visible. The marker comes only from a closed match of
+    the verified `EncapType` strings (`none`, `loopback`, `sit`, `ipip`,
+    `tunnel6`, `gre`) emitted by `nl.IfInfomsg.EncapType` in
+    `github.com/vishvananda/netlink/nl/nl_linux.go`; an unknown refusal remains
+    uncovered and disarms. Thus a healthy GRE node is complete without
+    weakening the genuinely-uncovered Ethernet-interface gate.
   - **The gate is only as good as the verdict it reads, and an ABORTED apply
     used to leave it describing a different one (#7289 R1).**
     `ProveArmCoverage` is the sole publisher of the coverage cell and it runs at

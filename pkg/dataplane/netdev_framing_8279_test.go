@@ -158,6 +158,11 @@ func TestCompileZonesRefusesShimOnNonEthernetNetdev8279(t *testing.T) {
 					"must be marked StillForwarding — that is the #5275 state the operator " +
 					"needs to see, and silently trading it away is the defect this guard exists for")
 			}
+			rep := classifyArmCoverage(result, lookupFrom(nil, nil))
+			if rep.Skipped != 1 || rep.Uncovered != 0 || rep.WouldGate {
+				t.Fatalf("a known raw-L3 refusal must be excluded from the gate while remaining "+
+					"reported; got %+v (%s)", rep, rep.SurfaceSummary())
+			}
 		})
 	}
 }

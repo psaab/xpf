@@ -75,7 +75,11 @@ const (
 	CoverageDelegated
 	// CoverageSkipped — the COMPILER declined to arm this surface and still
 	// returned success. Neither proven covered nor proven forwarding-without-
-	// policy; a third, distinct unknown. See UnarmedSurface.
+	// policy; a third, distinct unknown. See UnarmedSurface. A surface whose
+	// link framing is a provably unshimmable raw-L3 kind uses this same reported
+	// branch, but is explicitly excluded from the gate verdict.
+	//
+	// CoverageUncovered remains the only kind a gating build refuses on.
 	CoverageSkipped
 )
 
@@ -100,15 +104,20 @@ type SurfaceCoverage struct {
 	// netdev was missing, or the VLAN child was never created).
 	Name string
 	Kind SurfaceCoverageKind
+	// Unshimmable marks a compiler refusal for a known raw-L3 link kind. Such
+	// a surface remains operator-visible and counted as skipped, but it does
+	// not contribute to Uncovered/WouldGate because the Ethernet-only shim
+	// cannot safely attach there. The flag is set only by the closed
+	// isProvablyUnshimmableEncap match in netdev_framing_8279.go.
+	Unshimmable bool
 	// Via is the covering parent ifindex when Kind is CoverageDelegated. It is
 	// also set on an UNCOVERED VLAN child whose delegate was rejected, so the
 	// record names the parent that failed to cover it.
 	Via int
 	// ProgramID is the attached program INSTANCE (bpf_link readback) for a
 	// direct surface, or the delegate's instance for a delegated one. Zero
-	// means the readback did not yield one — reported, never inferred. It is
-	// REPORTED, not verified: nothing here compares it against the shim
-	// program the Manager holds. See xdpLinkProgramID.
+	// means the readback did not yield one — reported, never inferred. See
+	// xdpLinkProgramID.
 	ProgramID uint32
 	// Generic records that this surface is covered in skb-mode rather than
 	// driver-mode XDP. Informational: it does NOT reduce coverage. Read from
@@ -172,7 +181,11 @@ func (rep ArmCoverageReport) SurfaceSummary() string {
 			parts = append(parts, fmt.Sprintf("%s:delegated/via-%d/%s",
 				s.label(), s.Via, attachModeName(s.Generic)))
 		case CoverageSkipped:
-			parts = append(parts, fmt.Sprintf("%s:skipped", s.label()))
+			if s.Unshimmable {
+				parts = append(parts, fmt.Sprintf("%s:skipped/unshimmable", s.label()))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s:skipped", s.label()))
+			}
 		default:
 			parts = append(parts, fmt.Sprintf("%s:uncovered", s.label()))
 		}
@@ -285,6 +298,13 @@ type UnarmedSurface struct {
 	// regardless. That is the policy-free-router condition #5275 exists to
 	// prevent, so it reads as UNCOVERED rather than merely skipped.
 	StillForwarding bool
+	// Unshimmable marks a surface refused because its resolved link framing is
+	// one of the closed, provably raw-L3 kinds in
+	// isProvablyUnshimmableEncap. It remains visible and counted in the report
+	// as a skipped surface even when StillForwarding is true; it does not
+	// contribute to Uncovered/WouldGate because the Ethernet-only shim cannot
+	// safely attach there. Unknown framing kinds never receive this exemption.
+	Unshimmable bool
 }
 
 // disabledSurfaceRecord classifies an administratively disabled interface.
@@ -730,12 +750,13 @@ func unarmedCoverage(result *CompileResult) []SurfaceCoverage {
 	out := make([]SurfaceCoverage, 0, len(result.unarmedSurfaces))
 	for _, u := range result.unarmedSurfaces {
 		s := SurfaceCoverage{
-			Ifindex: u.Ifindex,
-			Name:    u.Name,
-			Kind:    CoverageSkipped,
-			Detail:  u.Reason,
+			Ifindex:     u.Ifindex,
+			Name:        u.Name,
+			Kind:        CoverageSkipped,
+			Unshimmable: u.Unshimmable,
+			Detail:      u.Reason,
 		}
-		if u.StillForwarding {
+		if u.StillForwarding && !u.Unshimmable {
 			s.Kind = CoverageUncovered
 		}
 		out = append(out, s)
@@ -958,7 +979,8 @@ func (rep ArmCoverageReport) LogArmCoverage(stage string, seq uint64) {
 				"issue", "#5275",
 				"stage", label,
 				"surface", s.label(),
-				"detail", s.Detail)
+				"detail", s.Detail,
+				"unshimmable", s.Unshimmable)
 		}
 	}
 }

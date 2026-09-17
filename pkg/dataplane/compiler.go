@@ -288,9 +288,11 @@ func (r *CompileResult) peekLinkByIndex(idx int) (netlink.Link, error) {
 // the per-phys dedup (st.attached) sits far below the soft skips, so an
 // interface named by two zones reaches the skip twice — and the count is the
 // deliverable of this phase, so a double count is a wrong number rather than a
-// cosmetic wart. A repeat sighting never downgrades the classification: if
-// either one could not prove the netdev down, the surface keeps the
-// conservative reading.
+// cosmetic wart. A repeat sighting never downgrades the forwarding
+// classification: if either one could not prove the netdev down, the surface
+// keeps the conservative reading. The Unshimmable disposition is stricter:
+// duplicate sightings are ANDed, so any non-unshimmable sighting remains
+// uncovered.
 // recordUnappliedFilterBinding records a filter binding the compiler could not
 // assign (#6893). Deduped on (Interface, Reason) so one unresolvable interface
 // with several units does not fan out into near-identical rows.
@@ -326,9 +328,14 @@ func (r *CompileResult) recordUnarmedSurface(u UnarmedSurface) {
 		if r.unarmedSurfaces[i].Name != u.Name || r.unarmedSurfaces[i].Ifindex != u.Ifindex {
 			continue
 		}
-		if u.StillForwarding && !r.unarmedSurfaces[i].StillForwarding {
-			r.unarmedSurfaces[i] = u
+		existing := &r.unarmedSurfaces[i]
+		if u.StillForwarding && !existing.StillForwarding {
+			previousUnshimmable := existing.Unshimmable
+			*existing = u
+			existing.Unshimmable = previousUnshimmable && u.Unshimmable
+			return
 		}
+		existing.Unshimmable = existing.Unshimmable && u.Unshimmable
 		return
 	}
 	r.unarmedSurfaces = append(r.unarmedSurfaces, u)
