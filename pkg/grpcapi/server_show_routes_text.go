@@ -433,6 +433,11 @@ func (s *Server) showRoutingInstancesDetail(cfg *config.Config, buf *strings.Bui
 	if cfg == nil || len(cfg.RoutingInstances) == 0 {
 		buf.WriteString("No routing instances configured\n")
 	} else {
+		// #7357 / #10001: which static routes buildRouteSnapshots drops.
+		// Computed once for the whole config because the next-table window
+		// verdict is order-dependent. The instance-detail next-table arm below
+		// must not render a configured-but-dropped leak as an installed route.
+		staticExcluded := config.StaticRouteExclusions(cfg)
 		for _, ri := range cfg.RoutingInstances {
 			fmt.Fprintf(buf, "Instance: %s\n", ri.Name)
 			if ri.Description != "" {
@@ -477,6 +482,17 @@ func (s *Server) showRoutingInstancesDetail(cfg *config.Config, buf *strings.Bui
 					}
 					if sr.Reject {
 						fmt.Fprintf(buf, "    %s -> reject\n", sr.Destination)
+						continue
+					}
+					// #10001: a next-table static has no NextHops, so without
+					// this arm it counted toward "Static routes: N" but emitted
+					// no row. Keep the row visible and, for a tolerant config,
+					// show why the builder refused to install it.
+					if sr.NextTable != "" {
+						fmt.Fprintf(buf, "    %s -> next-table %s\n", sr.Destination, sr.NextTable)
+						if reason := staticExcluded[sr]; reason != "" {
+							fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+						}
 						continue
 					}
 					for _, nh := range sr.NextHops {
