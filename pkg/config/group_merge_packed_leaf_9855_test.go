@@ -121,18 +121,24 @@ func TestPackedGroupLeafSyslog9855(t *testing.T) {
 	}
 }
 
-// TestPackedGroupLeafDifferentInstanceKeepsOverride9855 pins the #9859
-// boundary: a packed group leaf naming ANOTHER instance is still dropped
-// beside an inline leaf (peer selection is unchanged; only the merge action
-// for a same-instance peer is new).
-func TestPackedGroupLeafDifferentInstanceKeepsOverride9855(t *testing.T) {
+// TestPackedGroupLeafDifferentInstanceAdopts9859 pins the #9859 boundary: a
+// packed group leaf naming ANOTHER instance is adopted beside an inline leaf,
+// while the same-instance promotion behavior remains in the cells above.
+func TestPackedGroupLeafDifferentInstanceAdopts9859(t *testing.T) {
 	hosts := compileSyslogHosts9855(t,
 		`groups { G { system { syslog { host 10.0.0.1 any any; } } } } apply-groups G; system { syslog { host 10.0.0.2; } }`)
-	if len(hosts) != 1 || hosts[0].Address != "10.0.0.2" {
-		t.Fatalf("want only the inline host 10.0.0.2, got %+v", hosts)
+	if len(hosts) != 2 {
+		t.Fatalf("want both host instances 10.0.0.1 and 10.0.0.2, got %+v", hosts)
 	}
-	if len(hosts[0].Facilities) != 0 {
-		t.Fatalf("the other instance's tail must not leak, got %+v", hosts[0].Facilities)
+	byAddress := map[string]*SyslogHostConfig{}
+	for _, host := range hosts {
+		byAddress[host.Address] = host
+	}
+	if byAddress["10.0.0.1"] == nil || !slices.Equal(byAddress["10.0.0.1"].Facilities, []SyslogFacility{{Facility: "any", Severity: "any"}}) {
+		t.Fatalf("group host 10.0.0.1 = %+v, want its packed facility", byAddress["10.0.0.1"])
+	}
+	if byAddress["10.0.0.2"] == nil || len(byAddress["10.0.0.2"].Facilities) != 0 {
+		t.Fatalf("inline host 10.0.0.2 = %+v, want no inherited facilities", byAddress["10.0.0.2"])
 	}
 }
 
@@ -170,11 +176,24 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 			t.Fatalf("virtual-addresses = %v, want inline first, group appended", vg.VirtualAddresses)
 		}
 	})
-	t.Run("different instance keeps override", func(t *testing.T) {
-		vg := vrrpGroup9855(t,
-			group(`vrrp-group 2 priority 200;`)+addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`))
-		if vg.Priority != 100 {
-			t.Fatalf("priority = %d, want 100 (another group's instance was dropped)", vg.Priority)
+	t.Run("different instance remains distinct", func(t *testing.T) {
+		text := group(`vrrp-group 2 priority 200 virtual-address 10.0.61.3/24;`) +
+			addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`)
+		tree := parseHierarchical(t, text)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("CompileConfig: %v", err)
+		}
+		unit := cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0]
+		if len(unit.VRRPGroups) != 2 {
+			t.Fatalf("VRRP groups = %+v, want distinct IDs 1 and 2", unit.VRRPGroups)
+		}
+		priority := map[int]int{}
+		for _, group := range unit.VRRPGroups {
+			priority[group.ID] = group.Priority
+		}
+		if priority[1] != 100 || priority[2] != 200 {
+			t.Fatalf("VRRP priorities = %v, want ID1=100 and ID2=200", priority)
 		}
 	})
 	t.Run("canonical alias never beats inline, either src order", func(t *testing.T) {
@@ -325,23 +344,39 @@ func TestPackedGroupLeafHiddenPeerMerges9855(t *testing.T) {
 	}
 }
 
-// TestPackedGroupLeafSuccessiveDifferentInstanceSuppressed9855 pins the
-// #9859 boundary across successive merges: after a promotion, a packed or
-// bare group leaf naming another instance is suppressed, exactly as the base
-// suppressed it via the pre-promotion leaf. Adopting it would fix #9859 by
-// side effect; #9859 keeps that scope.
-func TestPackedGroupLeafSuccessiveDifferentInstanceSuppressed9855(t *testing.T) {
-	for _, inner := range []string{
-		`host 10.0.0.1 any any; host 10.0.0.2 local0 info;`,
-		`host 10.0.0.1 any any; host 10.0.0.2;`,
-	} {
+// TestPackedGroupLeafSuccessiveDifferentInstanceAdopts9859 pins the #9859
+// boundary across successive merges. After a promotion, a packed or bare
+// group leaf naming another instance is still adopted; #10056 requires this
+// result to be independent of source order.
+func TestPackedGroupLeafSuccessiveDifferentInstanceAdopts9859(t *testing.T) {
+	cases := []struct {
+		inner string
+		wantB []SyslogFacility
+	}{
+		{
+			inner: `host 10.0.0.1 any any; host 10.0.0.2 local0 info;`,
+			wantB: []SyslogFacility{{Facility: "local0", Severity: "info"}},
+		},
+		{
+			inner: `host 10.0.0.1 any any; host 10.0.0.2;`,
+			wantB: nil,
+		},
+	}
+	for _, tc := range cases {
 		hosts := compileSyslogHosts9855(t,
-			`groups { G { system { syslog { `+inner+` } } } } apply-groups G; system { syslog { host 10.0.0.1; } }`)
-		if len(hosts) != 1 || hosts[0].Address != "10.0.0.1" {
-			t.Fatalf("inner %q: want only host 10.0.0.1, got %+v", inner, hosts)
+			`groups { G { system { syslog { `+tc.inner+` } } } } apply-groups G; system { syslog { host 10.0.0.1; } }`)
+		if len(hosts) != 2 {
+			t.Fatalf("inner %q: want both host instances, got %+v", tc.inner, hosts)
 		}
-		if got, want := hosts[0].Facilities, []SyslogFacility{{Facility: "any", Severity: "any"}}; !slices.Equal(got, want) {
-			t.Fatalf("inner %q: facilities = %+v, want %+v", inner, got, want)
+		byAddress := map[string]*SyslogHostConfig{}
+		for _, host := range hosts {
+			byAddress[host.Address] = host
+		}
+		if byAddress["10.0.0.1"] == nil || !slices.Equal(byAddress["10.0.0.1"].Facilities, []SyslogFacility{{Facility: "any", Severity: "any"}}) {
+			t.Fatalf("inner %q: host A = %+v, want the promoted group facility", tc.inner, byAddress["10.0.0.1"])
+		}
+		if byAddress["10.0.0.2"] == nil || !slices.Equal(byAddress["10.0.0.2"].Facilities, tc.wantB) {
+			t.Fatalf("inner %q: host B = %+v, want facilities %+v", tc.inner, byAddress["10.0.0.2"], tc.wantB)
 		}
 	}
 }

@@ -473,11 +473,32 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if len(s.Keys) > 0 {
 				key = s.Keys[0]
 			}
-			// #9831: a group zone statement names ONE zone, so its inline peer is the
-			// statement naming that zone, not any statement sharing the keyword.
-			peer := leafListPeer(*dst, key)
+			var peer *Node
 			if groupZoneLeaf9831(ancestorPath, s) {
+				// #9831: a group zone statement names ONE zone, so its
+				// inline peer is the statement naming that zone, not any
+				// statement sharing the keyword.
 				peer = zoneGroupLeafPeer9831(ancestorPath, *dst, s)
+			} else {
+				namedPeer, identity := namedLeafPeer9859(ancestorPath, *dst, s)
+				if identity {
+					// #9859: a named-container leaf matches only the
+					// inline statement naming the same instance. A nil peer
+					// here is intentional: it means this is a different
+					// instance, which must be adopted instead of dropped by
+					// keyword-only matching. Bracketed interface addresses
+					// are the exception: their value tail is a list, so the
+					// dedicated union route selects a peer by membership.
+					peer = namedPeer
+				} else {
+					// Value-list, scalar, and unresolvable shapes retain
+					// the legacy keyword-peer behavior.
+					peer = leafListPeer(*dst, key)
+				}
+			}
+			if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil &&
+				mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
+				continue
 			}
 			if peer != nil {
 				// #7648: a COMPACT group leaf whose key names a schema
@@ -488,6 +509,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// child, so an inline value still wins.
 				if !peer.IsLeaf {
 					if body := groupPackedLeafBody(ancestorPath, s); body != nil {
+						// Canonical alias peers can receive successive packed
+						// bodies (for example vrrp-group 01 after 1). Mark
+						// synthesized terminals so their scalar children take
+						// the same inline-wins leaf path as the first promotion.
+						if canonicalAliasLeaf9859(ancestorPath, s) {
+							markSynthTerminals9855(body)
+						}
+
 						// #9862: the synthesized body carries s's provenance, so a
 						// nested group's packed leaf filters as nested below. The
 						// fallback covers only the impossible untagged case.
@@ -548,9 +577,10 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// same-instance container — a peer this merge already promoted, or
 			// an inline braced stanza. Without this a second packed leaf for
 			// the instance adopts beside the first and twins the node. Zones,
-			// value lists, and different instances keep the adopt below,
-			// except that a successive leaf after a promotion is suppressed
-			// as the base suppressed it (suppressSuccessiveLeaf9855).
+			// value lists, and different qualified instances keep the adopt
+			// below, except that canonical/value-list/unqualified successive
+			// leaves after a promotion remain suppressed as the base suppressed
+			// them (suppressSuccessiveLeaf9855).
 			if cpeer, cbody, ok := sameInstanceContainerPeer9855(ancestorPath, *dst, s); ok {
 				if err := budget.charge(countNodes(cbody)); err != nil {
 					return err
@@ -646,6 +676,22 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			continue
 		}
 		if contribExcluded9862(s, group, scope) && !subtreeSurvives9862(s, group, scope) {
+			continue
+		}
+		if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil {
+			// The source container itself was charged on entry. Charge its
+			// chained address children before the union mutates the peer.
+			if err := budget.charge(countNodes(s.Children)); err != nil {
+				return err
+			}
+			if mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
+				continue
+			}
+		}
+
+		// CoS shaping-rate remains a scalar even when its optional burst-size
+		// body makes the parsed node a container: a different inline rate wins.
+		if legacyScalarContainerOverride9859(ancestorPath, *dst, s) {
 			continue
 		}
 
