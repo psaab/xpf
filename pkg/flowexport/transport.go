@@ -110,23 +110,24 @@ type collectorConns struct {
 	conns []*collectorConn
 }
 
-// dialUDP and resolveUDPAddr are indirection seams so tests can inject
-// dial/resolve failures and observe connection teardown. They default to
-// the net package and are only overridden by tests. dialUDP returns a
-// net.Conn (not *net.UDPConn) so tests can substitute a recording fake
-// and assert that connections opened before a mid-loop failure are
-// closed.
-//
-// The context-aware seams are the production path. The legacy seams remain
-// for narrow tests that inject a fake UDP socket; test helpers adapt them to
-// contexts without changing the production timeout contract.
+// Context-aware indirection seams let tests inject resolver and dial failures
+// while observing connection teardown without uncancellable production
+// goroutines. resolveUDPAddrContext performs bounded lookup;
+// dialUDPResolvedContext handles an explicit source/destination pair; and
+// dialUDPContext handles the original destination for no-source collectors,
+// preserving the standard resolver's candidate-list fallback. The legacy
+// dialUDP and resolveUDPAddr seams remain for existing teardown tests.
 var (
 	dialUDP = func(network string, laddr, raddr *net.UDPAddr) (net.Conn, error) {
 		return net.DialUDP(network, laddr, raddr)
 	}
-	resolveUDPAddr        = net.ResolveUDPAddr
-	dialUDPContext        = dialUDPWithContext
-	resolveUDPAddrContext = resolveUDPAddrWithContext
+	resolveUDPAddr         = net.ResolveUDPAddr
+	dialUDPContext         = dialUDPWithContext
+	dialUDPResolvedContext = dialUDPResolvedWithContext
+	resolveUDPAddrContext  = resolveUDPAddrWithContext
+	lookupIPAddrContext    = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
 )
 
 // collectorDialTimeout bounds each collector's resolve plus dial operation.
@@ -154,35 +155,56 @@ func resolveUDPAddrWithContext(ctx context.Context, network, address string) (*n
 		return net.ResolveUDPAddr(network, address)
 	}
 
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := lookupIPAddrContext(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	var lastErr error
-	for _, ip := range ips {
-		ipHost := ip.IP.String()
-		if ip.Zone != "" {
-			ipHost += "%" + ip.Zone
-		}
-		resolved, err := net.ResolveUDPAddr(network, net.JoinHostPort(ipHost, port))
-		if err == nil {
-			return resolved, nil
-		}
-		lastErr = err
+	candidate, ok := firstResolveIP(network, ips)
+	if !ok {
+		return nil, fmt.Errorf("lookup %s: no suitable address", host)
 	}
-	if lastErr != nil {
-		return nil, lastErr
+	ipHost := candidate.IP.String()
+	if candidate.Zone != "" {
+		ipHost += "%" + candidate.Zone
 	}
-	return nil, fmt.Errorf("lookup %s: no suitable address", host)
+	resolved, err := net.ResolveUDPAddr(network, net.JoinHostPort(ipHost, port))
+	if err != nil {
+		return nil, err
+	}
+	return resolved, nil
 }
 
-// dialUDPWithContext opens a UDP connection while honoring ctx. The dialer
-// receives the original destination string so its resolver can try every
-// address returned by DNS, matching net.Dial's behavior. A non-nil LocalAddr
-// preserves source-address binding.
+// firstResolveIP mirrors net's forResolve selection after family filtering:
+// prefer the first address in the requested family, falling back to the first
+// result otherwise. Plain UDP/IPv4 resolution prefers IPv4; UDP6 prefers IPv6.
+func firstResolveIP(network string, ips []net.IPAddr) (net.IPAddr, bool) {
+	if len(ips) == 0 {
+		return net.IPAddr{}, false
+	}
+	wantV6 := len(network) > 0 && network[len(network)-1] == '6'
+	for _, ip := range ips {
+		isV4 := ip.IP.To4() != nil
+		if (wantV6 && !isV4) || (!wantV6 && isV4) {
+			return ip, true
+		}
+	}
+	return ips[0], true
+}
+
+// dialUDPWithContext opens a UDP connection to an original destination while
+// honoring ctx. It is used by collectors without a configured source address,
+// so the net package retains its candidate-list fallback.
 func dialUDPWithContext(ctx context.Context, network string, laddr *net.UDPAddr, address string) (net.Conn, error) {
 	dialer := &net.Dialer{LocalAddr: laddr}
 	return dialer.DialContext(ctx, network, address)
+}
+
+// dialUDPResolvedWithContext opens a UDP connection to an already-resolved
+// destination while honoring ctx. It preserves the source-bound path's prior
+// ResolveUDPAddr -> DialUDP behavior and error taxonomy.
+func dialUDPResolvedWithContext(ctx context.Context, network string, laddr, raddr *net.UDPAddr) (net.Conn, error) {
+	dialer := &net.Dialer{LocalAddr: laddr}
+	return dialer.DialContext(ctx, network, raddr.String())
 }
 
 // dialCollectors opens a UDP connection to every collector in the list.
@@ -221,7 +243,12 @@ func dialCollectors(collectors []CollectorConfig) (*collectorConns, error) {
 				cancel()
 				return fail(fmt.Errorf("resolve collector %s source-address %s: %w", c.Address, c.SourceAddress, err2))
 			}
-			conn, err = dialUDPContext(ctx, "udp", laddr, c.Address)
+			raddr, err2 := resolveUDPAddrContext(ctx, "udp", c.Address)
+			if err2 != nil {
+				cancel()
+				return fail(fmt.Errorf("resolve collector %s: %w", c.Address, err2))
+			}
+			conn, err = dialUDPResolvedContext(ctx, "udp", laddr, raddr)
 		} else {
 			// Pass the hostname directly to DialContext so the net
 			// package retains its candidate-list fallback behavior.
