@@ -252,6 +252,17 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 	cfg.Warnings = append(cfg.Warnings, wgPeerWarnings...)
+	// #9909: a WireGuard tunnel's inner wgN can be placed in a
+	// routing-instance, but S2a's outer UDP socket still has no VRF-fd
+	// binding. Strict commit refuses both tunnel-stanza scope and
+	// routing-instance interface-list membership. Tolerant load warns and
+	// removes the affected tunnel from the compiled config before routing
+	// or userspace snapshot consumers can act on the half-scoped tunnel.
+	wgRoutingInstanceWarnings, err := validateWireguardRoutingInstance9909(cfg, opts.lenientWireguardRoutingInstance)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, wgRoutingInstanceWarnings...)
 
 	// #9587 (#1434 Increment 2, landed): the AF_XDP shim's WG-RX steering is a
 	// bounded SET of at most MaxSteeredWireGuardPorts listen ports
