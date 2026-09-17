@@ -1465,6 +1465,14 @@ type compileOpts struct {
 	// reconcile is dup-pubkey-safe, so a leniently-loaded bad config is
 	// inert. Same doctrine as lenientNATHostMask.
 	lenientWireguardPeers bool
+	// lenientWireguardRoutingInstance (#9909) downgrades the unsupported
+	// WireGuard routing-instance scope gate from a hard compile error to a
+	// warning and removes the affected tunnel from the tolerant compiled
+	// config. This keeps persisted / peer-synced configs bootable without
+	// allowing a VRF-bound inner device to pair with a main-table outer UDP
+	// socket. The strict commit / commit-check path refuses until #1434 S6
+	// provides the VRF-fd binding mechanism.
+	lenientWireguardRoutingInstance bool
 	// lenientTunnelOuterFamily (#5162) downgrades the non-WireGuard tunnel
 	// outer-family cross-field gate (validateTunnelOuterFamilyStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -2969,6 +2977,7 @@ func lenientCompileOpts() compileOpts {
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientDHCPRelayDHCPv6:                 true,
+		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
