@@ -18,7 +18,9 @@ import (
 // enforces them: prefix-list references resolved to literal prefixes,
 // address/port `except` folded, DSCP tokens resolved to numeric code points,
 // TCP-flags lowered to required/forbidden masks, `then next term` fall-through
-// computed, and any unrepresentable match marked fail-closed.
+// computed, and any unrepresentable match marked fail-closed. A contradictory
+// terminating action plus `next term` is rendered as the terminating action
+// with the ignored fall-through request annotated.
 func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Filter: %s (family %s) [effective]\n", snap.Name, snap.Family)
@@ -130,9 +132,14 @@ func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 		if term.Count != "" {
 			fmt.Fprintf(&b, "    then count %s\n", term.Count)
 		}
-		// NextTerm marks a fall-through term (no terminating action); a
-		// non-fall-through term terminates with its action (default accept).
-		if term.NextTerm {
+		// The Rust evaluator terminates whenever a real action or a
+		// routing-instance is present, regardless of the advisory NextTerm bit:
+		// `continue_term = action.is_empty() && routing_instance.is_empty()`.
+		// A tolerant load can preserve the contradictory bits, so render the
+		// effective runtime decision and disclose that the fall-through request
+		// was ignored rather than claiming the term falls through (#10012).
+		effectiveFallThrough := term.Action == "" && term.RoutingInstance == ""
+		if effectiveFallThrough {
 			fmt.Fprintf(&b, "    then next term (fall-through)\n")
 		} else {
 			action := term.Action
@@ -146,6 +153,9 @@ func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 				fmt.Fprintf(&b, "    then %s %s\n", action, term.RejectMessageType)
 			} else {
 				fmt.Fprintf(&b, "    then %s\n", action)
+			}
+			if term.NextTerm {
+				fmt.Fprintf(&b, "    then next term (ignored — contradictory with terminating action)\n")
 			}
 		}
 	}
