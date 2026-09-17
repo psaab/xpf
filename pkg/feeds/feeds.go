@@ -99,6 +99,63 @@ const maxFeedPrefixes = 1 << 20 // 1,048,576 entries
 // fetch open indefinitely (#3934). The next refresh tick retries.
 const httpClientTimeout = 30 * time.Second
 
+// maxFeedRedirects preserves net/http's built-in redirect bound after the
+// client installs the feed-specific CheckRedirect policy below.
+const maxFeedRedirects = 10
+
+// sameOriginFeedURL reports whether two HTTP URLs share an origin. Origins are
+// defined by scheme, hostname, and effective port; credentials and paths are
+// intentionally excluded.
+func sameOriginFeedURL(a, b *url.URL) bool {
+	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(a.Scheme, b.Scheme) ||
+		!strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return feedOriginPort(a) == feedOriginPort(b)
+}
+
+func feedOriginPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+// checkFeedRedirect permits only same-origin redirects. A provider-controlled
+// Location must never turn the configured feed URL into an SSRF primitive.
+func checkFeedRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if len(via) >= maxFeedRedirects {
+		return fmt.Errorf("dynamic-address: stopped after %d redirects", maxFeedRedirects)
+	}
+
+	previous := via[len(via)-1]
+	if previous != nil && req != nil && sameOriginFeedURL(previous.URL, req.URL) {
+		return nil
+	}
+
+	from := "<unknown>"
+	if via[0] != nil && via[0].URL != nil {
+		from = config.RedactURL(via[0].URL.String())
+	}
+	slog.Warn("dynamic-address: cross-origin feed redirect refused", "from", from)
+	// Keep the provider-supplied Location out of url.Error; readFeed closes
+	// this response and rejects the retained 302 with a generic status error.
+	return http.ErrUseLastResponse
+}
+
 // Manager manages dynamic address feed servers and their periodic updates.
 type Manager struct {
 	mu     sync.RWMutex
@@ -190,6 +247,10 @@ func New(onUpdate func() error) *Manager {
 		feeds: make(map[string]*feedState),
 		client: &http.Client{
 			Timeout: httpClientTimeout,
+			// An explicit transport prevents HTTP(S)_PROXY and ALL_PROXY
+			// environment variables from changing feed egress.
+			Transport:     &http.Transport{Proxy: nil},
+			CheckRedirect: checkFeedRedirect,
 		},
 		onUpdate: onUpdate,
 		now:      time.Now,
