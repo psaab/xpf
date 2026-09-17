@@ -203,8 +203,30 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // helper's struct, into the routing_domain slot a new reader trusts. That is a
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
+// v24 STANDS (issue 9984): `EventPolicy.PlantClass` was added to the typed
+// config, and ConfigSnapshot embeds the whole Config, so it moved this digest.
+// Like #9416 (not like the `json:"-"` STANDS entries), the field IS serialized,
+// so an old helper really does receive one new key. It is nonetheless
+// unobservable to it, and this was MEASURED in the #9408/#9416 manner:
+//
+//   - the Rust side models this whole subtree as ONE opaque value --
+//     `pub config: serde_json::Value` in userspace-dp/src/protocol/snapshot.rs.
+//     It names no field inside it, so a new key cannot break a
+//     deserialization and `deny_unknown_fields` cannot bite;
+//   - `grep -rn "PlantClass\|plant_class\|plant-class" userspace-dp/src/`
+//     returns ZERO hits, as does a search for `EventOptions` -- the dataplane
+//     never reads event policies at all, of any vintage;
+//   - the field's only consumers are pkg/config (stamping), pkg/configstore
+//     (persistence), pkg/eventengine (fire-time adjudication) and the
+//     show surfaces, all Go-side and manager-local. Mixed-version direction is
+//     fail-closed: an old peer's policyless JSON reads as legacy metadata and
+//     is quarantined rather than executed as root.
+//
+// Bumping for a field no helper can observe would make a mixed-base pair
+// refuse every snapshot in exchange for nothing. The golden below moves to the
+// #9984-merge digest; ProtocolVersion stays at 24.
 const (
-	snapshotShapeGolden8892 = "4492dd9b4d8eaffee78a6b051ba784230cea26b16237c79b724d6da3fce34daf"
+	snapshotShapeGolden8892 = "c098e2c1f595be54bd617f5ae0b2a2806ef8cfed34ce7cadad9c824d17b5c779"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
