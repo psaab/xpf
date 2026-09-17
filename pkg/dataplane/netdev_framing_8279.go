@@ -52,6 +52,23 @@ import "github.com/vishvananda/netlink"
 // every physical NIC, VLAN, bond, reth and L2 IPVLAN reports exactly this.
 const ethernetEncapType = "ether"
 
+// isProvablyUnshimmableEncap is deliberately a CLOSED match. These are the
+// link-layer encap values emitted by
+// github.com/vishvananda/netlink/nl.IfInfomsg.EncapType (nl/nl_linux.go) for
+// ARPHRD_NONE, ARPHRD_LOOPBACK, ARPHRD_SIT, ARPHRD_TUNNEL, ARPHRD_TUNNEL6,
+// and ARPHRD_IPGRE. They cannot carry an Ethernet header, so the
+// Ethernet-only shim can never safely attach. A future or otherwise
+// unrecognised non-Ethernet value remains gate-visible and fail-closed;
+// refusal alone is not permission to exempt it.
+func isProvablyUnshimmableEncap(encapType string) bool {
+	switch encapType {
+	case "none", "loopback", "sit", "ipip", "tunnel6", "gre":
+		return true
+	default:
+		return false
+	}
+}
+
 // netdevCarriesEthernetFraming reports whether frames on a netdev with this
 // `netlink.LinkAttrs.EncapType` begin with a 14-byte Ethernet header.
 //
@@ -122,5 +139,6 @@ func nonEthernetSurfaceRecord(name string, ifindex int, encapType string) Unarme
 			"IP source octets as an ethertype (#8279); netdev is UP and zoned but has no " +
 			"XDP, so its traffic is not adjudicated",
 		StillForwarding: true,
+		Unshimmable:     isProvablyUnshimmableEncap(encapType),
 	}
 }

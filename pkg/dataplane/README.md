@@ -1190,6 +1190,16 @@ old detach site and the publish reads the attachment set —
 `entryProgramsLocked` (`maps_sync.go`) is the only other `XDPLinks()`
 reader and it is status reporting — so moving the detach costs no
 dependency.
+> **#9804 arm-gate classification.** The refusal remains an operator-visible
+> `UnarmedSurface` with `StillForwarding` set, but a closed match of the
+> verified raw-L3 `EncapType` strings (`none`, `loopback`, `sit`, `ipip`,
+> `tunnel6`, `gre`) emitted by `nl.IfInfomsg.EncapType` in
+> `github.com/vishvananda/netlink/nl/nl_linux.go` also sets `Unshimmable`.
+> `armproof.go` renders that surface as `CoverageSkipped`, counts it in the
+> report, and excludes it from `Uncovered`/`WouldGate`; this is what lets a
+> healthy GRE node prove complete without hiding the #8279 gap. An unknown
+> encap spelling never receives the marker and remains uncovered, so the gate
+> still disarms on a genuinely unproven surface.
 
 **Consequence to expect on a failing apply:** an interface the operator
 REMOVED from the config keeps its shim, and its transit stays dropped,
@@ -2009,12 +2019,15 @@ a test in `armproof_5275_test.go`.
     documents the opposite condition, and `UnappliedFilterBinding` — the
     precedent for adding a type — has no production consumer outside its own
     tests. A record nothing reads is not observability.
-  - `skipped` is **not** a claim that nothing forwards. It is the third unknown:
-    the compiler did not look, so the proof cannot say. `WouldGate` excludes it
-    because a clean `disable` is a legitimate operator action and folding every
-    one into would-gate would swamp the measurement this phase exists to take.
-    **The gating PR must decide** what a declined surface means to a gate; PR1
-    only has to stop hiding it.
+  - `skipped` is **not** a claim that nothing forwards. Ordinary compiler
+    skips remain the third unknown: the compiler did not look, so the proof
+    cannot say. `WouldGate` excludes them because a clean `disable` is a
+    legitimate operator action and folding every one into would-gate would
+    swamp the measurement this phase exists to take. Known raw-L3 refusals are
+    the deliberate #9804 extension: they retain `StillForwarding` and their
+    exact reason, but the closed `Unshimmable` marker renders them as reported
+    `CoverageSkipped` surfaces rather than gate failures. Unknown framing
+    values never receive that exemption and remain `CoverageUncovered`.
   - A VLAN child whose parent was declined and **proven down** inherits
     `skipped`, not `uncovered`. `compiler_iface.go` appends the child ~130 lines
     *above* the `isDisabled` check and never appends a disabled parent, so a
