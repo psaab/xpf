@@ -169,16 +169,20 @@ pub(super) fn handle(
                 // active; every other delete stays authoritative. `delete` reports a
                 // refusal, answered in-band below so the Go side keeps its own mirror
                 // and DNAT rows for the flow the helper kept.
-                // #9714 r2 F7: the helper reports an OUTCOME, not a bool in which a
-                // stale-generation rejection and a successful apply were the same
-                // value. Only the ownership refusal is answered in-band with the
-                // peer-delete token — a stale-generation refusal means the helper
-                // already holds something newer, so there is nothing for the Go side
-                // to preserve and nothing to tell it about.
+                // #9714 r2 F7 / #9960: the helper reports an OUTCOME, not a bool in
+                // which a stale-generation rejection and a successful apply were
+                // the same value. Only an ownership refusal — whether the early
+                // #9714 check or the under-lock #9960 concurrent check — is
+                // answered in-band with the peer-delete token. A stale-generation
+                // refusal means the helper already holds something newer, so there
+                // is nothing for the Go side to preserve and nothing to tell it
+                // about.
                 let forward_only = sync_req.forward_only;
                 let delete = |key| {
                     if sync_req.peer_delete {
-                        domain.delete_peer_synced_session(key, forward_only).is_refused_local_owned()
+                        domain
+                            .delete_peer_synced_session(key, forward_only)
+                            .keeps_caller_rows()
                     } else {
                         domain.delete_synced_session(key, forward_only);
                         false
