@@ -14,10 +14,10 @@ import (
 // which these tests pin: a committed renewal stores the lease, fires
 // the (debounced) onAddressChange only on content change, and handles
 // an address move as remove-old/apply-new. Loop control flow (renew
-// success returns to the T1 wait; only NAK/timeout at both T1 and T2
-// falls back to re-acquisition) is enforced by structure: commitLease
-// is the only success path and `break` to re-acquisition exists only
-// on commit/renew failure.
+// success returns to the T1 wait; a valid granting-server NAK deconfigures
+// immediately; a timeout waits for T2, and failures there fall back to
+// re-acquisition) is enforced by structure: commitLease is the only success
+// path and `break` to re-acquisition exists only on commit/renew failure.
 
 // recompileArmed reports whether a commit scheduled the debounced
 // onAddressChange callback. scheduleRecompile arms m.recompileTimer
@@ -153,6 +153,9 @@ func TestLeaseContentChanged(t *testing.T) {
 		}), false},
 		{"address changed", v4Lease("10.0.0.99/24"), true},
 		{"prefix length changed", v4Lease("10.0.0.5/25"), true},
+		{"server identifier changed", v4Lease("10.0.0.5/24", func(l *Lease) {
+			l.serverID = netip.MustParseAddr("10.0.0.2")
+		}), true},
 		{"gateway changed", v4Lease("10.0.0.5/24", func(l *Lease) {
 			l.Gateway = netip.MustParseAddr("10.0.0.254")
 		}), true},
