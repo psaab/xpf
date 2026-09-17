@@ -392,8 +392,12 @@ fn embedded_icmp_nat_match_ignores_non_error_echo() {
 /// flowless arm and the error takes normal flowless enforcement (LocalDelivery
 /// reinject) — no prebuilt reversed forward is queued, so `scratch_forwards`
 /// is empty and this test goes RED.
-#[test]
-fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
+fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+    allow_reverse_policy: bool,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    expect_denied: bool,
+    expect_fabric_redirect: bool,
+) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -404,9 +408,29 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
     let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
 
-    // allow_embedded_icmp gates the poll-path reversal — enable it.
-    let mut snapshot = nat_snapshot();
+    let mut snapshot = if expect_fabric_redirect {
+        nat_snapshot_with_fabric()
+    } else {
+        nat_snapshot()
+    };
     snapshot.flow.allow_embedded_icmp = true;
+    if allow_reverse_policy {
+        snapshot.policies.push(PolicyRuleSnapshot {
+            name: "permit-wan-to-lan-icmp-error".to_string(),
+            from_zone: "wan".to_string(),
+            to_zone: "lan".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
+            ..Default::default()
+        });
+    } else {
+        // Make the negative cell independent of any fixture rule ordering:
+        // the actual arrival-zone -> egress-zone pair must hit default deny.
+        snapshot.policies.clear();
+    }
     let forwarding = build_forwarding_state(&snapshot);
 
     // The error ingresses on the WAN (reth0.80, ifindex 12) since it is
@@ -461,7 +485,6 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
     let mirror_targets = MirrorTargetMap::default();
-    let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     // Neighbor toward the client on the LAN unit so the reversed error resolves
     // a tx interface + MAC (egress ifindex 24).
@@ -484,7 +507,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
     let peer_worker_commands = Vec::new();
     let dnat_fds = DnatTableFds::default();
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
-    let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
@@ -607,6 +630,99 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
         &worker_ctx,
         &mut telemetry,
     );
+    if expect_fabric_redirect {
+        assert_eq!(
+            binding.scratch.scratch_forwards.len(),
+            1,
+            "FabricRedirect embedded error must remain queued as one prebuilt"
+        );
+        let fwd = &binding.scratch.scratch_forwards[0];
+        assert_eq!(
+            fwd.decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "inactive owner-RG error must resolve to the peer-owned fabric"
+        );
+        assert!(
+            matches!(fwd.frame, PendingForwardFrame::Prebuilt(_)),
+            "FabricRedirect embedded error must use a prebuilt frame"
+        );
+        assert_eq!(
+            fwd.target_ifindex, 21,
+            "FabricRedirect prebuilt must dispatch on the fabric parent"
+        );
+        let prebuilt = match &fwd.frame {
+            PendingForwardFrame::Prebuilt(bytes) => bytes,
+            _ => unreachable!("prebuilt asserted above"),
+        };
+        assert_eq!(
+            &prebuilt[0..6],
+            &[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            "FabricRedirect prebuilt must target the peer MAC"
+        );
+        let [zone_hi, zone_lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+        assert_eq!(
+            &prebuilt[6..12],
+            &[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, zone_hi, zone_lo],
+            "FabricRedirect prebuilt must carry the actual WAN ingress zone stamp"
+        );
+        let mut peer_snapshot = nat_snapshot_with_fabric();
+        peer_snapshot.fabrics[0].local_mac = "00:aa:bb:cc:dd:ee".to_string();
+        peer_snapshot.fabrics[0].peer_mac = "02:bf:72:ff:00:01".to_string();
+        let peer_forwarding = build_forwarding_state(&peer_snapshot);
+        let mut peer_meta = meta;
+        peer_meta.ingress_ifindex = 21;
+        assert_eq!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                prebuilt,
+                peer_meta,
+                &peer_forwarding,
+                &fabric_redirect_peer_ha_state(),
+                123,
+            ),
+            Some(TEST_WAN_ZONE_ID),
+            "inverse peer must accept the WAN zone stamp while owning LAN RG2"
+        );
+        assert!(binding.scratch.scratch_recycle.is_empty());
+        assert_eq!(telemetry.dbg.policy_deny, 0);
+        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "peer-owned FabricRedirect must not emit a local policy deny"
+        );
+        return;
+    }
+    if expect_denied || !allow_reverse_policy {
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "a reversed embedded-ICMP error must not queue before zone policy \
+             permits its actual WAN->LAN delivery (RED on revert: bypasses policy)"
+        );
+        assert_eq!(
+            binding.scratch.scratch_recycle.len(),
+            1,
+            "a policy-denied reversed error recycles its owned descriptor"
+        );
+        assert_eq!(
+            telemetry.dbg.policy_deny, 1,
+            "a queued reversal denial increments the policy-deny debug counter"
+        );
+        let event = event_rx
+            .try_recv()
+            .expect("queued reversal policy-deny event")
+            .decode_dataplane_event()
+            .expect("queued reversal policy-deny payload");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        );
+        assert_eq!(event.ingress_zone_id, TEST_WAN_ZONE_ID);
+        assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(event.ingress_ifindex, 12);
+        assert_eq!(event.src_ip, IpAddr::V4(router_ip));
+        assert_eq!(event.dst_ip, IpAddr::V4(client_ip));
+        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+        return;
+    }
 
     // The load-bearing #5690 assertion: the ICMP error was reverse-translated on
     // the REAL poll path and queued as a prebuilt forward toward the client.
@@ -657,13 +773,59 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
         "a queued prebuilt forward owns the descriptor; no recycle"
     );
 }
+#[test]
+fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        true,
+        txn_ha_state(),
+        false,
+        false,
+    );
+}
+
+/// #9948 fail-on-revert: a matched reversed error must not be delivered when
+/// the packet's actual arrival-zone to egress-zone pair is denied. Removing
+/// the queued-prebuilt policy gate makes this cell queue one forward instead.
+#[test]
+fn poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        false,
+        txn_ha_state(),
+        true,
+        false,
+    );
+}
+
+/// #9948 HA-window control: even an explicitly permitted WAN-to-LAN error
+/// cannot transmit while the owning RG is inactive on this worker.
+#[test]
+fn poll_descriptor_embedded_icmp_reversal_ha_inactive_denies_9948() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        true,
+        inactive_ha_state(),
+        true,
+        false,
+    );
+}
+
+/// #9948 peer-owned control: a FabricRedirect prebuilt bypasses local policy
+/// because #3291 enforces it on the owning peer and TX #1946 sends it.
+/// Replacing the disposition carve-out with a deny makes this cell RED.
+#[test]
+fn poll_descriptor_embedded_icmp_reversal_fabric_redirect_passthrough_9948() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        true,
+        fabric_redirect_local_ha_state(),
+        false,
+        true,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // #6472: NAT64 (cross-family) ICMP error translation on the flowless arm.
 // ---------------------------------------------------------------------------
 
 /// The IPv6 client, v4 server, NAT64 pool address, and translated port the
-/// #6472 fixtures share. The synthetic destination is `64:ff9b::808:808`
 /// (Pref64 ∷ 8.8.8.8) from the shared `nat64_snapshot` fixture.
 const N6472_CLIENT_PORT: u16 = 12345;
 const N6472_XLATED_PORT: u16 = 40000;
@@ -848,8 +1010,12 @@ fn n6472_patch_ptb(frame: &mut [u8], l4_offset: usize) {
 /// the flowless arm and the error takes normal flowless enforcement — no
 /// prebuilt forward is queued (the pool address is not a local v4 socket),
 /// so `scratch_forwards` is empty and the test goes RED.
-#[test]
-fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() {
+fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+    allow_reverse_policy: bool,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    expect_denied: bool,
+    expect_fabric_redirect: bool,
+) {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
     let mut frame = build_icmp_te_frame_v4(
         router_ip,
@@ -860,13 +1026,35 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() 
         PROTO_TCP,
     );
     n6472_patch_ptb(&mut frame, 34);
-
     // allow_embedded_icmp deliberately NOT set: the NAT64 arm is ungated.
-    let forwarding = build_forwarding_state(&nat64_snapshot(lan_to_wan_permit(
-        "8.8.8.8/32",
-        "permit-nat64-v4",
-    )));
-    let ha_state = txn_ha_state();
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    if expect_fabric_redirect {
+        let fabric = nat_snapshot_with_fabric();
+        snapshot.interfaces.push(
+            fabric
+                .interfaces
+                .iter()
+                .find(|iface| iface.ifindex == 21)
+                .cloned()
+                .expect("fabric parent interface"),
+        );
+        snapshot.fabrics = fabric.fabrics.clone();
+        snapshot.neighbors.extend(
+            fabric
+                .neighbors
+                .iter()
+                .filter(|neighbor| neighbor.ifindex == 101)
+                .cloned(),
+        );
+    }
+    if allow_reverse_policy {
+        // #9948/#7169 positive control: an operator-permitted WAN->LAN error
+        // still delivers the translated Packet-Too-Big signal.
+        permit_wan_to_lan_flowless_icmp(&mut snapshot);
+    } else {
+        snapshot.policies.clear();
+    }
+    let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = Arc::<str>::from("reth0.80");
     let mut sessions = SessionTable::new();
@@ -890,8 +1078,108 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() 
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
-
+    let (_batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    if expect_fabric_redirect {
+        assert_eq!(binding.scratch.scratch_forwards.len(), 1);
+        let fwd = &binding.scratch.scratch_forwards[0];
+        assert_eq!(
+            fwd.decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect
+        );
+        assert_eq!(fwd.target_ifindex, 21);
+        let out = match &fwd.frame {
+            PendingForwardFrame::Prebuilt(bytes) => bytes,
+            _ => panic!("NAT64 FabricRedirect must queue a prebuilt frame"),
+        };
+        assert_eq!(&out[0..6], &[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+        let [zone_hi, zone_lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+        assert_eq!(
+            &out[6..12],
+            &[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, zone_hi, zone_lo]
+        );
+        let mut peer_snapshot = nat64_snapshot(lan_to_wan_permit(
+            "8.8.8.8/32",
+            "permit-nat64-v4",
+        ));
+        let fabric = nat_snapshot_with_fabric();
+        peer_snapshot.interfaces.push(
+            fabric
+                .interfaces
+                .iter()
+                .find(|iface| iface.ifindex == 21)
+                .cloned()
+                .expect("NAT64 peer fabric parent"),
+        );
+        peer_snapshot.fabrics = fabric
+            .fabrics
+            .iter()
+            .map(|link| {
+                let mut link = link.clone();
+                link.local_mac = "00:aa:bb:cc:dd:ee".to_string();
+                link.peer_mac = "02:bf:72:ff:00:01".to_string();
+                link
+            })
+            .collect();
+        peer_snapshot.neighbors.extend(
+            fabric
+                .neighbors
+                .iter()
+                .filter(|neighbor| neighbor.ifindex == 101)
+                .cloned(),
+        );
+        let peer_forwarding = build_forwarding_state(&peer_snapshot);
+        let mut peer_meta = meta;
+        peer_meta.ingress_ifindex = 21;
+        assert_eq!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                out,
+                peer_meta,
+                &peer_forwarding,
+                &fabric_redirect_peer_ha_state(),
+                123,
+            ),
+            Some(TEST_WAN_ZONE_ID)
+        );
+        assert!(binding.scratch.scratch_recycle.is_empty());
+        assert_eq!(dbg.policy_deny, 0);
+        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 0);
+        assert!(event_rx.try_recv().is_err());
+        return;
+    }
+    if expect_denied || !allow_reverse_policy {
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "a NAT64 translated ICMP error must not queue under WAN->LAN default deny"
+        );
+        assert_eq!(binding.scratch.scratch_recycle.len(), 1);
+        assert_eq!(dbg.policy_deny, 1);
+        let event = event_rx
+            .try_recv()
+            .expect("NAT64 queued policy-deny event")
+            .decode_dataplane_event()
+            .expect("NAT64 queued policy-deny payload");
+        assert_eq!(
+            event.kind,
+            crate::event_stream::codec::DataplaneEventKind::PolicyDeny
+        );
+        assert_eq!(event.ingress_zone_id, TEST_WAN_ZONE_ID);
+        assert_eq!(event.egress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(event.ingress_ifindex, 12);
+        assert_eq!(
+            event.src_ip,
+            "64:ff9b::ac10:5001".parse::<IpAddr>().expect("NAT64 event src")
+        );
+        assert_eq!(event.dst_ip, IpAddr::V6(n6472_client_v6()));
+        assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
+        return;
+    }
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
@@ -959,6 +1247,52 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() 
         "a queued prebuilt forward owns the descriptor; no recycle"
     );
 }
+#[test]
+fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        true,
+        txn_ha_state(),
+        false,
+        false,
+    );
+}
+
+/// #9948 fail-on-revert: the NAT64 queued prebuilt must be denied when the
+/// actual WAN-to-LAN zone pair has no permit, with a policy event and counter.
+#[test]
+fn poll_descriptor_nat64_icmp_error_zone_policy_denies_9948() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        false,
+        txn_ha_state(),
+        true,
+        false,
+    );
+}
+
+/// #9948 HA-window control: an explicitly permitted NAT64 PTB cannot transmit
+/// while its owning RG is inactive on this worker.
+#[test]
+fn poll_descriptor_nat64_icmp_error_ha_inactive_denies_9948() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        true,
+        inactive_ha_state(),
+        true,
+        false,
+    );
+}
+
+/// #9948 peer-owned NAT64 control: the translated prebuilt carries the fabric
+/// peer MAC and actual WAN zone stamp when LAN RG2 is owned remotely.
+#[test]
+fn poll_descriptor_nat64_icmp_error_fabric_redirect_passthrough_9948() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        true,
+        fabric_redirect_local_ha_state(),
+        false,
+        true,
+    );
+}
+
 
 /// #6472 FAIL-ON-REVERT (v6→v4, RFC 7915 §5.2): an ICMPv6 Time-Exceeded
 /// from a v6 hop about the session's translated REPLY packet — addressed to
@@ -1082,6 +1416,55 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
 // the domain and to nothing else.
 // ---------------------------------------------------------------------------
 
+/// Add the explicit reverse-direction permit required by flowless ICMP-error
+/// delivery. The translated/reversed wire packet arrives from `wan` and is
+/// sent to `lan`; tests that exercise a successful ICMP arm must keep that
+/// policy decision separate from the input/PBR controls under test.
+fn permit_wan_to_lan_flowless_icmp(snapshot: &mut ConfigSnapshot) {
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "permit-wan-to-lan-flowless-icmp".to_string(),
+        from_zone: "wan".to_string(),
+        to_zone: "lan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+}
+/// A clustered worker whose owner RGs are present but no longer forwarding.
+/// Embedded-ICMP resolution remains `HAInactive` when no fabric peer exists.
+fn inactive_ha_state() -> BTreeMap<i32, HAGroupRuntime> {
+    let mut ha = BTreeMap::new();
+    for rg in [1, 2] {
+        ha.insert(
+            rg,
+            HAGroupRuntime {
+                active: false,
+                watchdog_timestamp: 123,
+                lease: HAGroupRuntime::active_lease_until(123, 123),
+            },
+        );
+    }
+    ha
+}
+
+/// Split-RG local worker for the FabricRedirect control: WAN RG1 forwards here
+/// while LAN RG2 is inactive and therefore owned by the peer.
+fn fabric_redirect_local_ha_state() -> BTreeMap<i32, HAGroupRuntime> {
+    let mut ha = inactive_ha_state();
+    ha.get_mut(&1).expect("WAN RG").active = true;
+    ha
+}
+
+/// Inverse worker state used to validate the emitted zone stamp at the peer.
+fn fabric_redirect_peer_ha_state() -> BTreeMap<i32, HAGroupRuntime> {
+    let mut ha = inactive_ha_state();
+    ha.get_mut(&2).expect("LAN RG").active = true;
+    ha
+}
+
 /// `nat64_snapshot` with every interface a member of routing instance
 /// `domain`. Domain 0 reproduces `nat64_snapshot` exactly (the field's
 /// default), which is what makes the reference arm below a true control
@@ -1122,11 +1505,12 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         PROTO_TCP,
     );
     n6472_patch_ptb(&mut frame, 34);
-
-    let forwarding = build_forwarding_state(&n9162_nat64_snapshot_in_domain(
+    let mut snapshot = n9162_nat64_snapshot_in_domain(
         lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"),
         domain,
-    ));
+    );
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
+    let forwarding = build_forwarding_state(&snapshot);
     assert_eq!(
         crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 12, 0, None),
         domain,
@@ -1472,6 +1856,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
     // `nat64_reverse`) and the #5690 reversal must fire unchanged.
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
     snapshot.flow.allow_embedded_icmp = true;
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
@@ -3559,6 +3944,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     // #7359: attach `filter input` with a bare `discard` term to the WAN unit
     // the error ingresses on. Nothing about the filter is ICMP-specific — a
     // term with no match criteria matches every packet arriving there, which
@@ -3646,7 +4032,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
     let mirror_targets = MirrorTargetMap::default();
-    let ha_state = BTreeMap::new();
+    let ha_state = txn_ha_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     // Neighbor toward the client on the LAN unit so the reversed error resolves
     // a tx interface + MAC (egress ifindex 24).
@@ -3847,6 +4233,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     // #7359 criterion 2: attach `filter input` whose first term COUNTS and
     // falls through to an accept.
     //
@@ -3952,7 +4339,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
     let mirror_targets = MirrorTargetMap::default();
-    let ha_state = BTreeMap::new();
+    let ha_state = txn_ha_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     // Neighbor toward the client on the LAN unit so the reversed error resolves
     // a tx interface + MAC (egress ifindex 24).
@@ -4235,6 +4622,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     // #8271: and a GRE tunnel terminating on this node, so the outer frame is
     // DECAPPED before the embedded-ICMP arm classifies. Without this the frame
     // never reaches `stage_native_gre_decap`, `packet_frame` stays equal to
@@ -4312,7 +4700,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
     let mirror_targets = MirrorTargetMap::default();
-    let ha_state = BTreeMap::new();
+    let ha_state = txn_ha_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     // Neighbor toward the client on the LAN unit so the reversed error resolves
     // a tx interface + MAC (egress ifindex 24).
@@ -4547,6 +4935,7 @@ fn gre_decapped_nat64_icmp_error_reads_the_inner_frame_8271() {
     let frame = build_gre_to_self_outer_frame_v4(80, &inner);
 
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     // The GRE tunnel that makes `packet_frame` differ from `raw_frame`. Its
     // source must be the outer destination the fixture frame carries
     // (172.16.80.8) or `stage_native_gre_decap` never fires and the cell
@@ -4649,6 +5038,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     let forwarding = build_forwarding_state(&snapshot);
 
     // The error ingresses on the WAN (reth0.80, ifindex 12) since it is
@@ -4703,7 +5093,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
     let mirror_targets = MirrorTargetMap::default();
-    let ha_state = BTreeMap::new();
+    let ha_state = txn_ha_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     // Neighbor toward the client on the LAN unit so the reversed error resolves
     // a tx interface + MAC (egress ifindex 24).
@@ -5899,6 +6289,7 @@ fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<
     );
     n6472_patch_ptb(&mut frame, 34);
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     let with_filter = term.is_some();
     if let Some(term) = term {
         g9528_attach(&mut snapshot, true, term);
@@ -5949,6 +6340,7 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
     let client_port: u16 = 12345;
     let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
     let mut snapshot = nat_snapshot();
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
     snapshot.flow.allow_embedded_icmp = true;
     // The reversed error egresses toward the client on the LAN unit.
     // `..Default::default()`, not an exhaustive literal: NeighborSnapshot is an
@@ -6041,7 +6433,7 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
         flow_dst_addr: g9528_v4(snat_ip),
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &BTreeMap::new(), &frame, meta);
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, meta);
     let count = with_filter.then(|| g9528_packets(&forwarding));
     (
         binding.scratch.scratch_forwards.len(),

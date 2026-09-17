@@ -29,7 +29,7 @@ pub(super) enum EmbeddedIcmpReversal {
     /// A NAT'd flow matched and the reverse-translated error frame was queued
     /// as a prebuilt forward toward the original client. The original
     /// descriptor is now owned by that `PendingForwardRequest`; the caller MUST
-    /// NOT recycle it and MUST stop processing this descriptor.
+    /// then pop + recycle on deny and MUST stop processing this descriptor.
     Queued,
     /// A NAT'd flow matched and a reversed frame was built, but the egress
     /// CoS / output classification dropped it. The caller MUST recycle the
@@ -66,11 +66,12 @@ pub(super) fn try_reverse_embedded_icmp_error(
     scratch_forwards: &mut Vec<PendingForwardRequest>,
     now_ns: u64,
     now_secs: u64,
+    ingress_zone_override: Option<u16>,
 ) -> EmbeddedIcmpReversal {
     #[cfg(feature = "debug-log")]
     let icmpv6_trace = meta.protocol == PROTO_ICMPV6
         && ICMPV6_EMBED_LOGGED.fetch_add(1, Ordering::Relaxed) < 32;
-    let icmp_match = match try_embedded_icmp_nat_match_from_frame(
+    let mut icmp_match = match try_embedded_icmp_nat_match_from_frame(
         packet_frame,
         meta,
         sessions,
@@ -144,13 +145,22 @@ pub(super) fn try_reverse_embedded_icmp_error(
         }
         return EmbeddedIcmpReversal::NotHandled;
     }
-    let icmp_resolution = finalize_embedded_icmp_resolution(
+    let icmp_resolution = finalize_embedded_icmp_resolution_parts(
         worker_ctx.forwarding,
         worker_ctx.ha_state,
         now_secs,
         meta.ingress_ifindex as i32,
-        &icmp_match,
+        icmp_match.resolution,
+        actual_embedded_icmp_ingress_zone(
+            worker_ctx.forwarding,
+            meta,
+            ingress_zone_override,
+        ),
     );
+    // Builders consume the match's resolution for L2 construction. Replace it
+    // with the finalized (possibly zone-stamped FabricRedirect) decision before
+    // building the prebuilt frame.
+    icmp_match.resolution = icmp_resolution;
     let rewritten = match meta.addr_family as i32 {
         // #6474: an OUTBOUND error through source NAT takes the re-NAT
         // builders (external outer source + associable quote), never the
@@ -286,4 +296,188 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         cos_tx_selection_resolved: true,
     });
     EmbeddedIcmpReversal::Queued
+}
+
+/// Authorize the queued disposition and, for locally forwardable frames, apply
+/// the flowless transit zone-policy gate. The input/PBR filters are intentionally
+/// evaluated by the caller before either ICMP arm (#7359/#9528); this helper is
+/// the missing final authorization that the queued prebuilt otherwise skips
+/// (#9948).
+/// The policy direction is the packet's actual arrival zone to the queued
+/// resolution's egress zone, not the quoted session's original direction.
+/// That keeps a forged error arriving from an untrusted zone subject to the
+/// same `wan -> lan` policy as any other flowless transit packet while still
+/// allowing an explicitly permitted PMTUD error through (#7169).
+pub(super) fn enforce_queued_embedded_icmp_policy(
+    queued_frame: &[u8],
+    ingress_meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    resolution: ForwardingResolution,
+    worker_ctx: &WorkerContext,
+    now_ns: u64,
+    now_secs: u64,
+) -> bool {
+    // A queued prebuilt never reaches the later flowless disposition arms:
+    // both callers continue after this adjudicator and TX dispatch sends a
+    // `Prebuilt` unconditionally. FabricRedirect is the one peer-owned
+    // exception: #3291 adjudicates it on the owning peer, and TX #1946
+    // explicitly transmits its prebuilt frame across the fabric.
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        return true;
+    }
+    // Every terminal/non-sendable disposition must fail closed here rather
+    // than be treated as peer-owned by default.
+    let Some((policy_flow, mut policy_meta)) = queued_embedded_icmp_identity(queued_frame)
+    else {
+        // A prebuilt frame that cannot expose an L3 policy identity is not
+        // safe to deliver. Builders normally make this unreachable; keeping
+        // the gate fail-closed protects the queue if a new builder regresses.
+        return false;
+    };
+    policy_meta.ingress_ifindex = ingress_meta.ingress_ifindex;
+    policy_meta.ingress_vlan_id = ingress_meta.ingress_vlan_id;
+    let ingress_logical = super::resolve_ingress_logical_ifindex(
+        worker_ctx.forwarding,
+        ingress_meta.ingress_ifindex as i32,
+        ingress_meta.ingress_vlan_id,
+    )
+    .unwrap_or(ingress_meta.ingress_ifindex as i32);
+    let gated_zone_override = super::gate_fabric_zone_override_on_owner_rg(
+        worker_ctx.forwarding,
+        worker_ctx.ha_state,
+        now_secs,
+        ingress_zone_override,
+        resolution,
+    );
+    let (from_zone_id, to_zone_id) = super::zone_pair_ids_for_flow_with_override(
+        worker_ctx.forwarding,
+        ingress_logical,
+        gated_zone_override,
+        resolution.egress_ifindex,
+    );
+    let policy_result = if resolution.disposition == ForwardingDisposition::ForwardCandidate {
+        crate::policy::evaluate_policy_result_l3_aware(
+            &worker_ctx.forwarding.policy,
+            from_zone_id,
+            to_zone_id,
+            policy_flow.src_ip,
+            policy_flow.dst_ip,
+            policy_flow.forward_key.protocol,
+            0,
+            0,
+            super::policy_packet_icmp(queued_frame, policy_meta),
+            queued_frame.len() as u64,
+            false,
+        )
+    } else {
+        // HAInactive, PolicyDenied, and all unresolved route dispositions are
+        // not transmit-authorized even when their eventual zone pair would
+        // permit the packet. Preserve the deny event's normal default-policy
+        // identity while making the queue ownership decision fail closed.
+        crate::policy::PolicyEvaluationResult {
+            action: PolicyAction::Deny,
+            policy_id: crate::policy::DEFAULT_POLICY_SENTINEL_ID,
+            ..Default::default()
+        }
+    };
+    if resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && matches!(policy_result.action, PolicyAction::Permit)
+    {
+        return true;
+    }
+    let owner_rg_id = super::owner_rg_for_resolution(worker_ctx.forwarding, resolution);
+    super::emit_policy_deny_event(
+        worker_ctx.event_stream,
+        &policy_flow,
+        &NatDecision::default(),
+        policy_meta,
+        from_zone_id,
+        to_zone_id,
+        owner_rg_id,
+        policy_result.policy_id,
+        policy_result.action,
+        0,
+        false,
+        now_ns,
+    );
+    false
+}
+
+/// Resolve the zone identity that a peer-owned embedded error must carry.
+/// Fabric ingress already supplies an authenticated override; otherwise derive
+/// the actual packet arrival zone from the logical ingress unit, not the quoted
+/// session metadata.
+pub(super) fn actual_embedded_icmp_ingress_zone(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> u16 {
+    ingress_zone_override.unwrap_or_else(|| {
+        let logical_ifindex = super::resolve_ingress_logical_ifindex(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+        .unwrap_or(meta.ingress_ifindex as i32);
+        forwarding
+            .ifindex_to_zone_id
+            .get(&logical_ifindex)
+            .copied()
+            .unwrap_or(meta.ingress_zone)
+    })
+}
+
+/// Recover the outer L3 identity from the actual prebuilt wire frame. The
+/// queued frame can be cross-family (NAT64), so the original ingress metadata
+/// is not authoritative for policy addresses or ICMP type/code.
+fn queued_embedded_icmp_identity(frame: &[u8]) -> Option<(SessionFlow, UserspaceDpMeta)> {
+    let l3 = crate::afxdp::frame::frame_l3_offset(frame)?;
+    let version = frame.get(l3).map(|byte| byte >> 4)?;
+    let (addr_family, protocol, src_ip, dst_ip) = match version {
+        4 => {
+            let src = <[u8; 4]>::try_from(frame.get(l3 + 12..l3 + 16)?).ok()?;
+            let dst = <[u8; 4]>::try_from(frame.get(l3 + 16..l3 + 20)?).ok()?;
+            (
+                libc::AF_INET as u8,
+                *frame.get(l3 + 9)?,
+                IpAddr::V4(Ipv4Addr::from(src)),
+                IpAddr::V4(Ipv4Addr::from(dst)),
+            )
+        }
+        6 => {
+            let src = <[u8; 16]>::try_from(frame.get(l3 + 8..l3 + 24)?).ok()?;
+            let dst = <[u8; 16]>::try_from(frame.get(l3 + 24..l3 + 40)?).ok()?;
+            (
+                libc::AF_INET6 as u8,
+                PROTO_ICMPV6,
+                IpAddr::V6(Ipv6Addr::from(src)),
+                IpAddr::V6(Ipv6Addr::from(dst)),
+            )
+        }
+        _ => return None,
+    };
+    let l4 = crate::afxdp::frame::frame_l4_offset(frame, addr_family)?;
+    let policy_meta = UserspaceDpMeta {
+        l3_offset: l3 as u16,
+        l4_offset: l4 as u16,
+        pkt_len: frame.len().min(u16::MAX as usize) as u16,
+        addr_family,
+        protocol,
+        ..UserspaceDpMeta::default()
+    };
+    let flow = SessionFlow {
+        src_ip,
+        dst_ip,
+        forward_key: SessionKey {
+            addr_family,
+            protocol,
+            src_ip,
+            dst_ip,
+            src_port: 0,
+            dst_port: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    Some((flow, policy_meta))
 }
