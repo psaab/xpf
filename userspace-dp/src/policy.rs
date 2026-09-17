@@ -155,6 +155,22 @@ impl Default for PolicyAction {
 /// by a cross-language contract test in pkg/dataplane/userspace).
 pub(crate) const DEFAULT_POLICY_SENTINEL_ID: u32 = u32::MAX;
 
+/// #9989: reserved policy ID for verdicts NO policy produced — the #6682
+/// unzoned-ingress deny (the session path already stamps 0 for
+/// non-policy-forwarded installs).
+///
+/// The Go log/display planes render this value as the fixed pseudo-policy
+/// `unattributed` (`dataplane.ReservedPolicyName`, honored by
+/// `SessionPolicyName` and `logging.EventReader.resolvePolicyName`) — and,
+/// critically, never as `default-policy`. That is what separates it from
+/// [`DEFAULT_POLICY_SENTINEL_ID`]: the sentinel says "the implicit default
+/// decided", this says "no policy adjudicated at all".
+///
+/// A MAPPING change, not a new sentinel: 0 has always ridden the wire with
+/// render support on every surface (#4626/#6851). MUST stay byte-identical
+/// to Go `dataplane.UnattributedPolicyID`.
+pub(crate) const UNATTRIBUTED_POLICY_ID: u32 = 0;
+
 /// #6682: transit flows refused because their INGRESS interface is in no
 /// security zone.
 ///
@@ -176,14 +192,11 @@ pub(crate) const DEFAULT_POLICY_SENTINEL_ID: u32 = u32::MAX;
 /// configured, whereas a rising count here means an interface fell out of its
 /// zone, which is a configuration fault the operator wants to see.
 ///
-/// The RT_FLOW `policy_id` still carries `DEFAULT_POLICY_SENTINEL_ID`, so the
-/// deny LOGS as `default-policy`. That is deliberate scope, not an oversight: a
-/// dedicated sentinel is a wire-visible value mirrored across ~10 Go call sites
-/// (display maps, counter readers, the #4342 invalidation sweep, gRPC/CLI/API)
-/// and interacts with the #4626 policy-id-0 handling, which is far more surface
-/// than this fix needs. `default-policy` is honest — no rule matched — just
-/// less specific than this counter. A distinct log reason is worth doing on its
-/// own, not folded in here.
+/// The RT_FLOW `policy_id` carries `UNATTRIBUTED_POLICY_ID`, so the deny
+/// LOGS as `unattributed` rather than `default-policy`. The dedicated
+/// `UNZONED_INGRESS_DENIED` counter remains the aggregate-cause signal; this
+/// attribution is intentionally separate from the implicit default sentinel.
+/// A distinct log reason is worth doing on its own, not folded in here.
 pub(crate) static UNZONED_INGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -3267,7 +3280,7 @@ fn evaluate_policy_result_counted(
         UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return PolicyEvaluationResult {
             action: PolicyAction::Deny,
-            policy_id: DEFAULT_POLICY_SENTINEL_ID,
+            policy_id: UNATTRIBUTED_POLICY_ID,
             ..PolicyEvaluationResult::default()
         };
     }

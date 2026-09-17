@@ -920,3 +920,106 @@ fn emitted_timestamps_are_non_decreasing() {
         second.timestamp_ns
     );
 }
+
+/// #9989: the RT_FLOW PolicyDeny record for an unzoned-ingress deny AGREES
+/// with the policy evaluation result — both record paths carry the
+/// unattributed id, never the default-policy sentinel.
+///
+/// Threads `result.policy_id` through `emit_policy_deny_event` exactly as the
+/// transit deny sites do (`poll_descriptor/mod.rs` passes
+/// `policy_result.policy_id`), then decodes the frame and pins both paths to
+/// the same value. The Go side renders that value `unattributed`
+/// (`logging.EventReader.resolvePolicyName` honors
+/// `dataplane.ReservedPolicyName`, pinned by the #3057 sentinel test and the
+/// #4626/#6851 zero-id tests); the sentinel would render `default-policy`.
+///
+/// Fail-on-revert: restoring the sentinel in the #6682 arm turns BOTH the
+/// result and the wire record back into `default-policy` (RED here and in
+/// `unzoned_ingress_deny_is_unattributed_not_default_policy_9989`).
+#[test]
+fn unzoned_deny_rt_flow_agrees_with_policy_result_9989() {
+    use crate::policy::{evaluate_policy_result_l3_aware, parse_policy_state};
+    use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
+
+    let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+    zones.insert("lan".to_string(), TEST_LAN_ZONE_ID);
+    zones.insert("wan".to_string(), TEST_WAN_ZONE_ID);
+    let state = parse_policy_state(
+        "permit",
+        &[crate::PolicyRuleSnapshot {
+            rule_id: "both-any-permit".to_string(),
+            name: "baseline-allow".to_string(),
+            from_zone: "any".to_string(),
+            to_zone: "any".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        }],
+        &zones,
+    );
+    let result = evaluate_policy_result_l3_aware(
+        &state,
+        0,
+        TEST_WAN_ZONE_ID,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 5)),
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+        PROTO_TCP,
+        40000,
+        443,
+        None,
+        64,
+        true,
+    );
+    assert_eq!(
+        result.action,
+        crate::policy::PolicyAction::Deny,
+        "setup: an unzoned ingress must be denied (#6682)",
+    );
+
+    // The transit deny sites pass `policy_result.policy_id` straight into
+    // the emitter; mirror that call shape (unzoned from-zone 0).
+    let (handle, rx) = unlimited_handle();
+    let flow = test_flow();
+    emit_policy_deny_event(
+        Some(&handle),
+        &flow,
+        &NatDecision::default(),
+        test_meta(),
+        0,
+        TEST_WAN_ZONE_ID,
+        0,
+        result.policy_id,
+        result.action,
+        0,
+        false,
+        mono_now_ns(),
+    );
+
+    let event = rx
+        .try_recv()
+        .expect("policy event frame")
+        .decode_dataplane_event()
+        .expect("policy event payload");
+    assert_eq!(
+        event.policy_id, result.policy_id,
+        "the RT_FLOW PolicyDeny record must agree with the policy evaluation \
+         result (#9989)",
+    );
+    assert_eq!(
+        event.rule_id, result.policy_id,
+        "the mirrored rule_id rides the same attribution (#9989)",
+    );
+    assert_eq!(
+        result.policy_id,
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "both record paths must carry the unattributed id (#9989)",
+    );
+    assert_ne!(
+        event.policy_id,
+        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
+        "the RT_FLOW record for an unzoned deny must not alias \
+         default-policy (#9989)",
+    );
+}
