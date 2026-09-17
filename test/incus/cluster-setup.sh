@@ -704,11 +704,9 @@ deploy_vm_deb() {
 	# config explicitly (and separately) if a change is intended.
 	warn "NOTICE: deb deploy preserves node config (no config push, no config-DB clear, no Phase-0 artifact push) — push config explicitly if a change is intended"
 
-	info "Pushing $(basename "$deb") to $vm..."
-	incus file push "$deb" "${rinst}/tmp/$(basename "$deb")"
-	# apt install is STAGE-ONLY on a clustered node (node-id present): it
-	# refreshes the staging path but does NOT cut the dataplane.
-	incus exec "$rinst" -- apt-get install -y --reinstall "/tmp/$(basename "$deb")"
+	# Unique-slot deb install (#10026): push+install+cleanup through the
+	# tested helper, so a same-name re-push cannot collide in a fixed slot.
+	deploy_install_deb "$rinst" "$deb"
 
 	# Drive the verified controlled-drain cut on THIS node (peer keeps
 	# forwarding). Run on the node directly so the rolling driver sees the
