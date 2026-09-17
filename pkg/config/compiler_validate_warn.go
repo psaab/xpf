@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 // deterministicIPv4Enforced reports whether a deterministic-NAT pool uses the
@@ -485,6 +486,16 @@ func ValidateConfig(cfg *Config) []string {
 		sched := cfg.Schedulers[name]
 		if sched == nil {
 			continue
+		}
+		// #10006: the runtime intentionally preserves the historical
+		// start==stop wraparound convention, which makes the time-of-day arm
+		// always-active. Surface that surprising shorthand at commit and point
+		// operators to the matching explicit form.
+		if alwaysForm, ok := schedulerEqualTimeWindowForm(sched); ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"scheduler %q has start-time == stop-time; equal bounds make "+
+					"the time-of-day arm always-active (use `%s` for the "+
+					"explicit always-active form)", name, alwaysForm))
 		}
 		if schedulerHasEffectiveWindow(sched) {
 			continue
@@ -1858,6 +1869,58 @@ func schedulerHasEffectiveWindow(s *SchedulerConfig) bool {
 		return true
 	}
 	return false
+}
+
+// schedulerEqualTimeWindowForm reports the matching explicit always-active
+// form for a scheduler containing a complete effective daily or per-day time
+// window whose bounds are equal. Explicit all-day and exclude forms take
+// precedence in the runtime evaluator, so they are not reported as the
+// equality shorthand (#10006). The returned form is stable even when several
+// per-day arms are equal.
+func schedulerEqualTimeWindowForm(s *SchedulerConfig) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	if !s.AllDay && schedulerTimeOfDayEqual(s.StartTime, s.StopTime) {
+		return "daily all-day", true
+	}
+	dayNames := make([]string, 0, len(s.Days))
+	for dayName := range s.Days {
+		dayNames = append(dayNames, dayName)
+	}
+	sort.Strings(dayNames)
+	for _, dayName := range dayNames {
+		day := s.Days[dayName]
+		if day == nil || day.Exclude || day.AllDay {
+			continue
+		}
+		if schedulerTimeOfDayEqual(day.StartTime, day.StopTime) {
+			return dayName + " all-day", true
+		}
+	}
+	return "", false
+}
+
+// schedulerTimeOfDayEqual reports whether two scheduler time-of-day bounds
+// denote the same clock time. Comparison is on PARSED values with the layout
+// the runtime evaluator (pkg/scheduler.parseTimeOfDay) and the schema
+// validator (ValidateTimeOfDay) share ("15:04:05"), so mixed spellings of one
+// instant ("9:00:00" vs "09:00:00") compare equal exactly when the runtime
+// treats them as equal. Bounds parse RAW, with no whitespace trim, exactly
+// like the runtime: padded or otherwise unparseable bounds fail closed there.
+// Schema validation handles malformed configuration values separately; this
+// equality advisory stays silent rather than misclaiming always-active
+// (#10006).
+func schedulerTimeOfDayEqual(start, stop string) bool {
+	s, err := time.Parse("15:04:05", start)
+	if err != nil {
+		return false
+	}
+	e, err := time.Parse("15:04:05", stop)
+	if err != nil {
+		return false
+	}
+	return s.Equal(e)
 }
 
 // anySamplingDirectionConfigured reports whether any interface unit has

@@ -496,7 +496,10 @@ func schedulerHasDateRange(sched *config.SchedulerConfig) bool {
 
 // withinTimeOfDay reports whether now's clock time falls within
 // [start, stop), handling overnight (wraparound) windows. An unparseable
-// bound fails closed.
+// bound fails closed. Equal bounds (start == stop) take the wraparound branch
+// and therefore mean always-active. Use the corresponding explicit all-day
+// arm (`daily all-day` for a daily window or `<weekday> all-day` for a per-day
+// arm) when that intent is explicit.
 func withinTimeOfDay(now time.Time, name, start, stop string) bool {
 	startTOD, err := parseTimeOfDay(start)
 	if err != nil {
