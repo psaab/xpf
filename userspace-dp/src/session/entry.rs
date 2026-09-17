@@ -528,6 +528,16 @@ pub(crate) enum SessionDeltaKind {
     Update,
 }
 
+/// The export operation that produced a delta. Session origin describes who
+/// owns a flow; this separate marker describes why the same flow is emitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExportProvenance {
+    Incremental,
+    LossResync,
+    CommandExport(u64),
+}
+
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionDelta {
     pub(crate) kind: SessionDeltaKind,
@@ -536,6 +546,7 @@ pub(crate) struct SessionDelta {
     pub(crate) metadata: SessionMetadata,
     pub(crate) origin: SessionOrigin,
     pub(crate) fabric_redirect_sync: bool,
+    pub(crate) provenance: ExportProvenance,
     /// #2465: monotonic (`CLOCK_MONOTONIC`) nanosecond timestamp at which the
     /// session was first installed, copied from the `SessionEntry.created_ns`.
     /// Carried so the RT_FLOW SESSION_CLOSE frame can report a real flow
@@ -633,10 +644,29 @@ pub(crate) struct SessionDelta {
     pub(crate) purge_retirement: bool,
 }
 
+/// A session that went away with its close identity harvested.
+///
+/// Returned by the expiry walk for BPF reap AND recorded by `remove_entry`
+/// (the sole removal sink) into the per-table tombstone log the owner-RG
+/// export drains: a session deleted after the kick but before the cursor
+/// reaches it would otherwise leave the peer holding a zombie. The
+/// incremental Close (still emitted at every deletion site) is the
+/// backstop; the tombstone is the export-window repair. `session_id` is
+/// the canonical dedupe key (distinct across reinstall incarnations);
+/// `close_class` restores close state; `install_epoch` lets the export
+/// suppress post-kick incarnations (whose incremental open+close pair
+/// converges the peer on its own — pushing a tombstone for them would
+/// risk a close-before-open inversion).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExpiredSession {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
     pub(crate) origin: SessionOrigin,
+    /// Stable session id harvested pre-removal (`0` if none).
+    pub(crate) session_id: u64,
+    /// Close class on the HA wire at removal (`0` if open).
+    pub(crate) close_class: u8,
+    /// Write-once install epoch of the removed incarnation.
+    pub(crate) install_epoch: u64,
 }

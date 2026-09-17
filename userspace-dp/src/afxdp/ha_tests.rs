@@ -1600,7 +1600,9 @@ fn synced_snat_install_publishes_and_delete_releases_dnat_table_entry() {
 fn kick_owner_rg_export_empty_set_is_noop_and_consumes_no_sequence() {
     let coordinator = Coordinator::new();
     let before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
-    let wait = coordinator.kick_owner_rg_export(&[], 0, false);
+    let wait = coordinator
+        .kick_owner_rg_export(&[], 0, false)
+        .expect("kick");
     assert_eq!(
         coordinator.sessions.export_seq.load(Ordering::Relaxed),
         before,
@@ -1626,7 +1628,9 @@ fn kick_owner_rg_export_enqueues_command_then_wait_completes_on_ack() {
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
-    let wait = coordinator.kick_owner_rg_export(&[1, 2], 0, false);
+    let wait = coordinator
+        .kick_owner_rg_export(&[1, 2], 0, false)
+        .expect("kick");
 
     {
         let pending = commands.lock().expect("commands");
@@ -1783,43 +1787,39 @@ fn purge_remapped_tunnel_sessions_no_drop_on_lossless_success() {
 }
 
 #[test]
-fn drain_session_deltas_from_live_is_fair_across_bindings() {
-    // #5290: the owner-RG bulk-export mirror of `Coordinator::drain_session_deltas`
-    // must share the same fair rotating-cursor drain — a capped export budget
-    // below the aggregate pending count is spread across every binding, not
-    // handed whole to the first. Reverting to whole-budget-first would drain all
-    // 30 from binding 0 and leave bindings 1..3 untouched.
-    let live: Vec<Arc<BindingLiveState>> = (0..3)
+fn drain_export_deltas_from_workers_is_fair_across_workers_9856() {
+    use crate::afxdp::binding_state::ExportBufferState;
+    // #9856: migrated from `drain_session_deltas_from_live_is_fair_across_bindings`
+    // (#5290/#9344): the fair rotating-cursor drain now serves per-worker
+    // export buffers instead of per-binding RPC buffers. Same contract —
+    // a capped budget spreads across every buffer, not handed whole to the
+    // first. (The old cell's `more` half moved to the paging integration
+    // cell: `more` is decided by the collect loop now, not the helper.)
+    let buffers: Vec<Arc<ExportBufferState>> = (0..3)
         .map(|_| {
-            let b = Arc::new(BindingLiveState::new());
+            let b = Arc::new(ExportBufferState::new());
             for _ in 0..40 {
-                b.push_session_delta(SessionDeltaInfo::default());
+                b.push_export_open(9, SessionDeltaInfo::default())
+                    .expect("fixture fits");
             }
             b
         })
         .collect();
 
-    let (drained, cursor, more) = drain_session_deltas_from_live(&live, 30, 0); // quantum 10
+    let (drained, cursor) = drain_export_deltas_from_workers(&buffers, 9, 30, 0); // quantum 10
     assert_eq!(
         drained.len(),
         30,
         "capped export returns exactly the budget"
     );
-    // #9344: the bit this call site used to discard. 120 deltas were queued and
-    // 30 drained, so the answer is CAPPED and the remainder is still buffered.
-    assert!(
-        more,
-        "a capped drain that left 90 deltas behind must report more=true — \
-         without it a truncated answer and a complete one are indistinguishable"
-    );
     // Cursor wrapped back to 0 after serving all three (10 each).
-    assert_eq!(cursor % 3, 0, "cursor rotated through every binding");
+    assert_eq!(cursor % 3, 0, "cursor rotated through every buffer");
 
-    for (i, b) in live.iter().enumerate() {
-        let residual = b.drain_session_deltas(usize::MAX).len();
+    for (i, b) in buffers.iter().enumerate() {
+        let residual = b.drain_export(usize::MAX).len();
         assert_eq!(
             residual, 30,
-            "binding {i} must have been served an equal 10-delta quantum, \
+            "buffer {i} must have been served an equal 10-delta quantum, \
              leaving 30 — a whole-budget-first export would not"
         );
     }
@@ -4844,21 +4844,30 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
-    // One live binding holding 5 deltas.
-    let live = Arc::new(BindingLiveState::new());
-    for _ in 0..5 {
-        live.push_session_delta(SessionDeltaInfo::default());
-    }
-    coordinator.workers.live.insert(0, live.clone());
-
     // PAGE 1: an ordinary capped export. Kicks phase 1, waits for the ack.
-    let wait = coordinator.kick_owner_rg_export(&[1], 3, false);
+    // (#9856: the 5 deltas ride the worker's dedicated export buffer tagged
+    // with the kicked sequence — the window the collect path drains.)
+    let wait = coordinator
+        .kick_owner_rg_export(&[1], 3, false)
+        .expect("kick page 1");
     assert_eq!(
         commands.lock().expect("commands").len(),
         1,
         "the first page must kick the workers — it is what PRODUCES the window"
     );
     let seq_after_page1 = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let export_buffer = coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .export_buffer
+        .clone();
+    for _ in 0..5 {
+        export_buffer
+            .push_export_open(seq_after_page1, SessionDeltaInfo::default())
+            .expect("fixture fits");
+    }
     ack.store(seq_after_page1, Ordering::Release);
     let (page1, more1) = wait.wait_and_collect().expect("page 1");
     assert_eq!(page1.len(), 3, "page 1 returns exactly the cap");
@@ -4871,7 +4880,9 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
 
     // PAGE 2: a CONTINUATION. It must kick nothing, consume no sequence, and
     // not block on an ack that will never come.
-    let wait2 = coordinator.kick_owner_rg_export(&[1], 3, true);
+    let wait2 = coordinator
+        .kick_owner_rg_export(&[1], 3, true)
+        .expect("continuation kick");
     assert_eq!(
         commands.lock().expect("commands").len(),
         1,
@@ -4903,7 +4914,7 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
         "the pages must partition the window exactly"
     );
     assert!(
-        !live.has_pending_session_deltas(),
+        export_buffer.drain_export(usize::MAX).is_empty(),
         "nothing may be left behind once the caller has seen more=false"
     );
 }
@@ -4921,13 +4932,24 @@ fn owner_rg_export_uncapped_drains_everything_and_reports_no_more() {
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
-    let live = Arc::new(BindingLiveState::new());
+    // (#9856: deltas ride the worker's dedicated export buffer tagged with
+    // the kicked sequence.)
+    let wait = coordinator
+        .kick_owner_rg_export(&[1], 0, false)
+        .expect("kick");
+    let uncapped_seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let uncapped_buffer = coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .export_buffer
+        .clone();
     for _ in 0..2500 {
-        live.push_session_delta(SessionDeltaInfo::default());
+        uncapped_buffer
+            .push_export_open(uncapped_seq, SessionDeltaInfo::default())
+            .expect("fixture fits");
     }
-    coordinator.workers.live.insert(0, live.clone());
-
-    let wait = coordinator.kick_owner_rg_export(&[1], 0, false);
     ack.store(
         coordinator.sessions.export_seq.load(Ordering::Relaxed),
         Ordering::Release,
@@ -4960,13 +4982,24 @@ fn owner_rg_export_exact_fit_reports_no_more() {
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
-    let live = Arc::new(BindingLiveState::new());
+    // (#9856: deltas ride the worker's dedicated export buffer tagged with
+    // the kicked sequence.)
+    let wait = coordinator
+        .kick_owner_rg_export(&[1], 4, false)
+        .expect("kick");
+    let exact_seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let exact_buffer = coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .export_buffer
+        .clone();
     for _ in 0..4 {
-        live.push_session_delta(SessionDeltaInfo::default());
+        exact_buffer
+            .push_export_open(exact_seq, SessionDeltaInfo::default())
+            .expect("fixture fits");
     }
-    coordinator.workers.live.insert(0, live.clone());
-
-    let wait = coordinator.kick_owner_rg_export(&[1], 4, false);
     ack.store(
         coordinator.sessions.export_seq.load(Ordering::Relaxed),
         Ordering::Release,
@@ -4977,6 +5010,57 @@ fn owner_rg_export_exact_fit_reports_no_more() {
         !more,
         "the buffers are empty, so there is no remainder to page for"
     );
+}
+
+/// When the final entry is pushed before the worker publishes its ACK, an
+/// exactly full page must report `more=true`; the next page is the terminal
+/// probe after the ACK becomes visible.
+#[test]
+fn owner_rg_export_exact_cap_with_lagging_ack_reports_more() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands);
+    let ack = handle.session_export_ack.clone();
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+
+    let wait = coordinator
+        .kick_owner_rg_export(&[1], EXPORT_BUFFER_CAP_ENTRIES, false)
+        .expect("kick");
+    let sequence = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let export_buffer = coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .export_buffer
+        .clone();
+    for _ in 0..EXPORT_BUFFER_CAP_ENTRIES {
+        export_buffer
+            .push_export_open(sequence, SessionDeltaInfo::default())
+            .expect("fixture fits");
+    }
+
+    // The worker's push-then-ACK ordering is deliberately split here: the
+    // full page is available while the ACK still lags, so collection must
+    // return a page and leave the window open for its terminal probe.
+    let (page1, more1) = wait.wait_and_collect().expect("full page");
+    assert_eq!(page1.len(), EXPORT_BUFFER_CAP_ENTRIES);
+    assert!(more1, "a full page before ACK needs a terminal probe");
+    assert_eq!(
+        ack.load(Ordering::Acquire),
+        0,
+        "the fixture must leave the final ACK lagging the last push"
+    );
+
+    ack.store(sequence, Ordering::Release);
+    let wait2 = coordinator
+        .kick_owner_rg_export(&[1], EXPORT_BUFFER_CAP_ENTRIES, true)
+        .expect("terminal probe");
+    let (page2, more2) = wait2.wait_and_collect().expect("terminal page");
+    assert!(page2.is_empty(), "the first page drained the full window");
+    assert!(!more2, "the probe observes the now-published ACK");
 }
 
 // ---------------------------------------------------------------------------

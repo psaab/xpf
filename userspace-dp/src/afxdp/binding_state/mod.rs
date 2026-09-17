@@ -26,6 +26,9 @@ mod debug_state;
 mod latency;
 mod profile;
 mod session_delta;
+// #9856: dedicated per-worker owner-RG export buffer (page-sized, worker-keyed).
+mod export_buffer;
+pub(in crate::afxdp) use export_buffer::ExportBufferState;
 // #8108: the delta-buffer high-water mark.
 #[cfg(test)]
 #[path = "delta_high_water_8108_tests.rs"]

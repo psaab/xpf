@@ -229,3 +229,38 @@ fn a_bulk_export_delta_that_fits_is_stored_like_any_other_8593() {
          ARM, not the buffer"
     );
 }
+
+/// #9856 STEP-0 (M2): the owner-RG export's control response keeps at most 4096
+/// deltas per binding buffer — sessions past the cap are dropped at the push
+/// and the `more` bit cannot see them, so a FullResync can ACK a partial
+/// export. RED on base. Post-fix the export rides a dedicated export buffer
+/// drained incrementally while workers produce (this cell migrates to that API;
+/// the "every session reaches the response" assertion is kept).
+#[test]
+fn bulk_export_response_keeps_only_4096_deltas_9856() {
+    // Post-M2b driver: the export rides the dedicated per-worker buffer,
+    // drained incrementally while workers produce (drain-then-retry models
+    // the worker's pause-without-advance on Full). Assertion kept: every
+    // session reaches the response; +100-past-cap shape kept vs the new cap.
+    let b = ExportBufferState::new();
+    const N: usize = EXPORT_BUFFER_CAP_ENTRIES + 100;
+    let mut delivered = 0usize;
+    for i in 0..N {
+        loop {
+            match b.push_export_open(9, delta_8108(i as u64)) {
+                Ok(()) => break,
+                Err(_) => delivered += b.drain_export(usize::MAX).len(),
+            }
+        }
+    }
+    delivered += b.drain_export(usize::MAX).len();
+    assert_eq!(
+        delivered, N,
+        "#9856: dedicated export buffer must deliver every session; kept {delivered} of {N}"
+    );
+    assert_eq!(
+        b.export_dropped(),
+        0,
+        "opens never drop — Full pauses, never drops"
+    );
+}

@@ -157,6 +157,26 @@ fn refresh_runtime_view(
     (new_forwarding, validation)
 }
 
+/// #9856: one worker's resumable owner-RG export. Lives in the worker-loop
+/// locals (persists across passes); `None` = idle. Adopted from
+/// `WorkerCommandResults` when Export commands arrive; cleared on completion
+/// (after acking). Single slot: a timeout-then-rekick overwrites (with
+/// purge-foreign); concurrent kicks never reach here (coordinator BUSY).
+pub(in crate::afxdp) struct WorkerExportState {
+    /// Resume cursor (slab slot) for `iter_export_budgeted`.
+    pub(in crate::afxdp) cursor: usize,
+    /// Epoch predicate bound, captured at command accept.
+    pub(in crate::afxdp) kick_epoch: u64,
+    /// Requested owner RGs (union for the tick-batch).
+    pub(in crate::afxdp) owner_rgs: Vec<i32>,
+    /// Command sequences this export satisfies (acked on completion).
+    pub(in crate::afxdp) sequences: Vec<u64>,
+    /// Window token tagging every push (M2c: the kicked command sequence;
+    /// M3: the opaque continuation token). Pinned at adopt; purge + push +
+    /// collect all key on it.
+    pub(in crate::afxdp) token: u64,
+}
+
 pub(crate) fn worker_loop(
     plan: WorkerLaunchPlan,
     shared: WorkerSharedDataplane,
@@ -212,6 +232,8 @@ pub(crate) fn worker_loop(
         stop,
         heartbeat,
         session_export_ack,
+        // #9856 M2c: the multi-pass cursor drives this (control leg).
+        export_buffer,
         event_stream,
         startup_report_tx,
     } = control;
@@ -433,6 +455,23 @@ pub(crate) fn worker_loop(
     let mut last_transition_debt_epoch =
         crate::afxdp::worker_queue::transition_debt_epoch(worker_id);
     let mut transition_debt_pending = false;
+    // #9856: resumable owner-RG CommandExport (multi-pass cursor). `None` =
+    // idle. Adopted from the tick's dispatch results when Export commands
+    // arrive; cleared on completion (after acking). Paced like the sweeps
+    // above: one budgeted slice per pass, RX/TX/heartbeat between slices.
+    const EXPORT_SLICE_BUDGET: usize = 1024; // max slab slots scanned per slice
+    const EXPORT_SLICE_EMITS: usize = 256; // max sessions converted per slice
+    const EXPORT_SLICE_DEADLINE_NS: u64 = 500_000; // 500us slice cap
+    let mut worker_export: Option<WorkerExportState> = None;
+    // #9856: echo-batch scratch, reused across slices. The walk borrows
+    // `sessions` shared, so the echo emits — which need `&mut` — run after
+    // the walk from this buffer, then drain.
+    let mut export_echo_scratch: Vec<(
+        crate::session::SessionKey,
+        crate::session::SessionDecision,
+        crate::session::SessionMetadata,
+        crate::session::SessionOrigin,
+    )> = Vec::with_capacity(EXPORT_SLICE_EMITS);
     let mut dbg_last_report_ns = monotonic_nanos();
     // #1776: the per-interval cfg(debug-log) dbg_* counters are
     // consolidated into debug_report::DbgCounters (single-line
@@ -501,6 +540,10 @@ pub(crate) fn worker_loop(
         // steady-state drain, the #2442 resync, and the #2653 export) so the
         // FIRST wedge caps the whole cycle's lossless wait at ~1 budget; a fresh
         // iteration must start un-wedged so a healthy consumer pays no penalty.
+        // #9856: the CommandExport slice keeps this per-pass reset — its
+        // control leg never touches the lossless queue (Full pauses the
+        // cursor instead of wedging) and its echo deltas are
+        // bulk_resync-marked (non-arming), so no cross-pass extension.
         worker_lossless_wedged = false;
         // #869: attribute elapsed delta to the previous loop's state.
         {
@@ -964,6 +1007,7 @@ pub(crate) fn worker_loop(
             exported_sequences,
             session_counter_answers,
             export_owner_rgs,
+            export_kick_epoch,
             shaped_tx_requests,
             vacate_all_shared_exact_slots,
             commands_backlogged,
@@ -1352,8 +1396,15 @@ pub(crate) fn worker_loop(
             ($owner_rgs:expr) => {{
                 let owner_rgs = $owner_rgs;
                 if !owner_rgs.is_empty() {
+                    // #9856 M2c: LossResync keeps this unfiltered full-rescan
+                    // (`u64::MAX` preserves today's re-announce-everything
+                    // behavior); CommandExport moved to the accept-captured
+                    // kick_epoch + multi-pass cursor in the branch below. M4
+                    // forks the two legs (provenance) properly.
                     let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(
-                        &sessions, &owner_rgs,
+                        &sessions,
+                        &owner_rgs,
+                        u64::MAX,
                     );
                     for chunk in candidates.chunks(RESYNC_EXPORT_CHUNK) {
                         for (key, decision, metadata, origin) in chunk.iter().cloned() {
@@ -1471,7 +1522,10 @@ pub(crate) fn worker_loop(
                 );
             }
         }
-        if sessions.take_delta_loss() {
+        // #9856: defer while a CommandExport window is open — the export
+        // slice owns this pass's drain/emit budget, and the short-circuit
+        // leaves the latch armed so the resync runs once it completes.
+        if worker_export.is_none() && sessions.take_delta_loss() {
             // #2442 loss-of-sync resync. If `push_delta` dropped any delta
             // since the last drain, the in-worker session-delta ring
             // overflowed and the downstream session-sync consumer missed
@@ -1543,22 +1597,156 @@ pub(crate) fn worker_loop(
                 .counter_query_seq
                 .store(answer.sequence, Ordering::Release);
         }
-        if !exported_sequences.is_empty() {
-            // #2653 single-shot `ExportOwnerRGSessions` command path. The
-            // command handler (`handle_export_owner_rg_sessions`) no longer
-            // emits the open deltas itself — it only records the requested
-            // owner RGs in `export_owner_rgs`. We perform the SAME chunked
-            // drain-as-you-export here (where the binding + flush machinery
-            // lives), so a worker owning more sessions than the 4096-slot ring
-            // ships the COMPLETE bulk snapshot to the HA peer without dropping
-            // sessions 4097..N. Drain any pre-export backlog first so the ring
-            // starts empty, then export, then drain the final chunk's tail.
+        // #9856 M2c: multi-pass resumable CommandExport. New commands adopt
+        // (overwrite: single-window invariant — concurrent kicks never reach
+        // here, coordinator BUSY); an in-progress window resumes. Every active
+        // pass drains first so the ring starts empty, then runs ONE budgeted
+        // slice: direct conversion into the worker's export buffer (the
+        // control leg) + paced ring+flush echo (today's exact echo
+        // bytes/RTFLOW/fallback, preserved until #9630 keys suppression on
+        // CommandExport provenance). Backpressure (Full), emit cap, slice
+        // budget, or deadline pauses WITHOUT advancing past the failed slot;
+        // completion acks and clears.
+        if !exported_sequences.is_empty() || worker_export.is_some() {
+            // Adopt: a timeout-then-rekick overwrites with purge-foreign (a
+            // superseded window's leftovers must not poison the new one).
+            if !exported_sequences.is_empty() {
+                if let Some(token) = exported_sequences.iter().copied().max() {
+                    // M2c: the window token IS the kicked command sequence
+                    // (M3 replaces this with the opaque continuation token).
+                    export_buffer.purge_foreign(token);
+                    worker_export = Some(WorkerExportState {
+                        cursor: 0,
+                        kick_epoch: export_kick_epoch.unwrap_or(u64::MAX),
+                        owner_rgs: export_owner_rgs.clone(),
+                        sequences: exported_sequences.clone(),
+                        token,
+                    });
+                }
+            }
+            // Drain-first ALWAYS: the ring starts empty before echo emits.
             drain_and_flush_all!();
-            chunked_drain_as_you_export!(export_owner_rgs);
-            drain_and_flush_all!();
-            // Ack only after the complete export has drained to the peer.
-            if let Some(sequence) = exported_sequences.iter().copied().max() {
-                session_export_ack.store(sequence, Ordering::Release);
+            let mut export_done = false;
+            if let Some(state) = worker_export.as_mut() {
+                use crate::session::ExportWalkOutcome::{Complete, ResumeAt};
+                let old_cursor = state.cursor;
+                let token = state.token;
+                let kick = state.kick_epoch;
+                // Ident: the first binding's, else synthesized (mirrors the
+                // flush macro's no-binding arm — binding-less workers export
+                // too).
+                let export_ident = match bindings.first() {
+                    Some(binding) => binding.identity(),
+                    None => BindingIdentity {
+                        slot: 0,
+                        queue_id: 0,
+                        worker_id,
+                        interface: Arc::<str>::from(""),
+                        ifindex: -1,
+                    },
+                };
+                let zone_names = &forwarding.zone_id_to_name;
+                let slice_start_ns = monotonic_nanos();
+                let mut emitted: usize = 0;
+                export_echo_scratch.clear();
+                let tombstone_drops = sessions.take_tombstone_drops_for_export();
+                if tombstone_drops != 0 {
+                    export_buffer.note_export_tombstone_drops(tombstone_drops);
+                }
+                let tombstones_complete = sessions.take_tombstones_for_export(
+                    kick,
+                    &state.owner_rgs,
+                    |tombstone| {
+                        let info = crate::afxdp::export_close_direct(
+                            &export_ident,
+                            zone_names,
+                            tombstone,
+                        );
+                        export_buffer.push_export_tombstone(token, info).is_ok()
+                    },
+                );
+                // A full export buffer leaves the tombstone queued and
+                // pauses the cursor. Do not re-walk completed open slots
+                // until the close repair has been admitted.
+                let outcome = if tombstones_complete {
+                    sessions.iter_export_budgeted(
+                    state.cursor,
+                    EXPORT_SLICE_BUDGET,
+                    kick,
+                    &state.owner_rgs,
+                    |key, decision, metadata, origin| {
+                        // Emit cap FIRST: never exceed the slice, even once.
+                        if emitted >= EXPORT_SLICE_EMITS {
+                            return false;
+                        }
+                        // Slice deadline, sampled every 64 emits (vdso-cheap).
+                        if emitted > 0
+                            && emitted & 63 == 0
+                            && monotonic_nanos().saturating_sub(slice_start_ns)
+                                > EXPORT_SLICE_DEADLINE_NS
+                        {
+                            return false;
+                        }
+                        let Some(info) = crate::afxdp::export_open_direct(
+                            &sessions,
+                            &export_ident,
+                            zone_names,
+                            key.clone(),
+                            decision,
+                            metadata.clone(),
+                            origin,
+                            crate::session::ExportProvenance::CommandExport(token),
+                        ) else {
+                            // Reverse (unreachable: the walk predicate skips
+                            // them) — skip, never pause (pausing would
+                            // livelock on one slot forever).
+                            return true;
+                        };
+                        // Full: pause, retry this slot next pass — never a drop.
+                        if export_buffer.push_export_open(token, info).is_err() {
+                            return false;
+                        }
+                        emitted += 1;
+                        export_echo_scratch.push((key.clone(), decision, metadata.clone(), origin));
+                        true
+                    },
+                    )
+                } else {
+                    ResumeAt(state.cursor)
+                };
+                // Echo leg: the SAME visited opens through today's ring+flush
+                // path (bytes/RTFLOW/fallback identical) — #9630 owns
+                // suppression, keyed on CommandExport provenance.
+                for (key, decision, metadata, origin) in export_echo_scratch.drain(..) {
+                    sessions.emit_open_delta_with_provenance(
+                        key,
+                        decision,
+                        metadata,
+                        origin,
+                        true,
+                        crate::session::ExportProvenance::CommandExport(token),
+                    );
+                }
+                drain_and_flush_all!();
+                match outcome {
+                    Complete => {
+                        // Ack only after the complete export has shipped.
+                        if let Some(sequence) = state.sequences.iter().copied().max() {
+                            session_export_ack.store(sequence, Ordering::Release);
+                        }
+                        export_done = true;
+                        did_work = true;
+                    }
+                    ResumeAt(cursor) => {
+                        if emitted > 0 || cursor != old_cursor {
+                            did_work = true;
+                        }
+                        state.cursor = cursor;
+                    }
+                }
+            }
+            if export_done {
+                worker_export = None;
             }
         } else if sessions.has_pending_deltas() {
             let deltas = sessions.drain_deltas(256);
@@ -1572,6 +1760,14 @@ pub(crate) fn worker_loop(
             );
             // #2669: flush unconditionally — see flush_drained_session_deltas!.
             flush_drained_session_deltas!(&deltas);
+        }
+        // #9856: tombstones are useful only while an export window is active.
+        // Drop idle removals every tick so terminal-session churn cannot retain
+        // cloned metadata until an unrelated future export. A fresh command
+        // clears once at acceptance (the command handler), while a completed
+        // window clears here after its final harvest.
+        if worker_export.is_none() {
+            sessions.discard_tombstones_for_export();
         }
         // Debug: periodic summary report
         {
@@ -2229,6 +2425,9 @@ mod flow_cache_invalidation_tests {
             decision: reap_decision(snat_port),
             metadata: reap_metadata(),
             origin: SessionOrigin::ForwardFlow,
+            session_id: 0,
+            close_class: 0,
+            install_epoch: 0,
         }
     }
 
@@ -2843,8 +3042,11 @@ mod gc_reap_source_nat_release_tests_6901 {
                 src_mac: Some([6, 7, 8, 9, 10, 11]),
                 tx_vlan_id: 0,
             }, nat: nat_for(pool_addr, snat_port), install_table_domain: 0, install_table_check: 0 },
-            metadata: metadata(),
             origin: SessionOrigin::ForwardFlow,
+            session_id: 0,
+            close_class: 0,
+            install_epoch: 0,
+            metadata: metadata(),
         }
     }
 
@@ -3042,6 +3244,9 @@ mod gc_reap_nat64_release_tests_7740 {
                 tx_vlan_id: 0,
             }, nat, install_table_domain: 0, install_table_check: 0 },
             metadata: metadata(),
+            session_id: 0,
+            close_class: 0,
+            install_epoch: 0,
             origin: SessionOrigin::ForwardFlow,
         }
     }

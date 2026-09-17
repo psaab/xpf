@@ -496,6 +496,12 @@ type ControlResponse struct {
 	// supports paging; ExportOwnerRGSessionsPaged handles that by asking for
 	// the unbounded set on the first page when it has no evidence either way.
 	SessionExportMore bool `json:"session_export_more,omitempty"`
+	// #9856: v2 export completeness metadata. The helper emits these on
+	// every owner-RG export page; a nonzero dropped count is never
+	// publishable by the authoritative FullResync caller.
+	SessionExportDropped     uint64 `json:"session_export_dropped,omitempty"`
+	SessionExportIncarnation uint64 `json:"session_export_incarnation,omitempty"`
+	SessionExportSeq         uint64 `json:"session_export_seq,omitempty"`
 	// IdleLeases is the export_idle_leases result (#8121).
 	IdleLeases []IdleLeaseWire `json:"idle_leases,omitempty"`
 

@@ -3,6 +3,7 @@ package userspace
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // #9344: the owner-RG session export had no terminating bound.
@@ -14,23 +15,17 @@ import (
 // truncation, which `doBulkSync` turns into a failed cold prime — permanently,
 // on every attempt, on a busy cluster.
 //
-// Why "raise the cap" is not the fix. A worst-case `SessionDeltaInfo` is 1424
-// bytes of JSON (every string field a full-width IPv6 literal, every numeric at
-// its maximum), and the theoretical maximum answer is
-// `workers * DEFAULT_MAX_SESSIONS(131072) * 1424`:
+// Why "raise the cap" is not the fix. A worst-case `SessionDeltaInfo` measures
+// 1605 bytes of JSON in the current wire schema (every string field a full-width
+// IPv6 literal, every numeric at its maximum), and the theoretical maximum
+// answer is `workers * DEFAULT_MAX_SESSIONS(131072) * 1605`. That is roughly
+// 201 MiB per worker before response framing, so even one worker can exceed the
+// 64 MiB response cap; sizing from a helper-supplied worker count would still
+// make the allocation bound untrusted.
 //
-//	workers   theoretical max     vs 64 MiB cap   cap crossed at
-//	      1       178 MiB              2.8x          47,127 sessions/worker
-//	      4       712 MiB               11x          11,781
-//	      6      1068 MiB               16x           7,854   <- loss cluster
-//	      8      1424 MiB               22x           5,890
-//	     16      2848 MiB               44x           2,945
-//
-// That is not a number, it is a number PER BOX, and the only source for the
-// worker count is `ProcessStatus.Workers` — reported by the helper. Sizing an
-// allocation bound from a value the bounded party supplies is not a bound, and
-// any fixed constant large enough for a 16-worker box (>= 2.8 GiB) reopens the
-// unbounded-allocation case #9003 closed.
+// That is not a number, it is a number PER BOX, and the worker count is
+// supplied by the helper. A fixed response cap therefore cannot safely become
+// an allocation bound by multiplying it by that untrusted count.
 //
 // So the export is PAGED. The pieces were already there: the helper's
 // `drain_session_deltas_fair` computes the "there is more" bit and the owner-RG
@@ -38,130 +33,219 @@ import (
 // drain cursor across batches.
 
 const (
-	// MinProtocolOwnerRGExportPaging is the ProcessStatus paging-contract
-	// version at which a helper honours SessionExportRequest.Continuation and
-	// reports ControlResponse.SessionExportMore.
-	MinProtocolOwnerRGExportPaging = 1
+	// MinProtocolOwnerRGExportPaging is the v2 fail-closed owner-RG
+	// export contract. v1 helpers silently truncate at Max and are refused.
+	MinProtocolOwnerRGExportPaging = 2
 
 	// ownerRGExportPageDeltas is the per-page cap.
-	//
-	// Derived from the response cap, not chosen: a worst-case delta is 1424
-	// bytes of JSON, so 8192 deltas is 11.1 MiB against MaxControlResponseBytes
-	// (64 MiB) — a 5.7x margin that covers the rest of the response (the status
-	// block, which is the only other large member) and JSON framing without
-	// needing either side to agree on an exact per-delta size.
-	//
-	// It is deliberately far below the 47,127 deltas that would exactly fill
-	// the cap at worst case. A page that is merely correct at worst case is a
-	// page that fails the first time the worst case is underestimated, and the
-	// cost of a smaller page is one extra round trip on a socket that is
-	// already serialized.
 	ownerRGExportPageDeltas = 8192
 
-	// maxOwnerRGExportPages bounds the paging loop.
-	//
-	// A runaway loop is the same defect this file exists to fix wearing a
-	// different hat: "the answer is unbounded" is no better when the
-	// unboundedness is a page count instead of a byte count. 256 pages x 8192
-	// deltas = 2,097,152, which is one COMPLETELY full session table on a
-	// 16-worker box (16 x DEFAULT_MAX_SESSIONS). A window larger than every
-	// session the largest shipped box can hold is not a window, it is a helper
-	// that is not terminating, and the caller fails CLOSED on it — doBulkSync
-	// frames no window rather than a partial one.
-	maxOwnerRGExportPages = 256
+	// ownerRGExportEstimatedDeltaBytes conservatively mirrors the measured
+	// worst-case JSON sizing (the test reflects the current wire schema). The
+	// daemon's snapshot API still receives one complete slice, so cap that
+	// retained slice rather than retaining an unbounded number of pages.
+	ownerRGExportEstimatedDeltaBytes = 1605
+	ownerRGExportMaxAccumulatorBytes = 256 * 1024 * 1024
+	// maxOwnerRGExportDataPages is the structural data-page bound. Each
+	// kick-visible session can produce one open plus one terminal tombstone
+	// while the window drains: 16 workers * DEFAULT_MAX_SESSIONS * 2 /
+	// 8192 deltas = 512 pages.
+	maxOwnerRGExportDataPages = 512
+	// One additional request is reserved for the terminal probe when the
+	// final data page filled exactly while the worker ACK still lagged.
+	maxOwnerRGExportPages = maxOwnerRGExportDataPages + 1
+	// maxOwnerRGExportAccumulatorPages is the conservative retained-slice
+	// budget expressed in full pages; the collector checks each page before
+	// appending and fails closed at this boundary.
+	maxOwnerRGExportAccumulatorPages = ownerRGExportMaxAccumulatorBytes /
+		(ownerRGExportPageDeltas * ownerRGExportEstimatedDeltaBytes)
 )
 
+// ownerRGExportLease serializes paged windows without holding a Manager's
+// general mutex across every control round trip.
+var ownerRGExportLease sync.Mutex
+
 // ErrOwnerRGExportUnterminated is returned when the helper keeps reporting more
-// pages past maxOwnerRGExportPages. It is a FAILURE, never a partial answer:
-// #5085's receiver reconciles authoritatively against the delimited window and
-// deletes every eligible session missing from it, so handing back the pages we
-// did collect would delete the rest on the peer.
+// pages past maxOwnerRGExportPages.
 var ErrOwnerRGExportUnterminated = errors.New("owner-RG session export did not terminate")
+
+// ErrOwnerRGExportIncomplete is returned when a v2 helper reports a dropped
+// delta or an invalid/restarted export token. It is a failure, never a partial
+// answer, because the authoritative receiver deletes sessions missing from a
+// supposedly complete window.
+var ErrOwnerRGExportIncomplete = errors.New("owner-RG session export incomplete")
 
 // ExportOwnerRGSessionsPaged collects ONE owner-RG export window, paging when
 // the helper supports it.
 //
-// The manager lock is held across every page ON PURPOSE. The per-binding delta
-// buffers this export drains are the SAME buffers the incremental
-// `drain_session_deltas` verb drains, so an interleaved incremental drain
-// between two pages would steal part of the window — and a window missing
-// sessions is exactly what makes the peer delete live ones. Serializing the
-// whole sequence is what makes the pages add up to the single-shot answer;
-// holding the lock for one round trip and releasing it between pages would not.
+// The dedicated per-worker export buffers are distinct from the incremental
+// buffers, so the export lease can release the Manager mutex between pages.
+// ownerRGExportLease still serializes windows: a second export must not start
+// while the first one is carrying a continuation token.
 func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, ProcessStatus, error) {
+	ownerRGExportLease.Lock()
+	defer ownerRGExportLease.Unlock()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.proc == nil {
-		return nil, ProcessStatus{}, errors.New("userspace dataplane helper not running")
+		status := m.lastStatus
+		m.mu.Unlock()
+		return nil, status, errors.New("userspace dataplane helper not running")
 	}
-
-	// A helper that predates the paging contract honours Max by TRUNCATING and
-	// reports no more-bit, so paging it would silently lose the remainder. Ask
-	// it for the unbounded set instead: identical to the pre-#9344 caller,
-	// including the 64 MiB failure, which #9322 made diagnosable rather than
-	// mistakable for a helper rejection.
-	if m.lastStatus.SessionExportPagingProtocolVersion < MinProtocolOwnerRGExportPaging {
-		return m.exportOwnerRGSessionsUnpagedLocked(rgIDs)
+	status := m.lastStatus
+	protocol := status.SessionExportPagingProtocolVersion
+	controlSocket := m.cfg.ControlSocket
+	exportProcGen := m.procGen
+	exportConfigGen := m.generation
+	m.mu.Unlock()
+	if len(rgIDs) == 0 {
+		return nil, status, nil
+	}
+	if protocol < MinProtocolOwnerRGExportPaging {
+		return nil, status, fmt.Errorf(
+			"%w: helper advertises paging protocol %d, want %d",
+			ErrOwnerRGExportIncomplete,
+			protocol,
+			MinProtocolOwnerRGExportPaging,
+		)
 	}
 
 	var all []SessionDeltaInfo
-	var status ProcessStatus
-	for page := 0; page < maxOwnerRGExportPages; page++ {
-		resp, err := m.requestDetailedLocked(ControlRequest{
-			Type: "export_owner_rg_sessions",
-			SessionExport: &SessionExportRequest{
-				OwnerRGs: rgIDs,
-				Max:      ownerRGExportPageDeltas,
-				// Every page after the first continues the window the first
-				// page opened. A non-continuation would run phase 1 again and
-				// stack a second full set from a different instant onto the
-				// remainder of this one.
-				Continuation: page > 0,
-			},
-		})
+	var estimatedBytes int
+	expectedStatusIncarnation := status.SessionExportIncarnation
+	var incarnation, sequence uint64
+	for page := range maxOwnerRGExportPages {
+		probe := page == maxOwnerRGExportDataPages
+		req := SessionExportRequest{
+			OwnerRGs:        rgIDs,
+			Max:             ownerRGExportPageDeltas,
+			ProtocolVersion: MinProtocolOwnerRGExportPaging,
+			Continuation:    page > 0,
+		}
+		if page > 0 {
+			req.ContinuationIncarnation = incarnation
+			req.ContinuationSequence = sequence
+		}
+		m.mu.Lock()
+		if m.proc == nil ||
+			m.procGen != exportProcGen ||
+			m.generation != exportConfigGen ||
+			m.cfg.ControlSocket != controlSocket {
+			status = m.lastStatus
+			m.mu.Unlock()
+			return nil, status, fmt.Errorf(
+				"%w: helper/config generation changed during export window",
+				ErrOwnerRGExportIncomplete,
+			)
+		}
+		m.mu.Unlock()
+		resp, err := m.requestDetailedAtSocket(ControlRequest{
+			Type:          "export_owner_rg_sessions",
+			SessionExport: &req,
+		}, controlSocket)
+		m.mu.Lock()
+		if m.proc == nil ||
+			m.procGen != exportProcGen ||
+			m.generation != exportConfigGen ||
+			m.cfg.ControlSocket != controlSocket {
+			status = m.lastStatus
+			m.mu.Unlock()
+			return nil, status, fmt.Errorf(
+				"%w: helper/config generation changed during export window",
+				ErrOwnerRGExportIncomplete,
+			)
+		}
+		var statusErr error
+		if err == nil && resp.Status != nil {
+			status = *resp.Status
+			statusErr = m.applyHelperStatusLocked(&status)
+		}
+		m.mu.Unlock()
 		if err != nil {
 			return nil, ProcessStatus{}, err
 		}
-		all = append(all, resp.SessionDeltas...)
-		if resp.Status != nil {
-			status = *resp.Status
-			if err := m.applyHelperStatusLocked(&status); err != nil {
-				// #9699: one complete window or an error, never both. The
-				// pages collected so far are a partial window, and #5085's
-				// receiver deletes every session missing from a window.
-				return nil, status, err
-			}
+		if statusErr != nil {
+			return nil, status, statusErr
 		}
+		if resp.SessionExportDropped != 0 {
+			return nil, status, fmt.Errorf(
+				"%w: helper reported %d dropped delta(s) for seq=%d",
+				ErrOwnerRGExportIncomplete,
+				resp.SessionExportDropped,
+				resp.SessionExportSeq,
+			)
+		}
+		if resp.SessionExportIncarnation == 0 || resp.SessionExportSeq == 0 {
+			return nil, status, fmt.Errorf(
+				"%w: helper omitted nonzero incarnation/sequence on page %d",
+				ErrOwnerRGExportIncomplete,
+				page+1,
+			)
+		}
+		if page == 0 {
+			incarnation = resp.SessionExportIncarnation
+			sequence = resp.SessionExportSeq
+			if expectedStatusIncarnation != 0 &&
+				incarnation != expectedStatusIncarnation {
+				return nil, status, fmt.Errorf(
+					"%w: helper incarnation %d differs from status %d",
+					ErrOwnerRGExportIncomplete,
+					incarnation,
+					expectedStatusIncarnation,
+				)
+			}
+		} else if resp.SessionExportIncarnation != incarnation || resp.SessionExportSeq != sequence {
+			return nil, status, fmt.Errorf(
+				"%w: continuation token changed from (%d,%d) to (%d,%d)",
+				ErrOwnerRGExportIncomplete,
+				incarnation,
+				sequence,
+				resp.SessionExportIncarnation,
+				resp.SessionExportSeq,
+			)
+		}
+		if !probe && len(resp.SessionDeltas) > ownerRGExportPageDeltas {
+			return nil, status, fmt.Errorf(
+				"%w: helper returned %d deltas on page %d, max %d",
+				ErrOwnerRGExportIncomplete,
+				len(resp.SessionDeltas),
+				page+1,
+				ownerRGExportPageDeltas,
+			)
+		}
+		if probe {
+			// The probe is not another data page: it only gives a worker whose
+			// final push preceded its ACK a chance to publish more=false.
+			if len(resp.SessionDeltas) != 0 || resp.SessionExportMore {
+				return nil, status, fmt.Errorf(
+					"%w: terminal probe returned %d delta(s), more=%t",
+					ErrOwnerRGExportUnterminated,
+					len(resp.SessionDeltas),
+					resp.SessionExportMore,
+				)
+			}
+			return all, status, nil
+		}
+		pageBytes := len(resp.SessionDeltas) * ownerRGExportEstimatedDeltaBytes
+		if pageBytes > ownerRGExportMaxAccumulatorBytes ||
+			estimatedBytes > ownerRGExportMaxAccumulatorBytes-pageBytes {
+			return nil, status, fmt.Errorf(
+				"%w: export accumulator exceeds %d-byte bound",
+				ErrOwnerRGExportIncomplete,
+				ownerRGExportMaxAccumulatorBytes,
+			)
+		}
+		estimatedBytes += pageBytes
+		all = append(all, resp.SessionDeltas...)
 		if !resp.SessionExportMore {
 			return all, status, nil
 		}
 	}
-	return nil, status, fmt.Errorf("%w: still reporting more after %d pages of %d deltas (%d collected)",
-		ErrOwnerRGExportUnterminated, maxOwnerRGExportPages, ownerRGExportPageDeltas, len(all))
-}
-
-// exportOwnerRGSessionsUnpagedLocked is the pre-#9344 single request. It is the
-// fallback for a helper with no paging contract, and it is byte-identical to
-// what ExportOwnerRGSessions has always sent.
-func (m *Manager) exportOwnerRGSessionsUnpagedLocked(rgIDs []int) ([]SessionDeltaInfo, ProcessStatus, error) {
-	resp, err := m.requestDetailedLocked(ControlRequest{
-		Type: "export_owner_rg_sessions",
-		SessionExport: &SessionExportRequest{
-			OwnerRGs: rgIDs,
-			Max:      0,
-		},
-	})
-	if err != nil {
-		return nil, ProcessStatus{}, err
-	}
-	var status ProcessStatus
-	if resp.Status != nil {
-		status = *resp.Status
-		if err := m.applyHelperStatusLocked(&status); err != nil {
-			// #9699: never deltas together with an error (see the paged loop).
-			return nil, status, err
-		}
-	}
-	return resp.SessionDeltas, status, nil
+	return nil, status, fmt.Errorf(
+		"%w: still reporting more after %d data pages and a terminal probe of %d deltas (%d collected)",
+		ErrOwnerRGExportUnterminated,
+		maxOwnerRGExportDataPages,
+		ownerRGExportPageDeltas,
+		len(all),
+	)
 }

@@ -157,7 +157,15 @@ func controlRoundtripDeadline(bodyLen int) time.Duration {
 }
 
 func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, error) {
-	if m.cfg.ControlSocket == "" {
+	return m.requestDetailedAtSocket(req, m.cfg.ControlSocket)
+}
+
+// requestDetailedAtSocket performs one bounded control-socket round trip using
+// the caller's immutable socket snapshot. It deliberately does not read m.cfg,
+// so paged exports can release m.mu while waiting on a helper response and
+// revalidate the helper/config generation before applying the response.
+func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket string) (ControlResponse, error) {
+	if controlSocket == "" {
 		return ControlResponse{}, &knownUnsentError{msg: errControlSocketNotConfigured.Error(), cause: errControlSocketNotConfigured}
 	}
 	// Pre-flight size check (#2744). Serialize the request once and reject
@@ -191,7 +199,7 @@ func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, er
 	// path check is not: the kernel answers for the socket THIS connection is
 	// attached to, so swapping the path between a stat and the connect defeats
 	// nothing.
-	conn, err := dialTrustedHelperSocket("control socket", m.cfg.ControlSocket, 2*time.Second)
+	conn, err := dialTrustedHelperSocket("control socket", controlSocket, 2*time.Second)
 	if err != nil {
 		return ControlResponse{}, err
 	}

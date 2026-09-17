@@ -28,25 +28,14 @@ type SessionDeltaDrainRequest struct {
 type SessionExportRequest struct {
 	OwnerRGs []int  `json:"owner_rgs,omitempty"`
 	Max      uint32 `json:"max,omitempty"`
-	// Continuation asks the helper to drain the REMAINDER of the window an
-	// earlier capped call already produced, instead of opening a new one
-	// (#9344).
-	//
-	// It exists because Max alone does not express paging. The export is
-	// two-phase: phase 1 kicks every worker to PRODUCE deltas for its live
-	// sessions, phase 2 drains the per-binding buffers. A capped phase-2 drain
-	// removes the first Max and leaves the rest buffered, so an ordinary second
-	// call runs phase 1 AGAIN and stacks another full set on the remainder —
-	// successive calls would return duplicates from two different instants
-	// rather than successive pages of one window. #5085's receiver reconciles
-	// authoritatively against the delimited window and DELETES every eligible
-	// session missing from it, so a window assembled from two instants is
-	// exactly the harm userspaceBulkSnapshotWithConfig warns about.
-	//
-	// A continuation kicks nothing, consumes no export sequence and waits for
-	// no acks, so every page of a window comes from the one phase 1 that
-	// opened it.
+	// #9856: request-side v2 marker required on every page.
+	ProtocolVersion int `json:"session_export_paging_protocol_version,omitempty"`
+	// Continuation asks the helper to drain the remainder of the tokenized
+	// window opened by page 1.
 	Continuation bool `json:"continuation,omitempty"`
+	// #9856: opaque helper-incarnation and sequence token echoed by page 1.
+	ContinuationIncarnation uint64 `json:"session_export_incarnation,omitempty"`
+	ContinuationSequence    uint64 `json:"session_export_seq,omitempty"`
 }
 
 type SessionSyncRequest struct {

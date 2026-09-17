@@ -26,6 +26,9 @@ type ProcessStatus struct {
 	// probe that would separate them is unsafe on the old helper (it ignores
 	// the unknown `continuation` field and runs a second full export).
 	SessionExportPagingProtocolVersion int `json:"session_export_paging_protocol_version,omitempty"`
+	// #9856: nonzero per-helper token namespace. A restart must change
+	// this value before a sequence can be reused.
+	SessionExportIncarnation uint64 `json:"session_export_incarnation,omitempty"`
 	// SessionDeltaSchemaFingerprint is the helper's DERIVED session-open delta
 	// schema identity (#7194). 0 == not advertised (helper predates the field),
 	// which CompareSessionDeltaSchema treats as unknown-and-deferred rather

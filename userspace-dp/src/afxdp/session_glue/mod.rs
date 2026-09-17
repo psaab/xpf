@@ -439,6 +439,12 @@ pub(super) struct WorkerCommandResults {
     /// (collect candidates -> emit in < cap chunks -> drain between chunks),
     /// so the complete snapshot ships without overflowing the ring.
     pub export_owner_rgs: Vec<i32>,
+    /// #9856: kick epoch for this tick's export, captured at the FIRST
+    /// Export-command accept (`SessionTable::current_epoch`). None when no
+    /// Export command was accepted. NOTE (rebase duty): Eng9720's
+    /// `transition_debt_pending` lands LAST post-#10141-merge; this field
+    /// moves after it with the two guard strings updated in the same commit.
+    pub export_kick_epoch: Option<u64>,
     pub shaped_tx_requests: Vec<TxRequest>,
     /// #941 Work item C: set when at least one
     /// `WorkerCommand::VacateAllSharedExactSlots` was processed.
@@ -482,6 +488,7 @@ impl WorkerCommandResults {
             exported_sequences: Vec::new(),
             session_counter_answers: Vec::new(),
             export_owner_rgs: Vec::new(),
+            export_kick_epoch: None,
             shaped_tx_requests: Vec::new(),
             vacate_all_shared_exact_slots: false,
             commands_backlogged: false,
@@ -940,8 +947,14 @@ fn delete_terminal_half(
     sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false);
 }
 
+/// #9856: slice size for the collecting export-candidate walk below. The
+/// worker loop (M2c) drives the cursor directly across passes; this Vec
+/// path remains for tests and transitional callers.
+const FORWARD_EXPORT_CANDIDATE_SLICE: usize = 2048;
+
 /// #2442: the filter half of `export_forward_sessions_for_owner_rgs`. Walks the
-/// owner-RG index and returns the export candidates (forward, locally-owned,
+/// table via the #9856 budgeted export cursor (epoch ≤ kick + owner-RG set)
+/// and returns the export candidates (forward, locally-owned,
 /// forwarding-disposition sessions) WITHOUT pushing any delta. Both callers
 /// re-emit through the SAME `chunked_drain_as_you_export!` macro in
 /// `worker::loop_body` (#2653): the `ExportOwnerRGSessions` command path (now
@@ -953,32 +966,31 @@ fn delete_terminal_half(
 pub(crate) fn forward_export_candidates_for_owner_rgs(
     sessions: &SessionTable,
     owner_rgs: &[i32],
+    kick_epoch: u64,
 ) -> Vec<(SessionKey, SessionDecision, SessionMetadata, SessionOrigin)> {
     if owner_rgs.is_empty() {
         return Vec::new();
     }
+    // #9856: collect via the budgeted export cursor (epoch ≤ kick + owner-RG
+    // set + candidate gates) instead of the owner-RG index walk. Same set
+    // for kick_epoch = u64::MAX; a real kick epoch excludes post-kick
+    // installs and reused-key new incarnations by construction.
     let mut export = Vec::new();
-    for key in sessions.owner_rg_session_keys(owner_rgs) {
-        let Some((decision, metadata, origin)) = sessions.entry_with_origin(&key) else {
-            continue;
-        };
-        // #10038 item 5: TUN-origin never exports (per-entry predicate —
-        // node-local provenance must not cross HA in either direction).
-        if metadata.is_reverse
-            || origin.is_peer_synced()
-            || origin.is_transient_local_seed()
-            || origin.is_local_tun_origin()
-            || metadata.fabric_ingress
-        {
-            continue;
-        }
-        if !matches!(
-            decision.resolution.disposition,
-            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+    let mut cursor = 0;
+    loop {
+        match sessions.iter_export_budgeted(
+            cursor,
+            FORWARD_EXPORT_CANDIDATE_SLICE,
+            kick_epoch,
+            owner_rgs,
+            |key, decision, metadata, origin| {
+                export.push((key.clone(), decision, metadata.clone(), origin));
+                true
+            },
         ) {
-            continue;
+            crate::session::ExportWalkOutcome::ResumeAt(next) => cursor = next,
+            crate::session::ExportWalkOutcome::Complete => break,
         }
-        export.push((key, decision, metadata, origin));
     }
     export
 }
@@ -1002,7 +1014,7 @@ pub(crate) fn export_forward_sessions_for_owner_rgs(
     owner_rgs: &[i32],
 ) {
     for (key, decision, metadata, origin) in
-        forward_export_candidates_for_owner_rgs(sessions, owner_rgs)
+        forward_export_candidates_for_owner_rgs(sessions, owner_rgs, u64::MAX)
     {
         sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
     }
@@ -1050,6 +1062,9 @@ pub(super) fn apply_worker_commands(
     let mut exported_sequences = Vec::new();
     let mut session_counter_answers: Vec<SessionCounterAnswer> = Vec::new();
     let mut export_owner_rgs: Vec<i32> = Vec::new();
+    // #9856: first-accept-wins kick epoch for this tick's export (None when
+    // no Export command accepted). Kept out of the debt-step/gate regions.
+    let mut export_kick_epoch: Option<u64> = None;
     let mut shaped_tx_requests = Vec::new();
     let mut vacate_all_shared_exact_slots = false;
     // Hot path: try_lock avoids blocking on the mutex when another thread
@@ -1134,8 +1149,10 @@ pub(super) fn apply_worker_commands(
                 owner_rgs,
             } => {
                 commands::handle_export_owner_rg_sessions(
+                    sessions,
                     &mut exported_sequences,
                     &mut export_owner_rgs,
+                    &mut export_kick_epoch,
                     sequence,
                     owner_rgs,
                 );
@@ -1340,6 +1357,7 @@ pub(super) fn apply_worker_commands(
         exported_sequences,
         session_counter_answers,
         export_owner_rgs,
+        export_kick_epoch,
         shaped_tx_requests,
         vacate_all_shared_exact_slots,
         commands_backlogged,

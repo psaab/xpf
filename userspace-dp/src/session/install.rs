@@ -149,7 +149,7 @@ impl SessionTable {
         // proceed to insert the new record — the guard already
         // restored the prior mapping; the subsequent
         // self.key_to_handle.insert(...) overwrites it cleanly.
-        let _previous = self.remove_entry(&key);
+        let _previous = self.remove_entry(&key, RemovalKind::Replace);
         let epoch = self.next_epoch();
         // #4915: allocate the STABLE, node-unique session id for this fresh
         // install. Threaded onto the entry (write-once) and the Open delta so a
@@ -282,6 +282,7 @@ impl SessionTable {
         // live-synced; forwards still count toward per-IP limits above).
         if counted && !origin.is_peer_synced() && !origin.is_local_tun_origin() {
             self.push_delta(SessionDelta {
+                provenance: crate::session::ExportProvenance::Incremental,
                 kind: SessionDeltaKind::Open,
                 key,
                 decision,
@@ -430,7 +431,7 @@ impl SessionTable {
             decision.install_table_domain = domain;
             decision.install_table_check = check;
         }
-        let _previous = self.remove_entry(&key);
+        let _previous = self.remove_entry(&key, RemovalKind::Replace);
         let epoch = self.next_epoch();
         // #5212 (completes the #4915 follow-up): ADOPT the originating node's
         // session id when it rides the HA session-sync wire, so a session that
@@ -633,16 +634,40 @@ impl SessionTable {
         true
     }
 
-    pub fn emit_open_delta_with_origin(
-        &mut self,
+    /// #9856: build (but do not push) the Open delta the owner-RG export
+    /// emits for one entry. Single construction site shared by the ring path
+    /// (`emit_open_delta_with_origin`) and the direct-conversion path, so the
+    /// two legs cannot describe one session differently (byte-equivalence by
+    /// construction). Returns None for reverse entries (same guard as emit).
+    pub(crate) fn open_export_delta(
+        &self,
         key: SessionKey,
         decision: SessionDecision,
         metadata: SessionMetadata,
         origin: SessionOrigin,
         fabric_redirect_sync: bool,
-    ) {
+    ) -> Option<SessionDelta> {
+        self.open_export_delta_with_provenance(
+            key,
+            decision,
+            metadata,
+            origin,
+            fabric_redirect_sync,
+            ExportProvenance::Incremental,
+        )
+    }
+
+    pub(crate) fn open_export_delta_with_provenance(
+        &self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        fabric_redirect_sync: bool,
+        provenance: ExportProvenance,
+    ) -> Option<SessionDelta> {
         if metadata.is_reverse {
-            return;
+            return None;
         }
         // #5212: this is the owner-RG bulk/cold-sync export path (a live local
         // session re-announced as an Open delta so a freshly-connected or
@@ -659,34 +684,72 @@ impl SessionTable {
         // #9412: the live entry's close class, so this re-export also restores a
         // close-state Update the incremental stream dropped.
         let tcp_close_class = self.close_class_wire_for(&key);
-        self.push_delta(SessionDelta {
-            tcp_close_class,
-            purge_retirement: false,
-            kind: SessionDeltaKind::Open,
+        Some(SessionDelta { provenance, tcp_close_class,
+        purge_retirement: false,
+        kind: SessionDeltaKind::Open,
+        key,
+        decision,
+        metadata,
+        origin,
+        fabric_redirect_sync,
+        // #2465: an explicit Open-delta emit (no entry in hand). The
+        // SESSION_CREATE frame reports no duration, so 0/unknown is fine.
+        created_ns: 0,
+        last_seen_ns: 0,
+        // #2501: an open carries no volume yet.
+        counters: SessionCounters::default(),
+        // #2749: explicit Open-delta emit, no entry in hand.
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        // #5212: the stable id of the exported entry (0 if absent), so the
+        // peer adopts it rather than minting a fresh node-local id.
+        session_id,
+        // #8593: the ONLY producer of bulk-export deltas. Its production
+        // callers are the worker loop's owner-RG exports: the chunked
+        // resync macro (`chunked_drain_as_you_export!`, LossResync) and
+        // the #9856 multi-pass cursor slice (CommandExport); the other
+        // caller is a `#[cfg(test)]` fixture. A drop of one of these
+        // must not arm the loss-of-sync latch that TRIGGERS that export.
+        bulk_resync: true, })
+    }
+
+    pub fn emit_open_delta_with_origin(
+        &mut self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        fabric_redirect_sync: bool,
+    ) {
+        self.emit_open_delta_with_provenance(
             key,
             decision,
             metadata,
             origin,
             fabric_redirect_sync,
-            // #2465: an explicit Open-delta emit (no entry in hand). The
-            // SESSION_CREATE frame reports no duration, so 0/unknown is fine.
-            created_ns: 0,
-            last_seen_ns: 0,
-            // #2501: an open carries no volume yet.
-            counters: SessionCounters::default(),
-            // #2749: explicit Open-delta emit, no entry in hand.
-            observed_tos: 0,
-            observed_tcp_flags: 0,
-            // #5212: the stable id of the exported entry (0 if absent), so the
-            // peer adopts it rather than minting a fresh node-local id.
-            session_id,
-            // #8593: the ONLY producer of bulk-export deltas. Its sole production
-            // caller is the worker loop's chunked owner-RG export
-            // (`chunked_drain_as_you_export!`); the other caller is a
-            // `#[cfg(test)]` fixture. A drop of one of these must not arm the
-            // loss-of-sync latch that TRIGGERS that export.
-            bulk_resync: true,
-        });
+            ExportProvenance::LossResync,
+        );
+    }
+
+    pub fn emit_open_delta_with_provenance(
+        &mut self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        fabric_redirect_sync: bool,
+        provenance: ExportProvenance,
+    ) {
+        if let Some(delta) = self.open_export_delta_with_provenance(
+            key,
+            decision,
+            metadata,
+            origin,
+            fabric_redirect_sync,
+            provenance,
+        ) {
+            self.push_delta(delta);
+        }
     }
 
     pub fn emit_close_delta_with_origin(
@@ -705,39 +768,37 @@ impl SessionTable {
         // caller has typically already removed the entry. Emit 0/unknown so the
         // exporter falls back to the packet-count estimate. The dominant close
         // path (idle/age expiry in session/expire.rs) carries real timestamps.
-        self.push_delta(SessionDelta {
-            kind: SessionDeltaKind::Close,
-            key,
-            decision,
-            metadata,
-            origin,
-            fabric_redirect_sync: false,
-            created_ns: 0,
-            last_seen_ns: 0,
-            // #2501: the entry was already removed by the explicit-close
-            // caller, so its counters are no longer in hand — emit 0 (the
-            // same fallback as the timestamps above). The dominant close
-            // path (idle/age expiry) harvests the real counters.
-            counters: SessionCounters::default(),
-            // #2749: the entry was already removed by the explicit-close
-            // caller, so its observed ToS / TCP flags are no longer in hand —
-            // emit 0 (the dominant idle/age close path harvests the real
-            // values off the expiring entry).
-            observed_tos: 0,
-            observed_tcp_flags: 0,
-            // #4915: the entry was already removed by the explicit-close caller,
-            // so its stable id is no longer in hand — 0 keeps the "unknown"
-            // sentinel. The dominant idle/age close path (session/expire.rs)
-            // carries the real id off the expiring entry.
-            session_id: 0,
-            bulk_resync: false,
-            tcp_close_class: 0,
-            purge_retirement,
-        });
+        self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+        key,
+        decision,
+        metadata,
+        origin,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        // #2501: the entry was already removed by the explicit-close
+        // caller, so its counters are no longer in hand — emit 0 (the
+        // same fallback as the timestamps above). The dominant close
+        // path (idle/age expiry) harvests the real counters.
+        counters: SessionCounters::default(),
+        // #2749: the entry was already removed by the explicit-close
+        // caller, so its observed ToS / TCP flags are no longer in hand —
+        // emit 0 (the dominant idle/age close path harvests the real
+        // values off the expiring entry).
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        // #4915: the entry was already removed by the explicit-close caller,
+        // so its stable id is no longer in hand — 0 keeps the "unknown"
+        // sentinel. The dominant idle/age close path (session/expire.rs)
+        // carries the real id off the expiring entry.
+        session_id: 0,
+        bulk_resync: false,
+        tcp_close_class: 0,
+        purge_retirement, });
     }
 
     pub fn delete(&mut self, key: &SessionKey) {
-        self.remove_entry(key);
+        self.remove_entry(key, RemovalKind::Terminal);
     }
 
     pub fn demote_owner_rg(&mut self, owner_rg_id: i32) -> Vec<crate::session::SessionKey> {

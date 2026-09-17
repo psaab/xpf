@@ -1,4 +1,5 @@
 use super::*;
+use crate::afxdp::binding_state::ExportBufferState;
 
 /// #6242: the complete per-worker runtime, keyed by `worker_id`.
 ///
@@ -34,6 +35,12 @@ pub(in crate::afxdp) struct WorkerRuntimeRecord {
     /// #5289: per-worker last-forwarding-resolution slot; the status thread
     /// picks the newest across all workers.
     pub(in crate::afxdp) last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
+    /// #9856: this worker's dedicated owner-RG export buffer (page-sized FIFO
+    /// of `(token, info)` tuples). Same `Arc` the worker thread produces into
+    /// via its control-channels bundle — shared allocation, dual-homed like
+    /// `handle.session_export_ack`. Read by the HA export fan-out for the
+    /// kick-time per-worker capture.
+    pub(in crate::afxdp) export_buffer: Arc<ExportBufferState>,
 }
 
 impl WorkerRuntimeRecord {
@@ -77,6 +84,7 @@ impl WorkerRuntimeRecord {
             panic: Arc::new(Mutex::new(None)),
             exception_ring: Arc::new(Mutex::new(ExceptionEventRing::new())),
             last_resolution: Arc::new(Mutex::new(None)),
+            export_buffer: Arc::new(ExportBufferState::new()),
         }
     }
 }

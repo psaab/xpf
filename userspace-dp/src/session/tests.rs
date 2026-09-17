@@ -3990,7 +3990,7 @@ fn reference_update_session(
         protocol,
         tcp_flags,
     } = req;
-    let Some(mut entry) = table.remove_entry(key) else {
+    let Some(mut entry) = table.remove_entry(key, RemovalKind::Replace) else {
         return false;
     };
     if !ha_activation {
@@ -4007,7 +4007,7 @@ fn reference_update_session(
     entry.decision = decision;
     entry.metadata = metadata.clone();
     entry.origin = origin;
-    entry.install_epoch = table.next_epoch();
+    // #9856: mirror update_session — install_epoch is write-once per incarnation, no re-stamp.
     entry.last_seen_ns = now_ns;
     // #3046: mirror update_session exactly — set the sticky reset flag FIRST,
     // then select the timeout consulting it (RST→short, FIN→30s), so the
@@ -4047,23 +4047,21 @@ fn reference_update_session(
     if was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse {
         // #9412: production's promote stamps the entry's close class; mirror it.
         let tcp_close_class = table.close_class_wire_for(key);
-        table.push_delta(SessionDelta {
-            kind: SessionDeltaKind::Open,
-            key: key.clone(),
-            decision,
-            metadata,
-            origin,
-            fabric_redirect_sync: false,
-            created_ns,
-            last_seen_ns: now_ns,
-            counters: SessionCounters::default(),
-            observed_tos: 0,
-            observed_tcp_flags: 0,
-            session_id: 0,
-            bulk_resync: false,
-            tcp_close_class,
-            purge_retirement: false,
-        });
+        table.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
+        key: key.clone(),
+        decision,
+        metadata,
+        origin,
+        fabric_redirect_sync: false,
+        created_ns,
+        last_seen_ns: now_ns,
+        counters: SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        tcp_close_class,
+        purge_retirement: false, });
     }
     true
 }
@@ -4520,12 +4518,12 @@ fn reference_refresh_for_ha_transition(
     metadata: SessionMetadata,
     now_ns: u64,
 ) -> bool {
-    let Some(mut entry) = table.remove_entry(key) else {
+    let Some(mut entry) = table.remove_entry(key, RemovalKind::Replace) else {
         return false;
     };
     entry.decision = decision;
     entry.metadata = metadata;
-    entry.install_epoch = table.next_epoch();
+    // #9856: mirror refresh_for_ha_transition — install_epoch is write-once, no re-stamp.
     entry.last_seen_ns = now_ns;
     table.restore_entry(key.clone(), entry);
     table.push_to_wheel(key, now_ns);
@@ -7172,23 +7170,21 @@ fn touch_if_stale_survives_skew_that_starves_global_modulo() {
 /// Build a synthetic Open delta from the shared test fixtures. Used only to
 /// drive `push_delta` to the ring limit without installing real sessions.
 fn open_delta(key: SessionKey) -> SessionDelta {
-    SessionDelta {
-        kind: SessionDeltaKind::Open,
-        key,
-        decision: decision(),
-        metadata: metadata(),
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    }
+    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
+    key,
+    decision: decision(),
+    metadata: metadata(),
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, }
 }
 
 /// (a) Overflowing the ring sets the loss latch and counts the drop.
@@ -7417,7 +7413,7 @@ fn run_chunked_resync(table: &mut SessionTable, chunk: usize) -> usize {
     while !table.drain_deltas(256).is_empty() {}
 
     let owner_rgs = table.all_owner_rg_ids();
-    let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(table, &owner_rgs);
+    let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(table, &owner_rgs, u64::MAX);
     let mut exported = 0usize;
     for c in candidates.chunks(chunk) {
         for (key, decision, metadata, origin) in c.iter().cloned() {
@@ -8750,5 +8746,247 @@ fn session_decision_table_identity_layout_9752() {
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_check),
         96
+    );
+}
+
+/// #9856 cells follow the #9752 layout cell (both appended at EOF)
+/// #9856 STEP-0 (M1): `install_epoch` must be write-once per incarnation. A
+/// traffic refresh via `update_session` mutates in place; it must NOT move the
+/// install epoch, or a pre-kick session touched after the kick is excluded from
+/// its own export. RED on base: `update_session` re-stamps.
+#[test]
+fn install_epoch_survives_update_session_9856() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let before = table.entry_by_key(&key).expect("installed").install_epoch;
+    assert!(table.update_session(SessionUpdate {
+        key: &key,
+        decision: decision(),
+        metadata: metadata(),
+        origin: SessionOrigin::ForwardFlow,
+        now_ns: 2_000,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+    }, false));
+    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
+    assert_eq!(before, after, "#9856 RED: update_session re-stamped install_epoch {before}->{after}; a refreshed pre-kick session would be excluded from its own export");
+}
+
+/// #9856 STEP-0 (M1): same write-once contract for `refresh_for_ha_transition`.
+/// RED on base: it re-stamps.
+#[test]
+fn install_epoch_survives_refresh_for_ha_transition_9856() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let before = table.entry_by_key(&key).expect("installed").install_epoch;
+    assert!(table.refresh_for_ha_transition(&key, decision(), metadata(), 2_000));
+    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
+    assert_eq!(before, after, "#9856 RED: refresh_for_ha_transition re-stamped install_epoch {before}->{after}");
+}
+
+/// #9856 STEP-0 (M1+M2): the export contract "every session that existed at the
+/// kick" needs a refreshed pre-kick session to still satisfy
+/// `install_epoch <= kick_epoch`. This is the cell that would have caught the
+/// re-stamp. RED on base.
+#[test]
+fn refreshed_pre_kick_session_satisfies_kick_epoch_9856() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let kick_epoch = table.entry_by_key(&key).expect("installed").install_epoch;
+    assert!(table.update_session(SessionUpdate {
+        key: &key,
+        decision: decision(),
+        metadata: metadata(),
+        origin: SessionOrigin::ForwardFlow,
+        now_ns: 2_000,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+    }, false));
+    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
+    assert!(after <= kick_epoch, "#9856 RED: refresh moved epoch {kick_epoch}->{after} past the kick; the session would be excluded from its own export");
+}
+
+/// #9856 STEP-0 (M2): the export has no kick-epoch predicate — a session
+/// installed AFTER the kick is included in the candidates. RED on base.
+/// Post-fix this cell drives the epoch-predicate cursor with `kick_epoch` and
+/// the exclusion assertion greens (driver tracks the new API; assertion kept).
+#[test]
+fn forward_export_candidates_lack_kick_epoch_predicate_9856() {
+    let mut table = SessionTable::new();
+    let key_a = key_v4();
+    assert!(table.install_with_protocol(key_a.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let kick_epoch = table.entry_by_key(&key_a).expect("a installed").install_epoch;
+    let mut key_b = key_v4();
+    key_b.src_port = 54321;
+    assert!(table.install_with_protocol(key_b.clone(), decision(), metadata(), 2_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.entry_by_key(&key_b).expect("b installed").install_epoch > kick_epoch, "fixture: post-kick install must carry a higher epoch");
+    let got = crate::afxdp::forward_export_candidates_for_owner_rgs(&table, &[1], kick_epoch);
+    let keys: Vec<_> = got.iter().map(|(k, _, _, _)| k.clone()).collect();
+    assert!(keys.contains(&key_a), "pre-kick session must be exported");
+    assert!(!keys.contains(&key_b), "#9856 RED: post-kick install exported without an epoch predicate (kick={kick_epoch})");
+}
+
+/// #9856 STEP-0 (M2): a key reused by a NEW incarnation after the kick must be
+/// excluded — the incarnation did not exist at the kick. RED on base.
+/// Post-fix this cell drives the epoch-predicate cursor (driver tracks the new
+/// API; assertion kept).
+#[test]
+fn forward_export_candidates_lack_reuse_predicate_9856() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let kick_epoch = table.entry_by_key(&key).expect("A installed").install_epoch;
+    table.delete(&key);
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 2_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let new_epoch = table.entry_by_key(&key).expect("B installed").install_epoch;
+    assert!(new_epoch > kick_epoch, "fixture: reinstall is a new incarnation with a higher epoch");
+    let got = crate::afxdp::forward_export_candidates_for_owner_rgs(&table, &[1], kick_epoch);
+    let keys: Vec<_> = got.iter().map(|(k, _, _, _)| k.clone()).collect();
+    assert!(!keys.contains(&key), "#9856 RED: reused key's NEW incarnation (epoch {new_epoch} > kick {kick_epoch}) exported for a kick that predates it");
+}
+
+/// #9856: #2442 loss-resync and #2653 command-export deltas carry distinct
+/// producer provenance even when they describe the same live session.
+#[test]
+fn bulk_export_deltas_carry_provenance_9856() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let _ = table.drain_deltas(64);
+    table.emit_open_delta_with_origin(
+        key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        true,
+    );
+    table.emit_open_delta_with_provenance(
+        key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        true,
+        crate::session::ExportProvenance::CommandExport(7),
+    );
+    let d = table.drain_deltas(8);
+    assert_eq!(d.len(), 2, "fixture: two bulk-export deltas emitted");
+    assert_ne!(
+        d[0].provenance,
+        d[1].provenance,
+        "#9856: loss-resync and command-export deltas must remain distinguishable",
+    );
+}
+
+/// #9856 STEP-0 (M3): the helper must advertise export paging protocol v2
+/// (fail-closed: drops/sequence/incarnation echo). RED on base: still v1.
+#[test]
+fn helper_advertises_export_paging_v2_9856() {
+    assert_eq!(
+        crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+        2,
+        "#9856 RED: helper still advertises export paging v1; new Go must refuse it and old Go must see ok=false on partial",
+    );
+}
+
+/// #9856 STEP-0 (M1): `refresh_for_ha_activation` delegates to `update_session`
+/// (`mod.rs`), so it inherits the write-once contract with no separate fix.
+/// RED on base via the `update_session` re-stamp; flips with M1, unmodified.
+#[test]
+fn install_epoch_survives_refresh_for_ha_activation_9856() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    let before = table.entry_by_key(&key).expect("installed").install_epoch;
+    assert!(table.refresh_for_ha_activation(&key, decision(), metadata(), 2_000, 0));
+    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
+    assert_eq!(before, after, "#9856 RED: refresh_for_ha_activation re-stamped install_epoch {before}->{after}");
+}
+/// #9856: idle terminal removals must not accumulate until an unrelated
+/// export. A fresh kick discards pre-kick tombstones, while a removal after
+/// that kick remains harvestable for the active window.
+#[test]
+fn idle_terminal_removals_are_discarded_without_export_9856() {
+    let mut table = SessionTable::new();
+    let stale_key = key_v4();
+    assert!(table.install_with_protocol(
+        stale_key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    table.delete(&stale_key);
+    assert_eq!(table.tombstone_log.len(), 1, "terminal removal is harvested");
+    table.discard_tombstones_for_export();
+    assert!(
+        table.tombstone_log.is_empty(),
+        "idle removal harvest must be cleared without an export"
+    );
+
+    let mut active_key = key_v4();
+    active_key.src_port = active_key.src_port.wrapping_add(1);
+    assert!(table.install_with_protocol(
+        active_key.clone(),
+        decision(),
+        metadata(),
+        2_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let kick_epoch = table.current_epoch();
+    table.delete(&active_key);
+    let mut harvested = Vec::new();
+    assert!(table.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+        harvested.push(tombstone.key.clone());
+        true
+    }));
+    assert_eq!(
+        harvested,
+        vec![active_key],
+        "only a post-kick terminal removal belongs to the export"
+    );
+}
+
+/// #9856: overflow in the bounded tombstone harvest must be observable by the
+/// export buffer, otherwise a truncated close window could be acknowledged.
+#[test]
+fn tombstone_harvest_cap_transfers_drop_to_export_9856() {
+    let mut table = SessionTable::new();
+    for i in 0..=MAX_TOMBSTONES_FOR_EXPORT {
+        let mut key = key_v4();
+        key.src_port = 1_024 + i as u16;
+        assert!(table.install_with_protocol(
+            key.clone(),
+            decision(),
+            metadata(),
+            i as u64 + 1_000,
+            PROTO_TCP,
+            TCP_SYN | TCP_ACK,
+        ));
+        let _ = table.drain_deltas(8);
+        table.delete(&key);
+    }
+    assert_eq!(
+        table.tombstone_log.len(),
+        MAX_TOMBSTONES_FOR_EXPORT,
+        "terminal-removal harvest must stay bounded at its cap"
+    );
+    let drops = table.take_tombstone_drops_for_export();
+    assert_eq!(drops, 1, "the first terminal removal past the cap must be counted");
+    assert_eq!(
+        crate::afxdp::transfer_tombstone_drops_for_export_test(drops),
+        1,
+        "overflow must transfer into the export buffer's fail-closed metric"
     );
 }

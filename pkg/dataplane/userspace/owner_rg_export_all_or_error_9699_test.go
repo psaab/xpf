@@ -42,7 +42,13 @@ func startStatusHelper9699(t *testing.T, path string, deltas int, more bool) {
 				if _, err := bufio.NewReader(c).ReadBytes('\n'); err != nil {
 					return
 				}
-				resp := ControlResponse{OK: true, SessionExportMore: more, Status: &ProcessStatus{Enabled: true}}
+				resp := ControlResponse{
+					OK:                       true,
+					SessionExportMore:        more,
+					SessionExportIncarnation: 1,
+					SessionExportSeq:         1,
+					Status:                   &ProcessStatus{Enabled: true},
+				}
 				for i := 0; i < deltas; i++ {
 					resp.SessionDeltas = append(resp.SessionDeltas, SessionDeltaInfo{
 						Event: "open", SrcIP: fmt.Sprintf("10.0.0.%d", i%251),
@@ -72,13 +78,6 @@ func TestPagedOwnerRGExportReturnsNoDeltasWithAStatusError9699(t *testing.T) {
 	startStatusHelper9699(t, sock, 3, true)
 	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
 	requireNoDeltasOnError9699(t, "ExportOwnerRGSessionsPaged (paged)", len(deltas), err)
-}
-
-func TestUnpagedOwnerRGExportReturnsNoDeltasWithAStatusError9699(t *testing.T) {
-	m, _, sock := pagingManager9344(t, 0)
-	startStatusHelper9699(t, sock, 3, false)
-	deltas, _, err := m.ExportOwnerRGSessionsPaged([]int{1})
-	requireNoDeltasOnError9699(t, "ExportOwnerRGSessionsPaged (unpaged fallback)", len(deltas), err)
 }
 
 func TestExportOwnerRGSessionsReturnsNoDeltasWithAStatusError9699(t *testing.T) {

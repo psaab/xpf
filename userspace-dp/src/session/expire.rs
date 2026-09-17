@@ -339,9 +339,10 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
-                    if let Some(removed) = self.remove_entry(&key) {
+                    if let Some(removed) = self.remove_entry(&key, RemovalKind::Terminal) {
                         self.last_pop_stats.expired += 1;
                         let decision = removed.decision;
+                        let close_class = removed.tcp_close_class_wire();
                         let metadata = removed.metadata;
                         if key.protocol == PROTO_TCP {
                             debug_log!(
@@ -366,47 +367,48 @@ impl SessionTable {
                             && !removed.origin.is_transient_local_seed()
                             && !removed.origin.is_local_tun_origin()
                         {
-                            self.push_delta(SessionDelta {
-                                kind: SessionDeltaKind::Close,
-                                key: key.clone(),
-                                decision,
-                                metadata: metadata.clone(),
-                                origin: removed.origin,
-                                fabric_redirect_sync: false,
-                                // #2465: carry the real creation/last-seen
-                                // instants from the expiring entry so the
-                                // RT_FLOW close frame reports a true StartTime.
-                                created_ns: removed.created_ns,
-                                last_seen_ns: removed.last_seen_ns,
-                                // #2501: harvest the per-direction byte/packet
-                                // counters off the entry BEFORE it is dropped
-                                // (remove_entry has already returned it). These
-                                // populate the reserved volume slots on the
-                                // SESSION_CLOSE RT_FLOW frame so NetFlow/IPFIX
-                                // reports real volume instead of 0.
-                                counters: removed.counters,
-                                // #2749: harvest the observed forward ToS +
-                                // cumulative TCP control bits off the expiring
-                                // entry so the SESSION_CLOSE RT_FLOW frame
-                                // carries real NetFlow/IPFIX class-of-service
-                                // and TCP-flags values.
-                                observed_tos: removed.observed_tos,
-                                observed_tcp_flags: removed.observed_tcp_flags,
-                                // #4915: harvest the stable session id off the
-                                // expiring entry so the SESSION_CLOSE RT_FLOW
-                                // frame carries the SAME id this session's
-                                // SESSION_CREATE did — the correlatable key.
-                                session_id: removed.session_id,
-                                bulk_resync: false,
-                                tcp_close_class: 0,
-                                purge_retirement: false,
-                            });
+                            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+                            key: key.clone(),
+                            decision,
+                            metadata: metadata.clone(),
+                            origin: removed.origin,
+                            fabric_redirect_sync: false,
+                            // #2465: carry the real creation/last-seen
+                            // instants from the expiring entry so the
+                            // RT_FLOW close frame reports a true StartTime.
+                            created_ns: removed.created_ns,
+                            last_seen_ns: removed.last_seen_ns,
+                            // #2501: harvest the per-direction byte/packet
+                            // counters off the entry BEFORE it is dropped
+                            // (remove_entry has already returned it). These
+                            // populate the reserved volume slots on the
+                            // SESSION_CLOSE RT_FLOW frame so NetFlow/IPFIX
+                            // reports real volume instead of 0.
+                            counters: removed.counters,
+                            // #2749: harvest the observed forward ToS +
+                            // cumulative TCP control bits off the expiring
+                            // entry so the SESSION_CLOSE RT_FLOW frame
+                            // carries real NetFlow/IPFIX class-of-service
+                            // and TCP-flags values.
+                            observed_tos: removed.observed_tos,
+                            observed_tcp_flags: removed.observed_tcp_flags,
+                            // #4915: harvest the stable session id off the
+                            // expiring entry so the SESSION_CLOSE RT_FLOW
+                            // frame carries the SAME id this session's
+                            // SESSION_CREATE did — the correlatable key.
+                            session_id: removed.session_id,
+                            bulk_resync: false,
+                            tcp_close_class: 0,
+                            purge_retirement: false, });
                         }
                         expired_entries.push(ExpiredSession {
                             key,
                             decision,
                             metadata,
                             origin: removed.origin,
+                            session_id: removed.session_id,
+                            close_class,
+                            install_epoch: removed.install_epoch,
                         });
                     }
                 } else {

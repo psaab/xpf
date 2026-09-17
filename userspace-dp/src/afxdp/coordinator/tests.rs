@@ -10066,7 +10066,9 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
     // failure below comes from the shed count, never from a timeout.
     live_export_ack.store(u64::MAX, Ordering::Release);
 
-    let wait = coordinator.kick_owner_rg_export(&[1], 100, false);
+    let wait = coordinator
+        .kick_owner_rg_export(&[1], 100, false)
+        .expect("kick");
     let t0 = Instant::now();
     let err = wait.wait_and_collect().expect_err("shed export must fail");
     assert!(
@@ -10079,7 +10081,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
     );
 
     // Control: no dead workers, live pre-acked — the export succeeds (empty
-    // drain over the test coordinator's empty live buffers).
+    // drain over the test coordinator's empty export buffers).
     let mut coordinator = Coordinator::new();
     let live_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     live_rec
@@ -10087,7 +10089,9 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
         .session_export_ack
         .store(u64::MAX, Ordering::Release);
     coordinator.workers.register(6, live_rec, None);
-    let wait = coordinator.kick_owner_rg_export(&[1], 100, false);
+    let wait = coordinator
+        .kick_owner_rg_export(&[1], 100, false)
+        .expect("kick");
     let (deltas, more) = wait.wait_and_collect().expect("live export must succeed");
     assert!(deltas.is_empty());
     assert!(!more);

@@ -1796,6 +1796,29 @@ impl Coordinator {
         }
         self.workers.live.insert(slot, live);
     }
+
+    /// #9344: seed the installed worker's dedicated export buffer for
+    /// control-socket paging tests. A fresh kick consumes the next sequence,
+    /// so tag fixtures with the same token it will allocate.
+    pub(crate) fn test_seed_export_buffer_deltas(&mut self, worker_id: u32, count: usize) {
+        let token = self
+            .sessions
+            .export_seq
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        let record = self
+            .workers
+            .records()
+            .get(&worker_id)
+            .cloned()
+            .expect("export test worker");
+        for _ in 0..count {
+            record
+                .export_buffer
+                .push_export_open(token, crate::protocol::SessionDeltaInfo::default())
+                .expect("export fixture fits");
+        }
+    }
 }
 
 // #7160 (#2387): the routing-domain accessors the session-sync handler calls.

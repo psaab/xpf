@@ -179,6 +179,7 @@ fn rotate(new_rules: &[crate::PolicyRuleSnapshot]) -> Presence {
         stop.clone(),
         heartbeat.clone(),
         Arc::new(AtomicU64::new(0)),
+        Arc::new(crate::afxdp::binding_state::ExportBufferState::new()),
         None,
         startup_tx,
     );
