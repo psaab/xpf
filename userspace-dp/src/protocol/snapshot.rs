@@ -271,6 +271,13 @@ pub(crate) struct RouteSnapshot {
     pub discard: bool,
     #[serde(rename = "next_table", default)]
     pub next_table: String,
+    /// #9955: kernel ip-rule priority for a synthetic next-table leak.
+    /// Lower values are evaluated first in the pre-LPM rule stage. Ordinary
+    /// routes carry zero. The field is additive on the wire and defaults to
+    /// zero so an older snapshot remains decodable; the protocol version gate
+    /// keeps current Go/Rust producers and consumers in lockstep.
+    #[serde(rename = "rule_priority", default)]
+    pub rule_priority: u32,
     /// Junos route preference (administrative distance; lower = more
     /// preferred, default 5). The FIB tie-breaks two same-prefix routes in
     /// a table by ascending preference BEFORE insertion order (#2390).

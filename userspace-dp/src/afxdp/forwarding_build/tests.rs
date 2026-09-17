@@ -3735,13 +3735,15 @@ fn static_bare_gateway_single_table_still_resolves() {
         bare.next_hops[0].ifindex, 201,
         "single-table bare-gateway route still resolves to its connected interface"
     );
-    let leak = table
-        .iter()
-        .find(|r| !r.next_table.is_empty())
-        .expect("next-table route");
-    assert!(
-        leak.next_hops.is_empty(),
-        "a next-table leak carries no forwarding next-hop (inference untouched)"
+    let leak = state
+        .leak_rules_v4
+        .get("inet.0")
+        .and_then(|rules| rules.first())
+        .expect("next-table rule");
+    assert_eq!(leak.next_table, "blue.inet.0");
+    assert_eq!(
+        leak.rule_priority, 0,
+        "test-only snapshots default the optional kernel priority"
     );
 }
 
@@ -7817,31 +7819,20 @@ fn secure_tunnel_unit_ifindex_decides_route_disposition() {
     assert!(r42.disposition.is_slow_path_eligible());
 }
 
-/// #6664: a genuine inter-VRF next-table CYCLE resolves to
-/// `NextTableUnsupported` through the real recursion, and that disposition is
-/// not slow-path eligible.
+/// #9955: next-table rows are kernel ip rules, not recursive FIB routes.
+/// The source-table rule selects `blue`; the target lookup must perform only
+/// blue's table-local LPM, even though blue also contains a reverse rule.
 ///
-/// The chain is built rather than simulated: `inet.0` leaks 172.16/12 into
-/// `blue.inet.0`, which leaks the same prefix back. The walk pushes "inet.0"
-/// onto the visited set, recurses, and the second hop trips
-/// `visited.contains(next_table_name)` — the production cycle check in
-/// `fib.rs`, reached the way a packet reaches it. Passing `depth =
-/// MAX_NEXT_TABLE_DEPTH` directly would land on the same disposition by a
-/// different door and would keep passing if the cycle check were deleted.
-///
-/// Honest scope note. No config can currently put this state into the FIB:
-/// every `next_table`-bearing route the snapshot publishes lives in the GLOBAL
-/// table (`pkg/dataplane/userspace/routes.go` — the global static pass and the
-/// synthetic ip-rule leak pass are the only two producers), and a next-table
-/// authored UNDER a routing-instance is hard-rejected at commit (#5830) and
-/// dropped from the snapshot even on the tolerant load / peer-sync path. So the
-/// recursion is at most one hop, global -> instance, and terminates there. This
-/// test therefore pins DEFENSE-IN-DEPTH, not a live exposure: the safety above
-/// is an emergent property of two guards in another language and package, and
-/// a third producer or one relaxed guard would reopen the bypass silently.
+/// Both rules and the target FIB route are kept in the built state so deleting
+/// rule evaluation cannot make this positive control pass accidentally.
 #[test]
-fn next_table_cycle_resolves_unsupported_and_is_not_slow_path_eligible_6664() {
+fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
     let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/12".into(),
+            ifindex: 12,
+            ..Default::default()
+        }],
         routes: vec![
             crate::RouteSnapshot {
                 table: "inet.0".into(),
@@ -7857,48 +7848,43 @@ fn next_table_cycle_resolves_unsupported_and_is_not_slow_path_eligible_6664() {
                 next_table: "inet.0".into(),
                 ..Default::default()
             },
+            crate::RouteSnapshot {
+                table: "blue.inet.0".into(),
+                family: "inet".into(),
+                destination: "172.16.0.0/12".into(),
+                next_hops: vec!["@ge-0/0/12".into()],
+                ..Default::default()
+            },
         ],
         ..Default::default()
     };
     let state = build_forwarding_state(&snapshot);
 
-    // Premise: both legs of the cycle are actually present. Without this a
-    // snapshot that silently dropped one leg would still reach
-    // NextTableUnsupported — via NoRoute-shaped termination — and the test
-    // would pass for the wrong reason.
+    // Premise: both rules are actually present in the priority-ordered
+    // source-table collection.
     assert!(
         state
-            .routes_v4
+            .leak_rules_v4
             .get("inet.0")
-            .is_some_and(|t| t.iter().any(|r| r.next_table == "blue.inet.0")),
-        "premise broken: the global leg of the cycle is missing"
+            .is_some_and(|rules| rules.iter().any(|r| r.next_table == "blue.inet.0")),
+        "premise broken: the global rule is missing"
     );
     assert!(
         state
-            .routes_v4
+            .leak_rules_v4
             .get("blue.inet.0")
-            .is_some_and(|t| t.iter().any(|r| r.next_table == "inet.0")),
-        "premise broken: the return leg of the cycle is missing"
+            .is_some_and(|rules| rules.iter().any(|r| r.next_table == "inet.0")),
+        "premise broken: the return rule is missing"
     );
 
     let dst = Ipv4Addr::new(172, 16, 5, 5);
-    let cycled = lookup_forwarding_resolution_v4(&state, None, dst, "inet.0", 0, true, None);
+    let selected = lookup_forwarding_resolution_v4(&state, None, dst, "inet.0", 0, true, None);
     assert_eq!(
-        cycled.disposition,
-        ForwardingDisposition::NextTableUnsupported,
-        "an A->B->A next-table cycle must resolve NextTableUnsupported"
+        selected.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "the source rule must select blue's table-local route without restarting rules"
     );
-    assert_eq!(
-        cycled.egress_ifindex, 0,
-        "NextTableUnsupported carries no egress interface — which is why a \
-         zone-PAIR adjudication cannot be computed for it and #6664 fails it \
-         closed instead"
-    );
-    assert!(
-        !cycled.disposition.is_slow_path_eligible(),
-        "a cyclic next-table chain must NOT be handed to the kernel FIB, which \
-         would forward it with no zone policy, session, NAT or screen (#6664)"
-    );
+    assert_eq!(selected.egress_ifindex, 12);
 
     // Positive control: a destination with no route at all still resolves
     // NoRoute and REMAINS delegable. Without this, deleting the whole

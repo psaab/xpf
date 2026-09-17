@@ -95,6 +95,7 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     if let Some(action) = lan_action {
         snapshot.policies.push(PolicyRuleSnapshot {

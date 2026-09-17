@@ -752,6 +752,7 @@ pub(super) fn run_input_filter_accept_log_poll(
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     }];
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "log-input".to_string(),
@@ -2305,6 +2306,7 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),

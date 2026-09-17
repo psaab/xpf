@@ -1,7 +1,10 @@
 package userspace
 
 import (
+	"net"
 	"reflect"
+	"slices"
+	"syscall"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -93,67 +96,66 @@ func TestRouteSnapshotDedupeKeepsDistinctPreference(t *testing.T) {
 	}
 }
 
-// TestRouteSnapshotSortIsDeterministic verifies #3770 M10: the emitted
-// order is a deterministic function of route CONTENT, not of the build
-// input order. Two same-prefix routes that differ only in next-table
-// tie on the old Table/Family/Destination comparator; under the old
-// UNSTABLE sort their order tracked the input slice order, so an
-// unchanged config could churn the snapshot. Building the same content
-// with the two entries in opposite input order must yield an identical
-// snapshot.
+// TestRouteSnapshotSortIsDeterministic verifies #3770 M10 plus #9955:
+// emitted order is a deterministic function of route content, not of kernel
+// rule-dump order. For leak rows, RulePriority is the stage-1 ordering key.
+// This uses identical live rule content in opposite dump orders; unlike
+// config-static order, reversing a netlink dump must not change the actual
+// priorities assigned by the kernel.
 func TestRouteSnapshotSortIsDeterministic(t *testing.T) {
-	// Hermetic: stub the kernel ip-rule dump so host state cannot perturb the
-	// deterministic-order assertion (only the config-static sort path is tested).
 	orig := ruleListFn
 	t.Cleanup(func() { ruleListFn = orig })
-	ruleListFn = func(family int) ([]netlink.Rule, error) { return nil, nil }
 
-	// Both targets DEFINED and referenced by bare instance name (the compiler
-	// strips the ".inet[6].0" suffix; the #6467 eligibility gate skips a
-	// next-table route whose target is not a defined instance, mirroring the
-	// applier). The dedupe/sort mechanics under test are unchanged.
-	instances := []*config.RoutingInstanceConfig{{Name: "aaa", TableID: 100}, {Name: "bbb", TableID: 101}}
-	forward := &config.Config{}
-	// #9810: one unclaimed unit (N=1) so the leaks publish.
-	forward.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
-	}
-	forward.RoutingInstances = instances
-	forward.RoutingOptions.StaticRoutes = []*config.StaticRoute{
-		{Destination: "10.5.0.0/16", NextTable: "aaa"},
-		{Destination: "10.5.0.0/16", NextTable: "bbb"},
-	}
-	reverse := &config.Config{}
-	// #9810: one unclaimed unit (N=1) so the leaks publish.
-	reverse.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
-	}
-	reverse.RoutingInstances = instances
-	reverse.RoutingOptions.StaticRoutes = []*config.StaticRoute{
-		{Destination: "10.5.0.0/16", NextTable: "bbb"},
-		{Destination: "10.5.0.0/16", NextTable: "aaa"},
-	}
-
-	got1, _, err := buildRouteSnapshots(forward, nil, nil)
+	_, dst, err := net.ParseCIDR("10.5.0.0/16")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got2, _, err := buildRouteSnapshots(reverse, nil, nil)
+	reverseDump := false
+	ruleListFn = func(family int) ([]netlink.Rule, error) {
+		if family != syscall.AF_INET {
+			return nil, nil
+		}
+		rules := []netlink.Rule{
+			{Dst: dst, Table: 100, Priority: 101},
+			{Dst: dst, Table: 101, Priority: 100},
+		}
+		if reverseDump {
+			slices.Reverse(rules)
+		}
+		return rules, nil
+	}
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "aaa", TableID: 100},
+			{Name: "bbb", TableID: 101},
+		},
+	}
+
+	got1, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverseDump = true
+	got2, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got1, got2) {
-		t.Fatalf("route order depends on input order (non-deterministic):\n forward=%+v\n reverse=%+v", got1, got2)
+		t.Fatalf("route order depends on ip-rule dump order:\n first=%+v\n reverse=%+v", got1, got2)
 	}
-	// The tie-break is lexicographic on next-table: aaa before bbb.
-	var order []string
+
+	var priorities []uint32
+	var targets []string
 	for _, r := range got1 {
-		if r.Table == "inet.0" && r.Destination == "10.5.0.0/16" {
-			order = append(order, r.NextTable)
+		if r.Table == "inet.0" && r.Destination == "10.5.0.0/16" && r.NextTable != "" {
+			priorities = append(priorities, r.RulePriority)
+			targets = append(targets, r.NextTable)
 		}
 	}
-	if len(order) != 2 || order[0] != "aaa" || order[1] != "bbb" {
-		t.Fatalf("next-table tie-break order = %v, want [aaa bbb]", order)
+	if !reflect.DeepEqual(priorities, []uint32{100, 101}) ||
+		!reflect.DeepEqual(targets, []string{"bbb.inet.0", "aaa.inet.0"}) {
+		t.Fatalf("priority order = %v targets=%v, want priorities [100 101] and targets [bbb.inet.0 aaa.inet.0]",
+			priorities, targets)
 	}
 }
 

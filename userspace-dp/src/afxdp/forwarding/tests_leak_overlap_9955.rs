@@ -1,28 +1,22 @@
-//! #9955 — the leak-resolution differential.
+//! #9955 — the kernel two-stage leak-resolution contract.
 //!
-//! An operator can author overlapping `next-table` / rib-group leaks and the
-//! compiler accepts them without comment. When the leaked prefixes overlap, the
-//! kernel and this helper choose by DIFFERENT algorithms, by construction and
-//! not by accident:
+//! `next-table` / rib-group leaks are kernel policy-routing rules, not
+//! ordinary routes in one shared userspace LPM list:
 //!
-//!   * **kernel** — leaks are installed as ip RULES (`pkg/routing/rules.go`
-//!     assigns `rule.Priority = prio + added`, monotonically increasing). FIB
-//!     rules are evaluated in priority order and the FIRST match wins. Prefix
-//!     length is not a tiebreak and plays no part.
-//!   * **helper** — `sort_routes` orders each table by DESCENDING PREFIX LENGTH,
-//!     then ascending preference, and the lookup is
-//!     `routes.iter().find(|e| e.prefix.contains(ip))`. Its own comment states
-//!     the intent: the most specific one, "NOT the insertion-order first".
+//!   * stage 1 scans matching leak rules by ascending `rule_priority`;
+//!   * a target-table miss falls through to the next rule;
+//!   * stage 2 performs ordinary per-table longest-prefix matching.
 //!
-//! The ordering key never crosses the boundary. `pkg/dataplane/userspace/routes.go`
-//! reads `rule.Priority` only to classify the PBR window (31000-31999) and drops
-//! it; `RouteSnapshot` carries no priority at all. So the helper cannot reproduce
-//! the kernel's order even in principle.
+//! The Go snapshot producer carries the kernel priority through
+//! `RouteSnapshot.rule_priority`. The Rust builder partitions next-table rows
+//! into a priority-ordered leak index and leaves only ordinary routes in each
+//! table's LPM list. The target lookup runs stage 2 without restarting stage 1
+//! from the selected table.
 //!
-//! This is a DIFFERENTIAL over a GENERATED set of overlap shapes rather than one
-//! hand-built case, because a single case can agree by luck: with only one
-//! (outer, inner) pair you cannot tell "the algorithms agree" from "these two
-//! prefixes happen to rank the same way under both".
+//! These tests are fail-on-revert guards for all three measured divergences:
+//! overlapping leak order, leak-versus-ordinary precedence, and fall-through
+//! when a selected target table is empty. The generated cross-language corpus
+//! adds IPv4/IPv6 coverage for the same oracle.
 
 use super::super::forwarding_build::*;
 use super::*;
@@ -30,7 +24,8 @@ use crate::test_zone_ids::*;
 use crate::{
     InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot, RouteSnapshot, ZoneSnapshot,
 };
-use std::net::Ipv4Addr;
+use serde::Deserialize;
+use std::net::{IpAddr, Ipv4Addr};
 
 /// One leak the operator authored: a prefix, the kernel rule priority it was
 /// installed at, and the table it redirects into.
@@ -81,6 +76,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             discard: false,
             next_table: format!("{}.inet.0", leak.target),
             preference: 0,
+            rule_priority: leak.rule_priority,
         });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
@@ -95,6 +91,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 0,
+            rule_priority: 0,
         });
     }
 
@@ -241,47 +238,17 @@ fn leak_overlap_resolution_matches_the_kernel_9955() {
         }
     }
 
-    // CHARACTERIZATION of a KNOWN defect, not an aspiration. Every shape where
-    // the broader prefix carries the better rule priority diverges; every shape
-    // where the more specific prefix ALSO has the better priority agrees, because
-    // there the two algorithms happen to rank the same entry first.
-    //
-    // That 50/50 split is the reason the issue asked for a GENERATED set. A
-    // single hand-built case drawn from the agreeing half would have shown no
-    // defect at all, and a single case drawn from the diverging half would not
-    // have revealed that half the space agrees by luck.
-    //
-    // When the model is fixed this number must go DOWN to zero. If it changes in
-    // either direction unexpectedly, the resolution model moved and the change
-    // needs to say why.
     assert_eq!(
         divergences.len(),
-        5,
-        "#9955: expected the 5 known diverging shapes of {checked} ({agreements} agree); got \
-         {}.\n{}\n\nThe kernel evaluates leaks as ip RULES in PRIORITY order, first match \
-         wins, and prefix length is not a tiebreak. The helper sorts each table by DESCENDING \
-         PREFIX LENGTH then preference and takes the first containing entry. The ordering key \
-         never crosses the boundary: pkg/dataplane/userspace/routes.go reads rule.Priority only \
-         to classify the PBR window and drops it, so RouteSnapshot carries no priority and the \
-         helper cannot reproduce the kernel's order even in principle.",
-        divergences.len(),
+        0,
+        "#9955: {checked} shapes, {agreements} agreements; divergences:\n{}",
         divergences.join("\n")
     );
 }
 
-/// A SECOND shape family, measured before deciding anything about it: a leak
-/// overlapping an ordinary route in the SAME table.
-///
-/// In the kernel these are not peers. Leaks are ip RULES at priority 100-199 /
-/// 30000-30999, and the main table is reached by the `from all lookup main` rule
-/// at 32766 — so a matching leak rule fires BEFORE the table is consulted at
-/// all, whatever the prefix lengths are. In the helper both live in one list
-/// sorted by prefix length, so a /24 route beats a /8 leak.
-///
-/// This is reported rather than asserted. It is a wider behaviour change than
-/// the overlapping-leak question this issue was filed for, and the honest order
-/// is to measure it, say so, and get a scope decision — not to quietly widen the
-/// fix to something no differential demonstrated.
+/// A leak rule is evaluated before ordinary routes in the source table.
+/// Consequently a matching /8 leak wins over a more-specific /24 ordinary
+/// route when the target table contains a route for the destination.
 #[test]
 fn leak_versus_ordinary_route_in_the_same_table_9955() {
     let leak = Leak {
@@ -302,6 +269,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -335,43 +303,21 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         ForwardingDisposition::ForwardCandidate,
         "premise: the fixture must resolve, or this measures nothing"
     );
-    // 12 = the leak's target; 14 = the ordinary /24 route.
     assert_eq!(
-        resolved.egress_ifindex, 14,
-        "#9955 (second shape family, CHARACTERIZED): the helper prefers the ordinary /24 route \
-         (ifindex 14) over the /8 LEAK (ifindex 12); expected to become 12 when fixed. \
-         over the /8 LEAK (ifindex 12). In the kernel a leak is an ip RULE at priority 150 and \
-         the main table is only reached via the `from all lookup main` rule at 32766, so the \
-         leak fires first regardless of prefix length and the packet is redirected into the \
-         target VRF. This is a WIDER divergence than the overlapping-leak question #9955 was \
-         filed for; it is asserted here so the scope decision is made on a measurement rather \
-         than on a hunch."
+        resolved.egress_ifindex, 12,
+        "the leak rule must run before main-table LPM, even with a shorter prefix"
     );
 }
 
-/// THIRD shape family, and the one that settles what the fix has to be: a leak
-/// whose TARGET TABLE MISSES.
+/// THIRD shape family: a leak whose TARGET TABLE MISSES.
 ///
-/// Kernel FIB rules FALL THROUGH on a table miss. A rule that matches sends the
-/// lookup to its table; if that table has no route, evaluation CONTINUES with
-/// the next rule, and eventually reaches `from all lookup main` at 32766. So a
-/// leak pointing at a table that cannot route the packet costs nothing — main
-/// still routes it.
-///
-/// The helper cannot do this. `lookup_forwarding_resolution_v4_inner` ends the
-/// leak arm with `return lookup_forwarding_resolution_v4_inner(...)` — the
-/// recursive result is returned UNCONDITIONALLY, so a target-table miss becomes
-/// the final answer (NoRoute) rather than a fall-through. The packet is
-/// blackholed where the kernel forwards it.
-///
-/// This is why "carry the ordering key through" is necessary but NOT sufficient.
-/// The kernel mechanism is TWO-STAGE — priority-ordered rules with fall-through,
-/// then per-table longest-prefix-match — and the helper models it as ONE sorted
-/// list per table with unconditional recursion. No choice of comparator over a
-/// single list reproduces a two-stage mechanism with fall-through, so adding a
-/// priority field and re-sorting cannot close this on its own.
+/// The kernel treats the matching rule as a miss and continues to the next
+/// rule, eventually reaching the ordinary main-table lookup. The helper must
+/// preserve that fall-through rather than returning the target miss as the
+/// final answer. The test below keeps the main fallback broader than the leak
+/// so it proves the rule miss path rather than accidentally bypassing it.
 #[test]
-fn a_leak_into_a_table_that_misses_does_not_fall_through_9955() {
+fn a_leak_into_a_table_that_misses_falls_through_9955() {
     // The leak is the MORE SPECIFIC entry (/24) and the main-table fallback is
     // broader (/8). That ordering is load-bearing: with the fallback more
     // specific, the helper's prefix-length sort would return the fallback
@@ -397,6 +343,7 @@ fn a_leak_into_a_table_that_misses_does_not_fall_through_9955() {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -426,19 +373,12 @@ fn a_leak_into_a_table_that_misses_does_not_fall_through_9955() {
     let state = build_forwarding_state(&snapshot);
     let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE));
 
-    // CHARACTERIZED. The kernel would fall through the missing table to main and
-    // forward out ifindex 14. Expected to become ForwardCandidate/14 when the
-    // model is fixed.
-    assert_ne!(
+    assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate,
-        "#9955 (third shape family, CHARACTERIZED): the helper resolved a leak into an EMPTY \
-         target table to a forward candidate, which would mean fall-through is now modelled. \
-         Today it returns the recursive result unconditionally, so the packet is blackholed \
-         where the kernel falls through to main and forwards it out ifindex 14. If this \
-         assertion flips, the two-stage model landed and this cell should assert \
-         ForwardCandidate with egress_ifindex 14."
+        "a target-table miss must fall through to the main table"
     );
+    assert_eq!(resolved.egress_ifindex, 14);
 }
 
 /// A CONTROL that must pass both before and after any fix: with a SINGLE leak
@@ -467,15 +407,11 @@ fn a_single_leak_resolves_the_same_either_way_9955() {
     }
 }
 
-/// Pins the DIRECTION of the current divergence, so the differential's failure
-/// cannot be read as "something is different" without saying what.
-///
-/// This is deliberately an observation, not an aspiration: it documents that the
-/// helper is choosing by prefix length today. It is expected to need updating by
-/// the fix, and that is the point — a cell that survives the fix unchanged was
-/// not pinning the behaviour the fix changes.
+/// Pins the corrected priority direction: a broad, higher-priority leak beats
+/// a more-specific lower-priority leak because stage 1 is ordered by the
+/// kernel rule priority, not the FIB prefix length.
 #[test]
-fn the_divergence_is_prefix_length_beating_rule_priority_9955() {
+fn the_priority_order_beats_prefix_length_9955() {
     let leaks = [
         Leak {
             prefix_len: 8,
@@ -499,11 +435,223 @@ fn the_divergence_is_prefix_length_beating_rule_priority_9955() {
     );
     assert_eq!(
         helper_choice(&leaks),
-        Some("blue"),
-        "#9955: this pins the DIRECTION of the divergence — the helper takes the LONGER PREFIX \
-         (blue) where the kernel takes the LOWER-PRIORITY RULE (red), so a packet to 10.1.2.5 \
-         is leaked into a DIFFERENT VRF by the two sides. It is expected to flip to \
-         Some(\"red\") when the model is fixed; a cell that survives the fix unchanged was not \
-         pinning the behaviour the fix changes."
+        Some("red"),
+        "rule priority, not prefix length, must choose the target table"
     );
+}
+#[derive(Debug, Deserialize)]
+struct LeakCorpusRow9955 {
+    name: String,
+    routes: Vec<RouteSnapshot>,
+    destination: String,
+    want_ifindex: i32,
+}
+
+fn snapshot_from_go_leak_corpus_9955(row: &LeakCorpusRow9955) -> crate::ConfigSnapshot {
+    let interface = |ifindex: i32, v4: &str, v6: &str| InterfaceSnapshot {
+        name: format!("ge-0/0/{ifindex}.50"),
+        linux_name: format!("ge-0-0-{ifindex}.50"),
+        ifindex,
+        zone: "wan".to_string(),
+        hardware_addr: "02:bf:72:00:50:08".to_string(),
+        addresses: vec![
+            InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: v4.to_string(),
+                ..Default::default()
+            },
+            InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: v6.to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    super::super::test_fixtures::v5(crate::ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            interface(12, "172.16.50.8/24", "2001:db8:50::8/64"),
+            interface(13, "172.16.51.8/24", "2001:db8:51::8/64"),
+            interface(14, "172.16.52.8/24", "2001:db8:52::8/64"),
+        ],
+        routes: row.routes.clone(),
+        ..Default::default()
+    })
+}
+
+/// Cross-language agreement: consume the exact JSON emitted by the Go
+/// `buildRouteSnapshots` producer and compare Rust's production builder +
+/// resolver with Go's independent kernel-stage oracle. This catches both a
+/// producer field/sort drift and a Rust model drift across IPv4 and IPv6.
+#[test]
+fn go_leak_corpus_agrees_with_rust_kernel_model_9955() {
+    const CORPUS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/dataplane/userspace/testdata/leak_resolution_9955.json"
+    ));
+    let rows: Vec<LeakCorpusRow9955> =
+        serde_json::from_str(CORPUS).expect("the committed Go leak corpus is valid JSON");
+    assert!(
+        rows.len() >= 30,
+        "corpus must retain the full IPv4/IPv6 overlap and fall-through matrix"
+    );
+    assert!(
+        rows.iter().any(|row| row.destination.contains(':')),
+        "corpus must include IPv6 cases"
+    );
+    assert!(
+        rows.iter().any(|row| !row.destination.contains(':')),
+        "corpus must include IPv4 cases"
+    );
+
+    for row in rows {
+        let destination: IpAddr = row
+            .destination
+            .parse()
+            .unwrap_or_else(|err| panic!("{} has invalid destination: {err}", row.name));
+        let state = build_forwarding_state(&snapshot_from_go_leak_corpus_9955(&row));
+        let resolved = lookup_forwarding_resolution(&state, destination);
+        assert_eq!(
+            resolved.egress_ifindex, row.want_ifindex,
+            "{}: Rust egress {} disagrees with Go kernel-stage oracle {}",
+            row.name, resolved.egress_ifindex, row.want_ifindex
+        );
+        if row.want_ifindex == 0 {
+            assert_eq!(
+                resolved.disposition,
+                ForwardingDisposition::NoRoute,
+                "{}: an oracle miss must remain NoRoute",
+                row.name
+            );
+        } else {
+            assert!(
+                matches!(
+                    resolved.disposition,
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::MissingNeighbor
+                ),
+                "{}: expected a forwarding resolution, got {:?}",
+                row.name,
+                resolved.disposition
+            );
+        }
+    }
+}
+/// A leak target can own the destination as a local address. The target-table
+/// lookup must retain the local-delivery decision instead of falling through
+/// to its connected route.
+#[test]
+fn v4_leak_target_preserves_local_delivery_9955() {
+    let snapshot = super::super::test_fixtures::v5(crate::ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/12.50".to_string(),
+            routing_instance: "red".to_string(),
+            ifindex: 12,
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.1.2.1/32".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        routes: vec![RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "10.1.2.0/24".to_string(),
+            next_table: "red.inet.0".to_string(),
+            rule_priority: 100,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 1)));
+    assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(resolved.local_ifindex, 12);
+}
+
+/// A NAT-only leak target has no connected or ordinary FIB route. The
+/// table-presence precheck must still admit the target so local delivery runs.
+#[test]
+fn v4_nat_only_leak_target_preserves_local_delivery_9955() {
+    let target = Ipv4Addr::new(203, 0, 113, 9);
+    let snapshot = super::super::test_fixtures::v5(crate::ConfigSnapshot {
+        static_nat_rules: vec![crate::StaticNATRuleSnapshot {
+            name: "nat-only-leak-target".to_string(),
+            from_routing_instance: "red".to_string(),
+            external_ip: target.to_string(),
+            internal_ip: "192.0.2.9".to_string(),
+            ..Default::default()
+        }],
+        routes: vec![RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "203.0.113.0/24".to_string(),
+            next_table: "red.inet.0".to_string(),
+            rule_priority: 100,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.local_v4.contains(&target));
+    assert!(state
+        .local_tables_v4
+        .get(&target)
+        .is_some_and(|tables| tables.contains("red.inet.0")));
+    assert!(
+        state
+            .routes_v4
+            .get("red.inet.0")
+            .is_none_or(|routes| routes.iter().all(|entry| entry.next_table != ""))
+    );
+    assert!(
+        state
+            .connected_v4
+            .iter()
+            .all(|entry| entry.table != "red.inet.0")
+    );
+
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(target));
+    assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(resolved.local_ifindex, 0);
+}
+
+#[test]
+fn v6_leak_target_preserves_local_delivery_9955() {
+    let snapshot = super::super::test_fixtures::v5(crate::ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/12.50".to_string(),
+            routing_instance: "red".to_string(),
+            ifindex: 12,
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:1::1/128".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        routes: vec![RouteSnapshot {
+            table: "inet6.0".to_string(),
+            family: "inet6".to_string(),
+            destination: "2001:db8:1::/64".to_string(),
+            next_table: "red.inet6.0".to_string(),
+            rule_priority: 100,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let resolved = lookup_forwarding_resolution(
+        &state,
+        IpAddr::V6("2001:db8:1::1".parse().expect("v6 local address")),
+    );
+    assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(resolved.local_ifindex, 12);
 }

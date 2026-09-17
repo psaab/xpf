@@ -3058,14 +3058,14 @@ fn learn_dynamic_neighbor_relearns_removed_key() {
     );
 }
 
+/// A self-referential next-table rule has no target-table route. Under the
+/// kernel two-stage model it misses and leaves the source table's LPM intact;
+/// it must not become a synthetic recursion terminal.
 #[test]
-fn forwarding_resolution_rejects_next_table_loop() {
+fn forwarding_resolution_treats_next_table_self_miss_as_noroute() {
     let state = build_forwarding_state(&forwarding_snapshot_with_next_table_loop());
     let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
-    assert_eq!(
-        resolved.disposition,
-        ForwardingDisposition::NextTableUnsupported
-    );
+    assert_eq!(resolved.disposition, ForwardingDisposition::NoRoute);
 }
 
 // #3768 (M5): the v6 next-table recursion must canonicalize the next-table
@@ -3103,15 +3103,11 @@ fn forwarding_v6_next_table_canonicalizes_inet_form_on_recursion() {
     );
 }
 
-// #3768 (M6): an A->B->A cross-table next-table cycle is rejected as
-// NextTableUnsupported via the per-resolution visited-table set. The
-// pre-fix guard only caught a direct self-loop (next == current table), so
-// a two-table cycle recursed until MAX_NEXT_TABLE_DEPTH. This asserts the
-// terminal disposition and that resolution terminates (no hang / panic);
-// the visited set makes it terminate at the first revisit rather than
-// burning the full depth budget.
+// #9955: next-table entries are stage-1 rules, not recursive FIB peers.
+// A cross-table pair with no ordinary target routes therefore misses both
+// rule actions and falls through to the source table's ordinary LPM.
 #[test]
-fn forwarding_resolution_rejects_cross_table_next_table_cycle() {
+fn forwarding_resolution_falls_through_cross_table_rule_misses() {
     let snapshot = ConfigSnapshot {
         routes: vec![
             crate::RouteSnapshot {
@@ -3122,6 +3118,7 @@ fn forwarding_resolution_rejects_cross_table_next_table_cycle() {
                 discard: false,
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
+                rule_priority: 0,
             },
             crate::RouteSnapshot {
                 table: "red.inet.0".to_string(),
@@ -3131,16 +3128,14 @@ fn forwarding_resolution_rejects_cross_table_next_table_cycle() {
                 discard: false,
                 next_table: "inet.0".to_string(),
                 preference: 0,
+                rule_priority: 0,
             },
         ],
         ..Default::default()
     };
     let state = build_forwarding_state(&snapshot);
     let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
-    assert_eq!(
-        resolved.disposition,
-        ForwardingDisposition::NextTableUnsupported
-    );
+    assert_eq!(resolved.disposition, ForwardingDisposition::NoRoute);
 }
 
 #[test]
@@ -3936,6 +3931,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             discard: false,
             next_table: String::new(),
             preference: 5,
+            rule_priority: 0,
         }],
         // Only the SECOND next-hop's neighbor is resolved; the first is dead.
         neighbors: vec![crate::NeighborSnapshot {
@@ -4059,6 +4055,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             discard: false,
             next_table: String::new(),
             preference: 5,
+            rule_priority: 0,
         }],
         // ONLY the gateway member's neighbor is resolved. The interface-only
         // member's neighbor (the per-flow destination) is deliberately absent —
@@ -4193,6 +4190,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         discard: false,
         next_table: String::new(),
         preference: 5,
+        rule_priority: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4308,6 +4306,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         discard: false,
         next_table: String::new(),
         preference: 5,
+        rule_priority: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4395,6 +4394,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         discard: false,
         next_table: String::new(),
         preference: 5,
+        rule_priority: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4511,6 +4511,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             discard: false,
             next_table: String::new(),
             preference: 5,
+            rule_priority: 0,
         }],
         // BOTH next-hop neighbors are resolved/live, so the live pool is
         // the full set of equal-cost members.
@@ -4714,6 +4715,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 50,
+                rule_priority: 0,
             },
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
@@ -4724,6 +4726,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 5,
+                rule_priority: 0,
             },
         ],
         neighbors: vec![
@@ -5132,6 +5135,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 5,
+            rule_priority: 0,
         }],
         default_policy: "deny".to_string(),
         policies: vec![match policy {

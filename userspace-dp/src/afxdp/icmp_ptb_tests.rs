@@ -1435,6 +1435,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     }];
 
     let state = build_forwarding_state(&snap);
@@ -1557,6 +1558,7 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         discard: false,
         next_table: String::new(),
         preference: 0,
+        rule_priority: 0,
     });
     {
         let ep = &mut snap.tunnel_endpoints[0];
