@@ -47,11 +47,17 @@ fn virtio_uses_auto_mode_umem_owner_strategy() {
         binder_for_strategy(AfXdpBindStrategy::UmemOwnerSocket),
         AfXdpBinder::Umem
     );
-    assert_eq!(bind_flag_candidates_for_driver(Some("virtio_net")), &[0]);
+    assert_eq!(
+        bind_flag_candidates_for_driver(Some("virtio_net")),
+        &[XSK_BIND_FLAGS_ZEROCOPY, XSK_BIND_FLAGS_COPY]
+    );
     assert_eq!(
         bind_flag_candidates_for_driver(Some("mlx5_core")),
         &[XSK_BIND_FLAGS_ZEROCOPY, XSK_BIND_FLAGS_COPY]
     );
+    for flags in bind_flag_candidates_for_driver(Some("virtio_net")) {
+        assert_ne!(flags & SocketConfig::XDP_BIND_NEED_WAKEUP, 0);
+    }
 }
 
 
@@ -60,10 +66,29 @@ fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
     let mut info = IfInfo::invalid();
     info.set_queue(0);
 
-    assert_eq!(
-        bind_flag_candidates_for_socket_role(&info, Some("mlx5_core"), XskSocketRole::SharedOwner),
-        &[XSK_BIND_FLAGS_ZEROCOPY]
+    let owner = bind_flag_candidates_for_socket_role(
+        &info,
+        Some("mlx5_core"),
+        XskSocketRole::SharedOwner,
     );
+    assert_eq!(owner, &[XSK_BIND_FLAGS_ZEROCOPY]);
+    assert_ne!(
+        owner[0] & SocketConfig::XDP_BIND_ZEROCOPY,
+        0,
+        "the owner must establish zero-copy for the shared pool"
+    );
+    assert_ne!(
+        owner[0] & SocketConfig::XDP_BIND_NEED_WAKEUP,
+        0,
+        "the owner must establish NEED_WAKEUP for shared secondaries to inherit"
+    );
+    // `xp_assign_dev_shared` derives the secondary's effective mode from the
+    // owner UMEM (`umem->zc`) and its wake behavior from the owner pool's
+    // `uses_need_wakeup`; this positive row pins both inherited bits, rather
+    // than only pinning that the secondary request omits forbidden flags.
+    let inherited = owner[0]
+        & (SocketConfig::XDP_BIND_ZEROCOPY | SocketConfig::XDP_BIND_NEED_WAKEUP);
+    assert_eq!(inherited, XSK_BIND_FLAGS_ZEROCOPY);
 
     let secondary = bind_flag_candidates_for_socket_role(
         &info,
@@ -71,9 +96,14 @@ fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
         XskSocketRole::SharedSecondary,
     );
     assert_eq!(secondary, &[SocketConfig::XDP_BIND_SHARED_UMEM]);
-    assert_eq!(secondary[0] & SocketConfig::XDP_BIND_COPY, 0);
-    assert_eq!(secondary[0] & SocketConfig::XDP_BIND_ZEROCOPY, 0);
-    assert_eq!(secondary[0] & SocketConfig::XDP_BIND_NEED_WAKEUP, 0);
+    assert_eq!(
+        secondary[0] & (SocketConfig::XDP_BIND_COPY
+            | SocketConfig::XDP_BIND_ZEROCOPY
+            | SocketConfig::XDP_BIND_NEED_WAKEUP),
+        0,
+        "Linux rejects mode/wakeup flags on a shared-UMEM bind; the \
+         owner pool supplies those effective properties"
+    );
     assert_eq!(describe_bind_flags(secondary[0]), "shared-umem");
 }
 

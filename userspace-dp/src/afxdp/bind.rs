@@ -2,10 +2,29 @@ use super::*;
 use crate::xsk_ffi::{self, DeviceQueue, IfInfo, RingRx, RingTx, SocketConfig};
 use std::path::Path;
 
-const AUTO_BIND_FLAGS: [u16; 1] = [0];
+// #9924 AUTO row: request zero-copy and NEED_WAKEUP explicitly, then fall
+// back to copy mode with NEED_WAKEUP if the driver cannot do zero-copy. A
+// private socket has no owner pool to inherit these bits from. The explicit
+// pair preserves the old row's zero-copy-then-copy negotiation while making
+// both wake requests visible to the kernel.
+const AUTO_BIND_FLAGS: [u16; 2] = [XSK_BIND_FLAGS_ZEROCOPY, XSK_BIND_FLAGS_COPY];
 const COPY_ONLY_BIND_FLAGS: [u16; 1] = [XSK_BIND_FLAGS_COPY];
 const EXPLICIT_MODE_BIND_FLAGS: [u16; 2] = [XSK_BIND_FLAGS_ZEROCOPY, XSK_BIND_FLAGS_COPY];
 const SHARED_OWNER_BIND_FLAGS: [u16; 1] = [XSK_BIND_FLAGS_ZEROCOPY];
+// #9924 secondary row: SHARED_UMEM-only is KERNEL-MANDATED, not an omission.
+// `xsk_bind` rejects a shared socket carrying any of COPY/ZEROCOPY/NEED_WAKEUP
+// with -EINVAL ("Cannot specify flags for shared sockets", `net/xdp/xsk.c`,
+// verified v5.15/v6.12/v6.18/v7.0/master), so requesting NEED_WAKEUP here
+// would break the bind. The secondary instead inherits both properties from
+// the owner pool: same-queue secondaries share the pool object outright
+// (`xs->pool = umem_xs->pool`, `xs->zc = xs->umem->zc`), and cross-queue
+// secondaries go through `xp_assign_dev_shared`, which rebuilds
+// `umem->zc ? ZEROCOPY : COPY` plus the owner's `uses_need_wakeup`
+// (`net/xdp/xsk_buff_pool.c`). The owner row above is therefore the source of
+// both inherited bits, and `try_open_bind` fails a secondary closed when
+// zero-copy was not inherited. (The kernel spells the flag
+// `XDP_USE_NEED_WAKEUP`, `linux/if_xdp.h`; the repo alias
+// `XDP_BIND_NEED_WAKEUP` is the same 1<<3.)
 const SHARED_SECONDARY_BIND_FLAGS: [u16; 1] = [SocketConfig::XDP_BIND_SHARED_UMEM];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
