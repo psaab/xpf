@@ -54,7 +54,9 @@ mod session_admission;
 mod session_hit_authority;
 
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
-use embedded_icmp::{EmbeddedIcmpReversal, try_reverse_embedded_icmp_error};
+use embedded_icmp::{
+    EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, try_reverse_embedded_icmp_error,
+};
 use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
 use flow_cache_seed::stage_flow_cache_seed;
 use frag_assoc::{
@@ -4342,8 +4344,38 @@ pub(super) fn poll_binding_process_descriptor(
                             &mut binding.scratch.scratch_forwards,
                             now_ns,
                             now_secs,
+                            ingress_zone_override,
                         ) {
                             EmbeddedIcmpReversal::Queued => {
+                                let policy_allowed = binding
+                                    .scratch
+                                    .scratch_forwards
+                                    .last()
+                                    .and_then(|forward| match &forward.frame {
+                                        PendingForwardFrame::Prebuilt(frame) => Some(
+                                            enforce_queued_embedded_icmp_policy(
+                                                frame,
+                                                meta,
+                                                ingress_zone_override,
+                                                forward.decision.resolution,
+                                                worker_ctx,
+                                                now_ns,
+                                                now_secs,
+                                            ),
+                                        ),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(false);
+                                if !policy_allowed {
+                                    // The queue helper has transferred ownership
+                                    // to this last prebuilt; remove it before
+                                    // recycling the original descriptor.
+                                    binding.scratch.scratch_forwards.pop();
+                                    telemetry.counters.touched = true;
+                                    telemetry.dbg.policy_deny += 1;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 telemetry.counters.touched = true;
                                 continue;
                             }
@@ -4395,10 +4427,38 @@ pub(super) fn poll_binding_process_descriptor(
                             &mut binding.scratch.scratch_forwards,
                             now_ns,
                             now_secs,
+                            ingress_zone_override,
                         ) {
                             EmbeddedIcmpReversal::Queued => {
-                                // Reversed error queued as a prebuilt forward; the
-                                // descriptor is owned by that request (no recycle).
+                                // Reversed error queued as a prebuilt forward;
+                                // authorize the actual rewritten wire identity
+                                // before allowing the request to own the desc.
+                                let policy_allowed = binding
+                                    .scratch
+                                    .scratch_forwards
+                                    .last()
+                                    .and_then(|forward| match &forward.frame {
+                                        PendingForwardFrame::Prebuilt(frame) => Some(
+                                            enforce_queued_embedded_icmp_policy(
+                                                frame,
+                                                meta,
+                                                ingress_zone_override,
+                                                forward.decision.resolution,
+                                                worker_ctx,
+                                                now_ns,
+                                                now_secs,
+                                            ),
+                                        ),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(false);
+                                if !policy_allowed {
+                                    binding.scratch.scratch_forwards.pop();
+                                    telemetry.counters.touched = true;
+                                    telemetry.dbg.policy_deny += 1;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 telemetry.counters.touched = true;
                                 continue;
                             }

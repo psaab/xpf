@@ -22,7 +22,9 @@
 // consumed; anything else falls through to the same-family reversal and
 // then normal flowless enforcement, both unchanged.
 
-use super::embedded_icmp::{EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error};
+use super::embedded_icmp::{
+    actual_embedded_icmp_ingress_zone, EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error,
+};
 use super::*;
 
 /// Attempt the NAT64 ICMP-error translation for a non-query ICMP error on
@@ -46,6 +48,7 @@ pub(super) fn try_translate_nat64_icmp_error(
     scratch_forwards: &mut Vec<PendingForwardRequest>,
     now_ns: u64,
     now_secs: u64,
+    ingress_zone_override: Option<u16>,
 ) -> EmbeddedIcmpReversal {
     let nat64_match = match try_nat64_icmp_error_match_from_frame(
         packet_frame,
@@ -71,7 +74,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             orig_dst_v6,
             orig_client_port,
             resolution,
-            metadata,
+            metadata: _,
         } => {
             // SPARK-m6: verify L3 — a wrong stamp misreads the hop address.
             let l3 = crate::afxdp::frame::verified_l3_or_stamp(
@@ -93,22 +96,26 @@ pub(super) fn try_translate_nat64_icmp_error(
             src_v6_octets[12..].copy_from_slice(router_v4);
             let src_v6 = Ipv6Addr::from(src_v6_octets);
 
-            // The frame build needs REAL L2 addresses toward the client —
-            // the same gate the same-family builders apply (`?` on
-            // `resolution.neighbor_mac` / `src_mac`).
-            let (Some(dst_mac), Some(src_mac)) =
-                (resolution.neighbor_mac, resolution.src_mac)
-            else {
-                return EmbeddedIcmpReversal::NotHandled;
-            };
             let icmp_resolution = finalize_embedded_icmp_resolution_parts(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 now_secs,
                 meta.ingress_ifindex as i32,
                 resolution,
-                metadata.ingress_zone,
+                actual_embedded_icmp_ingress_zone(
+                    worker_ctx.forwarding,
+                    meta,
+                    ingress_zone_override,
+                ),
             );
+            // The frame build needs the FINAL resolution's L2 addresses. A
+            // FabricRedirect source MAC carries the actual ingress zone for
+            // the peer; using the pre-finalization client MAC loses that stamp.
+            let (Some(dst_mac), Some(src_mac)) =
+                (icmp_resolution.neighbor_mac, icmp_resolution.src_mac)
+            else {
+                return EmbeddedIcmpReversal::NotHandled;
+            };
             let Some(rewritten_frame) = crate::nat64::build_nat64_v4_to_v6_icmp_error_frame(
                 packet_frame,
                 src_v6,
@@ -116,7 +123,7 @@ pub(super) fn try_translate_nat64_icmp_error(
                 Some(orig_client_port),
                 dst_mac,
                 src_mac,
-                resolution.tx_vlan_id,
+                icmp_resolution.tx_vlan_id,
             ) else {
                 return EmbeddedIcmpReversal::NotHandled;
             };
@@ -138,21 +145,25 @@ pub(super) fn try_translate_nat64_icmp_error(
             server_v4,
             translated_port,
             resolution,
-            metadata,
+            metadata: _,
         } => {
-            let (Some(dst_mac), Some(src_mac)) =
-                (resolution.neighbor_mac, resolution.src_mac)
-            else {
-                return EmbeddedIcmpReversal::NotHandled;
-            };
             let icmp_resolution = finalize_embedded_icmp_resolution_parts(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 now_secs,
                 meta.ingress_ifindex as i32,
                 resolution,
-                metadata.ingress_zone,
+                actual_embedded_icmp_ingress_zone(
+                    worker_ctx.forwarding,
+                    meta,
+                    ingress_zone_override,
+                ),
             );
+            let (Some(dst_mac), Some(src_mac)) =
+                (icmp_resolution.neighbor_mac, icmp_resolution.src_mac)
+            else {
+                return EmbeddedIcmpReversal::NotHandled;
+            };
             let Some(rewritten_frame) = crate::nat64::build_nat64_v6_to_v4_icmp_error_frame(
                 packet_frame,
                 pool_v4,
@@ -160,7 +171,7 @@ pub(super) fn try_translate_nat64_icmp_error(
                 Some(translated_port),
                 dst_mac,
                 src_mac,
-                resolution.tx_vlan_id,
+                icmp_resolution.tx_vlan_id,
                 worker_ctx.forwarding.nat64.no_v6_frag_header,
             ) else {
                 return EmbeddedIcmpReversal::NotHandled;
