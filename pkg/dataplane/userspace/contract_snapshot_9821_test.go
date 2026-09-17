@@ -111,6 +111,22 @@ func TestRowIdentityWireKeyLockstepWithRust9821(t *testing.T) {
 	}
 }
 
+// TestFabricBondWireKeyLockstep9925 pins the additive field's Go/Rust wire
+// spelling. A serde default keeps old snapshots readable, so a key mismatch
+// would otherwise silently turn the admission bit off on one side.
+func TestFabricBondWireKeyLockstep9925(t *testing.T) {
+	goKey := jsonKeyOf(t, reflect.TypeOf(InterfaceSnapshot{}), "FabricBond")
+	path := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "snapshot.rs")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v (the fabric-bond wire-key guard cannot run)", path, err)
+	}
+	rustKey := rustSerdeRenameOf(t, rustStructBody(t, string(src), "InterfaceSnapshot"), "fabric_bond")
+	if goKey != rustKey {
+		t.Fatalf("fabric_bond wire key skew: Go emits %q, Rust reads %q", goKey, rustKey)
+	}
+}
+
 // TestContractSnapshotGoldenPins9821 asserts the load-bearing rows of the
 // golden INDEPENDENTLY of the byte-compare, so a blind regen cannot launder
 // a regression: the same-ifindex pair carries the instance on the

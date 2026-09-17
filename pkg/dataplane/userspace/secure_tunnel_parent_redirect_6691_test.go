@@ -314,14 +314,11 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 			wantDisagree: false,
 		},
 		{
-			// LocalFabric + the `fab` name arm together. Only a `fab*`
-			// interface ever carries LocalFabricMember — the compiler sets it
-			// on the fab0/fab1 InterfaceConfig, not on the member NIC
-			// (compiler_derivations.go) — so this class cannot be isolated
-			// from the name arm by any config, and its exclusion here is
-			// over-determined. Both reasons agree across the two rows anyway:
-			// the name arm reads the shared BASE name, and LocalFabric is the
-			// same InterfaceConfig field copied to both rows (asserted below).
+			// This is the WITH-member shape: LocalFabricMember keeps the
+			// rows excluded, and FabricBond is false, so the narrowed fab arm
+			// still fires. The configured unresolved-bond shape deliberately
+			// does NOT belong in this exclusion-class table; its positive
+			// admission is pinned by fabric_bond_9925_test.go.
 			class: "fab name",
 			lines: []string{
 				"set chassis cluster reth-count 2",
@@ -375,6 +372,10 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 						"rows read the SAME InterfaceConfig field, which is why this class "+
 						"cannot disagree", base.LocalFabric, child.LocalFabric, tc.wantLocal)
 				}
+			}
+			if base.FabricBond || child.FabricBond {
+				t.Errorf("WITH-member fab rows unexpectedly carry FabricBond: base=%v child=%v",
+					base.FabricBond, child.FabricBond)
 			}
 			disagree := !userspaceSkipsIngressInterface(child)
 			if disagree != tc.wantDisagree {

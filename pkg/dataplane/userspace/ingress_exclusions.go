@@ -70,9 +70,11 @@ import "strings"
 //     `set interfaces wgN unit 0 tunnel mode wireguard` is the canonical
 //     spelling — gives Tunnel=true on the unit and false on the base. That
 //     direction is the #6691 round 9 blocker; see userspaceRefusedNetdevs.
-//     LocalFabric really is one field copied to both rows, and the
-//     fxp/em/fab/lo0 arms really do test the BASE name a unit shares.
-//
+//     LocalFabric really is one field copied to both rows, and the fxp/em/lo0
+//     arms really do test the BASE name a unit shares. The fab arm is the
+//     deliberate exception: configured unresolved fabric bonds carry
+//     InterfaceSnapshot.FabricBond and bind through their rows instead.
+
 // TestExclusionClassesAgreeAcrossParentAndChild pins both directions for every
 // class, so a new class cannot be added on the wrong side unnoticed and a
 // direction cannot go unmeasured again.
@@ -137,7 +139,7 @@ var netdevExclusionClasses = []netdevExclusionClass{
 		return strings.HasPrefix(exclusionBaseName(iface), "em")
 	}},
 	{name: "fab name", match: func(iface InterfaceSnapshot) bool {
-		return strings.HasPrefix(exclusionBaseName(iface), "fab")
+		return strings.HasPrefix(exclusionBaseName(iface), "fab") && !iface.FabricBond
 	}},
 	{name: "lo0 name", match: func(iface InterfaceSnapshot) bool {
 		return exclusionBaseName(iface) == "lo0"
@@ -739,6 +741,21 @@ func snapshotNetdevVotes(snap *ConfigSnapshot) []netdevVote {
 func snapshotRequiresRefusalProtocol(snap *ConfigSnapshot) bool {
 	for _, vote := range snapshotNetdevVotes(snap) {
 		if vote.verdictNeedsProtocol {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotRequiresFabricBondProtocol reports whether the snapshot carries the
+// positive bond-fabric admission bit. Helpers below its feature floor retain
+// the old fab-name exclusion and cannot reproduce the bond-master target.
+func snapshotRequiresFabricBondProtocol(snap *ConfigSnapshot) bool {
+	if snap == nil {
+		return false
+	}
+	for _, iface := range snap.Interfaces {
+		if iface.FabricBond {
 			return true
 		}
 	}

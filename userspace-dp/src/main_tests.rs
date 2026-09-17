@@ -758,6 +758,128 @@ fn replan_queues_binds_vlan_unit_on_parent_netdev() {
     );
 }
 
+// #9925 fail-on-revert: configured fabric bonds without a LOCAL member admit
+// their bond master through the ordinary interface/VLAN planner. The positive
+// `fabric_bond` row flag is the only reason the fab-prefix device exclusion
+// does not fire; no FabricSnapshot is involved in this transit shape.
+#[test]
+fn bond_fabric_rows_plan_master_and_move_key_9925() {
+    use crate::server::helpers::{
+        clear_rx_queue_count_override, include_userspace_binding_interface, replan_queues,
+        set_rx_queue_count_override, snapshot_binding_plan_key, userspace_unbindable_netdev,
+    };
+
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "fab0".to_string(),
+                linux_name: "fab0".to_string(),
+                zone: "fabric".to_string(),
+                ifindex: 40,
+                rx_queues: 4,
+                fabric_bond: true,
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "fab0.10".to_string(),
+                linux_name: "fab0.10".to_string(),
+                parent_linux_name: "fab0".to_string(),
+                zone: "fabric".to_string(),
+                ifindex: 41,
+                parent_ifindex: 40,
+                vlan_id: 10,
+                rx_queues: 1,
+                fabric_bond: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    assert!(
+        !userspace_unbindable_netdev(&snapshot.interfaces[0])
+            && !userspace_unbindable_netdev(&snapshot.interfaces[1]),
+        "FabricBond rows must not trigger the fab-prefix device exclusion"
+    );
+    assert!(
+        snapshot
+            .interfaces
+            .iter()
+            .all(include_userspace_binding_interface),
+        "FabricBond rows must remain binding candidates"
+    );
+
+    let plain = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "fab0".to_string(),
+            linux_name: "fab0".to_string(),
+            zone: "fabric".to_string(),
+            ifindex: 42,
+            rx_queues: 4,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    assert!(userspace_unbindable_netdev(&plain.interfaces[0]));
+    assert!(!include_userspace_binding_interface(&plain.interfaces[0]));
+    assert!(
+        replan_queues(Some(&plain), 4, &[], true)
+            .expect("plain fab plan")
+            .is_empty(),
+        "plain fab0 remains excluded without FabricBond"
+    );
+
+    let mut legacy = snapshot.clone();
+    for iface in &mut legacy.interfaces {
+        iface.fabric_bond = false;
+    }
+    assert_ne!(
+        snapshot_binding_plan_key(&snapshot),
+        snapshot_binding_plan_key(&legacy),
+        "admitting configured bond rows must move the binding-plan key"
+    );
+
+    set_rx_queue_count_override("fab0", 4);
+    let bindings = replan_queues(Some(&snapshot), 4, &[], true).expect("plan");
+    clear_rx_queue_count_override();
+    let bound: std::collections::BTreeSet<&str> =
+        bindings.iter().map(|b| b.interface.as_str()).collect();
+    assert!(
+        bound.contains("fab0"),
+        "configured bond shape must bind the master fab0; bound: {bound:?}"
+    );
+    assert!(
+        !bound.contains("fab0.10"),
+        "fab0.10 is a non-orphan VLAN child and must be covered by the master; \
+         bound: {bound:?}"
+    );
+}
+
+#[test]
+fn fabric_bond_wire_defaults_and_omits_false_9925() {
+    let old: InterfaceSnapshot =
+        serde_json::from_value(serde_json::json!({"name": "fab0"})).expect("legacy row");
+    assert!(!old.fabric_bond, "missing fabric_bond must default false");
+    let old_wire = serde_json::to_value(&old).expect("legacy row wire");
+    assert!(
+        !old_wire
+            .as_object()
+            .expect("object")
+            .contains_key("fabric_bond"),
+        "false fabric_bond must preserve the old wire shape"
+    );
+
+    let mut bond = old;
+    bond.fabric_bond = true;
+    let bond_wire = serde_json::to_value(&bond).expect("bond row wire");
+    assert_eq!(
+        bond_wire
+            .get("fabric_bond")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "true fabric_bond must cross the snapshot wire"
+    );
+}
+
 // #3175 fail-on-revert: an ORPHAN VLAN child (a VLAN unit whose physical parent
 // is NOT itself a binding candidate) is re-keyed in the LAYOUT onto its parent
 // netdev using the parent's HARDWARE queue count (`rx_queue_count(parent)`). The

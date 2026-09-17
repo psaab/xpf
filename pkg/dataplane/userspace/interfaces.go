@@ -122,14 +122,15 @@ func userspaceBindTargetNetdev(iface InterfaceSnapshot) string {
 //
 // Scope mirrors buildUserspaceIngressIfindexes() and
 // userspaceSkipsIngressInterface(): include zoned non-tunnel interfaces
-// excluding fxp*, em*, fab*, lo0, mgmt/control zones, and RETH member
-// children — and, since #6691 round 8, excluding a row whose AF_XDP bind
-// TARGET is a netdev EVERY owning row was refused for (a VLAN child
-// redirecting onto an excluded parent); plus every fabric's parent member (fab0/fab1 themselves are
-// IPVLAN overlays and are excluded above, but their physical parent is
-// where AF_XDP binds). For zoned VLAN units whose parent is the physical
-// interface, we emit the parent Linux name — that is the netdev the
-// AF_XDP socket actually binds to.
+// excluding fxp*, em*, fab* (except configured unresolved fabric-bond rows
+// carrying FabricBond), lo0, mgmt/control zones, and RETH member children —
+// and, since #6691 round 8, excluding a row whose AF_XDP bind TARGET is a
+// netdev EVERY owning row was refused for (a VLAN child redirecting onto an
+// excluded parent); plus every fabric's parent member (the physical parent is
+// where AF_XDP binds for the WITH-member IPVLAN shape). For the unresolved
+// bond shape, the admitted fab row itself is the bond-master target. For zoned
+// VLAN units whose parent is the physical interface, we emit the parent Linux
+// name — that is the netdev the AF_XDP socket actually binds to.
 //
 // Returns nil on nil config. Never returns an error: this is a
 // best-effort derivation used to scope a best-effort optimization.
@@ -372,6 +373,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			RXQueues:        userspaceRXQueueCount(linuxName),
 			VLANID:          0,
 			LocalFabric:     iface.LocalFabricMember,
+			FabricBond:      snapshotFabricBond(cfg, name),
 			RedundancyGroup: rg,
 			UnitCount:       len(iface.Units),
 			Tunnel:          iface.Tunnel != nil,
@@ -448,6 +450,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				RXQueues:                  rxQueues,
 				VLANID:                    unit.VlanID,
 				LocalFabric:               iface.LocalFabricMember,
+				FabricBond:                snapshotFabricBond(cfg, name),
 				RedundancyGroup:           rg, // inherit resolved RG (RETH parent or own)
 				UnitCount:                 0,
 				Tunnel:                    iface.Tunnel != nil || unit.Tunnel != nil,
@@ -839,6 +842,21 @@ func xfrmNetdevNames(links []netlink.Link) map[string]bool {
 		out[name] = true
 	}
 	return out
+}
+
+// snapshotFabricBond reports the CONFIG-owned bond shape for an interface
+// row. It deliberately does not inspect live member rows: a configured bond
+// whose local member is unresolved must still admit the bond master.
+func snapshotFabricBond(cfg *config.Config, ref string) bool {
+	if cfg == nil {
+		return false
+	}
+	base := ref
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	iface := cfg.Interfaces.Interfaces[base]
+	return iface != nil && len(iface.FabricMembers) > 0 && iface.LocalFabricMember == ""
 }
 
 // snapshotSecureTunnel is the value a row's SecureTunnel flag carries: the

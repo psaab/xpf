@@ -345,7 +345,10 @@ pub(crate) fn userspace_unbindable_netdev(iface: &InterfaceSnapshot) -> bool {
         return true;
     }
     let base = iface.name.split('.').next().unwrap_or(iface.name.as_str());
-    if base.starts_with("fxp") || base.starts_with("em") || base.starts_with("fab") || base == "lo0"
+    if base.starts_with("fxp")
+        || base.starts_with("em")
+        || (base.starts_with("fab") && !iface.fabric_bond)
+        || base == "lo0"
     {
         return true;
     }
@@ -675,9 +678,10 @@ pub(crate) fn replan_queues(
             // (`update_snapshot_binding_plan_key`) and the Go authoritative
             // allowlist (`UserspaceBoundLinuxInterfaces`) both filter through
             // the binding exclusion contract — zoned, non-tunnel,
-            // non-local-fabric, excluding fxp*/em*/fab*/lo0 and mgmt/control
-            // zones. `replan_queues` MUST act on exactly that set; a
-            // prefix-only `ge-*`/`xe-*`/`et-*` test (the pre-#2915 predicate)
+            // non-local-fabric, excluding fxp*/em*/fab*/lo0 except for
+            // configured unresolved fabric bonds (`fabric_bond`), and
+            // mgmt/control zones. `replan_queues` MUST act on exactly that set;
+            // a prefix-only `ge-*`/`xe-*`/`et-*` test (the pre-#2915 predicate)
             // let a `ge-*` netdev placed in a mgmt/control zone (or a
             // tunnel/local-fabric context) be planned as an AF_XDP binding
             // that neither the hash nor the control plane accounts for.

@@ -13,8 +13,11 @@ import (
 )
 
 // Zoned dataplane interfaces emit their Linux names; management-zone and
-// fxp*/em*/fab*/lo interfaces are filtered out. VLAN units bind on the
-// parent physical netdev, so the parent Linux name is what's emitted.
+// fxp*/em*/fab*/lo interfaces are filtered out, except configured unresolved
+// fabric bonds, whose FabricBond row flag admits the bond master. VLAN units
+// bind on the parent physical netdev, so the parent Linux name is what's
+// emitted. The #9925 bond-shape cells live beside the ingress parity tests in
+// fabric_bond_9925_test.go.
 func TestUserspaceBoundLinuxInterfaces_BasicFilter(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.System.HostName = "fw"

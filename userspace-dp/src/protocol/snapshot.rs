@@ -80,6 +80,11 @@ pub(crate) struct InterfaceSnapshot {
     pub vlan_id: i32,
     #[serde(rename = "local_fabric_member", default)]
     pub local_fabric_member: String,
+    /// #9925: configured fabric members without a LOCAL member describe a
+    /// bond shape. The Go builder owns this config fact; false is omitted so
+    /// snapshots retain the existing wire shape for all other interfaces.
+    #[serde(rename = "fabric_bond", default, skip_serializing_if = "std::ops::Not::not")]
+    pub fabric_bond: bool,
     #[serde(rename = "redundancy_group", default)]
     pub redundancy_group: i32,
     /// #6722: the security zone this row's IFINDEX egresses into, or "" for

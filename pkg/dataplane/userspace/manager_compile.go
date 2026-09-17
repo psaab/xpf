@@ -81,6 +81,11 @@ var ErrEgressZoneProtocolIncompatible = errors.New("userspace egress-zone snapsh
 // only the reader is.
 var ErrSecureTunnelProtocolIncompatible = errors.New("userspace secure-tunnel snapshot protocol incompatible")
 
+// ErrFabricBondProtocolIncompatible is the #9925 gate. A snapshot carrying
+// InterfaceSnapshot.FabricBond needs a helper that admits the bond master
+// instead of applying the legacy fab-name exclusion.
+var ErrFabricBondProtocolIncompatible = errors.New("userspace fabric-bond snapshot protocol incompatible")
+
 // requiredProtocolGateSentinels enumerates every "this config cannot be
 // committed against the helper's current ConfigSnapshotProtocolVersion"
 // sentinel produced by ensureRequiredSnapshotProtocolLocked. ApplyConfig
@@ -118,6 +123,7 @@ var requiredProtocolGateSentinels = []error{
 	ErrScopedGlobalZoneSetProtocolIncompatible,
 	ErrEgressZoneProtocolIncompatible,
 	ErrSecureTunnelProtocolIncompatible,
+	ErrFabricBondProtocolIncompatible,
 }
 
 // IsRequiredProtocolGateError reports whether err is (or wraps) any
@@ -1184,6 +1190,37 @@ func (m *Manager) ensureScopedGlobalZoneSetProtocolLocked(cfg *config.Config) er
 	)
 }
 
+// ensureFabricBondProtocolLocked is the fail-closed half of the #9925
+// snapshot bump. FabricBond is a positive admission fact: a helper below its
+// feature floor ignores the field and keeps excluding the fab bond master,
+// silently removing the only ingress target for that fabric shape.
+func (m *Manager) ensureFabricBondProtocolLocked(snap *ConfigSnapshot) error {
+	if !snapshotRequiresFabricBondProtocol(snap) {
+		return nil
+	}
+	if m.lastStatus.ConfigSnapshotProtocolVersion >= MinProtocolFabricBond {
+		return nil
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+		m.recordHelperStatusLocked(&status)
+		if status.ConfigSnapshotProtocolVersion >= MinProtocolFabricBond {
+			return nil
+		}
+	}
+	if m.noHelperVersionObservedLocked() {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: helper config snapshot protocol version %d < required %d for a configured fabric bond whose "+
+			"local member is unresolved (an older helper retains the fab-name exclusion and loses the bond "+
+			"master ingress target)",
+		ErrFabricBondProtocolIncompatible,
+		m.lastStatus.ConfigSnapshotProtocolVersion,
+		MinProtocolFabricBond,
+	)
+}
+
 // ensureSecureTunnelProtocolLocked is the fail-closed half of the #5619/#6691
 // protocol bumps — v5 (the SecureTunnel field), v6 (the every-owner refusal
 // rule) and v7 (the fabric parent's verdict). It compares against
@@ -1378,22 +1415,17 @@ func (m *Manager) noHelperVersionObservedLocked() bool {
 // ensureRequiredSnapshotProtocolLocked takes the SNAPSHOT, not the config
 // (#6691 round 9).
 //
-// Three of the four gates are pure config questions and read snap.Config
-// exactly as before. The fourth — the secure-tunnel gate — is not: the flag it
-// arms on is stamped by the snapshot builder from a sample of the KERNEL, and
-// asking the same question from a config a moment later is asking a different
-// kernel. Measured before this round, with an xfrm device visible to the
-// builder's dump and gone by the gate's: the built snapshot carried
-// SecureTunnel=true on `st10` while the gate returned false, so an under-version helper
-// stayed ARMED on its previous-good image for exactly the snapshot the gate
-// exists to refuse.
+// Three of the six gates are pure config questions and read snap.Config
+// exactly as before. The fabric-bond and secure-tunnel gates consume positive
+// row flags stamped by the snapshot builder, while egress-zone remains the
+// unconditional exact-version acceptance check. Passing the snapshot makes
+// each shape gate arm iff the snapshot carries the flagged row, by construction
+// rather than by two samples agreeing.
 //
-// Passing the snapshot makes "arms iff the snapshot carries a flagged row" true
-// by construction rather than by two samples agreeing. Every call site already
-// had one in scope: the apply paths pass the snapshot they are about to
-// publish, and the poll/status/HA paths pass m.lastSnapshot, which is the
-// snapshot actually being enforced — a strictly better oracle than re-deriving
-// from config on a poll tick.
+// Every call site already had one in scope: the apply paths pass the snapshot
+// they are about to publish, and the poll/status/HA paths pass m.lastSnapshot,
+// which is the snapshot actually being enforced — a strictly better oracle
+// than re-deriving from config on a poll tick.
 func (m *Manager) ensureRequiredSnapshotProtocolLocked(snap *ConfigSnapshot) error {
 	var cfg *config.Config
 	if snap != nil {
@@ -1418,9 +1450,12 @@ func (m *Manager) ensureRequiredSnapshotProtocolLocked(snap *ConfigSnapshot) err
 	// actually carries a flagged row) while the egress-zone gate is
 	// UNCONDITIONAL, so asking the specific one first reports the narrower,
 	// more actionable reason when it applies and falls through to the general
-	// one otherwise. Fail-closed either way: both sentinels are in
+	// one otherwise. Fail-closed either way: all sentinels are in
 	// requiredProtocolGateSentinels, so the commit aborts and the helper is
 	// disarmed regardless of which one is returned.
+	if err := m.ensureFabricBondProtocolLocked(snap); err != nil {
+		return err
+	}
 	if err := m.ensureSecureTunnelProtocolLocked(snap); err != nil {
 		return err
 	}

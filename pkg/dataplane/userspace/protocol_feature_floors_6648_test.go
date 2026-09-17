@@ -186,6 +186,7 @@ func TestProtocolFloorsAreImmutableLiterals6648(t *testing.T) {
 		{"persistent source NAT landed in the v3 bump (c0a047ea2)", MinProtocolPersistentSourceNAT, 3},
 		{"multi-zone scoped policy landed in the v4 bump (8119bfe27)", MinProtocolMultiZoneScopedPolicy, 4},
 		{"the secure-tunnel refusal contract completed at the v7 bump (8c011681c)", MinProtocolSecureTunnelRefusal, 7},
+		{"fabric-bond admission landed in the v25 bump (#9925)", MinProtocolFabricBond, 25},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s: floor = %d, want %d. These name when a feature's wire "+

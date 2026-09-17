@@ -307,7 +307,12 @@ const (
 	// An old helper silently retains the one-list prefix-length leak model and
 	// cannot fall through a target-table miss. Exact equality refuses the mixed
 	// pairing, and the #8892 shape digest moves with this new field.
-	ProtocolVersion = 24
+	//
+	// v24 -> v25 BUMPED (#9925): InterfaceSnapshot.FabricBond identifies
+	// configured-member bond rows whose local member is unresolved. An old
+	// helper still classifies those fab rows as excluded and silently loses the
+	// bond master ingress target; exact equality rejects the mixed pairing.
+	ProtocolVersion = 25
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -363,7 +368,12 @@ const (
 	// is the first version that reads all of it. (The subsequent 7 -> 8 bump
 	// was collision resolution against #6722's parallel v5, not a fourth change
 	// to this contract — see the ProtocolVersion comment above.)
-	MinProtocolSecureTunnelRefusal   = 7
+	MinProtocolSecureTunnelRefusal = 7
+	// MinProtocolFabricBond: the positive bond-fabric admission bit landed in
+	// the v25 snapshot bump (#9925). Helpers below this floor do not know the
+	// bit and retain the old fab-row exclusion, so a mixed pairing would
+	// silently lose the bond master ingress target.
+	MinProtocolFabricBond            = 25
 	InjectPacketTupleProtocolVersion = 1
 	TypeUserspace                    = "userspace"
 
@@ -838,6 +848,7 @@ type InterfaceSnapshot struct {
 	RXQueues        int    `json:"rx_queues,omitempty"`
 	VLANID          int    `json:"vlan_id,omitempty"`
 	LocalFabric     string `json:"local_fabric_member,omitempty"`
+	FabricBond      bool   `json:"fabric_bond,omitempty"`
 	RedundancyGroup int    `json:"redundancy_group,omitempty"`
 	// EgressZone is the security zone this row's IFINDEX egresses into, or "" for
 	// none (#6722). It is the ANSWER, decided in stampEgressZones (interfaces.go)

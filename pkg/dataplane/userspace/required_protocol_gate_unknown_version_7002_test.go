@@ -22,11 +22,12 @@ import (
 // So the answer is "defer", and this file makes the remaining gates agree with
 // the two that already did rather than re-litigating the question per lane.
 //
-// THE ISSUE'S ENUMERATION IS A FLOOR. It names FOUR gates; there are FIVE —
-// ensureEgressZoneProtocolLocked joined the set in #6722 and is in
-// requiredProtocolGateSentinels alongside the other four. Its measured table is
-// also stale: it lists secure-tunnel as arming, which stopped being true when
-// #6691 round 10 landed the deferral and cited this issue by number while
+// THE ISSUE'S ENUMERATION IS A FLOOR. It names FOUR gates; there are SIX —
+// ensureEgressZoneProtocolLocked joined the set in #6722 and
+// ensureFabricBondProtocolLocked joined it in #9925. Both are in
+// requiredProtocolGateSentinels alongside the other four. Its measured table
+// is also stale: it lists secure-tunnel as arming, which stopped being true
+// when #6691 round 10 landed the deferral and cited this issue by number while
 // deliberately scoping the fix to itself.
 //
 // WHY helperStatusObserved AND NOT `version <= 0`. Three states share one
@@ -39,13 +40,14 @@ import (
 // this file's `observed-zero` column is asserted separately from
 // `never-observed` rather than folded into it.
 //
-// MEASURED BEFORE THE CHANGE, on origin/master, all five gates x four states:
+// MEASURED GATE CENSUS, all six gates x four states:
 //
 //	gate                   never-observed  observed-v1  observed-0  observed-current
 //	policy-scheduler       ARM             ARM          ARM         DEFER
 //	persistent-source-nat  ARM             ARM          ARM         DEFER
 //	scoped-global-zoneset  ARM             ARM          ARM         DEFER
 //	secure-tunnel          DEFER           ARM          ARM         DEFER
+//	fabric-bond            DEFER           ARM          ARM         DEFER
 //	egress-zone            DEFER           ARM          DEFER  <--  DEFER
 //
 // The `persistent-source-nat` row is the one the issue explicitly could not
@@ -78,6 +80,13 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 		t.Fatal("fixture invalid: the secure-tunnel snapshot carries no flagged row, " +
 			"so that gate's cells would pass without ever reaching its version check")
 	}
+	bondSnap := &ConfigSnapshot{
+		Interfaces: []InterfaceSnapshot{{FabricBond: true}},
+	}
+	if !snapshotRequiresFabricBondProtocol(bondSnap) {
+		t.Fatal("fixture invalid: the fabric-bond snapshot carries no flagged row, " +
+			"so that gate's cells would pass without ever reaching its version check")
+	}
 	return []gateCase{
 		{"policy-scheduler", func(m *Manager) error {
 			return m.ensurePolicySchedulerProtocolLocked(schedulerFloorCfg())
@@ -91,6 +100,9 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 		{"secure-tunnel", func(m *Manager) error {
 			return m.ensureSecureTunnelProtocolLocked(stSnap)
 		}},
+		{"fabric-bond", func(m *Manager) error {
+			return m.ensureFabricBondProtocolLocked(bondSnap)
+		}},
 		{"egress-zone", func(m *Manager) error {
 			return m.ensureEgressZoneProtocolLocked()
 		}},
@@ -101,9 +113,9 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 // executable.
 //
 // RED on revert: drop the `!m.helperStatusObserved` deferral from any one of
-// the five gates and that gate's row fails on the never-observed cell alone —
-// the other three cells are unchanged by the mutation, so the row localises
-// which gate regressed.
+// the six gates and that gate's row fails on the never-observed cell alone —
+// the other cells are unchanged by the mutation, so the row localises which
+// gate regressed.
 func TestRequiredProtocolGateDefersOnNeverObserved7002(t *testing.T) {
 	for _, g := range requiredProtocolGateCases(t) {
 		t.Run(g.name, func(t *testing.T) {
@@ -138,7 +150,7 @@ func TestRequiredProtocolGateDefersOnNeverObserved7002(t *testing.T) {
 			// field ANSWERED — evidence of a mismatch, not silence — and a gate
 			// keying on the value alone cannot tell it from the first cell.
 			//
-			// Four gates arm here. `egress-zone` DEFERS, and that is recorded
+			// Five gates arm here. `egress-zone` DEFERS, and that is recorded
 			// rather than corrected: no shipping helper reports 0 (lifecycle.rs
 			// sets the field unconditionally to a non-zero constant), so the case
 			// is unreachable, while that gate alone has no shape predicate and
@@ -203,11 +215,11 @@ func TestRequiredProtocolGateFixturesArm7002(t *testing.T) {
 }
 
 // TestRequiredProtocolGateSentinelsCoverEveryGate7002 pins the census's
-// population. #7002 names FOUR gates; there are FIVE, and the abort/disarm
+// population. #7002 names FOUR gates; there are SIX, and the abort/disarm
 // contract keys on this list — a gate added without an entry disarms the helper
 // while the commit reports success, which is exactly #2138.
 func TestRequiredProtocolGateSentinelsCoverEveryGate7002(t *testing.T) {
-	const wantGates = 5
+	const wantGates = 6
 	if got := len(requiredProtocolGateSentinels); got != wantGates {
 		t.Fatalf("requiredProtocolGateSentinels has %d entries, want %d. A gate was "+
 			"added or removed: add its cell to TestRequiredProtocolGateDefersOnNeverObserved7002 "+

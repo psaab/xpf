@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "4492dd9b4d8eaffee78a6b051ba784230cea26b16237c79b724d6da3fce34daf"
+	snapshotShapeGolden8892 = "fee99cca601734bd23045df1b22a33fd7e58e44690e309b5148ecba0a5c3a02d"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -324,7 +324,10 @@ const (
 	// cannot fall through a target-table miss. Exact equality refuses the mixed
 	// pairing, and the combined v24 snapshot shape requires the refreshed
 	// golden.
-	snapshotShapeVersion8892 = 24
+	// v24 -> v25 BUMPED (#9925): InterfaceSnapshot.FabricBond is a real
+	// transmitted field. An old helper retains the fab-name exclusion and loses
+	// the bond master ingress target, so exact equality refuses the mixed pairing.
+	snapshotShapeVersion8892 = 25
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

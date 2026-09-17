@@ -178,8 +178,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // this additional real field requires another exact-equality bump because an
 // old helper cannot perform priority-ordered next-table rules with
 // target-table fall-through. The #8892 shape digest moves with this field.
+// v24 -> v25 (#9925): `InterfaceSnapshot.fabric_bond` crosses the
+// ConfigSnapshot so unresolved fabric bonds can admit their master. Helpers
+// below this version retain the old fab-name exclusion.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 24;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 25;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

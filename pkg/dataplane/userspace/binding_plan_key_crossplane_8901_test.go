@@ -231,11 +231,13 @@ var adjudicated8901 = map[string]string{
 // describing a state that no longer exists — the same rot the `logical_only`
 // adjudication above suffered. Go now resolves the effective rx_queues
 // including the orphan-VLAN re-key (`planKeyRXQueues`) and applies the refusal
-// filters to BOTH loops. THIS CELL STILL CANNOT SEE EITHER CLASS: it compares
-// field NAMES, so it would pass just as happily if they were re-opened
-// tomorrow. What actually holds them is plan_key_crossplane_9009_test.go, which
-// EXECUTES the hash over paired snapshots and asserts whether the key moves.
-//
+// filters to BOTH loops. #9925 adds a deliberate population-level input:
+// `FabricBond` changes whether fab rows enter either tuple, but the flag itself
+// is not a planner tuple field and therefore is not hashed independently.
+// THIS CELL STILL CANNOT SEE EITHER CLASS: it compares field NAMES, so it would
+// pass just as happily if they were re-opened tomorrow. What actually holds
+// them is plan_key_crossplane_9009_test.go, which EXECUTES the hash over paired
+// snapshots and asserts whether the key moves.
 // THE DIRECTION OF EACH MATTERS AND IS NOT SYMMETRIC. A field RUST hashes and
 // Go does not means Go UNDER-detects: it calls a real plan change "same plan"
 // and publishes through the pending-XSK-startup window while the helper
