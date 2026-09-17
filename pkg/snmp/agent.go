@@ -1406,8 +1406,9 @@ func (a *Agent) handleGet(community []byte, pduBody []byte) []byte {
 	for _, oid := range oids {
 		val, valTag := a.getOIDValueSnap(oid, snap)
 		if val == nil {
-			// For v2c GET, return noSuchObject exception.
-			varbinds = append(varbinds, varbind{oid: oid, tag: tagNoSuchInstance, value: nil})
+			// getOIDValueSnap classifies the missing object/instance so v2c
+			// can emit the RFC 3416 exception appropriate to this OID.
+			varbinds = append(varbinds, varbind{oid: oid, tag: valTag, value: nil})
 		} else {
 			varbinds = append(varbinds, varbind{oid: oid, tag: valTag, value: val})
 		}
@@ -1683,6 +1684,43 @@ func (a *Agent) getOIDValue(oid []int) ([]byte, byte) {
 	return a.getOIDValueSnap(oid, a.newIfSnapshot())
 }
 
+// oidAbsenceTag classifies an OID that has no value in this MIB view. A
+// requested scalar object is identified by its OID without the required .0
+// instance; table objects are identified by their column under the table
+// prefix. A known object with a missing/malformed instance is noSuchInstance,
+// while an OID naming no served object is noSuchObject (RFC 3416 §4.2.1).
+func oidAbsenceTag(oid []int) byte {
+	for _, objectOID := range staticOIDs {
+		if len(objectOID) > 0 && oidHasPrefix(oid, objectOID[:len(objectOID)-1]) {
+			return tagNoSuchInstance
+		}
+	}
+
+	for _, table := range []struct {
+		prefix []int
+		cols   []int
+	}{
+		{oidIfTablePrefix, ifTableColumns},
+		{oidIfXTablePrefix, ifXTableColumns},
+	} {
+		if !oidHasPrefix(oid, table.prefix) {
+			continue
+		}
+		rest := oid[len(table.prefix):]
+		if len(rest) == 0 {
+			return tagNoSuchObject
+		}
+		for _, col := range table.cols {
+			if rest[0] == col {
+				return tagNoSuchInstance
+			}
+		}
+		return tagNoSuchObject
+	}
+
+	return tagNoSuchObject
+}
+
 // getOIDValueSnap is getOIDValue served from a caller-provided per-PDU
 // interface snapshot. All ifTable/ifXTable/ifNumber reads go through snap so a
 // multi-varbind walk triggers at most one netlink LinkList.
@@ -1736,17 +1774,25 @@ func (a *Agent) getOIDValueSnap(oid []int, snap *ifSnapshot) ([]byte, byte) {
 	if len(oid) == len(oidIfTablePrefix)+2 && oidHasPrefix(oid, oidIfTablePrefix) {
 		col := oid[len(oidIfTablePrefix)]
 		ifIdx := oid[len(oidIfTablePrefix)+1]
-		return getIfTableValue(col, ifIdx, snap.get())
+		val, tag := getIfTableValue(col, ifIdx, snap.get())
+		if val == nil {
+			return nil, oidAbsenceTag(oid)
+		}
+		return val, tag
 	}
 
 	// ifXTable: 1.3.6.1.2.1.31.1.1.1.<col>.<ifIndex>
 	if len(oid) == len(oidIfXTablePrefix)+2 && oidHasPrefix(oid, oidIfXTablePrefix) {
 		col := oid[len(oidIfXTablePrefix)]
 		ifIdx := oid[len(oidIfXTablePrefix)+1]
-		return getIfXTableValue(col, ifIdx, snap.get())
+		val, tag := getIfXTableValue(col, ifIdx, snap.get())
+		if val == nil {
+			return nil, oidAbsenceTag(oid)
+		}
+		return val, tag
 	}
 
-	return nil, 0
+	return nil, oidAbsenceTag(oid)
 }
 
 // getIfTableValue returns the value for a specific ifTable column and ifIndex,

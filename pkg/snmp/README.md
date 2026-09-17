@@ -116,10 +116,10 @@ views. The scopedPDU `contextEngineID` and `contextName` are decoded and the
   for that context, so per RFC 3413 the request yields no matching objects.
   Rather than leaking default-context data (an information-exposure /
   operator-confusion bug, #2611), the agent returns the **empty-view**
-  exceptions: `noSuchInstance` for every Get varbind and `endOfMibView` for
-  every GetNext / GetBulk varbind. SET is refused with `notWritable` as in any
-  context. This is fail-closed: a manager addressing an unknown context never
-  receives default-context values.
+  exceptions: `noSuchObject` for unknown objects and `noSuchInstance` for
+  missing instances, and `endOfMibView` for every GetNext / GetBulk varbind.
+  SET is refused with `notWritable` as in any context. This is fail-closed: a
+  manager addressing an unknown context never receives default-context values.
 - The response **echoes the requested `contextName`** back in the scopedPDU
   (empty for the default context), so the manager sees the response is bound to
   the context it addressed. `contextEngineID` in the response is our own engine

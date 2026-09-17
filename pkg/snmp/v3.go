@@ -349,11 +349,12 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 	// per-VRF/routing-instance context views, so a request naming a non-default
 	// context must NOT be answered with default-context data — that would be an
 	// information-exposure / operator-confusion bug (#2611). Per RFC 3413, an
-	// unknown context yields no matching MIB objects: Get/GetNext/GetBulk return
-	// the empty-view exceptions (noSuchInstance / endOfMibView) for every
-	// varbind, and Set is refused. The requested contextName is echoed back in
-	// the response so the manager sees which context it addressed. The empty
-	// (default) context continues to be served exactly as before.
+	// unknown context yields no matching MIB objects: Get returns
+	// noSuchObject for unknown objects and noSuchInstance for missing
+	// instances; GetNext/GetBulk return endOfMibView for every varbind.
+	// The requested contextName is echoed back in the response so the manager
+	// sees which context it addressed. The empty (default) context continues to
+	// be served exactly as before.
 	defaultContext := len(contextName) == 0
 	echoContext := contextName
 
@@ -387,12 +388,12 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 		}
 		for _, oid := range oids {
 			if !defaultContext {
-				respVarbinds = append(respVarbinds, varbind{oid: oid, tag: tagNoSuchInstance})
+				respVarbinds = append(respVarbinds, varbind{oid: oid, tag: oidAbsenceTag(oid)})
 				continue
 			}
 			val, valTag := a.getOIDValueSnap(oid, snap)
 			if val == nil {
-				respVarbinds = append(respVarbinds, varbind{oid: oid, tag: tagNoSuchInstance})
+				respVarbinds = append(respVarbinds, varbind{oid: oid, tag: valTag})
 			} else {
 				respVarbinds = append(respVarbinds, varbind{oid: oid, tag: valTag, value: val})
 			}
