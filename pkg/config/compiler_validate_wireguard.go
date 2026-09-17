@@ -26,10 +26,13 @@ import (
 //     private key does not decode (#3863).
 //   - Zero-peer = REJECT. A WG tunnel with no peer can never handshake;
 //     xpf has no dynamic peer learning (peers are config-static).
-//   - Duplicate peer pubkey = REJECT. The Rust engine reconcile only
-//     debug_asserts on duplicates (release builds would mis-index the
-//     AllowedIPs LPM and the peer slab); the Go control plane is the
-//     named owner of the dup-reject contract (engine.rs).
+//   - Duplicate peer pubkey = REJECT. The per-tunnel gate protects each
+//     unit, and the merged-view gate protects an interface-level WireGuard
+//     endpoint when two units author the same key; the latter runs before
+//     first-wins emission can discard one unit's routing intent. The Rust
+//     engine reconcile only debug_asserts on duplicates (release builds would
+//     mis-index the AllowedIPs LPM and the peer slab); the Go control plane is
+//     the named owner of the dup-reject contract (engine.rs).
 //   - Malformed pubkey = REJECT. A WG static key is exactly 64 hex
 //     chars (32-byte X25519). A bad key today fails silently at the
 //     dataplane (hydrate_wg_identity drops the whole row).
@@ -103,8 +106,66 @@ func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 				return warnings, err
 			}
 		}
+		// Interface-level WireGuard emits ONE endpoint with the interface
+		// and every unit's peers merged into it. Validate that merged view
+		// before mergeWireguardUnitPeers can first-wins deduplicate a peer
+		// authored by two different units.
+		if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" {
+			if err := emit(ifName, validateMergedWireguardUnitPeers(ifName, ifc, unitNums)); err != nil {
+				return warnings, err
+			}
+		}
 	}
 	return warnings, nil
+}
+
+// validateMergedWireguardUnitPeers rejects a peer public key authored by two
+// different units that feed one interface-level WireGuard endpoint. A unit's
+// compiled WgPeers includes the interface-level peers inherited by that unit,
+// so those parent keys are intentionally excluded from the ownership map: the
+// repeated inherited copies are expected, while two unit-owned copies are a
+// merged-view conflict.
+//
+// This gate is deliberately scoped to an interface-level WireGuard tunnel.
+// A WireGuard tunnel authored only at unit level emits one endpoint per unit,
+// so equal keys there do not enter mergeWireguardUnitPeers and retain the
+// existing single-tunnel behavior.
+func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitNums []int) error {
+	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != "wireguard" {
+		return nil
+	}
+	if len(unitNums) == 0 {
+		return nil
+	}
+	inherited := make(map[string]struct{}, len(ifc.Tunnel.WgPeers))
+	for _, p := range ifc.Tunnel.WgPeers {
+		inherited[p.PublicKeyHex] = struct{}{}
+	}
+	owners := make(map[string]int)
+	for _, unitNum := range unitNums {
+		unit := ifc.Units[unitNum]
+		if unit == nil || unit.Tunnel == nil {
+			continue
+		}
+		for _, p := range unit.Tunnel.WgPeers {
+			if _, isInherited := inherited[p.PublicKeyHex]; isInherited {
+				continue
+			}
+			if owner, exists := owners[p.PublicKeyHex]; exists {
+				if owner == unitNum {
+					// A duplicate within one unit is owned by the
+					// per-tunnel validator above, not this merged gate.
+					continue
+				}
+				return fmt.Errorf("duplicate peer public key %q is declared by WireGuard units %q and %q; one merged endpoint cannot retain both units' routing intent",
+					p.PublicKeyHex,
+					fmt.Sprintf("%s.%d", ifName, owner),
+					fmt.Sprintf("%s.%d", ifName, unitNum))
+			}
+			owners[p.PublicKeyHex] = unitNum
+		}
+	}
+	return nil
 }
 
 // unitWireguardIdentityOverride refuses a unit that changes the local
