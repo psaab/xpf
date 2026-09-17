@@ -239,7 +239,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	}
 	// #7357: the shared drop verdict for every static route in this config,
 	// computed once. See config.StaticRouteExclusions — it owns the
-	// order-dependent #6467 next-table ip-rule window as well as the three
+	// order-dependent #6467 next-table ip-rule window as well as the four
 	// per-route causes, and the show surfaces consult the same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
 	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
