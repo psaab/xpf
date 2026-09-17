@@ -1414,13 +1414,15 @@ const (
 	ScreenSynCookie       = 1 << 14
 	ScreenSessionLimitSrc = 1 << 15
 	ScreenSessionLimitDst = 1 << 16
-	// Bits 17-19 mirror the userspace-dp screen reason flags added after the
+	// Bits 17-20 mirror the userspace-dp screen reason flags added after the
 	// original eBPF parity set: ICMP fragment (#2146 sibling), IP malformed
-	// (#2146 fail-closed parse error), and scan-table pressure (#2234, the
-	// bounded stalest-eviction operator alarm — NOT a packet drop).
+	// (#2146 fail-closed parse error), scan-table pressure (#2234, the
+	// bounded stalest-eviction operator alarm — NOT a packet drop), and SYN
+	// flood alarm (#3315, a log-only alarm — NOT a packet drop).
 	ScreenICMPFragment      = 1 << 17
 	ScreenIPMalformed       = 1 << 18
 	ScreenScanTablePressure = 1 << 19
+	ScreenSynFloodAlarm     = 1 << 20
 )
 
 // ScreenFlagNames maps screen flag values to human-readable names.
@@ -1445,6 +1447,7 @@ var ScreenFlagNames = map[uint32]string{
 	ScreenICMPFragment:      "ICMP fragment",
 	ScreenIPMalformed:       "IP malformed",
 	ScreenScanTablePressure: "scan-table pressure",
+	ScreenSynFloodAlarm:     "SYN flood alarm",
 }
 
 // ScreenReasonDropCount is the number of published per-screen-reason DROP

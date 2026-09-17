@@ -168,14 +168,16 @@ const (
 	screenSynCookie       = 1 << 14
 	screenSessionLimitSrc = 1 << 15
 	screenSessionLimitDst = 1 << 16
-	// Bits 17-19 mirror the userspace-dp screen reason flags added after the
+	// Bits 17-20 mirror the userspace-dp screen reason flags added after the
 	// original eBPF parity set (kept in lockstep with dataplane.ScreenFlagNames;
 	// the cross-package count is asserted by TestRawEventContractMatchesDataplaneEvent):
-	// ICMP fragment, IP malformed (#2146 fail-closed parse), and scan-table
-	// pressure (#2234 bounded-eviction operator alarm — not a packet drop).
+	// ICMP fragment, IP malformed (#2146 fail-closed parse), scan-table
+	// pressure (#2234 bounded-eviction operator alarm — not a packet drop), and
+	// SYN flood alarm (#3315 log-only alarm — not a packet drop).
 	screenICMPFragment      = 1 << 17
 	screenIPMalformed       = 1 << 18
 	screenScanTablePressure = 1 << 19
+	screenSynFloodAlarm     = 1 << 20
 )
 
 var screenFlagNames = map[uint32]string{
@@ -199,6 +201,7 @@ var screenFlagNames = map[uint32]string{
 	screenICMPFragment:      "ICMP fragment",
 	screenIPMalformed:       "IP malformed",
 	screenScanTablePressure: "scan-table pressure",
+	screenSynFloodAlarm:     "SYN flood alarm",
 }
 
 // EventReader reads events from an EventSource.
