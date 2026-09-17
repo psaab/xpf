@@ -353,7 +353,8 @@ from the relay's explicit, configured server list.
   spoofable. Since #6562 it is the *first* of two checks; see
   "Outstanding-request binding" immediately below. (`giaddr`-echo and Option-82
   correlation remain out of scope: Option 82 is stripped on the reply but not
-  echo-validated.) This is DHCPv4-only (there is no DHCPv6 relay — see below).
+  echo-validated.) The source-port behavior in this section is DHCPv4-specific;
+  the DHCPv6 source checks are described below.
 
 ## Outstanding-request binding (#6562)
 
@@ -674,22 +675,55 @@ set forwarding-options dhcp-relay group <g> overrides trust-option-82
   into the interface list. See the "RFC 3046 §2.1 anti-spoofing" section
   above.
 
-### IPv6 / DHCPv6 parity
+### IPv6 / DHCPv6 parity (#9553)
 
-There is **no DHCPv6 relay agent** in the codebase, and DHCPv6 (RFC 8415)
-does not have this bug class: it has no BOOTP broadcast flag — clients use a
-link-local source and the relay replies to that link-local unicast (or
-`ff02::1:2`), so there is no "reply to an unconfigured global address via
-ND" failure mode. This fix is strictly DHCPv4.
+The relay now implements the supported RFC 8415 DHCPv6 subset. Under
+`forwarding-options dhcp-relay dhcpv6`, configure `server-group <name>` with
+IPv6 server literals, then bind a `group <name>` to one or more client-facing
+`interface` values and select its `active-server-group`. A family-level
+`active-server-group` is inherited by groups that omit their own selection.
+`relay-agent-interface-id` accepts a scalar value (or a valueless enable flag)
+at family and group scope; the group-level scalar wins, and the default is the
+authored interface name. A group-level valueless flag explicitly suppresses
+an inherited family scalar. Junos modifier forms (`use-option-82`, `prefix`,
+`host-name`, `routing-instance-name`, `logical-system-name`,
+`use-interface-description`, `include-irb-and-l2`, `keep-incoming-interface-id`,
+`no-vlan-interface-name`, and `use-vlan-id`) remain outside this scalar subset:
+strict config rejects them, while tolerant config warns without installing an
+unsupported Interface-ID override.
 
-**Authoring the Junos DHCPv6 relay stanza is refused (#9411).** Before #9411,
-`forwarding-options dhcp-relay dhcpv6 { … }` committed clean on every config
-channel and was either discarded or — in the elided spelling
-`dhcp-relay dhcpv6 { group g6 { … } }` — compiled AS A DHCPv4 relay group, which
-also hid a real DHCPv4 relay block authored after it. The config compiler now
-refuses the stanza at commit (warning on the tolerant load / peer-sync path) and
-never reads the dhcpv6 spelling as this package's DHCPv4 relay; see
-`docs/config-schema.md`. An RFC 8415 relay agent is separate, larger work.
+The Relay-Forw builder enforces the RFC 8415 hop boundary at eight: hop-7
+input becomes hop 8, while hop 8 is rejected before creating hop 9. The live
+client path rejects nested Relay-Forw requests before this builder. Relay-Reply
+packets at hop 8 are accepted, while hop 9 and above are dropped, following
+RFC 8415 Table 1 and Section 19.1.2.
+
+The client socket listens on UDP/547 and joins `ff02::1:2` on each authored
+interface. Each direct client message is wrapped in Relay-Forw with the
+selected global IPv6 link-address and the peer address of the received packet
+(normally link-local, but global and ULA unicast peers are accepted), then sent
+to every configured server on UDP/547. Configured Relay-Reply sources and the
+outer Interface-ID are validated; the inner message is sent to the peer on
+UDP/546. The existing HA master-state gate applies before forwarding client
+messages.
+
+- Nested downstream Relay-Forw requests and nested Relay-Reply responses are
+  dropped by default: #9553 has no downstream trust knob, so an on-link sender
+  cannot steer the outer link-address, receive forwarded traffic, or amplify
+  traffic through the relay. The RFC helper retains the unspecified outer
+  link-address rule for a future explicitly trusted downstream path.
+
+The default client-facing admission rate is 100 packets per second per
+interface, with a two-second burst. Drops by rate limit, HA state, malformed
+packet, source port/address, nested trust boundary, and build validation are
+visible in the `inet6` row returned by `Manager.Stats`; reply source, parse,
+Interface-ID, nested-chain, and validation drops are visible there too.
+
+The link resolver uses the first usable global address returned by
+`net.Interface.Addrs`; Linux does not expose address-deprecation state through
+that portable API, so address order is the documented selection policy. A
+running session rechecks the bound interface index and selected link address;
+drift closes both sockets and the supervisor rebuilds them.
 
 ### HA master-state gate (#2456)
 

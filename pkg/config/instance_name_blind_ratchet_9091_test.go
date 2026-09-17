@@ -173,6 +173,7 @@ var instanceNameBlindBaseline9091 = []string{
 	"/firewall/policer",
 	"/firewall/three-color-policer",
 	"/forwarding-options/dhcp-relay/group",
+	"/forwarding-options/dhcp-relay/dhcpv6/group",
 	"/forwarding-options/port-mirroring/instance",
 	"/forwarding-options/sampling/instance",
 	"/forwarding-options/sampling/instance/family/inet/output/flow-server",

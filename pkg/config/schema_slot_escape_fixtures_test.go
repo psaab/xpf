@@ -443,6 +443,18 @@ func slotEscapeRows() []slotEscapeRow {
 			[]string{"set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8::1/64 vrrp-group 1 priority 100"},
 			"set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8::1/64 vrrp-group 1 virtual-address", "2001:db8::254/64", "2001:db8::zzz/64"},
 
+		// -- DHCPv6 relay ---------------------------------------------------------
+		// #9553 gives this multi-value leaf the same interface-name
+		// validator as the v4 path. Keep a complete relay prerequisite so
+		// the slot-1 result exercises that validator rather than the
+		// server-group/active-server-group semantic checks.
+		{"dhcpv6 relay interface name validator", "forwarding-options dhcp-relay dhcpv6 group <*> interface",
+			[]string{
+				"set forwarding-options dhcp-relay dhcpv6 server-group sg6 2001:db8::5",
+				"set forwarding-options dhcp-relay dhcpv6 group g6 active-server-group sg6",
+			},
+			"set forwarding-options dhcp-relay dhcpv6 group g6 interface", "ge-0/0/0.0", "bad*glob"},
+
 		// -- misc ----------------------------------------------------------------------------
 		{"apply-groups", "apply-groups", []string{"set groups g1 system host-name h1"},
 			"set apply-groups", "g1", "zznotdefined"},

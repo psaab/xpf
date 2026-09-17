@@ -1455,6 +1455,10 @@ func compileFlowMonitoring(node *Node, svc *ServicesConfig) error {
 }
 
 func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
+	return compileForwardingOptionsWithOpts(node, fo, compileOpts{}, nil)
+}
+
+func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, warnings *[]string) error {
 	sampNode := node.FindChild("sampling")
 	if sampNode != nil {
 		if err := compileSampling(sampNode, fo); err != nil {
@@ -1469,13 +1473,19 @@ func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
 	// as a DHCPv4 relay group on every channel, and when that block came first the
 	// operator's real DHCPv4 relay block after it was never compiled. Select the
 	// first dhcp-relay node that is NOT the dhcpv6 spelling;
-	// validateDHCPRelayDHCPv6AST reports the dhcpv6 one (refused strict, warned
-	// tolerant).
+	// validateDHCPRelayDHCPv6AST now permits the implemented #9553 subset.
 	relayNode := dhcpRelayV4Node9411(node)
 	if relayNode != nil {
 		if err := compileDHCPRelay(relayNode, fo); err != nil {
 			return err
 		}
+	}
+
+	// #9553: compile the DHCPv6 family separately from the DHCPv4 relay. The
+	// family container owns identically-named `server-group`/`group` children,
+	// so handing it to compileDHCPRelay would install IPv6 groups as DHCPv4
+	if err := compileDHCPRelayV6(node, fo, opts.lenientDHCPRelayDHCPv6, warnings); err != nil {
+		return err
 	}
 
 	// Parse `family inet6 { mode <flow-based|packet-based> }` (#8797).

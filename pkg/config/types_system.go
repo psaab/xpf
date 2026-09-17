@@ -1195,6 +1195,13 @@ type PortMirrorInstance struct {
 type DHCPRelayConfig struct {
 	ServerGroups map[string]*DHCPRelayServerGroup
 	Groups       map[string]*DHCPRelayGroup
+	// V6 carries the DHCPv6 relay (RFC 8415) compiled from
+	// `forwarding-options dhcp-relay dhcpv6` (#9553). Nil when no dhcpv6
+	// stanza was authored. Lives here — rather than as a separate
+	// ForwardingOptions field — so the existing daemon wire
+	// (reconcileDHCPRelay → Manager.Apply) carries both families without
+	// a second call site (#9406).
+	V6 *DHCPRelayV6Config
 }
 
 // DHCPRelayServerGroup defines a group of DHCP servers.
@@ -1248,6 +1255,47 @@ type DHCPRelayGroup struct {
 	// effectively disable the bound. Compiled into `relaySpec.maxPacketRate`
 	// (a change restarts the per-interface relay).
 	MaximumPacketRate int
+}
+
+// DHCPRelayV6Config holds the DHCPv6 relay agent configuration (RFC 8415
+// Relay-Forw / Relay-Reply, #9553). Mirrors the v4 shape (server-group +
+// group) per the Junos `forwarding-options dhcp-relay dhcpv6` grammar:
+// server-group <name> <ipv6>, group <name> { active-server-group <name>;
+// interface <name>; }, plus a global active-server-group fallback that a
+// group without its own inherits.
+type DHCPRelayV6Config struct {
+	ServerGroups map[string]*DHCPRelayV6ServerGroup
+	Groups       map[string]*DHCPRelayV6Group
+	// ActiveServerGroup is the global default server group (#9553). A v6
+	// group with no active-server-group of its own relays via this one.
+	// Empty means no global default; such a group is rejected at compile time.
+	ActiveServerGroup string
+	// InterfaceIDOverride is the global Junos
+	// `relay-agent-interface-id` default. A group-level value wins.
+	InterfaceIDOverride string
+}
+
+// DHCPRelayV6ServerGroup defines a group of DHCPv6 servers (IPv6 literals).
+type DHCPRelayV6ServerGroup struct {
+	Name    string
+	Servers []string // server IPv6 addresses
+}
+
+// DHCPRelayV6Group defines a DHCPv6 relay group bound to interfaces.
+type DHCPRelayV6Group struct {
+	Name              string
+	Interfaces        []string
+	ActiveServerGroup string // reference to server group name (else global)
+	// InterfaceIDOverride carries Junos `relay-agent-interface-id` (#9553).
+	// Empty means the relay stamps Interface-ID (option 18) with the receiving
+	// interface's authored name — the v6 analogue of the v4 circuit-id. A
+	// non-empty value overrides those bytes.
+	InterfaceIDOverride string
+	// InterfaceIDOverrideSet distinguishes an explicit valueless default from
+	// an absent group setting. It is needed so a group flag can intentionally
+	// suppress an inherited family scalar while retaining authored-interface
+	// runtime behavior.
+	InterfaceIDOverrideSet bool
 }
 
 // SamplingConfig holds sampling instance definitions.

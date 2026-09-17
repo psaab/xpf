@@ -282,11 +282,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, riChildWarnings...)
 
-	// #9411 `forwarding-options dhcp-relay dhcpv6`. Same AST-level reason as the
-	// gates above: there is no DHCPv6 relay agent, the stanza compiles to nothing,
-	// and by the time cfg.ForwardingOptions.DHCPRelay exists there is no trace of
-	// it left to validate. Scoped to the dhcpv6 token by POSITION so a DHCPv4
-	// relay group or server-group NAMED `dhcpv6` still commits.
+	// #9553 DHCPv6 relay subset and unsupported remainder gate. The compiler
+	// installs supported RFC 8415 nodes in a typed DHCPv6 configuration; this
+	// AST-level check keeps incomplete or unsupported children visible before
+	// they disappear from the typed tree. Scoped to the dhcpv6 token by POSITION
+	// so a DHCPv4 relay group or server-group NAMED `dhcpv6` still commits.
 	dhcpv6RelayWarnings, err := validateDHCPRelayDHCPv6AST(tree.Children, opts.lenientDHCPRelayDHCPv6)
 	if err != nil {
 		return nil, err
@@ -297,7 +297,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// question #9411 left open: any child but server-group and group compiled to
 	// nothing. Scoped to the dhcp-relay level (NOT closedWorld, which would
 	// inherit into group and overrides), the permitted set is read from the
-	// schema, and dhcpv6 is left to #9411's more specific message above.
+	// schema; `dhcpv6` is handled by the specific gate above.
 	dhcpRelayChildWarnings, err := validateDHCPRelayChildTokensAST(tree.Children, opts.lenientDHCPRelayChildTokens)
 	if err != nil {
 		return nil, err

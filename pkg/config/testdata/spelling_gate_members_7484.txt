@@ -286,6 +286,12 @@ err (parent stanza does not compile)	firewall three-color-policer <*> two-rate c
 err (parent stanza does not compile)	firewall three-color-policer <*> two-rate peak-burst-size
 err (parent stanza does not compile)	firewall three-color-policer <*> two-rate peak-information-rate
 flag (read, but value-less)	forwarding-options allow-dataplane-sleep
+COMPARED	forwarding-options dhcp-relay dhcpv6 active-server-group
+advisory (read, value ignored, warning says so)	forwarding-options dhcp-relay dhcpv6 group <*> active-server-group
+advisory (read, value ignored, warning says so)	forwarding-options dhcp-relay dhcpv6 group <*> interface
+unreachable (leaf changed nothing)	forwarding-options dhcp-relay dhcpv6 group <*> relay-agent-interface-id
+valueMoves (value moves output, gate still lost it)	forwarding-options dhcp-relay dhcpv6 relay-agent-interface-id
+unreachable (leaf changed nothing)	forwarding-options dhcp-relay dhcpv6 server-group
 COMPARED	forwarding-options dhcp-relay group <*> active-server-group
 COMPARED	forwarding-options dhcp-relay group <*> interface
 flag (read, but value-less)	forwarding-options dhcp-relay group <*> overrides always-broadcast

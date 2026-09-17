@@ -72,7 +72,8 @@ group description	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group export	protocols/bgp/group,protocols/rip/group,routing-instances/*/protocols/bgp/group,routing-instances/*/protocols/rip/group
 group hold-time	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group import	protocols/bgp/group,routing-instances/*/protocols/bgp/group
-group interface	forwarding-options/dhcp-relay/group,system/services/dhcp-local-server/group,system/services/dhcpv6-local-server/group
+group active-server-group	forwarding-options/dhcp-relay/group,forwarding-options/dhcp-relay/dhcpv6/group
+group interface	forwarding-options/dhcp-relay/group,forwarding-options/dhcp-relay/dhcpv6/group,system/services/dhcp-local-server/group,system/services/dhcpv6-local-server/group
 group local-address	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group local-as	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group loops	protocols/bgp/group,routing-instances/*/protocols/bgp/group

@@ -56,91 +56,113 @@ func mentions9411(warnings []string) bool {
 	return false
 }
 
-// TestDHCPRelayDHCPv6IsRefusedInEveryShape9411 is the fix, in every measured AST
-// shape. A gate that checked one shape would pass its own fixture and miss the
-// other four.
-func TestDHCPRelayDHCPv6IsRefusedInEveryShape9411(t *testing.T) {
+// TestDHCPRelayDHCPv6IsAcceptedInEveryShape9553 exercises the Junos forms
+// which #9411 previously refused. Every valid shape must compile into the
+// typed DHCPv6 relay without a DHCPv4 group or an obsolete warning.
+func TestDHCPRelayDHCPv6IsAcceptedInEveryShape9553(t *testing.T) {
 	for _, tc := range []struct {
-		name                string
-		tree                func(*testing.T) *ConfigTree
-		lenientSG, lenientG int
+		name     string
+		tree     func(*testing.T) *ConfigTree
+		wantV4SG int
+		wantV4G  int
 	}{
 		{"braced nested", func(t *testing.T) *ConfigTree {
 			return bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }")
 		}, 0, 0},
-		{"bare dhcpv6 leaf", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6; } }")
+		{"relay elided onto dhcpv6", func(t *testing.T) *ConfigTree {
+			return bracedTree9411(t, "forwarding-options { dhcp-relay dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } }")
 		}, 0, 0},
-		{"relay elided onto dhcpv6 (the relay node's own Keys[1])", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay dhcpv6 { group g6 { interface ge-0/0/0.0; } } }")
-		}, 0, 0},
-		{"fully elided (forwarding-options' own Keys)", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 group g6 interface ge-0/0/0.0;")
-		}, 0, 0},
-		{"flat-set (one child per set line)", func(t *testing.T) *ConfigTree {
+		{"flat-set", func(t *testing.T) *ConfigTree {
 			return flatTree9411(t,
 				"set forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5",
 				"set forwarding-options dhcp-relay dhcpv6 group g6 active-server-group isp6",
 				"set forwarding-options dhcp-relay dhcpv6 group g6 interface ge-0/0/0.0")
 		}, 0, 0},
-		{
-			// On the tolerant path the v4 relay beside the stanza must still
-			// compile: the warning replaces a silent discard, it does not add a
-			// new one.
-			"BESIDE a working v4 relay", func(t *testing.T) *ConfigTree {
-				return bracedTree9411(t, "forwarding-options { dhcp-relay { group g1 { interface ge-0/0/0.0; } dhcpv6 { group g6 { interface ge-0/0/1.0; } } } }")
-			}, 0, 1},
-		{
-			// The dhcpv6-elided block FIRST. Before the fix FindChild returned it,
-			// so g6 compiled as a DHCPv4 relay AND the real DHCPv4 block after it
-			// was never compiled. The tolerant path must compile g1, not g6.
-			"relay-elided dhcpv6 BEFORE a v4 relay block", func(t *testing.T) *ConfigTree {
-				return bracedTree9411(t, "forwarding-options { dhcp-relay dhcpv6 { group g6 { interface ge-0/0/1.0; } } dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }")
-			}, 1, 1},
-		{
-			"relay-elided dhcpv6 AFTER a v4 relay block", func(t *testing.T) *ConfigTree {
-				return bracedTree9411(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } dhcp-relay dhcpv6 { group g6 { interface ge-0/0/1.0; } } }")
-			}, 1, 1},
-		{
-			// Measured: the pre-walk runs on the GROUP-EXPANDED tree, so a stanza
-			// injected through apply-groups is caught too.
-			"injected via apply-groups", func(t *testing.T) *ConfigTree {
-				return bracedTree9411(t, "groups { g1 { forwarding-options { dhcp-relay { dhcpv6 { group g6 { interface ge-0/0/0.0; } } } } } } apply-groups g1;")
-			}, 0, 0},
+		{"BESIDE a working v4 relay", func(t *testing.T) *ConfigTree {
+			return bracedTree9411(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/1.0; } } } }")
+		}, 1, 1},
+		{"relay-elided dhcpv6 BEFORE a v4 relay block", func(t *testing.T) *ConfigTree {
+			return bracedTree9411(t, "forwarding-options { dhcp-relay dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/1.0; } } dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }")
+		}, 1, 1},
+		{"injected via apply-groups", func(t *testing.T) *ConfigTree {
+			return bracedTree9411(t, "groups { g1 { forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } } } } apply-groups g1;")
+		}, 0, 0},
 	} {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			tree := tc.tree(t)
-			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#9411") {
-				t.Fatalf("#9411: strict CompileConfig did not refuse the dhcpv6 relay stanza; err = %v\n"+
-					"It compiles to NOTHING — there is no DHCPv6 relay agent — so a clean commit "+
-					"is the defect: the operator gets no relay and no complaint.", err)
-			}
-			cfg, err := CompileConfigLenient(tree)
+			cfg, err := CompileConfig(tree)
 			if err != nil {
-				t.Fatalf("#9411 NO-BRICK: the tolerant compile REFUSED the config (%v). "+
-					"Store.Load and Store.SyncApply use this path, so refusing here blackouts "+
-					"a node booting a persisted config or receiving one from its HA peer (#1960).", err)
+				t.Fatalf("#9553: implemented DHCPv6 relay was rejected: %v", err)
 			}
-			if !mentions9411(cfg.Warnings) {
-				t.Errorf("#9411: the tolerant path emitted no #9411 warning, so the stanza is still "+
-					"silently discarded wherever the strict gate does not run. warnings: %v", cfg.Warnings)
+			if cfg == nil || cfg.ForwardingOptions.DHCPRelay == nil || cfg.ForwardingOptions.DHCPRelay.V6 == nil {
+				t.Fatalf("#9553: strict compile did not produce a typed DHCPv6 relay: %+v", cfg)
 			}
-			if sg, g := relayCounts9411(cfg); sg != tc.lenientSG || g != tc.lenientG {
-				t.Errorf("#9411: tolerant relay = %d server-groups / %d groups, want %d / %d",
-					sg, g, tc.lenientSG, tc.lenientG)
+			if got := len(cfg.ForwardingOptions.DHCPRelay.V6.ServerGroups); got != 1 {
+				t.Errorf("#9553: v6 server-groups=%d, want 1", got)
 			}
-			// THE MIS-COMPILE, pinned directly: no DHCPv6 group may ever surface as a
-			// DHCPv4 relay group. Before the fix `dhcp-relay dhcpv6 { group g6 … }`
-			// compiled to v4-groups=[g6] on every channel.
-			if r := cfg.ForwardingOptions.DHCPRelay; r != nil {
+			if got := len(cfg.ForwardingOptions.DHCPRelay.V6.Groups); got != 1 {
+				t.Errorf("#9553: v6 groups=%d, want 1", got)
+			}
+			if sg, g := relayCounts9411(cfg); sg != tc.wantV4SG || g != tc.wantV4G {
+				t.Errorf("#9553: v4 relay = %d server-groups / %d groups, want %d / %d", sg, g, tc.wantV4SG, tc.wantV4G)
+			}
+			if mentions9411(cfg.Warnings) {
+				t.Fatalf("#9553: strict compile carried obsolete #9411 warning: %v", cfg.Warnings)
+			}
+
+			lenient, err := CompileConfigLenient(tc.tree(t))
+			if err != nil {
+				t.Fatalf("#9553: tolerant compile rejected implemented DHCPv6 relay: %v", err)
+			}
+			if mentions9411(lenient.Warnings) {
+				t.Fatalf("#9553: tolerant compile carried obsolete #9411 warning: %v", lenient.Warnings)
+			}
+			if r := lenient.ForwardingOptions.DHCPRelay; r != nil {
 				if _, ok := r.Groups["g6"]; ok {
-					t.Errorf("#9411 MIS-COMPILE: the DHCPv6 group g6 was compiled as a DHCPv4 relay "+
-						"group, so a DHCPv4 relay is installed on the interface the operator named for "+
-						"DHCPv6. groups: %v", r.Groups)
+					t.Fatalf("#9553 MIS-COMPILE: DHCPv6 group g6 surfaced as DHCPv4 relay")
 				}
 			}
 		})
 	}
+}
+
+// TestDHCPRelayDHCPv6UnsupportedRemainderRefused9553 keeps the refusal boundary
+// from #9411: unsupported or incomplete family statements must fail loudly,
+// rather than compile to an inert relay.
+func TestDHCPRelayDHCPv6UnsupportedRemainderRefused9553(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"bare family", "forwarding-options { dhcp-relay { dhcpv6; } }"},
+		{"unknown direct child", "forwarding-options { dhcp-relay { dhcpv6 { unsupported-knob foo; server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"},
+		{"unknown group child", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; unsupported-knob foo; interface ge-0/0/0.0; } } } }"},
+		{"missing active group", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { interface ge-0/0/0.0; } } } }"},
+		{"IPv4 server", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 192.0.2.5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(bracedTree9411(t, tc.text))
+			if err == nil || !strings.Contains(err.Error(), "#9553") {
+				t.Fatalf("#9553: unsupported DHCPv6 remainder committed or used the obsolete refusal: %v", err)
+			}
+			lenient, err := CompileConfigLenient(bracedTree9411(t, tc.text))
+			if err != nil {
+				t.Fatalf("#9553 no-brick: tolerant compile rejected persisted remainder: %v", err)
+			}
+			foundWarning := false
+			for _, warning := range lenient.Warnings {
+				if strings.Contains(warning, "#9553") {
+					foundWarning = true
+					break
+				}
+			}
+			if !foundWarning {
+				t.Fatalf("#9553 no-brick: tolerant compile emitted no remainder warning: %v", lenient.Warnings)
+			}
+		})
+	}
+
 }
 
 // TestDHCPRelayDHCPv6GateDoesNotRefuseAWorkingV4Relay9411 carries the rows that
@@ -218,45 +240,5 @@ func TestDHCPRelayDHCPv6GateDoesNotRefuseAWorkingV4Relay9411(t *testing.T) {
 					lc.Warnings)
 			}
 		})
-	}
-}
-
-// TestDHCPRelayDHCPv6GateSeesTheRawElidedShape9411 keeps the
-// forwarding-options-Keys clause of validateDHCPRelayDHCPv6AST exercisable.
-//
-// On every compile channel the normalizer folds `forwarding-options dhcp-relay
-// dhcpv6 …;` into the relay-node-Keys[1] shape before the pre-walk runs, so no
-// end-to-end cell can reach that clause — measured: removing it survived every
-// other #9411 cell. This cell drives the gate on the RAW parser tree, where that
-// clause is the only one that can fire, so a future normalizer change that stopped
-// folding the spelling cannot silently re-open it.
-func TestDHCPRelayDHCPv6GateSeesTheRawElidedShape9411(t *testing.T) {
-	tree := bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 group g6 interface ge-0/0/0.0;")
-
-	// POSITIVE CONTROLS: the raw tree must carry the token in forwarding-options'
-	// own Keys and have NO children, or the other clauses could fire and this cell
-	// would not isolate the one it exists for.
-	var fo *Node
-	for _, n := range tree.Children {
-		if n != nil && n.Name() == "forwarding-options" {
-			fo = n
-		}
-	}
-	if fo == nil || len(fo.Keys) < 3 || fo.Keys[1] != "dhcp-relay" || fo.Keys[2] != "dhcpv6" {
-		t.Fatalf("POSITIVE CONTROL: the raw parser tree no longer carries dhcpv6 in "+
-			"forwarding-options' own Keys (%+v); this cell cannot reach the clause it exists for", fo)
-	}
-	if len(fo.Children) != 0 {
-		t.Fatalf("POSITIVE CONTROL: the raw fully-elided node has %d children, so another "+
-			"clause could fire and this cell would not isolate the Keys clause", len(fo.Children))
-	}
-
-	if _, err := validateDHCPRelayDHCPv6AST(tree.Children, false); err == nil || !strings.Contains(err.Error(), "#9411") {
-		t.Fatalf("#9411: the gate did not refuse the RAW fully-elided spelling; err = %v. The "+
-			"normalizer happens to fold it today, but this clause is what refuses it if that stops.", err)
-	}
-	warns, err := validateDHCPRelayDHCPv6AST(tree.Children, true)
-	if err != nil || !mentions9411(warns) {
-		t.Fatalf("#9411: tolerant mode did not warn on the RAW fully-elided spelling (err=%v warns=%v)", err, warns)
 	}
 }

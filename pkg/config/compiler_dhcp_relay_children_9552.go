@@ -22,24 +22,25 @@ import (
 // left this wider question open pending a census.
 //
 // THE CENSUS: every tracked config-like file authors only `group` and
-// `server-group` under dhcp-relay. Every other child in the Go test literals is
-// #9411's `dhcpv6` fixtures, or `inactive: dhcpv6`, which is pruned before
-// pre-walk gates run. So the gate refuses nothing the tree authors today.
+// `server-group` under dhcp-relay, plus the declared `dhcpv6` family. Every
+// other child in the Go test literals is an unsupported remainder fixture, or
+// `inactive: dhcpv6`, which is pruned before pre-walk gates run. So the gate
+// refuses nothing supported by the tree authors today.
 //
 // WHY NOT closedWorld ON dhcp-relay: it INHERITS, into `group` and `overrides`
 // (the #9323 lesson). This gate is scoped to the dhcp-relay level and inherits
 // nothing. THE PERMITTED SET IS READ FROM THE SCHEMA (#9017's rule), so a
 // child declared later is permitted automatically.
 //
-// `dhcpv6` is skipped here: #9411's gate owns it, and its message says the
-// relay AGENT does not exist, which is more useful than "unknown keyword".
-// Meta statements (`apply-groups`, `apply-groups-except`, `apply-macro`) are
-// skipped, as #9323 skips them.
+// `dhcpv6` is skipped here: #9553's gate owns its supported subset and
+// unsupported remainder, with a more useful scoped message than "unknown
+// keyword". Meta statements (`apply-groups`, `apply-groups-except`,
+// `apply-macro`) are skipped, as #9323 skips them.
 //
 // Strict on commit / commit-check; downgraded to a warning on the tolerant
 // load / peer-sync paths (opts.lenientDHCPRelayChildTokens), so a persisted
-// config still BOOTS (#1960). The stanza is inert either way, because
-// compileDHCPRelay reads nothing but the two declared children.
+// config still BOOTS (#1960). The v4 compiler reads only the two declared
+// children; the DHCPv6 compiler owns the separate family subtree.
 func validateDHCPRelayChildTokensAST(nodes []*Node, lenient bool) ([]string, error) {
 	declared := dhcpRelayChildTokens9552()
 	if len(declared) == 0 {

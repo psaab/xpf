@@ -751,10 +751,15 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// and a leaf with modifier children (`family inet address <p> {
 		// primary; }`) is the same shape. With zero children there is nowhere
 		// left for the value to come from, whichever it is.
-		return fmt.Errorf("%s: `%s` declares a value and none was given — the compiler "+
-			"drops a valueless statement, so this commits clean and the configuration "+
-			"silently does not carry it",
-			strings.Join(newPath, " "), keyword)
+		// A small number of Junos leaves accept a presence-only form in
+		// addition to their value form. That capability is explicit on the
+		// schema node; every other value-taking leaf retains this refusal.
+		if !childSchema.allowEmptyValue {
+			return fmt.Errorf("%s: `%s` declares a value and none was given — the compiler "+
+				"drops a valueless statement, so this commits clean and the configuration "+
+				"silently does not carry it",
+				strings.Join(newPath, " "), keyword)
+		}
 	}
 	if missingArgs > 0 && !childSchema.compoundKey {
 		// The already-consumed identity tokens are Keys[1:consumed]; the
@@ -937,9 +942,9 @@ func validateModifierChild(node *Node, leafSchema *schemaNode, leafPath []string
 // unknown-KEYWORD gate — here the leaf keyword itself IS supported, only the
 // trailing token is not.
 //
-// Minimum arity is NOT enforced (a missing value is left to the compiler, as
-// before) — the gate is scoped strictly to EXCESS trailing tokens, the
-// silent-drop bug class.
+// Minimum arity is enforced for fixed-arity leaves; allowEmptyValue is the
+// explicit exception for a Junos leaf that also accepts a presence-only form.
+// The gate remains scoped to the same silent-drop bug class.
 func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []string) error {
 	leafName := node.Keys[0]
 	leafPath := append(append([]string(nil), parentPath...), leafName)
@@ -949,7 +954,7 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 	// silently dropped" — and a MISSING token is silently dropped in exactly
 	// the same sense: `set system host-name` with no name commits clean and
 	// the system carries no host-name. One arity check, both directions.
-	if len(node.Keys) < allowed && len(node.Children) == 0 {
+	if len(node.Keys) < allowed && len(node.Children) == 0 && !leafSchema.allowEmptyValue {
 		return typedLeafErrorf(leafPath,
 			"`%s` declares a value and none was given (this leaf takes %d value token(s)); "+
 				"the compiler drops a valueless statement, so this commits clean and the "+

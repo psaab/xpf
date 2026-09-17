@@ -89,21 +89,25 @@ func TestDHCPv4RelaySpellingsStillCompile9552(t *testing.T) {
 	}
 }
 
-// `dhcpv6` stays #9411's: its message says the relay agent does not exist.
-// The new gate must not replace that message or add a second warning.
+// `dhcpv6` is now a declared family container. A valid RFC 8415 subset must
+// compile without a #9552 unknown-child warning; unsupported direct children
+// are handled by #9553's narrow family gate.
 func TestDHCPRelayDHCPv6KeepsItsOwnMessage9552(t *testing.T) {
-	sp := spelling9414{label: "braced", braced: "forwarding-options { dhcp-relay { dhcpv6 { group g6 { interface ge-0/0/0.0; } } } }"}
-	_, err := CompileConfig(sp.tree(t))
-	if err == nil || !strings.Contains(err.Error(), "#9411") || strings.Contains(err.Error(), "#9552") {
-		t.Fatalf("dhcpv6 must be refused by #9411's message alone, got: %v", err)
+	sp := spelling9414{label: "braced", braced: "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"}
+	cfg, err := CompileConfig(sp.tree(t))
+	if err != nil {
+		t.Fatalf("implemented dhcpv6 subset must compile: %v", err)
 	}
-	cfg, err := CompileConfigLenient(sp.tree(t))
+	if cfg.ForwardingOptions.DHCPRelay == nil || cfg.ForwardingOptions.DHCPRelay.V6 == nil {
+		t.Fatalf("dhcpv6 subset did not compile to a typed v6 relay: %+v", cfg.ForwardingOptions.DHCPRelay)
+	}
+	cfg, err = CompileConfigLenient(sp.tree(t))
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
 	}
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "(#9552)") {
-			t.Errorf("dhcpv6 raised a #9552 warning beside #9411's: %q", w)
+		if strings.Contains(w, "(#9552)") || strings.Contains(w, "#9411") {
+			t.Errorf("implemented dhcpv6 subset raised an obsolete warning: %q", w)
 		}
 	}
 }
