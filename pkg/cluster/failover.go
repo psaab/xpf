@@ -283,6 +283,43 @@ func (m *Manager) FenceStatus() (action string, events []HistoryEvent) {
 	return
 }
 
+// manualFailoverHoldSnapshot records the operator hold that a peer-transfer
+// request temporarily clears. A reset that wins while the request is outside
+// m.mu increments failoverGen; the generation check prevents a stale abort
+// from resurrecting that newer operator decision. The abort also leaves any
+// newer hold already installed by another operator path untouched.
+type manualFailoverHoldSnapshot struct {
+	armed         bool
+	at            time.Time
+	state         NodeState
+	weight        int
+	restoreWeight bool
+	generation    uint64
+}
+
+func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailoverHoldSnapshot) {
+	if !snapshot.armed || m.failoverGen[rgID] != snapshot.generation {
+		return
+	}
+	rg, ok := m.groups[rgID]
+	if !ok {
+		return
+	}
+	if rg.ManualFailover {
+		return
+	}
+	oldState := rg.State
+	rg.ManualFailover = true
+	if snapshot.restoreWeight {
+		rg.Weight = snapshot.weight
+	}
+	rg.ManualFailoverAt = snapshot.at
+	rg.State = snapshot.state
+	if oldState != rg.State {
+		m.sendEvent(rg.GroupID, oldState, rg.State, "Manual failover restored after failed peer transfer")
+	}
+}
+
 // RequestPeerFailover asks the peer to transfer the given RG out of primary,
 // making the local node eligible to become primary. Used when
 // "request chassis cluster failover redundancy-group N node <local>" is run.
@@ -292,6 +329,13 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	if !ok {
 		m.mu.Unlock()
 		return fmt.Errorf("redundancy group %d not found", rgID)
+	}
+	// Reserve this RG for the whole request. Without the reservation, a
+	// concurrent request could consume the hold after this request clears it,
+	// then a late abort could restore the wrong request's snapshot.
+	if m.failoverInProgress[rgID] {
+		m.mu.Unlock()
+		return fmt.Errorf("failover already in progress for redundancy group %d, please wait", rgID)
 	}
 	if rg.State == StatePrimary {
 		m.mu.Unlock()
@@ -312,12 +356,18 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 			reasons,
 		)
 	}
+	m.failoverInProgress[rgID] = true
 	fn := m.peerFailoverFn
 	commitFn := m.peerFailoverCommitFn
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.failoverInProgress, rgID)
+		m.mu.Unlock()
+	}()
 
 	if fn == nil {
 		if !peerAlive {
@@ -345,6 +395,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	if err != nil {
 		return err
 	}
+	var hold manualFailoverHoldSnapshot
 	m.mu.Lock()
 	rg, ok = m.groups[rgID]
 	if !ok {
@@ -355,33 +406,34 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	// acknowledged the transfer-out request. Preflight rejection or request-send
 	// failure must not silently release the existing transfer-out state.
 	if rg.ManualFailover {
+		hold = manualFailoverHoldSnapshot{
+			armed:         true,
+			at:            rg.ManualFailoverAt,
+			state:         rg.State,
+			weight:        rg.Weight,
+			restoreWeight: rg.State == StateSecondary && rg.Weight == 0,
+			generation:    m.failoverGen[rgID],
+		}
 		rg.ManualFailover = false
 		rg.ManualFailoverAt = time.Time{}
 		m.recalcWeight(rg)
 	}
 	m.mu.Unlock()
 	if err := m.commitRequestedPeerFailover(rgID, reqID); err != nil {
-		// The commit applies peerTransferOutOverride BEFORE running the
-		// election, so an election that fails to promote us leaves the
-		// override armed. It has no expiry — applyTransferCommitOverrides-
-		// OnPeerStateLocked re-forces the peer to secondary-hold on EVERY
-		// subsequent heartbeat — so electRG's "Peer transfer out" arm
-		// self-promotes this node as soon as local weight recovers, giving a
-		// persistent dual-primary. Roll back exactly as the batch path does
-		// (#6527). The rollback is reqID-matched and a no-op on the two
-		// error returns that precede the override, so it is safe on every
-		// commit failure.
-		m.abortRequestedPeerFailover(rgID, reqID)
+		// The commit applies peerTransferOutOverride before running the
+		// election. Roll back the reqID-matched override and restore the
+		// preexisting local manual-failover hold on every commit failure.
+		m.abortRequestedPeerFailover(rgID, reqID, hold)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn([]int{rgID}); err != nil {
-			m.abortRequestedPeerFailover(rgID, reqID)
+			m.abortRequestedPeerFailover(rgID, reqID, hold)
 			return err
 		}
 	}
 	if err := commitFn(rgID, reqID); err != nil {
-		m.abortRequestedPeerFailover(rgID, reqID)
+		m.abortRequestedPeerFailover(rgID, reqID, hold)
 		return err
 	}
 	m.notePeerTransferCommitted(rgID)
@@ -429,15 +481,16 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64) {
+func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manualFailoverHoldSnapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
-		return
+	restoredOverride := m.restorePeerTransferOutOverrideLocked(rgID, reqID)
+	if restoredOverride {
+		delete(m.peerTransferCommitGraceUntil, rgID)
+		m.runElection()
 	}
-	delete(m.peerTransferCommitGraceUntil, rgID)
-	m.runElection()
+	m.restoreManualFailoverHoldLocked(rgID, hold)
 }
 
 func (m *Manager) notePeerTransferCommitted(rgID int) {
@@ -836,6 +889,12 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 			m.mu.Unlock()
 			return fmt.Errorf("redundancy group %d not found", rgID)
 		}
+		// Validate all members before claiming any ownership, so a rejected
+		// batch never leaves a partial reservation behind.
+		if m.failoverInProgress[rgID] {
+			m.mu.Unlock()
+			return fmt.Errorf("failover already in progress for redundancy groups %v, please wait", ids)
+		}
 		if rg.State == StatePrimary {
 			m.mu.Unlock()
 			return fmt.Errorf("node is already primary for redundancy groups %v", ids)
@@ -856,12 +915,22 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 			)
 		}
 	}
+	for _, rgID := range ids {
+		m.failoverInProgress[rgID] = true
+	}
 	fn := m.peerFailoverBatchFn
 	commitFn := m.peerFailoverCommitBatchFn
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		for _, rgID := range ids {
+			delete(m.failoverInProgress, rgID)
+		}
+		m.mu.Unlock()
+	}()
 
 	if fn == nil {
 		if !peerAlive {
@@ -893,10 +962,19 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		return err
 	}
 
+	holdSnapshots := make(map[int]manualFailoverHoldSnapshot, len(ids))
 	m.mu.Lock()
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
 		if rg != nil && rg.ManualFailover {
+			holdSnapshots[rgID] = manualFailoverHoldSnapshot{
+				armed:         true,
+				at:            rg.ManualFailoverAt,
+				state:         rg.State,
+				weight:        rg.Weight,
+				restoreWeight: rg.State == StateSecondary && rg.Weight == 0,
+				generation:    m.failoverGen[rgID],
+			}
 			rg.ManualFailover = false
 			rg.ManualFailoverAt = time.Time{}
 			m.recalcWeight(rg)
@@ -905,17 +983,17 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	m.mu.Unlock()
 
 	if err := m.commitRequestedPeerFailoverBatch(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn(ids); err != nil {
-			m.abortRequestedPeerFailoverBatch(ids, reqID)
+			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots)
 			return err
 		}
 	}
 	if err := commitFn(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots)
 		return err
 	}
 	m.notePeerTransferCommittedBatch(ids)
@@ -972,15 +1050,23 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) {
+func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]manualFailoverHoldSnapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	restoredOverride := false
 	for _, rgID := range rgIDs {
-		delete(m.peerTransferCommitGraceUntil, rgID)
-		m.restorePeerTransferOutOverrideLocked(rgID, reqID)
+		if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
+			delete(m.peerTransferCommitGraceUntil, rgID)
+			restoredOverride = true
+		}
 	}
-	m.runElection()
+	if restoredOverride {
+		m.runElection()
+	}
+	for _, rgID := range rgIDs {
+		m.restoreManualFailoverHoldLocked(rgID, holds[rgID])
+	}
 }
 
 func (m *Manager) notePeerTransferCommittedBatch(rgIDs []int) {
