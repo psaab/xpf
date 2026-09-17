@@ -931,10 +931,12 @@ func (c *CLI) showRoutingOptions() error {
 		for _, sr := range ro.StaticRoutes {
 			if sr.Discard {
 				fmt.Printf("  %-24s %-20s %-6s %s\n", sr.Destination, "discard", fmtPref(sr.Preference), "")
+				printStaticRouteNotInstalled(staticExcluded, sr)
 				continue
 			}
 			if sr.Reject {
 				fmt.Printf("  %-24s %-20s %-6s %s\n", sr.Destination, "reject", fmtPref(sr.Preference), "")
+				printStaticRouteNotInstalled(staticExcluded, sr)
 				continue
 			}
 			if sr.NextTable != "" {
@@ -953,6 +955,7 @@ func (c *CLI) showRoutingOptions() error {
 				}
 				fmt.Printf("  %-24s %-20s %-6s %s\n", dest, nhStr, fmtPref(sr.Preference), "")
 			}
+			printStaticRouteNotInstalled(staticExcluded, sr)
 		}
 		fmt.Println()
 		hasContent = true
@@ -964,10 +967,12 @@ func (c *CLI) showRoutingOptions() error {
 		for _, sr := range ro.Inet6StaticRoutes {
 			if sr.Discard {
 				fmt.Printf("  %-40s %-30s %-6s\n", sr.Destination, "discard", fmtPref(sr.Preference))
+				printStaticRouteNotInstalled(staticExcluded, sr)
 				continue
 			}
 			if sr.Reject {
 				fmt.Printf("  %-40s %-30s %-6s\n", sr.Destination, "reject", fmtPref(sr.Preference))
+				printStaticRouteNotInstalled(staticExcluded, sr)
 				continue
 			}
 			if sr.NextTable != "" {
@@ -986,6 +991,7 @@ func (c *CLI) showRoutingOptions() error {
 				}
 				fmt.Printf("  %-40s %-30s %-6s\n", dest, nhStr, fmtPref(sr.Preference))
 			}
+			printStaticRouteNotInstalled(staticExcluded, sr)
 		}
 		fmt.Println()
 		hasContent = true
@@ -1079,10 +1085,12 @@ func (c *CLI) showRoutingInstances(detail bool) error {
 			for _, sr := range ri.StaticRoutes {
 				if sr.Discard {
 					fmt.Printf("    %s -> discard\n", sr.Destination)
+					printStaticRouteNotInstalled(staticExcluded, sr)
 					continue
 				}
 				if sr.Reject {
 					fmt.Printf("    %s -> reject\n", sr.Destination)
+					printStaticRouteNotInstalled(staticExcluded, sr)
 					continue
 				}
 				// #4908 (C175-HC-129): a next-table static route has no
@@ -1101,6 +1109,7 @@ func (c *CLI) showRoutingInstances(detail bool) error {
 					}
 					fmt.Printf("    %s -> %s\n", sr.Destination, nhStr)
 				}
+				printStaticRouteNotInstalled(staticExcluded, sr)
 			}
 		}
 		if ri.InterfaceRoutesRibGroup != "" {

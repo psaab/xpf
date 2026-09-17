@@ -331,10 +331,16 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 			for _, sr := range ro.StaticRoutes {
 				if sr.Discard {
 					fmt.Fprintf(buf, "  %-24s %-20s %s\n", sr.Destination, "discard", fmtPref(sr.Preference))
+					if reason := staticExcluded[sr]; reason != "" {
+						fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+					}
 					continue
 				}
 				if sr.Reject {
 					fmt.Fprintf(buf, "  %-24s %-20s %s\n", sr.Destination, "reject", fmtPref(sr.Preference))
+					if reason := staticExcluded[sr]; reason != "" {
+						fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+					}
 					continue
 				}
 				if sr.NextTable != "" {
@@ -355,6 +361,9 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 					}
 					fmt.Fprintf(buf, "  %-24s %-20s %s\n", dest, nhStr, fmtPref(sr.Preference))
 				}
+				if reason := staticExcluded[sr]; reason != "" {
+					fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+				}
 			}
 			buf.WriteString("\n")
 			hasContent = true
@@ -365,10 +374,16 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 			for _, sr := range ro.Inet6StaticRoutes {
 				if sr.Discard {
 					fmt.Fprintf(buf, "  %-40s %-30s %s\n", sr.Destination, "discard", fmtPref(sr.Preference))
+					if reason := staticExcluded[sr]; reason != "" {
+						fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+					}
 					continue
 				}
 				if sr.Reject {
 					fmt.Fprintf(buf, "  %-40s %-30s %s\n", sr.Destination, "reject", fmtPref(sr.Preference))
+					if reason := staticExcluded[sr]; reason != "" {
+						fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+					}
 					continue
 				}
 				if sr.NextTable != "" {
@@ -388,6 +403,9 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 						nhStr += " via " + nh.Interface
 					}
 					fmt.Fprintf(buf, "  %-40s %-30s %s\n", dest, nhStr, fmtPref(sr.Preference))
+				}
+				if reason := staticExcluded[sr]; reason != "" {
+					fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
 				}
 			}
 			buf.WriteString("\n")
@@ -433,10 +451,11 @@ func (s *Server) showRoutingInstancesDetail(cfg *config.Config, buf *strings.Bui
 	if cfg == nil || len(cfg.RoutingInstances) == 0 {
 		buf.WriteString("No routing instances configured\n")
 	} else {
-		// #7357 / #10001: which static routes buildRouteSnapshots drops.
-		// Computed once for the whole config because the next-table window
-		// verdict is order-dependent. The instance-detail next-table arm below
-		// must not render a configured-but-dropped leak as an installed route.
+		// #7357 / #10000 / #10001: which static routes
+		// buildRouteSnapshots drops. Computed once for the whole config because
+		// the next-table window verdict is order-dependent. Every rendered
+		// disposition below consults the shared map, including the
+		// configured-but-dropped next-table row.
 		staticExcluded := config.StaticRouteExclusions(cfg)
 		for _, ri := range cfg.RoutingInstances {
 			fmt.Fprintf(buf, "Instance: %s\n", ri.Name)
@@ -478,10 +497,16 @@ func (s *Server) showRoutingInstancesDetail(cfg *config.Config, buf *strings.Bui
 				for _, sr := range ri.StaticRoutes {
 					if sr.Discard {
 						fmt.Fprintf(buf, "    %s -> discard\n", sr.Destination)
+						if reason := staticExcluded[sr]; reason != "" {
+							fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+						}
 						continue
 					}
 					if sr.Reject {
 						fmt.Fprintf(buf, "    %s -> reject\n", sr.Destination)
+						if reason := staticExcluded[sr]; reason != "" {
+							fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+						}
 						continue
 					}
 					// #10001: a next-table static has no NextHops, so without
@@ -501,6 +526,9 @@ func (s *Server) showRoutingInstancesDetail(cfg *config.Config, buf *strings.Bui
 							nhStr += " via " + nh.Interface
 						}
 						fmt.Fprintf(buf, "    %s -> %s\n", sr.Destination, nhStr)
+					}
+					if reason := staticExcluded[sr]; reason != "" {
+						fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
 					}
 				}
 			}
