@@ -202,7 +202,11 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		used      int
 		usedKnown bool
 		isIface   bool
-		key       ruleSetKey
+		// PortNoTranslation pools preserve the source port, so port
+		// availability/utilization do not apply even when the helper reports
+		// the structurally-zero UsedPorts value (#9995).
+		portUtilizationNA bool
+		key               ruleSetKey
 	}
 	var pools []poolInfo
 
@@ -220,10 +224,13 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		if portHigh == 0 {
 			portHigh = 65535
 		}
+		addr := strings.Join(pool.Addresses, ",")
 		ports, _ := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, overBudget)
 		totalPorts := int(ports)
-		addr := strings.Join(pool.Addresses, ",")
-		pools = append(pools, poolInfo{name: name, address: addr, total: totalPorts})
+		pools = append(pools, poolInfo{
+			name: name, address: addr, total: totalPorts,
+			portUtilizationNA: pool.PortNoTranslation,
+		})
 	}
 
 	// Interface-mode pools (count from rules, deduplicated by zone pair).
@@ -334,7 +341,7 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		//
 		// Making it explicit is behaviour-preserving while the invariant holds
 		// and fail-closed if it stops holding.
-		if p.total > 0 && poolDisarm == "" {
+		if p.total > 0 && poolDisarm == "" && !p.portUtilizationNA {
 			ports = fmt.Sprintf("%d", p.total)
 			// #8606: Available and Utilization are both DERIVED from `used`.
 			// With no live occupancy there is nothing to derive them from, and
@@ -353,6 +360,14 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				avail = "unknown"
 				util = "unknown"
 			}
+		} else if p.portUtilizationNA && poolDisarm == "" {
+			// Address-only pools have no port denominator: PortLow/PortHigh
+			// are irrelevant in this mode. Gate the full port-capacity and
+			// translation-state view instead of deriving a healthy-looking
+			// zero utilization from the allocator's structural zero (#9995).
+			ports = "NOT APPLICABLE"
+			avail = "NOT APPLICABLE"
+			util = "NOT APPLICABLE"
 		}
 		// #7473: the USED column was the one number in this row that ignored
 		// `poolDisarm`. Ports/Available/Utilization already render N/A for a
@@ -364,7 +379,11 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		// pool the builder refused and returns 0. Gated on the SAME
 		// `poolDisarm` the annotation below renders.
 		used := "N/A"
-		if poolDisarm == "" {
+		if p.portUtilizationNA && poolDisarm == "" {
+			// No source-port allocations exist in address-only mode, so
+			// Used is a translation-state value rather than a measured zero.
+			used = "NOT APPLICABLE"
+		} else if poolDisarm == "" {
 			// #8606: "unknown" (helper not reporting) is a third state,
 			// distinct from N/A (pool refused) and from a measured number.
 			if p.usedKnown {
@@ -428,12 +447,17 @@ func (c *CLI) showNATSourcePool(cfg *config.Config, poolName string) error {
 		// #7000: see the summary view above.
 		ports, unusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, detailOverBudget)
 		totalPorts := int(ports)
+		portUtilizationNA := pool.PortNoTranslation
 
 		fmt.Printf("Pool name: %s\n", name)
 		for _, addr := range pool.Addresses {
 			fmt.Printf("  Address: %s\n", addr)
 		}
-		fmt.Printf("  Port range: %d-%d\n", portLow, portHigh)
+		if portUtilizationNA {
+			fmt.Printf("  Port range: NOT APPLICABLE\n")
+		} else {
+			fmt.Printf("  Port range: %d-%d\n", portLow, portHigh)
+		}
 		// #7000: a capacity of 0 is ambiguous on its own — no members, a
 		// malformed member, or the #6812 aggregate budget all produce it, and
 		// they have different remedies. The detail view has room to say which,
@@ -455,7 +479,13 @@ func (c *CLI) showNATSourcePool(cfg *config.Config, poolName string) error {
 		// When it has no entry for this pool there is NO measurement, and
 		// printing "Ports allocated: 0" would be the fabricated healthy zero
 		// #7473 refused for a disarmed pool. Say so instead.
-		if unusable == "" {
+		if portUtilizationNA && unusable == "" {
+			// `port no-translation` preserves the source port; there is no
+			// port occupancy denominator to report (#9995).
+			fmt.Printf("  Ports allocated: NOT APPLICABLE\n")
+			fmt.Printf("  Ports available: NOT APPLICABLE\n")
+			fmt.Printf("  Utilization: NOT APPLICABLE\n")
+		} else if unusable == "" {
 			if rp, ok := detailOccupancy[name]; ok {
 				used := int(rp.UsedPorts)
 				avail := totalPorts - used
