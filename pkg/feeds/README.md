@@ -61,11 +61,14 @@ replaces them (`installSnapshot`). Distinctions:
   so a referencing policy fails **closed**, not a match-none fail-open.
 
 The atomic swap on a successful new fetch is unchanged, so the overlay compiler
-never sees a torn prefix set. Retained FAILURE markers (`LastError`/`StaleSince`)
-are intentionally NOT carried: the new endpoint gets a clean slate and the first
-post-Apply fetch re-derives stale state, which also gives an opt-in
-`hold-interval` a fresh window on the new endpoint rather than a partially-elapsed
-one (strictly more conservative for the fail-open guard).
+never sees a torn prefix set. Retained transient FAILURE markers
+(`LastError`/`StaleSince`) are intentionally NOT carried: the new endpoint gets
+a clean slate and the first post-Apply fetch re-derives stale state, which also
+gives an opt-in `hold-interval` a fresh window on the new endpoint rather than
+a partially-elapsed one (strictly more conservative for the fail-open guard).
+The distinct `HOLD-DROPPED` marker *is* carried: it records an already-enforced
+hold-interval drop even though that drop has no snapshot, preserving #9689's
+`fail-mode drop` semantics across a persisting reconfigure.
 
 ## First-fetch fail-closed — no match-none deny window (#5645)
 
