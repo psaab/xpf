@@ -77,11 +77,11 @@ const (
 	// positive integer ("14") or the Junos "group<N>" spelling
 	// ("group14"). Both spellings compile; validated by ValidateDHGroup.
 	ValueDHGroup
-	// ValueHostname is a DNS hostname / FQDN whose published form must
-	// equal the operator's intent (#2779): LDH labels (letters, digits,
-	// hyphens) joined by dots, optional trailing dot. Validated by
-	// ValidateDDNSHostname — a name the publish path would silently
-	// rewrite is rejected at commit.
+	// ValueHostname is a DNS hostname / FQDN whose published form must equal
+	// the operator's intent: LDH labels (letters, digits, hyphens) joined by
+	// dots, with an optional trailing dot. The shared DNS shape and length
+	// rules are enforced by each leaf's validator; for example, DDNS uses
+	// ValidateDDNSHostname while system host-name uses ValidateSystemHostname.
 	ValueHostname
 	// ValueTimeOfDay is a Junos scheduler time-of-day in HH:MM:SS 24-hour
 	// form (e.g. 09:00:00). Validated by ValidateTimeOfDay so an

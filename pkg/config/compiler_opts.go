@@ -2861,6 +2861,14 @@ type compileOpts struct {
 	// flagged. Same doctrine as lenientInterfaceAddressList.
 	lenientBareLeafInstance9838 bool
 
+	// lenientSystemHostname (#10003) downgrades the packed `system
+	// host-name <value>` admission check from a strict compile error to a
+	// cfg.Warnings entry on tolerant Load / SyncApply paths. The typed schema
+	// walk owns the nested/block spelling; this flag covers the compact
+	// spelling because compileSystem reads it directly from the system node's
+	// Keys. Existing persisted or peer-synced names must still boot (#1960).
+	lenientSystemHostname bool
+
 	// nodeAware / stampNodeID (#4329) carry the runtime cluster node
 	// identity (from /etc/xpf/node-id, or `-node-id` on `xpfd
 	// check-config`) into compileExpanded so it can be stamped onto the
@@ -3076,5 +3084,6 @@ func lenientCompileOpts() compileOpts {
 		lenientVlanUnitMTU:                     true,
 		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
+		lenientSystemHostname:                  true,
 	}
 }

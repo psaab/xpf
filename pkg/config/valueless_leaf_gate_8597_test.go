@@ -24,9 +24,10 @@ import (
 // next-hop, on the one route an operator can least afford to mis-scope.
 //
 // The population is larger than the finding's, and the cells below record it:
-// `system host-name`, `family inet address` and `policy ... match
-// source-address` were all accepted valueless too. The gate is written at the
-// walker rather than per-leaf for that reason.
+// `family inet address` and `policy ... match source-address` are still
+// untyped valueless leaves, so the generic walker gate owns them. `system
+// host-name` is now a typed scalar leaf (#10003); its typed-leaf branch owns
+// the same missing-value refusal with the shorter typed diagnostic.
 
 func schemaVerdict(t *testing.T, cmd string) error {
 	t.Helper()
@@ -48,26 +49,31 @@ func TestValuelessLeafIsRejected_8597(t *testing.T) {
 		name string
 		cmd  string
 		why  string
+		want string
 	}{
 		{
 			name: "static-route next-hop interface modifier",
 			cmd:  "set routing-options rib inet6.0 static route 2001:db8::/64 next-hop fe80::1 interface",
 			why:  "an unscoped IPv6 link-local next-hop — the finding's instance",
+			want: "declares a value and none was given",
 		},
 		{
 			name: "system host-name",
 			cmd:  "set system host-name",
-			why:  "not named by the finding; found by censusing the shape",
+			why:  "typed scalar leaf — covered by the #10003 admission validator",
+			want: "missing value",
 		},
 		{
 			name: "interface address",
 			cmd:  "set interfaces ge-0/0/0 unit 0 family inet address",
 			why:  "same",
+			want: "declares a value and none was given",
 		},
 		{
 			name: "policy match source-address",
 			cmd:  "set security policies from-zone trust to-zone untrust policy p match source-address",
 			why:  "same",
+			want: "declares a value and none was given",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,9 +83,8 @@ func TestValuelessLeafIsRejected_8597(t *testing.T) {
 					"this commits clean and the configuration silently does not carry the "+
 					"statement (#8597/K15)", tc.why)
 			}
-			if !strings.Contains(err.Error(), "declares a value and none was given") {
-				t.Errorf("rejected by a DIFFERENT gate, so this cell is not exercising the "+
-					"one it is about: %v", err)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("rejected with %q, not the expected missing-value diagnostic: %v", tc.want, err)
 			}
 		})
 	}
@@ -91,9 +96,9 @@ func TestValuelessLeafIsRejected_8597(t *testing.T) {
 // missing-value gate that condemned any legitimate spelling would be the same
 // mistake.
 //
-// The full pkg/config and pkg/configstore suites are the wider control — they
-// pass unchanged — but a gate needs its own statement of what it must NOT
-// reject, next to what it must.
+// The full pkg/config and pkg/configstore suites are the wider control, but a
+// gate needs its own statement of what it must NOT reject, next to what it
+// must.
 func TestValuedLeavesStillCommit_8597(t *testing.T) {
 	for _, cmd := range []string{
 		// The finding's leaf, correctly authored.

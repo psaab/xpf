@@ -319,6 +319,31 @@ func ValidateDNSDomain(raw string, _ *Config) error {
 	return validateDNSNameShape(raw, "domain")
 }
 
+// ValidateSystemHostname accepts the `system host-name` value. Unlike the
+// resolver/domain leaves, this name becomes the kernel node identity and is
+// persisted verbatim, so its admission diagnostic names `host-name` directly.
+// Empty is the unset form and remains valid: compileSystem leaves it empty and
+// applyHostname's empty early-return is load-bearing for config loads that do
+// not configure a system name.
+func ValidateSystemHostname(raw string, _ *Config) error {
+	if raw == "" {
+		return nil
+	}
+	if err := validateDNSNameShape(raw, "system host-name"); err != nil {
+		return err
+	}
+	// Linux sethostname(2) rejects names longer than HOST_NAME_MAX (64
+	// bytes), even though DNS permits up to 253 octets. Keep admission aligned
+	// with the syscall that applyHostname ultimately invokes.
+	if len(raw) > maxSystemHostnameLen {
+		return fmt.Errorf("system host-name %q exceeds Linux HOST_NAME_MAX of %d bytes",
+			raw, maxSystemHostnameLen)
+	}
+	return nil
+}
+
+const maxSystemHostnameLen = 64
+
 // ValidateSSHAlgorithm accepts one `system services ssh key-exchange | ciphers
 // | macs` token: a safe OpenSSH algorithm name (sshAlgorithmRE). It rejects a
 // comma (the list separator), whitespace, control characters, or any other
