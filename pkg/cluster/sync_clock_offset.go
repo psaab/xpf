@@ -67,6 +67,9 @@ func (s *SessionSync) publishClockSyncIfCurrent(conn net.Conn, offset int64) boo
 	}
 	s.peerClockOffset.Store(offset)
 	s.clockSynced.Store(true)
+	if s.testClockPublishAfterStore != nil {
+		s.testClockPublishAfterStore()
+	}
 	return true
 }
 

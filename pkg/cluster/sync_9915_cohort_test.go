@@ -910,12 +910,12 @@ func TestSyncNoiseIdentityRejectsBadClusterId_9915(t *testing.T) {
 	}
 }
 
-// F-118 review (gpt item 6): publication and retirement must be one
-// membership-checked transaction. The publication hook pauses while it holds
-// s.mu; the disconnect hook then signals immediately before its Lock call.
-// That signal proves the disconnect is blocked by the publication owner until
-// the publication stores its offset and unlocks.
-func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
+// F-118 review (gpt item 6): ClockSync membership checking and publication
+// must remain one s.mu transaction. P1 pauses after the membership check and
+// before either offset store; P2 pauses after both stores and before the
+// deferred unlock. TryLock must fail at both rendezvous, so an unlock before
+// either probe is rejected without relying on another goroutine's scheduling.
+func TestClockSyncPublicationLockProbes_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.testClockNow = func() uint64 { return 1000000 }
 	local, remote := net.Pipe()
@@ -925,15 +925,25 @@ func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 	ss.installConn(0, ac)
 	var payload [8]byte
 	binary.LittleEndian.PutUint64(payload[:], 900000)
-	checked := make(chan struct{})
-	continuePublish := make(chan struct{})
-	disconnectStarted := make(chan struct{})
-	ss.testClockPublishBeforeStore = func() {
-		close(checked)
-		<-continuePublish
+	p1Entered := make(chan struct{})
+	releaseP1 := make(chan struct{})
+	p2Entered := make(chan struct{})
+	releaseP2 := make(chan struct{})
+	assertHeld := func(phase string) {
+		if ss.mu.TryLock() {
+			ss.mu.Unlock()
+			t.Errorf("ClockSync publication did not hold s.mu at %s probe", phase)
+		}
 	}
-	ss.testDisconnectBeforeLock = func() {
-		close(disconnectStarted)
+	ss.testClockPublishBeforeStore = func() {
+		assertHeld("P1")
+		close(p1Entered)
+		<-releaseP1
+	}
+	ss.testClockPublishAfterStore = func() {
+		assertHeld("P2")
+		close(p2Entered)
+		<-releaseP2
 	}
 	published := make(chan struct{})
 	go func() {
@@ -941,36 +951,31 @@ func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 		close(published)
 	}()
 	select {
-	case <-checked:
+	case <-p1Entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("ClockSync did not reach the membership-checked publication gate")
+		t.Fatal("ClockSync did not reach the P1 membership-checked publication gate")
 	}
-	disconnected := make(chan struct{})
-	go func() {
-		ss.handleDisconnect(ac)
-		close(disconnected)
-	}()
+	close(releaseP1)
 	select {
-	case <-disconnectStarted:
+	case <-p2Entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("disconnect did not reach its pre-lock signal")
+		t.Fatal("ClockSync did not reach the P2 post-store publication gate")
 	}
-	close(continuePublish)
+	close(releaseP2)
 	select {
 	case <-published:
 	case <-time.After(5 * time.Second):
 		t.Fatal("ClockSync publication did not complete")
 	}
-	select {
-	case <-disconnected:
-	case <-time.After(5 * time.Second):
-		t.Fatal("retirement did not complete after publication")
+	const wantOffset int64 = 100000
+	if got := ss.peerClockOffset.Load(); got != wantOffset {
+		t.Fatalf("peerClockOffset = %d after locked publication, want %d", got, wantOffset)
 	}
-	if got := ss.peerClockOffset.Load(); got != 0 {
-		t.Fatalf("peerClockOffset = %d after publication/retirement interleave, want 0", got)
+	if got := ac.clockOffset.Load(); got != wantOffset {
+		t.Fatalf("connection clockOffset = %d after locked publication, want %d", got, wantOffset)
 	}
-	if ac.clockSynced.Load() {
-		t.Fatal("retired connection remained clock-synced after interleave")
+	if !ss.clockSynced.Load() || !ac.clockSynced.Load() {
+		t.Fatal("ClockSync publication did not mark global and connection state synced")
 	}
 }
 

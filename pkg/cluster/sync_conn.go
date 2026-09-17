@@ -1247,9 +1247,6 @@ func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peer
 	}
 }
 func (s *SessionSync) handleDisconnect(conn net.Conn) {
-	if s.testDisconnectBeforeLock != nil {
-		s.testDisconnectBeforeLock()
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {

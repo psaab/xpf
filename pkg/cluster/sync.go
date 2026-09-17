@@ -1115,12 +1115,13 @@ type SessionSync struct {
 	// testClockPublishBeforeStore pauses a current ClockSync publication while
 	// s.mu is held. Test-only interleaving seam; production never sets it.
 	testClockPublishBeforeStore func()
-	// testDisconnectBeforeLock fires immediately before handleDisconnect
-	// acquires s.mu. Test-only interleaving seam; production never sets it.
-	testDisconnectBeforeLock func()
-	vrfDevice                string
-	peerClockOffset          atomic.Int64
-	clockSynced              atomic.Bool
+	// testClockPublishAfterStore pauses a current ClockSync publication after
+	// both offset stores and before s.mu unlocks. Test-only seam; production
+	// never sets it.
+	testClockPublishAfterStore func()
+	vrfDevice                  string
+	peerClockOffset            atomic.Int64
+	clockSynced                atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the
