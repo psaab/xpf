@@ -369,10 +369,40 @@ func (r *Runner) recoverFromFlipFailure(j *Journal, opts Options, flipErr error)
 //     .restore.partial (the snapshot to install) exist on disk, so the
 //     next rollback re-run completes the swap. A re-run NEVER finds the
 //     live DB permanently destroyed.
+//
+// restoreDBSnapshot is the forward-cut auto-rollback behavior: complete the
+// crash-safe swap and clean the temporary .old rotation after success.
 func (r *Runner) restoreDBSnapshot(snapDir string) error {
+	return r.restoreDBSnapshotWithRetention(snapDir, false)
+}
+
+// restoreDBSnapshotRetainOld is the operator rollback variant. The failed
+// runtime's live DB remains at ConfigDBDir+".old" after the new snapshot is
+// promoted, matching the manual celle sequence and giving operators a
+// byte-preserving recovery point.
+func (r *Runner) restoreDBSnapshotRetainOld(snapDir string) error {
+	return r.restoreDBSnapshotWithRetention(snapDir, true)
+}
+
+func (r *Runner) restoreDBSnapshotWithRetention(snapDir string, retainOld bool) error {
 	parent := filepath.Dir(r.cfg.ConfigDBDir)
 	restore := r.cfg.ConfigDBDir + ".restore.partial"
 	old := r.cfg.ConfigDBDir + ".old"
+	// A prior operator rollback may have completed the directory swap and
+	// retained .old, then crashed before FLIP. If the live tree is byte
+	// identical to the requested snapshot, it is already installed: do not
+	// rotate it again or delete the original failed-runtime DB.
+	if retainOld {
+		if _, oldErr := os.Stat(old); oldErr == nil {
+			if _, liveErr := os.Stat(r.cfg.ConfigDBDir); liveErr == nil {
+				liveSum, liveSumErr := copyTreeChecksum(r.cfg.ConfigDBDir)
+				snapSum, snapSumErr := copyTreeChecksum(snapDir)
+				if liveSumErr == nil && snapSumErr == nil && liveSum == snapSum {
+					return nil
+				}
+			}
+		}
+	}
 
 	// Recovery: a prior interrupted swap may have left ConfigDBDir absent
 	// with .restore.partial already staged. If so, complete the install
@@ -386,7 +416,9 @@ func (r *Runner) restoreDBSnapshot(snapDir string) error {
 		if err := fsatomic.SyncDir(parent); err != nil {
 			return err
 		}
-		_ = os.RemoveAll(old)
+		if !retainOld {
+			_ = os.RemoveAll(old)
+		}
 		return nil
 	}
 
@@ -421,7 +453,9 @@ func (r *Runner) restoreDBSnapshot(snapDir string) error {
 	if err := fsatomic.SyncDir(parent); err != nil {
 		return err
 	}
-	_ = os.RemoveAll(old)
+	if !retainOld {
+		_ = os.RemoveAll(old)
+	}
 	return nil
 }
 

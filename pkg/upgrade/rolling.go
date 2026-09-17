@@ -125,6 +125,109 @@ func RunRolling(r *Runner, cfg Config) error {
 	return runRollingWith(r, cl, RollingConfig{})
 }
 
+// RunRollingRollback performs the HA per-node rollback with the same
+// host-wide lock and cluster-control surface as RunRolling.
+func RunRollingRollback(r *Runner, cfg Config, target string) error {
+	h, err := acquireUpgradeLock("upgrade --rollback --rolling", target)
+	if err != nil {
+		return fmt.Errorf("upgrade --rollback --rolling: %w", err)
+	}
+	defer func() { _ = h.Release() }()
+
+	cl, err := NewCLICluster(cfg.Unit)
+	if err != nil {
+		return fmt.Errorf("upgrade --rollback --rolling: %w", err)
+	}
+	return runRollingRollbackWith(r, cl, RollingConfig{}, target)
+}
+
+// runRollingRollbackWith is the testable HA rollback core. It performs the
+// rollback-specific restorable/snapshot/envelope gate before demoting the
+// local node, then mirrors the forward rolling sequence around the destructive
+// rollback cut.
+func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, target string) error {
+	rc.withDefaults()
+
+	// All rollback refusal checks happen before ForceSecondary. This includes
+	plan, _, err := r.rollbackInvocationPlan(target)
+	if err != nil {
+		return fmt.Errorf("rolling rollback: %w", err)
+	}
+
+	alive, err := cl.PeerAlive()
+	if err != nil {
+		return fmt.Errorf("rolling rollback: check peer alive: %w", err)
+	}
+	if !alive {
+		return fmt.Errorf("rolling rollback: peer is not alive — refusing to drain the only forwarding node; bring the peer up first")
+	}
+	synced, err := cl.SyncEstablished()
+	if err != nil {
+		return fmt.Errorf("rolling rollback: check session sync: %w", err)
+	}
+	if !synced {
+		return fmt.Errorf("rolling rollback: session sync not established — draining now would drop connections; aborting")
+	}
+	compat, err := cl.HAProtocolCompatible()
+	if err != nil {
+		return fmt.Errorf("rolling rollback: check HA protocol compatibility: %w", err)
+	}
+	if !compat {
+		return fmt.Errorf("rolling rollback: HA/session-sync protocol is NOT compatible across the target; use image-replace")
+	}
+	syncOK, syncWhy, err := cl.SessionSyncWireCompatible()
+	if err != nil {
+		return fmt.Errorf("rolling rollback: check session-sync wire compatibility: %w", err)
+	}
+	if !syncOK {
+		return fmt.Errorf("rolling rollback: session-sync WIRE version is NOT compatible with the peer (%s); use image-replace", syncWhy)
+	}
+	ready, err := cl.PeerTakeoverReady()
+	if err != nil {
+		return fmt.Errorf("rolling rollback: check peer takeover readiness: %w", err)
+	}
+	if !ready {
+		return fmt.Errorf("rolling rollback: peer is NOT takeover-ready; aborting without draining")
+	}
+
+	r.logf("rolling: peer ready; forcing local secondary (rollback drain start)")
+	if err := cl.ForceSecondary(); err != nil {
+		return fmt.Errorf("rolling rollback: force secondary: %w", err)
+	}
+	if err := waitPredicate(rc, false, cl.DrainComplete); err != nil {
+		r.logf("rolling: rollback drain predicate not met within %s; resetting failover and aborting", rc.DrainDeadline)
+		if resetErr := cl.ResetFailover(); resetErr != nil {
+			return fmt.Errorf("rolling rollback: strong drain predicate not satisfied AND failback failed: %w", errors.Join(err, resetErr))
+		}
+		rejoined, rerr := cl.LocalRejoinComplete()
+		if rerr != nil || !rejoined {
+			return fmt.Errorf("rolling rollback: strong drain predicate not satisfied; failback acknowledged but local rejoin is not confirmed: %w", err)
+		}
+		return fmt.Errorf("rolling rollback: strong drain predicate not satisfied; aborted WITHOUT cutting: %w", err)
+	}
+	r.logf("rolling: rollback drain complete (peer owns RGs, local backup, rg_active=false, sync clean)")
+
+	if err := r.RollbackTo(plan.toVersion, RollbackOptions{
+		ClusterCoordinated: true,
+		LockAlreadyHeld:    true,
+	}); err != nil {
+		return fmt.Errorf("rolling rollback: single-node rollback failed (inspect the drained node): %w", err)
+	}
+
+	if err := waitPredicate(RollingConfig{
+		DrainDeadline: rc.RejoinDeadline,
+		PollInterval:  rc.PollInterval,
+	}, true, cl.SyncEstablished); err != nil {
+		return fmt.Errorf("rolling rollback: rolled-back node did not re-establish session sync within %s: %w", rc.RejoinDeadline, err)
+	}
+	r.logf("rolling: rolled-back node re-synced")
+	if err := RejoinAndConfirm(cl, rc.RejoinDeadline); err != nil {
+		return fmt.Errorf("rolling rollback: local node did not rejoin election after rollback within %s: %w", rc.RejoinDeadline, err)
+	}
+	r.logf("rolling: local node rejoined election, confirmed for every configured RG; rollback complete for this node")
+	return nil
+}
+
 // runRollingWith is the testable core (cluster + timing injected). It does
 // NOT acquire the upgrade lock — its only caller, RunRolling, holds it for
 // the whole rolling window, and the inner r.Run() it invokes runs with

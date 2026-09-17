@@ -15,15 +15,15 @@ import (
 	"github.com/psaab/xpf/pkg/upgrade"
 )
 
-// runUpgradeSubcommand implements `xpfd upgrade [--rolling]` — the in-place
-// cut-over to the dpkg-staged version (#1917 increment B). It is invoked
-// from the .deb postinst on a STANDALONE node and by the operator / the
-// dogfood deploy driver. On a clustered node the postinst is stage-only;
-// the cluster is cut ONLY via `xpfd upgrade --rolling` (or the equivalent
-// external driver), which sequences a controlled per-node drain so the
+// runUpgradeSubcommand implements `xpfd upgrade [--rollback] [--rolling]` —
+// the in-place cut-over to the dpkg-staged version (#1917 increment B) or its
+// binary+DB-atomic operator rollback. It is invoked from the .deb postinst on
+// a STANDALONE node and by the operator / dogfood deploy driver. On a
+// clustered node the postinst is stage-only; the cluster is cut ONLY via the
+// coordinated rolling forms, which sequence a controlled per-node drain so the
 // cluster keeps forwarding.
 //
-// Exit codes: 0 success, 1 error (including a rollback report).
+// Exit codes: 0 success, 1 error.
 func runUpgradeSubcommand(args []string) {
 	// #1930: `xpfd upgrade kernel ...` is the LANE-1 verify-gated in-place
 	// kernel channel (a distinct sub-verb from the #1917 binary cut-over).
@@ -44,6 +44,22 @@ func runUpgradeSubcommand(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "upgrade: %v\n", err)
 		os.Exit(1)
+	}
+	if flags.rollback {
+		if flags.rolling {
+			if err := upgrade.RunRollingRollback(r, cfg, flags.target); err != nil {
+				fmt.Fprintf(os.Stderr, "upgrade --rollback --rolling: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("rolling rollback complete")
+			return
+		}
+		if err := r.RollbackTo(flags.target, upgrade.RollbackOptions{}); err != nil {
+			fmt.Fprintf(os.Stderr, "upgrade --rollback: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("rollback complete")
+		return
 	}
 
 	if *rolling {
@@ -226,6 +242,8 @@ func defaultUpgradeControlSocket(configDBDir string) string {
 // os.Exit / real-System side effects of the dispatch.
 type upgradeFlags struct {
 	rolling                                                                       bool
+	rollback                                                                      bool
+	target                                                                        string
 	stagedDir, versionsDir, stagedGenDir, sbinDir, configDBDir, journalPath, unit string
 	healthDeadline                                                                time.Duration
 }
@@ -241,8 +259,12 @@ type upgradeFlags struct {
 func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
 	rolling := fs.Bool("rolling", false,
-		"HA rolling upgrade: drive a controlled per-node drain + cut so the "+
+		"HA rolling upgrade/rollback: drive a controlled per-node drain + cut so the "+
 			"cluster keeps forwarding (one node down at a time)")
+	rollback := fs.Bool("rollback", false,
+		"rollback the current runtime to a retained compatible version; combine with --rolling on HA")
+	target := fs.String("target", "",
+		"rollback target version (default: newest restorable non-current version)")
 	stagedDir := fs.String("staged-dir", upgrade.DefaultStagedDir, "dpkg-staged binary set dir")
 	versionsDir := fs.String("versions-dir", upgrade.DefaultVersionsDir, "runtime versioned dir")
 	stagedGenDir := fs.String("staged-gen-dir", upgrade.DefaultStagedGenDir,
@@ -258,11 +280,16 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 	}
 	if fs.NArg() != 0 {
 		return upgradeFlags{}, fmt.Errorf("unexpected argument(s) %v; "+
-			"usage: xpfd upgrade [--rolling] [flags] "+
-			"(HA rolling upgrade needs the leading dashes: --rolling)", fs.Args())
+			"usage: xpfd upgrade [--rollback] [--rolling] [flags] "+
+			"(HA rolling forms need the leading dashes: --rolling)", fs.Args())
+	}
+	if *target != "" && !*rollback {
+		return upgradeFlags{}, fmt.Errorf("--target is only valid with --rollback")
 	}
 	return upgradeFlags{
 		rolling:        *rolling,
+		rollback:       *rollback,
+		target:         *target,
 		stagedDir:      *stagedDir,
 		versionsDir:    *versionsDir,
 		stagedGenDir:   *stagedGenDir,

@@ -55,6 +55,25 @@ func TestParseUpgradeArgsValidForms_4869(t *testing.T) {
 		t.Fatalf("flags not parsed: rolling=%v unit=%q", f.rolling, f.unit)
 	}
 }
+func TestParseUpgradeArgsRollbackForms(t *testing.T) {
+	f, err := parseUpgradeArgs([]string{"--rollback"})
+	if err != nil {
+		t.Fatalf("--rollback: %v", err)
+	}
+	if !f.rollback || f.rolling || f.target != "" {
+		t.Fatalf("--rollback parsed as rollback=%v rolling=%v target=%q", f.rollback, f.rolling, f.target)
+	}
+	f, err = parseUpgradeArgs([]string{"--rollback", "--rolling", "--target", "1.0.0"})
+	if err != nil {
+		t.Fatalf("--rollback --rolling --target: %v", err)
+	}
+	if !f.rollback || !f.rolling || f.target != "1.0.0" {
+		t.Fatalf("rollback flags not threaded: rollback=%v rolling=%v target=%q", f.rollback, f.rolling, f.target)
+	}
+	if _, err := parseUpgradeArgs([]string{"--target", "1.0.0"}); err == nil {
+		t.Fatal("--target without --rollback parsed successfully; want rejection")
+	}
+}
 
 func joinArgs(a []string) string {
 	if len(a) == 0 {

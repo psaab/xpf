@@ -236,13 +236,29 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 	}
 
-	// Resume an interrupted auto-rollback FIRST (Codex r1 Critical#1): a
-	// crash mid-rollback must complete the rollback to PreviousVersion, not
-	// resume the failed forward cut. rollback() clears the journal on
-	// success.
+	// Resume an interrupted rollback FIRST (Codex r1 Critical#1): a crash
+	// mid-rollback must complete the rollback to PreviousVersion, not resume
+	// the failed forward cut. Operator rollback journals use the retained-DB
+	// path so a retry cannot destroy ConfigDBDir+".old"; legacy auto-rollback
+	// journals continue through rollback() unchanged.
 	if j.State == StateRollingBack {
 		r.logf("upgrade: resuming interrupted rollback to %s", j.PreviousVersion)
-		if rbErr := r.rollback(j); rbErr != nil {
+		if j.OperatorRollback {
+			if err := r.validateOperatorRollbackJournal(j); err != nil {
+				return fmt.Errorf("resume operator rollback: %w", err)
+			}
+			plan := rollbackPlan{
+				fromVersion: j.TargetVersion,
+				toVersion:   j.PreviousVersion,
+				snapshotDir: j.DBSnapshotPath,
+			}
+			if err := r.validateRollbackPlan(plan); err != nil {
+				return fmt.Errorf("resume operator rollback: %w", err)
+			}
+			if err := r.executeRollback(plan, j, RollbackOptions{}); err != nil {
+				return fmt.Errorf("resume operator rollback: %w", err)
+			}
+		} else if rbErr := r.rollback(j); rbErr != nil {
 			return fmt.Errorf("resume rollback: %w", rbErr)
 		}
 		return nil

@@ -29,11 +29,12 @@ type fakeSystem struct {
 
 	// free is the value FreeBytes returns.
 	free uint64
-
 	// verifyPass controls the verify-dataplane gate result.
 	verifyPass bool
 	verifyErr  error
-
+	// readerVersion/readerErr model the target binary's pure envelope probe.
+	readerVersion int
+	readerErr     error
 	// healthErr is returned by HelperHealthy (nil = healthy).
 	healthErr error
 	// healthFailVersions: versions for which health fails (overrides
@@ -111,6 +112,12 @@ func (f *fakeSystem) VerifyDataplane(string, []string) (bool, error) {
 	return f.verifyPass, f.verifyErr
 }
 func (f *fakeSystem) BinaryVersion(string) (string, error) { return f.stagedVersion, nil }
+func (f *fakeSystem) EnvelopeReaderVersion(string) (int, error) {
+	if f.readerErr != nil {
+		return 0, f.readerErr
+	}
+	return f.readerVersion, nil
+}
 func (f *fakeSystem) HelperHealthy(ver string, deadline time.Duration) error {
 	f.log("health:" + ver)
 	if f.healthHook != nil {
