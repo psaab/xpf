@@ -55,6 +55,22 @@ pub(crate) enum SocketMode {
     Session,
 }
 
+fn fabric_plan_changed(previous: &[crate::FabricSnapshot], next: &[crate::FabricSnapshot]) -> bool {
+    if previous.len() != next.len() {
+        return true;
+    }
+    previous.iter().any(|old| {
+        let Some(new) = next.iter().find(|new| new.name == old.name) else {
+            return true;
+        };
+        old.parent_interface != new.parent_interface
+            || old.parent_linux_name != new.parent_linux_name
+            || old.parent_ifindex != new.parent_ifindex
+            || old.parent_unbindable != new.parent_unbindable
+            || old.rx_queues != new.rx_queues
+    })
+}
+
 pub(crate) fn handle_stream(
     stream: UnixStream,
     state_file: &str,
@@ -273,7 +289,19 @@ pub(crate) fn handle_stream(
             ),
             "update_fabrics" => {
                 if let Some(fabrics) = request.fabrics.as_ref() {
+                    let plan_changed = guard
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| fabric_plan_changed(&snapshot.fabrics, fabrics));
                     guard.afxdp.refresh_fabric_links(fabrics);
+                    if plan_changed {
+                        // #9803: this partial update replaces the helper's
+                        // retained plan half. Keep the debt on the
+                        // coordinator until a successful full apply takes
+                        // the replan path; otherwise that apply sees equal
+                        // plan keys and skips the fabric rebind.
+                        guard.afxdp.fabric_plan_replan_required = true;
+                    }
                     // #3773 (L4): PERSIST the resolved fabric set. Before #3773
                     // this arm was the ONLY mutating handler that neither
                     // updated the persisted snapshot nor set `persist_state`, so

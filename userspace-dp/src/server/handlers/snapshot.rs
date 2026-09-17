@@ -216,18 +216,25 @@ pub(super) fn apply(
         .snapshot
         .as_ref()
         .is_some_and(|prev| prev.defer_workers);
-    let same_plan = guard.snapshot.as_ref().is_some_and(|prev| {
-        let prev_key = snapshot_binding_plan_key(prev);
-        let next_key = snapshot_binding_plan_key(&snapshot);
-        let same = prev_key == next_key;
-        if !same {
-            eprintln!(
-                "CTRL_REQ: binding plan changed prev_key={} next_key={}",
-                prev_key, next_key
-            );
-        }
-        same
-    });
+    let fabric_plan_dirty = guard.afxdp.fabric_plan_replan_required;
+    if fabric_plan_dirty {
+        eprintln!(
+            "CTRL_REQ: fabric binding plan invalidated by update_fabrics; forcing full replan"
+        );
+    }
+    let same_plan = !fabric_plan_dirty
+        && guard.snapshot.as_ref().is_some_and(|prev| {
+            let prev_key = snapshot_binding_plan_key(prev);
+            let next_key = snapshot_binding_plan_key(&snapshot);
+            let same = prev_key == next_key;
+            if !same {
+                eprintln!(
+                    "CTRL_REQ: binding plan changed prev_key={} next_key={}",
+                    prev_key, next_key
+                );
+            }
+            same
+        });
     if same_plan {
         let needs_reconcile = same_plan_apply_needs_binding_reconcile(
             guard,
@@ -499,6 +506,10 @@ pub(super) fn apply(
             return;
         }
         refresh_status(guard);
+        // #9803: only a successful full apply clears the dirty plan marker.
+        // Every refusal above restores the prior state and leaves it set so
+        // the next valid apply cannot fall back to same-plan refresh.
+        guard.afxdp.fabric_plan_replan_required = false;
         *persist_state = true;
     }
 }
