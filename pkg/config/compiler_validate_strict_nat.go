@@ -1506,7 +1506,26 @@ func validateNATHostMaskStrict(cfg *Config, lenient bool) ([]string, error) {
 			continue
 		}
 		for _, rule := range rs.Rules {
-			if rule == nil || rule.IsNPTv6 {
+			if rule == nil {
+				continue
+			}
+			// Reset the per-rule verdict before any check reports a
+			// whole-rule exclusion. Deferred multi-address diagnostics below
+			// must observe every exclusion, including this one.
+			ruleDropped, selectedMatchInvalid = false, false
+			deferredSuffixes = deferredSuffixes[:0]
+			// #9988: Atoi failures in the static-NAT destination-port
+			// compiler are preserved as raw tokens because zero is the valid
+			// absent-port wildcard. Reject the token by name on strict commit
+			// and warn on tolerant load before the NPTv6/plain split below.
+			if len(rule.InvalidDestinationPorts) > 0 {
+				if err := emit(fmt.Sprintf(
+					"security nat static rule-set %q rule %q match destination-port %q is not a numeric port (1-65535)",
+					rs.Name, rule.Name, rule.InvalidDestinationPorts[0])); err != nil {
+					return nil, err
+				}
+			}
+			if rule.IsNPTv6 {
 				continue
 			}
 			// `then static-nat inet` is a NAT64 translation, not host-1:1
@@ -1608,8 +1627,6 @@ func validateNATHostMaskStrict(cfg *Config, lenient bool) ([]string, error) {
 			// so it accumulates EVERY rule-dropping cause reported for this
 			// rule, including ones added later; the deferred suffixes below are
 			// resolved from it once the rule is fully validated.
-			ruleDropped, selectedMatchInvalid = false, false
-			deferredSuffixes = deferredSuffixes[:0]
 			for _, addr := range matchAddrs {
 				if addr == "" {
 					continue
@@ -1859,10 +1876,10 @@ func validateNATHostMaskStrict(cfg *Config, lenient bool) ([]string, error) {
 			// A VALID in-range mapped-port still requires a matching `match
 			// destination-port`: without an external port to match, the port
 			// rewrite has no inbound trigger and the reverse SNAT cannot recover
-			// the original port. Guarded on MappedPort != 0 so it does not
-			// double-fire on a malformed mapped-port (MappedPort==0), which the
-			// presence gate above already rejected.
-			if rule.MappedPort != 0 && rule.MatchDestinationPort == 0 {
+			// the original port. An invalid destination-port is a whole-rule
+			// exclusion, so its zero parse sentinel must not trigger a second
+			// mapped-port-without-match warning.
+			if len(rule.InvalidDestinationPorts) == 0 && rule.MappedPort != 0 && rule.MatchDestinationPort == 0 {
 				if err := emitSuffix(fmt.Sprintf(
 					"security nat static rule-set %q rule %q then static-nat mapped-port %d requires a matching `match destination-port`",
 					rs.Name, rule.Name, rule.MappedPort),

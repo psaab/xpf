@@ -69,6 +69,14 @@ func StaticNATRuleExcludedReason(rule *StaticNATRule) string {
 	if reason := unknownNATMatchLeavesReason(rule.UnknownMatchLeaves); reason != "" {
 		return reason
 	}
+	// #9988: an unparseable destination-port is preserved separately from
+	// MatchDestinationPort, whose zero value is the legitimate whole-address
+	// wildcard. Drop the rule before clampPort can turn the invalid token into
+	// an installed wildcard on the lenient load / peer-sync path.
+	if len(rule.InvalidDestinationPorts) > 0 {
+		return "destination-port contains non-numeric token(s) [" +
+			quoteNATLeafKeywords(rule.InvalidDestinationPorts) + "]"
+	}
 	if rule.IsNPTv6 {
 		return ""
 	}

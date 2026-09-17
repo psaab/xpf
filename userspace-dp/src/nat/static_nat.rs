@@ -491,10 +491,12 @@ impl StaticNatTable {
             let internal_ip: IpAddr = int_prefix.base;
             // #2491: a `mapped_port` without a `match_destination_port` has no
             // inbound trigger (no external port to match) and the reverse SNAT
-            // cannot recover the original port, so fail CLOSED: drop the port
-            // translation and treat the rule as a whole-address 1:1. The Go
-            // compiler already rejects this at strict commit-check; this is the
-            // lenient-load / peer-sync backstop.
+            // cannot recover the original port. Drop the port rewrite, but keep
+            // the entry as a whole-address 1:1: this is fail-closed for the
+            // translation, NOT for the match (the zero match port remains the
+            // intentional unconstrained wildcard). The Go compiler's
+            // static-NAT exclusion must reject malformed destination-port tokens
+            // before they can reach this wire-level ambiguity.
             let (match_dst_port, mapped_port) = match (snap.match_destination_port, snap.mapped_port)
             {
                 (0, _) => (None, None),
