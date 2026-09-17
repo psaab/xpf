@@ -266,7 +266,18 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
 - The DHCP client owns the address. `pkg/networkd` deliberately skips
   address reconciliation on DHCP-marked interfaces.
 - DHCP-learned default routes go into FRR with admin distance 200 — lower
-  priority than static routes, so a configured static default wins.
+  priority than static routes, so a configured static default wins. DHCP-learned
+  classless routes follow the same contract: FRR and the management-VRF twin
+  suppress a learned prefix contained by a rendered/operator static route in
+  the same table, with a visible warning. In table 999, only operator routes
+  stamped `RTPROT_STATIC` are authority; xpf-owned `RTPROT_DHCP` and
+  connected/kernel routes are silently ignored, while unexpected
+  other-protocol routes are warned and ignored. An option-121 `/0` follows the
+  normal DHCP-default suppression contract. Unusually broad classless `/1`
+  prefixes and non-forwardable martian ranges (`0/8`, `127/8`, `169.254/16`,
+  `224/4`, `240/4`) are refused by default. `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1`
+  is an explicit escape hatch for covered/broad/martian learned classless
+  routes and emits a loud security warning.
 - **DHCPv6 IA_NA holds one address, selected deterministically** (#4383):
   a reply may carry multiple IAADDR options within an IA_NA (and multiple
   IA_NA options), but xpf's `Lease` model installs a single `/128`.
@@ -386,22 +397,32 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   route lands on `lease.ClasslessRoutes`. When option 121/249 is absent
   the client falls back to option 3 exactly as before. The classless
   routes are programmed through the same paths as the default route:
-  `collectDHCPRoutes` emits one `frr.DHCPRoute` per route (with a
-  non-empty `Destination`), `renderDHCPDefaults` writes
-  `ip route <dest> <gw> [<iface>] 200` — and the static-default
-  suppression applies ONLY to the default route, never to the
-  more-specific classless routes — and `applyMgmtVRFRoutes` installs them
-  into the management VRF table (999) via netlink. `leaseContentChanged`
-  diffs `ClasslessRoutes`, so the routes are withdrawn/re-installed in
-  lock-step with the lease on renew/expiry, like the default route. For
-  the management VRF the withdrawal is enforced by a full RECONCILE, not
-  an append-only apply (#5108): every route xpf installs in table 999 is
-  stamped `RTPROT_DHCP`, and each `applyMgmtVRFRoutes` run lists the
-  xpf-owned routes already in the table and `RouteDel`s any whose
-  destination is no longer in the current desired set — including the
-  empty-desired case (management lease disabled, or option-121 route
-  withdrawn), which the pre-#5108 early-return skipped, leaving a stale
-  route that could blackhole management traffic to a prior DHCP router.
+  `collectDHCPRoutes` emits one `frr.DHCPRoute` per route (with a non-empty
+  `Destination`), and `renderDHCPDefaults` writes
+  `ip route <dest> <gw> [<iface>] 200`. Before emission, a rendered static
+  route in the same FRR table suppresses a learned classless prefix it
+  contains, with a visible security warning; this containment rule is what
+  makes a static `0.0.0.0/0` defeat a rogue `/1` pair while leaving
+  non-overlapping learned routes usable. The management-VRF twin applies the
+  same rule against `RTPROT_STATIC` routes in table 999 before `RouteReplace`;
+  xpf-owned `RTPROT_DHCP` and connected/kernel routes are silently ignored,
+  while unexpected other-protocol routes are warned and ignored rather than
+  becoming static precedence authority. An option-121 `0.0.0.0/0` follows the
+  normal DHCP-default suppression behavior. `/1` and non-forwardable martian
+  classless prefixes are refused by default. `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1`
+  is an explicit, unset-by-default escape hatch that permits covered/broad/
+  martian classless routes in both paths and emits a loud security warning at
+  each use.
+  `leaseContentChanged` diffs `ClasslessRoutes`, so routes are withdrawn/re-installed in lock-step with
+  the lease on renew/expiry, like the default route. For the management VRF
+  the withdrawal is enforced by a full RECONCILE, not an append-only apply
+  (#5108): every route xpf installs in table 999 is stamped `RTPROT_DHCP`,
+  and each `applyMgmtVRFRoutes` run lists the xpf-owned routes already in the
+  table and `RouteDel`s any whose destination is no longer in the current
+  desired set — including the empty-desired case (management lease disabled,
+  or option-121 route withdrawn), which the pre-#5108 early-return skipped,
+  leaving a stale route that could blackhole management traffic to a prior
+  DHCP router.
   The delete is scoped to `RTPROT_DHCP` so operator routes in the VRF are
   never touched.
 - **Lease records are NOT expired by the wall clock.** During a
