@@ -270,19 +270,18 @@ func (c *CLI) applyToDataplane(cfg *config.Config) error {
 
 	// 3. Apply all routes + dynamic protocols via FRR
 	if c.frr != nil {
+		// #9821/#9942: use the same declared-device constructor as the
+		// daemon. It resolves secure-tunnel route refs through
+		// Config.SecureTunnelUnitNetdev before the renderer's generic `.0`
+		// collapse, while retaining both authored and Linux spellings.
+		declaredNetdevs := frr.DeclaredNetdevsForConfig(cfg, nil)
 		// Collect interface bandwidths and point-to-point flags for FRR.
 		ifaceBandwidths := make(map[string]uint64)
 		ifaceP2P := make(map[string]bool)
-		// #9821: same declared-name → device map the daemon wires, so this
-		// legacy standalone-CLI path renders devices for authored operands.
-		declaredNetdevs := make(map[string]string)
 		for name, ifc := range cfg.Interfaces.Interfaces {
 			if ifc == nil { // #5886: skip present-but-nil InterfaceConfig
 				continue
 			}
-			linuxName := config.LinuxIfName(name)
-			declaredNetdevs[name] = linuxName
-			declaredNetdevs[linuxName] = linuxName
 			if ifc.Bandwidth > 0 {
 				ifaceBandwidths[name] = ifc.Bandwidth
 			}
