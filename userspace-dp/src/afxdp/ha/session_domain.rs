@@ -98,9 +98,24 @@ pub(crate) struct SessionDomain {
     /// stops seaming.
     #[cfg(test)]
     pub(in crate::afxdp) synced_import_cap_override: Arc<std::sync::atomic::AtomicUsize>,
+    /// #9629 test-only rendezvous sender, absent from release builds.
+    #[cfg(test)]
+    pub(in crate::afxdp) ha_refresh_attempt: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
-
 impl SessionDomain {
+    /// #9629 test-only rendezvous: notify immediately before the fast path
+    /// attempts its shared HA leaf mutex. The production build has no sender
+    /// field or callback, so this cannot alter the lock ordering.
+    #[cfg(test)]
+    pub(crate) fn set_ha_refresh_attempt_sender_for_test(
+        &self,
+        sender: std::sync::mpsc::Sender<()>,
+    ) {
+        *self
+            .ha_refresh_attempt
+            .lock()
+            .expect("HA refresh test hook lock") = Some(sender);
+    }
     /// Build a handle from the coordinator's own shared parts.
     ///
     /// Takes borrows of the live fields rather than an `&Coordinator`, so it
@@ -126,6 +141,8 @@ impl SessionDomain {
             dynamic_neighbors: Arc::clone(&neighbors.dynamic),
             #[cfg(test)]
             synced_import_cap_override: Arc::clone(synced_import_cap_override),
+            #[cfg(test)]
+            ha_refresh_attempt: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -238,6 +255,18 @@ impl SessionDomain {
             std::collections::BTreeMap::new();
         for group in groups {
             incoming.insert(group.rg_id, (group.active, group.watchdog_timestamp));
+        }
+        #[cfg(test)]
+        {
+            let attempt = self
+                .ha_refresh_attempt
+                .lock()
+                .expect("HA refresh test hook lock")
+                .as_ref()
+                .cloned();
+            if let Some(sender) = attempt {
+                sender.send(()).expect("signal HA refresh mutex attempt");
+            }
         }
         // Lock FIRST, before the load — a transition landing between a pre-lock
         // decision and the store would recreate the stale-overwrite race this

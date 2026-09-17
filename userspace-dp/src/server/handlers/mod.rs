@@ -241,7 +241,17 @@ pub(crate) fn handle_stream(
             return Err("server state quarantined after a handler panic; restart required".to_string());
         }
         match request.request_type.as_str() {
-            "ping" | "status" => {}
+            "ping" => {}
+            "status" => {
+                // #9629 (Spark MAJOR-2): the status loop is the bounded
+                // observability heartbeat (1s in production). Persisting its
+                // refreshed live status keeps the operator/restart state file
+                // from freezing indefinitely when HA ownership is unchanged.
+                // Session status is refused above, so this remains on the
+                // control path and does not reintroduce the session-thread
+                // mutex wedge.
+                persist_state = true;
+            }
             "apply_snapshot" => snapshot::apply(
                 &mut guard,
                 request.snapshot,

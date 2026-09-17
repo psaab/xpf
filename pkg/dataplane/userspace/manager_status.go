@@ -52,6 +52,7 @@ func (m *Manager) setLastStatusLocked(status ProcessStatus) {
 	m.helperStatusObserved = true
 	// #9902 F-026: exactly one bump per publication (all callers hold m.mu).
 	m.lastStatusSeq++
+	m.publishHAWatchdogSnapshotLocked()
 }
 
 // clearLastStatusLocked forgets the helper status and the observation together.
@@ -61,6 +62,7 @@ func (m *Manager) setLastStatusLocked(status ProcessStatus) {
 func (m *Manager) clearLastStatusLocked() {
 	m.lastStatus = ProcessStatus{}
 	m.helperStatusObserved = false
+	m.publishHAWatchdogSnapshotLocked()
 }
 
 func (m *Manager) Status() (ProcessStatus, error) {

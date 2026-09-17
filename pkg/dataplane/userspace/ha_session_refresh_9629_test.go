@@ -42,10 +42,13 @@ func sessionTestManager9629(t *testing.T, groups map[int]HAGroupStatus) *Manager
 	m := New()
 	m.proc = fakeProc9629(t)
 	m.haWatchdogMapWrite = func(int, uint64) error { return nil }
+	m.mu.Lock()
 	for id, g := range groups {
 		g.RGID = id
 		m.haGroups[id] = g
 	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
 	return m
 }
 
@@ -71,6 +74,32 @@ func TestRequestHAWatchdogSessionNeverTakesManagerMu9629(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("requestHAWatchdogSession blocked while m.mu was held — the sender takes m.mu")
+	}
+}
+
+// The complete production entry point must also escape m.mu, not only the
+// sender helper. This models a long snapshot/apply holding m.mu while a
+// heartbeat arrives; the immutable watchdog snapshot carries the capability
+// and inventory into the session request.
+func TestUpdateHAWatchdogEntryPointNeverWaitsOnManagerMu9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{1: {Active: true}})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.publishHAWatchdogSnapshotLocked()
+	m.sessionRequestHook = func(ControlRequest, *ProcessStatus) error { return nil }
+	done := make(chan error, 1)
+	go func() {
+		done <- m.UpdateHAWatchdog(1, 100)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("UpdateHAWatchdog with m.mu held: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("UpdateHAWatchdog blocked while m.mu was held; entry point still depends on snapshot mutex")
 	}
 }
 

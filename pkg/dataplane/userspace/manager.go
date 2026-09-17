@@ -261,6 +261,26 @@ type Manager struct {
 	// Active-state change (failover/failback — instant) or a periodic backstop
 	// comfortably under the helper's ~10s stale-lease window. Guarded by m.mu.
 	haWatchdogIPCSynced map[int]haWatchdogIPCSyncState
+	// haWatchdogSnapshot is a lock-free-readable copy of the HA watchdog
+	// refresh inputs (#9629, verdict item 1). It is published under m.mu by
+	// publishHAWatchdogSnapshotLocked at every site that mutates what the
+	// watchdog sends (watchdog ticks, ownership transitions, map refreshes,
+	// and helper-status capability changes); read WITHOUT m.mu by the
+	// degraded watchdog path when m.mu is contended.
+	//
+	// The pointed-to struct and its slice are immutable after publication, so
+	// one atomic load observes a consistent group-set generation. Nil until
+	// the first publish (bare Manager literals remain valid test fixtures).
+	haWatchdogSnapshot atomic.Pointer[haWatchdogSnapshot]
+	// haDegradedMu guards haDegradedLastSent. It is a leaf held only across
+	// a throttle check/update, never across socket I/O, so snapshot application
+	// cannot wedge the degraded watchdog path.
+	haDegradedMu sync.Mutex
+	// haDegradedLastSent is the throttle baseline for the degraded (m.mu
+	// contended) watchdog path. It is separate from haWatchdogIPCSynced,
+	// which requires m.mu. The baselines may briefly disagree after an apply,
+	// costing at most one redundant idempotent refresh.
+	haDegradedLastSent map[int]haWatchdogIPCSyncState
 	// fabricSnapshotBuilder resolves the fabric snapshots (with live peer/local
 	// MACs from kernel neighbor + link state) that SyncFabricState pushes to the
 	// helper. Indirected through a field so tests can inject a deterministic
@@ -583,13 +603,16 @@ func shouldAttemptRSTSuppression(
 func New() *Manager {
 	bpfShim := dataplane.New()
 	bpfShim.SelectUserspaceXDPShimEntryProgram()
-	return &Manager{
+	m := &Manager{
 		bpfShim:             bpfShim,
 		configuredMode:      ModeUserspaceCompat,
 		haGroups:            make(map[int]HAGroupStatus),
 		haWatchdogMapWrite:  bpfShim.UpdateHAWatchdog,
 		haWatchdogIPCSynced: make(map[int]haWatchdogIPCSyncState),
+		haDegradedLastSent:  make(map[int]haWatchdogIPCSyncState),
 	}
+	m.publishHAWatchdogSnapshotLocked()
+	return m
 }
 
 func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {

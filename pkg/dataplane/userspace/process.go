@@ -556,6 +556,12 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	// clear the arm gate would pass on a restarted helper that has never been
 	// sent an inventory — the exact state it exists to refuse.
 	m.helperHAStatePublished = false
+	// A restarted helper has a new empty inventory; discard the degraded
+	// watchdog throttle baseline so the next published capability cannot inherit
+	// the old process's receipt.
+	m.haDegradedMu.Lock()
+	clear(m.haDegradedLastSent)
+	m.haDegradedMu.Unlock()
 	m.publishedPlanKey = ""
 	// #2079: forget the applied snapshot when the helper stops so a
 	// restarted helper does not expose a stale applied config before its

@@ -686,12 +686,9 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     let held = domain.ha_mutex_for_test();
     let _guard = held.lock().expect("ha mutex");
     let (tx, rx) = mpsc::channel();
-    let (started_tx, started_rx) = mpsc::channel();
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    domain.set_ha_refresh_attempt_sender_for_test(attempt_tx);
     let worker = std::thread::spawn(move || {
-        // Race witness (verdict item 6): signal BEFORE the contended call so the
-        // test below waits for "blocked inside try_refresh" rather than
-        // assuming the spawn was fast.
-        started_tx.send(()).expect("signal started");
         let outcome = domain.try_refresh_ha_leases(&[HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -700,12 +697,12 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
         }]);
         tx.send(outcome).expect("send outcome");
     });
-    // Race witness: wait until the worker is provably INSIDE the contended
-    // call, THEN prove it cannot complete while held. Without the gate, a
-    // slow spawn (not a blocked call) could satisfy the 200 ms window.
-    started_rx
+    // The test-only rendezvous fires immediately before the production call
+    // attempts `ha_mutex`, so the following absence proves lock contention,
+    // not merely a delayed thread spawn.
+    attempt_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("worker never reached try_refresh_ha_leases");
+        .expect("worker never reached the HA mutex attempt");
     // While held, the refresh cannot complete (it needs the mutex).
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
@@ -828,6 +825,46 @@ fn update_ha_state_session_refresh_writes_no_state_file_9629() {
         std::fs::metadata(&file).is_err(),
         "session fast path must not create a state file"
     );
+}
+
+/// #9629: the bounded main-socket status heartbeat refreshes the persisted
+/// state-file view even when HA ownership has not changed (Spark MAJOR-2).
+/// Without the status arm's persist flag, an unchanged active lease could
+/// leave `show` reading an indefinitely old `ha_groups` snapshot.
+#[test]
+fn status_heartbeat_persists_live_ha_state_9629() {
+    let state = new_state(ProcessStatus::default());
+    let file = unique_state_file("ha-status-heartbeat-9629");
+    let mut seed = req("update_ha_state");
+    seed.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }],
+    });
+    assert!(run_request_on_file(state.clone(), seed, &file).ok);
+    std::fs::remove_file(&file).expect("remove seed state file");
+
+    let response = run_request_on_file(state, req("status"), &file);
+    assert!(response.ok, "status heartbeat: {}", response.error);
+    let bytes = std::fs::read(&file).expect("status heartbeat state file");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("parse status heartbeat state file");
+    let groups = persisted["status"]["ha_groups"]
+        .as_array()
+        .expect("persisted status ha_groups");
+    let entry = groups
+        .iter()
+        .find(|group| group["rg_id"].as_i64() == Some(1))
+        .expect("persisted RG1");
+    assert_eq!(
+        entry["active"].as_bool(),
+        Some(true),
+        "status heartbeat persisted stale HA ownership"
+    );
+    let _ = std::fs::remove_file(&file);
 }
 
 /// #9629: a Session refresh with a changed RG keeps STORED ownership with a
