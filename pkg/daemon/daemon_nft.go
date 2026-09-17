@@ -171,21 +171,21 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) error {
 	// install an empty `policy accept` shell. toNftLo0Spec's map lookup silently
 	// yields no terms for a missing filter (a quarantined unknown-family filter
 	// on the tolerant boot/peer-sync path, or any typo'd hook downgraded by
-	// opts.lenientFirewallRefs), and InstallLo0 commits that empty shell
-	// SUCCESSFULLY — atomically REPLACING a live real filter (existing-state) or
-	// leaving cold-boot open. The #6529 zero-rules branch below cannot recover
-	// from that: it clears the gate but the kernel is already open until the NEXT
-	// failure. Fail closed WITHOUT touching the kernel table (the #3296 userspace
-	// backstop's kernel analogue — prior state kept, never degrades to Accept):
-	//   - existing-state (lo0Enforced true): retain the prior real filter by NOT
-	//     installing, and surface an error so the commit fails.
-	//   - cold-start (!enforced): install the #6476 fence from the current
-	//     snapshot, then surface the error (boot logs+discards, but the fence
-	//     remains as the only protection).
-	// A DEFINED-but-empty filter (no terms, or every term match-nothing) still
-	// takes the #6529 path — that CAN occur on a clean commit, where fencing
-	// would deny host-bound traffic. Only a DANGLING name (which strict rejects,
-	// so it only arrives via lenient boot/peer-sync) fences here.
+	// opts.lenientFirewallRefs), and InstallLo0 would otherwise commit that empty
+	// shell SUCCESSFULLY — atomically REPLACING a live real filter (existing-state)
+	// or leaving cold-boot open. The #9883 pre-check rejects this dangling shape
+	// before the installer: existing-state retains the prior table, and cold-start
+	// installs the #6476 fence before returning the commit-visible error.
+	//
+	// #9940's preflight below applies the same fail-closed rule to DEFINED filters
+	// whose lowering produces zero rules (no terms or match-nothing terms). It
+	// runs BEFORE InstallLo0, so existing-state keeps its real table and cold-start
+	// installs the #6476 fence; no empty policy-accept shell is ever installed.
+	//
+	// The rendered-rule count remains a defensive post-install drift guard only:
+	// if the installer reports zero after a non-empty preflight, the atomic
+	// replacement has already happened and the daemon must fence the now-empty
+	// table before returning the renderer-parity error.
 	if (filterV4 != "" && !lo0FilterDefined(cfg, filterV4, false)) ||
 		(filterV6 != "" && !lo0FilterDefined(cfg, filterV6, true)) {
 		var missing []string
@@ -198,6 +198,30 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) error {
 		err := fmt.Errorf("lo0 input filter %s not defined (dangling reference — refusing to install an empty policy-accept shell)", strings.Join(missing, ", "))
 		slog.Warn("lo0 input filter dangles; refusing to install an empty policy-accept shell",
 			"missing", strings.Join(missing, ", "),
+			"v4", filterV4, "v6", filterV6,
+			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
+			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
+		if !d.lo0Enforced.Load() {
+			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
+			wgListenPorts := cfg.WireGuardListenPorts()
+			if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+				return errors.Join(err, fenceErr)
+			}
+		}
+		return err
+	}
+
+	// Preflight the daemon's retained text-oracle lowering before invoking the
+	// installer. InstallLo0 atomically replaces the live table in one netlink
+	// Flush, so checking its returned rule count would be too late: an empty
+	// result would already have replaced a real RE-protection table with a
+	// policy-accept shell. The oracle and netlink builder are parity-tested; this
+	// check is deliberately daemon-side so the empty swap is refused before any
+	// kernel transaction.
+	expectedRules := lo0RenderedRuleCount(cfg, filterV4, filterV6)
+	if expectedRules == 0 {
+		err := fmt.Errorf("lo0 input filter renders no rules (empty or match-nothing; refusing to replace the live table with an empty policy-accept shell)")
+		slog.Warn("lo0 input filter renders no rules; refusing to replace the live table with an empty policy-accept shell",
 			"v4", filterV4, "v6", filterV6,
 			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
@@ -246,33 +270,23 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) error {
 		return fmt.Errorf("apply lo0 nftables filter: %w", err)
 	}
 	if rules == 0 {
-		// #6529: the install SUCCEEDED but rendered NOTHING — the live xpf_lo0
-		// table is an empty `policy accept` shell that enforces nothing. Recording
-		// that as "a real operator filter is loaded" is what defeated the #6476
-		// fence: with the flag true every later failed install skips the fence and
-		// the host input path stays open. A vacated filter is exactly as
-		// unprotecting as no filter, so clear the gate — do NOT merely leave it
-		// alone, because a peer-sync that atomically replaces a REAL filter with a
-		// vacated one would otherwise keep the stale true.
-		//
-		// Zero rules is reachable through two remaining doors (a third — a filter
-		// NAME that resolves to no filter — no longer arrives here: the #9883
-		// dangling pre-check above fails it closed without installing): a DEFINED
-		// filter with no terms, and a DEFINED filter whose every term lowers to zero
-		// rules — a Junos match-nothing scope, e.g. an unresolved `from
-		// source-prefix-list`. Both CAN occur on a clean commit (strict accepts an
-		// empty or match-nothing filter), which is why this branch must NOT fence.
-		// This does NOT install a fence: fencing on a SUCCESSFUL install would deny
-		// host-bound traffic on a clean commit. The gate being false is what
-		// matters — the next failed install fences from the current snapshot.
+		// The daemon preflight and the netlink builder are parity-tested, so this
+		// is a renderer-drift guard rather than the normal empty-render path.
+		// InstallLo0 has already completed its atomic transaction here: the live
+		// table is now an empty policy-accept shell, whether this was cold start
+		// or a day-2 replacement of a real table. Clear the real-filter latch and
+		// install a current-snapshot #6476 fence in BOTH cases; cold-start drift
+		// must fail closed because there is no safe table to retain.
+		err := fmt.Errorf("lo0 installer rendered no rules after non-empty daemon preflight; refusing to report an empty policy-accept shell as success")
 		d.lo0Enforced.Store(false)
-		slog.Warn("lo0 input filter installed but renders NO rules; the xpf_lo0 table is an empty "+
-			"policy-accept shell that enforces nothing, so it is NOT recorded as a real filter and a "+
-			"later failed install will install the cold-boot fail-closed fence",
-			"v4", filterV4, "v6", filterV6,
-			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
-			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
-		return nil
+		slog.Error("lo0 installer rendered no rules after daemon preflight; renderer parity is broken and the live table may be an empty policy-accept shell",
+			"v4", filterV4, "v6", filterV6)
+		sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
+		wgListenPorts := cfg.WireGuardListenPorts()
+		if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+			return errors.Join(err, fenceErr)
+		}
+		return err
 	}
 	// A real lo0 filter is now the live table. Record it so a later failed install
 	// retains this generation and skips the fence (the intended day-2 divergence).
@@ -302,11 +316,9 @@ func logFenceWithheld(table string, sets dpuserspace.FenceAddrSets) {
 		"table", table, "withheld_v4", sets.WithheldV4, "withheld_v6", sets.WithheldV6)
 }
 
-// lo0FilterDefined reports whether the named lo0 input filter exists in cfg, for
-// the #6529 vacated-install diagnostic. A configured name that resolves to no
-// filter is the headline door into the zero-rule install: toNftLo0Spec's map
-// lookup yields no terms and the resulting empty table installs cleanly. An
-// empty name is "not configured", reported as defined so it does not read as the
+// lo0FilterDefined reports whether the named lo0 input filter exists in cfg.
+// It is used by the dangling/empty-render diagnostics; an empty name is
+// "not configured" and is reported as defined so it does not read as the
 // cause.
 func lo0FilterDefined(cfg *config.Config, name string, v6 bool) bool {
 	if name == "" {
@@ -318,6 +330,39 @@ func lo0FilterDefined(cfg *config.Config, name string, v6 bool) bool {
 	}
 	_, ok := filters[name]
 	return ok
+}
+
+// lo0RenderedRuleCount mirrors the retained text-oracle lowering used by
+// buildLo0FilterPayload and counts only non-empty emitted rules. It is a
+// daemon-side preflight because InstallLo0's count is returned only after its
+// atomic replaceTable transaction has already swapped the live table. The
+// netlink builder is parity-tested against this oracle, including the
+// match-nothing address-scope disposition.
+func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
+	prefixLists := cfg.PolicyOptions.PrefixLists
+	countFilter := func(f *config.FirewallFilter, family string) int {
+		if f == nil {
+			return 0
+		}
+		count := 0
+		for _, term := range f.Terms {
+			for _, rule := range nftRulesFromTerm(term, family, prefixLists) {
+				if rule != "" {
+					count++
+				}
+			}
+		}
+		return count
+	}
+
+	count := 0
+	if filterV4 != "" {
+		count += countFilter(cfg.Firewall.FiltersInet[filterV4], "ip")
+	}
+	if filterV6 != "" {
+		count += countFilter(cfg.Firewall.FiltersInet6[filterV6], "ip6")
+	}
+	return count
 }
 
 // installLo0ColdBootFence installs the #6476 lo0 cold-boot fail-closed fence: a
@@ -348,17 +393,19 @@ func lo0FilterDefined(cfg *config.Config, name string, v6 bool) bool {
 // "Lifeline exclusion is by address VALUE, in the fence and the real table". It carries no named counters
 // (a fence is transient).
 //
-// A fence deliberately does NOT set lo0Enforced — that flag is set true ONLY by a
-// successful real InstallLo0, so it means exactly "a real operator lo0 filter is
+// A fence deliberately does NOT set lo0Enforced — that flag is set true ONLY by
+// a successful real InstallLo0, so it means exactly "a real operator lo0 filter is
 // loaded". A fence is NOT a real filter (its chain is `policy accept` and drops
-// only THIS snapshot's addresses). lo0Enforced is already false whenever this runs
-// (we only reach here when the day-2 gate `!lo0Enforced` passed), so it stays
-// false and a subsequent failed real install RE-RENDERS the whole-table fence from
-// the then-current snapshot — covering any address that appeared after this fence
+// only THIS snapshot's addresses). The normal failed-install path calls this
+// helper only when `!lo0Enforced`; the renderer-drift guard also calls it after
+// an atomic zero-rule replacement, when even an existing real table is gone and
+// the latch has already been cleared. In either case it stays false and a
+// subsequent failed real install RE-RENDERS the whole-table fence from the
+// then-current snapshot — covering any address that appeared after this fence
 // — rather than trusting the stale fence (#6489). This subsumes the zero-drop
 // case: an addressless snapshot yields a policy-accept shell, still not a real
-// filter, so a later failure re-fences from a possibly-now-addressed snapshot. On
-// failure (nft itself is broken) the error is returned and joined into the commit
+// filter, so a later failure re-fences from a possibly-now-addressed snapshot.
+// On failure (nft itself is broken) the error is returned and joined into the commit
 // result; the daemon has done all it can.
 func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
