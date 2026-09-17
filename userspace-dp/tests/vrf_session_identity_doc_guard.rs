@@ -18,7 +18,7 @@
 //!     Track B lands this assertion fires and the README/plan MUST be updated
 //!     in the same change — that is the point.
 //!   * `install_with_protocol_with_origin` still opens with an unconditional
-//!     `remove_entry(&key)`, which is why "decline the cross-domain hit and
+//!     `remove_entry(&key, RemovalKind::Replace)`, which is why "decline the
 //!     fall through to the session-miss path" is not a viable cheap mitigation
 //!     (the two colliding flows would evict each other per packet).
 //!   * `pkg/cluster/sync_protocol.go` still uses length-gated trailing VALUE
@@ -251,7 +251,7 @@ fn vrf_session_identity_doc_claims_still_match_the_code() {
     // session-miss path is not a viable mitigation.
     let install_rs = read(&root.join("userspace-dp/src/session/install.rs"));
     assert!(
-        install_rs.contains("let _previous = self.remove_entry(&key);"),
+        install_rs.contains("let _previous = self.remove_entry(&key, RemovalKind::Replace);"),
         "session install no longer unconditionally evicts a same-key incumbent — \
          the #2387 README/plan rationale for rejecting \"decline the hit and fall \
          through\" no longer holds and must be revisited"
