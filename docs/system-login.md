@@ -445,18 +445,21 @@ not parse for its verb falls back to gating the WHOLE remainder. A precision
 gain must never remove coverage.
 
 **An `event-options` payload is adjudicated against the operator who plants it
-(#9939).** `then change-configuration commands "delete security policies …"`
-stores its payload as DATA, and at fire time the daemon applies it with INTERNAL
-(root) authority — there is no principal to charge, which is what made it an
-escalation. The commit that plants it is the only moment a class is in scope, so
-each embedded `set`/`delete` is now evaluated against the planting class's own
-regexes, from the same evaluator every surface uses.
+(#9939, #9984).** `then change-configuration commands "delete security
+policies …"` stores its payload as DATA, and at fire time the daemon rechecks
+each target under the login class recorded in the config record. The record is
+stamped atomically with the mutation that changes the effective
+`change-configuration` payload, including set/delete, load, copy/rename,
+rollback, and group-derived policy changes. A restricted class therefore
+cannot plant a command and have the daemon execute it with INTERNAL (root)
+authority.
 
-Two things an operator should know: an **unanchored** deny already caught this
-incidentally, because the payload text is part of the planting line — only an
-**anchored** deny reached the gap; and a payload **already persisted** before
-this landed still fires as root, because the policy records no planting class
-(#9984).
+Payloads written by trusted root/system surfaces carry the explicit
+`super-user` marker. A payload persisted before #9984 has no marker and is
+quarantined at fire time with a visible warning/counter rather than silently
+firing as root. Unrelated legacy policies remain loadable and may be repaired
+by a later mutation; only a legacy `change-configuration` payload that reaches
+the event engine is refused.
 
 **How REST resolves a command.** A REST route is not a CLI command, so the
 canonical command each route performs is DEFINED in a table
