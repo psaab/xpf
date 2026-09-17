@@ -1289,15 +1289,32 @@ func (m *Manager) heartbeatNonce() (session, counter uint64) {
 	return m.hbSession, m.hbCounter.Add(1)
 }
 
-// randomSessionID returns a random 64-bit anti-replay session id. On the
-// (practically impossible) crypto/rand failure it falls back to the monotonic
-// clock, which is still process-unique for the receiver's re-anchor logic.
+// LocalProcessToken returns the Manager-scoped random token for this daemon
+// incarnation. It is stable across heartbeat restarts and SessionSync
+// recreation, but a new Manager (and therefore a new daemon process) gets a
+// fresh token. A zero manager returns zero.
+func (m *Manager) LocalProcessToken() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.hbNonceOnce.Do(func() { m.hbSession = randomSessionID() })
+	return m.hbSession
+}
+
+// randomSessionID returns a non-zero random 64-bit anti-replay session id. On
+// the (practically impossible) crypto/rand failure it falls back to the
+// monotonic clock, and finally to one so identity zero always means absent.
 func randomSessionID() uint64 {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return uint64(MonotonicNanos())
+	if _, err := rand.Read(b[:]); err == nil {
+		if id := binary.LittleEndian.Uint64(b[:]); id != 0 {
+			return id
+		}
 	}
-	return binary.LittleEndian.Uint64(b[:])
+	if id := uint64(MonotonicNanos()); id != 0 {
+		return id
+	}
+	return 1
 }
 
 // PeerGroupState holds the last-known state of a peer's redundancy group.

@@ -648,6 +648,20 @@ func (m *Manager) heartbeatBootEpoch() uint64 {
 	return m.bootEpoch.Load()
 }
 
+// LocalBootEpoch returns this daemon's immutable ordered process identity
+// epoch without starting heartbeat persistence. The heartbeat startup path
+// publishes bootEpoch before session-sync starts; a zero value means that
+// path has not published an epoch yet, so the sender relies on its token.
+func (m *Manager) LocalBootEpoch() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.localIdentityEpochOnce.Do(func() {
+		m.localIdentityEpoch.Store(m.bootEpoch.Load())
+	})
+	return m.localIdentityEpoch.Load()
+}
+
 // refreshBootEpoch re-runs the persistence refinement for an incarnation that
 // has already published, and is what keeps a lost ordering race recoverable.
 //

@@ -1072,6 +1072,22 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 						}
 						return d.cluster.PeerBootEpoch()
 					}
+					// #9818: the sender's own ordered daemon boot epoch
+					// accompanies its boot id on every installed sync
+					// connection, so a peer can retain a new process's
+					// pre-evidence fabric during later retirement.
+					ss.LocalBootEpochFn = func() uint64 {
+						if d.cluster == nil {
+							return 0
+						}
+						return d.cluster.LocalBootEpoch()
+					}
+					ss.LocalProcessTokenFn = func() uint64 {
+						if d.cluster == nil {
+							return 0
+						}
+						return d.cluster.LocalProcessToken()
+					}
 				}
 				if err := ss.Start(commsCtx); err != nil {
 					if i < 5 {

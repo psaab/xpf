@@ -543,9 +543,22 @@ func (s *SessionSync) sendClockSync(conn net.Conn) {
 // clock sync this is advisory metadata, and dropping a live fabric because an
 // advisory frame did not fit would trade a narrowing risk for a sync outage.
 // The receiver's 0-means-incapable default already fails closed.
+func (s *SessionSync) localProcessIdentity() peerProcessIdentity {
+	s.localIdentityOnce.Do(func() {
+		s.localIdentity = peerProcessIdentity{boot: localBootIncarnation()}
+		if s.LocalBootEpochFn != nil {
+			s.localIdentity.epoch = s.LocalBootEpochFn()
+		}
+		if s.LocalProcessTokenFn != nil {
+			s.localIdentity.token = s.LocalProcessTokenFn()
+		}
+	})
+	return s.localIdentity
+}
+
 func (s *SessionSync) sendCapabilities(conn net.Conn) {
 	v := s.localSnapshotProtocol.Load()
-	var buf [5]byte
+	var buf [5 + bootIncarnationLen + 8 + 8]byte
 	binary.LittleEndian.PutUint16(buf[:2], uint16(v))
 	buf[2] = localCapabilityFlags
 	// #7990: the sender's session-sync WIRE version, as a trailing u16 under
@@ -559,8 +572,38 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 	// compares it for exact equality, so the bump would refuse session sync
 	// across exactly the upgrade that first carries the field.
 	binary.LittleEndian.PutUint16(buf[3:5], SessionSyncWireVersion)
+
+	// #9818: advertise the sender's process identity on EVERY installed
+	// connection, before the connection's BulkStart. The boot id distinguishes
+	// OS boots; the ordered boot epoch distinguishes daemon restarts that keep
+	// the OS boot id; and the Manager-scoped token prevents a persistence
+	// collision from making two daemon processes look equal. Each trailing
+	// field is length-gated for old peers and omitted when unavailable, so an
+	// unreadable identity remains the pre-#9818 fail-open class rather than an
+	// explicit all-zero identity.
+	identity := s.localProcessIdentity()
+	if identity.boot.known() {
+		copy(buf[5:5+bootIncarnationLen], identity.boot[:])
+	}
+	n := 5
+	if identity.boot.known() {
+		n += bootIncarnationLen
+	}
+	if identity.epoch != 0 || identity.token != 0 {
+		// Ordered identity fields need a fixed-width boot field so receivers
+		// can decode the epoch and token even when boot id lookup failed.
+		if n == 5 {
+			n += bootIncarnationLen
+		}
+		binary.LittleEndian.PutUint64(buf[n:n+8], identity.epoch)
+		n += 8
+		if identity.token != 0 {
+			binary.LittleEndian.PutUint64(buf[n:n+8], identity.token)
+			n += 8
+		}
+	}
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgPeerCapabilities, buf[:])
+	err := writeMsg(conn, syncMsgPeerCapabilities, buf[:n])
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: failed to advertise capabilities", "err", err)

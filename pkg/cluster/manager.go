@@ -362,6 +362,13 @@ type Manager struct {
 	bootEpoch      atomic.Uint64
 	bootEpochReady chan struct{}
 	bootEpochWrote atomic.Uint64
+	// localIdentityEpochOnce/localIdentityEpoch preserve the immutable process
+	// identity exposed to session-sync connections. The heartbeat epoch may be
+	// refined upward later in this daemon, and SessionSync instances can be
+	// recreated during comms restart; both must continue identifying this same
+	// process with the first published value.
+	localIdentityEpochOnce sync.Once
+	localIdentityEpoch     atomic.Uint64
 	// bootEpochPersistOwed is set when a refine pass ended with the published
 	// epoch not known to be on disk because something FAILED or was SKIPPED
 	// (the dir create, the lock, the read, or the write) — never because a

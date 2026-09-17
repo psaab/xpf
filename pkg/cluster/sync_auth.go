@@ -162,6 +162,29 @@ func (s *SessionSync) authKey() []byte {
 	return nil
 }
 
+// peerProcessIdentity is the sender identity advertised on a capabilities
+// frame (#9818). The boot id distinguishes OS boots; the ordered boot epoch
+// distinguishes daemon processes that restart without an OS reboot; and the
+// Manager-scoped token remains unique when persistence cannot advance the
+// epoch. Either field may be absent while a peer is rolling back or cannot
+// read its local identity, so the zero value means "unattributed".
+type peerProcessIdentity struct {
+	boot  bootIncarnation
+	epoch uint64
+	token uint64
+}
+
+func (id peerProcessIdentity) known() bool {
+	return id.boot.known() || id.epoch != 0 || id.token != 0
+}
+
+func (id peerProcessIdentity) sameProcess(other peerProcessIdentity) bool {
+	if id.token != 0 && other.token != 0 {
+		return id.token == other.token
+	}
+	return id.boot == other.boot && id.epoch == other.epoch
+}
+
 // authConn wraps a session-sync connection after the setup handshake. When
 // key != nil the connection is AUTHENTICATED: every frame written through
 // writeFull gets a per-connection sequence + HMAC trailer (sealFrame) and
@@ -204,6 +227,30 @@ type authConn struct {
 	// than per slot because a config payload must be stamped with the
 	// incarnation of the stream that carried it, not with whatever the other
 	// fabric last saw.
+	//
+	// peerIdentity is the process identity the peer advertised on this
+	// connection's capabilities frame (#9818). It is deliberately per
+	// connection: a new peer process can install one fabric before any reboot
+	// classifier has evidence, while the other fabric still carries the
+	// retired process. A zero value means the peer announced nothing, so
+	// retirement falls back to the pre-#9818 stamp rule.
+	peerIdentity peerProcessIdentity
+	// peerCapabilitiesSeen records that this connection delivered the
+	// capabilities frame, including a legacy/short frame. Retirement defers
+	// eviction while this is false because the other fabric's frame may arrive
+	// first; the two receive loops have no cross-connection ordering.
+	peerCapabilitiesSeen bool
+	// peerCapabilitiesExpected marks a production connection after wrapping
+	// and before its local capabilities advertisement is sent. Test fixtures
+	// that install sockets directly leave it false, retaining legacy behavior.
+	peerCapabilitiesExpected bool
+	// pendingRetirement marks a stale-stamped connection preserved until its
+	// in-flight capabilities frame identifies it as the retired process or a
+	// replacement. Guarded by SessionSync.mu.
+	pendingRetirement      bool
+	pendingRetirementGen   uint64
+	retiredIdentity        peerProcessIdentity
+	pendingRetirementTimer *time.Timer
 	//
 	// unincarnatedWarned makes the fail-open notice ONE line per connection
 	// instead of one per prime.

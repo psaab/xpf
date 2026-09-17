@@ -59,8 +59,8 @@ func TestStartClusterCommsWiresPeerBootEpochFn_7762(t *testing.T) {
 		vrrpMgr:  vrrp.NewManager(),
 		rgStates: make(map[int]*rgStateMachine),
 	}
-	// The predicates are wired only when a runtime is published, and
-	// PeerBootEpochFn is assigned in the same block.
+	// The predicates are wired only when a runtime is published, and both
+	// boot-epoch callbacks are assigned in the same block.
 	d.setDataplane(&wiringExporterDP{})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -73,7 +73,9 @@ func TestStartClusterCommsWiresPeerBootEpochFn_7762(t *testing.T) {
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
 		if cand := d.getSessionSync(); cand != nil {
 			published = true
-			if cand.PeerBootEpochFn != nil {
+			if cand.PeerBootEpochFn != nil &&
+				cand.LocalBootEpochFn != nil &&
+				cand.LocalProcessTokenFn != nil {
 				ss = cand
 				break
 			}
@@ -82,9 +84,9 @@ func TestStartClusterCommsWiresPeerBootEpochFn_7762(t *testing.T) {
 	}
 	if ss == nil {
 		if published {
-			t.Fatal("SessionSync was published but PeerBootEpochFn was never wired — the " +
-				"classifier will take its not-wired arm forever and #7762's fix is inert " +
-				"in production while every cluster-package cell still passes")
+			t.Fatal("SessionSync was published but one of PeerBootEpochFn or " +
+				"LocalBootEpochFn was never wired — peer incarnation attribution " +
+				"would silently fall back to the legacy path")
 		}
 		t.Fatal("SessionSync was never published")
 	}
@@ -101,5 +103,10 @@ func TestStartClusterCommsWiresPeerBootEpochFn_7762(t *testing.T) {
 	}
 	if epoch != 0 {
 		t.Errorf("unlatched floor must be 0, got %d", epoch)
+	}
+
+	token := ss.LocalProcessTokenFn()
+	if token == 0 {
+		t.Fatal("wired local process token must be non-zero")
 	}
 }

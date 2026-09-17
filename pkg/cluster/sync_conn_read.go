@@ -959,6 +959,21 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
 		s.peerSessionSyncWire.Store(uint32(peerWire))
+		// #9818: the sender's process identity rides after the existing
+		// capabilities fields. Old peers ignore this trailing extension; a
+		// short frame leaves the connection unattributed and therefore on the
+		// old stamp-based corpse path.
+		var peerIdentity peerProcessIdentity
+		if len(payload) >= 5+bootIncarnationLen {
+			copy(peerIdentity.boot[:], payload[5:5+bootIncarnationLen])
+			if len(payload) >= 5+bootIncarnationLen+8 {
+				peerIdentity.epoch = binary.LittleEndian.Uint64(payload[5+bootIncarnationLen:])
+				if len(payload) >= 5+bootIncarnationLen+8+8 {
+					peerIdentity.token = binary.LittleEndian.Uint64(payload[5+bootIncarnationLen+8:])
+				}
+			}
+		}
+		s.noteConnPeerCapabilities(conn, peerIdentity)
 		// #9752 round 4: a capable discovery re-arms the bulk. A window that
 		// aborted during the discovery race must not stay latched once the
 		// peer proves capable — the next redrive completes it.

@@ -736,6 +736,12 @@ type SessionSync struct {
 	// boot?"), never a ranking; ordering two of these is the mistake #6900
 	// made and cannot express the predicate.
 	peerBootIncarnation bootIncarnation
+	// peerIdentity is the process identity of the peer incarnation that is
+	// currently authoritative. It is set by an accepted BulkStart and is
+	// deliberately distinct from peerBootIncarnation: the latter is a legacy
+	// boot-id fence, while this also carries the ordered daemon boot epoch
+	// (#9818). Guarded by mu.
+	peerIdentity peerProcessIdentity
 	// peerIncarnation identifies which run of the peer process the currently
 	// installed connections belong to, and conn0Gen/conn1Gen record the
 	// incarnation each slot's connection was installed under. All three are
@@ -760,25 +766,12 @@ type SessionSync struct {
 	// change and must not advance it, or the connection that legitimately
 	// proved the capability would be stranded stale and could never re-arm.
 	//
-	// Residual, deliberately not closed here. This used to be described as a
-	// THIRD incarnation dialling into the slot that still held a stale
-	// connection — fold r4b's eviction made that shape unreachable, because no
-	// RETIRED-STAMPED connection remains installed after a recognized
-	// supersession for a later incarnation to land on. (Precisely that: the
-	// accepted residual below can still leave a semantically dead connection
-	// installed carrying a falsely-CURRENT stamp, and a third incarnation can
-	// physically land on that corpse — but it is then classified as replacing a
-	// current connection, which advances the incarnation and evicts, so it does
-	// not reach the old no-advance outcome.)
-	//
-	// The residual that survives is narrower to state and wider in effect: a
-	// peer whose replacement enters through an EMPTY alternate slot is never
-	// classified as a supersession at all, so the incarnation never advances
-	// and none of this machinery runs. See evictStaleIncarnationConnsLocked's
-	// KNOWN-INCOMPLETE note and pkg/cluster/README.md for the sequence. Both
-	// the old shape and this one need the same thing — a peer-supplied boot
-	// incarnation on the wire, which #5480 tracks and #6669 implements. It is a
-	// wire change, not a local one, which is why it is not closed here.
+	// #9818 closes the previously accepted residual. A connection that
+	// announces a newer process identity before retirement is re-stamped and
+	// kept; an announced retired identity, or an unattributed connection, is
+	// still evicted as a corpse. Unknown identity remains fail-open only until
+	// the retirement decision, so genuinely dead legacy connections preserve
+	// the old behavior.
 	peerIncarnation uint64
 	conn0Gen        uint64
 	conn1Gen        uint64
@@ -1031,6 +1024,25 @@ type SessionSync struct {
 	// reboot race window, before its heartbeat has landed), and latched (the
 	// ordered floor is usable).
 	PeerBootEpochFn func() (epoch uint64, latched bool)
+	// LocalBootEpochFn reports this node's ordered daemon boot epoch for the
+	// per-connection process identity sent in syncMsgPeerCapabilities (#9818).
+	// It is separate from PeerBootEpochFn: the latter is the remote floor used
+	// to classify reboot evidence, while this value identifies the sender
+	// process. Nil means the embedding path cannot provide the epoch, so the
+	// sender carries its boot id when available and remains fail-open for the
+	// missing field.
+	LocalBootEpochFn func() uint64
+	// LocalProcessTokenFn reports the Manager-scoped random daemon token that
+	// complements LocalBootEpochFn. It prevents two incarnations that collide
+	// on the persisted epoch from being treated as one process. Nil omits the
+	// token for embedders that do not expose cluster heartbeat state.
+	LocalProcessTokenFn func() uint64
+	// localIdentity is sampled once per SessionSync. Manager's heartbeat epoch
+	// may be refined upward later in the same daemon, but all connections from
+	// that daemon must carry one stable process identity rather than making
+	// routine refinement look like a second peer process.
+	localIdentityOnce sync.Once
+	localIdentity     peerProcessIdentity
 	// peerEpochAtIncarnation is the boot-epoch floor observed when the current
 	// peerIncarnation was established (#7762), guarded by s.mu like the
 	// incarnation itself. A LATER install seeing a strictly higher floor is
