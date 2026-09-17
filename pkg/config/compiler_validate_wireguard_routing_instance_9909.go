@@ -30,7 +30,28 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 		ifNames = append(ifNames, name)
 	}
 	sort.Strings(ifNames)
-	tunMap := tunnelNameMapFn(cfg)
+	// Lazy TunnelNameMap: built at most once, only when a WireGuard scope
+	// check actually needs membership expansion. Configs without WG tunnels
+	// (the common case) pay zero walks; explicit-stanza violations
+	// short-circuit without building.
+	var tunMap map[string]string
+	tunMapReady := false
+	getTunMap := func() map[string]string {
+		if !tunMapReady {
+			tunMap = tunnelNameMapFn(cfg)
+			tunMapReady = true
+		}
+		return tunMap
+	}
+	scopeFor := func(tc *TunnelConfig) string {
+		if tc == nil {
+			return ""
+		}
+		if tc.RoutingInstance != "" || tc.RIListMember != "" || len(cfg.RoutingInstances) == 0 {
+			return wireguardRoutingInstance9909(cfg, nil, tc)
+		}
+		return wireguardRoutingInstance9909(cfg, getTunMap(), tc)
+	}
 
 	violations := make([]wireguardRoutingInstanceViolation9909, 0)
 	for _, ifName := range ifNames {
@@ -40,7 +61,7 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 		}
 
 		if tc := ifc.Tunnel; tc != nil && tc.Mode == "wireguard" {
-			if ri := wireguardRoutingInstance9909(cfg, tunMap, tc); ri != "" {
+			if ri := scopeFor(tc); ri != "" {
 				violations = append(violations, wireguardRoutingInstanceViolation9909{
 					ifName: ifName, unitNum: -1, tc: tc, ri: ri,
 				})
@@ -57,7 +78,7 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != "wireguard" {
 				continue
 			}
-			if ri := wireguardRoutingInstance9909(cfg, tunMap, unit.Tunnel); ri != "" {
+			if ri := scopeFor(unit.Tunnel); ri != "" {
 				violations = append(violations, wireguardRoutingInstanceViolation9909{
 					ifName: ifName, unitNum: n, tc: unit.Tunnel, ri: ri,
 				})
@@ -79,7 +100,11 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 	// important when an interface-level WG and a scope-only unit override
 	// share one device: removing just the violating unit would leave the
 	// interface-level endpoint alive on the main-table socket.
-	quarantineWireguardRoutingInstanceMembers9909(cfg, tunMap, violations)
+	quarantineMap := tunMap
+	if len(cfg.RoutingInstances) > 0 && !tunMapReady {
+		quarantineMap = getTunMap()
+	}
+	quarantineWireguardRoutingInstanceMembers9909(cfg, quarantineMap, violations)
 	quarantineWireguardRoutingInstanceRecords9909(cfg, violations)
 
 	var warnings []string
@@ -102,6 +127,13 @@ type wireguardRoutingInstanceViolation9909 struct {
 	unitNum int
 	tc      *TunnelConfig
 	ri      string
+}
+
+// wireguardRoutingInstanceMemberRef9909 pairs one authored RI member spelling
+// with each kernel device the daemon's bind loop gives that spelling.
+type wireguardRoutingInstanceMemberRef9909 struct {
+	ref    string
+	device string
 }
 
 // wireguardRoutingInstance9909 returns the first deterministic routing-instance
@@ -137,13 +169,6 @@ func wireguardRoutingInstance9909(cfg *Config, tunMap map[string]string, tc *Tun
 	return ""
 }
 
-// wireguardRoutingInstanceMemberRef9909 pairs one authored RI member spelling
-// with each kernel device the daemon's bind loop gives that spelling.
-type wireguardRoutingInstanceMemberRef9909 struct {
-	ref    string
-	device string
-}
-
 // quarantineWireguardRoutingInstanceMembers9909 removes affected WG devices
 // from RI membership. A declared bare member fans down to every configured
 // unit, so a partial match is rewritten to explicit surviving unit refs rather
@@ -154,7 +179,27 @@ func quarantineWireguardRoutingInstanceMembers9909(cfg *Config, tunMap map[strin
 		if ri == nil {
 			continue
 		}
+
+		// Prefer an already-authored explicit member over a generated survivor
+		// from a bare member. This keeps narrowing order-preserving and avoids
+		// introducing a duplicate unit ref when both spellings were authored.
+		authoredDevices := make(map[string]struct{}, len(ri.Interfaces))
+		for _, member := range ri.Interfaces {
+			if wireguardDeclaredBareMember9909(cfg, member) {
+				continue
+			}
+			for _, ref := range wireguardMemberRefs9909(cfg, tunMap, member) {
+				if ref.device != "" {
+					authoredDevices[ref.device] = struct{}{}
+				}
+			}
+		}
+
 		kept := make([]string, 0, len(ri.Interfaces))
+		generatedDevices := make(map[string]struct{}, len(authoredDevices))
+		for device := range authoredDevices {
+			generatedDevices[device] = struct{}{}
+		}
 		for _, member := range ri.Interfaces {
 			refs := wireguardMemberRefs9909(cfg, tunMap, member)
 			matched := false
@@ -171,8 +216,15 @@ func quarantineWireguardRoutingInstanceMembers9909(cfg *Config, tunMap map[strin
 			if !wireguardDeclaredBareMember9909(cfg, member) {
 				continue
 			}
-			for _, survivor := range wireguardSurvivingBareRefs9909(cfg, member, refs, affected) {
-				kept = append(kept, survivor)
+			for _, survivor := range wireguardSurvivingBareRefs9909(cfg, tunMap, member, refs, affected) {
+				if survivor.device == "" {
+					continue
+				}
+				if _, duplicate := generatedDevices[survivor.device]; duplicate {
+					continue
+				}
+				generatedDevices[survivor.device] = struct{}{}
+				kept = append(kept, survivor.ref)
 			}
 		}
 		ri.Interfaces = kept
@@ -225,10 +277,10 @@ func wireguardDeclaredBareMember9909(cfg *Config, member string) bool {
 	return !split.HasUnit && cfg.Interfaces.Interfaces[split.Base] != nil
 }
 
-func wireguardSurvivingBareRefs9909(cfg *Config, member string, refs []wireguardRoutingInstanceMemberRef9909, affected map[string]struct{}) []string {
+func wireguardSurvivingBareRefs9909(cfg *Config, tunMap map[string]string, member string, refs []wireguardRoutingInstanceMemberRef9909, affected map[string]struct{}) []wireguardRoutingInstanceMemberRef9909 {
 	split := cfg.SplitInterfaceUnitRef(member)
 	seenDevices := make(map[string]struct{}, len(refs))
-	out := make([]string, 0, len(refs))
+	out := make([]wireguardRoutingInstanceMemberRef9909, 0, len(refs))
 	for i, ref := range refs {
 		if ref.device == "" {
 			continue
@@ -239,14 +291,21 @@ func wireguardSurvivingBareRefs9909(cfg *Config, member string, refs []wireguard
 		if _, duplicate := seenDevices[ref.device]; duplicate {
 			continue
 		}
-		seenDevices[ref.device] = struct{}{}
-		// The first ref is the bare base device. Make it explicit as unit 0
-		// so the surviving member cannot fan back down into quarantined units.
+
+		candidate := ref.ref
 		if i == 0 {
-			out = append(out, split.Base+".0")
-		} else {
-			out = append(out, ref.ref)
+			// A bare base has no safe unit spelling when unit 0 uses a
+			// VLAN-ID (Base.0 resolves to Base.<vlan>). Only preserve it
+			// when the explicit spelling resolves back to the same device.
+			candidate = split.Base + ".0"
 		}
+		if wireguardMemberDevice9909(cfg, tunMap, candidate) != ref.device {
+			continue
+		}
+		seenDevices[ref.device] = struct{}{}
+		out = append(out, wireguardRoutingInstanceMemberRef9909{
+			ref: candidate, device: ref.device,
+		})
 	}
 	return out
 }
