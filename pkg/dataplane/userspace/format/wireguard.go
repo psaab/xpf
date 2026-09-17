@@ -77,7 +77,8 @@ func FormatWireguardStatus(status userspace.ProcessStatus, detail bool, now time
 			t.EncapDropsRekeyRequired + t.EncapDropsOther + t.EncapMtuDrops
 		hsDrops := t.HsRxDropsMac1Mismatch + t.HsRxDropsMalformed + t.HsRxDropsCrypto +
 			t.HsRxDropsUnknownPeer + t.HsRxDropsStaleResponse + t.HsRxDropsIndexExhausted +
-			t.HsRxDropsReplayedInit + t.HsRxCookieUnsupported + t.RxUnknownType
+			t.HsRxDropsReplayedInit + t.HsRxUnderLoadAdmissionDrops + t.HsRxCookieUnsupported +
+			t.RxUnknownType
 		ioErrors := t.HsSendErrors + t.TransportSendErrors + t.TunWriteErrors +
 			t.TunRxDropsNoEndpoint
 		fmt.Fprintf(&b, "  Drops:              %d receive, %d transmit, %d handshake, %d I/O errors\n",
@@ -136,6 +137,7 @@ func FormatWireguardStatus(status userspace.ProcessStatus, detail bool, now time
 			{"stale-response", t.HsRxDropsStaleResponse},
 			{"index-exhausted", t.HsRxDropsIndexExhausted},
 			{"replayed-init", t.HsRxDropsReplayedInit},
+			{"under-load-admission", t.HsRxUnderLoadAdmissionDrops},
 			{"cookie-unsupported", t.HsRxCookieUnsupported},
 			{"unknown-type", t.RxUnknownType},
 		})

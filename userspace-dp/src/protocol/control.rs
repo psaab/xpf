@@ -495,18 +495,21 @@ pub(crate) struct WgTunnelStatus {
     /// (decrypted + stored, arming a valid MAC2 on the next initiation).
     #[serde(rename = "hs_rx_cookie_consumed", default)]
     pub hs_rx_cookie_consumed: u64,
-    /// #4094 PR-A responder cookie-reply / MAC2 under-load DoS-mitigation
-    /// accounting: cookie replies emitted, under-load initiations dropped
-    /// for a missing/bad MAC2 (challenged), under-load initiations that
-    /// carried a valid MAC2 and proceeded, and cookie replies suppressed by
-    /// the per-window emission budget (`hs_cookie_reply_budget_drops` also
-    /// folds in the #4332 per-source token-bucket throttle drops).
+    /// #4094/#9908 responder cookie-reply / MAC2 under-load accounting:
+    /// cookie replies emitted, missing/bad-MAC2 initiations challenged,
+    /// valid-MAC2 initiations admitted, valid-MAC2 admissions refused by
+    /// the per-source pre-Noise bucket, and cookie replies suppressed by
+    /// the per-window emission budget.
     #[serde(rename = "hs_cookie_replies_sent", default)]
     pub hs_cookie_replies_sent: u64,
     #[serde(rename = "hs_rx_under_load_no_mac2", default)]
     pub hs_rx_under_load_no_mac2: u64,
     #[serde(rename = "hs_rx_under_load_mac2_ok", default)]
     pub hs_rx_under_load_mac2_ok: u64,
+    /// #9908 responder pre-Noise admission drops: valid-MAC2
+    /// initiations refused by the per-source bucket under load.
+    #[serde(rename = "hs_rx_under_load_admission_drops", default)]
+    pub hs_rx_under_load_admission_drops: u64,
     #[serde(rename = "hs_cookie_reply_budget_drops", default)]
     pub hs_cookie_reply_budget_drops: u64,
     #[serde(rename = "rx_unknown_type", default)]

@@ -220,8 +220,11 @@ func (c *xpfCollector) emitWireguardTelemetry(ch chan<- prometheus.Metric, statu
 			{"index_exhausted", t.HsRxDropsIndexExhausted},
 			{"replayed_init", t.HsRxDropsReplayedInit},
 			{"cookie_unsupported", t.HsRxCookieUnsupported},
-			// #4094 PR-A responder under-load cookie gate drops.
+			// #4094/#9908 responder under-load admission drops:
+			// missing/bad MAC2 is challenged; valid-MAC2 admission
+			// exhaustion is dropped before Noise and counted separately.
 			{"under_load_no_mac2", t.HsRxUnderLoadNoMac2},
+			{"under_load_admission", t.HsRxUnderLoadAdmissionDrops},
 			{"cookie_reply_budget", t.HsCookieReplyBudgetDrops},
 			{"unknown_type", t.RxUnknownType},
 		} {

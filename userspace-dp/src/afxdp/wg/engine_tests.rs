@@ -2069,3 +2069,286 @@ fn initiator_consume_completes_handshake_under_load() {
         "a cookie-derived MAC2 must not authorize a handshake from a different source"
     );
 }
+
+// ===================================================================
+// #9908: per-source bound on valid-MAC2 handshake ADMISSIONS. A
+// non-spoofed host that obtained a cookie replays valid-MAC2 bytes; on
+// base every replay classifies Process and pays a full responder Noise
+// DH BEFORE the #4092 TAI64N replay drop, inline on the per-tunnel
+// control thread. The fix gates under-load Process admissions per
+// source BEFORE the Noise read (fail-closed Drop + counter). These
+// cells pin: flood bounded (RED on base), legit cross-source completion
+// during a flood (control), retransmit tolerance + preserved TAI64N
+// semantics (control).
+// ===================================================================
+
+/// #9908 fixture: initiator + responder engines with REAL keys (mutual
+/// single-peer config) so `consume_initiation_create_response` pays the
+/// real snow responder DH — the cost the admission bound must gate.
+fn admit_9908_engine_pair() -> (WgEngine, WgEngine, [u8; 32], [u8; 32]) {
+    let (init_priv, init_pub) = keypair();
+    let (resp_priv, resp_pub) = keypair();
+    let i_engine = WgEngine::new(WgEngineConfig {
+        local_private_key: init_priv.into(),
+        listen_port: 51820,
+        peers: vec![WgPeerConfig {
+            pubkey: resp_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![],
+            preshared_key: [0u8; 32].into(),
+        }],
+    });
+    let r_engine = WgEngine::new(WgEngineConfig {
+        local_private_key: resp_priv.into(),
+        listen_port: 51820,
+        peers: vec![WgPeerConfig {
+            pubkey: init_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![],
+            preshared_key: [0u8; 32].into(),
+        }],
+    });
+    (i_engine, r_engine, init_pub, resp_pub)
+}
+
+/// #9908 helper: trip the responder's under-load gate with synthetic
+/// valid-MAC1 filler from DISTINCT sources (never the flood/legit
+/// addrs), so the flood source's own admission bucket starts full.
+fn trip_9908_under_load(r_engine: &WgEngine, resp_pub: &[u8; 32], now: u64) {
+    use crate::afxdp::wg::cookie::INITIATIONS_UNDER_LOAD_THRESHOLD;
+    use std::net::SocketAddr;
+    let noise = [0x3Cu8; crate::afxdp::wg::handshake::MSG_INIT_NOISE_LEN];
+    let mut filler = [0u8; crate::afxdp::wg::WG_MSG_INIT_LEN];
+    crate::afxdp::wg::handshake::build_initiation(&mut filler, 0x9908, &noise, resp_pub).unwrap();
+    let mut out = [0u8; 256];
+    for i in 0..(INITIATIONS_UNDER_LOAD_THRESHOLD + 4) {
+        let s: SocketAddr = format!("192.0.2.{}:51820", (i % 250) + 1).parse().unwrap();
+        r_engine.classify_initiation(&filler, s, &mut out, now);
+    }
+}
+
+/// #9908 helper: build a REAL initiation and prime it with the cookie
+/// the responder would have issued to `from` (the attacker's
+/// legitimately obtained cookie, or a challenged peer's).
+fn prime_9908_initiation(
+    i_engine: &WgEngine,
+    r_engine: &WgEngine,
+    resp_pub: &[u8; 32],
+    from: std::net::SocketAddr,
+    now: u64,
+) -> [u8; crate::afxdp::wg::WG_MSG_INIT_LEN] {
+    use crate::afxdp::wg::cookie::stamp_initiation_mac2;
+    let mut buf = [0u8; 256];
+    i_engine.create_initiation(resp_pub, &mut buf).unwrap();
+    let mut msg = [0u8; crate::afxdp::wg::WG_MSG_INIT_LEN];
+    msg.copy_from_slice(&buf[..crate::afxdp::wg::WG_MSG_INIT_LEN]);
+    let cookie = r_engine.cookie.cookie_for_test(from, now);
+    stamp_initiation_mac2(&mut msg, &cookie);
+    msg
+}
+
+/// #9908 RED-on-revert: replaying ONE valid-MAC2 initiation N times from
+/// one source must cost at most K expensive handshakes (the per-source
+/// admission burst at a frozen clock), with the rest dropped BEFORE the
+/// Noise read and counted. On base (no gate) all N classify Process and
+/// each pays the responder DH before the TAI64N drop — the CPU-exhaustion
+/// loop this issue closes. The eprintln line is the STEP-0/GREEN DH-cost
+/// measurement (run with --nocapture).
+#[test]
+fn handshake_admission_9908_replay_flood_bounded_and_counted() {
+    use std::net::SocketAddr;
+
+    const N: usize = 100;
+    // Per-source admission burst at a frozen clock (no refill). A literal,
+    // not the const: it pins the security-relevant bound this cell exists
+    // for — retuning the limiter must consciously update this cell.
+    const BURST: usize = 5;
+
+    let (i_engine, r_engine, _init_pub, resp_pub) = admit_9908_engine_pair();
+    let now = 10_000_000_000u64;
+    i_engine.set_mock_now_ns(now);
+    r_engine.set_mock_now_ns(now);
+    let from: SocketAddr = "203.0.113.9:51820".parse().unwrap();
+    trip_9908_under_load(&r_engine, &resp_pub, now);
+
+    // One REAL initiation, primed with the cookie issued to `from`.
+    let primed = prime_9908_initiation(&i_engine, &r_engine, &resp_pub, from, now);
+    let mut out = [0u8; 256];
+    let mut resp_buf = [0u8; crate::afxdp::wg::WG_MSG_RESPONSE_LEN];
+    let mut processed = 0usize;
+    let mut dropped = 0usize;
+    let t0 = std::time::Instant::now();
+    for _ in 0..N {
+        match r_engine.classify_initiation(&primed, from, &mut out, now) {
+            InitiationAction::Process => {
+                processed += 1;
+                // The dispatch path consumes every Process arm inline.
+                let _ = r_engine.consume_initiation_create_response(&primed, &mut resp_buf);
+            }
+            InitiationAction::Drop => dropped += 1,
+            InitiationAction::SendCookie(_) => {
+                panic!("a valid-MAC2 replay from its bound source must never be re-challenged")
+            }
+        }
+    }
+    let elapsed = t0.elapsed();
+    let c = r_engine.counters();
+    eprintln!(
+        "9908 flood: N={N} admitted={processed} dh_paid={processed} dropped={dropped} \
+         responses={} replayed={} mac2_ok={} elapsed_ms={}",
+        c.hs_responses_created.load(Ordering::Relaxed),
+        c.hs_rx_drops_replayed_init.load(Ordering::Relaxed),
+        c.hs_rx_under_load_mac2_ok.load(Ordering::Relaxed),
+        elapsed.as_millis(),
+    );
+    assert_eq!(processed + dropped, N, "every replay is admitted or dropped");
+    assert!(
+        processed >= 1,
+        "a fresh source's first primed initiation must always be admitted"
+    );
+    assert!(
+        processed <= BURST,
+        "replay flood must be admission-bounded per source: {processed}/{N} reached the Noise DH \
+         (base admits all N before the TAI64N drop)"
+    );
+    assert_eq!(
+        c.hs_responses_created.load(Ordering::Relaxed),
+        1,
+        "exactly one replay installs a session"
+    );
+    assert_eq!(
+        c.hs_rx_drops_replayed_init.load(Ordering::Relaxed),
+        (processed - 1) as u64,
+        "every admitted replay after the first still pays DH, then TAI64N-drops (bounded residual)"
+    );
+    assert_eq!(
+        c.hs_rx_under_load_mac2_ok.load(Ordering::Relaxed),
+        processed as u64,
+        "mac2_ok counts admissions that reached the handshake"
+    );
+    assert_eq!(
+        c.hs_rx_under_load_admission_drops.load(Ordering::Relaxed),
+        dropped as u64,
+        "every over-burst valid-MAC2 replay is counted as a pre-Noise admission drop"
+    );
+}
+
+/// #9908 control: while attacker A replays a primed initiation (exhausting
+/// A's OWN admission bucket), a FRESH initiation from source B still
+/// classifies Process and completes — per-source isolation (the issue's
+/// acceptance: "a fresh initiation from another source still completes
+/// under load"). Passes on base too (base admits everything); pins the
+/// fix must not throttle across sources.
+#[test]
+fn handshake_admission_9908_legit_source_completes_during_flood() {
+    use std::net::SocketAddr;
+
+    let (i_engine, r_engine, _init_pub, resp_pub) = admit_9908_engine_pair();
+    let now = 10_000_000_000u64;
+    i_engine.set_mock_now_ns(now);
+    r_engine.set_mock_now_ns(now);
+    let flood_from: SocketAddr = "203.0.113.9:51820".parse().unwrap();
+    let legit_from: SocketAddr = "198.51.100.7:51820".parse().unwrap();
+    trip_9908_under_load(&r_engine, &resp_pub, now);
+
+    let mut out = [0u8; 256];
+    let mut resp_buf = [0u8; crate::afxdp::wg::WG_MSG_RESPONSE_LEN];
+
+    // Attacker A: one cookie, replayed past its burst.
+    let replay = prime_9908_initiation(&i_engine, &r_engine, &resp_pub, flood_from, now);
+    let mut admitted_a = 0usize;
+    for _ in 0..20 {
+        if r_engine.classify_initiation(&replay, flood_from, &mut out, now)
+            == InitiationAction::Process
+        {
+            admitted_a += 1;
+            let _ = r_engine.consume_initiation_create_response(&replay, &mut resp_buf);
+        }
+    }
+    eprintln!("9908 isolation: attacker admitted {admitted_a}/20 from its own source");
+
+    // Legit fresh initiation (newer TAI64N) from source B with B's cookie.
+    let fresh = prime_9908_initiation(&i_engine, &r_engine, &resp_pub, legit_from, now);
+    assert_eq!(
+        r_engine.classify_initiation(&fresh, legit_from, &mut out, now),
+        InitiationAction::Process,
+        "a fresh initiation from an unflooded source must be admitted during another source's flood"
+    );
+    assert!(
+        r_engine
+            .consume_initiation_create_response(&fresh, &mut resp_buf)
+            .is_ok(),
+        "the admitted fresh initiation must complete the responder handshake"
+    );
+    assert_eq!(
+        r_engine.counters().hs_responses_created.load(Ordering::Relaxed),
+        2,
+        "attacker's first replay + legit fresh handshake both complete"
+    );
+}
+
+/// #9908 control: a legitimate retransmit — a FRESH initiation (new
+/// ephemeral, strictly-greater TAI64N; the WG initiator mints a new
+/// initiation on every retransmit fire, it does not resend bytes) from
+/// the SAME source in quick succession — is admitted, not throttled. And
+/// an identical-byte redelivery (network duplicate) is still admitted by
+/// the LIMITER within burst while the #4092 TAI64N layer keeps rejecting
+/// it after DH — replay semantics otherwise identical. Passes on base;
+/// fails on a naive burst-1/dedup "fix".
+#[test]
+fn handshake_admission_9908_retransmit_tolerated_and_replay_preserved() {
+    use crate::afxdp::wg::handshake_session::HandshakeError;
+    use std::net::SocketAddr;
+
+    let (i_engine, r_engine, _init_pub, resp_pub) = admit_9908_engine_pair();
+    let now = 10_000_000_000u64;
+    i_engine.set_mock_now_ns(now);
+    r_engine.set_mock_now_ns(now);
+    let from: SocketAddr = "203.0.113.9:51820".parse().unwrap();
+    trip_9908_under_load(&r_engine, &resp_pub, now);
+
+    let mut out = [0u8; 256];
+    let mut resp_buf = [0u8; crate::afxdp::wg::WG_MSG_RESPONSE_LEN];
+
+    // First attempt.
+    let msg1a = prime_9908_initiation(&i_engine, &r_engine, &resp_pub, from, now);
+    assert_eq!(
+        r_engine.classify_initiation(&msg1a, from, &mut out, now),
+        InitiationAction::Process
+    );
+    assert!(
+        r_engine
+            .consume_initiation_create_response(&msg1a, &mut resp_buf)
+            .is_ok(),
+        "the first primed initiation must complete"
+    );
+
+    // Retransmit: fresh initiation, same source, immediately after.
+    let msg1b = prime_9908_initiation(&i_engine, &r_engine, &resp_pub, from, now);
+    assert_eq!(
+        r_engine.classify_initiation(&msg1b, from, &mut out, now),
+        InitiationAction::Process,
+        "a legitimate same-source retransmit (fresh TAI64N) must be admitted, not throttled"
+    );
+    assert!(
+        r_engine
+            .consume_initiation_create_response(&msg1b, &mut resp_buf)
+            .is_ok(),
+        "the retransmitted fresh initiation must complete (strictly-newer TAI64N)"
+    );
+
+    // Identical-byte redelivery: admitted by the limiter (within burst)
+    // but still rejected by the TAI64N replay layer after DH.
+    assert_eq!(
+        r_engine.classify_initiation(&msg1a, from, &mut out, now),
+        InitiationAction::Process,
+        "the limiter must not dedup: a within-burst redelivery reaches the replay layer"
+    );
+    assert_eq!(
+        r_engine.consume_initiation_create_response(&msg1a, &mut resp_buf),
+        Err(HandshakeError::ReplayedInitiation),
+        "#4092 TAI64N replay semantics preserved under the admission bound"
+    );
+}

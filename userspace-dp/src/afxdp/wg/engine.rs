@@ -105,17 +105,18 @@ pub(crate) struct EncapOutcome {
 
 /// What the coordinator should do with an inbound WG type-1 initiation,
 /// decided by [`WgEngine::classify_initiation`] BEFORE the expensive Noise
-/// responder path (#4094 PR-A). The under-load cookie gate lives here so
-/// the security-critical ordering (MAC2-good → process; MAC1-good +
-/// MAC2-missing → challenge; otherwise cheap drop) is auditable in one
-/// place and cannot be reordered at the call site.
+/// responder path (#4094 PR-A, #9908). The under-load cookie and admission
+/// gates live here so the security-critical ordering (valid MAC2 + admission
+/// → process; admission exhaustion → drop; MAC1-good + MAC2-missing →
+/// challenge; otherwise cheap drop) is auditable in one place and cannot be
+/// reordered at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitiationAction {
     /// Run the full Noise handshake (`consume_initiation_create_response`).
-    /// Reached when the responder is NOT under load (spec-correct
-    /// skip-verify of MAC2), when an under-load initiation carries a VALID
-    /// MAC2, or when the datagram is malformed / MAC1-bad (so the consume
-    /// path drops it cheaply, before any crypto, with the correct
+    /// Reached when the responder is NOT under load (spec-correct skip-verify
+    /// of MAC2), when an under-load valid-MAC2 initiation passes the #9908
+    /// source bucket, or when the datagram is malformed / MAC1-bad (so the
+    /// consume path drops it cheaply, before any crypto, with the correct
     /// per-reason counter and no cookie reply).
     Process,
     /// Under load with no valid MAC2 but a valid MAC1: a WG type-3
@@ -123,9 +124,10 @@ pub(crate) enum InitiationAction {
     /// buffer. Send it to the initiation's real source and DROP the
     /// initiation (no Noise crypto spent).
     SendCookie(usize),
-    /// Drop the initiation with no reply and no further processing
-    /// (under-load, MAC1-valid, MAC2-missing, but the cookie-reply budget
-    /// for this window is exhausted).
+    /// Drop the initiation with no reply and no further processing. This is
+    /// either under-load valid-MAC2 admission exhaustion (#9908), or an
+    /// under-load valid-MAC1 / missing-MAC2 initiation whose cookie-reply
+    /// budget is exhausted.
     Drop,
 }
 
@@ -643,7 +645,8 @@ impl WgEngine {
     ///    path drops it cheaply (one more precomputed MAC1, no crypto) with
     ///    the right counter and NO reply — a random / bad-MAC1 flood cannot
     ///    turn us into a reflector. MAC2 is never verified for these.
-    /// 3. Under load + MAC1 valid + valid MAC2 → `Process` (liveness proved).
+    /// 3. Under load + MAC1 valid + valid MAC2 → the per-source #9908
+    ///    handshake-admission bucket must also pass before `Process`.
     /// 4. Under load + MAC1 valid + MAC2 missing/bad → `SendCookie` (budget
     ///    permitting) else `Drop`.
     pub(crate) fn classify_initiation(
@@ -670,9 +673,15 @@ impl WgEngine {
         if super::handshake::parse_initiation_with_key(msg, &self.mac1_key).is_err() {
             return InitiationAction::Process;
         }
-        // Valid MAC1. A valid MAC2 (peer holds a fresh cookie bound to this
-        // exact source) authorizes the expensive handshake.
+        // Valid MAC1 + MAC2 is necessary but not sufficient under load:
+        // #9908 applies a per-source token bucket BEFORE the expensive
+        // responder Noise read. Exhaustion fails closed and is counted;
+        // valid-MAC2 packets from another source have an independent bucket.
         if self.cookie.verify_initiation_mac2(msg, from, now_ns) {
+            if !self.cookie.source_handshake_allowed(from.ip(), now_ns) {
+                WgCounters::bump(&self.counters.hs_rx_under_load_admission_drops);
+                return InitiationAction::Drop;
+            }
             WgCounters::bump(&self.counters.hs_rx_under_load_mac2_ok);
             return InitiationAction::Process;
         }

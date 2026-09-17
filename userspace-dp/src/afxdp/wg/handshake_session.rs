@@ -54,9 +54,10 @@ pub(crate) enum HandshakeError {
     Internal,
     /// The initiation's recovered TAI64N is `<=` the greatest already
     /// accepted from this peer — a replayed or reordered type-1 message.
-    /// Dropped per the WireGuard handshake anti-replay rule (#4092)
-    /// AFTER identifying the peer but BEFORE any msg2 crypto or session
-    /// install, so a replay costs the responder nothing.
+    /// Dropped per the WireGuard handshake anti-replay rule (#4092) after
+    /// the Noise read identifies the peer, but before msg2 crypto/session
+    /// install. #9908 bounds how many valid-MAC2 replays can reach that
+    /// read per source; admitted replays still pay the bounded read cost.
     ReplayedInitiation,
 }
 

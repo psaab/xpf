@@ -132,18 +132,21 @@ type WgTunnelStatus struct {
 	// #4094 PR-B initiator-side cookie-replies successfully consumed
 	// (decrypted + stored, arming a valid MAC2 on the next initiation).
 	HsRxCookieConsumed uint64 `json:"hs_rx_cookie_consumed,omitempty"`
-	// #4094 PR-A responder cookie-reply / MAC2 under-load DoS mitigation:
-	// cookie replies emitted, under-load initiations dropped for a
-	// missing/bad MAC2 (challenged instead of handshaked), under-load
-	// initiations that carried a valid MAC2 and proceeded, and cookie
-	// replies suppressed by the per-window emission budget.
+	// #4094/#9908 responder cookie-reply / MAC2 under-load accounting:
+	// cookie replies emitted, missing/bad-MAC2 initiations challenged,
+	// valid-MAC2 initiations admitted, valid-MAC2 admissions refused by
+	// the per-source pre-Noise bucket, and cookie replies suppressed by
+	// the per-window emission budget.
 	HsCookieRepliesSent      uint64 `json:"hs_cookie_replies_sent,omitempty"`
 	HsRxUnderLoadNoMac2      uint64 `json:"hs_rx_under_load_no_mac2,omitempty"`
 	HsRxUnderLoadMac2Ok      uint64 `json:"hs_rx_under_load_mac2_ok,omitempty"`
-	HsCookieReplyBudgetDrops uint64 `json:"hs_cookie_reply_budget_drops,omitempty"`
-	RxUnknownType            uint64 `json:"rx_unknown_type,omitempty"`
-	HsSendErrors             uint64 `json:"hs_send_errors,omitempty"`
-	HsRequestsArmed          uint64 `json:"hs_requests_armed,omitempty"`
+	// #9908 valid-MAC2 initiations dropped by the per-source
+	// pre-Noise admission bucket while the responder is under load.
+	HsRxUnderLoadAdmissionDrops uint64 `json:"hs_rx_under_load_admission_drops,omitempty"`
+	HsCookieReplyBudgetDrops    uint64 `json:"hs_cookie_reply_budget_drops,omitempty"`
+	RxUnknownType               uint64 `json:"rx_unknown_type,omitempty"`
+	HsSendErrors                uint64 `json:"hs_send_errors,omitempty"`
+	HsRequestsArmed             uint64 `json:"hs_requests_armed,omitempty"`
 
 	DecapPackets              uint64 `json:"decap_packets,omitempty"`
 	DecapBytes                uint64 `json:"decap_bytes,omitempty"`

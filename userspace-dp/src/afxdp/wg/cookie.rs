@@ -15,6 +15,12 @@
 //! initiation. Spoofed sources never receive the reply, so their MAC2
 //! never validates and the expensive handshake is never spent on them.
 //!
+//! #9908 closes the remaining valid-MAC2 admission gap: under load, a
+//! per-source handshake token bucket runs after MAC2 verification but
+//! before Noise, so a cookie holder cannot make the control thread pay
+//! responder DH for an unbounded replay flood. Its state is independent
+//! of the cookie-reply bucket and is bounded by the same source-table cap.
+//!
 //! ## Construction (§5.4.7)
 //!
 //! - `cookie = MAC(Rm, A_r)` where `MAC = keyed-BLAKE2s-128`, `Rm` is a
@@ -119,6 +125,16 @@ pub(crate) const SOURCE_REPLIES_PER_SEC: u64 = 20;
 /// Burst depth: how many replies a fresh source may draw back-to-back before
 /// the sustained [`SOURCE_REPLIES_PER_SEC`] rate applies.
 pub(crate) const SOURCE_REPLY_BURST: u64 = 5;
+/// #9908 per-SOURCE handshake-admission token bucket. It deliberately uses
+/// the same 20/s sustained rate and 5-packet burst as the #4332 cookie-
+/// reply bucket: a legitimate source can complete a fresh handshake plus a
+/// quick retransmit, while a valid-MAC2 replay flood reaches Noise at most
+/// five times before the frozen-clock bucket fails closed.
+pub(crate) const SOURCE_HANDSHAKES_PER_SEC: u64 = SOURCE_REPLIES_PER_SEC;
+pub(crate) const SOURCE_HANDSHAKE_BURST: u64 = SOURCE_REPLY_BURST;
+const HANDSHAKE_PACKET_COST_NS: u64 = 1_000_000_000 / SOURCE_HANDSHAKES_PER_SEC;
+const HANDSHAKE_MAX_TOKENS_NS: i64 =
+    (HANDSHAKE_PACKET_COST_NS * SOURCE_HANDSHAKE_BURST) as i64;
 /// Token cost of one reply, in nanoseconds of accrued time
 /// (`1e9 / SOURCE_REPLIES_PER_SEC` = 50 ms). One second of idle accrues exactly
 /// `SOURCE_REPLIES_PER_SEC` tokens.
@@ -284,12 +300,13 @@ struct SourceBucket {
     tokens_ns: i64,
 }
 
-/// #4332 bounded per-source-IP reply-bucket table + its GC clock, guarded as a
-/// unit by one mutex so a sweep and an admit never observe a torn table.
-/// `last_gc_ns` is an `Option` (not a 0 sentinel) for the same #4094 BUG-1
-/// reason as [`LoadState`]: `now_ns == 0` is a legitimate first sweep time.
+/// #4332 per-source cookie-reply buckets plus #9908 per-source
+/// handshake-admission buckets. Both are bounded and share one GC lock.
+/// Each map has its own token state so valid-MAC2 admissions never consume
+/// cookie-reply budget, and vice versa.
 struct SourceTable {
     buckets: HashMap<IpAddr, SourceBucket>,
+    handshake_buckets: HashMap<IpAddr, SourceBucket>,
     last_gc_ns: Option<u64>,
 }
 
@@ -353,6 +370,7 @@ impl CookieChecker {
             }),
             per_source: Mutex::new(SourceTable {
                 buckets: HashMap::new(),
+                handshake_buckets: HashMap::new(),
                 last_gc_ns: None,
             }),
             #[cfg(test)]
@@ -446,7 +464,8 @@ impl CookieChecker {
         };
         if gc_due {
             t.last_gc_ns = Some(now_ns);
-            t.buckets
+            t.buckets.retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
+            t.handshake_buckets
                 .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
         }
 
@@ -470,6 +489,58 @@ impl CookieChecker {
         bucket.last_ns = bucket.last_ns.max(now_ns);
         bucket.tokens_ns = (bucket.tokens_ns + elapsed).min(MAX_TOKENS_NS);
         let cost = PACKET_COST_NS as i64;
+        if bucket.tokens_ns >= cost {
+            bucket.tokens_ns -= cost;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// #9908 per-source handshake-admission gate. Called only after a
+    /// valid MAC1 + MAC2 has been verified and before the responder enters
+    /// Noise. The bucket is independent of #4332's reply bucket: valid
+    /// MAC2 admissions never spend cookie-reply tokens. A new source is
+    /// denied when the bounded table is full (fail closed); a tracked source
+    /// receives a 5-packet burst and refills at 20/s.
+    pub(crate) fn source_handshake_allowed(&self, src_ip: IpAddr, now_ns: u64) -> bool {
+        let mut t = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Keep both per-source maps bounded and reclaim idle entries before
+        // rejecting a new source. The one GC clock covers both maps under
+        // the same mutex, so the table cannot be observed half-swept.
+        let gc_due = match t.last_gc_ns {
+            None => true,
+            Some(last) => now_ns.saturating_sub(last) >= SOURCE_GC_INTERVAL_NS,
+        };
+        if gc_due {
+            t.last_gc_ns = Some(now_ns);
+            t.buckets
+                .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
+            t.handshake_buckets
+                .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
+        }
+
+        // A NEW source that would exceed the bounded table is denied without
+        // insertion. Existing sources are never denied at this structural
+        // cap; they receive their normal token check below.
+        if !t.handshake_buckets.contains_key(&src_ip)
+            && t.handshake_buckets.len() >= SOURCE_TABLE_MAX
+        {
+            return false;
+        }
+
+        let bucket = t
+            .handshake_buckets
+            .entry(src_ip)
+            .or_insert(SourceBucket {
+                last_ns: now_ns,
+                tokens_ns: HANDSHAKE_MAX_TOKENS_NS,
+            });
+        let elapsed = now_ns.saturating_sub(bucket.last_ns) as i64;
+        bucket.last_ns = bucket.last_ns.max(now_ns);
+        bucket.tokens_ns = (bucket.tokens_ns + elapsed).min(HANDSHAKE_MAX_TOKENS_NS);
+        let cost = HANDSHAKE_PACKET_COST_NS as i64;
         if bucket.tokens_ns >= cost {
             bucket.tokens_ns -= cost;
             true
@@ -737,6 +808,13 @@ impl CookieChecker {
     #[cfg(test)]
     pub(crate) fn source_contains_for_test(&self, ip: IpAddr) -> bool {
         self.per_source.lock().unwrap().buckets.contains_key(&ip)
+    }
+
+    /// #9908 test hook: number of distinct source IPs currently tracked in
+    /// the per-source handshake-admission table.
+    #[cfg(test)]
+    pub(crate) fn handshake_source_table_len_for_test(&self) -> usize {
+        self.per_source.lock().unwrap().handshake_buckets.len()
     }
 }
 

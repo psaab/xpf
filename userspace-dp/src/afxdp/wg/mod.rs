@@ -78,8 +78,8 @@ pub(crate) mod allowed_ips;
 // engine (relaxed atomics). See counters.rs for the lifetime/reset
 // semantics (engine-Arc-bound; reset on identity rebuild, NEVER
 // inherited across #1873 positional-id renumbering) and the
-// reserved-reason list (tai64n-replay, rate-limit — no increment
-// sites until responder hardening).
+// reserved-reason list (tai64n-replay, under-load admission, rate-limit)
+// and their increment sites.
 pub(crate) mod counters;
 // #8274 step 3: the worker-side transport-data decap stage.
 pub(crate) mod decap;

@@ -105,8 +105,9 @@ pub(super) fn dispatch_inbound(
                     return InboundOutcome::Unauthenticated;
                 }
                 crate::afxdp::wg::InitiationAction::Drop => {
-                    // Under load, cookie-reply budget exhausted — drop
-                    // silently (the counter recorded it).
+                    // Under load, a valid-MAC2 source admission or the
+                    // cookie-reply budget may be exhausted — drop silently.
+                    // The relevant counter was recorded by the classifier.
                     return InboundOutcome::Unauthenticated;
                 }
                 crate::afxdp::wg::InitiationAction::Process => {}
