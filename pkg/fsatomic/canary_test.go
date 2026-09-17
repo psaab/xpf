@@ -51,8 +51,11 @@ var allowedFunctions = map[string]string{
 	"dataplane::writeProxyResponderSysctl":          "procfs proxy_arp / proxy_ndp knob",
 	// pkg/dataplane/userspace — socket-buffer sysctls.
 	"dataplane/userspace::tuneSocketBuffers": "procfs socket-buffer sysctls",
-	// pkg/networkd — slow-path rp_filter restore (procfs).
-	"networkd::restoreSlowPathRPFilter": "procfs rp_filter knob",
+	// pkg/networkd — slow-path rp_filter restore (procfs). #9637 split the
+	// loop (restoreSlowPathRPFilter) from the leaf knob writer
+	// (restoreSlowPathRPFilterOn); only the leaf holds the direct write,
+	// so only the leaf is allowlisted (#10155).
+	"networkd::restoreSlowPathRPFilterOn": "procfs rp_filter knob",
 }
 
 // funcKey formats the receiver-aware allowlist key for a FuncDecl in the
