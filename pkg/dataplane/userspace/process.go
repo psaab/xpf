@@ -182,6 +182,9 @@ func (m *Manager) drainAndClearSteeringRowsLocked(reason string) {
 	if m.sessionSocketPath() != "" {
 		m.sessionMu.Lock()
 		defer m.sessionMu.Unlock()
+		// #9629: this ping is served off-lock (the session allowlist serves
+		// ping without ServerState), so the fence holds even mid-apply — no
+		// 10s wedge stalling the session thread behind snapshot application.
 		ping := ControlRequest{Type: "ping", SuppressStatus: true}
 		if err := m.requestSessionSyncLocked(ping); err != nil {
 			slog.Warn("userspace: session drain failed; keeping possibly-orphaned steering rows",
@@ -303,6 +306,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 	// this existed a helper that died AFTER reporting ready was never reaped,
 	// never noticed, and left every `m.proc == nil` liveness test reading TRUE.
 	m.startHelperSupervisorLocked(cmd)
+	m.publishHAWatchdogSnapshotLocked()
 	// Bootstrap XSK fill ring on all queues: send broadcast pings
 	// 3 seconds after helper start. During this window, ctrl is disabled;
 	// the shim only passes proven local/control traffic and drops transit.
@@ -442,6 +446,11 @@ func (m *Manager) stopLocked() {
 	// re-fences its next attempt on whatever `m.procGen` reads after the failed
 	// spawn.
 	m.procGen++
+	// Retire the helper-session epoch before teardown so a watchdog sender that
+	// passed its snapshot check cannot reach this generation after the stop.
+	// Do not wait on sessionMu here: explicit fail-closed disarm must happen
+	// before any potentially slow session drain.
+	m.haWatchdogProcessGen.Add(1)
 	if m.eventStreamCancel != nil {
 		m.eventStreamCancel()
 		m.eventStreamCancel = nil
@@ -455,12 +464,23 @@ func (m *Manager) stopLocked() {
 		m.syncCancel = nil
 	}
 	if m.proc == nil {
+		m.sessionMu.Lock()
+		m.sessionMu.Unlock()
 		m.clearLastStatusLocked()
 		m.bindingsBusySince = time.Time{}
 		m.lastBindingsAutoRebind = time.Time{}
 		m.consecutiveFailedAutoRebinds = 0
 		m.sessionMirrorFailed = false
 		m.sessionMirrorErr = ""
+		m.helperHAStatePublished = false
+		m.haWatchdogHelperInventory = nil
+		m.haDegradedMu.Lock()
+		clear(m.haDegradedCurrent)
+		clear(m.haDegradedLastSent)
+		m.haDegradedLastSentAt = 0
+		m.haDegradedHaveLastSent = false
+		m.haDegradedMu.Unlock()
+		m.publishHAWatchdogSnapshotLocked()
 		return
 	}
 	// Disable userspace forwarding BEFORE stopping the helper. Without this,
@@ -470,6 +490,8 @@ func (m *Manager) stopLocked() {
 	// disable cannot be verified, the wrapper clears all bindings fail-closed
 	// before the helper shutdown below (#5486).
 	_ = m.disableCtrlBeforeTeardownLocked()
+	m.sessionMu.Lock()
+	m.sessionMu.Unlock()
 	_ = m.requestLocked(ControlRequest{Type: "shutdown"}, nil)
 	// The waiter started at spawn owns this child's Wait. Waiting on ITS
 	// completion — rather than launching a second cmd.Wait() here, which is
@@ -553,6 +575,16 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	// clear the arm gate would pass on a restarted helper that has never been
 	// sent an inventory — the exact state it exists to refuse.
 	m.helperHAStatePublished = false
+	m.haWatchdogHelperInventory = nil
+	// A restarted helper has a new empty inventory; discard the degraded
+	// watchdog throttle baseline so the next published capability cannot inherit
+	// the old process's receipt.
+	m.haDegradedMu.Lock()
+	clear(m.haDegradedCurrent)
+	clear(m.haDegradedLastSent)
+	m.haDegradedLastSentAt = 0
+	m.haDegradedHaveLastSent = false
+	m.haDegradedMu.Unlock()
 	m.publishedPlanKey = ""
 	// #2079: forget the applied snapshot when the helper stops so a
 	// restarted helper does not expose a stale applied config before its
@@ -560,6 +592,7 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	m.appliedSnapshot = appliedSnapshot{}
 	m.sessionMirrorFailed = false
 	m.sessionMirrorErr = ""
+	m.publishHAWatchdogSnapshotLocked()
 }
 
 // processRestartRequiredDuringStartup reports whether a config applied during

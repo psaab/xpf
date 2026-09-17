@@ -401,17 +401,17 @@ func (e endlessReader) Read(p []byte) (int, error) {
 }
 
 // TestEveryHelperResponseDecodeIsBounded9003 is the census the issue asks for:
-// a decode-cap cell at EACH of the four sites, not one site plus an assumption
+// a decode-cap cell at EACH of the five sites, not one site plus an assumption
 // about the rest.
 //
-// It scans source rather than behaviour because three of the four sites need a
+// It scans source rather than behaviour because four of the five sites need a
 // live helper to reach, and a guard that can only see the one reachable site
-// would report a clean board while the other three stayed unbounded — which is
+// would report a clean board while the other four stayed unbounded — which is
 // how the originating report counted three of them and missed the fourth.
 func TestEveryHelperResponseDecodeIsBounded9003(t *testing.T) {
 	sites := map[string][]string{
 		"boot_probe.go":                  {"ProbeStatus"},
-		"process_control.go":             {"requestDetailedLocked", "requestSessionSyncLocked"},
+		"process_control.go":             {"requestDetailedLocked", "requestSessionSyncLocked", "requestHAWatchdogSessionLockedAtPath"},
 		"../../dhcpserver/lease_sync.go": {"keaControl"},
 	}
 	decodeRe := regexp.MustCompile(`json\.NewDecoder\(([^)]*)`)
@@ -456,12 +456,13 @@ func TestEveryHelperResponseDecodeIsBounded9003(t *testing.T) {
 			}
 		}
 	}
-	// POSITIVE CONTROL on the census itself: the four sites the issue enumerated
-	// must all still be found. A refactor that moves one somewhere this walk
-	// does not look would otherwise silently shrink the population to a green.
-	if total != 4 {
-		t.Fatalf("census matched %d json.NewDecoder sites across the helper/Kea control sockets, want the 4 "+
-			"#9003 enumerated; a different number means the population moved and this guard no longer "+
+	// POSITIVE CONTROL on the census itself: the five sites (four #9003 enumerated
+	// plus session HA refresh #9629) must all still be found. A refactor that
+	// moves one somewhere this walk does not look would otherwise silently
+	// shrink the population to a green.
+	if total != 5 {
+		t.Fatalf("census matched %d json.NewDecoder sites across the helper/Kea control sockets, want the 5 "+
+			"(4 #9003 enumerated + session HA #9629); a different number means the population moved and this guard no longer "+
 			"covers what it claims", total)
 	}
 }

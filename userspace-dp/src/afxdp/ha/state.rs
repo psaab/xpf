@@ -2,6 +2,11 @@ use crate::afxdp::*;
 
 impl crate::afxdp::Coordinator {
     pub fn update_ha_state(&self, groups: &[HAGroupStatus]) -> Result<(), String> {
+        // #9629: hold the HA leaf mutex across load→diff→store (+ epoch bumps),
+        // serializing against the session fast path. Lock-first: acquired BEFORE
+        // the `rg_runtime` load. µs hold (local builds + ArcSwap/atomics only;
+        // the debug print below is hoisted past release).
+        let _held = crate::afxdp::coordinator::lock_ha_recover(&self.ha.ha_mutex);
         let previous = self.ha.rg_runtime.load();
         let now_secs = monotonic_nanos() / 1_000_000_000;
         let mut state = BTreeMap::new();
@@ -25,15 +30,18 @@ impl crate::afxdp::Coordinator {
         }
         let demoted_rgs = demoted_owner_rgs(previous.as_ref(), &state);
         let activated_rgs = activated_owner_rgs(previous.as_ref(), &state);
-        // Debug: log state comparison for RGs 0-2
+        // Debug: collect RG0-2 transition lines inside the hold, print after
+        // release (eprintln takes the stderr lock; holding `ha_mutex` across
+        // it would turn the µs hold unbounded under journal backpressure).
+        let mut debug_lines: Vec<String> = Vec::new();
         for rg_id in 0..=2i32 {
             let prev_active = previous.get(&rg_id).map(|r| r.active);
             let curr_active = state.get(&rg_id).map(|r| r.active);
             if prev_active != curr_active {
-                eprintln!(
+                debug_lines.push(format!(
                     "xpf-ha: RG{} state changed: {:?} -> {:?} (demoted={:?} activated={:?})",
                     rg_id, prev_active, curr_active, demoted_rgs, activated_rgs
-                );
+                ));
             }
         }
         // #2120 (MANDATORY): bump rg_epochs for every demoted AND
@@ -69,7 +77,12 @@ impl crate::afxdp::Coordinator {
             // standby self-heal can release HELD owner_rg_id==0 entries.
             self.rg_epochs[0].fetch_add(1, Ordering::Release);
         }
-        self.ha.rg_runtime.store(Arc::new(state));
+        let state = Arc::new(state);
+        self.ha.rg_runtime.store(Arc::clone(&state));
+        drop(_held);
+        for line in debug_lines {
+            eprintln!("{line}");
+        }
         if !demoted_rgs.is_empty() {
             // #6242: fan out demote commands via each worker's runtime record.
             for (worker_id, rec) in self.workers.records().iter() {
@@ -161,7 +174,7 @@ impl crate::afxdp::Coordinator {
                 // to get wrong during a failover post-mortem.
                 lock_shared_recover(&self.sessions.synced).len(),
             );
-            self.handle_activated_rgs(&activated_rgs, now_secs);
+            self.handle_activated_rgs(&activated_rgs, &state, now_secs);
         }
         Ok(())
     }
@@ -184,7 +197,7 @@ impl crate::afxdp::Coordinator {
             .collect()
     }
 
-    fn handle_activated_rgs(&self, activated_rgs: &[i32], now_secs: u64) {
+    fn handle_activated_rgs(&self, activated_rgs: &[i32], current: &BTreeMap<i32, HAGroupRuntime>, now_secs: u64) {
         if activated_rgs.is_empty() {
             return;
         }
@@ -235,7 +248,6 @@ impl crate::afxdp::Coordinator {
                 );
             }
         }
-        let current = self.ha.rg_runtime.load();
         // #7209: hold the loaded set for as long as the raw fd is used below —
         // the `Arc` is what keeps the descriptor open across a concurrent
         // teardown, so extracting the raw `fd` and dropping the guard would
@@ -269,7 +281,7 @@ impl crate::afxdp::Coordinator {
             &live_commands,
             session_map,
             &self.forwarding,
-            current.as_ref(),
+            current,
             self.dynamic_neighbors_ref(),
             activated_rgs,
             now_secs,

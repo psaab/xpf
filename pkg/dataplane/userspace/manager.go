@@ -172,7 +172,15 @@ type Manager struct {
 	// Cleared in resetAfterHelperGoneLocked: a new helper starts with an empty
 	// inventory, so the fact that the PREVIOUS one was told says nothing.
 	helperHAStatePublished bool
-	generation             uint64
+	// haWatchdogHelperInventory is the last FULL group set acknowledged by the
+	// current helper. During an apply, seedHAGroupInventoryLocked intentionally
+	// narrows m.haGroups to the new config before the maps are replayed; retain
+	// this acknowledged membership in the lock-free watchdog snapshot so a
+	// contended refresh remains compatible with the helper's 16-entry inventory.
+	// Guarded by m.mu; cleared with helperHAStatePublished on helper reset.
+	haWatchdogHelperInventory []HAGroupStatus
+
+	generation uint64
 	// neighborReplaceGen is a dedicated monotonic counter for the #6034
 	// manager-neighbor replace-generation envelope. Every authoritative
 	// update_neighbors replace (RegenerateNeighborSnapshot, BumpFIBGeneration)
@@ -254,6 +262,9 @@ type Manager struct {
 	// UpdateHAWatchdog without a loaded BPF map. Defaults to
 	// bpfShim.UpdateHAWatchdog (set in New()); nil-safe at the call site.
 	haWatchdogMapWrite func(rgID int, timestamp uint64) error
+	// haRGActiveMapWrite is a map-free test seam for the first operation in
+	// UpdateRGActive. Production leaves it nil and uses bpfShim.UpdateRGActive.
+	haRGActiveMapWrite func(rgID int, active bool) error
 	// haWatchdogIPCSynced tracks, per RG, the watchdog timestamp and Active
 	// state last published to the helper via the update_ha_state socket IPC.
 	// It throttles that IPC (see UpdateHAWatchdog): the shim map write above
@@ -261,6 +272,45 @@ type Manager struct {
 	// Active-state change (failover/failback — instant) or a periodic backstop
 	// comfortably under the helper's ~10s stale-lease window. Guarded by m.mu.
 	haWatchdogIPCSynced map[int]haWatchdogIPCSyncState
+	// haWatchdogSnapshot is a lock-free-readable copy of the HA watchdog
+	// refresh inputs (#9629, verdict item 1). It is published under m.mu by
+	// publishHAWatchdogSnapshotLocked at every site that mutates what the
+	// watchdog sends (watchdog ticks, ownership transitions, map refreshes,
+	// and helper-status capability changes); read WITHOUT m.mu by the
+	// degraded watchdog path when m.mu is contended.
+	//
+	// The pointed-to struct and its slice are immutable after publication, so
+	// one atomic load observes a consistent group-set generation. Nil until
+	// the first publish (bare Manager literals remain valid test fixtures).
+	haWatchdogSnapshot atomic.Pointer[haWatchdogSnapshot]
+	// haWatchdogProcessGen is the lock-free current helper-session epoch paired
+	// with haWatchdogSnapshot.processGen. It advances independently of procGen:
+	// crash teardown must retire the epoch before reset publishes its
+	// processLive=false snapshot, even though the restart timer still uses the
+	// dead helper's procGen. Every stop/crash/start also fences sessionMu.
+	haWatchdogProcessGen atomic.Uint64
+	// haWatchdogIntentGen advances whenever Go's desired HA ownership or
+	// membership changes. Session payloads capture this alongside the helper
+	// process epoch so a request queued on sessionMu cannot send stale Active
+	// bits after a demotion or config removal publishes a newer intent.
+	haWatchdogIntentGen atomic.Uint64
+
+	// haDegradedMu is a leaf held only across the degraded merge/throttle
+	// decision, never across socket I/O, so snapshot application cannot wedge
+	// the degraded watchdog path.
+	haDegradedMu sync.Mutex
+	// haDegradedCurrent is the monotonic, merged watchdog payload for the
+	// contended path. It carries every RG's freshest timestamp seen while the
+	// manager lock is unavailable, so one full-set refresh does not regress
+	// another RG's timestamp.
+	haDegradedCurrent map[int]haWatchdogIPCSyncState
+	// haDegradedLastSent is the last full payload acknowledged/attempted by the
+	// degraded path. Active changes are compared against it for immediate sends.
+	haDegradedLastSent map[int]haWatchdogIPCSyncState
+	// haDegradedLastSentAt is the scalar full-set backstop. A heartbeat batch
+	// sends at most once per 3-second window, regardless of RG iteration order.
+	haDegradedLastSentAt   uint64
+	haDegradedHaveLastSent bool
 	// fabricSnapshotBuilder resolves the fabric snapshots (with live peer/local
 	// MACs from kernel neighbor + link state) that SyncFabricState pushes to the
 	// helper. Indirected through a field so tests can inject a deterministic
@@ -450,6 +500,25 @@ type Manager struct {
 	// manager state transitions without opening a Unix control socket.
 	controlRequestHook func(ControlRequest, *ProcessStatus) error
 
+	// sessionRequestHook replaces the session-socket round trip in unit tests
+	// (mirror of controlRequestHook, which only covers requestLocked and never
+	// the session path — without this the #9629 sender would ship bound by
+	// nothing CI runs, the #6994 failure mode).
+	sessionRequestHook func(ControlRequest, *ProcessStatus) error
+
+	// haWatchdogSessionLockHook is a test-only rendezvous immediately before
+	// the generation-fenced watchdog sender takes sessionMu. Production leaves
+	// it nil; it makes the queued-on-sessionMu restart fence deterministic.
+	haWatchdogSessionLockHook func()
+	// haWatchdogSessionFenceHook is a test-only rendezvous after the final
+	// process/intent checks and before the session request hook. It makes the
+	// check-to-send window observable for lock-order regression coverage.
+	haWatchdogSessionFenceHook func()
+	// haRGActiveSessionHoldHook is a test-only rendezvous immediately after
+	// UpdateRGActive acquires sessionMu. It pauses the mutation while tests
+	// probe ownership of the production mutex.
+	haRGActiveSessionHoldHook func()
+
 	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
 	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate
 	// a successful respawn without spawning a helper process. Teardown
@@ -577,13 +646,17 @@ func shouldAttemptRSTSuppression(
 func New() *Manager {
 	bpfShim := dataplane.New()
 	bpfShim.SelectUserspaceXDPShimEntryProgram()
-	return &Manager{
+	m := &Manager{
 		bpfShim:             bpfShim,
 		configuredMode:      ModeUserspaceCompat,
 		haGroups:            make(map[int]HAGroupStatus),
 		haWatchdogMapWrite:  bpfShim.UpdateHAWatchdog,
 		haWatchdogIPCSynced: make(map[int]haWatchdogIPCSyncState),
+		haDegradedCurrent:   make(map[int]haWatchdogIPCSyncState),
+		haDegradedLastSent:  make(map[int]haWatchdogIPCSyncState),
 	}
+	m.publishHAWatchdogSnapshotLocked()
+	return m
 }
 
 func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {

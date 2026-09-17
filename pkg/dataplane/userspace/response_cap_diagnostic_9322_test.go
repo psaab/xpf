@@ -204,6 +204,35 @@ func TestSessionSocketNamesTheResponseCap9322(t *testing.T) {
 	}
 }
 
+// --- SITE 5: the session HA refresh (requestHAWatchdogSessionLocked, #9629).
+//
+// Same socket, deadline, bound and wrapper as SITE 2 (it is a second decoder
+// on the session path, not a new socket class): truncation stays
+// errSessionHelperUnreachable with the cap named.
+func TestSessionHANamesTheResponseCap9629(t *testing.T) {
+	smallResponseCap9697(t)
+	run := func(t *testing.T, reply func(net.Conn)) error {
+		dir := shortSockDir9322(t)
+		ctrl := filepath.Join(dir, "control.sock")
+		m := managerOnSocket9322(t, ctrl)
+		sockPath := m.sessionSocketPath()
+		startFakeHelper9322(t, sockPath, reply)
+		m.sessionMu.Lock()
+		defer m.sessionMu.Unlock()
+		return m.requestHAWatchdogSessionLockedAtPath([]HAGroupStatus{{RGID: 1, Active: true}}, sockPath)
+	}
+	oversize := func(t *testing.T) error { return run(t, oversizeReply9322) }
+	control := func(t *testing.T) error { return run(t, preReplyClose9322) }
+
+	capErr := assertCapVsPreReplyClose9322(t, oversize, control)
+	if !errors.Is(capErr, errSessionHelperUnreachable) {
+		t.Errorf("the truncation error lost its errSessionHelperUnreachable wrapper: %v.\n"+
+			"#9322 names the cause; it does not reclassify a truncation as healthy — "+
+			"that would un-gate takeover-readiness (#5247) and is a #6785-shaped "+
+			"decision this change does not make", capErr)
+	}
+}
+
 // --- SITE 3: the boot probe (ProbeStatus). ---
 //
 // It returns the error BARE, so before #9322 a truncation here surfaced as an

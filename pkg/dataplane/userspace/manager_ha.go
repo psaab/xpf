@@ -65,12 +65,14 @@ func (m *Manager) syncHAStateLocked() error {
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
 	}
-	// #7465: the helper now holds a clustered inventory. Recorded HERE, after
-	// the request succeeded, and deliberately NOT at the `len(m.haGroups) == 0`
-	// early return above — that path returns nil WITHOUT publishing anything, so
-	// treating it as a publish would mark the flag on exactly the case the gate
-	// exists to catch.
+	// Record the exact full group set the current helper acknowledged before
+	// applying its returned status. A later apply may reseed m.haGroups to a
+	// smaller configured set while the helper still owns this inventory; the
+	// lock-free watchdog snapshot must retain that membership until a new full
+	// publish lands.
 	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	m.publishHAWatchdogSnapshotLocked()
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return err
 	}
@@ -88,7 +90,13 @@ func (m *Manager) syncHAStateLocked() error {
 // only on snapshot apply for non-cluster nodes (rare), not on the hot path.
 func (m *Manager) clearHelperHAStateLocked() error {
 	if m.clearHelperHAStateHook != nil {
-		return m.clearHelperHAStateHook()
+		err := m.clearHelperHAStateHook()
+		if err == nil {
+			m.helperHAStatePublished = false
+			m.haWatchdogHelperInventory = nil
+			m.publishHAWatchdogSnapshotLocked()
+		}
+		return err
 	}
 	if m.proc == nil || m.proc.Process == nil {
 		return nil
@@ -103,6 +111,9 @@ func (m *Manager) clearHelperHAStateLocked() error {
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
 	}
+	m.helperHAStatePublished = false
+	m.haWatchdogHelperInventory = nil
+	m.publishHAWatchdogSnapshotLocked()
 	return m.applyHelperStatusLocked(&status)
 }
 
@@ -177,17 +188,49 @@ func (m *Manager) refreshHAStateFromMapsLocked() error {
 	if len(merged) == 0 {
 		return nil
 	}
+	// Keep the map replay and its intent epoch in the same m.mu -> sessionMu
+	// critical section as UpdateRGActive. A sender that already owns
+	// sessionMu finishes before this replay; a queued sender sees the epoch
+	// change before it can send the old ownership bits.
+	m.sessionMu.Lock()
+	if haWatchdogIntentChanged(m.haGroups, merged) {
+		m.haWatchdogIntentGen.Add(1)
+	}
 	m.haGroups = merged
+	m.publishHAWatchdogSnapshotLocked()
+	m.sessionMu.Unlock()
 	return nil
 }
 
+func haWatchdogIntentChanged(before, after map[int]HAGroupStatus) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for rgID, prior := range before {
+		current, ok := after[rgID]
+		if !ok || current.Active != prior.Active {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) seedHAGroupInventoryLocked(cfg *config.Config) {
+	// Caller holds m.mu; serialize the inventory transition with the watchdog
+	// sender in canonical m.mu -> sessionMu order.
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		// #1928: a non-cluster config has no redundancy groups. Drop any HA
 		// groups retained from a prior clustered apply so the manager's view
 		// matches reality and the startup path does not re-publish phantom HA
 		// state to the helper (the source of the standalone transit-drop bug).
-		m.haGroups = make(map[int]HAGroupStatus)
+		cleared := make(map[int]HAGroupStatus)
+		if haWatchdogIntentChanged(m.haGroups, cleared) {
+			m.haWatchdogIntentGen.Add(1)
+		}
+		m.haGroups = cleared
+		m.publishHAWatchdogSnapshotLocked()
 		return
 	}
 	seeded := make(map[int]HAGroupStatus, len(cfg.Chassis.Cluster.RedundancyGroups)+1)
@@ -203,7 +246,11 @@ func (m *Manager) seedHAGroupInventoryLocked(cfg *config.Config) {
 		group.RGID = rg.ID
 		seeded[rg.ID] = group
 	}
+	if haWatchdogIntentChanged(m.haGroups, seeded) {
+		m.haWatchdogIntentGen.Add(1)
+	}
 	m.haGroups = seeded
+	m.publishHAWatchdogSnapshotLocked()
 }
 
 // refreshHAWatchdogOnlyFromMapsLocked updates only the watchdog timestamps
@@ -226,6 +273,7 @@ func (m *Manager) refreshHAWatchdogOnlyFromMapsLocked() error {
 			m.haGroups[int(wdKey)] = group
 		}
 	}
+	m.publishHAWatchdogSnapshotLocked()
 	return wdIter.Err()
 }
 
@@ -718,6 +766,13 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 	// Scoped exactly like the #6165 gate above: ARM direction only. A disarm
 	// must NEVER be blocked, and the delta check above has already established
 	// that desired != current, so reaching here with desired==true is an arm.
+	// #9629 scope: when a Go-side demotion or config-removal intent is
+	// recorded, haWatchdogGroupsLocked overlays Active=false and Rust's
+	// mismatch branch refuses to mint an expired stored-active lease. The
+	// matching branch intentionally renews a still-active owner when no
+	// demotion/removal intent exists; this guarantee does not cover that normal
+	// heartbeat path. For a recorded mismatch, a continuously renewed stale
+	// owner can last only until authoritative demotion or bounded recovery.
 	//
 	// Fail closed and LOUD: a clustered helper that is never told its inventory
 	// simply does not forward, and the error surfaces on the poll caller's log
@@ -762,10 +817,25 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Update BPF rg_active UNDER the lock so the periodic poll can't
-	// read the new BPF value and sync to the helper before we do.
+	// Serialize the ownership linearization with the watchdog's final intent
+	// fence. Callers hold m.mu, so this is the canonical m.mu -> sessionMu
+	// order: an in-flight sender completes before this transition publishes,
+	// while a queued sender observes the incremented epoch and drops.
+	m.sessionMu.Lock()
+	if m.haRGActiveSessionHoldHook != nil {
+		m.haRGActiveSessionHoldHook()
+	}
+	// Update BPF rg_active UNDER both locks so the periodic poll can't read the
+	// new BPF value and sync to the helper before we do.
 	// This prevents the race where the poll eats the demotion delta.
-	if err := m.bpfShim.UpdateRGActive(rgID, active); err != nil {
+	var updateRGActive func(int, bool) error
+	if m.haRGActiveMapWrite != nil {
+		updateRGActive = m.haRGActiveMapWrite
+	} else {
+		updateRGActive = m.bpfShim.UpdateRGActive
+	}
+	if err := updateRGActive(rgID, active); err != nil {
+		m.sessionMu.Unlock()
 		return err
 	}
 
@@ -774,6 +844,11 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	group.RGID = rgID
 	group.Active = active
 	m.haGroups[rgID] = group
+	if !known || prior.Active != active {
+		m.haWatchdogIntentGen.Add(1)
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.sessionMu.Unlock()
 
 	// Only log on real transitions. The reconcile loop retries this
 	// call whenever applied != desired (see #757), so emitting INFO
@@ -834,6 +909,9 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
 	}
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
+	m.publishHAWatchdogSnapshotLocked()
 	if active {
 		// The helper has already acknowledged the RG activation update.
 		// Clear the transition guard before applying the returned status so
@@ -859,6 +937,224 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 type haWatchdogIPCSyncState struct {
 	timestamp uint64
 	active    bool
+}
+
+// haWatchdogSnapshot is the immutable, lock-free watchdog input published by
+// the manager while holding m.mu. It exists because an apply_snapshot can hold
+// m.mu across a long helper RPC; the watchdog must still be able to reach the
+// session socket during that interval (#9629, GPT-1/Spark MAJOR-1).
+type haWatchdogSnapshot struct {
+	groups            []HAGroupStatus
+	sessionFastPath   bool
+	processLive       bool
+	processGen        uint64
+	intentGen         uint64
+	sessionSocketPath string
+}
+
+// haWatchdogGroupsLocked returns the group membership compatible with the
+// helper's last acknowledged inventory. A config apply reseeds m.haGroups
+// before replaying the fixed 16-entry kernel maps; using that narrowed map for
+// a contended session refresh would make Rust reject every request as a
+// membership change. Keep the old helper keys until the next full main-path
+// publish lands. A known Go-side demotion intent is overlaid as inactive so
+// an expired stored-active lease cannot be renewed while the authoritative
+// main request is blocked; activation remains at the acknowledged value until
+// UpdateRGActive succeeds.
+func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
+	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
+		return nil
+	}
+	desired := make(map[int]HAGroupStatus, len(m.haGroups))
+	for id, group := range m.haGroups {
+		desired[id] = group
+	}
+	groups := make([]HAGroupStatus, 0, len(m.haWatchdogHelperInventory))
+	for _, prior := range m.haWatchdogHelperInventory {
+		group := prior
+		current, ok := desired[prior.RGID]
+		// A Go-side demotion is authoritative intent even before its
+		// main-socket request is acknowledged. Missing desired entries are
+		// demotions too: retain their keys for helper membership compatibility
+		// but never renew an obsolete active owner.
+		if !ok || !current.Active {
+			group.Active = false
+		}
+		if ok && current.WatchdogTimestamp > group.WatchdogTimestamp {
+			group.WatchdogTimestamp = current.WatchdogTimestamp
+		}
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].RGID < groups[j].RGID
+	})
+	return groups
+}
+
+// publishHAWatchdogSnapshotLocked publishes a complete watchdog input
+// generation. Every field read by the degraded path is copied before the
+// atomic store; the pointed-to slice is never mutated afterward.
+//
+// The processGen field is an independent helper-session epoch, not m.procGen:
+// crash handling must retire it before reset publishes processLive=false while
+// the restart timer still remains fenced on the dead helper's procGen.
+//
+// Caller holds m.mu. This function does not perform I/O and does not acquire
+// any lock other than the atomic pointer's internal synchronization.
+func (m *Manager) publishHAWatchdogSnapshotLocked() {
+	groups := m.haWatchdogGroupsLocked()
+	processLive := m.proc != nil && m.proc.Process != nil
+	sessionFastPath := m.helperHAStatePublished &&
+		m.helperStatusObserved &&
+		m.lastStatus.HaSessionRefreshSupported &&
+		processLive &&
+		len(groups) != 0
+	processGen := m.haWatchdogProcessGen.Load()
+	intentGen := m.haWatchdogIntentGen.Load()
+	m.haWatchdogSnapshot.Store(&haWatchdogSnapshot{
+		groups:            groups,
+		sessionFastPath:   sessionFastPath,
+		processLive:       processLive,
+		processGen:        processGen,
+		intentGen:         intentGen,
+		sessionSocketPath: sessionSocketPathFor(m.cfg.ControlSocket),
+	})
+}
+
+// tryUpdateHAWatchdogWhileManagerMuHeld is the actual Manager entry-point
+// escape hatch for the long snapshot-held m.mu case. A failed TryLock is not
+// itself permission to send: only a previously published capability and
+// inventory can take this path. That preserves the first-inventory and
+// helper-restart fences owned by the locked control path.
+//
+// The degraded throttle has its own leaf mutex. It is held only through the
+// monotonic full-set merge and throttle decision, then released before
+// requestHAWatchdogSession, so this path cannot turn a slow socket into
+// another lock convoy.
+func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
+	rgID int,
+	timestamp uint64,
+) (bool, error) {
+	snapshot := m.haWatchdogSnapshot.Load()
+	if snapshot == nil {
+		return false, nil
+	}
+	if snapshot.processGen != m.haWatchdogProcessGen.Load() {
+		return true, nil
+	}
+	// Mirror the locked path's proc-nil no-op without waiting for m.mu. This
+	// also prevents a stale capability snapshot from talking to a departed
+	// helper during the reset publication window.
+	if !snapshot.processLive {
+		return true, nil
+	}
+	if !snapshot.sessionFastPath || len(snapshot.groups) == 0 {
+		return false, nil
+	}
+
+	var found bool
+	for _, group := range snapshot.groups {
+		if group.RGID == rgID {
+			found = true
+			break
+		}
+	}
+	// Never synthesize a group on the refresh-only path. The main path owns
+	// inventory creation and transitions, including the standalone CLEAR fence.
+	if !found {
+		return false, nil
+	}
+
+	m.haDegradedMu.Lock()
+	if m.haDegradedCurrent == nil {
+		m.haDegradedCurrent = make(map[int]haWatchdogIPCSyncState, len(snapshot.groups))
+	}
+	seen := make(map[int]struct{}, len(snapshot.groups))
+	for _, group := range snapshot.groups {
+		seen[group.RGID] = struct{}{}
+		current, ok := m.haDegradedCurrent[group.RGID]
+		if !ok {
+			current = haWatchdogIPCSyncState{
+				timestamp: group.WatchdogTimestamp,
+				active:    group.Active,
+			}
+		} else {
+			// Active is authoritative from the latest m.mu-published
+			// snapshot; timestamps are monotonic because this path may
+			// observe several RG calls while m.mu remains held.
+			current.active = group.Active
+			if group.WatchdogTimestamp > current.timestamp {
+				current.timestamp = group.WatchdogTimestamp
+			}
+		}
+		if group.RGID == rgID && timestamp > current.timestamp {
+			current.timestamp = timestamp
+		}
+		m.haDegradedCurrent[group.RGID] = current
+	}
+	for id := range m.haDegradedCurrent {
+		if _, ok := seen[id]; !ok {
+			delete(m.haDegradedCurrent, id)
+		}
+	}
+
+	observationTimestamp := timestamp
+	for _, current := range m.haDegradedCurrent {
+		if current.timestamp > observationTimestamp {
+			observationTimestamp = current.timestamp
+		}
+	}
+	due := !m.haDegradedHaveLastSent ||
+		observationTimestamp >= m.haDegradedLastSentAt+haWatchdogIPCBackstopSecs
+	if !due {
+		for id, current := range m.haDegradedCurrent {
+			last, ok := m.haDegradedLastSent[id]
+			if !ok || last.active != current.active {
+				due = true
+				break
+			}
+		}
+	}
+	var groups []HAGroupStatus
+	if due {
+		groups = make([]HAGroupStatus, 0, len(m.haDegradedCurrent))
+		for id, current := range m.haDegradedCurrent {
+			groups = append(groups, HAGroupStatus{
+				RGID:              id,
+				Active:            current.active,
+				WatchdogTimestamp: current.timestamp,
+			})
+		}
+		sort.Slice(groups, func(i, j int) bool {
+			return groups[i].RGID < groups[j].RGID
+		})
+		if m.haDegradedLastSent == nil {
+			m.haDegradedLastSent = make(map[int]haWatchdogIPCSyncState, len(groups))
+		}
+		clear(m.haDegradedLastSent)
+		for id, current := range m.haDegradedCurrent {
+			m.haDegradedLastSent[id] = current
+		}
+		m.haDegradedLastSentAt = observationTimestamp
+		m.haDegradedHaveLastSent = true
+	}
+	m.haDegradedMu.Unlock()
+	if !due {
+		return true, nil
+	}
+
+	err := m.requestHAWatchdogSessionAtPathForGeneration(
+		groups, snapshot.sessionSocketPath, snapshot.processGen, snapshot.intentGen)
+	if errors.Is(err, errHARefreshNeedsControlSocket) ||
+		errors.Is(err, errHARefreshStaleProcess) ||
+		errors.Is(err, errHARefreshStaleIntent) {
+		// A healthy helper refused a transition/clear, or the helper generation
+		// was retired while this request queued. The main path will retry it;
+		// both outcomes are throttle-success and never mark helper state as
+		// published from the degraded path.
+		return true, nil
+	}
+	return true, err
 }
 
 // haWatchdogIPCBackstopSecs bounds how far the watchdog timestamp (CLOCK_MONOTONIC
@@ -911,6 +1207,35 @@ func (m *Manager) markHAWatchdogIPCSyncedLocked() {
 			active:    g.Active,
 		}
 	}
+	// Keep the degraded path's merged current payload and last-send baseline
+	// aligned with the full set just published by the locked path. This is a
+	// single scalar backstop, not one deadline per RG.
+	m.haDegradedMu.Lock()
+	if m.haDegradedCurrent == nil {
+		m.haDegradedCurrent = make(map[int]haWatchdogIPCSyncState, len(m.haGroups))
+	}
+	if m.haDegradedLastSent == nil {
+		m.haDegradedLastSent = make(map[int]haWatchdogIPCSyncState, len(m.haGroups))
+	}
+	clear(m.haDegradedCurrent)
+	clear(m.haDegradedLastSent)
+	groups := m.haWatchdogGroupsLocked()
+	for _, group := range groups {
+		state := haWatchdogIPCSyncState{
+			timestamp: group.WatchdogTimestamp,
+			active:    group.Active,
+		}
+		m.haDegradedCurrent[group.RGID] = state
+		m.haDegradedLastSent[group.RGID] = state
+	}
+	m.haDegradedLastSentAt = 0
+	for _, group := range groups {
+		if group.WatchdogTimestamp > m.haDegradedLastSentAt {
+			m.haDegradedLastSentAt = group.WatchdogTimestamp
+		}
+	}
+	m.haDegradedHaveLastSent = len(groups) != 0
+	m.haDegradedMu.Unlock()
 }
 
 func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
@@ -925,27 +1250,98 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	if err := mapWrite(rgID, timestamp); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+
+	// A snapshot/apply can hold m.mu across a long control-socket round trip.
+	// Try the lock once so the actual production entry point, not just the
+	// session sender, can use the independent session refresh during that hold.
+	// If the immutable snapshot is unavailable (old helper, no inventory, or a
+	// bare test Manager), fall through to the legacy lock-first path.
+	if !m.mu.TryLock() {
+		if handled, err := m.tryUpdateHAWatchdogWhileManagerMuHeld(rgID, timestamp); handled {
+			return err
+		}
+		m.mu.Lock()
+	}
 	group := m.haGroups[rgID]
 	group.RGID = rgID
 	group.WatchdogTimestamp = timestamp
 	m.haGroups[rgID] = group
+	m.publishHAWatchdogSnapshotLocked()
 
 	// Throttle the update_ha_state socket IPC. Nothing to send before the helper
 	// is up; the first tick after it comes up seeds the baseline and syncs.
 	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
 		return nil
 	}
 	if !m.shouldSyncHAWatchdogIPCLocked(rgID, group.Active, timestamp) {
+		m.mu.Unlock()
 		return nil
 	}
-	// Record the baseline BEFORE the send so a post-send applyHelperStatusLocked
-	// or transient socket error cannot trigger a per-tick resync storm: the next
-	// backstop (<= haWatchdogIPCBackstopSecs) retries, and the shim map write
-	// keeps the kernel watchdog fresh in the meantime.
+	// Capability gate (#9629): explicit helper-status bit, NOT the snapshot
+	// protocol version (this behavior adds no snapshot-wire bump, so old and
+	// new helpers report the same version and version inference would be
+	// unsound). False when never observed → legacy main path. Branched BEFORE
+	// any refresh so the legacy arm below stays byte-for-byte (single inner
+	// BPF refresh, unchanged failure timing) instead of paying two reads.
+	sessionFastPath := m.helperStatusObserved && m.lastStatus.HaSessionRefreshSupported
+	if !sessionFastPath {
+		// Record the baseline BEFORE the send so a post-send applyHelperStatusLocked
+		// or transient socket error cannot trigger a per-tick resync storm: the next
+		// backstop (<= haWatchdogIPCBackstopSecs) retries, and the shim map write
+		// keeps the kernel watchdog fresh in the meantime.
+		m.markHAWatchdogIPCSyncedLocked()
+		defer m.mu.Unlock()
+		return m.syncHAStateLocked()
+	}
+	// Session arm: refresh from the maps BEFORE snapshot/mark (preserves
+	// syncHAStateLocked's refresh-then-build order): the mark records fresh
+	// full-set timestamps so the remaining RGs' heartbeat calls in the same
+	// tick stay throttled (one full-set publish per tick, not one IPC per RG).
+	// On map failure, still mark (today's no-storm throttle: the baseline is
+	// recorded even when the sync fails) and return — no publish, no flag.
+	if err := m.refreshHAWatchdogOnlyFromMapsLocked(); err != nil {
+		m.markHAWatchdogIPCSyncedLocked()
+		m.mu.Unlock()
+		return err
+	}
+	// Prefer the helper-compatible acknowledged inventory in the session arm,
+	// including any pending demotion intent. Bare/legacy fixtures without a
+	// published helper inventory retain the direct manager view.
+	groups := m.haWatchdogGroupsLocked()
+	if len(groups) == 0 {
+		groups = make([]HAGroupStatus, 0, len(m.haGroups))
+		for _, g := range m.haGroups {
+			groups = append(groups, g)
+		}
+		sort.Slice(groups, func(i, j int) bool { return groups[i].RGID < groups[j].RGID })
+	}
+	sessionSocketPath := m.sessionSocketPath()
+	processGen := m.haWatchdogProcessGen.Load()
+	intentGen := m.haWatchdogIntentGen.Load()
+	// Record the baseline BEFORE the send (same no-storm rationale as above).
+	// Marked ONCE here, never re-marked after the send (a stale snapshot
+	// overwriting a fresher UpdateRGActive baseline would fire one redundant
+	// immediate IPC at failover).
 	m.markHAWatchdogIPCSyncedLocked()
-	return m.syncHAStateLocked()
+	m.mu.Unlock()
+	// Session path: lease-only refresh OUTSIDE m.mu, so a 10s apply holding
+	// m.mu never blocks the 3s watchdog backstop (G1). Transport errors return
+	// to the daemon caller, which Warn-and-continues per RG per tick
+	// (daemon_ha_comms_wiring) and retries next tick/backstop. The final
+	// generation and intent checks run after sessionMu acquisition, so a queued
+	// sender cannot reach a replacement helper or resurrect a demoted owner.
+	err := m.requestHAWatchdogSessionAtPathForGeneration(
+		groups, sessionSocketPath, processGen, intentGen)
+	if errors.Is(err, errHARefreshNeedsControlSocket) ||
+		errors.Is(err, errHARefreshStaleProcess) ||
+		errors.Is(err, errHARefreshStaleIntent) {
+		// Healthy helper, transition/CLEAR owned by the main path, or a
+		// retired helper generation. Treat both as throttle-success; neither
+		// should be reported as a watchdog transport failure.
+		return nil
+	}
+	return err
 }
 
 func activeHAGroupSignature(groups map[int]HAGroupStatus) string {

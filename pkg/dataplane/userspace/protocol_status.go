@@ -31,6 +31,12 @@ type ProcessStatus struct {
 	// which CompareSessionDeltaSchema treats as unknown-and-deferred rather
 	// than as a mismatch.
 	SessionDeltaSchemaFingerprint uint64 `json:"session_delta_schema_fingerprint,omitempty"`
+	// HaSessionRefreshSupported reports whether the helper serves session-socket
+	// update_ha_state via the lease-only fast path (#9629). Explicit capability,
+	// false when absent (helper predates the field) — the Go watchdog gates
+	// session HA on the last observed status, never on the snapshot protocol
+	// version (no wire bump, same value both sides → unsound).
+	HaSessionRefreshSupported bool `json:"ha_session_refresh_supported,omitempty"`
 	// LinkedLibxdpVersion is the build host's libxdp (pkg-config) the helper
 	// statically linked, and LinkedLibbpfVersion the full version of the vendored
 	// libbpf it linked. BuildHostLibbpfVersion is the build host's libbpf

@@ -447,6 +447,9 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.debug_reconcile_calls = reconcile_calls;
     state.status.debug_reconcile_stage = reconcile_stage;
     state.status.ha_groups = state.afxdp.ha_groups();
+    // #9629: self-report session fast-path support (top-level field, never
+    // snapshot-overwritten unlike `capabilities`). Old helpers omit it (false).
+    state.status.ha_session_refresh_supported = true;
     // Report enabled when all bindings are registered+armed (XSKMAP slots
     // populated), NOT when every binding is `ready` (first RX packet
     // received). Requiring `ready` deadlocked bring-up: nothing is admitted

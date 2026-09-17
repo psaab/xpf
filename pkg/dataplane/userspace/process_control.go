@@ -94,6 +94,35 @@ var errSessionHelperUnreachable = errors.New("session helper unreachable")
 // a transport failure.
 const syncedImportRefusedPrefix = "synced-import-refused:"
 
+// haRefreshNeedsControlPrefix is the machine-readable token the helper prefixes
+// onto a session fast-path refusal that must be retried on the control socket
+// (HA_REFRESH_NEEDS_CONTROL_SOCKET in
+// userspace-dp/src/afxdp/ha/session_domain.rs). The two spellings must agree;
+// TestHARefreshNeedsControlPrefixMatchesTheHelper asserts the AGREEMENT by
+// reading the Rust constant rather than pinning either side to a literal, so a
+// rename on either side reds instead of silently reclassifying every refusal as
+// a transport failure.
+const haRefreshNeedsControlPrefix = "ha-refresh-needs-control:"
+
+// errHARefreshNeedsControlSocket marks a HEALTHY helper's NeedsLock answer to
+// a session HA refresh: the transition/CLEAR is owned by the main path
+// (UpdateRGActive + reconcile retry), so the watchdog treats it as
+// throttle-success (no error return, no published-flag set), never as a
+// transport failure.
+var errHARefreshNeedsControlSocket = errors.New("ha refresh needs control socket")
+
+// errHARefreshStaleProcess marks a watchdog refresh that was queued behind
+// sessionMu while the helper generation was retired. It is a successful
+// no-op: the replacement helper must receive a fresh inventory from the
+// locked main path, never a stale request from the previous process.
+var errHARefreshStaleProcess = errors.New("ha refresh process generation changed")
+
+// errHARefreshStaleIntent marks a watchdog refresh queued behind sessionMu
+// whose captured Active/membership intent was superseded before send. It is a
+// successful no-op: the authoritative main path owns the transition, and an
+// old Active=true payload must never resurrect a demoted owner.
+var errHARefreshStaleIntent = errors.New("ha refresh active intent changed")
+
 // sessionSyncDialTimeout and sessionSyncRoundtripDeadline bound a single
 // session-socket round-trip so a hung helper fails one mirror request in a few
 // seconds instead of the OS default (which can be minutes). They match the
@@ -305,13 +334,21 @@ func (e *helperRejectedError) Error() string { return e.msg }
 
 func (e *helperRejectedError) Is(target error) bool { return target == errHelperRejected }
 
-// sessionSocketPath returns the path to the dedicated session sync socket.
-func (m *Manager) sessionSocketPath() string {
-	if m.cfg.ControlSocket == "" {
+// sessionSocketPathFor derives the helper's dedicated session socket without
+// reading Manager state. The watchdog publishes this path under m.mu and uses
+// that immutable copy after unlocking, so an apply changing m.cfg cannot race
+// a lock-free heartbeat send.
+func sessionSocketPathFor(controlSocket string) string {
+	if controlSocket == "" {
 		return ""
 	}
-	dir := filepath.Dir(m.cfg.ControlSocket)
+	dir := filepath.Dir(controlSocket)
 	return filepath.Join(dir, "userspace-dp-sessions.sock")
+}
+
+// sessionSocketPath returns the path to the dedicated session sync socket.
+func (m *Manager) sessionSocketPath() string {
+	return sessionSocketPathFor(m.cfg.ControlSocket)
 }
 
 // requestSessionSync sends a session sync request via the dedicated session
@@ -396,6 +433,101 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 		if strings.HasPrefix(resp.Error, syncedImportRefusedPrefix) {
 			return fmt.Errorf("%w: %s", dataplane.ErrSyncedImportRefused,
 				strings.TrimPrefix(resp.Error, syncedImportRefusedPrefix))
+		}
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// requestHAWatchdogSessionAtPath publishes a lease-only HA refresh via the
+// dedicated session socket (#9629), using sessionMu instead of mu so a 10s
+// apply holding mu never blocks the 3s watchdog backstop (G1), and the session
+// accept thread serves it while the main accept thread is wedged in the apply
+// (H1). The caller supplies a path captured while m.mu was held, so this method
+// never reads m.cfg.
+//
+// This compatibility wrapper is used by direct sender tests. Production
+// watchdog entry points use the generation-fenced variant below.
+func (m *Manager) requestHAWatchdogSessionAtPath(groups []HAGroupStatus, sockPath string) error {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.requestHAWatchdogSessionLockedAtPath(groups, sockPath)
+}
+
+// requestHAWatchdogSessionAtPathForGeneration is the production watchdog
+// wrapper. The helper process generation and Go ownership-intent generation
+// are checked only AFTER sessionMu is acquired: a sender that passed its
+// initial immutable-snapshot check can queue behind sessionMu while stopLocked
+// retires the helper or UpdateRGActive publishes a demotion.
+//
+// stopLocked and every intent-changing m.mu path use the same m.mu -> sessionMu
+// order. The final check and request call stay in one sessionMu critical
+// section, so either the old sender completes before a transition publishes or
+// this final fence drops it before dial.
+func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
+	groups []HAGroupStatus,
+	sockPath string,
+	processGen uint64,
+	intentGen uint64,
+) error {
+	if m.haWatchdogSessionLockHook != nil {
+		m.haWatchdogSessionLockHook()
+	}
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	if m.haWatchdogProcessGen.Load() != processGen {
+		return errHARefreshStaleProcess
+	}
+	if m.haWatchdogIntentGen.Load() != intentGen {
+		return errHARefreshStaleIntent
+	}
+	if m.haWatchdogSessionFenceHook != nil {
+		m.haWatchdogSessionFenceHook()
+	}
+	return m.requestHAWatchdogSessionLockedAtPath(groups, sockPath)
+}
+
+// requestHAWatchdogSessionLockedAtPath performs ONE session-socket HA round
+// trip. The caller MUST already hold m.sessionMu; it is not reentrant.
+func (m *Manager) requestHAWatchdogSessionLockedAtPath(groups []HAGroupStatus, sockPath string) error {
+	req := ControlRequest{
+		Type:           "update_ha_state",
+		SuppressStatus: true,
+		HAState:        &HAStateUpdateRequest{Groups: groups},
+	}
+	if m.sessionRequestHook != nil {
+		return m.sessionRequestHook(req, nil)
+	}
+	if sockPath == "" {
+		return errors.New("session socket not configured")
+	}
+	conn, err := dialTrustedHelperSocket("session socket", sockPath, sessionSyncDialTimeout)
+	if err != nil {
+		return fmt.Errorf("%w: dial session socket: %w", errSessionHelperUnreachable, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(sessionSyncRoundtripDeadline))
+	if err := json.NewEncoder(conn).Encode(&req); err != nil {
+		return fmt.Errorf("%w: write session HA request: %w", errSessionHelperUnreachable, err)
+	}
+	var resp ControlResponse
+	bounded := boundedResponseReader(conn)
+	if err := json.NewDecoder(bufio.NewReader(bounded)).Decode(&resp); err != nil {
+		if bounded.truncated {
+			return fmt.Errorf("%w: read session HA response: %w",
+				errSessionHelperUnreachable, responseCapError(req.Type, err))
+		}
+		return fmt.Errorf("%w: read session HA response: %w", errSessionHelperUnreachable, err)
+	}
+	if !resp.OK {
+		if resp.Error == "" {
+			resp.Error = "unknown helper error"
+		}
+		// #9629: NeedsLock is the CORRECT answer from a HEALTHY helper
+		// (transition/CLEAR owned by main), classified on the stable prefix
+		// (never the remainder), exactly like syncedImportRefusedPrefix.
+		if strings.HasPrefix(resp.Error, haRefreshNeedsControlPrefix) {
+			return errHARefreshNeedsControlSocket
 		}
 		return errors.New(resp.Error)
 	}

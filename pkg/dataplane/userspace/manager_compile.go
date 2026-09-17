@@ -495,6 +495,7 @@ func (m *Manager) applyCompiledSnapshot(
 		// and its snapshot is what every later reader enforces.
 		m.syncInterfaceAttachments(result, snap)
 		m.cfg = ucfg
+		m.publishHAWatchdogSnapshotLocked()
 		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 		slog.Info(
 			"userspace: deferring snapshot publish during XSK startup",
@@ -619,6 +620,7 @@ func (m *Manager) applyCompiledSnapshot(
 	}
 	m.ensureStatusLoopLocked()
 	m.cfg = ucfg
+	m.publishHAWatchdogSnapshotLocked()
 	m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 	return result, nil
 }
@@ -729,6 +731,7 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 				m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
 				m.lastSnapshot = &adopted
 				m.cfg = adopted.Userspace
+				m.publishHAWatchdogSnapshotLocked()
 				debtGen = adopted.Generation
 			}
 			if !m.clusterHA {

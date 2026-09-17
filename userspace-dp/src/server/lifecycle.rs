@@ -348,6 +348,9 @@ pub(crate) fn run() -> Result<(), String> {
             enabled: false,
             forwarding_armed: false,
             capabilities: UserspaceCapabilities::default(),
+            // #9629: this binary serves session fast-path refreshes from boot
+            // (`refresh_status` re-asserts it on every attach).
+            ha_session_refresh_supported: true,
             last_snapshot_generation: 0,
             last_fib_generation: 0,
             last_snapshot_at: None,
@@ -629,6 +632,7 @@ pub(crate) fn run() -> Result<(), String> {
                                     state.clone(),
                                     running.clone(),
                                     session_domain.clone(),
+                                    SocketMode::Session,
                                 )
                             });
                         }
@@ -684,6 +688,7 @@ pub(crate) fn run() -> Result<(), String> {
                         state.clone(),
                         running.clone(),
                         main_session_domain.clone(),
+                        SocketMode::Main,
                     )
                 });
             }

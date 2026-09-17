@@ -35,7 +35,7 @@ mod snapshot;
 mod stop_workers;
 mod sync_session;
 
-use crate::afxdp::SessionDomain;
+use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
 use super::helpers::{
     lock_server_state_recover, refresh_status, wait_for_binding_settle, write_state,
@@ -46,6 +46,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// #9629: which socket accepted this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketMode {
+    /// Control socket: today's behavior (locked `update_ha_state`, full serve).
+    Main,
+    /// Session socket: `update_ha_state` takes the lease fast path (never `ServerState`).
+    Session,
+}
+
 pub(crate) fn handle_stream(
     stream: UnixStream,
     state_file: &str,
@@ -54,8 +63,13 @@ pub(crate) fn handle_stream(
     // #7209: the session-domain handle, passed EXPLICITLY rather than derived
     // from `state` — deriving it would need the very mutex this exists to
     // avoid. Taking it as a parameter also puts the fact in the signature: this
-    // dispatcher can serve one verb without `ServerState` at all.
+    // dispatcher can serve `sync_session` (both sockets) and session `update_ha_state`
+    // without `ServerState` at all.
     session_domain: SessionDomain,
+    // #9629: which socket accepted this connection. Session `update_ha_state`
+    // takes the lease fast path (never `ServerState`); Main takes the locked
+    // path (today's behavior, byte-identical).
+    mode: SocketMode,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -176,19 +190,68 @@ pub(crate) fn handle_stream(
         sync_session::handle(&session_domain, request.session_sync, &mut response);
     }
 
-    if !served_off_lock {
+    // #9629: session-socket HA fast path — lease-only refresh, never `ServerState`.
+    // Served and NeedsLock both skip the lock (no status attach, no persist,
+    // quarantine-immune like `sync_session`); transitions/CLEARs are owned by
+    // the main path (`UpdateRGActive` + reconcile retry).
+    let session_ha = mode == SocketMode::Session && request.request_type == "update_ha_state";
+    if session_ha {
+        match request.ha_state.as_ref() {
+            None => {
+                response.ok = false;
+                response.error = "missing HA state".to_string();
+            }
+            Some(ha_req) => match session_domain.try_refresh_ha_leases(&ha_req.groups) {
+                HaRefreshOutcome::Served(_) => {}
+                HaRefreshOutcome::NeedsLock => {
+                    response.ok = false;
+                    response.error = HA_REFRESH_NEEDS_CONTROL_SOCKET.to_string();
+                }
+            },
+        }
+    }
+
+    // #9629 (verdict item 5): the session socket serves EXACTLY `ping`
+    // (below, off-lock), `sync_session` and session `update_ha_state`. Any
+    // other verb arriving here is misrouted: serving it would take
+    // `ServerState` on the session accept thread, wedging it behind a 10 s
+    // apply while session HAs queue and die on their 3 s deadline (the exact
+    // defect class this issue closes — the pre-fix `drainAndClear` ping wedge).
+    // Refuse fast instead. Old Go sends only session-sync + drain pings here
+    // (census-verified); new Go adds only HA refresh — no legitimate caller
+    // is refused. No machine-readable const: no Go sender can trigger this
+    // (all Go session verbs are allowlisted above), so tests pin the text.
+    let session_ping = mode == SocketMode::Session && request.request_type == "ping";
+    let session_refused =
+        mode == SocketMode::Session && !served_off_lock && !session_ha && !session_ping;
+    if session_refused {
+        response.ok = false;
+        response.error = "verb not served on session socket; use control socket".to_string();
+    }
+
+    if !served_off_lock && !session_ha && !session_ping && !session_refused {
         let mut guard = lock_server_state_recover(&state);
         // GPT-4: quarantined state serves nothing — a prior handler panic may
         // have torn it mid-mutation. Refuse and ensure shutdown is underway
         // (the panic arm already cleared `running`; this covers poison
-        // observed without a witnessed panic). `sync_session` above stays
-        // servable: it provably never touches `ServerState`.
+        // observed without a witnessed panic). `sync_session` and the session
+        // fast paths above stay servable: they provably never touch `ServerState`.
         if guard.quarantined_after_panic {
             running.store(false, Ordering::SeqCst);
             return Err("server state quarantined after a handler panic; restart required".to_string());
         }
         match request.request_type.as_str() {
-            "ping" | "status" => {}
+            "ping" => {}
+            "status" => {
+                // #9629 (Spark MAJOR-2): the status loop is the bounded
+                // observability heartbeat (1s in production). Persisting its
+                // refreshed live status keeps the operator/restart state file
+                // from freezing indefinitely when HA ownership is unchanged.
+                // Session status is refused above, so this remains on the
+                // control path and does not reintroduce the session-thread
+                // mutex wedge.
+                persist_state = true;
+            }
             "apply_snapshot" => snapshot::apply(
                 &mut guard,
                 request.snapshot,

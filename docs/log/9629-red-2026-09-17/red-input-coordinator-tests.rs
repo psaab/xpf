@@ -135,26 +135,35 @@ impl Coordinator {
             },
         )])));
     }
+}
 
-    /// #9629 test seam: store an EXPIRED active HA lease (verdict item 3).
+impl crate::afxdp::SessionDomain {
+    /// #9629 RED-only (secondary worktree): lock-free single-RG status read
+    /// WITHOUT touching production `session_domain.rs`.
     ///
-    /// Models a demotion that never landed: `active` still true but the lease
-    /// already fails `is_forwarding_active`. Internally consistent (as if
-    /// minted 11 s ago: watchdog `now-11`, lease until `now-1`). Timing-free
-    /// expired fixture — no sleep can produce this deterministically.
-    pub(crate) fn store_expired_ha_lease_for_test(&self, rg_id: i32) {
+    /// Byte-identical logic to the adopted `SessionDomain::ha_group_status`
+    /// seam, relocated here as a test-only inherent impl so the base-commit
+    /// RED proves the mutex wait with ZERO production changes (per STEP-0
+    /// advisory). Only compiled under `cfg(test)` (this file is
+    /// `#[cfg(test)]`), so release builds are untouched.
+    pub(crate) fn ha_group_status(&self, rg_id: i32) -> Option<crate::HAGroupStatus> {
         let now_secs = monotonic_nanos() / 1_000_000_000;
-        debug_assert!(now_secs > 11);
-        self.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
-            rg_id,
-            HAGroupRuntime {
-                active: true,
-                watchdog_timestamp: now_secs.saturating_sub(11),
-                lease: crate::afxdp::HAForwardingLease::ActiveUntil(
-                    now_secs.saturating_sub(1),
-                ),
-            },
-        )])));
+        self.rg_runtime.load().get(&rg_id).map(|runtime| {
+            let (lease_state, lease_until) = match runtime.lease {
+                crate::afxdp::HAForwardingLease::Inactive => ("inactive".to_string(), 0),
+                crate::afxdp::HAForwardingLease::ActiveUntil(until) => {
+                    ("active".to_string(), until)
+                }
+            };
+            crate::HAGroupStatus {
+                rg_id,
+                active: runtime.active,
+                watchdog_timestamp: runtime.watchdog_timestamp,
+                forwarding_active: runtime.is_forwarding_active(now_secs),
+                lease_state,
+                lease_until,
+            }
+        })
     }
 }
 
@@ -8544,21 +8553,24 @@ fn f4_seed_shared_only(
     // fix applied.
     let entry = crate::afxdp::worker::SyncedSessionEntry {
         key: key.clone(),
-        decision: crate::afxdp::SessionDecision { resolution: crate::afxdp::ForwardingResolution {
-            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        }, nat: crate::nat::NatDecision {
-            rewrite_src: Some(translated.ip),
-            rewrite_src_port: Some(translated.port),
-            ..crate::nat::NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: crate::nat::NatDecision {
+                rewrite_src: Some(translated.ip),
+                rewrite_src_port: Some(translated.port),
+                ..crate::nat::NatDecision::default()
+            },
+        },
         metadata: crate::session::SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
@@ -8621,7 +8633,7 @@ fn a_dropped_deletesynced_releases_the_workers_reservation_6979_f4() {
     f4_fill_queue(&coordinator, 3);
 
     let drops_before = WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(f4_key(), false);
+    coordinator.delete_synced_session(f4_key());
     assert!(
         WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed) > drops_before,
         "fixture: the DeleteSynced must actually have been DROPPED — if the queue \
@@ -8658,7 +8670,7 @@ fn a_queued_deletesynced_leaves_the_release_to_the_worker_6979_f4() {
     f4_seed(&mut coordinator, 3);
     // Queue NOT filled: the push succeeds.
 
-    coordinator.delete_synced_session(f4_key(), false);
+    coordinator.delete_synced_session(f4_key());
 
     assert!(
         coordinator.forwarding.source_nat_rules[0]
@@ -10117,7 +10129,7 @@ fn session_delete_fan_out_sheds_dead_workers_9900() {
 
     let shed_before =
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(f4_key(), false);
+    coordinator.delete_synced_session(f4_key());
     assert_eq!(
         live_commands.lock().unwrap().len(),
         1,

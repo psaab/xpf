@@ -256,6 +256,10 @@ func (m *Manager) scheduleRestartTimer(d time.Duration, fn func()) {
 // Called with m.mu held, immediately after a successful cmd.Start().
 func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	m.procGen++
+	// Keep the helper-session epoch ahead of any sender while this new process
+	// is still being published. The subsequent snapshot publication records
+	// the same live generation together with its capability and inventory.
+	m.haWatchdogProcessGen.Add(1)
 	g := &helperGeneration{gen: m.procGen, cmd: cmd, exited: make(chan struct{})}
 	m.procSup = g
 	go m.superviseHelper(g)
@@ -305,6 +309,13 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	slog.Error("userspace dataplane helper exited unexpectedly; failing closed and scheduling restart (#5838)",
 		"pid", pid, "disposition", detail, "generation", g.gen)
 
+	// Retire the independent helper-session epoch immediately, but keep the
+	// explicit fail-closed disarm FIRST. The restart timer must continue to use
+	// g.gen for its procGen fence, so incrementing procGen here would cancel the
+	// legitimate retry; this separate epoch closes stale sends without changing
+	// that contract.
+	m.haWatchdogProcessGen.Add(1)
+
 	// Disarm the shim explicitly rather than relying on it noticing. The
 	// degraded gates in userspace-xdp already drop transit for a dead helper —
 	// stale heartbeat within 5s, and a failing XSK redirect immediately — but
@@ -312,6 +323,12 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	// the shim has nothing READY to redirect to at all. It is the same
 	// primitive the intentional teardown uses (#5486).
 	_ = m.disableCtrlBeforeTeardownLocked()
+
+	// Drain any sender that was already in flight before the crash before
+	// reset/restart can publish a replacement process. Senders queued after the
+	// epoch bump take the lock but fail their final epoch check before dialing.
+	m.sessionMu.Lock()
+	m.sessionMu.Unlock()
 
 	// The child is reaped; drop the handle so every `m.proc == nil` liveness
 	// test in the package — takeoverReadyLocked's first gate among them — reads

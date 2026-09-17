@@ -93,6 +93,13 @@ pub(crate) struct ProcessStatus {
     pub forwarding_armed: bool,
     #[serde(default)]
     pub capabilities: UserspaceCapabilities,
+    /// #9629: this helper serves session-socket `update_ha_state` via the
+    /// lease-only fast path (never `ServerState`). Set in `refresh_status`;
+    /// absent (false) from older helpers. Go gates session HA on the last
+    /// observed status — never on the snapshot protocol version (no wire bump,
+    /// same value both sides → unsound).
+    #[serde(rename = "ha_session_refresh_supported", default)]
+    pub ha_session_refresh_supported: bool,
     #[serde(rename = "last_snapshot_generation")]
     pub last_snapshot_generation: u64,
     #[serde(rename = "last_fib_generation", default)]
