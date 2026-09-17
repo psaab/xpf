@@ -56,6 +56,8 @@ func TestArmCoverageUnshimmableKindsAreClosed9804(t *testing.T) {
 		{encap: "ipip", want: true},
 		{encap: "tunnel6", want: true},
 		{encap: "gre", want: true},
+		{encap: "tunnel", want: false},
+		{encap: "ipgre", want: false},
 		{encap: "ether", want: false},
 		{encap: "future-raw-l3", want: false},
 		{encap: "ip6gre", want: false},
