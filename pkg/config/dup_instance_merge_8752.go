@@ -30,17 +30,19 @@ import "strings"
 //
 // #9571: NOT FOR EVERY MERGE. A merge takes the LAST terminal action and the
 // UNION of the statements' match criteria, because compilePolicy is last-wins on
-// a tolerant load. When one statement said deny or reject and the merged policy
-// permits, the merge admits traffic that statement denied: a deny turned into a
-// permit, over a wider match, with the simulator agreeing. Such a merge is still
-// performed, so the configuration keeps one policy object and one warning, but
-// the merged policy is poisoned with the #5575 LenientContentDropped flag and the
-// helper refuses the whole snapshot. Before the fold the same text was refused
-// too, by the helper's duplicate-rule-id check, so this restores that outcome for
-// exactly this case. The narrowing direction (a later deny over an earlier
-// permit) is left alone: it admits nothing a statement denied, and it is the
-// #8752 fixture this fold was built for.
-//
+// a tolerant load. When one statement has restrictive effective semantics —
+// an explicit deny or reject, or an actionless statement defaulted to deny
+// (#3043) — and the merged policy permits, the merge admits traffic that
+// statement restricted: a deny turned into a permit, over a wider match, with
+// the simulator agreeing. Such a merge is still performed, so the configuration
+// keeps one policy object and one warning, but the merged policy is poisoned
+// with the #5575 LenientContentDropped flag and the helper refuses the whole
+// snapshot. Before the fold the same text was refused too, by the helper's
+// duplicate-rule-id check, so this restores that outcome for exactly this case.
+// The narrowing direction (a later deny over an earlier permit) is left alone:
+// it admits nothing a statement denied, and it is the #8752 fixture this fold was
+// built for.
+
 // WHY MERGE RATHER THAN REPLACE, and it is not a preference. Flat `set` already
 // MERGES — pinned by TestFlatSetMergesWhereHierarchicalDuplicates — so the two
 // spellings of one configuration disagree, and hierarchical is the deviant one.
@@ -61,8 +63,9 @@ import "strings"
 // a day removing.
 //
 // It returns the folded names, and separately every policy the fold merged into
-// a PERMIT although one of its statements said deny or reject (#9571). The
-// caller poisons those after the compile (markFoldWidenedPolicies9571).
+// a PERMIT although one of its statements had restrictive effective semantics
+// (#9571: explicit deny/reject; #9992: defaulted deny). The caller poisons those
+// after the compile (markFoldWidenedPolicies9571).
 func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPolicy9571) {
 	if tree == nil {
 		return nil, nil
@@ -190,7 +193,7 @@ const (
 )
 
 // foldWidenedPolicy9571 names a policy the tolerant fold merged into a PERMIT
-// although one of its statements said deny or reject.
+// although one of its statements had restrictive effective semantics.
 type foldWidenedPolicy9571 struct {
 	global           bool
 	anyPair          bool
@@ -252,7 +255,12 @@ func statementAction9571(name string, n *Node, isGlobal bool) (PolicyAction, boo
 
 func statementRestricts9571(name string, n *Node, isGlobal bool) bool {
 	a, ok := statementAction9571(name, n, isGlobal)
-	return ok && a != PolicyPermit
+	if !ok {
+		// #9992: compilePolicy's effective action is DENY for an actionless
+		// statement (#3043), so empty terminalActions still restrict.
+		return a == PolicyDeny
+	}
+	return a != PolicyPermit
 }
 
 func statementPermits9571(name string, n *Node, isGlobal bool) bool {
@@ -297,10 +305,12 @@ func markFoldWidenedPolicies9571(cfg *Config, widened []foldWidenedPolicy9571) {
 // that is the existing contract for the fold's diagnostics.
 func foldWidenedWarning9571(w foldWidenedPolicy9571) string {
 	return "duplicate policy name in `" + w.String() + "` — merging the repeated statements " +
-		"would turn a `then deny`/`then reject` into `then permit` over every statement's match " +
-		"criteria, so the policy is refused instead: the dataplane rejects the whole policy " +
-		"snapshot (previous-good retained; fresh-boot default-deny) rather than admit traffic a " +
-		"statement denied. Rename one of the policies (#3473/#9571)"
+		"would turn an effective restrictive statement (explicit `then deny`/`then reject` " +
+		"or an actionless statement defaulted to deny) into `then permit` over every " +
+		"statement's match criteria, so the policy is refused instead: the dataplane " +
+		"rejects the whole policy snapshot (previous-good retained; fresh-boot default-deny) " +
+		"rather than admit traffic a restrictive statement blocked. Rename one of the policies " +
+		"(#3473/#9571)"
 }
 
 // mergeSiblingContainers9209 folds sibling CONTAINERS that share identical Keys

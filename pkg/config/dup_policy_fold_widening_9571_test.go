@@ -145,8 +145,6 @@ func TestFoldControlsStillMergeWithoutPoison9571(t *testing.T) {
 			`policy p1 { ` + anyMatch9571 + ` then { deny; } } policy p1 { ` + anyMatch9571 + ` then { deny; } }`), PolicyDeny, 1},
 		{"deny then reject", zonePairText9571(
 			`policy p1 { ` + anyMatch9571 + ` then { deny; } } policy p1 { ` + anyMatch9571 + ` then { reject; } }`), PolicyReject, 1},
-		{"match-only statement then a permit fragment", zonePairText9571(
-			`policy p1 { ` + anyMatch9571 + ` } policy p1 { then { permit; } }`), PolicyPermit, 1},
 		{"deny, permit fragment, deny fragment: ends restrictive", zonePairText9571(
 			`policy p1 { ` + anyMatch9571 + ` then { deny; } } policy p1 { then { permit; } } policy p1 { then { deny; } }`),
 			PolicyDeny, 1},
