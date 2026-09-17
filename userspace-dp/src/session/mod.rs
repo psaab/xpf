@@ -83,6 +83,10 @@ use wheel::SessionWheel;
 
 const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
 const DEFAULT_MAX_SESSIONS: usize = 131072;
+/// #9856: one page of deferred terminal removals per worker. Overflow is
+/// counted and makes the active export fail closed rather than growing an
+/// unbounded `ExpiredSession` queue.
+pub(crate) const MAX_TOMBSTONES_FOR_EXPORT: usize = 8192;
 const DEFAULT_TCP_SESSION_TIMEOUT_NS: u64 = 300_000_000_000;
 /// #3152: short half-open / opening timeout for a TCP session whose
 /// three-way handshake has not completed. A session created by a bare SYN
@@ -530,6 +534,7 @@ mod install;
 mod lookup;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
+pub(crate) use lookup::ExportWalkOutcome;
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's
@@ -1006,6 +1011,29 @@ fn icmp_error_tat_take(tat: &mut u64, now_ns: u64) -> bool {
     true
 }
 
+/// #9856: why a removal is happening — gates tombstone capture.
+///
+/// Only `Terminal` (the session is really gone) logs a tombstone for the
+/// export window. `Replace` (same-key reinstall eviction) and `Transfer`
+/// (ownership handoff to another table) suppress it: the key lives on,
+/// and a close for the evicted incarnation would race the replacement's
+/// open with no inter-channel ordering (key-matched application would
+/// kill the live incarnation). Replacement convergence comes from
+/// overwrite + the replacement's ordered incremental open instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemovalKind {
+    /// Genuine terminal removal (expire, teardown, purge, RST, synced
+    /// delete): harvest a tombstone if export-visible.
+    Terminal,
+    /// Same-key eviction for an incoming local reinstall: the old
+    /// incarnation dies but the key lives on — no tombstone.
+    Replace,
+    /// Ownership transfer out (`take_synced_local`): the entry continues
+    /// elsewhere — no tombstone (moot under the ownership filter anyway,
+    /// since transfers only take peer-synced entries).
+    Transfer,
+}
+
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
@@ -1314,6 +1342,14 @@ pub(crate) struct SessionTable {
     /// hash-floodable. Local matches use the entry TAT and never touch this
     /// map. Node-local (never synced).
     icmp_error_side_tats: SeededKeyMap<u64>,
+    /// #9856: terminal-removal harvests awaiting export (`remove_entry`
+    /// with `RemovalKind::Terminal`). Drained every tick by the worker
+    /// loop (`take_tombstones_into`) — pushed when a window is open,
+    /// discarded when idle — so it holds at most one page of deletions.
+    tombstone_log: Vec<ExpiredSession>,
+    /// Tombstones refused by the bounded log. The active export transfers
+    /// this count to its dedicated buffer's fail-closed drop metric.
+    tombstone_drops: u64,
 }
 
 impl SessionTable {
@@ -1401,11 +1437,19 @@ impl SessionTable {
             // until `set_session_id_namespace` is called at worker setup.
             next_session_id: 1,
             session_id_worker_hi: 0,
+            tombstone_log: Vec::new(),
+            tombstone_drops: 0,
         }
     }
 
     fn next_epoch(&mut self) -> u64 {
         self.epoch_counter += 1;
+        self.epoch_counter
+    }
+    /// #9856: current install-epoch counter value (no bump). Read at export
+    /// command accept as the window's kick epoch: the cursor exports entries
+    /// with `install_epoch <= kick_epoch`.
+    pub(crate) fn current_epoch(&self) -> u64 {
         self.epoch_counter
     }
 
@@ -2369,23 +2413,21 @@ impl SessionTable {
         // The metadata clone bumps the bound policy-counter Arc (#5445). That is
         // acceptable here only because this runs on a class transition, never
         // on the per-packet path.
-        let delta = SessionDelta {
-            kind: SessionDeltaKind::Update,
-            key: forward_key.clone(),
-            decision: forward.decision,
-            metadata: forward.metadata.clone(),
-            origin: forward.origin,
-            fabric_redirect_sync: false,
-            created_ns: forward.created_ns,
-            last_seen_ns: forward.last_seen_ns,
-            counters: SessionCounters::default(),
-            observed_tos: forward.observed_tos,
-            observed_tcp_flags: forward.observed_tcp_flags,
-            session_id: forward.session_id,
-            bulk_resync: false,
-            tcp_close_class: class_after,
-            purge_retirement: false,
-        };
+        let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Update,
+        key: forward_key.clone(),
+        decision: forward.decision,
+        metadata: forward.metadata.clone(),
+        origin: forward.origin,
+        fabric_redirect_sync: false,
+        created_ns: forward.created_ns,
+        last_seen_ns: forward.last_seen_ns,
+        counters: SessionCounters::default(),
+        observed_tos: forward.observed_tos,
+        observed_tcp_flags: forward.observed_tcp_flags,
+        session_id: forward.session_id,
+        bulk_resync: false,
+        tcp_close_class: class_after,
+        purge_retirement: false, };
         self.push_delta(delta);
     }
 
@@ -2598,7 +2640,6 @@ impl SessionTable {
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
         }
 
-        let epoch = self.next_epoch();
         // #3527: resolve the per-zone half-open override before borrowing the
         // record mutably (the timeout selection below cannot re-borrow self).
         let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
@@ -2610,7 +2651,7 @@ impl SessionTable {
             record.entry.decision = decision;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
-            record.entry.install_epoch = epoch;
+            // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #3046: RST is sticky — once observed it keeps the entry on the
             // short RST timeout even if a later (reordered) segment lacks RST.
@@ -2739,23 +2780,21 @@ impl SessionTable {
             // #9412: a promote re-announces the session, so it carries the close
             // class the entry already holds.
             let tcp_close_class = self.close_class_wire_for(key);
-            self.push_delta(SessionDelta {
-                tcp_close_class,
-                purge_retirement: false,
-                kind: SessionDeltaKind::Open,
-                key: key.clone(),
-                decision,
-                metadata,
-                origin,
-                fabric_redirect_sync: false,
-                created_ns,
-                last_seen_ns: now_ns,
-                counters,
-                observed_tos,
-                observed_tcp_flags,
-                session_id,
-                bulk_resync: false,
-            });
+            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, tcp_close_class,
+            purge_retirement: false,
+            kind: SessionDeltaKind::Open,
+            key: key.clone(),
+            decision,
+            metadata,
+            origin,
+            fabric_redirect_sync: false,
+            created_ns,
+            last_seen_ns: now_ns,
+            counters,
+            observed_tos,
+            observed_tcp_flags,
+            session_id,
+            bulk_resync: false, });
         }
         true
     }
@@ -2867,7 +2906,6 @@ impl SessionTable {
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
         }
 
-        let epoch = self.next_epoch();
         {
             let record = self
                 .entries
@@ -2875,7 +2913,7 @@ impl SessionTable {
                 .expect("handle validated above");
             record.entry.decision = decision;
             record.entry.metadata = metadata;
-            record.entry.install_epoch = epoch;
+            // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
             // #2120: promotion refresh re-stamps `last_seen_ns` (the entry
             // now ages from a full timeout on the promoted node), so it
@@ -2913,7 +2951,50 @@ impl SessionTable {
         self.delta_drained = self.delta_drained.saturating_add(out.len() as u64);
         out
     }
-
+    /// #9856: drain tombstones harvested by terminal removals for an active
+    /// owner-RG export. Entries outside this window are discarded because a
+    /// future export cannot include an already-removed incarnation.
+    ///
+    /// The callback returns false when the dedicated export buffer is full.
+    /// Matching tombstones then remain queued and the worker retries them
+    /// on a later pass without advancing its export cursor.
+    pub(crate) fn take_tombstones_for_export(
+        &mut self,
+        kick_epoch: u64,
+        owner_rgs: &[i32],
+        mut f: impl FnMut(&ExpiredSession) -> bool,
+    ) -> bool {
+        let tombstones = std::mem::take(&mut self.tombstone_log);
+        let mut deferred = Vec::new();
+        let mut complete = true;
+        for tombstone in tombstones {
+            if tombstone.install_epoch <= kick_epoch
+                && owner_rgs.contains(&tombstone.metadata.owner_rg_id)
+            {
+                if !f(&tombstone) {
+                    complete = false;
+                    deferred.push(tombstone);
+                }
+            }
+        }
+        self.tombstone_log.extend(deferred);
+        complete
+    }
+    /// Discard tombstones collected before a fresh export kick. A tombstone
+    /// predating the kick has no matching open in that export window; retaining
+    /// it could close a reused key on the peer. This also bounds idle retention:
+    /// terminal removals are harvested only between the kick and its terminal
+    /// page.
+    pub(crate) fn discard_tombstones_for_export(&mut self) {
+        self.tombstone_log.clear();
+        self.tombstone_drops = 0;
+    }
+    /// Transfer tombstone-log overflow into the active export's drop metric.
+    pub(crate) fn take_tombstone_drops_for_export(&mut self) -> u64 {
+        let drops = self.tombstone_drops;
+        self.tombstone_drops = 0;
+        drops
+    }
     pub fn has_pending_deltas(&self) -> bool {
         !self.deltas.is_empty()
     }
@@ -2975,7 +3056,16 @@ impl SessionTable {
     /// invariant — every handle-valued internal index MUST be
     /// cleaned BEFORE the slab slot is returned to the free list.
     /// All session removal goes through this helper.
-    fn remove_entry(&mut self, key: &SessionKey) -> Option<SessionEntry> {
+    ///
+    /// #9856: `kind` gates export-tombstone harvest. Only `Terminal`
+    /// (the session is really gone) logs a tombstone, and only when
+    /// the removed entry satisfies the STATIC part of the owner-RG
+    /// export predicate (forward, locally-owned, non-seed,
+    /// non-fabric-ingress, exportable disposition); the window parts
+    /// (owner-RG set, `install_epoch <= kick_epoch`) are checked at
+    /// push time by the worker loop via
+    /// `ExpiredSession::in_export_window`.
+    fn remove_entry(&mut self, key: &SessionKey, kind: RemovalKind) -> Option<SessionEntry> {
         let handle = self.key_to_handle.remove(key)?;
         // Read the record (still in slab) to learn what to clean.
         // `.get` not `.remove` — we'll remove from slab last.
@@ -3046,6 +3136,42 @@ impl SessionTable {
         // decrement balances every increment (install + synced import).
         if !removed_is_reverse && !removed_origin.is_transient_local_seed() {
             self.session_limit_dec(key.src_ip, key.dst_ip);
+        }
+        // #9856: harvest an export tombstone for genuine terminal
+        // removals of export-visible entries. A session deleted after
+        // the kick but before the cursor reaches it would otherwise
+        // leave the peer holding a zombie open; the tombstone is the
+        // export-window repair (the incremental Close stays the
+        // backstop). `Replace`/`Transfer` log nothing: the key lives
+        // on and a close for the evicted incarnation would race the
+        // replacement's open with no inter-channel ordering.
+        // `record` is an owned local past the slab remove, so this
+        // borrow is disjoint from the `&mut self` push below.
+        let entry = &record.entry;
+        if kind == RemovalKind::Terminal {
+            if !entry.metadata.is_reverse
+                && !entry.origin.is_peer_synced()
+                && !entry.origin.is_transient_local_seed()
+                && !entry.metadata.fabric_ingress
+                && matches!(
+                    entry.decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+                )
+            {
+                if self.tombstone_log.len() >= MAX_TOMBSTONES_FOR_EXPORT {
+                    self.tombstone_drops = self.tombstone_drops.saturating_add(1);
+                } else {
+                    self.tombstone_log.push(ExpiredSession {
+                        key: key.clone(),
+                        decision: entry.decision,
+                        metadata: entry.metadata.clone(),
+                        origin: entry.origin,
+                        session_id: entry.session_id,
+                        close_class: entry.tcp_close_class_wire(),
+                        install_epoch: entry.install_epoch,
+                    });
+                }
+            }
         }
         Some(record.entry)
     }

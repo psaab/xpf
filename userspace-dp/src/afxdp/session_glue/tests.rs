@@ -2659,7 +2659,7 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
     // (c) driving the recorded RGs through the chunked drain-as-you-export the
     // worker loop runs ships the COMPLETE snapshot with zero new drops.
     let owner_rgs = results.export_owner_rgs.clone();
-    let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &owner_rgs);
+    let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &owner_rgs, u64::MAX);
     let mut exported = 0usize;
     for chunk in candidates.chunks(RESYNC_EXPORT_CHUNK) {
         for (key, decision, metadata, origin) in chunk.iter().cloned() {
@@ -2683,6 +2683,457 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
         "the chunked export drops nothing (drain-as-you-export never overflows)"
     );
     assert!(!sessions.take_delta_loss(), "no spurious re-arm after export");
+}
+
+/// #9856 (primary): one worker owning MORE than the 4096-slot binding
+/// buffer still delivers EVERY session in the control response.
+///
+/// The sibling cell above proves the chunked drain-as-you-export never
+/// overflows the 4096-slot SessionTable RING — but every chunk used to be
+/// flushed into `bindings.first()`'s RPC-fallback buffer, which held
+/// `MAX_PENDING_SESSION_DELTAS` (4096) and dropped sessions 4097..N at the
+/// push (the #8593 non-arming push) while the `more` bit stayed silent.
+/// The export now rides the worker's dedicated export buffer instead:
+/// a multi-pass cursor direct-converts into it slice by slice (drained
+/// between slices) while the ring+flush echo leg keeps flowing beside it
+/// (capped as ever — the control leg, not the echo, is what the FullResync
+/// ACKs).
+///
+/// This cell drives that production shape (cursor slices + echo, with NO
+/// interleaved control-thread drain — the control thread collects only
+/// after every worker acks) and asserts the response then yields EVERY
+/// session while the echo leg still fills exactly to its cap.
+#[test]
+fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
+    const BINDING_CAP: usize = 4096; // MAX_PENDING_SESSION_DELTAS (afxdp/mod.rs)
+    const SLICE: usize = 512; // cursor slice: 5096 sessions => 10 passes
+    let n: usize = BINDING_CAP + 1000; // 5096 > cap to exercise the drop hole
+
+    let mut sessions = SessionTable::new();
+    for i in 0..n {
+        let mut key = test_key();
+        // Unique forward keys (owner RG 1 from test_metadata): sweep src ip+port.
+        key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, (i / 256) as u8));
+        key.src_port = ((i % 256) as u16) + 1000;
+        assert!(sessions.install_with_protocol(
+            key,
+            test_decision(),
+            test_metadata(),
+            1_000_000,
+            PROTO_TCP,
+            0x10,
+        ));
+    }
+    // Clear the install backlog so the export below measures ONLY itself.
+    while !sessions.drain_deltas(256).is_empty() {}
+    let _ = sessions.take_delta_loss();
+
+    let candidates =
+        crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &[1], u64::MAX);
+    assert_eq!(
+        candidates.len(),
+        n,
+        "precondition: every installed session is an export candidate"
+    );
+
+    // The echo leg flushes into `bindings.first()`'s live buffer (as the
+    // production `flush_drained_session_deltas!` does), so one live buffer
+    // is the whole echo path; the control path is the export buffer below.
+    let live = BindingLiveState::new();
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("x9856"),
+        ifindex: 0,
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let forwarding = ForwardingState::default();
+    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+    let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
+
+    // #9856 M2c: multi-pass cursor drive (mirrors the worker-loop slice):
+    // direct-convert into the worker's export buffer (control leg) + paced
+    // ring+flush echo (echo leg), draining between passes. NO interleaved
+    // control-thread drain — collection happens after every worker acks.
+    use crate::session::ExportWalkOutcome::{Complete, ResumeAt};
+    let kick = sessions.current_epoch();
+    let export_buffer = crate::afxdp::binding_state::ExportBufferState::new();
+    const TOKEN: u64 = 11;
+    let mut delivered: Vec<crate::protocol::SessionDeltaInfo> = Vec::new();
+    let mut cursor = 0usize;
+    loop {
+        let mut slice_emitted = 0usize;
+        let mut echo_batch = Vec::new();
+        let outcome = sessions.iter_export_budgeted(
+            cursor,
+            SLICE,
+            kick,
+            &[1],
+            |key, decision, metadata, origin| {
+                if slice_emitted >= SLICE {
+                    return false;
+                }
+                let Some(info) = crate::afxdp::export_open_direct(
+                    &sessions,
+                    &ident,
+                    &forwarding.zone_id_to_name,
+                    key.clone(),
+                    decision,
+                    metadata.clone(),
+                    origin,
+                    crate::session::ExportProvenance::CommandExport(TOKEN),
+                ) else {
+                    return true;
+                };
+                if export_buffer.push_export_open(TOKEN, info).is_err() {
+                    return false;
+                }
+                slice_emitted += 1;
+                echo_batch.push((key.clone(), decision, metadata.clone(), origin));
+                true
+            },
+        );
+        for (key, decision, metadata, origin) in echo_batch {
+            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+        }
+        loop {
+            let d = sessions.drain_deltas(256);
+            if d.is_empty() {
+                break;
+            }
+            flush_session_deltas(
+                &ident,
+                Some(&live),
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &dnat_fds,
+                &d,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &recent_session_deltas,
+                &peer_worker_commands,
+                crate::afxdp::empty_worker_commands_by_id(),
+                &None,
+                &forwarding,
+                &__r3_reader,
+                &mut worker_lossless_wedged,
+            );
+        }
+        // Per-pass control drain (mirrors the control thread collecting
+        // while workers produce).
+        delivered.extend(export_buffer.drain_export_skipping_foreign(TOKEN, usize::MAX));
+        match outcome {
+            Complete => break,
+            ResumeAt(next) => cursor = next,
+        }
+    }
+
+    assert_eq!(
+        delivered.len(),
+        n,
+        "every session reaches the response, past the old 4096 binding cap"
+    );
+    let echo = live.drain_session_deltas(usize::MAX);
+    assert_eq!(
+        echo.len(),
+        BINDING_CAP,
+        "echo leg unchanged: still capped at {BINDING_CAP} (the control leg, \
+         not the echo, carries the complete window now)"
+    );
+}
+
+/// #9856 M2c: the cursor advances every pass, terminates, and visits each
+/// session exactly once — pins backpressure end-to-end at SLICE=1 (one
+/// conversion per pass forces maximal resumption).
+#[test]
+fn owner_rg_export_cursor_progresses_and_visits_once_9856() {
+    const N: usize = 10;
+    let mut sessions = SessionTable::new();
+    let mut installed = Vec::new();
+    for i in 0..N {
+        let mut key = test_key();
+        key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 62, i as u8));
+        key.src_port = 2000 + i as u16;
+        installed.push(key.clone());
+        assert!(sessions.install_with_protocol(
+            key,
+            test_decision(),
+            test_metadata(),
+            1_000_000,
+            PROTO_TCP,
+            0x10,
+        ));
+    }
+    while !sessions.drain_deltas(256).is_empty() {}
+    let _ = sessions.take_delta_loss();
+
+    use crate::session::ExportWalkOutcome::{Complete, ResumeAt};
+    let kick = sessions.current_epoch();
+    let export_buffer = crate::afxdp::binding_state::ExportBufferState::new();
+    const TOKEN: u64 = 12;
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("x9856p"),
+        ifindex: 0,
+    };
+    let forwarding = ForwardingState::default();
+    let mut visited = Vec::new();
+    let mut cursor = 0usize;
+    let mut passes = 0usize;
+    loop {
+        passes += 1;
+        assert!(passes <= 4 * N, "cursor must terminate, not spin");
+        let mut slice_emitted = 0usize;
+        let outcome = sessions.iter_export_budgeted(
+            cursor,
+            1,
+            kick,
+            &[1],
+            |key, decision, metadata, origin| {
+                if slice_emitted >= 1 {
+                    return false;
+                }
+                let Some(info) = crate::afxdp::export_open_direct(
+                    &sessions,
+                    &ident,
+                    &forwarding.zone_id_to_name,
+                    key.clone(),
+                    decision,
+                    metadata.clone(),
+                    origin,
+                    crate::session::ExportProvenance::CommandExport(TOKEN),
+                ) else {
+                    return true;
+                };
+                if export_buffer.push_export_open(TOKEN, info).is_err() {
+                    return false;
+                }
+                slice_emitted += 1;
+                visited.push(key.clone());
+                true
+            },
+        );
+        // Drain every pass so Full never pauses (progression, not
+        // backpressure, is what this cell pins).
+        let _ = export_buffer.drain_export_skipping_foreign(TOKEN, usize::MAX);
+        match outcome {
+            Complete => break,
+            ResumeAt(next) => {
+                assert_ne!(next, cursor, "a non-terminal pass must advance");
+                cursor = next;
+            }
+        }
+    }
+    assert_eq!(visited.len(), N, "every session visited");
+    for key in &installed {
+        assert_eq!(
+            visited.iter().filter(|v| *v == key).count(),
+            1,
+            "each session visited exactly once"
+        );
+    }
+}
+
+/// #9856 M2c: the direct-conversion leg and the ring leg describe one
+/// session identically — byte-equivalence by construction (one delta
+/// builder + one converter), pinned here with NO normalization: every
+/// volatile field is a literal zero by construction (`install.rs`
+/// created_ns/last_seen_ns/counters/observed_*), so a future volatile
+/// field fails this cell LOUDLY instead of silently diverging the legs.
+#[test]
+fn owner_rg_export_direct_matches_ring_bytes_9856() {
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        test_key(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    while !sessions.drain_deltas(256).is_empty() {}
+    let _ = sessions.take_delta_loss();
+
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("x9856e"),
+        ifindex: 0,
+    };
+    let forwarding = ForwardingState::default();
+    // Harvest the tuple from a real walk (entry truth, not fresh fixtures).
+    let kick = sessions.current_epoch();
+    let mut tuple = None;
+    let outcome =
+        sessions.iter_export_budgeted(0, 64, kick, &[1], |key, decision, metadata, origin| {
+            tuple = Some((key.clone(), decision, metadata.clone(), origin));
+            false
+        });
+    assert!(
+        matches!(outcome, crate::session::ExportWalkOutcome::ResumeAt(_)),
+        "walk stops after harvesting one tuple"
+    );
+    let (wkey, wdecision, wmetadata, worigin) = tuple.expect("installed session is a candidate");
+    let mut direct = sessions
+        .open_export_delta(wkey.clone(), wdecision, wmetadata.clone(), worigin, true)
+        .expect("forward entry builds");
+    sessions.emit_open_delta_with_origin(wkey, wdecision, wmetadata, worigin, true);
+    let deltas = sessions.drain_deltas(256);
+    assert_eq!(deltas.len(), 1, "one echo emit drains exactly one delta");
+    // Provenance is intentionally an internal producer marker and is not part
+    // of the wire-shaped conversion. Normalize it for this byte-equivalence
+    // assertion; the dedicated provenance regression checks it separately.
+    direct.provenance = deltas[0].provenance;
+    assert_eq!(
+        direct, deltas[0],
+        "direct and ring legs describe identically on the wire",
+    );
+}
+
+/// #9856 M2c: the echo leg still emits every visited open through the
+/// ring+flush path (today's exact echo bytes) — #9630 owns suppression,
+/// and until then the export must not starve the echo. Small n (under
+/// every cap: 8 < 64 recent, 8 < 4096 live) so both counts are exact.
+#[test]
+fn owner_rg_export_echo_still_emits_every_visit_9856() {
+    const N: usize = 8;
+    const SLICE: usize = 4;
+    let mut sessions = SessionTable::new();
+    for i in 0..N {
+        let mut key = test_key();
+        key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 63, i as u8));
+        key.src_port = 3000 + i as u16;
+        assert!(sessions.install_with_protocol(
+            key,
+            test_decision(),
+            test_metadata(),
+            1_000_000,
+            PROTO_TCP,
+            0x10,
+        ));
+    }
+    while !sessions.drain_deltas(256).is_empty() {}
+    let _ = sessions.take_delta_loss();
+
+    let live = BindingLiveState::new();
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("x9856e2"),
+        ifindex: 0,
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let forwarding = ForwardingState::default();
+    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+    let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
+
+    use crate::session::ExportWalkOutcome::{Complete, ResumeAt};
+    let kick = sessions.current_epoch();
+    let export_buffer = crate::afxdp::binding_state::ExportBufferState::new();
+    const TOKEN: u64 = 13;
+    let mut delivered = 0usize;
+    let mut cursor = 0usize;
+    loop {
+        let mut slice_emitted = 0usize;
+        let mut echo_batch = Vec::new();
+        let outcome = sessions.iter_export_budgeted(
+            cursor,
+            SLICE,
+            kick,
+            &[1],
+            |key, decision, metadata, origin| {
+                if slice_emitted >= SLICE {
+                    return false;
+                }
+                let Some(info) = crate::afxdp::export_open_direct(
+                    &sessions,
+                    &ident,
+                    &forwarding.zone_id_to_name,
+                    key.clone(),
+                    decision,
+                    metadata.clone(),
+                    origin,
+                    crate::session::ExportProvenance::CommandExport(TOKEN),
+                ) else {
+                    return true;
+                };
+                if export_buffer.push_export_open(TOKEN, info).is_err() {
+                    return false;
+                }
+                slice_emitted += 1;
+                echo_batch.push((key.clone(), decision, metadata.clone(), origin));
+                true
+            },
+        );
+        for (key, decision, metadata, origin) in echo_batch {
+            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+        }
+        loop {
+            let d = sessions.drain_deltas(256);
+            if d.is_empty() {
+                break;
+            }
+            flush_session_deltas(
+                &ident,
+                Some(&live),
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &dnat_fds,
+                &d,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &recent_session_deltas,
+                &peer_worker_commands,
+                crate::afxdp::empty_worker_commands_by_id(),
+                &None,
+                &forwarding,
+                &__r3_reader,
+                &mut worker_lossless_wedged,
+            );
+        }
+        delivered += export_buffer
+            .drain_export_skipping_foreign(TOKEN, usize::MAX)
+            .len();
+        match outcome {
+            Complete => break,
+            ResumeAt(next) => cursor = next,
+        }
+    }
+    assert_eq!(
+        delivered, N,
+        "control complete at small n (isolates echo assert)"
+    );
+    {
+        let recent = recent_session_deltas.lock().expect("recent deltas");
+        assert_eq!(recent.len(), N, "echo reaches the recent-deltas buffer");
+    }
+    let echo = live.drain_session_deltas(usize::MAX);
+    assert_eq!(echo.len(), N, "echo reaches the binding fallback buffer");
 }
 
 #[test]
@@ -6059,23 +6510,21 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
     let forwarding = ForwardingState::default();
 
-    let delta = SessionDelta {
-        kind: SessionDeltaKind::Close,
-        key: key.clone(),
-        decision,
-        metadata,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
+    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+    key: key.clone(),
+    decision,
+    metadata,
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, };
 
     // Synthesize a binding identity with labels only — exactly what the
     // worker loop does when `bindings` is empty — and flush with NO live
@@ -6187,23 +6636,21 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
     // log selection; SESSION_CLOSE always emits.
     metadata.log_session_init = true;
 
-    let make_delta = |kind| SessionDelta {
-        kind,
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
+    let make_delta = |kind| SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind,
+    key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, };
 
     // Drive the production drain loop and return the stamped application_id off
     // the emitted RT_FLOW frame. `want_event_type` is the RT_FLOW event-type
@@ -6341,23 +6788,21 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     metadata.policy_id = 5;
     metadata.policy_counter = Some(bound_bee);
 
-    let delta = SessionDelta {
-        kind: SessionDeltaKind::Close,
-        key: test_key(),
-        decision: test_decision(),
-        metadata,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
+    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+    key: test_key(),
+    decision: test_decision(),
+    metadata,
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, };
 
     let (handle, rx) = crate::event_stream::test_worker_handle(
         8,
@@ -6453,23 +6898,21 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     );
     let event_stream = Some(handle);
 
-    let open = SessionDelta {
-        kind: SessionDeltaKind::Open,
-        key: key.clone(),
-        decision,
-        metadata,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
+    let open = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
+    key: key.clone(),
+    decision,
+    metadata,
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, };
 
     let ident = BindingIdentity {
         slot: 0,
@@ -6561,23 +7004,21 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         crate::event_stream::DataplaneEventRateLimitConfig::default(),
     );
 
-    let open = SessionDelta {
-        kind: SessionDeltaKind::Open,
-        key: key.clone(),
-        decision,
-        metadata,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
+    let open = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
+    key: key.clone(),
+    decision,
+    metadata,
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, };
 
     // Saturate the channel: fill every slot with a best-effort filler push so the
     // subsequent worker-loop lossless send finds it Full and enters the bounded
@@ -6691,23 +7132,21 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         crate::event_stream::DataplaneEventRateLimitConfig::default(),
     );
 
-    let open = SessionDelta {
-        kind: SessionDeltaKind::Open,
-        key: key.clone(),
-        decision,
-        metadata,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    };
+    let open = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
+    key: key.clone(),
+    decision,
+    metadata,
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement: false, };
     for _ in 0..capacity {
         handle.push_delta(&open, &forwarding.zone_name_to_id);
     }
@@ -6819,23 +7258,21 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             install_table_domain: 0,
             install_table_check: 0,
         };
-        SessionDelta {
-            kind: SessionDeltaKind::Close,
-            key,
-            decision,
-            metadata,
-            origin: SessionOrigin::ForwardFlow,
-            fabric_redirect_sync: false,
-            created_ns: 0,
-            last_seen_ns: 0,
-            counters: crate::session::SessionCounters::default(),
-            observed_tos: 0,
-            observed_tcp_flags: 0,
-            session_id: 0,
-            bulk_resync: false,
-            tcp_close_class: 0,
-            purge_retirement: false,
-        }
+        SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+        key,
+        decision,
+        metadata,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        tcp_close_class: 0,
+        purge_retirement: false, }
     };
 
     let ident = BindingIdentity {
@@ -9236,23 +9673,21 @@ fn only_the_owner_rg_export_produces_a_bulk_resync_delta_8593() {
 }
 
 fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
-    SessionDelta {
-        kind: SessionDeltaKind::Close,
-        key: key.clone(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync,
-        tcp_close_class: 0,
-        purge_retirement: false,
-    }
+    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+    key: key.clone(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync,
+    tcp_close_class: 0,
+    purge_retirement: false, }
 }
 
 /// Drive `flush_session_deltas` once against a SATURATED fallback buffer and
@@ -10272,23 +10707,21 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     };
     let mut metadata = test_metadata();
     metadata.log_session_init = true;
-    let make_delta = |kind| SessionDelta {
-        kind,
-        key: key.clone(),
-        decision: test_decision(),
-        metadata: metadata.clone(),
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 77,
-        bulk_resync: false,
-        tcp_close_class: 2,
-        purge_retirement: false,
-    };
+    let make_delta = |kind| SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind,
+    key: key.clone(),
+    decision: test_decision(),
+    metadata: metadata.clone(),
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 77,
+    bulk_resync: false,
+    tcp_close_class: 2,
+    purge_retirement: false, };
     let flush = |delta: SessionDelta| {
         let (handle, rx) = // CONNECTED, so the lossless peer-sync push can queue; the unconnected handle
         // refuses it before any frame reaches the channel.

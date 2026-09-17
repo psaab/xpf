@@ -23,12 +23,44 @@ use super::*;
 /// to tests, which build one `Coordinator` per `#[test]` and run them
 /// concurrently in a single process — as globals, every assertion about these
 /// counters depended on what every other test happened to do (#6819).
+/// #9856: open-window idle expiry. A window with no `wait_and_collect`
+/// activity this long is abandoned (Go side died mid-window — healthy paged
+/// exports refresh every call) and the next kick clears + proceeds instead
+/// of BUSY-looping. Generous vs the 15 s per-call bound; M3 replaces with
+/// explicit expiry errors + measured sizing.
+const EXPORT_WINDOW_IDLE_EXPIRY_NS: u64 = 60_000_000_000;
+
+/// #9856: the currently-open owner-RG export window. Private to this module:
+/// all access goes through the `open_export_*` methods so the BUSY / adopt /
+/// refresh / clear-if-ours protocol has exactly one implementation. Kick-time
+/// buffer+ack Arcs ride here so every continuation of the window drains the
+/// EXACT worker set the kick saw (a reconcile between pages can neither drop
+/// torn-down workers' buffers nor add a new worker into this window).
+pub(in crate::afxdp) struct OpenExportWindow {
+    sequence: u64,
+    incarnation: u64,
+    since_ns: u64,
+    buffers: Vec<Arc<crate::afxdp::binding_state::ExportBufferState>>,
+    acks: Vec<Arc<AtomicU64>>,
+    dropped_at_begin: Vec<u64>,
+    shed: u32,
+}
+
 pub(in crate::afxdp) struct SessionManager {
     pub(in crate::afxdp) synced: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) nat: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) forward_wire: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) owner_rg_indexes: SharedSessionOwnerRgIndexes,
     pub(in crate::afxdp) export_seq: AtomicU64,
+    /// #9856: random per-helper incarnation. It is emitted with every
+    /// export page so a restarted helper cannot reuse a sequence number
+    /// and accidentally resume an old window.
+    pub(in crate::afxdp) export_incarnation: u64,
+    /// #9856: the currently-open owner-RG export window (`None` = idle).
+    /// Shared with in-flight `OwnerRgExportWait` handles, which refresh
+    /// activity per page and clear-if-ours on terminal pages and error
+    /// paths. See `OpenExportWindow` + the `open_export_*` methods.
+    pub(in crate::afxdp) open_export: Arc<Mutex<Option<OpenExportWindow>>>,
     /// #2170 HA deferred-delete generation guard observability. These count how
     /// often the helper's in-memory SyncedSessionEntry generation guard refused
     /// a stale-generation install (`upsert_synced_session`, the
@@ -205,6 +237,8 @@ impl SessionManager {
             forward_wire: Arc::new(Mutex::new(FastMap::default())),
             owner_rg_indexes: SharedSessionOwnerRgIndexes::default(),
             export_seq: AtomicU64::new(0),
+            export_incarnation: crate::protocol::session_export_incarnation(),
+            open_export: Arc::new(Mutex::new(None)),
             install_stale_ignored: AtomicU64::new(0),
             synced_import_zone_unresolved: AtomicU64::new(0),
             synced_import_unpublished: AtomicU64::new(0),
@@ -215,6 +249,106 @@ impl SessionManager {
             import_cap_drops: AtomicU64::new(0),
             import_unknown_routing_domain: AtomicU64::new(0),
             import_reserve_refused: AtomicU64::new(0),
+        }
+    }
+    /// #9856: BUSY check for a fresh kick. `Some(open_seq)` when a non-idle
+    /// window is open (caller fails WITHOUT consuming a sequence); `None`
+    /// when kick may proceed (no window, or idle-expired — the subsequent
+    /// `begin` overwrites). MUST be called under the `ServerState` lock,
+    /// in the same critical section as the `begin` that follows it.
+    pub(in crate::afxdp) fn open_export_busy(&self, now_ns: u64) -> Option<u64> {
+        let open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        match open.as_ref() {
+            Some(w) if now_ns.saturating_sub(w.since_ns) < EXPORT_WINDOW_IDLE_EXPIRY_NS => {
+                Some(w.sequence)
+            }
+            _ => None,
+        }
+    }
+
+    /// #9856: record a fresh window after a `None` from `open_export_busy`.
+    pub(in crate::afxdp) fn open_export_begin(
+        &self,
+        sequence: u64,
+        now_ns: u64,
+        buffers: &[Arc<crate::afxdp::binding_state::ExportBufferState>],
+        acks: &[Arc<AtomicU64>],
+        shed: u32,
+    ) {
+        let dropped_at_begin = buffers.iter().map(|b| b.export_dropped()).collect();
+        *self.open_export.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenExportWindow {
+            sequence,
+            incarnation: self.export_incarnation,
+            since_ns: now_ns,
+            buffers: buffers.to_vec(),
+            acks: acks.to_vec(),
+            dropped_at_begin,
+            shed,
+        });
+    }
+
+    /// #9856: helper incarnation advertised with every page.
+    pub(in crate::afxdp) fn export_incarnation(&self) -> u64 {
+        self.export_incarnation
+    }
+
+    /// #9856: adopt the open window for a continuation: clones out the
+    /// sequence, incarnation, buffers, acks, drop baselines and shed count.
+    pub(in crate::afxdp) fn open_export_adopt(
+        &self,
+        now_ns: u64,
+    ) -> Option<(
+        u64,
+        u64,
+        Vec<Arc<crate::afxdp::binding_state::ExportBufferState>>,
+        Vec<Arc<AtomicU64>>,
+        Vec<u64>,
+        u32,
+    )> {
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        open.as_mut().map(|w| {
+            w.since_ns = now_ns;
+            (
+                w.sequence,
+                w.incarnation,
+                w.buffers.clone(),
+                w.acks.clone(),
+                w.dropped_at_begin.clone(),
+                w.shed,
+            )
+        })
+    }
+
+    /// #9856: refresh activity iff `sequence` is still the open window
+    /// (per-page proof of collection; healthy paged exports never idle out
+    /// no matter how many pages they span).
+    pub(in crate::afxdp) fn open_export_refresh_if(&self, sequence: u64, now_ns: u64) {
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = open.as_mut() {
+            if w.sequence == sequence {
+                w.since_ns = now_ns;
+            }
+        }
+    }
+
+    /// #9856: clear the open window iff it is still `sequence` (terminal
+    /// pages and error paths). Single-waiter-per-window + kick-under-lock:
+    /// the sequence match means this can never clear a newer window.
+    pub(in crate::afxdp) fn open_export_clear_if(&self, sequence: u64) {
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(open.as_ref(), Some(w) if w.sequence == sequence) {
+            *open = None;
+        }
+    }
+
+    /// Test seam for the idle-expiry path: overwrite the activity stamp of
+    /// the open window (no-op when idle), so a cell can age a window out
+    /// without sleeping 60 s.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn open_export_set_since_for_test(&self, since_ns: u64) {
+        let mut open = self.open_export.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = open.as_mut() {
+            w.since_ns = since_ns;
         }
     }
 }

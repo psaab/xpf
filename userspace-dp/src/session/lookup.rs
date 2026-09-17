@@ -41,6 +41,19 @@ pub(in crate::session) struct TcpStatePropagation {
     pub(in crate::session) handshake_completed: bool,
 }
 
+/// #9856: outcome of one budgeted export-walk slice.
+///
+/// `ResumeAt(next)` continues the cycle at slot `next` — including a
+/// callback-requested stop AT the failed slot (even slot 0: the enum has no
+/// bare-0 ambiguity, so stop-at-0 never reads as completion). `Complete`
+/// means the walk wrapped past the high watermark with every callback
+/// accepting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportWalkOutcome {
+    ResumeAt(usize),
+    Complete,
+}
+
 impl SessionTable {
     pub fn lookup(
         &mut self,
@@ -519,7 +532,7 @@ impl SessionTable {
         {
             return None;
         }
-        self.remove_entry(key).map(|entry| SessionLookup {
+        self.remove_entry(key, RemovalKind::Transfer).map(|entry| SessionLookup {
             decision: entry.decision,
             metadata: entry.metadata,
         })
@@ -713,5 +726,74 @@ impl SessionTable {
         // Wrap to 0 on cycle completion so the caller can detect "table fully
         // walked" and pace the next cycle to the freshness window.
         if end >= cap { 0 } else { end }
+    }
+
+    /// #9856: budgeted, resumable owner-RG export walk with the kick-epoch
+    /// predicate — same cursor/budget contract as
+    /// [`Self::iter_with_idle_budgeted`]: `budget` counts examined slab
+    /// SLOTS (occupied or vacant), the callback fires only for entries
+    /// satisfying the export predicate below. The callback returns false to
+    /// stop at the current slot (backpressure: the failed slot becomes the
+    /// next cursor); the walk returns [`ExportWalkOutcome`] (`ResumeAt` or
+    /// `Complete`), so stop-at-0 never reads as completion.
+    ///
+    /// The predicate is `forward_export_candidates_for_owner_rgs` evaluated
+    /// per entry plus `install_epoch <= kick_epoch`: owner-RG membership
+    /// (via `metadata.owner_rg_id`, which the index key always equals —
+    /// every index mutation pairs with the metadata write: install,
+    /// update/refresh reindex, remove; demote touches neither), forward,
+    /// locally-owned, non-seed, non-fabric-ingress, disposition in
+    /// {ForwardCandidate, FabricRedirect}.
+    ///
+    /// Unlike the refresh/sweep precedents, resumption is EXACT for the
+    /// stated set, not deliberately approximate: a slot reused below the
+    /// cursor holds a new incarnation with a higher epoch, so the epoch
+    /// conjunct skips it by construction (post-M1 epochs are write-once).
+    /// The contract is "every session that existed at the kick", evaluated
+    /// with visit-time attributes (§3e(b)).
+    pub fn iter_export_budgeted(
+        &self,
+        cursor: usize,
+        budget: usize,
+        kick_epoch: u64,
+        owner_rgs: &[i32],
+        mut f: impl FnMut(&SessionKey, SessionDecision, &SessionMetadata, SessionOrigin) -> bool,
+    ) -> ExportWalkOutcome {
+        use self::ExportWalkOutcome::*;
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        if cap == 0 || budget == 0 {
+            return Complete;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
+            if let Some(record) = self.entries.get(idx) {
+                let entry = &record.entry;
+                if entry.install_epoch > kick_epoch {
+                    continue;
+                }
+                if !owner_rgs.contains(&entry.metadata.owner_rg_id) {
+                    continue;
+                }
+                if entry.metadata.is_reverse
+                    || entry.origin.is_peer_synced()
+                    || entry.origin.is_transient_local_seed()
+                    || entry.origin.is_local_tun_origin()
+                    || entry.metadata.fabric_ingress
+                {
+                    continue;
+                }
+                if !matches!(
+                    entry.decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+                ) {
+                    continue;
+                }
+                if !f(&record.key, entry.decision, &entry.metadata, entry.origin) {
+                    return ResumeAt(idx);
+                }
+            }
+        }
+        if end >= cap { Complete } else { ResumeAt(end) }
     }
 }

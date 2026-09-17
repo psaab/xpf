@@ -661,6 +661,7 @@ fn spawn_workers(
         let stop = Arc::new(AtomicBool::new(false));
         let heartbeat = Arc::new(AtomicU64::new(monotonic_nanos()));
         let session_export_ack = Arc::new(AtomicU64::new(0));
+        let export_buffer = Arc::new(crate::afxdp::binding_state::ExportBufferState::new());
         let cos_status = Arc::new(ArcSwap::from_pointee(Vec::new()));
         let commands = worker_command_queues
             .get(&worker_id)
@@ -686,10 +687,12 @@ fn spawn_workers(
         let record_exception_ring = recent_exceptions.clone();
         let last_resolution = Arc::new(Mutex::new(None));
         let record_last_resolution = last_resolution.clone();
+        let record_export_buffer = export_buffer.clone();
         let recent_session_deltas = coord.recent_session_deltas.clone();
         let stop_clone = stop.clone();
         let heartbeat_clone = heartbeat.clone();
         let session_export_ack_clone = session_export_ack.clone();
+        let export_buffer_clone = export_buffer.clone();
         let commands_clone = commands.clone();
         let peer_commands_clone = worker_command_queues
             .iter()
@@ -745,6 +748,7 @@ fn spawn_workers(
             stop_clone,
             heartbeat_clone,
             session_export_ack_clone,
+            export_buffer_clone,
             event_stream_handle,
             startup_report_tx_worker,
         );
@@ -966,6 +970,7 @@ busy — forced private bind failure (test seam #6245)"
                         panic: record_panic,
                         exception_ring: record_exception_ring,
                         last_resolution: record_last_resolution,
+                        export_buffer: record_export_buffer,
                     },
                     Some(join),
                 );

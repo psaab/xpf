@@ -354,7 +354,11 @@
     "type": ""
   },
   "control_response": {
-    "ok": false
+    "ok": false,
+    "session_export_dropped": 0,
+    "session_export_incarnation": 0,
+    "session_export_more": false,
+    "session_export_seq": 0
   },
   "cos_active_flow_count_status": {
     "active_flow_count": 0,
@@ -1012,6 +1016,7 @@
     "session_delete_replica_dropped": 0,
     "session_delete_stale_ignored": 0,
     "session_delta_schema_fingerprint": 0,
+    "session_export_incarnation": 0,
     "session_export_paging_protocol_version": 0,
     "session_install_admission_refused": 0,
     "session_install_partial": 0,
@@ -1178,7 +1183,10 @@
   "session_export_request": {
     "continuation": false,
     "max": 0,
-    "owner_rgs": []
+    "owner_rgs": [],
+    "session_export_incarnation": 0,
+    "session_export_paging_protocol_version": 0,
+    "session_export_seq": 0
   },
   "session_sync_request": {
     "addr_family": 0,

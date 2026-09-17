@@ -123,6 +123,9 @@ mod sharded_neighbor;
 #[path = "cos/mod.rs"]
 mod cos;
 mod session_glue;
+// #9856: the CommandExport direct conversion (control leg), so the worker
+// loop's cursor slice can reach it without naming the private module.
+pub(in crate::afxdp) use session_delta::{export_close_direct, export_open_direct};
 // #2442: re-export the owner-RG export walk + its chunkable candidate collector
 // so the worker loop's loss-of-sync resync path and the session-module resync
 // test can reach them without naming the private `session_glue` module.
@@ -453,6 +456,49 @@ const _: () = assert!(
 const MAX_RECENT_EXCEPTIONS: usize = 32;
 const MAX_RECENT_SESSION_DELTAS: usize = 64;
 const MAX_PENDING_SESSION_DELTAS: usize = 4096;
+/// #9856: one export page per worker. Sized to the Go page
+/// (`ownerRGExportPageDeltas = 8192`): the measured worst-case delta is 1605
+/// bytes of JSON, so a full buffer is ~12.5 MiB against the 64 MiB response cap.
+/// Deliberately far below DEFAULT_MAX_SESSIONS: the worker pauses without
+/// advancing when full and the control thread drains incrementally, so no
+/// bound on sessions-per-worker is implied here.
+const EXPORT_BUFFER_CAP_ENTRIES: usize = 8192;
+/// #9856: bounded session-side tombstone retention. Included in the
+/// process-wide export-state assertion below.
+const EXPORT_TOMBSTONE_CAP_ENTRIES: usize = crate::session::MAX_TOMBSTONES_FOR_EXPORT;
+/// #9856 (G-F3): documented worker-buffer cap. The Go data-page bound is 512
+/// pages × 8192 = 4,194,304 deltas: 16 full workers ×
+/// DEFAULT_MAX_SESSIONS × two records per kick-visible incarnation (open plus
+/// terminal tombstone). The binding planner structurally caps each interface's
+/// queue ids at the same 16-slot stride, so distinct worker buffers cannot
+/// exceed this cap; Go permits one additional terminal probe.
+const EXPORT_WORKER_CAP: usize = 16;
+// The worker planner caps each interface's queue ids at this same stride, so
+// the number of distinct worker buffers is structurally bounded by this cap.
+const _: () = assert!(
+    EXPORT_WORKER_CAP == crate::server::helpers::BINDING_QUEUES_PER_IFACE,
+    "export worker cap must match the planner's queue stride (#9856)"
+);
+/// Worst-case JSON bytes for one SessionDeltaInfo (full-width IPv6
+/// literals, max numerics — same measured figure the Go pager derives from).
+const EXPORT_WORST_CASE_DELTA_JSON_BYTES: usize = 1605;
+/// Process-wide export-state byte bound (all worker FIFOs and tombstone logs
+/// full at once, using the conservative per-delta JSON sizing).
+const EXPORT_PROCESS_BYTE_BOUND: usize = 512 * 1024 * 1024;
+const _: () = assert!(
+    EXPORT_WORKER_CAP
+        * (EXPORT_BUFFER_CAP_ENTRIES + EXPORT_TOMBSTONE_CAP_ENTRIES)
+        * EXPORT_WORST_CASE_DELTA_JSON_BYTES
+        <= EXPORT_PROCESS_BYTE_BOUND,
+    "export state must fit the process byte bound (#9856)"
+);
+
+#[cfg(test)]
+pub(crate) fn transfer_tombstone_drops_for_export_test(drops: u64) -> u64 {
+    let buffer = ExportBufferState::new();
+    buffer.note_export_tombstone_drops(drops);
+    buffer.export_dropped()
+}
 const BIND_RETRY_ATTEMPTS: usize = 20;
 const BIND_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_PATH_TUN: &str = "xpf-usp0";

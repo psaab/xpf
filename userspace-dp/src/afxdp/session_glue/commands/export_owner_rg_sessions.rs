@@ -16,16 +16,29 @@ use super::super::*;
 /// drain the ring to the peer mid-export. The fix mirrors the #2442
 /// loss-of-sync resync: the handler only RECORDS the owner RGs here; the
 /// worker loop (`worker::loop_body`), which holds the binding + flush
-/// machinery, performs the same chunked drain-as-you-export (collect
-/// candidates -> emit in < cap chunks -> drain between chunks) so the complete
-/// snapshot ships without ever overflowing the ring. The sequence is acked
-/// only after that chunked export drains to empty.
+/// machinery, drives a resumable multi-pass cursor over the table
+/// (budgeted slices: direct-convert into the export buffer + paced
+/// ring/echo + drain between slices, #9856) so the complete snapshot
+/// ships without ever overflowing the ring. The sequence is acked
+/// only after the final slice completes.
 pub(in crate::afxdp::session_glue) fn handle_export_owner_rg_sessions(
+    sessions: &mut SessionTable,
     exported_sequences: &mut Vec<u64>,
     export_owner_rgs: &mut Vec<i32>,
+    export_kick_epoch: &mut Option<u64>,
     sequence: u64,
     owner_rgs: Vec<i32>,
 ) {
+    // #9856: capture the kick epoch at accept (first command wins; no installs
+    // run during dispatch, so every accept in one slice would read the same
+    // value). The worker loop exports entries with install_epoch <= kick.
+    if export_kick_epoch.is_none() {
+        // Drop removals that predate this fresh window. They have no matching
+        // open in the export and could close a reused key on the peer.
+        sessions.discard_tombstones_for_export();
+        *export_kick_epoch = Some(sessions.current_epoch());
+    }
+
     for rg in owner_rgs {
         if !export_owner_rgs.contains(&rg) {
             export_owner_rgs.push(rg);

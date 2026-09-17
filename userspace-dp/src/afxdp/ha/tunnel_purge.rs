@@ -83,6 +83,7 @@ impl crate::afxdp::Coordinator {
                 if !entry.metadata.is_reverse {
                     reservations.push((entry.key.clone(), entry.decision.nat));
                     deltas.push(crate::session::SessionDelta {
+                        provenance: crate::session::ExportProvenance::Incremental,
                         kind: crate::session::SessionDeltaKind::Close,
                         key: entry.key.clone(),
                         decision: entry.decision,

@@ -367,6 +367,64 @@ pub(in crate::afxdp) fn session_delta_info(
     }
 }
 
+/// #9856: direct CommandExport conversion — the CONTROL leg of the export.
+/// Converts the SAME Open delta `open_export_delta` builds to
+/// `SessionDeltaInfo` WITHOUT pushing ring/flush/echo itself (no
+/// `push_delta`, no binding buffer). The worker loop runs paced ring+flush
+/// echo slices ALONGSIDE (today's exact echo bytes/RTFLOW/fallback
+/// preserved) until #9630 keys suppression on `CommandExport` provenance
+/// after fail-closed v2. Byte-equivalence with the ring leg holds by
+/// construction (one delta builder + one converter). Returns None for
+/// reverse entries.
+pub(in crate::afxdp) fn export_open_direct(
+    sessions: &crate::session::SessionTable,
+    ident: &BindingIdentity,
+    zone_id_to_name: &FastMap<u16, String>,
+    key: SessionKey,
+    decision: SessionDecision,
+    metadata: SessionMetadata,
+    origin: SessionOrigin,
+    provenance: crate::session::ExportProvenance,
+) -> Option<SessionDeltaInfo> {
+    sessions
+        .open_export_delta_with_provenance(
+            key,
+            decision,
+            metadata,
+            origin,
+            true,
+            provenance,
+        )
+        .map(|delta| session_delta_info(ident, &delta, zone_id_to_name))
+}
+
+/// #9856: convert a terminal-removal tombstone into the CONTROL leg of
+/// the active owner-RG export. Tombstones are deliberately not emitted
+/// through the incremental ring or event stream: they repair a live
+/// export window whose cursor may no longer visit the removed entry.
+pub(in crate::afxdp) fn export_close_direct(
+    ident: &BindingIdentity,
+    zone_id_to_name: &FastMap<u16, String>,
+    tombstone: &crate::session::ExpiredSession,
+) -> SessionDeltaInfo {
+    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+    key: tombstone.key.clone(),
+    decision: tombstone.decision,
+    metadata: tombstone.metadata.clone(),
+    origin: tombstone.origin,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: tombstone.session_id,
+    bulk_resync: true,
+    tcp_close_class: tombstone.close_class,
+    purge_retirement: false, };
+    session_delta_info(ident, &delta, zone_id_to_name)
+}
+
 // #2669: `live` is `Option` because a drain cycle can coincide with an
 // empty `bindings` slice (XSK sockets admin-down / unconfigured during a
 // reload or transaction while the session table is still aging entries

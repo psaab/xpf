@@ -4712,7 +4712,10 @@ fn export_owner_rg_does_not_hold_state_lock_during_ack_wait() {
         r.session_export = Some(SessionExportRequest {
             owner_rgs: vec![1],
             max: 0,
+            protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
             continuation: false,
+            continuation_incarnation: 0,
+            continuation_sequence: 0,
         });
         run_request(export_state, r)
     });
@@ -4756,8 +4759,8 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
     let ack = {
         let mut guard = state.lock().expect("lock state");
         let ack = guard.afxdp.test_install_export_worker(0);
-        // 5 pending deltas on one binding, against a cap of 3.
-        guard.afxdp.test_seed_binding_session_deltas(0, 5);
+        // 5 export deltas on one worker, against a cap of 3.
+        guard.afxdp.test_seed_export_buffer_deltas(0, 5);
         ack
     };
     // Ack every sequence up front so neither call blocks on the ack-wait.
@@ -4767,7 +4770,10 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
     page1_req.session_export = Some(SessionExportRequest {
         owner_rgs: vec![1],
         max: 3,
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
         continuation: false,
+        continuation_incarnation: 0,
+        continuation_sequence: 0,
     });
     let page1 = run_request(state.clone(), page1_req);
     assert!(page1.ok, "page 1 failed: {}", page1.error);
@@ -4788,7 +4794,10 @@ fn export_owner_rg_sessions_reports_more_and_a_continuation_pages_the_window() {
     page2_req.session_export = Some(SessionExportRequest {
         owner_rgs: vec![1],
         max: 3,
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
         continuation: true,
+        continuation_incarnation: page1.session_export_incarnation,
+        continuation_sequence: page1.session_export_seq,
     });
     let page2 = run_request(state.clone(), page2_req);
     assert!(page2.ok, "page 2 failed: {}", page2.error);
@@ -4824,7 +4833,7 @@ fn export_owner_rg_sessions_uncapped_reports_no_more() {
     let ack = {
         let mut guard = state.lock().expect("lock state");
         let ack = guard.afxdp.test_install_export_worker(0);
-        guard.afxdp.test_seed_binding_session_deltas(0, 5);
+        guard.afxdp.test_seed_export_buffer_deltas(0, 5);
         ack
     };
     ack.store(u64::MAX, Ordering::Release);
@@ -4833,7 +4842,10 @@ fn export_owner_rg_sessions_uncapped_reports_no_more() {
     r.session_export = Some(SessionExportRequest {
         owner_rgs: vec![1],
         max: 0,
+        protocol_version: crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
         continuation: false,
+        continuation_incarnation: 0,
+        continuation_sequence: 0,
     });
     let resp = run_request(state, r);
     assert!(resp.ok, "export failed: {}", resp.error);

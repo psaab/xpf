@@ -25,25 +25,14 @@ pub(crate) struct ProcessStatus {
     pub config_snapshot_protocol_version: i32,
     #[serde(rename = "inject_packet_tuple_protocol_version", default)]
     pub inject_packet_tuple_protocol_version: i32,
-    /// #9344: the version of the owner-RG session export PAGING contract this
-    /// helper implements. 0 (or absent) means "no paging" — the Go caller then
-    /// falls back to the pre-#9344 single-shot `max = 0` request rather than
-    /// trying to page, because a helper that predates this field honours `max`
-    /// and TRUNCATES: it would return exactly `max` deltas with no
-    /// `session_export_more` bit, and a truncated window is precisely what
-    /// #5085's authoritative receiver turns into deleted live sessions on the
-    /// peer.
-    ///
-    /// An explicit version is used rather than probing because the ambiguous
-    /// case is unresolvable by observation: an answer of exactly `max` deltas
-    /// with `more` false is EITHER a new helper whose page consumed the window
-    /// exactly OR an old helper that silently dropped the remainder, and the
-    /// probe that would separate them (send a continuation) is itself unsafe on
-    /// an old helper — serde ignores the unknown `continuation` field, so the
-    /// old helper would run a second full phase-1 export and hand back a fresh
-    /// set from a different instant.
+    /// #9344/#9856: owner-RG export paging contract version. Version 2
+    /// requires request markers plus the response's incarnation, sequence,
+    /// and dropped fields; older helpers are not safe to page.
     #[serde(rename = "session_export_paging_protocol_version", default)]
     pub session_export_paging_protocol_version: i32,
+    /// #9856: random per-helper incarnation, changed on every helper restart.
+    #[serde(rename = "session_export_incarnation", default)]
+    pub session_export_incarnation: u64,
     /// #7194: DERIVED fingerprint of the session-open delta wire schema
     /// (protocol::session_delta_schema). Unlike the two version integers above
     /// it is not hand-maintained -- it is computed from the serialized shape of

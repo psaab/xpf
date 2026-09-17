@@ -2038,23 +2038,21 @@ fn purge_close_without_reinstall_flushes_through_flush() {
 }
 
 fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
-    SessionDelta {
-        kind: SessionDeltaKind::Close,
-        key: pbr_key(),
-        decision: stamped_decision(unusable_resolution()),
-        metadata: pbr_metadata(),
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        purge_retirement,
-    }
+    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+    key: pbr_key(),
+    decision: stamped_decision(unusable_resolution()),
+    metadata: pbr_metadata(),
+    origin: SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    purge_retirement, }
 }
 
 /// Round 3 item 3, flow-cancel gating: cancelled flows are DROPPED, so the

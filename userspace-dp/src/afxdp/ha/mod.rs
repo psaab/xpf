@@ -24,7 +24,7 @@ pub(crate) use self::session_domain::SessionDomain;
 pub(crate) use self::session_domain::HaRefreshOutcome;
 pub(crate) use self::export::{AllSessionsExport, OwnerRgExportWait};
 #[cfg(test)]
-pub(crate) use self::export::drain_session_deltas_from_live;
+pub(crate) use self::export::drain_export_deltas_from_workers;
 
 #[cfg(test)]
 #[path = "../ha_tests.rs"]

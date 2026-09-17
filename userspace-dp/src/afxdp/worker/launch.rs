@@ -182,6 +182,7 @@ pub(crate) struct WorkerControlChannels {
     pub(in crate::afxdp) stop: Arc<AtomicBool>,
     pub(in crate::afxdp) heartbeat: Arc<AtomicU64>,
     pub(in crate::afxdp) session_export_ack: Arc<AtomicU64>,
+    pub(in crate::afxdp) export_buffer: Arc<crate::afxdp::binding_state::ExportBufferState>,
     pub(in crate::afxdp) event_stream: Option<crate::event_stream::EventStreamWorkerHandle>,
     pub(in crate::afxdp) startup_report_tx: std::sync::mpsc::Sender<WorkerStartupReport>,
 }
@@ -189,9 +190,9 @@ pub(crate) struct WorkerControlChannels {
 impl WorkerControlChannels {
     /// Assemble the control-channel bundle from its per-worker inputs
     /// (the command-queue projections + the fresh stop/heartbeat/ack
-    /// atomics + the event-stream handle + the readiness sender). This
-    /// is the single wiring site the production caller and the
-    /// `Arc::ptr_eq` heartbeat/export-ack wiring test share.
+    /// atomics + the export buffer + the event-stream handle + the
+    /// readiness sender). This is the single wiring site the production
+    /// caller and the `Arc::ptr_eq` heartbeat/export-ack wiring test share.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::afxdp) fn new(
         commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
@@ -200,6 +201,7 @@ impl WorkerControlChannels {
         stop: Arc<AtomicBool>,
         heartbeat: Arc<AtomicU64>,
         session_export_ack: Arc<AtomicU64>,
+        export_buffer: Arc<crate::afxdp::binding_state::ExportBufferState>,
         event_stream: Option<crate::event_stream::EventStreamWorkerHandle>,
         startup_report_tx: std::sync::mpsc::Sender<WorkerStartupReport>,
     ) -> Self {
@@ -210,6 +212,7 @@ impl WorkerControlChannels {
             stop,
             heartbeat,
             session_export_ack,
+            export_buffer,
             event_stream,
             startup_report_tx,
         }
@@ -419,6 +422,7 @@ mod tests {
             stop.clone(),
             heartbeat.clone(),
             session_export_ack.clone(),
+            Arc::new(crate::afxdp::binding_state::ExportBufferState::new()),
             None,
             tx,
         );

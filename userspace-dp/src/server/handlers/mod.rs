@@ -134,6 +134,9 @@ pub(crate) fn handle_stream(
         status: None,
         session_deltas: Vec::new(),
         session_export_more: false,
+        session_export_dropped: 0,
+        session_export_incarnation: 0,
+        session_export_seq: 0,
         idle_leases: Vec::new(),
         display_leases: Vec::new(),
         session_counters: Vec::new(),
@@ -436,7 +439,10 @@ pub(crate) fn handle_stream(
             "export_owner_rg_sessions" => {
                 // #2962: locked phase only — enqueue + capture the wait
                 // handle. The blocking ack-wait runs after the lock drops.
-                export_wait = Some(export::owner_rg_kick(&mut guard, request.session_export));
+                // #9856: BUSY (or no-window continuation) folds into the
+                // response here; no wait runs without a handle.
+                export_wait =
+                    export::owner_rg_kick(&mut guard, request.session_export, &mut response);
             }
             "export_all_sessions" => {
                 // #4054: locked phase only — snapshot + capture the push
