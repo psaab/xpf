@@ -608,6 +608,7 @@ pub(super) fn retry_pending_neigh(
         ) {
             record_mirror_clone_result(&binding.live, result, source_frame.len());
         }
+        let selected_tcp_mss = select_tcp_mss(forwarding, &decision, &pkt.meta.into());
         let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
             &*area,
             pkt.desc,
@@ -615,6 +616,7 @@ pub(super) fn retry_pending_neigh(
             &decision,
             false,
             expected_ports,
+            selected_tcp_mss,
         ) else {
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;

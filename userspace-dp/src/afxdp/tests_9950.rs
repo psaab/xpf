@@ -409,6 +409,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         &fwd.decision,
         false,
         None,
+        0,
     )
     .expect("F-036: TX rewrite must succeed");
     let out = area
@@ -620,6 +621,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         &fwd.decision,
         false,
         None,
+        0,
     )
     .expect("F-053: TX rewrite must succeed");
     let out = area
@@ -792,6 +794,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             &fwd.decision,
             false,
             None,
+            0,
         )
         .expect("rewrite");
         let out = area
@@ -912,6 +915,7 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
         &fwd.decision,
         false,
         None,
+        0,
     )
     .expect("rewrite");
     let out = area

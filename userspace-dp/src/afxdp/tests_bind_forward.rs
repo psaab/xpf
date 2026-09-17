@@ -1895,6 +1895,7 @@ fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
         },
         false,
         None,
+        0,
     )
     .expect("in-place forward");
     let out = area

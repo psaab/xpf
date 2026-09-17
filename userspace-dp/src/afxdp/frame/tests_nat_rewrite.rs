@@ -543,6 +543,7 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_checksum_valid_after_snat() {
         &decision,
         false,
         None,
+        0,
     )
     .expect("in-place v6 forward");
     let out = area
@@ -592,6 +593,7 @@ fn rewrite_forwarded_frame_in_place_pushes_vlan_by_shifting_tx_descriptor() {
         &l2_rewrite_test_decision(80),
         false,
         None,
+        0,
     )
     .expect("vlan push");
 
@@ -651,6 +653,7 @@ fn rewrite_forwarded_frame_in_place_pops_vlan_by_shifting_tx_descriptor() {
         &l2_rewrite_test_decision(0),
         false,
         None,
+        0,
     )
     .expect("vlan pop");
 
@@ -706,6 +709,7 @@ fn rewrite_forwarded_frame_in_place_pushes_vlan_with_memmove_without_headroom() 
         &l2_rewrite_test_decision(80),
         false,
         None,
+        0,
     )
     .expect("vlan push fallback");
 
@@ -811,6 +815,7 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_echo_identifier_and_sequence() 
         &decision,
         false,
         None,
+        0,
     )
     .expect("in-place v6 echo forward");
     let out = area
@@ -875,6 +880,7 @@ fn rewrite_forwarded_frame_in_place_translates_icmpv4_echo_identifier() {
         &icmp_test_decision(fwd_nat),
         false,
         None,
+        0,
     )
     .expect("fwd rewrite");
     let out = area
@@ -914,6 +920,7 @@ fn rewrite_forwarded_frame_in_place_translates_icmpv4_echo_identifier() {
         &icmp_test_decision(rev_nat),
         false,
         None,
+        0,
     )
     .expect("rev rewrite");
     let rout = rarea
@@ -1202,6 +1209,7 @@ fn rewrite_forwarded_frame_in_place_translates_icmpv6_echo_identifier() {
         &icmp_test_decision(fwd_nat),
         false,
         None,
+        0,
     )
     .expect("fwd v6 rewrite");
     let out = area
@@ -1239,6 +1247,7 @@ fn rewrite_forwarded_frame_in_place_translates_icmpv6_echo_identifier() {
         &icmp_test_decision(rev_nat),
         false,
         None,
+        0,
     )
     .expect("rev v6 rewrite");
     let rout = rarea
@@ -1302,6 +1311,7 @@ fn rewrite_forwarded_frame_in_place_dnat_preserves_icmpv4_identifier() {
         &icmp_test_decision(dnat),
         false,
         None,
+        0,
     )
     .expect("dnat rewrite");
     let out = area
@@ -1370,6 +1380,7 @@ fn restore_icmpv4_identifier_repairs_the_icmp_checksum_5191() {
         &icmp_test_decision(NatDecision::default()),
         false,
         None,
+        0,
     )
     .expect("in-place icmpv4 forward");
     let out = area
@@ -1456,6 +1467,7 @@ fn restore_icmpv4_identifier_skips_a_non_query_type_5191() {
         &icmp_test_decision(NatDecision::default()),
         false,
         None,
+        0,
     )
     .expect("in-place icmpv4 redirect forward");
     let out = area
@@ -1515,6 +1527,7 @@ fn restore_icmpv6_identifier_skips_a_non_query_type_5191() {
         &icmp_test_decision(NatDecision::default()),
         false,
         None,
+        0,
     )
     .expect("in-place icmpv6 mld forward");
     let out = area

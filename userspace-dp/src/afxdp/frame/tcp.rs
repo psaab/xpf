@@ -317,8 +317,16 @@ pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
                 // Incremental TCP checksum update per RFC 1624:
                 //   HC' = HC + m + ~m'  (ones-complement, end-around carry)
                 // The result is stored directly; no further negation.
-                let old_val = u16::from_be_bytes(old_bytes) as u32;
-                let new_val = max_mss as u32;
+                let old_val = if pos & 1 == 0 {
+                    u16::from_be_bytes(old_bytes)
+                } else {
+                    u16::from_be_bytes(old_bytes).swap_bytes()
+                } as u32;
+                let new_val = if pos & 1 == 0 {
+                    max_mss
+                } else {
+                    max_mss.swap_bytes()
+                } as u32;
                 let old_csum = u16::from_be_bytes([tcp[16], tcp[17]]) as u32;
                 let mut sum = old_csum + old_val + (!new_val & 0xFFFF);
                 sum = (sum & 0xFFFF) + (sum >> 16);

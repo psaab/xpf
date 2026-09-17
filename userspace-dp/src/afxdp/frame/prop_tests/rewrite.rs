@@ -302,7 +302,7 @@ proptest! {
 
         let decision = make_decision(&pkt, nat, tx_vlan);
         let generic = rewrite_forwarded_frame_in_place(
-            &area_a, desc, pkt.meta, &decision, false, None,
+            &area_a, desc, pkt.meta, &decision, false, None, 0,
         );
         let rd = make_descriptor(&pkt, nat, tx_vlan);
         let fast = apply_rewrite_descriptor(&area_b, desc, pkt.meta, &rd, None);
@@ -419,7 +419,7 @@ fn pin_ttl_expired_declines_l3_untouched() {
         let area = area_with_frame(&pkt.frame);
         let decision = make_decision(&pkt, nat, 0);
         assert!(
-            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None)
+            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None, 0)
                 .is_none(),
             "generic path must decline TTL≤1 (v6={v6})"
         );
@@ -497,7 +497,7 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
         };
         let decision = make_decision(pkt, nat, 0);
         assert!(
-            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None)
+            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None, 0)
                 .is_none(),
             "generic must decline: {label}"
         );
@@ -586,7 +586,7 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
         // UMEM chunk → VlanPushMemmoveNoHeadroom (the memmove path).
         let decision = make_decision(&pkt, NatDecision::default(), 100);
         assert!(
-            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None)
+            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None, 0)
                 .is_none(),
             "generic must decline TTL≤1 on the vlan-push memmove path"
         );
@@ -623,7 +623,7 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
         let rd = make_descriptor(&pkt, nat, 0);
         let decision = make_decision(&pkt, nat, 0);
         let result = apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).or_else(|| {
-            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None)
+            rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None, 0)
         });
         assert!(
             result.is_none(),
@@ -780,6 +780,7 @@ fn pin_5466_descriptor_success_matches_generic() {
             &make_decision(&pkt, nat, tx_vlan),
             false,
             None,
+            0,
         )
         .expect("generic rewrite must succeed");
 
@@ -905,8 +906,9 @@ fn pin_nptv6_descriptor_matches_generic_byte_for_byte() {
     // Generic slow path.
     let area_g = area_with_frame(&pkt.frame);
     let decision = make_decision(&pkt, nptv6_nat, 0);
-    let generic = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None)
-        .expect("generic NPTv6 rewrite must succeed");
+    let generic =
+        rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None, 0)
+            .expect("generic NPTv6 rewrite must succeed");
 
     // Descriptor fast path — descriptor built exactly as the flow cache does,
     // including the nptv6 flag (#2652) and the zero L4 csum delta.
@@ -995,8 +997,9 @@ fn pin_nptv6_composes_with_dnat_checksum_valid() {
     // Generic slow path.
     let area_g = area_with_frame(&pkt.frame);
     let decision = make_decision(&pkt, nat, 0);
-    let generic = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None)
-        .expect("generic NPTv6+DNAT rewrite must succeed");
+    let generic =
+        rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None, 0)
+            .expect("generic NPTv6+DNAT rewrite must succeed");
 
     // Descriptor fast path -- built exactly as the flow cache does,
     // including the nptv6 flag. Unlike pure NPTv6 (#2652), the compose
@@ -1106,7 +1109,7 @@ fn pin_1838_generic_v6_nat_ext_header_rewrites_real_l4() {
     };
     let area_g = area_with_frame(&pkt.frame);
     let decision = make_decision(&pkt, nat, 0);
-    let g = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None)
+    let g = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None, 0)
         .expect("generic in-place rewrite succeeds");
     let area_d = area_with_frame(&pkt.frame);
     let rd = make_descriptor(&pkt, nat, 0);
@@ -1186,7 +1189,7 @@ fn pin_1839_v6_tcp_zero_encoding_parity() {
 
     let area = area_with_frame(&pkt.frame);
     let decision = make_decision(&pkt, nat, 0);
-    let g = rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None)
+    let g = rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None, 0)
         .expect("generic succeeds");
     let out_g = area.slice(g.offset as usize, g.len as usize).unwrap();
     assert_eq!(
@@ -1259,7 +1262,7 @@ fn run_both_paths(pkt: &ValidPacket, nat: NatDecision) -> (Vec<u8>, Vec<u8>) {
     };
     let area_g = area_with_frame(&pkt.frame);
     let decision = make_decision(pkt, nat, 0);
-    let g = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None)
+    let g = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None, 0)
         .expect("generic in-place rewrite succeeds");
     let area_d = area_with_frame(&pkt.frame);
     let rd = make_descriptor(pkt, nat, 0);

@@ -1073,6 +1073,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     && owner_matches_target
                     && matches!(request.frame, PendingForwardFrame::Live);
                 if can_rewrite_in_place {
+                    let selected_tcp_mss =
+                        select_tcp_mss(forwarding, &request.decision, &request.meta);
                     match rewrite_forwarded_frame_in_place(
                         unsafe { &*ingress_area },
                         request.desc,
@@ -1080,6 +1082,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                         &request.decision,
                         request.apply_nat_on_fabric,
                         expected_ports,
+                        selected_tcp_mss,
                     ) {
                         Some(rewrite_result) => {
                             target_binding.tx_pipeline.pending_tx_prepared.push_back(

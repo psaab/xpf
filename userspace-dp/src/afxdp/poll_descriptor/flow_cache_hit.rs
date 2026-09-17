@@ -456,6 +456,12 @@ pub(super) fn stage_flow_cache_hit(
                     expected_ports,
                 )
                 .or_else(|| {
+                    // Flow-cache eligibility currently admits ACK-only
+                    // TCP/UDP, so SYNs do not reach this fallback today.
+                    // Keep selection here: the fallback is cold and remains
+                    // correct if eligibility broadens in the future.
+                    let selected_tcp_mss =
+                        select_tcp_mss(worker_ctx.forwarding, &cached_decision, &meta.into());
                     rewrite_forwarded_frame_in_place(
                         unsafe { &*area },
                         desc,
@@ -463,6 +469,7 @@ pub(super) fn stage_flow_cache_hit(
                         &cached_decision,
                         cached_descriptor.apply_nat_on_fabric,
                         expected_ports,
+                        selected_tcp_mss,
                     )
                 });
                 if let Some(rewrite_result) = rewrite_result {

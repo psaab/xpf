@@ -1065,6 +1065,7 @@ pub(super) fn rewrite_forwarded_frame_in_place(
     decision: &SessionDecision,
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
+    selected_tcp_mss: u16,
 ) -> Option<InPlaceRewriteResult> {
     let meta = meta.into();
     // #4965: preflight-then-commit, mirroring the #5466 descriptor fast path.
@@ -1148,6 +1149,13 @@ pub(super) fn rewrite_forwarded_frame_in_place(
             expected_ports,
         )?,
         _ => return None,
+    }
+    if selected_tcp_mss > 0 {
+        // #9954: the copy/build path already clamps SYN MSS, but the
+        // shared-UMEM generic in-place path must apply the same selected
+        // policy after NAT/TTL rewrites so its incremental TCP checksum
+        // update sees the final wire tuple.
+        let _ = tcp::clamp_tcp_mss_frame(packet, prep.ip_start, selected_tcp_mss);
     }
     // Debug: dump first N in-place rewritten frames' Ethernet headers
     #[cfg(feature = "debug-log")]

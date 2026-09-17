@@ -600,3 +600,132 @@ fn local_origin_tunnel_session_domain_is_zero_without_routing_instances_9032() {
          domain 0 — pre-#7160 bit-identical"
     );
 }
+
+// =====================================================================
+// #9954 STEP-0 (RED on master): the generic in-place TX rewrite — the
+// path taken whenever ingress and egress bindings share a UMEM (the
+// default mlx5 grouping) — threads no MSS clamp, so a configured
+// `tcp-mss all-tcp` is silently inert there. These cells drive a SYN
+// with MSS 1460 through `rewrite_forwarded_frame_in_place` and assert
+// the issue's acceptance value (1300). On master they FAIL with the
+// MSS still 1460; the fix adds the clamp and they go GREEN.
+// The forwarding binding documents the defect shape: the configured value
+// must be selected before entering the in-place rewrite.
+// =====================================================================
+
+#[test]
+fn all_tcp_clamps_in_place_v4_syn_9954() {
+    let src = Ipv4Addr::new(10, 0, 1, 102);
+    let dst = Ipv4Addr::new(10, 0, 2, 200);
+    let frame = build_ipv4_tcp_syn_with_mss(src, dst, 40000, 5201, 1460);
+    let forwarding = ForwardingState {
+        tcp_mss_all_tcp: 1300,
+        ..ForwardingState::default()
+    };
+    let meta = plain_meta_v4(40000, 5201, 0);
+    let decision = plain_forward_decision_v4(dst);
+    let selected_tcp_mss = select_tcp_mss(&forwarding, &decision, &meta.into());
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, frame.len())
+        .expect("slice")
+        .copy_from_slice(&frame);
+    let rewrite_result = rewrite_forwarded_frame_in_place(
+        &area,
+        XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        &decision,
+        false,
+        None,
+        selected_tcp_mss,
+    )
+    .expect("in-place rewrite");
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("rewritten frame");
+    assert_eq!(
+        built_ipv4_mss(out),
+        1300,
+        "#9954: in-place path must clamp v4 SYN MSS 1460 -> 1300 \
+         (all-tcp configured)"
+    );
+    assert!(
+        tcp_checksum_ok_ipv4(&out[14..]),
+        "#9954: in-place v4 MSS clamp must preserve TCP checksum"
+    );
+}
+
+#[test]
+fn all_tcp_clamps_in_place_v6_syn_9954() {
+    let src: Ipv6Addr = "2001:559:8585:bf01::102".parse().unwrap();
+    let dst: Ipv6Addr = "2001:559:8585:bf02::200".parse().unwrap();
+    let frame = build_ipv6_tcp_syn_with_mss(src, dst, 40000, 5201, 1460);
+    let forwarding = ForwardingState {
+        tcp_mss_all_tcp: 1300,
+        ..ForwardingState::default()
+    };
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_SYN,
+        flow_src_port: 40000,
+        flow_dst_port: 5201,
+        ..UserspaceDpMeta::default()
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(dst)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, frame.len())
+        .expect("slice")
+        .copy_from_slice(&frame);
+    let selected_tcp_mss = select_tcp_mss(&forwarding, &decision, &meta.into());
+    let rewrite_result = rewrite_forwarded_frame_in_place(
+        &area,
+        XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        &decision,
+        false,
+        None,
+        selected_tcp_mss,
+    )
+    .expect("in-place rewrite");
+    let out = area
+        .slice(rewrite_result.offset as usize, rewrite_result.len as usize)
+        .expect("rewritten frame");
+    assert_eq!(
+        built_ipv6_mss(out),
+        1300,
+        "#9954: in-place path must clamp v6 SYN MSS 1460 -> 1300 \
+         (all-tcp configured)"
+    );
+    assert!(
+        tcp_checksum_ok_ipv6(&out[14..]),
+        "#9954: in-place v6 MSS clamp must preserve TCP checksum"
+    );
+}
