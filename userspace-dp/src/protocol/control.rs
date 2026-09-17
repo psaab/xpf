@@ -177,9 +177,14 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // ConfigSnapshot. The v23 contract already carries DHCPv6 relay rows (#9553);
 // this additional real field requires another exact-equality bump because an
 // old helper cannot perform priority-ordered next-table rules with
-// target-table fall-through. The #8892 shape digest moves with this field.
-// Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 24;
+// target-table fall-through.
+// v24 -> v25 (#10018): persistent-NAT lease identity gained
+// `routing_scope`. The field crosses the helper control socket and the
+// version gate protects the #8121 idle-lease import from a helper that would
+// silently ignore it and merge two VRFs into one lease. Cluster idle-lease
+// sync uses a new message type as an independent mixed-version fence.
+// Keep this line in lockstep with pkg/dataplane/userspace/protocol.go.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 25;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -1006,6 +1011,11 @@ pub(crate) struct IdleLeaseWire {
     pub src_ip: String,
     #[serde(rename = "src_port", default)]
     pub src_port: u16,
+    /// #10018: required on the v25 lease-control wire. `None` means a
+    /// pre-v25 helper omitted the field; handlers reject that record rather
+    /// than interpreting it as domain 0.
+    #[serde(rename = "routing_scope", default)]
+    pub routing_scope: Option<u32>,
     /// Empty => `permit-any-remote-host`.
     #[serde(
         rename = "remote_ip",
@@ -1049,6 +1059,10 @@ pub(crate) struct DisplayLeaseWire {
     pub src_ip: String,
     #[serde(rename = "src_port", default)]
     pub src_port: u16,
+    /// #10018: display rows retain the routing domain so overlapping
+    /// subscriber identities are distinguishable in the SHOW output.
+    #[serde(rename = "routing_scope", default)]
+    pub routing_scope: Option<u32>,
     /// Empty => `permit-any-remote-host`.
     #[serde(
         rename = "remote_ip",

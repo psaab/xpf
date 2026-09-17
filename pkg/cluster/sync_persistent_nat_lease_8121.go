@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -37,25 +38,23 @@ import (
 // ignores the frame, the new node receives nothing, and idle leases are simply
 // not rebuilt — which is the state before this landed, not a broken one.
 const (
-	// syncMsgPersistentNatLease carries a full set of the sender's IDLE
-	// persistent-NAT leases (#8121).
-	//
-	// 38 is the first id above every one ever allocated. It is deliberately NOT
-	// 34: sync.go records that 34 was syncMsgAuthUpgradeAck and is "left unused
-	// rather than recycled: a frame numbered 34 meant something else in every
-	// build before this one". Filling a retired number is the one way an
-	// additive frame stops being additive, because an old peer still reads the
-	// old meaning.
+	// syncMsgPersistentNatLease is the RETIRED pre-#10018 lease set. It stays
+	// reserved so a new receiver can explicitly ignore an old sender's
+	// unscoped records rather than decoding them as domain 0.
 	syncMsgPersistentNatLease = 38
+	// syncMsgPersistentNatLeaseScoped carries the v25 lease set whose records
+	// include routing_scope. Old peers do not have a receive arm for 39 and
+	// therefore ignore the new frame fail-closed.
+	syncMsgPersistentNatLeaseScoped = 39
 )
 
-// encodePersistentNatLeasePayload serializes a full set of idle leases.
+// encodePersistentNatLeasePayload serializes a full set of v25 idle leases.
 //
 // Records are encoded FIRST so an unencodable one drops individually while the
 // count prefix stays consistent with what was actually emitted — the #4892
 // shape, and the reason the string helper returns an error rather than
 // narrowing a uint16 length. Dropping one lease costs that client its port on
-// takeover; misframing the peer's decode corrupts every record after it.
+// takeover; misframing the peer's decode corrupts the lease's identity.
 func encodePersistentNatLeasePayload(leases []userspace.IdleLeaseWire) []byte {
 	recs := make([][]byte, 0, len(leases))
 	for _, l := range leases {
@@ -67,7 +66,7 @@ func encodePersistentNatLeasePayload(leases []userspace.IdleLeaseWire) []byte {
 		}
 		recs = append(recs, rec)
 	}
-	b := make([]byte, 0, 8+len(recs)*96)
+	b := make([]byte, 0, 8+len(recs)*100)
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(recs)))
 	for _, rec := range recs {
 		b = binary.LittleEndian.AppendUint32(b, uint32(len(rec)))
@@ -77,12 +76,16 @@ func encodePersistentNatLeasePayload(leases []userspace.IdleLeaseWire) []byte {
 }
 
 func encodeOnePersistentNatLease(l userspace.IdleLeaseWire) ([]byte, error) {
-	b := make([]byte, 0, 96)
+	b := make([]byte, 0, 100)
 	var err error
 	if b, err = putLeaseString(b, l.Pool); err != nil {
 		return nil, fmt.Errorf("encode idle lease Pool: %w", err)
 	}
 	b = append(b, l.Protocol)
+	if l.RoutingScope == nil {
+		return nil, errors.New("encode idle lease RoutingScope: missing v25 scope")
+	}
+	b = binary.LittleEndian.AppendUint32(b, *l.RoutingScope)
 	if b, err = putLeaseString(b, l.SrcIP); err != nil {
 		return nil, fmt.Errorf("encode idle lease SrcIP: %w", err)
 	}
@@ -189,6 +192,12 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	}
 	l.Protocol = buf[off]
 	off++
+	if off+4 > len(buf) {
+		return l, false
+	}
+	scope := binary.LittleEndian.Uint32(buf[off:])
+	l.RoutingScope = &scope
+	off += 4
 	if l.SrcIP, off, ok = getLeaseString(buf, off); !ok {
 		return l, false
 	}
@@ -223,7 +232,10 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	}
 	l.RemainingNs = binary.LittleEndian.Uint64(buf[off:])
 	l.TimeoutNs = binary.LittleEndian.Uint64(buf[off+8:])
-	return l, true
+	off += 16
+	// A v25 record is self-contained: trailing bytes are not an append-only
+	// extension because they could be a legacy sender's unscoped payload.
+	return l, off == len(buf)
 }
 
 // QueuePersistentNatLeases pushes this node's full idle-lease set to the peer.
@@ -237,7 +249,7 @@ func (s *SessionSync) QueuePersistentNatLeases(leases []userspace.IdleLeaseWire)
 	seq := s.persistentNatLeaseSeqCounter.Add(1)
 	payload := appendFullSetSeq(encodePersistentNatLeasePayload(leases), s.syncEpoch, seq)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgPersistentNatLease, payload)
+	err := writeMsg(conn, syncMsgPersistentNatLeaseScoped, payload)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: persistent-NAT lease send error", "err", err)

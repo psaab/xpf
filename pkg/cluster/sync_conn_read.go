@@ -654,32 +654,60 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.OnIPsecSAReceived(names)
 		}
 	case syncMsgPersistentNatLease:
-		// #8121: a full IDLE persistent-NAT lease set. Same two refusals the
-		// DHCP full-set arms make, and for the same reason: a full set
-		// REPLACES, so installing a stale or truncated one is worse than
-		// installing nothing. The standby simply keeps rebuilding leases from
-		// sessions (#7360) until a good set arrives.
+		// #10018 migration fence: type 38 is the pre-scope format. Never
+		// decode or advance the v25 receive guard for it — interpreting its
+		// omitted routing scope as domain 0 would recreate the cross-VRF
+		// collision, and a high legacy sequence must not suppress a later
+		// scoped type-39 set.
+		slog.Warn("cluster sync: ignoring legacy unscoped persistent-NAT lease set",
+			"bytes", len(payload))
+	case syncMsgPersistentNatLeaseScoped:
+		// #8121/#10018: a full IDLE persistent-NAT lease set whose records all
+		// carry routing_scope. Same two refusals the DHCP full-set arms make,
+		// and for the same reason: a full set REPLACES, so installing a stale
+		// or truncated one is worse than installing nothing. The standby
+		// simply keeps rebuilding leases from sessions (#7360) until a good
+		// scoped set arrives.
 		base, incarnation, seq := stripFullSetSeq(payload)
+		// Check the high-water mark before decode, but advance it only after a
+		// complete set is accepted. A malformed high-sequence frame must not
+		// wedge the standby against a later valid lower-sequence push.
 		s.recvSeqMu.Lock()
-		admit := s.persistentNatLeaseRecvSeq.admit(incarnation, seq)
+		admit := s.persistentNatLeaseRecvSeq.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
-			slog.Warn("cluster sync: dropping out-of-order persistent-NAT lease set (stale sequence)",
+			slog.Warn("cluster sync: dropping out-of-order scoped persistent-NAT lease set (stale sequence)",
 				"incarnation", incarnation, "seq", seq)
 			return
 		}
 		leases, ok := decodePersistentNatLeasePayload(base)
 		if !ok {
 			s.stats.MalformedRecordsDropped.Add(1)
-			slog.Warn("cluster sync: dropping malformed persistent-NAT lease set",
+			slog.Warn("cluster sync: dropping malformed scoped persistent-NAT lease set",
 				"incarnation", incarnation, "seq", seq, "bytes", len(base))
 			return
 		}
-		slog.Debug("cluster sync: received persistent-NAT idle lease set",
+		// Serialize commit order and callback order across both receive loops,
+		// and fence a reset that raced decode, exactly as the DHCP full-set
+		// arms do below.
+		s.persistentNatLeaseApplyMu.Lock()
+		s.recvSeqMu.Lock()
+		applied := s.recvEpoch == commitEpoch &&
+			s.persistentNatLeaseRecvSeq.advanceIfNewer(incarnation, seq)
+		s.recvSeqMu.Unlock()
+		if !applied {
+			s.persistentNatLeaseApplyMu.Unlock()
+			slog.Warn("cluster sync: dropping out-of-order scoped persistent-NAT lease set (stale sequence)",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
+		slog.Debug("cluster sync: received scoped persistent-NAT idle lease set",
 			"count", len(leases), "incarnation", incarnation, "seq", seq)
 		if s.OnPersistentNatLeasesReceived != nil {
 			s.OnPersistentNatLeasesReceived(leases)
 		}
+		s.persistentNatLeaseApplyMu.Unlock()
 	case syncMsgDHCPLeaseV4:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)

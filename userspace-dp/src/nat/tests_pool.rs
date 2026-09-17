@@ -1885,6 +1885,7 @@ fn lease_key(src_port: u16) -> PersistentSourceKey {
         protocol: 6,
         src_ip: "10.0.1.100".parse().unwrap(),
         src_port,
+        routing_scope: 0,
         remote: None,
     }
 }
@@ -6653,6 +6654,7 @@ fn install_expired_idle_leases(
                 protocol: 6,
                 src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8)),
                 src_port: 40000 + i,
+                routing_scope: 0,
                 remote: None,
             };
             live.persistent_by_source.insert(
@@ -6741,12 +6743,14 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
         protocol: 6,
         src_ip: "10.1.1.1".parse().unwrap(),
         src_port: 1,
+        routing_scope: 0,
         remote: None,
     };
     let future_key = PersistentSourceKey {
         protocol: 6,
         src_ip: "10.1.1.2".parse().unwrap(),
         src_port: 2,
+        routing_scope: 0,
         remote: None,
     };
     {

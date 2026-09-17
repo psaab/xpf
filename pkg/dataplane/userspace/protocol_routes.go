@@ -23,8 +23,9 @@ type RouteSnapshot struct {
 	// verbatim). Ordinary routes carry 0. Additive on the wire: omitempty
 	// suppresses the byte for 0, and the Rust side defaults an absent key to 0
 	// — but an old helper that ignores the key keeps the prefix-length order
-	// that IS the defect, so the field rides ProtocolVersion 24 on top of the
-	// v23 DHCPv6 relay contract and the exact-equality gate refuses a
+	// that IS the defect, so the field rode the v24 bump on top of the
+	// v23 DHCPv6 relay contract. The shared protocol is now v25 for #10018's
+	// persistent-NAT lease scope, and the exact-equality gate refuses a
 	// mismatched pairing.
 	RulePriority uint32 `json:"rule_priority,omitempty"`
 	// Preference is the Junos route preference (administrative distance;

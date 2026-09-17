@@ -223,8 +223,8 @@ func shapeDigest8892(t *testing.T) (string, int) {
 //     is quarantined rather than executed as root.
 //
 // Bumping for a field no helper can observe would make a mixed-base pair
-// refuse every snapshot in exchange for nothing. The golden below moves to the
-// #9984-merge digest; ProtocolVersion stays at 24.
+// refuse every snapshot in exchange for nothing. The golden below moved to the
+// #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
 	snapshotShapeGolden8892 = "c098e2c1f595be54bd617f5ae0b2a2806ef8cfed34ce7cadad9c824d17b5c779"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
@@ -346,7 +346,11 @@ const (
 	// cannot fall through a target-table miss. Exact equality refuses the mixed
 	// pairing, and the combined v24 snapshot shape requires the refreshed
 	// golden.
-	snapshotShapeVersion8892 = 24
+	// v24 -> v25 STANDS (#10018): RoutingScope is on the lease control wire,
+	// not any ConfigSnapshot struct walked by this digest. The shared protocol
+	// version still moves so the manager can fence old helpers before lease
+	// verbs, while this shape's field set and golden remain unchanged.
+	snapshotShapeVersion8892 = 25
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

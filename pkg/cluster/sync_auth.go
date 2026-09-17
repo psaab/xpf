@@ -70,10 +70,11 @@ const (
 	// case and ignores them — the same additive-type discipline as the #2239
 	// DHCP-lease messages. Post-install, 27 is REUSED as syncMsgConfigApplyNack
 	// (phase-separated, not a live collision — see the NOTE in sync.go); the
-	// post-install set runs to 38 (syncMsgPersistentNatLease) as of
-	// origin/master 05b99ba80, 28 has no post-install receive arm, and 34 is
-	// reserved-unused. See liveSyncMessageTypesExcept and
-	// TestLiveSyncMessageCensusIsComplete7163 for the current census.
+	// post-install set runs to 39 (the scoped #10018 persistent-NAT lease
+	// message); 38 is retained as the retired unscoped lease message, 28 has
+	// no post-install receive arm, and 34 is reserved-unused. See
+	// liveSyncMessageTypesExcept and TestLiveSyncMessageCensusIsComplete7163
+	// for the current census.
 	syncMsgAuthHello = 27 // Noise_NNpsk0 handshake msg1 (raw; see performNoiseHandshake)
 	syncMsgAuthProof = 28 // Noise_NNpsk0 handshake msg2 (raw; see performNoiseHandshake)
 )

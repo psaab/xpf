@@ -64,6 +64,12 @@ impl SourceNatFlowKey {
             protocol: self.protocol,
             src_ip: self.src_ip,
             src_port: self.src_port,
+            // #10018: retain the exact routing domain that already
+            // distinguishes `SourceNatFlowKey`. The allocator remains shared
+            // for wire-identity occupancy (#9389); lease reuse alone is
+            // partitioned so overlapping subscribers in different VRFs cannot
+            // receive one another's persistent translation.
+            routing_scope: self.routing_scope,
             remote: match permit {
                 PersistentNatPermit::AnyRemoteHost => None,
                 PersistentNatPermit::TargetHost => Some((self.dst_ip, 0)),

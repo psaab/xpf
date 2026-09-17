@@ -279,11 +279,13 @@ type fullSetSeqGuard struct {
 // no ordering trailer: admit-always and do NOT advance the mark, mirroring the
 // config-gen gen==0 accept-always compat. The caller holds recvSeqMu.
 //
-// Used by the IPsec and persistent-NAT arms, whose sets apply-or-drop without
-// a filter. The DHCP arms split the check from the advance (newer +
-// advanceIfNewer below): the #9915 F-117 identity filter can retain a set the
-// guard admitted, and an admitted-but-retained set must not wedge the mark
-// against honest lower-seq pushes.
+// Used by the IPsec arm, whose set applies-or-drops without a filter. The
+// DHCP arms split the check from the advance (newer + advanceIfNewer below):
+// the #9915 F-117 identity filter can retain a set the guard admitted, and an
+// admitted-but-retained set must not wedge the mark against honest lower-seq
+// pushes. The scoped persistent-NAT lease arm splits the same way (#10018): a
+// malformed high-sequence set is retained, and retaining must not advance the
+// mark.
 func (g *fullSetSeqGuard) admit(incarnation, seq uint64) bool {
 	if !g.newer(incarnation, seq) {
 		return false
