@@ -185,6 +185,7 @@ func TestProtocolFloorsAreImmutableLiterals6648(t *testing.T) {
 		{"policy scheduler landed in the v2 bump (f7c4b125c)", MinProtocolPolicyScheduler, 2},
 		{"persistent source NAT landed in the v3 bump (c0a047ea2)", MinProtocolPersistentSourceNAT, 3},
 		{"multi-zone scoped policy landed in the v4 bump (8119bfe27)", MinProtocolMultiZoneScopedPolicy, 4},
+		{"persistent NAT lease routing scope landed in the v25 bump (#10018)", MinProtocolPersistentNatLeaseScope, 25},
 		{"the secure-tunnel refusal contract completed at the v7 bump (8c011681c)", MinProtocolSecureTunnelRefusal, 7},
 	} {
 		if tc.got != tc.want {

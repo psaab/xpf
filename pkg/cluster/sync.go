@@ -1620,6 +1620,12 @@ type SessionSync struct {
 	dhcpV4RecvSeq             fullSetSeqGuard
 	dhcpV6RecvSeq             fullSetSeqGuard
 	persistentNatLeaseRecvSeq fullSetSeqGuard
+	// #10018: lease full-set commit and callback order must match the
+	// high-water mark order across the two fabric receive loops. Decode is
+	// performed without this lock, then the commit advances the guard and
+	// invokes the callback while serialized so an older decoded frame cannot
+	// regress the imported lease set after a newer frame.
+	persistentNatLeaseApplyMu sync.Mutex
 	// dhcpApplyMu serializes each DHCP arm's commit (high-water advance +
 	// held-set store) with its callback (#9915 F-117 review), so commit order
 	// == callback order across the two fabric receiveLoops. It nests recvSeqMu

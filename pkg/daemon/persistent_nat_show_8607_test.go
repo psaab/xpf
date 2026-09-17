@@ -13,6 +13,10 @@ import (
 	"github.com/psaab/xpf/pkg/natshow"
 )
 
+func persistentNatLeaseScopeDaemon(v uint32) *uint32 {
+	return &v
+}
+
 // #8607: the persistent-NAT SHOW table under the userspace dataplane.
 //
 // The reported symptom is a RENDERING — "No persistent NAT bindings" for a pool
@@ -22,6 +26,7 @@ import (
 
 func leaseWire8607(src string, sport uint16, nat string, nport uint16, remaining, timeout time.Duration) dpuserspace.IdleLeaseWire {
 	return dpuserspace.IdleLeaseWire{
+		RoutingScope:   persistentNatLeaseScopeDaemon(0),
 		Pool:           "pool-snat-pool",
 		Protocol:       6,
 		SrcIP:          src,

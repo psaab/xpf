@@ -57,6 +57,10 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
         protocol: rec.lease.protocol,
         src_ip: rec.lease.src_ip.to_string(),
         src_port: rec.lease.src_port,
+        // #10018: scope is mandatory on the v25 control wire. It is emitted
+        // even for domain 0 so a missing field remains distinguishable from
+        // the real unscoped domain.
+        routing_scope: Some(rec.lease.routing_scope),
         remote_ip,
         remote_port,
         translated_ip: rec.lease.translated_ip.to_string(),
@@ -73,6 +77,10 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
     if w.pool_name.is_empty() || w.remaining_ns == 0 {
         return None;
     }
+    // #10018: an old helper omits this field and serde maps that to `None`.
+    // Refuse rather than defaulting to domain 0; otherwise a mixed helper
+    // pair silently merges the record into the default tenant's lease.
+    let routing_scope = w.routing_scope?;
     let src_ip: IpAddr = w.src_ip.parse().ok()?;
     let translated_ip: IpAddr = w.translated_ip.parse().ok()?;
     // An empty remote is `permit-any-remote-host`; a NON-empty one that does not
@@ -90,6 +98,7 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
             protocol: w.protocol,
             src_ip,
             src_port: w.src_port,
+            routing_scope,
             remote,
             translated_ip,
             translated_port: w.translated_port,
@@ -152,6 +161,7 @@ mod tests {
             protocol: 6,
             src_ip: "10.0.61.50".to_string(),
             src_port: 40000,
+            routing_scope: Some(0),
             remote_ip: "8.8.8.8".to_string(),
             remote_port: 443,
             translated_ip: "203.0.113.1".to_string(),
@@ -308,6 +318,11 @@ mod tests {
                 "bad translated",
                 Box::new(|w: &mut IdleLeaseWire| w.translated_ip = "x".to_string()),
             ),
+            (
+                "missing routing scope",
+                Box::new(|w: &mut IdleLeaseWire| w.routing_scope = None)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
         ] {
             let mut w = wire();
             // CONTROL: unmutated, this fixture parses — so each `None` below is
@@ -333,6 +348,7 @@ fn to_display_wire(rec: &PoolDisplayLease) -> DisplayLeaseWire {
         protocol: rec.lease.protocol,
         src_ip: rec.lease.src_ip.to_string(),
         src_port: rec.lease.src_port,
+        routing_scope: Some(rec.lease.routing_scope),
         remote_ip,
         remote_port,
         translated_ip: rec.lease.translated_ip.to_string(),

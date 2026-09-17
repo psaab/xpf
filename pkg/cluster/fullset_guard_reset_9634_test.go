@@ -100,17 +100,17 @@ func TestPersistentNatLeaseSetFromARebootedPeerIsAdmittedAfterRePrime_9634(t *te
 		return appendFullSetSeq(encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{sampleIdleLease()}), incarnation, seq)
 	}
 
-	ss.handleMessage(nil, syncMsgPersistentNatLease, frame(10000, 5))
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped, frame(10000, 5))
 	if sets != 1 {
 		t.Fatalf("setup: the long-running peer's lease set was not delivered (sets=%d)", sets)
 	}
-	ss.handleMessage(nil, syncMsgPersistentNatLease, frame(100, 1))
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped, frame(100, 1))
 	if sets != 1 {
 		t.Fatalf("attribution: a lower incarnation was admitted before any re-prime (sets=%d), so this cell would not isolate the reset", sets)
 	}
 
 	ss.resetRecvGen()
-	ss.handleMessage(nil, syncMsgPersistentNatLease, frame(100, 1))
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped, frame(100, 1))
 	if sets != 2 {
 		t.Fatalf("#9634: after the peer re-prime, the rebooted peer's persistent-NAT lease set was still dropped as stale (sets=%d)", sets)
 	}

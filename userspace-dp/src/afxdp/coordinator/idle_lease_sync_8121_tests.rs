@@ -35,6 +35,7 @@ fn record(pool: &str, src: &str, translated: &str, port: u16) -> PoolIdleLease {
             protocol: 6,
             src_ip: src.parse().unwrap(),
             src_port: 40000,
+            routing_scope: 0,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             translated_ip: translated.parse().unwrap(),
             translated_port: port,

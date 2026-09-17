@@ -306,8 +306,11 @@ const (
 	// transmitted field added on top of the v23 DHCPv6 relay contract (#9553).
 	// An old helper silently retains the one-list prefix-length leak model and
 	// cannot fall through a target-table miss. Exact equality refuses the mixed
-	// pairing, and the #8892 shape digest moves with this new field.
-	ProtocolVersion = 24
+	// pairing.
+	// v24 -> v25 (#10018): persistent-NAT lease identity gained RoutingScope.
+	// The manager gates both lease-control verbs on an observed v25 helper;
+	// without that gate an old helper would ignore the field and merge two VRFs.
+	ProtocolVersion = 25
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -353,6 +356,12 @@ const (
 	// MinProtocolPersistentSourceNAT: persistent SNAT pool leases landed in the
 	// v3 bump (c0a047ea2, #1377).
 	MinProtocolPersistentSourceNAT = 3
+	// MinProtocolPersistentNatLeaseScope is the FIRST protocol version whose
+	// control-socket lease records carry a routing domain. Unlike the historical
+	// persistent-SNAT feature floor above, this gate is used at runtime by both
+	// lease-control verbs: an unobserved or older helper is not allowed to
+	// ignore the scope and import a lease as domain 0.
+	MinProtocolPersistentNatLeaseScope = 25
 
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
 	// contract spans THREE bumps on the #5619/#6691 branch — v5 added
@@ -384,6 +393,9 @@ const (
 // IdleLeaseWire is one idle persistent-NAT lease crossing the helper control
 // socket and, in the same shape, the cluster sync channel (#8121).
 //
+// RoutingScope is a pointer deliberately: nil means a pre-v25 helper omitted
+// the field, while a non-nil pointer to 0 is the real default routing domain.
+// Callers must reject nil rather than silently converting it to domain 0.
 // Three fields are deliberately NOT what the helper holds internally, and each
 // for the same reason — the internal form is node-local and means something
 // different on the peer:
@@ -398,17 +410,18 @@ const (
 // Go never interprets these beyond carrying them; the meanings live in the
 // helper (userspace-dp nat/idle_lease_sync_8121.rs).
 type IdleLeaseWire struct {
-	Pool           string `json:"pool"`
-	Protocol       uint8  `json:"protocol"`
-	SrcIP          string `json:"src_ip"`
-	SrcPort        uint16 `json:"src_port"`
-	RemoteIP       string `json:"remote_ip,omitempty"`
-	RemotePort     uint16 `json:"remote_port,omitempty"`
-	TranslatedIP   string `json:"translated_ip"`
-	TranslatedPort uint16 `json:"translated_port"`
-	AddressOnly    bool   `json:"address_only,omitempty"`
-	RemainingNs    uint64 `json:"remaining_ns"`
-	TimeoutNs      uint64 `json:"timeout_ns"`
+	Pool           string  `json:"pool"`
+	Protocol       uint8   `json:"protocol"`
+	SrcIP          string  `json:"src_ip"`
+	SrcPort        uint16  `json:"src_port"`
+	RoutingScope   *uint32 `json:"routing_scope"`
+	RemoteIP       string  `json:"remote_ip,omitempty"`
+	RemotePort     uint16  `json:"remote_port,omitempty"`
+	TranslatedIP   string  `json:"translated_ip"`
+	TranslatedPort uint16  `json:"translated_port"`
+	AddressOnly    bool    `json:"address_only,omitempty"`
+	RemainingNs    uint64  `json:"remaining_ns"`
+	TimeoutNs      uint64  `json:"timeout_ns"`
 }
 
 // DisplayLeaseWire is the export_persistent_lease_display result (#8615): one
@@ -426,6 +439,7 @@ type DisplayLeaseWire struct {
 	Protocol       uint8  `json:"protocol"`
 	SrcIP          string `json:"src_ip"`
 	SrcPort        uint16 `json:"src_port"`
+	RoutingScope   *uint32 `json:"routing_scope"`
 	RemoteIP       string `json:"remote_ip,omitempty"`
 	RemotePort     uint16 `json:"remote_port,omitempty"`
 	TranslatedIP   string `json:"translated_ip"`

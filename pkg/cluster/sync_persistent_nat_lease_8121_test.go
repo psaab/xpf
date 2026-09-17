@@ -8,12 +8,31 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
+func persistentNatLeaseScope(v uint32) *uint32 {
+	return &v
+}
+
+func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
+	if a.RoutingScope == nil || b.RoutingScope == nil {
+		return a.RoutingScope == b.RoutingScope && a.Pool == b.Pool &&
+			a.Protocol == b.Protocol && a.SrcIP == b.SrcIP &&
+			a.SrcPort == b.SrcPort && a.RemoteIP == b.RemoteIP &&
+			a.RemotePort == b.RemotePort && a.TranslatedIP == b.TranslatedIP &&
+			a.TranslatedPort == b.TranslatedPort && a.AddressOnly == b.AddressOnly &&
+			a.RemainingNs == b.RemainingNs && a.TimeoutNs == b.TimeoutNs
+	}
+	as, bs := *a.RoutingScope, *b.RoutingScope
+	a.RoutingScope, b.RoutingScope = nil, nil
+	return as == bs && a == b
+}
+
 func sampleIdleLease() userspace.IdleLeaseWire {
 	return userspace.IdleLeaseWire{
 		Pool:           "P",
 		Protocol:       6,
 		SrcIP:          "10.0.61.50",
 		SrcPort:        40000,
+		RoutingScope: persistentNatLeaseScope(7),
 		RemoteIP:       "8.8.8.8",
 		RemotePort:     443,
 		TranslatedIP:   "203.0.113.1",
@@ -38,6 +57,7 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 			Protocol:       17,
 			SrcIP:          "2001:db8::1",
 			SrcPort:        5000,
+			RoutingScope:   persistentNatLeaseScope(0),
 			TranslatedIP:   "203.0.113.9",
 			TranslatedPort: 2048,
 			AddressOnly:    true,
@@ -53,7 +73,7 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 		t.Fatalf("record count: got %d want %d", len(out), len(in))
 	}
 	for i := range in {
-		if out[i] != in[i] {
+		if !equalIdleLeaseWire(out[i], in[i]) {
 			t.Errorf("record %d round-trip mismatch:\n got %+v\nwant %+v", i, out[i], in[i])
 		}
 	}
@@ -78,7 +98,7 @@ func TestPersistentNatLeaseEncode_OversizedFieldDropsOnlyThatRecord(t *testing.T
 		t.Fatalf("the oversized record must be dropped and the others kept: got %d records", len(out))
 	}
 	for i, rec := range out {
-		if rec != good {
+		if !equalIdleLeaseWire(rec, good) {
 			t.Errorf("surviving record %d was corrupted by the dropped one: %+v", i, rec)
 		}
 	}
@@ -109,5 +129,68 @@ func TestPersistentNatLeasePayload_TruncationReportsIncomplete(t *testing.T) {
 		if _, ok := decodePersistentNatLeasePayload(full[:cut]); ok {
 			t.Fatalf("a payload truncated to %d/%d bytes must report incomplete", cut, len(full))
 		}
+	}
+}
+
+func TestPersistentNatLeaseEncodeRejectsMissingScope10018(t *testing.T) {
+	legacy := sampleIdleLease()
+	legacy.RoutingScope = nil
+
+	out, ok := decodePersistentNatLeasePayload(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{legacy, sampleIdleLease()}),
+	)
+	if !ok {
+		t.Fatal("a dropped legacy record must not make the remaining scoped set incomplete")
+	}
+	if len(out) != 1 || out[0].RoutingScope == nil || *out[0].RoutingScope != 7 {
+		t.Fatalf("missing-scope record was not dropped fail-closed: %+v", out)
+	}
+}
+
+// #10018 migration fence: a pre-v25 type-38 frame is ignored as a whole. It
+// must not invoke the receive callback and must not advance the scoped
+// sequence guard, because doing either would let an unscoped high-water mark
+// suppress a later scoped type-39 set.
+func TestPersistentNatLeaseSyncIgnoresRetiredUnscopedType10018(t *testing.T) {
+	ss := &SessionSync{}
+	sets := 0
+	ss.OnPersistentNatLeasesReceived = func([]userspace.IdleLeaseWire) { sets++ }
+	payload := appendFullSetSeq(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{sampleIdleLease()}),
+		9000,
+		99,
+	)
+
+	ss.handleMessage(nil, syncMsgPersistentNatLease, payload)
+	if sets != 0 {
+		t.Fatalf("retired unscoped type-38 frame invoked callback %d times", sets)
+	}
+
+	// A scoped frame with a deliberately lower sequence must still apply. If
+	// the retired arm touched persistentNatLeaseRecvSeq, this would be dropped.
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
+		appendFullSetSeq(encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{
+			sampleIdleLease(),
+		}), 1, 1))
+	if sets != 1 {
+		t.Fatalf("scoped type-39 frame was suppressed by retired type-38 sequence state; sets=%d", sets)
+	}
+}
+
+func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence10018(t *testing.T) {
+	ss := &SessionSync{}
+	sets := 0
+	ss.OnPersistentNatLeasesReceived = func([]userspace.IdleLeaseWire) { sets++ }
+
+	// A high-sequence malformed full set must be retained as no-op, not become
+	// the high-water mark that blocks a later valid lower-sequence set.
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
+		appendFullSetSeq([]byte{1, 2, 3}, 9000, 99))
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
+		appendFullSetSeq(encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{
+			sampleIdleLease(),
+		}), 1, 1))
+	if sets != 1 {
+		t.Fatalf("valid lower-sequence set was suppressed after malformed high-sequence input; sets=%d", sets)
 	}
 }

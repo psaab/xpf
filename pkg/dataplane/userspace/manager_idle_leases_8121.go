@@ -1,16 +1,80 @@
 package userspace
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrPersistentNatLeaseScopeProtocolIncompatible means the helper has not
+// proved that it understands the v25 persistent-lease routing_scope field.
+// Lease export/import are live control verbs, so unlike config compilation
+// these paths fail closed when status is unavailable or unobserved.
+var ErrPersistentNatLeaseScopeProtocolIncompatible = errors.New(
+	"userspace persistent NAT lease scope protocol incompatible")
+
+// ensurePersistentNatLeaseScopeProtocolLocked is the live-verb compatibility
+// fence for every lease control request. A cached status is usable only after
+// it was actually observed from the running helper; a zero-value or failed
+// probe is not evidence that an old helper is safe to receive scoped JSON.
+func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
+	if m.helperStatusObserved &&
+		m.lastStatus.ConfigSnapshotProtocolVersion >= MinProtocolPersistentNatLeaseScope {
+		return nil
+	}
+
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err != nil {
+		return fmt.Errorf("%w: could not verify helper protocol before lease request: %v",
+			ErrPersistentNatLeaseScopeProtocolIncompatible, err)
+	}
+	// requestLocked leaves status at its zero value when a test hook or a
+	// malformed response does not provide the status object. Record that
+	// observation, then reject it below rather than treating zero as domain 0.
+	m.recordHelperStatusLocked(&status)
+	if status.ConfigSnapshotProtocolVersion < MinProtocolPersistentNatLeaseScope {
+		return fmt.Errorf(
+			"%w: helper protocol version %d is below required %d for scoped persistent-NAT leases",
+			ErrPersistentNatLeaseScopeProtocolIncompatible,
+			status.ConfigSnapshotProtocolVersion,
+			MinProtocolPersistentNatLeaseScope,
+		)
+	}
+	return nil
+}
+
+func validateIdleLeaseScopes(leases []IdleLeaseWire) error {
+	for i, lease := range leases {
+		if lease.RoutingScope == nil {
+			return fmt.Errorf(
+				"%w: helper returned idle lease %d without routing_scope",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
+	}
+	return nil
+}
+
+func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
+	for i, lease := range leases {
+		if lease.RoutingScope == nil {
+			return fmt.Errorf(
+				"%w: helper returned display lease %d without routing_scope",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
+	}
+	return nil
+}
 
 // #8121: idle persistent-NAT lease export/import over the helper control
 // socket.
 //
-// Both calls set SuppressStatus. The control socket is shared with the 1/s
-// status poll, HA session sync, session installs, snapshot sync and forwarding
-// sync, and CLAUDE.md is explicit that a new caller at >1/s starves session
-// installs during bulk sync. These run on a slow cadence (see the daemon's lease
-// ticker) and have no use for a status blob, so they neither ask for one nor pay
-// to carry it back.
+// All lease calls set SuppressStatus. The control socket is shared with the
+// 1/s status poll, HA session sync, session installs, snapshot sync and
+// forwarding sync, and CLAUDE.md is explicit that a new caller at >1/s starves
+// session installs during bulk sync. These run on a slow cadence (see the
+// daemon's lease ticker) and have no use for a status blob, so the request
+// itself neither asks for one nor pays to carry it back. The compatibility
+// fence may issue one status probe when no observed helper version is cached;
+// subsequent calls use that observation.
 
 // ExportIdleLeases returns every persistent-NAT lease this node holds that has
 // NO live flows but is still inside its persistence timeout — the population
@@ -22,11 +86,17 @@ func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	if m.proc == nil {
 		return nil, errors.New("userspace dataplane helper not running")
 	}
+	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+		return nil, err
+	}
 	resp, err := m.requestDetailedLocked(ControlRequest{
 		Type:           "export_idle_leases",
 		SuppressStatus: true,
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := validateIdleLeaseScopes(resp.IdleLeases); err != nil {
 		return nil, err
 	}
 	return resp.IdleLeases, nil
@@ -45,6 +115,12 @@ func (m *Manager) ImportIdleLeases(leases []IdleLeaseWire) error {
 
 	if m.proc == nil {
 		return errors.New("userspace dataplane helper not running")
+	}
+	if err := validateIdleLeaseScopes(leases); err != nil {
+		return err
+	}
+	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+		return err
 	}
 	_, err := m.requestDetailedLocked(ControlRequest{
 		Type:           "import_idle_leases",
@@ -72,11 +148,21 @@ func (m *Manager) ExportPersistentLeaseDisplay() ([]DisplayLeaseWire, error) {
 	if m.proc == nil {
 		return nil, errors.New("userspace dataplane helper not running")
 	}
+	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+		return nil, err
+	}
 	resp, err := m.requestDetailedLocked(ControlRequest{
 		Type:           "export_persistent_lease_display",
 		SuppressStatus: true,
 	})
-	return displayLeasesFromResponse(resp, err)
+	rows, err := displayLeasesFromResponse(resp, err)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDisplayLeaseScopes(rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // ErrPersistentLeaseDisplayUnsupported means the running helper predates #8615

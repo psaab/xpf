@@ -60,6 +60,7 @@ func TestDisplayLeaseWireAgreesWithTheHelperSpelling8615(t *testing.T) {
 	goJSON, err := json.Marshal(DisplayLeaseWire{
 		Pool: "p1", Protocol: 6,
 		SrcIP: "10.0.61.102", SrcPort: 40000,
+		RoutingScope: userspaceLeaseScope(7),
 		RemoteIP: "8.8.8.8", RemotePort: 443,
 		TranslatedIP: "172.16.80.7", TranslatedPort: 51400,
 		AddressOnly: true, RemainingNs: 123, TimeoutNs: 300_000_000_000,
@@ -109,6 +110,7 @@ func TestDisplayLeaseWireAgreesWithTheHelperSpelling8615(t *testing.T) {
 // a field renamed into the payload would defeat a source scan.
 func TestTheSyncLeaseRecordStillCarriesNoFlowCount8615(t *testing.T) {
 	goJSON, err := json.Marshal(IdleLeaseWire{
+		RoutingScope: userspaceLeaseScope(7),
 		Pool: "p1", Protocol: 6,
 		SrcIP: "10.0.61.102", SrcPort: 40000,
 		RemoteIP: "8.8.8.8", RemotePort: 443,

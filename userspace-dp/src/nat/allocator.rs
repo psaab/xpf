@@ -109,6 +109,13 @@ pub(super) struct PersistentSourceKey {
     pub(super) protocol: u8,
     pub(super) src_ip: IpAddr,
     pub(super) src_port: u16,
+    /// #10018: persistent leases are partitioned by the flow's routing
+    /// domain, just like `SourceNatFlowKey`. The allocator itself remains
+    /// shared across rules and tenants (#9389), because `(translated_ip, port)`
+    /// occupancy is a shared wire resource; only source-identity lease reuse
+    /// is scoped. A scope omitted here lets overlapping subscribers in
+    /// different VRFs share one lease and one translated tuple.
+    pub(super) routing_scope: u32,
     /// #2397: remote (destination) endpoint scope. `None` => the lease is
     /// reusable by ANY remote host (`persistent-nat permit-any-remote-host`).
     /// `Some((dst_ip, dst_port))` => the lease is bound to the original remote

@@ -234,16 +234,16 @@ fn an_address_persistent_collision_still_exhausts_9131() {
 /// OVER-REACH GUARD 2 — an EXISTING lease. Its address is pinned by
 /// `persistent-nat` for the permit scope's lifetime and must not move.
 ///
-/// The collision is reachable because `AddressOnlyReverseKey` carries no
-/// routing scope while `SourceNatFlowKey` does: two flows identical except for
-/// `routing_scope` are DIFFERENT flows, share ONE persistent lease (the lease
-/// key carries no scope either), and produce the SAME public reverse identity.
-/// Admitting the second would be misdelivery — the return packet carries
-/// nothing that tells the two apart.
+/// #10018 changes the old cross-scope premise: routing scope is now part of
+/// `PersistentSourceKey`, so a second VRF must no longer reuse this lease.
+/// Keep this guard in ONE scope instead. Two same-scope GRE flows to different
+/// remotes still share the `permit-any-remote-host` lease, and that existing
+/// lease must stay pinned to its original address rather than probing a sibling.
 ///
-/// GREEN at master; RED under the blanket fallback.
+/// GREEN at master; RED if the persistent lease is accidentally re-keyed by
+/// remote endpoint or if reuse is allowed to move the translated address.
 #[test]
-fn a_reused_lease_collision_still_exhausts_9131() {
+fn a_same_scope_reused_lease_stays_pinned_9131() {
     let pool = [A1, A2];
     let alloc = PortAllocator::new(pool.len(), 1024, 65535);
 
@@ -251,32 +251,30 @@ fn a_reused_lease_collision_still_exhausts_9131() {
     let t1 = reserve(&alloc, &pool, base, false).expect("the first flow must mint");
     assert_eq!(t1.ip, IpAddr::V4(A1), "fixture: round-robin index 0");
 
-    let other_scope = SourceNatFlowKey {
-        routing_scope: 1,
-        ..base
-    };
-    assert_ne!(other_scope, base, "fixture: a distinct flow key");
+    let same_scope_other_remote = gre_flow("10.0.1.100", REMOTE_S);
     assert_eq!(
-        other_scope.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
+        same_scope_other_remote.routing_scope, base.routing_scope,
+        "fixture: both flows stay in one routing scope"
+    );
+    assert_eq!(
+        same_scope_other_remote.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
         base.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-        "fixture: the two flows must share ONE lease, so the second REUSES it"
+        "permit-any-remote-host must share the existing lease within one scope"
     );
 
-    let denied = reserve(&alloc, &pool, other_scope, false);
+    let reused = reserve(&alloc, &pool, same_scope_other_remote, false)
+        .expect("a same-scope any-remote flow must reuse its persistent lease");
     assert_eq!(
-        denied.err(),
-        Some(SourceNatFailureReason::AllocatorExhausted),
-        "a flow REUSING a pinned lease must not rotate the lease's address onto \
-         a sibling — persistent-nat pins it, and the colliding identity is \
-         genuinely ambiguous on the return path (#9131 narrowing)"
+        reused, t1,
+        "reusing a pinned lease must keep the original translated tuple"
     );
     let owners = alloc.debug_address_only_owners();
-    assert_eq!(owners.len(), 1, "the denied flow minted no token");
+    assert_eq!(owners.len(), 2, "the two remote reverse identities are both live");
     assert!(
-        !owners
+        owners
             .iter()
-            .any(|(k, _)| k.translated_ip == IpAddr::V4(A2)),
-        "the lease must not have moved to A2"
+            .all(|(k, _)| k.translated_ip == IpAddr::V4(A1)),
+        "reuse must not move the existing lease onto sibling A2"
     );
     {
         let live = alloc.debug_live();
@@ -284,15 +282,15 @@ fn a_reused_lease_collision_still_exhausts_9131() {
             .persistent_by_source
             .values()
             .next()
-            .expect("one lease");
+            .expect("one same-scope lease");
         assert_eq!(
             lease.translated.ip,
             IpAddr::V4(A1),
-            "the pinned address must be untouched by the refusal"
+            "the pinned address must be untouched by reuse"
         );
         assert_eq!(
-            lease.active_flows, 1,
-            "a denied flow must not bump the lease refcount"
+            lease.active_flows, 2,
+            "both same-scope flows must credit the one reused lease"
         );
     }
 }

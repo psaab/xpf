@@ -167,6 +167,11 @@ mod tests_det_lock_scope_9130;
 #[cfg(test)]
 #[path = "tests_addr_only_sibling_9131.rs"]
 mod tests_addr_only_sibling_9131;
+// #10018: PersistentSourceKey must include routing scope so overlapping
+// subscribers in different VRFs cannot share a persistent NAT lease.
+#[cfg(test)]
+#[path = "tests_persistent_scope_10018.rs"]
+mod tests_persistent_scope_10018;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]

@@ -52,7 +52,7 @@ func TestAnOldHelperRefusalIsDistinguishableFromAFailure8615(t *testing.T) {
 	}
 
 	// And the success path still carries rows through.
-	ok := ControlResponse{DisplayLeases: []DisplayLeaseWire{{Pool: "p1"}}}
+	ok := ControlResponse{DisplayLeases: []DisplayLeaseWire{{Pool: "p1", RoutingScope: userspaceLeaseScope(0)}}}
 	rows, err := displayLeasesFromResponse(ok, nil)
 	if err != nil || len(rows) != 1 {
 		t.Errorf("a successful exchange must pass its rows through; got %d rows, err %v",

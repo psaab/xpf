@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+func userspaceLeaseScope(v uint32) *uint32 {
+	return &v
+}
+
 // #8121: the Go and Rust spellings of the idle-lease wire must AGREE.
 //
 // `IdleLeaseWire` exists twice — here (protocol.go) and in the helper
@@ -58,6 +62,7 @@ func TestIdleLeaseWireAgreesWithTheHelperSpelling8121(t *testing.T) {
 	goJSON, err := json.Marshal(IdleLeaseWire{
 		Pool: "p1", Protocol: 6,
 		SrcIP: "10.0.61.102", SrcPort: 40000,
+		RoutingScope: userspaceLeaseScope(7),
 		RemoteIP: "8.8.8.8", RemotePort: 443,
 		TranslatedIP: "172.16.80.7", TranslatedPort: 51400,
 		AddressOnly: true, RemainingNs: 123, TimeoutNs: 300_000_000_000,

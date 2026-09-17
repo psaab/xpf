@@ -70,6 +70,11 @@ pub(crate) struct IdleLeaseRecord {
     pub(crate) protocol: u8,
     pub(crate) src_ip: IpAddr,
     pub(crate) src_port: u16,
+    /// #10018: source-identity lease reuse is partitioned by routing domain,
+    /// while the allocator's translated `(address, port)` occupancy remains
+    /// shared across tenants. This value must cross the idle-lease channel;
+    /// dropping it would make the standby merge two VRFs back into one lease.
+    pub(crate) routing_scope: u32,
     /// `None` => `permit-any-remote-host`; `Some` => bound to that remote.
     pub(crate) remote: Option<(IpAddr, u16)>,
     /// The translated ADDRESS, never the pool index (see module note 3).
@@ -86,16 +91,19 @@ pub(crate) struct IdleLeaseRecord {
 /// AND the live-flow count.
 ///
 /// Deliberately NOT an extension of `IdleLeaseRecord`, and deliberately without
-/// a conversion into it. `IdleLeaseRecord` is what a peer can IMPORT, and design
-/// note 1 forbids carrying `active_flows` on that record for a reason that has
-/// nothing to do with display. Keeping the two types separate is what makes the
-/// rule structural: there is no widening of the import record to review, and no
-/// path by which a count can arrive at `import_idle_lease`.
+/// a conversion into it. `IdleLeaseRecord` is what a peer can IMPORT, and
+/// design note 1 forbids carrying `active_flows` on that record for a reason
+/// that has nothing to do with display. Keeping the two types separate is what
+/// makes the rule structural: there is no widening of the import record to
+/// review, and no path by which a count can arrive at `import_idle_lease`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DisplayLeaseRecord {
     pub(crate) protocol: u8,
     pub(crate) src_ip: IpAddr,
     pub(crate) src_port: u16,
+    /// #10018: display rows retain the lease's routing domain too, so the
+    /// operator can distinguish overlapping subscriber identities.
+    pub(crate) routing_scope: u32,
     /// `None` => `permit-any-remote-host`; `Some` => bound to that remote.
     pub(crate) remote: Option<(IpAddr, u16)>,
     pub(crate) translated_ip: IpAddr,
@@ -143,6 +151,7 @@ impl PortAllocator {
                 protocol: key.protocol,
                 src_ip: key.src_ip,
                 src_port: key.src_port,
+                routing_scope: key.routing_scope,
                 remote: key.remote,
                 translated_ip: lease.translated.ip,
                 translated_port: lease.translated.port,
@@ -180,6 +189,7 @@ impl PortAllocator {
                 protocol: key.protocol,
                 src_ip: key.src_ip,
                 src_port: key.src_port,
+                routing_scope: key.routing_scope,
                 remote: key.remote,
                 translated_ip: lease.translated.ip,
                 translated_port: lease.translated.port,
@@ -219,6 +229,7 @@ impl PortAllocator {
             protocol: rec.protocol,
             src_ip: rec.src_ip,
             src_port: rec.src_port,
+            routing_scope: rec.routing_scope,
             remote: rec.remote,
         };
         let mut live = self.lock_live();
