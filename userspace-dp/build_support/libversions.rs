@@ -14,6 +14,76 @@ pub(crate) const LIBXDP_MAX_EXCLUSIVE: (u64, u64, u64) = (1, 7, 0);
 /// `libbpf-sys = "~1.6"` asks for it; check_libbpf_family is what enforces it.
 pub(crate) const LIBBPF_FAMILY: (u64, u64) = (1, 6);
 
+/// #9931: lower bounds for the three host-supplied transitive static libs
+/// (`-lelf -lz -lzstd`, via libelf/libbpf). Unlike libxdp's tight range there
+/// is no upper bound: these are ordinary distro libraries with stable ABIs
+/// the helper never calls directly, and an upper bound would brick routine
+/// `apt upgrade`s (libelf 0.196 was already a candidate when this shipped).
+/// A host below the validated floor fails the build instead of shipping a
+/// helper nothing tested. `debian/control` declares the same floors.
+pub(crate) const LIBELF_MIN: (u64, u64, u64) = (0, 195, 0);
+/// zlib 1.3.0, not 1.3.2: the 1.3.x line is ABI-stable bugfixes, and Debian's
+/// `1.3.dfsg+really1.3.2` mangling sorts AFTER a plain `1.3.2`, so a patch
+/// bound would admit 1.3.1-dfsg while looking precise. Minor precision avoids
+/// the trap; 1.2.x stays rejected as unvalidated.
+pub(crate) const ZLIB_MIN: (u64, u64, u64) = (1, 3, 0);
+pub(crate) const ZSTD_MIN: (u64, u64, u64) = (1, 5, 7);
+
+/// #9931: admits a libelf version only at or above `LIBELF_MIN`. A version
+/// without a patch reads as `.0`.
+pub(crate) fn check_libelf_version(elf: &str) -> Result<(), String> {
+    let v = parse_version(elf)
+        .ok_or_else(|| format!("#9931: unparsable libelf version {elf:?}"))?;
+    if v < LIBELF_MIN {
+        return Err(format!(
+            "#9931: libelf {elf} is below the validated minimum 0.195; \
+             re-validate the helper against it before lowering LIBELF_MIN"
+        ));
+    }
+    Ok(())
+}
+
+/// #9931: admits a zlib version only at or above `ZLIB_MIN`.
+pub(crate) fn check_zlib_version(z: &str) -> Result<(), String> {
+    let v = parse_version(z)
+        .ok_or_else(|| format!("#9931: unparsable zlib version {z:?}"))?;
+    if v < ZLIB_MIN {
+        return Err(format!(
+            "#9931: zlib {z} is below the validated minimum 1.3; \
+             re-validate the helper against it before lowering ZLIB_MIN"
+        ));
+    }
+    Ok(())
+}
+
+/// #9931: admits a zstd version only at or above `ZSTD_MIN`.
+pub(crate) fn check_zstd_version(zstd: &str) -> Result<(), String> {
+    let v = parse_version(zstd)
+        .ok_or_else(|| format!("#9931: unparsable zstd version {zstd:?}"))?;
+    if v < ZSTD_MIN {
+        return Err(format!(
+            "#9931: zstd {zstd} is below the validated minimum 1.5.7; \
+             re-validate the helper against it before lowering ZSTD_MIN"
+        ));
+    }
+    Ok(())
+}
+
+/// #9931: `elfutils/version.h` carries no dotted version, only
+/// `#define _ELFUTILS_VERSION 195` for 0.195 (major * 1000 + minor, per its
+/// `_ELFUTILS_PREREQ` macro). Decode it to the pkg-config spelling so the
+/// header fallback records the same string pkg-config would.
+pub(crate) fn elfutils_version_string(raw: u64) -> String {
+    format!("{}.{}", raw / 1000, raw % 1000)
+}
+
+/// #9931: compose the pkg-config spelling from three numeric header defines:
+/// zlib's `ZLIB_VER_MAJOR/MINOR/REVISION`, zstd's
+/// `ZSTD_VERSION_MAJOR/MINOR/RELEASE`.
+pub(crate) fn dotted_version(major: u64, minor: u64, patch: u64) -> String {
+    format!("{major}.{minor}.{patch}")
+}
+
 pub(crate) fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut parts = v.split('.');
     let major = parts.next()?.parse().ok()?;
