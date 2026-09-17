@@ -711,10 +711,14 @@ func enumerateGateLeaves() []gateLeaf {
 
 // gateBraceConfig wraps a leaf statement in the brace nesting its path implies.
 // See trap (1): `args` names merge into the preceding head, wildcard names do not.
+// The chassis identity fallback is the one exception: gateNumericArgs replaces
+// its synthetic `args` names with `7`, so those numeric tokens must merge too.
 func gateBraceConfig(path []string, stmt string) string {
 	var heads []string
+	chassisIdentity := gateChassisIdentityPath(path)
 	for _, tok := range path {
-		if strings.HasPrefix(tok, gateArgPrefix) && len(heads) > 0 {
+		if len(heads) > 0 &&
+			(strings.HasPrefix(tok, gateArgPrefix) || (chassisIdentity && tok == "7")) {
 			heads[len(heads)-1] += " " + tok
 			continue
 		}
@@ -730,6 +734,15 @@ func gateBraceConfig(path []string, stmt string) string {
 		b.WriteString(" }")
 	}
 	return b.String()
+}
+
+func gateChassisIdentityPath(path []string) bool {
+	for i := 0; i+1 < len(path); i++ {
+		if path[i] == "redundancy-group" && path[i+1] == "7" {
+			return true
+		}
+	}
+	return false
 }
 
 // gateMarshal renders the compiled config for comparison with the DIAGNOSTIC

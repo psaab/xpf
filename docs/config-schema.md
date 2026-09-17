@@ -9699,11 +9699,17 @@ reserved for whole-dataplane selection where a rewrite shim
   `validateChassisClusterIdentitiesAST` — an AST PRE-WALK gate in
   `runPreWalkGates` (`compiler_chassis_identity.go`) that rejects a
   MALFORMED `redundancy-group <id>` / RG-scoped `node <id>` token (non-
-  numeric, empty, or negative) at strict commit and warns on tolerant
-  load, because `compileChassis` otherwise Atoi-coerces such a token to 0
-  and silently aliases redundancy-group / node 0. Being an AST walk it
-  covers every shape, INCLUDING the packed one-liner the schema walker
-  bypasses — pinned by `compiler_chassis_identity_5694_test.go`),
+  numeric, explicitly quoted-empty, or negative) at strict commit and warns
+  on tolerant load. On the tolerant path, non-numeric and explicitly
+  quoted-empty tokens are ignored: `compileChassis` drops the malformed
+  redundancy-group instance and `compileRGNodePriority` drops the malformed
+  RG-scoped node statement, so the old Atoi-to-0 coercion cannot silently alias
+  redundancy-group / node 0. The separate #9723 cleanup drops negative
+  redundancy-group ids; a negative RG-scoped node remains the pre-existing
+  warning/compiled behavior. Being an AST walk it covers every shape,
+  INCLUDING the packed one-liner the schema walker bypasses — pinned by
+  `compiler_chassis_identity_5694_test.go` and
+  `compiler_chassis_identity_10002_test.go`),
   `interface-monitor <if> weight <n>` (tokens pack inline into a
   `children==nil` leaf; typing the weight needs a children map, which
   would flip SetPath grouping — so **#6549** range-gates the weight the

@@ -55,9 +55,10 @@ const MaxRethRedundancyGroupOctet = MaxHeartbeatRedundancyGroupID
 // InterfaceConfig exists, a malformed token has already collapsed to 0 and is
 // indistinguishable from a reth that simply has no redundant-ether-options
 // stanza at all. Only the raw AST can tell "the operator wrote something and we
-// could not use it" from "the operator wrote nothing". This mirrors
-// validateChassisClusterIdentitiesAST (#5694), whose header describes the
-// identical Atoi-then-default mechanism for the sibling chassis-cluster slots.
+// could not use it" from "the operator wrote nothing". This is the same
+// raw-AST pre-walk principle used by validateChassisClusterIdentitiesAST
+// (#5694), although the chassis identity compiler now drops non-numeric
+// identities instead of retaining its old zero coercion.
 //
 // Scope — deliberately NOT extended, each measured rather than assumed:
 //

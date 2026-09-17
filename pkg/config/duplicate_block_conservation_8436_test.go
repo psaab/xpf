@@ -296,12 +296,23 @@ func runDupConservationCensus8436(t *testing.T) dupCensusResult8436 {
 			continue
 		}
 		named := s.keyword + " xpfname"
+		stmtA, stmtB := s.stmtA, s.stmtB
+		if siteKey == "chassis cluster redundancy-group" {
+			// #10002: chassis RG and per-RG node identities are numeric.
+			// The generic census name (`xpfname`) used to be accepted only
+			// because Atoi failures defaulted to zero; use valid identities
+			// here so the conservation probe still exercises this container
+			// instead of becoming an unprobeable malformed fixture.
+			named = s.keyword + " 1"
+			stmtA = strings.ReplaceAll(stmtA, "node xpfinner", "node 0")
+			stmtB = strings.ReplaceAll(stmtB, "node xpfinner", "node 0")
+		}
 		ctx := contextFor(s.container)
 		dup := nest(s.container, ctx+
-			named+" { "+s.stmtA+" } "+
-			named+" { "+s.stmtB+" }")
+			named+" { "+stmtA+" } "+
+			named+" { "+stmtB+" }")
 		merged := nest(s.container, ctx+
-			named+" { "+s.stmtA+" "+s.stmtB+" }")
+			named+" { "+stmtA+" "+stmtB+" }")
 
 		cd, cm := compileText(t, dup), compileText(t, merged)
 		if cd == nil || cm == nil {
@@ -311,7 +322,7 @@ func runDupConservationCensus8436(t *testing.T) dupCensusResult8436 {
 		// VACUITY GUARD. If the MERGED form compiles the same as a block
 		// carrying only leafA, then leafB is not observable in the typed config
 		// and this site cannot show a loss either way.
-		onlyA := compileText(t, nest(s.container, ctx+named+" { "+s.stmtA+" }"))
+		onlyA := compileText(t, nest(s.container, ctx+named+" { "+stmtA+" }"))
 		if onlyA == nil || cfgEqual(cm, onlyA) {
 			note("second leaf not observable in the typed config")
 			continue
