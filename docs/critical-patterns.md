@@ -176,8 +176,19 @@ non-trivial code. This page is the quick-reference gotcha list.
   the parent, which is otherwise left with no IPv4 source
   (`VLANParentAddresses`, #9721).
 - DHCP interfaces: the daemon's DHCP client manages the address; address
-  reconciliation is skipped. DHCP-learned default routes get admin
-  distance 200 in FRR.
+  reconciliation is skipped. DHCP-learned default routes get admin distance
+  200 in FRR. A learned classless prefix is suppressed (with a visible warning)
+  when a rendered/operator static route in the same table contains it, so
+  DHCP cannot defeat the documented learned < static contract. The management
+  VRF treats only table-999 routes stamped `RTPROT_STATIC` as operator
+  authority; xpf-owned `RTPROT_DHCP` and connected/kernel routes are silently
+  ignored, while unexpected other-protocol routes are warned and ignored.
+  An option-121 `/0` follows the normal DHCP-default suppression contract;
+  unusually broad classless `/1` prefixes and non-forwardable martian ranges
+  (`0/8`, `127/8`, `169.254/16`, `224/4`, `240/4`) are refused by default.
+  The deliberate escape hatch `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` restores
+  covered/broad/martian classless routes and emits a loud security warning; it
+  is unset by default.
 
 ## XDP on SR-IOV interfaces
 

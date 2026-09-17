@@ -32,6 +32,7 @@ type fakeMgmtProgrammer struct {
 	v4, v6     []netlink.Route
 	linkIdx    int
 	linkErr    error
+	listErr    error
 	replaceErr error
 	replaced   []*netlink.Route
 	deleted    []string
@@ -72,14 +73,28 @@ func (f *fakeMgmtProgrammer) RouteReplace(route *netlink.Route) error {
 }
 
 func (f *fakeMgmtProgrammer) RouteListFiltered(family int, filter *netlink.Route, mask uint64) ([]netlink.Route, error) {
-	if filter == nil || filter.Protocol != unix.RTPROT_DHCP ||
-		mask&netlink.RT_FILTER_PROTOCOL == 0 || mask&netlink.RT_FILTER_TABLE == 0 {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	if filter == nil || filter.Table != mgmtVRFTableID || mask&netlink.RT_FILTER_TABLE == 0 {
 		return nil, nil
 	}
+	var routes []netlink.Route
 	if family == netlink.FAMILY_V6 {
-		return append([]netlink.Route(nil), f.v6...), nil
+		routes = f.v6
+	} else {
+		routes = f.v4
 	}
-	return append([]netlink.Route(nil), f.v4...), nil
+	if mask&netlink.RT_FILTER_PROTOCOL != 0 {
+		out := make([]netlink.Route, 0, len(routes))
+		for _, route := range routes {
+			if route.Protocol == filter.Protocol {
+				out = append(out, route)
+			}
+		}
+		routes = out
+	}
+	return append([]netlink.Route(nil), routes...), nil
 }
 
 func (f *fakeMgmtProgrammer) RouteDel(route *netlink.Route) error {

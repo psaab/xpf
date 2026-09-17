@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -220,6 +221,100 @@ func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 // mgmtVRFTableID is the kernel routing table backing the management VRF, for
 // the netlink route reconcile below (#9622: config.ManagementVRFTableID).
 const mgmtVRFTableID = config.ManagementVRFTableID
+const dhcpClasslessTrustOverrideEnv = "XPF_DHCP_TRUST_CLASSLESS_OVERRIDE"
+
+// mgmtVRFNeedsOperatorInventory reports whether active management leases have
+// routes whose precedence must be checked against operator statics. The
+// inventory is needed for both a DHCP default and RFC 3442 classless routes.
+func mgmtVRFNeedsOperatorInventory(leases []*dhcp.Lease, mgmtSet map[string]bool) bool {
+	for _, lease := range leases {
+		if mgmtSet[lease.Interface] &&
+			(lease.Gateway.IsValid() || len(lease.ClasslessRoutes) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// mgmtVRFOperatorRoutes lists configured static routes in the management
+// table. Connected/local kernel routes are not operator-configured statics;
+// treating them as authority would suppress legitimate DHCP routes merely
+// because an interface happens to have an overlapping address.
+func mgmtVRFOperatorRoutes(nlh mgmtRouteReconciler, family int) ([]netlink.Route, error) {
+	routes, err := nlh.RouteListFiltered(family, &netlink.Route{
+		Table: mgmtVRFTableID,
+	}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netlink.Route, 0, len(routes))
+	for _, route := range routes {
+		if route.Protocol == unix.RTPROT_DHCP || route.Protocol == unix.RTPROT_KERNEL {
+			continue
+		}
+		if route.Protocol != unix.RTPROT_STATIC {
+			slog.Warn("SECURITY: ignoring non-static management-VRF route for "+
+				"DHCP precedence (#9943)",
+				"destination", mgmtRoutePrefixString(route, family),
+				"protocol", route.Protocol, "table", mgmtVRFTableID)
+			continue
+		}
+		out = append(out, route)
+	}
+	return out, nil
+}
+
+func mgmtRoutePrefixString(route netlink.Route, family int) string {
+	if prefix, ok := mgmtRoutePrefix(route, family); ok {
+		return prefix.String()
+	}
+	return "<invalid>"
+}
+
+func mgmtRoutePrefix(route netlink.Route, family int) (netip.Prefix, bool) {
+	if route.Dst == nil {
+		if family == netlink.FAMILY_V6 {
+			return netip.PrefixFrom(netip.IPv6Unspecified(), 0), true
+		}
+		return netip.PrefixFrom(netip.IPv4Unspecified(), 0), true
+	}
+	addr, ok := netip.AddrFromSlice(route.Dst.IP)
+	if !ok || (family == netlink.FAMILY_V4 && !addr.Is4()) ||
+		(family == netlink.FAMILY_V6 && addr.Is4()) {
+		return netip.Prefix{}, false
+	}
+	ones, bits := route.Dst.Mask.Size()
+	if bits != addr.BitLen() {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(addr, ones).Masked(), true
+}
+
+// mgmtRouteCoveredByOperator returns the configured/operator route that
+// contains a learned classless prefix. Only a route at least as broad as the
+// learned prefix can override it; a broader learned route does not override a
+// more-specific operator route and remains necessary for uncovered addresses.
+func mgmtRouteCoveredByOperator(learned netip.Prefix, operators []netlink.Route, family int) string {
+	for _, route := range operators {
+		static, ok := mgmtRoutePrefix(route, family)
+		if !ok || static.Bits() > learned.Bits() ||
+			static.Addr().BitLen() != learned.Addr().BitLen() ||
+			!static.Contains(learned.Addr()) {
+			continue
+		}
+		return static.String()
+	}
+	return ""
+}
+func mgmtClasslessPrefixSafetyFailure(prefix netip.Prefix) string {
+	if dhcp.ClasslessRouteIsTooBroad(prefix) {
+		return "broad"
+	}
+	if dhcp.ClasslessRouteIsMartian(prefix) {
+		return "martian"
+	}
+	return ""
+}
 
 // The management-VRF route reconcile (applyMgmtVRFRoutes / applyMgmtVRFRoutesTo /
 // reconcileMgmtVRFRouteDeletes) programs the DHCP-learned routes for the
@@ -230,7 +325,8 @@ const mgmtVRFTableID = config.ManagementVRFTableID
 //
 // This is a full reconcile, not an append-only apply (#5108). Every route xpf
 // installs here is stamped RTPROT_DHCP so it can be distinguished from
-// operator/kernel routes sharing the table. Each apply:
+// configured RTPROT_STATIC operator routes and kernel/connected routes that do
+// not have precedence authority. Each apply:
 //
 //  1. RouteReplaces each desired lease route (idempotent add-or-update) and, on
 //     SUCCESS, records the route's FULL identity (destination + gateway + output
@@ -305,6 +401,22 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 	// (#5867). When no management interface has a route-bearing lease it stays
 	// empty and the reconcile deletes every xpf-owned route in the table.
 	applied := make(map[string]struct{})
+	trustClassless := os.Getenv(dhcpClasslessTrustOverrideEnv) == "1"
+	needsInventory := mgmtVRFNeedsOperatorInventory(leases, mgmtSet)
+	var operatorV4, operatorV6 []netlink.Route
+	var operatorInventoryErr error
+	if needsInventory {
+		operatorV4, operatorInventoryErr = mgmtVRFOperatorRoutes(nlh, netlink.FAMILY_V4)
+		if operatorInventoryErr == nil {
+			operatorV6, operatorInventoryErr = mgmtVRFOperatorRoutes(nlh, netlink.FAMILY_V6)
+		}
+		if operatorInventoryErr != nil {
+			slog.Warn("SECURITY: refusing DHCP routes because management-VRF "+
+				"operator-route inventory failed (#9943)",
+				"table", mgmtVRFTableID, "err", operatorInventoryErr)
+			errs = append(errs, fmt.Errorf("mgmt VRF operator-route inventory: %w", operatorInventoryErr))
+		}
+	}
 	for _, lease := range leases {
 		if !mgmtSet[lease.Interface] {
 			continue
@@ -337,29 +449,107 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 			} else {
 				dst = &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
 			}
-			gwSlice := lease.Gateway.AsSlice()
-			route := &netlink.Route{
-				LinkIndex: linkIndex,
-				Dst:       dst,
-				Gw:        net.IP(gwSlice),
-				Table:     mgmtVRFTableID,
-				Protocol:  unix.RTPROT_DHCP,
-			}
-			if err := nlh.RouteReplace(route); err != nil {
-				slog.Warn("mgmt VRF route: failed to add default route",
-					"interface", lease.Interface, "gw", lease.Gateway, "table", mgmtVRFTableID, "err", err)
-				errs = append(errs, fmt.Errorf("mgmt VRF default route via %s dev %s: %w",
-					lease.Gateway, lease.Interface, err))
+			suppressDefault := false
+			if operatorInventoryErr != nil {
+				suppressDefault = true
+				slog.Warn("SECURITY: refusing management-VRF DHCP default "+
+					"without a complete operator-route inventory (#9943)",
+					"interface", lease.Interface, "gw", lease.Gateway,
+					"table", mgmtVRFTableID)
 			} else {
-				// #5867: protect ONLY the identity that actually applied.
-				applied[mgmtRouteAppliedKey(dst, nlFamily, route.Gw, route.LinkIndex)] = struct{}{}
-				slog.Info("mgmt VRF default route installed",
-					"interface", lease.Interface, "gw", lease.Gateway, "table", mgmtVRFTableID)
+				defaultPrefix := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
+				operators := operatorV4
+				if nlFamily == netlink.FAMILY_V6 {
+					defaultPrefix = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
+					operators = operatorV6
+				}
+				if staticDestination := mgmtRouteCoveredByOperator(defaultPrefix, operators, nlFamily); staticDestination != "" {
+					suppressDefault = true
+					slog.Warn("SECURITY: suppressing management-VRF DHCP default "+
+						"covered by an operator route (#9943)",
+						"interface", lease.Interface, "gw", lease.Gateway,
+						"operator_destination", staticDestination, "table", mgmtVRFTableID)
+				}
+			}
+			if !suppressDefault {
+				gwSlice := lease.Gateway.AsSlice()
+				route := &netlink.Route{
+					LinkIndex: linkIndex,
+					Dst:       dst,
+					Gw:        net.IP(gwSlice),
+					Table:     mgmtVRFTableID,
+					Protocol:  unix.RTPROT_DHCP,
+				}
+				if err := nlh.RouteReplace(route); err != nil {
+					slog.Warn("mgmt VRF route: failed to add default route",
+						"interface", lease.Interface, "gw", lease.Gateway, "table", mgmtVRFTableID, "err", err)
+					errs = append(errs, fmt.Errorf("mgmt VRF default route via %s dev %s: %w",
+						lease.Gateway, lease.Interface, err))
+				} else {
+					// #5867: protect ONLY the identity that actually applied.
+					applied[mgmtRouteAppliedKey(dst, nlFamily, route.Gw, route.LinkIndex)] = struct{}{}
+					slog.Info("mgmt VRF default route installed",
+						"interface", lease.Interface, "gw", lease.Gateway, "table", mgmtVRFTableID)
+				}
 			}
 		}
 
 		// RFC 3442 classless static routes.
 		for _, cr := range lease.ClasslessRoutes {
+			safetyReason := mgmtClasslessPrefixSafetyFailure(cr.Destination)
+			staticDestination := ""
+			if operatorInventoryErr == nil {
+				operators := operatorV4
+				if nlFamily == netlink.FAMILY_V6 {
+					operators = operatorV6
+				}
+				staticDestination = mgmtRouteCoveredByOperator(cr.Destination, operators, nlFamily)
+			}
+			if safetyReason != "" {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows "+
+						"an unsafe management-VRF route (#9943)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"reason", safetyReason, "env", dhcpClasslessTrustOverrideEnv,
+						"table", mgmtVRFTableID,
+						"operator_destination", staticDestination)
+				} else {
+					slog.Warn("SECURITY: refusing unsafe management-VRF DHCP "+
+						"classless route (broad/martian prefix, #9943)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"reason", safetyReason, "table", mgmtVRFTableID,
+						"operator_destination", staticDestination)
+					continue
+				}
+			}
+			if operatorInventoryErr != nil {
+				if !trustClassless {
+					slog.Warn("SECURITY: refusing management-VRF DHCP classless route "+
+						"without a complete operator-route inventory (#9943)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"table", mgmtVRFTableID)
+					continue
+				}
+				slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+					"despite incomplete operator-route inventory (#9943)",
+					"interface", lease.Interface, "destination", cr.Destination,
+					"env", dhcpClasslessTrustOverrideEnv, "table", mgmtVRFTableID)
+			}
+			if staticDestination != "" {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"covered by an operator route (#9943)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"operator_destination", staticDestination,
+						"env", dhcpClasslessTrustOverrideEnv, "table", mgmtVRFTableID)
+				} else {
+					slog.Warn("SECURITY: suppressing management-VRF DHCP classless route "+
+						"covered by an operator route (#9943)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"operator_destination", staticDestination, "table", mgmtVRFTableID)
+					continue
+				}
+			}
 			dst := &net.IPNet{
 				IP:   net.IP(cr.Destination.Addr().AsSlice()),
 				Mask: net.CIDRMask(cr.Destination.Bits(), cr.Destination.Addr().BitLen()),

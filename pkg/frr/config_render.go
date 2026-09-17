@@ -17,11 +17,16 @@ package frr
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dhcp"
 )
+
+const dhcpClasslessTrustOverrideEnv = "XPF_DHCP_TRUST_CLASSLESS_OVERRIDE"
 
 // DeclaredNetdevsForConfig builds the authored-interface → kernel-device map
 // consumed by static-route rendering. In addition to interface declarations,
@@ -189,6 +194,69 @@ func staticRouteRendersFIB(sr *config.StaticRoute) bool {
 		return false
 	}
 	return sr.Discard || sr.Reject || len(sr.NextHops) > 0
+}
+
+// dhcpClasslessCoveredByStatic reports the rendered static route that contains
+// a DHCP-learned classless prefix in the same FRR table. A static route only
+// suppresses a learned prefix when it is at least as broad: a less-specific
+// learned route does not override a more-specific static route, and suppressing
+// it would remove legitimate coverage outside the static prefix. Equal-prefix
+// routes are suppressed because the static route wins on its lower preference.
+//
+// Trust handling belongs to the caller so it can emit a visible warning when
+// an operator explicitly permits a covered route.
+func dhcpClasslessCoveredByStatic(fc *FullConfig, dr DHCPRoute) string {
+	if fc == nil || dr.Destination == "" {
+		return ""
+	}
+	learned, err := netip.ParsePrefix(dr.Destination)
+	if err != nil {
+		return ""
+	}
+	staticRoutes := fc.StaticRoutes
+	if dr.IsIPv6 {
+		staticRoutes = fc.Inet6StaticRoutes
+	}
+	if dr.VRF != "" {
+		staticRoutes = nil
+		for _, inst := range fc.Instances {
+			if inst.Name != dr.VRF {
+				continue
+			}
+			if dr.IsIPv6 {
+				staticRoutes = inst.Inet6StaticRoutes
+			} else {
+				staticRoutes = inst.StaticRoutes
+			}
+			break
+		}
+	}
+	for _, sr := range staticRoutes {
+		if sr == nil || !staticRouteRendersFIB(sr) {
+			continue
+		}
+		static, err := netip.ParsePrefix(sr.Destination)
+		if err != nil || static.Addr().BitLen() != learned.Addr().BitLen() {
+			continue
+		}
+		if static.Bits() <= learned.Bits() && static.Contains(learned.Addr()) {
+			return static.String()
+		}
+	}
+	return ""
+}
+func dhcpClasslessPrefixSafetyFailure(destination string) string {
+	prefix, err := netip.ParsePrefix(destination)
+	if err != nil {
+		return ""
+	}
+	if dhcp.ClasslessRouteIsTooBroad(prefix) {
+		return "broad"
+	}
+	if dhcp.ClasslessRouteIsMartian(prefix) {
+		return "martian"
+	}
+	return ""
 }
 
 // generateStaticRoute produces FRR static route commands.
@@ -452,23 +520,21 @@ func instanceRouteTarget(instances []InstanceConfig, name string) (vrfName strin
 
 // renderDHCPDefaults emits DHCP-learned routes at admin distance 200: the
 // default route (option-3 gateway or the option-121 0.0.0.0/0 entry) plus
-// any RFC 3442 classless static routes (option 121 / legacy 249), each
-// carried on its DHCPRoute with a non-empty Destination. The default route
-// is suppressed when a static default route of the same address family
-// actually RENDERS a FIB entry (staticRouteRendersFIB) so the management
-// interface's DHCP gateway doesn't compete with configured routes; a static
-// 0.0.0.0/0 (or ::/0) stanza that renders nothing — a zero-next-hop,
-// non-discard default (#3872) — does NOT suppress the DHCP fallback, else no
-// default route is installed at all (#5519, remote lockout). Classless static
-// routes are more-specific and are never suppressed by a static default. Both
-// families bind the route to the originating interface when the lease records
-// one (dr.Interface != ""), so that in multi-WAN / shared-gateway-IP
-// deployments the kernel can pick the correct egress instead of leaving an
-// ambiguous gateway-only default.
+// RFC 3442 classless static routes (option 121 / legacy 249). A rendered
+// static route suppresses a learned classless route when it contains that
+// learned prefix, because the more-specific learned route would otherwise
+// override the operator's static route by longest-prefix match. The default
+// route keeps its existing same-prefix suppression and renderability rules.
+// XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1 is an explicit operator escape hatch:
+// covered classless routes render again, with a loud warning at every render.
+// Both families bind the route to the originating interface when the lease
+// records one (dr.Interface != ""), so in multi-WAN / shared-gateway-IP
+// deployments the kernel can pick the correct egress.
 func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 	if len(fc.DHCPRoutes) == 0 {
 		return
 	}
+	trustClassless := os.Getenv(dhcpClasslessTrustOverrideEnv) == "1"
 	// Suppression is derived from the static default's ACTUAL renderability, not
 	// merely the presence of a 0.0.0.0/0 (or ::/0) stanza (#5519). A static
 	// default that renders NO FIB entry — a zero-next-hop, non-discard route
@@ -526,9 +592,9 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 		isDefault := dest == "" || dest == "0.0.0.0/0" || dest == "::/0"
 		if isDefault {
 			// A configured static default of the same family suppresses the
-			// DHCP-learned default (a static default wins). This suppression
-			// applies ONLY to the default route — classless static routes are
-			// more-specific and must not be dropped by a static default.
+			// DHCP-learned default (a static default wins). Renderability is
+			// deliberate: an empty non-discard static must not mask the only
+			// usable WAN fallback (#5519).
 			if dr.IsIPv6 {
 				dest = "::/0"
 				if hasV6Default[dr.VRF] {
@@ -537,6 +603,40 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 			} else {
 				dest = "0.0.0.0/0"
 				if hasV4Default[dr.VRF] {
+					continue
+				}
+			}
+		} else {
+			safetyReason := dhcpClasslessPrefixSafetyFailure(dest)
+			staticDestination := dhcpClasslessCoveredByStatic(fc, dr)
+			if safetyReason != "" {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows "+
+						"an unsafe route (#9943)",
+						"destination", dest, "reason", safetyReason,
+						"gateway", dr.Gateway, "env", dhcpClasslessTrustOverrideEnv,
+						"static_destination", staticDestination, "vrf", dr.VRF)
+				} else {
+					slog.Warn("SECURITY: refusing unsafe DHCP classless route "+
+						"(broad/martian prefix, #9943)",
+						"destination", dest, "reason", safetyReason,
+						"gateway", dr.Gateway, "static_destination", staticDestination,
+						"vrf", dr.VRF)
+					continue
+				}
+			}
+			if staticDestination != "" {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"covered by a configured static route (#9943)",
+						"destination", dest, "static_destination", staticDestination,
+						"gateway", dr.Gateway, "env", dhcpClasslessTrustOverrideEnv,
+						"vrf", dr.VRF)
+				} else {
+					slog.Warn("SECURITY: suppressing DHCP classless route covered by "+
+						"a configured static route (#9943)",
+						"destination", dest, "static_destination", staticDestination,
+						"gateway", dr.Gateway, "vrf", dr.VRF)
 					continue
 				}
 			}
@@ -550,7 +650,7 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 		// exist, so the tenant's DHCP-learned default never reached its table.
 		//
 		// #8963: the clause goes through sanitizeFRRValue for the same #5557
-		// reason the static-route clause is sanitized -- the tolerant load / HA
+		// reason the static-route clause is sanitized — the tolerant load / HA
 		// config-sync paths only warn, so a control character reaching here
 		// could inject a second vtysh line into the managed frr.conf. This is
 		// the single interpolation point for the DHCP route's vrf clause,

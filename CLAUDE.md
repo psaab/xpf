@@ -432,7 +432,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   lifeline falls back to the first enumerated NIC, restoring the image's
   vNIC#1 -> fxp0 factory contract on that artifact only (`isApplianceFactoryBoot`
   / `chooseBootstrapLifeline`, `docs/install-images.md`)
-- DHCP-learned default routes get admin distance 200 in FRR (lower priority than static routes)
+- DHCP-learned default routes get admin distance 200 in FRR (lower priority than static routes). DHCP-learned classless routes are also lower priority: FRR and the management-VRF twin suppress a learned prefix contained by a rendered/operator static route in the same table, with a visible warning. In table 999, only operator routes stamped `RTPROT_STATIC` are authority; xpf-owned `RTPROT_DHCP` and connected/kernel routes are silently ignored, while unexpected other-protocol routes are warned and ignored. An option-121 `/0` follows the normal DHCP-default suppression contract; unusually broad classless `/1` prefixes and non-forwardable martian ranges (`0/8`, `127/8`, `169.254/16`, `224/4`, `240/4`) are refused by default. Set `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` only when deliberately trusting the DHCP server; it restores covered/broad/martian learned classless routes and emits a loud security warning.
 - **Device-map mode (#1956, bare metal)**: an opt-in `set chassis device-map`
   stanza replaces positional naming with a STABLE-IDENTITY managed allowlist.
   When `len(chassis device-map entries) > 0`, the daemon renames ONLY the

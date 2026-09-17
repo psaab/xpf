@@ -27,17 +27,28 @@ func (f *fakeMgmtRouteHandle) RouteListFiltered(family int, filter *netlink.Rout
 	// The reconcile MUST scope its list to table+protocol; if it ever stops
 	// filtering on RTPROT_DHCP this fake returns nothing, and the empty-desired
 	// test (which expects deletes) fails — guarding the ownership scope.
-	if filter == nil || filter.Protocol != unix.RTPROT_DHCP ||
-		mask&netlink.RT_FILTER_PROTOCOL == 0 || mask&netlink.RT_FILTER_TABLE == 0 {
+	if filter == nil || filter.Table != mgmtVRFTableID ||
+		filter.Protocol != unix.RTPROT_DHCP ||
+		mask&netlink.RT_FILTER_PROTOCOL == 0 ||
+		mask&netlink.RT_FILTER_TABLE == 0 {
 		return nil, nil
 	}
+	var routes []netlink.Route
 	switch family {
 	case netlink.FAMILY_V4:
-		return append([]netlink.Route(nil), f.v4...), nil
+		routes = f.v4
 	case netlink.FAMILY_V6:
-		return append([]netlink.Route(nil), f.v6...), nil
+		routes = f.v6
+	default:
+		return nil, nil
 	}
-	return nil, nil
+	out := make([]netlink.Route, 0, len(routes))
+	for _, route := range routes {
+		if route.Protocol == filter.Protocol {
+			out = append(out, route)
+		}
+	}
+	return append([]netlink.Route(nil), out...), nil
 }
 
 func (f *fakeMgmtRouteHandle) RouteDel(route *netlink.Route) error {

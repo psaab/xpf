@@ -426,6 +426,7 @@ func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
 // 0.0.0.0/0 entry (in which case defaultGW is the zero Addr and no default
 // route is installed — the server's explicit choice). A malformed entry
 // (bad mask, short buffer) is skipped rather than failing the whole lease.
+
 func classlessStaticRoutes(ack *dhcpv4.DHCPv4) (routes []LeaseRoute, defaultGW netip.Addr, present bool) {
 	// #6756: PRESENCE is whether the server RETURNED the option, not whether it
 	// parsed. RFC 3442 is explicit — "If the DHCP server returns both a Classless
@@ -504,4 +505,38 @@ func classlessStaticRoutes(ack *dhcpv4.DHCPv4) (routes []LeaseRoute, defaultGW n
 		})
 	}
 	return routes, defaultGW, present
+}
+
+// ClasslessRouteIsTooBroad reports whether an option-121 destination is broad
+// enough to act as a default-route replacement. Prefixes /0 and /1 cover half
+// or all of IPv4 and are refused by the route consumers unless the operator
+// explicitly enables XPF_DHCP_TRUST_CLASSLESS_OVERRIDE. Option-121 /0 entries
+// normally populate Lease.Gateway before this helper is reached; retaining the
+// predicate here keeps the safety rule shared for direct LeaseRoute producers.
+func ClasslessRouteIsTooBroad(prefix netip.Prefix) bool {
+	return prefix.IsValid() && prefix.Addr().BitLen() == 32 && prefix.Bits() <= 1
+}
+
+var classlessV4MartianPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),   // "this network"
+	netip.MustParsePrefix("127.0.0.0/8"), // loopback
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"), // multicast
+	netip.MustParsePrefix("240.0.0.0/4"), // reserved
+}
+
+// ClasslessRouteIsMartian reports whether an IPv4 classless destination
+// intersects a non-forwardable special-use range. RFC1918 private space is
+// intentionally not included: private networks are a legitimate DHCP-learned
+// destination in enterprise/WAN deployments.
+func ClasslessRouteIsMartian(prefix netip.Prefix) bool {
+	if !prefix.IsValid() || prefix.Addr().BitLen() != 32 {
+		return false
+	}
+	for _, martian := range classlessV4MartianPrefixes {
+		if prefix.Contains(martian.Addr()) || martian.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
 }

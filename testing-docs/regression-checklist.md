@@ -60,7 +60,19 @@ Pre-commit validation checklist. Check the boxes that apply to your change.
 
 - [ ] `vtysh -c "show ip route"` — routes correct
 - [ ] VRF isolation: traffic in one VRF doesn't leak to another
-- [ ] Default route via DHCP: admin distance 200
+- [ ] Default route via DHCP: admin distance 200; a learned classless prefix
+  contained by a rendered/operator static route is suppressed in both FRR and
+  management VRF (including the `0.0.0.0/1` + `128.0.0.0/1` rogue pair).
+  In table 999, only `RTPROT_STATIC` routes are operator authority; xpf-owned
+  `RTPROT_DHCP` and connected/kernel routes are silent negative controls, while
+  an unexpected other protocol (for example `RTPROT_BOOT`) must emit a WARN
+  before being ignored.
+- [ ] Broad classless `/1` and non-forwardable martian destinations (`0/8`,
+  `127/8`, `169.254/16`, `224/4`, `240/4`) are refused by default; option-121
+  `/0` follows the normal DHCP-default suppression behavior.
+- [ ] Leave `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE` unset. If deliberately set to
+  `1`, confirm the loud security warning and verify the covered/broad/martian
+  learned route is installed only under that explicit trust override.
 
 ## If You Changed RA / IPv6
 
