@@ -1362,17 +1362,15 @@ type compileOpts struct {
 	// doctrine as lenientNextTableRefs.
 	lenientForwardingInstanceProtocols bool
 
-	// lenientDHCPRelayDHCPv6 (#9411) downgrades validateDHCPRelayDHCPv6AST from
-	// a hard compile error to a cfg.Warnings entry. `forwarding-options
-	// dhcp-relay dhcpv6` was accepted on all four config channels and compiled to
-	// NOTHING -- there is no DHCPv6 relay agent -- because the schema walk is
-	// open-world under dhcp-relay and compileDHCPRelay reads only server-group and
-	// group. The strict commit / commit-check path rejects so the absent feature
-	// is operator-visible; the tolerant load / peer-sync paths warn so a persisted
-	// or peer-synced config carrying the stanza still BOOTS (#1960). Safe only
-	// because compileForwardingOptions no longer compiles the `dhcp-relay dhcpv6
-	// { … }` spelling as the DHCPv4 relay (dhcpRelayV4Node9411) -- before that it
-	// installed the DHCPv6 groups as DHCPv4 relays, so the stanza was not inert.
+	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
+	// a hard compile error to a cfg.Warnings entry. The implemented RFC 8415
+	// subset is compiled into the typed DHCPv6 relay configuration and excluded
+	// from the DHCPv4 compiler. This gate keeps incomplete or unsupported
+	// DHCPv6 children operator-visible: strict commit / commit-check rejects
+	// them, while tolerant load / peer-sync paths warn so a persisted or
+	// peer-synced config still BOOTS (#1960). The typed compiler installs only
+	// supported scalar Interface-ID values; warned modifiers and descendants
+	// remain inert rather than becoming literal Option-18 bytes.
 	lenientDHCPRelayDHCPv6 bool
 	// lenientDHCPRelayChildTokens (#9552) downgrades
 	// validateDHCPRelayChildTokensAST from a hard compile error to a cfg.Warnings

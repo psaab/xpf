@@ -172,13 +172,18 @@ type schemaNode struct {
 	// test's synthetic port-range leaf sets it today.
 	rangeSeparator bool
 
-	scalar       bool      // true = fixed-arity scalar value leaf (keyword + exactly `args` value tokens, NO body); rejects trailing tokens at commit (#3332). Opt-in; see isScalarValueLeaf.
-	valueHint    ValueHint // hint for dynamic value completion (when args > 0)
-	desc         string    // description shown in completion help
-	placeholder  string    // Junos-style placeholder (e.g., "<interface-name>")
-	midKeyword   string    // fixed keyword in the middle of args (e.g., "to-zone")
-	midKeywordAt int       // 1-based arg position where midKeyword appears (e.g., 2 for "from-zone X to-zone Y")
-	compoundKey  bool      // children form compound key (e.g., "family inet6" → Keys=["family","inet6"])
+	scalar bool // true = fixed-arity scalar value leaf (keyword + exactly `args` value tokens, NO body); rejects trailing tokens at commit (#3332). Opt-in; see isScalarValueLeaf.
+	// allowEmptyValue permits a presence-only spelling for an otherwise
+	// value-taking leaf. It is deliberately separate from args: args remains
+	// the maximum flat-token consumption, while this flag models Junos leaves
+	// that accept both a value and an enable form (#9553).
+	allowEmptyValue bool
+	valueHint       ValueHint // hint for dynamic value completion (when args > 0)
+	desc            string    // description shown in completion help
+	placeholder     string    // Junos-style placeholder (e.g., "<interface-name>")
+	midKeyword      string    // fixed keyword in the middle of args (e.g., "to-zone")
+	midKeywordAt    int       // 1-based arg position where midKeyword appears (e.g., 2 for "from-zone X to-zone Y")
+	compoundKey     bool      // children form compound key (e.g., "family inet6" → Keys=["family","inet6"])
 
 	// closedWorld opts this subtree in to closed-world validation: when
 	// true, an unmodeled child keyword under this subtree is REJECTED at

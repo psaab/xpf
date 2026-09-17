@@ -2,122 +2,155 @@ package config
 
 import "fmt"
 
-// validateDHCPRelayDHCPv6AST refuses `forwarding-options dhcp-relay dhcpv6`
-// (#9411).
-//
-// xpf has NO DHCPv6 relay agent: pkg/dhcprelay relays DHCPv4 only, and its
-// README says so under "IPv6 / DHCPv6 parity". That absence is documented and
-// is not the defect. The defect is what AUTHORING the Junos DHCPv6 relay stanza
-// did. Measured on all four config channels, with controls in the same run:
-//
-//	braced dhcpv6 relay       SchemaValidate/CompileConfig/Lenient/CheckText ACCEPT   relay 0 server-groups, 0 groups
-//	CONTROL braced v4 relay   ACCEPT on all four                                      relay 1 server-group, 1 group
-//	CONTROL bogus child       ACCEPT on all four                                      relay 0, 0
-//	dhcpv6 BESIDE a v4 relay  ACCEPT on all four                                      only the v4 group survives
-//	flat-set dhcpv6 relay     SchemaValidate/CompileConfig/Lenient ACCEPT            relay 0, 0
-//
-// So a stanza asking for a relay that does not exist was indistinguishable from
-// garbage and from having authored nothing: it committed clean, rendered back
-// in `show configuration`, and relayed nothing. Mechanism: the `dhcp-relay`
-// schema node declares exactly `server-group` and `group`, the walk SKIPS an
-// undeclared child rather than refusing it, and compileDHCPRelay reads only
-// those two keywords.
-//
-// WHY ON THE AST. The stanza compiles to NOTHING, so by the time
-// cfg.ForwardingOptions.DHCPRelay exists there is no trace of it left to
-// validate — the reason #9017's family-token gate and #9323's routing-instance
-// child gate run here too. It also avoids a config field whose only job would
-// be to remember an absence.
-//
-// WHY NOT closedWorld ON dhcp-relay. closedWorld INHERITS, and it would refuse
-// every OTHER undeclared child as well. The bogus-child control above is
-// equally silent, but refusing arbitrary children needs its own census of
-// shipped configs first, so that wider question is not folded in here.
-//
-// FIVE AST SHAPES, measured, and a gate checking one would miss the rest:
-//
-//	dhcp-relay { dhcpv6 { … } }              child node,  Keys=["dhcpv6"]
-//	dhcp-relay { dhcpv6; }                   child leaf,  Keys=["dhcpv6"]
-//	set … dhcp-relay dhcpv6 group …          child leaf,  Keys=["dhcpv6","group",…]
-//	dhcp-relay dhcpv6 { … }                  the relay node's OWN Keys[1]
-//	forwarding-options dhcp-relay dhcpv6 …;  forwarding-options' OWN Keys[1:3]
-//
-// THE PARSER PRODUCES FIVE; THE GATE SEES FOUR, measured by mutation rather than
-// assumed. The brace-elision normalizer folds the fully elided spelling into the
-// relay-node-Keys[1] shape BEFORE runPreWalkGates runs, so on every compile
-// channel the forwarding-options-Keys clause below is never the one that fires:
-// removing it SURVIVES every end-to-end #9411 cell, while removing the relay
-// Keys[1] check reds the fully-elided row. It is KEPT rather than trimmed,
-// because the normalizer is under active change (#8690, #8876) and a change that
-// stopped folding this spelling would otherwise silently re-open it — and it is
-// kept EXERCISABLE rather than excused:
-// TestDHCPRelayDHCPv6GateSeesTheRawElidedShape9411 drives the gate on the RAW
-// parser tree, where this clause is the only one that can fire.
-//
-// POSITION, NOT MEMBERSHIP, is what keeps this from over-rejecting. A DHCPv4
-// relay GROUP or SERVER-GROUP may legitimately be NAMED `dhcpv6`
-// (`dhcp-relay group dhcpv6 { … }`). That token sits after `group`, never
-// immediately after `dhcp-relay` and never as a child's Name(), so a gate that
-// searched for the token anywhere would refuse a working DHCPv4 relay.
-//
-// Strict on commit / commit-check; downgraded to a warning on the tolerant load
-// / peer-sync paths (opts.lenientDHCPRelayDHCPv6) so a persisted or peer-synced
-// config carrying the stanza still BOOTS (#1960).
-//
-// THE DOWNGRADE WAS NOT SAFE UNTIL THE COMPILER WAS FIXED TOO, and the first draft
-// of this comment claimed it already was. "The stanza compiles to nothing" held
-// for four of the five shapes. For `dhcp-relay dhcpv6 { group g6 { … } }` it was
-// false, measured at the pristine base on all four channels:
-//
-//	dhcp-relay dhcpv6 { group g6 … }                    ACCEPT  v4-groups=[g6]
-//	dhcp-relay dhcpv6 { g6 } THEN dhcp-relay { g1 v4 }   see compileForwardingOptions
-//
-// The elided spelling puts `dhcpv6` on the relay node's own Keys, so `group g6`
-// is a direct child of a node named `dhcp-relay`, and compileForwardingOptions'
-// FindChild("dhcp-relay") returned that node: a DHCPv6 relay group was installed
-// as a DHCPv4 relay on the interface the operator named for DHCPv6. A warning in
-// front of that would have been a warning in front of a mis-compile, not in front
-// of an inert stanza. dhcpRelayV4Node9411 is what makes the downgrade inert.
+// Junos places these Interface-ID modifiers under
+// forwarding-options dhcp-relay dhcpv6 relay-agent-interface-id. xpf
+// supports only a scalar byte value (or the valueless default), so every
+// documented modifier remains in the scoped #9553 refusal boundary.
+func isUnsupportedDHCPRelayV6InterfaceIDSubOption9553(value string) bool {
+	switch value {
+	case "use-option-82", "prefix", "host-name", "routing-instance-name",
+		"logical-system-name", "use-interface-description",
+		"include-irb-and-l2", "keep-incoming-interface-id",
+		"no-vlan-interface-name", "use-vlan-id":
+		return true
+	default:
+		return false
+	}
+}
 
+// validateDHCPRelayDHCPv6AST now owns only the unsupported remainder of the
+// Junos DHCPv6 relay grammar. The RFC 8415 subset implemented by #9553 is
+// schema-declared and compiled by compileDHCPRelayV6; unknown direct children
+// remain loud instead of being silently discarded by the open-world walker.
 func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
-	report := func(spelling string) error {
-		msg := fmt.Sprintf("forwarding-options dhcp-relay dhcpv6 (%s): xpf has no DHCPv6 "+
-			"relay agent — pkg/dhcprelay relays DHCPv4 only — so this stanza compiles to "+
-			"NOTHING: it commits clean, renders in `show configuration`, and relays no "+
-			"DHCPv6 at all. Remove it; a DHCPv4 relay under `forwarding-options dhcp-relay` "+
-			"is unaffected (#9411)", spelling)
+	report := func(keyword string) error {
+		msg := fmt.Sprintf("forwarding-options dhcp-relay dhcpv6: %q is not in xpf's implemented RFC 8415 relay subset (known: active-server-group, group, interface, relay-agent-interface-id, server-group) — it is not compiled (#9553)", keyword)
 		if lenient {
 			warnings = append(warnings, msg)
 			return nil
 		}
 		return fmt.Errorf("%s", msg)
 	}
+	checkScalar := func(node *Node) error {
+		if node == nil {
+			return nil
+		}
+		if len(node.Children) > 0 {
+			return report(node.Children[0].Name())
+		}
+		// A normal scalar leaf is exactly one unbracketed value. Junos also
+		// accepts valueless relay-agent-interface-id as an enable flag; the
+		// compiler records an explicit group default so it suppresses inheritance.
+		if node.Name() == "relay-agent-interface-id" && len(node.Keys) == 1 {
+			return nil
+		}
+		if len(node.Keys) != 2 || node.KeyBracketed(1) {
+			switch {
+			case len(node.Keys) > 2:
+				return report(node.Keys[2])
+			case len(node.Keys) == 2:
+				return report(node.Keys[1])
+			default:
+				return report(node.Name() + " requires a value")
+			}
+		}
+		return nil
+	}
+	checkInterfaceID := func(node *Node) error {
+		if node != nil && len(node.Keys) > 1 && isUnsupportedDHCPRelayV6InterfaceIDSubOption9553(node.Keys[1]) {
+			return report(node.Keys[1])
+		}
+		return checkScalar(node)
+	}
+	checkInterface := func(node *Node) error {
+		if node == nil {
+			return nil
+		}
+		// `interface { ge-0/0/0.0; }` is a legitimate multi-value
+		// container. A scalar followed by a braced child is not.
+		if len(node.Children) > 0 && len(node.Keys) > 1 {
+			return report(node.Children[0].Name())
+		}
+		if len(node.Keys) == 1 && len(node.Children) == 0 {
+			return report(node.Name() + " requires a value")
+		}
+		for _, member := range node.Children {
+			if member != nil && len(member.Children) > 0 {
+				return report(member.Children[0].Name())
+			}
+		}
+		if len(node.Keys) > 2 && !node.KeyBracketed(2) {
+			return report(node.Keys[2])
+		}
+		return nil
+	}
 	for _, fo := range nodes {
 		if fo == nil || fo.Name() != "forwarding-options" {
 			continue
 		}
-		// forwarding-options dhcp-relay dhcpv6 …;  — the fully elided spelling.
-		if len(fo.Keys) >= 3 && fo.Keys[1] == "dhcp-relay" && fo.Keys[2] == "dhcpv6" {
-			if err := report("elided spelling"); err != nil {
-				return warnings, err
-			}
-		}
-		for _, relay := range fo.FindChildren("dhcp-relay") {
-			if relay == nil {
+		for _, family := range dhcpRelayV6Nodes9553(fo) {
+			if family == nil {
 				continue
 			}
-			found := len(relay.Keys) >= 2 && relay.Keys[1] == "dhcpv6"
-			for _, ch := range relay.Children {
-				if ch != nil && ch.Name() == "dhcpv6" {
-					found = true
+			for _, child := range family.Children {
+				if child == nil {
+					continue
 				}
-			}
-			if found {
-				// Once per relay node: the flat-set spelling yields one child PER
-				// set line, and three identical warnings would read as three stanzas.
-				if err := report("dhcp-relay dhcpv6"); err != nil {
-					return warnings, err
+				if routingInstanceApplyMetaKeyword9323(child.Name()) {
+					continue
+				}
+				switch child.Name() {
+				case "active-server-group":
+					if err := checkScalar(child); err != nil {
+						return warnings, err
+					}
+				case "relay-agent-interface-id":
+					if err := checkInterfaceID(child); err != nil {
+						return warnings, err
+					}
+				case "group":
+					for _, groupChild := range child.Children {
+						if groupChild == nil {
+							continue
+						}
+						if routingInstanceApplyMetaKeyword9323(groupChild.Name()) {
+							continue
+						}
+						switch groupChild.Name() {
+						case "active-server-group":
+							if err := checkScalar(groupChild); err != nil {
+								return warnings, err
+							}
+						case "interface":
+							if err := checkInterface(groupChild); err != nil {
+								return warnings, err
+							}
+						case "relay-agent-interface-id":
+							if err := checkInterfaceID(groupChild); err != nil {
+								return warnings, err
+							}
+						default:
+							if err := report(groupChild.Name()); err != nil {
+								return warnings, err
+							}
+						}
+					}
+				case "server-group":
+					for _, member := range child.Children {
+						if member != nil && len(member.Children) > 0 {
+							if err := report(member.Children[0].Name()); err != nil {
+								return warnings, err
+							}
+						}
+					}
+					// Named server-group values are otherwise validated by
+					// the typed compiler; their child addresses are not
+					// scalar statements.
+				default:
+					if err := report(child.Name()); err != nil {
+						return warnings, err
+					}
 				}
 			}
 		}
@@ -125,14 +158,10 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 	return warnings, nil
 }
 
-// dhcpRelayV4Node9411 returns the `dhcp-relay` node compileDHCPRelay should read:
-// the FIRST one that is not the `dhcp-relay dhcpv6 { … }` spelling.
-//
-// It keeps FindChild's "first node wins" semantics for every DHCPv4 spelling, so
-// this changes nothing for a config without the dhcpv6 token. It only stops the
-// dhcpv6-elided node — whose `group` children are DHCPv6 groups — from being
-// taken for the DHCPv4 relay, which both mis-compiled those groups as DHCPv4
-// relays and, when that node came first, hid the real DHCPv4 relay block after it.
+// dhcpRelayV4Node9411 returns the first `dhcp-relay` node that is not the
+// `dhcp-relay dhcpv6 { … }` spelling. DHCPv6 is compiled separately, but this
+// guard remains necessary to prevent its identically-named `group` children
+// from being installed as DHCPv4 relays (#9411, #9553).
 func dhcpRelayV4Node9411(fo *Node) *Node {
 	if fo == nil {
 		return nil
