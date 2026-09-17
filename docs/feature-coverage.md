@@ -473,7 +473,12 @@ the userspace dataplane admission boundary is in
   reserved host bindings (`static-binding <mac> { fixed-address; host-name; }`
   under `dhcp-local-server`/`dhcpv6-local-server` → Kea per-subnet
   `reservations`, HA-consistent via config-sync — #2243).
-- **DHCP relay**: DHCPv4 only, with Option 82 support. There is no DHCPv6 relay agent: `forwarding-options dhcp-relay dhcpv6` is refused at commit and warned on the tolerant load / peer-sync path, and is never compiled as the DHCPv4 relay (#9411).
+- **DHCP relay**: DHCPv4 and the supported RFC 8415 DHCPv6 Relay-Forw /
+  Relay-Reply agent. DHCPv6 uses `forwarding-options dhcp-relay dhcpv6` with
+  multicast client intake, configured UDP/547 upstream servers, per-group
+  Interface-ID inheritance, and the existing HA master gate (#9553). The
+  unsupported-child remainder is still refused strictly and warned
+  tolerantly; see the #9411 history in `docs/config-schema.md`.
 - **Event engine**: event-driven automation.
 
 ## Userspace dataplane capability matrix

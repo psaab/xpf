@@ -7110,13 +7110,15 @@ compiler reads or accepts is declared. Since #9620 the compiler keeps no keyword
 list of its own: a brace-elided instance is split by these same declarations
 (see "Brace-elided routing instances"), so there is no second set to drift.
 
-## `forwarding-options dhcp-relay dhcpv6` — refused, and never compiled as the DHCPv4 relay (#9411)
+## `forwarding-options dhcp-relay dhcpv6` — supported RFC 8415 subset (#9553); historical refusal (#9411)
 
-xpf has no DHCPv6 relay agent; `pkg/dhcprelay` relays DHCPv4 only. Authoring the
-Junos DHCPv6 relay stanza was worse than the silent discard #9411 was filed as.
-Measured at the pristine base `3b24fe26e`; **every row below was ACCEPTED on all
-four channels** — `config.SchemaValidate`, `config.CompileConfig`,
-`config.CompileConfigLenient` and `configstore.CheckText`:
+The full-stanza refusal from #9411 is **historical and retired for the
+implemented subset**. Before #9553, xpf had no DHCPv6 relay agent and
+`pkg/dhcprelay` relayed DHCPv4 only. Authoring the Junos DHCPv6 relay stanza was
+worse than the silent discard #9411 was filed as. The original measurement is
+preserved below rather than rewritten: at pristine base `3b24fe26e`, **every
+row was ACCEPTED on all four channels** — `config.SchemaValidate`,
+`config.CompileConfig`, `config.CompileConfigLenient` and `configstore.CheckText`:
 
 | spelling | what compiled as the DHCPv4 relay |
 |---|---|
@@ -7125,54 +7127,74 @@ four channels** — `config.SchemaValidate`, `config.CompileConfig`,
 | `dhcp-relay dhcpv6 { g6 }` then `dhcp-relay { server-group isp; group g1 }` | **server-groups=0, v4-groups=[g6]** — the operator's real DHCPv4 relay DROPPED |
 | `dhcp-relay { server-group isp; group g1 }` then `dhcp-relay dhcpv6 { g6 }` | 1 server-group, v4-groups=[g1] — v6 discarded |
 
-Three outcomes behind one symptom. The elided spelling puts `dhcpv6` on the relay
-node's OWN Keys, so `group g6` is a direct child of a node named `dhcp-relay`, and
-`compileForwardingOptions` took `FindChild("dhcp-relay")` — first node wins. Which
-DHCPv4 relay an operator actually got depended on the order of two blocks.
+Three outcomes hid behind one symptom. The elided spelling put `dhcpv6` on the
+relay node's OWN Keys, so `group g6` was a direct child of a node named
+`dhcp-relay`, and `compileForwardingOptions` took `FindChild("dhcp-relay")` —
+first node wins. Which DHCPv4 relay an operator actually got depended on the
+order of two blocks.
 
-### Two changes, and both are needed
+### The #9553 cutover and its remaining gate
 
-1. **`validateDHCPRelayDHCPv6AST`** (`compiler_dhcp_relay_dhcpv6_9411.go`), a
-   compiler pre-walk gate beside #9017's and #9323's. Strict commit / `CheckText`
-   refuses the stanza; the tolerant load / peer-sync path warns
-   (`opts.lenientDHCPRelayDHCPv6`, #1960). It runs on the AST because the stanza
-   compiles to nothing, so nothing is left in the typed config to validate.
-2. **`dhcpRelayV4Node9411`**: `compileForwardingOptions` reads the first
-   `dhcp-relay` node that is NOT the dhcpv6 spelling. Without this, the tolerant
-   downgrade would put a warning in front of a mis-compile rather than in front of
-   an inert stanza. The gate's first draft claimed "the stanza already compiles to
-   nothing"; measured, that was false for the elided spelling.
+The supported RFC 8415 subset now includes `server-group` with IPv6 server
+addresses, `group` with `active-server-group` and client `interface` values,
+family/group `relay-agent-interface-id` inheritance, and separate typed DHCPv6
+state. `compileDHCPRelayV6` handles braced, relay-elided, and fully packed
+parser shapes; `dhcpRelayV4Node9411` still excludes the DHCPv6 node so its
+identically named groups cannot enter the DHCPv4 maps. `pkg/dhcprelay` owns the
+multicast client socket, upstream UDP/547 sockets, Relay-Forw/Reply validation,
+Interface-ID matching, and the existing HA master gate. The client-facing
+DHCPv6 listener drops nested downstream Relay-Forw requests and nested
+Relay-Reply responses by default because no downstream trust knob exists; its
+`inet6` statistics row exposes per-reason admission/reply drops. A running
+session rebuilds on link-address or interface index drift rather than leaving
+stale sockets alive.
+
+The refusal boundary was **narrowed, not removed**. The pre-walk gate beside
+#9017 and #9323 now reports only unsupported or incomplete DHCPv6 remainder:
+strict commit / `CheckText` refuses it, while tolerant load / peer-sync warns
+with scoped `#9553` diagnostics (`opts.lenientDHCPRelayDHCPv6`). Valid supported
+configuration compiles to the typed DHCPv6 relay without the obsolete #9411
+warning; a remainder is never silently downgraded into DHCPv4. Semantic
+incompleteness (for example no group, no active server-group, or an invalid
+server address) is checked by the typed compiler with the same strict-reject /
+tolerant-warn contract.
 
 ### Position, not membership
 
-The gate matches `dhcpv6` only immediately after `dhcp-relay` — on the relay
-node's own Keys, or in `forwarding-options`' elided Keys — or as a child's own
-name. A DHCPv4 relay `group` or `server-group` merely **named** `dhcpv6` must still
-commit, and does: those are the load-bearing acceptance rows. A gate that looked
-for the token anywhere would refuse a working DHCPv4 relay.
+The surviving gate matches `dhcpv6` only immediately after `dhcp-relay` — on
+the relay node's own Keys, or in `forwarding-options`' elided Keys — or as a
+child's own name. A DHCPv4 relay `group` or `server-group` merely **named**
+`dhcpv6` must still commit, and does: those are the load-bearing acceptance
+rows. A gate that looked for the token anywhere would refuse a working DHCPv4
+relay.
 
 **The parser produces five AST shapes; the gate sees four.** The brace-elision
-normalizer folds the fully elided `forwarding-options dhcp-relay dhcpv6 …;` into
-the relay-node shape before the pre-walk runs — measured by mutation: removing the
-forwarding-options-Keys clause survives every end-to-end cell, while removing the
-relay-node check reds the fully-elided row. The clause is kept, and kept
-exercisable by a unit cell that drives the gate on the raw parser tree, because
-the normalizer is under active change (#8690, #8876).
+normalizer folds the fully elided `forwarding-options dhcp-relay dhcpv6 …;`
+into the relay-node shape before the pre-walk runs — measured by mutation:
+removing the forwarding-options-Keys clause survives every end-to-end cell,
+while removing the relay-node check reds the fully-elided row. The clause is
+kept, and kept exercisable by a unit cell that drives the gate on the raw
+parser tree, because the normalizer is under active change (#8690, #8876).
 
 ### Reach, measured
 
-- A stanza injected through `apply-groups` is refused — the pre-walk runs on the
-  group-expanded tree.
+- A supported stanza injected through `apply-groups` compiles to the typed
+  DHCPv6 relay — the pre-walk and compiler run on the group-expanded tree.
 - `inactive: dhcpv6` is accepted — deactivated config is pruned before the gate
   and is inert by design, so refusing it would be over-rejection.
+- Unsupported direct/group children and incomplete supported-family records
+  remain covered by strict refusal and tolerant warning tests (#9553).
 
 ### Not in scope
 
-Every OTHER undeclared child of `dhcp-relay` is still accepted on all four channels
-and compiles to nothing (`dhcp-relay { xpfbogus { … } }` is indistinguishable from
-authoring nothing). Refusing arbitrary children needs a census of shipped configs
-first and is tracked as #9552. `closedWorld: true` on `dhcp-relay` is not the
-remedy: it inherits into `group` and `overrides`.
+Every OTHER undeclared child of `dhcp-relay` **outside the implemented `dhcpv6`
+subset** is covered by the scoped #9552 child-token gate. A strict commit or
+`CheckText` refuses an unknown child; tolerant load / peer-sync records a
+scoped warning and keeps the snapshot bootable. The gate skips only the
+supported DHCPv4/DHCPv6 children and Junos apply-meta statements, so
+`dhcp-relay { xpfbogus { … } }` no longer compiles cleanly as an indistinguishable
+no-op. `closedWorld: true` on `dhcp-relay` is not the remedy: it inherits into
+`group` and `overrides`.
 
 ## Per-subtree closed-world keyword validation (#4313)
 
