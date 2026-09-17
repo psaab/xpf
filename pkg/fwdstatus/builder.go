@@ -102,6 +102,7 @@ func Build(
 		}
 		if limitBytes > 0 {
 			fs.HeapPercent = float64(rssBytes) * 100.0 / float64(limitBytes)
+			fs.HeapPercentValid = true
 		}
 	}
 

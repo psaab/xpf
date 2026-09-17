@@ -59,6 +59,7 @@ type ForwardingStatus struct {
 	WorkerCPUMode CPUMode
 
 	HeapPercent       float64
+	HeapPercentValid  bool    // False when RSS or its memory limit cannot be measured.
 	BufferPercent     float64 // Only valid if BufferKnown.
 	BufferKnown       bool    // False on userspace-dp until UMEM telemetry lands.
 	BufferFollowupRef int     // GitHub issue number printed in place of buffer %.
@@ -178,8 +179,12 @@ func Format(fs *ForwardingStatus) string {
 			formatWindowRow(fs.WorkerCPUWindows, fs.WorkerCPUWindowValid))
 	}
 
-	writeRow(&b, "Heap utilization",
-		fmt.Sprintf("%.0f percent", clampPercent(fs.HeapPercent)))
+	if fs.HeapPercentValid {
+		writeRow(&b, "Heap utilization",
+			fmt.Sprintf("%.0f percent", clampPercent(fs.HeapPercent)))
+	} else {
+		writeRow(&b, "Heap utilization", "-")
+	}
 
 	if fs.BufferKnown {
 		writeRow(&b, "Buffer utilization",
