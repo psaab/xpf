@@ -7702,3 +7702,269 @@ fn triple_flap_debt_collapses_to_net_demote_9720() {
         "one apply must consume the debt exactly once (#9720)"
     );
 }
+
+// --- #9960: one declined decision governs the whole synced delete. ---
+//
+// The under-lock predicate already protects the shared forward and reverse rows
+// (#9714 r2 F3). The defect was that the other teardown legs ran before, after
+// or regardless of that decision. Each required leg below has its own cell so a
+// single-gate mutant has one directly targetable failure.
+
+/// Build one deterministic under-lock decline. The initial snapshot is a peer
+/// entry, so #9714's early ownership refusal cannot fire. At the test-only seam
+/// after that snapshot, a publisher thread installs a LOCAL replacement under
+/// the same key and rendezvouses before the delete reaches its conditional
+/// removal. The predicate therefore sees the replacement, declines it, and
+/// cannot be reached by scheduler luck.
+fn declined_delete_fixture_9960() -> (
+    Fixture9714,
+    SessionKey,
+    SessionKey,
+    usize,
+    super::session_import::SyncedDeleteOutcome,
+    Vec<crate::afxdp::bpf_map::SessionMapWriteRecord>,
+    u64,
+) {
+    use std::sync::{Arc, Barrier};
+
+    let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
+    let key = fixture.forward.key.clone();
+    let reverse_key = fixture.reverse_key.clone();
+    let mut replacement = fixture.forward.clone();
+    replacement.origin = SessionOrigin::ForwardFlow;
+    assert!(
+        !replacement.origin.is_peer_synced(),
+        "FIXTURE: the replacement must be LOCAL-origin"
+    );
+    assert!(
+        fixture.shared_has(&key) && fixture.shared_has(&reverse_key),
+        "FIXTURE: the peer forward and reverse must be seeded"
+    );
+    file_prewarm_9714(&fixture, &key);
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "FIXTURE: the key must be filed before the decline"
+    );
+    let holds_before = fixture.dnat_holds();
+    assert!(
+        holds_before >= 1,
+        "FIXTURE: the forward session must hold its DNAT steering row"
+    );
+    let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let domain = fixture.coordinator.session_domain().clone();
+    let publisher_ready = Arc::new(Barrier::new(2));
+    let published = Arc::new(Barrier::new(2));
+    domain.set_synced_delete_after_clone_hook_for_test({
+        let publisher_ready = Arc::clone(&publisher_ready);
+        let published = Arc::clone(&published);
+        move |_domain, _key| {
+            // The publisher cannot proceed until the delete has cloned the
+            // original peer entry and reached this exact seam.
+            publisher_ready.wait();
+            // Do not let the delete acquire the removal lock until the
+            // replacement's complete shared publish has finished.
+            published.wait();
+        }
+    });
+
+    let outcome = std::thread::scope(|scope| {
+        let publisher_domain = domain.clone();
+        let publisher_ready = Arc::clone(&publisher_ready);
+        let published = Arc::clone(&published);
+        let publisher = scope.spawn(move || {
+            publisher_ready.wait();
+            crate::afxdp::shared_ops::publish_shared_session(
+                &publisher_domain.sessions.synced,
+                &publisher_domain.sessions.nat,
+                &publisher_domain.sessions.forward_wire,
+                &publisher_domain.sessions.owner_rg_indexes,
+                &replacement,
+            );
+            published.wait();
+        });
+        let outcome = domain.delete_peer_synced_session(key.clone(), false);
+        publisher.join().expect("decline publisher");
+        outcome
+    });
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    (
+        fixture,
+        key,
+        reverse_key,
+        holds_before,
+        outcome,
+        writes,
+        refused_before,
+    )
+}
+
+/// Matrix row 1/6: a declined delete keeps the kernel steering row.
+#[test]
+fn declined_synced_delete_keeps_steering_row_9960() {
+    let (fixture, _key, _reverse_key, _holds_before, _outcome, writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert!(
+        !writes.iter().any(|write| write.value.is_none() && write.key == fixture.forward.key),
+        "DECLINED delete removed the live replacement's steering row; writes: {writes:?}"
+    );
+}
+
+/// Matrix row 2/6: a declined delete keeps the DNAT steering hold.
+#[test]
+fn declined_synced_delete_keeps_dnat_hold_9960() {
+    let (fixture, _key, _reverse_key, holds_before, _outcome, _writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert_eq!(
+        fixture.dnat_holds(),
+        holds_before,
+        "DECLINED delete released the live replacement's DNAT hold"
+    );
+}
+
+/// Matrix row 3/6: the shared forward authority survives. This row is already
+/// green on origin/master; its single-gate mutant is RED in the fail-on-revert
+/// matrix because removing the existing `SharedRemoval::Declined` gate changes
+/// the observed shared state.
+#[test]
+fn declined_synced_delete_keeps_shared_forward_9960() {
+    let (fixture, key, _reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert!(
+        fixture.shared_has(&key),
+        "DECLINED delete removed the live replacement's shared forward authority"
+    );
+    let origin = fixture
+        .coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced map")
+        .get(&key)
+        .map(|entry| entry.origin);
+    assert_eq!(
+        origin,
+        Some(SessionOrigin::ForwardFlow),
+        "DECLINED delete did not leave the LOCAL replacement in shared authority"
+    );
+}
+
+/// Matrix row 4/6: a declined delete keeps the reverse companion.
+#[test]
+fn declined_synced_delete_keeps_reverse_companion_9960() {
+    let (fixture, _key, reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert!(
+        fixture.shared_has(&reverse_key),
+        "DECLINED delete removed the live session's reverse companion"
+    );
+}
+
+/// Matrix row 5/6: a declined delete does not fan out DeleteSynced.
+#[test]
+fn declined_synced_delete_skips_worker_fanout_9960() {
+    let (fixture, key, reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert!(
+        !fixture.queued_delete(&key) && !fixture.queued_delete(&reverse_key),
+        "DECLINED delete fanned DeleteSynced to a sibling worker"
+    );
+}
+
+/// Matrix row 6/6: a declined delete is distinguishable from Applied, so the
+/// Go caller does not delete its BPF mirror row.
+#[test]
+fn declined_synced_delete_reports_refusal_9960() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    let (_fixture, _key, _reverse_key, _holds_before, outcome, _writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::RefusedConcurrentLocalOwned,
+        "DECLINED delete returned the wrong outcome; the Go side would delete the kept mirror row"
+    );
+    assert!(
+        outcome.keeps_caller_rows(),
+        "DECLINED delete outcome did not preserve caller-owned mirror rows"
+    );
+}
+
+/// Additional #9960 row: a declined delete leaves the reverse-prewarm filing
+/// for the live replacement. Removing this leg is a distinct single-gate
+/// mutant even though it is maintained by the shared-removal helper as well.
+#[test]
+fn declined_synced_delete_keeps_reverse_prewarm_filing_9960() {
+    let (fixture, key, _reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+        declined_delete_fixture_9960();
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "DECLINED delete un-filed a live replacement from reverse prewarm"
+    );
+}
+
+/// Additional #9960 row: the concurrent ownership decline is visible on the
+/// same counter as the #9714 early ownership refusal.
+#[test]
+fn declined_synced_delete_counts_concurrent_ownership_refusal_9960() {
+    let (_fixture, _key, _reverse_key, _holds_before, _outcome, _writes, refused_before) =
+        declined_delete_fixture_9960();
+    assert_eq!(
+        PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed),
+        refused_before + 1,
+        "DECLINED delete did not increment the peer-local-owned refusal counter"
+    );
+}
+
+/// Applied control: a peer delete with no replacement still removes all
+/// teardown state and reports Applied. Existing #9714 acceptance/control cells
+/// pin the same behavior; this cell pins the new outcome discriminant too.
+#[test]
+fn an_unraced_peer_delete_still_reports_applied_9960() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::Applied),
+        "an applied peer delete must retain the Applied outcome"
+    );
+}
+
+/// #9714 pin: the early ownership refusal remains its original distinct
+/// outcome, rather than being relabelled as the concurrent decline.
+#[test]
+fn early_ownership_refusal_keeps_its_original_outcome_9960() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    let fixture = fixture_9714(true);
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::RefusedLocalOwned),
+        "the #9714 early ownership refusal changed outcome"
+    );
+}
+
+/// #9714 F3c expiry condition: without a replacement, a single-threaded
+/// delete cannot reach the concurrent-decline state. The actual decline is
+/// driven by the deterministic concurrent harness above.
+#[test]
+fn single_threaded_peer_delete_never_spuriously_declines_9960() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    for _ in 0..20 {
+        let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
+        let outcome = fixture
+            .coordinator
+            .session_domain()
+            .delete_peer_synced_session(fixture.forward.key.clone(), false);
+        assert!(matches!(outcome, SyncedDeleteOutcome::Applied));
+    }
+}
