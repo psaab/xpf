@@ -5677,9 +5677,9 @@ fn shared_ifindex_ingress_and_egress_both_refuse_a_siblings_zone_7509() {
     );
     assert_eq!(
         denied.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "and the verdict must come from the DEFAULT policy, not from an operator \
-         rule that happened to deny"
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "an unzoned ingress is not adjudicated by the default policy or an \
+         operator rule: its verdict is unattributed (#9989)"
     );
 
     // ---- POSITIVE CONTROL on the accept side ----

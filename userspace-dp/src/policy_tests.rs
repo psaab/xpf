@@ -7761,3 +7761,75 @@ fn go_built_split_duplicate_wire_is_refused_9584() {
         Err(other) => panic!("#9584: refused for the wrong reason: {other:?}"),
     }
 }
+
+/// #9989: an unzoned-ingress deny must NOT alias the default-policy id.
+///
+/// The #6682 arm returns before the implicit default, but it stamped
+/// `DEFAULT_POLICY_SENTINEL_ID` on the result, so every RT_FLOW/policy record
+/// for the drop rendered as `default-policy` on the Go side (`resolvePolicyName`
+/// and `SessionPolicyName` map the sentinel to that fixed name). The drop is
+/// now attributed to the reserved unattributed id (`UNATTRIBUTED_POLICY_ID`,
+/// rendered `unattributed` — never `default-policy`), while enforcement stays
+/// Deny, the dedicated `UNZONED_INGRESS_DENIED` counter stays the aggregate
+/// signal, and the reserved default-policy counter stays untouched (no silent
+/// counter drop, no double-count).
+///
+/// Fail-on-revert: restoring `policy_id: DEFAULT_POLICY_SENTINEL_ID` in the
+/// unzoned arm fails the `assert_ne!` below (RED). The GENUINE implicit-default
+/// path keeps the sentinel and is pinned separately by
+/// `default_policy_no_match_emits_sentinel_policy_id` — the two verdicts must
+/// never share an attribution again.
+#[test]
+fn unzoned_ingress_deny_is_unattributed_not_default_policy_9989() {
+    let state = parse_policy_state(
+        "permit",
+        &[both_any_permit_snapshot_6682()],
+        &test_zone_name_to_id(),
+    );
+
+    // Setup guard: the both-any permit really does permit a properly ZONED
+    // flow, so the deny below proves the unzoned arm fired — not that the
+    // fixture never matches (same guard shape as the #6682 tests).
+    assert_eq!(
+        eval_6682(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID).action,
+        PolicyAction::Permit,
+        "setup: a from-any/to-any permit must admit a zoned flow",
+    );
+
+    let default_before = policy_counter(&state, "default-policy").packets;
+    let unzoned_before = unzoned_denied_count_6682();
+    let result = eval_6682(&state, 0, TEST_WAN_ZONE_ID);
+
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "enforcement is unchanged: an unzoned ingress is still denied (#6682)",
+    );
+    assert_eq!(
+        result.policy_id, UNATTRIBUTED_POLICY_ID,
+        "an unzoned-ingress deny is produced by no policy and must carry the \
+         unattributed id (#9989)",
+    );
+    assert_ne!(
+        result.policy_id, DEFAULT_POLICY_SENTINEL_ID,
+        "an unzoned-ingress deny must not alias the default-policy id: the \
+         drop would log as `default-policy` (#9989)",
+    );
+    assert_eq!(
+        unzoned_denied_count_6682() - unzoned_before,
+        1,
+        "the dedicated unzoned-ingress counter stays the aggregate-cause \
+         signal for this drop (#9989)",
+    );
+    assert_eq!(
+        result.policy_counter_idx, 0,
+        "an unzoned deny must not claim a configured rule's hit counter (#9989)",
+    );
+    assert_eq!(
+        policy_counter(&state, "default-policy").packets - default_before,
+        0,
+        "the unzoned deny must not touch the reserved default-policy counter: \
+         a rising default count means policy is working, a rising unzoned \
+         count means an interface fell out of its zone (#9989)",
+    );
+}
