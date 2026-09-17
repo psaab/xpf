@@ -64,8 +64,8 @@ func TestDuplicateBlocksMergeAtFourMoreSites9209(t *testing.T) {
 			// and a description of a symptom rather than of the duplication.
 			// Merging first lets that gate see the policy actually described.
 			name:   "security ipsec policy",
-			dup:    `security { ipsec { proposal pr1 { encryption-algorithm aes-256-cbc; } policy p1 { proposals pr1; } policy p1 { perfect-forward-secrecy { keys group14; } } } }`,
-			merged: `security { ipsec { proposal pr1 { encryption-algorithm aes-256-cbc; } policy p1 { proposals pr1; perfect-forward-secrecy { keys group14; } } } }`,
+			dup:    `security { ipsec { proposal pr1 { encryption-algorithm aes-256-cbc; authentication-algorithm hmac-sha-256-128; } policy p1 { proposals pr1; } policy p1 { perfect-forward-secrecy { keys group14; } } } }`,
+			merged: `security { ipsec { proposal pr1 { encryption-algorithm aes-256-cbc; authentication-algorithm hmac-sha-256-128; } policy p1 { proposals pr1; perfect-forward-secrecy { keys group14; } } } }`,
 			read: func(c *Config) string {
 				for n, p := range c.Security.IPsec.Policies {
 					return fmt.Sprintf("%s proposals=%v pfsGroup=%d", n, p.Proposals, p.PFSGroup)

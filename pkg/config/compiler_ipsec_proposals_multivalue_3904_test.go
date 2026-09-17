@@ -27,8 +27,10 @@ func multiProposalsFlat(t *testing.T) *Config {
 		"set security ike policy ike-pol proposals [ ike-a ike-b ]",
 		"set security ipsec proposal esp-a protocol esp",
 		"set security ipsec proposal esp-a encryption-algorithm aes-256-cbc",
+		"set security ipsec proposal esp-a authentication-algorithm hmac-sha-256-128",
 		"set security ipsec proposal esp-b protocol esp",
 		"set security ipsec proposal esp-b encryption-algorithm aes-128-cbc",
+		"set security ipsec proposal esp-b authentication-algorithm hmac-sha-256-128",
 		"set security ipsec policy esp-pol proposals [ esp-a esp-b ]",
 	})
 	cfg, err := CompileConfig(tree)
@@ -75,10 +77,12 @@ func TestIKEIPsecProposalsMultiValueHierarchical(t *testing.T) {
         proposal esp-a {
             protocol esp;
             encryption-algorithm aes-256-cbc;
+            authentication-algorithm hmac-sha-256-128;
         }
         proposal esp-b {
             protocol esp;
             encryption-algorithm aes-128-cbc;
+            authentication-algorithm hmac-sha-256-128;
         }
         policy esp-pol {
             proposals [ esp-a esp-b ];
@@ -104,6 +108,7 @@ func TestIKEIPsecProposalsMultiValueHierarchical(t *testing.T) {
 func TestIPsecPolicyProposalsDanglingSecondRejected(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security zones security-zone untrust",
+		"set security ipsec proposal esp-a authentication-algorithm hmac-sha-256-128",
 		"set security ipsec proposal esp-a protocol esp",
 		"set security ipsec proposal esp-a encryption-algorithm aes-256-cbc",
 		"set security ipsec policy esp-pol proposals [ esp-a esp-typo ]",

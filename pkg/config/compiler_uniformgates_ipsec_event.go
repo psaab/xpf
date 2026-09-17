@@ -202,6 +202,18 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 			return err
 		}
 	}
+	// #9906/#9907: proposal algorithm values are interpolated into unquoted
+	// swanctl lists, and non-AEAD ESP must carry an integrity term. Strict
+	// commit rejects the named value/proposal; tolerant load warns and the
+	// pkg/ipsec renderer skips the affected proposal as a second belt.
+	if err := validateIPsecProposalAlgorithmsStrict(cfg); err != nil {
+		if opts.lenientIPsecProposalAlgorithms {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec proposal algorithms (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #4300 (V-4): reject an IPsec VPN configuring a `manual { ... }`
 	// manual-key SA. xpf has no manual-key path; the block was silently

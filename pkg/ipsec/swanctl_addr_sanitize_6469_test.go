@@ -159,22 +159,12 @@ func TestSwanctlAddrLegitPreserved_6469(t *testing.T) {
 	})
 }
 
-// TestSwanctlProposalsInjectionNeutralized_6469 is the fold guard: the swanctl
-// `proposals` (IKE, Phase 1) and `esp_proposals` (ESP, Phase 2, INSIDE the
-// children{} block) render sites must run the built proposal string through
-// sanitizeSwanctlValue. buildIKEProposal* / buildESPProposal append
-// prop.EncryptionAlg / prop.AuthAlg VERBATIM on the unknown-algorithm
-// fall-through (normalizeAuthAlg's default branch; normalizeEncAlg's generic
-// gcm strip), so a control char in a peer-synced / directly-constructed
-// proposal reaches the renderer. An embedded newline in esp_proposals injects
-// a child-SA directive (`updown = <script>` runs as ROOT under charon) — a
-// strictly worse vector than the endpoint one, on the identical
-// validation-bypassed threat model. Reverting either wrap makes the matching
-// case fail with a clean assertion: the injected directive is a live line.
+// TestSwanctlProposalsInjectionNeutralized_6469 is the fail-closed companion
+// to the endpoint sanitizer: proposal algorithm values are now rejected by
+// the same SectionSafe allowlist at render, so a persisted control-byte
+// payload cannot reach either unquoted proposal slot. The VPN is skipped and
+// the stale SA teardown path uses the rendered set.
 func TestSwanctlProposalsInjectionNeutralized_6469(t *testing.T) {
-	// IKE proposals: EncryptionAlg carries the payload, no AuthAlg / DHGroup,
-	// so buildIKEProposalFromIKE emits the payload as the whole proposals
-	// value (nothing is appended after the newline).
 	ikeCfg := &config.IPsecConfig{
 		Gateways: map[string]*config.IPsecGateway{
 			"gw": {Name: "gw", Address: "203.0.113.1", IKEPolicy: "ike-pol"},
@@ -189,10 +179,6 @@ func TestSwanctlProposalsInjectionNeutralized_6469(t *testing.T) {
 			"ike-prop": {Name: "ike-prop", AuthMethod: "pre-shared-keys", EncryptionAlg: "aes256\n    reauth_time = 0"},
 		},
 	}
-
-	// ESP proposals: the ipsec-policy proposal's EncryptionAlg carries the
-	// updown→root payload; no AuthAlg / DHGroup so esp_proposals is exactly
-	// the payload. gw has a valid address so the VPN is not skipped.
 	espCfg := &config.IPsecConfig{
 		Gateways: map[string]*config.IPsecGateway{
 			"gw": {Name: "gw", Address: "203.0.113.1"},
@@ -207,50 +193,28 @@ func TestSwanctlProposalsInjectionNeutralized_6469(t *testing.T) {
 			"prop1": {Name: "prop1", EncryptionAlg: "aes256\n        updown = /tmp/pwn.sh"},
 		},
 	}
-
-	cases := []struct {
+	for _, tc := range []struct {
 		name string
 		cfg  *config.IPsecConfig
-		// #6824: a KEY that must not become live anywhere, and the slot the
-		// sanitized value must still lead -- named by path, not by a rendered
-		// line whose indentation encoded which phase it belonged to.
-		directiveKey string
-		slotKey      string
-		slotPrefix   string
 	}{
-		{
-			name:         "IKE proposals newline injection",
-			cfg:          ikeCfg,
-			directiveKey: "reauth_time",
-			slotKey:      "proposals",
-			slotPrefix:   "aes256",
-		},
-		{
-			name:         "ESP esp_proposals updown->root injection",
-			cfg:          espCfg,
-			directiveKey: "updown",
-			slotKey:      "esp_proposals",
-			slotPrefix:   "aes256",
-		},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
-			doc := parseSwanctlDoc(t, m.generateConfig(c.cfg))
-			doc.hasNoSettingAnywhere(t, c.directiveKey)
-
-			// The sanitized proposal must still lead its slot. #6824 pins WHICH
-			// slot: `proposals` on the connection is Phase 1, `esp_proposals`
-			// on the child SA is Phase 2, and a containment needle for
-			// "esp_proposals = aes256" could previously be satisfied by either
-			// render site emitting the token.
-			slot := doc.at(t, "connections", "tun")
-			if c.slotKey == "esp_proposals" {
-				slot = childSA_3904(t, m.generateConfig(c.cfg), "tun")
+		{name: "IKE proposals newline injection", cfg: ikeCfg},
+		{name: "ESP esp_proposals updown->root injection", cfg: espCfg},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, rendered, err := (&Manager{}).renderConfig(tc.cfg)
+			if err != nil {
+				t.Fatalf("render returned error instead of tolerant skip: %v", err)
 			}
-			if v := slot.setting(t, c.slotKey); !strings.HasPrefix(v, c.slotPrefix) {
-				t.Fatalf("%s = %q, want it to still start with %q", c.slotKey, v, c.slotPrefix)
+			if rendered["tun"] {
+				t.Fatal("unsafe proposal VPN must be omitted from rendered connection set")
+			}
+			for _, directive := range []string{"reauth_time", "updown"} {
+				if strings.Contains(text, directive+" =") {
+					t.Fatalf("injected directive became live in rendered config: %q\n%s", directive, text)
+				}
+			}
+			if strings.Contains(text, "proposals =") || strings.Contains(text, "esp_proposals =") {
+				t.Fatalf("unsafe proposal slot must not be emitted:\n%s", text)
 			}
 		})
 	}

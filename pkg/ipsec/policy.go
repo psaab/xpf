@@ -113,6 +113,13 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 					"vpn", name, "detail", err.Error())
 				continue
 			}
+			if errors.Is(err, errProposalUnresolved) {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: no safe IKE proposal remains "+
+					"(an unsafe algorithm value would change swanctl syntax)",
+					"vpn", name, "detail", err.Error())
+				continue
+			}
 			return "", nil, fmt.Errorf("vpn %s: %w", name, err)
 		}
 
@@ -177,6 +184,14 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 				slog.Warn("skipping IPsec VPN: unusable Diffie-Hellman group "+
 					"(emitting the proposal would silently drop PFS or render "+
 					"a keyword charon refuses) — fix the dh-group / keys value",
+					"vpn", name, "detail", err.Error())
+				continue
+			}
+			if errors.Is(err, errProposalUnresolved) {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: no safe ESP proposal remains "+
+					"(an unsafe algorithm or missing integrity term would "+
+					"weaken/change the swanctl proposal)",
 					"vpn", name, "detail", err.Error())
 				continue
 			}
