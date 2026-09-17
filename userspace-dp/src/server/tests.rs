@@ -5049,6 +5049,105 @@ fn update_fabrics_unchanged_set_does_not_rewrite_state_file() {
     let _ = std::fs::remove_file(&state_file);
 }
 
+/// #9803: an `update_fabrics` carrying a new fabric parent ifindex, followed by
+/// a full apply with the same rows, must end with the fabric bindings replanned.
+/// The helper's `update_fabrics` arm stores the rows in its retained snapshot
+/// without replanning, so the next full apply compares same-plan (stored and
+/// incoming carry the same new values) and skips the fabric rebind — the
+/// bindings stay on the previous parent while the snapshot describes the new one.
+/// fail-on-revert: without the plan-invalidation the second apply takes the
+/// same-plan refresh leg and every binding still carries ifindex 101 (RED).
+#[test]
+fn update_fabrics_plan_change_forces_rebind_on_next_apply_9803() {
+    use crate::{ConfigSnapshot, FabricSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let mut status = ProcessStatus::default();
+    status.workers = 1;
+    let state = new_state(status);
+    let fab = |parent_ifindex: i32| FabricSnapshot {
+        name: "fab0".into(),
+        parent_interface: "ge-0/0/0".into(),
+        parent_linux_name: "ge-0-0-0".into(),
+        parent_ifindex,
+        parent_unbindable: false,
+        overlay_linux_name: "fab0".into(),
+        overlay_ifindex: 101,
+        rx_queues: 2,
+        peer_address: "10.99.13.2".into(),
+        local_mac: "02:bf:72:ff:00:01".into(),
+        peer_mac: "00:aa:bb:cc:dd:ee".into(),
+        up: true,
+    };
+    let apply = |generation: u64, fabrics: Vec<FabricSnapshot>| {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation,
+            fib_generation: 1,
+            generated_at: chrono::Utc::now(),
+            fabrics,
+            ..ConfigSnapshot::default()
+        });
+        request
+    };
+    // Baseline full apply: the fabric parent lives at ifindex 101.
+    let baseline = run_request(state.clone(), apply(1, vec![fab(101)]));
+    assert!(baseline.ok, "baseline apply: {}", baseline.error);
+    // Premise: the bindings were planned for the 101 parent.
+    let planned: Vec<(String, i32)> = state
+        .lock()
+        .expect("state")
+        .status
+        .bindings
+        .iter()
+        .map(|b| (b.interface.clone(), b.ifindex))
+        .collect();
+    assert!(
+        !planned.is_empty() && planned.iter().all(|(_, ifindex)| *ifindex == 101),
+        "premise: baseline apply must plan fabric bindings on ifindex 101, got {planned:?}"
+    );
+    // SyncFabricState re-resolves after the parent netdev is re-created at 202.
+    {
+        let mut request = req("update_fabrics");
+        request.fabrics = Some(vec![fab(202)]);
+        let resp = run_request(state.clone(), request);
+        assert!(resp.ok, "update_fabrics: {}", resp.error);
+    }
+    // A failed full apply must not clear the dirty-plan marker. A wild
+    // ifindex makes the queue planner refuse this attempt before teardown.
+    let failed = run_request(state.clone(), apply(2, vec![fab(70_000)]));
+    assert!(!failed.ok, "wild-ifindex apply must be refused");
+    let after_failed = state
+        .lock()
+        .expect("state")
+        .status
+        .bindings
+        .iter()
+        .map(|b| (b.interface.clone(), b.ifindex))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_failed, planned,
+        "a refused apply must leave the old bindings live: {after_failed:?}"
+    );
+    // The valid full apply carries the same 202 rows that update_fabrics
+    // stored. It must still take the full replan path.
+    let second = run_request(state.clone(), apply(3, vec![fab(202)]));
+    assert!(second.ok, "second apply: {}", second.error);
+    // The fabric bindings must have been replanned onto the 202 parent.
+    let rebound: Vec<(String, i32)> = state
+        .lock()
+        .expect("state")
+        .status
+        .bindings
+        .iter()
+        .map(|b| (b.interface.clone(), b.ifindex))
+        .collect();
+    assert!(
+        !rebound.is_empty() && rebound.iter().all(|(_, ifindex)| *ifindex == 202),
+        "an update_fabrics plan change must force a rebind on the next full apply: \
+         bindings still on the old parent: {rebound:?}"
+    );
+}
+
 /// #5469 fail-on-revert: `write_state` must hold the `ServerState` lock ONLY
 /// long enough to refresh status and clone the owned payload — the expensive
 /// serialization and the `persist` fsync must run with the lock RELEASED. The

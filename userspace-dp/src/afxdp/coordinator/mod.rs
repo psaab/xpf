@@ -316,6 +316,11 @@ pub struct Coordinator {
     pub(in crate::afxdp) workers: WorkerManager,
     pub(crate) mirror_targets: Arc<ArcSwap<MirrorTargetMap>>,
     pub(crate) forwarding: ForwardingState,
+    /// #9803: `update_fabrics` may replace the helper's retained fabric rows
+    /// before the next full snapshot arrives. If the replacement changes the
+    /// binding-plan half, the next apply must take the full replan path even
+    /// when its rows now compare equal to the retained snapshot.
+    pub(crate) fabric_plan_replan_required: bool,
     pub(crate) policy_counters: PolicyCounterStore,
     /// #2218: per-rule NAT translation hit counters (SNAT/DNAT/static),
     /// owned alongside `policy_counters` and threaded into the
@@ -539,12 +544,13 @@ impl Coordinator {
             cos: SharedCoSState::new(),
             neighbors,
             sessions,
+            forwarding: ForwardingState::default(),
+            fabric_plan_replan_required: false,
+            policy_counters: PolicyCounterStore::default(),
             ike_exchanges: Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new()),
             pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
             workers,
             mirror_targets: Arc::new(ArcSwap::from_pointee(MirrorTargetMap::default())),
-            forwarding: ForwardingState::default(),
-            policy_counters: PolicyCounterStore::default(),
             nat_counters: crate::nat::NatCounterStore::default(),
             recent_exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
             recent_session_deltas: Arc::new(Mutex::new(VecDeque::with_capacity(
