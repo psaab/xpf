@@ -1775,7 +1775,21 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// seed runs (fully closes the duplicate-allocation window).
 			// Best-effort + fail-open; the post-start seed is the
 			// backstop.
-			d.preSeedDHCPLeaseMemfile()
+			//
+			// A later RG can transition while an earlier ApplyAsync restart
+			// still has Kea down. In that window, a peer-only fallback
+			// pre-seed would wipe leases for the already-MASTER RG. Keep the
+			// fallback union and its LFC generations whenever another RG is
+			// still MASTER; only the first/pure-backup takeover may replace
+			// them with the peer set.
+			stillMastering := false
+			for otherRG, isMaster := range d.snapshotRethMasterState() {
+				if otherRG != rgID && isMaster {
+					stillMastering = true
+					break
+				}
+			}
+			d.preSeedDHCPLeaseMemfile(stillMastering)
 			// ApplyAsync (#1835 F2): Kea reconcile shells out to
 			// systemctl with a 15s bound; running it inline would
 			// block this VRRP event loop. Latest-wins coalescing in

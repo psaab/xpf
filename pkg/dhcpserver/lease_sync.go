@@ -3,6 +3,7 @@ package dhcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -519,18 +520,29 @@ func (m *Manager) GetSyncLeases6(ctx context.Context, now time.Time) ([]SyncLeas
 }
 
 func (m *Manager) getSyncLeases(ctx context.Context, family int, now time.Time) ([]SyncLease, error) {
+	leases, _, err := m.getSyncLeasesWithSource(ctx, family, now)
+	return leases, err
+}
+
+// getSyncLeasesWithSource reads one family's active leases and reports whether
+// the result came from Kea's live control socket. The memfile is a necessary
+// fallback for ordinary lease-sync pushes while Kea is starting, but a
+// takeover pre-seed must not treat that persisted fallback as current local
+// authority: on a pure backup it is the last lease set this node served and
+// may contain rows the primary has since released (#9853).
+func (m *Manager) getSyncLeasesWithSource(ctx context.Context, family int, now time.Time) ([]SyncLease, bool, error) {
 	socket := m.controlSocket(family)
-	leases, err := readSyncLeasesViaSocket(ctx, m.keaDial, socket, family, now)
-	if err == nil {
-		return leases, nil
+	leases, socketErr := readSyncLeasesViaSocket(ctx, m.keaDial, socket, family, now)
+	if socketErr == nil {
+		return leases, true, nil
 	}
 	// Fallback: read the memfile (socket not up yet, or hook unavailable).
 	memfile := m.leaseFile(family)
 	mem, memErr := readSyncLeasesViaMemfile(memfile, family, now)
 	if memErr != nil {
-		return nil, fmt.Errorf("kea v%d lease read: socket=%v memfile=%v", family, err, memErr)
+		return nil, false, fmt.Errorf("kea v%d lease read: socket=%v memfile=%v", family, socketErr, memErr)
 	}
-	return mem, nil
+	return mem, false, nil
 }
 
 // SeedSyncLeases4 writes held peer v4 leases into the just-started Kea via
@@ -752,27 +764,47 @@ func (m *Manager) PreSeedMemfile6(leases []SyncLease, now time.Time) error {
 // invariant: restarting Kea during one RG transition must preserve the lease
 // union for every RG that remains locally MASTER.
 //
-// The local set is read via the same socket-preferred, memfile-fallback path
-// GetSyncLeases4 uses. FAIL-CLOSED: if that read errors (an untrusted/corrupt
-// local source), we do NOT overwrite the memfile with peer-only leases — we
-// return the error and leave the existing memfile intact so the restarting Kea
-// reloads its own persisted rows, and the async post-start lease-add seed still
-// adds the peer set. A genuinely MISSING memfile with Kea down is a trusted
-// empty (a cold node with nothing to preserve), so the union degenerates to the
-// peer set and the pre-seed proceeds.
-func (m *Manager) PreSeedMemfileMerged4(ctx context.Context, peer []SyncLease, now time.Time) error {
-	local, err := m.getSyncLeases(ctx, 4, now)
+// The live socket is the authority for this pre-seed union. A persisted
+// memfile is still a valid fallback for ordinary lease-sync pushes, but on a
+// pure backup it is only the last lease set this node served and can contain
+// rows that the primary has since released (#9853). When the socket is down,
+// the fallback is parsed to retain the existing fail-closed behavior for
+// corrupt/untrusted files. If stillMastering is true, the fallback rows are
+// preserved because another RG is already MASTER while Kea is restarting for
+// this transition; only a pure-backup takeover may exclude fallback rows and
+// remove stale LFC generations. A genuinely MISSING memfile with Kea down is a
+// trusted empty (a cold node with nothing to preserve), so the union degenerates
+// to the peer set.
+func (m *Manager) PreSeedMemfileMerged4(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
+	local, live, err := m.getSyncLeasesWithSource(ctx, 4, now)
 	if err != nil {
 		return fmt.Errorf("pre-seed v4: local lease read failed, not overwriting memfile: %w", err)
+	}
+	if !live && stillMastering {
+		return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
+	}
+	if !live {
+		// The fallback was parsed only to distinguish a trusted empty file from
+		// a corrupt source. It is not current authority for a pure-backup
+		// takeover, so write the peer set and replace stale LFC generations.
+		return m.writeMemfile4ReplacingLFC(
+			m.leaseFile(4), mergeLeasesByIdentity(nil, peer, 4), now)
 	}
 	return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
 }
 
-// PreSeedMemfileMerged6 is the v6 counterpart of PreSeedMemfileMerged4 (#5040).
-func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, now time.Time) error {
-	local, err := m.getSyncLeases(ctx, 6, now)
+// PreSeedMemfileMerged6 is the v6 counterpart of PreSeedMemfileMerged4 (#9853).
+func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
+	local, live, err := m.getSyncLeasesWithSource(ctx, 6, now)
 	if err != nil {
 		return fmt.Errorf("pre-seed v6: local lease read failed, not overwriting memfile: %w", err)
+	}
+	if !live && stillMastering {
+		return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
+	}
+	if !live {
+		return m.writeMemfile6ReplacingLFC(
+			m.leaseFile(6), mergeLeasesByIdentity(nil, peer, 6), now)
 	}
 	return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
 }
@@ -978,6 +1010,49 @@ func (m *Manager) writeMemfileAtomic(path, content string) error {
 	}
 	uid, gid, ok := m.resolveKeaOwner()
 	return writeMemfileFile(path, []byte(content), 0640, uid, gid, ok)
+}
+
+// writeMemfile4ReplacingLFC performs a peer-only takeover pre-seed and then
+// removes prior LFC generations. It is used only when the local source was a
+// stopped-Kea fallback; the live-socket active-active union path retains Kea's
+// normal LFC lifecycle (#9853).
+func (m *Manager) writeMemfile4ReplacingLFC(path string, leases []SyncLease, now time.Time) error {
+	if err := m.writeMemfile4(path, leases, now); err != nil {
+		return err
+	}
+	return removeLFCGenerations(path)
+}
+
+func (m *Manager) writeMemfile6ReplacingLFC(path string, leases []SyncLease, now time.Time) error {
+	if err := m.writeMemfile6(path, leases, now); err != nil {
+		return err
+	}
+	return removeLFCGenerations(path)
+}
+
+func removeLFCGenerations(path string) error {
+	// The current file alone is not the effective Kea lease set while LFC
+	// generations exist. Remove them after the durable current-file rename so a
+	// stale backup row cannot be replayed from .1/.2 on the promoted start.
+	//
+	// .completed is removed too: it is kea-lfc's finished compaction output
+	// (lease-bearing, one row per active lease), and Kea's startup loader
+	// reads it INSTEAD of .2/.1 when present (memfile_lease_mgr.cc
+	// loadLeasesFromFiles). An interrupted-LFC orphan would otherwise
+	// resurrect stale rows despite the peer-only current file (#9853 M1).
+	var errs []error
+	for _, generation := range []string{path + ".2", path + ".1", path + ".completed"} {
+		if err := os.Remove(generation); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove stale Kea LFC generation %s: %w", generation, err))
+		}
+	}
+	// The current-file write fsyncs the directory before these unlinks. Sync it
+	// again so a power loss cannot restore the removed generation names. This is
+	// deliberately after ALL removal attempts, including when any failed.
+	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil {
+		errs = append(errs, fmt.Errorf("sync Kea LFC generation cleanup directory: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 // writeMemfileFile installs the pre-seeded memfile. It is a package var so a

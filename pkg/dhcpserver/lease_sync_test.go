@@ -670,7 +670,7 @@ func TestPreSeedMemfileMerged4_PreservesLocalLeases(t *testing.T) {
 		Family: 4, Address: "10.0.2.80", HWAddress: "bb:bb:bb:bb:bb:bb",
 		SubnetID: 2, ValidLife: 3600, Remaining: 1800, State: keaStateDefault,
 	}}
-	if err := m.PreSeedMemfileMerged4(context.Background(), peer, localNow); err != nil {
+	if err := m.PreSeedMemfileMerged4(context.Background(), peer, localNow, false); err != nil {
 		t.Fatalf("PreSeedMemfileMerged4: %v", err)
 	}
 	got, err := parseActiveLeases4(memfile, localNow)
@@ -686,6 +686,342 @@ func TestPreSeedMemfileMerged4_PreservesLocalLeases(t *testing.T) {
 	}
 	if !addrs["10.0.2.80"] {
 		t.Errorf("newly-taken peer lease 10.0.2.80 missing from pre-seed; memfile has %v", addrs)
+	}
+}
+
+// TestPreSeedMemfileMerged6_PreservesLocalLeases is the v6 counterpart of the
+// #5040 live-socket guard. A live local RG-X binding must survive while a peer
+// RG-Y binding is added to the same pre-seed.
+func TestPreSeedMemfileMerged6_PreservesLocalLeases(t *testing.T) {
+	localNow := time.Unix(1_700_000_000, 0)
+	sock := tmpSocket(t, "k6merge.sock")
+	stub := &stubKea{handler: func(cmd keaCommand) keaResponse {
+		if cmd.Command == "lease6-get-all" {
+			return leaseGetAllResponse([]keaLeaseJSON{{
+				IPAddress: "2001:db8:1::50", DUID: "00:03:00:01:aa:aa",
+				IAID: 50, Type: "IA_NA", SubnetID: 1, ValidLft: 3600,
+				CLTT: localNow.Unix() - 100, State: keaStateDefault,
+			}})
+		}
+		return keaResponse{Result: keaResultError, Text: "unexpected"}
+	}}
+	dial, stop := startStubKea(t, sock, stub)
+	defer stop()
+
+	dir := t.TempDir()
+	memfile := filepath.Join(dir, "kea-leases6.csv")
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(dial, "", sock, "", memfile)
+
+	peer := []SyncLease{{
+		Family: 6, Address: "2001:db8:2::80", DUID: "00:03:00:01:bb:bb",
+		IAID: 80, LeaseType: "IA_NA", SubnetID: 2, ValidLife: 3600,
+		Remaining: 1800, PreferredRemaining: 1800, State: keaStateDefault,
+	}}
+	if err := m.PreSeedMemfileMerged6(context.Background(), peer, localNow, false); err != nil {
+		t.Fatalf("PreSeedMemfileMerged6: %v", err)
+	}
+	got, err := parseActiveLeases6(memfile, localNow)
+	if err != nil {
+		t.Fatalf("parseActiveLeases6 on pre-seeded file: %v", err)
+	}
+	addrs := make(map[string]bool, len(got))
+	for _, l := range got {
+		addrs[l.Address] = true
+	}
+	if !addrs["2001:db8:1::50"] {
+		t.Errorf("still-mastered local v6 lease was wiped by the pre-seed; memfile has %v", addrs)
+	}
+	if !addrs["2001:db8:2::80"] {
+		t.Errorf("newly-taken peer v6 lease missing from pre-seed; memfile has %v", addrs)
+	}
+}
+
+// TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853 guards the pure
+// backup takeover path. When Kea is stopped, getSyncLeases must parse the
+// memfile to retain fail-closed validation, but those persisted rows are not
+// current local authority and must not be merged back into the promoted
+// memfile. A valid peer row still seeds.
+//
+// The stale row is placed in each LFC generation in turn, including
+// `.completed`. Fail-on-revert: restoring the unconditional local+peer merge
+// writes the stale row from `.1`/`.2`, while omitting pre-seed generation
+// replacement leaves a stale generation in the effective set or leaves
+// `.completed` on disk after a peer-only current write.
+func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		name   string
+		family int
+		stale  SyncLease
+		peer   SyncLease
+		header string
+	}{
+		{
+			name:   "v4",
+			family: 4,
+			stale: SyncLease{
+				Family: 4, Address: "10.0.61.103", HWAddress: "02:00:00:00:98:53",
+				SubnetID: 1, ValidLife: 86400, Remaining: 72000, State: keaStateDefault,
+			},
+			peer: SyncLease{
+				Family: 4, Address: "10.0.61.101", HWAddress: "02:00:00:00:98:51",
+				SubnetID: 1, ValidLife: 86400, Remaining: 3600, State: keaStateDefault,
+			},
+			header: keaMemfileHeader4,
+		},
+		{
+			name:   "v6",
+			family: 6,
+			stale: SyncLease{
+				Family: 6, Address: "2001:db8:61::103",
+				DUID: "00:03:00:01:02:00:00:00:98:53", IAID: 53, LeaseType: "IA_NA",
+				SubnetID: 1, ValidLife: 86400, Remaining: 72000, PreferredRemaining: 72000,
+				State: keaStateDefault,
+			},
+			peer: SyncLease{
+				Family: 6, Address: "2001:db8:61::101",
+				DUID: "00:03:00:01:02:00:00:00:98:51", IAID: 51, LeaseType: "IA_NA",
+				SubnetID: 1, ValidLife: 86400, Remaining: 3600, PreferredRemaining: 3600,
+				State: keaStateDefault,
+			},
+			header: keaMemfileHeader6,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, suffix := range []string{".1", ".2", ".completed"} {
+				t.Run("stale-in"+suffix, func(t *testing.T) {
+					dir := t.TempDir()
+					memfile := filepath.Join(dir, "kea-leases.csv")
+					ctrl4, ctrl6, file4, file6 := "", "", "", ""
+					if tc.family == 4 {
+						ctrl4, file4 = filepath.Join(dir, "missing4.sock"), memfile
+					} else {
+						ctrl6, file6 = filepath.Join(dir, "missing6.sock"), memfile
+					}
+					m := New()
+					m.SetLeaseSyncSeamsForTesting(nil, ctrl4, ctrl6, file4, file6)
+					m.SetKeaOwnerLookupForTesting(func() (int, int, bool) {
+						return os.Getuid(), os.Getgid(), true
+					})
+					if tc.family == 4 {
+						if err := m.PreSeedMemfile4([]SyncLease{tc.stale}, now); err != nil {
+							t.Fatalf("write stale v4 fixture: %v", err)
+						}
+					} else {
+						if err := m.PreSeedMemfile6([]SyncLease{tc.stale}, now); err != nil {
+							t.Fatalf("write stale v6 fixture: %v", err)
+						}
+					}
+					if err := os.Rename(memfile, memfile+suffix); err != nil {
+						t.Fatalf("move stale fixture to %s: %v", suffix, err)
+					}
+					if err := os.WriteFile(memfile, []byte(tc.header+"\n"), 0644); err != nil {
+						t.Fatalf("write current header: %v", err)
+					}
+
+					var err error
+					if tc.family == 4 {
+						err = m.PreSeedMemfileMerged4(context.Background(), []SyncLease{tc.peer}, now, false)
+					} else {
+						err = m.PreSeedMemfileMerged6(context.Background(), []SyncLease{tc.peer}, now, false)
+					}
+					if err != nil {
+						t.Fatalf("merged pre-seed: %v", err)
+					}
+
+					var got []ddnsLease
+					if tc.family == 4 {
+						got, err = parseActiveLeases4(memfile, now)
+					} else {
+						got, err = parseActiveLeases6(memfile, now)
+					}
+					if err != nil {
+						t.Fatalf("read effective pre-seeded set: %v", err)
+					}
+					seen := make(map[string]bool, len(got))
+					for _, lease := range got {
+						seen[lease.Address] = true
+					}
+					if seen[tc.stale.Address] {
+						t.Fatalf("released fallback row %s was re-injected from %s: %+v",
+							tc.stale.Address, suffix, got)
+					}
+					if !seen[tc.peer.Address] {
+						t.Fatalf("valid peer row %s was not seeded: %+v", tc.peer.Address, got)
+					}
+					if _, statErr := os.Stat(memfile + suffix); !os.IsNotExist(statErr) {
+						t.Fatalf("stale LFC generation %s survived replacement (stat=%v)", suffix, statErr)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853 covers
+// the hostile-review race: RG-X is already MASTER, its Kea restart is still in
+// flight, and RG-Y's synchronous pre-seed runs while the control socket is
+// down. The fallback union must preserve RG-X's binding and leave its LFC
+// generation intact while adding RG-Y's peer binding.
+//
+// Fail-on-revert: making stillMastering take the peer-only replacement branch
+// drops the RG-X assertion and removes the generation, reproducing the
+// duplicate-allocation wipe.
+func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		name   string
+		family int
+		local  SyncLease
+		peer   SyncLease
+		header string
+	}{
+		{
+			name:   "v4",
+			family: 4,
+			local: SyncLease{
+				Family: 4, Address: "10.0.71.50", HWAddress: "02:00:00:00:71:50",
+				SubnetID: 1, ValidLife: 86400, Remaining: 72000, State: keaStateDefault,
+			},
+			peer: SyncLease{
+				Family: 4, Address: "10.0.72.80", HWAddress: "02:00:00:00:72:80",
+				SubnetID: 2, ValidLife: 86400, Remaining: 3600, State: keaStateDefault,
+			},
+			header: keaMemfileHeader4,
+		},
+		{
+			name:   "v6",
+			family: 6,
+			local: SyncLease{
+				Family: 6, Address: "2001:db8:71::50",
+				DUID: "00:03:00:01:02:00:00:00:71:50", IAID: 50, LeaseType: "IA_NA",
+				SubnetID: 1, ValidLife: 86400, Remaining: 72000, PreferredRemaining: 72000,
+				State: keaStateDefault,
+			},
+			peer: SyncLease{
+				Family: 6, Address: "2001:db8:72::80",
+				DUID: "00:03:00:01:02:00:00:00:72:80", IAID: 80, LeaseType: "IA_NA",
+				SubnetID: 2, ValidLife: 86400, Remaining: 3600, PreferredRemaining: 3600,
+				State: keaStateDefault,
+			},
+			header: keaMemfileHeader6,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			memfile := filepath.Join(dir, "kea-leases.csv")
+			ctrl4, ctrl6, file4, file6 := "", "", "", ""
+			if tc.family == 4 {
+				ctrl4, file4 = filepath.Join(dir, "missing4.sock"), memfile
+			} else {
+				ctrl6, file6 = filepath.Join(dir, "missing6.sock"), memfile
+			}
+			m := New()
+			m.SetLeaseSyncSeamsForTesting(nil, ctrl4, ctrl6, file4, file6)
+			m.SetKeaOwnerLookupForTesting(func() (int, int, bool) {
+				return os.Getuid(), os.Getgid(), true
+			})
+			if tc.family == 4 {
+				if err := m.PreSeedMemfile4([]SyncLease{tc.local}, now); err != nil {
+					t.Fatalf("write local v4 fixture: %v", err)
+				}
+			} else {
+				if err := m.PreSeedMemfile6([]SyncLease{tc.local}, now); err != nil {
+					t.Fatalf("write local v6 fixture: %v", err)
+				}
+			}
+			generation := memfile + ".1"
+			if err := os.Rename(memfile, generation); err != nil {
+				t.Fatalf("move local fixture to LFC generation: %v", err)
+			}
+			if err := os.WriteFile(memfile, []byte(tc.header+"\n"), 0644); err != nil {
+				t.Fatalf("write current header: %v", err)
+			}
+
+			var err error
+			if tc.family == 4 {
+				err = m.PreSeedMemfileMerged4(context.Background(), []SyncLease{tc.peer}, now, true)
+			} else {
+				err = m.PreSeedMemfileMerged6(context.Background(), []SyncLease{tc.peer}, now, true)
+			}
+			if err != nil {
+				t.Fatalf("staggered-failover pre-seed: %v", err)
+			}
+
+			var got []ddnsLease
+			if tc.family == 4 {
+				got, err = parseActiveLeases4(memfile, now)
+			} else {
+				got, err = parseActiveLeases6(memfile, now)
+			}
+			if err != nil {
+				t.Fatalf("read effective staggered-failover set: %v", err)
+			}
+			seen := make(map[string]bool, len(got))
+			for _, lease := range got {
+				seen[lease.Address] = true
+			}
+			if !seen[tc.local.Address] || !seen[tc.peer.Address] {
+				t.Fatalf("still-mastered fallback union lost a binding: got %v, want %s and %s",
+					seen, tc.local.Address, tc.peer.Address)
+			}
+			if _, statErr := os.Stat(generation); statErr != nil {
+				t.Fatalf("still-mastered LFC generation was removed: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestRemoveLFCGenerationsAttemptsBoth verifies cleanup attempts every
+// lease-bearing generation even when removal fails. A non-empty directory is
+// not removable with os.Remove; all generation names must appear in the joined
+// error, proving one failure cannot prevent later attempts.
+func TestRemoveLFCGenerationsAttemptsBoth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kea-leases.csv")
+	for _, suffix := range []string{".2", ".1", ".completed"} {
+		generation := path + suffix
+		if err := os.Mkdir(generation, 0750); err != nil {
+			t.Fatalf("mkdir %s: %v", generation, err)
+		}
+		if err := os.WriteFile(filepath.Join(generation, "keep"), []byte("x"), 0600); err != nil {
+			t.Fatalf("write %s: %v", generation, err)
+		}
+	}
+	err := removeLFCGenerations(path)
+	if err == nil {
+		t.Fatal("removeLFCGenerations returned nil when generation unlinks failed")
+	}
+	for _, suffix := range []string{".2", ".1", ".completed"} {
+		generation := path + suffix
+		if !strings.Contains(err.Error(), generation) {
+			t.Errorf("joined cleanup error omitted %s: %v", generation, err)
+		}
+		if _, statErr := os.Stat(generation); statErr != nil {
+			t.Errorf("failed-removal fixture %s unexpectedly disappeared: %v", generation, statErr)
+		}
+	}
+}
+
+// TestRemoveLFCGenerationsRemovesCompleted9853 proves a pure-backup
+// replacement removes an orphaned, lease-bearing .completed file. Kea loads
+// that file in preference to .2/.1 at startup, so leaving it would resurrect
+// stale leases after the peer-only current-file write.
+func TestRemoveLFCGenerationsRemovesCompleted9853(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kea-leases.csv")
+	completed := path + ".completed"
+	if err := os.WriteFile(completed, []byte(keaMemfileHeader4+"\n"), 0600); err != nil {
+		t.Fatalf("write completed fixture: %v", err)
+	}
+	if err := removeLFCGenerations(path); err != nil {
+		t.Fatalf("removeLFCGenerations: %v", err)
+	}
+	if _, err := os.Stat(completed); !os.IsNotExist(err) {
+		t.Fatalf("orphaned completed file survived cleanup (stat=%v)", err)
 	}
 }
 
@@ -713,7 +1049,7 @@ func TestPreSeedMemfileMerged4_FailsClosedOnUntrustedLocal(t *testing.T) {
 		Family: 4, Address: "10.0.2.80", HWAddress: "bb", SubnetID: 2,
 		Remaining: 1800, State: keaStateDefault,
 	}}
-	if err := m.PreSeedMemfileMerged4(context.Background(), peer, localNow); err == nil {
+	if err := m.PreSeedMemfileMerged4(context.Background(), peer, localNow, false); err == nil {
 		t.Fatalf("expected fail-closed error on untrusted local source, got nil")
 	}
 	after, rerr := os.ReadFile(memfile)
