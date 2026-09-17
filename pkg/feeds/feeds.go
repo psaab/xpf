@@ -504,10 +504,20 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 // carried: the new endpoint gets a clean slate, and the first post-Apply fetch
 // re-derives stale state via recordFailure (which re-arms staleSince because the
 // carried snapshot is present). This also gives an opt-in hold-interval a FRESH
-// window on the new endpoint rather than inheriting a partially-elapsed one — a
-// strictly more conservative (later-dropping) choice for the fail-open guard.
+// window on the new endpoint rather than inheriting a partially-elapsed one —
+// a strictly more conservative (later-dropping) choice for the fail-open guard.
+//
+// The holdDropped marker is different: it records an already-enforced
+// hold-interval drop, not transient failure state. A dropped feed has no
+// snapshot, so it must be carried before the snapshot guard below; otherwise a
+// persisted hold-dropped feed becomes indistinguishable from a never-fetched
+// feed after reconfiguration and #9689's fail-mode-drop semantics are lost.
 func carryForwardSnapshot(dst, src *feedState) {
-	if src == nil || !src.hasSnapshot || len(src.prefixes) == 0 {
+	if src == nil {
+		return
+	}
+	dst.holdDropped = src.holdDropped
+	if !src.hasSnapshot || len(src.prefixes) == 0 {
 		return
 	}
 	dst.prefixes = append([]string(nil), src.prefixes...)
