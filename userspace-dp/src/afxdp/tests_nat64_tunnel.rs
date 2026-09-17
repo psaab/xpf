@@ -1162,6 +1162,211 @@ fn nat64_v6_frag_frame(
     f.extend_from_slice(&tcp);
     f
 }
+/// Ethernet + IPv4 + TCP fragment for the reverse NAT64 reachability pin.
+/// `frag_off` uses the IPv4 flags/offset word: `0x2000` is the first fragment
+/// (MF=1), and a nonzero offset with MF=0 is a non-first fragment. The
+/// checksum is recomputed after changing the fragment identity.
+fn nat64_v4_frag_frame(
+    frag_off: u16,
+    ident: u16,
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    tcp_flags: u8,
+) -> Vec<u8> {
+    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, src_port, dst_port, tcp_flags);
+    // Four bytes beyond the TCP header make the first fragment's payload
+    // 24 bytes, so a companion at offset 3 starts exactly at its end.
+    frame.extend_from_slice(&[0u8; 4]);
+    let total_len = (frame.len() - 14) as u16;
+    frame[16..18].copy_from_slice(&total_len.to_be_bytes());
+    frame[18..20].copy_from_slice(&ident.to_be_bytes());
+    frame[20..22].copy_from_slice(&frag_off.to_be_bytes());
+    frame[24..26].fill(0);
+    let checksum = crate::afxdp::frame::checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&checksum.to_be_bytes());
+    frame
+}
+
+// #9957: the reverse non-first builder's `nat64_reverse` input has no
+// production producer. A reverse first fragment is a session hit and carries
+// the session's NAT64 reverse info, but the reverse (AF_INET) fragment-assoc
+// install is intentionally absent; the following non-first fragment is
+// flowless and cannot build a request with that info.
+//
+// RED on revert: wiring `reverse: Some(..)` into the reverse association (and
+// enabling its consult) makes the direct reverse-key lookup below HIT and the
+// non-first reply translate + forward. Updating the #9957 expiry rationale is
+// required at that point: the first production NAT64 install caller that gives
+// `FragAssoc::install` a reverse value must also replace this
+// non-reachability pin with coverage for the now-live builder.
+#[test]
+fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
+    let src_v6: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("client v6");
+    let dst_v6: Ipv6Addr = "64:ff9b::808:808".parse().expect("NAT64 destination");
+    let pool_v4: Ipv4Addr = "172.16.80.50".parse().expect("pool v4");
+    let server_v4: Ipv4Addr = "8.8.8.8".parse().expect("server v4");
+
+    // The reverse first fragment must reach ForwardCandidate so the test
+    // exercises the exact post-commit association-install site rather than
+    // stopping at MissingNeighbor.
+    let mut snapshot = nat64_frag_snapshot();
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet6".to_string(),
+        ip: src_v6.to_string(),
+        mac: "02:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut lan_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    lan_binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+
+    // First establish the NAT64 forward + reverse sessions and the v6-side
+    // association. This is the liveness control for the reverse-session path.
+    let forward_first = nat64_v6_frag_frame(0x0001, 0x1234_5678, src_v6, dst_v6, 12345, 443);
+    let (forward_batch, forward_dbg) = txn_run_descriptor(
+        &mut lan_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &forward_first,
+        nat64_v6_frag_meta(forward_first.len(), src_v6, dst_v6),
+    );
+    assert_eq!(forward_dbg.tx, 1, "the NAT64 forward first fragment must be live");
+    assert_eq!(forward_batch.nat64_translations, 1);
+    assert_eq!(sessions.len(), 2, "the forward and reverse sessions must install");
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1, "the v6-side association is the control");
+    // The production NAT64 install is pinned: its live v6-side association
+    // carries no reverse payload. The reverse production install is absent
+    // today; the direct reverse-key assertion below pins that AF_INET path
+    // separately if it is ever wired.
+    let forward_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
+        &forwarding,
+        nat64_v6_frag_meta(forward_first.len(), src_v6, dst_v6),
+        None,
+    );
+    let forward_key = crate::fragment_assoc::first_fragment_key(
+        &forward_first[14..],
+        libc::AF_INET6,
+        forward_authority,
+    )
+    .expect("forward first-fragment key");
+    let (_, forward_reverse) = forwarding
+        .nat64
+        .frag_assoc
+        .lookup(
+            &forward_key,
+            123_000_000_100,
+            forwarding.nat64.build_generation,
+            |_| true,
+        )
+        .expect("forward association remains live");
+    assert!(
+        forward_reverse.is_none(),
+        "#9957: the production v6 association must not carry reverse info"
+    );
+
+    // NAPT64 keys the reverse companion on the translated destination port.
+    let mut translated_port = 0u16;
+    sessions.iter_with_origin(|key, _decision, _metadata, _origin| {
+        if key.addr_family == libc::AF_INET as u8 {
+            translated_port = key.dst_port;
+        }
+    });
+    assert_ne!(translated_port, 0, "the reverse session must expose its translated port");
+
+    let ident = 0x4321;
+    const TCP_SYN_ACK: u8 = TCP_FLAG_SYN | 0x10;
+    let reverse_first = nat64_v4_frag_frame(
+        0x2000,
+        ident,
+        server_v4,
+        pool_v4,
+        443,
+        translated_port,
+        TCP_SYN_ACK,
+    );
+    let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    wan_binding.interface = Arc::<str>::from("reth0.80");
+    let reverse_first_meta = txn_meta_v4(12, TCP_SYN_ACK, reverse_first.len() as u16);
+    let (reverse_batch, reverse_dbg) = txn_run_descriptor(
+        &mut wan_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &reverse_first,
+        reverse_first_meta,
+    );
+    assert_eq!(reverse_dbg.tx, 1, "the reverse first fragment must hit the NAT64 session");
+    assert_eq!(reverse_batch.nat64_translations, 1);
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        1,
+        "the AF_INET reverse first fragment must not install a second association"
+    );
+
+    let reverse_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
+        &forwarding,
+        txn_meta_v4(12, 0, reverse_first.len() as u16),
+        None,
+    );
+    let reverse_key = crate::fragment_assoc::first_fragment_key(
+        &reverse_first[14..],
+        libc::AF_INET,
+        reverse_authority,
+    )
+    .expect("reverse first-fragment key");
+    assert!(
+        forwarding
+            .nat64
+            .frag_assoc
+            .lookup(
+                &reverse_key,
+                123_000_000_100,
+                forwarding.nat64.build_generation,
+                |_| true,
+            )
+            .is_none(),
+        "#9957: no production AF_INET reverse association may be installed"
+    );
+
+    // The same datagram's non-first reply fragment has no L4 tuple. It is
+    // therefore flowless, the v4 association consult is absent, and the
+    // NAT64 reverse non-first builder cannot be reached.
+    let reverse_nonfirst = nat64_v4_frag_frame(
+        0x0003,
+        ident,
+        server_v4,
+        pool_v4,
+        0,
+        0,
+        0,
+    );
+    let (nonfirst_batch, nonfirst_dbg) = txn_run_descriptor(
+        &mut wan_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &reverse_nonfirst,
+        txn_meta_v4(12, 0, reverse_nonfirst.len() as u16),
+    );
+    assert_eq!(
+        nonfirst_batch.nat64_translations, 0,
+        "#9957: a non-first reply must not reach the reverse NAT64 builder"
+    );
+    assert_eq!(
+        nonfirst_dbg.tx, 0,
+        "#9957: an unassociated reverse non-first fragment must be dropped"
+    );
+}
 
 /// Metadata for a v6 NAT64 fragment: the L4 header sits after the 8-byte
 /// Fragment extension header, so `l4_offset = 14 + 40 + 8 = 62`.
