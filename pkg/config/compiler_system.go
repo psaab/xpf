@@ -33,28 +33,31 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 	}
 	sys.DataplaneType = dpType
 
-	// #6956: `system host-name fw1;` packs the value onto the `system` node's
-	// OWN Keys — `Keys=["system","host-name","fw1"]` with ZERO children — so the
-	// child walk below never runs and the host name compiled to "" with no
-	// error and no warning. The nested spelling `system { host-name fw1; }`
-	// works, and the flattened one is what `display set` output and vSRX
-	// migration paths produce.
+	// #10003: `system host-name fw1;` packs the value onto the `system` node's
+	// OWN Keys — `Keys=["system","host-name","fw1"]` with ZERO children — so
+	// the child walk below cannot reach the typed leaf. The nested spelling
+	// `system { host-name fw1; }` is owned by SchemaValidate's typed-leaf
+	// validator; this compact spelling is read here and needs the same
+	// admission rule.
 	//
-	// Everything keyed on host name is affected: the management TLS
-	// certificate's subject, syslog's origin field, the CLI prompt.
-	//
-	// Read here rather than through `packedBodyChildren` + a `packedTail` opt-in
-	// (the #6821 mechanism) DELIBERATELY. That pairing exists because compiling
-	// a packed tail the gate does not validate turns "not compiled" into
-	// "compiled, unvalidated". It has nothing to bypass here: `host-name` is a
-	// scalar leaf with NO validator, measured in both spellings — `system
-	// host-name bad..name;` and `system { host-name bad..name; }` are both
-	// accepted by SchemaValidate today. So the rule is satisfied vacuously, and
-	// this stays narrowed to the leaf the issue names rather than teaching the
-	// gate to validate every packed token on the `system` line, which would
-	// newly reject configurations that commit cleanly now.
+	// Keep this check narrowed to the leaf the issue names rather than teaching
+	// the gate to validate every packed token on the `system` line. Strict
+	// commit rejects a malformed identity; tolerant Load / SyncApply keeps the
+	// persisted value and records a warning (#1960 no-brick).
 	if len(node.Keys) >= 3 && node.Keys[1] == "host-name" {
-		sys.HostName = node.Keys[2]
+		hostName := node.Keys[2]
+		if err := ValidateSystemHostname(hostName, nil); err != nil {
+			if opts.lenientSystemHostname {
+				if cfg != nil {
+					cfg.Warnings = append(cfg.Warnings,
+						fmt.Sprintf("system host-name %q (downgraded to warning on tolerant path): %v",
+							hostName, err))
+				}
+			} else {
+				return fmt.Errorf("system host-name %q: %w", hostName, err)
+			}
+		}
+		sys.HostName = hostName
 	}
 
 	// #6957/#6992: spans every `login` child of this `system` node. See the

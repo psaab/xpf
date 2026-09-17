@@ -67,7 +67,16 @@ func syslogDestinationModifiers(extra map[string]*schemaNode) map[string]*schema
 }
 
 var schemaSystem = &schemaNode{desc: "System configuration", children: map[string]*schemaNode{
-	"host-name": {desc: "System hostname", args: 1, scalar: true, placeholder: "<hostname>", children: nil},
+	// #10003: the kernel identity is a DNS hostname. Type it at admission so
+	// spaces/control characters and malformed LDH labels cannot reach
+	// sethostname(2) or /etc/hostname. The shared DNS shape retains its
+	// 63-octet label rules; this leaf additionally enforces Linux HOST_NAME_MAX
+	// (64 bytes) because the apply syscall cannot accept the DNS-wide 253-octet
+	// total. Empty remains valid as the unset form; applyHostname's empty
+	// early-return is load-bearing.
+	"host-name": {desc: "System hostname", args: 1, scalar: true, placeholder: "<hostname>",
+		valueType: ValueHostname, valueDesc: "DNS hostname", valueExamples: []string{"fw1", "fw1.example.net"},
+		validator: ValidateSystemHostname, children: nil},
 	// #4902: domain-name / domain-search are rendered verbatim into the
 	// resolved.conf `Domains=` line and the resolv.conf `search` line. Type them
 	// as DNS names so a space/control/malformed value cannot inject an extra

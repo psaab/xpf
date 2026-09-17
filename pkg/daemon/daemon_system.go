@@ -655,6 +655,16 @@ func (d *Daemon) applyHostname(cfg *config.Config) {
 	if current == cfg.System.HostName {
 		return
 	}
+	// Tolerant Load/SyncApply can retain a legacy malformed value after
+	// warning at config admission. Do not let that value cross the final
+	// syscall/filesystem boundary; strict commits already reject it, while
+	// this belt keeps tolerant boot from attempting an impossible or
+	// identity-changing hostname. Keep this after the unchanged guard so an
+	// unchanged tolerated value remains the documented no-op.
+	if err := config.ValidateSystemHostname(cfg.System.HostName, nil); err != nil {
+		slog.Warn("refusing invalid hostname", "hostname", cfg.System.HostName, "err", err)
+		return
+	}
 
 	// The rename and the staleness ledger move together, under ONE hold of
 	// staleCertMu (#6827 round 7). Calling sethostname here and recording the
