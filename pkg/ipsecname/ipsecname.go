@@ -20,8 +20,9 @@ func SwanctlValue(s string) string {
 	return rendersafe.ReplaceControlBytes(s, ' ')
 }
 
-// ChildBase maps a traffic-selector name onto swanctl's child-section alphabet: every rune
-// outside [A-Za-z0-9._-] becomes '-', and an empty result becomes "traffic-selector".
+// ChildBase maps a traffic-selector name onto swanctl's child-section alphabet: ASCII letters,
+// digits, '-' and '_' pass through; every other rune (including '.') becomes '-', and empty
+// input becomes "traffic-selector".
 func ChildBase(name string) string {
 	if name == "" {
 		return "traffic-selector"
@@ -42,10 +43,11 @@ func ChildBase(name string) string {
 	return string(b)
 }
 
-// Disambiguator returns a short, stable hash of an ORIGINAL selector name, used to make colliding
-// child bases injective within one VPN (#5122). It is a deterministic pure function of the input
-// (fnv-1a 64-bit, low 32 bits as 8 hex chars), so the same config renders the same names on every
-// node, a prerequisite for HA config-sync and idempotent commits.
+// Disambiguator returns a short, stable hash of an ORIGINAL selector name, appended to colliding
+// child bases within one VPN (#5122). ChildNames extends repeated suffixes as needed to keep
+// rendered child names unique. It is a deterministic pure function of the input (fnv-1a 64-bit,
+// low 32 bits as 8 hex chars), so the same config renders the same names on every node, a
+// prerequisite for HA config-sync and idempotent commits.
 func Disambiguator(original string) string {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(original))
