@@ -209,6 +209,10 @@ const suboption1CircuitID byte = 1
 
 // RelayStats holds per-interface relay statistics.
 type RelayStats struct {
+	// Family is empty for the historical DHCPv4 rows and "inet6" for
+	// DHCPv6 rows. It lets callers distinguish identical interface names
+	// across the two independently configured relay families.
+	Family string
 	// Interface is the AUTHORED config reference ("ge-0/0/0.0", "reth0.0").
 	Interface string
 	// KernelInterface is the Linux device the relay actually bound (#9406).
@@ -312,6 +316,18 @@ type RelayStats struct {
 	RepliesBroadcastNoTarget   uint64 // no routable target (yiaddr==0,ciaddr==0)
 	RepliesBroadcastL2Fallback uint64 // raw-L2 path failed → degraded
 	RepliesBroadcastNak        uint64 // DHCPNAK force-broadcast (RFC 2131 §4.3.2)
+	// DHCPv6-specific per-reason counters (#9553). These are populated only
+	// on Family=="inet6" rows; the common rate-limit/unknown-server counters
+	// above remain shared field names for both families.
+	RequestsDroppedNested uint64
+	RequestsDroppedParse  uint64
+	RequestsDroppedPort   uint64
+	RequestsDroppedPeer   uint64
+	RequestsDroppedBuild  uint64
+	RepliesDroppedIID     uint64
+	RepliesDroppedParse   uint64
+	RepliesDroppedInvalid uint64
+	RepliesDroppedNested  uint64
 }
 
 // l2Replier is the raw-L2 unicast seam. *l2Sender implements it in production;
@@ -574,6 +590,9 @@ type Manager struct {
 	// relay (standalone fail-open). SetMasterGate installs the daemon's live
 	// RG-master query.
 	relayGate masterGate
+	// v6 owns separate client/server IPv6 sockets and multicast membership,
+	// while sharing this Manager's interface-name and HA-gate wiring (#9553).
+	v6 *dhcpV6Manager
 }
 
 // SetMasterGate installs the per-interface VRRP/cluster master-state gate
@@ -658,6 +677,7 @@ func NewManager() *Manager {
 		ifindexCheck:   ifindexCheckInterval,
 		newL2:          defaultL2SenderFactory,
 		now:            time.Now,
+		v6:             newDHCPV6Manager(),
 	}
 }
 
@@ -941,8 +961,15 @@ func computeDesired(cfg *config.DHCPRelayConfig, resolveIfName func(string) stri
 // (#1915 close-on-cancel + WaitGroup join) fully close the old listener before
 // the replacement binds, so a restart never races EADDRINUSE and never hangs.
 func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
-	desired := computeDesired(cfg, m.ifNameResolver())
-
+	var v6cfg *config.DHCPRelayV6Config
+	if cfg != nil {
+		v6cfg = cfg.V6
+	}
+	resolveIfName := m.ifNameResolver()
+	if m.v6 != nil {
+		m.v6.apply(ctx, v6cfg, resolveIfName, m.shouldRelay)
+	}
+	desired := computeDesired(cfg, resolveIfName)
 	// Phase 1 (under lock): decide which running relays to stop and which
 	// desired relays to start, mutating m.relays to the post-reconcile set.
 	// We collect the relays to stop and start them OUTSIDE the lock so the
@@ -1128,6 +1155,31 @@ func (m *Manager) Stats() []RelayStats {
 			RepliesBroadcastNak:          ir.repliesBroadcastNak.Load(),
 		})
 	}
+	if m.v6 != nil {
+		m.v6.mu.Lock()
+		for _, relay := range m.v6.relays {
+			stats = append(stats, RelayStats{
+				Family:                      "inet6",
+				Interface:                   relay.ifaceName,
+				KernelInterface:             relay.kernelName,
+				RequestsRelayed:             relay.requestsRelayed.Load(),
+				RepliesForwarded:            relay.repliesForwarded.Load(),
+				RequestsDroppedBackup:       relay.requestsDroppedBackup.Load(),
+				RequestsDroppedRateLimit:    relay.requestsDroppedRateLimit.Load(),
+				RequestsDroppedNested:       relay.requestsDroppedNested.Load(),
+				RequestsDroppedParse:        relay.requestsDroppedParse.Load(),
+				RequestsDroppedPort:         relay.requestsDroppedPort.Load(),
+				RequestsDroppedPeer:         relay.requestsDroppedPeer.Load(),
+				RequestsDroppedBuild:        relay.requestsDroppedBuild.Load(),
+				RepliesDroppedUnknownServer: relay.repliesDroppedUnknownSrv.Load(),
+				RepliesDroppedIID:           relay.repliesDroppedIID.Load(),
+				RepliesDroppedParse:         relay.repliesDroppedParse.Load(),
+				RepliesDroppedInvalid:       relay.repliesDroppedInvalid.Load(),
+				RepliesDroppedNested:        relay.repliesDroppedNested.Load(),
+			})
+		}
+		m.v6.mu.Unlock()
+	}
 	return stats
 }
 
@@ -1141,6 +1193,11 @@ func (m *Manager) Stop() {
 	m.relays = make(map[string]*interfaceRelay)
 	m.mu.Unlock()
 
+	// v6.stop() performs its own lock-and-join cycle after m.mu is released;
+	// the HA callback can therefore safely read Manager's gate state.
+	if m.v6 != nil {
+		m.v6.stop()
+	}
 	for _, ir := range relays {
 		ir.cancel()
 		<-ir.done
