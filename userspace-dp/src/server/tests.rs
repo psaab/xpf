@@ -655,12 +655,11 @@ fn update_ha_state_fast_proxy_9629() {
     );
 }
 
-/// #9629: the fast path serializes on `ha_mutex` — while a test holds the
-/// mutex (via the `ha_mutex_for_test` handle, the same `Arc` both production
-/// writers share), a lease refresh waits; after release it serves. The
-/// attempt/proceed/acquired rendezvous proves the worker reaches the
-/// post-lock signal only after the external guard is released, so deleting
-/// the production lock makes the acquired-signal assertion fail.
+/// #9629: the fast path serializes on `ha_mutex`. The attempt/proceed/acquired
+/// rendezvous pauses the worker inside the production critical section after
+/// it signals holding; the test's own `try_lock` must fail while that signal is
+/// outstanding. A lock-removal revert makes `try_lock` succeed deterministically
+/// before the worker is released, so this witness cannot false-green on timing.
 #[test]
 fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     use std::sync::mpsc;
@@ -683,15 +682,14 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
             .expect("seed");
     }
     let domain = state.lock().expect("state").afxdp.session_domain().clone();
-    // Hold the leaf mutex (test handle clones the same Arc).
     let held = domain.ha_mutex_for_test();
-    let _guard = held.lock().expect("ha mutex");
     let (tx, rx) = mpsc::channel();
     let (attempt_tx, attempt_rx) = mpsc::channel();
     let (proceed_tx, proceed_rx) = mpsc::channel();
     let (acquired_tx, acquired_rx) = mpsc::channel();
+    let (acquired_release_tx, acquired_release_rx) = mpsc::channel();
     domain.set_ha_refresh_rendezvous_for_test(attempt_tx, proceed_rx);
-    domain.set_ha_refresh_acquired_sender_for_test(acquired_tx);
+    domain.set_ha_refresh_acquired_rendezvous_for_test(acquired_tx, acquired_release_rx);
     let worker = std::thread::spawn(move || {
         let outcome = domain.try_refresh_ha_leases(&[HAGroupStatus {
             rg_id: 1,
@@ -702,37 +700,32 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
         tx.send(outcome).expect("send outcome");
     });
     // The attempt signal is followed by a test-controlled proceed gate. The
-    // worker cannot reach the lock statement until this test has established
-    // that the guard is held, removing the notification-before-acquisition
-    // scheduling ambiguity.
+    // worker cannot reach the lock statement until the test has installed its
+    // own probe path.
     attempt_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("worker never reached the HA mutex rendezvous");
     proceed_tx
         .send(())
-        .expect("allow worker to attempt the held HA mutex");
-    // While held, neither the refresh outcome nor the post-lock acquisition
-    // signal can arrive. If the production lock is removed, that signal fires
-    // during this window and this assertion fails independently of scheduling
-    // after the guard is dropped.
-    assert!(
-        rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "fast path returned while ha_mutex was held — it does not serialize"
-    );
-    assert!(
-        acquired_rx
-            .recv_timeout(Duration::from_millis(200))
-            .is_err(),
-        "fast path acquired ha_mutex while the external guard was held"
-    );
-    drop(_guard);
+        .expect("allow worker to attempt the HA mutex");
+    // The acquired signal is sent while the worker owns the production lock,
+    // then the worker waits here. Probe the same Arc directly: a lock-removal
+    // mutant makes this try_lock succeed, independently of scheduling.
     acquired_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("worker never acquired the HA mutex after release");
+        .expect("worker never signaled production-lock ownership");
+    let worker_holds_lock = held.try_lock().is_err();
+    acquired_release_tx
+        .send(())
+        .expect("release worker's production-lock rendezvous");
     let outcome = rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("outcome after release");
+        .expect("outcome after production-lock release");
     worker.join().expect("worker");
+    assert!(
+        worker_holds_lock,
+        "worker signaled holding without owning the production ha_mutex"
+    );
     assert!(
         matches!(outcome, crate::afxdp::HaRefreshOutcome::Served(1)),
         "expected Served(1) after release, got {outcome:?}"

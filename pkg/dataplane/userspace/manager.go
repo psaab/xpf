@@ -514,6 +514,10 @@ type Manager struct {
 	// process/intent checks and before the session request hook. It makes the
 	// check-to-send window observable for lock-order regression coverage.
 	haWatchdogSessionFenceHook func()
+	// haRGActiveSessionHoldHook is a test-only rendezvous immediately after
+	// UpdateRGActive acquires sessionMu. It pauses the mutation while tests
+	// probe ownership of the production mutex.
+	haRGActiveSessionHoldHook func()
 
 	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
 	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate

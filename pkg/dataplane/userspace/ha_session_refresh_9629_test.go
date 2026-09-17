@@ -57,9 +57,9 @@ func sessionTestManager9629(t *testing.T, groups map[int]HAGroupStatus) *Manager
 
 // haRefreshOracle9629 is a small stateful mirror of Rust's lease-only
 // decision table. It deliberately models key-set equality, matching refreshes,
-// valid stored-active mismatch renewal, and expired stored-active preservation,
-// so the Go composition cells validate helper behavior rather than only
-// capturing a request payload.
+// valid stored-active mismatch renewal, and expired stored-active mismatch
+// preservation, so the Go composition cells validate helper behavior rather
+// than only capturing a request payload.
 type haRefreshOutcome9629 uint8
 
 const (
@@ -128,7 +128,7 @@ func (o *haRefreshOracle9629) apply(groups []HAGroupStatus) haRefreshOutcome9629
 			refreshed++
 			continue
 		}
-		if stored.Active && nextLeaseUntil[rgID] > o.now {
+		if stored.Active && nextLeaseUntil[rgID] != 0 && o.now <= nextLeaseUntil[rgID] {
 			leaseBase := stored.WatchdogTimestamp
 			if leaseBase < o.now {
 				leaseBase = o.now
@@ -147,7 +147,24 @@ func (o *haRefreshOracle9629) apply(groups []HAGroupStatus) haRefreshOutcome9629
 
 func (o *haRefreshOracle9629) forwardingActive(rgID int) bool {
 	stored, ok := o.groups[rgID]
-	return ok && stored.Active && o.leaseUntil[rgID] > o.now
+	return ok && stored.Active && o.leaseUntil[rgID] != 0 && o.now <= o.leaseUntil[rgID]
+}
+
+func TestHARefreshOracleLeaseBoundaryIsInclusive9629(t *testing.T) {
+	oracle := newHARefreshOracle9629(
+		[]HAGroupStatus{{RGID: 1, Active: true, WatchdogTimestamp: 1}},
+		10,
+	)
+	oracle.leaseUntil[1] = 10
+	if !oracle.forwardingActive(1) {
+		t.Fatal("oracle marked lease_until == now inactive; Rust uses now <= until")
+	}
+	if got := oracle.apply([]HAGroupStatus{{RGID: 1, Active: false}}); got != haRefreshServed9629 {
+		t.Fatalf("oracle equality-boundary mismatch outcome = %v, want Served", got)
+	}
+	if oracle.leaseUntil[1] != 20 {
+		t.Fatalf("oracle equality-boundary lease_until = %d, want renewed to 20", oracle.leaseUntil[1])
+	}
 }
 
 // The session sender never takes m.mu: with m.mu held by the test, a session
@@ -405,18 +422,14 @@ func TestHARefreshQueuedBeforeDemotionDropsStaleIntent9629(t *testing.T) {
 }
 
 // The final epoch check and the request hook are one sessionMu critical
-// section. Park the sender after the check, then start a demotion: the
-// demotion's m.mu -> sessionMu linearization must wait until the old send
-// completes, rather than changing intent in the check-to-send window.
+// section. Park the sender after the check, probe that it owns the real
+// production mutex, then start demotion and probe that mutation's lock in the
+// same rendezvous style.
 func TestHARefreshDemotionWaitsForPostFenceSend9629(t *testing.T) {
 	m := sessionTestManager9629(t, map[int]HAGroupStatus{
 		1: {Active: true, WatchdogTimestamp: 1},
 	})
-	demoteMapWrite := make(chan struct{})
-	m.haRGActiveMapWrite = func(int, bool) error {
-		close(demoteMapWrite)
-		return nil
-	}
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
 	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
 	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
 	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
@@ -464,31 +477,59 @@ func TestHARefreshDemotionWaitsForPostFenceSend9629(t *testing.T) {
 		t.Fatal("watchdog sender never reached the post-fence rendezvous")
 	}
 
+	// The sender's post-check rendezvous runs while it owns sessionMu. A
+	// lock-removal mutant makes TryLock succeed here, without any timing window.
+	senderHoldsSessionMu := !m.sessionMu.TryLock()
+	if !senderHoldsSessionMu {
+		m.sessionMu.Unlock()
+	}
+	demotionHolding := make(chan struct{})
+	demotionRelease := make(chan struct{})
+	m.haRGActiveSessionHoldHook = func() {
+		close(demotionHolding)
+		<-demotionRelease
+	}
 	demoteDone := make(chan error, 1)
 	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
-	demoteBeforeRelease := false
-	select {
-	case <-demoteMapWrite:
-		demoteBeforeRelease = true
-	case <-time.After(200 * time.Millisecond):
-	}
 	close(fenceRelease)
 
-	if err := <-refreshDone; err != nil {
+	refreshErr := <-refreshDone
+	if refreshErr != nil {
+		close(demotionRelease)
 		<-demoteDone
-		t.Fatalf("post-fence watchdog refresh: %v", err)
+		t.Fatalf("post-fence watchdog refresh: %v", refreshErr)
 	}
 	select {
 	case <-sessionSent:
 	case <-time.After(5 * time.Second):
+		close(demotionRelease)
 		<-demoteDone
 		t.Fatal("post-fence watchdog sender never reached the session request hook")
 	}
-	if err := <-demoteDone; err != nil {
-		t.Fatalf("authoritative demotion: %v", err)
+	select {
+	case <-demotionHolding:
+	case <-time.After(5 * time.Second):
+		close(demotionRelease)
+		<-demoteDone
+		t.Fatal("demotion never reached its sessionMu holding rendezvous")
 	}
-	if demoteBeforeRelease {
-		t.Fatal("demotion changed ownership before the post-fence sender completed")
+
+	// UpdateRGActive's rendezvous runs while it owns sessionMu. If its
+	// production lock is removed, TryLock succeeds deterministically.
+	demotionHoldsSessionMu := !m.sessionMu.TryLock()
+	if !demotionHoldsSessionMu {
+		m.sessionMu.Unlock()
+	}
+	close(demotionRelease)
+	demoteErr := <-demoteDone
+	if !senderHoldsSessionMu {
+		t.Fatal("post-fence sender signaled without owning the production sessionMu")
+	}
+	if !demotionHoldsSessionMu {
+		t.Fatal("demotion signaled holding without owning the production sessionMu")
+	}
+	if demoteErr != nil {
+		t.Fatalf("authoritative demotion: %v", demoteErr)
 	}
 	if m.haWatchdogIntentGen.Load() <= oldIntent {
 		t.Fatalf("demotion intent epoch = %d, want greater than %d",

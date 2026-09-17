@@ -201,6 +201,7 @@ func (m *Manager) refreshHAStateFromMapsLocked() error {
 	m.sessionMu.Unlock()
 	return nil
 }
+
 func haWatchdogIntentChanged(before, after map[int]HAGroupStatus) bool {
 	if len(before) != len(after) {
 		return true
@@ -765,13 +766,13 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 	// Scoped exactly like the #6165 gate above: ARM direction only. A disarm
 	// must NEVER be blocked, and the delta check above has already established
 	// that desired != current, so reaching here with desired==true is an arm.
-	// #9629 demotion-pending bound: a session refresh may mint a lease only
-	// while the stored active lease remains valid, and each receipt-anchored
-	// lease lasts at most (10,11] seconds. UpdateRGActive is authoritative for
-	// the ownership flip and its applied-gate reconcile retries every 2 seconds.
-	// A continuously renewed stale ownership can therefore last until that
-	// authoritative demotion or bounded recovery lands; expired stored ownership
-	// is always fail-closed and cannot be resurrected here.
+	// #9629 scope: when a Go-side demotion or config-removal intent is
+	// recorded, haWatchdogGroupsLocked overlays Active=false and Rust's
+	// mismatch branch refuses to mint an expired stored-active lease. The
+	// matching branch intentionally renews a still-active owner when no
+	// demotion/removal intent exists; this guarantee does not cover that normal
+	// heartbeat path. For a recorded mismatch, a continuously renewed stale
+	// owner can last only until authoritative demotion or bounded recovery.
 	//
 	// Fail closed and LOUD: a clustered helper that is never told its inventory
 	// simply does not forward, and the error surfaces on the poll caller's log
@@ -821,6 +822,9 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	// order: an in-flight sender completes before this transition publishes,
 	// while a queued sender observes the incremented epoch and drops.
 	m.sessionMu.Lock()
+	if m.haRGActiveSessionHoldHook != nil {
+		m.haRGActiveSessionHoldHook()
+	}
 	// Update BPF rg_active UNDER both locks so the periodic poll can't read the
 	// new BPF value and sync to the helper before we do.
 	// This prevents the race where the poll eats the demotion delta.

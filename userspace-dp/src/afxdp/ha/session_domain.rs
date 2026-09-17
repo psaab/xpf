@@ -106,12 +106,15 @@ pub(crate) struct SessionDomain {
     /// caller has established that the mutex is held.
     #[cfg(test)]
     pub(in crate::afxdp) ha_refresh_proceed: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
-    /// #9629 test-only signal sent immediately after acquiring ha_mutex.
-    /// The sender is reached only inside the production critical section, so
-    /// a lock-removal revert signals before the external test guard drops.
+    /// #9629 test-only holding signal sent inside the acquired ha_mutex
+    /// critical section. The paired release gate keeps the worker paused while
+    /// the test probes ownership with its own try_lock.
     #[cfg(test)]
     pub(in crate::afxdp) ha_refresh_acquired:
         Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+    #[cfg(test)]
+    pub(in crate::afxdp) ha_refresh_acquired_proceed:
+        Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 impl SessionDomain {
     /// #9629 test-only rendezvous: notify immediately before the fast path
@@ -143,16 +146,23 @@ impl SessionDomain {
             .lock()
             .expect("HA refresh proceed hook lock") = Some(proceed);
     }
-    /// #9629 test-only acquisition witness paired with the pre-lock rendezvous.
+    /// #9629 test-only acquisition rendezvous paired with the pre-lock
+    /// rendezvous. The sender fires inside the production critical section,
+    /// then the receiver keeps that section held until the test probes it.
     #[cfg(test)]
-    pub(crate) fn set_ha_refresh_acquired_sender_for_test(
+    pub(crate) fn set_ha_refresh_acquired_rendezvous_for_test(
         &self,
         sender: std::sync::mpsc::Sender<()>,
+        proceed: std::sync::mpsc::Receiver<()>,
     ) {
         *self
             .ha_refresh_acquired
             .lock()
             .expect("HA refresh acquired hook lock") = Some(sender);
+        *self
+            .ha_refresh_acquired_proceed
+            .lock()
+            .expect("HA refresh acquired proceed hook lock") = Some(proceed);
     }
     /// Build a handle from the coordinator's own shared parts.
     ///
@@ -185,6 +195,8 @@ impl SessionDomain {
             ha_refresh_proceed: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             ha_refresh_acquired: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            ha_refresh_acquired_proceed: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -335,6 +347,16 @@ impl SessionDomain {
                 sender
                     .send(())
                     .expect("signal HA refresh mutex acquisition");
+            }
+            if let Some(receiver) = self
+                .ha_refresh_acquired_proceed
+                .lock()
+                .expect("HA refresh acquired proceed hook lock")
+                .take()
+            {
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("release HA refresh mutex acquisition");
             }
         }
         // Incoming empty is a CLEAR (standalone `clearHelperHAStateLocked` is
@@ -849,5 +871,20 @@ mod try_refresh_9629_tests {
             "refreshed lease_until ({after}) must strictly exceed seeded ({before}); equality would mean keep-not-mint"
         );
         assert_eq!(stored_active(&coordinator, 1), Some(true));
+    }
+
+    /// The helper's lease predicate is inclusive: a receipt is valid through
+    /// `now == lease_until`, not only while `now < lease_until`. Pin the
+    /// equality boundary directly so Go's stateful mirror cannot drift to a
+    /// strict comparison.
+    #[test]
+    fn lease_until_equality_is_forwarding_active_9629() {
+        let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
+        let runtime = crate::afxdp::HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 0,
+            lease: crate::afxdp::HAForwardingLease::ActiveUntil(now_secs),
+        };
+        assert!(runtime.is_forwarding_active(now_secs));
     }
 }
