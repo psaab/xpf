@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/binary"
 	"log/slog"
 	"net"
@@ -28,6 +29,53 @@ func buildZoneIDs(cfg *config.Config) map[string]uint16 {
 	for name := range cfg.Security.Zones {
 		ids[name] = config.StableZoneID(name)
 	}
+	return ids
+}
+
+// userspaceZoneIDsCache pairs a stable zone-id map with the active
+// generation it was built from (#9905, F-152). Published through
+// Daemon.userspaceZoneIDs; immutable after publication — misses always
+// build fresh via buildZoneIDs and swap the pointer, never mutate in place.
+type userspaceZoneIDsCache struct {
+	gen uint64
+	cfg *config.Config
+	ids map[string]uint16
+}
+
+// cachedUserspaceZoneIDs returns the stable zone-id map for the current
+// active generation, rebuilding only when the store's published snapshot
+// moves (#9905, F-152). The warm path is one atomic snapshot load plus one
+// atomic cache load — zero store locks, zero allocs. Misses serialize on
+// userspaceZoneIDsMu and re-check under the lock; the build stores the
+// START pair, never a reloaded generation with this build (a commit landing
+// mid-build then costs at most one redundant rebuild, whereas the reverse
+// order could pair an old map with a newer generation — permanent
+// staleness). A nil store or nil snapshot config yields nil (no config),
+// which the caller treats as a transient withhold like a nil ActiveConfig.
+// WARNING (stale-map zombie direction): a zone REMOVE fails OPEN here —
+// the deleted ID still resolves until the next delta rebuilds — while ADD
+// fails closed. Window bounded by next-delta rebuild; stable IDs for
+// surviving names only (see docs/log/9905.md; z174/z214 collide across
+// the boundary, so no cross-boundary aliasing guarantee).
+func (d *Daemon) cachedUserspaceZoneIDs() map[string]uint16 {
+	if d.store == nil {
+		return nil
+	}
+	gen, cfg := d.store.ActiveSnapshot()
+	if c := d.userspaceZoneIDs.Load(); c != nil && c.gen == gen && c.cfg == cfg {
+		return c.ids
+	}
+	d.userspaceZoneIDsMu.Lock()
+	defer d.userspaceZoneIDsMu.Unlock()
+	gen, cfg = d.store.ActiveSnapshot()
+	if c := d.userspaceZoneIDs.Load(); c != nil && c.gen == gen && c.cfg == cfg {
+		return c.ids
+	}
+	if cfg == nil {
+		return nil
+	}
+	ids := buildZoneIDs(cfg)
+	d.userspaceZoneIDs.Store(&userspaceZoneIDsCache{gen: gen, cfg: cfg, ids: ids})
 	return ids
 }
 
@@ -221,7 +269,167 @@ func userspaceNetworkToHost16(v uint16) uint16 {
 	return binary.BigEndian.Uint16(raw[:])
 }
 
-func userspaceReverseKeyV4(key dataplane.SessionKey, delta dpuserspace.SessionDeltaInfo) dataplane.SessionKey {
+// userspaceResolvedV4 is one delta's V4 addresses resolved exactly once: the
+// parsed or copied bytes plus explicit presence. Presence is NOT "any nonzero
+// byte": the JSON leg distinguishes absent (""/nil) from present-but-zero
+// ("0.0.0.0" sets SNAT with IP 0 and trips the effective-port fallback), so
+// every optional field carries its own bit and bytes copy verbatim even when
+// zero-valued (#9905).
+type userspaceResolvedV4 struct {
+	src, dst               [4]byte
+	ok                     bool
+	natSrc, natDst         [4]byte
+	hasNATSrc, hasNATDst   bool
+	natSrcPort, natDstPort uint16
+	srcMAC, neighborMAC    [6]byte
+}
+
+// userspaceResolvedV6 is the V6 twin, plus the NAT64 pool source.
+type userspaceResolvedV6 struct {
+	src, dst               [16]byte
+	ok                     bool
+	natSrc, natDst         [16]byte
+	hasNATSrc, hasNATDst   bool
+	natSrcPort, natDstPort uint16
+	srcMAC, neighborMAC    [6]byte
+	nat64Snat              [4]byte
+	hasNat64Snat           bool
+}
+
+// userspaceResolveV4 resolves one delta's V4 addresses. The leg gate is
+// whole-struct: BinAddrLen==0 takes the string path for every field (legacy
+// JSON behavior, verbatim); 4 takes the binary path. Anything else — or a
+// family/length mismatch — fails closed. Zero binary bytes mirror "" exactly:
+// absent NAT/MAC and an unparseable (dropped) src/dst. There is no per-field
+// mixing: decoders set one leg, and no Go site remarshals or merges the two.
+func userspaceResolveV4(delta dpuserspace.SessionDeltaInfo) userspaceResolvedV4 {
+	if delta.BinAddrLen != 0 {
+		var r userspaceResolvedV4
+		if delta.BinAddrLen != 4 || delta.AddrFamily != dataplane.AFInet {
+			return r
+		}
+		copy(r.src[:], delta.SrcAddr[:4])
+		copy(r.dst[:], delta.DstAddr[:4])
+		r.ok = r.src != [4]byte{} && r.dst != [4]byte{}
+		copy(r.natSrc[:], delta.NATSrcAddr[:4])
+		copy(r.natDst[:], delta.NATDstAddr[:4])
+		r.hasNATSrc = r.natSrc != [4]byte{}
+		r.hasNATDst = r.natDst != [4]byte{}
+		r.natSrcPort = userspaceEffectiveNATPort(delta.NATSrcPort, delta.SrcPort, r.hasNATSrc)
+		r.natDstPort = userspaceEffectiveNATPort(delta.NATDstPort, delta.DstPort, r.hasNATDst)
+		r.srcMAC = delta.SrcMACBin
+		r.neighborMAC = delta.NeighborMACBin
+		return r
+	}
+	var r userspaceResolvedV4
+	src := net.ParseIP(delta.SrcIP).To4()
+	dst := net.ParseIP(delta.DstIP).To4()
+	if src == nil || dst == nil {
+		return r
+	}
+	copy(r.src[:], src)
+	copy(r.dst[:], dst)
+	r.ok = true
+	if ip := net.ParseIP(delta.NATSrcIP).To4(); ip != nil {
+		copy(r.natSrc[:], ip)
+		r.hasNATSrc = true
+	}
+	if ip := net.ParseIP(delta.NATDstIP).To4(); ip != nil {
+		copy(r.natDst[:], ip)
+		r.hasNATDst = true
+	}
+	r.natSrcPort = userspaceEffectiveNATPort(delta.NATSrcPort, delta.SrcPort, r.hasNATSrc)
+	r.natDstPort = userspaceEffectiveNATPort(delta.NATDstPort, delta.DstPort, r.hasNATDst)
+	r.srcMAC = userspaceParseSyncMAC(delta.SrcMAC)
+	r.neighborMAC = userspaceParseSyncMAC(delta.NeighborMAC)
+	return r
+}
+
+// userspaceResolveV6 is the V6 twin: To16 parses, [16]byte copies, and the
+// NAT64 pool source (flag-gated + nonzero on the binary leg, ParseIP fallback
+// on the string leg) that lets a peer-promoted NAT64 session rebuild its
+// reverse BIB (#4565).
+func userspaceResolveV6(delta dpuserspace.SessionDeltaInfo) userspaceResolvedV6 {
+	if delta.BinAddrLen != 0 {
+		var r userspaceResolvedV6
+		if delta.BinAddrLen != 16 || delta.AddrFamily != dataplane.AFInet6 {
+			return r
+		}
+		copy(r.src[:], delta.SrcAddr[:])
+		copy(r.dst[:], delta.DstAddr[:])
+		r.ok = r.src != [16]byte{} && r.dst != [16]byte{}
+		copy(r.natSrc[:], delta.NATSrcAddr[:])
+		copy(r.natDst[:], delta.NATDstAddr[:])
+		r.hasNATSrc = r.natSrc != [16]byte{}
+		r.hasNATDst = r.natDst != [16]byte{}
+		r.natSrcPort = userspaceEffectiveNATPort(delta.NATSrcPort, delta.SrcPort, r.hasNATSrc)
+		r.natDstPort = userspaceEffectiveNATPort(delta.NATDstPort, delta.DstPort, r.hasNATDst)
+		r.srcMAC = delta.SrcMACBin
+		r.neighborMAC = delta.NeighborMACBin
+		if delta.Nat64 && delta.Nat64SnatV4Bin != [4]byte{} {
+			r.nat64Snat = delta.Nat64SnatV4Bin
+			r.hasNat64Snat = true
+		}
+		return r
+	}
+	var r userspaceResolvedV6
+	src := net.ParseIP(delta.SrcIP).To16()
+	dst := net.ParseIP(delta.DstIP).To16()
+	if src == nil || dst == nil {
+		return r
+	}
+	copy(r.src[:], src)
+	copy(r.dst[:], dst)
+	r.ok = true
+	if ip := net.ParseIP(delta.NATSrcIP).To16(); ip != nil {
+		copy(r.natSrc[:], ip)
+		r.hasNATSrc = true
+	}
+	if ip := net.ParseIP(delta.NATDstIP).To16(); ip != nil {
+		copy(r.natDst[:], ip)
+		r.hasNATDst = true
+	}
+	r.natSrcPort = userspaceEffectiveNATPort(delta.NATSrcPort, delta.SrcPort, r.hasNATSrc)
+	r.natDstPort = userspaceEffectiveNATPort(delta.NATDstPort, delta.DstPort, r.hasNATDst)
+	r.srcMAC = userspaceParseSyncMAC(delta.SrcMAC)
+	r.neighborMAC = userspaceParseSyncMAC(delta.NeighborMAC)
+	if ip := net.ParseIP(delta.Nat64SnatV4).To4(); ip != nil {
+		copy(r.nat64Snat[:], ip)
+		r.hasNat64Snat = true
+	}
+	return r
+}
+
+// userspaceEffectiveNATPort is the NAT port a value stamps: the explicit port
+// when set, else the base port when NAT is present, else 0. It replaces the
+// two delta-taking effectiveUserspaceNAT*Port helpers, whose !="" presence
+// test is the string-leg spelling of the resolved bit.
+func userspaceEffectiveNATPort(raw, base uint16, present bool) uint16 {
+	if raw != 0 {
+		return raw
+	}
+	if present {
+		return base
+	}
+	return 0
+}
+
+// userspaceDeltaFlowStrings renders the flow tuple for logs, binary-first:
+// the binary leg leaves the strings empty, so the bytes must be consulted
+// here. Eager (allocates) — call only behind an slog.Enabled gate so the hot
+// path pays nothing at the default level.
+func userspaceDeltaFlowStrings(delta dpuserspace.SessionDeltaInfo) (src, dst string) {
+	switch delta.BinAddrLen {
+	case 4:
+		return net.IP(delta.SrcAddr[:4]).String(), net.IP(delta.DstAddr[:4]).String()
+	case 16:
+		return net.IP(delta.SrcAddr[:]).String(), net.IP(delta.DstAddr[:]).String()
+	default:
+		return delta.SrcIP, delta.DstIP
+	}
+}
+
+func userspaceReverseKeyV4(key dataplane.SessionKey, r userspaceResolvedV4) dataplane.SessionKey {
 	rev := dataplane.SessionKey{
 		SrcIP:    key.DstIP,
 		DstIP:    key.SrcIP,
@@ -229,55 +437,44 @@ func userspaceReverseKeyV4(key dataplane.SessionKey, delta dpuserspace.SessionDe
 		DstPort:  key.SrcPort,
 		Protocol: key.Protocol,
 	}
-	if ip := net.ParseIP(delta.NATDstIP).To4(); ip != nil {
-		copy(rev.SrcIP[:], ip)
+	if r.hasNATDst {
+		rev.SrcIP = r.natDst
 	}
-	if ip := net.ParseIP(delta.NATSrcIP).To4(); ip != nil {
-		copy(rev.DstIP[:], ip)
+	if r.hasNATSrc {
+		rev.DstIP = r.natSrc
 	}
-	if delta.NATDstPort != 0 {
-		rev.SrcPort = userspaceHostToNetwork16(delta.NATDstPort)
+	// Effective ports are behavior-identical to the raw ports this used to
+	// read: raw!=0 passes through; raw==0+present falls back to htons(base),
+	// which is the key port already in place; raw==0+absent keeps it.
+	if r.natDstPort != 0 {
+		rev.SrcPort = userspaceHostToNetwork16(r.natDstPort)
 	}
-	if delta.NATSrcPort != 0 {
-		rev.DstPort = userspaceHostToNetwork16(delta.NATSrcPort)
+	if r.natSrcPort != 0 {
+		rev.DstPort = userspaceHostToNetwork16(r.natSrcPort)
 	}
 	return rev
 }
 
-func userspaceForwardWireKeyV4(key dataplane.SessionKey, delta dpuserspace.SessionDeltaInfo) dataplane.SessionKey {
+// userspaceForwardWireKeyV4 derives the fabric-redirect forward-wire key
+// from an ALREADY-CONVERTED value (#9905): the value carries the NAT IPs
+// (network bytes), the effective NAT ports (already htons), and the
+// SNAT/DNAT presence bits, so no second resolve — and on the JSON leg no
+// second ParseIP — is needed. Each NAT IP is therefore parsed at most once
+// per delta, inside the conversion that produced val.
+func userspaceForwardWireKeyV4(key dataplane.SessionKey, val dataplane.SessionValue) dataplane.SessionKey {
 	wire := key
-	if ip := net.ParseIP(delta.NATSrcIP).To4(); ip != nil {
-		copy(wire.SrcIP[:], ip)
-		wire.SrcPort = userspaceHostToNetwork16(effectiveUserspaceNATSrcPort(delta))
+	if val.Flags&dataplane.SessFlagSNAT != 0 {
+		binary.NativeEndian.PutUint32(wire.SrcIP[:], val.NATSrcIP)
+		wire.SrcPort = val.NATSrcPort
 	}
-	if ip := net.ParseIP(delta.NATDstIP).To4(); ip != nil {
-		copy(wire.DstIP[:], ip)
-		wire.DstPort = userspaceHostToNetwork16(effectiveUserspaceNATDstPort(delta))
+	if val.Flags&dataplane.SessFlagDNAT != 0 {
+		binary.NativeEndian.PutUint32(wire.DstIP[:], val.NATDstIP)
+		wire.DstPort = val.NATDstPort
 	}
 	return wire
 }
 
-func effectiveUserspaceNATSrcPort(delta dpuserspace.SessionDeltaInfo) uint16 {
-	if delta.NATSrcPort != 0 {
-		return delta.NATSrcPort
-	}
-	if delta.NATSrcIP != "" {
-		return delta.SrcPort
-	}
-	return 0
-}
-
-func effectiveUserspaceNATDstPort(delta dpuserspace.SessionDeltaInfo) uint16 {
-	if delta.NATDstPort != 0 {
-		return delta.NATDstPort
-	}
-	if delta.NATDstIP != "" {
-		return delta.DstPort
-	}
-	return 0
-}
-
-func userspaceReverseKeyV6(key dataplane.SessionKeyV6, delta dpuserspace.SessionDeltaInfo) dataplane.SessionKeyV6 {
+func userspaceReverseKeyV6(key dataplane.SessionKeyV6, r userspaceResolvedV6) dataplane.SessionKeyV6 {
 	rev := dataplane.SessionKeyV6{
 		SrcIP:    key.DstIP,
 		DstIP:    key.SrcIP,
@@ -285,17 +482,20 @@ func userspaceReverseKeyV6(key dataplane.SessionKeyV6, delta dpuserspace.Session
 		DstPort:  key.SrcPort,
 		Protocol: key.Protocol,
 	}
-	if ip := net.ParseIP(delta.NATDstIP).To16(); ip != nil {
-		copy(rev.SrcIP[:], ip)
+	if r.hasNATDst {
+		rev.SrcIP = r.natDst
 	}
-	if ip := net.ParseIP(delta.NATSrcIP).To16(); ip != nil {
-		copy(rev.DstIP[:], ip)
+	if r.hasNATSrc {
+		rev.DstIP = r.natSrc
 	}
-	if delta.NATDstPort != 0 {
-		rev.SrcPort = userspaceHostToNetwork16(delta.NATDstPort)
+	// Effective ports are behavior-identical to the raw ports this used to
+	// read: raw!=0 passes through; raw==0+present falls back to htons(base),
+	// which is the key port already in place; raw==0+absent keeps it.
+	if r.natDstPort != 0 {
+		rev.SrcPort = userspaceHostToNetwork16(r.natDstPort)
 	}
-	if delta.NATSrcPort != 0 {
-		rev.DstPort = userspaceHostToNetwork16(delta.NATSrcPort)
+	if r.natSrcPort != 0 {
+		rev.DstPort = userspaceHostToNetwork16(r.natSrcPort)
 	}
 	return rev
 }
@@ -314,9 +514,8 @@ func userspaceParseSyncMAC(raw string) [6]byte {
 }
 
 func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint16) (dataplane.SessionKey, dataplane.SessionValue, bool) {
-	src := net.ParseIP(delta.SrcIP).To4()
-	dst := net.ParseIP(delta.DstIP).To4()
-	if src == nil || dst == nil {
+	r := userspaceResolveV4(delta)
+	if !r.ok {
 		// #7171: these four conversion drops were SILENT while the V4
 		// delta filters in daemon_ha_userspace_stream.go logged every
 		// reason at Debug. A session dropped here never reaches the peer,
@@ -324,13 +523,15 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		// to say a session was seen and discarded. Debug, not Info: this
 		// is a per-session path (CLAUDE.md logging rules), and it matches
 		// the level the V4 stream-side filters already use.
-		slog.Debug("userspace delta: dropped (v4 address unparseable)",
-			"src", delta.SrcIP, "dst", delta.DstIP, "proto", delta.Protocol)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: dropped (v4 address unparseable)",
+				"src", src, "dst", dst, "proto", delta.Protocol)
+		}
 		return dataplane.SessionKey{}, dataplane.SessionValue{}, false
 	}
 	var key dataplane.SessionKey
-	copy(key.SrcIP[:], src)
-	copy(key.DstIP[:], dst)
+	key.SrcIP, key.DstIP = r.src, r.dst
 	key.SrcPort = userspaceHostToNetwork16(delta.SrcPort)
 	key.DstPort = userspaceHostToNetwork16(delta.DstPort)
 	key.Protocol = delta.Protocol
@@ -348,10 +549,13 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		egressZone = zoneIDs[delta.EgressZone]
 	}
 	if ingressZone == 0 || egressZone == 0 {
-		slog.Debug("userspace delta: dropped (v4 zone unresolved)",
-			"ingress_zone", delta.IngressZone, "egress_zone", delta.EgressZone,
-			"ingress_zone_id", ingressZone, "egress_zone_id", egressZone,
-			"src", delta.SrcIP, "dst", delta.DstIP)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: dropped (v4 zone unresolved)",
+				"ingress_zone", delta.IngressZone, "egress_zone", delta.EgressZone,
+				"ingress_zone_id", ingressZone, "egress_zone_id", egressZone,
+				"src", src, "dst", dst)
+		}
 		return dataplane.SessionKey{}, dataplane.SessionValue{}, false
 	}
 
@@ -404,7 +608,7 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		Timeout:       userspaceSessionTimeout(delta.Protocol),
 		IngressZone:   ingressZone,
 		EgressZone:    egressZone,
-		ReverseKey:    userspaceReverseKeyV4(key, delta),
+		ReverseKey:    userspaceReverseKeyV4(key, r),
 	}
 	if delta.TunnelEndpointID != 0 {
 		val.LogFlags |= dataplane.LogFlagUserspaceTunnelEndpoint
@@ -415,17 +619,17 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		val.FibIfindex = uint32(delta.EgressIfindex)
 	}
 	val.FibVlanID = delta.TXVLANID
-	val.FibDmac = userspaceParseSyncMAC(delta.NeighborMAC)
-	val.FibSmac = userspaceParseSyncMAC(delta.SrcMAC)
-	if ip := net.ParseIP(delta.NATSrcIP).To4(); ip != nil {
+	val.FibDmac = r.neighborMAC
+	val.FibSmac = r.srcMAC
+	if r.hasNATSrc {
 		val.Flags |= dataplane.SessFlagSNAT
-		val.NATSrcIP = binary.NativeEndian.Uint32(ip)
-		val.NATSrcPort = userspaceHostToNetwork16(effectiveUserspaceNATSrcPort(delta))
+		val.NATSrcIP = binary.NativeEndian.Uint32(r.natSrc[:])
+		val.NATSrcPort = userspaceHostToNetwork16(r.natSrcPort)
 	}
-	if ip := net.ParseIP(delta.NATDstIP).To4(); ip != nil {
+	if r.hasNATDst {
 		val.Flags |= dataplane.SessFlagDNAT
-		val.NATDstIP = binary.NativeEndian.Uint32(ip)
-		val.NATDstPort = userspaceHostToNetwork16(effectiveUserspaceNATDstPort(delta))
+		val.NATDstIP = binary.NativeEndian.Uint32(r.natDst[:])
+		val.NATDstPort = userspaceHostToNetwork16(r.natDstPort)
 	}
 	if delta.FabricIngress {
 		val.LogFlags |= dataplane.LogFlagUserspaceFabricIngress
@@ -479,9 +683,11 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 // nextUserspaceSyncedSessionID mints a FRESH id per conversion (#6198): a second
 // conversion of the same delta would split one logical session across two
 // SessionIDs, where the alias and its base entry must share one. It also drops a
-// redundant conversion from the delta path.
-func userspaceForwardWireAliasV4(key dataplane.SessionKey, val dataplane.SessionValue, delta dpuserspace.SessionDeltaInfo) (dataplane.SessionKey, dataplane.SessionValue, bool) {
-	wireKey := userspaceForwardWireKeyV4(key, delta)
+// redundant conversion from the delta path. Since #9905 the wire key itself is
+// derived from the value (NAT bytes + stamped ports + presence flags), so the
+// alias path parses nothing — not even on the JSON leg.
+func userspaceForwardWireAliasV4(key dataplane.SessionKey, val dataplane.SessionValue) (dataplane.SessionKey, dataplane.SessionValue, bool) {
+	wireKey := userspaceForwardWireKeyV4(key, val)
 	if wireKey == key {
 		return dataplane.SessionKey{}, dataplane.SessionValue{}, false
 	}
@@ -489,16 +695,17 @@ func userspaceForwardWireAliasV4(key dataplane.SessionKey, val dataplane.Session
 }
 
 func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map[string]uint16) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
-	src := net.ParseIP(delta.SrcIP).To16()
-	dst := net.ParseIP(delta.DstIP).To16()
-	if src == nil || dst == nil {
-		slog.Debug("userspace delta: dropped (v6 address unparseable)",
-			"src", delta.SrcIP, "dst", delta.DstIP, "proto", delta.Protocol)
+	r := userspaceResolveV6(delta)
+	if !r.ok {
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: dropped (v6 address unparseable)",
+				"src", src, "dst", dst, "proto", delta.Protocol)
+		}
 		return dataplane.SessionKeyV6{}, dataplane.SessionValueV6{}, false
 	}
 	var key dataplane.SessionKeyV6
-	copy(key.SrcIP[:], src)
-	copy(key.DstIP[:], dst)
+	key.SrcIP, key.DstIP = r.src, r.dst
 	key.SrcPort = userspaceHostToNetwork16(delta.SrcPort)
 	key.DstPort = userspaceHostToNetwork16(delta.DstPort)
 	key.Protocol = delta.Protocol
@@ -514,10 +721,13 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		egressZone = zoneIDs[delta.EgressZone]
 	}
 	if ingressZone == 0 || egressZone == 0 {
-		slog.Debug("userspace delta: dropped (v6 zone unresolved)",
-			"ingress_zone", delta.IngressZone, "egress_zone", delta.EgressZone,
-			"ingress_zone_id", ingressZone, "egress_zone_id", egressZone,
-			"src", delta.SrcIP, "dst", delta.DstIP)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			src, dst := userspaceDeltaFlowStrings(delta)
+			slog.Debug("userspace delta: dropped (v6 zone unresolved)",
+				"ingress_zone", delta.IngressZone, "egress_zone", delta.EgressZone,
+				"ingress_zone_id", ingressZone, "egress_zone_id", egressZone,
+				"src", src, "dst", dst)
+		}
 		return dataplane.SessionKeyV6{}, dataplane.SessionValueV6{}, false
 	}
 
@@ -543,7 +753,7 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		Timeout:       userspaceSessionTimeout(delta.Protocol),
 		IngressZone:   ingressZone,
 		EgressZone:    egressZone,
-		ReverseKey:    userspaceReverseKeyV6(key, delta),
+		ReverseKey:    userspaceReverseKeyV6(key, r),
 	}
 	if delta.TunnelEndpointID != 0 {
 		val.LogFlags |= dataplane.LogFlagUserspaceTunnelEndpoint
@@ -554,17 +764,17 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		val.FibIfindex = uint32(delta.EgressIfindex)
 	}
 	val.FibVlanID = delta.TXVLANID
-	val.FibDmac = userspaceParseSyncMAC(delta.NeighborMAC)
-	val.FibSmac = userspaceParseSyncMAC(delta.SrcMAC)
-	if ip := net.ParseIP(delta.NATSrcIP).To16(); ip != nil {
+	val.FibDmac = r.neighborMAC
+	val.FibSmac = r.srcMAC
+	if r.hasNATSrc {
 		val.Flags |= dataplane.SessFlagSNAT
-		copy(val.NATSrcIP[:], ip)
-		val.NATSrcPort = userspaceHostToNetwork16(effectiveUserspaceNATSrcPort(delta))
+		val.NATSrcIP = r.natSrc
+		val.NATSrcPort = userspaceHostToNetwork16(r.natSrcPort)
 	}
-	if ip := net.ParseIP(delta.NATDstIP).To16(); ip != nil {
+	if r.hasNATDst {
 		val.Flags |= dataplane.SessFlagDNAT
-		copy(val.NATDstIP[:], ip)
-		val.NATDstPort = userspaceHostToNetwork16(effectiveUserspaceNATDstPort(delta))
+		val.NATDstIP = r.natDst
+		val.NATDstPort = userspaceHostToNetwork16(r.natDstPort)
 	}
 	if delta.FabricIngress {
 		val.LogFlags |= dataplane.LogFlagUserspaceFabricIngress
@@ -582,10 +792,12 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	val.AppTimeout = delta.AppTimeout
 	// #4565: stamp the NAT64 translated pool SOURCE so the cluster wire + peer
 	// helper carry it, letting a peer-PROMOTED NAT64 session rebuild its reverse
-	// (v4->v6) BIB after failover. Non-empty delta.Nat64SnatV4 (decoded from the
-	// FLAG_NAT64 open frame) marks a NAT64 cross-family session.
-	if ip := net.ParseIP(delta.Nat64SnatV4).To4(); ip != nil {
-		copy(val.Nat64SnatV4[:], ip)
+	// (v4->v6) BIB after failover. A resolved pool source marks a NAT64
+	// cross-family session: Nat64SnatV4Bin on the binary leg (#9905,
+	// decode-gated on the FLAG_NAT64 open frame) or ParseIP of
+	// delta.Nat64SnatV4 on the string leg (flag-blind legacy fallback).
+	if r.hasNat64Snat {
+		val.Nat64SnatV4 = r.nat64Snat
 	}
 	// #7188: carry the helper's tunnel session-identity discriminator so the
 	// peer helper folds it back into the key it reconstructs. Opaque here.
@@ -606,23 +818,26 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	return key, val, true
 }
 
-func userspaceForwardWireKeyV6(key dataplane.SessionKeyV6, delta dpuserspace.SessionDeltaInfo) dataplane.SessionKeyV6 {
+// userspaceForwardWireKeyV6 is the V6 twin: the NAT arrays copy directly
+// from the value, ports and presence likewise — no second resolve (#9905).
+func userspaceForwardWireKeyV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) dataplane.SessionKeyV6 {
 	wire := key
-	if ip := net.ParseIP(delta.NATSrcIP).To16(); ip != nil {
-		copy(wire.SrcIP[:], ip)
-		wire.SrcPort = userspaceHostToNetwork16(effectiveUserspaceNATSrcPort(delta))
+	if val.Flags&dataplane.SessFlagSNAT != 0 {
+		wire.SrcIP = val.NATSrcIP
+		wire.SrcPort = val.NATSrcPort
 	}
-	if ip := net.ParseIP(delta.NATDstIP).To16(); ip != nil {
-		copy(wire.DstIP[:], ip)
-		wire.DstPort = userspaceHostToNetwork16(effectiveUserspaceNATDstPort(delta))
+	if val.Flags&dataplane.SessFlagDNAT != 0 {
+		wire.DstIP = val.NATDstIP
+		wire.DstPort = val.NATDstPort
 	}
 	return wire
 }
 
 // userspaceForwardWireAliasV6 is the V6 twin of userspaceForwardWireAliasV4 —
-// same reason for taking the already-converted base (#6198).
-func userspaceForwardWireAliasV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, delta dpuserspace.SessionDeltaInfo) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
-	wireKey := userspaceForwardWireKeyV6(key, delta)
+// same reason for taking the already-converted base (#6198), same
+// no-re-resolve wire derivation (#9905).
+func userspaceForwardWireAliasV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) (dataplane.SessionKeyV6, dataplane.SessionValueV6, bool) {
+	wireKey := userspaceForwardWireKeyV6(key, val)
 	if wireKey == key {
 		return dataplane.SessionKeyV6{}, dataplane.SessionValueV6{}, false
 	}

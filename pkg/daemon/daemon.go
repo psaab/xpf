@@ -1481,6 +1481,16 @@ type Daemon struct {
 	// observed before the snapshot, convergence instead relies on the helper's
 	// snapshot/event coherence; this mutex does not supply that premise.
 	userspaceDeltaSyncMu sync.Mutex
+	// userspaceZoneIDs caches the stable zone-id map across event-stream
+	// deltas (#9905, F-152): the map is a pure function of the active
+	// config, so it is rebuilt only when the store's active generation
+	// moves. The warm path is one atomic generation load plus one atomic
+	// pointer load — no store RLock, no map build. Misses serialize on
+	// userspaceZoneIDsMu (leaf lock: only cachedUserspaceZoneIDs takes it).
+	// The published map is immutable: misses always build fresh and swap
+	// the pointer, never mutate in place.
+	userspaceZoneIDs   atomic.Pointer[userspaceZoneIDsCache]
+	userspaceZoneIDsMu sync.Mutex
 	// userspaceDeltaBeforeLockForTest, userspaceDeltaAfterLockForTest, and
 	// userspaceDeltaAfterQueueForTest are test-only seams for the deterministic
 	// #9766 stream-vs-repayment ordering cell. The cell wires the real

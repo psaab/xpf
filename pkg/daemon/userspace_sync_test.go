@@ -497,7 +497,7 @@ func TestUserspaceForwardWireAliasFromDeltaV4UsesNATTuple(t *testing.T) {
 	if !ok {
 		t.Fatal("expected v4 delta to convert")
 	}
-	key, _, ok := userspaceForwardWireAliasV4(baseKey, baseVal, delta)
+	key, _, ok := userspaceForwardWireAliasV4(baseKey, baseVal)
 	if !ok {
 		t.Fatal("expected v4 forward-wire alias")
 	}
@@ -624,7 +624,7 @@ func TestUserspaceForwardWireAliasFromDeltaV6UsesNATTuple(t *testing.T) {
 	if !ok {
 		t.Fatal("expected v6 delta to convert")
 	}
-	key, _, ok := userspaceForwardWireAliasV6(baseKey, baseVal, delta)
+	key, _, ok := userspaceForwardWireAliasV6(baseKey, baseVal)
 	if !ok {
 		t.Fatal("expected v6 forward-wire alias")
 	}

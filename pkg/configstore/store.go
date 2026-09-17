@@ -87,6 +87,22 @@ type Store struct {
 	// ALWAYS bumped via bumpCandidateGenLocked under s.mu.Lock.
 	candidateGen uint64
 
+	// activeGen is the writer-side counter behind the published active
+	// snapshot (#9905). Advanced on every compiled-active swap — commit,
+	// commit-confirmed, auto-rollback, peer sync, load, and boot recovery —
+	// via publishActiveLocked, under s.mu write lock. Readers never touch
+	// it directly; they load activeSnap (below), whose immutable {gen, cfg}
+	// pair is always mutually consistent, unlike a separately-loaded
+	// generation + RLock-read pointer (which can straddle a commit).
+	activeGen atomic.Uint64
+	// activeSnap is the lock-free publication of the current active
+	// generation + compiled config (#9905): one immutable snapshot per
+	// swap. A reader's single atomic load observes exactly one
+	// publication, so the daemon's cached per-commit derivations (zone-id
+	// map) reuse on an unchanged snapshot with zero store locks and
+	// rebuild on any change. nil on a fresh store (no publication yet).
+	activeSnap atomic.Pointer[activeSnapshot]
+
 	// Persistent storage
 	db      *DB
 	journal *journal.Journal
@@ -876,6 +892,7 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 
 	s.active = tree
 	s.compiled = compiled
+	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.recordSyncDivergenceLocked(divergence)
 	s.dirty = false
 
