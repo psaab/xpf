@@ -127,6 +127,16 @@ type Journal struct {
 	// DBSnapshotPath is the absolute path to the pre-upgrade config-DB
 	// snapshot taken in PREFLIGHT (for binary+DB-atomic rollback).
 	DBSnapshotPath string `json:"db_snapshot_path,omitempty"`
+	// RollbackDBRestored records the operator rollback's completed DB swap.
+	// It closes the crash window where the snapshot is installed and .old
+	// retained but the process dies before the binary flip: a retry must not
+	// rotate the already-restored live DB into .old and destroy the original
+	// failed-runtime copy. Forward-cut journals leave this false.
+	RollbackDBRestored bool `json:"rollback_db_restored,omitempty"`
+	// OperatorRollback distinguishes the CLI rollback journal from the legacy
+	// automatic forward-cut failure journal. Runner.Run uses it to resume the
+	// retained-.old DB path rather than the cleanup-oriented auto path.
+	OperatorRollback bool `json:"operator_rollback,omitempty"`
 
 	// AdvancedStateFloor records whether the new version raises the
 	// config-DB state-format floor (envelope min-reader). When true,

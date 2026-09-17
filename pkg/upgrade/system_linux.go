@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,6 +139,34 @@ func (s *realSystem) BinaryVersion(bin string) (string, error) {
 	}
 	return "", fmt.Errorf("%s version: unrecognized output format "+
 		"(want \"xpfd <version> ...\"): %q", bin, trimmed)
+}
+
+// EnvelopeReaderVersion invokes the target's side-effect-free
+// `--capability-check` probe and parses its envelope reader major. The target
+// path is supplied by the validated rollback version directory, never PATH.
+func (s *realSystem) EnvelopeReaderVersion(bin string) (int, error) {
+	cmd := exec.Command(bin, "--capability-check")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("%s capability-check: %w (output: %s)",
+			bin, err, strings.TrimSpace(out.String()))
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if key != "configdb-envelope-version" || !ok {
+			continue
+		}
+		reader, err := strconv.Atoi(value)
+		if err != nil || reader < 1 {
+			return 0, fmt.Errorf("%s capability-check: invalid "+
+				"configdb-envelope-version=%q", bin, value)
+		}
+		return reader, nil
+	}
+	return 0, fmt.Errorf("%s capability-check: missing configdb-envelope-version "+
+		"in output %q", bin, strings.TrimSpace(out.String()))
 }
 
 // unitActiveProbeCtx reports whether <unit>.service is active per `systemctl

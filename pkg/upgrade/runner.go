@@ -96,6 +96,10 @@ type System interface {
 	VerifyDataplane(bin string, env []string) (bool, error)
 	// BinaryVersion runs `<bin> version` and returns the version token.
 	BinaryVersion(bin string) (string, error)
+	// EnvelopeReaderVersion runs the target binary's pure
+	// `--capability-check` probe and returns the envelope format major it can
+	// read. It MUST NOT start a daemon or mutate runtime state.
+	EnvelopeReaderVersion(bin string) (int, error)
 	// HelperHealthy reports whether the running daemon's helper is healthy
 	// and reports the expected version within the deadline.
 	HelperHealthy(expectVersion string, deadline time.Duration) error

@@ -181,6 +181,43 @@ type envelopeHeader struct {
 	Committed bool
 }
 
+// EnvelopeCompatibility is the portion of an on-disk envelope header needed
+// by an upgrade rollback preflight. It intentionally omits the writer and AST
+// metadata: rollback policy compares only the envelope grammar and minimum
+// reader floors.
+type EnvelopeCompatibility struct {
+	FormatVersion int
+	MinReader     int
+}
+
+// InspectEnvelopeHeader parses an envelope header without applying this
+// package's current-reader gate. Callers that need to compare a snapshot
+// against a different target reader (for example, an older rollback binary)
+// must inspect first and apply that target-specific policy themselves.
+//
+// A legacy, pre-envelope body returns (zero, false, nil). A body beginning
+// with the envelope magic is parsed strictly; malformed headers return an
+// error so destructive callers can refuse before mutation.
+func InspectEnvelopeHeader(data []byte) (EnvelopeCompatibility, bool, error) {
+	if !hasEnvelope(data) {
+		return EnvelopeCompatibility{}, false, nil
+	}
+	nl := bytes.IndexByte(data, '\n')
+	if nl < 0 {
+		return EnvelopeCompatibility{}, true,
+			fmt.Errorf("config envelope: header line has no terminating newline")
+	}
+	headerLine := strings.TrimRight(string(data[:nl]), "\r")
+	hdr, err := parseEnvelopeHeader(headerLine)
+	if err != nil {
+		return EnvelopeCompatibility{}, true, err
+	}
+	return EnvelopeCompatibility{
+		FormatVersion: hdr.FormatVersion,
+		MinReader:     hdr.MinReader,
+	}, true, nil
+}
+
 // hasEnvelope reports whether data begins with the envelope magic line.
 func hasEnvelope(data []byte) bool {
 	return bytes.HasPrefix(data, []byte(envelopeMagic))

@@ -158,3 +158,37 @@ func TestBinaryVersion_ExecFailure(t *testing.T) {
 		t.Fatal("expected error on non-zero exec, got nil")
 	}
 }
+func TestEnvelopeReaderVersion_ProbeOutput(t *testing.T) {
+	s := &realSystem{systemdUnitDir: t.TempDir(), unit: "xpfd"}
+	bin := filepath.Join(t.TempDir(), "xpfd-capability")
+	writeFakeVersionBin(t, bin, "configdb-envelope-version=2\nconfigdb-min-reader-version=1\n", 0)
+	got, err := s.EnvelopeReaderVersion(bin)
+	if err != nil {
+		t.Fatalf("EnvelopeReaderVersion: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("EnvelopeReaderVersion = %d, want 2", got)
+	}
+}
+
+func TestEnvelopeReaderVersion_RefusesMalformedProbe(t *testing.T) {
+	s := &realSystem{systemdUnitDir: t.TempDir(), unit: "xpfd"}
+	cases := []struct {
+		name string
+		out  string
+		code int
+	}{
+		{"missing-key", "xpfd capability-check\n", 0},
+		{"zero-reader", "configdb-envelope-version=0\n", 0},
+		{"exec-failure", "boom\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := filepath.Join(t.TempDir(), "xpfd-capability")
+			writeFakeVersionBin(t, bin, tc.out, tc.code)
+			if got, err := s.EnvelopeReaderVersion(bin); err == nil {
+				t.Fatalf("EnvelopeReaderVersion = %d, want error", got)
+			}
+		})
+	}
+}

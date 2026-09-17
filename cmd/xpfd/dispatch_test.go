@@ -23,6 +23,7 @@ func TestClassifyCommand(t *testing.T) {
 		{"nil argv runs daemon", nil, cmdDaemon},
 		{"version", []string{"xpfd", "version"}, cmdVersion},
 		{"protocol-versions", []string{"xpfd", "protocol-versions"}, cmdProtocolVersions},
+		{"capability-check", []string{"xpfd", "--capability-check"}, cmdCapabilityCheck},
 		{"cleanup", []string{"xpfd", "cleanup"}, cmdCleanup},
 		{"cleanup with stray operand still routes to cleanup", []string{"xpfd", "cleanup", "oops"}, cmdCleanup},
 		{"upgrade", []string{"xpfd", "upgrade"}, cmdUpgrade},

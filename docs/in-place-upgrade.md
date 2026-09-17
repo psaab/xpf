@@ -283,6 +283,39 @@ would boot an N daemon that fatal-rejects the N+1 envelope DB (a brick).
 The HA path disables auto-rollback — HA rollback is operator-driven (an
 auto re-flip mid-rolling un-coordinates the cluster).
 
+#### Operator rollback verb and envelope policy (#10024)
+
+The manual sequence above is available as one guarded command:
+
+```
+xpfd upgrade --rollback [--target <version>]
+xpfd upgrade --rollback --rolling [--target <version>]
+```
+
+Without `--rolling`, the command is for a standalone node and refuses when
+`/etc/xpf/node-id` marks the node as clustered. On HA, run the rolling form on
+one node at a time. It checks peer liveness, session-sync and takeover
+readiness, drains the node, performs the stop → snapshot restore → re-flip →
+start sequence, then waits for sync and confirms every redundancy group has
+rejoined before reporting `rolling rollback complete`. A standalone success
+prints `rollback complete`; failures are reported on stderr with the
+`upgrade --rollback...:` prefix.
+
+Rollback uses a **refuse-with-guidance** envelope-major policy. Before
+`StopUnit`, it parses the snapshot's `v=` and `min-reader=` fields and invokes
+the target binary's pure `--capability-check` probe. If either snapshot major
+exceeds the target reader, rollback exits 1 without stopping the daemon,
+rewriting the unit drop-in, moving `current`, or changing the live config DB.
+The error names the current and target versions and directs the operator to
+roll forward or re-stage an envelope-compatible target. The daemon's existing
+fail-closed envelope check remains the backstop for hand-driven flips and
+stale journals; rollback never migrates or discards envelope fields.
+
+Booting from a text config such as `/etc/xpf/xpf.conf` after removing the
+config DB is **not** a rollback success: it does not restore the committed DB
+or prove forwarding. Restore the compatible snapshot and complete the guarded
+binary+DB sequence instead.
+
 ## First-install seed + legacy migration + refuse-before-STOP (#1964)
 
 The cut needs a real, immutable rollback target. Before #1964 the very

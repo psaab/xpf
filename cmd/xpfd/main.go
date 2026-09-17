@@ -38,6 +38,7 @@ const (
 	cmdDaemon xpfdCommand = iota
 	cmdVersion
 	cmdProtocolVersions
+	cmdCapabilityCheck
 	cmdCleanup
 	cmdUpgrade
 	cmdSeedRuntime
@@ -104,6 +105,8 @@ func classifyCommand(argv []string) xpfdCommand {
 		return cmdVersion
 	case "protocol-versions":
 		return cmdProtocolVersions
+	case "--capability-check":
+		return cmdCapabilityCheck
 	case "cleanup":
 		return cmdCleanup
 	case "upgrade":
@@ -158,6 +161,19 @@ func main() {
 	switch classifyCommand(os.Args) {
 	case cmdVersion:
 		fmt.Printf("xpfd %s (commit %s, built %s)\n", version, commit, buildTime)
+		return
+
+	case cmdCapabilityCheck:
+		// Pure rollback preflight probe: this path reports compile-time
+		// envelope support and performs no filesystem, daemon, or dataplane
+		// work. Reject extra operands so a future caller cannot accidentally
+		// turn the probe into a side-effecting mode.
+		if len(os.Args) != 2 {
+			fmt.Fprintf(os.Stderr, "--capability-check: unexpected argument(s) %v\n", os.Args[2:])
+			os.Exit(1)
+		}
+		fmt.Printf("configdb-envelope-version=%d\n", configstore.EnvelopeFormatVersion)
+		fmt.Printf("configdb-min-reader-version=%d\n", configstore.EnvelopeMinReaderVersion)
 		return
 
 	case cmdProtocolVersions:
