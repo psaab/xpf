@@ -32,9 +32,15 @@ func readLinkDuplex(ifaceName string) string {
 }
 
 // formatSpeed formats a link speed in Mbps to a human-readable string.
+// Exact multiples of 1000 render as integer Gbps; other gigabit-plus
+// speeds render one decimal, truncated with integer math rather than
+// float rounding. Speeds below 1000 Mbps retain their Mbps display.
 func formatSpeed(mbps int) string {
 	if mbps >= 1000 {
-		return fmt.Sprintf("%dGbps", mbps/1000)
+		if mbps%1000 == 0 {
+			return fmt.Sprintf("%dGbps", mbps/1000)
+		}
+		return fmt.Sprintf("%d.%dGbps", mbps/1000, (mbps%1000)/100)
 	}
 	return fmt.Sprintf("%dMbps", mbps)
 }
