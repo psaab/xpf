@@ -586,6 +586,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.routeListener(ctx, coalesce.New(d.actuateLearnedRouteRefresh))
 			}()
 		}
+
+		// #9848: keep the transit gate synchronized with kernel device
+		// unregisters that happen outside ApplyConfig. The subscription is
+		// always on for an armed dataplane, independent of SNMP and HA; its
+		// post-subscribe re-read also repairs notification gaps after ENOBUFS.
+		d.startTransitGateLinkWatch(ctx, &wg)
+
 		// #2197 item 2: always-on proxy-ARP/NDP re-assert. Started
 		// unconditionally (independent of ActiveConfig at start, which it
 		// re-reads each tick) so a non-commit link cycle that re-defaults
