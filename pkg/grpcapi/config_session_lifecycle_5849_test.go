@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -33,11 +34,18 @@ func newLifecycleTestServer(t *testing.T) (*Server, func(t *testing.T) (pb.Bpfrx
 	if err != nil {
 		t.Fatalf("configstore.New: %v", err)
 	}
-	s := &Server{store: store, addr: "bufnet"}
+	s := &Server{
+		store: store,
+		addr:  "bufnet",
+		peerLookupFn: func(net.Addr, net.Addr) authz.PeerIdentity {
+			return authz.PeerIdentity{UID: 0, OK: true, Local: true}
+		},
+	}
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
+		grpc.StatsHandler(&peerAuthStatsHandler{s: s}),
 		grpc.StatsHandler(&configLockStatsHandler{s: s}),
 	)
 	pb.RegisterBpfrxServiceServer(srv, s)

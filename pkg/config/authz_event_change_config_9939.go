@@ -5,43 +5,23 @@ import (
 	"strings"
 )
 
-// #9939: an `event-options policy … then change-configuration commands "…"`
-// payload was never authorized against anyone.
+// #9939/#9984: an `event-options policy … then change-configuration commands
+// "…"` payload is DATA at authoring time and executable only after two gates:
+// the planting request is adjudicated against the authenticated class, and
+// the resulting policy record stores that class for fire-time revalidation.
 //
-// The line that PLANTS it is adjudicated — as a path under `event-options` — but
-// the payload it carries is DATA, and nothing looks inside. When the policy
-// fires, `pkg/eventengine` applies the embedded `set`/`delete` and commits with
-// explicit INTERNAL (root) authority: `commit_authority.go` answers
-// `case authorityInternal: return nil`, so no authority check runs on that path
-// at all.
+// The event engine applies embedded `set`/`delete` operations with its internal
+// commit authority, but before any candidate mutation it resolves the recorded
+// class from the active login configuration and evaluates every target through
+// the same evaluator. Missing, deleted, or denied metadata quarantines the
+// payload, so a routine event cannot turn a class denied `security policies`
+// into an autonomous root deletion.
 //
-// A class denied `security policies` but permitted `event-options` could
-// therefore delete a guard policy autonomously, on a routine RPM event, as root.
-//
-// The absence was a MEASUREMENT: `AuthorizeConfigMutation` had exactly four
-// non-test call sites — the two gRPC gates, REST, and the on-box CLI — and zero
-// in `pkg/eventengine`. The same grep finding all four surfaces is what makes
-// "none in the engine" evidence rather than a failed search.
-//
-// ── WHY THE GATE IS HERE AND NOT IN THE ENGINE ──────────────────────────────
-//
-// At fire time there is no principal. The payload is applied by the daemon on
-// its own behalf, so there is nobody to charge — which is exactly what makes it
-// an escalation. The only moment a class is in scope is the COMMIT that plants
-// the payload, and every surface already routes its config mutations through
-// AuthorizeConfigMutation, including `load` (#9892 renders content to set lines
-// and adjudicates each). Putting the check here means all of them get it from
-// one implementation rather than four that agree today.
-//
-// ── WHAT THIS DOES NOT CLOSE, STATED RATHER THAN IMPLIED ────────────────────
-//
-// A payload ALREADY PERSISTED before this gate existed still fires as root. The
-// engine cannot re-adjudicate it, because the policy does not record who planted
-// it — closing that needs the authoring class stored WITH the policy, which is a
-// config-type change on the HA wire with repo-wide blast radius. Filed as
-// #9984 rather than bundled here, with the reachability bounded: an UNANCHORED
-// deny catches the plant incidentally (the payload text is part of the planting
-// line), so only an ANCHORED deny leaves a persisted payload unadjudicated.
+// The marker is stamped atomically by every config mutation that changes the
+// effective event payload, including set/delete, load, copy/rename, rollback,
+// and group-derived changes. Trusted root/system writers use the explicit
+// `super-user` marker. Payloads persisted before #9984 have no marker and are
+// intentionally refused at fire time with an operator-visible fault.
 
 // changeConfigRecursionLimit9939 bounds the payload walk.
 //

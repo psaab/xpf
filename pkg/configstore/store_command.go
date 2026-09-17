@@ -41,6 +41,18 @@ func (s *Store) SetAsQuoted(sessionID string, path []string, quoted []bool) erro
 // A nil grouping is the pre-#6668 behaviour: nothing is widened and no
 // bracket provenance is recorded.
 func (s *Store) SetAsQuotedGrouped(sessionID string, path []string, quoted, grouped []bool) error {
+	return s.setAsQuotedGroupedPlantClass(sessionID, "", path, quoted, grouped)
+}
+
+// SetAsQuotedGroupedPlantClass is the authenticated mutation entry point for
+// event-options planting. The class is stamped while the same store lock is
+// held as the candidate edit, before the lock is released or another session
+// can commit the candidate.
+func (s *Store) SetAsQuotedGroupedPlantClass(sessionID, plantClass string, path []string, quoted, grouped []bool) error {
+	return s.setAsQuotedGroupedPlantClass(sessionID, plantClass, path, quoted, grouped)
+}
+
+func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path []string, quoted, grouped []bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -53,10 +65,11 @@ func (s *Store) SetAsQuotedGrouped(sessionID string, path []string, quoted, grou
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
-
+	before := s.candidate.Clone()
 	if err := s.candidate.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
@@ -73,11 +86,17 @@ func (s *Store) SetFromInput(input string) error { return s.SetFromInputAs("", i
 // matching the load-merge / replay path (applyEditLine): an interactive set
 // line and its `show | display set` replay now build the same tree.
 func (s *Store) SetFromInputAs(sessionID, input string) error {
+	return s.SetFromInputAsPlantClass(sessionID, "", input)
+}
+
+// SetFromInputAsPlantClass binds the authenticated planting class atomically
+// with the set mutation.
+func (s *Store) SetFromInputAsPlantClass(sessionID, plantClass, input string) error {
 	path, quoted, grouped, err := config.ParseSetCommandGrouped("set " + input)
 	if err != nil {
 		return err
 	}
-	return s.SetAsQuotedGrouped(sessionID, path, quoted, grouped)
+	return s.SetAsQuotedGroupedPlantClass(sessionID, plantClass, path, quoted, grouped)
 }
 
 // Delete removes a node at the given path from the candidate configuration. The
@@ -97,6 +116,16 @@ func (s *Store) DeleteAs(sessionID string, path []string) error {
 // the walk re-splits a bracketed container key group at the schema arity and
 // reports the node missing. A nil grouping is the pre-#6668 behaviour.
 func (s *Store) DeleteAsGrouped(sessionID string, path []string, grouped []bool) error {
+	return s.deleteAsGroupedPlantClass(sessionID, "", path, grouped)
+}
+
+// DeleteAsGroupedPlantClass binds the authenticated planting class atomically
+// with the delete mutation.
+func (s *Store) DeleteAsGroupedPlantClass(sessionID, plantClass string, path []string, grouped []bool) error {
+	return s.deleteAsGroupedPlantClass(sessionID, plantClass, path, grouped)
+}
+
+func (s *Store) deleteAsGroupedPlantClass(sessionID, plantClass string, path []string, grouped []bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -109,10 +138,11 @@ func (s *Store) DeleteAsGrouped(sessionID string, path []string, grouped []bool)
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
-
+	before := s.candidate.Clone()
 	if err := s.candidate.DeletePathGrouped(path, grouped); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
@@ -128,11 +158,17 @@ func (s *Store) DeleteFromInput(input string) error { return s.DeleteFromInputAs
 // interactive `set` builds bracketed containers wide, so the matching
 // interactive `delete` must navigate wide too.
 func (s *Store) DeleteFromInputAs(sessionID, input string) error {
+	return s.DeleteFromInputAsPlantClass(sessionID, "", input)
+}
+
+// DeleteFromInputAsPlantClass binds the authenticated planting class
+// atomically with the delete mutation.
+func (s *Store) DeleteFromInputAsPlantClass(sessionID, plantClass, input string) error {
 	path, _, grouped, err := config.ParseSetCommandGrouped("delete " + input)
 	if err != nil {
 		return err
 	}
-	return s.DeleteAsGrouped(sessionID, path, grouped)
+	return s.DeleteAsGroupedPlantClass(sessionID, plantClass, path, grouped)
 }
 
 // DeactivateFromInput marks the candidate node at the given path inactive
@@ -153,6 +189,12 @@ func (s *Store) DeactivateFromInput(input string) error {
 // DeactivateFromInputAs is DeactivateFromInput scoped to a config-lock holder
 // session (#5059).
 func (s *Store) DeactivateFromInputAs(sessionID, input string) error {
+	return s.DeactivateFromInputAsPlantClass(sessionID, "", input)
+}
+
+// DeactivateFromInputAsPlantClass binds the authenticated planting class
+// atomically with a deactivate mutation.
+func (s *Store) DeactivateFromInputAsPlantClass(sessionID, plantClass, input string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureWritableLocked(); err != nil {
@@ -164,9 +206,11 @@ func (s *Store) DeactivateFromInputAs(sessionID, input string) error {
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
+	before := s.candidate.Clone()
 	if err := applyEditLine(s.candidate, "deactivate "+input); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
@@ -174,9 +218,7 @@ func (s *Store) DeactivateFromInputAs(sessionID, input string) error {
 }
 
 // ActivateFromInput clears the inactive marker on the candidate node at the
-// given path (#2051), implementing the interactive Junos `activate <path>`
-// verb. Symmetric with DeactivateFromInput; ActivatePath on an already-active
-// node is idempotent.
+// given path (#2051), implementing the interactive Junos `activate <path>` verb.
 func (s *Store) ActivateFromInput(input string) error {
 	return s.ActivateFromInputAs("", input)
 }
@@ -184,6 +226,12 @@ func (s *Store) ActivateFromInput(input string) error {
 // ActivateFromInputAs is ActivateFromInput scoped to a config-lock holder
 // session (#5059).
 func (s *Store) ActivateFromInputAs(sessionID, input string) error {
+	return s.ActivateFromInputAsPlantClass(sessionID, "", input)
+}
+
+// ActivateFromInputAsPlantClass binds the authenticated planting class
+// atomically with an activate mutation.
+func (s *Store) ActivateFromInputAsPlantClass(sessionID, plantClass, input string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureWritableLocked(); err != nil {
@@ -195,9 +243,11 @@ func (s *Store) ActivateFromInputAs(sessionID, input string) error {
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
+	before := s.candidate.Clone()
 	if err := applyEditLine(s.candidate, "activate "+input); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
@@ -205,10 +255,18 @@ func (s *Store) ActivateFromInputAs(sessionID, input string) error {
 }
 
 // Copy duplicates a config subtree from srcPath to dstPath.
-func (s *Store) Copy(srcPath, dstPath []string) error { return s.CopyAs("", srcPath, dstPath) }
+func (s *Store) Copy(srcPath, dstPath []string) error {
+	return s.CopyAs("", srcPath, dstPath)
+}
 
 // CopyAs is Copy scoped to a config-lock holder session (#5059).
 func (s *Store) CopyAs(sessionID string, srcPath, dstPath []string) error {
+	return s.CopyAsPlantClass(sessionID, "", srcPath, dstPath)
+}
+
+// CopyAsPlantClass binds the authenticated planting class atomically with a
+// copy that may create or replace an event command subtree.
+func (s *Store) CopyAsPlantClass(sessionID, plantClass string, srcPath, dstPath []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureWritableLocked(); err != nil {
@@ -220,9 +278,11 @@ func (s *Store) CopyAs(sessionID string, srcPath, dstPath []string) error {
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
+	before := s.candidate.Clone()
 	if err := s.candidate.CopyPath(srcPath, dstPath); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
@@ -230,10 +290,18 @@ func (s *Store) CopyAs(sessionID string, srcPath, dstPath []string) error {
 }
 
 // Rename moves a config subtree from srcPath to dstPath.
-func (s *Store) Rename(srcPath, dstPath []string) error { return s.RenameAs("", srcPath, dstPath) }
+func (s *Store) Rename(srcPath, dstPath []string) error {
+	return s.RenameAs("", srcPath, dstPath)
+}
 
 // RenameAs is Rename scoped to a config-lock holder session (#5059).
 func (s *Store) RenameAs(sessionID string, srcPath, dstPath []string) error {
+	return s.RenameAsPlantClass(sessionID, "", srcPath, dstPath)
+}
+
+// RenameAsPlantClass binds the authenticated planting class atomically with a
+// rename that may move an event command subtree.
+func (s *Store) RenameAsPlantClass(sessionID, plantClass string, srcPath, dstPath []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureWritableLocked(); err != nil {
@@ -245,15 +313,16 @@ func (s *Store) RenameAs(sessionID string, srcPath, dstPath []string) error {
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
+	before := s.candidate.Clone()
 	if err := s.candidate.RenamePath(srcPath, dstPath); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
-
 // Insert moves an element before or after a reference element within the
 // same parent's ordered children list.
 func (s *Store) Insert(elementPath, refPath []string, before bool) error {
@@ -262,6 +331,12 @@ func (s *Store) Insert(elementPath, refPath []string, before bool) error {
 
 // InsertAs is Insert scoped to a config-lock holder session (#5059).
 func (s *Store) InsertAs(sessionID string, elementPath, refPath []string, before bool) error {
+	return s.InsertAsPlantClass(sessionID, "", elementPath, refPath, before)
+}
+
+// InsertAsPlantClass binds the authenticated planting class atomically with an
+// insertion that may reorder event command nodes.
+func (s *Store) InsertAsPlantClass(sessionID, plantClass string, elementPath, refPath []string, before bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureWritableLocked(); err != nil {
@@ -273,6 +348,7 @@ func (s *Store) InsertAs(sessionID string, elementPath, refPath []string, before
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
+	beforeTree := s.candidate.Clone()
 	var err error
 	if before {
 		err = s.candidate.InsertBefore(elementPath, refPath)
@@ -282,26 +358,19 @@ func (s *Store) InsertAs(sessionID string, elementPath, refPath []string, before
 	if err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(beforeTree, s.candidate, plantClass)
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true
 	return nil
 }
-
-// Annotate sets a comment on a configuration node in the candidate config. It
-// is the internal/system entry point (no session ownership check); a
-// session-scoped caller uses AnnotateAs to carry the caller's session for
-// config-lock holder enforcement (#5379).
+// Annotate sets a comment on a configuration node in the candidate config.
 func (s *Store) Annotate(path []string, comment string) error {
 	return s.AnnotateAs("", path, comment)
 }
 
 // AnnotateAs is Annotate scoped to a config-lock holder session (#5379,
-// mirroring the #5059 *As mutators). sessionID == "" bypasses ownership
-// (internal/system caller). Annotate was the one candidate mutator missing the
-// ensureHolderLocked ownership check that every sibling enforces, so a caller
-// that did not hold the config lock could annotate another session's candidate
-// and refresh (extend) the true holder's idle lease with no ownership check.
+// mirroring the #5059 *As mutators). sessionID == "" bypasses ownership.
 func (s *Store) AnnotateAs(sessionID string, path []string, comment string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -351,6 +420,12 @@ func (s *Store) LoadOverride(content string) error { return s.LoadOverrideAs("",
 
 // LoadOverrideAs is LoadOverride scoped to a config-lock holder session (#5059).
 func (s *Store) LoadOverrideAs(sessionID, content string) error {
+	return s.LoadOverrideAsPlantClass(sessionID, "", content)
+}
+
+// LoadOverrideAsPlantClass binds the authenticated planting class atomically
+// with the complete replacement candidate.
+func (s *Store) LoadOverrideAsPlantClass(sessionID, plantClass, content string) error {
 	if err := checkConfigSize(content); err != nil {
 		return err
 	}
@@ -398,6 +473,7 @@ func (s *Store) LoadOverrideAs(sessionID, content string) error {
 		return err
 	}
 
+	config.StampChangedEventPlantClasses(s.candidate, tree, plantClass)
 	s.candidate = tree
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
@@ -460,6 +536,12 @@ func (s *Store) LoadMerge(content string) error { return s.LoadMergeAs("", conte
 
 // LoadMergeAs is LoadMerge scoped to a config-lock holder session (#5059).
 func (s *Store) LoadMergeAs(sessionID, content string) error {
+	return s.LoadMergeAsPlantClass(sessionID, "", content)
+}
+
+// LoadMergeAsPlantClass binds the authenticated planting class atomically
+// with the complete merge candidate.
+func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) error {
 	if err := checkConfigSize(content); err != nil {
 		return err
 	}
@@ -541,6 +623,7 @@ func (s *Store) LoadMergeAs(sessionID, content string) error {
 		}
 	}
 
+	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation
@@ -629,10 +712,21 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 // command). The deactivate/activate verbs make `show | display set` output
 // round-trippable: previously a `deactivate <path>` line was skipped here,
 // so an inactive node reloaded ACTIVE.
+// LoadSet applies multiple flat command lines to the candidate config.
+// Each line starting with a recognized verb — set, delete, deactivate, or
+// activate (#2008 H1) — is parsed and applied. Blank lines and `#` comments
+// are skipped; any other non-empty line is rejected with a line-numbered
+// error (#3442 M4).
 func (s *Store) LoadSet(content string) (int, error) { return s.LoadSetAs("", content) }
 
 // LoadSetAs is LoadSet scoped to a config-lock holder session (#5059).
 func (s *Store) LoadSetAs(sessionID, content string) (int, error) {
+	return s.LoadSetAsPlantClass(sessionID, "", content)
+}
+
+// LoadSetAsPlantClass binds the authenticated planting class atomically with
+// the complete flat-script candidate mutation.
+func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int, error) {
 	if err := checkConfigSize(content); err != nil {
 		return 0, err
 	}
@@ -647,16 +741,6 @@ func (s *Store) LoadSetAs(sessionID, content string) (int, error) {
 	if s.candidate == nil {
 		return 0, fmt.Errorf("not in configuration mode")
 	}
-	// #5187: replay every line into a deep clone of the candidate and swap it
-	// in only after ALL lines apply. Applying directly to s.candidate advanced
-	// it line-by-line and, on the first failing line, left every EARLIER
-	// set/delete line committed to the live candidate while the RPC/CLI
-	// reported the load FAILED — a non-atomic import. A partial delete was
-	// fail-open: replacement deny lines that followed the failing line were
-	// dropped, yet the candidate had already advanced. Mirror LoadOverride's
-	// parse-into-a-separate-tree-then-swap discipline so a mid-body error
-	// leaves the candidate byte-identical to before the request (dirty/lease
-	// state untouched).
 	working := s.candidate.Clone()
 	count := 0
 	for i, line := range strings.Split(content, "\n") {
@@ -677,6 +761,7 @@ func (s *Store) LoadSetAs(sessionID, content string) (int, error) {
 		}
 		count++
 	}
+	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: candidate changed — advance the generation

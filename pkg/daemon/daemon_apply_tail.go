@@ -711,10 +711,11 @@ func (d *Daemon) initEventEngine() {
 
 // reconcileEventOptions applies the committed event-options policy set to the
 // engine on every commit (#3752). The engine is constructed once at boot
-// (initEventEngine); this only ever calls Apply, which RECONCILES per-policy
-// runtime state (carrying cooldown/window memory forward for unchanged
-// policies, #2140). It NEVER reassigns the pointer. A nil cfg (or empty policy
-// set) applies zero policies — a no-op that also clears a removed set.
+// (initEventEngine); this only ever calls ApplyWithConfig, which RECONCILES
+// per-policy runtime state (carrying cooldown/window memory forward for
+// unchanged policies, #2140) and refreshes the login-class snapshot. A nil cfg
+// (or empty policy set) applies zero policies — a no-op that also clears a
+// removed set.
 func (d *Daemon) reconcileEventOptions(cfg *config.Config) {
 	if d.eventEngine == nil {
 		// Defensive: boot wiring constructs the engine before any reconcile.
@@ -724,7 +725,7 @@ func (d *Daemon) reconcileEventOptions(cfg *config.Config) {
 	if cfg != nil {
 		policies = cfg.EventOptions
 	}
-	d.eventEngine.Apply(policies)
+	d.eventEngine.ApplyWithConfig(policies, cfg)
 }
 
 // lldpConfigEqual reports whether two effective LLDP configs are equivalent for

@@ -1,7 +1,6 @@
 package grpcapi
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,7 +39,7 @@ func TestSetRPCDeactivateRoutesNotMangled(t *testing.T) {
 	store := newGRPCConfigStore(t)
 	s := &Server{store: store}
 
-	if _, err := s.Set(context.Background(), &pb.SetRequest{
+	if _, err := s.Set(ctxWithPeerUID(0), &pb.SetRequest{
 		Input: "deactivate system name-server 9.9.9.9",
 	}); err != nil {
 		t.Fatalf("Set(deactivate ...) error = %v", err)
@@ -64,12 +63,12 @@ func TestSetRPCActivateRoutesNotMangled(t *testing.T) {
 	store := newGRPCConfigStore(t)
 	s := &Server{store: store}
 
-	if _, err := s.Set(context.Background(), &pb.SetRequest{
+	if _, err := s.Set(ctxWithPeerUID(0), &pb.SetRequest{
 		Input: "deactivate system name-server 9.9.9.9",
 	}); err != nil {
 		t.Fatalf("Set(deactivate ...) error = %v", err)
 	}
-	if _, err := s.Set(context.Background(), &pb.SetRequest{
+	if _, err := s.Set(ctxWithPeerUID(0), &pb.SetRequest{
 		Input: "activate system name-server 9.9.9.9",
 	}); err != nil {
 		t.Fatalf("Set(activate ...) error = %v", err)
@@ -100,7 +99,7 @@ func TestLoadRPCModeSetAppliesDeactivate(t *testing.T) {
 		"deactivate system name-server 9.9.9.9",
 	}, "\n")
 
-	if _, err := s.Load(context.Background(), &pb.LoadRequest{Mode: "set", Content: body}); err != nil {
+	if _, err := s.Load(ctxWithPeerUID(0), &pb.LoadRequest{Mode: "set", Content: body}); err != nil {
 		t.Fatalf("Load(mode=set) error = %v", err)
 	}
 
@@ -122,7 +121,7 @@ func TestSetRPCDeactivateBareVerbErrorsNotMangled(t *testing.T) {
 	s := &Server{store: store}
 
 	// Bare verb, no path: must error, must NOT create a junk node.
-	if _, err := s.Set(context.Background(), &pb.SetRequest{Input: "deactivate"}); err == nil {
+	if _, err := s.Set(ctxWithPeerUID(0), &pb.SetRequest{Input: "deactivate"}); err == nil {
 		t.Fatal("Set(\"deactivate\") with no path must return an error")
 	}
 	out := store.ShowCandidateSet()
@@ -138,7 +137,7 @@ func TestSetRPCDeactivateTabSeparatorRoutes(t *testing.T) {
 	store := newGRPCConfigStore(t)
 	s := &Server{store: store}
 
-	if _, err := s.Set(context.Background(), &pb.SetRequest{
+	if _, err := s.Set(ctxWithPeerUID(0), &pb.SetRequest{
 		Input: "deactivate\tsystem name-server 9.9.9.9",
 	}); err != nil {
 		t.Fatalf("Set(deactivate<tab>...) error = %v", err)

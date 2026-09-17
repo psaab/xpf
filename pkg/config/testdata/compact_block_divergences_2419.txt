@@ -223,17 +223,23 @@
 # not fixture failures and no synthesiser should invent a pair for them; the
 # seventh, `security nat source interface port-overloading`, declares one
 # example and a validator whose message does not enumerate.
+# #9984: `event-options policy <name> plant-class` is a new value-bearing
+# child under a policy. The canonical compact policy spelling still folds the
+# entire path onto the event-options node, which the existing event-options
+# compiler intentionally does not consume; keep this measured divergence in
+# the inventory rather than widening the unrelated compact-policy reader.
 #
-# checked: 1158
+# checked: 1161
 #
-# skipped (leaf value not observable in the typed config): 220
+# skipped (leaf value not observable in the typed config): 227
 # skipped (a spelling did not parse or compile): 31
 # skipped (no two distinct synthesizable values): 7
-# skipped (under groups (schema re-host, duplicate coverage)): 1111
+# skipped (under groups (schema re-host, duplicate coverage)): 1121
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
 class-of-service schedulers xpfarg surplus-sharing	empty
+event-options policy xpfarg plant-class	empty
 firewall family any filter xpfarg interface-specific	empty
 firewall family inet filter xpfarg interface-specific	empty
 firewall family inet6 filter xpfarg interface-specific	empty

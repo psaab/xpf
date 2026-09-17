@@ -1280,9 +1280,14 @@ func (s *Store) Rollback(n int) error { return s.RollbackAs("", n) }
 // RollbackAs is Rollback scoped to a config-lock holder session (#5059).
 // sessionID == "" bypasses ownership (internal/system caller).
 func (s *Store) RollbackAs(sessionID string, n int) error {
+	return s.RollbackAsPlantClass(sessionID, "", n)
+}
+
+// RollbackAsPlantClass binds the authenticated planting class atomically with
+// the restored candidate so historical payloads cannot retain stale authority.
+func (s *Store) RollbackAsPlantClass(sessionID, plantClass string, n int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	// #3893: `rollback N` mutates the candidate; reject it on a read-only
 	// secondary. This is the user-session verb, distinct from the internal
 	// commit-confirmed timeout revert PromoteRollback (which promotes the
@@ -1311,7 +1316,9 @@ func (s *Store) RollbackAs(sessionID string, n int) error {
 	if err != nil {
 		return err
 	}
-	s.candidate = entry.Config.Clone()
+	target := entry.Config.Clone()
+	config.StampChangedEventPlantClasses(s.candidate, target, plantClass)
+	s.candidate = target
 	s.bumpCandidateGenLocked() // #5848: candidate replaced by rollback n
 	s.dirty = true
 	return nil

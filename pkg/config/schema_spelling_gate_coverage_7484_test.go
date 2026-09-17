@@ -385,7 +385,9 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // Option 18. The family Interface-ID site therefore moves from COMPARED to
 // valueMoves, and the group site moves from advisory to unreachable; both
 // are intentional consequences of making malformed spellings inert.
-const gateCoverageFloor = 764
+// #9984 adds the value-bearing event-options plant-class leaf; the spelling
+// census moved one leaf into COMPARED, so tighten the floor 764 -> 765.
+const gateCoverageFloor = 765
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

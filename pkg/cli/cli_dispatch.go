@@ -367,25 +367,25 @@ func (c *CLI) dispatchConfig(line string) error {
 			return fmt.Errorf("set: missing path")
 		}
 		fullPath := append(c.store.GetEditPath(), parts[1:]...)
-		return c.store.SetFromInput(strings.Join(fullPath, " "))
+		return c.store.SetFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "delete":
 		if len(parts) < 2 {
 			return fmt.Errorf("delete: missing path")
 		}
 		fullPath := append(c.store.GetEditPath(), parts[1:]...)
-		return c.store.DeleteFromInput(strings.Join(fullPath, " "))
+		return c.store.DeleteFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "deactivate":
 		if len(parts) < 2 {
 			return fmt.Errorf("deactivate: missing path")
 		}
 		fullPath := append(c.store.GetEditPath(), parts[1:]...)
-		return c.store.DeactivateFromInput(strings.Join(fullPath, " "))
+		return c.store.DeactivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "activate":
 		if len(parts) < 2 {
 			return fmt.Errorf("activate: missing path")
 		}
 		fullPath := append(c.store.GetEditPath(), parts[1:]...)
-		return c.store.ActivateFromInput(strings.Join(fullPath, " "))
+		return c.store.ActivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "copy", "rename":
 		return c.handleCopyRename(parts)
 	case "insert":
@@ -423,7 +423,7 @@ func (c *CLI) dispatchConfig(line string) error {
 		if err := config.AuthorizeConfigRollback(rbCfg, c.userClass, n); err != nil {
 			return err
 		}
-		if err := c.store.Rollback(n); err != nil {
+		if err := c.store.RollbackAsPlantClass("", config.EventPlantClassForMutation(c.userClass), n); err != nil {
 			return err
 		}
 		fmt.Println("configuration rolled back")

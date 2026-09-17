@@ -2354,8 +2354,9 @@ func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 				ep.WithinClauses = append(ep.WithinClauses, w)
 			case "attributes-match":
 				ep.AttributesMatch = append(ep.AttributesMatch, eventAttributesMatchExprs(child)...)
+			case "plant-class":
+				ep.PlantClass = nodeVal(child)
 			case "then":
-				// #6714: FindChildren, not FindChild, on BOTH levels. The
 				// hierarchical parser keeps repeated same-keyed statements as
 				// SIBLINGS (parseStatements), so
 				// `change-configuration { commands "a"; commands "b"; }`

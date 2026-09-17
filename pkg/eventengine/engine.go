@@ -117,6 +117,7 @@ type Stats struct {
 	// via Stats) plus the shutdown INFO log are the operator signal.
 	DroppedShutdown   uint64 // actions abandoned on shutdown (queued at Close + in-flight retries)
 	AttributesInvalid uint64 // runtime fail-closed: malformed/unknown attributes-match line
+	PlantClassInvalid uint64 // payloads refused for missing/denied planting class (#9984)
 	QueueDepth        int64  // currently queued actions
 }
 
@@ -132,6 +133,7 @@ type engineCounters struct {
 	droppedStale      atomic.Uint64
 	droppedShutdown   atomic.Uint64
 	attributesInvalid atomic.Uint64
+	plantClassInvalid atomic.Uint64
 	queueDepth        atomic.Int64
 }
 
@@ -154,13 +156,15 @@ type plannedOp struct {
 // in its cooldown must NOT commit — it is dropped as stale. Before #3750 the
 // worker committed the batch unconditionally, so a removed/redefined policy's
 // stale command set still mutated config, and a cooldown-window duplicate
-// double-committed.
 type plannedAction struct {
 	policyName string
 	// semRev is the policy's semantic revision (policySemanticRevision) as of
-	// the evaluate that enqueued this action. The worker drops the action if the
+	// the evaluate that enqueued the action. The worker drops the action if the
 	// live revision no longer matches (policy redefined) or is absent (removed).
 	semRev string
+	// plantClass is the authenticated class that authored this payload. It is
+	// checked again immediately before any candidate mutation.
+	plantClass string
 	// Triggering-event context, captured at evaluate time so the worker can
 	// stamp a deterministic audit description on the remediation commit (#3754).
 	// A security appliance that mutates its own config autonomously must record
@@ -213,28 +217,24 @@ type Engine struct {
 	store    *configstore.Store
 	commitFn CommitFn
 
+	// authzCfg and enforcePlantClass are refreshed atomically with Apply. The
+	// worker snapshots them under e.mu immediately before candidate mutation so
+	// a policy cannot use an authorization decision from enqueue time.
+	authzCfg          *config.Config
+	enforcePlantClass bool
+
 	// runtime holds per-policy temporal/cooldown state keyed by policy NAME.
 	// Reconciled (carried forward) on Apply when the policy semantic revision
 	// is unchanged (#2140).
 	runtime map[string]*policyRuntime
-	// semRev records the semantic revision each policy's runtime was built
+	// semRev records the policy semantic revision each runtime was built
 	// for, so Apply can decide carry-forward vs reset.
 	semRev map[string]string
 
 	// Compiled attributes-match regexes, keyed by the raw pattern string.
-	// Built once at Apply() time so the hot HandleEvent path never compiles
-	// a regex per event. Patterns are validated at COMMIT by
-	// config.ValidateEventAttributesMatchStrict, so a bad pattern normally
-	// never reaches here; the one exception is the tolerant LOAD path which
-	// downgrades an invalid persisted pattern to a warning.
 	regexCache map[string]*regexp.Regexp
 
-	// eventIndex maps an event NAME to the policies that list it, built once at
-	// Apply so evaluateEvent scans only the policies relevant to the fired event
-	// instead of every policy on every event (#4423 M6: linear policy scan per
-	// event). Rebuilt whenever the policy set changes; read under e.mu. A policy
-	// appears at most once per distinct event name it lists, preserving the
-	// pre-index "match once, in config order" firing semantics.
+	// eventIndex maps an event NAME to the policies that list it.
 	eventIndex map[string][]*config.EventPolicy
 
 	counters engineCounters
@@ -405,9 +405,26 @@ func (e *Engine) newRetryTimer(d time.Duration) (<-chan time.Time, func() bool) 
 // event hot path (HandleEvent) never compiles a regex per event; the cache is
 // derived purely from config (not runtime state) so rebuilding it is cheap and
 // correct.
+// Apply is the strict execution API. It has no authorization snapshot, so
+// only an explicitly stamped superuser payload can fire; legacy payloads are
+// quarantined. Production daemon wiring uses ApplyWithConfig to also resolve
+// the active login-class policy at fire time.
 func (e *Engine) Apply(policies []*config.EventPolicy) {
+	e.apply(policies, nil, true)
+}
+
+// ApplyWithConfig loads policies and the active login-class configuration.
+// The worker reuses the latest snapshot at fire time, immediately before any
+// candidate mutation.
+func (e *Engine) ApplyWithConfig(policies []*config.EventPolicy, cfg *config.Config) {
+	e.apply(policies, cfg, true)
+}
+
+func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enforcePlantClass bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.authzCfg = cfg
+	e.enforcePlantClass = enforcePlantClass
 	e.policies = policies
 
 	nextRuntime := make(map[string]*policyRuntime, len(policies))
@@ -536,6 +553,8 @@ func policySemanticRevision(pol *config.EventPolicy) string {
 	for _, cmd := range pol.ThenCommands {
 		writeField(cmd)
 	}
+	writeField("plant-class")
+	writeField(pol.PlantClass)
 	sum := h.Sum(nil)
 	return string(sum)
 }
@@ -569,12 +588,12 @@ func (e *Engine) HandleEvent(ev rpm.Event) {
 		if !e.enqueue(plannedAction{
 			policyName: tp.pol.Name,
 			semRev:     tp.semRev,
+			plantClass: tp.pol.PlantClass,
 			event:      ev.Name,
 			testOwner:  ev.TestOwner,
 			testName:   ev.TestName,
 			ops:        ops,
 		}) {
-			// #6810: the action was NOT admitted, so this crossing did not
 			// fire. evaluateEvent already armed the edge latch for it; leaving
 			// it armed makes withinMatches suppress every later at/above-
 			// threshold event until some clause drops below its threshold —
@@ -663,6 +682,7 @@ func (e *Engine) Stats() Stats {
 		DroppedStale:      e.counters.droppedStale.Load(),
 		DroppedShutdown:   e.counters.droppedShutdown.Load(),
 		AttributesInvalid: e.counters.attributesInvalid.Load(),
+		PlantClassInvalid: e.counters.plantClassInvalid.Load(),
 		QueueDepth:        e.counters.queueDepth.Load(),
 	}
 }
@@ -791,6 +811,41 @@ func (e *Engine) commitContext() context.Context {
 	return context.Background()
 }
 
+// validatePlantClass re-evaluates every set/delete target against the login
+// class policy captured by ApplyWithConfig while the configure lock is held.
+// It runs before the first candidate mutation, so a denied target cannot leave
+// a partial batch.
+func (e *Engine) validatePlantClass(a plannedAction) error {
+	e.mu.Lock()
+	enforce := e.enforcePlantClass
+	cfg := e.authzCfg
+	e.mu.Unlock()
+	if !enforce {
+		return nil
+	}
+	if a.plantClass == "" {
+		return errBatch("legacy change-configuration payload has no planting class")
+	}
+	if a.plantClass == config.EventPlantClassSuperuser {
+		return nil
+	}
+	if cfg == nil {
+		return errBatch("planting class %q cannot be resolved without an authorization snapshot", a.plantClass)
+	}
+	if !config.LoginClassExists(cfg, a.plantClass) {
+		return errBatch("planting class %q no longer exists in the authorization snapshot", a.plantClass)
+	}
+	if !config.ClassHasPermission(cfg, a.plantClass, config.PermConfig) {
+		return errBatch("planting class %q no longer has configure permission", a.plantClass)
+	}
+	for _, op := range a.ops {
+		if err := config.AuthorizeConfigMutation(cfg, a.plantClass, nil, op.raw); err != nil {
+			return errBatch("planting class %q refused a configuration target: %v", a.plantClass, err)
+		}
+	}
+	return nil
+}
+
 func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 	// #4423 L7: a matcher-only Engine (New(nil, nil)) has no store. A policy
 	// that both matches AND triggers would otherwise nil-panic on EnterConfigure
@@ -819,10 +874,16 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		e.store.ExitConfigure()
 		return staleErr(reason)
 	}
-
+	if err := e.validatePlantClass(a); err != nil {
+		e.store.ExitConfigure()
+		e.counters.plantClassInvalid.Add(1)
+		slog.Warn("event-options: remediation refused by planting-class authorization",
+			"policy", a.policyName, "plant-class", a.plantClass, "err", err)
+		return err
+	}
 	for _, op := range a.ops {
 		if op.isDelete {
-			if err := e.store.Delete(op.delPath); err != nil {
+			if err := e.store.DeleteAsGroupedPlantClass("", a.plantClass, op.delPath, nil); err != nil {
 				// A delete of a missing path is a TOLERATED exception (Junos
 				// change-configuration semantics; #2139 documented carve-out):
 				// it is not a half-applied batch. Any other delete error
@@ -833,17 +894,17 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 				// into a batch-aborting hard reject.
 				if errors.Is(err, config.ErrPathNotFound) {
 					slog.Debug("event-options: delete skipped (path not found)",
-						"policy", a.policyName, "cmd", op.raw)
+						"policy", a.policyName)
 					continue
 				}
 				e.store.ExitConfigure()
-				return errBatch("delete %q: %v", op.raw, err)
+				return errBatch("delete target failed: %v", err)
 			}
 			continue
 		}
-		if err := e.store.SetFromInput(op.setInput); err != nil {
+		if err := e.store.SetFromInputAsPlantClass("", a.plantClass, op.setInput); err != nil {
 			e.store.ExitConfigure()
-			return errBatch("set %q: %v", op.raw, err)
+			return errBatch("set target failed: %v", err)
 		}
 	}
 

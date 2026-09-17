@@ -52,7 +52,7 @@ func TestStale_RemovedPolicyDropsQueuedAction_3750(t *testing.T) {
 	e := New(s, nil)
 	fastRetry(e)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// Operator holds the config lock; the worker parks retrying the action.
 	if err := s.EnterConfigureSession("operator"); err != nil {
@@ -63,7 +63,7 @@ func TestStale_RemovedPolicyDropsQueuedAction_3750(t *testing.T) {
 
 	// Operator commits a config that REMOVES policy p (Apply(nil)) while the
 	// action is still in flight.
-	e.Apply(nil)
+	applyPolicies9984(e, nil)
 
 	// Release the lock: the worker's next attempt enters configure, revalidates,
 	// and must drop the action (policy removed).
@@ -99,7 +99,7 @@ func TestStale_RedefinedPolicyDropsOldBatch_3750(t *testing.T) {
 	e := New(s, nil)
 	fastRetry(e)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{old})
+	applyPolicies9984(e, []*config.EventPolicy{old})
 
 	if err := s.EnterConfigureSession("operator"); err != nil {
 		t.Fatalf("hold lock: %v", err)
@@ -113,7 +113,7 @@ func TestStale_RedefinedPolicyDropsOldBatch_3750(t *testing.T) {
 		Events:       []string{"ping_test_failed"},
 		ThenCommands: []string{"set system host-name NEW"},
 	}
-	e.Apply([]*config.EventPolicy{redef})
+	applyPolicies9984(e, []*config.EventPolicy{redef})
 
 	if !s.ExitConfigureSession("operator") {
 		t.Fatal("failed to release the held lock")
@@ -151,7 +151,7 @@ func TestStale_CooldownSuppressesQueuedDuplicate_3750(t *testing.T) {
 	e := New(s, nil)
 	fastRetry(e)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// Operator holds the lock so the worker parks retrying action #1.
 	if err := s.EnterConfigureSession("operator"); err != nil {
@@ -197,7 +197,7 @@ func TestStale_DistinctRemediationsFlow_3750(t *testing.T) {
 	p2 := &config.EventPolicy{Name: "p2", Events: []string{"e2"}, ThenCommands: []string{"set system domain-name d2"}}
 	e := New(s, nil)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{p1, p2})
+	applyPolicies9984(e, []*config.EventPolicy{p1, p2})
 
 	e.HandleEvent(rpm.Event{Name: "e1", TestOwner: "o", TestName: "t"})
 	e.HandleEvent(rpm.Event{Name: "e2", TestOwner: "o", TestName: "t"})
@@ -233,7 +233,7 @@ func TestStale_PostCooldownRefire_3750(t *testing.T) {
 	e.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return cur }
 	advance := func(d time.Duration) { mu.Lock(); cur = cur.Add(d); mu.Unlock() }
 
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// First trigger commits and arms the cooldown.
 	e.HandleEvent(eventFor("ping_test_failed"))

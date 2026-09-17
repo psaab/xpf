@@ -52,7 +52,7 @@ func TestArmCooldown_SkipsSuccessorGeneration_5311(t *testing.T) {
 	e := New(nil, nil)
 
 	r1 := redefinePolicy("p", "ping_test_failed", "set system host-name gen2")
-	e.Apply([]*config.EventPolicy{r1})
+	applyPolicies9984(e, []*config.EventPolicy{r1})
 
 	e.mu.Lock()
 	authRev := e.semRev["p"] // the revision the action carries (evaluate time)
@@ -62,7 +62,7 @@ func TestArmCooldown_SkipsSuccessorGeneration_5311(t *testing.T) {
 	// The daemon's commit callback reconciles a redefined policy: same name, new
 	// semantic revision -> Apply installs a FRESH re-armed runtime.
 	r2 := redefinePolicy("p", "ping_test_failed", "set system host-name gen3")
-	e.Apply([]*config.EventPolicy{r2})
+	applyPolicies9984(e, []*config.EventPolicy{r2})
 
 	e.mu.Lock()
 	succRev := e.semRev["p"]
@@ -107,7 +107,7 @@ func TestArmCooldown_StampsSameGeneration_5311(t *testing.T) {
 	e.nowFn = func() time.Time { return fixed }
 
 	pol := redefinePolicy("p", "ping_test_failed", "set system host-name r")
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.mu.Lock()
 	rev := e.semRev["p"]
@@ -159,13 +159,13 @@ func TestCooldown_SelfRedefinedSuccessorFires_5311(t *testing.T) {
 		// fresh runtime. Only on the FIRST commit (R1's) — R2 does not redefine
 		// itself again.
 		if atomic.AddInt32(&applied, 1) == 1 {
-			e.Apply([]*config.EventPolicy{r2})
+			applyPolicies9984(e, []*config.EventPolicy{r2})
 		}
 		return cfg, nil
 	}
 	e = New(s, commitFn)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{r1})
+	applyPolicies9984(e, []*config.EventPolicy{r1})
 
 	// R1 fires: commits gen2 AND (via the reconcile) installs the fresh R2.
 	e.HandleEvent(eventFor("ping_test_failed"))
@@ -199,7 +199,7 @@ func TestCooldown_NormalPolicyRapidRefireSuppressed_5311(t *testing.T) {
 	}
 	e := New(s, commitFn)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	// First trigger commits and arms the cooldown.
 	e.HandleEvent(eventFor("ping_test_failed"))

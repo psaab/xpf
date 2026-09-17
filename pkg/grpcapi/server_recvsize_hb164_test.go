@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -32,8 +33,17 @@ func TestGRPCLoadRejectsOversizedMessage(t *testing.T) {
 	}
 
 	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer(grpc.MaxRecvMsgSize(maxRecvMsgSize))
-	pb.RegisterBpfrxServiceServer(srv, &Server{store: store})
+	s := &Server{store: store}
+	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxRecvMsgSize),
+		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+			ctx = context.WithValue(ctx, connPeerKey{}, &connPeer{
+				id: authz.PeerIdentity{UID: 0, OK: true, Local: true},
+			})
+			return handler(ctx, req)
+		}),
+	)
+	pb.RegisterBpfrxServiceServer(srv, s)
 	go srv.Serve(lis)
 	defer srv.Stop()
 

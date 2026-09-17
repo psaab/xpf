@@ -14,8 +14,14 @@ import (
 func newTestEngine(t *testing.T, policies []*config.EventPolicy) *Engine {
 	t.Helper()
 	e := New(nil, nil) // nil store/commitFn: matcher tests never commit
-	e.Apply(policies)
+	applyPolicies9984(e, policies)
 	return e
+}
+// Existing matcher/remediation fixtures predate persisted planting classes.
+// Keep their trusted setup explicit without weakening production Apply, which
+// remains fail-closed for payloads with no recorded class.
+func applyPolicies9984(e *Engine, policies []*config.EventPolicy) {
+	e.apply(policies, nil, false)
 }
 
 func policyWithMatch(name, event, match string) *config.EventPolicy {
@@ -171,7 +177,7 @@ func TestAttributesMatch_RegexCachedAtApply(t *testing.T) {
 	}
 
 	// Re-Apply rebuilds the cache (new map); the same pattern is present.
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 	if _, ok := e.regexCache[pattern]; !ok {
 		t.Error("Apply() rebuild dropped the cached pattern")
 	}

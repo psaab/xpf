@@ -89,6 +89,19 @@ func (s *Server) configHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeOK(w, cfg)
 }
+func (s *Server) mutationPlantClass(r *http.Request) (string, error) {
+	p, ok := authorizedMutationPrincipal(r)
+	if !ok {
+		return "", errors.New("authorized mutation principal is unavailable")
+	}
+	if p.Superuser {
+		return config.EventPlantClassSuperuser, nil
+	}
+	if p.Class == "" {
+		return "", errors.New("authenticated principal has no login class")
+	}
+	return p.Class, nil
+}
 
 func (s *Server) configEnterHandler(w http.ResponseWriter, r *http.Request) {
 	// An absent header starts a new session. Supplying the token returned by an
@@ -146,13 +159,17 @@ func (s *Server) configSetHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.store.SetFromInputAs(sessionID, req.Input); err != nil {
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
+	if err := s.store.SetFromInputAsPlantClass(sessionID, plantClass, req.Input); err != nil {
 		writeConfigMutationError(w, err)
 		return
 	}
 	writeOK(w, map[string]string{"status": "ok"})
 }
-
 func (s *Server) configDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	var req ConfigSetRequest
 	if !decodeJSONBody(w, r, &req) {
@@ -166,7 +183,12 @@ func (s *Server) configDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.store.DeleteFromInputAs(sessionID, req.Input); err != nil {
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
+	if err := s.store.DeleteFromInputAsPlantClass(sessionID, plantClass, req.Input); err != nil {
 		writeConfigMutationError(w, err)
 		return
 	}
@@ -191,7 +213,12 @@ func (s *Server) configDeactivateHandler(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if err := s.store.DeactivateFromInputAs(sessionID, req.Input); err != nil {
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
+	if err := s.store.DeactivateFromInputAsPlantClass(sessionID, plantClass, req.Input); err != nil {
 		writeConfigMutationError(w, err)
 		return
 	}
@@ -213,7 +240,12 @@ func (s *Server) configActivateHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.store.ActivateFromInputAs(sessionID, req.Input); err != nil {
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
+	if err := s.store.ActivateFromInputAsPlantClass(sessionID, plantClass, req.Input); err != nil {
 		writeConfigMutationError(w, err)
 		return
 	}
@@ -303,7 +335,12 @@ func (s *Server) configRollbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// #5870: rollback replaces the candidate, so it runs under the REST holder
 	// identity and is rejected when a CLI/gRPC session owns the candidate.
-	if err := s.store.RollbackAs(sessionID, req.N); err != nil {
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
+	if err := s.store.RollbackAsPlantClass(sessionID, plantClass, req.N); err != nil {
 		writeConfigMutationError(w, err)
 		return
 	}
@@ -489,26 +526,24 @@ func (s *Server) configLoadHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	// #5870: load* is a candidate mutation, so it runs under the REST holder
-	// identity and is rejected when a CLI/gRPC session owns the candidate.
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
 	switch req.Mode {
 	case "override":
-		if err := s.store.LoadOverrideAs(sessionID, req.Content); err != nil {
+		if err := s.store.LoadOverrideAsPlantClass(sessionID, plantClass, req.Content); err != nil {
 			writeConfigMutationError(w, err)
 			return
 		}
 	case "merge", "":
-		if err := s.store.LoadMergeAs(sessionID, req.Content); err != nil {
+		if err := s.store.LoadMergeAsPlantClass(sessionID, plantClass, req.Content); err != nil {
 			writeConfigMutationError(w, err)
 			return
 		}
 	case "set":
-		// #2052: make `load set` a real service-mode op (REST). LoadSet
-		// replays flat lines through applyEditLine so a body with
-		// `deactivate <path>` lines round-trips to inactive nodes (#2008 H1).
-		// Applied-count is log-only to keep the response shape stable.
-		count, err := s.store.LoadSetAs(sessionID, req.Content)
+		count, err := s.store.LoadSetAsPlantClass(sessionID, plantClass, req.Content)
 		if err != nil {
 			writeConfigMutationError(w, err)
 			return

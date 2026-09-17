@@ -89,9 +89,9 @@ func (c *CLI) handleCopyRename(parts []string) error {
 		dstPath = append(append([]string{}, editPath...), dstPath...)
 	}
 	if cmd == "rename" {
-		return c.store.Rename(srcPath, dstPath)
+		return c.store.RenameAsPlantClass("", config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
 	}
-	return c.store.Copy(srcPath, dstPath)
+	return c.store.CopyAsPlantClass("", config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
 }
 
 // handleInsert handles:
@@ -134,7 +134,7 @@ func (c *CLI) handleInsert(parts []string) error {
 	}
 	parentPath := elemPath[:len(elemPath)-len(refTokens)]
 	refPath := append(append([]string{}, parentPath...), refTokens...)
-	return c.store.Insert(elemPath, refPath, isBefore)
+	return c.store.InsertAsPlantClass("", config.EventPlantClassForMutation(c.userClass), elemPath, refPath, isBefore)
 }
 
 // readLine reads one line of terminal input, honouring the readLineFn test
@@ -239,7 +239,7 @@ func (c *CLI) handleLoad(args []string) error {
 
 	switch mode {
 	case "set":
-		count, err := c.store.LoadSet(content)
+		count, err := c.store.LoadSetAsPlantClass("", config.EventPlantClassForMutation(c.userClass), content)
 		if err != nil {
 			return fmt.Errorf("load set: %w", err)
 		}
@@ -249,9 +249,9 @@ func (c *CLI) handleLoad(args []string) error {
 		var err error
 		switch mode {
 		case "override":
-			err = c.store.LoadOverride(content)
+			err = c.store.LoadOverrideAsPlantClass("", config.EventPlantClassForMutation(c.userClass), content)
 		case "merge":
-			err = c.store.LoadMerge(content)
+			err = c.store.LoadMergeAsPlantClass("", config.EventPlantClassForMutation(c.userClass), content)
 		}
 		if err != nil {
 			return fmt.Errorf("load %s: %w", mode, err)

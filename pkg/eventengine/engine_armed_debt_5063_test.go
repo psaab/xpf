@@ -64,7 +64,7 @@ func TestCommitDebt_ActiveWithNonfatalError_CountsCommitted_5063(t *testing.T) {
 	}
 	e := New(s, commitFn)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "committed-with-debt counted", func() bool { return e.Stats().Committed >= 1 })
@@ -102,7 +102,7 @@ func TestCommitDebt_GenuineRejection_CountsRejected_5063(t *testing.T) {
 	}
 	e := New(s, commitFn)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "rejection counted", func() bool { return e.Stats().Rejected >= 1 })
@@ -141,7 +141,7 @@ func TestCommitDebt_CleanCommit_NoDebtCounted_5063(t *testing.T) {
 	}
 	e := New(s, commitFn)
 	defer e.Close()
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	e.HandleEvent(eventFor("ping_test_failed"))
 	waitFor(t, "clean commit counted", func() bool { return e.Stats().Committed >= 1 })

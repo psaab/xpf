@@ -210,6 +210,9 @@ type EventPolicy struct {
 	WithinClauses   []*EventWithin
 	AttributesMatch []string // raw "field matches pattern" strings
 	ThenCommands    []string // change-configuration commands
+	// PlantClass records the login class that planted ThenCommands (#9984).
+	// An empty value is legacy metadata and is quarantined by eventengine.
+	PlantClass string
 }
 
 // EventWithin defines a temporal trigger clause.

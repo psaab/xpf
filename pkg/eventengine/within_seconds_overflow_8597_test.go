@@ -226,7 +226,7 @@ func TestPruneWindowIgnoresAnOverflowingClause_8597(t *testing.T) {
 			{Seconds: overflowWithinSeconds8597, TriggerUntil: 5},
 		},
 	}
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	rt := e.runtime[pol.Name]
 	if rt == nil {

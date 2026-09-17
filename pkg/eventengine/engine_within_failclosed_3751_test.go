@@ -27,7 +27,7 @@ func feedEvents(t *testing.T, pol *config.EventPolicy, count int) int {
 	base := time.Unix(1_700_000_000, 0)
 	var tick int64
 	e.nowFn = func() time.Time { return base.Add(time.Duration(tick) * time.Second) }
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	triggered := 0
 	for tick = 0; tick < int64(count); tick++ {
@@ -47,7 +47,7 @@ func firstFireIndex(t *testing.T, pol *config.EventPolicy, count int) int {
 	base := time.Unix(1_700_000_000, 0)
 	var tick int64
 	e.nowFn = func() time.Time { return base.Add(time.Duration(tick) * time.Second) }
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	for tick = 0; tick < int64(count); tick++ {
 		got := e.evaluateEvent(rpm.Event{Name: pol.Events[0], TestOwner: "o", TestName: "t"})

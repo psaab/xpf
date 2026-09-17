@@ -63,7 +63,7 @@ func TestEngineCloseAbortsRetryCounted9916(t *testing.T) {
 	}
 	e := New(s, nil)
 	// NOTE: no defer Close — Close is the act under test.
-	e.Apply([]*config.EventPolicy{pol})
+	applyPolicies9984(e, []*config.EventPolicy{pol})
 
 	entered := make(chan struct{})
 	var once sync.Once
