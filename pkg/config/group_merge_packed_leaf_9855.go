@@ -29,11 +29,11 @@ package config
 // invisible to leafListPeer: successive same-keyword group leaves must
 // resolve against it (raw match merges, including across the peer!=nil /
 // peer==nil split) or be suppressed as the base suppressed them via the
-// pre-promotion leaf — a bare twin, a canonical alias (`vrrp-group 01`
-// beside `vrrp-group 1`, which the compiler canonicalizes), and a
-// #9859-different instance alike. The delta against the base is exactly:
-// raw-same packed leaves merge instead of dropping or adopting; everything
-// else resolves as the base did.
+// pre-promotion leaf. Bare twins and canonical-equal aliases keep that
+// suppression; #9859/#10056-qualified different instances are admitted
+// instead. The delta against the base is exactly: raw-same packed leaves merge
+// instead of dropping or adopting; distinct named instances now survive beside
+// their inline peers.
 
 // notePromoted9855 records a node promoteLeafPeerForPackedGroup9855 promoted.
 // The map is created lazily — most expansions promote nothing. A nil budget
@@ -193,7 +193,8 @@ func promoteLeafPeerForPackedGroup9855(ancestorPath [][]string, peer, s *Node) (
 // compile a second destination (review finding 1). The scan also reaches an
 // inline braced stanza naming the same instance — one node, merged — which
 // converges with the braced-merge semantics and with #10048's expectation
-// for that shape. Different instances and canonical aliases keep adopt.
+// for that shape. Distinct instances and canonical aliases remain on the
+// existing adopt/override path.
 func sameInstanceContainerPeer9855(ancestorPath [][]string, dst []*Node, s *Node) (*Node, []*Node, bool) {
 	if s == nil || len(s.Keys) == 0 || len(s.Children) > 0 {
 		return nil, nil, false
@@ -246,20 +247,24 @@ func rawInstanceContainer9855(ancestorPath [][]string, dst []*Node, s *Node) *No
 //     any;`) names an instance already present and adds nothing — adopting
 //     it twins the node (failure 2). A raw braced twin still adopts: the
 //     base adopts there too, and #10048 coalesces the pair at compile.
-//   - a leaf of any shape naming no raw peer while a promoted same-keyword
-//     sibling exists: the base suppressed it via the pre-promotion leaf.
-//     That sibling is either a canonical alias (failure 1: `vrrp-group 01`
-//     after `vrrp-group 1` must not adopt and let the compiler's Atoi
-//     canonicalization hand the group value a last-wins victory over
-//     inline) or a #9859-different instance (adopting it would fix #9859
-//     by side effect; #9859 keeps it, so the suppression preserves the
-//     base outcome explicitly).
+//   - a leaf naming no raw peer while a promoted same-keyword sibling exists:
+//     the base suppressed it via the pre-promotion leaf. Canonical aliases,
+//     value lists, and unqualified shapes keep that suppression; a qualified
+//     different named-container instance is admitted by #9859/#10056 before
+//     this guard so it is not lost beside the promoted sibling.
 func suppressSuccessiveLeaf9855(budget *groupExpandBudget, ancestorPath [][]string, dst []*Node, s *Node) bool {
 	if s == nil || len(s.Keys) == 0 {
 		return false
 	}
 	if c := rawInstanceContainer9855(ancestorPath, dst, s); c != nil {
 		return budget.isPromoted9855(c)
+	}
+	// #9859/#10056: once peer selection admits named-container leaves by
+	// identity, a different instance must be adopted even when an earlier
+	// same-keyword leaf promoted a sibling. Keep the old suppression for
+	// value lists, canonical-alias sites, and all unqualified shapes.
+	if namedLeafCanAdopt9859(ancestorPath, dst, s) {
+		return false
 	}
 	return budget.hasPromotedSibling9855(dst, s.Keys[0])
 }
