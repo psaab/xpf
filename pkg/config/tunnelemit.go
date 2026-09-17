@@ -186,12 +186,14 @@ func EmitTunnelEndpointNames(cfg *Config) []TunnelEndpointName {
 // the port or the key is a different local identity and is refused at commit
 // instead (compiler_validate_wireguard.go), so it never reaches here.
 //
-// THE MERGE CANNOT CONFLICT, and that is a property of the validator rather
-// than of this function: a unit re-declaring an inherited peer is already
-// rejected at commit ("duplicate peer public key"), so a unit's peer set is
-// always the inherited set plus pubkeys no other unit declares. De-duplication
-// by pubkey is therefore total -- there is never a case where two different
-// values compete for one peer, so no precedence rule is needed or implied.
+// Within each per-unit tunnel, the peer set cannot conflict on the strict
+// path: validateOneWireguardTunnel rejects duplicate public keys. The
+// merged-view validator separately rejects a key authored by two different
+// units before this first-wins deduplication runs. On the lenient path, a
+// warning may permit this function to retain its first-wins behavior, making
+// the warning the operator-visible signal for the dropped routing intent.
+// De-duplication by pubkey is therefore total on the strict path, while this
+// function remains deliberately defensive for tolerant loads.
 //
 // The result is sorted by pubkey. Iteration here is already deterministic
 // (unitNums is sorted, and peers keep their authored order within a unit), and
