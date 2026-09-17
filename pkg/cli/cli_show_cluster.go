@@ -214,6 +214,7 @@ func (c *CLI) showChassisClusterStatus() error {
 	} else {
 		fmt.Println("Cluster not configured")
 	}
+	c.appendClockSkewAlarm()
 
 	// Show VRRP status if any
 	cfg := c.store.ActiveConfig()
@@ -259,6 +260,18 @@ func (c *CLI) showChassisClusterStatus() error {
 		}
 	}
 	return nil
+}
+
+// appendClockSkewAlarm surfaces the daemon-resident pre-break fabric-auth
+// alarm next to the local cluster status (#10025). Empty or unwired snapshots
+// are silent so healthy status output remains unchanged.
+func (c *CLI) appendClockSkewAlarm() {
+	if c.clockSkewAlarmsFn == nil {
+		return
+	}
+	for _, alarm := range c.clockSkewAlarmsFn() {
+		fmt.Printf("\nWarning: %s\n", alarm.Summary())
+	}
 }
 
 func (c *CLI) showChassisClusterInterfaces() error {

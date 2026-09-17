@@ -72,6 +72,7 @@ func (s *Server) showChassisClusterStatus(buf *strings.Builder) {
 	} else {
 		fmt.Fprintln(buf, "Cluster not configured")
 	}
+	s.appendClockSkewAlarm(buf)
 }
 
 // appendFabricClockSkew surfaces the #6708 measured peer wall-clock skew.
@@ -101,6 +102,18 @@ func (s *Server) appendFabricClockSkew(buf *strings.Builder) {
 		"  cross-node failover) are failing authentication. Forwarding, VRRP and\n"+
 		"  failover are unaffected. Synchronise NTP on both nodes.\n",
 		skew, dir, fabricAuthWindowSeconds)
+}
+
+// appendClockSkewAlarm surfaces the daemon-resident pre-break clock alarm
+// beside the post-break measured-skew diagnosis above (#10025). The callback
+// is nil in standalone/unit-test servers, and an empty snapshot is silent.
+func (s *Server) appendClockSkewAlarm(buf *strings.Builder) {
+	if s.clockSkewAlarmsFn == nil {
+		return
+	}
+	for _, alarm := range s.clockSkewAlarmsFn() {
+		fmt.Fprintf(buf, "\nWarning: %s\n", alarm.Summary())
+	}
 }
 
 // showChassisClusterInterfaces renders cluster RETH interfaces.

@@ -426,6 +426,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// monitor starts here exactly as before.
 		d.maybeStartNATPoolAlarm()
 	}
+	// #10025: start the daemon-resident clock monitor independently of the
+	// dataplane gate; it samples the local chrony reference before fabric auth
+	// can fail and remains useful in NoDataplane mode.
+	d.maybeStartClockSkewAlarm()
 
 	// Start cluster heartbeat + sync after event fanout is initialized.
 	// This avoids an HA startup race where runUserspaceEventStream wires a
@@ -842,6 +846,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		shell.SetNATPoolAlarmsFn(d.natPoolAlarms)
 		// #9902 F-026: active NAT pool-exhaustion alarms.
 		shell.SetNATPoolExhaustionAlarmsFn(d.natPoolExhaustionAlarms)
+		// #10025: active pre-break fabric-auth clock alarms.
+		shell.SetClockSkewAlarmsFn(d.clockSkewAlarms)
 		shell.SetFeedsFn(func() map[string]feeds.FeedInfo {
 			if d.feeds != nil {
 				return d.feeds.AllFeeds()

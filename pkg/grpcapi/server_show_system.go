@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
@@ -110,22 +111,30 @@ func (s *Server) showCommitHistory(buf *strings.Builder) error {
 	return nil
 }
 
-// showAlarms renders config-validation warnings as alarms.
+// showAlarms renders config-validation warnings and daemon-resident clock
+// alarms as system alarms.
 func (s *Server) showAlarms(buf *strings.Builder) {
 	cfg := s.store.ActiveConfig()
-	if cfg == nil {
-		buf.WriteString("No active configuration loaded\n")
-		return
+	var warnings []string
+	if cfg != nil {
+		warnings = config.ValidateConfig(cfg)
 	}
-	warnings := config.ValidateConfig(cfg)
 	// #9530: a peer config sync that discarded a local commit is an alarm too.
 	divergence := s.store.ConfigSyncDivergenceAlarm()
-	n := len(warnings)
+	var clockAlarms []clockskew.ActiveAlarm
+	if s.clockSkewAlarmsFn != nil {
+		clockAlarms = s.clockSkewAlarmsFn()
+	}
+	n := len(warnings) + len(clockAlarms)
 	if divergence != "" {
 		n++
 	}
 	if n == 0 {
-		buf.WriteString("No alarms currently active\n")
+		if cfg == nil {
+			buf.WriteString("No active configuration loaded\n")
+		} else {
+			buf.WriteString("No alarms currently active\n")
+		}
 		return
 	}
 	fmt.Fprintf(buf, "%d active alarm(s):\n", n)
@@ -134,6 +143,9 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(buf, "  WARNING: %s\n", w)
+	}
+	for _, alarm := range clockAlarms {
+		fmt.Fprintf(buf, "  CRITICAL: %s\n", alarm.Summary())
 	}
 }
 

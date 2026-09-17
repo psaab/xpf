@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/logging"
@@ -215,6 +216,10 @@ func (c *CLI) showSecurityAlarms(args []string) error {
 	// #9902 F-026: NAT source pool-exhaustion alarms from the daemon monitor.
 	if c.natPoolExhaustionAlarmsFn != nil {
 		alarmCount = natpoolalarm.RenderExhaustionAlarms(os.Stdout, c.natPoolExhaustionAlarmsFn(), alarmCount, detail)
+	}
+	// #10025: daemon-resident pre-break fabric-auth clock alarms.
+	if c.clockSkewAlarmsFn != nil {
+		alarmCount = clockskew.RenderAlarms(os.Stdout, c.clockSkewAlarmsFn(), alarmCount, detail)
 	}
 
 	if alarmCount == 0 {

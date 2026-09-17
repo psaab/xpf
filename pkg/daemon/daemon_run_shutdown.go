@@ -345,6 +345,9 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	// through the helper so the atomic pointer is read/cleared the same way
 	// as the runtime start/discard paths.
 	d.stopAndDiscardNATPoolAlarm()
+	// #10025: stop the pre-break fabric-auth clock monitor after all alarm
+	// consumers have quiesced.
+	d.stopAndDiscardClockSkewAlarm()
 
 	// Stop the FRR manager (after ipmon, whose actuator is an FRR
 	// writer): cancels the degraded-retry goroutine and kills any

@@ -17,6 +17,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sync/semaphore"
 
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/coalesce"
 	"github.com/psaab/xpf/pkg/config"
@@ -440,6 +441,13 @@ type Daemon struct {
 	// construction time (#2114 race tests only). Zero in production (default
 	// 10s). Read once in maybeStartNATPoolAlarm before Start.
 	natPoolAlarmTestTick time.Duration
+	// clockSkewAlarm is the daemon-resident pre-break monitor for clustered
+	// fabric-auth time skew (#10025). It is published atomically because the
+	// CLI and gRPC read surfaces remain live while bootstrap/shutdown swaps
+	// the monitor.
+	clockSkewAlarm atomic.Pointer[clockskew.Monitor]
+	// clockSkewAlarmTestTick overrides the production cadence in tests.
+	clockSkewAlarmTestTick time.Duration
 	// pendingFIBBump records an UNCONFIRMED FIB-generation bump after a
 	// successful route-overlay publish (#1844, Codex plan r2-1): the
 	// bump_fib_generation control message failed, so the next actuation

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/bootstrapshow"
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
@@ -1112,27 +1113,41 @@ func (c *CLI) handleShowSystem(args []string) error {
 
 	case "alarms":
 		cfg := c.store.ActiveConfig()
+		var warnings []string
+		var divergence string
 		if cfg != nil {
-			warnings := config.ValidateConfig(cfg)
+			warnings = config.ValidateConfig(cfg)
 			// #9530: a peer config sync that discarded a local commit is an alarm too.
-			divergence := c.store.ConfigSyncDivergenceAlarm()
-			n := len(warnings)
-			if divergence != "" {
-				n++
-			}
-			if n == 0 {
-				fmt.Println("No alarms currently active")
+			divergence = c.store.ConfigSyncDivergenceAlarm()
+		}
+		// #10025: daemon-resident pre-break fabric-auth clock alarms remain
+		// visible while a bootstrap or rollback has temporarily removed the
+		// active configuration.
+		var clockAlarms []clockskew.ActiveAlarm
+		if c.clockSkewAlarmsFn != nil {
+			clockAlarms = c.clockSkewAlarmsFn()
+		}
+		n := len(warnings) + len(clockAlarms)
+		if divergence != "" {
+			n++
+		}
+		if n == 0 {
+			if cfg == nil {
+				fmt.Println("No active configuration loaded")
 			} else {
-				fmt.Printf("%d active alarm(s):\n", n)
-				if divergence != "" {
-					fmt.Printf("  CRITICAL: %s\n", divergence)
-				}
-				for _, w := range warnings {
-					fmt.Printf("  WARNING: %s\n", w)
-				}
+				fmt.Println("No alarms currently active")
 			}
 		} else {
-			fmt.Println("No active configuration loaded")
+			fmt.Printf("%d active alarm(s):\n", n)
+			if divergence != "" {
+				fmt.Printf("  CRITICAL: %s\n", divergence)
+			}
+			for _, w := range warnings {
+				fmt.Printf("  WARNING: %s\n", w)
+			}
+			for _, alarm := range clockAlarms {
+				fmt.Printf("  CRITICAL: %s\n", alarm.Summary())
+			}
 		}
 		return nil
 

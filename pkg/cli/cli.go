@@ -14,6 +14,7 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/psaab/xpf/pkg/bootstrapshow"
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -64,7 +65,10 @@ type CLI struct {
 	// natPoolExhaustionAlarmsFn returns the active NAT pool-exhaustion
 	// alarms (#9902 F-026). Nil when no monitor is wired.
 	natPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
-	feedsFn                   func() map[string]feeds.FeedInfo
+	// clockSkewAlarmsFn returns daemon-resident pre-break fabric-auth clock
+	// alarms for `show system alarms` (#10025). Nil when no monitor is wired.
+	clockSkewAlarmsFn func() []clockskew.ActiveAlarm
+	feedsFn           func() map[string]feeds.FeedInfo
 	// feedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#3105): an address-name -> union-of-live-feed-CIDR-strings map, the same
 	// source the REST/gRPC simulators consume (daemon SnapshotForBindings). The
@@ -268,6 +272,12 @@ func (c *CLI) SetNATPoolAlarmsFn(fn func() []natpoolalarm.ActiveAlarm) {
 // pool-exhaustion alarms surfaced by `show security alarms` (#9902 F-026).
 func (c *CLI) SetNATPoolExhaustionAlarmsFn(fn func() []natpoolalarm.ActiveExhaustionAlarm) {
 	c.natPoolExhaustionAlarmsFn = fn
+}
+
+// SetClockSkewAlarmsFn sets a callback for retrieving daemon-resident
+// fabric-auth clock alarms surfaced by `show system alarms` (#10025).
+func (c *CLI) SetClockSkewAlarmsFn(fn func() []clockskew.ActiveAlarm) {
+	c.clockSkewAlarmsFn = fn
 }
 
 // SetFeedsFn sets a callback for retrieving live dynamic address feed status.

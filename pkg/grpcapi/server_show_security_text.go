@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -397,6 +398,10 @@ func (s *Server) showSecurityAlarms(cfg *config.Config, topic string, buf *strin
 	// #9902 F-026: NAT source pool-exhaustion alarms from the daemon monitor.
 	if s.natPoolExhaustionAlarmsFn != nil {
 		alarmCount = natpoolalarm.RenderExhaustionAlarms(buf, s.natPoolExhaustionAlarmsFn(), alarmCount, detail)
+	}
+	// #10025: daemon-resident pre-break fabric-auth clock alarms.
+	if s.clockSkewAlarmsFn != nil {
+		alarmCount = clockskew.RenderAlarms(buf, s.clockSkewAlarmsFn(), alarmCount, detail)
 	}
 
 	if alarmCount == 0 {

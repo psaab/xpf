@@ -987,6 +987,23 @@ construction**.
   `fabric_auth_skew_6708.go` scans a bounded band and names the clock
   rather than leaving the operator with the sessions symptom.
 
+- **Pre-break runtime monitor (#10025):** each clustered node runs a
+  daemon-resident sampler every 5 seconds. A missing `system ntp server`, an
+  unsynchronized NTP reference, or a local reference offset of **15 seconds or
+  more** raises a CRITICAL clock alarm before fabric authentication can fail.
+  The alarm appears in `show system alarms`, `show security alarms detail`, and
+  `show chassis cluster status`; one `RT_SYSTEM` syslog line is emitted on
+  each raise and clear transition. A failed or temporarily unavailable clock
+  sample holds the current state rather than falsely clearing it.
+  Numeric-offset alarms use a 10-second clear bound (hysteresis) so a clock
+  hovering near 15 seconds does not spam raise/clear transitions.
+- **Bound:** when both nodes stay within 15 seconds of the same reachable NTP
+  reference, their inter-node skew is at most 30 seconds, inside the
+  verifier's always-accepted current-window ±1 band. Inter-node skew from
+  30–60 seconds is alignment-dependent; at 60 seconds or more the window
+  indices differ by at least two and fabric RPC authentication always fails.
+  Keep the accept band unchanged: it is also the replay horizon.
+
 The accept band is deliberately NOT widened to tolerate skew: the band
 **is** the replay horizon, and the allowlisted fabric RPCs include
 `ClearSessions` and cross-node redundancy-group failover. #7487 explored
