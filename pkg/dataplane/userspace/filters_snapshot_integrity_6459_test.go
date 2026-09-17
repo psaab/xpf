@@ -161,6 +161,44 @@ func TestFilterSnapshotLenientPartialAddressListSetsMarker_6463(t *testing.T) {
 	}
 }
 
+// TestFilterSnapshotLenientZoneScopedAddressSetsMarker_10011 is the
+// end-to-end #10011 guard: a `%zone` filter address accepted by the Junos
+// lexer must survive the TOLERANT compile path verbatim, be recorded by the
+// shared classifier/recording path, and set AddressUnrepresentable before the
+// Rust compiler can parse/drop it per-token. The existing Rust
+// address_unrepresentable_marker_fails_closed_not_narrowed test proves that
+// this marker rejects the whole snapshot rather than silently narrowing the
+// matcher to the surviving prefix.
+func TestFilterSnapshotLenientZoneScopedAddressSetsMarker_10011(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, cmd := range []string{
+		"set firewall family inet6 filter f6 term t from source-address [ 2001:db8::/32 fe80::1%eth0 ]",
+		"set firewall family inet6 filter f6 term t then discard",
+	} {
+		path, err := config.ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
+	if !term.AddressUnrepresentable {
+		t.Fatal("a leniently-loaded zone-scoped address must set AddressUnrepresentable (#10011)")
+	}
+	if len(term.SourceAddresses) != 2 ||
+		term.SourceAddresses[0] != "2001:db8::/32" ||
+		term.SourceAddresses[1] != "fe80::1%eth0" {
+		t.Fatalf("the valid prefix and raw scoped token must both ride the wire, got %v",
+			term.SourceAddresses)
+	}
+}
+
 // TestFirewallTermSnapshotUnrepresentableMarkerWireKeys_6459_6463 is the
 // Go-encode half of the cross-language wire contract: the exact JSON keys the
 // Rust consumer (userspace-dp protocol/security.rs, pinned by

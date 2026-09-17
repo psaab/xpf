@@ -350,15 +350,16 @@ pub(crate) struct FirewallTermSnapshot {
     // that omits the field (#1961).
     #[serde(rename = "ports_unrepresentable", default)]
     pub ports_unrepresentable: bool,
-    // address_unrepresentable (#6463) is set by the Go control plane when the
-    // term carried a literal `from source-address` / `destination-address`
-    // token that is not a parseable IP/CIDR (classifyFilterAddrFamily rejects
-    // it; recorded on term.UnknownAddresses). The pre-fix `parse_address`
-    // dropped such a token PER-TOKEN (its `Err(_)` arm pushed nothing): a
-    // PARTIALLY-malformed list then matched only the surviving prefixes — a
-    // `then discard`/`reject` term silently enforced a NARROWER address set
-    // than the operator wrote (fail-OPEN via fall-through to the implicit
-    // accept). With this flag the filter compiler raises
+    // address_unrepresentable (#6463/#10011) is set by the Go control plane
+    // when the term carried a literal `from source-address` /
+    // `destination-address` token the Rust matcher cannot represent (malformed
+    // IP/CIDR text or a zone-scoped `%zone` literal; classifyFilterAddrFamily
+    // rejects it; recorded on term.UnknownAddresses). The pre-fix
+    // `parse_address` dropped such a token PER-TOKEN (its `Err(_)` arm pushed
+    // nothing): a PARTIALLY-malformed list then matched only the surviving
+    // prefixes — a `then discard`/`reject` term silently enforced a NARROWER
+    // address set than the operator wrote (fail-OPEN via fall-through to the
+    // implicit accept). With this flag the filter compiler raises
     // SnapshotIntegrityError::UnrepresentableFilterAddress and rejects the
     // whole snapshot. serde(default) keeps wire parity with an older control
     // plane that omits the field (#1961).

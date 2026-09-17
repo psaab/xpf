@@ -6958,6 +6958,32 @@ fn address_unrepresentable_marker_fails_closed_not_narrowed() {
 }
 
 #[test]
+fn address_zone_scoped_marker_fails_closed_not_dropped_10011() {
+    // #10011 RED-on-revert: the Go filter classifier rejects `%zone` because
+    // parse_address cannot represent an IPv6 scope. The tolerant Go path keeps
+    // the raw token beside a surviving prefix and sets this marker; the Rust
+    // preflight must reject the WHOLE snapshot rather than parse the prefix and
+    // silently drop `fe80::1%eth0` per-token.
+    let err = filter_with_marked_term("inet6", |t| {
+        t.source_addresses = vec!["2001:db8::/32".into(), "fe80::1%eth0".into()];
+        t.address_unrepresentable = true;
+    })
+    .expect_err("a zone-scoped address marker must fail the build closed");
+    match err {
+        SnapshotIntegrityError::UnrepresentableFilterAddress {
+            family,
+            filter,
+            term,
+        } => {
+            assert_eq!(family, "inet6");
+            assert_eq!(filter, "f");
+            assert_eq!(term, "marked");
+        }
+        other => panic!("expected UnrepresentableFilterAddress, got {other:?}"),
+    }
+}
+
+#[test]
 fn from_unrepresentable_marker_fails_closed_not_widened() {
     // #9875 RED-on-revert: a term carrying the `from_unrepresentable` wire
     // marker (the term's `from` block carried a match leaf the dataplane does

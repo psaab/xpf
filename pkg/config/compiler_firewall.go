@@ -1421,12 +1421,12 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 			// Multi-value (#2419/#2545): a bracket/flat-set list collapses
 			// onto child.Keys[1:] (firewallMatchValues), a hierarchical
 			// block carries each address as a child node — handle both.
-			// #6463: record every literal classifyFilterAddrFamily rejects on
-			// term.UnknownAddresses (kept VERBATIM in SourceAddresses) so the
+			// #6463/#10011: record every literal classifyFilterAddrFamily rejects
+			// on term.UnknownAddresses (kept VERBATIM in SourceAddresses) so the
 			// snapshot builder can set the AddressUnrepresentable wire marker
 			// on the tolerant path — the Rust parse_address drops such a token
-			// per-token, and a partially-malformed list would otherwise
-			// silently narrow a discard/reject term (fail-open).
+			// per-token, and a partially-malformed or zone-scoped list would
+			// otherwise silently narrow a discard/reject term (fail-open).
 			srcValues := firewallMatchValues(child)
 			recordFilterAddrTokens(term, srcValues)
 			term.SourceAddresses = append(term.SourceAddresses, srcValues...)

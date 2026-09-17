@@ -176,19 +176,21 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownPorts) > 0 {
 			snap.PortsUnrepresentable = true
 		}
-		// #6463: a literal `from source-address` / `destination-address` token
-		// that is not a parseable IP/CIDR is recorded on term.UnknownAddresses
-		// by compileFilterFrom (recordFilterAddrTokens). The strict commit gate
-		// (validateFilterAddressLiteralsStrict, #3433) rejects it; on the
-		// lenient / peer-sync path it reaches here. The pre-#6463 Rust
-		// parse_address dropped such a token PER-TOKEN (its `Err(_)` arm pushed
-		// nothing): a PARTIALLY-malformed list matched only the surviving
-		// prefixes — a discard/reject term then silently enforced a NARROWER
-		// address set than the operator wrote, and a host in the dropped range
-		// was accepted by fall-through (fail-OPEN). (An ALL-malformed direction
-		// already failed closed at match-time via `constrained && empty`,
-		// #2400.) Mark the term so the Rust filter compiler fails the snapshot
-		// CLOSED rather than enforcing the narrowed subset.
+		// #6463/#10011: a literal `from source-address` /
+		// `destination-address` token that the shared classifier cannot represent
+		// (malformed IP/CIDR text or a zone-scoped `%zone` literal) is recorded
+		// on term.UnknownAddresses by compileFilterFrom (recordFilterAddrTokens).
+		// The strict commit gate (validateFilterAddressLiteralsStrict, #3433)
+		// rejects it; on the lenient / peer-sync path it reaches here. The
+		// pre-#6463 Rust parse_address dropped such a token PER-TOKEN (its
+		// `Err(_)` arm pushed nothing): a PARTIALLY-malformed list matched only
+		// the surviving prefixes — a discard/reject term then silently enforced
+		// a NARROWER address set than the operator wrote, and a host in the
+		// dropped range was accepted by fall-through (fail-OPEN). (An
+		// ALL-malformed direction already failed closed at match-time via
+		// `constrained && empty`, #2400.) Mark the term so the Rust filter
+		// compiler fails the snapshot CLOSED rather than enforcing the narrowed
+		// subset.
 		if len(term.UnknownAddresses) > 0 {
 			snap.AddressUnrepresentable = true
 		}
