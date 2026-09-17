@@ -219,16 +219,16 @@ pub(super) fn nat_install_forward_fragment_assoc(
     // same-family address rewrite.
     //
     // #7899: this used to read "(which also stamps the reverse info)". It does
-    // not, and has not: BOTH installs pass `reverse: None`, no caller anywhere
-    // in the tree passes `Some(..)`, and both consults bind `_reverse` and
-    // discard it. #9950: `reverse: None` stays None BY DESIGN for same-family —
-    // a reply's reverse translation lives in the reply entry's own `decision`
-    // (via `NatDecision::reverse` at the hit tail), not in `Nat64ReverseInfo`
-    // (which is NAT64-only: original v6 addrs for v4->v6 rebuild). The v4->v6
-    // NAT64 reverse remains the deferred increment documented on the consult
-    // helpers above. The #7899 sentence was the stated reason the cache's entry
-    // type was "already shared enough to move", so it was load-bearing for a
-    // design argument while being false.
+    // not, and has not: BOTH production installs pass `reverse: None`; the
+    // only `Some(..)` install arguments in the tree are test-only low-level
+    // fixtures, and both consults bind `_reverse` and discard it. #9950:
+    // `reverse: None` stays None BY DESIGN for same-family — a reply's reverse
+    // translation lives in the reply entry's own `decision` (via
+    // `NatDecision::reverse` at the hit tail), not in `Nat64ReverseInfo`
+    // (which is NAT64-only: original v6 addrs for v4->v6 rebuild). The
+    // #7899 sentence was the stated reason the cache's entry type was "already
+    // shared enough to move", so it was load-bearing for a design argument
+    // while being false.
     if decision.nat.nat64
         || (decision.nat.rewrite_src.is_none() && decision.nat.rewrite_dst.is_none())
     {
