@@ -1,6 +1,7 @@
 package flowexport
 
 import (
+	"context"
 	"errors"
 	"net"
 	"strings"
@@ -30,18 +31,74 @@ func (c *fakeConn) isClosed() bool {
 }
 
 // withSeams swaps the resolve/dial seams for the duration of fn and
-// restores them afterward via t.Cleanup.
+// restores them afterward via t.Cleanup. The context adapters preserve the
+// legacy seam signatures used by the existing teardown tests while allowing
+// the production path to enforce cancellation.
 func withSeams(t *testing.T,
 	resolve func(string, string) (*net.UDPAddr, error),
 	dial func(string, *net.UDPAddr, *net.UDPAddr) (net.Conn, error),
 	fn func()) {
 	t.Helper()
 	origResolve, origDial := resolveUDPAddr, dialUDP
+	origResolveContext, origDialContext := resolveUDPAddrContext, dialUDPContext
 	resolveUDPAddr = resolve
 	dialUDP = dial
+	resolveUDPAddrContext = func(ctx context.Context, network, address string) (*net.UDPAddr, error) {
+		type result struct {
+			addr *net.UDPAddr
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			addr, err := resolve(network, address)
+			done <- result{addr: addr, err: err}
+		}()
+		select {
+		case result := <-done:
+			return result.addr, result.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	dialUDPContext = func(ctx context.Context, network string, laddr *net.UDPAddr, address string) (net.Conn, error) {
+		type resolveResult struct {
+			addr *net.UDPAddr
+			err  error
+		}
+		resolveDone := make(chan resolveResult, 1)
+		go func() {
+			addr, err := resolve(network, address)
+			resolveDone <- resolveResult{addr: addr, err: err}
+		}()
+		var raddr *net.UDPAddr
+		select {
+		case result := <-resolveDone:
+			if result.err != nil {
+				return nil, result.err
+			}
+			raddr = result.addr
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		type dialResult struct {
+			conn net.Conn
+			err  error
+		}
+		dialDone := make(chan dialResult, 1)
+		go func() {
+			conn, err := dial(network, laddr, raddr)
+			dialDone <- dialResult{conn: conn, err: err}
+		}()
+		select {
+		case result := <-dialDone:
+			return result.conn, result.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	t.Cleanup(func() {
-		resolveUDPAddr = origResolve
-		dialUDP = origDial
+		resolveUDPAddr, dialUDP = origResolve, origDial
+		resolveUDPAddrContext, dialUDPContext = origResolveContext, origDialContext
 	})
 	fn()
 }
