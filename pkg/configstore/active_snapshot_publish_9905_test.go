@@ -22,7 +22,7 @@ import (
 // the swap↔publish pairing within store*.go production files (line and
 // block comments excluded on both sides of the check). Swaps outside
 // store*.go non-test files are out of this guard's sight by construction.
-// way). The daemon rebuild test pins the commit path end to end, and the
+// The daemon rebuild test pins the commit path end to end, and the
 // daemon withhold cell pins the (gen, nil) snapshot shape the daemon
 // treats as transient.
 
@@ -305,8 +305,12 @@ func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
 		lines := strings.Split(stripBlocks(string(raw)), "\n")
 		for i, line := range lines {
 			// Code lines only: doc comments (including this test's own
-			// description of the pattern) must not count as swaps.
-			if strings.HasPrefix(strings.TrimSpace(line), "//") || !swapRE.MatchString(line) {
+			// description of the pattern) must not count as swaps. Cut
+			// trailing `//` first: a comment merely MENTIONING the
+			// pattern must not count either. (No `//` appears inside
+			// string literals on swap lines.)
+			code, _, _ := strings.Cut(line, "//")
+			if strings.TrimSpace(code) == "" || !swapRE.MatchString(code) {
 				continue
 			}
 			swaps++

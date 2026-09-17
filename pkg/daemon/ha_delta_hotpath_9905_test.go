@@ -496,12 +496,18 @@ func TestForwardWireAliasNeedsNoDelta9905(t *testing.T) {
 // TestNAT64SnatFlagGate9905 pins the per-leg NAT64 gating intent (#9905
 // review F2). Base evidence (609433efb): convert had ONE NAT64 site,
 // flag-blind `ParseIP(delta.Nat64SnatV4)` at
-// daemon_ha_userspace_convert.go:575, through which BOTH string sources
-// flowed (strings were the only carrier — no BinAddrLen existed); the
-// binary-decoded string was decode-gated on flag && nonzero at
-// eventstream.go:1553-1554, while JSON carried producer bytes. Post-change
-// equivalence: binary honors the flag explicitly (a flagless bin never
-// stamps), string stays flag-blind (legacy fallback).
+// daemon_ha_userspace_convert.go:575
+// (`if ip := net.ParseIP(delta.Nat64SnatV4).To4(); ip != nil {`),
+// through which BOTH string sources flowed (strings were the only
+// carrier — no BinAddrLen existed); the binary-decoded string was
+// decode-gated at eventstream.go:1553-1554:
+//
+//	`if d.Nat64 && (payload[off] != 0 || payload[off+1] != 0 || payload[off+2] != 0 || payload[off+3] != 0) {`
+//	`d.Nat64SnatV4 = net.IP(payload[off : off+4]).String()`
+//
+// while JSON carried producer bytes. Post-change equivalence: binary
+// honors the flag explicitly (a flagless bin never stamps), string stays
+// flag-blind (legacy fallback).
 func TestNAT64SnatFlagGate9905(t *testing.T) {
 	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
 	// String leg, flag unset, snat present → stamps (flag-blind legacy).
