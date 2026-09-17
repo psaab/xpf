@@ -672,3 +672,53 @@ deploy_preflight_cleanup() {
 	local rinst="$1"
 	incus exec "$rinst" -- rm -f "$DEPLOY_PREFLIGHT_PATH" 2>/dev/null || true
 }
+
+# deploy_install_deb <rinst> <local_deb>
+#
+# Install a local .deb on a node through a freshly-created remote directory.
+# The old fixed destination, /tmp/<basename>, made a same-name re-push hit the
+# existing file before apt ran (and meant the versions-slot collision was never
+# diagnosed). A mktemp-created directory gives every install a distinct slot;
+# both the package and its temporary directory are removed after apt, including
+# failed push/install paths.
+deploy_install_deb() {
+	local rinst="$1" deb="$2"
+	local base tmpdir remote_deb rc
+	base=$(basename "$deb")
+
+	# mktemp creates the directory atomically on the target, so even a same-name
+	# re-push gets a distinct, absent destination. Validate the returned path
+	# before interpolating it into subsequent remote commands.
+	if ! tmpdir=$(incus exec "$rinst" -- mktemp -d /tmp/xpf-deb.XXXXXX); then
+		die "could not allocate a unique remote .deb slot on $rinst"
+	fi
+	if [[ "$tmpdir" != /tmp/xpf-deb.* ]]; then
+		die "remote mktemp returned an unsafe .deb slot on $rinst: $tmpdir"
+	fi
+	remote_deb="${tmpdir%/}/$base"
+
+	info "Pushing $base to $rinst (slot $tmpdir)..."
+	if incus file push "$deb" "${rinst}${remote_deb}"; then
+		:
+	else
+		rc=$?
+		incus exec "$rinst" -- rm -rf "$tmpdir" 2>/dev/null ||
+			warn "could not clean failed .deb slot $tmpdir on $rinst"
+		return "$rc"
+	fi
+
+	# apt install is STAGE-ONLY on a clustered node (node-id present): it
+	# refreshes the staging path but does NOT cut the dataplane.
+	if incus exec "$rinst" -- apt-get install -y --reinstall "$remote_deb"; then
+		:
+	else
+		rc=$?
+		incus exec "$rinst" -- rm -rf "$tmpdir" 2>/dev/null ||
+			warn "could not clean failed .deb slot $tmpdir on $rinst"
+		return "$rc"
+	fi
+
+	if ! incus exec "$rinst" -- rm -rf "$tmpdir"; then
+		die "installed $base on $rinst but could not remove temporary .deb slot $tmpdir"
+	fi
+}

@@ -42,6 +42,14 @@ FAKE_VERIFY_RC=0
 # on return. A file survives, so "what did NOT happen" is still assertable
 # after the abort.
 FAKE_CALL_LOG=""
+# #10026: verdict the fake `apt-get install` returns (0 = installed), and the
+# file-backed mktemp sequence. The sequence MUST be file-backed (cf.
+# CLI_IDX_FILE): _fake_exec runs in a command-substitution subshell, so a
+# variable counter would stick at 0 and every slot would collide — the exact
+# fixture defect that would blind the re-push regression cell.
+# Rejecting an existing target models the Incus same-name re-push collision.
+FAKE_REJECT_EXISTING=0
+FAKE_MKTEMP_SEQ=""
 
 setup_fake_vm() {
 	FAKE_VM=$(mktemp -d)
@@ -49,7 +57,11 @@ setup_fake_vm() {
 	FAKE_EXECSTART="/usr/local/sbin/xpfd"
 	FAKE_VERIFY_RC=0
 	FAKE_CALL_LOG=$(mktemp)
-	mkdir -p "$FAKE_VM/usr/local/sbin" "$FAKE_VM/etc/systemd/system"
+	FAKE_APT_RC=0
+	FAKE_REJECT_EXISTING=0
+	FAKE_MKTEMP_SEQ=$(mktemp)
+	printf '0' > "$FAKE_MKTEMP_SEQ"
+	mkdir -p "$FAKE_VM/usr/local/sbin" "$FAKE_VM/etc/systemd/system" "$FAKE_VM/tmp"
 }
 
 # fake_calls_contain <extended-regex> — did any recorded incus call match?
@@ -62,6 +74,9 @@ teardown_fake_vm() {
 	FAKE_VM=""
 	[[ -n "$FAKE_CALL_LOG" ]] && rm -f "$FAKE_CALL_LOG"
 	FAKE_CALL_LOG=""
+	FAKE_REJECT_EXISTING=0
+	[[ -n "$FAKE_MKTEMP_SEQ" ]] && rm -f "$FAKE_MKTEMP_SEQ"
+	FAKE_MKTEMP_SEQ=""
 }
 
 # incus mock: supports `incus exec <inst> -- <cmd...>` and
@@ -103,6 +118,12 @@ incus() {
 			# Mirror `incus file push` over a dangling symlink: it fails.
 			if [[ -L "$target" && ! -e "$target" ]]; then
 				echo "Error: push through dangling symlink $target" >&2
+				return 1
+			fi
+			# Incus rejects an existing fixed destination in the same way the
+			# live validation did for a same-name re-push (#10026).
+			if [[ "${FAKE_REJECT_EXISTING:-0}" == "1" && -e "$target" ]]; then
+				echo "Error: target already exists $target" >&2
 				return 1
 			fi
 			cp -f "$src" "$target"
@@ -155,9 +176,41 @@ _fake_exec() {
 		;;
 	rm)
 		shift
-		[[ "$1" == "-f" ]] && shift
-		rm -f "$FAKE_VM/${1#/}"
+		while [[ "${1:-}" == -* ]]; do shift; done
+		local remote_path="${1:-}" rel
+		[[ -n "$remote_path" && "$remote_path" == /* && "$remote_path" != "/" ]] || return 2
+		rel="${remote_path#/}"
+		rm -rf -- "$FAKE_VM/${rel:?}"
 		return 0
+		;;
+	mktemp)
+		shift
+		local make_dir=0 tmpl seq slot
+		while [[ "${1:-}" == -* ]]; do
+			[[ "$1" == "-d" ]] && make_dir=1
+			shift
+		done
+		# mktemp <template> — replace the X-run with a file-backed sequence
+		# so every call yields a distinct slot (the #10026 property).
+		tmpl="${1:-/tmp/tmp.XXXXXXXXXX}"
+		seq=$(cat "$FAKE_MKTEMP_SEQ" 2>/dev/null || echo 0)
+		seq=$((seq + 1))
+		printf '%s' "$seq" > "$FAKE_MKTEMP_SEQ"
+		slot=$(sed -E "s/X+/$(printf '%06d' "$seq")/" <<<"$tmpl")
+		if (( make_dir )); then
+			mkdir -p "$FAKE_VM/${slot#/}"
+		else
+			mkdir -p "$FAKE_VM/$(dirname "${slot#/}")"
+			: > "$FAKE_VM/${slot#/}"
+		fi
+		printf '%s\n' "$slot"
+		return 0
+		;;
+	apt-get)
+		# apt-get install -y --reinstall <slot> — the install step of
+		# deploy_install_deb. Succeeds unless a test arms FAKE_APT_RC;
+		# the call log records the exact slot installed.
+		return "${FAKE_APT_RC:-0}"
 		;;
 	systemctl)
 		shift
@@ -332,6 +385,65 @@ test_verify_pushed_sha_absent_hardfails() {
 		ok "verify_pushed_sha: absent binary hard-fails (empty readback)"
 	fi
 	rm -f "$lb"; teardown_fake_vm
+}
+
+
+# #10026 regression: two installs of the same local filename must not reuse a
+# fixed remote /tmp/<basename> destination. The fake Incus rejects overwrite,
+# matching the live permission-denied collision from #9486 validation. The
+# chosen remediation is disambiguation: each attempt gets a distinct remote
+# directory, and both directories are cleaned after apt succeeds.
+test_deb_repush_uses_distinct_remote_slots() {
+	setup_fake_vm
+	local deb slots slot_count stale=0
+	deb=$(mktemp --suffix=.deb)
+	make_local_bin "$deb" "DEB-BYTES"
+	FAKE_REJECT_EXISTING=1
+	if ! deploy_install_deb vm "$deb" >/dev/null 2>&1 ||
+		! deploy_install_deb vm "$deb" >/dev/null 2>&1; then
+		bad "deb re-push: same-name installs must use distinct remote slots"
+		rm -f "$deb"; teardown_fake_vm
+		return
+	fi
+	slots=$(grep -oE '/tmp/xpf-deb\.[0-9]+' "$FAKE_CALL_LOG" | sort -u)
+	slot_count=$(printf '%s\n' "$slots" | sed '/^$/d' | wc -l)
+	if (( slot_count != 2 )); then
+		bad "deb re-push: expected two distinct remote slots, got $slot_count"
+		rm -f "$deb"; teardown_fake_vm
+		return
+	fi
+	for slot in $slots; do
+		if [[ -e "$FAKE_VM/${slot#/}" ]]; then
+			stale=1
+		fi
+		if ! grep -Fq "apt-get install -y --reinstall ${slot}/" "$FAKE_CALL_LOG"; then
+			bad "deb re-push: apt did not install the deb from its pushed slot $slot"
+			rm -f "$deb"; teardown_fake_vm
+			return
+		fi
+	done
+	if (( stale )); then
+		bad "deb re-push: temporary remote slots were not cleaned"
+	else
+		ok "deb re-push: same-name installs use distinct cleaned remote slots"
+	fi
+	rm -f "$deb"; teardown_fake_vm
+}
+
+# The helper behavior test above is not enough if the deploy script stops
+# calling it. Pin the production wiring and reject the retired fixed path.
+test_deb_repush_wiring() {
+	local f="$SCRIPT_DIR/cluster-setup.sh" code
+	code=$(awk '/^deploy_vm_deb\(\)/,/^}/' "$f")
+	if ! grep -Fq 'deploy_install_deb "$rinst" "$deb"' <<<"$code"; then
+		bad "deb re-push wiring: deploy_vm_deb bypasses deploy_install_deb"
+		return
+	fi
+	if grep -Fq 'incus file push "$deb"' <<<"$code"; then
+		bad "deb re-push wiring: deploy_vm_deb still owns a fixed-name deb push"
+		return
+	fi
+	ok "deb re-push wiring: deploy_vm_deb uses the unique-slot helper"
 }
 
 test_reconcile_stale_pin_removes_managed() {
@@ -1312,6 +1424,8 @@ test_rolling_rg_ids
 test_verify_pushed_sha_match
 test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
+test_deb_repush_uses_distinct_remote_slots
+test_deb_repush_wiring
 test_reconcile_stale_pin_removes_managed
 test_reconcile_stale_pin_no_pin_noop
 test_reconcile_stale_pin_foreign_override_hardfails
