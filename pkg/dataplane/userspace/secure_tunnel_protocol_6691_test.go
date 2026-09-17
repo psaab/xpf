@@ -124,7 +124,10 @@ const preSecureTunnelProtocolVersion = 4
 // Issue 9752 moved it 21 -> 22, for the session's installing-table identity
 // crossing the HA session-sync path. Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 22
+// Issue 9553 moves it 22 -> 23, for the DHCPv6 relay rows crossing the
+// ConfigSnapshot. Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 23
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state
