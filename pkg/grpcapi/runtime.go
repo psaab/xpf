@@ -67,6 +67,14 @@ type userspaceStatusProvider interface {
 type userspaceCrashProvider interface {
 	HelperCrashState() (dpuserspace.HelperCrashRecord, bool)
 }
+// userspaceCrashHistoryProvider is the #8397 completed-episode accessor.
+//
+// Separate from userspaceCrashProvider because current crash state and
+// recovered history have different lifetimes: a successful restart wipes the
+// current record while the manager retains the episode in its history ring.
+type userspaceCrashHistoryProvider interface {
+	HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int)
+}
 
 // userspaceControlProvider: superset of statusProvider used by the
 // diag/control path (queue/binding admin, forwarding-armed, inject).

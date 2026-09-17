@@ -92,6 +92,15 @@ type cliUserspaceCrashProvider interface {
 	HelperCrashState() (dpuserspace.HelperCrashRecord, bool)
 }
 
+// cliUserspaceCrashHistoryProvider is the #8397 completed-episode accessor.
+//
+// Separate from cliUserspaceCrashProvider because current crash state and
+// recovered history have different lifetimes: a successful restart wipes the
+// current record while the manager retains the episode in its history ring.
+type cliUserspaceCrashHistoryProvider interface {
+	HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int)
+}
+
 // cliUserspaceControlProvider extends the status provider with the
 // mutating control operations used by `request chassis cluster
 // data-plane userspace ...` (the sole CLI consumer, handled in
