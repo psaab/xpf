@@ -155,11 +155,13 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 					"lease_time", renewed.LeaseTime)
 				continue
 			}
-			// A DHCPNAK in RENEWING is an explicit lease REVOCATION: the
-			// address is no longer valid (reassigned / moved subnet). Per
-			// RFC 2131 §4.4.5 abandon it immediately and return to INIT
-			// (fresh DISCOVER) — do NOT keep using it until T2 (#3956). A
-			// genuine renew TIMEOUT still falls through to the T2 rebind.
+			// A DHCPNAK from the granting server is an explicit lease
+			// revocation: the address is no longer valid (reassigned /
+			// moved subnet). Per RFC 2131 §4.4.5 abandon it immediately and
+			// return to INIT (fresh DISCOVER) — do NOT keep using it until
+			// T2 (#3956). A genuine renew TIMEOUT still falls through to
+			// the T2 rebind. Wrong-server NAKs are filtered by
+			// v4RenewMatcher and remain ordinary timeouts.
 			if errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: RENEWING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
@@ -195,12 +197,12 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 					"lease_time", renewed.LeaseTime)
 				continue
 			}
-			// A DHCPNAK in REBINDING is also a revocation (RFC 2131
-			// §4.4.5): deconfigure now and re-DISCOVER from INIT with no
-			// prior lease. A rebind TIMEOUT is left to the existing
-			// lease-expiry fallback, which retains the address until the
-			// re-acquire replaces it (#1844 last-known-gateway note in
-			// README) — only an explicit NAK forces immediate abandon.
+			// A DHCPNAK from the granting server in REBINDING is also a
+			// revocation (RFC 2131 §4.4.5): deconfigure now and re-DISCOVER
+			// from INIT with no prior lease. A rebind TIMEOUT is left to the
+			// lease-expiry fallback, retaining the address until re-acquire
+			// replaces it (#1844). Only an explicit granting-server NAK
+			// forces immediate abandon; off-server NAKs never match.
 			if errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: REBINDING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
@@ -215,22 +217,23 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	}
 }
 
-// errDHCPNAK is returned (wrapped) by doDHCPv4 when the server answers a
-// RENEWING/REBINDING DHCPREQUEST with a DHCPNAK. It is a sentinel so the
-// run loop can distinguish an explicit lease REVOCATION (RFC 2131
-// §4.4.5: stop using the address immediately and return to INIT) from a
-// renew TIMEOUT (which still falls through to the T2 rebind). The
-// discriminator is errors.Is(err, errDHCPNAK); see runDHCPv4 (#3956).
-var errDHCPNAK = errors.New("DHCPv4 server sent NAK")
+// errDHCPNAK is returned (wrapped) by doDHCPv4 when the granting server
+// answers a RENEWING/REBINDING DHCPREQUEST with a DHCPNAK. It is a sentinel so
+// the run loop can distinguish an explicit lease REVOCATION (RFC 2131 §4.4.5:
+// stop using the address immediately and return to INIT) from a renew TIMEOUT
+// (which still falls through to the T2 rebind). The discriminator is
+// errors.Is(err, errDHCPNAK); see runDHCPv4 (#3956). A NAK from any other
+// server is rejected by v4RenewMatcher and never reaches this branch.
+var errDHCPNAK = errors.New("DHCPv4 granting server sent NAK")
 
-// abandonLeaseAfterNAK deconfigures the interface and drops the lease
-// record after a DHCPNAK revoked the lease (RFC 2131 §4.4.5). The client
-// must stop using the address immediately and return to INIT — it must
-// NOT wait for T2. This mirrors finishClient's removal ordering (the
-// established lease-record-removal owner): remove the kernel address,
-// delete the lease record under m.mu, then fire the gateway-change hook
-// OUTSIDE m.mu so the ip-monitoring overlay withdraws its resolved
-// next-hop in lock-step with the address (the #1844 coupling rule).
+// abandonLeaseAfterNAK deconfigures the interface and drops the lease record
+// after a DHCPNAK revoked the lease (RFC 2131 §4.4.5). The client must stop
+// using the address immediately and return to INIT — it must NOT wait for T2.
+// This mirrors finishClient's removal ordering (the established
+// lease-record-removal owner): remove the kernel address, delete the lease
+// record under m.mu, then fire the gateway-change hook OUTSIDE m.mu so the
+// ip-monitoring overlay withdraws its resolved next-hop in lock-step with the
+// address (#1844 coupling rule).
 // Callers hold no lock. committed may be nil (nothing to remove).
 func (m *Manager) abandonLeaseAfterNAK(key clientKey, committed *Lease) {
 	if committed != nil && committed.Address.IsValid() {
@@ -240,12 +243,11 @@ func (m *Manager) abandonLeaseAfterNAK(key clientKey, committed *Lease) {
 	delete(m.leases, key)
 	m.mu.Unlock()
 	m.fireGatewayChange()
-	// #4874 A2: withdraw the FRR default/classless routes in lock-step
-	// with the address. onGatewayChange only nudges the ip-monitoring
-	// overlay; the base DHCP default route is re-rendered by applyConfig
-	// (recompile) from Leases(), so scheduling the recompile is what makes
-	// the README's "a NAK deconfigures the interface immediately" promise
-	// (#3956) cover the route, not just the kernel address.
+	// #4874 A2: withdraw the FRR default/classless routes in lock-step with
+	// the address. onGatewayChange only nudges the ip-monitoring overlay; the
+	// base DHCP default route is re-rendered by applyConfig (recompile) from
+	// Leases(), so scheduling the recompile covers the route, not just the
+	// kernel address.
 	m.scheduleRecompile()
 }
 
@@ -255,6 +257,15 @@ func (m *Manager) abandonLeaseAfterNAK(key clientKey, committed *Lease) {
 // sends a broadcast REBINDING DHCPREQUEST (#2994). prev is the currently
 // committed lease (nil only for acquire).
 func (m *Manager) doDHCPv4(ctx context.Context, ifaceName string, mode dhcpExchangeMode, prev *Lease) (*Lease, error) {
+	if mode != exchangeAcquire {
+		if prev == nil {
+			return nil, fmt.Errorf("DHCPv4 %s without a prior lease", mode)
+		}
+		if !leaseInterfaceMatches(ifaceName, prev) {
+			return nil, fmt.Errorf("DHCPv4 %s lease belongs to interface %q, not %q",
+				mode, prev.Interface, ifaceName)
+		}
+	}
 	client, err := nclient4.New(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("create DHCPv4 client: %w", err)
@@ -287,15 +298,15 @@ func (m *Manager) doDHCPv4(ctx context.Context, ifaceName string, mode dhcpExcha
 		}
 		dest := v4RenewDest(prev, rebind)
 		resp, err := client.SendAndRead(exCtx, dest, req,
-			nclient4.IsMessageType(dhcpv4.MessageTypeAck, dhcpv4.MessageTypeNak))
+			v4RenewMatcher(m, req, prev, rebind))
 		if err != nil {
 			return nil, fmt.Errorf("DHCPv4 %s: %w", mode, err)
 		}
 		if resp.MessageType() == dhcpv4.MessageTypeNak {
-			// A DHCPNAK is an explicit lease REVOCATION, not a transient
-			// renew failure — wrap the sentinel so the run loop abandons
-			// the address and returns to INIT immediately rather than
-			// waiting for T2 (RFC 2131 §4.4.5). See runDHCPv4 / #3956.
+			// A granting-server NAK is kept distinct from an ACK so the
+			// run loop can revoke the lease and return to INIT. A NAK from
+			// any other server never reaches this branch: v4RenewMatcher
+			// rejects it before SendAndRead returns.
 			return nil, fmt.Errorf("DHCPv4 %s: %w", mode, errDHCPNAK)
 		}
 		ack = resp

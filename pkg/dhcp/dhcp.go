@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -125,8 +126,12 @@ type Manager struct {
 	// recompileWG tracks an in-flight recompile callback so Quiesce can JOIN
 	// one that started before the latch. Add(1) happens under mu in
 	// scheduleRecompile (so it cannot race the latch), Done in the timer func.
-	recompileWG sync.WaitGroup
-	stateDir    string
+	// RenewalBindingStats counters count replies that pass transaction/client
+	// identity checks but fail the stored granting-server identity check.
+	renewV4ServerIdentityRejects atomic.Uint64
+	renewV6ServerIdentityRejects atomic.Uint64
+	recompileWG                  sync.WaitGroup
+	stateDir                     string
 
 	// runClientForTest replaces the per-family run goroutine body in
 	// tests so reconcile/registry behavior can be exercised without
@@ -143,6 +148,22 @@ type Manager struct {
 	// waitLinkLocalForTest replaces the DHCPv6 link-local wait so the v6
 	// run loop is drivable without a real interface. nil in production.
 	waitLinkLocalForTest func(ctx context.Context, ifaceName string, timeout time.Duration) error
+}
+
+// RenewalBindingStats reports renewal replies that were ignored because
+// their server identity did not match the committed lease binding.
+type RenewalBindingStats struct {
+	DHCPv4ServerIdentityRejects uint64
+	DHCPv6ServerIdentityRejects uint64
+}
+
+// RenewalBindingStats returns a snapshot of the server-identity rejection
+// counters.
+func (m *Manager) RenewalBindingStats() RenewalBindingStats {
+	return RenewalBindingStats{
+		DHCPv4ServerIdentityRejects: m.renewV4ServerIdentityRejects.Load(),
+		DHCPv6ServerIdentityRejects: m.renewV6ServerIdentityRejects.Load(),
+	}
 }
 
 // New creates a DHCP manager. stateDir is where DUID files are persisted.

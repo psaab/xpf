@@ -148,24 +148,25 @@ the debounced `onAddressChange` callback when content changed.
   DUID-LLT (a `GetTime()` timestamp stamped at send) while the renew path
   presented the persistent DUID-LL — a DUID mismatch that churned the
   lease on every renewal.
-- **Timeout falls through, NAK abandons (#3956)**: a renew *timeout*
-  (no reply) at T1 falls through to the T2 rebind; a second timeout (or
-  a failure to apply the renewed address) falls back to full
-  re-acquisition, retaining the old lease and address until then
-  (`docs/dns-ownership.md`). A DHCPNAK is different — it is an explicit
-  lease REVOCATION (the server reassigned the address or the client
-  changed subnets). Per RFC 2131 §4.4.5 a NAK in the RENEWING *or*
-  REBINDING state deconfigures the interface immediately
-  (`abandonLeaseAfterNAK`: remove the kernel address, drop the lease
-  record, fire `onGatewayChange`, then `scheduleRecompile`) and returns
-  to INIT — a fresh DISCOVER with no prior lease — rather than keeping
-  the revoked address until T2. The `scheduleRecompile` is what makes
-  "immediately" cover the FRR default/classless routes too, not just the
-  kernel address: those routes are re-rendered only by `applyConfig`
-  (#4874 A2). `doDHCPv4` wraps the sentinel `errDHCPNAK` on a NAK reply so the
-  run loop distinguishes the two via `errors.Is`. A malformed/unmatched
-  timeout renew is therefore still fail-safe (degrades to the previous
-  full-acquisition path), and an explicit revocation is honored at once.
+- **Renew replies are bound to the lease owner (#9944)**: the DHCPv4
+  RENEWING and REBINDING matchers require the request transaction ID, client
+  hardware address/interface, and stored granting server-identifier. The
+  DHCPv6 matchers apply the same transaction/interface/client identity
+  checks and require the stored server DUID. Replies from another server,
+  including ACKs and NAKs, are ignored rather than rewriting or revoking the
+  lease.
+- **NAK immediately revokes the lease (#9944, #3956)**: a NAK accepted from
+  the granting server is an explicit lease revocation in either RENEWING or
+  REBINDING. The client deconfigures and drops the lease record, then starts
+  fresh acquisition from INIT; a timeout remains the separate path that
+  waits for T2 or retains the address through re-acquisition.
+- **Server identity changes are content changes (#9944)**:
+  `leaseContentChanged` includes the v4 server-identifier and v6 server DUID,
+  so a changed renewal binding is visible to downstream consumers instead
+  of silently changing renewal state.
+- `Manager.RenewalBindingStats()` exposes per-family counters for replies
+  ignored after transaction/client validation because their server identity
+  did not match the committed granting lease.
 - **Address moves are re-acquisition-equivalent**: if a renewal returns
   a different address, the old one is removed and the new one applied
   via the same netlink mechanisms the fresh-acquisition path uses.
@@ -405,29 +406,32 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   never touched.
 - **Lease records are NOT expired by the wall clock.** During a
   *timeout-driven* failed re-acquisition (T2 rebind timed out, fresh
-  DORA in progress) the lease record and the kernel address
-  intentionally persist until replaced — consumers (FRR DHCP routes,
+  DORA in progress) the lease record and the kernel address intentionally
+  persist until replaced — consumers (FRR DHCP routes,
   ip-monitoring resolved next-hops) keep the last-known gateway. This
   deliberately diverges from RFC 2131 §4.4.5 for the *timeout* case (an
-  expired lease should stop being used). An explicit **DHCPNAK is
-  honored** (#3956): it deconfigures immediately via
-  `abandonLeaseAfterNAK` — see "Timeout falls through, NAK abandons"
-  above. **Coupling rule (#1844, extended #4874 A2):** any lease-record
-  removal (the NAK path, the `finishClient` max-retransmission/terminal
-  exit, and, if clock expiry is ever implemented, that path too) MUST
-  route through a path that fires **both** `onGatewayChange` AND
-  `scheduleRecompile` (`finishClient` and `abandonLeaseAfterNAK` both do).
+  expired lease should stop being used). An explicit **DHCPNAK is honored**
+  (#3956, #9944): a granting-server NAK deconfigures immediately through
+  `abandonLeaseAfterNAK`, schedules the coupled route recompile, and returns
+  the client to INIT; a wrong-server NAK is ignored. A timeout is still the
+  separate path that falls through to REBINDING and then fresh acquisition
+  while retaining the old lease until replacement.
+- **Coupling rule (#1844, extended #4874 A2):** any lease-record removal
+  (the NAK path, the `finishClient` max-retransmission/terminal exit, and,
+  if clock expiry is ever implemented, that path too) MUST route through a
+  path that fires **both** `onGatewayChange` AND `scheduleRecompile`
+  (`finishClient` and `abandonLeaseAfterNAK` both do).
   `onGatewayChange` alone only marks the ip-monitoring overlay dirty; the
-  base DHCP default/classless routes (from `Leases()`) and the v6 RA
-  prefix (from `DelegatedPrefixesForRA()`) are re-rendered ONLY by
-  `applyConfig`, which the debounced `scheduleRecompile` drives — so
-  without it a terminal exit removes the address but leaves the FRR route
-  + RA prefix stale until an unrelated commit (indefinitely on the
-  `finishClient` max-retransmission exit, which does not run from an
-  `applyConfig`). The ctx.Done cancellation exits already delete the
-  record inline and are re-rendered by their surrounding `applyConfig`
-  (Reconcile) or the following re-acquire (Renew), so `finishClient`
-  fires the recompile only when a lease record actually remained.
+  base DHCP default/classless routes (from `Leases()`) and the v6 RA prefix
+  (from `DelegatedPrefixesForRA()`) are re-rendered ONLY by `applyConfig`,
+  which the debounced `scheduleRecompile` drives — so without it a terminal
+  exit removes the address but leaves the FRR route + RA prefix stale until
+  an unrelated commit (indefinitely on the `finishClient` max-retransmission
+  exit, which does not run from an `applyConfig`). The ctx.Done cancellation
+  exits already delete the record inline and are re-rendered by their
+  surrounding `applyConfig` (Reconcile) or the following re-acquire (Renew),
+  so `finishClient` fires the recompile only when a lease record actually
+  remained.
 - **Degenerate subnet mask is refused (#4101, untrusted input).**
   `leaseFromACKv4` validates option 1 after `net.IPMask.Size()`: a zero
   mask (`0.0.0.0` → `Size()` returns `ones=0`) or a non-contiguous mask
