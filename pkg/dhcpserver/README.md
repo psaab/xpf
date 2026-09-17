@@ -488,12 +488,16 @@ What increment 1 ships (the fully unit-testable, lab-free slice):
   `memfile_lease_mgr.cc appendSuffix` / `LFCFileType`): `<f>.1` is the INPUT file
   (the current file the server moves aside at the START of a cleanup) and
   `<f>.2` is the PREVIOUS file (the COMPACTED result of the last COMPLETED
-  cleanup, one row per active lease); `.output`/`.completed`/`.pid` are kea-lfc
-  scratch/markers with no lease union and are ignored. Reading only `<f>` LOST
-  every lease living in `.2`/`.1`: right after LFC rotates the current file it
-  is a fresh, often header-only append log while the active leases sit in the
-  compacted previous file — so a valid header-only current file wrongly read as
-  a trusted-empty set would authorize the DDNS reconciler to MASS-DELETE every
+  cleanup, one row per active lease); `.output` is temporary compaction output,
+  `.completed` is the finished lease-bearing output that Kea startup loads in
+  preference to `.2`/`.1`, and `.pid` is the kea-lfc pid file. The display/DDNS
+  reader intentionally ignores `.output`/`.completed`; destructive replacement
+  must remove an orphaned `.completed` before promoted Kea starts.
+  Reading only `<f>` LOST every lease living in `.2`/`.1`: right after LFC
+  rotates the current file, it is a fresh, often header-only append log while
+  the active leases sit in the compacted previous file — so a valid header-only
+  current file wrongly read as a trusted-empty set would authorize the DDNS
+  reconciler to MASS-DELETE every
   owned A/AAAA/PTR (fail-open). BOTH the destructive `parseActiveLeases4/6` and
   the display `parseLeaseCSV` now read the whole set via the one shared
   `keaLFCLeaseFilePaths` (`lease_lfc.go`) in Kea CHRONOLOGICAL order — PREVIOUS
@@ -508,7 +512,9 @@ What increment 1 ships (the fully unit-testable, lab-free slice):
   and the trusted-empty result is returned only when every existing file in the
   set validates AND the merged active set is empty. `readSyncLeasesViaMemfile`
   (the HA lease-sync fallback) inherits the union through `parseActiveLeases`.
-  The #5796 residual invariants 2/3/8 are now CLOSED (#5938):
+  The #5796 residual invariants 2 and 8 are now CLOSED (#5938). Invariant 3
+  documents the current reader's deliberate intermediate handling, but its
+  orphaned `.completed` crash gap remains open and is covered below.
   - **Invariant 2 — live `lease_cmds` socket preference (display):** when the
     `lease_cmds` hook is EXPECTED (lease-sync enabled), the display path
     (`getDisplayLeases` → `GetLeasesWithSource{4,6}`, `lease_source.go`) queries
@@ -518,14 +524,16 @@ What increment 1 ships (the fully unit-testable, lab-free slice):
     memfile is the normal source, so a memfile read there is NOT flagged degraded.
     (The HA-sync `getSyncLeases` already preferred the socket; this extends the
     same discipline to the display.)
-  - **Invariant 3 — crash-interrupted-cleanup safety:** the reader IGNORES
-    kea-lfc's `.output`/`.completed` intermediates. This is proven safe by an
-    exact argument (documented at `keaLFCLeaseFilePaths`, `lease_lfc.go`): every
-    lease reachable through `.output` is a subset of `.1 ∪ .2` (kea-lfc builds
-    `.output` by merging them) which the reader already ingests, and the atomic
-    `.output → .2` swap means no active lease is ever reachable ONLY through an
-    intermediate — so a torn cleanup never presents a stale-yet-authoritative set.
-    No generation protocol is needed for this read-only path. Pinned by
+  - **Invariant 3 — crash-interrupted-cleanup handling:** the display/DDNS
+    reader intentionally IGNORES kea-lfc's `.output`/`.completed`
+    intermediates. `.output` is safe to skip because it is built by merging
+    `.1` and `.2`, so every lease key it could contain is already in the
+    union the reader ingests. `.completed` is different: Kea startup loads it
+    in preference to `.2`/`.1`, and Kea removes `.2`, removes `.1`, then
+    renames `.completed` to `.2`. A crash between those operations can leave
+    leases only in `.completed`, which this reader misses. This is a known
+    reader gap; destructive peer-only replacement removes the orphan before
+    promoted Kea starts. Pinned only for the remaining-files contract by
     `TestKeaLFCIntermediatesIgnored_5938`.
   - **Invariant 8 — degraded-source display banner:** a `LeaseSource`
     (`lease_source.go`) is threaded from the read to BOTH the gRPC

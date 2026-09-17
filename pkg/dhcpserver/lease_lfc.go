@@ -25,41 +25,33 @@ package dhcpserver
 //	                          (one row per active lease). Present once any LFC
 //	                          has run.
 //	<f>.output     kea-lfc's temporary compaction output.
-//	<f>.completed  kea-lfc's finish marker.
+//	<f>.completed  kea-lfc's finished, lease-bearing compacted output.
 //	<f>.pid        kea-lfc's pid file.
 //
-// The .output/.completed/.pid files hold no lease union we must read and are
-// ignored.
+// Kea's startup loader gives .completed precedence over .2/.1 when it exists
+// (memfile_lease_mgr.cc loadLeasesFromFiles); a stale orphan can therefore
+// resurrect rows even though the generation files were replaced. The display
+// and DDNS reader below intentionally ignores .output and .completed, because
+// its candidate-path contract reads only .2, .1, and the current file.
 //
-// #5938 Invariant 3 — crash-interrupted-cleanup safety argument. A cleanup that
-// crashes mid-run can leave a stale `.output` and/or `.completed` behind, so the
-// reader must be provably correct to SKIP them. It is, and here is the exact
-// argument (no generation protocol is needed for this read-only display/DDNS
-// path):
+// #5938 Invariant 3 — crash-interrupted-cleanup handling for the display/DDNS
+// reader. A cleanup can leave `.output` and/or `.completed` behind, so this
+// reader intentionally skips both. `.output` is safe to skip because it is
+// built by merging INPUT (.1) and PREVIOUS (.2); every lease key it could
+// contain is already in the .1/.2 union.
 //
-//   - `.output` is kea-lfc's IN-PROGRESS compaction target: it is built by
-//     MERGING the INPUT (.1) and PREVIOUS (.2) files (Kea src: LFCController /
-//     memfile — kea-lfc reads `.1`+`.2` and writes the compacted union to
-//     `.output`). Every lease key that could appear in `.output` therefore ALSO
-//     appears in `.1` ∪ `.2`, which this reader already ingests. So `.output`
-//     contributes NO lease key we would otherwise miss — reading it could only
-//     re-assert rows we already have (idempotent under the last-row-wins dedup)
-//     or, worse, a TORN half-written merge (kea-lfc crashed mid-write) whose
-//     partial rows are strictly LESS complete than `.1`+`.2`. Skipping it is thus
-//     not merely safe but STRICTLY SAFER than reading it.
-//   - `.completed` is kea-lfc's zero-content FINISH MARKER (its presence tells
-//     the server the swap may proceed); it carries no lease rows at all.
-//   - The atomic swap kea-lfc performs on SUCCESS (`.output` → `.2`, unlink
-//     `.1`) means a lease is never in-flight-only: before the swap it lives in
-//     `.1`+`.2`; after the swap it lives in the new `.2`. At NO instant is an
-//     active lease reachable ONLY through `.output`/`.completed`. A crash at any
-//     point leaves the pre-swap `.1`+`.2` intact (or the post-swap `.2`), both of
-//     which this reader covers. Hence a torn cleanup can never briefly present a
-//     STALE-yet-authoritative set through the intermediates.
+// `.completed` is different: it is lease-bearing and Kea startup gives it
+// precedence over `.2`/.1. Kea's rotation removes old `.2`, removes `.1`, then
+// renames `.completed` to `.2`; a crash between those removals and the rename
+// can leave leases only in `.completed`. The display/DDNS reader would then
+// miss those leases. This is a known reader gap, not a proof that ignoring
+// `.completed` is safe; destructive pre-seed replacement removes the orphan
+// before promoted Kea starts, and the reader gap remains a follow-up.
 //
-// TestKeaLFCIntermediatesIgnored pins this: `.output`/`.completed` present
-// alongside `.2`+`.1` do not change the resolved lease set, and a lease living
-// in `.output` is already covered by `.2`/`.1`.
+// TestKeaLFCIntermediatesIgnored pins only the current reader contract when
+// `.2` and `.1` remain present: `.output`/`.completed` do not change its
+// resolved lease set, and a lease living in `.output` is already covered by
+// `.2`/`.1`.
 //
 // NOTE the suffix mapping: .1 is INPUT and .2 is PREVIOUS — so the
 // CHRONOLOGICAL read order (oldest → newest) is .2 → .1 → current, i.e. the

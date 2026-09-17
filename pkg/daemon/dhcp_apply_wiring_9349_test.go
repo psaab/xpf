@@ -36,10 +36,12 @@ import (
 // re-implemented the derivation would supply the behaviour under test and could
 // not observe production failing to.
 type recordingDHCPApplier9349 struct {
-	mu           sync.Mutex
-	applied      []config.DHCPServerConfig
-	clusterApply []config.DHCPServerConfig
-	clusterNil   int
+	mu                     sync.Mutex
+	applied                []config.DHCPServerConfig
+	clusterApply           []config.DHCPServerConfig
+	clusterNil             int
+	preSeed4StillMastering []bool
+	preSeed6StillMastering []bool
 }
 
 func (r *recordingDHCPApplier9349) Apply(cfg *config.DHCPServerConfig) error {
@@ -86,10 +88,16 @@ func (r *recordingDHCPApplier9349) SeedSyncLeases4(context.Context, []dhcpserver
 func (r *recordingDHCPApplier9349) SeedSyncLeases6(context.Context, []dhcpserver.SyncLease, time.Time) (int, error) {
 	return 0, nil
 }
-func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4(context.Context, []dhcpserver.SyncLease, time.Time) error {
+func (r *recordingDHCPApplier9349) PreSeedMemfileMerged4(_ context.Context, _ []dhcpserver.SyncLease, _ time.Time, stillMastering bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preSeed4StillMastering = append(r.preSeed4StillMastering, stillMastering)
 	return nil
 }
-func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6(context.Context, []dhcpserver.SyncLease, time.Time) error {
+func (r *recordingDHCPApplier9349) PreSeedMemfileMerged6(_ context.Context, _ []dhcpserver.SyncLease, _ time.Time, stillMastering bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preSeed6StillMastering = append(r.preSeed6StillMastering, stillMastering)
 	return nil
 }
 func (r *recordingDHCPApplier9349) WaitControlSocket4(context.Context, time.Duration) bool {
@@ -115,6 +123,66 @@ func rethDHCPConfig9349(t *testing.T, cluster bool) *config.Config {
 		cfg.Chassis.Cluster = &config.ClusterConfig{}
 	}
 	return cfg
+}
+
+// TestMasterEdgePassesStillMasteringToPreSeed9853 drives the staggered
+// active-active transition through the daemon call site. RG1 is already MASTER
+// when RG2 takes over, so a Kea-down pre-seed for RG2 must receive the
+// stillMastering flag and preserve RG1's fallback union.
+//
+// Fail-on-revert: removing the per-RG state check or passing false makes this
+// assertion RED even though the lower-level merge tests remain green.
+func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
+	d := leaseSyncTestDaemon(t, "/tmp/9853-k4-missing", "/tmp/9853-k6-missing", true)
+	rec := &recordingDHCPApplier9349{}
+	d.dhcpServer = rec
+	d.getOrCreateRGState(1).SetCluster(true)
+	d.getOrCreateRGState(2).SetCluster(true)
+	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
+		{Family: 4, Address: "10.0.72.80", HWAddress: "02:00:00:00:72:80",
+			SubnetID: 2, Remaining: 3600, State: 0},
+	})
+	d.sessionSync.SetPeerDHCPLeasesForTesting(6, []dhcpserver.SyncLease{
+		{Family: 6, Address: "2001:db8:72::80", DUID: "00:03:00:01:02:00:00:00:72:80",
+			IAID: 80, LeaseType: "IA_NA", SubnetID: 2, Remaining: 3600, State: 0},
+	})
+
+	d.applyRethServicesForRG(2)
+
+	if len(rec.preSeed4StillMastering) != 1 || !rec.preSeed4StillMastering[0] {
+		t.Fatalf("v4 pre-seed did not receive stillMastering=true: %v", rec.preSeed4StillMastering)
+	}
+	if len(rec.preSeed6StillMastering) != 1 || !rec.preSeed6StillMastering[0] {
+		t.Fatalf("v6 pre-seed did not receive stillMastering=true: %v", rec.preSeed6StillMastering)
+	}
+}
+
+// TestFirstMasterEdgePassesPureBackupToPreSeed9853 covers the complementary
+// case: when the transitioning RG is the only MASTER, its stopped-Kea
+// pre-seed must receive false so peer-only replacement can remove stale LFC
+// generations. Fail-on-revert: passing true unconditionally makes this RED.
+func TestFirstMasterEdgePassesPureBackupToPreSeed9853(t *testing.T) {
+	d := leaseSyncTestDaemon(t, "/tmp/9853-k4-pure-missing", "/tmp/9853-k6-pure-missing", true)
+	rec := &recordingDHCPApplier9349{}
+	d.dhcpServer = rec
+	d.getOrCreateRGState(2).SetCluster(true)
+	d.sessionSync.SetPeerDHCPLeasesForTesting(4, []dhcpserver.SyncLease{
+		{Family: 4, Address: "10.0.72.81", HWAddress: "02:00:00:00:72:81",
+			SubnetID: 2, Remaining: 3600, State: 0},
+	})
+	d.sessionSync.SetPeerDHCPLeasesForTesting(6, []dhcpserver.SyncLease{
+		{Family: 6, Address: "2001:db8:72::81", DUID: "00:03:00:01:02:00:00:00:72:81",
+			IAID: 81, LeaseType: "IA_NA", SubnetID: 2, Remaining: 3600, State: 0},
+	})
+
+	d.applyRethServicesForRG(2)
+
+	if len(rec.preSeed4StillMastering) != 1 || rec.preSeed4StillMastering[0] {
+		t.Fatalf("v4 pure-backup pre-seed did not receive false: %v", rec.preSeed4StillMastering)
+	}
+	if len(rec.preSeed6StillMastering) != 1 || rec.preSeed6StillMastering[0] {
+		t.Fatalf("v6 pure-backup pre-seed did not receive false: %v", rec.preSeed6StillMastering)
+	}
 }
 
 // STANDALONE: what reaches dhcpserver.Apply must have RETH names RESOLVED.

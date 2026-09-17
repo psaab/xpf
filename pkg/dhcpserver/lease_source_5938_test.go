@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-// lease_source_5938_test.go pins the three Kea LFC lease-source invariants #5938
-// closed (residual from #5796/#5936):
+// lease_source_5938_test.go pins the three Kea LFC lease-source behaviors
+// carried forward from #5796/#5936:
 //   - Invariant 2: the DISPLAY path PREFERS the live lease_cmds socket over the
 //     memfile snapshot when the hook is expected (getDisplayLeases).
-//   - Invariant 3: the crash-interrupted-cleanup intermediates (.output/.completed)
-//     are provably safe to ignore (TestKeaLFCIntermediatesIgnored_5938).
+//   - Invariant 3: the current reader ignores .output/.completed when .2/.1
+//     remain; an orphaned lease-bearing .completed remains a reader gap.
 //   - Invariant 8: a DEGRADED source (socket-unavailable fallback, or an
 //     unreadable sibling) raises a banner on the show path.
 
@@ -167,13 +167,13 @@ func TestDisplayLeases_UnreadableSiblingDegraded_5938(t *testing.T) {
 	}
 }
 
-// ---- Invariant 3: crash-interrupted-cleanup intermediates ignored ---------
+// ---- Invariant 3: reader handling of intermediates -------------------------
 
-// TestKeaLFCIntermediatesIgnored_5938 proves the reader IGNORES kea-lfc's
-// crash-interrupted intermediates (.output/.completed): their presence does NOT
-// change the resolved lease set, and every lease reachable through them is still
-// covered by the .2/.1 union the reader actually ingests (the Invariant 3 safety
-// argument, documented at keaLFCLeaseFilePaths).
+// TestKeaLFCIntermediatesIgnored_5938 proves the display/DDNS reader ignores
+// kea-lfc's `.output`/`.completed` when the canonical `.2`/.1 set remains.
+// `.output` is redundant because it is built from `.1`/.2. Kea startup gives
+// `.completed` precedence, however, so a crash after deleting `.2`/.1 and
+// before renaming `.completed` remains a reader gap not covered by this test.
 func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
 	now := lfcNow
 	dir := t.TempDir()
@@ -204,7 +204,7 @@ func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
 	writeCSV(t, cur+".output", lfcV4Header+"\n"+
 		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,0\n"+
 		"10.0.0.77,aa:bb:cc:dd:ee:77,,3600,"+lfcFuture+",1,0,1,ONLY-in-output,0\n")
-	writeCSV(t, cur+".completed", "") // zero-content finish marker
+	writeCSV(t, cur+".completed", "") // empty fixture; reader still ignores .completed
 
 	after, err := parseLeaseCSV(cur, now)
 	if err != nil {
