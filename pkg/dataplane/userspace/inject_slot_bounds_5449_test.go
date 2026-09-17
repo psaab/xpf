@@ -12,7 +12,7 @@ import (
 //
 // RED-on-revert: reverting parseBindingSlot's bounds check makes the
 // unguarded strconv.Atoi + uint32() cast return 4294967295 for "slot -1"
-// (and accept 1048576, one past the array). The "-1 rejected" and
+// (and accept 4096, one past the slot dimension). The "-1 rejected" and
 // "at-bound rejected" assertions below then fail because a non-nil error
 // is expected but the wrapped/oversized slot is returned instead.
 // Likewise, dropping the validateInjectPacketRequestForHelper slot guard
@@ -26,11 +26,11 @@ func TestParseInjectPacketCommandSlotBounds(t *testing.T) {
 		wantSlot uint32
 	}{
 		{name: "negative wraps", slotArg: "-1", wantErr: true},
-		{name: "at-bound", slotArg: "1048576", wantErr: true}, // == BindingArrayMaxEntries
+		{name: "at-bound", slotArg: "4096", wantErr: true}, // == BindingSlotMapMaxEntries (#9915 F-124)
 		{name: "over-bound", slotArg: "2000000", wantErr: true},
 		{name: "zero", slotArg: "0", wantErr: false, wantSlot: 0},
 		{name: "mid-range", slotArg: "5", wantErr: false, wantSlot: 5},
-		{name: "max-valid", slotArg: "1048575", wantErr: false, wantSlot: 1048575}, // BindingArrayMaxEntries-1
+		{name: "max-valid", slotArg: "4095", wantErr: false, wantSlot: 4095}, // BindingSlotMapMaxEntries-1
 		{name: "not-a-number", slotArg: "abc", wantErr: true},
 	}
 	for _, tt := range tests {
@@ -70,11 +70,11 @@ func TestParseBindingCommandSlotBounds(t *testing.T) {
 		wantSlot uint32
 	}{
 		{name: "negative wraps", slotArg: "-1", wantErr: true},
-		{name: "at-bound", slotArg: "1048576", wantErr: true}, // == BindingArrayMaxEntries
+		{name: "at-bound", slotArg: "4096", wantErr: true}, // == BindingSlotMapMaxEntries (#9915 F-124)
 		{name: "over-bound", slotArg: "9999999", wantErr: true},
 		{name: "zero", slotArg: "0", wantErr: false, wantSlot: 0},
 		{name: "mid-range", slotArg: "7", wantErr: false, wantSlot: 7},
-		{name: "max-valid", slotArg: "1048575", wantErr: false, wantSlot: 1048575}, // BindingArrayMaxEntries-1
+		{name: "max-valid", slotArg: "4095", wantErr: false, wantSlot: 4095}, // BindingSlotMapMaxEntries-1
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

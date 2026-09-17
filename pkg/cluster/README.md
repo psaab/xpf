@@ -3789,8 +3789,9 @@ outside the monitor loop:
   standby converges to the master's state (session GONE) regardless of
   install/delete arrival order; a genuinely newer incarnation (re-stamped by a
   later sweep) carries a higher generation and still installs (last-writer-wins).
-  A `gen == 0` (legacy) delete still evicts. The generation maps are bounded by
-  `genGuardMapCap` (200000). On overflow the map is NEVER cleared (#2198 F1): an
+  A `gen == 0` (legacy) delete still evicts. The generation maps start bounded by
+  `genGuardMapDefaultCap` (200000) and grow on full-of-live demand toward the
+  `genGuardMapCap` ceiling (half of conntrack.MaxSessions; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
   existing key updates in place, and a live entry is never dropped.
   **Tombstones age out oldest-first (#9719).**
   - A tombstone never frees its entry. So a long-lived connection used to fill the
@@ -3838,9 +3839,10 @@ outside the monitor loop:
       pre-#9412 window), never toward an early reap.
   - **Not the generation.** The generation cannot key it, because every send draws
     a fresh one.
-  - **Lifetime and locking.** Evicted in `takeDeleteGenV4/V6`. Bounded by
-    `genGuardMapCap`, where a new record skip-records at the cap. Held under
-    `genSentMu`, inside the sections that already took it.
+- **Lifetime and locking.** Evicted in `takeDeleteGenV4/V6`. Bounded by the
+  effective sender cap (`sentCap()`), which starts at the default and grows only
+  on full-of-live demand; held under `genSentMu`, inside the sections that
+  already took it.
   - **The one arrival order identity cannot see.** An old incarnation's own
     closing frame can land after a reused tuple's newer frame. The install guard
     above refuses it (`TestLateOldIncarnationCloseFrameIsRefused9412`).

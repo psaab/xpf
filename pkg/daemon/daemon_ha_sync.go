@@ -13,6 +13,8 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/conntrack"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -795,6 +797,24 @@ func (d *Daemon) publishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync
 	return true
 }
 
+// genGuardCapacityForRuntime resolves provisioned session capacity for sync
+// guard sizing (#9915 F-044): helper-backed runtimes report aggregate logical
+// sessions via cached status; anything else is a kernel/legacy backend whose
+// BPF tables are addressed to conntrack.MaxSessions (forward sessions = half).
+// Second return is false only when neither applies (nil or unknown status).
+func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
+	if rt == nil {
+		return 0, false
+	}
+	if probe, ok := rt.(userspaceCachedStatusProbe); ok {
+		if st, ok := probe.CachedStatus(); ok && st.MaxSessions > 0 {
+			return st.MaxSessions, true
+		}
+		return 0, false
+	}
+	return conntrack.MaxSessions / 2, true
+}
+
 // publishFabricRefreshChansIfCurrent installs the fabric refresh channels iff
 // gen still matches the current epoch (#4958), mirroring
 // publishSessionSyncIfCurrent so a superseded constructor does not replace a
@@ -1023,6 +1043,12 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				rt := d.dataplane()
 				if rt != nil {
 					ss.SetRuntime(rt)
+					// #9915 F-044: seed guard sizing from backend capacity at
+					// construction (helper provisioned, else kernel addressed-max;
+					// the fallback tick refreshes the helper value as status arrives).
+					if capacity, ok := genGuardCapacityForRuntime(rt); ok {
+						ss.SetGenGuardSessionCap(capacity)
+					}
 					ss.IsPrimaryFn = func() bool {
 						return d.cluster != nil && d.cluster.IsLocalPrimary(0)
 					}

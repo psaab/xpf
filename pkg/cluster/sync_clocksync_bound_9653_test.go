@@ -28,6 +28,10 @@ type clockEnv9653 struct {
 	port  uint16
 }
 
+// clockTestNow9653 freezes the local monotonic clock for deterministic
+// offsets (a live clock makes fixtures uptime-sensitive and boundary-flaky).
+const clockTestNow9653 = 1000000
+
 // newClockEnv9653 is a SessionSync with a session store and a connection on
 // each fabric, wrapped the way handleNewConnection wraps them.
 func newClockEnv9653(t *testing.T) *clockEnv9653 {
@@ -37,6 +41,7 @@ func newClockEnv9653(t *testing.T) *clockEnv9653 {
 		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
 	}
 	e := &clockEnv9653{t: t, s: NewSessionSync(":0", "10.0.0.2:4785", dp), dp: dp, port: 1000}
+	e.s.testClockNow = func() uint64 { return clockTestNow9653 }
 	for i := range e.conns {
 		local, remote := net.Pipe()
 		t.Cleanup(func() { local.Close(); remote.Close() })
@@ -86,7 +91,7 @@ func TestClockSyncWithAnImpossiblePeerClockIsRefused_9653(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newClockEnv9653(t)
-			e.clockSync(0, monotonicSeconds()/2)
+			e.clockSync(0, clockTestNow9653/2)
 			want, synced := e.connOffset(0)
 			if !synced || e.s.peerClockOffset.Load() != want {
 				t.Fatalf("setup: the honest clock sync was not stored (fabric 0 synced=%v offset=%d, global=%d)",
@@ -128,7 +133,7 @@ func TestClockSyncWithAnImpossiblePeerClockIsRefused_9653(t *testing.T) {
 // longer (a negative offset that a recent timestamp must not be clamped by).
 func TestHonestClockSyncsStillApply_9653(t *testing.T) {
 	e := newClockEnv9653(t)
-	local := monotonicSeconds()
+	local := uint64(clockTestNow9653)
 	later := local / 2
 	longer := local + 30*24*3600
 	e.clockSync(0, later)
@@ -158,7 +163,7 @@ func TestHonestClockSyncsStillApply_9653(t *testing.T) {
 // belongs to the connection that carried it.
 func TestClockSyncRebasesOnlyTheSessionsItsOwnConnectionCarries_9653(t *testing.T) {
 	e := newClockEnv9653(t)
-	local := monotonicSeconds()
+	local := uint64(clockTestNow9653)
 	peer := local / 2
 	e.clockSync(0, peer)
 	o0, _ := e.connOffset(0)

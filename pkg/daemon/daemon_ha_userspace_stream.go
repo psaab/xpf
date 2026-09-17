@@ -686,6 +686,16 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace
 		// the owed latch is set (one atomic load per tick).
 		d.repayOwedFullResyncIfDue()
 
+		// #9915 F-044: wire helper session capacity into sync guard sizing once
+		// per tick (idempotent ratchet). Role/connectivity-independent: the
+		// standby's receiver maps need sizing before any bulk lands. Zero or
+		// absent status retains previous (unknown, never unbounded).
+		if st, ok := d.userspaceDataplaneCachedStatus(); ok && st.MaxSessions > 0 {
+			if ss := d.getSessionSync(); ss != nil {
+				ss.SetGenGuardSessionCap(st.MaxSessions)
+			}
+		}
+
 		if connected {
 			// Stream is live — run reconciliation drain to catch any
 			// missed events, but at the slow 5s cadence.

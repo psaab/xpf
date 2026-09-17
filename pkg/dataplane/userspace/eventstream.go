@@ -83,6 +83,8 @@ type EventStream struct {
 
 	connected atomic.Bool
 	paused    atomic.Bool
+	// pauseMu serializes SendPause/SendResume write+store pairs (#9915 F-125).
+	pauseMu sync.Mutex
 
 	// Sequence tracking.
 	lastRecvSeq    atomic.Uint64
@@ -90,6 +92,13 @@ type EventStream struct {
 	lastAckSeq     atomic.Uint64
 	ackBatch       atomic.Uint64 // events since last ack
 
+	// Telemetry-gap resync state (#9915 F-046): the seq space is global, so a
+	// gap first observed on a telemetry frame may hide a session open/close.
+	// Gaps trigger the resync path through a DEDICATED debounced limiter —
+	// never the shared session-decode budget — and count separately, so
+	// SessionSyncResyncs stays session-only.
+	telemetryGapResyncs         atomic.Uint64
+	lastTelemetryGapResyncNanos atomic.Int64
 	// Callbacks are invoked on the reader goroutine and may be updated
 	// dynamically by control-plane code.
 	callbackMu          sync.RWMutex
@@ -336,15 +345,31 @@ func (es *EventStream) IsConnected() bool {
 }
 
 // SendPause sends a Pause frame to the helper, requesting it to buffer events.
+//
+// The flag stores only after a successful write (#9915 F-125): a failed Pause
+// leaves the truthful un-paused state plus the returned error, instead of a
+// lying paused=true the helper never saw. Serialized with SendResume by pauseMu.
 func (es *EventStream) SendPause() error {
+	es.pauseMu.Lock()
+	defer es.pauseMu.Unlock()
+	if err := es.writeFrame(EventTypePause, 0, nil); err != nil {
+		return err
+	}
 	es.paused.Store(true)
-	return es.writeFrame(EventTypePause, 0, nil)
+	return nil
 }
 
 // SendResume sends a Resume frame to the helper, requesting it to flush buffered events.
+//
+// Store-after-success and pauseMu-serialized, mirroring SendPause (#9915 F-125).
 func (es *EventStream) SendResume() error {
+	es.pauseMu.Lock()
+	defer es.pauseMu.Unlock()
+	if err := es.writeFrame(EventTypeResume, 0, nil); err != nil {
+		return err
+	}
 	es.paused.Store(false)
-	return es.writeFrame(EventTypeResume, 0, nil)
+	return nil
 }
 
 // SendDrainRequest sends a DrainRequest frame and blocks until DrainComplete
@@ -422,6 +447,8 @@ func (es *EventStream) Status() EventStreamStatus {
 		SessionCloseDrops:      es.SessionCloseDrops.Load(),
 		SessionCreateDrops:     es.SessionCreateDrops.Load(),
 		UnknownFrameDrops:      es.UnknownFrameDrops.Load(),
+		Paused:                 es.paused.Load(),
+		EventsSinceAck:         es.ackBatch.Load(),
 	}
 }
 
@@ -461,6 +488,7 @@ func (es *EventStream) acceptLoop(ctx context.Context, listener net.Listener) {
 		es.conn = conn
 		es.connected.Store(true)
 		es.ackBatch.Store(0)
+		es.paused.Store(false) // #9915 F-125: a new helper never received Pause.
 		// Reset sequence tracking for the new connection so stale
 		// watermarks from a previous helper don't cause gaps (#280).
 		es.lastRecvSeq.Store(0)
@@ -656,10 +684,20 @@ func (es *EventStream) readLoop(ctx context.Context) {
 
 		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog,
 			EventFrameTypeSessionClose, EventFrameTypeSessionCreate:
+			// The event stream sequence is global across session and telemetry
+			// frames. Detect the hole before validating this frame: malformed
+			// telemetry must not advance the baseline past a missing
+			// session-sync frame without spending the dedicated telemetry-gap
+			// resync budget.
+			telemetryGap := seq > prevSeq+1 && prevSeq > 0
+			if telemetryGap {
+				es.SeqGaps.Add(1)
+				es.triggerTelemetryGapResync(seq)
+			}
 			if !dataplaneEventPayloadMatchesFrame(typ, payload) {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
-				if !es.markDroppedFrameApplied(seq, &prevSeq) {
+				if !es.markDroppedFrameAppliedNoGap(seq, &prevSeq) {
 					es.backoffCallbackNotReady(ctx)
 					return
 				}
@@ -669,17 +707,13 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			if !ok {
 				es.DecodeErrors.Add(1)
 				es.recordDataplaneEventDrop(typ)
-				if !es.markDroppedFrameApplied(seq, &prevSeq) {
+				if !es.markDroppedFrameAppliedNoGap(seq, &prevSeq) {
 					es.backoffCallbackNotReady(ctx)
 					return
 				}
 				continue
 			}
 			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
-			if seq > prevSeq+1 && prevSeq > 0 {
-				es.SeqGaps.Add(1)
-				slog.Debug("event stream: sequence gap", "expected", prevSeq+1, "got", seq)
-			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueDataplaneFrame(typ, seq, payload, rec, onRawDataplaneEvent, onDataplaneEvent) {
@@ -728,9 +762,16 @@ func (es *EventStream) markDroppedFrameApplied(seq uint64, prevSeq *uint64) bool
 	if seq > *prevSeq+1 && *prevSeq > 0 {
 		es.SeqGaps.Add(1)
 	}
+	return es.markDroppedFrameAppliedNoGap(seq, prevSeq)
+}
+
+// markDroppedFrameAppliedNoGap advances the receive watermark without
+// classifying a gap. Telemetry paths classify the gap before decoding so a
+// malformed frame cannot advance the baseline without triggering F-046's
+// dedicated resync budget.
+func (es *EventStream) markDroppedFrameAppliedNoGap(seq uint64, prevSeq *uint64) bool {
 	*prevSeq = seq
 	es.lastRecvSeq.Store(seq)
-
 	return es.applyRefusedFrameInOrder(seq)
 }
 
@@ -946,6 +987,38 @@ func (es *EventStream) triggerRateLimitedResync(reason string, seq uint64) {
 	}
 }
 
+// telemetryGapResyncInterval debounces telemetry-gap resyncs (#9915 F-046):
+// lossy telemetry drops are routine under backpressure, so every isolated gap
+// must not force a primary-wide snapshot at the shared 2s decode budget.
+// Session truth has faster backstops (continuous deltas, sweep reconcile);
+// 30s bounds snapshot churn while catching anything they miss.
+const telemetryGapResyncInterval = 30 * time.Second
+
+// triggerTelemetryGapResync fires onFullResync plus a WARN for a sequence gap
+// first observed on a telemetry frame. Dedicated limiter + counter: sharing
+// triggerRateLimitedResync would let routine telemetry loss starve the
+// critical session-decode resync budget. First gap always fires (limiter
+// starts at zero), keeping tests deterministic.
+func (es *EventStream) triggerTelemetryGapResync(seq uint64) {
+	nowNanos := time.Now().UnixNano()
+	last := es.lastTelemetryGapResyncNanos.Load()
+	if last == 0 || nowNanos-last >= int64(telemetryGapResyncInterval) {
+		es.lastTelemetryGapResyncNanos.Store(nowNanos)
+		es.telemetryGapResyncs.Add(1)
+		slog.Warn("event stream: telemetry sequence gap; forcing debounced full resync",
+			"seq", seq, "last_applied", es.lastAppliedSeq.Load())
+		es.callbackMu.RLock()
+		onFullResync := es.onFullResync
+		es.callbackMu.RUnlock()
+		if onFullResync != nil {
+			onFullResync()
+		}
+	}
+	// Suppressed-by-limiter gaps are already counted in SeqGaps at the call
+	// site; no second counter (unlike the session-decode path, whose
+	// DecodeResyncSuppressed diagnoses persistent codec skew).
+}
+
 // maxDiscardableOversizedFrameBytes bounds how many payload bytes the reader will
 // read-and-discard to skip past an oversized-but-well-framed frame and re-align
 // on the next header (#6132). The helper writes atomic, correctly-length-
@@ -982,88 +1055,85 @@ const maxDiscardableOversizedFrameBytes = 64 * 1024
 //   - Trigger a rate-limited full resync so the peer is re-baselined from table
 //     truth (onFullResync -> ExportOwnerRGSessions, an unbounded ground-truth
 //     snapshot), superseding whatever the refused frame carried.
-//   - Advance the sequence watermark PAST this frame so the helper's cumulative
-//     ACK trims it and it is NOT re-sent verbatim — the loop-break.
+//   - Advance the sequence watermark PAST this frame on the trusted path
+//     (within-ceiling drain success) or a strictly contiguous desync seq, so
+//     the helper's cumulative ACK trims it and it is NOT re-sent verbatim —
+//     the loop-break. A noncontiguous desync seq is refused (no advance, no
+//     poisoned ACK) and drops instead.
 //
 // The byte-stream re-alignment differs by trust in the LENGTH:
 //   - length <= maxDiscardableOversizedFrameBytes: the frame boundary is trusted;
 //     discard exactly `length` bytes to land on the next header and KEEP the
 //     connection (returns true -> caller `continue`s). No drop.
 //   - length above the ceiling, or a failed drain (short / desynced stream): the
-//     length is not trusted to re-align the byte stream, so flush the advanced
-//     ACK (so the helper trims the frame) and drop the connection (returns false
-//     -> caller returns) to re-establish framing cleanly on reconnect. The
-//     advance + flushed ACK make the drop bounded — the frame is trimmed, not
-//     replayed into another drop.
+//     length is not trusted to re-align the byte stream, so gate the advance on
+//     strict contiguity (seq == prevSeq+1) and drop the connection (returns
+//     false -> caller returns) to re-establish framing cleanly on reconnect. A
+//     contiguous frame still advances and flushes an honest ACK (bounded drop);
+//     garbage drops untrimmed and replays only until framing re-establishes.
 func (es *EventStream) handleOversizedFrame(conn net.Conn, length uint32, typ uint8, seq uint64, prevSeq *uint64) bool {
 	slog.Warn("event stream: oversized frame", "length", length, "type", typ, "seq", seq)
 	es.DecodeErrors.Add(1)
 	es.triggerRateLimitedResync("oversized/framing-desync frame", seq)
 
-	// LOOP-BREAK (#6160): advance the watermark PAST this frame so the helper
-	// trims it and never re-sends it verbatim. Without the advance the helper
-	// never trims, re-sends on reconnect, and the reader drops again — a
-	// permanent reconnect with no forward progress. That is why the advance is
-	// unconditional, and `Test_oversized_session_frame_over_ceiling_drops_and_
-	// flushes_ack_6160` pins it deliberately rather than incidentally.
+	// LOOP-BREAK, split by trust (#6160, #9915 F-123): advancing the watermark
+	// past this frame is what keeps the helper from re-sending it verbatim on
+	// reconnect — but the two paths below trust the header differently, so a
+	// single unconditional advance is wrong for one of them:
 	//
-	// WHERE THE SAFETY ACTUALLY COMES FROM (#8597 K80). This comment used to
-	// justify the advance as "its aligned-header seq is trustworthy". That
-	// claim is FALSE on one of the two paths below: the branch that finds
-	// `length > maxDiscardableOversizedFrameBytes` has, by its own reasoning,
-	// just concluded the byte stream is DESYNCED — and a desynced stream's
-	// "header" is not a header, so its seq is whatever the payload bytes
-	// happened to be. The advance is safe anyway, but for a reason that lives
-	// in another component and another language, which is why the local claim
-	// was worth removing rather than repairing:
+	//   - Within-ceiling length with a SUCCESSFUL drain: the byte stream
+	//     re-aligned, so the header was aligned and this seq is the frame's
+	//     TRUE seq. Advance + trim + keep the connection.
+	//   - Over-ceiling length, or a failed drain: the stream is DESYNCED by
+	//     this branch's own reasoning, so the "header" is payload bytes and
+	//     its seq is arbitrary. Advance ONLY on strict contiguity
+	//     (seq == prevSeq+1, which cannot poison — it lands exactly on the
+	//     honest baseline); otherwise skip the advance, warn, and drop
+	//     WITHOUT flushing a poisoned ACK. The rate-limited resync fired
+	//     above still re-baselines truth.
 	//
-	//   - The HELPER validates every ACK before acting on it (#2959,
-	//     `userspace-dp/src/event_stream/control.rs`). A sequence outside
-	//     [acked_seq, next_seq] — which a garbage seq overwhelmingly is —
-	//     is IGNORED, the replay buffer is left intact, and it is counted on
-	//     `frames_invalid_acks`. A poisoned watermark does not trim anything.
-	//   - The daemon-side effect on `lastRecvSeq` is absorbed by the
-	//     rate-limited full resync triggered above, which re-baselines from
-	//     table truth rather than from the sequence space.
+	// Honest residual (adjudicated): a garbage seq equal to exactly prevSeq+1
+	// trims one real frame — negligible, resync-healed. A real (aligned) frame
+	// that is BOTH oversized AND noncontiguous drops without trim and replays
+	// into the same drop: a loud reconnect loop, strictly preferable to a
+	// silent trim of live frames. Follow-up if ever observed: trim-after-N
+	// identical desync drops as a bounded loop-breaker.
 	//
-	// THE RESIDUAL, stated so nobody has to rediscover it: a garbage seq that
-	// happens to land INSIDE the live [acked_seq, next_seq] window is honoured
-	// and trims frames the daemon has not applied. Narrow, not impossible, and
-	// strictly smaller than the reconnect loop that removing the advance would
-	// create — which is why #8597 K80 was refuted rather than fixed.
-	//
-	// If that residual is ever worth closing, the remedy is NEITHER "always
-	// trust" nor "never trust" but a PLAUSIBILITY BOUND: a desynced seq is
-	// arbitrary while a real one is adjacent to `prevSeq`, so advancing only on
-	// a near-contiguous seq keeps #6160's loop-break and drops the poisoned
-	// path. That changes a protocol liveness property and is a decision to be
-	// taken deliberately, not a tidy-up to fold into an unrelated change.
-	*prevSeq = seq
-	es.lastRecvSeq.Store(seq)
-	// #6558: the advance goes behind anything still queued unapplied, so the
-	// ACK this function flushes on its drop path (below) cannot trim the
-	// helper's replay buffer over a delta the daemon has not applied. A full
-	// queue means the drop cannot be recorded in order at all, so drop the
-	// connection WITHOUT flushing an ACK — the helper then replays from a
-	// watermark that is still honest, which is the whole point.
-	if !es.applyRefusedFrameInOrder(seq) {
-		return false
-	}
-
-	// Oversized-but-well-framed: the declared length is a trusted frame boundary
-	// (within the discard ceiling). Drain exactly that many bytes to re-align on
-	// the next header and KEEP the connection.
+	// (Prior art: #8597 K80 refuted the unconditional advance as safe-via-
+	// helper-ACK-validation; F-123 closes the in-window garbage case instead.)
 	if length <= maxDiscardableOversizedFrameBytes {
 		if _, err := io.CopyN(io.Discard, conn, int64(length)); err == nil {
+			// Trusted path: aligned header, drained cleanly — advance and keep.
+			*prevSeq = seq
+			es.lastRecvSeq.Store(seq)
+			// #6558: the advance goes behind anything still queued unapplied.
+			if !es.applyRefusedFrameInOrder(seq) {
+				return false
+			}
 			return true
 		}
-		// Drain failed (short / desynced stream) — fall through to the drop path
-		// below to re-establish framing on reconnect.
+		// Drain failed (short / desynced stream) — fall through to the
+		// untrusted path below to re-establish framing on reconnect.
 	}
 
-	// Genuine framing desync (untrusted length, or a failed drain): re-establish
-	// framing by dropping the connection. Flush the advanced ACK first so the
-	// helper trims the frame — the drop is bounded, not a replay loop.
+	// Untrusted path (over-ceiling length, or failed drain): drop the
+	// connection to re-establish framing. Advance the watermark only on
+	// strict contiguity; anything else is desync garbage.
+	if seq == *prevSeq+1 {
+		*prevSeq = seq
+		es.lastRecvSeq.Store(seq)
+		// #6558: the advance goes behind anything still queued unapplied, so
+		// the ACK flushed below cannot trim the helper's replay buffer over a
+		// delta the daemon has not applied. A full queue means the drop
+		// cannot be recorded in order at all, so drop WITHOUT flushing an
+		// ACK — the helper then replays from an honest watermark.
+		if !es.applyRefusedFrameInOrder(seq) {
+			return false
+		}
+	} else {
+		slog.Warn("event stream: refusing oversized-frame watermark advance on implausible seq",
+			"seq", seq, "prev_seq", *prevSeq)
+	}
 	es.sendAckIfNeeded()
 	return false
 }

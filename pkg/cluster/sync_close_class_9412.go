@@ -33,15 +33,15 @@ type sentCloseClass struct {
 // path stamps from one monotonic nextInstallGen, so the older frame carries a
 // strictly lower generation (#2170/#2221).
 // TestLateOldIncarnationCloseFrameIsRefused9412 delivers that order. The guard
-// degrades to unconditional only past genGuardMapCap keys, which is its existing
-// bound.
+// degrades to unconditional only when the effective sender cap is full; the
+// cap starts at the default and grows only on full-of-live demand.
 //
 // MONOTONE. Close classes only progress within an incarnation (CLOSING,
 // TIME_WAIT, RST), so a matched frame carries the higher of its own class and
 // the recorded one.
 //
-// The caller holds genSentMu. Generic over the two wire-key types.
-func stampCloseClassLocked[K comparable](m map[K]sentCloseClass, key K, sessionID uint64, class *uint8) {
+// The caller holds genSentMu and supplies the effective sender cap.
+func stampCloseClassLocked[K comparable](m map[K]sentCloseClass, key K, sessionID uint64, class *uint8, maxEntries int) {
 	if sessionID == 0 {
 		return
 	}
@@ -57,7 +57,7 @@ func stampCloseClassLocked[K comparable](m map[K]sentCloseClass, key K, sessionI
 	if *class == 0 {
 		return
 	}
-	if !ok && len(m) >= genGuardMapCap {
+	if !ok && len(m) >= maxEntries {
 		// Skip-record-on-full, like putGenBounded: no memo for this key, which
 		// degrades to the pre-#9412 window, never to an early reap.
 		return

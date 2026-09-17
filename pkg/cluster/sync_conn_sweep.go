@@ -77,6 +77,13 @@ func (s *SessionSync) ShouldSyncZone(zoneID uint16) bool {
 	}
 	return false
 }
+func (s *SessionSync) sweepNow() uint64 {
+	if s != nil && s.testSweepNow != nil {
+		return s.testSweepNow()
+	}
+	return monotonicSeconds()
+}
+
 func (s *SessionSync) syncSweep() int {
 	if s.IsPrimaryFn == nil && s.IsPrimaryForRGFn == nil {
 		return 0
@@ -184,7 +191,7 @@ func (s *SessionSync) syncSweep() int {
 			newCtr, err1 := s.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsNew)
 			closedCtr, err2 := s.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsClosed)
 			if err1 == nil && err2 == nil && newCtr == s.lastNewCounter && closedCtr == s.lastClosedCounter {
-				s.lastSweepTime = monotonicSeconds()
+				s.lastSweepTime = s.sweepNow()
 				return 0
 			}
 			s.lastNewCounter = newCtr
@@ -192,15 +199,27 @@ func (s *SessionSync) syncSweep() int {
 		}
 	}
 	threshold := s.lastSweepTime
-	now := monotonicSeconds()
+	now := s.sweepNow()
+	// now is also the plausibility ceiling for Created in the filters below:
+	// saturated (MaxUint64) rows are known corrupt/far-future values and must
+	// not re-queue every sweep. A non-saturated row just beyond this scan's
+	// start can instead be a legitimate session born while map enumeration
+	// yields between batches. Keep the sweep non-empty for that case, so an
+	// unchanged telemetry counter cannot advance lastSweepTime past the row
+	// before a later tick sees it.
 	var count int
 	var overflow bool
+	var future bool
 	replaying := s.syncBackfillNeeded.Load()
 	if err := s.sessions.ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if val.IsReverse != 0 {
 			return true
 		}
-		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+		if val.Created > now && val.Created != ^uint64(0) {
+			future = true
+			return true
+		}
+		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
 			announced := s.installTableAnnouncedV4(key)
 			s.stampInstallGenV4(key, &val)
 			// #9752 round 4: the sweep is its own transmission path — it
@@ -240,7 +259,11 @@ func (s *SessionSync) syncSweep() int {
 		if val.IsReverse != 0 {
 			return true
 		}
-		if val.Created >= threshold && s.ShouldSyncZone(val.IngressZone) {
+		if val.Created > now && val.Created != ^uint64(0) {
+			future = true
+			return true
+		}
+		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
 			announced := s.installTableAnnouncedV6(key)
 			s.stampInstallGenV6(key, &val)
 			// #9752 round 4: v6 twin of the sweep fence above.
@@ -270,6 +293,17 @@ func (s *SessionSync) syncSweep() int {
 		s.syncBackfillNeeded.Store(true)
 		slog.Warn("cluster sync: sweep queue overflow, replaying previous window", "threshold", threshold, "queued", count, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
 		return count
+	}
+	if future && count == 0 {
+		// The row was born after this scan's watermark. Do not mark the
+		// sweep empty or move lastSweepTime past it: telemetry counters can
+		// already include the row, making the unchanged-counter fast path
+		// otherwise skip it forever. Saturated MaxUint64 rows intentionally
+		// do not set future above, so known corrupt timestamps still follow
+		// the existing one-time skip behavior.
+		s.lastSweepEmpty = false
+		slog.Debug("cluster sync: sweep saw a session born during enumeration; retaining the prior window", "threshold", threshold, "now", now)
+		return 0
 	}
 	if replaying {
 		s.syncBackfillNeeded.Store(false)

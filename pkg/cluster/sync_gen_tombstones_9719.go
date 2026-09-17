@@ -82,10 +82,10 @@ func (o *genTombstoneOrder[K]) reset() {
 // evicts a live entry, and it never clears the map (#2198 F1).
 //
 // It reports whether gen was stored and whether a tombstone was evicted. The caller holds the map's
-// mutex.
-func putGenEvictingTombstones[K comparable](m map[K]uint64, tombs *genTombstoneOrder[K], key K, gen uint64) (stored, evicted bool) {
-	if _, exists := m[key]; !exists && len(m) >= genGuardMapCap {
+// mutex and supplies the effective cap (SessionSync.genGuardCap).
+func putGenEvictingTombstones[K comparable](m map[K]uint64, tombs *genTombstoneOrder[K], key K, gen uint64, maxEntries int) (stored, evicted bool) {
+	if _, exists := m[key]; !exists && len(m) >= maxEntries {
 		evicted = tombs.evictOldest(m)
 	}
-	return putGenBounded(m, key, gen), evicted
+	return putGenBounded(m, key, gen, maxEntries), evicted
 }

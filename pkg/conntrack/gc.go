@@ -20,6 +20,7 @@ type GCStats struct {
 	TotalEntries        int
 	EstablishedSessions int
 	ExpiredDeleted      int
+	DeadlinesSaturated  int
 	NextSweepDelay      time.Duration
 }
 
@@ -98,6 +99,9 @@ type GC struct {
 	// see accurate idle times.  The helper owns session lifetime;
 	// GC expiry is intentionally bypassed.  See #333.
 	SkipSweep func() bool
+	// testNow overrides the monotonic clock used by sweep and next-sweep
+	// calculations (nil = live clock). Test-only; production never sets it.
+	testNow func() uint64
 }
 
 // NewGC creates a new session garbage collector from runtime-domain providers.
@@ -223,6 +227,28 @@ func (gc *GC) Run(ctx context.Context) {
 	}
 }
 
+// saturatingDeadline adds a session timeout to a LastSeen timestamp without
+// wrapping (#9915 F-118): on overflow the deadline saturates at MaxUint64
+// (never expires on wrapped math) instead of landing in the past and
+// instantly reaping a live session. Reports saturation via saturated, which
+// may be nil for count-only uses (the expiry check already counted the row).
+func saturatingDeadline(lastSeen, timeout uint64, saturated *int) uint64 {
+	if deadline := lastSeen + timeout; deadline >= lastSeen {
+		return deadline
+	}
+	if saturated != nil {
+		*saturated++
+	}
+
+	return ^uint64(0)
+}
+func (gc *GC) monotonicNow() uint64 {
+	if gc != nil && gc.testNow != nil {
+		return gc.testNow()
+	}
+	return monotonicSeconds()
+}
+
 func (gc *GC) sweep() time.Duration {
 	// When userspace dataplane is active, skip the BPF session map scan
 	// entirely — sessions are managed in user-space. Without this, the
@@ -257,8 +283,7 @@ func (gc *GC) sweep() time.Duration {
 		newCtr, err1 := gc.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsNew)
 		closedCtr, err2 := gc.telemetry.GlobalCounter(dataplane.GlobalCtrSessionsClosed)
 		if err1 == nil && err2 == nil &&
-			newCtr == gc.lastSessionCounter &&
-			closedCtr == gc.lastClosedCounter {
+			newCtr == gc.lastSessionCounter && closedCtr == gc.lastClosedCounter {
 			return gc.nextSweepDelay(0, false, false, 0, agingActive, earlyAgeout)
 		}
 		// Counters changed — fall through to full sweep.
@@ -267,13 +292,13 @@ func (gc *GC) sweep() time.Duration {
 	}
 
 	sweepStart := time.Now()
-	now := monotonicSeconds()
+	now := gc.monotonicNow()
 
 	// When in cluster mode and this node is secondary, skip session
 	// expiry — the primary owns session lifetime and syncs deletes.
 	isPrimary := gc.IsLocalPrimary == nil || gc.IsLocalPrimary()
 
-	var total, established, expired int
+	var total, established, expired, saturated int
 	var earliestDeadline uint64
 	toDelete := gc.toDeleteV4[:0]
 
@@ -304,7 +329,7 @@ func (gc *GC) sweep() time.Duration {
 			if agingActive && earlyAgeout > 0 && earlyAgeout < effectiveTimeout {
 				effectiveTimeout = earlyAgeout
 			}
-			deadline := val.LastSeen + effectiveTimeout
+			deadline := saturatingDeadline(val.LastSeen, effectiveTimeout, &saturated)
 			if deadline < now {
 				toDelete = append(toDelete, dataplane.SessionEntryV4{Key: key, Value: val})
 			} else if earliestDeadline == 0 || deadline < earliestDeadline {
@@ -313,7 +338,9 @@ func (gc *GC) sweep() time.Duration {
 		}
 		// Count active (non-expired) forward sessions per src/dst IP.
 		// On secondary, all sessions are active (no local expiry).
-		if countSessions && (!isPrimary || val.LastSeen+uint64(val.Timeout) >= now) {
+		// Count-only use: nil counter (the expiry check above already counted
+		// this row; counting twice would inflate the statistic).
+		if countSessions && (!isPrimary || saturatingDeadline(val.LastSeen, uint64(val.Timeout), nil) >= now) {
 			srcKey := dataplane.SessionCountKey{
 				IP:     binary.NativeEndian.Uint32(key.SrcIP[:]),
 				ZoneID: val.IngressZone,
@@ -378,14 +405,16 @@ func (gc *GC) sweep() time.Duration {
 				if agingActive && earlyAgeout > 0 && earlyAgeout < effectiveTimeout {
 					effectiveTimeout = earlyAgeout
 				}
-				deadline := val.LastSeen + effectiveTimeout
+				deadline := saturatingDeadline(val.LastSeen, effectiveTimeout, &saturated)
 				if deadline < now {
 					toDeleteV6 = append(toDeleteV6, dataplane.SessionEntryV6{Key: key, Value: val})
 				} else if earliestDeadline == 0 || deadline < earliestDeadline {
 					earliestDeadline = deadline
 				}
 			}
-			if countSessions && (!isPrimary || val.LastSeen+uint64(val.Timeout) >= now) {
+			// Count-only use: nil counter (the expiry check above already counted
+			// this row; counting twice would inflate the statistic).
+			if countSessions && (!isPrimary || saturatingDeadline(val.LastSeen, uint64(val.Timeout), nil) >= now) {
 				// XOR-hash IPv6 addresses to uint32 for session count key
 				srcHash := binary.NativeEndian.Uint32(key.SrcIP[0:4]) ^
 					binary.NativeEndian.Uint32(key.SrcIP[4:8]) ^
@@ -446,11 +475,12 @@ func (gc *GC) sweep() time.Duration {
 		}
 	}
 
-	if expired > 0 {
+	if expired > 0 || saturated > 0 {
 		slog.Info("conntrack GC sweep",
 			"total_entries", total,
 			"established", established,
-			"expired_deleted", expired)
+			"expired_deleted", expired,
+			"deadlines_saturated", saturated)
 	}
 
 	gc.lastTotal = total
@@ -499,6 +529,7 @@ func (gc *GC) sweep() time.Duration {
 		TotalEntries:        total,
 		EstablishedSessions: established,
 		ExpiredDeleted:      expired,
+		DeadlinesSaturated:  saturated,
 		NextSweepDelay:      nextDelay,
 	}
 	gc.mu.Unlock()
@@ -507,7 +538,7 @@ func (gc *GC) sweep() time.Duration {
 }
 
 func (gc *GC) nextSweepDelay(earliestDeadline uint64, countSessions, isPrimary bool, total int, agingActive bool, earlyAgeout uint64) time.Duration {
-	return gc.nextSweepDelayAt(monotonicSeconds(), earliestDeadline, countSessions, isPrimary, total, agingActive, earlyAgeout)
+	return gc.nextSweepDelayAt(gc.monotonicNow(), earliestDeadline, countSessions, isPrimary, total, agingActive, earlyAgeout)
 }
 
 func (gc *GC) nextSweepDelayAt(now, earliestDeadline uint64, countSessions, isPrimary bool, total int, agingActive bool, earlyAgeout uint64) time.Duration {

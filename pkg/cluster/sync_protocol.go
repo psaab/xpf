@@ -37,12 +37,40 @@ func MonotonicNanos() int64 {
 }
 
 // rebaseTimestamp adjusts a peer timestamp to the local monotonic clock domain.
+//
+// Saturating (#9915 F-118): a rebase whose result would fall outside the int64
+// range clamps to the far future instead of installing a corrupt-huge value
+// (before saturation it wrapped into the past and instantly reaped), where
+// explicit deletes, bulk reconcile, and traffic-refresh bound the linger.
+// Callers count saturations via rebaseSaturates; this stays pure.
 func rebaseTimestamp(peerTS uint64, offset int64) uint64 {
-	v := int64(peerTS) + offset
-	if v < 0 {
+	if rebaseSaturates(peerTS, offset) {
+		return ^uint64(0)
+	}
+	if offset >= 0 {
+		return peerTS + uint64(offset)
+	}
+	neg := uint64(-(offset + 1)) + 1
+	if peerTS < neg {
 		return 0
 	}
-	return uint64(v)
+	return peerTS - neg
+}
+
+// rebaseSaturates reports whether rebasing peerTS by offset would leave the
+// int64 range (and thus saturate). It is the single range predicate shared by
+// the clamp above and the install-site counter, so counting and clamping can
+// never disagree. Nonnegative offsets saturate past MaxInt64; a negative
+// offset that underflows clamps toward zero instead (exact, uncounted).
+func rebaseSaturates(peerTS uint64, offset int64) bool {
+	if offset >= 0 {
+		return peerTS > uint64(math.MaxInt64)-uint64(offset)
+	}
+	neg := uint64(-(offset + 1)) + 1
+	if peerTS < neg {
+		return false
+	}
+	return peerTS-neg > uint64(math.MaxInt64)
 }
 
 // writeFull loops until all bytes are written or an error occurs, handling
@@ -1336,6 +1364,42 @@ func decodeOneLease(buf []byte) dhcpserver.SyncLease {
 		off += 4
 	}
 	return l
+}
+
+// validLeaseIdentityForFamily reports whether a decoded lease carries the
+// minimal identity its OUTER message family requires (#9915 F-117). Keyed on
+// the message family, never the record's untrusted Family byte: a v4 frame
+// carrying Family=6 records (corrupt or hostile) must not bypass by matching
+// the wrong family's rule. v4 needs HWAddress and/or ClientID (the SyncLease
+// contract); v6 needs DUID; anything else (including family mismatch) drops.
+func validLeaseIdentityForFamily(msgFamily int, l dhcpserver.SyncLease) bool {
+	if l.Family != msgFamily {
+		return false
+	}
+	switch msgFamily {
+	case 4:
+		return l.HWAddress != "" || l.ClientID != ""
+	case 6:
+		return l.DUID != ""
+	default:
+		return false
+	}
+}
+
+// filterDHCPLeasesByIdentity drops records lacking minimal identity for the
+// OUTER message family, returning survivors and the drop count. Pure: callers
+// own counting and the retain-on-empty disposition.
+func filterDHCPLeasesByIdentity(msgFamily int, leases []dhcpserver.SyncLease) ([]dhcpserver.SyncLease, int) {
+	kept := make([]dhcpserver.SyncLease, 0, len(leases))
+	dropped := 0
+	for _, l := range leases {
+		if validLeaseIdentityForFamily(msgFamily, l) {
+			kept = append(kept, l)
+		} else {
+			dropped++
+		}
+	}
+	return kept, dropped
 }
 
 // encodeDHCPLeasePayload serializes a full-set lease push: a 4-byte count

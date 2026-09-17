@@ -267,27 +267,30 @@ func TestLateOldIncarnationCloseFrameIsRefused9412(t *testing.T) {
 // before the table filled still resends its class. Driven on the generic helper
 // directly, with int keys, so the cell does not build 200000 session keys.
 func TestCloseClassMemoIsBoundedAtTheGenerationCap9412(t *testing.T) {
-	m := make(map[int]sentCloseClass, genGuardMapCap)
-	for i := 0; i < genGuardMapCap; i++ {
+	// #9915: small explicit cap — decoupled from the 5M ceiling symbol, same
+	// skip-on-full property, instant volume.
+	const memoCap = 64
+	m := make(map[int]sentCloseClass, memoCap)
+	for i := range memoCap {
 		m[i] = sentCloseClass{sessionID: uint64(i + 1), class: 1}
 	}
 
 	fresh := uint8(2)
-	stampCloseClassLocked(m, genGuardMapCap, 900001, &fresh)
-	if _, grew := m[genGuardMapCap]; grew || len(m) != genGuardMapCap {
-		t.Fatalf("#9412: the close-class memo grew past genGuardMapCap (len=%d)", len(m))
+	stampCloseClassLocked(m, memoCap, 900001, &fresh, memoCap)
+	if _, grew := m[memoCap]; grew || len(m) != memoCap {
+		t.Fatalf("#9412: the close-class memo grew past cap %d (len=%d)", memoCap, len(m))
 	}
 	if fresh != 2 {
 		t.Fatalf("a frame's own class must be sent unchanged when the memo is full, got %d", fresh)
 	}
 
 	existing := uint8(3) // key 7's own incarnation (sessionID 8) progresses to RST
-	stampCloseClassLocked(m, 7, 8, &existing)
+	stampCloseClassLocked(m, 7, 8, &existing, memoCap)
 	if rec := m[7]; rec.class != 3 {
 		t.Fatalf("#9412: at the cap an existing record must still progress, got class %d", rec.class)
 	}
 	resend := uint8(0)
-	stampCloseClassLocked(m, 7, 8, &resend)
+	stampCloseClassLocked(m, 7, 8, &resend, memoCap)
 	if resend != 3 {
 		t.Fatalf("#9412: at the cap a resend of a recorded incarnation must keep its class, got %d", resend)
 	}

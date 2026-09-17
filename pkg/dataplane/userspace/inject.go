@@ -137,14 +137,15 @@ func validateInjectPacketRequestForHelper(req InjectPacketRequest, status Proces
 	// is always below 4096 by the fail-closed check above. The change buys an
 	// earlier refusal with a truthful ceiling, not a fix for a live defect.
 	//
-	// It is NOT the #8597 K79 finding, which is refuted: K79 claimed
+	// #9915 F-124 OVERRIDES the #8597 conclusion recorded here: K79 claimed
 	// `uint16(req.Slot)` truncates the default emit-on-wire source port for
-	// "legal high binding slots". Slots at that magnitude are not legal, which
-	// is why the truncation cannot be reached — and reading THIS line's
-	// constant as the definition of "legal" is what made the row look live.
-	// The parse-side bound in control.go keeps its documented value; its
-	// #5449 cells pin 1048575 as accepted there, and changing an operator-
-	// facing grammar is not what this note justifies.
+	// "legal high binding slots", and the old reading held that narrowing the
+	// operator grammar was unjustified because slots at that magnitude were
+	// merely unaddressable. The cohort refiled the divergence itself as the
+	// defect: a grammar 256x wider than the seam is wire-safe only by call
+	// order, and the truncation runs pre-validation. The parse-side bound now
+	// matches this seam (BindingSlotMapMaxEntries); slots 4096..1048575 were
+	// never addressable, so earlier refusal is strictly more truthful.
 	if req.Slot >= dataplane.BindingSlotMapMaxEntries {
 		return fmt.Errorf("inject slot %d out of range [0, %d)", req.Slot, dataplane.BindingSlotMapMaxEntries)
 	}
@@ -198,6 +199,12 @@ func validateInjectPacketRequestForHelper(req InjectPacketRequest, status Proces
 }
 
 func populateInjectPacketTuple(req *InjectPacketRequest, extra map[string]string, status ProcessStatus) error {
+	// #9915 F-124: validate the slot BEFORE the uint16(req.Slot) source-port
+	// derivation below. Deriving first would silently truncate an out-of-range
+	// slot into a wrong port; the seam check runs later and cannot un-bake it.
+	if req.Slot >= dataplane.BindingSlotMapMaxEntries {
+		return fmt.Errorf("inject slot %d out of range [0, %d)", req.Slot, dataplane.BindingSlotMapMaxEntries)
+	}
 	if status.InjectPacketTupleProtocolVersion < InjectPacketTupleProtocolVersion {
 		return fmt.Errorf("emit-on-wire requires helper inject tuple protocol version %d (helper has %d)",
 			InjectPacketTupleProtocolVersion, status.InjectPacketTupleProtocolVersion)

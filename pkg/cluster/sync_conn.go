@@ -262,6 +262,31 @@ func (s *SessionSync) connIsCurrentIncarnationLocked(conn net.Conn) bool {
 func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.peerIncarnation++
 	s.peerHeartbeatAckEver.Store(false)
+	// Clock provenance (fold-2 HIGH-1): the kept conn primed the new boot —
+	// its BulkStart carried the changed id that triggered this switch (the
+	// sole caller passes the priming slot) — so any ClockSync it carried
+	// came over its own socket from the NEW boot, including ClockSyncs
+	// accepted before the switch: handleNewConnection sends ClockSync
+	// before the cold-prime bulk, and ClockSync is never re-sent, so
+	// erasure would be unbounded. Preserve a proven-new offset and bind
+	// the global to it, so unsynced/new conns fall back to new-boot truth.
+	// Only a kept conn that never primed the new boot (unprimed direct
+	// switch: test-only shape) takes the clear path — the pre-existing
+	// unknown-posture. One socket carries exactly one boot, so a primed
+	// kept conn's offset cannot be dead-boot state.
+	var kept net.Conn
+	switch keepIdx {
+	case 0:
+		kept = s.conn0
+	case 1:
+		kept = s.conn1
+	}
+	if ac, ok := kept.(*authConn); ok && ac.clockSynced.Load() && ac.bootIncarnation.known() && ac.bootIncarnation == s.peerBootIncarnation {
+		s.peerClockOffset.Store(ac.clockOffset.Load())
+	} else {
+		clearConnClockState(kept)
+		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
+	}
 	// #7762: rebase the boot-epoch baseline onto THIS incarnation.
 	//
 	// This path retires an incarnation on #5084 boot-id evidence without going
@@ -308,7 +333,8 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.armColdPrimeLocked()
 	// Stamp AFTER the advance, exactly as installConn does, so the priming
 	// connection belongs to the incarnation it established rather than to the
-	// one just retired.
+	// one just retired. Its clock state was handled at the top of this function
+	// according to its provenance (preserved only for the new boot).
 	switch keepIdx {
 	case 0:
 		s.conn0Gen = s.peerIncarnation
@@ -557,6 +583,17 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int) bool {
 		s.conn1Gen = 0
 		evicted = true
 	}
+	// #9915 F-116: waiters tied to evicted conns can never be answered (their
+	// loops' late disconnects take the stale branch and release nothing) —
+	// abort the not-installed ones now. Caller holds s.mu.
+	//
+	// Review note: this holds with or without reboot evidence. An evicted
+	// socket is closed, and the peer answers a fence on the conn that carried
+	// it, so an ack (if the peer ever sends one) arrives on a socket this node
+	// closed and no receive loop reads. Prompt abort equals the timeout
+	// outcome, faster. Waiters on still-installed fabrics are untouched —
+	// that scoping is the F-116 fix.
+	s.abortFenceAckWaitersFor(nil, true)
 	return evicted
 }
 
@@ -924,6 +961,7 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	if supersededCurrent || epochReboot {
 		s.peerIncarnation++
 		s.peerHeartbeatAckEver.Store(false)
+		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
 		s.evictStaleIncarnationConnsLocked(fabricIdx)
 		if epochReboot {
 			// A changed boot id on this reboot's BulkStart is this reboot too.
@@ -994,6 +1032,16 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	case 1:
 		s.conn1Announced = d.shouldColdPrime
 	}
+	// #9915 F-116: a supersession replaced a live conn without any disconnect,
+	// so waiters tagged with the removed conn would otherwise survive to a
+	// full-timeout burn. Abort the not-installed ones now; still under s.mu.
+	//
+	// Review note: this holds even for a spurious (same-process) supersession.
+	// The replacement closes the old socket above, destroying its ACK path —
+	// the peer answers on the receiving conn, so the ack can only return to
+	// the closed socket. Prompt abort equals the timeout outcome, faster;
+	// waiters on the surviving fabric are untouched.
+	s.abortFenceAckWaitersFor(nil, true)
 	return d
 }
 
@@ -1215,12 +1263,16 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// a stale generation from being resurrected by a future edit that
 		// reuses the field before re-stamping it.
 		s.conn0Gen = 0
+		// #9915 F-118 review: the offset belongs to the connection's
+		// incarnation — a dead conn keeps no clock state behind.
+		clearConnClockState(conn)
 		slog.Info("cluster sync: fabric 0 disconnected")
 	case s.conn1 != nil && s.conn1 == conn:
 		s.conn1.Close()
 		s.conn1 = nil
 		s.configCrypto1 = nil
 		s.conn1Gen = 0
+		clearConnClockState(conn)
 		slog.Info("cluster sync: fabric 1 disconnected")
 	default:
 		slog.Debug("cluster sync: ignoring stale disconnect", "stale", fmt.Sprintf("%p", conn))
@@ -1228,14 +1280,13 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 	}
 	connected := s.conn0 != nil || s.conn1 != nil
 	s.stats.Connected.Store(connected)
-	// #7147: release fence-ack waiters on ANY fabric drop, not only a full
-	// disconnect. The peer answers a fence on the connection it RECEIVED it
-	// on (sendFenceAck is handed the receive loop's conn), so once that
-	// connection is gone the ack can never arrive — the surviving fabric will
-	// not carry it. Leaving the waiter registered would make the takeover burn
-	// the whole FenceConfirmTimeout for an answer that is already impossible.
-	// Fail-open is preserved either way; this is what makes it immediate.
-	s.abortFenceAckWaiters()
+	// #9915 F-116: release only the fence-ack waiters the dropped fabric can
+	// no longer answer (scoped, not abort-all): the peer answers a fence on
+	// the connection it RECEIVED it on, so waiters sent on the surviving
+	// fabric — whose ack path is healthy — stay registered across an idle
+	// fabric flap instead of degrading a CONFIRMED fence to the fail-open
+	// path. A full disconnect still releases everything, immediately.
+	s.abortFenceAckWaitersFor(conn, connected)
 	if !connected {
 		pendingBarriers := s.barrierSeq.Load()
 		ackedBarriers := s.barrierAckSeq.Load()
@@ -1291,6 +1342,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 			close(waiter.ch)
 		}
 		s.clockSynced.Store(false)
+		s.peerClockOffset.Store(0) // #9915 F-118: the offset belongs to the dead incarnation, like clockSynced.
 		// #6650: the peer's snapshot-protocol capability is scoped to the peer
 		// INCARNATION that advertised it, exactly like clockSynced. A full
 		// disconnect ends that incarnation and the peer that reconnects may be

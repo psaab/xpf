@@ -125,9 +125,22 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 					s.bulkMu.Unlock()
 				}
 				offset := s.clockOffsetFor(conn)
+				// #9915 F-118: count only installs that both saturate AND land:
+				// the predicate decides the clamp, installClusterSyncedV4 decides
+				// the guard outcome, and only a landed apply is counted.
+				saturated := rebaseSaturates(val.Created, offset) || rebaseSaturates(val.LastSeen, offset)
+				created, lastSeen := val.Created, val.LastSeen
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
-				s.installClusterSyncedV4(key, val)
+				landed := s.installClusterSyncedV4(key, val)
+				if saturated && landed {
+					n := s.stats.RebaseSaturations.Add(1)
+					if n == 1 || n%64 == 0 {
+						slog.Warn("cluster sync: saturating peer timestamp on rebase overflow; install clamped to far future",
+							"created", created, "last_seen", lastSeen, "offset", offset,
+							"saturated_total", n, "remote", connRemoteAddrString(conn))
+					}
+				}
 			}
 		}
 	case syncMsgSessionV6:
@@ -160,9 +173,20 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 					s.bulkMu.Unlock()
 				}
 				offset := s.clockOffsetFor(conn)
+				// #9915 F-118: see the v4 twin — count only landed saturations.
+				saturated := rebaseSaturates(val.Created, offset) || rebaseSaturates(val.LastSeen, offset)
+				created, lastSeen := val.Created, val.LastSeen
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
-				s.installClusterSyncedV6(key, val)
+				landed := s.installClusterSyncedV6(key, val)
+				if saturated && landed {
+					n := s.stats.RebaseSaturations.Add(1)
+					if n == 1 || n%64 == 0 {
+						slog.Warn("cluster sync: saturating peer timestamp on rebase overflow; install clamped to far future",
+							"created", created, "last_seen", lastSeen, "offset", offset,
+							"saturated_total", n, "remote", connRemoteAddrString(conn))
+					}
+				}
 			}
 		}
 	case syncMsgDeleteV4:
@@ -659,8 +683,14 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDHCPLeaseV4:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)
+		// #9915 F-117 review: check the mark BEFORE decode, but advance it
+		// only when the set actually applies (see advanceIfNewer below). An
+		// admitted-but-retained set (malformed, or filtered to empty) must not
+		// wedge the mark: an injected all-bad high-seq set would otherwise
+		// block honest lower-seq pushes until the sender catches up.
 		s.recvSeqMu.Lock()
-		admit := s.dhcpV4RecvSeq.admit(incarnation, seq)
+		admit := s.dhcpV4RecvSeq.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
@@ -672,22 +702,75 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if !ok {
 			// #7175: a full-set push REPLACES the set, so storing a truncated
 			// prefix would delete every lease past the truncation point. Retain
-			// the prior set, exactly as the stale-sequence guard above does.
+			// the prior set. The mark does not advance (see above).
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed DHCP v4 lease set — standby retains previous set",
 				"incarnation", incarnation, "seq", seq, "bytes", len(base))
 			return
 		}
-		s.storePeerDHCPLeases(4, leases)
+		// Every decoded set is identity-filtered, legacy or sequenced alike:
+		// the filter judges records, not senders. Legacy (untrailered) only
+		// affects ordering (admit-always, never advances the mark).
+		origCount := len(leases)
+		leases, dropped := filterDHCPLeasesByIdentity(4, leases)
+		if dropped > 0 {
+			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(dropped))
+			slog.Warn("cluster sync: dropping DHCP v4 lease records without family identity — keeping the rest",
+				"dropped", dropped, "kept", len(leases), "incarnation", incarnation, "seq", seq)
+		}
+		if len(leases) == 0 && origCount > 0 {
+			// #9915 F-117: a filtered-to-empty set retains the prior held set
+			// (the #7175 posture) — only a genuine count==0 push clears. The
+			// mark does not advance (see above).
+			slog.Warn("cluster sync: DHCP v4 lease set filtered to empty — standby retains previous set",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
+		// Atomic commit (#9915 F-117 review): the high-water advance, the
+		// held-set replacement, and the callback are serialized by
+		// dhcpApplyMu, so commit order == callback order: split out, seq 10
+		// can advance, seq 11 advance+store+callback, then seq 10 store or
+		// callback and regress the held set or its consumer.
+		// Locking: recvSeqMu covers only mark+store inside (nesting
+		// peerDHCPLeasesMu — the only direction that order is taken, so no
+		// cycle); the callback runs under dhcpApplyMu AFTER recvSeqMu is
+		// released, so a consumer can never deadlock on the widely-taken
+		// receive mutex. Lock order dhcpApplyMu -> recvSeqMu ->
+		// peerDHCPLeasesMu, taken only here.
+		if s.testDHCPPreCommit != nil {
+			s.testDHCPPreCommit()
+		}
+		s.dhcpApplyMu.Lock()
+		s.recvSeqMu.Lock()
+		applied := s.recvEpoch == commitEpoch && s.dhcpV4RecvSeq.advanceIfNewer(incarnation, seq)
+		if applied {
+			s.storePeerDHCPLeases(4, leases)
+		}
+		s.recvSeqMu.Unlock()
+		if !applied {
+			s.dhcpApplyMu.Unlock()
+			// Lost a duplicate-fabric race to a newer set that already
+			// applied, or lapped by a receiver reset (epoch changed under
+			// us): drop rather than regress the held set or resurrect a
+			// dead high-water.
+			s.stats.DHCPLeasesStaleIgnored.Add(1)
+			slog.Warn("cluster sync: dropping out-of-order DHCP v4 lease set (stale sequence) — standby retains newer set",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
 		slog.Debug("cluster sync: received DHCP v4 lease set", "count", len(leases), "incarnation", incarnation, "seq", seq)
 		if s.OnDHCPLeasesReceived != nil {
 			s.OnDHCPLeasesReceived(4, leases)
 		}
+		s.dhcpApplyMu.Unlock()
 	case syncMsgDHCPLeaseV6:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)
+		// #9915 F-117 review: see the v4 twin — check before decode, advance
+		// only on apply.
 		s.recvSeqMu.Lock()
-		admit := s.dhcpV6RecvSeq.admit(incarnation, seq)
+		admit := s.dhcpV6RecvSeq.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
@@ -697,19 +780,52 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 		leases, ok := decodeDHCPLeasePayload(base)
 		if !ok {
-			// #7175: a full-set push REPLACES the set, so storing a truncated
-			// prefix would delete every lease past the truncation point. Retain
-			// the prior set, exactly as the stale-sequence guard above does.
+			// #7175: see the v4 twin — retain, no advance.
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed DHCP v6 lease set — standby retains previous set",
 				"incarnation", incarnation, "seq", seq, "bytes", len(base))
 			return
 		}
-		s.storePeerDHCPLeases(6, leases)
+		// Every decoded set is filtered: see the v4 twin.
+		origCount := len(leases)
+		leases, dropped := filterDHCPLeasesByIdentity(6, leases)
+		if dropped > 0 {
+			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(dropped))
+			slog.Warn("cluster sync: dropping DHCP v6 lease records without family identity — keeping the rest",
+				"dropped", dropped, "kept", len(leases), "incarnation", incarnation, "seq", seq)
+		}
+		if len(leases) == 0 && origCount > 0 {
+			// #9915 F-117: see the v4 twin — retain, no advance.
+			slog.Warn("cluster sync: DHCP v6 lease set filtered to empty — standby retains previous set",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
+		// Atomic commit: see the v4 twin (dhcpApplyMu spans commit+callback;
+		// recvSeqMu only mark+store; the callback must not reenter DHCP
+		// receive paths).
+		if s.testDHCPPreCommit != nil {
+			s.testDHCPPreCommit()
+		}
+		s.dhcpApplyMu.Lock()
+		s.recvSeqMu.Lock()
+		applied := s.recvEpoch == commitEpoch && s.dhcpV6RecvSeq.advanceIfNewer(incarnation, seq)
+		if applied {
+			s.storePeerDHCPLeases(6, leases)
+		}
+		s.recvSeqMu.Unlock()
+		if !applied {
+			s.dhcpApplyMu.Unlock()
+			// Lost a duplicate-fabric race or lapped by a reset: see the v4 twin.
+			s.stats.DHCPLeasesStaleIgnored.Add(1)
+			slog.Warn("cluster sync: dropping out-of-order DHCP v6 lease set (stale sequence) — standby retains newer set",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
 		slog.Debug("cluster sync: received DHCP v6 lease set", "count", len(leases), "incarnation", incarnation, "seq", seq)
 		if s.OnDHCPLeasesReceived != nil {
 			s.OnDHCPLeasesReceived(6, leases)
 		}
+		s.dhcpApplyMu.Unlock()
 	case syncMsgFailover:
 		if len(payload) < 9 {
 			slog.Warn("cluster sync: failover message too short")
@@ -877,7 +993,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		peerMono := binary.LittleEndian.Uint64(payload[:8])
-		localMono := monotonicSeconds()
+		localMono := s.clockSyncLocalMono()
 		// #9653: the offset rebases Created/LastSeen of every session installed
 		// from this peer, and it used to be stored with no bound. peerMono 2^63-1
 		// rebased every later install to 0, so the standby aged the sessions out;
@@ -895,13 +1011,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		offset := int64(localMono) - int64(peerMono)
 		// A bound cannot tell a plausible false reading from a true one, so the
 		// offset belongs to the connection that carried it: it rebases only the
-		// sessions that connection carries (clockOffsetFor).
-		if ac, ok := conn.(*authConn); ok {
-			ac.clockOffset.Store(offset)
-			ac.clockSynced.Store(true)
+		// sessions that connection carries (clockOffsetFor). Publication is gated
+		// on the connection still being installed and current: a frame already
+		// read off a conn that retired (disconnect, supersession, incarnation
+		// advance) must not republish the dead incarnation's offset.
+		if !s.publishClockSyncIfCurrent(conn, offset) {
+			slog.Debug("cluster sync: dropping clock sync from a retired connection; the current incarnation's offset stays in force",
+				"peer_mono", peerMono, "local_mono", localMono, "remote", connRemoteAddrString(conn))
+			return
 		}
-		s.peerClockOffset.Store(offset)
-		s.clockSynced.Store(true)
 		slog.Info("cluster sync: clock synced with peer", "peer_mono", peerMono, "local_mono", localMono, "offset", offset)
 	case syncMsgPrepareActivation:
 		if len(payload) < 1 {

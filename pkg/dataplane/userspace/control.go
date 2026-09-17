@@ -15,22 +15,23 @@ const (
 )
 
 // parseBindingSlot parses a CLI/gRPC binding-slot argument and rejects
-// negatives and values >= dataplane.BindingArrayMaxEntries. A valid slot
-// lives in [0, BindingArrayMaxEntries), the max_entries of the
-// "userspace_bindings" array (MaxInterfaces * BindingQueuesPerIface).
+// negatives and values >= dataplane.BindingSlotMapMaxEntries. A valid slot
+// lives in [0, BindingSlotMapMaxEntries): the planner's dense slot dimension
+// (4096), which bounds the helper maps keyed by slot (userspace_heartbeat,
+// userspace_xsk_map) — NOT BindingArrayMaxEntries (1048576), which bounds the
+// COMPOSED index into userspace_bindings and is 256x wider (#7497, #9915
+// F-124). Slots the helper cannot address are refused here, truthfully and
+// early, instead of failing later as "unknown binding slot".
 // Without the bounds check a "-1" slot passes strconv.Atoi and wraps to
-// 4294967295 on the uint32 cast (#5449), which selects an out-of-bounds
-// binding-array slot (and, on the inject path, is later truncated by
-// uint16(req.Slot) into a wrong source port). The bound is compared in
-// int space so a value larger than uint32 max cannot alias a valid slot
-// via truncation.
+// 4294967295 on the uint32 cast (#5449). The bound is compared in int space
+// so a value larger than uint32 max cannot alias a valid slot via truncation.
 func parseBindingSlot(arg string) (uint32, error) {
 	n, err := strconv.Atoi(arg)
 	if err != nil {
 		return 0, fmt.Errorf("invalid slot: %s", arg)
 	}
-	if n < 0 || n >= int(dataplane.BindingArrayMaxEntries) {
-		return 0, fmt.Errorf("slot %d out of range [0, %d)", n, dataplane.BindingArrayMaxEntries)
+	if n < 0 || n >= int(dataplane.BindingSlotMapMaxEntries) {
+		return 0, fmt.Errorf("slot %d out of range [0, %d)", n, dataplane.BindingSlotMapMaxEntries)
 	}
 	return uint32(n), nil
 }
