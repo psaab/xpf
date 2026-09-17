@@ -1,0 +1,3184 @@
+$ cargo test server::tests::update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629 -- --exact --nocapture
+warning: xpf-userspace-dp@0.1.0: #9726: the build host's libbpf (pkg-config) is 1.7.0, but the helper links vendored libbpf 1.6.3
+warning: unused import: `evaluate_policy`
+  --> src/afxdp/mod.rs:19:64
+   |
+19 |     AppCatalog, PolicyAction, PolicyCounterStore, PolicyState, evaluate_policy,
+   |                                                                ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SessionCounters`
+  --> src/afxdp/mod.rs:25:26
+   |
+25 |     ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,
+   |                          ^^^^^^^^^^^^^^^
+
+warning: unused import: `core::ptr::NonNull`
+  --> src/afxdp/mod.rs:35:5
+   |
+35 | use core::ptr::NonNull;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `IpNet`, `Ipv4Net`, and `Ipv6Net`
+  --> src/afxdp/mod.rs:36:13
+   |
+36 | use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+   |             ^^^^^  ^^^^^^^  ^^^^^^^
+
+warning: unused imports: `DEBUG_STATE_PUBLISH_MASK`, `IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS`, `advance_debug_state_publish_counter`, `flush_v_min_scratches_into`, and `idle_debug_state_publish_due`
+  --> src/afxdp/binding_state/mod.rs:51:5
+   |
+51 |     advance_debug_state_publish_counter, flush_v_min_scratches_into,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+52 |     idle_debug_state_publish_due, update_binding_debug_state,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+53 |     update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
+   |                                      ^^^^^^^^^^^^^^^^^^^^^^^^
+54 |     IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `host_inbound_admits`
+  --> src/afxdp/forwarding/mod.rs:26:5
+   |
+26 |     host_inbound_admits, host_inbound_admits_iface, zone_host_inbound_from_snapshot,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `infer_connected_route_target_v4`, `infer_connected_route_target_v6`, `parse_route_next_hop_v6`, `parse_route_next_hop`, `resolve_ifindex`, `resolve_route_next_hops_v4`, and `resolve_route_next_hops_v6`
+  --> src/afxdp/forwarding_build/mod.rs:45:5
+   |
+45 |     infer_connected_route_target_v4, infer_connected_route_target_v6, parse_route_next_hop,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+46 |     parse_route_next_hop_v6, resolve_ifindex, resolve_route_next_hops_v4, resolve_route_next_hops_v6,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `eth_header_len` and `write_udp_header`
+  --> src/afxdp/frame/mod.rs:38:41
+   |
+38 |     TPID_8021AD, TPID_8021Q, TxVlanTag, eth_header_len, write_eth_header,
+   |                                         ^^^^^^^^^^^^^^
+39 |     write_eth_header_tagged, write_ipv4_header, write_ipv6_header, write_udp_header,
+   |                                                                    ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `adjust_l4_checksum_ipv4_words` and `checksum16_ipv4`
+  --> src/afxdp/frame/mod.rs:62:34
+   |
+62 |     adjust_l4_checksum_ipv4_src, adjust_l4_checksum_ipv4_words, adjust_l4_checksum_ipv6_words,
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+63 |     checksum16, checksum16_add_bytes, checksum16_adjust, checksum16_finish, checksum16_ipv4,
+   |                                                                             ^^^^^^^^^^^^^^^
+
+warning: unused imports: `live_frame_ports`, `metadata_tuple_complete`, `parse_flow_ports`, `parse_ipv4_session_flow_from_frame`, and `parse_zone_encoded_fabric_ingress`
+  --> src/afxdp/frame/mod.rs:90:68
+   |
+90 |     frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
+   |                                                                    ^^^^^^^^^^^^^^^^
+91 |     live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
+   |                                                               ^^^^^^^^^^^^^^^^^^^^^^^
+92 |     nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
+93 |     packet_rel_l4_offset_and_protocol, parse_flow_ports, parse_ipv4_session_flow_from_frame,
+   |                                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+94 |     parse_packet_destination_from_frame, parse_session_flow_from_bytes,
+95 |     parse_session_flow_from_frame, parse_session_flow_from_meta, parse_zone_encoded_fabric_ingress,
+   |                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ipv6_is_any_fragment`, `l3_session_flow_from_meta`, and `parse_session_flow`
+   --> src/afxdp/frame/mod.rs:101:60
+    |
+101 |     ipv4_is_non_first_fragment, ipv6_ext_chain_over_limit, ipv6_is_any_fragment,
+    |                                                            ^^^^^^^^^^^^^^^^^^^^
+...
+104 |     l3_session_flow_from_meta,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+107 |     parse_session_flow, post_nat_expected_ports,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `extract_tcp_window`
+   --> src/afxdp/frame/mod.rs:126:52
+    |
+126 | pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
+    |                                                    ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `segment_forwarded_tcp_frames`
+   --> src/afxdp/frame/mod.rs:139:35
+    |
+139 |     finalize_tcp_segment_headers, segment_forwarded_tcp_frames,
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `WorkerSessionCounters`
+   --> src/afxdp/mod.rs:101:46
+    |
+101 | pub(crate) use ha::{SessionCounterQueryWait, WorkerSessionCounters};
+    |                                              ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `cos_item_len` and `cos_queue_front`
+  --> src/afxdp/cos/tx_completion.rs:21:34
+   |
+21 |     cos_exact_queue_serviceable, cos_item_len, cos_queue_front, cos_queue_is_empty,
+   |                                  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused import: `cos_exact_queue_serviceable`
+  --> src/afxdp/cos/mod.rs:24:5
+   |
+24 |     cos_exact_queue_serviceable, cos_item_len, cos_queue_clear_orphan_snapshot_after_drop,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::super::*`
+ --> src/afxdp/session_glue/commands/export_owner_rg_sessions.rs:1:5
+  |
+1 | use super::super::*;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `DELETE_DROP_SWEEP_BUDGET`
+ --> src/afxdp/session_glue/mod.rs:7:63
+  |
+7 | pub(in crate::afxdp) use delete_drop_sweep::{DeleteDropSweep, DELETE_DROP_SWEEP_BUDGET};
+  |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TxDropReason`
+  --> src/afxdp/tx/mod.rs:15:5
+   |
+15 |     TxDropReason, TxError, TxRetryReason, recycle_cancelled_prepared_offset_with_shared,
+   |     ^^^^^^^^^^^^
+
+warning: unused imports: `extract_l3_packet_with_nat` and `maybe_reinject_slow_path`
+  --> src/afxdp/tx/dispatch/mod.rs:58:5
+   |
+58 |     extract_l3_packet_with_nat, handle_forward_build_failure, maybe_reinject_slow_path,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^                                ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `extract_l3_packet_from_frame` and `extract_l3_packet`
+  --> src/afxdp/tx/dispatch/mod.rs:64:42
+   |
+64 | pub(in crate::afxdp::tx) use slow_path::{extract_l3_packet, extract_l3_packet_from_frame};
+   |                                          ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `GeneratedReplyVerdict`, `resolve_cached_cos_tx_selection_flowless`, `resolve_cached_cos_tx_selection`, `resolve_cos_queue_id`, and `resolve_cos_tx_selection`
+  --> src/afxdp/tx/mod.rs:35:21
+   |
+35 |     CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply, enqueue_local_into_cos,
+   |                     ^^^^^^^^^^^^^^^^^^^^^
+36 |     reclassify_cached_ba_queue, resolve_cached_cos_tx_queue_id, resolve_cached_cos_tx_selection,
+   |                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+37 |     resolve_cached_cos_tx_selection_flowless, resolve_cached_cos_tx_selection_prenat,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+38 |     resolve_cos_queue_id, resolve_cos_tx_selection, resolve_cos_tx_selection_at,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NOT_PARTICIPATING` and `PaddedVtimeSlot`
+ --> src/afxdp/types/mod.rs:9:52
+  |
+9 |     AcquireV8ShortfallCause, ExactDemandQueueMask, NOT_PARTICIPATING, PaddedVtimeSlot,
+  |                                                    ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: ambiguous import visibility: pub(in crate::afxdp) or pub(crate)
+   --> src/afxdp/mod.rs:238:30
+    |
+238 | pub(crate) use self::types::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
+    |                              ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: ambiguous because of multiple glob imports of a name in the same module
+note: `ForwardingDisposition` could refer to the enum imported here
+   --> src/afxdp/types/mod.rs:22:26
+    |
+ 22 | pub(in crate::afxdp) use forwarding::*;
+    |                          ^^^^^^^^^^^^^
+    = help: consider adding an explicit import of `ForwardingDisposition` to disambiguate
+note: `ForwardingDisposition` could also refer to the enum imported here
+   --> src/afxdp/types/mod.rs:1:5
+    |
+  1 | use super::*;
+    |     ^^^^^^^^
+    = help: consider adding an explicit import of `ForwardingDisposition` to disambiguate
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
+    = note: `#[warn(ambiguous_import_visibilities)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: ambiguous import visibility: pub(in crate::afxdp) or pub(crate)
+   --> src/afxdp/mod.rs:238:53
+    |
+238 | pub(crate) use self::types::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
+    |                                                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: ambiguous because of multiple glob imports of a name in the same module
+note: `ForwardingResolution` could refer to the struct imported here
+   --> src/afxdp/types/mod.rs:22:26
+    |
+ 22 | pub(in crate::afxdp) use forwarding::*;
+    |                          ^^^^^^^^^^^^^
+    = help: consider adding an explicit import of `ForwardingResolution` to disambiguate
+note: `ForwardingResolution` could also refer to the struct imported here
+   --> src/afxdp/types/mod.rs:1:5
+    |
+  1 | use super::*;
+    |     ^^^^^^^^
+    = help: consider adding an explicit import of `ForwardingResolution` to disambiguate
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
+
+warning: ambiguous import visibility: pub(in crate::afxdp) or pub(crate)
+   --> src/afxdp/mod.rs:238:75
+    |
+238 | pub(crate) use self::types::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
+    |                                                                           ^^^^^^^^^^^^^
+    |
+    = note: ambiguous because of multiple glob imports of a name in the same module
+note: `NeighborEntry` could refer to the struct imported here
+   --> src/afxdp/types/mod.rs:22:26
+    |
+ 22 | pub(in crate::afxdp) use forwarding::*;
+    |                          ^^^^^^^^^^^^^
+    = help: consider adding an explicit import of `NeighborEntry` to disambiguate
+note: `NeighborEntry` could also refer to the struct imported here
+   --> src/afxdp/types/mod.rs:1:5
+    |
+  1 | use super::*;
+    |     ^^^^^^^^
+    = help: consider adding an explicit import of `NeighborEntry` to disambiguate
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
+
+warning: unused imports: `DecapOutcome`, `EncapOutcome`, and `InstallSessionError`
+   --> src/afxdp/wg/mod.rs:141:17
+    |
+141 |     DecapError, DecapOutcome, EncapError, EncapOutcome, InitiationAction, InstallSessionError,
+    |                 ^^^^^^^^^^^^              ^^^^^^^^^^^^                    ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::super::*`
+  --> src/afxdp/coordinator/reconcile/mod.rs:17:5
+   |
+17 | use super::super::*;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `super::super::*`
+  --> src/afxdp/coordinator/refresh_bindings.rs:36:5
+   |
+36 | use super::super::*;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `lifecycle::REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS`
+  --> src/afxdp/worker/mod.rs:14:16
+   |
+14 | pub(crate) use lifecycle::REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `OwnerProfileSnapshot`, `merge_binding_scoped_owner_profile`, `merge_owner_profile_sum`, and `owner_profile_snapshot`
+  --> src/afxdp/worker/mod.rs:80:5
+   |
+80 |     OwnerProfileSnapshot, merge_binding_scoped_owner_profile, merge_owner_profile_sum,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+81 |     owner_profile_snapshot,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `reset_binding_cos_runtime`
+  --> src/afxdp/worker/mod.rs:85:60
+   |
+85 |     build_worker_cos_statuses, cos_runtime_config_changed, reset_binding_cos_runtime,
+   |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `evaluate_non_pbr_input_filter_counters_cached` and `evaluate_non_pbr_input_filter_log_only`
+   --> src/afxdp/poll_descriptor/mod.rs:100:36
+    |
+100 |     evaluate_non_pbr_input_filter, evaluate_non_pbr_input_filter_counters_cached,
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+101 |     evaluate_non_pbr_input_filter_log_only, filter_terminal, host_inbound_gated_lo0_action,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `interface_input_filter_varies_per_packet`
+  --> src/filter/engine/mod.rs:18:5
+   |
+18 |     interface_input_filter_varies_per_packet, interface_output_filter_has_dscp_match,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `evaluate_filter_counted`, `evaluate_filter`, `evaluate_interface_filter_counted`, `evaluate_interface_filter`, `evaluate_interface_output_filter_counted`, `evaluate_interface_output_filter`, `evaluate_lo0_filter_log_match`, and `evaluate_lo0_filter`
+  --> src/filter/engine/mod.rs:22:5
+   |
+22 |     evaluate_filter, evaluate_filter_counted, evaluate_filter_ref_routing_instance_event_counted,
+   |     ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+23 |     evaluate_filter_ref_routing_instance_uncounted,
+24 |     evaluate_interface_filter, evaluate_interface_filter_counted,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+25 |     evaluate_interface_filter_log_match, evaluate_interface_filter_non_routing_counted,
+26 |     evaluate_interface_output_filter, evaluate_interface_output_filter_counted, evaluate_lo0_filter,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+27 |     evaluate_lo0_filter_counted, evaluate_lo0_filter_log_match, filter_ref_static_verdict,
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `evaluate_interface_filter_tx_selection_counted` and `evaluate_interface_output_filter_tx_selection_counted`
+  --> src/filter/engine/mod.rs:45:5
+   |
+45 |     evaluate_interface_filter_tx_selection_counted,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+46 |     evaluate_interface_output_filter_tx_selection_counted, filter_state_has_input_tx_selection,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PROTO_UDP`
+  --> src/nat/destination.rs:11:45
+   |
+11 | pub(super) use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
+   |                                             ^^^^^^^^^
+
+warning: unused import: `dropped_persistent_lease_note`
+ --> src/nat/source/mod.rs:4:34
+  |
+4 | pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_leases};
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PortAllocatorSnapshot`
+   --> src/nat/mod.rs:199:72
+    |
+199 |     DeterministicV6, MAX_NAT_HOLDER_WORKERS, NatHolder, PortAllocator, PortAllocatorSnapshot,
+    |                                                                        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DnatKey` and `DnatValue`
+   --> src/nat/mod.rs:201:30
+    |
+201 | pub(crate) use destination::{DnatKey, DnatTable, DnatValue};
+    |                              ^^^^^^^             ^^^^^^^^^
+
+warning: unused imports: `parse_source_nat_rules`, `peer_owns_identity_in`, and `retained_pool_index_map`
+   --> src/nat/mod.rs:212:51
+    |
+212 |     PoolAddressOwners, nat64_refuse_if_peer_owns, peer_owns_identity_in,
+    |                                                   ^^^^^^^^^^^^^^^^^^^^^
+...
+216 |     match_source_nat_result_for_tuple, parse_source_nat_rules,
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^
+...
+223 |     reserve_synced_source_nat_allocation_untracked, retained_pool_index_map,
+    |                                                     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SourceNatMatchSnapshot`
+   --> src/nat/mod.rs:243:25
+    |
+243 | pub(crate) use source::{SourceNatMatchSnapshot, process_source_nat_match_counters};
+    |                         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `allocator::TranslatedTuple`
+   --> src/nat/mod.rs:246:16
+    |
+246 | pub(crate) use allocator::TranslatedTuple;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StaticNatEntry`
+   --> src/nat/mod.rs:247:29
+    |
+247 | pub(crate) use static_nat::{StaticNatEntry, StaticNatTable};
+    |                             ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::session::SessionDecision`
+   --> src/nat64.rs:185:5
+    |
+185 | use crate::session::SessionDecision;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AtomicU64`
+   --> src/nat64.rs:187:25
+    |
+187 | use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    |                         ^^^^^^^^^
+
+warning: unused imports: `Arc` and `Mutex`
+   --> src/nat64.rs:188:17
+    |
+188 | use std::sync::{Arc, Mutex};
+    |                 ^^^  ^^^^^
+
+warning: unused import: `TCP_RST`
+  --> src/screen/packet.rs:18:53
+   |
+18 | pub(super) use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, TCP_URG};
+   |                                                     ^^^^^^^
+
+warning: unused imports: `SYN_COOKIE_MSS_VALUES` and `SynCookieValidation`
+   --> src/screen/mod.rs:198:5
+    |
+198 |     SYN_COOKIE_MSS_VALUES, SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+199 |     SynCookieClientKey, SynCookieKeyRing, SynCookieTuple, SynCookieValidation,
+    |                                                           ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `TCP_FIN` and `TCP_RST`
+   --> src/session/mod.rs:506:24
+    |
+506 | use crate::tcp_flags::{TCP_FIN, TCP_RST, has_fin, has_rst, is_closing, is_initial_syn, is_syn_ack};
+    |                        ^^^^^^^  ^^^^^^^
+
+warning: unused imports: `DateTime` and `Utc`
+ --> src/protocol/control.rs:7:14
+  |
+7 | use chrono::{DateTime, Utc};
+  |              ^^^^^^^^  ^^^
+
+warning: unused imports: `BindingCountersSnapshot`, `BindingStatus`, `ExceptionStatus`, `QueueStatus`, and `WorkerRuntimeStatus`
+  --> src/protocol/control.rs:16:5
+   |
+16 |     BindingCountersSnapshot, BindingStatus, ExceptionStatus, HAGroupStatus, QueueStatus,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^                 ^^^^^^^^^^^
+17 |     SessionDeltaInfo, WorkerRuntimeStatus,
+   |                       ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CoSActiveFlowCountStatus` and `CoSInterfaceStatus`
+  --> src/protocol/control.rs:19:18
+   |
+19 | use super::cos::{CoSActiveFlowCountStatus, CoSInterfaceStatus};
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NatRuleCounterStatus` and `SourceNatPoolStatus`
+  --> src/protocol/control.rs:20:18
+   |
+20 | use super::nat::{NatRuleCounterStatus, SourceNatPoolStatus};
+   |                  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `FlowWorkerStatus` and `PacketResolution`
+  --> src/protocol/control.rs:21:25
+   |
+21 | use super::resolution::{FlowWorkerStatus, PacketResolution};
+   |                         ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `FirewallFilterTermCounterStatus`, `PolicyRuleCounterStatus`, and `ThreeColorPolicerStatus`
+  --> src/protocol/control.rs:23:5
+   |
+23 |     FirewallFilterTermCounterStatus, PolicyRuleCounterStatus, ThreeColorPolicerStatus,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `UserspaceCapabilities`
+  --> src/protocol/control.rs:25:73
+   |
+25 | use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, UserspaceCapabilities};
+   |                                                                         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Write`
+  --> src/afxdp/mod.rs:40:27
+   |
+40 | use std::io::{self, Read, Write};
+   |                           ^^^^^
+
+warning: unused import: `KeyInit`
+  --> src/afxdp/wg/cookie.rs:67:29
+   |
+67 | use chacha20poly1305::{Key, KeyInit as AeadKeyInit, XChaCha20Poly1305, XNonce};
+   |                             ^^^^^^^
+
+warning: unnecessary `unsafe` block
+   --> src/afxdp/frame/checksum.rs:246:9
+    |
+246 |         unsafe {
+    |         ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `e`
+    --> src/afxdp/session_glue/mod.rs:1060:28
+     |
+1060 |                 if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
+     |                            ^ help: if this is intentional, prefix it with an underscore: `_e`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `mtu_signalled` is never read
+    --> src/afxdp/tx/dispatch/mod.rs:873:33
+     |
+ 873 |         let mut mtu_signalled = false;
+     |                                 ^^^^^ this value is reassigned later and never used
+...
+1033 |                 (ptb_reply, mtu_signalled) = compute_forwarded_egress_ptb(
+     |                             ------------- `mtu_signalled` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/afxdp/coordinator/reconcile/mod.rs:336:13
+    |
+336 |         let mut preserved = teardown::tear_down(self, will_rebind);
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/afxdp/coordinator/wg_control/mod.rs:195:9
+    |
+195 |     let mut tun = match open_wg_tun(&tunnel_name) {
+    |         ----^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `slot`
+   --> src/afxdp/worker/loop_body/setup.rs:177:13
+    |
+177 |         let slot = plan.status.slot;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_slot`
+
+warning: unused variable: `slot`
+    --> src/afxdp/worker/mod.rs:1168:13
+     |
+1168 |         let slot = plan.status.slot;
+     |             ^^^^ help: if this is intentional, prefix it with an underscore: `_slot`
+
+warning: unused variable: `e`
+   --> src/afxdp/worker_queue.rs:367:20
+    |
+367 |         if let Err(e) = sessions.pptp_mut().install(call, control, now_ns) {
+    |                    ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: value assigned to `source_nat_release_key` is never read
+    --> src/afxdp/poll_descriptor/mod.rs:6158:66
+     |
+6158 |   ...                   let mut source_nat_release_key = None;
+     |                                                          ^^^^ this value is reassigned later and never used
+...
+6246 | / ...                               source_nat_release_key =
+6247 | | ...                                   Some(nat_match_flow.forward_key.clone());
+     | |______________________________________________________________________________- `source_nat_release_key` is overwritten here before the previous value is read
+
+warning: value assigned to `warned` is never read
+   --> src/event_stream/connection.rs:124:21
+    |
+124 |                     warned = false;
+    |                     ^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `timeout_ns`
+    --> src/nat/allocator.rs:3472:38
+     |
+3472 |         if let Some((persistent_key, timeout_ns)) = persistent {
+     |                                      ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timeout_ns`
+
+warning: value assigned to `close_class_before` is never read
+   --> src/session/lookup.rs:95:38
+    |
+ 95 |         let mut close_class_before = 0u8;
+    |                                      ^^^ this value is reassigned later and never used
+...
+116 |             close_class_before = entry.tcp_close_class_wire();
+    |             ------------------------------------------------- `close_class_before` is overwritten here before the previous value is read
+
+warning: type `runtime_view::RuntimeView` is more private than the item `SessionDomain::runtime_view`
+   --> src/afxdp/ha/session_domain.rs:112:5
+    |
+112 |     pub(crate) fn runtime_view(&self) -> arc_swap::Guard<Arc<RuntimeView>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `SessionDomain::runtime_view` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime_view::RuntimeView` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/runtime_view.rs:93:1
+    |
+ 93 | pub(in crate::afxdp) struct RuntimeView {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `afxdp::types::forwarding::ForwardingState` is more private than the item `tunnel_purge::<impl coordinator::Coordinator>::purge_remapped_tunnel_sessions`
+  --> src/afxdp/ha/tunnel_purge.rs:39:5
+   |
+39 | /     pub(crate) fn purge_remapped_tunnel_sessions(
+40 | |         &self,
+41 | |         purge_ids: &[u16],
+42 | |         release_against: &crate::afxdp::types::ForwardingState,
+43 | |     ) -> usize {
+   | |______________^ method `tunnel_purge::<impl coordinator::Coordinator>::purge_remapped_tunnel_sessions` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::forwarding::ForwardingState` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/forwarding.rs:34:1
+   |
+34 | pub(in crate::afxdp) struct ForwardingState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::forwarding::ForwardingState` is more private than the item `coordinator::Coordinator::forwarding`
+   --> src/afxdp/coordinator/mod.rs:309:5
+    |
+309 |     pub(crate) forwarding: ForwardingState,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `coordinator::Coordinator::forwarding` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::forwarding::ForwardingState` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/forwarding.rs:34:1
+    |
+ 34 | pub(in crate::afxdp) struct ForwardingState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::ValidationState` is more private than the item `coordinator::Coordinator::validation`
+   --> src/afxdp/coordinator/mod.rs:318:5
+    |
+318 |     pub(crate) validation: ValidationState,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `coordinator::Coordinator::validation` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime::ValidationState` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/runtime.rs:457:1
+    |
+457 | pub(in crate::afxdp) struct ValidationState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::WorkerCommand` is more private than the item `coordinator::Coordinator::replay_synced_sessions`
+    --> src/afxdp/coordinator/mod.rs:1114:5
+     |
+1114 | /     pub(crate) fn replay_synced_sessions(
+1115 | |         &self,
+1116 | |         entries: &[SyncedSessionEntry],
+1117 | |         worker_command_queues: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+1118 | |         session_map: SteeringMap<'_>,
+1119 | |     ) -> usize {
+     | |______________^ method `coordinator::Coordinator::replay_synced_sessions` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime::WorkerCommand` is only usable at visibility `pub(in crate::afxdp)`
+    --> src/afxdp/types/runtime.rs:536:1
+     |
+ 536 | pub(in crate::afxdp) enum WorkerCommand {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::map_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:35:5
+   |
+35 |     pub(crate) map_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::map_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::heartbeat_map_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:36:5
+   |
+36 |     pub(crate) heartbeat_map_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::heartbeat_map_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::session_map_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:37:5
+   |
+37 |     pub(crate) session_map_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::session_map_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::conntrack_v4_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:38:5
+   |
+38 |     pub(crate) conntrack_v4_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::conntrack_v4_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::conntrack_v6_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:39:5
+   |
+39 |     pub(crate) conntrack_v6_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::conntrack_v6_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::dnat_table_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:40:5
+   |
+40 |     pub(crate) dnat_table_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::dnat_table_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::bpf_map::pin::OwnedFd` is more private than the item `BpfMaps::dnat_table_v6_fd`
+  --> src/afxdp/coordinator/bpf_maps.rs:41:5
+   |
+41 |     pub(crate) dnat_table_v6_fd: Option<OwnedFd>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BpfMaps::dnat_table_v6_fd` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::bpf_map::pin::OwnedFd` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/bpf_map/pin.rs:20:1
+   |
+20 | pub(in crate::afxdp) struct OwnedFd {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::binding_state::BindingLiveState` is more private than the item `SharedCoSState::owner_live_by_queue`
+  --> src/afxdp/coordinator/cos_state.rs:5:5
+   |
+ 5 |     pub(crate) owner_live_by_queue: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<BindingLiveState>>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SharedCoSState::owner_live_by_queue` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::binding_state::BindingLiveState` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/binding_state/mod.rs:93:1
+   |
+93 | pub(in crate::afxdp) struct BindingLiveState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `lease::SharedCoSRootLease` is more private than the item `SharedCoSState::root_leases`
+  --> src/afxdp/coordinator/cos_state.rs:6:5
+   |
+ 6 |     pub(crate) root_leases: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSRootLease>>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SharedCoSState::root_leases` is reachable at visibility `pub(crate)`
+   |
+note: but type `lease::SharedCoSRootLease` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/shared_cos_lease/lease.rs:50:1
+   |
+50 | pub(in crate::afxdp) struct SharedCoSRootLease {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `shared_cos_lease::backlog::SharedCoSExactBacklog` is more private than the item `SharedCoSState::exact_backlogs`
+   --> src/afxdp/coordinator/cos_state.rs:7:5
+    |
+  7 |     pub(crate) exact_backlogs: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSExactBacklog>>>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SharedCoSState::exact_backlogs` is reachable at visibility `pub(crate)`
+    |
+note: but type `shared_cos_lease::backlog::SharedCoSExactBacklog` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/shared_cos_lease/backlog.rs:123:1
+    |
+123 | pub(in crate::afxdp) struct SharedCoSExactBacklog {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `lease::SharedCoSQueueLease` is more private than the item `SharedCoSState::queue_leases`
+  --> src/afxdp/coordinator/cos_state.rs:8:5
+   |
+ 8 |     pub(crate) queue_leases: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SharedCoSState::queue_leases` is reachable at visibility `pub(crate)`
+   |
+note: but type `lease::SharedCoSQueueLease` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/shared_cos_lease/lease.rs:32:1
+   |
+32 | pub(in crate::afxdp) struct SharedCoSQueueLease {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `vtime::SharedCoSQueueVtimeFloor` is more private than the item `SharedCoSState::queue_vtime_floors`
+   --> src/afxdp/coordinator/cos_state.rs:14:5
+    |
+ 14 |     pub(crate) queue_vtime_floors: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `SharedCoSState::queue_vtime_floors` is reachable at visibility `pub(crate)`
+    |
+note: but type `vtime::SharedCoSQueueVtimeFloor` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/shared_cos_lease/vtime.rs:125:1
+    |
+125 | pub(in crate::afxdp) struct SharedCoSQueueVtimeFloor {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::BindingSetupFailure` is more private than the item `reconcile::stage::WorkerBindShortfall::failures`
+   --> src/afxdp/coordinator/reconcile/stage.rs:71:5
+    |
+ 71 |     pub(crate) failures: Vec<BindingSetupFailure>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `reconcile::stage::WorkerBindShortfall::failures` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime::BindingSetupFailure` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/runtime.rs:274:1
+    |
+274 | pub(in crate::afxdp) struct BindingSetupFailure {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::binding_state::BindingLiveState` is more private than the item `afxdp::worker::BindingWorker::live`
+   --> src/afxdp/worker/mod.rs:126:5
+    |
+126 |     pub(crate) live: Arc<BindingLiveState>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::live` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::binding_state::BindingLiveState` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/binding_state/mod.rs:93:1
+    |
+ 93 | pub(in crate::afxdp) struct BindingLiveState {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `umem::WorkerUmem` is more private than the item `afxdp::worker::BindingWorker::umem`
+   --> src/afxdp/worker/mod.rs:136:5
+    |
+136 |     pub(crate) umem: WorkerUmem,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::umem` is reachable at visibility `pub(crate)`
+    |
+note: but type `umem::WorkerUmem` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/umem/mod.rs:46:1
+    |
+ 46 | pub(super) struct WorkerUmem {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::PendingNeighPacket` is more private than the item `afxdp::worker::BindingWorker::pending_neigh`
+   --> src/afxdp/worker/mod.rs:176:5
+    |
+176 | /     pub(crate) pending_neigh:
+177 | |         super::types::FastMap<(i32, std::net::IpAddr), PendingNeighPacket>,
+    | |__________________________________________________________________________^ field `afxdp::worker::BindingWorker::pending_neigh` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::PendingNeighPacket` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/mod.rs:81:1
+    |
+ 81 | pub(super) struct PendingNeighPacket {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PendingNeighSchedule` is more private than the item `afxdp::worker::BindingWorker::pending_neigh_schedule`
+   --> src/afxdp/worker/mod.rs:183:5
+    |
+183 |     pub(crate) pending_neigh_schedule: crate::afxdp::neigh_schedule::PendingNeighSchedule,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::pending_neigh_schedule` is reachable at visibility `pub(crate)`
+    |
+note: but type `PendingNeighSchedule` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/neigh_schedule.rs:139:1
+    |
+139 | pub(super) struct PendingNeighSchedule {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::LearnedNeighborKey` is more private than the item `afxdp::worker::BindingWorker::last_learned_neighbor`
+   --> src/afxdp/worker/mod.rs:219:5
+    |
+219 |     pub(crate) last_learned_neighbor: Option<LearnedNeighborKey>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::last_learned_neighbor` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime::LearnedNeighborKey` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/runtime.rs:528:1
+    |
+528 | pub(in crate::afxdp) struct LearnedNeighborKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `neighbor_program_limiter::KernelNeighborProgramLimiter` is more private than the item `afxdp::worker::BindingWorker::neigh_program_limiter`
+   --> src/afxdp/worker/mod.rs:226:5
+    |
+226 |     pub(crate) neigh_program_limiter: super::KernelNeighborProgramLimiter,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::neigh_program_limiter` is reachable at visibility `pub(crate)`
+    |
+note: but type `neighbor_program_limiter::KernelNeighborProgramLimiter` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/neighbor_program_limiter.rs:161:1
+    |
+161 | pub(in crate::afxdp) struct KernelNeighborProgramLimiter {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `WorkerColdPathCounters` is more private than the item `afxdp::worker::BindingWorker::cold_path`
+   --> src/afxdp/worker/mod.rs:248:5
+    |
+248 |     pub(crate) cold_path: super::cold_path_hist::WorkerColdPathCounters,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::cold_path` is reachable at visibility `pub(crate)`
+    |
+note: but type `WorkerColdPathCounters` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/cold_path_hist.rs:876:1
+    |
+876 | pub(in crate::afxdp) struct WorkerColdPathCounters {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::SessionFlow` is more private than the item `afxdp::worker::fabric_queue_hash`
+   --> src/afxdp/worker/mod.rs:296:1
+    |
+296 | / pub(crate) fn fabric_queue_hash(
+297 | |     flow: Option<&SessionFlow>,
+298 | |     expected_ports: Option<(u16, u16)>,
+299 | |     meta: UserspaceDpMeta,
+300 | |     non_first_fragment: bool,
+301 | | ) -> u64 {
+    | |________^ function `afxdp::worker::fabric_queue_hash` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::SessionFlow` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/mod.rs:359:1
+    |
+359 | pub(super) struct SessionFlow {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::UserspaceDpMeta` is more private than the item `afxdp::worker::fabric_queue_hash`
+   --> src/afxdp/worker/mod.rs:296:1
+    |
+296 | / pub(crate) fn fabric_queue_hash(
+297 | |     flow: Option<&SessionFlow>,
+298 | |     expected_ports: Option<(u16, u16)>,
+299 | |     meta: UserspaceDpMeta,
+300 | |     non_first_fragment: bool,
+301 | | ) -> u64 {
+    | |________^ function `afxdp::worker::fabric_queue_hash` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::UserspaceDpMeta` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/mod.rs:122:1
+    |
+122 | pub(super) struct UserspaceDpMeta {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::forwarding::BindingIdentity` is more private than the item `afxdp::worker::BindingWorker::identity`
+    --> src/afxdp/worker/mod.rs:892:5
+     |
+ 892 |     pub(crate) fn identity(&self) -> BindingIdentity {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `afxdp::worker::BindingWorker::identity` is reachable at visibility `pub(crate)`
+     |
+note: but type `afxdp::types::forwarding::BindingIdentity` is only usable at visibility `pub(in crate::afxdp)`
+    --> src/afxdp/types/forwarding.rs:1445:1
+     |
+1445 | pub(in crate::afxdp) struct BindingIdentity {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PendingForwardRequest` is more private than the item `WorkerScratch::scratch_forwards`
+  --> src/afxdp/worker/scratch.rs:43:5
+   |
+43 |     pub(crate) scratch_forwards: Vec<PendingForwardRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerScratch::scratch_forwards` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::PendingForwardRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:73:1
+   |
+73 | pub(in crate::afxdp) struct PendingForwardRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `WorkerScratch::scratch_prepared_tx`
+   --> src/afxdp/worker/scratch.rs:45:5
+    |
+ 45 |     pub(crate) scratch_prepared_tx: Vec<PreparedTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerScratch::scratch_prepared_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `WorkerScratch::scratch_local_tx`
+  --> src/afxdp/worker/scratch.rs:46:5
+   |
+46 |     pub(crate) scratch_local_tx: Vec<(u64, TxRequest)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerScratch::scratch_local_tx` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::ExactPreparedScratchTxRequest` is more private than the item `WorkerScratch::scratch_exact_prepared_tx`
+   --> src/afxdp/worker/scratch.rs:58:5
+    |
+ 58 |     pub(crate) scratch_exact_prepared_tx: Vec<ExactPreparedScratchTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerScratch::scratch_exact_prepared_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::ExactPreparedScratchTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:170:1
+    |
+170 | pub(in crate::afxdp) struct ExactPreparedScratchTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::ExactLocalScratchTxRequest` is more private than the item `WorkerScratch::scratch_exact_local_tx`
+   --> src/afxdp/worker/scratch.rs:59:5
+    |
+ 59 |     pub(crate) scratch_exact_local_tx: Vec<ExactLocalScratchTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerScratch::scratch_exact_local_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::ExactLocalScratchTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:164:1
+    |
+164 | pub(in crate::afxdp) struct ExactLocalScratchTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `WorkerScratch::scratch_cross_binding_tx`
+   --> src/afxdp/worker/scratch.rs:68:5
+    |
+ 68 |     pub(crate) scratch_cross_binding_tx: Vec<(usize, PreparedTxRequest)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerScratch::scratch_cross_binding_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::cos::WorkerCoSInterfaceFastPath` is more private than the item `WorkerCos::cos_fast_interfaces`
+   --> src/afxdp/worker/cos_state.rs:28:5
+    |
+ 28 |     pub(crate) cos_fast_interfaces: FastMap<i32, WorkerCoSInterfaceFastPath>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerCos::cos_fast_interfaces` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::cos::WorkerCoSInterfaceFastPath` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/cos.rs:581:1
+    |
+581 | pub(in crate::afxdp) struct WorkerCoSInterfaceFastPath {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::cos::CoSInterfaceRuntime` is more private than the item `WorkerCos::cos_interfaces`
+   --> src/afxdp/worker/cos_state.rs:29:5
+    |
+ 29 |     pub(crate) cos_interfaces: FastMap<i32, CoSInterfaceRuntime>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerCos::cos_interfaces` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::cos::CoSInterfaceRuntime` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/cos.rs:620:1
+    |
+620 | pub(in crate::afxdp) struct CoSInterfaceRuntime {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `WorkerCos::cos_local_batch_scratch`
+  --> src/afxdp/worker/cos_state.rs:66:5
+   |
+66 |     pub(crate) cos_local_batch_scratch: std::collections::VecDeque<TxRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerCos::cos_local_batch_scratch` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `WorkerCos::cos_prepared_batch_scratch`
+   --> src/afxdp/worker/cos_state.rs:67:5
+    |
+ 67 |     pub(crate) cos_prepared_batch_scratch: std::collections::VecDeque<PreparedTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerCos::cos_prepared_batch_scratch` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `WorkerTxPipeline::pending_tx_prepared`
+   --> src/afxdp/worker/tx_pipeline.rs:43:5
+    |
+ 43 |     pub(crate) pending_tx_prepared: VecDeque<PreparedTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerTxPipeline::pending_tx_prepared` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `WorkerTxPipeline::pending_tx_local`
+  --> src/afxdp/worker/tx_pipeline.rs:44:5
+   |
+44 |     pub(crate) pending_tx_local: VecDeque<TxRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerTxPipeline::pending_tx_local` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `WorkerTxPipeline::backup_retry_scratch`
+  --> src/afxdp/worker/tx_pipeline.rs:56:5
+   |
+56 |     pub(crate) backup_retry_scratch: VecDeque<TxRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerTxPipeline::backup_retry_scratch` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRecycle` is more private than the item `WorkerTxPipeline::in_flight_prepared_recycles`
+   --> src/afxdp/worker/tx_pipeline.rs:70:5
+    |
+ 70 |     pub(crate) in_flight_prepared_recycles: FastMap<u64, PreparedTxRecycle>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerTxPipeline::in_flight_prepared_recycles` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRecycle` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:176:1
+    |
+176 | pub(in crate::afxdp) enum PreparedTxRecycle {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `WorkerTxPipeline::park_drained_deques`
+   --> src/afxdp/worker/tx_pipeline.rs:125:5
+    |
+125 | /     pub(crate) fn park_drained_deques(
+126 | |         &mut self,
+127 | |         pending: VecDeque<TxRequest>,
+128 | |         retry: VecDeque<TxRequest>,
+129 | |     ) -> VecDeque<TxRequest> {
+    | |____________________________^ method `WorkerTxPipeline::park_drained_deques` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:12:1
+    |
+ 12 | pub(in crate::afxdp) struct TxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `flow_cache::FlowCache` is more private than the item `WorkerFlowCacheState::flow_cache`
+   --> src/afxdp/worker/flow_cache_state.rs:34:5
+    |
+ 34 |     pub(crate) flow_cache: FlowCache,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `WorkerFlowCacheState::flow_cache` is reachable at visibility `pub(crate)`
+    |
+note: but type `flow_cache::FlowCache` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/flow_cache.rs:685:1
+    |
+685 | pub(super) struct FlowCache {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `AddressOnlyReverseKey` is more private than the item `allocator::PortAllocator::holds_address_only_identity`
+    --> src/nat/allocator.rs:1718:5
+     |
+1718 |     pub(crate) fn holds_address_only_identity(&self, rkey: &AddressOnlyReverseKey) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `allocator::PortAllocator::holds_address_only_identity` is reachable at visibility `pub(crate)`
+     |
+note: but type `AddressOnlyReverseKey` is only usable at visibility `pub(in crate::nat)`
+    --> src/nat/allocator.rs:434:1
+     |
+ 434 | pub(super) struct AddressOnlyReverseKey {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `AddressOnlyReverseKey` is more private than the item `overlap::<impl source::SourceNatRule>::peer_holds_address_only_identity`
+   --> src/nat/source/overlap.rs:203:5
+    |
+203 |     pub(crate) fn peer_holds_address_only_identity(&self, rkey: &AddressOnlyReverseKey) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `overlap::<impl source::SourceNatRule>::peer_holds_address_only_identity` is reachable at visibility `pub(crate)`
+    |
+note: but type `AddressOnlyReverseKey` is only usable at visibility `pub(in crate::nat)`
+   --> src/nat/allocator.rs:434:1
+    |
+434 | pub(super) struct AddressOnlyReverseKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `try_enqueue_tx_owned` and `try_push_redirect_inbox` are never used
+   --> src/afxdp/binding_state/tx_inbox.rs:189:29
+    |
+118 | impl BindingLiveState {
+    | --------------------- methods in this implementation
+...
+189 |     pub(in crate::afxdp) fn try_enqueue_tx_owned(&self, req: TxRequest) -> Result<(), TxRequest> {
+    |                             ^^^^^^^^^^^^^^^^^^^^
+...
+224 |     fn try_push_redirect_inbox(&self, req: TxRequest) -> Result<(), TxRequest> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `publish_session_map_key` is never used
+   --> src/afxdp/bpf_map/mod.rs:329:15
+    |
+329 | pub(super) fn publish_session_map_key(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `publish_live_session_key` is never used
+   --> src/afxdp/bpf_map/mod.rs:344:15
+    |
+344 | pub(super) fn publish_live_session_key(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `delete_live_session_key` is never used
+    --> src/afxdp/bpf_map/mod.rs:1306:15
+     |
+1306 | pub(super) fn delete_live_session_key(map: SteeringMap<'_>, key: &SessionKey, owner: &SessionKey) {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `diagnose_raw_ring_state` is never used
+  --> src/afxdp/bpf_map/metrics.rs:17:25
+   |
+17 | pub(in crate::afxdp) fn diagnose_raw_ring_state(
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `count` is never used
+   --> src/afxdp/bpf_map/steering_owners.rs:157:8
+    |
+136 | impl Claim {
+    | ---------- method in this implementation
+...
+157 |     fn count(self) -> usize {
+    |        ^^^^^
+
+warning: methods `publish_row` and `release_row` are never used
+   --> src/afxdp/bpf_map/steering_owners.rs:311:19
+    |
+299 | impl SteeringRowOwners {
+    | ---------------------- methods in this implementation
+...
+311 |     pub(crate) fn publish_row(
+    |                   ^^^^^^^^^^^
+...
+380 |     pub(crate) fn release_row(
+    |                   ^^^^^^^^^^^
+
+warning: constant `HOST_INBOUND_UNPORTED_SERVICES` is never used
+   --> src/afxdp/forwarding/host_inbound.rs:208:7
+    |
+208 | const HOST_INBOUND_UNPORTED_SERVICES: &[&str] =
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `evictions` is never used
+   --> src/afxdp/forwarding/ipsec.rs:456:29
+    |
+443 | impl IkeExchangeTable {
+    | --------------------- method in this implementation
+...
+456 |     pub(in crate::afxdp) fn evictions(&self) -> u64 {
+    |                             ^^^^^^^^^
+
+warning: function `build_forwarding_state` is never used
+   --> src/afxdp/forwarding_build/mod.rs:196:15
+    |
+196 | pub(super) fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingState {
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_forwarding_state_with_policy_counters` is never used
+   --> src/afxdp/forwarding_build/mod.rs:201:15
+    |
+201 | pub(super) fn build_forwarding_state_with_policy_counters(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `try_build_forwarding_state_with_policy_counters` is never used
+   --> src/afxdp/forwarding_build/mod.rs:209:15
+    |
+209 | pub(super) fn try_build_forwarding_state_with_policy_counters(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `from_parts` is never used
+  --> src/afxdp/frame/headers.rs:95:29
+   |
+83 | impl TxVlanTag {
+   | -------------- associated function in this implementation
+...
+95 |     pub(in crate::afxdp) fn from_parts(tpid: u16, pcp: u8, dei: bool, vid: u16) -> TxVlanTag {
+   |                             ^^^^^^^^^^
+
+warning: function `eth_header_len` is never used
+   --> src/afxdp/frame/headers.rs:139:25
+    |
+139 | pub(in crate::afxdp) fn eth_header_len(vlan_id: u16) -> usize {
+    |                         ^^^^^^^^^^^^^^
+
+warning: field `domain` is never read
+   --> src/afxdp/ha/session_domain.rs:126:5
+    |
+125 | pub(crate) struct SessionDomainView<'a> {
+    |                   ----------------- field in this struct
+126 |     domain: &'a SessionDomain,
+    |     ^^^^^^
+
+warning: method `synced_entry_count` is never used
+   --> src/afxdp/ha/session_domain.rs:149:19
+    |
+130 | impl SessionDomain {
+    | ------------------ method in this implementation
+...
+149 |     pub(crate) fn synced_entry_count(&self) -> usize {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: method `domain` is never used
+   --> src/afxdp/ha/session_domain.rs:173:19
+    |
+169 | impl SessionDomainView<'_> {
+    | -------------------------- method in this implementation
+...
+173 |     pub(crate) fn domain(&self) -> &SessionDomain {
+    |                   ^^^^^^
+
+warning: function `try_embedded_icmp_session_match_from_frame` is never used
+   --> src/afxdp/icmp_embed/mod.rs:223:15
+    |
+223 | pub(super) fn try_embedded_icmp_session_match_from_frame(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `l4_off` is never read
+  --> src/afxdp/icmp_embed/parse.rs:97:9
+   |
+63 | pub(in crate::afxdp::icmp_embed) struct EmbeddedV4Header {
+   |                                         ---------------- field in this struct
+...
+97 |     pub l4_off: usize,
+   |         ^^^^^^
+
+warning: field `l4_off` is never read
+   --> src/afxdp/icmp_embed/parse.rs:118:9
+    |
+110 | pub(in crate::afxdp::icmp_embed) struct EmbeddedV6Header {
+    |                                         ---------------- field in this struct
+...
+118 |     pub l4_off: usize,
+    |         ^^^^^^
+
+warning: constant `NUD_REACHABLE` is never used
+   --> src/afxdp/neighbor.rs:368:18
+    |
+368 | pub(super) const NUD_REACHABLE: u16 = 0x02;
+    |                  ^^^^^^^^^^^^^
+
+warning: constant `MAX_DYNAMIC_NEIGHBORS` is never used
+  --> src/afxdp/sharded_neighbor.rs:85:18
+   |
+85 | pub(crate) const MAX_DYNAMIC_NEIGHBORS: usize = MAX_DYNAMIC_NEIGHBORS_PER_SHARD * NUM_SHARDS;
+   |                  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `mac_change_epoch_for`, `insert`, and `is_empty` are never used
+   --> src/afxdp/sharded_neighbor.rs:311:19
+    |
+244 | impl ShardedNeighborMap {
+    | ----------------------- methods in this implementation
+...
+311 |     pub(crate) fn mac_change_epoch_for(&self, key: &(i32, IpAddr)) -> u32 {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+364 |     pub(crate) fn insert(&self, key: (i32, IpAddr), val: NeighborEntry) {
+    |                   ^^^^^^
+...
+740 |     pub(crate) fn is_empty(&self) -> bool {
+    |                   ^^^^^^^^
+
+warning: constant `ECN_NOT_ECT` is never used
+  --> src/afxdp/cos/ecn.rs:15:28
+   |
+15 | pub(in crate::afxdp) const ECN_NOT_ECT: u8 = 0b0000_0000;
+   |                            ^^^^^^^^^^^
+
+warning: function `bucket_target_bps` is never used
+   --> src/afxdp/cos/fairness.rs:126:25
+    |
+126 | pub(in crate::afxdp) fn bucket_target_bps(
+    |                         ^^^^^^^^^^^^^^^^^
+
+warning: function `service_exact_guarantee_queue_direct` is never used
+   --> src/afxdp/cos/queue_service/mod.rs:415:4
+    |
+415 | fn service_exact_guarantee_queue_direct(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile_peer_synced_against_shared` is never used
+    --> src/afxdp/session_glue/mod.rs:1478:25
+     |
+1478 | pub(in crate::afxdp) fn reconcile_peer_synced_against_shared(
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `is_running` is never used
+  --> src/afxdp/session_glue/delete_drop_sweep.rs:58:29
+   |
+47 | impl DeleteDropSweep {
+   | -------------------- method in this implementation
+...
+58 |     pub(in crate::afxdp) fn is_running(&self) -> bool {
+   |                             ^^^^^^^^^^
+
+warning: field `0` is never read
+    --> src/afxdp/shared_ops.rs:1261:13
+     |
+1261 |     Removed(Box<SyncedSessionEntry>),
+     |     ------- ^^^^^^^^^^^^^^^^^^^^^^^
+     |     |
+     |     field in this variant
+     |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+     |
+1261 -     Removed(Box<SyncedSessionEntry>),
+1261 +     Removed(()),
+     |
+
+warning: variant `Flowless` is never constructed
+   --> src/afxdp/tx/cos_classify.rs:150:5
+    |
+132 | pub(in crate::afxdp) enum CachedTxTuple<'a> {
+    |                           ------------- variant in this enum
+...
+150 |     Flowless { wire_l3: &'a SessionKey },
+    |     ^^^^^^^^
+
+warning: function `resolve_cached_cos_tx_selection_flowless` is never used
+   --> src/afxdp/tx/cos_classify.rs:180:25
+    |
+180 | pub(in crate::afxdp) fn resolve_cached_cos_tx_selection_flowless(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_cos_queue_id` is never used
+   --> src/afxdp/tx/cos_classify.rs:655:25
+    |
+655 | pub(in crate::afxdp) fn resolve_cos_queue_id(
+    |                         ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_cos_tx_selection` is never used
+   --> src/afxdp/tx/cos_classify.rs:669:25
+    |
+669 | pub(in crate::afxdp) fn resolve_cos_tx_selection(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `maybe_reinject_slow_path` is never used
+   --> src/afxdp/tx/dispatch/slow_path.rs:173:25
+    |
+173 | pub(in crate::afxdp) fn maybe_reinject_slow_path(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `has_peer_serviceable_backlog` is never used
+   --> src/afxdp/types/shared_cos_lease/backlog.rs:197:29
+    |
+128 | impl SharedCoSExactBacklog {
+    | -------------------------- method in this implementation
+...
+197 |     pub(in crate::afxdp) fn has_peer_serviceable_backlog(&self, binding_slot: u32) -> bool {
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `store_for_new_epoch` is never used
+   --> src/afxdp/types/shared_cos_lease/epoch.rs:168:8
+    |
+150 | impl PackedEpochGrant {
+    | --------------------- method in this implementation
+...
+168 |     fn store_for_new_epoch(&self, new_tag: u32) {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src/afxdp/types/shared_cos_lease/lease.rs:355:29
+     |
+ 333 | impl SharedCoSQueueLease {
+     | ------------------------ associated items in this implementation
+...
+ 355 |     pub(in crate::afxdp) fn new_v8(
+     |                             ^^^^^^
+...
+ 373 |     pub(in crate::afxdp) fn new_v8_with_rate_mode(
+     |                             ^^^^^^^^^^^^^^^^^^^^^
+...
+ 532 |     pub(in crate::afxdp) fn acquire_v8(
+     |                             ^^^^^^^^^^
+...
+ 897 |     pub(in crate::afxdp) fn v8_rollback_retry_exceeded(&self) -> u64 {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 907 |     pub(in crate::afxdp) fn v8_bypass_grace_active(&self) -> bool {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 920 |     pub(in crate::afxdp) fn v8_bypass_grace_arms(&self) -> u64 {
+     |                             ^^^^^^^^^^^^^^^^^^^^
+...
+ 929 |     pub(in crate::afxdp) fn v8_bypass_grace_uses(&self) -> u64 {
+     |                             ^^^^^^^^^^^^^^^^^^^^
+...
+1023 |     pub(in crate::afxdp) fn v8_equal_flow_fail_open_count(&self) -> u64 {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1044 |     pub(in crate::afxdp) fn v8_newly_active_excluded_count(&self) -> u64 {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1056 |     pub(in crate::afxdp) fn release_unused(&self, bytes: u64) {
+     |                             ^^^^^^^^^^^^^^
+...
+1158 |     pub(in crate::afxdp) fn v8_release_recredited_bytes(&self) -> u64 {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `len`, `front`, and `pop_front` are never used
+   --> src/afxdp/types/cos.rs:445:29
+    |
+438 | impl FlowRrRing {
+    | --------------- methods in this implementation
+...
+445 |     pub(in crate::afxdp) fn len(&self) -> usize {
+    |                             ^^^
+...
+450 |     pub(in crate::afxdp) fn front(&self) -> Option<u16> {
+    |                             ^^^^^
+...
+508 |     pub(in crate::afxdp) fn pop_front(&mut self) -> Option<u16> {
+    |                             ^^^^^^^^^
+
+warning: fields `priority_low_min_share_bytes`, `priority_low_reserved_tokens`, and `priority_low_last_refill_ns` are never read
+   --> src/afxdp/types/cos.rs:643:26
+    |
+620 | pub(in crate::afxdp) struct CoSInterfaceRuntime {
+    |                             ------------------- fields in this struct
+...
+643 |     pub(in crate::afxdp) priority_low_min_share_bytes: u64,
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+648 |     pub(in crate::afxdp) priority_low_reserved_tokens: u64,
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+652 |     pub(in crate::afxdp) priority_low_last_refill_ns: u64,
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `equal_flow_enforcement` and `codel_target_ns` are never read
+   --> src/afxdp/types/cos.rs:906:26
+    |
+881 | pub(in crate::afxdp) struct CoSQueueConfigState {
+    |                             ------------------- fields in this struct
+...
+906 |     pub(in crate::afxdp) equal_flow_enforcement: bool,
+    |                          ^^^^^^^^^^^^^^^^^^^^^^
+...
+947 |     pub(in crate::afxdp) codel_target_ns: u64,
+    |                          ^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+    --> src/afxdp/types/cos.rs:1171:29
+     |
+1161 | impl FlowFairState {
+     | ------------------ associated function in this implementation
+...
+1171 |     pub(in crate::afxdp) fn new(flow_hash_seed: u64) -> Self {
+     |                             ^^^
+
+warning: methods `ifindex`, `tunnel_endpoint_id`, and `next_hop` are never used
+   --> src/afxdp/types/forwarding.rs:929:29
+    |
+925 | impl RouteEntryV4 {
+    | ----------------- methods in this implementation
+...
+929 |     pub(in crate::afxdp) fn ifindex(&self) -> i32 {
+    |                             ^^^^^^^
+...
+932 |     pub(in crate::afxdp) fn tunnel_endpoint_id(&self) -> u16 {
+    |                             ^^^^^^^^^^^^^^^^^^
+...
+938 |     pub(in crate::afxdp) fn next_hop(&self) -> Option<Ipv4Addr> {
+    |                             ^^^^^^^^
+
+warning: methods `ifindex`, `tunnel_endpoint_id`, and `next_hop` are never used
+   --> src/afxdp/types/forwarding.rs:944:29
+    |
+943 | impl RouteEntryV6 {
+    | ----------------- methods in this implementation
+944 |     pub(in crate::afxdp) fn ifindex(&self) -> i32 {
+    |                             ^^^^^^^
+...
+947 |     pub(in crate::afxdp) fn tunnel_endpoint_id(&self) -> u16 {
+    |                             ^^^^^^^^^^^^^^^^^^
+...
+953 |     pub(in crate::afxdp) fn next_hop(&self) -> Option<Ipv6Addr> {
+    |                             ^^^^^^^^
+
+warning: field `zone_id` is never read
+    --> src/afxdp/types/forwarding.rs:1055:26
+     |
+1018 | pub(in crate::afxdp) struct EgressInterface {
+     |                             --------------- field in this struct
+...
+1055 |     pub(in crate::afxdp) zone_id: u16,
+     |                          ^^^^^^^
+     |
+     = note: `EgressInterface` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `cos_tx_selection_resolved` is never read
+  --> src/afxdp/types/tx.rs:96:26
+   |
+73 | pub(in crate::afxdp) struct PendingForwardRequest {
+   |                             --------------------- field in this struct
+...
+96 |     pub(in crate::afxdp) cos_tx_selection_resolved: bool,
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `recovered_fallbacks` is never read
+   --> src/afxdp/types/runtime.rs:377:26
+    |
+373 | pub(in crate::afxdp) struct WorkerStartupReport {
+    |                             ------------------- field in this struct
+...
+377 |     pub(in crate::afxdp) recovered_fallbacks: Vec<BindingRecoveredFallback>,
+    |                          ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `WorkerStartupReport` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variant `ForgetPptpCall` is never constructed
+   --> src/afxdp/types/runtime.rs:594:5
+    |
+536 | pub(in crate::afxdp) enum WorkerCommand {
+    |                           ------------- variant in this enum
+...
+594 |     ForgetPptpCall(u32),
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `WorkerCommand` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `load_full` is never used
+   --> src/afxdp/types/runtime_view.rs:180:29
+    |
+162 | impl RuntimeViewChannel {
+    | ----------------------- method in this implementation
+...
+180 |     pub(in crate::afxdp) fn load_full(&self) -> Arc<RuntimeView> {
+    |                             ^^^^^^^^^
+
+warning: method `same_channel` is never used
+   --> src/afxdp/types/runtime_view.rs:219:29
+    |
+208 | impl RuntimeViewReader {
+    | ---------------------- method in this implementation
+...
+219 |     pub(in crate::afxdp) fn same_channel(&self, other: &Self) -> bool {
+    |                             ^^^^^^^^^^^^
+
+warning: methods `upsert_synced_session`, `synced_session_contains`, `delete_synced_session`, `delete_synced_session_gen`, `synced_import_cap_for`, and `zone_name_to_id_ref` are never used
+   --> src/afxdp/coordinator/mod.rs:650:12
+    |
+492 | impl Coordinator {
+    | ---------------- methods in this implementation
+...
+650 |     pub fn upsert_synced_session(
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+658 |     pub fn synced_session_contains(&self, key: &crate::session::SessionKey) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+663 |     pub fn delete_synced_session(&self, key: crate::session::SessionKey) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+668 |     pub fn delete_synced_session_gen(&self, key: crate::session::SessionKey, delete_gen: u64) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+673 |     pub(in crate::afxdp) fn synced_import_cap_for(
+    |                             ^^^^^^^^^^^^^^^^^^^^^
+...
+686 |     pub fn zone_name_to_id_ref(&self) -> &FastMap<String, u16> {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: fields `conntrack_v4_fd` and `conntrack_v6_fd` are never read
+  --> src/afxdp/coordinator/bpf_maps.rs:38:16
+   |
+34 | pub(crate) struct BpfMaps {
+   |                   ------- fields in this struct
+...
+38 |     pub(crate) conntrack_v4_fd: Option<OwnedFd>,
+   |                ^^^^^^^^^^^^^^^
+39 |     pub(crate) conntrack_v6_fd: Option<OwnedFd>,
+   |                ^^^^^^^^^^^^^^^
+
+warning: function `build_shared_cos_root_leases` is never used
+   --> src/afxdp/coordinator/cos_leases.rs:527:15
+    |
+527 | pub(super) fn build_shared_cos_root_leases(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `stop_remove_wg_control_entry` is never used
+   --> src/afxdp/coordinator/tunnel_supervision.rs:702:8
+    |
+ 21 | impl super::Coordinator {
+    | ----------------------- method in this implementation
+...
+702 |     fn stop_remove_wg_control_entry(&mut self, id: u16, reason: &str) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `authenticated` is never used
+  --> src/afxdp/coordinator/wg_control/dispatch.rs:34:19
+   |
+33 | impl InboundOutcome {
+   | ------------------- method in this implementation
+34 |     pub(super) fn authenticated(&self) -> bool {
+   |                   ^^^^^^^^^^^^^
+
+warning: method `records_snapshot` is never used
+   --> src/afxdp/coordinator/worker_manager.rs:263:29
+    |
+161 | impl WorkerManager {
+    | ------------------ method in this implementation
+...
+263 |     pub(in crate::afxdp) fn records_snapshot(
+    |                             ^^^^^^^^^^^^^^^^
+
+warning: methods `routing_domains`, `synced_routing_domain`, and `note_unknown_routing_domain_import` are never used
+   --> src/afxdp/coordinator/routing_domain.rs:74:12
+    |
+ 11 | impl Coordinator {
+    | ---------------- methods in this implementation
+...
+ 74 |     pub fn routing_domains(&self) -> Vec<u32> {
+    |            ^^^^^^^^^^^^^^^
+...
+ 96 |     pub fn synced_routing_domain(&self, ingress_ifindex: i32, ingress_vlan_id: u16) -> Option<u32> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+104 |     pub fn note_unknown_routing_domain_import(&self) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `drain_latency_hist`, `drain_invocations`, `drain_noop_invocations`, `redirect_acquire_hist`, `owner_pps`, and `peer_pps` are never read
+    --> src/afxdp/worker/mod.rs:1664:16
+     |
+1375 | pub(crate) struct BindingLiveSnapshot {
+     |                   ------------------- fields in this struct
+...
+1664 |     pub(crate) drain_latency_hist: [u64; DRAIN_HIST_BUCKETS],
+     |                ^^^^^^^^^^^^^^^^^^
+1665 |     pub(crate) drain_invocations: u64,
+     |                ^^^^^^^^^^^^^^^^^
+1666 |     pub(crate) drain_noop_invocations: u64,
+     |                ^^^^^^^^^^^^^^^^^^^^^^
+1667 |     pub(crate) redirect_acquire_hist: [u64; DRAIN_HIST_BUCKETS],
+     |                ^^^^^^^^^^^^^^^^^^^^^
+1668 |     pub(crate) owner_pps: u64,
+     |                ^^^^^^^^^
+1669 |     pub(crate) peer_pps: u64,
+     |                ^^^^^^^^
+
+warning: constant `REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS` is never used
+   --> src/afxdp/worker/lifecycle.rs:436:18
+    |
+436 | pub(crate) const REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS: usize =
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `drain_latency_hist` and `drain_invocations` are never read
+  --> src/afxdp/worker/cos/mod.rs:39:16
+   |
+38 | pub(crate) struct OwnerProfileSnapshot {
+   |                   -------------------- fields in this struct
+39 |     pub(crate) drain_latency_hist: [u64; DRAIN_HIST_BUCKETS],
+   |                ^^^^^^^^^^^^^^^^^^
+40 |     pub(crate) drain_invocations: u64,
+   |                ^^^^^^^^^^^^^^^^^
+
+warning: function `merge_owner_profile_sum` is never used
+   --> src/afxdp/worker/cos/mod.rs:541:25
+    |
+541 | pub(in crate::afxdp) fn merge_owner_profile_sum(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `broadcast_pptp_forget` is never used
+   --> src/afxdp/worker_queue.rs:384:25
+    |
+384 | pub(in crate::afxdp) fn broadcast_pptp_forget(
+    |                         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `KERNEL_NEIGH_LIMITER_SLOTS` is never used
+   --> src/afxdp/neighbor_program_limiter.rs:101:28
+    |
+101 | pub(in crate::afxdp) const KERNEL_NEIGH_LIMITER_SLOTS: usize =
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `neigh_latency_bucket_upper_ns` is never used
+  --> src/afxdp/neighbor_latency.rs:92:25
+   |
+92 | pub(in crate::afxdp) fn neigh_latency_bucket_upper_ns(idx: usize) -> u64 {
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `len` is never used
+   --> src/afxdp/neigh_schedule.rs:168:19
+    |
+143 | impl PendingNeighSchedule {
+    | ------------------------- method in this implementation
+...
+168 |     pub(super) fn len(&self) -> usize {
+    |                   ^^^
+
+warning: methods `try_send` and `push_delta` are never used
+   --> src/event_stream/mod.rs:527:19
+    |
+520 | impl EventStreamWorkerHandle {
+    | ---------------------------- methods in this implementation
+...
+527 |     pub(crate) fn try_send(&self, frame: EventFrame) -> bool {
+    |                   ^^^^^^^^
+...
+759 |     pub(crate) fn push_delta(
+    |                   ^^^^^^^^^^
+
+warning: function `monotonic_ns_to_unix_secs` is never used
+  --> src/event_stream/clock.rs:56:15
+   |
+56 | pub(crate) fn monotonic_ns_to_unix_secs(mono_ns: u64, now_mono_ns: u64, now_unix_ns: u64) -> u32 {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `len` is never used
+   --> src/filter/mod.rs:706:19
+    |
+676 | impl CachedThreeColorPolicers {
+    | ----------------------------- method in this implementation
+...
+706 |     pub(crate) fn len(&self) -> usize {
+    |                   ^^^
+
+warning: methods `is_empty` and `len` are never used
+   --> src/filter/mod.rs:749:19
+    |
+735 | impl CachedFilterCounters {
+    | ------------------------- methods in this implementation
+...
+749 |     pub(crate) fn is_empty(&self) -> bool {
+    |                   ^^^^^^^^
+...
+754 |     pub(crate) fn len(&self) -> usize {
+    |                   ^^^
+
+warning: method `record` is never used
+   --> src/filter/mod.rs:849:19
+    |
+848 | impl FilterTermCounter {
+    | ---------------------- method in this implementation
+849 |     pub(crate) fn record(&self, packet_bytes: u64) {
+    |                   ^^^^^^
+
+warning: function `parse_filter_state` is never used
+  --> src/filter/compiler.rs:18:15
+   |
+18 | pub(crate) fn parse_filter_state(
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_filter_state_with_three_color` is never used
+  --> src/filter/compiler.rs:37:15
+   |
+37 | pub(crate) fn parse_filter_state_with_three_color(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `interface_input_filter_varies_per_packet` is never used
+   --> src/filter/engine/cache_sensitive/rotation.rs:330:15
+    |
+330 | pub(crate) fn interface_input_filter_varies_per_packet(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_filter` is never used
+  --> src/filter/engine/eval.rs:48:15
+   |
+48 | pub(crate) fn evaluate_filter(
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `evaluate_filter_counted` is never used
+  --> src/filter/engine/eval.rs:64:15
+   |
+64 | pub(crate) fn evaluate_filter_counted(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_lo0_filter_log_match` is never used
+   --> src/filter/engine/eval.rs:799:15
+    |
+799 | pub(crate) fn evaluate_lo0_filter_log_match(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_interface_filter` is never used
+   --> src/filter/engine/eval.rs:821:15
+    |
+821 | pub(crate) fn evaluate_interface_filter(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_interface_filter_counted` is never used
+   --> src/filter/engine/eval.rs:838:15
+    |
+838 | pub(crate) fn evaluate_interface_filter_counted(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_interface_output_filter` is never used
+    --> src/filter/engine/eval.rs:1249:15
+     |
+1249 | pub(crate) fn evaluate_interface_output_filter(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_interface_output_filter_counted` is never used
+    --> src/filter/engine/eval.rs:1266:15
+     |
+1266 | pub(crate) fn evaluate_interface_output_filter_counted(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_interface_filter_tx_selection_counted` is never used
+   --> src/filter/engine/tx_selection.rs:301:15
+    |
+301 | pub(crate) fn evaluate_interface_filter_tx_selection_counted<'a>(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_interface_output_filter_tx_selection_counted` is never used
+   --> src/filter/engine/tx_selection.rs:335:15
+    |
+335 | pub(crate) fn evaluate_interface_output_filter_tx_selection_counted<'a>(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `PoolReverseIndex` is never used
+   --> src/nat/allocator.rs:533:17
+    |
+533 | pub(crate) type PoolReverseIndex = FxHashMap<Ipv4Addr, u32>;
+    |                 ^^^^^^^^^^^^^^^^
+
+warning: function `build_pool_reverse_index` is never used
+   --> src/nat/allocator.rs:538:15
+    |
+538 | pub(crate) fn build_pool_reverse_index(pool_v4: &[Ipv4Addr]) -> PoolReverseIndex {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reverse_deterministic_v4` is never used
+   --> src/nat/allocator.rs:555:15
+    |
+555 | pub(crate) fn reverse_deterministic_v4(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reverse_deterministic_v6` is never used
+   --> src/nat/allocator.rs:696:15
+    |
+696 | pub(crate) fn reverse_deterministic_v6(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `destination_ips` is never used
+    --> src/nat/destination.rs:1097:19
+     |
+ 284 | impl DnatTable {
+     | -------------- method in this implementation
+...
+1097 |     pub(crate) fn destination_ips(&self) -> impl Iterator<Item = IpAddr> {
+     |                   ^^^^^^^^^^^^^^^
+
+warning: methods `peer_holds_identity` and `peer_holds_address_only_identity` are never used
+   --> src/nat/source/overlap.rs:192:19
+    |
+186 | impl SourceNatRule {
+    | ------------------ methods in this implementation
+...
+192 |     pub(crate) fn peer_holds_identity(&self, addr: IpAddr, port: u16) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+203 |     pub(crate) fn peer_holds_address_only_identity(&self, rkey: &AddressOnlyReverseKey) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `match_dnat_with_counter`, `match_snat_with_counter`, and `external_ips` are never used
+   --> src/nat/static_nat.rs:590:19
+    |
+390 | impl StaticNatTable {
+    | ------------------- methods in this implementation
+...
+590 |     pub(crate) fn match_dnat_with_counter(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+743 |     pub(crate) fn match_snat_with_counter(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+888 |     pub(crate) fn external_ips(&self) -> impl Iterator<Item = IpAddr> {
+    |                   ^^^^^^^^^^^^
+
+warning: associated function `from_snapshots` is never used
+   --> src/nat64.rs:650:19
+    |
+618 | impl Nat64State {
+    | --------------- associated function in this implementation
+...
+650 |     pub(crate) fn from_snapshots(snaps: &[NAT64RuleSnapshot]) -> Self {
+    |                   ^^^^^^^^^^^^^^
+
+warning: constant `JUNOS_GLOBAL_ZONE_ID` is never used
+  --> src/policy.rs:59:18
+   |
+59 | pub(crate) const JUNOS_GLOBAL_ZONE_ID: u16 = u16::MAX;
+   |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `is_empty` is never used
+    --> src/policy.rs:1352:19
+     |
+1313 | impl AppCatalog {
+     | --------------- method in this implementation
+...
+1352 |     pub(crate) fn is_empty(&self) -> bool {
+     |                   ^^^^^^^^
+
+warning: function `parse_policy_state` is never used
+    --> src/policy.rs:1967:15
+     |
+1967 | pub(crate) fn parse_policy_state(
+     |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_policy` is never used
+    --> src/policy.rs:2806:15
+     |
+2806 | pub(crate) fn evaluate_policy(
+     |               ^^^^^^^^^^^^^^^
+
+warning: function `evaluate_policy_with_len` is never used
+    --> src/policy.rs:2822:15
+     |
+2822 | pub(crate) fn evaluate_policy_with_len(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_policy_result_with_len` is never used
+    --> src/policy.rs:2843:15
+     |
+2843 | pub(crate) fn evaluate_policy_result_with_len(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `evaluate_junos_host_policy` is never used
+    --> src/policy.rs:3377:15
+     |
+3377 | pub(crate) fn evaluate_junos_host_policy(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `prefix_count` is never used
+   --> src/prefix_set.rs:123:19
+    |
+ 57 | impl PrefixSetV4 {
+    | ---------------- method in this implementation
+...
+123 |     pub(crate) fn prefix_count(&self) -> usize {
+    |                   ^^^^^^^^^^^^
+
+warning: method `prefix_count` is never used
+   --> src/prefix_set.rs:189:19
+    |
+132 | impl PrefixSetV6 {
+    | ---------------- method in this implementation
+...
+189 |     pub(crate) fn prefix_count(&self) -> usize {
+    |                   ^^^^^^^^^^^^
+
+warning: methods `missing_profile_warn_count`, `inert_profile_warn_count`, and `check_flowless_screens` are never used
+    --> src/screen/mod.rs:440:19
+     |
+ 401 | impl ScreenState {
+     | ---------------- methods in this implementation
+...
+ 440 |     pub(crate) fn missing_profile_warn_count(&self) -> u64 {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 447 |     pub(crate) fn inert_profile_warn_count(&self) -> u64 {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1095 |     pub(crate) fn check_flowless_screens(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `pkt_len` is never read
+  --> src/screen/packet.rs:34:9
+   |
+23 | pub(crate) struct ScreenPacketInfo {
+   |                   ---------------- field in this struct
+...
+34 |     pub pkt_len: u16, // total packet length from meta
+   |         ^^^^^^^
+   |
+   = note: `ScreenPacketInfo` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `filter_revalidation_gen`, `contains_key`, `refresh_for_ha_activation`, and `delta_drops` are never used
+    --> src/session/mod.rs:1558:19
+     |
+1318 | impl SessionTable {
+     | ----------------- methods in this implementation
+...
+1558 |     pub(crate) fn filter_revalidation_gen(&self) -> u64 {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2161 |     fn contains_key(&self, key: &SessionKey) -> bool {
+     |        ^^^^^^^^^^^^
+...
+2789 |     pub fn refresh_for_ha_activation(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2948 |     pub fn delta_drops(&self) -> u64 {
+     |            ^^^^^^^^^^^
+
+warning: method `to_wire_call_ids` is never used
+  --> src/session/pptp.rs:70:19
+   |
+55 | impl PptpCall {
+   | ------------- method in this implementation
+...
+70 |     pub(crate) fn to_wire_call_ids(&self) -> u64 {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: constant `PPTP_CALL_IDS_ABSENT` is never used
+   --> src/session/pptp.rs:126:18
+    |
+126 | pub(crate) const PPTP_CALL_IDS_ABSENT: u64 = 0;
+    |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `control` is never read
+   --> src/session/pptp.rs:157:5
+    |
+154 | struct AssociationRecord {
+    |        ----------------- field in this struct
+...
+157 |     control: ControlChannelId,
+    |     ^^^^^^^
+    |
+    = note: `AssociationRecord` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: methods `forget_control_channel`, `unassociated_count`, and `len` are never used
+   --> src/session/pptp.rs:328:19
+    |
+215 | impl PptpAssociations {
+    | --------------------- methods in this implementation
+...
+328 |     pub(crate) fn forget_control_channel(&mut self, control: ControlChannelId) -> usize {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+357 |     pub(crate) fn unassociated_count(&self) -> u64 {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+361 |     pub(crate) fn len(&self) -> usize {
+    |                   ^^^
+
+warning: methods `dropped_count` and `pending_len` are never used
+   --> src/session/pptp_control.rs:159:19
+    |
+106 | impl PptpControlInbox {
+    | --------------------- methods in this implementation
+...
+159 |     pub(crate) fn dropped_count(&self) -> u64 {
+    |                   ^^^^^^^^^^^^^
+...
+166 |     pub(crate) fn pending_len(&self) -> usize {
+    |                   ^^^^^^^^^^^
+
+warning: method `policy_revalidation_loud_declines` is never used
+  --> src/session/install.rs:80:12
+   |
+31 | impl SessionTable {
+   | ----------------- method in this implementation
+...
+80 |     pub fn policy_revalidation_loud_declines(&self) -> u64 {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `find_forward_wire_match` is never used
+   --> src/session/lookup.rs:344:12
+    |
+ 44 | impl SessionTable {
+    | ----------------- method in this implementation
+...
+344 |     pub fn find_forward_wire_match(&self, wire_key: &SessionKey) -> Option<ForwardSessionMatch> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `delegated_status` is never used
+   --> src/slowpath.rs:738:12
+    |
+441 | impl SlowPathReinjector {
+    | ----------------------- method in this implementation
+...
+738 |     pub fn delegated_status(&self) -> SlowPathStatus {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: `xpf-userspace-dp` (bin "xpf-userspace-dp") generated 226 warnings (run `cargo fix --bin "xpf-userspace-dp" -p xpf-userspace-dp` to apply 61 suggestions)
+warning: unused import: `SessionCounters`
+  --> src/afxdp/mod.rs:25:26
+   |
+25 |     ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,
+   |                          ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `IpNet` and `Ipv6Net`
+  --> src/afxdp/mod.rs:36:13
+   |
+36 | use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+   |             ^^^^^           ^^^^^^^
+
+warning: unused imports: `DEFAULT_V4_TABLE` and `DEFAULT_V6_TABLE`
+    --> src/afxdp/forwarding/tests.rs:2780:41
+     |
+2780 |     use crate::afxdp::forwarding::fib::{DEFAULT_V4_TABLE, DEFAULT_V6_TABLE};
+     |                                         ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::net::SocketAddr`
+   --> src/afxdp/forwarding_build/tunnels.rs:508:9
+    |
+508 |     use std::net::SocketAddr;
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused doc comment
+  --> src/afxdp/frame/wg.rs:39:1
+   |
+39 | / /// Test-only seam: counts every entry into `outer_physical_egress_resolution`
+40 | | /// (each one performs exactly one outer-underlay FIB LPM). `wg_encap_frame`
+41 | | /// resolves the outer route ONCE per packet (#3992); a test resets this to 0,
+42 | | /// builds one frame, and asserts the count is exactly 1 (it was 2 before the
+...  |
+55 | | /// bit-identical to the former atomic. See `wg_tests.rs`'s
+56 | | /// `outer_route_resolve_count_is_thread_local_isolated` for the fail-on-revert.
+   | |_-------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `write_udp_header`
+  --> src/afxdp/frame/mod.rs:39:68
+   |
+39 |     write_eth_header_tagged, write_ipv4_header, write_ipv6_header, write_udp_header,
+   |                                                                    ^^^^^^^^^^^^^^^^
+
+warning: unused import: `adjust_l4_checksum_ipv4_words`
+  --> src/afxdp/frame/mod.rs:62:34
+   |
+62 |     adjust_l4_checksum_ipv4_src, adjust_l4_checksum_ipv4_words, adjust_l4_checksum_ipv6_words,
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `live_frame_ports`
+  --> src/afxdp/frame/mod.rs:90:68
+   |
+90 |     frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
+   |                                                                    ^^^^^^^^^^^^^^^^
+
+warning: unused import: `l3_session_flow_from_meta`
+   --> src/afxdp/frame/mod.rs:104:5
+    |
+104 |     l3_session_flow_from_meta,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::afxdp::PROTO_TCP`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:13:5
+   |
+13 | use crate::afxdp::PROTO_TCP;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `apply_cos_queue_flow_fair_promotion`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:15:5
+   |
+15 |     apply_cos_queue_flow_fair_promotion, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `cos_queue_pop_front_no_snapshot` and `cos_queue_restore_front`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:19:5
+   |
+19 |     cos_queue_pop_front_no_snapshot, cos_queue_push_back, cos_queue_push_front,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+20 |     cos_queue_restore_front,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ExactCoSScratchBuild`, `drain_exact_local_fifo_items_to_scratch`, `drain_exact_local_items_to_scratch_flow_fair`, `drain_exact_prepared_fifo_items_to_scratch`, `drain_exact_prepared_items_to_scratch_flow_fair`, `settle_exact_local_fifo_submission`, `settle_exact_local_scratch_submission_flow_fair`, and `settle_exact_prepared_fifo_submission`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:23:5
+   |
+23 |     ExactCoSScratchBuild, drain_exact_local_fifo_items_to_scratch,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+24 |     drain_exact_local_items_to_scratch_flow_fair, drain_exact_prepared_fifo_items_to_scratch,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+25 |     drain_exact_prepared_items_to_scratch_flow_fair, settle_exact_local_fifo_submission,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+26 |     settle_exact_local_scratch_submission_flow_fair, settle_exact_prepared_fifo_submission,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `cos_queue_accepts_prepared` and `demote_prepared_cos_queue_to_local`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:30:5
+   |
+30 |     cos_queue_accepts_prepared, demote_prepared_cos_queue_to_local,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::afxdp::tx_frame_capacity`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:33:5
+   |
+33 | use crate::afxdp::tx_frame_capacity;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `COS_FLOW_FAIR_BUCKETS`, `FastMap`, `PreparedTxRecycle`, `PreparedTxRequest`, and `TxRequest`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:35:5
+   |
+35 |     COS_FLOW_FAIR_BUCKETS, CoSQueueConfig, FastMap, PreparedTxRecycle, PreparedTxRequest, TxRequest,
+   |     ^^^^^^^^^^^^^^^^^^^^^                  ^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `crate::afxdp::umem::MmapArea`
+  --> src/afxdp/cos/queue_ops/pop_tests/mod.rs:37:5
+   |
+37 | use crate::afxdp::umem::MmapArea;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `cos_flow_aware_buffer_limit` and `cos_queue_flow_share_limit`
+  --> src/afxdp/cos/queue_ops/tests/mod.rs:10:42
+   |
+10 |     apply_cos_queue_flow_fair_promotion, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
+   |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `drain_exact_prepared_items_to_scratch_flow_fair`
+  --> src/afxdp/cos/queue_ops/tests/mod.rs:15:49
+   |
+15 |     drain_exact_prepared_fifo_items_to_scratch, drain_exact_prepared_items_to_scratch_flow_fair,
+   |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `demote_prepared_cos_queue_to_local`
+  --> src/afxdp/cos/queue_ops/tests/mod.rs:21:33
+   |
+21 |     cos_queue_accepts_prepared, demote_prepared_cos_queue_to_local,
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `cos_flow_bucket_index`
+  --> src/afxdp/cos/queue_ops/fused_diff_tests.rs:23:36
+   |
+23 | use crate::afxdp::cos::flow_hash::{cos_flow_bucket_index, cos_item_flow_key};
+   |                                    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `COS_FLOW_FAIR_BUCKETS` and `FlowRrRing`
+  --> src/afxdp/cos/queue_service/tests/mod.rs:29:5
+   |
+29 |     COS_FLOW_FAIR_BUCKETS, CoSQueueConfig, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing,
+   |     ^^^^^^^^^^^^^^^^^^^^^                                                              ^^^^^^^^^^
+
+warning: unused import: `crate::afxdp::TX_BATCH_SIZE`
+ --> src/afxdp/cos/tx_completion_tests.rs:8:5
+  |
+8 | use crate::afxdp::TX_BATCH_SIZE;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `COS_FLOW_FAIR_BUCKETS` and `FlowRrRing`
+  --> src/afxdp/cos/tx_completion_tests.rs:15:5
+   |
+15 |     COS_FLOW_FAIR_BUCKETS, CoSQueueDropCounters, CoSQueueOwnerProfile, CoSQueueWaterfillCounters,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+16 |     FlowRrRing, PreparedTxRecycle, SharedCoSExactBacklog, SharedCoSQueueLease,
+   |     ^^^^^^^^^^
+
+warning: unused imports: `cos_queue_pop_front_with_cap` and `cos_queue_pop_front`
+  --> src/afxdp/cos/mod.rs:34:28
+   |
+34 | pub(super) use queue_ops::{cos_queue_pop_front, cos_queue_pop_front_with_cap};
+   |                            ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::atomic::Ordering`
+    --> src/afxdp/session_glue/tests.rs:9112:9
+     |
+9112 |     use std::sync::atomic::Ordering;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::atomic::Ordering`
+    --> src/afxdp/session_glue/tests.rs:9161:9
+     |
+9161 |     use std::sync::atomic::Ordering;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::mpsc::SyncSender`
+  --> src/afxdp/tx/dispatch/tests/mod.rs:21:5
+   |
+21 | use std::sync::mpsc::SyncSender;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `GeneratedReplyVerdict`, `resolve_cos_queue_id`, and `resolve_cos_tx_selection`
+  --> src/afxdp/tx/mod.rs:35:21
+   |
+35 |     CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply, enqueue_local_into_cos,
+   |                     ^^^^^^^^^^^^^^^^^^^^^
+...
+38 |     resolve_cos_queue_id, resolve_cos_tx_selection, resolve_cos_tx_selection_at,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `encode_data_header`
+  --> src/afxdp/wg/tests.rs:11:22
+   |
+11 | use super::framing::{encode_data_header, parse_data_header};
+   |                      ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SessionOrigin`
+  --> src/afxdp/worker/lifecycle_revoked_flow_cache_7212_tests.rs:14:68
+   |
+14 | use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
+   |                                                                    ^^^^^^^^^^^^^
+
+warning: unused import: `Ordering`
+    --> src/afxdp/worker/loop_body/mod.rs:1997:40
+     |
+1997 |     use std::sync::atomic::{AtomicU32, Ordering};
+     |                                        ^^^^^^^^
+
+warning: unused import: `TEST_WAN_ZONE_ID`
+    --> src/afxdp/poll_stages_tests.rs:1897:50
+     |
+1897 |     use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
+     |                                                  ^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::afxdp::test_fixtures::*`
+  --> src/afxdp/neighbor_dispatch_deferred_verdict_tests.rs:19:5
+   |
+19 | use crate::afxdp::test_fixtures::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `evaluate_lo0_filter_log_match`
+  --> src/filter/engine/mod.rs:27:34
+   |
+27 |     evaluate_lo0_filter_counted, evaluate_lo0_filter_log_match, filter_ref_static_verdict,
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused doc comment
+    --> src/nat/allocator.rs:1435:1
+     |
+1435 | / /// Test-only PortAllocator CONSTRUCTION counter (#6812 F3 round 4).
+1436 | | ///
+1437 | | /// The #6812 guards previously asserted only on the FINAL allocator a rule
+1438 | | /// carries — its identity, or its occupancy-word count. Both are end-state
+...    |
+1448 | | /// on the caller's thread, so a thread-local counts exactly the constructions
+1449 | | /// the test under it caused, with no serialisation and no cross-test coupling.
+     | |_------------------------------------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused import: `IdleLeaseRecord`
+ --> src/nat/tests_idle_lease_sync_8121.rs:4:52
+  |
+4 | use super::idle_lease_sync_8121::{IdleLeaseImport, IdleLeaseRecord};
+  |                                                    ^^^^^^^^^^^^^^^
+
+warning: unused import: `peer_owns_identity_in`
+   --> src/nat/mod.rs:212:51
+    |
+212 |     PoolAddressOwners, nat64_refuse_if_peer_owns, peer_owns_identity_in,
+    |                                                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SynCookieValidation`
+   --> src/screen/mod.rs:199:59
+    |
+199 |     SynCookieClientKey, SynCookieKeyRing, SynCookieTuple, SynCookieValidation,
+    |                                                           ^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src/afxdp/ha/../ha_tests.rs:1539:9
+     |
+1539 |     let mut coordinator = Coordinator::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/afxdp/ha/../ha_tests.rs:3246:9
+     |
+3246 |     let mut no_worker = Coordinator::new();
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/afxdp/cos/queue_ops/tests/bench.rs:343:17
+    |
+343 |             let mut req = TxRequest {
+    |                 ----^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: unused variable: `root_tokens_before`
+   --> src/afxdp/cos/queue_service/tests/drain.rs:150:9
+    |
+150 |     let root_tokens_before = root.tokens;
+    |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_root_tokens_before`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `e`
+    --> src/afxdp/session_glue/mod.rs:1060:28
+     |
+1060 |                 if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
+     |                            ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: unused variable: `init_pub`
+   --> src/afxdp/wg/tests.rs:252:36
+    |
+252 |     let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: unused variable: `init_pub`
+   --> src/afxdp/wg/tests.rs:268:36
+    |
+268 |     let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: unused variable: `init_pub`
+   --> src/afxdp/wg/tests.rs:530:36
+    |
+530 |     let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: unused variable: `init_pub`
+   --> src/afxdp/wg/tests.rs:703:36
+    |
+703 |     let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: unused variable: `init_pub`
+    --> src/afxdp/wg/tests.rs:1593:36
+     |
+1593 |     let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+     |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: unused variable: `init_pub`
+    --> src/afxdp/wg/tests.rs:3394:40
+     |
+3394 |         let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+     |                                        ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: unused variable: `init_pub`
+    --> src/afxdp/wg/tests.rs:3420:40
+     |
+3420 |         let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+     |                                        ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_pub`
+
+warning: variable does not need to be mutable
+   --> src/afxdp/coordinator/reconcile/mod.rs:336:13
+    |
+336 |         let mut preserved = teardown::tear_down(self, will_rebind);
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `sessions_before`
+    --> src/afxdp/tests_embedded_poll_filter.rs:4060:9
+     |
+4060 |     let sessions_before = sessions.len();
+     |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sessions_before`
+
+warning: variable does not need to be mutable
+    --> src/afxdp/tests_nat64_tunnel.rs:2351:9
+     |
+2351 |     let mut run = |ha: &BTreeMap<i32, HAGroupRuntime>, ident: u32| -> u64 {
+     |         ----^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `handle`
+   --> src/event_stream/tests/backpressure.rs:333:9
+    |
+333 |     let handle = EventStreamWorkerHandle {
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_handle`
+
+warning: variable does not need to be mutable
+   --> src/nat/tests_iface.rs:667:9
+    |
+667 |     let mut mint = |src: &str| -> NatDecision {
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `w2`
+    --> src/nat64_tests.rs:2695:9
+     |
+2695 |     let w2 = write_v6_to_v4_into(&mut buf2, &v6_pkt, pool_v4, server_v4, false)
+     |         ^^ help: if this is intentional, prefix it with an underscore: `_w2`
+
+warning: variable does not need to be mutable
+    --> src/screen/scan.rs:1121:13
+     |
+1121 |         let mut nonempty = |p: u16| {
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/session/close_state_sync_9412_acceptance_tests.rs:254:9
+    |
+254 |     let mut step = |t: &mut SessionTable, key: &SessionKey, at: u64, flags: u8| {
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `skipped_non_literal` is assigned to, but never used
+  --> src/protocol/cos_literal_guard_7689.rs:73:9
+   |
+73 |     let mut skipped_non_literal = 0usize;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: consider using `_skipped_non_literal` instead
+
+warning: value assigned to `skipped_non_literal` is never read
+   --> src/protocol/cos_literal_guard_7689.rs:124:17
+    |
+124 |                 skipped_non_literal += 1;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: type `runtime_view::RuntimeView` is more private than the item `coordinator::Coordinator::runtime_view_at_publish`
+   --> src/afxdp/coordinator/mod.rs:459:5
+    |
+459 |     pub(crate) runtime_view_at_publish: Option<(Arc<RuntimeView>, Arc<RuntimeView>)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `coordinator::Coordinator::runtime_view_at_publish` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime_view::RuntimeView` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/runtime_view.rs:93:1
+    |
+ 93 | pub(in crate::afxdp) struct RuntimeView {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::ValidationState` is more private than the item `coordinator::Coordinator::published_validation`
+    --> src/afxdp/coordinator/mod.rs:1643:5
+     |
+1643 |     pub(crate) fn published_validation(&self) -> ValidationState {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `coordinator::Coordinator::published_validation` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime::ValidationState` is only usable at visibility `pub(in crate::afxdp)`
+    --> src/afxdp/types/runtime.rs:457:1
+     |
+ 457 | pub(in crate::afxdp) struct ValidationState {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::ValidationState` is more private than the item `coordinator::Coordinator::seed_published_validation`
+    --> src/afxdp/coordinator/mod.rs:1661:5
+     |
+1661 |     pub(crate) fn seed_published_validation(&mut self, validation: ValidationState) {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `coordinator::Coordinator::seed_published_validation` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime::ValidationState` is only usable at visibility `pub(in crate::afxdp)`
+    --> src/afxdp/types/runtime.rs:457:1
+     |
+ 457 | pub(in crate::afxdp) struct ValidationState {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::binding_state::BindingLiveState` is more private than the item `PrePublishSiblings::cos_owner_live_by_queue`
+  --> src/afxdp/coordinator/cos_state.rs:60:5
+   |
+60 |     pub(crate) cos_owner_live_by_queue: Arc<BTreeMap<(i32, u8), Arc<BindingLiveState>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::cos_owner_live_by_queue` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::binding_state::BindingLiveState` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/binding_state/mod.rs:93:1
+   |
+93 | pub(in crate::afxdp) struct BindingLiveState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `lease::SharedCoSRootLease` is more private than the item `PrePublishSiblings::cos_root_leases`
+  --> src/afxdp/coordinator/cos_state.rs:61:5
+   |
+61 |     pub(crate) cos_root_leases: Arc<BTreeMap<i32, Arc<SharedCoSRootLease>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::cos_root_leases` is reachable at visibility `pub(crate)`
+   |
+note: but type `lease::SharedCoSRootLease` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/shared_cos_lease/lease.rs:50:1
+   |
+50 | pub(in crate::afxdp) struct SharedCoSRootLease {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `shared_cos_lease::backlog::SharedCoSExactBacklog` is more private than the item `PrePublishSiblings::cos_exact_backlogs`
+   --> src/afxdp/coordinator/cos_state.rs:62:5
+    |
+ 62 |     pub(crate) cos_exact_backlogs: Arc<BTreeMap<i32, Arc<SharedCoSExactBacklog>>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::cos_exact_backlogs` is reachable at visibility `pub(crate)`
+    |
+note: but type `shared_cos_lease::backlog::SharedCoSExactBacklog` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/shared_cos_lease/backlog.rs:123:1
+    |
+123 | pub(in crate::afxdp) struct SharedCoSExactBacklog {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `lease::SharedCoSQueueLease` is more private than the item `PrePublishSiblings::cos_queue_leases`
+  --> src/afxdp/coordinator/cos_state.rs:63:5
+   |
+63 |     pub(crate) cos_queue_leases: Arc<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::cos_queue_leases` is reachable at visibility `pub(crate)`
+   |
+note: but type `lease::SharedCoSQueueLease` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/shared_cos_lease/lease.rs:32:1
+   |
+32 | pub(in crate::afxdp) struct SharedCoSQueueLease {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `vtime::SharedCoSQueueVtimeFloor` is more private than the item `PrePublishSiblings::cos_queue_vtime_floors`
+   --> src/afxdp/coordinator/cos_state.rs:64:5
+    |
+ 64 |     pub(crate) cos_queue_vtime_floors: Arc<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::cos_queue_vtime_floors` is reachable at visibility `pub(crate)`
+    |
+note: but type `vtime::SharedCoSQueueVtimeFloor` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/shared_cos_lease/vtime.rs:125:1
+    |
+125 | pub(in crate::afxdp) struct SharedCoSQueueVtimeFloor {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::forwarding::FabricLink` is more private than the item `PrePublishSiblings::ha_fabrics`
+    --> src/afxdp/coordinator/cos_state.rs:65:5
+     |
+  65 |     pub(crate) ha_fabrics: Arc<Vec<FabricLink>>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::ha_fabrics` is reachable at visibility `pub(crate)`
+     |
+note: but type `afxdp::types::forwarding::FabricLink` is only usable at visibility `pub(in crate::afxdp)`
+    --> src/afxdp/types/forwarding.rs:1171:1
+     |
+1171 | pub(in crate::afxdp) struct FabricLink {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_view::RuntimeView` is more private than the item `PrePublishSiblings::previous_view`
+  --> src/afxdp/coordinator/cos_state.rs:66:5
+   |
+66 |     pub(crate) previous_view: Arc<RuntimeView>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `PrePublishSiblings::previous_view` is reachable at visibility `pub(crate)`
+   |
+note: but type `runtime_view::RuntimeView` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/runtime_view.rs:93:1
+   |
+93 | pub(in crate::afxdp) struct RuntimeView {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime::BindingSetupFailure` is more private than the item `coordinator::reconcile::stage::WorkerBindShortfall::failures`
+   --> src/afxdp/coordinator/reconcile/stage.rs:71:5
+    |
+ 71 |     pub(crate) failures: Vec<BindingSetupFailure>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `coordinator::reconcile::stage::WorkerBindShortfall::failures` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime::BindingSetupFailure` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/runtime.rs:274:1
+    |
+274 | pub(in crate::afxdp) struct BindingSetupFailure {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::forwarding::ForwardingState` is more private than the item `coordinator::tests::<impl coordinator::Coordinator>::set_forwarding_for_test`
+  --> src/afxdp/coordinator/tests.rs:27:5
+   |
+27 |     pub(crate) fn set_forwarding_for_test(&mut self, forwarding: ForwardingState) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `coordinator::tests::<impl coordinator::Coordinator>::set_forwarding_for_test` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::forwarding::ForwardingState` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/forwarding.rs:34:1
+   |
+34 | pub(in crate::afxdp) struct ForwardingState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::cold_path_hist::WorkerColdPathCounters` is more private than the item `afxdp::worker::BindingWorker::cold_path`
+   --> src/afxdp/worker/mod.rs:248:5
+    |
+248 |     pub(crate) cold_path: super::cold_path_hist::WorkerColdPathCounters,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::BindingWorker::cold_path` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::cold_path_hist::WorkerColdPathCounters` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/cold_path_hist.rs:876:1
+    |
+876 | pub(in crate::afxdp) struct WorkerColdPathCounters {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::SessionFlow` is more private than the item `afxdp::worker::fabric_queue_hash_seeded`
+   --> src/afxdp/worker/mod.rs:331:1
+    |
+331 | / pub(crate) fn fabric_queue_hash_seeded(
+332 | |     seed_secret: u64,
+333 | |     flow: Option<&SessionFlow>,
+334 | |     expected_ports: Option<(u16, u16)>,
+335 | |     meta: UserspaceDpMeta,
+336 | |     non_first_fragment: bool,
+337 | | ) -> u64 {
+    | |________^ function `afxdp::worker::fabric_queue_hash_seeded` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::SessionFlow` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/mod.rs:359:1
+    |
+359 | pub(super) struct SessionFlow {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::UserspaceDpMeta` is more private than the item `afxdp::worker::fabric_queue_hash_seeded`
+   --> src/afxdp/worker/mod.rs:331:1
+    |
+331 | / pub(crate) fn fabric_queue_hash_seeded(
+332 | |     seed_secret: u64,
+333 | |     flow: Option<&SessionFlow>,
+334 | |     expected_ports: Option<(u16, u16)>,
+335 | |     meta: UserspaceDpMeta,
+336 | |     non_first_fragment: bool,
+337 | | ) -> u64 {
+    | |________^ function `afxdp::worker::fabric_queue_hash_seeded` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::UserspaceDpMeta` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/mod.rs:122:1
+    |
+122 | pub(super) struct UserspaceDpMeta {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PendingForwardRequest` is more private than the item `afxdp::worker::scratch::WorkerScratch::scratch_forwards`
+  --> src/afxdp/worker/scratch.rs:43:5
+   |
+43 |     pub(crate) scratch_forwards: Vec<PendingForwardRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::scratch::WorkerScratch::scratch_forwards` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::PendingForwardRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:73:1
+   |
+73 | pub(in crate::afxdp) struct PendingForwardRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `afxdp::worker::scratch::WorkerScratch::scratch_prepared_tx`
+   --> src/afxdp/worker/scratch.rs:45:5
+    |
+ 45 |     pub(crate) scratch_prepared_tx: Vec<PreparedTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::scratch::WorkerScratch::scratch_prepared_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `afxdp::worker::scratch::WorkerScratch::scratch_local_tx`
+  --> src/afxdp/worker/scratch.rs:46:5
+   |
+46 |     pub(crate) scratch_local_tx: Vec<(u64, TxRequest)>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::scratch::WorkerScratch::scratch_local_tx` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::ExactPreparedScratchTxRequest` is more private than the item `afxdp::worker::scratch::WorkerScratch::scratch_exact_prepared_tx`
+   --> src/afxdp/worker/scratch.rs:58:5
+    |
+ 58 |     pub(crate) scratch_exact_prepared_tx: Vec<ExactPreparedScratchTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::scratch::WorkerScratch::scratch_exact_prepared_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::ExactPreparedScratchTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:170:1
+    |
+170 | pub(in crate::afxdp) struct ExactPreparedScratchTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::ExactLocalScratchTxRequest` is more private than the item `afxdp::worker::scratch::WorkerScratch::scratch_exact_local_tx`
+   --> src/afxdp/worker/scratch.rs:59:5
+    |
+ 59 |     pub(crate) scratch_exact_local_tx: Vec<ExactLocalScratchTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::scratch::WorkerScratch::scratch_exact_local_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::ExactLocalScratchTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:164:1
+    |
+164 | pub(in crate::afxdp) struct ExactLocalScratchTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `afxdp::worker::scratch::WorkerScratch::scratch_cross_binding_tx`
+   --> src/afxdp/worker/scratch.rs:68:5
+    |
+ 68 |     pub(crate) scratch_cross_binding_tx: Vec<(usize, PreparedTxRequest)>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `afxdp::worker::scratch::WorkerScratch::scratch_cross_binding_tx` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRequest` is more private than the item `tx_pipeline::WorkerTxPipeline::pending_tx_prepared`
+   --> src/afxdp/worker/tx_pipeline.rs:43:5
+    |
+ 43 |     pub(crate) pending_tx_prepared: VecDeque<PreparedTxRequest>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `tx_pipeline::WorkerTxPipeline::pending_tx_prepared` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:108:1
+    |
+108 | pub(in crate::afxdp) struct PreparedTxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `tx_pipeline::WorkerTxPipeline::pending_tx_local`
+  --> src/afxdp/worker/tx_pipeline.rs:44:5
+   |
+44 |     pub(crate) pending_tx_local: VecDeque<TxRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `tx_pipeline::WorkerTxPipeline::pending_tx_local` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `tx_pipeline::WorkerTxPipeline::backup_retry_scratch`
+  --> src/afxdp/worker/tx_pipeline.rs:56:5
+   |
+56 |     pub(crate) backup_retry_scratch: VecDeque<TxRequest>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `tx_pipeline::WorkerTxPipeline::backup_retry_scratch` is reachable at visibility `pub(crate)`
+   |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+  --> src/afxdp/types/tx.rs:12:1
+   |
+12 | pub(in crate::afxdp) struct TxRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::PreparedTxRecycle` is more private than the item `tx_pipeline::WorkerTxPipeline::in_flight_prepared_recycles`
+   --> src/afxdp/worker/tx_pipeline.rs:70:5
+    |
+ 70 |     pub(crate) in_flight_prepared_recycles: FastMap<u64, PreparedTxRecycle>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `tx_pipeline::WorkerTxPipeline::in_flight_prepared_recycles` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::PreparedTxRecycle` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:176:1
+    |
+176 | pub(in crate::afxdp) enum PreparedTxRecycle {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `afxdp::types::tx::TxRequest` is more private than the item `tx_pipeline::WorkerTxPipeline::park_drained_deques`
+   --> src/afxdp/worker/tx_pipeline.rs:125:5
+    |
+125 | /     pub(crate) fn park_drained_deques(
+126 | |         &mut self,
+127 | |         pending: VecDeque<TxRequest>,
+128 | |         retry: VecDeque<TxRequest>,
+129 | |     ) -> VecDeque<TxRequest> {
+    | |____________________________^ method `tx_pipeline::WorkerTxPipeline::park_drained_deques` is reachable at visibility `pub(crate)`
+    |
+note: but type `afxdp::types::tx::TxRequest` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/types/tx.rs:12:1
+    |
+ 12 | pub(in crate::afxdp) struct TxRequest {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `flow_cache::FlowCache` is more private than the item `flow_cache_state::WorkerFlowCacheState::flow_cache`
+   --> src/afxdp/worker/flow_cache_state.rs:34:5
+    |
+ 34 |     pub(crate) flow_cache: FlowCache,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `flow_cache_state::WorkerFlowCacheState::flow_cache` is reachable at visibility `pub(crate)`
+    |
+note: but type `flow_cache::FlowCache` is only usable at visibility `pub(in crate::afxdp)`
+   --> src/afxdp/flow_cache.rs:685:1
+    |
+685 | pub(super) struct FlowCache {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `publish_session_map_key` is never used
+   --> src/afxdp/bpf_map/mod.rs:329:15
+    |
+329 | pub(super) fn publish_session_map_key(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `eh_class_table` is never used
+  --> src/afxdp/frame/../../../../userspace-xdp/src/ipv6_ext_walk.rs:96:14
+   |
+96 | pub const fn eh_class_table() -> [u8; 256] {
+   |              ^^^^^^^^^^^^^^
+
+warning: function `wg_worker_claims_record` is never used
+   --> src/afxdp/frame/../../../../userspace-xdp/src/wg_classify.rs:136:8
+    |
+136 | pub fn wg_worker_claims_record(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `large_udp_v4_df_frame` is never used
+  --> src/afxdp/tx/dispatch/tests/ptb.rs:27:4
+   |
+27 | fn large_udp_v4_df_frame(l3_payload: usize) -> Vec<u8> {
+   |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `codel_target_ns` is never read
+   --> src/afxdp/types/cos.rs:947:26
+    |
+881 | pub(in crate::afxdp) struct CoSQueueConfigState {
+    |                             ------------------- field in this struct
+...
+947 |     pub(in crate::afxdp) codel_target_ns: u64,
+    |                          ^^^^^^^^^^^^^^^
+
+warning: associated function `single` is never used
+   --> src/afxdp/types/forwarding.rs:988:29
+    |
+987 | impl RouteEntryV6 {
+    | ----------------- associated function in this implementation
+988 |     pub(in crate::afxdp) fn single(
+    |                             ^^^^^^
+
+warning: field `hugepage` is never read
+  --> src/afxdp/umem/mmap.rs:28:5
+   |
+21 | pub(in crate::afxdp) struct MmapArea {
+   |                             -------- field in this struct
+...
+28 |     hugepage: bool,
+   |     ^^^^^^^^
+
+warning: method `is_hugepage_backed` is never used
+   --> src/afxdp/umem/mmap.rs:184:29
+    |
+ 55 | impl MmapArea {
+    | ------------- method in this implementation
+...
+184 |     pub(in crate::afxdp) fn is_hugepage_backed(&self) -> bool {
+    |                             ^^^^^^^^^^^^^^^^^^
+
+warning: method `synced_session_contains` is never used
+   --> src/afxdp/coordinator/mod.rs:658:12
+    |
+492 | impl Coordinator {
+    | ---------------- method in this implementation
+...
+658 |     pub fn synced_session_contains(&self, key: &crate::session::SessionKey) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `OVERSIZE_TUN_NAME` is never used
+   --> src/afxdp/coordinator/reconcile/snapshot.rs:698:11
+    |
+698 |     const OVERSIZE_TUN_NAME: &str = "xpf-usp-6097-oversize-name";
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: method `note_unknown_routing_domain_import` is never used
+   --> src/afxdp/coordinator/routing_domain.rs:104:12
+    |
+ 11 | impl Coordinator {
+    | ---------------- method in this implementation
+...
+104 |     pub fn note_unknown_routing_domain_import(&self) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `the_poll_paths_reverse_install_releases_a_predecessors_rows_9560` is never used
+    --> src/afxdp/tests_policy_revocation_8356.rs:1287:4
+     |
+1287 | fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `tx` is never read
+    --> src/afxdp/tests_policy_revocation_8356.rs:2637:5
+     |
+2631 | struct AdmitReverseOutcome {
+     |        ------------------- field in this struct
+...
+2637 |     tx: u64,
+     |     ^^
+
+warning: function `session_count` is never used
+   --> src/afxdp/tests_host_bound_post_dnat_9529.rs:143:4
+    |
+143 | fn session_count(sessions: &SessionTable) -> usize {
+    |    ^^^^^^^^^^^^^
+
+warning: method `next_due_ns` is never used
+   --> src/afxdp/neigh_schedule.rs:174:19
+    |
+143 | impl PendingNeighSchedule {
+    | ------------------------- method in this implementation
+...
+174 |     pub(super) fn next_due_ns(&self) -> Option<u64> {
+    |                   ^^^^^^^^^^^
+
+warning: function `p6` is never used
+  --> src/prefix_set_tests.rs:36:4
+   |
+36 | fn p6(s: &str) -> PrefixV6 {
+   |    ^^
+
+warning: methods `policy_revalidation_gen` and `contains_key` are never used
+    --> src/session/mod.rs:1717:19
+     |
+1318 | impl SessionTable {
+     | ----------------- methods in this implementation
+...
+1717 |     pub(crate) fn policy_revalidation_gen(&self) -> u64 {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2161 |     fn contains_key(&self, key: &SessionKey) -> bool {
+     |        ^^^^^^^^^^^^
+
+warning: unused `Result` that must be used
+    --> src/afxdp/ha/../ha_tests.rs:4001:5
+     |
+4001 | /     healthy.update_ha_state(&[
+4002 | |         HAGroupStatus {
+4003 | |             rg_id: 1,
+4004 | |             active: true,
+...    |
+4011 | |         },
+4012 | |     ]);
+     | |______^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+4001 |     let _ = healthy.update_ha_state(&[
+     |     +++++++
+
+warning: unused `Result` that must be used
+    --> src/afxdp/ha/../ha_tests.rs:4118:5
+     |
+4118 | /     coordinator.update_ha_state(&[
+4119 | |         HAGroupStatus {
+4120 | |             rg_id: 1,
+4121 | |             active: true,
+...    |
+4128 | |         },
+4129 | |     ]);
+     | |______^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+4118 |     let _ = coordinator.update_ha_state(&[
+     |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:861:5
+    |
+861 |     publish_dnat_table_entry(&fds, &a, nat);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+861 |     let _ = publish_dnat_table_entry(&fds, &a, nat);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:862:5
+    |
+862 |     publish_dnat_table_entry(&fds, &b, nat);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+862 |     let _ = publish_dnat_table_entry(&fds, &b, nat);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:898:5
+    |
+898 |     publish_dnat_table_entry(&fds, &key, nat);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+898 |     let _ = publish_dnat_table_entry(&fds, &key, nat);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:899:5
+    |
+899 |     publish_dnat_table_entry(&fds, &key, nat);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+899 |     let _ = publish_dnat_table_entry(&fds, &key, nat);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:900:5
+    |
+900 |     publish_dnat_table_entry(&fds, &key, nat);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+900 |     let _ = publish_dnat_table_entry(&fds, &key, nat);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:954:5
+    |
+954 |     publish_dnat_table_entry(&fds, &v4, nat4);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+954 |     let _ = publish_dnat_table_entry(&fds, &v4, nat4);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:955:5
+    |
+955 |     publish_dnat_table_entry(&fds, &v6, nat6);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+955 |     let _ = publish_dnat_table_entry(&fds, &v6, nat6);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+   --> src/afxdp/tests_decap_dnat_table.rs:985:5
+    |
+985 |     publish_dnat_table_entry(&DnatTableFds::default(), &key, nat);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+985 |     let _ = publish_dnat_table_entry(&DnatTableFds::default(), &key, nat);
+    |     +++++++
+
+warning: unused return value of `afxdp::checksum::publish_dnat_table_entry` that must be used
+    --> src/afxdp/tests_decap_dnat_table.rs:1003:5
+     |
+1003 |     publish_dnat_table_entry(&DnatTableFds::default(), &key, no_nat);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: use `let _ = ...` to ignore the resulting value
+     |
+1003 |     let _ = publish_dnat_table_entry(&DnatTableFds::default(), &key, no_nat);
+     |     +++++++
+
+warning: `xpf-userspace-dp` (bin "xpf-userspace-dp" test) generated 214 warnings (98 duplicates) (run `cargo fix --bin "xpf-userspace-dp" -p xpf-userspace-dp --tests` to apply 57 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/bin/fairness-eval.rs (target/debug/deps/fairness_eval-22a4543c867a7596)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/xpf_userspace_dp-1e7763e3cb77f9e0)
+
+running 1 test
+test server::tests::update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629 ... 
+thread 'server::tests::update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629' (2247544) panicked at src/server/tests.rs:520:5:
+the per-RG forwarding lease EXPIRED behind a held snapshot mutex: the mid-hold sample (seed expired, hold ongoing, refresh in flight) observes the RG inactive (sample=Some(HAGroupStatus { rg_id: 1, active: true, watchdog_timestamp: 6842275, forwarding_active: false, lease_state: "active", lease_until: 6842285 })). Served after 7.007666999s; the refresh queued instead of landing (#9629).
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    server::tests::update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6107 filtered out; finished in 12.01s
+
+error: test failed, to rerun pass `--bin xpf-userspace-dp`
+[exit status: 101]
