@@ -568,13 +568,14 @@ func (a *Agent) enqueueTrap(job trapJob) {
 // struct) so the worker never races Stop's field access. Stop waits on trapWG.
 //
 // C180-026: the abandoned backlog is ACCOUNTED for — the worker counts
-// every dequeued-but-unsent job (Stop raced the re-check) plus every job left
-// buffered in the queue into trapsDropped exactly once before exiting. Before
-// this, Stop discarded the queued link-state traps (during SNMP disable /
-// target rotation / shutdown) while trapsDropped omitted them, so the drop
-// total under-reported — it reflected only queue-full and post-Stop-enqueue
-// drops. The worker is the SOLE reader of the queue, so the drain removes each
-// job once and no other goroutine can double-count it.
+// every dequeued-but-undelivered job (whether Stop raced the re-check or the
+// sender returned an error) plus every job left buffered in the queue into
+// trapsDropped exactly once before exiting. Before this, Stop discarded the
+// queued link-state traps (during SNMP disable / target rotation / shutdown)
+// while trapsDropped omitted them, so the drop total under-reported — it
+// reflected only queue-full and post-Stop-enqueue drops. The worker is the SOLE
+// reader of the queue, so the drain removes each job once and no other
+// goroutine can double-count it.
 func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 	defer a.trapWG.Done()
 	// Snapshot the sender once at worker start. It is set at construction
@@ -640,9 +641,11 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				}
 			}
 			if err := send(job.target, pkt); err != nil {
-				slog.Warn("SNMP trap send failed",
+				dropped := a.trapsDropped.Add(1)
+				slog.Warn("SNMP trap send failed, counting as dropped",
 					"target", job.target, "group", job.group,
-					"event", job.event, "iface", job.iface, "err", err)
+					"event", job.event, "iface", job.iface,
+					"err", err, "dropped_total", dropped)
 			} else {
 				slog.Info("SNMP trap sent",
 					"target", job.target, "group", job.group,
