@@ -463,6 +463,9 @@ func TestFormatInformation(t *testing.T) {
 		},
 	}
 	m.UpdateConfig(cfg)
+	// Status formatting is a steady-state view; model the already-attached
+	// dataplane so the new HA boot debt is cleared before asserting priority.
+	m.SetMonitorWeight(0, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
 
 	out := m.FormatInformation()
 	if !strings.Contains(out, "Cluster ID: 1") {

@@ -37,6 +37,9 @@ func notReadyWithPeerAlive(t *testing.T) *Manager {
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
 	cfg.ControlInterface = "em0" // cluster mode: the readiness gate applies
 	m.UpdateConfig(cfg)
+	// The readiness fallback tests exercise election readiness after the
+	// dataplane is already serviceable; clear the new HA boot debt first.
+	m.SetMonitorWeight(0, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
 
 	// Peer heartbeat at LOWER priority: peerAlive/peerEverSeen become true (so
 	// electSingleNode is not the path) while the election still wants us
