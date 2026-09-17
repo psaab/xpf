@@ -419,22 +419,17 @@ impl crate::afxdp::ha::SessionDomain {
         let view = self.runtime_view();
         let forwarding = view.forwarding();
 
-        // #7209: ONE snapshot of the worker set for this whole import.
+        // #7209: ONE initial snapshot of the worker set for admission.
         //
-        // Three decisions below ask about the workers — the admission cap, the
-        // no-worker reservation gate, and the command fan-out — and they must
-        // agree with each other. They used to, for free: every mutator of the
-        // record map needed `&mut Coordinator`, which the snapshot-wide
-        // `ServerState` mutex made impossible to obtain while this ran. Once
-        // `sync_session` dispatches off that mutex, three separate loads can
-        // straddle a reconcile's teardown and disagree — a cap sized for live
-        // workers, a gate that then sees none (skipping the reservation), and a
-        // fan-out that finds some again (queueing a command for a session with
-        // no reservation). Or the reverse: reserve, then fan out to nobody,
-        // leaving an `Untracked` reservation with no worker to release it.
-        // Pinning the snapshot here makes the import internally consistent
-        // whatever the reconcile does, which is the property the mutex was
-        // providing incidentally.
+        // The aggregate cap and the reservation gate must agree with the
+        // worker generation observed before validation. They used to be
+        // incidentally serialized by the snapshot-wide `ServerState` mutex;
+        // `sync_session` now dispatches off that mutex, so this snapshot keeps
+        // those two decisions paired across a reconcile's teardown.
+        //
+        // #9718: command fan-out deliberately reloads the set after shared
+        // publication below. This covers registration-before-publication;
+        // the late-bringup reconciler covers publication-before-registration.
         let worker_records = Arc::clone(&self.workers.load());
         let now_secs = monotonic_nanos() / 1_000_000_000;
         let ha_state = self.rg_runtime.load();
@@ -776,7 +771,11 @@ impl crate::afxdp::ha::SessionDomain {
             }
         }
         // #6242: fan out to each worker's command queue via its runtime record.
-        for rec in worker_records.values() {
+        // #9718: reload the worker set AFTER publishing shared authority.
+        // This is the registration-before-publication half; the late-bringup
+        // reconciler handles publication-before-registration.
+        let worker_records_for_fanout = Arc::clone(&self.workers.load());
+        for rec in worker_records_for_fanout.values() {
             // #9900 F-093: shed dead workers — no thread will ever drain this queue.
             if rec.shed_if_dead(1 + reverse_entry.is_some() as u64) {
                 continue;

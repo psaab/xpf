@@ -8788,6 +8788,359 @@ fn bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157() {
     );
 }
 
+/// #9718: a peer-synced forward entry naming `pool_port` on the `f4_pool_rules`
+/// single-address pool, for driving the IMPORT path (`upsert_synced_session`).
+/// Mirrors the `f4_seed_shared_only` decision/metadata so the two fixtures
+/// cannot disagree about what a synced entry looks like.
+fn import_entry_9718(
+    key: &crate::session::SessionKey,
+    pool_port: u16,
+) -> crate::afxdp::worker::SyncedSessionEntry {
+    crate::afxdp::worker::SyncedSessionEntry {
+        key: key.clone(),
+        decision: crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: crate::nat::NatDecision {
+                rewrite_src: Some("203.0.113.1".parse().unwrap()),
+                rewrite_src_port: Some(pool_port),
+                ..crate::nat::NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        origin: crate::afxdp::SessionOrigin::SyncImport,
+        protocol: key.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    }
+}
+
+/// #9718: a peer import landing between the bring-up replay read and worker
+/// registration must be delivered to the late worker and reserve its port.
+///
+/// `sync_session` runs off the snapshot-wide mutex (#7209), so an import can
+/// interleave with a worker bring-up whose replay read already happened. The
+/// import snapshots an EMPTY worker set and publishes to shared authority
+/// without a worker command. After registration, `replay_late_synced_sessions`
+/// reloads the authoritative shared entries and queues `UpsertSynced`; draining
+/// that command makes the worker take the translated-port reservation.
+///
+/// This cell intentionally drives `replay_late_synced_sessions` directly so it
+/// can assert the queue and then drain the real worker command handler without
+/// timing-dependent thread setup. It therefore binds the late-reconciler
+/// behavior only: removing that helper's shared-snapshot reconciliation reds
+/// the queue and allocator assertions.
+///
+/// It does NOT bind the production `spawn_workers` call at `bringup.rs:1030`,
+/// nor does it exercise the import side's post-publish worker reload. Those
+/// are covered by the ordering argument in production: the import-side reload
+/// handles registration-before-publication, the spawn-success registration
+/// followed by this helper handles publication-before-registration, and the
+/// startup barrier prevents polling before both steps complete.
+#[test]
+fn import_between_replay_and_registration_delivers_late_upsert_9718() {
+    use std::collections::BTreeMap;
+
+    let mut coordinator = Coordinator::new();
+    coordinator.forwarding.source_nat_rules = f4_pool_rules();
+    coordinator.publish_runtime_view();
+    assert!(
+        coordinator.workers.records().is_empty(),
+        "fixture broken: the window under test has NO worker registered, or the \
+         import takes the worker-present path and this proves nothing"
+    );
+
+    // The bring-up replay read, with nothing in the shared map yet.
+    let workers: BTreeMap<u32, Vec<crate::afxdp::BindingPlan>> =
+        BTreeMap::from([(0u32, Vec::new())]);
+    let queues = super::reconcile::bringup::replay_preserved_sessions(
+        &mut coordinator,
+        &workers,
+        &[],
+        crate::afxdp::bpf_map::SteeringMap {
+            fd: -1,
+            owners: &Default::default(),
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        },
+    );
+
+    // The peer import lands after the replay read, before any registration.
+    let key = f4_key();
+    coordinator.upsert_synced_session(import_entry_9718(&key, 20000));
+    assert!(
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .contains_key(&key),
+        "the window import must still be Applied (shared-published); a refusal \
+         here would be a different defect, not this one"
+    );
+    // Registration follows the import, matching the late-worker side of the
+    // race. The worker must receive an UpsertSynced for the shared entry it
+    // missed in the replay read.
+    let commands = queues.get(&0).expect("one worker queue").clone();
+    let mut handle = gre1881_fake_worker_handle();
+    handle.commands = commands.clone();
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, &commands, &[]);
+    {
+        let pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        assert!(
+            pending.iter().any(|cmd| matches!(
+                cmd,
+                crate::afxdp::WorkerCommand::UpsertSynced(entry) if entry.key == key
+            )),
+            "the worker registered after the replay read did not receive the late \
+             shared-session upsert (#9718)"
+        );
+    }
+
+    // Drain the actual worker command handler, then verify that worker
+    // adoption—not a coordinator-only hold—owns the translated port.
+    let mut worker_sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    crate::afxdp::session_glue::apply_worker_commands(
+        &commands,
+        &mut worker_sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &coordinator.forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut scratch,
+    );
+    assert!(
+        coordinator.forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, 20000),
+        "draining the late worker's UpsertSynced did not hold its translated port"
+    );
+}
+
+/// #9718: a shared row promoted by local traffic must be mapped to a
+/// peer-synced worker replica before late bring-up adoption. `SharedPromote`
+/// itself is intentionally NOT `is_peer_synced`; feeding it raw to
+/// `handle_upsert_synced` would skip the allocator reservation.
+///
+/// This cell first seeds the imported row into a local `SessionTable` with a
+/// live session id and close class, then invokes production
+/// `maybe_promote_synced_session` to publish the `SharedPromote` row. It drives
+/// the actual late reconciler and the actual worker command handler with the
+/// registered worker's queue. The metadata, id, and close class assertions bind
+/// the promoter's output contract before origin mapping and worker adoption.
+///
+/// FAIL-ON-REVERT: remove the `synced_replica_entry` mapping in
+/// `replay_late_synced_sessions`; the queued origin remains `SharedPromote`,
+/// the worker skips reservation, and the allocator assertion reds.
+#[test]
+fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
+    let mut coordinator = Coordinator::new();
+    coordinator.forwarding.source_nat_rules = f4_pool_rules();
+    coordinator.publish_runtime_view();
+
+    let key = f4_key();
+    let imported = import_entry_9718(&key, 20000);
+    const LIVE_SESSION_ID: u64 = 0x8001_0000_0000_0097;
+    const LIVE_CLOSE_CLASS: u8 = 2;
+    let mut local_sessions = SessionTable::new();
+    assert!(local_sessions.upsert_synced_with_origin(
+        crate::session::SessionInstall {
+            key: imported.key.clone(),
+            decision: imported.decision,
+            metadata: imported.metadata.clone(),
+            origin: imported.origin,
+            now_ns: 1_000_000,
+            protocol: imported.protocol,
+            tcp_flags: imported.tcp_flags,
+            session_id: LIVE_SESSION_ID,
+            tcp_close_class: LIVE_CLOSE_CLASS,
+        },
+        false,
+    ));
+    let shared = crate::afxdp::session_glue::SharedSessionRefs {
+        sessions: &coordinator.sessions.synced,
+        nat_sessions: &coordinator.sessions.nat,
+        forward_wire_sessions: &coordinator.sessions.forward_wire,
+        owner_rg_indexes: &coordinator.sessions.owner_rg_indexes,
+    };
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<crate::afxdp::WorkerCommand>>>> =
+        Vec::new();
+    let promoted_metadata = crate::afxdp::session_glue::maybe_promote_synced_session(
+        &mut local_sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &peer_worker_commands,
+        &coordinator.forwarding,
+        &key,
+        imported.decision,
+        imported.metadata.clone(),
+        imported.origin,
+        false,
+        2_000_000,
+        imported.protocol,
+        0x10,
+    );
+    assert_eq!(
+        promoted_metadata, imported.metadata,
+        "the real promote must retain the imported metadata"
+    );
+    let promoted_entry = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+        .get(&key)
+        .cloned()
+        .expect("the real promote must publish the shared row");
+    assert_eq!(
+        promoted_entry.origin,
+        crate::afxdp::SessionOrigin::SharedPromote
+    );
+    assert_eq!(promoted_entry.metadata, promoted_metadata);
+    assert_eq!(promoted_entry.session_id, LIVE_SESSION_ID);
+    assert_eq!(promoted_entry.tcp_close_class, LIVE_CLOSE_CLASS);
+
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let mut handle = gre1881_fake_worker_handle();
+    handle.commands = commands.clone();
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, &commands, &[]);
+
+    {
+        let pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        let queued = pending
+            .iter()
+            .find_map(|command| match command {
+                crate::afxdp::WorkerCommand::UpsertSynced(entry) if entry.key == key => {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .expect("late reconciler must queue the promoted shared row");
+        assert_eq!(
+            queued.origin,
+            crate::afxdp::SessionOrigin::WorkerLocalImport,
+            "late reconciliation must apply worker_replica_origin before adoption"
+        );
+    }
+
+    let mut worker_sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    crate::afxdp::session_glue::apply_worker_commands(
+        &commands,
+        &mut worker_sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &coordinator.forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut scratch,
+    );
+    assert!(
+        coordinator.forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, 20000),
+        "the mapped promoted replica must reserve its translated port on adoption"
+    );
+}
+/// #9718 control: an import made BEFORE the replay read is still replayed as
+/// today. Guards the fix against narrowing the replay path while closing the
+/// post-read window: this passes with and without the fix.
+#[test]
+fn pre_replay_import_still_replays_9718() {
+    use std::collections::BTreeMap;
+
+    let mut coordinator = Coordinator::new();
+    coordinator.forwarding.source_nat_rules = f4_pool_rules();
+    coordinator.publish_runtime_view();
+    // Pre-bringup standby state: no map fd yet, no workers. The import skips
+    // the reservation (nothing live to resolve against) and publishes shared.
+    let key = f4_key();
+    coordinator.upsert_synced_session(import_entry_9718(&key, 20000));
+    assert!(
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .contains_key(&key),
+        "fixture broken: the control import must be shared-published, or the \
+         replay below has nothing to prove"
+    );
+
+    let workers: BTreeMap<u32, Vec<crate::afxdp::BindingPlan>> =
+        BTreeMap::from([(0u32, Vec::new())]);
+    let queues = super::reconcile::bringup::replay_preserved_sessions(
+        &mut coordinator,
+        &workers,
+        &[],
+        crate::afxdp::bpf_map::SteeringMap {
+            fd: -1,
+            owners: &Default::default(),
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        },
+    );
+    let commands = queues.get(&0).expect("one worker queue").clone();
+    {
+        let pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        assert!(
+            pending.iter().any(|cmd| matches!(
+                cmd,
+                crate::afxdp::WorkerCommand::UpsertSynced(entry) if entry.key == key
+            )),
+            "the pre-replay import was not replayed to the new worker queue; the \
+             #9718 fix must not narrow the replay path it leaves in place"
+        );
+    }
+
+    // The late-registration reconciliation must preserve this control import,
+    // not narrow the original replay path or filter an already-authoritative row.
+    let mut handle = gre1881_fake_worker_handle();
+    handle.commands = commands.clone();
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, &commands, &[]);
+    let pending = crate::afxdp::worker_queue::lock_recover(&commands);
+    assert!(
+        pending.iter().any(|cmd| matches!(
+            cmd,
+            crate::afxdp::WorkerCommand::UpsertSynced(entry) if entry.key == key
+        )),
+        "late reconciliation removed the pre-replay control upsert"
+    );
+}
+
 /// #9560: one steering-row owner registry for the coordinator's whole life. The session
 /// domain (HA import and delete) shares it with the workers, `stop` keeps it, and `stop`
 /// retires every claim once the workers are joined. A registry replaced at stop would hide

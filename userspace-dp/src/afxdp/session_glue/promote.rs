@@ -18,7 +18,7 @@ use super::*;
 /// argument (Copy + pointer-sized fields + no Drop) and is
 /// empirically gated by the smoke-plus-test-failover pass in the PR.
 #[derive(Clone, Copy)]
-pub(in crate::afxdp::session_glue) struct SharedSessionRefs<'a> {
+pub(in crate::afxdp) struct SharedSessionRefs<'a> {
     pub sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -68,7 +68,7 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
 ///
 /// Behavior unchanged from the pre-#1346 free function; only the
 /// signature changed (16 → 13 params via `SharedSessionRefs`).
-pub(in crate::afxdp::session_glue) fn maybe_promote_synced_session(
+pub(in crate::afxdp) fn maybe_promote_synced_session(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
