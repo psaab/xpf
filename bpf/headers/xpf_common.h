@@ -205,6 +205,13 @@ struct icmp6hdr {
 #define SESS_FLAG_STATIC_NAT   (1 << 6)
 #define SESS_FLAG_NAT64        (1 << 7)
 #define SESS_FLAG_NPTV6        (1 << 8)   /* bit 8 -- requires __u16 flags */
+/* #9655: set on a row installed from the cluster peer (Go putClusterSynced*,
+ * kernel-map path only). The datapath never sets it -- it predates the bit,
+ * and fresh installs zero it -- so it reads as the row's proven origin: set
+ * means peer-synced, clear means locally created (or legacy). The cluster
+ * wire carries only the low byte of flags, so this bit never crosses it; the
+ * receiver stamps it unconditionally at install instead. */
+#define SESS_FLAG_CLUSTER_SYNCED (1 << 9)
 
 /* pkt_meta.meta_flags bits */
 #define META_FLAG_EMBEDDED_ICMP      (1 << 0)

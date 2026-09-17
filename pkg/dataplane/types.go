@@ -1227,6 +1227,14 @@ const (
 	SessFlagStaticNAT = 1 << 6
 	SessFlagNAT64     = 1 << 7
 	SessFlagNPTV6     = 1 << 8 // bit 8 -- requires uint16 Flags
+	// SessFlagClusterSynced is the #9655 map-ABI origin bit: set on a row
+	// installed from the cluster peer (putClusterSynced*, kernel-map path
+	// only), clear on locally created rows. The cluster wire carries only
+	// the low byte of flags, so this bit never crosses it; the receiver
+	// stamps it unconditionally at install. The bulk reconcile's strict
+	// partition deletes a stale row lacking helper origin authority only
+	// when this bit is set, so a genuinely local row is always kept.
+	SessFlagClusterSynced = 1 << 9
 )
 
 // StaticNATKeyV4 mirrors the C struct static_nat_key_v4.
