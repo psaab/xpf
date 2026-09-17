@@ -165,14 +165,21 @@ func (m *Manager) xdpLinkFor(ifindex int) (link.Link, bool) {
 
 func (m *Manager) setXDPLink(ifindex int, l link.Link) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.xdpLinks[ifindex] = l
+	m.mu.Unlock()
+	// Event delivery is only a latency optimisation. The callback carries no
+	// state; the daemon re-reads kernel truth and the periodic gate tick remains
+	// authoritative for writers that are not represented here.
+	m.notifyAttachedLinksChanged()
 }
 
 func (m *Manager) deleteXDPLink(ifindex int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.xdpLinks, ifindex)
+	m.mu.Unlock()
+	// See setXDPLink: wake the same recount path, never report a writer-owned
+	// count that could go stale before the kernel transition completes.
+	m.notifyAttachedLinksChanged()
 }
 
 func (m *Manager) tcLinkFor(ifindex int) (link.Link, bool) {

@@ -580,8 +580,9 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 //     bootstrap) inherits ip_forward=1 from the previous armed run and routes
 //     transit under no policy. pkg/daemon/README.md already asserts transit
 //     is fail-closed in this state; this is what makes that true.
-//   - otherwise: enable, provisionally. The arm has not happened yet;
-//     setupDataplaneAndInitialConfig closes the knobs again if it fails.
+//   - otherwise: apply the host forwarding posture but keep kernel transit
+//     CLOSED. The dataplane arm below does not open it by itself; a fresh
+//     kernel-truth re-evaluation opens it only after an XDP link is attached.
 func (d *Daemon) applyBootTransitPolicy() {
 	switch {
 	case d.opts.NoDataplane:
@@ -589,7 +590,8 @@ func (d *Daemon) applyBootTransitPolicy() {
 	case d.inBootstrap():
 		d.markDataplaneNotArmed("boot", "bootstrap mode: no committed config to enforce")
 	default:
-		enableForwarding()
+		applyHostForwardingPosture()
+		d.closeTransitUntilAttached("boot")
 	}
 }
 
@@ -605,9 +607,9 @@ func (d *Daemon) applyBootTransitPolicy() {
 // ONE dataplane snapshot the surrounding boot block shares (#2114 plan
 // §5.3 rule 3) rather than re-reading the cell here.
 //
-// Both outcomes drive the #5275 transit gate: a successful arm leaves
-// kernel transit forwarding enabled, a failed arm closes it BEFORE the
-// caller's applyConfig runs.
+// Both outcomes drive the #5275/#9725 transit gate: a successful arm leaves
+// kernel transit closed until the kernel reports a live XDP link, while a
+// failed arm closes it before the caller's applyConfig runs.
 func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 	if rt == nil {
 		return
@@ -643,36 +645,24 @@ func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 	}
 }
 
-// isInteractive returns true if stdin is a real terminal (not /dev/null or a pipe).
-// enableForwarding enables IPv4 and IPv6 forwarding via sysctl
-// and disables RA acceptance on all interfaces.
-// A firewall must forward packets between interfaces; without this,
-// the kernel drops all transit traffic. A firewall must not accept
-// RAs — it uses its own configured routes exclusively.
-func enableForwarding() {
-	// #5275: the two TRANSIT knobs are owned by the arm gate
-	// (daemon_transit_gate.go) so bring-up and the apply tail cannot drift
-	// into disagreeing about which sysctls admit transit. The rest of this
-	// bundle is host posture that does not admit transit on its own and
-	// stays unconditional.
-	writeTransitForwardSysctls(true)
-	sysctls := map[string]string{
-		"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
-		"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
-		// l3mdev_accept: allow accepting TCP/UDP connections on management VRF
-		// interfaces from sockets not bound to the VRF (needed for SSH).
-		"/proc/sys/net/ipv4/tcp_l3mdev_accept": "1",
-		"/proc/sys/net/ipv4/udp_l3mdev_accept": "1",
-		// accept_local: allow packets with a source IP that is local to the
-		// machine on a different interface. Required when XDP SNAT rewrites
-		// src to a tunnel endpoint IP and XDP_PASS to kernel for routing —
-		// kernel would otherwise reject the packet as a martian.
-		"/proc/sys/net/ipv4/conf/all/accept_local": "1",
-	}
-	for path, val := range sysctls {
+// hostForwardingPostureSysctls is the host posture required whether or not
+// kernel transit is open. These values do not admit forwarded packets; the
+// transit knobs remain exclusively owned by daemon_transit_gate.go.
+var hostForwardingPostureSysctls = map[string]string{
+	"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
+	"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
+	// Allow management sockets to be accepted from a VRF context.
+	"/proc/sys/net/ipv4/tcp_l3mdev_accept": "1",
+	"/proc/sys/net/ipv4/udp_l3mdev_accept": "1",
+	// Permit XDP SNAT frames passed to the kernel to retain local sources.
+	"/proc/sys/net/ipv4/conf/all/accept_local": "1",
+}
+
+func applyHostForwardingPosture() {
+	for path, val := range hostForwardingPostureSysctls {
 		if err := os.WriteFile(path, []byte(val), 0644); err != nil {
 			slog.Warn("failed to set sysctl", "path", path, "err", err)
 		}
 	}
-	slog.Info("IP forwarding enabled, RA acceptance disabled")
+	slog.Info("host forwarding posture applied; kernel transit remains with the XDP gate")
 }

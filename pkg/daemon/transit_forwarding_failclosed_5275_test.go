@@ -107,6 +107,7 @@ func TestApplyKernelTuningHonoursArmGate5275(t *testing.T) {
 
 	// Same call on an ARMED daemon must raise them again — proving the gate
 	// reads the arm state and is not simply pinned off.
+	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
 	d.applyKernelTuning(&config.Config{})
 	assertTransitForwarding(t, v4, v6, "1",

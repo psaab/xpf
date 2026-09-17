@@ -186,6 +186,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	// The gate's periodic kernel-truth census starts after startup has completed
+	// and remains joined through the normal shutdown WaitGroup. Writer events
+	// may wake it sooner, but never replace this tick.
+	d.startTransitGateLoop(ctx, &wg)
 
 	// #2926: dedicated apply-abort context. A child of the signal context
 	// captured at the top of Run, so a real daemon stop (SIGTERM, plus SIGINT in

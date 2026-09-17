@@ -716,6 +716,25 @@ func (m *Manager) Start(ctx context.Context) error {
 	EnableLearnedRouteImport()
 	return m.Load()
 }
+// AttachedXDPLinkCount forwards the daemon's kernel-truth XDP link census to
+// the retained shim Manager. The count is a snapshot; callers must not treat
+// it as a writer-maintained counter.
+func (m *Manager) AttachedXDPLinkCount() int {
+	if m == nil || m.bpfShim == nil {
+		return 0
+	}
+	return m.bpfShim.AttachedXDPLinkCount()
+}
+
+// SetAttachedLinksObserver installs a wake-only callback on the retained shim.
+// The callback carries no count; the daemon re-reads AttachedXDPLinkCount when
+// woken, and its periodic tick remains the completeness guarantee.
+func (m *Manager) SetAttachedLinksObserver(fn func()) {
+	if m == nil || m.bpfShim == nil {
+		return
+	}
+	m.bpfShim.SetAttachedLinksObserver(fn)
+}
 
 func (m *Manager) Link() dataplane.LinkController {
 	return userspaceLinkController{manager: m}

@@ -222,8 +222,9 @@ func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) {
 		slog.Warn("bootstrap exit: interface naming failed", "err", err)
 	}
 
-	// Enable IP forwarding (suppressed in bootstrap).
-	enableForwarding()
+	// Host posture is safe before dataplane arm; kernel transit remains closed
+	// until the link-count gate proves an attached XDP program.
+	applyHostForwardingPosture()
 
 	// Arm the dataplane (AF_XDP attach) — the backend object was
 	// constructed at boot (C1) but never started in bootstrap mode.

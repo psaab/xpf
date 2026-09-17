@@ -176,6 +176,10 @@ var managerMethodClasses = map[string]string{
 	"XDPEntryPrograms":   "catG",
 	"IsVLANSubInterface": "catG",
 	"SetLinkForTest":     "catG",
+	// #9725: link membership is only a candidate set; these expose the
+	// kernel-truth count and wake-only observer to the daemon gate.
+	"AttachedXDPLinkCount":    "catG",
+	"SetAttachedLinksObserver": "catG",
 	// #6741: a pure read of the observability counter under m.mu. It changes no
 	// behaviour and needs no armed state, so it classifies with the other
 	// registry-state reads.
@@ -236,8 +240,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 		}
 	}
 
-	if len(inventory) != 140 {
-		t.Fatalf("exported *Manager method inventory = %d, want 140 (the 164 census minus the 23 NAT write methods retired in #7268, plus ArmCoverageSummary added in #7191, minus DeleteStaleNAT64 and ZeroStaleNATPoolConfigs retired in #7804 — the writers for snat_rules, static_nat_*, nptv6_rules, nat_pool_*, snat_egress_ips and nat64_* maps, none of which the AF_XDP shim declares); reconcile the count or the plan", len(inventory))
+	if len(inventory) != 142 {
+		t.Fatalf("exported *Manager method inventory = %d, want 142 (the 140-method baseline plus the #9725 kernel-truth XDP-link count and wake-only observer registration; reconcile the count or the plan)", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {

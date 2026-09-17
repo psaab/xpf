@@ -168,12 +168,15 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// window. See daemon_policy_invalidate_capture.go.
 	d.capturePolicyInvalidationLocked(cfg)
 
-	// 2. Apply dataplane config through the runtime config sink.
 	var applyResult *dataplane.ApplyResult
 	if rt := d.dataplane(); rt != nil {
 		var err error
-		if applyResult, err = rt.ApplyConfig(context.Background(), cfg); err != nil {
-			d.recordCompileFailure(err)
+		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
+		// #9725: an apply may attach and then fail, or detach its last link
+		// while reconciling. Re-read kernel truth on both outcomes; the tick
+		// remains the completeness guarantee outside this path.
+		d.reassertTransitGate("apply")
+		if err != nil {
 			// #9637-D1: the dataplane still runs the previous snapshot while
 			// the tail below renders from the NEW config — clear the
 			// reinject-accept gate so the render omits the accept (abort-class
@@ -1201,6 +1204,10 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 		return
 	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)
+	// #9725: this re-apply can remove the last link even when it reports an
+	// error. Re-read the kernel census on both outcomes; an independent tick
+	// covers changes outside this caller.
+	d.reassertTransitGate("deferred-mac-reapply")
 	if err != nil {
 		slog.Warn("failed to re-apply after deferred MAC; recording worker-arm debt for retry",
 			"err", err)

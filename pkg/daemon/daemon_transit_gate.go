@@ -14,23 +14,24 @@ import (
 // a compile failure only; an arm failure (`rt.Start` → LoadUserspaceShim,
 // or a retired-backend construction error) took a different branch that
 // logged "running in config-only mode", cleared the dataplane cell, and
-// FELL THROUGH to the boot applyConfig. Two sites then forced kernel
-// transit forwarding ON regardless: enableForwarding() at bring-up and
-// applyKernelTuning() at EVERY apply tail. With the AF_XDP shim never
-// attached, nothing adjudicates transit — and this repo installs no
-// nftables `hook forward` chain at all (the host-inbound tables are `hook
-// input`), so the kernel routed transit under no policy whatsoever. A
-// firewall whose dataplane failed to arm became a plain Linux router.
+// fell through to transit forwarding ON regardless: the original unconditional
+// writer and apply-tail writer opened the kernel before XDP attachment was
+// proven. With the AF_XDP shim absent or detached, nothing adjudicates
+// transit — and this repo installs no nftables `hook forward` chain at all
+// (the host-inbound tables are `hook input`), so the kernel routed transit
+// under no policy whatsoever. A firewall whose dataplane failed to arm became
+// a plain Linux router, and a booting dataplane briefly did the same.
 //
-// THE GATE. Kernel transit forwarding is now CONDITIONAL on the dataplane
-// being armed: `ip_forward` / `ipv6.conf.all.forwarding` are 1 only while
-// Daemon.dataplaneArmed is true, and are driven to 0 on every path that
-// lands in setDataplane(nil) — the boot Start() failure, the bootstrap-exit
-// Start() failure, and both retired-backend arms — plus the two states
-// where the daemon deliberately never arms (bootstrap mode, --no-dataplane).
-// The apply-tail half is the load-bearing one: the tail runs on every
-// commit, so without an armed-gated applyKernelTuning a later commit would
-// silently re-open the hole.
+// THE GATE. Kernel transit forwarding is conditional on BOTH the dataplane
+// having successfully started and the kernel reporting at least one live XDP
+// link. `ip_forward` / `ipv6.conf.all.forwarding` are 1 only while that
+// predicate is true. The periodic kernel-truth tick is authoritative; writer
+// notifications only wake an earlier recount.
+//
+// The gate closes on every arm failure, deliberate non-arm, detach, and
+// uncertain count. A successful Start therefore leaves forwarding closed
+// until a fresh kernel count proves an XDP link; this prevents the boot window
+// addressed by #9725 while preserving a live dataplane's kernel paths.
 //
 // WHAT IS *NOT* CLOSED. Management stays up on purpose (#1960 no-brick):
 // `ip_forward` governs FORWARDED packets only, so locally-terminated
@@ -54,36 +55,28 @@ import (
 // flush. TestNoFlowtableIsEverCreated7191 pins that assumption so this
 // sentence cannot rot into a false claim.
 //
-// CRITICALLY, the nftables legs are scoped to the UNARMED window only — the
-// same window in which `ip_forward` is already 0 — so they close nothing that
-// was open. See "WHY THE ARMED CASE IS UNAFFECTED" below: several armed paths
-// depend on the kernel forward hook being open and unfiltered, and a barrier
-// live while armed would drop them.
+// CRITICALLY, the nftables legs are scoped to the CLOSED gate window only —
+// the same window in which the transit sysctls are already 0 — so they close
+// nothing that was open. Once both arm state and a live XDP link are proven,
+// the barrier is removed so kernel-forwarded paths remain usable.
 //
-// #7191 also made the per-interface attach part of the arm state: the
-// post-attach arm-coverage proof now GATES (daemon_arm_coverage_7191.go)
-// instead of only logging, so a box where Start() succeeded but an interface
-// never got a shim no longer reports itself armed while forwarding that
-// interface unadjudicated.
+// #7191 added the post-attach arm-coverage proof. Coverage still gates the
+// arm bit, while #9725 additionally requires a fresh kernel XDP-link census
+// before opening the transit knobs.
 //
-// WHY THE ARMED CASE IS UNAFFECTED. The armed AF_XDP fast path does not
-// need `ip_forward` at all — measured in docs/image-validation.md
-// ("Discriminator — this is the xpf dataplane, not the guest kernel"):
-// with `net.ipv4.ip_forward=0` AND `net.ipv6.conf.all.forwarding=0` on the
-// appliance, ping stayed at 0% loss and iperf3 moved 4.29 Gbit/s (v4) /
-// 3.02 Gbit/s (v6). But some ARMED paths DO XDP_PASS to the kernel and rely
-// on it — the route-based-VPN plaintext leaving an xfrm interface
-// (pkg/config/README.md: "no `hook forward` rule covers it and `ip_forward`
-// is 1") and SNAT'd frames passed up for kernel routing (the `accept_local`
-// sysctl in enableForwarding exists for exactly that). So the gate NEVER
-// lowers the knob while armed: the armed desired value is "1", byte-identical
-// to the pre-#5275 unconditional write.
-
+// WHY THE OPEN CASE IS PRESERVED. The AF_XDP fast path does not need
+// `ip_forward` at all — measured in docs/image-validation.md ("Discriminator —
+// this is the xpf dataplane, not the guest kernel"): with the transit sysctls
+// at 0 on the appliance, ping stayed at 0% loss and iperf3 moved 4.29 Gbit/s
+// (v4) / 3.02 Gbit/s (v6). But some attached paths DO XDP_PASS to the kernel
+// and rely on it — route-based-VPN plaintext leaving an xfrm interface and
+// SNAT'd frames passed up for kernel routing. Once a live XDP link is proven,
+// the gate keeps the desired value "1", byte-identical to the pre-#9725
+// behavior.
 // ipv4ForwardSysctlPath / ipv6ForwardSysctlPath are the two kernel knobs
 // that decide whether the kernel routes TRANSIT packets. They are the ONLY
-// two sysctls the arm gate owns — the rest of enableForwarding's bundle
-// (accept_ra, l3mdev_accept, accept_local) is host posture that does not
-// admit transit on its own and stays unconditional.
+// two sysctls the arm gate owns — host posture (accept_ra, l3mdev_accept,
+// accept_local) does not admit transit on its own and stays unconditional.
 //
 // Package vars, not consts, for the same reason sshKnownHostsPath is one
 // (daemon_system.go): tests drive the gate against a temp dir instead of
@@ -94,9 +87,8 @@ var (
 )
 
 // transitForwardSysctlPaths is the single source of truth for the gated
-// knob set. Both writers (enableForwarding at bring-up, applyKernelTuning
-// at the apply tail) and the gate itself go through it, so the two can
-// never drift into disagreeing about which knobs "transit forwarding" is.
+// knob set. The gate is the sole writer of these transit knobs; host posture
+// remains separate and is applied by applyHostForwardingPosture.
 func transitForwardSysctlPaths() []string {
 	return []string{ipv4ForwardSysctlPath, ipv6ForwardSysctlPath}
 }
@@ -137,36 +129,23 @@ func writeTransitForwardSysctls(on bool) {
 	}
 }
 
-// DataplaneArmed reports whether the runtime dataplane has been proven to
-// have STARTED in this daemon's lifetime. It is the predicate the transit
-// gate keys off, and it is exported so a later status surface (`show
-// chassis forwarding`, /health) can project it instead of re-deriving the
-// state from a nil dataplane cell — a nil cell answers "is a backend
-// published", which is NOT the same question (#5719: an unexported
-// atomic.Bool with no accessor makes a truth projection impossible).
-//
-// Scope: this tracks the Start()/LoadUserspaceShim boundary, which is the
-// boundary #5275 names. It is NOT the per-interface AF_XDP attach that
-// happens later inside the first ApplyConfig — see the arm-coverage proof
-// (pkg/dataplane/armproof.go, observe-only) and
-// docs/research/5275-arm-failclosed/plan.md for that residual.
+// DataplaneArmed reports whether the runtime dataplane has been successfully
+// started in this daemon's lifetime. Kernel transit is NOT opened by this bit
+// alone: #9725 requires a separate kernel-truth XDP-link count, continuously
+// re-evaluated by transit_gate_tick_9725.go.
 func (d *Daemon) DataplaneArmed() bool { return d.dataplaneArmed.Load() }
 
-// markDataplaneArmed records a successful arm and re-opens kernel transit
-// forwarding, so recovery from a prior fail-closed state (the bootstrap-exit
-// arm after a bootstrap boot) does not need a daemon restart.
-//
-// Ordering: the atomic is stored BEFORE the knobs are written, so an
-// applyKernelTuning that observes the flag can never re-close a knob this
-// call just opened.
+// markDataplaneArmed records a successful Start. It deliberately leaves the
+// transit gate closed until the same gate predicate proves a live XDP link;
+// first ApplyConfig or the periodic tick opens it once the kernel reports one.
 func (d *Daemon) markDataplaneArmed(stage string) {
+	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(true)
-	writeTransitForwardSysctls(true)
-	// #7191: remove the nft barrier LAST on the opening path, so transit is
-	// open only once both legs agree. Either leg alone still closes it.
-	d.applyTransitBarrier(true)
+	d.writeTransitGateLocked(stage)
+	d.transitGateMu.Unlock()
 	d.applyDataplaneArmTrack(true)
-	slog.Info("dataplane armed; kernel transit forwarding enabled", "stage", stage)
+	slog.Info("dataplane armed; transit gate re-evaluated", "stage", stage,
+		"kernel_transit_open", d.transitOpen())
 }
 
 // applyDataplaneArmTrack mirrors the arm state into redundancy-group weight so
@@ -211,11 +190,12 @@ func (d *Daemon) applyDataplaneArmTrack(armed bool) {
 // The daemon deliberately does NOT exit — management/CLI/gRPC must stay
 // reachable so the operator can correct the config in-band (#1960 no-brick).
 func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
+	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(false)
 	// #7191: install the nft barrier FIRST on the closing path. Both legs
 	// close, so the order only affects how early closure is complete.
-	d.applyTransitBarrier(false)
-	writeTransitForwardSysctls(false)
+	d.writeTransitGateLocked(stage)
+	d.transitGateMu.Unlock()
 	d.applyDataplaneArmTrack(false)
 	slog.Error("dataplane arm FAILED; kernel transit forwarding DISABLED (fail-closed, degraded): "+
 		"nothing adjudicates transit on this node, so it forwards none — management (SSH/CLI/gRPC/REST) "+
@@ -241,9 +221,10 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 // enable forwarding in that mode, so closing the knob makes the apply tail
 // agree with bring-up instead of contradicting it.
 func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
+	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(false)
-	d.applyTransitBarrier(false) // #7191
-	writeTransitForwardSysctls(false)
+	d.writeTransitGateLocked(stage)
+	d.transitGateMu.Unlock()
 	// #7178: DELIBERATE and FAILED are the same fact to a peer — this node
 	// forwards no transit either way, so it must not outbid one that does. The
 	// distinction is why this logs at Info while the failure path logs at Error;
