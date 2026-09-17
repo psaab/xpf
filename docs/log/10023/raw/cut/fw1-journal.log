@@ -1,0 +1,473 @@
+2026-09-17T22:45:11+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:11.931Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:13+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:13.288Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:45:14+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:14.737Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:14+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:14.840Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:14+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:14.904Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:45:15+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:15.860Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:18+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:18.236Z level=INFO msg="cluster: forced secondary for all RGs (ISSU)"
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.815Z level=INFO msg="conntrack GC stopped"
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.815Z level=WARN msg="neighbor listener netlink error" err="resource temporarily unavailable"
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.816Z level=INFO msg="signal received, shutting down"
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.816Z level=INFO msg="gRPC server stopped" addr=127.0.0.1:50051
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.816Z level=WARN msg="transit gate link watcher: netlink receive error, resubscribing" err="Receive failed: resource temporarily unavailable"
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.816Z level=WARN msg="route listener: netlink error, forcing FIB refresh" err="Receive failed: resource temporarily unavailable" errors_total=1
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.816Z level=INFO msg="gRPC fabric listener stopped" addr=10.99.12.2:50051 vrf=vrf-mgmt
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 systemd[1]: Stopping xpfd.service - xpf Stateful Firewall Daemon...
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=WARN msg="cluster: interface monitor failure" rg=0 interface=__dataplane-arm__ weight=254
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=INFO msg="cluster: weight changed" rg=0 old=0 new=1
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=WARN msg="cluster: interface monitor failure" rg=1 interface=__dataplane-arm__ weight=254
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=INFO msg="cluster: weight changed" rg=1 old=0 new=1
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=WARN msg="cluster: interface monitor failure" rg=2 interface=__dataplane-arm__ weight=254
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=INFO msg="cluster: weight changed" rg=2 old=0 new=1
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=INFO msg="dataplane not armed; kernel transit forwarding disabled (fail-closed)" stage=shutdown reason="HA fail-closed stop: closing kernel transit before the dataplane detach"
+2026-09-17T22:45:19+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:19.820Z level=INFO msg="HA shutdown: clearing rg_active for all RGs"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.313Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=INFO msg="event stream: helper disconnected"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=WARN msg="failed to clear rg_active on shutdown" rg=0 err="read unix @->/run/xpf/userspace-dp.sock: read: connection reset by peer"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=ERROR msg="userspace dataplane helper exited unexpectedly; failing closed and scheduling restart (#5838)" pid=13137 disposition="killed by signal terminated" generation=1
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=INFO msg="userspace: disabled ctrl (helper stopping)"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=WARN msg="userspace dataplane helper restart scheduled" attempt=1 delay=1s
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=WARN msg="failed to clear rg_active on shutdown" rg=1 err="dial unix /run/xpf/userspace-dp.sock: connect: connection refused"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.351Z level=WARN msg="failed to clear rg_active on shutdown" rg=2 err="dial unix /run/xpf/userspace-dp.sock: connect: connection refused"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.373Z level=INFO msg="shutdown: DHCP server stopped before relinquishing ownership"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.374Z level=INFO msg="vrrp: manager stopped"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.374Z level=INFO msg="cluster sync: fabric 0 disconnected"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.374Z level=INFO msg="cluster sync: peer disconnected (all fabrics down)"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.374Z level=INFO msg="cluster: session sync peer disconnected" retry_gen=4 was_ever_primed=true bulk_primed=true peer_bulk_primed=true cluster_sync_ready=true
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.374Z level=INFO msg="final statistics" rx_packets=0 tx_packets=0 drops=0 sessions_created=0 sessions_closed=0 screen_drops=0 policy_denies=0
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.374Z level=INFO msg="HA shutdown: tearing down BPF state"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.783Z level=INFO msg="removed all pinned BPF state" path=/sys/fs/bpf/xpf
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.783Z level=INFO msg="shutdown: restoring tunables to pre-xpfd values" host_scope=false coalesce_ifaces=2 neigh_retrans=true rss_ifaces=2
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.787Z level=INFO msg="linksetup: coalescence restored to pre-xpfd value" iface=ge-7-0-1 adaptive_rx=true adaptive_tx=true rx_usecs=8 tx_usecs=8
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.792Z level=INFO msg="linksetup: coalescence restored to pre-xpfd value" iface=ge-7-0-2 adaptive_rx=true adaptive_tx=true rx_usecs=8 tx_usecs=8
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.792Z level=WARN msg="linksetup: host tunable restore — neigh retrans_time_ms write failed" path=/proc/sys/net/ipv4/neigh/xpf-usp0/retrans_time_ms want=252 err="open /proc/sys/net/ipv4/neigh/xpf-usp0/retrans_time_ms: no such file or directory"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.792Z level=WARN msg="linksetup: host tunable restore — neigh retrans_time_ms write failed" path=/proc/sys/net/ipv4/neigh/xpf-usp1/retrans_time_ms want=252 err="open /proc/sys/net/ipv4/neigh/xpf-usp1/retrans_time_ms: no such file or directory"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.792Z level=WARN msg="linksetup: host tunable restore — neigh retrans_time_ms write failed" path=/proc/sys/net/ipv6/neigh/xpf-usp1/retrans_time_ms want=252 err="open /proc/sys/net/ipv6/neigh/xpf-usp1/retrans_time_ms: no such file or directory"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.792Z level=WARN msg="linksetup: host tunable restore — neigh retrans_time_ms write failed" path=/proc/sys/net/ipv6/neigh/xpf-usp0/retrans_time_ms want=252 err="open /proc/sys/net/ipv6/neigh/xpf-usp0/retrans_time_ms: no such file or directory"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.793Z level=INFO msg="linksetup: neigh retrans_time_ms restored to pre-xpfd value" restored=28 total=32
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.803Z level=INFO msg="linksetup: restored default rss indirection" iface=ge-7-0-1
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.814Z level=INFO msg="linksetup: restored default rss indirection" iface=ge-7-0-2
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.814Z level=INFO msg="shutdown: rss indirection restore complete" restored=2 failed=0 not_attempted=0
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 xpfd[13083]: time=2026-09-17T22:45:20.814Z level=INFO msg="shutdown complete"
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 systemd[1]: xpfd.service: Deactivated successfully.
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 systemd[1]: Stopped xpfd.service - xpf Stateful Firewall Daemon.
+2026-09-17T22:45:20+00:00 xpf-userspace-fw1 systemd[1]: xpfd.service: Consumed 2min 37.014s CPU time over 7min 46.697s wall clock time, 3.9G memory peak.
+2026-09-17T22:45:21+00:00 xpf-userspace-fw1 systemd[1]: Starting xpfd.service - xpf Stateful Firewall Daemon...
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13473]: PASS embedded userspace shim (verifier accepted; no production state touched)
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 systemd[1]: Started xpfd.service - xpf Stateful Firewall Daemon.
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.519Z level=INFO msg="cluster node ID loaded from file" node=1 file=/etc/xpf/node-id
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.520Z level=INFO msg="starting xpf daemon" config=/etc/xpf/xpf.conf pid=13482
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.539Z level=INFO msg="loaded rollback history" entries=2
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.539Z level=INFO msg="configuration loaded from db"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.555Z level=INFO msg="linksetup: positional naming claims every present NIC, so the management/lifeline protected set is NOT a rename refusal on this branch (it is one only in device-map mode, where unmapped NICs exist)" protected=fxp0
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.556Z level=INFO msg="linksetup: wrote .link file" original=fxp0 target=fxp0
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.556Z level=INFO msg="linksetup: wrote .link file" original=em0 target=em0
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.556Z level=INFO msg="linksetup: wrote .link file" original=ge-7-0-0 target=ge-7-0-0
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.557Z level=INFO msg="linksetup: wrote .link file" original=enp8s0 target=ge-7-0-1
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.557Z level=INFO msg="linksetup: wrote .link file" original=enp9s0 target=ge-7-0-2
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.580Z level=INFO msg="linksetup: interface naming updated"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.581Z level=INFO msg="linksetup: rss weight reshaping skipped" iface=ge-7-0-0 workers=6 queues=6 reason="active (6) >= queues (6) — default table already feeds exactly the bound set"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.583Z level=INFO msg="linksetup: rss indirection table unreadable, queue cap is the remedy" iface=ge-7-0-0 driver=virtio_net rows=0
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.583Z level=INFO msg="linksetup: rss weight reshaping skipped" iface=ge-7-0-1 workers=6 queues=6 reason="active (6) >= queues (6) — default table already feeds exactly the bound set"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.585Z level=INFO msg="linksetup: rss weight reshaping skipped" iface=ge-7-0-2 workers=6 queues=6 reason="active (6) >= queues (6) — default table already feeds exactly the bound set"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.591Z level=INFO msg="linksetup: coalescence applied" iface=ge-7-0-1 adaptive=false rx_usecs=8 tx_usecs=8
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.595Z level=INFO msg="linksetup: coalescence applied" iface=ge-7-0-2 adaptive=false rx_usecs=8 tx_usecs=8
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.598Z level=INFO msg="linksetup: neigh retrans_time_ms applied" value=250 applied=28 already_set=0 failed=0
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.605Z level=INFO msg="event-options engine constructed"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.605Z level=INFO msg="cluster: new redundancy group" rg=0 priority=100 preempt=false weight=1 reason="dataplane XDP attachment not yet proven"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.605Z level=INFO msg="cluster: new redundancy group" rg=1 priority=100 preempt=false weight=1 reason="dataplane XDP attachment not yet proven"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.605Z level=INFO msg="cluster: new redundancy group" rg=2 priority=100 preempt=false weight=1 reason="dataplane XDP attachment not yet proven"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.605Z level=INFO msg="cluster manager initialized" node=1 cluster=22
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.605Z level=INFO msg="host forwarding posture applied; kernel transit remains with the XDP gate"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.654Z level=INFO msg="transit gate closed until a live XDP link is proven" stage=boot
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.655Z level=INFO msg="vrrp: manager started"
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.655Z level=INFO msg="cluster: no-RETH startup promotion hold active" timeout=30s
+2026-09-17T22:45:22+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:22.655Z level=INFO msg="loading userspace XDP shim"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.094Z level=INFO msg="userspace XDP shim loaded successfully"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.130Z level=INFO msg="dataplane armed; transit gate re-evaluated" stage=boot kernel_transit_open=false
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=INFO msg="seeded NAT port counters with random offset"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=INFO msg="seeded session ID counter" nodeID=1 cpus=16
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=INFO msg="applying active configuration"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=WARN msg="config validation" warning="chassis cluster authentication-key matches a published placeholder from a reference config; those values are in this repository, so the control channel is forgeable by anyone who has read it — replace it with a key generated by `openssl rand -base64 32`"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=WARN msg="config validation" warning="zone \"lan\" host-inbound-traffic: host-bound routing multicast (router-discovery (IRDP) 224.0.0.1/224.0.0.2) is currently admitted PACKET-WIDE via the kernel input-chain accept fall-through, not scoped to this zone's ingress interface — a known Junos-parity gap (#4455), pending the per-zone iifname multicast admission model."
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=WARN msg="config validation" warning="zone \"lan\" interface \"reth1\" host-inbound-traffic: host-bound routing multicast (router-discovery (IRDP) 224.0.0.1/224.0.0.2) is currently admitted PACKET-WIDE via the kernel input-chain accept fall-through, not scoped to this zone's ingress interface — a known Junos-parity gap (#4455), pending the per-zone iifname multicast admission model."
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.131Z level=WARN msg="config validation" warning="zone \"wan\" host-inbound-traffic: host-bound routing multicast (router-discovery (IRDP) 224.0.0.1/224.0.0.2) is currently admitted PACKET-WIDE via the kernel input-chain accept fall-through, not scoped to this zone's ingress interface — a known Junos-parity gap (#4455), pending the per-zone iifname multicast admission model."
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.132Z level=INFO msg="interface bound to VRF" interface=gr-0-0-0 vrf=vrf-sfmix
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.133Z level=INFO msg="interface bound to VRF" interface=em0 vrf=vrf-mgmt
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.133Z level=INFO msg="interface bound to VRF" interface=fab1 vrf=vrf-mgmt
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.133Z level=INFO msg="interface bound to VRF" interface=fxp0 vrf=vrf-mgmt
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.133Z level=INFO msg="interface bound to VRF" interface=fab0 vrf=vrf-mgmt
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.133Z level=INFO msg="mgmt VRF route withdrawn" dst=0.0.0.0/0 table=999
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.134Z level=WARN msg="bond member not found" bond=fab0 member=ge-0/0/0 linux=ge-0-0-0 err="Link not found"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.158Z level=INFO msg="removed fabric IPVLAN for deferred zerocopy XSK bind" name=fab1
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.158Z level=INFO msg="deferring fabric IPVLAN creation until XSK binds complete" parent=ge-7-0-0 name=fab1
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.161Z level=INFO msg="created fabric IPVLAN" name=fab1 parent=ge-7-0-0 addrs=[10.99.13.2/30]
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.162Z level=INFO msg="host-inbound-traffic compiled" zone=control flags=0xffffffff
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.168Z level=INFO msg="zone interface configured" zone=control interface=em0 phys_ifindex=3 vlan_id=0 zone_id=26483
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.172Z level=INFO msg="zone interface configured" zone=control interface=fab0 phys_ifindex=11 vlan_id=0 zone_id=26483
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.180Z level=INFO msg="zone interface configured" zone=control interface=fab1 phys_ifindex=4 vlan_id=0 zone_id=26483
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.180Z level=INFO msg="host-inbound-traffic compiled" zone=wan flags=0x300002
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.181Z level=INFO msg="VLAN sub-interface configured" parent=ge-7-0-2 vlan_id=50 sub_ifindex=13 zone=wan
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.190Z level=INFO msg="zone interface configured" zone=wan interface=reth0.50 phys_ifindex=6 vlan_id=50 zone_id=13098
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.191Z level=INFO msg="VLAN sub-interface configured" parent=ge-7-0-2 vlan_id=80 sub_ifindex=14 zone=wan
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.191Z level=INFO msg="zone interface configured" zone=wan interface=reth0.80 phys_ifindex=6 vlan_id=80 zone_id=13098
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.191Z level=INFO msg="host-inbound-traffic compiled" zone=sfmix flags=0x2
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.191Z level=INFO msg="skipping tx_port for tunnel interface" name=gr-0-0-0 ifindex=10
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.196Z level=INFO msg="skipping XDP/TC attachment for non-Ethernet netdev" name=gr-0-0-0 ifindex=10 encap=none
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.196Z level=INFO msg="zone interface configured" zone=sfmix interface=gr-0/0/0.0 phys_ifindex=10 vlan_id=0 zone_id=52010
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.196Z level=INFO msg="host-inbound-traffic compiled" zone=lan flags=0x120023
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.207Z level=INFO msg="zone interface configured" zone=lan interface=reth1 phys_ifindex=5 vlan_id=0 zone_id=21230
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.207Z level=INFO msg="host-inbound-traffic compiled" zone=mgmt flags=0x3
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.215Z level=INFO msg="zone interface configured" zone=mgmt interface=fxp0 phys_ifindex=2 vlan_id=0 zone_id=31881
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.235Z level=INFO msg="recovered RETH original kernel name" iface=ge-7-0-1 originalName=enp8s0
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.254Z level=INFO msg="recovered RETH original kernel name" iface=ge-7-0-2 originalName=enp9s0
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="source NAT rule compiled" rule-set=lan-to-wan rule=pool-snat from=lan to=wan pool_id=0 counter_id=4004929368 src_addr_id=1 dst_addr_id=0 src_addr=10.0.61.240/28 dst_addr=""
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="SNAT egress IP resolved" interface=reth0.50 ifindex=6 vlan=50 v4=172.16.50.8 v6=2001:559:8585:50::8
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="SNAT egress IP resolved" interface=reth0.80 ifindex=6 vlan=80 v4=172.16.80.8 v6=2001:559:8585:80::8
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="source NAT rule compiled" rule-set=lan-to-wan rule=snat from=lan to=wan pool_id=1 counter_id=52955747 src_addr_id=2 dst_addr_id=0 src_addr=0.0.0.0/0 dst_addr=""
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="SNAT egress IP resolved" interface=reth0.50 ifindex=6 vlan=50 v4=172.16.50.8 v6=2001:559:8585:50::8
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="SNAT egress IP resolved" interface=reth0.80 ifindex=6 vlan=80 v4=172.16.80.8 v6=2001:559:8585:80::8
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="source NAT rule compiled" rule-set=lan-to-wan rule=snat6 from=lan to=wan pool_id=2 counter_id=1292387279 src_addr_id=3 dst_addr_id=0 src_addr=::/0 dst_addr=""
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="SNAT egress IP resolved" interface=gr-0/0/0.0 ifindex=10 vlan=0 v4=10.255.192.42 v6=""
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="source NAT rule compiled" rule-set=lan-to-sfmix rule=snat from=lan to=sfmix pool_id=3 counter_id=558408622 src_addr_id=2 dst_addr_id=0 src_addr=0.0.0.0/0 dst_addr=""
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="default policy compiled" action=deny-all
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="compiled firewall filter" name=sfmix-pbr family=inet terms=2 rules=2 filter_id=0
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="assigned filter to interface" interface=ge-7-0-1 vlan=0 family=inet filter=sfmix-pbr
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="flow config compiled" tcp_mss_ipsec=0 tcp_mss_gre_in=0 tcp_mss_gre_out=0 allow_dns_reply=1 allow_embedded_icmp=1 app_flags=0 lo0_filter_v4=65535 lo0_filter_v6=65535
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.255Z level=INFO msg="config compiled to dataplane" zones=5 addresses=3 applications=0 policy_sets=2
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.282Z level=INFO msg="attached XDP program" ifindex=3 mode=native
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.283Z level=INFO msg="attached XDP program" ifindex=11 mode=native
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.284Z level=WARN msg="native XDP unavailable for userspace shim; falling back to generic (skb-mode)" ifindex=4 err="attach XDP to ifindex 4: failed to attach link: create link: invalid argument" impact="higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.481Z level=INFO msg="attached XDP program" ifindex=6 mode=native
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.688Z level=INFO msg="attached XDP program" ifindex=5 mode=native
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.689Z level=INFO msg="attached XDP program" ifindex=2 mode=native
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.689Z level=INFO msg="attached XDP program" ifindex=4 mode=generic
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.690Z level=INFO msg="dataplane arm-coverage proof" issue=#5275 stage=post-attach#1 ran=true direct=6 delegated=2 skipped=1 uncovered=0 would_gate=false did_gate=false surfaces="2:direct/native 3:direct/native 4:direct/generic 5:direct/native 6:direct/native 11:direct/native 13:delegated/via-6/native 14:delegated/via-6/native gr-0-0-0:skipped/unshimmable"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.690Z level=INFO msg="dataplane arm-coverage: compiler DECLINED to arm this surface (compile still succeeded)" issue=#5275 stage=post-attach#1 surface=gr-0-0-0 detail="link-layer type none is not Ethernet — the XDP shim parses a 14-byte Ethernet header unconditionally, so attaching it here would read the IP source octets as an ethertype (#8279); netdev is UP and zoned but has no XDP, so its traffic is not adjudicated" unshimmable=true
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.706Z level=INFO msg="userspace cpumap enabled for zero-copy AF_XDP" cpus=6
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.730Z level=INFO msg="RST suppression: installed nftables rules via netlink" v4=3 v6=3
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.731Z level=INFO msg="event stream: listening" path=/run/xpf/userspace-dp-events.sock
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: keep /proc/sys/net/core/rmem_default=67108864 (>= target 67108864)
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: keep /proc/sys/net/core/rmem_max=67108864 (>= target 67108864)
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: keep /proc/sys/net/core/wmem_default=67108864 (>= target 67108864)
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: keep /proc/sys/net/core/wmem_max=67108864 (>= target 67108864)
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: interrupt mode — skipping busy_poll sysctls
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: session socket at /run/xpf/userspace-dp-sessions.sock
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: linked libxdp 1.6.3 and vendored libbpf 1.6.3; linked libelf 0.195, zlib 1.3.2 and zstd 1.5.7; the build host's libbpf (pkg-config) was 1.7.0
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: poll_mode=Interrupt
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: event stream targeting /run/xpf/userspace-dp-events.sock
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-event-stream: connected to /run/xpf/userspace-dp-events.sock
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.744Z level=INFO msg="event stream: helper connected"
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.847Z level=INFO msg="userspace dataplane helper started" pid=13535 socket=/run/xpf/userspace-dp.sock
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: CTRL_REQ: apply_snapshot generation=3 fib_generation=0 forwarding_armed_before=false
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.903Z level=INFO msg="detached XDP program" ifindex=11
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.904Z level=INFO msg="detached XDP program" ifindex=2
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.904Z level=INFO msg="detached XDP program" ifindex=3
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: RG0 state changed: None -> Some(false) (demoted=[] activated=[])
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: RG1 state changed: None -> Some(false) (demoted=[] activated=[])
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: RG2 state changed: None -> Some(false) (demoted=[] activated=[])
+2026-09-17T22:45:24+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:24.957Z level=INFO msg="userspace: forwarding arm state change" desired=true current=false config_has_data_rg=true ha_group_count=16
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: CTRL_REQ: set_forwarding_state armed=true forwarding_armed_before=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: reconcile planned_workers=6 planned_bindings=18 live_slots=18
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: started worker thread worker_id=0 planned_bindings=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: started worker thread worker_id=1 planned_bindings=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: started worker thread worker_id=2 planned_bindings=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: started worker thread worker_id=3 planned_bindings=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: started worker thread worker_id=4 planned_bindings=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: started worker thread worker_id=5 planned_bindings=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-cold-path: worker=2 clock_source=tsc ns_per_tsc_q32=1871691049 wrapper_ns_baseline=19
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-cold-path: worker=1 clock_source=tsc ns_per_tsc_q32=1871677625 wrapper_ns_baseline=19
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-cold-path: worker=3 clock_source=tsc ns_per_tsc_q32=1871698401 wrapper_ns_baseline=17
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-cold-path: worker=0 clock_source=tsc ns_per_tsc_q32=1871579911 wrapper_ns_baseline=43
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-cold-path: worker=5 clock_source=tsc ns_per_tsc_q32=1871692519 wrapper_ns_baseline=19
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-cold-path: worker=4 clock_source=tsc ns_per_tsc_q32=1871579940 wrapper_ns_baseline=43
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 167772160 bytes (160 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 167772160 bytes (160 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 167772160 bytes (160 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 167772160 bytes (160 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 167772160 bytes (160 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 167772160 bytes (160 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: zero-copy bind failed using umem-owner-socket: libxdp private bind(flags=0x000c): Invalid argument — trying copy-mode
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=private fd=21 rx_ring=[mask=0x3fff size=16384 producer=0x7f7262343000 consumer=0x7f7262343080 ring=0x7f7262343140 flags=0x7f72623430c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x0 size=0 cached_prod=0 cached_cons=0]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=21) OK on attempt 0 role=private mode=Copy flags=0x000a
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=8 fd=21 strategy=umem-owner-socket role=private bound if4q2 mode=Copy flags=0x000a shared_umem=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: zero-copy bind failed using umem-owner-socket: libxdp private bind(flags=0x000c): Invalid argument — trying copy-mode
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: zero-copy bind failed using umem-owner-socket: libxdp private bind(flags=0x000c): Invalid argument — trying copy-mode
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: zero-copy bind failed using umem-owner-socket: libxdp private bind(flags=0x000c): Invalid argument — trying copy-mode
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=8 fd=21 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=private fd=22 rx_ring=[mask=0x3fff size=16384 producer=0x7f7261de0000 consumer=0x7f7261de0080 ring=0x7f7261de0140 flags=0x7f7261de00c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x0 size=0 cached_prod=0 cached_cons=0]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=22) OK on attempt 0 role=private mode=Copy flags=0x000a
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=11 fd=22 strategy=umem-owner-socket role=private bound if4q3 mode=Copy flags=0x000a shared_umem=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=private fd=25 rx_ring=[mask=0x3fff size=16384 producer=0x7f7261ff8000 consumer=0x7f7261ff8080 ring=0x7f7261ff8140 flags=0x7f7261ff80c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x0 size=0 cached_prod=0 cached_cons=0]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=private fd=26 rx_ring=[mask=0x3fff size=16384 producer=0x7f7261f76000 consumer=0x7f7261f76080 ring=0x7f7261f76140 flags=0x7f7261f760c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x0 size=0 cached_prod=0 cached_cons=0]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=25) OK on attempt 0 role=private mode=Copy flags=0x000a
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=14 fd=25 strategy=umem-owner-socket role=private bound if4q4 mode=Copy flags=0x000a shared_umem=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=26) OK on attempt 0 role=private mode=Copy flags=0x000a
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=5 fd=26 strategy=umem-owner-socket role=private bound if4q1 mode=Copy flags=0x000a shared_umem=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 335544320 bytes (320 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: zero-copy bind failed using umem-owner-socket: libxdp private bind(flags=0x000c): Invalid argument — trying copy-mode
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: zero-copy bind failed using umem-owner-socket: libxdp private bind(flags=0x000c): Invalid argument — trying copy-mode
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=private fd=24 rx_ring=[mask=0x3fff size=16384 producer=0x7f72625ba000 consumer=0x7f72625ba080 ring=0x7f72625ba140 flags=0x7f72625ba0c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x0 size=0 cached_prod=0 cached_cons=0]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=11 fd=22 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=5 fd=26 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=private fd=23 rx_ring=[mask=0x3fff size=16384 producer=0x7f7261ef4000 consumer=0x7f7261ef4080 ring=0x7f7261ef4140 flags=0x7f7261ef40c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x0 size=0 cached_prod=0 cached_cons=0]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=24) OK on attempt 0 role=private mode=Copy flags=0x000a
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=2 fd=24 strategy=umem-owner-socket role=private bound if4q0 mode=Copy flags=0x000a shared_umem=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=23) OK on attempt 0 role=private mode=Copy flags=0x000a
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=17 fd=23 strategy=umem-owner-socket role=private bound if4q5 mode=Copy flags=0x000a shared_umem=false
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 335544320 bytes (320 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=14 fd=25 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 335544320 bytes (320 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 335544320 bytes (320 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=2 fd=24 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=17 fd=23 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 335544320 bytes (320 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-ha: umem alloc 335544320 bytes (320 MB, 2MB hugepages)
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=27 rx_ring=[mask=0x3fff size=16384 producer=0x7f726278e000 consumer=0x7f726278e080 ring=0x7f726278e140 flags=0x7f726278e0c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=27) OK on attempt 0 role=shared-owner mode=ZeroCopy flags=0x000c
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=7 fd=27 strategy=umem-owner-socket role=shared-owner bound if5q2 mode=ZeroCopy flags=0x000c shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=30 rx_ring=[mask=0x3fff size=16384 producer=0x7f72621ff000 consumer=0x7f72621ff080 ring=0x7f72621ff140 flags=0x7f72621ff0c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=30) OK on attempt 0 role=shared-owner mode=ZeroCopy flags=0x000c
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=4 fd=30 strategy=umem-owner-socket role=shared-owner bound if5q1 mode=ZeroCopy flags=0x000c shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=31 rx_ring=[mask=0x3fff size=16384 producer=0x7f7260287000 consumer=0x7f7260287080 ring=0x7f7260287140 flags=0x7f72602870c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=31) OK on attempt 0 role=shared-owner mode=ZeroCopy flags=0x000c
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=16 fd=31 strategy=umem-owner-socket role=shared-owner bound if5q5 mode=ZeroCopy flags=0x000c shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=28 rx_ring=[mask=0x3fff size=16384 producer=0x7f7260205000 consumer=0x7f7260205080 ring=0x7f7260205140 flags=0x7f72602050c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=28) OK on attempt 0 role=shared-owner mode=ZeroCopy flags=0x000c
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=10 fd=28 strategy=umem-owner-socket role=shared-owner bound if5q3 mode=ZeroCopy flags=0x000c shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=29 rx_ring=[mask=0x3fff size=16384 producer=0x7f7261e31000 consumer=0x7f7261e31080 ring=0x7f7261e31140 flags=0x7f7261e310c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=29) OK on attempt 0 role=shared-owner mode=ZeroCopy flags=0x000c
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=13 fd=29 strategy=umem-owner-socket role=shared-owner bound if5q4 mode=ZeroCopy flags=0x000c shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=32 rx_ring=[mask=0x3fff size=16384 producer=0x7f7260183000 consumer=0x7f7260183080 ring=0x7f7260183140 flags=0x7f72601830c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=32) OK on attempt 0 role=shared-owner mode=ZeroCopy flags=0x000c
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=1 fd=32 strategy=umem-owner-socket role=shared-owner bound if5q0 mode=ZeroCopy flags=0x000c shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=33 rx_ring=[mask=0x3fff size=16384 producer=0x7f7260000000 consumer=0x7f7260000080 ring=0x7f7260000140 flags=0x7f72600000c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=33) OK on attempt 0 role=shared-secondary mode=ZeroCopy flags=0x0001
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=6 fd=33 strategy=umem-owner-socket role=shared-secondary bound if6q2 mode=ZeroCopy flags=0x0001 shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=7 fd=27 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=6 fd=33 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=34 rx_ring=[mask=0x3fff size=16384 producer=0x7f718b859000 consumer=0x7f718b859080 ring=0x7f718b859140 flags=0x7f718b8590c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=34) OK on attempt 0 role=shared-secondary mode=ZeroCopy flags=0x0001
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=3 fd=34 strategy=umem-owner-socket role=shared-secondary bound if6q1 mode=ZeroCopy flags=0x0001 shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=4 fd=30 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=3 fd=34 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=35 rx_ring=[mask=0x3fff size=16384 producer=0x7f718b3c4000 consumer=0x7f718b3c4080 ring=0x7f718b3c4140 flags=0x7f718b3c40c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=35) OK on attempt 0 role=shared-secondary mode=ZeroCopy flags=0x0001
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=15 fd=35 strategy=umem-owner-socket role=shared-secondary bound if6q5 mode=ZeroCopy flags=0x0001 shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=16 fd=31 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=15 fd=35 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=36 rx_ring=[mask=0x3fff size=16384 producer=0x7f718af2f000 consumer=0x7f718af2f080 ring=0x7f718af2f140 flags=0x7f718af2f0c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=36) OK on attempt 0 role=shared-secondary mode=ZeroCopy flags=0x0001
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=9 fd=36 strategy=umem-owner-socket role=shared-secondary bound if6q3 mode=ZeroCopy flags=0x0001 shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=10 fd=28 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=9 fd=36 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=37 rx_ring=[mask=0x3fff size=16384 producer=0x7f718aa9a000 consumer=0x7f718aa9a080 ring=0x7f718aa9a140 flags=0x7f718aa9a0c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=37) OK on attempt 0 role=shared-secondary mode=ZeroCopy flags=0x0001
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=12 fd=37 strategy=umem-owner-socket role=shared-secondary bound if6q4 mode=ZeroCopy flags=0x0001 shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=13 fd=29 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=12 fd=37 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-xsk-ffi: create_xsk_binding mode=shared fd=38 rx_ring=[mask=0x3fff size=16384 producer=0x7f718a605000 consumer=0x7f718a605080 ring=0x7f718a605140 flags=0x7f718a6050c4 cached_prod=0 cached_cons=0] fill_ring=[mask=0x1ffff size=131072 cached_prod=0 cached_cons=131072]
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: prime_fill_ring: inserted=32768/32768 fill_pending=32768
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: libxdp bind(fd=38) OK on attempt 0 role=shared-secondary mode=ZeroCopy flags=0x0001
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: binding slot=0 fd=38 strategy=umem-owner-socket role=shared-secondary bound if6q0 mode=ZeroCopy flags=0x0001 shared_umem=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=1 fd=32 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: registered slot=0 fd=38 in XSKMAP
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: neigh_monitor: rcvbuf set via SO_RCVBUFFORCE: requested 4194304, effective 8388608 bytes
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: neigh_monitor: initial kernel neighbor dump complete
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: neigh_monitor: listening for kernel neighbor events
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: xpf-userspace-dp: spawning GRE local-origin thread endpoint=44687 tun=gr-0-0-0
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=0 transitioning bound=false->true fd=38
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=1 transitioning bound=false->true fd=32
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=2 transitioning bound=false->true fd=24
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=3 transitioning bound=false->true fd=34
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=4 transitioning bound=false->true fd=30
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=5 transitioning bound=false->true fd=26
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=6 transitioning bound=false->true fd=33
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=7 transitioning bound=false->true fd=27
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=8 transitioning bound=false->true fd=21
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=9 transitioning bound=false->true fd=36
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=10 transitioning bound=false->true fd=28
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=11 transitioning bound=false->true fd=22
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=12 transitioning bound=false->true fd=37
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=13 transitioning bound=false->true fd=29
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=14 transitioning bound=false->true fd=25
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=15 transitioning bound=false->true fd=35
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=16 transitioning bound=false->true fd=31
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13535]: refresh_bindings: slot=17 transitioning bound=false->true fd=23
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.568Z level=INFO msg="userspace: delaying ctrl enable for readiness" hard_timeout=15s cluster_ha=true
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.570Z level=INFO msg="userspace: starting XSK liveness probe"
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.571Z level=INFO msg="XSK bound — creating deferred fabric IPVLAN" parent=ge-7-0-0 name=fab1
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.572Z level=INFO msg="fabric IPVLAN: removed stale address" name=fab1 addr=fe80::1066:6a00:13f:6760/64
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.575Z level=INFO msg="interface bound to VRF" interface=fab1 vrf=vrf-mgmt
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.644Z level=INFO msg="userspace: bootstrapping NAPI queues" reason=startup-prewarm
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.674Z level=INFO msg="cluster: interface monitor recovered" rg=0 interface=__dataplane-arm__
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.674Z level=INFO msg="cluster: weight changed" rg=0 old=1 new=255
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.674Z level=INFO msg="cluster: interface monitor recovered" rg=1 interface=__dataplane-arm__
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.674Z level=INFO msg="cluster: weight changed" rg=1 old=1 new=255
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.674Z level=INFO msg="cluster: interface monitor recovered" rg=2 interface=__dataplane-arm__
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.674Z level=INFO msg="cluster: weight changed" rg=2 old=1 new=255
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.714Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth0 reason="link lookup failed" skips_total=1
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.714Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth0.50 reason="link lookup failed" skips_total=2
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.714Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth0.80 reason="link lookup failed" skips_total=3
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.714Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth1 reason="link lookup failed" skips_total=4
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.714Z level=INFO msg="removed stale networkd file" path=/etc/systemd/network/10-xpf-ge-7-0-0.link
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.714Z level=INFO msg="wrote networkd file" path=/etc/systemd/network/10-xpf-fxp0.link
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.715Z level=INFO msg="wrote networkd file" path=/etc/systemd/network/10-xpf-ge-7-0-1.link
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.715Z level=INFO msg="wrote networkd file" path=/etc/systemd/network/10-xpf-em0.link
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.715Z level=INFO msg="wrote networkd file" path=/etc/systemd/network/10-xpf-ge-7-0-2.link
+2026-09-17T22:45:25+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:25.715Z level=INFO msg="networkd config updated, reloading" interfaces=9
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.136Z level=INFO msg="removed auto link-local from RETH member" iface=ge-7-0-2 addr=fe80::bf:72ff:fe16:101
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.140Z level=INFO msg="removed auto link-local from RETH member" iface=ge-7-0-2.50 addr=fe80::bf:72ff:fe16:101
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.140Z level=INFO msg="added link-local for NDP on RETH interface" iface=ge-7-0-2.50 addr=fe80::bf:72ff:fe16:101
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.140Z level=INFO msg="removed auto link-local from RETH member" iface=ge-7-0-2.80 addr=fe80::bf:72ff:fe16:101
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.141Z level=INFO msg="added link-local for NDP on RETH interface" iface=ge-7-0-2.80 addr=fe80::bf:72ff:fe16:101
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.142Z level=INFO msg="removed auto link-local from RETH member" iface=ge-7-0-1 addr=fe80::bf:72ff:fe16:201
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.143Z level=INFO msg="added link-local for NDP on RETH interface" iface=ge-7-0-1 addr=fe80::bf:72ff:fe16:201
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.145Z level=INFO msg="proxy-arp responder: started" iface=ge-7-0-2.80 addresses=1
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.145Z level=INFO msg="proxy-arp: suppressing responder for an interface this node does not own" iface=reth0.80 issue=#8297
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.145Z level=INFO msg="interface bound to VRF" interface=gr-0-0-0 vrf=vrf-sfmix
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.146Z level=INFO msg="interface bound to VRF" interface=fab1 vrf=vrf-mgmt
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.149Z level=INFO msg="interface bound to VRF" interface=fxp0 vrf=vrf-mgmt
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.151Z level=INFO msg="interface bound to VRF" interface=fab0 vrf=vrf-mgmt
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.156Z level=INFO msg="interface bound to VRF" interface=em0 vrf=vrf-mgmt
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.158Z level=INFO msg="FRR config written" path=/etc/frr/frr.conf generation=1
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.436Z level=INFO msg="FRR reloaded via frr-reload.py (full diff)"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.436Z level=INFO msg="PBR rule added" instance=sfmix iif=ge-7-0-1 dscp=0 dscp_set=false src="" dst=10.255.192.40/30 ipproto=0 sport="" dport="" table=488570
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.447Z level=INFO msg="swanctl config reloaded"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.465Z level=INFO msg="DHCP: starting client" interface=fxp0 family=4
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.465Z level=INFO msg="DHCPv4: starting discovery" interface=fxp0
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.473Z level=INFO msg="DNS: reconciled managed /etc/resolv.conf" servers=[1.1.1.1] domain="" search=[] replaced_symlink=false
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.479Z level=INFO msg="DHCPv4: lease obtained" interface=fxp0 address=10.136.126.134/24 gateway=10.136.126.1 lease_time=1h0m0s
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.619Z level=INFO msg="host-inbound filter applied" zones=5 unzoned_deny_v4=0 unzoned_deny_v6=0 junos_host_deny_programs=0
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.627Z level=INFO msg="RPM probe set applied" probes=0
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.645Z level=INFO msg="linksetup: rss weight reshaping skipped" iface=ge-7-0-0 workers=6 queues=6 reason="active (6) >= queues (6) — default table already feeds exactly the bound set"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.646Z level=INFO msg="linksetup: rss indirection table unreadable, queue cap is the remedy" iface=ge-7-0-0 driver=virtio_net rows=0
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.646Z level=INFO msg="linksetup: rss weight reshaping skipped" iface=ge-7-0-1 workers=6 queues=6 reason="active (6) >= queues (6) — default table already feeds exactly the bound set"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.648Z level=INFO msg="linksetup: rss weight reshaping skipped" iface=ge-7-0-2 workers=6 queues=6 reason="active (6) >= queues (6) — default table already feeds exactly the bound set"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.651Z level=WARN msg="linksetup: coalescence drift detected; overwriting" iface=ge-7-0-1 captured_prior_rx_usecs=8 captured_prior_tx_usecs=8 live_rx_usecs=3 live_tx_usecs=16 writing_rx_usecs=8 writing_tx_usecs=8
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.654Z level=INFO msg="linksetup: coalescence applied" iface=ge-7-0-1 adaptive=false rx_usecs=8 tx_usecs=8
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.655Z level=WARN msg="linksetup: coalescence drift detected; overwriting" iface=ge-7-0-2 captured_prior_rx_usecs=8 captured_prior_tx_usecs=8 live_rx_usecs=3 live_tx_usecs=16 writing_rx_usecs=8 writing_tx_usecs=8
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.658Z level=INFO msg="linksetup: coalescence applied" iface=ge-7-0-2 adaptive=false rx_usecs=8 tx_usecs=8
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.660Z level=INFO msg="linksetup: neigh retrans_time_ms applied" value=250 applied=32 already_set=0 failed=0
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.660Z level=WARN msg="failed to create event source" err="events map not loaded"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.660Z level=INFO msg="conntrack GC started" interval=10s
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.677Z level=INFO msg="HA watchdog heartbeat started" rgs=3
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.677Z level=INFO msg="dynamic-address feed producers reconciled" feed_servers=0
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=INFO msg="cluster: session sync transport" mode=control-link local=10.99.12.2:4785 peer=10.99.12.1:4785
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=INFO msg="cluster: heartbeat started" local=10.99.12.2 peer=10.99.12.1 interval=200ms threshold=5
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=INFO msg="cluster sync: listening" addr=10.99.12.2:4785
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=INFO msg="cluster session sync started" local=10.99.12.2:4785 peer=10.99.12.1:4785 vrf=vrf-mgmt
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=INFO msg="cluster sync: sweep started"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=WARN msg="cluster: config read-only gate disagreed with RG0 state — correcting. An RG0 transition event was almost certainly dropped (see the \"event channel full\" warning); the node would otherwise have stayed in this split state until the next transition." rg0_state=secondary store_read_only_was=false issue=#6889
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.678Z level=INFO msg="cluster: became secondary for RG0, disabling config writes"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.679Z level=INFO msg="cluster: fabric state monitor started (link + neighbor)"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.680Z level=INFO msg="cluster: fabric peer MAC resolved via parent ARP" peer_mac="\x10fj\xfe\xd9U" overlay=fab1
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.681Z level=INFO msg="proactive neighbor resolution" resolving=3 total_targets=5
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.681Z level=INFO msg="HTTP API server listening" addr=127.0.0.1:8080
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.681Z level=INFO msg="HTTP API server started" addr=127.0.0.1:8080
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.729Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.780Z level=INFO msg="gRPC API server started" addr=127.0.0.1:50051
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.780Z level=INFO msg="daemon mode (non-interactive), waiting for signals"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.781Z level=INFO msg="gRPC server listening" addr=127.0.0.1:50051
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.806Z level=INFO msg="cluster: peer heartbeat received" peer_node=0 groups=3
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.831Z level=INFO msg="userspace: event stream connected, polling reduced to reconciliation (5s)"
+2026-09-17T22:45:26+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:26.883Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.122Z level=INFO msg="cluster sync: peer connected" remote=10.99.12.1:51808 fabric=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.123Z level=INFO msg="cluster sync: connection authenticated with control-link PSK" fabric=0 remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: handling new connection" fabric=0 remote=10.99.12.1:51808 was_disconnected=true active_before=-1 active_after=0 became_active=true should_cold_prime=true had_conn0=false had_conn1=false
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: driving authoritative cold-prime bulk on active connection" fabric=0 remote=10.99.12.1:51808 cold_start=true was_disconnected=true
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: scheduling OnPeerConnected callback" fabric=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: starting bulk sync on cold start" fabric=0 remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: clock synced with peer" peer_mono=27266 local_mono=236916 offset=209650
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: peer advertised capabilities" version=25 flags=15 session_sync_wire=2
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync starting" epoch=1 source=table-truth local=10.99.12.2:4785 remote=10.99.12.1:51808 sessions_sent=0 sessions_received=0 sessions_installed=0 queue_len=0 queue_cap=4096
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster: session sync peer connected" retry_gen=1 cold_start=true bulk_primed=false peer_bulk_primed=false cluster_sync_ready=false
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync iterating v4" epoch=1 source=table-truth
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync iterated v4" epoch=1 source=table-truth sessions=0 skipped=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: config-sync payload encryption negotiated on this connection (#6629)" remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync iterating v6" epoch=1 source=table-truth sessions=0 skipped=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync iterated v6" epoch=1 source=table-truth sessions=0 skipped=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster: starting session sync bulk-prime retry loop" retry_gen=1 max_attempts=6 intervals="[10s 20s 30s 30s 30s 30s]"
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync writing end marker" epoch=1 source=table-truth sessions=0 skipped=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.124Z level=INFO msg="cluster sync: bulk sync complete" source=table-truth sessions=0 skipped=0 epoch=1
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.126Z level=INFO msg="cluster sync: config received from peer" size=11307 gen=22614179292457
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.127Z level=INFO msg="cluster: skipping config sync apply (config already matches active and is applied)" size=11307
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.192Z level=INFO msg="cluster sync: bulk transfer starting" epoch=9 peer_boot_incarnation=74dec521aa924c909f62e65f86d7aa47 incarnation_switched=true retired_incarnation=false reboot_already_retired=false evicted_stale_incarnation_conn=false local=10.99.12.2:4785 remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.192Z level=INFO msg="cluster sync: bulk receive progress" epoch=9 sessions=1 type=v4 local=10.99.12.2:4785 remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.212Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster sync: reconcile stale sessions starting" recv_v4=14 recv_v6=0 zones=-1
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster sync: reconcile stale sessions skipped (no zone snapshot)"
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster sync: bulk transfer complete" epoch=9 sessions=14 local=10.99.12.2:4785 remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster sync: bulk ack sent" epoch=9 local=10.99.12.2:4785 remote=10.99.12.1:51808
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster sync: bulk ack received" epoch=1 local=10.99.12.2:4785 remote=10.99.12.1:51808 sessions_sent=0 sessions_received=14 sessions_installed=7 queue_len=0 queue_cap=4096
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster: session sync complete, releasing VRRP hold"
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster: session sync bulk ack received" retry_gen=1
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster: session sync bulk received" retry_gen=1
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster: no-RETH startup promotion hold released" reason=bulk-sync-complete
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.374Z level=INFO msg="cluster: sync readiness changed" ready=true
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.375Z level=INFO msg="cluster: RG readiness: ready" rg=1
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.375Z level=INFO msg="cluster: RG readiness: ready" rg=2
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.375Z level=INFO msg="cluster: RG readiness: ready" rg=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.599Z level=INFO msg="cluster: failover reset" rg=0
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.601Z level=INFO msg="cluster: failover reset" rg=1
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.603Z level=INFO msg="cluster: failover reset" rg=2
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.679Z level=INFO msg="gRPC fabric listener up" addr=10.99.12.2:50051 vrf=vrf-mgmt
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.741Z level=INFO msg="userspace: bootstrapping NAPI queues" reason=startup
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.817Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth0 reason="link lookup failed" skips_total=5
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.817Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth0.50 reason="link lookup failed" skips_total=6
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.817Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth0.80 reason="link lookup failed" skips_total=7
+2026-09-17T22:45:27+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:27.817Z level=WARN msg="napi bootstrap: interface NOT probed; its queues may stay cold (no synthetic HW RX event). The XSK liveness gate is box-wide, so a live queue elsewhere still reports this box healthy" interface=reth1 reason="link lookup failed" skips_total=8
+2026-09-17T22:45:28+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:28.480Z level=INFO msg="DHCP address changed on management-only interface, refreshing management routes"
+2026-09-17T22:45:28+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:28.480Z level=INFO msg="mgmt VRF default route installed" interface=fxp0 gw=10.136.126.1 table=999
+2026-09-17T22:45:28+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:28.489Z level=INFO msg="DNS: reconciled managed /etc/resolv.conf" servers="[1.1.1.1 10.136.126.1]" domain="" search=[] replaced_symlink=false
+2026-09-17T22:45:28+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:28.843Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:29+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:29.876Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:45:31+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:31.910Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:32+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:32.013Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:32+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:32.844Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:35+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:35.683Z level=INFO msg="userspace: XSK liveness proven on idle standby"
+2026-09-17T22:45:36+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:36.844Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:37+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:37.124Z level=INFO msg="cluster: stopping session sync bulk-prime retry loop" retry_gen=1 attempt=1 reason="peer bulk ack received"
+2026-09-17T22:45:40+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:40.847Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:41+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:41.680Z level=INFO msg="proactive neighbor resolution" resolving=1 total_targets=5
+2026-09-17T22:45:41+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:41.680Z level=INFO msg="force-probe neighbors" count=44
+2026-09-17T22:45:44+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:44.846Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:48+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:48.845Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:52+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:52.845Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:56+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:56.679Z level=INFO msg="proxy-arp: suppressing responder for an interface this node does not own" iface=reth0.80 issue=#8297
+2026-09-17T22:45:56+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:56.680Z level=INFO msg="proactive neighbor resolution" resolving=1 total_targets=5
+2026-09-17T22:45:56+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:56.736Z level=INFO msg="force-probe neighbors" count=44
+2026-09-17T22:45:56+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:56.793Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:45:56+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:56.843Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:45:58+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:45:58.852Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:46:00+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:00.745Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:46:01+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:01.563Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:46:02+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:02.846Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:46:06+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:06.743Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:46:06+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:06.847Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:46:06+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:06.848Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:46:08+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:08.910Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:46:11+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:11.680Z level=INFO msg="force-probe neighbors" count=44
+2026-09-17T22:46:11+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:11.680Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:46:12+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:12.844Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:46:13+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:13.299Z level=INFO msg="proactive neighbor resolution" resolving=3 total_targets=5
+2026-09-17T22:46:13+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:13.881Z level=INFO msg="cluster: fabric_fwd updated" interface=ge-7-0-0 ifindex=4 fib_ifindex=4 local_mac="\x10fj?g`" peer_mac="\x10fj\xfe\xd9U"
+2026-09-17T22:46:14+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:14.855Z level=INFO msg="proactive neighbor resolution" resolving=3 total_targets=5
+2026-09-17T22:46:16+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:46:16.848Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""

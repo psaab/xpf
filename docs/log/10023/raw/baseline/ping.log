@@ -1,0 +1,53 @@
+PING 172.16.80.200 (172.16.80.200) 56(84) bytes of data.
+[1789685879.225824] 64 bytes from 172.16.80.200: icmp_seq=1 ttl=63 time=0.496 ms
+[1789685879.327921] 64 bytes from 172.16.80.200: icmp_seq=2 ttl=63 time=0.252 ms
+[1789685879.435961] 64 bytes from 172.16.80.200: icmp_seq=3 ttl=63 time=0.303 ms
+[1789685879.539921] 64 bytes from 172.16.80.200: icmp_seq=4 ttl=63 time=0.257 ms
+[1789685879.643898] 64 bytes from 172.16.80.200: icmp_seq=5 ttl=63 time=0.233 ms
+[1789685879.747925] 64 bytes from 172.16.80.200: icmp_seq=6 ttl=63 time=0.206 ms
+[1789685879.855985] 64 bytes from 172.16.80.200: icmp_seq=7 ttl=63 time=0.327 ms
+[1789685879.959922] 64 bytes from 172.16.80.200: icmp_seq=8 ttl=63 time=0.240 ms
+[1789685880.063846] 64 bytes from 172.16.80.200: icmp_seq=9 ttl=63 time=0.192 ms
+[1789685880.167883] 64 bytes from 172.16.80.200: icmp_seq=10 ttl=63 time=0.231 ms
+[1789685880.271987] 64 bytes from 172.16.80.200: icmp_seq=11 ttl=63 time=0.314 ms
+[1789685880.375848] 64 bytes from 172.16.80.200: icmp_seq=12 ttl=63 time=0.193 ms
+[1789685880.479912] 64 bytes from 172.16.80.200: icmp_seq=13 ttl=63 time=0.221 ms
+[1789685880.583873] 64 bytes from 172.16.80.200: icmp_seq=14 ttl=63 time=0.215 ms
+[1789685880.687994] 64 bytes from 172.16.80.200: icmp_seq=15 ttl=63 time=0.336 ms
+[1789685880.791885] 64 bytes from 172.16.80.200: icmp_seq=16 ttl=63 time=0.228 ms
+[1789685880.899995] 64 bytes from 172.16.80.200: icmp_seq=17 ttl=63 time=0.334 ms
+[1789685881.008026] 64 bytes from 172.16.80.200: icmp_seq=18 ttl=63 time=0.368 ms
+[1789685881.115902] 64 bytes from 172.16.80.200: icmp_seq=19 ttl=63 time=0.244 ms
+[1789685881.219923] 64 bytes from 172.16.80.200: icmp_seq=20 ttl=63 time=0.258 ms
+[1789685881.323964] 64 bytes from 172.16.80.200: icmp_seq=21 ttl=63 time=0.312 ms
+[1789685881.431964] 64 bytes from 172.16.80.200: icmp_seq=22 ttl=63 time=0.303 ms
+[1789685881.536066] 64 bytes from 172.16.80.200: icmp_seq=23 ttl=63 time=0.382 ms
+[1789685881.640035] 64 bytes from 172.16.80.200: icmp_seq=24 ttl=63 time=0.360 ms
+[1789685881.743903] 64 bytes from 172.16.80.200: icmp_seq=25 ttl=63 time=0.227 ms
+[1789685881.848034] 64 bytes from 172.16.80.200: icmp_seq=26 ttl=63 time=0.377 ms
+[1789685881.952012] 64 bytes from 172.16.80.200: icmp_seq=27 ttl=63 time=0.344 ms
+[1789685882.055878] 64 bytes from 172.16.80.200: icmp_seq=28 ttl=63 time=0.216 ms
+[1789685882.159886] 64 bytes from 172.16.80.200: icmp_seq=29 ttl=63 time=0.218 ms
+[1789685882.263884] 64 bytes from 172.16.80.200: icmp_seq=30 ttl=63 time=0.210 ms
+[1789685882.368013] 64 bytes from 172.16.80.200: icmp_seq=31 ttl=63 time=0.330 ms
+[1789685882.471956] 64 bytes from 172.16.80.200: icmp_seq=32 ttl=63 time=0.303 ms
+[1789685882.575980] 64 bytes from 172.16.80.200: icmp_seq=33 ttl=63 time=0.296 ms
+[1789685882.683967] 64 bytes from 172.16.80.200: icmp_seq=34 ttl=63 time=0.307 ms
+[1789685882.792043] 64 bytes from 172.16.80.200: icmp_seq=35 ttl=63 time=0.385 ms
+[1789685882.895983] 64 bytes from 172.16.80.200: icmp_seq=36 ttl=63 time=0.326 ms
+[1789685882.999993] 64 bytes from 172.16.80.200: icmp_seq=37 ttl=63 time=0.343 ms
+[1789685883.103901] 64 bytes from 172.16.80.200: icmp_seq=38 ttl=63 time=0.218 ms
+[1789685883.208041] 64 bytes from 172.16.80.200: icmp_seq=39 ttl=63 time=0.360 ms
+[1789685883.312041] 64 bytes from 172.16.80.200: icmp_seq=40 ttl=63 time=0.361 ms
+[1789685883.415930] 64 bytes from 172.16.80.200: icmp_seq=41 ttl=63 time=0.228 ms
+[1789685883.523962] 64 bytes from 172.16.80.200: icmp_seq=42 ttl=63 time=0.290 ms
+[1789685883.628007] 64 bytes from 172.16.80.200: icmp_seq=43 ttl=63 time=0.352 ms
+[1789685883.731898] 64 bytes from 172.16.80.200: icmp_seq=44 ttl=63 time=0.243 ms
+[1789685883.835891] 64 bytes from 172.16.80.200: icmp_seq=45 ttl=63 time=0.239 ms
+[1789685883.943871] 64 bytes from 172.16.80.200: icmp_seq=46 ttl=63 time=0.206 ms
+[1789685884.047965] 64 bytes from 172.16.80.200: icmp_seq=47 ttl=63 time=0.312 ms
+[1789685884.151930] 64 bytes from 172.16.80.200: icmp_seq=48 ttl=63 time=0.252 ms
+
+--- 172.16.80.200 ping statistics ---
+48 packets transmitted, 48 received, 0% packet loss, time 4926ms
+rtt min/avg/max/mdev = 0.192/0.286/0.496/0.065 ms
