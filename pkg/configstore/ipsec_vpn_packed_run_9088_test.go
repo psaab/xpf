@@ -19,7 +19,7 @@ const ipsecPreamble9088 = `security {
         }
     }
     ipsec {
-        proposal IPR { protocol esp; }
+        proposal IPR { protocol esp; encryption-algorithm aes-256-cbc; authentication-algorithm hmac-sha-256-128; }
         policy P { proposals IPR; }
 `
 
