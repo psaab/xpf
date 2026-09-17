@@ -2,42 +2,35 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
-// lo0_vacated_enforced_6529_test.go are the #6529 fail-on-revert proofs. A
-// VACATED lo0 filter — one that installs cleanly but renders NO kernel rules —
-// used to set lo0Enforced=true on the unconditional success path, which
-// permanently suppressed the #6476 cold-boot fence: with the flag true every
-// later failed install skips the fence and the host input path stays open.
+// lo0_vacated_enforced_6529_test.go carries the #9940 fail-on-revert proofs
+// for the two zero-render shapes that survived #9883: a DEFINED-but-empty
+// filter and a DEFINED filter whose terms all match nothing.
 //
-// Revert the `if rules == 0` branch in applyLo0Filter and every test here goes
-// RED except TestRealLo0FilterStillEnforces6529, which is the anti-over-fix
-// half and must stay green under both.
+// The daemon must reject either shape BEFORE InstallLo0 runs. That preserves
+// the prior live xpf_lo0 table, returns a commit-visible error, and logs the
+// refusal. On cold start, the same refusal takes the existing #6476 fence path
+// so the host input path is not left open.
 //
-// Production call path: applyLo0Filter -> toNftLo0Spec ->
-// nftInstaller.InstallLo0(spec) (which now reports the RENDERED rule count from
-// nlPlan.rules) -> the lo0Enforced decision -> the `!lo0Enforced` fence gate on
-// the next failed install.
+// TestRealLo0FilterStillEnforces6529 is the anti-over-fix half and must remain
+// green: a render with at least one kernel rule still installs and records
+// enforcement, and a later failed install retains that real table.
 //
-// #9883: a DANGLING lo0 filter name (configured but not defined — a quarantined
-// unknown-family filter on the tolerant path, or any typo'd hook) NO LONGER
-// reaches the zero-rules branch: the dangling pre-check in applyLo0Filter fails
-// it closed WITHOUT installing (fence on cold-start, retain on existing-state).
-// These proofs therefore use a DEFINED-but-empty vacated shape (filters present
-// with no terms) — the zero-rules door that CAN occur on a clean commit and must
-// still clear the gate without fencing. Dangling fail-closed is proven in
-// lo0_quarantined_failclosed_9883_test.go.
+// #9883 remains separately covered by lo0_quarantined_failclosed_9883_test.go:
+// a DANGLING lo0 filter name is rejected before rendering and never reaches
+// either zero-render shape.
 
-// vacatedLo0Config returns a config whose lo0 input filters are DEFINED but carry
-// no terms, so toNftLo0Spec yields no terms and the installed xpf_lo0 table is an
-// empty `policy accept` shell. This is the #6529 zero-rules shape that survives
-// #9883: strict ACCEPTS an empty filter, so it CAN occur on a clean commit and
-// must clear the gate without fencing (unlike a DANGLING name, which strict
-// rejects and #9883 fails closed before installing).
+// vacatedLo0Config returns a config whose lo0 input filters are DEFINED but
+// carry no terms. It is a legitimate compiler output shape (strict compilation
+// accepts it with the existing no-terminal-catch-all warning), but it is not a
+// legitimate RE-protection render: swapping it would install an empty
+// policy-accept shell. #9940 therefore refuses it unconditionally.
 func vacatedLo0Config() *config.Config {
 	cfg := hostInboundTestConfig()
 	cfg.System.Lo0FilterInputV4 = "protect-re"
@@ -53,162 +46,188 @@ func vacatedLo0Config() *config.Config {
 	return cfg
 }
 
-// TestVacatedLo0FilterDoesNotClaimEnforcement6529 is the primary proof and the
-// issue's first acceptance criterion: a DEFINED-but-empty filter (no terms) must
-// NOT set lo0Enforced. (#9883: a DANGLING name no longer reaches this branch —
-// it fails closed before installing; see lo0_quarantined_failclosed_9883_test.go.)
-func TestVacatedLo0FilterDoesNotClaimEnforcement6529(t *testing.T) {
+// TestVacatedLo0FilterRefusesEmptyRender9940 is the primary #9940 proof:
+// a DEFINED-but-empty render must retain a prior real table, return an error,
+// and never call the installer.
+func TestVacatedLo0FilterRefusesEmptyRender9940(t *testing.T) {
 	cfg := vacatedLo0Config()
 
-	var got xnft.Lo0FilterSpec
-	calls := 0
+	calls, fences := 0, 0
 	orig := nftInstaller
 	nftInstaller = &fakeNftInstaller{
-		lo0: func(s xnft.Lo0FilterSpec) error { got = s; calls++; return nil },
-	}
-	defer func() { nftInstaller = orig }()
-
-	d := &Daemon{}
-	if err := d.applyLo0Filter(cfg); err != nil {
-		t.Fatalf("a vacated install still SUCCEEDS; applyLo0Filter must not error: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("InstallLo0 call count = %d, want 1", calls)
-	}
-	// Precondition: this really is the vacated shape — the install went through
-	// with an empty spec, not with a filter that happened to render something.
-	// (Defined-but-empty lowers to no terms, exactly as a dangling name did
-	// before #9883 moved dangling to the fail-closed pre-check.)
-	if len(got.V4Terms)+len(got.V6Terms) != 0 {
-		t.Fatalf("precondition: a defined-but-empty filter must lower to NO terms, got v4=%d v6=%d",
-			len(got.V4Terms), len(got.V6Terms))
-	}
-	if d.lo0Enforced.Load() {
-		t.Fatal("a lo0 table that renders NO rules enforces nothing; recording it as a real " +
-			"operator filter permanently suppresses the #6476 cold-boot fence (the #6529 hole)")
-	}
-}
-
-// TestVacatedLo0ThenFailedInstallStillFences6529 is the issue's second
-// acceptance criterion: after the vacated install, a later FAILED install must
-// still install the fence.
-func TestVacatedLo0ThenFailedInstallStillFences6529(t *testing.T) {
-	cfg := vacatedLo0Config()
-	injected := errors.New("nftables: injected lo0 failure")
-
-	failNext := false
-	fences := 0
-	orig := nftInstaller
-	nftInstaller = &fakeNftInstaller{
-		lo0: func(xnft.Lo0FilterSpec) error {
-			if failNext {
-				return injected
-			}
-			return nil
-		},
+		lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
 		lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
 	}
 	defer func() { nftInstaller = orig }()
 
 	d := &Daemon{}
-	if err := d.applyLo0Filter(cfg); err != nil {
-		t.Fatalf("vacated install: %v", err)
-	}
-
-	// Now a real filter appears in the config but its install fails.
-	failNext = true
-	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
-		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "deny-rest", Action: "discard"},
-		}},
-	}
+	// Model the prior live real xpf_lo0 table. The fake has no kernel state,
+	// so lo0Enforced is the observable retention latch.
+	d.lo0Enforced.Store(true)
+	logBuf, restoreLog := captureSlog(t)
+	defer restoreLog()
 	err := d.applyLo0Filter(cfg)
 	if err == nil {
-		t.Fatal("the failed install must be surfaced as an error")
+		t.Fatal("an empty lo0 render must fail closed, got nil")
 	}
-	if !errors.Is(err, injected) {
-		t.Fatalf("returned error must wrap the injected failure, got %v", err)
+	if !strings.Contains(err.Error(), "renders no rules") {
+		t.Fatalf("error must identify the empty render, got %v", err)
 	}
-	if fences != 1 {
-		t.Fatalf("the earlier VACATED install must not have suppressed the fence; "+
-			"cold-boot fence install count = %d, want 1", fences)
+	if !strings.Contains(logBuf.String(), "refusing to replace the live table with an empty policy-accept shell") {
+		t.Fatalf("empty-render refusal must be operator-visible in the log, got %q", logBuf.String())
 	}
-}
-
-// TestVacatedLo0ClearsAPriorRealFilter6529 pins the half a "don't Store(true)"
-// fix would miss. On an HA peer-sync a DEFINED-but-empty vacated generation
-// atomically REPLACES a real filter that is already live, so the kernel loses
-// its rules. Leaving the flag at its stale true would keep suppressing the
-// fence — the same hole through a different door. The vacated branch must
-// Store(FALSE), mirroring the no-filter teardown (#5790 parity). (#9883: a
-// DANGLING generation does NOT replace — the pre-check retains the prior real
-// filter and keeps the flag true; see lo0_quarantined_failclosed_9883_test.go.)
-func TestVacatedLo0ClearsAPriorRealFilter6529(t *testing.T) {
-	real := lo0FenceTestConfig()
-	vacated := vacatedLo0Config()
-
-	orig := nftInstaller
-	nftInstaller = &fakeNftInstaller{}
-	defer func() { nftInstaller = orig }()
-
-	d := &Daemon{}
-	if err := d.applyLo0Filter(real); err != nil {
-		t.Fatalf("real install: %v", err)
+	if calls != 0 {
+		t.Fatalf("empty render must be refused before InstallLo0; call count=%d", calls)
+	}
+	if fences != 0 {
+		t.Fatalf("a retained real table must not be replaced by a fence; fence count=%d", fences)
 	}
 	if !d.lo0Enforced.Load() {
-		t.Fatal("precondition: a real rendering filter must set lo0Enforced")
-	}
-
-	if err := d.applyLo0Filter(vacated); err != nil {
-		t.Fatalf("vacated install: %v", err)
-	}
-	if d.lo0Enforced.Load() {
-		t.Fatal("the vacated generation atomically REPLACED the real filter; the kernel table " +
-			"now enforces nothing, so the stale true must be cleared or the fence stays suppressed")
+		t.Fatal("refusing the empty render must retain the prior real-table state")
 	}
 }
 
-// TestZeroRenderedRulesClearsEnforcement6529 pins the decision on the RENDERED
-// rule count rather than on "the spec had terms". The second remaining door into
-// a zero-rule install (the dangling-name door moved to the #9883 fail-closed
-// pre-check) is a DEFINED filter whose every term lowers to zero kernel rules —
-// a Junos match-nothing scope, e.g. an unresolved `from source-prefix-list` on
-// the lenient path. pkg/nftables/netlink_lo0_zero_render_6529_test.go proves that
-// door is real against the production builder; this pins the consequence, with
-// the fake reporting the count the real builder would.
-func TestZeroRenderedRulesClearsEnforcement6529(t *testing.T) {
-	cfg := lo0FenceTestConfig() // a filter WITH terms
-	zero := 0
+// TestVacatedLo0ColdStartRefusesAndFences9940 proves the no-prior-table arm:
+// refusal is still visible, InstallLo0 is not called, and the existing
+// fail-closed fence is installed as the only protection.
+func TestVacatedLo0ColdStartRefusesAndFences9940(t *testing.T) {
+	cfg := vacatedLo0Config()
 
-	var got xnft.Lo0FilterSpec
+	calls, fences := 0, 0
 	orig := nftInstaller
 	nftInstaller = &fakeNftInstaller{
-		lo0:      func(s xnft.Lo0FilterSpec) error { got = s; return nil },
-		lo0Rules: &zero,
+		lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
+		lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
 	}
 	defer func() { nftInstaller = orig }()
 
 	d := &Daemon{}
-	if err := d.applyLo0Filter(cfg); err != nil {
-		t.Fatalf("applyLo0Filter: %v", err)
+	logBuf, restoreLog := captureSlog(t)
+	defer restoreLog()
+	err := d.applyLo0Filter(cfg)
+	if err == nil {
+		t.Fatal("an empty lo0 render must fail closed, got nil")
 	}
-	// Precondition: the spec DID carry terms, so a term-count gate would have
-	// wrongly recorded enforcement here.
-	if len(got.V4Terms)+len(got.V6Terms) == 0 {
-		t.Fatal("precondition: this case must have terms; otherwise it is the defined-empty case")
+	if !strings.Contains(err.Error(), "renders no rules") {
+		t.Fatalf("error must identify the empty render, got %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "refusing to replace the live table with an empty policy-accept shell") {
+		t.Fatalf("cold-start empty-render refusal must be operator-visible in the log, got %q", logBuf.String())
+	}
+	if calls != 0 {
+		t.Fatalf("empty render must be refused before InstallLo0; call count=%d", calls)
+	}
+	if fences != 1 {
+		t.Fatalf("cold-start empty render must install one fail-closed fence; count=%d", fences)
 	}
 	if d.lo0Enforced.Load() {
-		t.Fatal("terms that render NO kernel rules enforce nothing; the gate must key on the " +
-			"RENDERED rule count, not on the presence of terms")
+		t.Fatal("a fence is not a real operator filter")
+	}
+}
+
+// TestLo0InstallerDriftRefusesAndFences9940 covers the renderer-drift guard:
+// the daemon oracle predicts a real render, but the installer reports zero
+// after its atomic replacement. The now-empty live table is fenced regardless
+// of whether the old latch said cold start or a real filter was loaded.
+func TestLo0InstallerDriftRefusesAndFences9940(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		enforced bool
+	}{
+		{name: "cold-start-latch-false", enforced: false},
+		{name: "existing-state-latch-true", enforced: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := lo0FenceTestConfig()
+			zero := 0
+			calls, fences := 0, 0
+			orig := nftInstaller
+			nftInstaller = &fakeNftInstaller{
+				lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
+				lo0Rules:         &zero,
+				lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
+			}
+			defer func() { nftInstaller = orig }()
+
+			d := &Daemon{}
+			d.lo0Enforced.Store(tc.enforced)
+			logBuf, restoreLog := captureSlog(t)
+			defer restoreLog()
+			err := d.applyLo0Filter(cfg)
+			if err == nil {
+				t.Fatal("renderer drift must fail closed, got nil")
+			}
+			if !strings.Contains(err.Error(), "rendered no rules") {
+				t.Fatalf("renderer-drift error must identify the zero-rule parity failure, got %v", err)
+			}
+			if !strings.Contains(logBuf.String(), "renderer parity is broken") {
+				t.Fatalf("renderer-drift failure must be operator-visible in the log, got %q", logBuf.String())
+			}
+			if calls != 1 {
+				t.Fatalf("renderer drift must reach InstallLo0 once before the guard; call count=%d", calls)
+			}
+			if fences != 1 {
+				t.Fatalf("renderer drift must install one fail-closed fence for %s; count=%d", tc.name, fences)
+			}
+			if d.lo0Enforced.Load() {
+				t.Fatal("renderer drift must clear the real-filter latch")
+			}
+		})
+	}
+}
+
+// TestMatchNothingLo0RenderRefuses9940 proves the second residual shape:
+// terms are present in both family pools, but each term is constrained to the
+// opposite address family and therefore lowers to no kernel rules.
+func TestMatchNothingLo0RenderRefuses9940(t *testing.T) {
+	cfg := lo0FenceTestConfig()
+	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
+			{Name: "nothing-v4", SourceAddresses: []string{"2001:db8::/32"}, Action: "discard"},
+		}},
+	}
+	cfg.Firewall.FiltersInet6 = map[string]*config.FirewallFilter{
+		"protect-re6": {Name: "protect-re6", Terms: []*config.FirewallFilterTerm{
+			{Name: "nothing-v6", SourceAddresses: []string{"10.0.0.0/8"}, Action: "discard"},
+		}},
+	}
+
+	calls, fences := 0, 0
+	orig := nftInstaller
+	nftInstaller = &fakeNftInstaller{
+		lo0:              func(xnft.Lo0FilterSpec) error { calls++; return nil },
+		lo0ColdBootFence: func(xnft.FenceSpec) error { fences++; return nil },
+	}
+	defer func() { nftInstaller = orig }()
+
+	d := &Daemon{}
+	d.lo0Enforced.Store(true)
+	logBuf, restoreLog := captureSlog(t)
+	defer restoreLog()
+	err := d.applyLo0Filter(cfg)
+	if err == nil {
+		t.Fatal("a match-nothing lo0 render must fail closed, got nil")
+	}
+	if !strings.Contains(err.Error(), "renders no rules") {
+		t.Fatalf("error must identify the match-nothing render, got %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "refusing to replace the live table with an empty policy-accept shell") {
+		t.Fatalf("match-nothing refusal must be operator-visible in the log, got %q", logBuf.String())
+	}
+	if calls != 0 {
+		t.Fatalf("match-nothing render must be refused before InstallLo0; call count=%d", calls)
+	}
+	if fences != 0 {
+		t.Fatalf("a retained real table must not be replaced by a fence; fence count=%d", fences)
+	}
+	if !d.lo0Enforced.Load() {
+		t.Fatal("refusing the match-nothing render must retain the prior real-table state")
 	}
 }
 
 // TestRealLo0FilterStillEnforces6529 is the anti-over-fix half: a real filter
-// that renders rules must still set lo0Enforced, and a later failed install must
-// still SKIP the fence — the deliberate #6476/#6489 day-2 divergence (the
-// retained operator filter is not per-destination-address scoped, so lo0 needs
-// no gap fence). A fix that cleared the flag too eagerly would re-fence over a
-// live operator filter and turn this RED.
+// that renders rules must still set lo0Enforced, and a later failed install
+// must still SKIP the fence — the deliberate #6476/#6489 day-2 divergence.
 func TestRealLo0FilterStillEnforces6529(t *testing.T) {
 	cfg := lo0FenceTestConfig()
 	injected := errors.New("nftables: injected day-2 lo0 failure")
