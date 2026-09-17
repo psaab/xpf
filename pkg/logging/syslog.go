@@ -51,6 +51,11 @@ const (
 	// reconnect fails fast (drops) instead of dialing — preventing a
 	// thundering herd of 5s dials against a down server.
 	defaultReconnectCooldown = 1 * time.Second
+	// closeJoinTimeout bounds how long Close waits for an in-flight Send to
+	// release s.mu after the active socket has been closed. A real net.Conn
+	// unblocks promptly; this bound also protects a reconfigure commit from a
+	// custom connection that ignores Close.
+	closeJoinTimeout = 100 * time.Millisecond
 )
 
 // Syslog wire severity levels (RFC 5424 / RFC 3164 numeric PRI severity).
@@ -114,6 +119,7 @@ const (
 // TCP/TLS use RFC 6587 octet-counting framing.
 type SyslogClient struct {
 	mu          sync.Mutex
+	connMu      sync.RWMutex // protects conn while Close races an in-flight Write
 	conn        net.Conn
 	hostname    string
 	remoteAddr  string
@@ -154,16 +160,11 @@ type SyslogClient struct {
 	nowFn  func() time.Time         // clock source (default time.Now)
 	dialFn func() (net.Conn, error) // dial override (default s.dial)
 
-	// closed is set true by Close() (mu-guarded) and checked at the top of
-	// Send/SendBinary. Without it, a Send racing a Close (both serialize on
-	// mu, so this is a happens-after ordering, not a data race) can run
-	// AFTER Close() returns, see the pre-#4806 code's now-stale
-	// s.conn != nil, hit a "use of closed network connection" write error,
-	// and — since that is treated as a generic write failure — fall into
-	// reconnect(), silently re-establishing a brand-new socket to a target
-	// the caller believed was torn down (#4806). Checking closed instead of
-	// conn != nil makes Close() terminal: no Send after Close() may dial.
-	closed bool
+	// closed is set atomically by Close() before it closes the active socket.
+	// Send/SendBinary/Connect/reconnect check it both before and after any
+	// operation that can race Close. The separate connMu lets Close detach and
+	// close a socket without waiting for s.mu, which an in-flight Write holds.
+	closed atomic.Bool
 }
 
 // now returns the client's clock (overridable in tests).
@@ -172,6 +173,70 @@ func (s *SyslogClient) now() time.Time {
 		return s.nowFn()
 	}
 	return time.Now()
+}
+
+// loadConn returns the current connection. A Send copies the interface under
+// connMu, then deliberately writes through the local copy so Close can close
+// the same socket concurrently without racing the s.conn field.
+func (s *SyslogClient) loadConn() net.Conn {
+	s.connMu.RLock()
+	defer s.connMu.RUnlock()
+	return s.conn
+}
+
+// storeConn publishes a newly connected socket unless Close won the race.
+// The closed check and publication share connMu with Close's detach, so a
+// connection can never be installed after Close has detached the prior one.
+func (s *SyslogClient) storeConn(conn net.Conn) bool {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.closed.Load() {
+		return false
+	}
+	s.conn = conn
+	return true
+}
+
+// detachConn removes and returns the active socket. It is intentionally
+// independent of s.mu: Close uses it to interrupt a Write that holds s.mu.
+func (s *SyslogClient) detachConn() net.Conn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	conn := s.conn
+	s.conn = nil
+	return conn
+}
+
+// closeSyslogConn closes a syslog socket without allowing TLS close_notify to
+// block a caller. tls.Conn.Close writes close_notify before closing its raw
+// socket; close the raw socket first so that notification fails immediately,
+// then finish the TLS wrapper close and ignore the expected notification error.
+func closeSyslogConn(conn net.Conn) error {
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		if raw := tlsConn.NetConn(); raw != nil {
+			_ = raw.Close()
+		}
+		_ = tlsConn.Close()
+		return nil
+	}
+	return conn.Close()
+}
+
+// joinSendBounded gives an in-flight Send a short chance to observe the
+// socket close and release s.mu. It never waits on a custom Conn indefinitely.
+func (s *SyslogClient) joinSendBounded() {
+	if s.mu.TryLock() {
+		s.mu.Unlock()
+		return
+	}
+	deadline := time.Now().Add(closeJoinTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		if s.mu.TryLock() {
+			s.mu.Unlock()
+			return
+		}
+	}
 }
 
 // dialConn dials a new connection via the test seam if set, else the real
@@ -353,18 +418,24 @@ func NewSyslogClientDeferred(host string, port int, sourceAddr, protocol string,
 func (s *SyslogClient) Connect() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return errSyslogClientClosed
 	}
-	if s.conn != nil {
+	if s.loadConn() != nil {
 		return nil
 	}
 	conn, err := s.dialConn()
 	if err != nil {
+		if s.closed.Load() {
+			return errSyslogClientClosed
+		}
 		s.lastReconnectFailure = s.now()
 		return err
 	}
-	s.conn = conn
+	if !s.storeConn(conn) {
+		_ = closeSyslogConn(conn)
+		return errSyslogClientClosed
+	}
 	return nil
 }
 
@@ -377,9 +448,7 @@ func (s *SyslogClient) Connect() error {
 // from a failed dial — both end unconnected. Against a REACHABLE listener the
 // two are distinguishable, and that is the shape the daemon cell uses.
 func (s *SyslogClient) Connected() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.conn != nil
+	return s.loadConn() != nil
 }
 
 // RemoteAddr is the "host:port" this client targets. Read-only after
@@ -506,8 +575,9 @@ func (s *SyslogClient) dialTLS() (net.Conn, error) {
 // The event hot-path therefore never spends more than one dial's worth of time
 // per cooldown window on a dead target.
 //
-// The cooldown clock (lastReconnectFailure) is armed by BOTH failure modes:
-//   - a failed dial (set here), and
+// The cooldown clock (lastReconnectFailure) is armed by THREE failure modes:
+//   - a failed dial (set here),
+//   - a write timeout (set by Send/SendBinary), and
 //   - a dial that SUCCEEDS but whose subsequent retry-write fails (set by the
 //     caller via armReconnectCooldown).
 //
@@ -520,32 +590,50 @@ func (s *SyslogClient) dialTLS() (net.Conn, error) {
 // recovery path (a single broken-pipe error that the reconnect repairs) is
 // unaffected.
 func (s *SyslogClient) reconnect() error {
-	if s.reconnectCooldown > 0 && !s.lastReconnectFailure.IsZero() {
-		if s.now().Sub(s.lastReconnectFailure) < s.reconnectCooldown {
-			return errReconnectCooldown
-		}
+	if s.closed.Load() {
+		return errSyslogClientClosed
 	}
-	if s.conn != nil {
-		s.conn.Close()
-		s.conn = nil
+	if s.reconnectCooldownActive() {
+		return errReconnectCooldown
+	}
+	if conn := s.detachConn(); conn != nil {
+		_ = closeSyslogConn(conn)
+	}
+	if s.closed.Load() {
+		return errSyslogClientClosed
 	}
 	conn, err := s.dialConn()
 	if err != nil {
+		if s.closed.Load() {
+			return errSyslogClientClosed
+		}
 		s.lastReconnectFailure = s.now()
 		return err
 	}
 	// Dial succeeded. Do NOT clear the cooldown clock yet — the retry-write may
 	// still fail (accept-then-reset). The caller clears it on a successful
 	// retry-write and arms it (armReconnectCooldown) if the retry-write fails.
-	s.conn = conn
+	if !s.storeConn(conn) {
+		_ = closeSyslogConn(conn)
+		return errSyslogClientClosed
+	}
 	return nil
 }
 
-// armReconnectCooldown records a reconnect-cycle failure on the cooldown clock
-// so the NEXT reconnect within the window fails fast. Called with mu held from
-// the post-reconnect retry-write-failure path (dial succeeded, write failed):
-// without this, an accept-then-reset target bypasses the cooldown forever
-// because the dial never errors (#2302).
+// reconnectCooldownActive reports whether a reconnect-cycle failure is still
+// suppressing writes. Called with s.mu held.
+func (s *SyslogClient) reconnectCooldownActive() bool {
+	return s.reconnectCooldown > 0 &&
+		!s.lastReconnectFailure.IsZero() &&
+		s.now().Sub(s.lastReconnectFailure) < s.reconnectCooldown
+}
+
+// armReconnectCooldown records a failure on the cooldown clock so the NEXT
+// write or reconnect within the window fails fast. Called with mu held from
+// both the write-timeout path and the post-reconnect retry-write-failure path:
+// without this, a hung or accept-then-reset target bypasses the cooldown
+// because the initial write or dial never reaches the reconnect gate (#2302,
+// #9911).
 func (s *SyslogClient) armReconnectCooldown() {
 	s.lastReconnectFailure = s.now()
 }
@@ -746,12 +834,22 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		// Close() already ran: fail fast, never reconnect (#4806).
 		return errSyslogClientClosed
 	}
+	if s.protocol != "udp" && s.reconnectCooldownActive() {
+		pendingWarn = s.noteDrop(dropCooldown, errReconnectCooldown)
+		return errReconnectCooldown
+	}
 
 	if err := s.writeMsg(line); err != nil {
+		if s.closed.Load() {
+			// Close may have interrupted the write. Count the dropped record
+			// before returning the terminal closed-client error.
+			pendingWarn = s.noteDrop(dropWrite, err)
+			return errSyslogClientClosed
+		}
 		// For stream protocols, attempt one cooldown-gated reconnect. UDP has
 		// no connection to re-establish, so it returns the error — but it is
 		// now a BOUNDED error: #9025 armed the same write deadline on the
@@ -763,12 +861,17 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 			// doubling the worst-case stall on the event reader, #2287). Drop
 			// and return. Only a genuine connection error reconnects.
 			if isTimeout(err) {
+				s.armReconnectCooldown()
 				pendingWarn = s.noteDrop(dropWrite, err)
 				return err
 			}
 			// Captured, not emitted: this runs under s.mu (#8597).
 			pendingDbg = &pendingDebug{msg: "syslog send failed, reconnecting", err: err}
 			if rerr := s.reconnect(); rerr != nil {
+				if rerr == errSyslogClientClosed {
+					pendingWarn = s.noteDrop(dropWrite, err)
+					return rerr
+				}
 				// Cooldown or dial failure: drop and continue. The event
 				// reader must make forward progress regardless.
 				if rerr == errReconnectCooldown {
@@ -778,7 +881,15 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 				}
 				return fmt.Errorf("syslog reconnect %s: %w", s.remoteAddr, rerr)
 			}
+			if s.closed.Load() {
+				pendingWarn = s.noteDrop(dropWrite, err)
+				return errSyslogClientClosed
+			}
 			if werr := s.writeMsg(line); werr != nil {
+				if s.closed.Load() {
+					pendingWarn = s.noteDrop(dropWrite, werr)
+					return errSyslogClientClosed
+				}
 				// Dial succeeded but the retry-write failed (accept-then-reset).
 				// Arm the cooldown so the NEXT message's reconnect is throttled
 				// instead of dialing afresh every time (#2302).
@@ -842,27 +953,28 @@ func isTimeout(err error) bool {
 // EVERY datagram write error, so this no longer depends on isTimeout — the
 // ECONNREFUSED a connected UDP socket gets back from a dead collector is
 // counted on the same footing.
-func (s *SyslogClient) datagramWrite(b []byte) error {
+func (s *SyslogClient) datagramWrite(conn net.Conn, b []byte) error {
 	if s.writeTimeout > 0 {
 		// Best-effort, as in streamWrite: a conn that does not support
 		// deadlines still gets its Write, just unbounded.
-		_ = s.conn.SetWriteDeadline(s.now().Add(s.writeTimeout))
+		_ = conn.SetWriteDeadline(s.now().Add(s.writeTimeout))
 	}
-	_, err := s.conn.Write(b)
+	_, err := conn.Write(b)
 	return err
 }
 
 // writeMsg writes the framed message to the connection. Called with mu held.
 func (s *SyslogClient) writeMsg(line string) error {
-	if s.conn == nil {
+	conn := s.loadConn()
+	if conn == nil {
 		return fmt.Errorf("syslog connection closed")
 	}
 	if s.protocol == "udp" {
-		return s.datagramWrite([]byte(line))
+		return s.datagramWrite(conn, []byte(line))
 	}
 	// TCP/TLS: RFC 6587 octet-counting: "<length> <message>"
 	framed := fmt.Sprintf("%d %s", len(line), line)
-	return s.streamWrite([]byte(framed))
+	return s.streamWrite(conn, []byte(framed))
 }
 
 // streamWrite writes to a TCP/TLS conn with a bounded write deadline so a
@@ -877,40 +989,40 @@ func (s *SyslogClient) writeMsg(line string) error {
 // by a truncated write: the RFC 6587 octet-count prefix ("<len> <msg>") and
 // the self-framing binary record (length at offset [3:5]) both tell the
 // collector to expect `len` bytes, so a truncated frame leaves the collector's
-// length parser mid-record. If the connection stayed up, the NEXT frame's
-// bytes would concatenate onto the truncated one and the parser would
-// mis-frame every subsequent message — a permanent desync of the
-// audit/forensics channel, exactly under incident load (slow writes). A
-// half-written octet-counted frame is unrecoverable in-stream; the only
-// correct recovery is close+reconnect so the next frame starts a fresh,
-// correctly-counted stream. So on a partial write we tear the conn down here
-// (conn=nil); the next Send sees conn==nil, treats it as a non-timeout write
-// failure, and the existing cooldown-gated reconnect path dials a fresh
-// stream. A clean 0-byte timeout (n==0) wrote nothing, cannot desync the
-// collector, and stays drop-without-close per #2287.
+// length parser mid-record — a permanent desync of the audit/forensics
+// channel, exactly under incident load (slow writes). A half-written
+// octet-counted frame is unrecoverable in-stream; the only correct recovery is
+// close+reconnect so a later frame starts a fresh, correctly-counted stream.
+// So on a partial write we tear the conn down (conn=nil). A partial
+// non-timeout write reconnects in the same Send; a partial timeout arms the
+// reconnect cooldown, which makes immediate later Sends fail fast before
+// attempting another write or dial. Once the window expires, a later Send
+// reconnects to a fresh stream. A clean 0-byte TCP timeout wrote nothing and
+// stays drop-without-close per #2287. A TLS timeout also tears down the conn:
+// crypto/tls documents its state as corrupt after a timed-out Write, so the
+// next post-cooldown Send must reconnect rather than reuse it.
 //
-// Closing the raw conn here does NOT reintroduce the #2285 re-entrant
-// deadlock: net.Conn.Close() (and *tls.Conn.Close) is a pure syscall that
-// never routes back through slog/SyslogSlogHandler.Handle/SyslogClient.Send,
-// so it cannot re-lock s.mu on this goroutine. It is also NOT the #2287 stall
-// hazard: we only close (cheap) — we do NOT dial or re-arm a second
-// writeTimeout in this branch; the reconnect happens on the next Send via the
-// conn==nil path, so the worst-case in-Send stall stays one writeTimeout.
-func (s *SyslogClient) streamWrite(b []byte) error {
+// closeSyslogConn closes the raw socket before asking *tls.Conn to send its
+// close_notify. This keeps TLS shutdown bounded against a blackholed collector;
+// the expected close_notify error is ignored after the raw socket is closed.
+// Closing the raw conn here does NOT reintroduce the #2285 re-entrant deadlock:
+// it never routes back through slog/SyslogSlogHandler.Handle/SyslogClient.Send.
+func (s *SyslogClient) streamWrite(conn net.Conn, b []byte) error {
 	if s.writeTimeout > 0 {
 		// Best-effort: if SetWriteDeadline is unsupported by the conn it
 		// returns an error we ignore (the Write still proceeds, just
 		// without the bound). Real TCP/TLS conns always support it.
-		_ = s.conn.SetWriteDeadline(s.now().Add(s.writeTimeout))
+		_ = conn.SetWriteDeadline(s.now().Add(s.writeTimeout))
 	}
-	n, err := s.conn.Write(b)
-	if n > 0 && n < len(b) {
-		// A truncated frame is on the wire and the stream is now unrecoverable
-		// (see the doc comment). Discard the corrupt conn so the next Send
-		// reconnects and resyncs; leaving it up would concatenate the next
-		// frame onto the truncated one and permanently desync the collector.
-		s.conn.Close()
+	n, err := conn.Write(b)
+	_, isTLS := conn.(*tls.Conn)
+	if (n > 0 && n < len(b)) || (isTLS && isTimeout(err)) {
+		// corrupt state after a timed-out Write. In either case, discard the
+		// connection so a later Send cannot reuse an unrecoverable stream.
+		_ = closeSyslogConn(conn)
+		s.connMu.Lock()
 		s.conn = nil
+		s.connMu.Unlock()
 	}
 	return err
 }
@@ -931,21 +1043,36 @@ func (s *SyslogClient) SendBinary(data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		// Close() already ran: fail fast, never reconnect (#4806).
 		return errSyslogClientClosed
 	}
+	if s.protocol != "udp" && s.reconnectCooldownActive() {
+		pendingWarn = s.noteDrop(dropCooldown, errReconnectCooldown)
+		return errReconnectCooldown
+	}
 
 	if err := s.writeBinaryMsg(data); err != nil {
+		if s.closed.Load() {
+			// Close may have interrupted the write. Count the dropped record
+			// before returning the terminal closed-client error.
+			pendingWarn = s.noteDrop(dropWrite, err)
+			return errSyslogClientClosed
+		}
 		if s.protocol != "udp" {
 			// Write-deadline timeout: already bounded — drop, don't retry (#2287).
 			if isTimeout(err) {
+				s.armReconnectCooldown()
 				pendingWarn = s.noteDrop(dropWrite, err)
 				return err
 			}
 			// Captured, not emitted: this runs under s.mu (#8597).
 			pendingDbg = &pendingDebug{msg: "syslog binary send failed, reconnecting", err: err}
 			if rerr := s.reconnect(); rerr != nil {
+				if rerr == errSyslogClientClosed {
+					pendingWarn = s.noteDrop(dropWrite, err)
+					return rerr
+				}
 				if rerr == errReconnectCooldown {
 					pendingWarn = s.noteDrop(dropCooldown, err)
 				} else {
@@ -953,7 +1080,15 @@ func (s *SyslogClient) SendBinary(data []byte) error {
 				}
 				return fmt.Errorf("syslog reconnect %s: %w", s.remoteAddr, rerr)
 			}
+			if s.closed.Load() {
+				pendingWarn = s.noteDrop(dropWrite, err)
+				return errSyslogClientClosed
+			}
 			if werr := s.writeBinaryMsg(data); werr != nil {
+				if s.closed.Load() {
+					pendingWarn = s.noteDrop(dropWrite, werr)
+					return errSyslogClientClosed
+				}
 				// Dial succeeded but the retry-write failed (accept-then-reset):
 				// arm the cooldown so the next reconnect is throttled (#2302).
 				s.armReconnectCooldown()
@@ -978,13 +1113,14 @@ func (s *SyslogClient) SendBinary(data []byte) error {
 
 // writeBinaryMsg writes the raw binary data to the connection. Called with mu held.
 func (s *SyslogClient) writeBinaryMsg(data []byte) error {
-	if s.conn == nil {
+	conn := s.loadConn()
+	if conn == nil {
 		return fmt.Errorf("syslog connection closed")
 	}
 	if s.protocol == "udp" {
-		return s.datagramWrite(data)
+		return s.datagramWrite(conn, data)
 	}
-	return s.streamWrite(data)
+	return s.streamWrite(conn, data)
 }
 
 // ShouldSend returns true if the event severity passes this client's filter.
@@ -1385,18 +1521,22 @@ func ParseFacility(name string) int {
 }
 
 // Close closes the underlying connection and marks the client closed (#4806).
-// Once Close returns, Send/SendBinary always fail fast — they never dial a
-// fresh connection, even if a caller races a Send against this Close (the
-// shared mu serializes the two: whichever acquires it first runs to
-// completion before the other observes the closed state).
+// It marks closed and detaches the socket without taking s.mu, so a concurrent
+// Send blocked in conn.Write cannot serialize a reconfigure commit behind it.
+// Once Close returns, Send/SendBinary always fail fast and never dial a fresh
+// connection.
 func (s *SyslogClient) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closed = true
-	if s.conn != nil {
-		err := s.conn.Close()
-		s.conn = nil
-		return err
+	// Mark the client closed before detaching the socket. This path must not
+	// take s.mu: an in-flight Send holds it across conn.Write, and Close must
+	// be able to interrupt that Write for a reconfigure commit.
+	s.closed.Store(true)
+	conn := s.detachConn()
+	var err error
+	if conn != nil {
+		err = closeSyslogConn(conn)
 	}
-	return nil
+	// Real sockets unblock the in-flight Write promptly. Keep the join bounded
+	// for custom connections whose Close does not interrupt Write.
+	s.joinSendBounded()
+	return err
 }

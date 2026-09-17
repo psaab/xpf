@@ -98,10 +98,10 @@ func TestSendAfterCloseDoesNotResurrectConnection(t *testing.T) {
 		t.Fatalf("Send after Close dialed %d times, want 0 (resurrected a closed connection, #4806)", got)
 	}
 
-	c.mu.Lock()
-	stillClosed := c.closed
+	c.connMu.RLock()
+	stillClosed := c.closed.Load()
 	connAfterSend := c.conn
-	c.mu.Unlock()
+	c.connMu.RUnlock()
 	if !stillClosed {
 		t.Fatalf("closed flag was cleared by Send")
 	}
@@ -149,10 +149,10 @@ func TestCloseNilsConn(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	c.mu.Lock()
+	c.connMu.RLock()
 	conn := c.conn
-	closed := c.closed
-	c.mu.Unlock()
+	c.connMu.RUnlock()
+	closed := c.closed.Load()
 	if conn != nil {
 		t.Fatalf("s.conn is non-nil after Close: %#v", conn)
 	}

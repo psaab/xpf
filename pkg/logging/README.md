@@ -289,35 +289,42 @@ sync, the ISSU drain signal and full-resync as well as logging:
   channel**, exactly under incident load (slow writes / a backpressured
   collector, when the logs matter most). A half-written octet-counted
   frame is unrecoverable in-stream, so `streamWrite` tears the connection
-  down (`conn=nil`) whenever `0 < n < len(b)`; the next `Send` sees
-  `conn==nil`, treats it as a non-timeout write failure, and the
-  cooldown-gated reconnect path dials a fresh, correctly-counted stream
-  (the resync). A **clean 0-byte timeout** (`n==0`) wrote nothing, cannot
-  desync the collector, and stays drop-without-close per #2287 — only a
-  partial write closes. Closing the raw conn here does NOT reintroduce
-  the #2285 re-entrant deadlock: `net.Conn.Close` (and `*tls.Conn.Close`)
-  is a pure syscall that never routes back through the
-  slog→`SyslogSlogHandler.Handle`→`SyslogClient.Send` path, so it cannot
-  re-lock `s.mu` on the sending goroutine. It is also NOT the #2287 stall
-  hazard: the close is cheap (no dial, no second `writeTimeout`) — the
-  reconnect happens on the next `Send` via the `conn==nil` path, so the
-  worst-case in-`Send` stall stays one `writeTimeout`.
+  down (`conn=nil`) whenever `0 < n < len(b)`; an immediate subsequent
+  `Send` is dropped by the timeout's cooldown before another write or dial,
+  and after the window expires the cooldown-gated path dials a fresh,
+  correctly-counted stream.
+- A **clean 0-byte TCP timeout** (`n==0`) wrote nothing, cannot desync the
+  collector, and stays drop-without-close per #2287. A timeout nevertheless
+  arms the reconnect cooldown, and subsequent sends in that window fail fast
+  before attempting another write. A TLS timeout also detaches and closes the
+  connection because Go's TLS state is corrupt after a timed-out `Write`; the
+  next post-cooldown send reconnects instead of reusing it.
+- Closing the raw conn here does NOT reintroduce the #2285 re-entrant deadlock:
+  it never routes back through the slog→`SyslogSlogHandler.Handle`→
+  `SyslogClient.Send` path, so it cannot re-lock `s.mu` on the sending
+  goroutine. `closeSyslogConn` closes a TLS connection's raw socket first, so
+  `close_notify` cannot block on a blackholed collector; its expected error is
+  ignored. `Close` marks the client closed and detaches the socket without
+  waiting on `s.mu`; its deferred join is bounded so a commit cannot wait on a
+  hung write.
 - **Reconnect cooldown.** A non-timeout write failure on a stream
-  transport attempts one reconnect, gated by `reconnectCooldown`
-  (default `defaultReconnectCooldown`, 1s). If the previous reconnect
-  cycle failed inside the window, the reconnect is skipped and the send
-  fails fast (drop) — so a down server cannot drive a fresh 5s-timeout
-  dial on every event (thundering herd). The cooldown clock
-  (`lastReconnectFailure`) is armed by BOTH failure modes (#2302): a
-  failed **dial**, AND a dial that succeeds but whose subsequent
-  retry-**write** fails (accept-then-reset collector, half-open server,
-  TLS app-layer drop). Gating only on a failed dial left an
+  transport attempts one cooldown-gated reconnect, gated by
+  `reconnectCooldown` (default `defaultReconnectCooldown`, 1s). If the
+  previous reconnect cycle failed inside the window, the reconnect is skipped
+  and the send fails fast (drop) — so a down server cannot drive a fresh
+  5s-timeout dial on every event (thundering herd). A timeout arms the same
+  clock and the next send fails fast before `Write`, so a hung server costs at
+  most one `writeTimeout` per cooldown window. The cooldown clock
+  (`lastReconnectFailure`) is armed by all three failure modes (#2302/#9911):
+  a failed **dial**, a **write timeout**, AND a dial that succeeds but whose
+  subsequent retry-**write** fails (accept-then-reset collector, half-open
+  server, TLS app-layer drop). Gating only on a failed dial left an
   accept-then-reset target permanently un-throttled — the dial succeeded
-  every time, so every log message drove a fresh TCP connect + teardown
-  (a dial storm: ephemeral port exhaustion + SYN pressure on the
-  collector). The clock is cleared only on a FULLY successful reconnect
-  (dial AND the retry-write both land), so the legitimate
-  single-broken-pipe recovery path is unaffected.
+  every time, so every log message drove a fresh TCP connect + teardown (a
+  dial storm: ephemeral port exhaustion + SYN pressure on the collector). The
+  clock is cleared only on a FULLY successful reconnect (dial AND the
+  retry-write both land), so the legitimate single-broken-pipe recovery path is
+  unaffected.
 - **Severity filtering — complete threshold mapping (#5314).**
   `SyslogClient.MinSeverity` encodes the Junos `host <facility> <severity>`
   threshold: "forward this severity AND every more-severe one" (lower RFC

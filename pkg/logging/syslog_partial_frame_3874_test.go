@@ -92,12 +92,15 @@ func parseOctetFrame(b []byte) (msg []byte, consumed int, err error) {
 // TestPartialWriteTearsDownStreamToResync is the #3874 fix-on-revert proof.
 //
 // A stream write that returns 0 < n < len (a partial octet-counted frame on the
-// wire) must tear the connection down so the NEXT frame starts a fresh,
-// correctly-counted stream — never concatenated onto the truncated one. On
-// revert (streamWrite ignores the short write, Send's timeout branch drops
-// without closing) the conn stays up and the second frame appends to the
-// truncated first frame, permanently desyncing the collector's length parser.
+// wire) must tear the connection down so a later frame starts a fresh,
+// correctly-counted stream — never concatenated onto the truncated one. The
+// timeout also arms the #9911 cooldown, so the immediate next frame must
+// fast-drop without dialing; after that cooldown expires, the fresh stream must
+// resync. On a teardown revert that keeps the timeout cooldown, the third frame
+// after cooldown expiry appends to the truncated first frame and desynchronizes
+// the collector's length parser.
 func TestPartialWriteTearsDownStreamToResync(t *testing.T) {
+	now := time.Now()
 	var dialCount int
 	corrupt := &partialFrameConn{prefix: 5} // first frame truncated to 5 bytes
 	fresh := &recordingBufConn{}
@@ -108,6 +111,7 @@ func TestPartialWriteTearsDownStreamToResync(t *testing.T) {
 		Facility:          FacilityLocal0,
 		writeTimeout:      30 * time.Millisecond,
 		reconnectCooldown: defaultReconnectCooldown,
+		nowFn:             func() time.Time { return now },
 		conn:              corrupt,
 		dialFn: func() (net.Conn, error) {
 			dialCount++
@@ -129,21 +133,31 @@ func TestPartialWriteTearsDownStreamToResync(t *testing.T) {
 		t.Fatalf("timeout drop must not retry the write in place: writes=%d, want 1", writes1)
 	}
 
-	// Frame 2: conn was torn down (conn==nil), so this reconnects to a FRESH
-	// stream and writes a complete, correctly-counted frame there.
-	if err := c.Send(SyslogInfo, "second message on the resynced stream"); err != nil {
-		t.Fatalf("expected the second frame to land on a reconnected stream, got %v", err)
+	// Frame 2: the torn-down stream's timeout armed the #9911 cooldown. The
+	// immediate next frame must fast-drop without attempting a reconnect.
+	if err := c.Send(SyslogInfo, "second message during the cooldown"); !errors.Is(err, errReconnectCooldown) {
+		t.Fatalf("expected the immediate second frame to hit reconnect cooldown, got %v", err)
 	}
-	if dialCount != 1 {
-		t.Fatalf("partial-write teardown must force one reconnect for the next frame: "+
-			"dials=%d, want 1 (revert: 0 — frame 2 concatenates onto the truncated frame)", dialCount)
+	if dialCount != 0 {
+		t.Fatalf("cooldown must suppress reconnect after partial timeout: dials=%d, want 0", dialCount)
 	}
 
-	// The corrupt conn must have received ONLY the truncated first frame — the
-	// second frame must NOT have concatenated onto it.
+	// Frame 3: after cooldown expiry, reconnect to a FRESH stream and write a
+	// complete, correctly-counted frame there.
+	now = now.Add(defaultReconnectCooldown + time.Nanosecond)
+	if err := c.Send(SyslogInfo, "third message on the resynced stream"); err != nil {
+		t.Fatalf("expected the third frame to land on a reconnected stream, got %v", err)
+	}
+	if dialCount != 1 {
+		t.Fatalf("partial-write teardown must force one reconnect after cooldown: "+
+			"dials=%d, want 1 (revert: 0 — frame 3 concatenates onto the truncated frame)", dialCount)
+	}
+
+	// The corrupt conn must have received ONLY the truncated first frame — no
+	// later frame may concatenate onto it.
 	if len(got1) != 5 {
 		t.Fatalf("corrupt conn received %d bytes; want exactly the 5-byte truncated "+
-			"prefix (revert: truncated frame 1 + full frame 2 concatenated → desync)", len(got1))
+			"prefix (revert: truncated frame 1 + full frame 3 concatenated → desync)", len(got1))
 	}
 
 	// The fresh stream must carry exactly one valid octet-counted frame with no
@@ -157,8 +171,8 @@ func TestPartialWriteTearsDownStreamToResync(t *testing.T) {
 		t.Fatalf("fresh stream has trailing bytes after one frame: consumed %d of %d",
 			consumed, len(freshBytes))
 	}
-	if !bytes.Contains(msg, []byte("second message on the resynced stream")) {
-		t.Fatalf("fresh frame does not carry the second message: %q", msg)
+	if !bytes.Contains(msg, []byte("third message on the resynced stream")) {
+		t.Fatalf("fresh frame does not carry the third message: %q", msg)
 	}
 }
 
