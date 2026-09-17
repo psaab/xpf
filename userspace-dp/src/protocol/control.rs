@@ -173,8 +173,12 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // every PBR-steered session stamp-less and re-resolve it in `inet.0`. Exact
 // equality refuses that pairing. The #8892 digest did not move (session-sync
 // messages are not snapshot structs). See protocol.go's v22 note.
+// v22 -> v23 (#9553): DHCPv6 relay rows now cross the ConfigSnapshot. An old
+// helper ignores them and never configures the relay — silent missing feature
+// on a mixed pairing — so exact equality refuses it. The #8892 digest moves
+// with it (real, transmitted fields). See protocol.go's v23 note.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 22;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 23;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

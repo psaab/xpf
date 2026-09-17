@@ -301,7 +301,13 @@ const (
 	// and imports every PBR-steered session stamp-less, re-resolving it in
 	// `inet.0` — and that IS the defect the fields close. The session-sync
 	// messages are not snapshot structs, so the #8892 digest did not move.
-	ProtocolVersion = 22
+	//
+	// v22 -> v23 BUMPED (issue 9553), and this one DID move the digest above:
+	// the DHCPv6 relay configuration now crosses the ConfigSnapshot (real,
+	// transmitted rows). An old helper ignores the rows and never configures
+	// the relay — silent missing feature on a mixed pairing — so exact
+	// equality refuses it until both sides upgrade.
+	ProtocolVersion = 23
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

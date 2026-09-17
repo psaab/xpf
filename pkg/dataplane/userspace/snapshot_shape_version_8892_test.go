@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "55e9864f9ca4710fbb053ae46d80ee2a7a14e44368438f83bdc7c7db13caeb70"
+	snapshotShapeGolden8892 = "ea388252b00016dbe7046cb0974c4903e5baa4af042b025a14d8d9ef6328dd45"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -318,7 +318,12 @@ const (
 	// behaviour (re-resolve every PBR-steered session in inet.0) is the defect
 	// it closes. The session-sync messages are not snapshot structs, which is
 	// why the digest above did not move.
-	snapshotShapeVersion8892 = 22
+	// v22 -> v23 BUMPED (issue 9553), and this one DID move the digest above:
+	// the DHCPv6 relay configuration crosses the ConfigSnapshot (real,
+	// transmitted rows). An old helper ignores the rows and never configures
+	// the relay — silent missing feature on a mixed pairing — so exact
+	// equality refuses it until both sides upgrade.
+	snapshotShapeVersion8892 = 23
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
