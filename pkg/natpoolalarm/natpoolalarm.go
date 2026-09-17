@@ -440,7 +440,7 @@ func (m *Monitor) evaluate() {
 			// The monitor keeps no measurability history to tell a convert
 			// from a flap, and the convert contract is the pinned one.
 			if p.Deterministic != nil {
-				m.clear(poolName, "utilization no longer measurable")
+				m.clear(poolName, "utilization no longer measurable", nil)
 				m.markInapplicable(poolName, "deterministic pool (per-subscriber blocks): "+
 					"aggregate port utilization cannot predict per-block exhaustion, "+
 					"and no tracked-flow cap reported")
@@ -456,7 +456,7 @@ func (m *Monitor) evaluate() {
 		case !raised && pct >= uint64(alarmCfg.RaiseThreshold):
 			m.raise(poolName, pct, alarmCfg.RaiseThreshold)
 		case raised && pct < uint64(alarmCfg.ClearThreshold):
-			m.clear(poolName, "utilization below clear-threshold")
+			m.clear(poolName, "utilization below clear-threshold", &pct)
 		case raised:
 			// Held above clear: refresh the displayed pct only, no syslog.
 			m.updatePct(poolName, pct)
@@ -471,7 +471,7 @@ func (m *Monitor) evaluate() {
 	// applied config.
 	for _, poolName := range m.activeKeys() {
 		if !eligible[poolName] {
-			m.clear(poolName, "pool no longer eligible")
+			m.clear(poolName, "pool no longer eligible", nil)
 		}
 	}
 
@@ -550,10 +550,13 @@ func (m *Monitor) raise(poolName string, pct uint64, raiseThr int) {
 		poolName, pct, raiseThr))
 }
 
-// clear removes an active alarm and emits one clear syslog line. It is a no-op
-// (no emission) if the pool has no active alarm, so a single transition never
-// double-clears.
-func (m *Monitor) clear(poolName, reason string) {
+// clear removes an active alarm and emits one clear syslog line. It is a
+// no-op (no emission) if the pool has no active alarm, so a single transition
+// never double-clears. sampledPct is non-nil only when this transition was
+// driven by a fresh utilization sample; unsampled clears (for example,
+// clearAll on a disabled or unavailable config) retain the held pct rather
+// than fabricating a sample.
+func (m *Monitor) clear(poolName, reason string, sampledPct *uint64) {
 	m.mu.Lock()
 	st, ok := m.active[poolName]
 	if !ok {
@@ -561,6 +564,9 @@ func (m *Monitor) clear(poolName, reason string) {
 		return
 	}
 	pct := st.pct
+	if sampledPct != nil {
+		pct = *sampledPct
+	}
 	delete(m.active, poolName)
 	m.mu.Unlock()
 
@@ -577,7 +583,7 @@ func (m *Monitor) clear(poolName, reason string) {
 // stale count.
 func (m *Monitor) clearAll(reason string) {
 	for _, poolName := range m.activeKeys() {
-		m.clear(poolName, reason)
+		m.clear(poolName, reason, nil)
 	}
 	for _, poolName := range m.activeExhaustionKeys() {
 		m.clearExhaustion(poolName, reason)
