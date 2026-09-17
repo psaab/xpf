@@ -2,8 +2,6 @@ package vrrp
 
 import (
 	"time"
-
-	"github.com/psaab/xpf/pkg/config"
 )
 
 // vrrpInstance timing: advertisement interval derivation (local vs learned),
@@ -69,22 +67,29 @@ func (vi *vrrpInstance) advertIntervalLocked() time.Duration {
 }
 
 // advertIntervalFromMS converts a configured advertise interval in
-// milliseconds (0 or negative → the 1000 ms default) to a Duration.
+// milliseconds to the Duration that the run loop actually uses.
 //
-// #8642: the ceiling is as load-bearing as the floor here, and this is the most
-// severe site in that sweep. `vg.AdvertiseInterval` is set by a bare
-// `strconv.Atoi` with no range check (compiler_interfaces.go), the schema
-// ceilings (1..40 for `advertise-interval`, 10..40959 for
-// `reth-advertise-interval`) are downgraded to warnings on the tolerant
-// Store.Load / peer-sync ingress, and the old `ms <= 0` guard was blind to
-// overflow by construction: past MaxDurationMillis the multiply wraps, and with
-// `gcd(1e6, 2^64) = 64` the residue bottoms out at **64ns**.
-//
-// A 64ns advertisement timer on a RETH instance is an advert storm on the
-// 30ms heartbeat HA failover timing is built on — the control-path starvation
-// CLAUDE.md warns about, at ~1.5e7/s.
+// VRRP's Max Advert Int field carries centiseconds, so the timer must use the
+// same 10ms quantum as the wire. This is also the owning boundary for tolerant
+// load / peer-sync values: non-positive input uses the documented 1000ms
+// default, sub-quantum positive input floors safely to one quantum, and values
+// above the field's 12-bit ceiling saturate instead of wrapping.
 func advertIntervalFromMS(ms int) time.Duration {
-	return config.MillisToDuration(ms, 1000*time.Millisecond)
+	return time.Duration(normalizeAdvertIntervalMS9914(ms)) * time.Millisecond
+}
+
+func normalizeAdvertIntervalMS9914(ms int) int {
+	if ms <= 0 {
+		return 1000
+	}
+	if ms < 10 {
+		return 10
+	}
+	maxMS := maxAdvertIntCentiseconds9039 * 10
+	if ms > maxMS {
+		return maxMS
+	}
+	return (ms / 10) * 10
 }
 
 // effectiveAdvertInterval picks the advertisement interval that drives the
@@ -98,11 +103,10 @@ func effectiveAdvertInterval(localMS int, learned time.Duration) time.Duration {
 	if learned > 0 {
 		return learned
 	}
-	// #8642: same bound as advertIntervalFromMS — this reads the same
-	// unbounded config int, so guarding only the zero end here would leave the
-	// cold-start path (before any advert has been heard) carrying the overflow
-	// the other path no longer has.
-	return config.MillisToDuration(localMS, 1000*time.Millisecond)
+	// Use the same normalization as the cold-start timer and send sink, so a
+	// tolerant out-of-domain local value cannot make the fallback horizon
+	// disagree with the Max Advert Int value we emit.
+	return advertIntervalFromMS(localMS)
 }
 
 // masterDownInterval returns the master-down timer value.

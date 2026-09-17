@@ -258,7 +258,7 @@ func TestSchema2497_RALinkMTU_RejectsBelowMinimum(t *testing.T) {
 }
 
 func TestSchema2497_RALinkMTU_AcceptsMinimumAndAbove(t *testing.T) {
-	for _, mtu := range []string{"1280", "1500", "9000"} {
+	for _, mtu := range []string{"1280", "1500", "9000", "65535"} {
 		if err := schemaCheck(t, `protocols {
     router-advertisement {
         interface ge-0-0-0 {
@@ -268,6 +268,25 @@ func TestSchema2497_RALinkMTU_AcceptsMinimumAndAbove(t *testing.T) {
 }`); err != nil {
 			t.Fatalf("unexpected error for link-mtu %s: %v", mtu, err)
 		}
+	}
+}
+
+// #9914: the runtime sink uses the same uint16 ceiling as the strict schema.
+// Tolerant load / peer-sync still needs the sender clamp, but a fresh commit
+// must reject a value that cannot fit the owning LinkMTU contract.
+func TestSchema9914_RALinkMTU_RejectsAboveUint16(t *testing.T) {
+	err := schemaCheck(t, `protocols {
+    router-advertisement {
+        interface ge-0-0-0 {
+            link-mtu 65536;
+        }
+    }
+}`)
+	if err == nil {
+		t.Fatal("expected error for link-mtu 65536 (above uint16 ceiling), got nil")
+	}
+	if !strings.Contains(err.Error(), "link-mtu") {
+		t.Fatalf("error should reference link-mtu: %v", err)
 	}
 }
 

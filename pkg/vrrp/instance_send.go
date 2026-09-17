@@ -58,31 +58,12 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 	// horizon — the flapping mechanism gemini-048 finding 06 describes.
 	//
 	// The value is milliseconds; the /10 below converts to the centiseconds
-	// RFC 5798 puts on the wire.
-	advertMS := vi.advertiseIntervalMS()
-	// #9039: SATURATE rather than alias. packet.go writes this field under an
-	// 0x0FFF mask, so an over-range value does not merely lose precision -- it
-	// wraps to a SMALL number, and a small Max Advert Int tells the peer to
-	// expect adverts far more often than this instance sends them. The peer
-	// then derives a master-down window that expires while a healthy master is
-	// simply between adverts.
-	//
-	// Saturating is the safe direction and aliasing is the dangerous one. Too
-	// LARGE a value on the wire makes a peer wait longer than necessary to
-	// notice a real failure -- slow, and recovered by the next advert. Too
-	// SMALL a value makes it declare a live master dead. Between "converges
-	// late" and "fails over against a healthy peer", the first is the one to
-	// pick when the config is already out of range.
-	//
-	// #9039 also bounds this at commit (validateRethAdvertiseIntervalStrict),
-	// which is the primary fix. This clamp is not redundant with it: that gate
-	// is deliberately LENIENT on Store.Load and Store.SyncApply (#1960
-	// no-brick), so a config from disk or from an HA peer still arrives here
-	// out of range -- warned about, and applied.
+	// RFC 5798 puts on the wire. Normalize at the send boundary with the same
+	// quantum/default used by the local timer: a tolerant negative or zero
+	// value must not wrap through uint16, and an inexact millisecond value must
+	// not make the peer's interval disagree with this instance's timer.
+	advertMS := normalizeAdvertIntervalMS9914(vi.advertiseIntervalMS())
 	advertCS := advertMS / 10
-	if advertCS > maxAdvertIntCentiseconds9039 {
-		advertCS = maxAdvertIntCentiseconds9039
-	}
 
 	// Send IPv4 advertisement if we have any IPv4 VIPs.
 	if len(v4Addrs) > 0 {

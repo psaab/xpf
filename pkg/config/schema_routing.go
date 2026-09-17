@@ -311,6 +311,11 @@ const (
 	// maximum; 0 is the RFC "unspecified" sentinel (host uses its own
 	// defaults) and is the pre-existing behavior.
 	RAReachableRetransMaxMillis = 4294967295
+	// RFC 8200 §5 requires an IPv6 link MTU of at least 1280 bytes. The
+	// configuration/sender contract uses the uint16 ceiling so a tolerant
+	// load cannot carry a value that the owning RA sink would narrow.
+	RALinkMTUMin = 1280
+	RALinkMTUMax = 65535
 )
 
 var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map[string]*schemaNode{
@@ -629,13 +634,14 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"default-lifetime": {desc: "Router lifetime advertised to hosts (seconds; 0 = not a default router)", args: 1, placeholder: "<seconds>",
 				valueType: ValueInteger, valueDesc: "router lifetime in seconds (RFC 4861 §4.2 16-bit; 0 = not a default router)",
 				valueExamples: []string{"0", "1800", "9000"}, validator: ValidateInteger(0, RARouterMaxLifetimeSeconds), children: nil},
-			// #2497: link-mtu is advertised verbatim via ndp.NewMTU. RFC 8200
-			// §5 sets the IPv6 minimum link MTU at 1280 bytes; a smaller value
-			// (1-1279) committed today reaches the wire and blackholes hosts
-			// that honor it. Floor the leaf at the IPv6 minimum.
+			// #2497/#9914: RFC 8200 §5 sets the IPv6 minimum link MTU at
+			// 1280 bytes. Bound the leaf at both sides of the uint16
+			// configuration/sender contract; tolerant load / peer-sync can
+			// still deliver an out-of-range value, so pkg/ra repeats the
+			// saturating clamp at the wire sink.
 			"link-mtu": {desc: "Link MTU option advertised to hosts", args: 1, placeholder: "<mtu>",
-				valueType: ValueInteger, valueDesc: "advertised link MTU (RFC 8200 §5 minimum 1280)",
-				valueExamples: []string{"1280", "1500"}, validator: ValidateIntegerMin(1280), children: nil},
+				valueType: ValueInteger, valueDesc: "advertised link MTU (RFC 8200 §5 minimum 1280; maximum 65535)",
+				valueExamples: []string{"1280", "1500"}, validator: ValidateInteger(RALinkMTUMin, RALinkMTUMax), children: nil},
 			// #4307 (I-2): the RFC 4861 §4.2 Reachable Time / Retrans Timer
 			// header fields. Both are 32-bit millisecond values the sender
 			// emits verbatim on the RA; before this leaf existed they were

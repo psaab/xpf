@@ -173,9 +173,10 @@ pins it deterministically, driving the write from inside the v4 arm through the
 `sendPacketFn` seam rather than racing for the interleaving.
 
 `advertiseIntervalMS` deliberately returns the RAW milliseconds rather than
-reusing `advertInterval()`: that helper substitutes the 1000 ms default for a
-non-positive value, and folding the default into the wire field would make a
-misconfigured instance advertise a cadence it is not sending at.
+reusing `advertInterval()`: the send sink applies
+`normalizeAdvertIntervalMS9914` to that one snapshot, the same normalization
+used by the local timer. This keeps a tolerant negative, sub-quantum, or
+over-range value from making the wire and timer disagree (#9914).
 
 `advertIntervalLocked` is NOT one of these sites despite looking like one — it
 is documented as lock-held-by-caller and is reached from `recordMasterAdvert`
@@ -193,14 +194,14 @@ low priority but the RFC 5798 RESIGNATION beacon this package uses to
 hand mastership over (`manager.go` `ResignRG`). The node would advertise
 "take over now" on every advert while believing itself the most preferred
 candidate.
-
 `clampConfigPriority` bounds the value at both config entry points —
 `newInstance` and `updateConfig`; the day-2 commit path reaches only the
 second, so a clamp on the constructor alone would let a running instance
-acquire the value it was protected from at startup. The internal writes
-in `manager.go` (`ResignRG` setting 0, `UpdateRGPriority` restoring from
-cluster state) are deliberately NOT clamped: those are runtime sentinels,
-not config.
+acquire the value it was protected from at startup. The internal write in
+`manager.go` (`ResignRG` setting 0) is deliberately NOT clamped: that is the
+runtime resignation sentinel, not config. `UpdateRGPriority` is the opposite:
+it restores a config-derived priority after resignation, so it uses the same
+clamp before storing a value that will reach the wire (#9914).
 
 The two clamp targets differ on purpose, and a single target would be
 wrong in two distinct ways:

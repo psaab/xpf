@@ -437,6 +437,7 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	// addr-watcher can recognise an address event for a configured interface
 	// that has no instance built yet (#2788, late-appearing interface).
 	desiredMap := make(map[instanceKey]*Instance, len(desired))
+	rejectedDesired := make(map[instanceKey]string)
 	domainsByElection := make(map[electionKey]*electionDomains, len(desired))
 	desiredIfaces := make(map[string]struct{}, len(desired))
 	needsLinkWatcher := false
@@ -453,7 +454,11 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		// an aliased VRID (257→1). Refuse to build such an instance rather than
 		// emit a wrong-VRID advert that a strict RFC peer discards.
 		if inst.GroupID < MinVRID || inst.GroupID > MaxVRID {
-			slog.Warn("vrrp: skipping instance with out-of-range VRID",
+			key := instanceKey{iface: inst.Interface, groupID: inst.GroupID, family: inst.Family}
+			rejectedDesired[key] = fmt.Sprintf(
+				"VRID %d out of range %d..%d",
+				inst.GroupID, MinVRID, MaxVRID)
+			slog.Warn("vrrp: refusing instance with out-of-range VRID",
 				"interface", inst.Interface, "group_id", inst.GroupID,
 				"valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
 			continue
@@ -723,7 +728,10 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	// its captured reason (or a generic fallback if it was omitted upstream,
 	// e.g. the out-of-range VRID guard). Replaced wholesale so recovered keys
 	// clear.
-	unbuilt := make(map[instanceKey]string, len(buildFailReason))
+	unbuilt := make(map[instanceKey]string, len(buildFailReason)+len(rejectedDesired))
+	for key, reason := range rejectedDesired {
+		unbuilt[key] = reason
+	}
 	for key := range desiredMap {
 		if _, built := m.instances[key]; built {
 			continue
@@ -758,7 +766,12 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 func (m *Manager) ResignRG(rgID int) *ResignBarrier {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	vrid := 100 + rgID
+	vrid, validVRID := rethVRID(rgID)
+	if !validVRID {
+		slog.Warn("vrrp: refusing RETH resignation for out-of-range VRID",
+			"rg_id", rgID, "valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
+		return newResignBarrier(0)
+	}
 	var targets []*vrrpInstance
 	for _, vi := range m.instances {
 		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid {
@@ -789,16 +802,22 @@ func (m *Manager) ResignRG(rgID int) *ResignBarrier {
 func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	vrid := 100 + rgID
+	vrid, validVRID := rethVRID(rgID)
+	if !validVRID {
+		slog.Warn("vrrp: refusing priority update for out-of-range VRID",
+			"rg_id", rgID, "valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
+		return
+	}
 	for _, vi := range m.instances {
 		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid {
 			vi.mu.Lock()
 			old := vi.cfg.Priority
-			vi.cfg.Priority = priority
+			newPriority := clampConfigPriority(priority)
+			vi.cfg.Priority = newPriority
 			vi.mu.Unlock()
-			if old != priority {
+			if old != newPriority {
 				slog.Info("vrrp: immediate priority update",
-					"key", vi.key(), "old_pri", old, "new_pri", priority)
+					"key", vi.key(), "old_pri", old, "new_pri", newPriority)
 			}
 		}
 	}
@@ -813,7 +832,12 @@ func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 func (m *Manager) ForceRGMaster(rgID int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	vrid := 100 + rgID
+	vrid, validVRID := rethVRID(rgID)
+	if !validVRID {
+		slog.Warn("vrrp: refusing MASTER force for out-of-range VRID",
+			"rg_id", rgID, "valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
+		return
+	}
 	for _, vi := range m.instances {
 		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid && vi.getState() != StateMaster {
 			slog.Info("vrrp: forcing MASTER (cluster authoritative)",
@@ -844,7 +868,12 @@ func (m *Manager) SetGARPSuppression(rgID int, suppress bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	vrid := 100 + rgID
+	vrid, validVRID := rethVRID(rgID)
+	if !validVRID {
+		slog.Warn("vrrp: refusing GARP suppression for out-of-range VRID",
+			"rg_id", rgID, "valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
+		return
+	}
 	for _, vi := range m.instances {
 		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid {
 			// Swap (not Store) so we can detect the true->false EDGE.
@@ -897,7 +926,15 @@ func (m *Manager) RGVRRPReady(rgID int, hasRETH bool) (bool, []string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	vrid := 100 + rgID
+	vrid, validVRID := rethVRID(rgID)
+	if !validVRID {
+		if !hasRETH {
+			return true, nil
+		}
+		return false, []string{fmt.Sprintf(
+			"vrrp: RG %d derives an out of range RETH VRID (valid range %d..%d)",
+			rgID, MinVRID, MaxVRID)}
+	}
 
 	// A desired RETH key for this RG that failed to build leaves a dark VIP.
 	// RETH keys carry an empty family; VRID == 100+rgID maps a key to this RG.
