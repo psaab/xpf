@@ -49,6 +49,116 @@ fn no_match_embedded_icmp_returns_none() {
         "should return None when no session matches"
     );
 }
+#[test]
+fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_port = 80;
+    let client_port = 40_000;
+    // Untranslated quote: the inner tuple is server -> client, so the
+    // forward-NAT reverse matcher has no forward candidate and the ordinary
+    // same-family fallback must resolve this exact reverse entry.
+    let frame = build_icmp_te_frame_v4(
+        router_ip,
+        server_ip,
+        client_ip,
+        server_port,
+        client_port,
+        PROTO_TCP,
+    );
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+    let quote_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(server_ip),
+        dst_ip: IpAddr::V4(client_ip),
+        src_port: server_port,
+        dst_port: client_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let install_ns = 1_000_000;
+    let mut sessions = SessionTable::new();
+    let metadata = SessionMetadata {
+        ingress_zone: TEST_WAN_ZONE_ID,
+        egress_zone: TEST_LAN_ZONE_ID,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    assert!(sessions.install_with_protocol(
+        quote_key.clone(),
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 6,
+                tx_ifindex: 6,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(client_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata.clone(),
+        install_ns,
+        PROTO_TCP,
+        0x10,
+    ));
+    let before = sessions
+        .lifetime_state_for(&quote_key)
+        .expect("same-family quote entry installed");
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    let outcome = try_embedded_icmp_nat_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        install_ns + 1_000_000,
+    );
+    assert!(
+        matches!(outcome, EmbeddedMatchOutcome::Match(_)),
+        "an untranslated same-family quote must use the plain session fallback"
+    );
+    assert_eq!(
+        sessions.lifetime_state_for(&quote_key),
+        Some(before),
+        "same-family quote inspection must not refresh or complete session state"
+    );
+}
+
 
 
 #[test]
@@ -1058,8 +1168,24 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = Arc::<str>::from("reth0.80");
     let mut sessions = SessionTable::new();
-    n6472_install_sessions(&mut sessions, 123_000_000_000);
+    // Keep the poll's real monotonic clock immediately after installation so
+    // a reverted mutating quote lookup is observably RED.
+    let install_ns = crate::afxdp::neighbor::monotonic_nanos();
+    n6472_install_sessions(&mut sessions, install_ns.saturating_sub(1));
     let sessions_before = sessions.len();
+    let quote_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(n6472_server_v4()),
+        dst_ip: IpAddr::V4(n6472_pool_v4()),
+        src_port: N6472_SERVER_PORT,
+        dst_port: N6472_XLATED_PORT,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let quote_lifetime_before = sessions
+        .lifetime_state_for(&quote_key)
+        .expect("NAT64 v4 quote reverse session");
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1085,6 +1211,11 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         &ha_state,
         &frame,
         meta,
+    );
+    assert_eq!(
+        sessions.lifetime_state_for(&quote_key),
+        Some(quote_lifetime_before),
+        "#9990: NAT64 v4 quote lookup must not refresh or advance session lifetime",
     );
     if expect_fabric_redirect {
         assert_eq!(binding.scratch.scratch_forwards.len(), 1);
@@ -1329,8 +1460,23 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    n6472_install_sessions(&mut sessions, 123_000_000_000);
+    // Keep the poll's fixed clock one nanosecond after installation so a
+    // reverted mutating quote lookup is observably RED.
+    n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
     let sessions_before = sessions.len();
+    let quote_key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V6(n6472_client_v6()),
+        dst_ip: IpAddr::V6(n6472_pref64_server()),
+        src_port: N6472_CLIENT_PORT,
+        dst_port: N6472_SERVER_PORT,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let quote_lifetime_before = sessions
+        .lifetime_state_for(&quote_key)
+        .expect("NAT64 v6 quote forward session");
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1350,6 +1496,11 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
         ..UserspaceDpMeta::default()
     };
     txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(
+        sessions.lifetime_state_for(&quote_key),
+        Some(quote_lifetime_before),
+        "#9990: NAT64 v6 quote lookup must not refresh or advance session lifetime",
+    );
 
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -1912,10 +2063,23 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
-        123_000_000_000,
+        123_000_000_000 - 1,
         PROTO_TCP,
         0x18,
     ));
+    let quote_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let quote_lifetime_before = sessions
+        .lifetime_state_for(&quote_key)
+        .expect("same-family quote session");
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1954,6 +2118,11 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         &frame,
         meta,
         &dynamic_neighbors,
+    );
+    assert_eq!(
+        sessions.lifetime_state_for(&quote_key),
+        Some(quote_lifetime_before),
+        "#9990: same-family ICMP quote lookup must not mutate session lifetime",
     );
 
     assert_eq!(

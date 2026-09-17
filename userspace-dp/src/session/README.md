@@ -44,8 +44,12 @@ structure.)
   inbound packet matches an existing outbound flow").
 - `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Each
   worker sweeps its own table once per second from its poll loop
-  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`);
-  lazy-delete on lookup picks up stragglers.
+  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet
+  lookups enforce the same strict idle deadline and return a miss once
+  `now - last_seen_ns > expires_after_ns`; the stale entry remains for the
+  wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). Thus
+  "lazy-delete on lookup" describes only cleanup of entries that slip a
+  sweep, not lookup-side refresh or deletion.
 - `tests.rs` — co-located unit tests.
 
 ## Timeouts

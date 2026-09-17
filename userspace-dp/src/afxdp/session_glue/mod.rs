@@ -2373,11 +2373,12 @@ pub(super) fn resolve_flow_session_decision(
             None => crate::afxdp::shared_ops::ReverseIngress::Unzoned,
         }
     };
-    let forward_match = lookup_forward_nat_across_scopes(
+    let forward_match = lookup_forward_nat_across_scopes_at(
         sessions,
         shared_nat_sessions,
         &flow.forward_key,
         reverse_ingress,
+        now_ns,
     )?;
     let (resolved, reverse_installed) = install_reverse_session_from_forward_match(
         sessions,

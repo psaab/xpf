@@ -134,18 +134,19 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     );
 
     if let Some(fwd) =
-        lookup_forward_nat_across_scopes(
+        lookup_forward_nat_across_scopes_at(
             ctx.sessions,
             ctx.shared_nat_sessions,
             &reverse_key,
             // #7169: no ingress constraint here, and the reason is not
-            // that it is inconvenient. This path installs NO session — it
-            // uses the match only to recover the pre-NAT tuple for
+            // that it is inconvenient. This path installs NO session —
+            // it uses the match only to recover the pre-NAT tuple for
             // rewriting an embedded ICMP error — so there is no durable
             // state to endorse a spoof. And an ICMP error may legitimately
             // originate off-path from an intermediate router, so requiring
             // it to arrive from the flow's egress zone would break PMTUD.
             crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+            now_ns,
         )
     {
         let nat = fwd.decision.nat;
@@ -213,23 +214,21 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         // arm was dead for every VRF flow.
         embedded_routing_domain,
     );
-    let found = lookup_session_across_scopes(
+    let found = probe_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
         &embedded_key,
         now_ns,
-        0,
     )
     .map(|resolved| (resolved, false))
     .or_else(|| {
-        lookup_session_across_scopes(
+        probe_session_across_scopes(
             ctx.sessions,
             ctx.shared_sessions,
             ctx.shared_forward_wire_sessions,
             &shared_reverse_key,
             now_ns,
-            0,
         )
         .map(|resolved| (resolved, true))
     });

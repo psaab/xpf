@@ -202,13 +202,12 @@ fn match_v4_error(
         TunnelDiscriminator::None,
         embedded_routing_domain,
     );
-    let Some(resolved) = lookup_session_across_scopes(
+    let Some(resolved) = probe_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
         &reply_key,
         now_ns,
-        0,
     ) else {
         return EmbeddedMatchOutcome::NoMatch;
     };
@@ -314,13 +313,12 @@ fn match_v6_error(
         TunnelDiscriminator::None,
         embedded_routing_domain,
     );
-    let Some(resolved) = lookup_session_across_scopes(
+    let Some(resolved) = probe_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
         &forward_key,
         now_ns,
-        0,
     ) else {
         return EmbeddedMatchOutcome::NoMatch;
     };

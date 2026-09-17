@@ -960,14 +960,14 @@ impl LiveCallSiteFixture {
 }
 
 /// #6997/#6999: the two knobs the call-site binders need and no pre-existing
-/// test wanted, defaulted so every existing caller is bit-identical.
+/// test wanted, defaulted so every existing caller exercises a live backing
+/// session.
 ///
-/// `session` is the load-bearing one. `sessions` starts as an EMPTY
-/// `SessionTable`, and both `account_packet` and `touch_if_stale` return
-/// immediately when the key resolves to nothing — so on the historical fixture
-/// those two production lines are no-ops REGARDLESS of whether they are called.
-/// A binder built on that fixture would stay green with them deleted: it would
-/// be a guard whose fixture omits the interaction it exists to observe.
+/// `session` is the load-bearing one. Production cache hits require a backing
+/// session, so the default harness seeds `test_key()`; callers that explicitly
+/// need an empty table can pass `None`. Both `account_packet` and
+/// `touch_if_stale` return immediately when the key resolves to nothing — so a
+/// binder built on an empty fixture would stay green with those calls deleted.
 struct StageSeed {
     /// Install a session for `test_key()` before the call, as
     /// `(install_ns, protocol, tcp_flags)`.
@@ -1021,7 +1021,9 @@ impl Default for StageSeed {
     fn default() -> Self {
         // 1_000_000 is the `now_ns` every pre-#6997 caller passed inline.
         Self {
-            session: None,
+            // Cache-hit admission now requires this backing session. Keep
+            // explicit `None` available for miss-path fixtures.
+            session: Some((1_000_000, PROTO_TCP, 0x10)),
             now_ns: 1_000_000,
             flow: None,
             tx_headroom: None,
@@ -2645,9 +2647,13 @@ fn live_flow_cache_callsite_served_hit_still_counts_as_a_hit_5190() {
 // fixture work below IS the test: seed a session, seed a filter-log match, and
 // attach a stream.
 
-/// A `now_ns` far enough past the seeded install that the session is stale by
-/// `touch_if_stale`'s rule (idle >= its own timeout / 4).
-const STALE_NOW_NS: u64 = 1_000_000 + 7_200_000_000_000; // install + 7200 s
+/// A `now_ns` between the keepalive threshold and the TCP opening timeout,
+/// so the seeded half-open session is still eligible for a live cache hit.
+const STALE_NOW_NS: u64 = INSTALL_NS + 10_000_000_000; // install + 10 s
+
+/// A `now_ns` beyond the TCP opening timeout. The cache entry remains
+/// physically installed, but must fall through instead of resurrecting it.
+const EXPIRED_NOW_NS: u64 = INSTALL_NS + 21_000_000_000; // install + 21 s
 
 /// The seeded install instant. Non-zero so "the timestamp moved" cannot be
 /// satisfied by a field that was simply left at its default.
@@ -2772,7 +2778,8 @@ fn live_flow_cache_callsite_accounts_the_packet_onto_the_session_6997() {
 fn live_flow_cache_callsite_refreshes_only_a_stale_session_6997() {
     let frame = tcp_v4_ack_frame();
 
-    // STALE: idle for 7200 s at call time.
+    // STALE: idle for 10 s at call time, beyond the keepalive threshold but
+    // within the TCP opening timeout.
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
     let stale = run_stage_seeded(
         &fixture,
@@ -2781,7 +2788,7 @@ fn live_flow_cache_callsite_refreshes_only_a_stale_session_6997() {
         cached_entry(),
         1,
         StageSeed {
-            session: Some((INSTALL_NS, PROTO_TCP, 0x00)),
+            session: Some((INSTALL_NS, PROTO_TCP, 0x02)),
             now_ns: STALE_NOW_NS,
             ..StageSeed::default()
         },
@@ -2832,6 +2839,55 @@ fn live_flow_cache_callsite_refreshes_only_a_stale_session_6997() {
          cell above pass against an unconditional write, which is what this \
          cell exists to exclude (#6997)"
     );
+}
+
+/// An idle-crossed session must evict the cached candidate and fall through
+/// before any cache-hit side effect can run. The entry remains installed for
+/// the timer wheel to reap, but this packet gets no refresh, accounting, TX, or
+/// scratch ownership transfer.
+#[test]
+fn expired_flow_cache_hit_falls_through_without_side_effects_9991() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        cached_entry(),
+        1,
+        StageSeed {
+            session: Some((INSTALL_NS, PROTO_TCP, 0x02)),
+            now_ns: EXPIRED_NOW_NS,
+            ..StageSeed::default()
+        },
+    );
+
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "an idle-crossed cached session must be reclassified as a miss"
+    );
+    assert_eq!(
+        run.sessions.last_seen_ns(&test_key()),
+        Some(INSTALL_NS),
+        "the expired cache candidate must not refresh its backing session"
+    );
+    let counters = run
+        .sessions
+        .session_counters(&test_key())
+        .expect("the timer wheel still owns the installed session");
+    assert_eq!(
+        (
+            counters.fwd_packets,
+            counters.fwd_bytes,
+            counters.rev_packets,
+            counters.rev_bytes,
+        ),
+        (0, 0, 0, 0),
+        "fallthrough must happen before packet accounting"
+    );
+    assert!(run.scratch.scratch_recycle.is_empty());
+    assert!(run.scratch.scratch_forwards.is_empty());
+    assert!(run.tx_frame.is_none());
 }
 
 /// A cached descriptor carrying BOTH a `then log` input-filter match and a
