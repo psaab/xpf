@@ -189,6 +189,7 @@ pub(super) fn bring_up_workers(
         // carried it.
         snapshot.node_id,
         worker_command_queues,
+        tunnel_purge_ids,
         dnat_fds,
         &startup_report_tx,
     ) {
@@ -523,6 +524,46 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
     }
     worker_command_queues
 }
+/// #9718: reconcile a newly spawned worker's synced-session queue with the
+/// shared entries that are authoritative after the bring-up replay read.
+/// This helper handles publication-before-registration; the import path's
+/// post-publish worker reload handles registration-before-publication.
+///
+/// The queue guard is acquired before the shared snapshot. A delete that wins
+/// this guard first leaves its DeleteSynced after reconciliation, while a
+/// delete that wins first is absent from the snapshot. Existing UpsertSynced
+/// commands are replaced with the current filtered snapshot, which removes
+/// deleted or same-key stale generations without quadratic key comparisons.
+/// Each appended entry goes through `synced_replica_entry`, the same
+/// origin mapping the initial replay applies via `replicate_session_upsert`:
+/// a raw shared origin such as `SharedPromote` is NOT peer-synced, so a worker
+/// adopting it would skip its translated-port reservation. Mapping it before
+/// queueing preserves the worker-owned reservation on adoption.
+pub(in crate::afxdp) fn replay_late_synced_sessions(
+    coord: &Coordinator,
+    commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    tunnel_purge_ids: &[u16],
+) {
+    // Hold the queue guard while taking the shared snapshot. A delete that
+    // wins this queue first therefore leaves DeleteSynced after our Upsert;
+    // a delete that wins first makes the snapshot omit the entry. This avoids
+    // resurrecting a row deleted between an unlocked snapshot and enqueue.
+    let mut pending = crate::afxdp::worker_queue::lock_recover(commands);
+    let mut entries = coord.snapshot_shared_session_entries();
+    crate::afxdp::coordinator::filter_replayed_synced_sessions(&mut entries, tunnel_purge_ids);
+    // The initial replay queue may contain an entry removed or replaced while
+    // workers were still spawning. Keep non-upsert commands in order, then
+    // append the authoritative current snapshot below.
+    pending.retain(|command| !matches!(command, WorkerCommand::UpsertSynced(_)));
+    for entry in entries {
+        let replica = crate::afxdp::shared_ops::synced_replica_entry(&entry);
+        crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::UpsertSynced(replica),
+        );
+    }
+}
+
 
 /// #6240 phase: RESOLVER (best-effort, ATTEMPTED before worker launch). Spawn
 /// the shared on-demand neighbor resolver so every worker's
@@ -621,6 +662,7 @@ fn spawn_workers(
     workers: BTreeMap<u32, Vec<BindingPlan>>,
     node_id: u8,
     worker_command_queues: Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>>,
+    tunnel_purge_ids: &[u16],
     dnat_fds: DnatTableFds,
     startup_report_tx: &mpsc::Sender<WorkerStartupReport>,
 ) -> LaunchOutcome {
@@ -761,7 +803,14 @@ fn spawn_workers(
             runtime_atomics_clone,
             cold_path_atomics_clone,
         );
+        // #9718: keep the worker out of its poll loop until its coordinator
+        // record is registered and the post-replay shared-session queue has
+        // been reconciled. The worker thread starts before registration by
+        // design (#6242); this barrier closes the resulting startup interval.
+        let startup_gate = Arc::new(std::sync::Barrier::new(2));
+        let worker_startup_gate = Arc::clone(&startup_gate);
         let body = move || {
+            worker_startup_gate.wait();
             worker_loop(
                 launch_plan,
                 shared_dataplane,
@@ -844,6 +893,7 @@ busy — forced private bind failure (test seam #6245)"
                     live.set_error(failure.reason.clone());
                 }
             }
+            let startup_gate_for_stub = Arc::clone(&startup_gate);
             let stub_stop = stop.clone();
             let stub_heartbeat = heartbeat.clone();
             let stub_tx = startup_report_tx.clone();
@@ -853,6 +903,7 @@ busy — forced private bind failure (test seam #6245)"
                 runtime_atomics.clone(),
                 panic_slot,
                 move || {
+                    startup_gate_for_stub.wait();
                     let _ = stub_tx.send(WorkerStartupReport {
                         worker_id: stub_worker_id,
                         bound_slots: incomplete_bound,
@@ -905,11 +956,13 @@ busy — forced private bind failure (test seam #6245)"
                     live.set_bound(-1);
                 }
             }
+            let startup_gate_for_stub = Arc::clone(&startup_gate);
             let stub_stop = stop.clone();
             let stub_heartbeat = heartbeat.clone();
             let stub_tx = startup_report_tx.clone();
             let stub_worker_id = worker_id;
             spawn_supervised_worker(worker_id, runtime_atomics.clone(), panic_slot, move || {
+                startup_gate_for_stub.wait();
                 let _ = stub_tx.send(WorkerStartupReport {
                     worker_id: stub_worker_id,
                     bound_slots: full_bound,
@@ -961,7 +1014,7 @@ busy — forced private bind failure (test seam #6245)"
                         handle: WorkerHandle {
                             stop,
                             heartbeat,
-                            commands,
+                            commands: commands.clone(),
                             session_export_ack,
                             cos_status,
                             runtime_atomics,
@@ -974,6 +1027,8 @@ busy — forced private bind failure (test seam #6245)"
                     },
                     Some(join),
                 );
+                replay_late_synced_sessions(coord, &commands, tunnel_purge_ids);
+                startup_gate.wait();
             }
             Err(err) => {
                 eprintln!(

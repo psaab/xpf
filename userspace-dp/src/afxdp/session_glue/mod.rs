@@ -9,10 +9,8 @@ pub(in crate::afxdp) use delete_drop_sweep::{DeleteDropSweep, DELETE_DROP_SWEEP_
 pub(in crate::afxdp) use install_table_purge::{
     InstallTablePurge, INSTALL_TABLE_PURGE_BUDGET, install_table_purge_predicate,
 };
-use promote::{
-    SharedSessionRefs, maybe_promote_synced_session, purge_translated_synced_hit,
-    should_keep_synced_hit_transient,
-};
+pub(in crate::afxdp) use promote::{SharedSessionRefs, maybe_promote_synced_session};
+use promote::{purge_translated_synced_hit, should_keep_synced_hit_transient};
 
 pub(super) fn resolution_target_for_session(
     flow: &SessionFlow,
