@@ -1496,17 +1496,19 @@ type FirewallFilterTerm struct {
 	UnknownICMPCodes []string
 	UnknownPorts     []string
 	// UnknownAddresses records literal `from source-address` /
-	// `destination-address` tokens that are not parseable IP/CIDR literals at
-	// compile time (#6463) — classifyFilterAddrFamily rejects them. The token
-	// is kept VERBATIM in SourceAddresses / DestAddresses (the pre-#6463
-	// behavior) so the term still compiles for the strict-gate diagnostic;
-	// validateFilterAddressLiteralsStrict (#3433) hard-rejects the commit, and
-	// on the tolerant load / peer-sync path the snapshot builder sets the
-	// AddressUnrepresentable wire marker so the Rust filter compiler fails the
-	// whole snapshot CLOSED. Without the marker the Rust parse_address dropped
-	// the malformed token PER-TOKEN, so a PARTIALLY-malformed list silently
-	// narrowed a discard/reject term to only the surviving prefixes (fail-OPEN
-	// via fall-through to the implicit accept). Mirrors UnknownPorts.
+	// `destination-address` tokens that the shared classifier cannot represent
+	// at compile time (#6463/#10011) — malformed IP/CIDR text and
+	// zone-scoped literals (`%zone`) are both rejected by
+	// classifyFilterAddrFamily. The token is kept VERBATIM in SourceAddresses /
+	// DestAddresses (the pre-#6463 behavior) so the term still compiles for
+	// the strict-gate diagnostic; validateFilterAddressLiteralsStrict (#3433)
+	// hard-rejects the commit, and on the tolerant load / peer-sync path the
+	// snapshot builder sets the AddressUnrepresentable wire marker so the Rust
+	// filter compiler fails the whole snapshot CLOSED. Without the marker the
+	// Rust parse_address dropped the unrepresentable token PER-TOKEN, so a
+	// PARTIALLY-malformed list silently narrowed a discard/reject term to only
+	// the surviving prefixes (fail-OPEN via fall-through to the implicit accept).
+	// Mirrors UnknownPorts.
 	UnknownAddresses []string
 	TCPFlags         []string // TCP flags: "syn", "ack", "fin", "rst", "psh", "urg"
 	IsFragment       bool     // match IP fragments

@@ -1252,6 +1252,18 @@ func validateFilterAddressLiteralsStrict(cfg *Config) error {
 						if a == "" || a == "any" {
 							continue
 						}
+						// A scoped address literal can pass netip.ParseAddr/ParsePrefix,
+						// but the userspace dataplane has no IPv6 zone model. Reject it
+						// with a precise representability diagnostic before the generic
+						// parse/family checks (#10011, mirroring #5875).
+						if filterAddressHasZoneScope(a) {
+							return fmt.Errorf(
+								"firewall family %s filter %q term %q: `from %s` "+
+									"value %q carries an IPv6 zone/scope qualifier (%%zone), "+
+									"which the dataplane cannot represent — remove the "+
+									"%%zone suffix (a filter address needs no scope)",
+								family, name, term.Name, side.leaf, a)
+						}
 						isV6, ok := classifyFilterAddrFamily(a)
 						if !ok {
 							return fmt.Errorf(
@@ -1280,11 +1292,27 @@ func validateFilterAddressLiteralsStrict(cfg *Config) error {
 	return check("inet6", cfg.Firewall.FiltersInet6)
 }
 
+// filterAddressHasZoneScope reports whether a firewall-filter address literal
+// carries a zone/scope qualifier (`%<zone>`), e.g. `fe80::1%eth0` (#10011).
+// The Junos lexer permits `%` in an identifier and Go's netip parsers accept
+// zones, but the userspace Rust matcher parses addresses as IpNet/Ipv[46]Addr
+// and has no zone model. A `%` cannot occur in an unscoped IPv4/IPv6/CIDR
+// literal, so a plain substring test catches scoped hosts and scoped-CIDRs
+// without rewriting the operator's token.
+func filterAddressHasZoneScope(addr string) bool {
+	return strings.Contains(addr, "%")
+}
+
 // classifyFilterAddrFamily reports whether a literal firewall-filter address is
 // IPv6 (isV6) and whether it parsed at all (ok), accepting both a CIDR prefix
 // (10.0.0.0/24) and a bare host IP (10.0.0.1 -> /32, ::1 -> /128) — exactly the
-// forms the userspace matcher's parse_address accepts.
+// forms the userspace matcher's parse_address accepts. Zone-scoped literals are
+// deliberately rejected even though netip.ParsePrefix/ParseAddr accept them:
+// the Rust dataplane has no scope model (#10011).
 func classifyFilterAddrFamily(a string) (isV6 bool, ok bool) {
+	if filterAddressHasZoneScope(a) {
+		return false, false
+	}
 	if pfx, err := netip.ParsePrefix(a); err == nil {
 		return pfx.Addr().Is6(), true
 	}

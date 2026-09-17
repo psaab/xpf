@@ -177,18 +177,18 @@ type FirewallTermSnapshot struct {
 	// snapshot instead. omitempty + the Rust serde default keep wire parity
 	// with an older control plane that omits the field (#1961).
 	PortsUnrepresentable bool `json:"ports_unrepresentable,omitempty"`
-	// AddressUnrepresentable (#6463) is set true when the term carried at
-	// least one literal `from source-address` / `destination-address` token
-	// that is not a parseable IP/CIDR (classifyFilterAddrFamily rejects it),
-	// recorded on term.UnknownAddresses. The strict commit gate
-	// (validateFilterAddressLiteralsStrict, #3433) rejects it, so a committed
-	// config never sets this; it is the helper-boundary fail-closed marker for
-	// the tolerant load / peer-sync path. The pre-#6463 Rust parse_address
-	// dropped such a token PER-TOKEN (its `Err(_)` arm pushed nothing): a
-	// PARTIALLY-malformed list matched only the surviving prefixes, so a
-	// discard/reject term silently enforced a NARROWER address set than the
-	// operator wrote — a host in the dropped range was accepted by
-	// fall-through (fail-OPEN). (An ALL-malformed direction already failed
+	// AddressUnrepresentable (#6463/#10011) is set true when the term carried
+	// at least one literal `from source-address` / `destination-address` token
+	// the shared classifier cannot represent (malformed IP/CIDR text or a
+	// zone-scoped `%zone` literal), recorded on term.UnknownAddresses. The
+	// strict commit gate (validateFilterAddressLiteralsStrict, #3433) rejects
+	// it, so a committed config never sets this; it is the helper-boundary
+	// fail-closed marker for the tolerant load / peer-sync path. The pre-#6463
+	// Rust parse_address dropped such a token PER-TOKEN (its `Err(_)` arm
+	// pushed nothing): a PARTIALLY-malformed list matched only the surviving
+	// prefixes, so a discard/reject term silently enforced a NARROWER address
+	// set than the operator wrote — a host in the dropped range was accepted
+	// by fall-through (fail-OPEN). (An ALL-malformed direction already failed
 	// closed at match-time via `constrained && empty`, #2400.) With this flag
 	// the Rust filter compiler raises
 	// SnapshotIntegrityError::UnrepresentableFilterAddress and rejects the

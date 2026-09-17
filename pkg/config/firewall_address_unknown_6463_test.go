@@ -5,10 +5,11 @@ import (
 )
 
 // #6463: a literal `from source-address` / `destination-address` token that is
-// not a parseable IP/CIDR must be RECORDED on term.UnknownAddresses at compile
-// time (kept verbatim in the address list) so the snapshot builder can set the
-// AddressUnrepresentable wire marker on the tolerant load / peer-sync path —
-// the Rust parse_address drops such a token per-token, and a
+// not parseable OR not representable by the Rust dataplane (including a
+// zone-scoped `%zone` literal) must be RECORDED on term.UnknownAddresses at
+// compile time (kept verbatim in the address list) so the snapshot builder can
+// set the AddressUnrepresentable wire marker on the tolerant load / peer-sync
+// path — the Rust parse_address drops such a token per-token, and a
 // PARTIALLY-malformed list would otherwise silently narrow a discard/reject
 // term to only the surviving prefixes (fail-open). The strict commit gate
 // (validateFilterAddressLiteralsStrict, #3433) remains the primary defense.
