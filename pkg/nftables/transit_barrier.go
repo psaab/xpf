@@ -12,6 +12,67 @@ import (
 // families while the dataplane is UNARMED (#7191).
 const TransitBarrierTableName = "xpf_transit_barrier"
 
+// ErrTransitBarrierBridgeUnsupported marks a kernel that does not provide the
+// bridge nf_tables family. The inet barrier remains useful on that kernel, so
+// callers may treat this sentinel as a documented degraded-success condition
+// only when it is the sole InstallTransitBarrier error.
+var ErrTransitBarrierBridgeUnsupported = errors.New("bridge nftables family unsupported")
+
+type transitBarrierBridgeUnsupportedError struct {
+	err error
+}
+
+func (e *transitBarrierBridgeUnsupportedError) Error() string {
+	return fmt.Sprintf("%s: %v", ErrTransitBarrierBridgeUnsupported, e.err)
+}
+
+func (e *transitBarrierBridgeUnsupportedError) Unwrap() error {
+	return e.err
+}
+
+func (e *transitBarrierBridgeUnsupportedError) Is(target error) bool {
+	return target == ErrTransitBarrierBridgeUnsupported
+}
+
+// IsTransitBarrierBridgeUnsupportedOnly reports whether err is exactly the
+// bridge-family unsupported degradation from InstallTransitBarrier, with no
+// inet or other family failure joined alongside it.
+func IsTransitBarrierBridgeUnsupportedOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) != 1 {
+			return false
+		}
+		err = children[0]
+	}
+	for err != nil {
+		if err == ErrTransitBarrierBridgeUnsupported {
+			return true
+		}
+		if _, ok := err.(*transitBarrierBridgeUnsupportedError); ok {
+			return true
+		}
+		if _, ok := err.(interface{ Unwrap() []error }); ok {
+			return false
+		}
+		unwrapped, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = unwrapped.Unwrap()
+	}
+	return false
+}
+
+func transitBarrierFamilyUnsupported(err error) bool {
+	return errors.Is(err, unix.ENOENT) ||
+		errors.Is(err, unix.EOPNOTSUPP) ||
+		errors.Is(err, unix.EAFNOSUPPORT)
+}
+
 // #7191: the nftables half of the unarmed transit barrier.
 //
 // WHY IT EXISTS. PR #7189 shipped the `ip_forward=0` leg of the barrier
@@ -63,11 +124,16 @@ func transitBarrierFamilies() []nftables.TableFamily {
 // transaction, so a re-assert on the apply tail cannot accumulate chains.
 //
 // A per-family failure is returned joined rather than short-circuited: the inet
-// leg must still install when a kernel lacks bridge netfilter support.
+// leg must still install when a kernel lacks bridge netfilter support. A bridge
+// family-unsupported error carries ErrTransitBarrierBridgeUnsupported so a
+// caller can report that documented degradation without hiding other failures.
 func (in *netlinkInstaller) InstallTransitBarrier() error {
 	var errs []error
 	for _, family := range transitBarrierFamilies() {
 		if err := in.installBarrierFamily(family); err != nil {
+			if family == nftables.TableFamilyBridge && transitBarrierFamilyUnsupported(err) {
+				err = &transitBarrierBridgeUnsupportedError{err: err}
+			}
 			errs = append(errs, fmt.Errorf("%s: %w", familyName(family), err))
 		}
 	}
