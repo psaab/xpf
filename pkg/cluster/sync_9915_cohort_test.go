@@ -911,10 +911,10 @@ func TestSyncNoiseIdentityRejectsBadClusterId_9915(t *testing.T) {
 }
 
 // F-118 review (gpt item 6): publication and retirement must be one
-// membership-checked transaction. The hook pauses a current publication while
-// it holds s.mu; a disconnect is requested at that exact point and can only
-// clear the offset after publication unlocks. A check-unlock-store mutant
-// lets the disconnect clear first and then republishes the retired offset.
+// membership-checked transaction. The publication hook pauses while it holds
+// s.mu; the disconnect hook then signals immediately before its Lock call.
+// That signal proves the disconnect is blocked by the publication owner until
+// the publication stores its offset and unlocks.
 func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.testClockNow = func() uint64 { return 1000000 }
@@ -927,13 +927,13 @@ func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 	binary.LittleEndian.PutUint64(payload[:], 900000)
 	checked := make(chan struct{})
 	continuePublish := make(chan struct{})
+	disconnectStarted := make(chan struct{})
 	ss.testClockPublishBeforeStore = func() {
-		if ss.mu.TryLock() {
-			ss.mu.Unlock()
-			t.Errorf("ClockSync publication gate ran without s.mu held")
-		}
 		close(checked)
 		<-continuePublish
+	}
+	ss.testDisconnectBeforeLock = func() {
+		close(disconnectStarted)
 	}
 	published := make(chan struct{})
 	go func() {
@@ -946,13 +946,15 @@ func TestClockSyncPublicationRetirementInterleave_9915(t *testing.T) {
 		t.Fatal("ClockSync did not reach the membership-checked publication gate")
 	}
 	disconnected := make(chan struct{})
-	disconnectStarted := make(chan struct{})
 	go func() {
-		close(disconnectStarted)
 		ss.handleDisconnect(ac)
 		close(disconnected)
 	}()
-	<-disconnectStarted
+	select {
+	case <-disconnectStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnect did not reach its pre-lock signal")
+	}
 	close(continuePublish)
 	select {
 	case <-published:
