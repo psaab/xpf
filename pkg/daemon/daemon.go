@@ -128,9 +128,18 @@ type Daemon struct {
 	// transitGateMu serializes every sysctl/barrier actuation with the periodic
 	// kernel-truth census. A wake callback can arrive from any dataplane writer,
 	// while the tick is the completeness guarantee for writers no observer sees.
-	transitGateMu sync.Mutex
+	transitGateMu       sync.Mutex
 	transitGateWakeOnce sync.Once
 	transitGateWake     chan struct{}
+
+	// --- always-on transit-gate link watcher (#9848) ---
+	// The watcher has its own subscription seam so it remains independent of
+	// the SNMP-gated link-state monitor. nil means the production netlink
+	// subscription; tests inject a channel that can model ENOBUFS closure.
+	transitGateLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onErr func(error)) error
+	// Zero means linkStateResubBackoffDefault (2s), matching the other
+	// resilient netlink monitor loops.
+	transitGateLinkResubBackoff time.Duration
 
 	// #9239: whether the LAST DHCP lease-change pass saw a delegated prefix
 	// mapped to an RA interface.
