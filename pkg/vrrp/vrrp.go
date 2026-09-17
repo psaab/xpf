@@ -3,6 +3,7 @@ package vrrp
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -23,6 +24,18 @@ const (
 	MinVRID = 1
 	MaxVRID = 255
 )
+
+// rethVRID is the single checked constructor for the synthesized RETH VRID.
+// Keep the range check alongside the 100+RG arithmetic: the config validator
+// and the tolerant runtime both need the same boundary, while callers that
+// only have an RG id must not duplicate an unchecked addition.
+func rethVRID(rgID int) (int, bool) {
+	const base = config.RethVRRPGroupIDBase
+	if rgID <= 0 || rgID > MaxVRID-base {
+		return 0, false
+	}
+	return base + rgID, true
+}
 
 // Instance describes a single VRRP instance.
 type Instance struct {
@@ -194,6 +207,13 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 		if !owns || rgID <= 0 {
 			continue
 		}
+		vrid, validVRID := rethVRID(rgID)
+		if !validVRID {
+			slog.Warn("vrrp: skipping RETH instance with out-of-range VRID",
+				"rg_id", rgID,
+				"valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
+			continue
+		}
 
 		pri := localPriority[rgID]
 		if pri == 0 {
@@ -233,7 +253,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 				}
 				instances = append(instances, &Instance{
 					Interface:         subIface,
-					GroupID:           100 + rgID,
+					GroupID:           vrid,
 					Priority:          pri,
 					Preempt:           preemptMap[rgID],
 					AcceptData:        true,
@@ -256,7 +276,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 			}
 			instances = append(instances, &Instance{
 				Interface:         linuxName,
-				GroupID:           100 + rgID,
+				GroupID:           vrid,
 				Priority:          pri,
 				Preempt:           preemptMap[rgID],
 				AcceptData:        true,

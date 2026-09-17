@@ -991,9 +991,13 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		}
 	}
 
-	// Link MTU.
+	// Link MTU. RFC 8200 §5 requires at least 1280 bytes, while the
+	// configured leaf is an int and tolerant load / peer-sync can deliver
+	// values outside the on-wire uint16 contract. Keep 0 as the documented
+	// "omit" sentinel; saturate every positive value at the owning send sink
+	// so a stale config cannot advertise an unusable or wrapped MTU.
 	if s.cfg.LinkMTU > 0 {
-		ra.Options = append(ra.Options, ndp.NewMTU(uint32(s.cfg.LinkMTU)))
+		ra.Options = append(ra.Options, ndp.NewMTU(uint32(clampLinkMTU9914(s.cfg.LinkMTU))))
 	}
 
 	// #3895 defense-in-depth: drop any option that fails to marshal so one bad
@@ -1196,6 +1200,19 @@ func clampRAHeaderMillis(v int) int {
 	}
 	if int64(v) > config.RAReachableRetransMaxMillis {
 		return config.RAReachableRetransMaxMillis
+	}
+	return v
+}
+
+// clampLinkMTU9914 saturates a positive configured MTU at the RFC 8200
+// minimum and the uint16 configuration ceiling. Zero/negative values are not
+// passed here: buildRA preserves them as the documented "omit" sentinel.
+func clampLinkMTU9914(v int) int {
+	if v < config.RALinkMTUMin {
+		return config.RALinkMTUMin
+	}
+	if int64(v) > config.RALinkMTUMax {
+		return config.RALinkMTUMax
 	}
 	return v
 }
