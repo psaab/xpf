@@ -154,6 +154,17 @@ pub(super) fn stage_flow_cache_hit(
         let cached_decision = cached.decision;
         let cached_descriptor = &cached.descriptor;
         let cached_metadata = &cached.metadata;
+        // #9991: a cached descriptor is admissible only while its backing
+        // local session remains within the strict idle deadline. Keep this
+        // read-only gate before TTL, filters, policers, logs, and accounting
+        // so an idle-crossed cache candidate cannot cause packet side effects.
+        if !sessions.session_is_live_at(&flow.forward_key, now_ns) {
+            flow_state
+                .flow_cache
+                .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
+            flow_state.flow_cache.reclassify_hit_as_miss();
+            return FlowCacheOutcome::FallThrough;
+        }
         // #3779: TTL/hop-limit check BEFORE any egress side effect. The slow
         // paths (session-hit `poll_descriptor/mod.rs`, session-miss) test TTL
         // before egress accounting, but the cache-hit path used to run the
@@ -205,6 +216,19 @@ pub(super) fn stage_flow_cache_hit(
             // egress counters/policers/logs — drop it here.
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
+        }
+        // #9991: the cache hit must still be backed by a non-expired session.
+        // `touch_if_stale` returns false for an absent or idle-crossed entry;
+        // reclassify that candidate and fall through before replaying any
+        // filter, log, policer, or packet-accounting side effects. The TTL
+        // check above is intentionally first so a TTL-expired packet does not
+        // refresh a session before its generated error/drop decision.
+        if !sessions.touch_if_stale(&flow.forward_key, now_ns) {
+            flow_state
+                .flow_cache
+                .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
+            flow_state.flow_cache.reclassify_hit_as_miss();
+            return FlowCacheOutcome::FallThrough;
         }
         // #2573: replay ALL matched `then count` term counters, not just the
         // last. A #2544 fall-through flow can match multiple count terms.
@@ -316,13 +340,6 @@ pub(super) fn stage_flow_cache_hit(
         let cached_dscp_rewrite = policer_action
             .dscp_rewrite
             .or(cached_descriptor.tx_selection.dscp_rewrite);
-        // #2220: per-session keepalive. Refresh THIS session's
-        // last_seen_ns when it is a quarter of the way to its own
-        // expiry. The prior binding-GLOBAL modulo-64 counter touched
-        // only the flow that happened to land on a global multiple of
-        // 64, so a low-rate flow co-resident with a saturating flow
-        // could be served entirely from the cache and reaped mid-flow.
-        sessions.touch_if_stale(&flow.forward_key, now_ns);
         // #2501: account this forwarded packet against the session. The packet
         // is keyed by its OWN tuple (`flow.forward_key`); `account_packet`
         // derives the direction from the resolved entry and folds both

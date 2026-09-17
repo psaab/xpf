@@ -2219,6 +2219,16 @@ impl SessionTable {
         }
     }
 
+    /// Return whether a local backing session exists and is within its
+    /// protocol-specific idle deadline. This probe is read-only so callers
+    /// can reject stale flow-cache hits before any packet side effects.
+    #[inline]
+    pub fn session_is_live_at(&self, key: &SessionKey, now_ns: u64) -> bool {
+        self.record_by_key(key).is_some_and(|record| {
+            now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+        })
+    }
+
     /// #2220: per-session keepalive throttle for the flow-cache fast
     /// path. Refreshes the matched session's `last_seen_ns` ONLY when it
     /// has gone idle for at least `expires_after_ns / SESSION_KEEPALIVE_DIVISOR`
@@ -2243,22 +2253,29 @@ impl SessionTable {
     /// the steady-state per-cache-hit cost is one lookup and an integer
     /// compare. Allocation-free.
     #[inline]
-    pub fn touch_if_stale(&mut self, key: &SessionKey, now_ns: u64) {
+    pub fn touch_if_stale(&mut self, key: &SessionKey, now_ns: u64) -> bool {
         let stale = match self.record_by_key(key) {
             Some(record) => {
                 let last_seen = record.entry.last_seen_ns;
-                let refresh_after = record
-                    .entry
-                    .expires_after_ns
-                    .max(SESSION_KEEPALIVE_DIVISOR)
+                let expires_after = record.entry.expires_after_ns;
+                let age = now_ns.saturating_sub(last_seen);
+                // Keep the flow-cache keepalive from resurrecting a session
+                // after the same strict deadline enforced by packet lookup
+                // and the expiry wheel. The wheel still owns physical
+                // removal, including HA HOLD/SELF-HEAL retention.
+                if age > expires_after {
+                    return false;
+                }
+                let refresh_after = expires_after.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
-                now_ns.saturating_sub(last_seen) >= refresh_after
+                age >= refresh_after
             }
-            None => return,
+            None => return false,
         };
         if stale {
             self.touch(key, now_ns);
         }
+        true
     }
 
     /// #2501: account a single forwarded packet (of on-wire length `len`,
@@ -3628,3 +3645,7 @@ mod icmp_error_budget_9901_tests;
 #[cfg(test)]
 #[path = "reverse_domain_9895_tests.rs"]
 mod reverse_domain_9895_tests;
+// #9990/#9991: pre-decision probes and strict hit-path expiry.
+#[cfg(test)]
+#[path = "session_lifetime_9990_9991_tests.rs"]
+mod session_lifetime_9990_9991_tests;

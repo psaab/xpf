@@ -5476,8 +5476,12 @@ fn expire_holds_peer_synced_when_rg_inactive() {
     let expired = run_expire_ha(&mut table, past_tcp_timeout(then), &[], &|_| 0);
     assert!(expired.is_empty(), "standby must NOT expire synced RG1 session");
     assert!(
-        table.lookup(&key, past_tcp_timeout(then), 0x10).is_some(),
-        "held session must still be present"
+        table.entry_by_key(&key).is_some(),
+        "held session must remain installed for HA retention",
+    );
+    assert!(
+        table.lookup(&key, past_tcp_timeout(then), 0x10).is_none(),
+        "strict expiry gate must reject traffic until the held entry is refreshed",
     );
     let s = table.last_pop_stats();
     assert_eq!(s.held_standby, 1, "exactly one held entry");

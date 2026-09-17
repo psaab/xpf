@@ -44,8 +44,12 @@ structure.)
   inbound packet matches an existing outbound flow").
 - `wheel.rs` — bucketed timer wheel (1 s per tick, 256 buckets). Each
   worker sweeps its own table once per second from its poll loop
-  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`);
-  lazy-delete on lookup picks up stragglers.
+  (`expire_stale_entries` in `afxdp/worker/loop_body/mod.rs`). Packet
+  lookups enforce the same strict idle deadline and return a miss once
+  `now - last_seen_ns > expires_after_ns`; the stale entry remains for the
+  wheel's physical cleanup (including HA HOLD/SELF-HEAL retention). The former
+  "lazy-delete on lookup" wording is obsolete: lookups reject idle-crossed
+  entries but do not refresh or physically delete them.
 - `tests.rs` — co-located unit tests.
 
 ## Timeouts
@@ -452,26 +456,29 @@ future caller that bypasses the Go gate.
 ## GC
 
 `SESSION_GC_INTERVAL_NS = 1_000_000_000` (1 s). Single-threaded per-worker
-sweep walks the wheel bucket for the current tick; stale entries get
-lazy-deleted on the next lookup if they slip past the sweep (e.g.
-because they were re-bucketed mid-sweep).
+sweep walks the wheel bucket for the current tick and physically removes stale
+entries (subject to the HA retention gates). Packet and flow-cache lookups
+reject idle-crossed entries but leave physical removal to the wheel.
 
 ## Flow-cache keepalive (#2220)
 
 The flow-cache fast path (`afxdp/poll_descriptor/flow_cache_hit.rs`) is
 the ONLY code path that refreshes a forwarded flow's `last_seen_ns` — a
 flow served entirely from the per-worker flow cache never re-runs the
-slow path that would otherwise touch the session. `touch_if_stale` is
-the keepalive it calls on every cache hit: it re-stamps the matched
+slow path that would otherwise touch the session. Every cached candidate is
+first admitted by the read-only `session_is_live_at` deadline check; missing
+or idle-crossed backing sessions fall through before filters, policers, logs,
+accounting, or TX side effects. After the TTL check, `touch_if_stale` is
+the keepalive it calls on every admitted cache hit: it re-stamps the matched
 session ONLY once that session has gone idle for at least
 `expires_after_ns / SESSION_KEEPALIVE_DIVISOR` (a quarter of its OWN
 timeout). An actively-forwarding cached flow is thus re-stamped whenever
 its idle time crosses `expires_after_ns / N`, keeping its age ~`T/N` in
 steady state regardless of co-resident flow rates, so it can never be
 GC'd mid-flow (reaped only if a real inter-packet gap exceeds `T`). The
-steady-state per-hit cost is one `key_to_handle` probe plus an integer
-compare (the `last_seen_ns` write + throttled `push_to_wheel` run only
-when actually stale); allocation-free.
+steady-state per-hit cost is two warm `key_to_handle` probes (admission plus
+keepalive) and integer compares; the `last_seen_ns` write + throttled
+`push_to_wheel` run only when actually stale. Allocation-free.
 
 This replaced the pre-#2220 binding-GLOBAL modulo-64 counter
 (`flow_cache_session_touch`), which incremented across ALL flows on the

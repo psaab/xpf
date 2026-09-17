@@ -55,6 +55,37 @@ pub enum ExportWalkOutcome {
 }
 
 impl SessionTable {
+    #[inline]
+    fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
+        match self.key_to_handle.get(key) {
+            Some(handle) => Some((*handle, false)),
+            None => self
+                .resolve_reverse_translated_handle(key)
+                .map(|handle| (handle, true)),
+        }
+    }
+
+    #[inline]
+    fn lookup_record_matches_key(
+        record: &SessionRecord,
+        key: &SessionKey,
+        via_alias: bool,
+    ) -> bool {
+        if !via_alias {
+            record.key == *key
+        } else {
+            record.entry.metadata.is_reverse
+                && translated_session_key(&record.key, record.entry.decision.nat) == *key
+        }
+    }
+
+    #[inline]
+    fn probe_record_with_origin(&self, key: &SessionKey) -> Option<&SessionRecord> {
+        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
+        let record = self.entries.get(handle as usize)?;
+        Self::lookup_record_matches_key(record, key, via_alias).then_some(record)
+    }
+
     pub fn lookup(
         &mut self,
         key: &SessionKey,
@@ -63,6 +94,47 @@ impl SessionTable {
     ) -> Option<SessionLookup> {
         self.lookup_with_origin(key, now_ns, tcp_flags)
             .map(|(lookup, _origin)| lookup)
+    }
+
+    /// Read-only counterpart to [`Self::lookup_with_origin`] for pre-decision
+    /// ownership inspection. Unlike packet lookup, this method deliberately
+    /// does not apply the idle gate: the #9048 delete guard must see the same
+    /// installed entry that the old lookup saw before deciding whether to
+    /// refuse a peer delete. It still performs the same stale-index and alias
+    /// validation, and cannot mutate the table by construction.
+    pub fn probe_with_origin(
+        &self,
+        key: &SessionKey,
+    ) -> Option<(SessionLookup, SessionOrigin)> {
+        let record = self.probe_record_with_origin(key)?;
+        Some((
+            SessionLookup {
+                decision: record.entry.decision,
+                metadata: record.entry.metadata.clone_without_policy_counter(),
+            },
+            record.entry.origin,
+        ))
+    }
+
+    /// Read-only, expiry-aware probe for quoted traffic that is not itself
+    /// admitted as session activity. An idle-crossed local entry is a miss,
+    /// while the HA shared-map fallback remains map-owned and is not aged here.
+    pub fn probe_with_origin_at(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<(SessionLookup, SessionOrigin)> {
+        let record = self.probe_record_with_origin(key)?;
+        if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
+            return None;
+        }
+        Some((
+            SessionLookup {
+                decision: record.entry.decision,
+                metadata: record.entry.metadata.clone_without_policy_counter(),
+            },
+            record.entry.origin,
+        ))
     }
 
     pub fn lookup_with_origin(
@@ -79,13 +151,7 @@ impl SessionTable {
         // (validate-on-lookup) so a translated-key collision no longer resolves
         // to a displaced/wrong session. The in-borrow alias check below
         // re-validates the same predicate as a stale-index guard.
-        let (handle, via_alias) = match self.key_to_handle.get(key) {
-            Some(h) => (*h, false),
-            None => match self.resolve_reverse_translated_handle(key) {
-                Some(h) => (h, true),
-                None => return None,
-            },
-        };
+        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
         // Pre-compute the timeout before borrowing &mut self.entries
         // so the inner block doesn't need to access self.timeouts.
         let timeouts = self.timeouts;
@@ -113,16 +179,15 @@ impl SessionTable {
             // was reused by a different session (release-mode guard,
             // not just debug). Direct-primary checks record.key ==
             // *key; alias path verifies the NAT-translation roundtrip.
-            if !via_alias {
-                if record.key != *key {
-                    return None;
-                }
-            } else {
-                let must_be_reverse = record.entry.metadata.is_reverse;
-                let translated = translated_session_key(&record.key, record.entry.decision.nat);
-                if !must_be_reverse || translated != *key {
-                    return None;
-                }
+            if !Self::lookup_record_matches_key(record, key, via_alias) {
+                return None;
+            }
+            // A hit is usable only before its strict idle deadline. The wheel
+            // remains the owner of physical removal (and HA HOLD/SELF-HEAL
+            // retention), but an idle-crossed entry cannot be re-admitted by
+            // traffic before that sweep runs.
+            if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
+                return None;
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
@@ -280,6 +345,24 @@ impl SessionTable {
     }
 
     pub fn find_forward_nat_match(&self, reply_key: &SessionKey) -> Option<ForwardSessionMatch> {
+        self.find_forward_nat_match_inner(reply_key, None)
+    }
+
+    /// Expiry-aware reverse-NAT probe used by packet admission and embedded
+    /// quote paths. The legacy accessor remains unaged for inspection callers.
+    pub fn find_forward_nat_match_at(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<ForwardSessionMatch> {
+        self.find_forward_nat_match_inner(reply_key, Some(now_ns))
+    }
+
+    fn find_forward_nat_match_inner(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: Option<u64>,
+    ) -> Option<ForwardSessionMatch> {
         // #4399: `nat_reverse_index` is a 1:N multimap — a reverse-key
         // collision (interface-mode SNAT / DNAT-to-shared-backend / NAT64 /
         // non-bijective static NAT, the #1758 latent collision) parks BOTH
@@ -338,6 +421,9 @@ impl SessionTable {
             let entry = &record.entry;
             if entry.metadata.is_reverse
                 || !reply_matches_forward_session(&record.key, entry.decision.nat, probe)
+                || now_ns.is_some_and(|now| {
+                    now.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
+                })
             {
                 continue;
             }
@@ -370,13 +456,33 @@ impl SessionTable {
     }
 
     pub fn find_forward_wire_match(&self, wire_key: &SessionKey) -> Option<ForwardSessionMatch> {
-        self.find_forward_wire_match_with_origin(wire_key)
+        self.find_forward_wire_match_inner(wire_key, None)
             .map(|(matched, _origin)| matched)
     }
 
     pub fn find_forward_wire_match_with_origin(
         &self,
         wire_key: &SessionKey,
+    ) -> Option<(ForwardSessionMatch, SessionOrigin)> {
+        self.find_forward_wire_match_inner(wire_key, None)
+    }
+
+    /// Expiry-aware wire-index probe used by session hit resolution. The
+    /// legacy no-timestamp accessor above remains an inspection API, while
+    /// packet paths must not bypass the strict idle deadline after the primary
+    /// lookup has rejected an idle-crossed entry.
+    pub fn find_forward_wire_match_with_origin_at(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<(ForwardSessionMatch, SessionOrigin)> {
+        self.find_forward_wire_match_inner(wire_key, Some(now_ns))
+    }
+
+    fn find_forward_wire_match_inner(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: Option<u64>,
     ) -> Option<(ForwardSessionMatch, SessionOrigin)> {
         // #4438: `forward_wire_index` is a 1:N multimap — a forward-wire key
         // collision (interface-mode SNAT with no port translation and the other
@@ -397,6 +503,9 @@ impl SessionTable {
             let entry = &record.entry;
             if entry.metadata.is_reverse
                 || forward_wire_key(&record.key, entry.decision.nat) != *wire_key
+                || now_ns.is_some_and(|now| {
+                    now.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
+                })
             {
                 continue;
             }
@@ -495,6 +604,15 @@ impl SessionTable {
     ) -> Option<(SessionCounters, bool)> {
         self.entry_by_key(key)
             .map(|entry| (entry.counters, entry.origin.is_peer_synced()))
+    }
+
+    /// #9990: test-only lifetime snapshot for cross-module regression tests.
+    /// Keep `SessionEntry` private while exposing the exact state that
+    /// pre-decision probes and packet lookups must leave untouched.
+    #[cfg(test)]
+    pub(crate) fn lifetime_state_for(&self, key: &SessionKey) -> Option<(u64, bool, u64)> {
+        self.entry_by_key(key)
+            .map(|entry| (entry.last_seen_ns, entry.handshake_pending, entry.expires_after_ns))
     }
 
     /// #5152: test-only read of an entry's `first_held_ns` — the standby

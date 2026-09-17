@@ -17,13 +17,12 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
     now_ns: u64,
 ) -> ForwardingResolution {
     let reverse_key = reverse_session_key(forward_key, forward_decision.nat);
-    if let Some(reverse) = lookup_session_across_scopes(
+    if let Some(reverse) = probe_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
         &reverse_key,
         now_ns,
-        0,
     ) {
         return reverse.lookup.decision.resolution;
     }

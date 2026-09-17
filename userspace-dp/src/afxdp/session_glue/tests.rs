@@ -734,6 +734,146 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
 }
 
 #[test]
+fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
+    let mut sessions = SessionTable::new();
+    let forward_key = test_key();
+    let install_ns = 1_000_000;
+    let mut decision = test_decision();
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(40_001),
+        ..NatDecision::default()
+    };
+    let metadata = test_metadata();
+    assert!(sessions.install_with_protocol(
+        forward_key.clone(),
+        decision,
+        metadata.clone(),
+        install_ns,
+        PROTO_TCP,
+        0,
+    ));
+    let timeout_ns = sessions
+        .lifetime_state_for(&forward_key)
+        .expect("forward session installed")
+        .2;
+    let now_ns = install_ns + timeout_ns + 1;
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &SyncedSessionEntry {
+            key: forward_key.clone(),
+            decision,
+            metadata,
+            origin: SessionOrigin::ForwardFlow,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+    );
+    assert!(
+        !shared_nat_sessions.lock().expect("shared NAT map").is_empty(),
+        "the stale local candidate must have a published shared alias"
+    );
+    assert!(
+        probe_session_across_scopes(
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward_key,
+            now_ns,
+        )
+        .is_none(),
+        "an idle-crossed local primary must not fall through to its shared alias"
+    );
+
+    let forwarding = test_forwarding_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let reply_key = SessionKey {
+        addr_family: forward_key.addr_family,
+        protocol: forward_key.protocol,
+        src_ip: forward_key.dst_ip,
+        dst_ip: decision.nat.rewrite_src.unwrap_or(forward_key.src_ip),
+        src_port: forward_key.dst_port,
+        dst_port: decision.nat.rewrite_src_port.unwrap_or(forward_key.src_port),
+        discriminator: forward_key.discriminator,
+        routing_domain: forward_key.routing_domain,
+    };
+    let forward_wire_key = SessionKey {
+        addr_family: forward_key.addr_family,
+        protocol: forward_key.protocol,
+        src_ip: decision.nat.rewrite_src.unwrap_or(forward_key.src_ip),
+        dst_ip: decision.nat.rewrite_dst.unwrap_or(forward_key.dst_ip),
+        src_port: decision.nat.rewrite_src_port.unwrap_or(forward_key.src_port),
+        dst_port: decision.nat.rewrite_dst_port.unwrap_or(forward_key.dst_port),
+        discriminator: forward_key.discriminator,
+        routing_domain: forward_key.routing_domain,
+    };
+    assert!(
+        lookup_session_across_scopes(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward_wire_key,
+            now_ns,
+            TCP_FLAG_ACK,
+        )
+        .is_none(),
+        "an idle-crossed local wire alias must not fall through to its shared clone"
+    );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &SessionFlow {
+            src_ip: reply_key.src_ip,
+            dst_ip: reply_key.dst_ip,
+            forward_key: reply_key.clone(),
+        },
+        now_ns,
+        now_secs,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        6,
+        0,
+        false,
+        0,
+        0,
+    );
+    assert!(
+        resolved.is_none(),
+        "an idle-crossed local NAT candidate must not fall through to its shared clone"
+    );
+    assert!(
+        sessions.lifetime_state_for(&forward_key).is_some(),
+        "the timer wheel still owns the stale forward entry"
+    );
+    assert!(
+        sessions.lifetime_state_for(&reply_key).is_none(),
+        "stale NAT fallback must not mint a reverse companion"
+    );
+}
+
+#[test]
 fn cached_session_resolution_skips_fabric_redirect() {
     let forwarding = test_forwarding_state_with_fabric();
     let cached = ForwardingResolution {
@@ -2319,6 +2459,59 @@ fn apply_worker_commands_refuses_peer_delete_of_live_local_session_9048() {
          reports a dual-primary split to an operator."
     );
 }
+/// #9990: the #9048 refusal must not itself advance a half-open flow. This
+/// uses a genuine SYN → SYN-ACK state so a flagless mutating lookup would
+/// both re-stamp the idle clock and clear `handshake_pending`.
+#[test]
+fn apply_worker_commands_refusal_preserves_lifetime_state_9990() {
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    let install_ns = monotonic_nanos();
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        install_ns,
+        PROTO_TCP,
+        0x02,
+    ));
+    let reverse = reverse_session_key(&forward, test_decision().nat);
+    let mut reverse_metadata = test_metadata();
+    reverse_metadata.is_reverse = true;
+    assert!(sessions.install_with_protocol(
+        reverse.clone(),
+        test_decision(),
+        reverse_metadata,
+        install_ns,
+        PROTO_TCP,
+        0x02,
+    ));
+    let _ = sessions.drain_deltas(8);
+    assert!(sessions
+        .lookup(&reverse, install_ns + 1_000_000, 0x12)
+        .is_some());
+
+    let before = sessions
+        .lifetime_state_for(&forward)
+        .expect("forward session");
+    assert!(
+        before.1,
+        "premise: reverse SYN-ACK must leave the forward handshake pending"
+    );
+
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000));
+    drive_delete_synced_9048(&mut sessions, &forward, &ha_state);
+
+    let after = sessions
+        .lifetime_state_for(&forward)
+        .expect("refused entry survives");
+    assert_eq!(
+        after, before,
+        "#9990: refusing a peer delete must leave session lifetime state byte-identical"
+    );
+}
+
 
 // ARM 1 of the conjunction: a PEER-SYNCED entry is deleted normally. Without
 // this, a guard that simply refused every delete would pass the cell above —
@@ -9013,8 +9206,8 @@ fn the_main_path_passes_a_resolved_arrival_zone_7169() {
     // Non-vacuity first: if the call moved or was renamed, everything below
     // passes for free.
     assert!(
-        code.contains("lookup_forward_nat_across_scopes("),
-        "session_glue/mod.rs no longer calls lookup_forward_nat_across_scopes — \
+        code.contains("lookup_forward_nat_across_scopes_at("),
+        "session_glue/mod.rs no longer calls lookup_forward_nat_across_scopes_at — \
          this guard is scanning for something that no longer exists"
     );
     // #9383: this used to assert the literal substring

@@ -760,6 +760,43 @@ pub(super) fn is_fabric_wire_placeholder(
         && decision.nat.rewrite_dst.is_none()
 }
 
+/// Local expiry classification used before considering shared aliases. A stale
+/// local record is terminal for this worker: its shared replica must not
+/// resurrect a packet or quote that the local age gate rejected.
+enum LocalExpiryProbe<T> {
+    Live(T),
+    Stale,
+    Absent,
+}
+
+fn probe_local_exact_at(
+    sessions: &SessionTable,
+    key: &SessionKey,
+    now_ns: u64,
+) -> LocalExpiryProbe<(SessionLookup, SessionOrigin)> {
+    if let Some(hit) = sessions.probe_with_origin_at(key, now_ns) {
+        LocalExpiryProbe::Live(hit)
+    } else if sessions.probe_with_origin(key).is_some() {
+        LocalExpiryProbe::Stale
+    } else {
+        LocalExpiryProbe::Absent
+    }
+}
+
+fn probe_local_wire_at(
+    sessions: &SessionTable,
+    key: &SessionKey,
+    now_ns: u64,
+) -> LocalExpiryProbe<(ForwardSessionMatch, SessionOrigin)> {
+    if let Some(hit) = sessions.find_forward_wire_match_with_origin_at(key, now_ns) {
+        LocalExpiryProbe::Live(hit)
+    } else if sessions.find_forward_wire_match_with_origin(key).is_some() {
+        LocalExpiryProbe::Stale
+    } else {
+        LocalExpiryProbe::Absent
+    }
+}
+
 pub(super) fn lookup_session_across_scopes(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -780,21 +817,88 @@ pub(super) fn lookup_session_across_scopes(
         }
         return Some(ResolvedSessionLookup::local_query(lookup, origin));
     }
-    if let Some((matched, origin)) = sessions.find_forward_wire_match_with_origin(key) {
-        let lookup = SessionLookup {
-            decision: matched.decision,
-            metadata: matched.metadata,
-        };
-        if is_fabric_wire_placeholder(
-            lookup.metadata.fabric_ingress,
-            lookup.metadata.is_reverse,
-            lookup.decision,
-        ) && let Some(shared) =
-            lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
-        {
-            return Some(ResolvedSessionLookup::shared(shared));
+    if matches!(probe_local_exact_at(sessions, key, now_ns), LocalExpiryProbe::Stale) {
+        return None;
+    }
+    match probe_local_wire_at(sessions, key, now_ns) {
+        LocalExpiryProbe::Live((matched, origin)) => {
+            let lookup = SessionLookup {
+                decision: matched.decision,
+                metadata: matched.metadata,
+            };
+            if is_fabric_wire_placeholder(
+                lookup.metadata.fabric_ingress,
+                lookup.metadata.is_reverse,
+                lookup.decision,
+            ) && let Some(shared) =
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            {
+                return Some(ResolvedSessionLookup::shared(shared));
+            }
+            return Some(ResolvedSessionLookup::local(matched.key, lookup, origin));
         }
-        return Some(ResolvedSessionLookup::local(matched.key, lookup, origin));
+        LocalExpiryProbe::Stale => return None,
+        LocalExpiryProbe::Absent => {}
+    }
+    lookup_shared_session(shared_sessions, key)
+        .map(ResolvedSessionLookup::shared)
+        .or_else(|| {
+            lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+                .map(ResolvedSessionLookup::shared)
+        })
+}
+
+/// #9990: non-mutating counterpart to [`lookup_session_across_scopes`].
+///
+/// Delete guards and embedded-error quote matching inspect an installed
+/// decision before deciding whether to remove, rewrite, or account for it.
+/// They must not run the packet-hit state machine (`last_seen_ns`,
+/// handshake completion, companion propagation, or wheel refresh). Local
+/// probes still honor the session's strict idle deadline; shared HA entries
+/// retain their existing map-owned lifetime and are intentionally not aged by
+/// this worker-local check.
+pub(super) fn probe_session_across_scopes(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+) -> Option<ResolvedSessionLookup> {
+    match probe_local_exact_at(sessions, key, now_ns) {
+        LocalExpiryProbe::Live((lookup, origin)) => {
+            if is_fabric_wire_placeholder(
+                lookup.metadata.fabric_ingress,
+                lookup.metadata.is_reverse,
+                lookup.decision,
+            ) && let Some(shared) =
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            {
+                return Some(ResolvedSessionLookup::shared(shared));
+            }
+            return Some(ResolvedSessionLookup::local_query(lookup, origin));
+        }
+        LocalExpiryProbe::Stale => return None,
+        LocalExpiryProbe::Absent => {}
+    }
+    match probe_local_wire_at(sessions, key, now_ns) {
+        LocalExpiryProbe::Live((matched, origin)) => {
+            let lookup = SessionLookup {
+                decision: matched.decision,
+                metadata: matched.metadata,
+            };
+            if is_fabric_wire_placeholder(
+                lookup.metadata.fabric_ingress,
+                lookup.metadata.is_reverse,
+                lookup.decision,
+            ) && let Some(shared) =
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            {
+                return Some(ResolvedSessionLookup::shared(shared));
+            }
+            return Some(ResolvedSessionLookup::local(matched.key, lookup, origin));
+        }
+        LocalExpiryProbe::Stale => return None,
+        LocalExpiryProbe::Absent => {}
     }
     lookup_shared_session(shared_sessions, key)
         .map(ResolvedSessionLookup::shared)
@@ -870,16 +974,46 @@ pub(super) fn lookup_forward_nat_across_scopes(
     reply_key: &SessionKey,
     ingress: ReverseIngress,
 ) -> Option<ForwardSessionMatch> {
-    let m = lookup_forward_nat_across_scopes_inner(sessions, shared_nat_sessions, reply_key)?;
+    let m =
+        lookup_forward_nat_across_scopes_inner(sessions, shared_nat_sessions, reply_key, None)?;
     revalidate_reverse_ingress(m, ingress)
 }
+
+pub(super) fn lookup_forward_nat_across_scopes_at(
+    sessions: &SessionTable,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    reply_key: &SessionKey,
+    ingress: ReverseIngress,
+    now_ns: u64,
+) -> Option<ForwardSessionMatch> {
+    let m = lookup_forward_nat_across_scopes_inner(
+        sessions,
+        shared_nat_sessions,
+        reply_key,
+        Some(now_ns),
+    )?;
+    revalidate_reverse_ingress(m, ingress)
+}
+
 
 fn lookup_forward_nat_across_scopes_inner(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     reply_key: &SessionKey,
+    now_ns: Option<u64>,
 ) -> Option<ForwardSessionMatch> {
-    if let Some(local) = sessions.find_forward_nat_match(reply_key) {
+    let local_match = now_ns
+        .map(|now| sessions.find_forward_nat_match_at(reply_key, now))
+        .unwrap_or_else(|| sessions.find_forward_nat_match(reply_key));
+    if now_ns.is_some()
+        && local_match.is_none()
+        && sessions.find_forward_nat_match(reply_key).is_some()
+    {
+        // A wheel-lazy local entry was found but failed the strict age gate.
+        // Do not resurrect its shared-map clone on this worker.
+        return None;
+    }
+    if let Some(local) = local_match {
         if is_fabric_wire_placeholder(
             local.metadata.fabric_ingress,
             local.metadata.is_reverse,

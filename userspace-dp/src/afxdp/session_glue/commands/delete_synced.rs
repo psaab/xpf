@@ -34,7 +34,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     // bit and the port is freed by whichever worker happens to be last.
     worker_id: u32,
 ) {
-    let (delete_alias, existing_origin) = match sessions.lookup_with_origin(&key, now_ns, 0) {
+    let (delete_alias, existing_origin) = match sessions.probe_with_origin(&key) {
         Some((lookup, origin)) => (Some(lookup), Some(origin)),
         None => (None, None),
     };
