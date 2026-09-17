@@ -31,7 +31,9 @@ monitor:
    CLI `CLI.showSecurityAlarms`) via the shared `RenderAlarms` helper; and
 2. emits ONE structured `RT_NAT NAT_POOL_UTILIZATION_ALARM_RAISED` /
    `..._CLEARED` syslog line via the injected `Emitter`
-   (daemon → `logging.EventReader.ForwardLogMsg`).
+   (daemon → `logging.EventReader.ForwardLogMsg`). A threshold-driven clear
+   reports the fresh sub-threshold sample; config-driven clears with no sample
+   retain the held utilization rather than fabricating a value.
 
 ## Generation coherency (the r10 fixed point)
 
@@ -136,7 +138,9 @@ raise=0/clear=0 is an always-firing alarm). See `docs/config-schema.md` #2079.
   deterministic flow-leg (ports exclusion preserved) + det-convert clear,
   no-double-count, nil-config / feature-disabled clear-all, unavailable /
   not-coherent HOLD-all, updatePct-no-syslog, syslog severity/shape, start/stop.
-  Mutation-verified non-tautological.
+- `natpoolalarm_clear_sample_9996_test.go` — threshold raise/hold/clear pins
+  that a sampled CLEARED line reports the fresh sub-threshold utilization, plus
+  config-driven unsampled clear coverage.
 - `natpoolalarm_exhaustion_9902_test.go` — exhaustion first-sight silence,
   raise/refresh/clear-3, id×{below,equal,above} + procGen×{below,equal,above}
   silent rebase, same-key below/equal/above, rebase-no-clear-credit,
