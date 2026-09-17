@@ -699,9 +699,11 @@ type Result struct {
 	// this gate the simulator evaluated the two address sides independently and
 	// could return a concrete permit/deny/default verdict for a packet shape
 	// the runtime can never see. When set, Matched / DefaultUsed /
-	// HostInboundUnmatched / ContentRejected are all false and Action is the
-	// conservative PolicyDeny for a raw reader; DisplayAction renders the
-	// dedicated UnsupportedTupleFamilyActionString.
+	// HostInboundUnmatched are false and Action is the conservative PolicyDeny
+	// for a raw reader. On a healthy config DisplayAction renders the dedicated
+	// UnsupportedTupleFamilyActionString; if the config is also snapshot-
+	// rejected, ContentRejected and its reasons are stamped onto this result
+	// (#9993) and DisplayAction instead prioritizes the retention posture.
 	UnsupportedTupleFamily bool
 
 	// HostInboundUnmatched is true ONLY for a `to-zone junos-host` query that
@@ -1000,16 +1002,19 @@ const ContentRejectedShowLine = "policy content rejected: the dataplane fails th
 // host-inbound and default-deny verdicts while REST returned explicit strings;
 // routing both surfaces through this method keeps them in lockstep.
 //
-//   - ContentRejected -> ContentRejectedActionString (#3727)
+//   - ContentRejected -> ContentRejectedActionString (#3727), including when
+//     an impossible tuple also carries the config-wide retention advisory
+//     (#9993); this is the primary operator posture on every surface.
+//   - UnsupportedTupleFamily -> UnsupportedTupleFamilyActionString
 //   - HostInboundUnmatched -> HostInboundActionString
 //   - no match (default-policy verdict) -> "<action> (default)"
 //   - concrete policy match -> "<action>"
 func (r Result) DisplayAction() string {
 	switch {
-	case r.UnsupportedTupleFamily:
-		return UnsupportedTupleFamilyActionString
 	case r.ContentRejected:
 		return ContentRejectedActionString
+	case r.UnsupportedTupleFamily:
+		return UnsupportedTupleFamilyActionString
 	case r.HostInboundUnmatched:
 		return HostInboundActionString
 	case r.UnzonedIngress:
@@ -1100,6 +1105,22 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	if q.SrcIP != nil && q.DstIP != nil &&
 		queryTupleFamily(q.SrcIP, q.SrcFamily) == "v4" &&
 		queryTupleFamily(q.DstIP, q.DstFamily) == "v6" {
+		// #9993: ContentRejected is a CONFIG-WIDE retention advisory, so it
+		// must still ride an UnsupportedTuple result. The tuple gate has to
+		// remain first — the tuple verdict is conservative and independent of
+		// policy evaluation — but the runtime's snapshot-retention state must
+		// not disappear merely because this query is impossible. Mirror the
+		// #4373 defer-stamp pattern so the advisory is additive; when both
+		// flags are present, ContentRejected wins DisplayAction precedence
+		// while UnsupportedTupleFamily and conservative Action remain intact.
+		if cfg != nil {
+			if reasons := policyContentRejectionReasons(cfg, q.FeedOverlay); len(reasons) > 0 {
+				defer func() {
+					res.ContentRejected = true
+					res.ContentRejectionReasons = reasons
+				}()
+			}
+		}
 		return Result{UnsupportedTupleFamily: true, Action: config.PolicyDeny}
 	}
 	// #4373 (E4/H2/H7): a TRANSIT destination that is multicast / broadcast /
