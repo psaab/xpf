@@ -204,7 +204,7 @@ func unitWireguardIdentityOverride(ifc *InterfaceConfig, unitTunnel *TunnelConfi
 			"identity on its own interface",
 			unitTunnel.WgListenPort, ifc.Tunnel.WgListenPort)
 	}
-	if unitTunnel.WgLocalPrivkeyHex != ifc.Tunnel.WgLocalPrivkeyHex {
+	if !strings.EqualFold(unitTunnel.WgLocalPrivkeyHex.Reveal(), ifc.Tunnel.WgLocalPrivkeyHex.Reveal()) {
 		return fmt.Errorf("unit overrides the WireGuard private-key of the interface-level " +
 			"tunnel; listen-port and private-key are properties of the WireGuard interface, " +
 			"which is ONE UDP socket and ONE local identity, so a unit may add `peer` " +
