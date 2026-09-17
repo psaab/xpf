@@ -20,6 +20,7 @@ func TestFormat_LabelsAndOrderEBPF(t *testing.T) {
 		DaemonCPUWindowValid: [numCPUWindows]bool{true, true, true},
 		WorkerCPUMode:        CPUModeEBPFNoWorkers,
 		HeapPercent:          72.0,
+		HeapPercentValid:     true,
 		BufferPercent:        83.0,
 		BufferKnown:          true,
 		Uptime:               474635 * time.Second,
@@ -132,6 +133,7 @@ func TestFormat_HeapAndBufferClampButCPUDoesNot(t *testing.T) {
 		WorkerCPUWindows:     [numCPUWindows]float64{-3.0, -3.0, -3.0}, // negatives floor to 0
 		WorkerCPUWindowValid: [numCPUWindows]bool{true, true, true},
 		HeapPercent:          150.0,
+		HeapPercentValid:     true,
 		BufferKnown:          true,
 		BufferPercent:        -5.0,
 	}
