@@ -1,0 +1,9 @@
+# Clock skew evidence — loss userspace cluster, 2026-09-13.
+# fw0's clock runs ~125 s behind the deploy host; fw1 is ~4 s behind.
+# All journal-vs-iperf/ping timeline mappings in RESULTS.md use these offsets.
+# Captured with: date -u +%FT%TZ (host) and incus exec loss:xpf-userspace-fw<N> -- date -u +%FT%TZ
+host: 2026-09-13T20:10:01Z
+fw0:  2026-09-13T20:07:56Z   (host-minus-fw0 = 125 s)
+fw1:  2026-09-13T20:09:57Z   (host-minus-fw1 = 4 s)
+# The same ~125 s fw0 offset was observed during the run (host 19:56:57Z vs
+# fw0 19:54:52Z); the offset is stable, not drifting within the run window.

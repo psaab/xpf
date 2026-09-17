@@ -1,0 +1,19 @@
+cut_start=2026-09-17T22:46:12.949197045Z
+rolling: peer ready; forcing local secondary (drain start)
+rolling: drain complete (peer owns RGs, local backup, rg_active=false, sync clean)
+upgrade: -> STAGED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: -> PREFLIGHT (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: version dir /var/lib/xpf/versions/working-15440-ga36ba20ac-dirty already present (same source generation); skipping copy
+upgrade: -> COPIED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: -> VERIFIED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: stopping xpfd before flip
+upgrade: -> STOPPED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: -> FLIPPED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: -> STARTED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: -> COMMITTED (target=working-15440-ga36ba20ac-dirty prev=working-15440-ga36ba20ac-dirty)
+upgrade: committed version working-15440-ga36ba20ac-dirty
+rolling: upgraded node re-synced
+rolling: local node rejoined election, confirmed for every configured RG; cut complete for this node
+rolling upgrade complete
+cut_end=2026-09-17T22:46:22.569570316Z cut_rc=0
+sampler_rc=0

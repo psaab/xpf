@@ -1,0 +1,7 @@
+2026-09-17T22:57:02+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:02.847Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:57:04+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:04.160Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:57:06+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:06.845Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:57:09+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:09.175Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:57:10+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:10.845Z level=WARN msg="ra: startup goodbye failed; will retry on next reconcile" rg=2 interface=ge-7-0-1 err="ndp: address \"fe80::bf72:16:2\" not found on interface \"ge-7-0-1\""
+2026-09-17T22:57:11+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:11.680Z level=INFO msg="proactive neighbor resolution" resolving=2 total_targets=5
+2026-09-17T22:57:11+00:00 xpf-userspace-fw1 xpfd[13482]: time=2026-09-17T22:57:11.692Z level=INFO msg="force-probe neighbors" count=44
