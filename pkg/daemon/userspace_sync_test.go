@@ -1023,8 +1023,14 @@ func TestHandleEventStreamFullResyncRequiresHAReady(t *testing.T) {
 		cluster:     newClusterManager(true),
 		sessionSync: &cluster.SessionSync{},
 	}
-	if d.handleEventStreamFullResync() {
-		t.Fatal("full resync with disconnected sessionSync should withhold ACK")
+	// #9631: a disconnected primary now sheds the barrier (handled) with a
+	// latched repayment debt instead of withholding ACK (which head-blocked
+	// the flush and re-armed the delta storm for the whole outage).
+	if !d.handleEventStreamFullResync() {
+		t.Fatal("full resync with disconnected sessionSync should shed with a repayment debt (#9631)")
+	}
+	if !d.userspaceFullResyncOwedWhileDown.Load() {
+		t.Fatal("shed barrier must latch the owed-repayment debt (#9631)")
 	}
 }
 

@@ -991,7 +991,7 @@ var schemaRoutingInstances = &schemaNode{desc: "Routing instance configuration",
 		"vrf-table-label":     {desc: "VRF table label (accepted; xpf compiles no BGP/MPLS VPN state from it)", children: nil},
 		"route-distinguisher": {desc: "VRF route distinguisher (accepted; xpf compiles no BGP/MPLS VPN state from it)", args: 1, placeholder: "<rd>", children: nil},
 
-		"instance-type": {desc: "Routing instance type", args: 1, placeholder: "<type>", children: nil},
+		"instance-type": {desc: "Routing instance type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "Routing instance type (forwarding | virtual-router | vrf)", valueExamples: []string{"forwarding", "virtual-router", "vrf"}, validator: ValidateRoutingInstanceType9814, children: nil},
 		"interface":     {desc: "Interfaces bound to this routing instance", args: 1, multi: true, placeholder: "<interface>", children: nil},
 		"routing-options": {desc: "Routing options", children: map[string]*schemaNode{
 			"static": {desc: "Static routes", children: map[string]*schemaNode{

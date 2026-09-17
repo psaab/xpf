@@ -83,5 +83,13 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRIMemberCollision(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #9814: appended at the END of the phase deliberately, after the #9821
+	// gate above — same doctrine as its comment: a NEW gate inserted between
+	// existing ones would steal the first-error slot from a config that trips
+	// two. Dead-last means the instance-type error only surfaces when no
+	// earlier gate failed.
+	if err := runUniformGatesRoutingInstanceType9814(tree, cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

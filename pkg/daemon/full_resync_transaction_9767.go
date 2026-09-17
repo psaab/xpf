@@ -21,11 +21,13 @@ import (
 //     sessions. The background sweep does not repair that, because it re-sends
 //     only sessions whose timestamps moved, and a resync exports old ones.
 //   - #9766: nothing else may queue a delta between the export's snapshot and
-//     its queueing. The fallback loop's reconciliation drain runs on its own
-//     goroutine. A close it drained in that window reached the peer ahead of
-//     the export's stale install of the same session, and the install's fresher
-//     generation resurrected the session on the standby.
-
+//     its queueing. The fallback loop's reconciliation drain and the event
+//     stream callback can run on other goroutines, so both take
+//     userspaceDeltaSyncMu. A close in that window therefore cannot reach the
+//     peer ahead of the export's stale install. The paced repayment export is
+//     ordered by this lock but is intentionally not an authoritative
+//     reconciliation window; cold-start bulk remains broader and reconciles
+//     stale receiver entries.
 const (
 	// fullResyncInstallWait bounds how long one export install waits for room
 	// in the send queue. The writer drains thousands of messages a second, so a
@@ -66,13 +68,13 @@ func (d *Daemon) holdOffFullResync(now time.Time) {
 func (d *Daemon) drainUserspaceSessionDeltasLocked(drainer userspaceSessionDeltaDrainer, cfg *config.Config) (int, error) {
 	d.userspaceDeltaSyncMu.Lock()
 	defer d.userspaceDeltaSyncMu.Unlock()
-	return d.drainUserspaceSessionDeltasWithConfig(drainer, cfg, 1)
+	return d.drainUserspaceSessionDeltasWithConfigLocked(drainer, cfg, 1)
 }
 
 // queueUserspaceSessionDeltasComplete queues deltas through the same schema
-// gate and the same walk as queueUserspaceSessionDeltas, but paces each install
-// against the send queue. It returns an error unless the gate admitted the
-// batch and every install reached the queue.
+// gate and the same walk as queueUserspaceSessionDeltasLocked, but paces each
+// install against the send queue. It returns an error unless the gate admitted
+// the batch and every install reached the queue.
 func (d *Daemon) queueUserspaceSessionDeltasComplete(
 	zoneIDs map[string]uint16,
 	deltas []dpuserspace.SessionDeltaInfo,

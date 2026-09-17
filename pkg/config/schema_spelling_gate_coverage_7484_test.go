@@ -524,6 +524,11 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	//   property of the leaf, not a gap in the instrument. The fifth is the
 	//   `interface-routes` container itself, whose comparable child moved the
 	//   floor above.
+	// #9814 qualifies the CANNOT sentence above: it holds only while an
+	// accepted-and-inert leaf is SILENT. Three of the four (`vrf-target`,
+	// `vrf-table-label`, `route-distinguisher`) now warn #9374-style, so they
+	// change output through the advisory channel and moved to `advisory`
+	// (the #9414 shape). `description` stays: it changes no compared output.
 	// #9351: 137 -> 153, a NET +16 that is +17 and -1. MEASURED by diffing this
 	// cell's own classification against origin/master rather than inferred from
 	// the totals: all 17 arrivals are `routing-instances <*> protocols bgp
@@ -547,7 +552,13 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// pkg/config. The `structured-data brief` leaves stay here: the advisory
 	// names `structured-data` whether or not `brief` is present, so `brief`
 	// still changes nothing.
-	gateBlindUnreachable: 138,
+	// #9814: 138 -> 135, a pure RECLASSIFICATION of three leaves into
+	// `advisory` (named at that ceiling): `routing-instances <*> vrf-target`,
+	// `vrf-table-label` and `route-distinguisher` now warn #9374-style, so they
+	// change output through the advisory channel (the #9414 shape). ATTRIBUTED:
+	// the registry diff names exactly these three rows, and the branch touches
+	// nothing else under `routing-instances`.
+	gateBlindUnreachable: 135,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
@@ -564,7 +575,13 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// the seven above. The blind TOTAL did not move (427); these left
 	// `unreachable`, where they were silent. They leave THIS class only when a
 	// modifier is actually implemented.
-	gateBlindAdvisory: 22,
+	// #9814 raises this 22 -> 25, DELIBERATELY, and names the three because a
+	// raise without them is slack: `routing-instances <*> vrf-target`,
+	// `vrf-table-label` and `route-distinguisher`. Each is accepted and inert
+	// by the #9323 decision and now warns #9374-style, which is this class's
+	// definition (read, value ignored, warning says so). The blind TOTAL did
+	// not move; these left `unreachable`, where they were silent.
+	gateBlindAdvisory: 25,
 	// #7132 raised this 175 -> 176 for `system ntp server ... prefer`.
 	//
 	// Raised deliberately, and it is the one kind of raise that is not a

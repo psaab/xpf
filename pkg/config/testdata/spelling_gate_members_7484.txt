@@ -666,7 +666,7 @@ COMPARED	routing-instances <*> protocols rip group <*> neighbor
 COMPARED	routing-instances <*> protocols rip neighbor
 COMPARED	routing-instances <*> protocols rip passive-interface
 COMPARED	routing-instances <*> protocols rip redistribute
-unreachable (leaf changed nothing)	routing-instances <*> route-distinguisher
+advisory (read, value ignored, warning says so)	routing-instances <*> route-distinguisher
 COMPARED	routing-instances <*> routing-options interface-routes rib-group inet
 COMPARED	routing-instances <*> routing-options interface-routes rib-group inet6
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> discard
@@ -685,8 +685,8 @@ COMPARED	routing-instances <*> routing-options static route <*> qualified-next-h
 COMPARED	routing-instances <*> routing-options static route <*> qualified-next-hop <*> metric
 COMPARED	routing-instances <*> routing-options static route <*> qualified-next-hop <*> preference
 flag (read, but value-less)	routing-instances <*> routing-options static route <*> reject
-unreachable (leaf changed nothing)	routing-instances <*> vrf-table-label
-unreachable (leaf changed nothing)	routing-instances <*> vrf-target
+advisory (read, value ignored, warning says so)	routing-instances <*> vrf-table-label
+advisory (read, value ignored, warning says so)	routing-instances <*> vrf-target
 COMPARED	routing-options autonomous-system
 COMPARED	routing-options forwarding-table export
 flag (read, but value-less)	routing-options generate route <*> discard

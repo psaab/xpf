@@ -2732,6 +2732,17 @@ type compileOpts struct {
 	// and silently conflated the two — still BOOTS, now with a deterministic
 	// warning. Same doctrine as lenientInterfaceUnitRef (#5933).
 	lenientRIMemberCollision bool
+	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
+	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
+	// from a hard compile error to a cfg.Warnings entry. A mistyped or
+	// unimplemented type was accepted on all four config channels and then
+	// silently treated as a VRF by every consumer, creating a VRF the operator
+	// may have asked NOT to have. The strict commit / commit-check path
+	// hard-rejects so the typo is operator-visible; the tolerant load /
+	// peer-sync paths warn so an already-persisted or peer-synced config
+	// carrying it still BOOTS (#1960) — the raw value stays live as a VRF, see
+	// the gate's comment. Same doctrine as lenientRIMemberCollision.
+	lenientRoutingInstanceType9814 bool
 
 	// lenientInterfaceRangeBudget (#8438) downgrades the total interface-range
 	// expansion budget from a hard compile error to a cfg.Warnings entry. The
@@ -3007,6 +3018,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRethVRRPGroupID:                 true,
 		lenientIfNameCollision:                 true,
 		lenientRIMemberCollision:               true,
+		lenientRoutingInstanceType9814:         true,
 		lenientRethMember:                      true,
 		lenientRethRGOwnership:                 true,
 		lenientReservedZoneNames:               true,

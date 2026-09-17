@@ -207,10 +207,10 @@ var (
 //
 // The id is per CONVERSION, not stable per session: a bulk resync re-converts
 // live sessions and re-stamps them with fresh ids, and the `close` branch of
-// queueUserspaceSessionDeltas converts purely to derive the key and discards the
-// id it mints. Both are harmless in a 48-bit space, and the old composition
-// churned the id the same way — what changed is that concurrent sessions no
-// longer SHARE one.
+// queueUserspaceSessionDeltasLocked converts purely to derive the key and
+// discards the id it mints. Both are harmless in a 48-bit space, and the old
+// composition churned the id the same way — what changed is that concurrent
+// sessions no longer SHARE one.
 //
 // This id stays NODE-LOCAL by design: the cross-node correlatable id is the
 // separate RTFlowSessionID (#5212), which rides its own wire field and is
