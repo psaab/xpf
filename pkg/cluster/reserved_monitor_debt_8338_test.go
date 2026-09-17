@@ -11,13 +11,13 @@ import (
 // THE DEFECT. `reconcileMonitorDebtsLocked` builds its desired set solely from
 // `rg.InterfaceMonitors`, so a reserved key is never in it, and the delete loop
 // exempted only `isIPMonitorName`. Every commit therefore deleted the
-// `__dataplane-arm__` debt. `applyDataplaneArmTrack` is edge-triggered from the
-// three arm-transition helpers, so a commit taken while the node was ALREADY
-// unarmed reinstalled nothing — the node forwarded nothing and carried no
-// penalty saying so, and could win an election and hold the RG as a blackhole.
+// `__dataplane-arm__` debt. `applyDataplaneReadyTrack` is edge-triggered from
+// the three ready-transition helpers, so a commit taken while the node was
+// ALREADY unready reinstalled nothing — the node forwarded nothing and carried
+// no penalty saying so, and could win an election and hold the RG as a blackhole.
 //
-// THE FIXTURE MUST ENTER THE UNARMED STATE BEFORE COMMITTING. A cell that
-// commits while ARMED passes against the broken code, because in that state the
+// THE FIXTURE MUST ENTER THE UNREADY STATE BEFORE COMMITTING. A cell that
+// commits while READY passes against the broken code, because in that state the
 // debt is absent anyway and there is nothing to delete. That is not a likely
 // mistake here, it is a guaranteed one, so the debt is installed first and its
 // presence asserted before the commit.
@@ -35,7 +35,7 @@ func TestReservedMonitorDebtSurvivesConfigCommit8338(t *testing.T) {
 			drainEvents(m, 8)
 
 			// Enter the state the debt represents — for the arm debt this is
-			// exactly what `applyDataplaneArmTrack(false)` does.
+			// exactly what `applyDataplaneReadyTrack(false)` does.
 			m.SetMonitorWeight(0, iface, true, DataplaneArmMonitorCost)
 			before := m.GroupStates()
 			if len(before) == 0 || before[0].Weight == 255 {
@@ -78,7 +78,7 @@ func TestReservedMonitorDebtIsStillClearedByItsOwner8338(t *testing.T) {
 		t.Fatalf("precondition: the debt must be installed, weight = %d", w)
 	}
 
-	// The armed transition — `applyDataplaneArmTrack(true)`.
+	// The ready-to-serve transition — `applyDataplaneReadyTrack(true)`.
 	m.SetMonitorWeight(0, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
 	if w := m.GroupStates()[0].Weight; w != 255 {
 		t.Fatalf("the arm-recovered transition must clear the debt: weight = %d, want 255. "+

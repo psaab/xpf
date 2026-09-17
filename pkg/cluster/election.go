@@ -651,33 +651,33 @@ func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int
 const maxRedundancyGroupWeight = 255
 
 // DataplaneArmMonitorIface is the synthetic interface-monitor name the daemon
-// uses to express "this node's forwarding dataplane is not armed" as
-// redundancy-group weight debt (#7178).
+// uses to express "this node's dataplane is not ready to serve" as
+// redundancy-group weight debt (#7178, #9842).
 //
 // It is deliberately not a legal Junos or Linux interface name, so it can never
 // collide with a configured `track-interface` entry, and it is exported so the
 // daemon writes ONE agreed key rather than a string literal on each side.
 const DataplaneArmMonitorIface = "__dataplane-arm__"
 
-// DataplaneArmMonitorCost is the weight debt an unarmed dataplane contributes:
-// enough to lose to any peer that IS armed, but NOT enough to reach weight 0.
+// DataplaneArmMonitorCost is the weight debt a dataplane that is not ready to
+// serve contributes: enough to lose to any peer that IS ready, but NOT enough
+// to reach weight 0.
 //
-// #7178: the floor is the design, not an implementation detail. A node whose
-// dataplane failed to arm forwards no transit (#5275 closes kernel forwarding)
-// while deliberately keeping management up, so on a cluster the right answer is
-// "let the peer have it" — which a large debt achieves, because the election is
-// RELATIVE and an armed peer at 255 outbids this node at 1.
+// #7178/#9842: the floor is the design, not an implementation detail. A node
+// whose dataplane failed to arm, or whose arm has not yet yielded a kernel-
+// proven XDP link, forwards no transit (#5275/#9725 close kernel forwarding)
+// while deliberately keeping management up, so on a cluster the right answer
+// is "let the peer have it" — which a large debt achieves, because the election
+// is RELATIVE and a ready peer at 255 outbids this node at 1.
 //
-// But driving the weight to 0 would also demote a STANDALONE unarmed node, and
-// there the outcome is different in kind: nothing else picks up the VIPs, so the
-// only effect is to remove the addresses an operator may be reaching the box on.
-// The node is a black hole for transit either way; demoting it there removes the
-// repair path without removing the black hole. Landing at 1 keeps a lone node
-// primary and lets a healthy peer win, from one rule rather than a special case.
+// But driving the weight to 0 would also demote a STANDALONE node that has no
+// ready dataplane, and there nothing else picks up the VIPs. Landing at 1 keeps
+// a lone node primary and lets a healthy peer win, from one rule rather than a
+// special case.
 //
 // The floor of 1 also mirrors the VRRP `track-interface priority-cost` clamp of
-// [1,254]: that machinery already settled that "demoted" means the bottom of the
-// range, never out of it.
+// [1,254]: that machinery already settled that "demoted" means the bottom of
+// the range, never out of it.
 const DataplaneArmMonitorCost = maxRedundancyGroupWeight - 1
 
 // rgWeightFromDebt converts a redundancy group's accumulated monitor debt into
@@ -800,9 +800,9 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 		// class. The previous shape exempted only `isIPMonitorName`, so the
 		// reserved `__dataplane-arm__` debt — which is never in `desired`,
 		// because `desired` is built solely from `InterfaceMonitors` — was
-		// deleted by every commit that reached here. `applyDataplaneArmTrack`
-		// is edge-triggered from the three arm-transition helpers, so a commit
-		// taken while the node was ALREADY unarmed reinstalled nothing: the
+		// deleted by every commit that reached here. `applyDataplaneReadyTrack`
+		// is edge-triggered from the three ready-transition helpers, so a commit
+		// taken while the node was ALREADY unready reinstalled nothing: the
 		// node kept forwarding nothing and lost the penalty that expressed it,
 		// and could then win an election and hold the RG as a blackhole.
 		//

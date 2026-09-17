@@ -1,31 +1,44 @@
 package daemon
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #7178: the arm-state transitions must actually DRIVE the redundancy-group
-// weight, not merely have a helper that could.
+// #7178/#9842: the dataplane-ready transitions must actually DRIVE the
+// redundancy-group weight, not merely have a helper that could.
 //
 // WHY THIS IS SEPARATE FROM THE ARITHMETIC TESTS. pkg/cluster pins the cost's
-// value — large enough to lose to an armed peer, small enough to leave the node
+// value — large enough to lose to a ready peer, small enough to leave the node
 // eligible. Those pass whether or not anything ever applies it. Deleting the
-// applyDataplaneArmTrack call from markDataplaneArmFailed leaves every one of
-// them green, because they exercise rgWeightFromDebt directly. The defect being
-// fixed lives in the WIRING — a node that failed to arm went on holding RG
-// mastership — so the wiring is what this file asserts.
+// applyDataplaneReadyTrack call from the re-evaluation path leaves every one
+// of these tests green, because they exercise rgWeightFromDebt directly. The
+// defect being fixed lives in the WIRING — a node that failed to become ready
+// went on holding RG mastership — so the wiring is what this file asserts.
 
 func armTrackManager(t *testing.T) *cluster.Manager {
 	t.Helper()
 	m := cluster.NewManager(0, 1)
 	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0",
 		RedundancyGroups: []*config.RedundancyGroup{{ID: 1, NodePriorities: map[int]int{0: 200}}},
 	})
 	return m
+}
+
+func armTrackDaemon(t *testing.T, m *cluster.Manager, attached int) (*Daemon, *gateRuntime9725) {
+	t.Helper()
+	rt := &gateRuntime9725{RuntimeDataPlane: &armedRecorderDP{}}
+	rt.setCount(attached, false)
+	d := &Daemon{cluster: m}
+	d.setDataplane(rt)
+	return d, rt
 }
 
 func rgWeight(t *testing.T, m *cluster.Manager, id int) int {
@@ -43,14 +56,16 @@ func TestArmFailureDemotesRedundancyGroupWeight7178(t *testing.T) {
 	withTempTransitForwardSysctls(t, "1")
 
 	m := armTrackManager(t)
-	d := &Daemon{cluster: m}
+	d, _ := armTrackDaemon(t, m, 1)
+	d.markDataplaneArmed("test")
 
-	// Precondition: a group with no monitor debt carries the full weight. Without
-	// this the assertion below could pass on a group that was never healthy.
-	if w := rgWeight(t, m, 1); w == 0 {
-		t.Fatalf("precondition: the group must start with a non-zero weight, got %d", w)
-	}
+	// Precondition: an armed dataplane with a kernel-proven XDP link carries
+	// the full weight. Without this the assertion below could pass on a group
+	// that was never ready.
 	full := rgWeight(t, m, 1)
+	if full != 255 {
+		t.Fatalf("precondition: attached dataplane weight = %d, want 255", full)
+	}
 
 	d.markDataplaneArmFailed("test", "test", errors.New("boom"))
 
@@ -67,28 +82,105 @@ func TestArmFailureDemotesRedundancyGroupWeight7178(t *testing.T) {
 	}
 }
 
-// The gate must FOLLOW the arm state, not be pinned off: a successful arm has to
-// clear the debt, or a node that recovered would stay demoted forever and could
-// never take back mastership after the peer fails.
-func TestSuccessfulArmClearsTheDemotion7178(t *testing.T) {
+// An arm-success signal alone is not enough: until the kernel proves an XDP
+// link, the node remains at the losing floor (#9842).
+func TestArmedButUnattachedKeepsRedundancyGroupWeightLow9842(t *testing.T) {
 	withTempTransitForwardSysctls(t, "1")
 
 	m := armTrackManager(t)
-	d := &Daemon{cluster: m}
-	full := rgWeight(t, m, 1)
-
-	d.markDataplaneArmFailed("test", "test", errors.New("boom"))
-	if rgWeight(t, m, 1) >= full {
-		t.Fatalf("precondition: the failure must demote before recovery can be observed")
-	}
-
+	d, _ := armTrackDaemon(t, m, 0)
 	d.markDataplaneArmed("test")
 
-	if got := rgWeight(t, m, 1); got != full {
-		t.Errorf("after a successful arm the RG weight is %d, want the full %d restored. A "+
-			"node that recovered but stays demoted can never take mastership back when the "+
-			"peer fails — a permanent single point of failure created by the fix", got, full)
+	if got := rgWeight(t, m, 1); got != 1 {
+		t.Fatalf("armed-but-unattached RG weight = %d, want 1; Start must not restore "+
+			"full weight before the first XDP attach (#9842)", got)
 	}
+}
+
+// The gate must FOLLOW the full ready-to-serve predicate: a successful arm
+// with an attached XDP link clears the debt, or a recovered node stays
+// demoted forever and can never take back mastership.
+func TestAttachedDataplaneRestoresFullRedundancyGroupWeight9842(t *testing.T) {
+	withTempTransitForwardSysctls(t, "1")
+
+	m := armTrackManager(t)
+	d, rt := armTrackDaemon(t, m, 0)
+	d.markDataplaneArmed("test")
+	if got := rgWeight(t, m, 1); got != 1 {
+		t.Fatalf("precondition: armed-but-unattached RG weight = %d, want 1", got)
+	}
+
+	rt.setCount(1, false)
+	d.reassertTransitGate("test-attach")
+
+	if got := rgWeight(t, m, 1); got != 255 {
+		t.Errorf("after the first proven attach the RG weight is %d, want full 255; "+
+			"the node would remain permanently demoted after recovery", got)
+	}
+}
+
+// A new RG created while the node is unattached starts at the same losing
+// floor and is raised by the next ready re-evaluation.
+func TestNewRGWhileUnattachedStartsLowThenRaisesOnAttach9842(t *testing.T) {
+	withTempTransitForwardSysctls(t, "1")
+
+	m := armTrackManager(t)
+	d, rt := armTrackDaemon(t, m, 0)
+	d.markDataplaneArmed("test")
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlInterface: "em0",
+		RedundancyGroups: []*config.RedundancyGroup{
+			{ID: 1, NodePriorities: map[int]int{0: 200}},
+			{ID: 2, NodePriorities: map[int]int{0: 200}},
+		},
+	})
+
+	if got := rgWeight(t, m, 2); got != 1 {
+		t.Fatalf("new RG while unattached has weight %d, want losing floor 1", got)
+	}
+	rt.setCount(1, false)
+	d.reassertTransitGate("test-attach")
+	if got := rgWeight(t, m, 2); got != 255 {
+		t.Fatalf("new RG after first attach has weight %d, want full 255", got)
+	}
+}
+
+// The periodic kernel-truth census must refresh the RG bid too, including
+// changes with no observer wake (the same completeness path as transit).
+func TestDataplaneTickRefreshesRedundancyGroupWeight9842(t *testing.T) {
+	withTempTransitForwardSysctls(t, "1")
+	withBarrierRecorder(t)
+	oldInterval := transitGateTickInterval
+	transitGateTickInterval = 5 * time.Millisecond
+	t.Cleanup(func() { transitGateTickInterval = oldInterval })
+
+	m := armTrackManager(t)
+	d, rt := armTrackDaemon(t, m, 0)
+	d.markDataplaneArmed("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	d.startTransitGateLoop(ctx, &wg)
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+
+	waitWeight := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if got := rgWeight(t, m, 1); got == want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("periodic RG weight = %d, want %d", rgWeight(t, m, 1), want)
+	}
+
+	rt.setCount(1, false)
+	waitWeight(255)
+	rt.setCount(0, false)
+	waitWeight(1)
 }
 
 // A daemon with no cluster configured must not panic. This is the standalone

@@ -23,16 +23,31 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		existing, ok := m.groups[rg.ID]
 		if !ok {
 			pri := clampNodePriority(rg.ID, rg.NodePriorities[m.nodeID])
+			initialWeight := maxRedundancyGroupWeight
+			var initialMonitorFails []string
+			if cfg.ControlInterface != "" {
+				initialWeight = rgWeightFromDebt(DataplaneArmMonitorCost)
+				initialMonitorFails = []string{DataplaneArmMonitorIface}
+			}
 			existing = &RedundancyGroupState{
 				GroupID:       rg.ID,
 				LocalPriority: pri,
-				Weight:        255,
+				Weight:        initialWeight,
 				State:         StateSecondary,
 				Preempt:       rg.Preempt,
+				MonitorFails:  initialMonitorFails,
 			}
 			m.groups[rg.ID] = existing
-			slog.Info("cluster: new redundancy group",
-				"rg", rg.ID, "priority", pri, "preempt", rg.Preempt)
+			if cfg.ControlInterface != "" {
+				m.monitorWeights[monitorKey{rgID: rg.ID, iface: DataplaneArmMonitorIface}] =
+					DataplaneArmMonitorCost
+				slog.Info("cluster: new redundancy group",
+					"rg", rg.ID, "priority", pri, "preempt", rg.Preempt,
+					"weight", existing.Weight, "reason", "dataplane XDP attachment not yet proven")
+			} else {
+				slog.Info("cluster: new redundancy group",
+					"rg", rg.ID, "priority", pri, "preempt", rg.Preempt)
+			}
 		} else {
 			existing.LocalPriority = clampNodePriority(rg.ID, rg.NodePriorities[m.nodeID])
 			existing.Preempt = rg.Preempt
