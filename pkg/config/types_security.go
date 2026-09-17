@@ -1342,6 +1342,12 @@ type StaticNATRule struct {
 	// `match destination-port`). 0 = match any port (whole-address 1:1,
 	// the legacy behaviour). #2491.
 	MatchDestinationPort int
+	// InvalidDestinationPorts holds raw `match destination-port` tokens that
+	// did NOT parse as an integer. The parser preserves them so strict commit
+	// validation can reject the authored token by name and the lenient
+	// snapshot builder can fail closed instead of treating the parse failure
+	// as the legitimate port-0 whole-address wildcard (#9988).
+	InvalidDestinationPorts []string `json:"-"`
 	// MappedPort is the internal (post-translation) destination port the
 	// 1:1 host receives (Junos `then static-nat prefix <ip> mapped-port
 	// <port>`). 0 = no port translation (whole-address 1:1). When set, the

@@ -913,12 +913,15 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 							rule.SourceAddress = rule.SourceAddresses[0]
 						}
 					case "destination-port":
-						// #2491: external (pre-translation) destination
-						// port the inbound packet must carry. Schema
-						// already range-checks 1..65535; tolerate a
-						// non-numeric value defensively (leave 0 = any).
-						if p, err := strconv.Atoi(nodeVal(m)); err == nil {
+						// #9988: preserve a non-numeric token instead of
+						// silently leaving MatchDestinationPort at 0. Zero is
+						// the valid whole-address wildcard, so discarding the
+						// parse error would widen the authored match.
+						raw := nodeVal(m)
+						if p, err := strconv.Atoi(raw); err == nil {
 							rule.MatchDestinationPort = p
+						} else {
+							rule.InvalidDestinationPorts = append(rule.InvalidDestinationPorts, raw)
 						}
 					default:
 						// #9877: record the unknown leaf instead of silently
