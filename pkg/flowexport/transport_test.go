@@ -41,8 +41,12 @@ func withSeams(t *testing.T,
 	t.Helper()
 	origResolve, origDial := resolveUDPAddr, dialUDP
 	origResolveContext, origDialContext := resolveUDPAddrContext, dialUDPContext
+	origResolvedDial := dialUDPResolvedContext
 	resolveUDPAddr = resolve
 	dialUDP = dial
+	dialUDPResolvedContext = func(_ context.Context, network string, laddr, raddr *net.UDPAddr) (net.Conn, error) {
+		return dial(network, laddr, raddr)
+	}
 	resolveUDPAddrContext = func(ctx context.Context, network, address string) (*net.UDPAddr, error) {
 		type result struct {
 			addr *net.UDPAddr
@@ -98,7 +102,7 @@ func withSeams(t *testing.T,
 	}
 	t.Cleanup(func() {
 		resolveUDPAddr, dialUDP = origResolve, origDial
-		resolveUDPAddrContext, dialUDPContext = origResolveContext, origDialContext
+		resolveUDPAddrContext, dialUDPContext, dialUDPResolvedContext = origResolveContext, origDialContext, origResolvedDial
 	})
 	fn()
 }
