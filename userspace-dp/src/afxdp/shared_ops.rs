@@ -639,10 +639,10 @@ pub(super) fn lookup_shared_forward_nat_match(
     // `reverse_session_key` (which PRESERVES the routing domain) and
     // `reverse_canonical_key` (which zeroes it, being a reverse-MATCH key).
     // Probe in that order so a reply that resolved the flow's own domain
-    // demuxes to its own tenant's entry, and a reply that arrived in another
-    // domain still resolves through the domain-agnostic entry. This is the
-    // same preference `find_forward_nat_match` applies to the local 1:N
-    // bucket, expressed as two probes because this map is 1:1.
+    // demuxes to its own tenant's entry. The zeroed second probe remains
+    // available for a legitimate non-contained flow when either endpoint is
+    // domain 0, but a different non-zero domain is a cross-tenant collision
+    // and must be refused before the shared entry is cloned.
     //
     // A domain-0 reply key makes the second probe identical to the first;
     // `reverse_match_key` returns the key unchanged in that case, so a
@@ -655,7 +655,14 @@ pub(super) fn lookup_shared_forward_nat_match(
     if probe == *reply_key {
         return None;
     }
-    map.get(&probe).cloned()
+    let fallback = map.get(&probe)?;
+    if reply_key.routing_domain != 0
+        && fallback.key.routing_domain != 0
+        && fallback.key.routing_domain != reply_key.routing_domain
+    {
+        return None;
+    }
+    Some(fallback.clone())
 }
 
 pub(super) fn lookup_shared_forward_wire_match(

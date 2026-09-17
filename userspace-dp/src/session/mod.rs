@@ -3623,3 +3623,8 @@ mod policy_revalidation_8356_tests;
 #[cfg(test)]
 #[path = "icmp_error_budget_9901_tests.rs"]
 mod icmp_error_budget_9901_tests;
+// #9895: reverse NAT lookup must refuse a validating pass-2 candidate when
+// both the reply and candidate carry different non-zero routing domains.
+#[cfg(test)]
+#[path = "reverse_domain_9895_tests.rs"]
+mod reverse_domain_9895_tests;

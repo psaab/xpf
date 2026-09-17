@@ -126,10 +126,11 @@ pub(crate) struct SessionKey {
     ///     so they must not lose the discriminator.
     ///   * `reverse_wire_key` and `reverse_canonical_key` deliberately ZERO
     ///     it. Those two build the REVERSE-MATCH index — the keys a REPLY is
-    ///     looked up under — and a reply whose domain the forward direction
-    ///     cannot predict must still find its session. Preserving the domain
-    ///     there would blackhole every non-contained VRF flow's replies, which
-    ///     is a forwarding outage, not a hardening.
+    ///     looked up under — and a reply from the default domain may still
+    ///     need to find a tenant forward session (and vice versa). Preserving
+    ///     the domain there would blackhole every legitimate mixed-zero
+    ///     non-contained VRF flow's replies, which is a forwarding outage, not
+    ///     a hardening.
     ///
     /// Zeroing the reverse-match keys does NOT give the cross-tenant collision
     /// back, and this is the part to check before touching either group.
@@ -140,10 +141,13 @@ pub(crate) struct SessionKey {
     /// hold two entries and neither can reach the other's. The reverse side
     /// keeps its isolation a different way: `find_forward_nat_match` walks the
     /// (1:N) reverse bucket in TWO passes and prefers a candidate whose
-    /// forward session carries the reply's own domain, falling back to a
-    /// domain-agnostic match only when no candidate shares it. Two contained
-    /// tenants therefore demux exactly; a flow whose reply genuinely arrives
-    /// in another domain still resolves, as it did before this field existed.
+    /// forward session carries the reply's own domain. Its pass-2 fallback is
+    /// permitted only when either endpoint is domain 0, preserving the
+    /// legitimate non-contained VRF shape; two different non-zero domains
+    /// fail closed rather than crossing tenants. Two contained tenants
+    /// therefore demux exactly, while a flow whose reply genuinely arrives
+    /// in the default domain (or whose default-domain forward sees a tenant
+    /// reply) still resolves.
     ///
     /// Do not "optimise" the PRESERVING three to `Default::default()`, and do
     /// not "restore symmetry" on the zeroing two without also removing the
