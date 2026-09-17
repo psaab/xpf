@@ -393,7 +393,7 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 					// Strict) rejects this at commit; this de-dup is the runtime
 					// safety net for a leniently-loaded / peer-synced config.
 					slog.Warn("dynamic-address: duplicate feed name ignored — only the first declaration starts a refresh loop (declare each feed name once)",
-						"name", name, "server", fsCfg.Name, "url", url)
+						"name", name, "server", fsCfg.Name, "url", config.RedactURL(url))
 					return
 				}
 				seen[name] = true
@@ -1270,7 +1270,9 @@ func (m *Manager) recordFailure(fs *feedState, ferr error) {
 	switch {
 	case dropped:
 		slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
-			"name", fs.name, "err", ferr, "hold", fs.holdInterval)
+			// #10015: use the already-redacted error text. Go's transport error
+			// quotes the dialed URL, which may contain a per-tenant bearer token.
+			"name", fs.name, "err", fs.lastError, "hold", fs.holdInterval)
 		if m.onUpdate != nil {
 			// #9527: the drop-to-empty has NO fixed safety direction. It depends
 			// on how the operator uses the feed: an empty denylist stops denying
@@ -1312,7 +1314,8 @@ func (m *Manager) recordFailure(fs *feedState, ferr error) {
 			}())
 	default:
 		slog.Debug("dynamic-address: fetch failed, retaining last-good",
-			"name", fs.name, "err", ferr)
+			// #10015: use the already-redacted error text rather than `ferr`.
+			"name", fs.name, "err", fs.lastError)
 	}
 }
 
