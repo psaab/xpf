@@ -43,7 +43,10 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 		return nil
 	}
 	var findings []string
-	// Deterministic order: sort zone pairs by from/to zone.
+	// Deterministic order: sort zone pairs by from/to zone. Stable sorting is
+	// important here: the runtime preserves the authored order among distinct
+	// same-pair stanzas, while this pass only reorders independent scopes for
+	// deterministic diagnostics.
 	pairs := append([]*config.ZonePairPolicies(nil), cfg.Security.Policies...)
 	sort.SliceStable(pairs, func(i, j int) bool {
 		if pairs[i] == nil || pairs[j] == nil {
@@ -54,12 +57,36 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 		}
 		return pairs[i].ToZone < pairs[j].ToZone
 	})
-	for _, zpp := range pairs {
+	for i := 0; i < len(pairs); {
+		zpp := pairs[i]
 		if zpp == nil {
+			i++
 			continue
 		}
+
+		// #9994: the compiler keeps each same-pair stanza as a distinct
+		// ZonePairPolicies entry, but the runtime appends every rule index for
+		// that (from-zone,to-zone) key and walks the resulting stream in order.
+		// Concatenate the stanzas before analyzing so a rule in a later stanza
+		// cannot evade a shadower in an earlier one. Do not mutate any stanza's
+		// Policies slice: the analyzer's sorted diagnostic view is independent
+		// of the active config. Keep the common single-stanza case allocation-
+		// free; copy only when a second stanza actually joins the group.
+		policies := zpp.Policies
+		grouped := false
+		j := i + 1
+		for j < len(pairs) && pairs[j] != nil &&
+			pairs[j].FromZone == zpp.FromZone && pairs[j].ToZone == zpp.ToZone {
+			if !grouped {
+				policies = append([]*config.Policy(nil), zpp.Policies...)
+				grouped = true
+			}
+			policies = append(policies, pairs[j].Policies...)
+			j++
+		}
 		scope := fmt.Sprintf("from-zone %s to-zone %s", zpp.FromZone, zpp.ToZone)
-		findings = analyzePolicyListShadowing(zpp.Policies, scope, nil, findings)
+		findings = analyzePolicyListShadowing(policies, scope, nil, findings)
+		i = j
 	}
 	// codex-182 A10-b00-C01: global policies (`security policies global`) are
 	// an ordered, terminal, first-match list too — an earlier global shadows a
