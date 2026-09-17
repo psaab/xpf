@@ -723,6 +723,15 @@ type ConfigSnapshot struct {
 	// before building this snapshot (resampleForCompileLocked). Unexported, so it
 	// never reaches the wire or the content hash.
 	partialUpdateEpoch uint64
+	// schedulerActiveState is manager-local metadata carried by a snapshot
+	// between the build/defer and publish boundaries. It records the scheduler
+	// state whose policy bits this snapshot contains so the applied/show cache
+	// can advance only after the helper accepts the snapshot. It is
+	// intentionally unexported, like zoneIDCollisions and partialUpdateEpoch:
+	// encoding/json omits it from the wire, and snapshotContentHash (which
+	// hashes the JSON encoding) therefore excludes it as well.
+	schedulerActiveState    map[string]bool
+	schedulerActiveStateSet bool
 }
 
 // AddressBookSnapshot is #1606: one row of the deduplicated address-book

@@ -29,13 +29,15 @@ func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceCo
 func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32) (*ConfigSnapshot, error) {
 	if cfg == nil {
 		return &ConfigSnapshot{
-			Version:       ProtocolVersion,
-			Generation:    generation,
-			FIBGeneration: 0,
-			GeneratedAt:   time.Now().UTC(),
-			Capabilities:  deriveUserspaceCapabilities(nil),
-			MapPins:       userspaceMapPins(),
-			Userspace:     ucfg,
+			Version:              ProtocolVersion,
+			Generation:           generation,
+			FIBGeneration:        0,
+			GeneratedAt:          time.Now().UTC(),
+			Capabilities:         deriveUserspaceCapabilities(nil),
+			MapPins:              userspaceMapPins(),
+			Userspace:             ucfg,
+			schedulerActiveState: copyPolicySchedulerActiveState(activeState),
+			schedulerActiveStateSet: true,
 		}, nil
 	}
 	// ONE kernel xfrm sample for the whole snapshot (#6691 round 10). The
@@ -84,13 +86,15 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	mirrorConfigs, mirrorExclusions := buildMirrorConfigSnapshots(cfg, interfaces)
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	snap := &ConfigSnapshot{
-		Version:       ProtocolVersion,
-		Generation:    generation,
-		FIBGeneration: fibGeneration,
-		GeneratedAt:   time.Now().UTC(),
-		Capabilities:  caps,
-		MapPins:       userspaceMapPins(),
-		Userspace:     ucfg,
+		Version:                ProtocolVersion,
+		Generation:             generation,
+		FIBGeneration:          fibGeneration,
+		GeneratedAt:             time.Now().UTC(),
+		Capabilities:           caps,
+		MapPins:                userspaceMapPins(),
+		Userspace:              ucfg,
+		schedulerActiveState:   copyPolicySchedulerActiveState(activeState),
+		schedulerActiveStateSet: true,
 		// #6311: the chassis-cluster node id becomes the high bit of every
 		// worker's session-id namespace on the helper. Read from the compiled
 		// config's cluster stanza; absent/standalone leaves it 0, which is the

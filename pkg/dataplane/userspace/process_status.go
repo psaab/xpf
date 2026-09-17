@@ -48,6 +48,7 @@ func (m *Manager) syncSnapshotLocked() error {
 		// #2079: the helper already reports this generation as applied
 		// (status.LastSnapshotGeneration >= m.lastSnapshot.Generation
 		// gated this branch), so it IS the applied snapshot.
+		m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
 		m.markAppliedSnapshotLocked()
 		if hashOK {
 			m.lastSnapshotHash = hash
@@ -132,6 +133,10 @@ func (m *Manager) syncSnapshotLocked() error {
 		m.partialOutcomeUnknown == 0 {
 		// Still update the published generation so subsequent checks pass.
 		m.publishedSnapshot = m.lastSnapshot.Generation
+		// The retained snapshot is content-equivalent to the helper's already
+		// published state, so this is a successful convergence boundary for its
+		// scheduler metadata even though no control request is needed.
+		m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
 		return nil
 	}
 	// #1197 v5 (Codex code-review v4 #2): publishable-only filter
@@ -180,6 +185,10 @@ func (m *Manager) syncSnapshotLocked() error {
 	if err := m.publishSnapshotFailClosedLocked(&publishSnap, &status, true); err != nil {
 		return err
 	}
+	// The deferred snapshot has now landed in the helper. Commit its scheduler
+	// state only after the successful request; all failure returns above retain
+	// the prior applied/show cache.
+	m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
 	// #1197 v5 (Codex code-review v4 #1): rebuild listener
 	// caches AFTER successful publish on the deferred-publish
 	// path too. Compile() defers when XSK is starting up; this

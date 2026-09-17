@@ -48,11 +48,13 @@ import (
 // blocks behind the rest, one of which runs every second. (2) The
 // long hold is not incidental: UpdatePolicyScheduleState builds the snapshot
 // from manager state, publishes it, and commits m.generation /
-// m.lastSnapshot / m.publishedSnapshot from the SAME critical section.
+// m.lastSnapshot / m.publishedSnapshot and the applied scheduler-state view
+// from the SAME critical section.
 // Dropping the lock across the publish opens a window where
-// m.policySchedulerActive and the helper's live snapshot disagree, which is
-// the #3780 stale-permit failure the error return exists to prevent. (3) It
-// would make that one site the only unserialized control caller.
+// m.policySchedulerActive (the applied/show cache) and the helper's live
+// snapshot disagree, which is the #3780 stale-permit failure the error return
+// exists to prevent. (3) It would make that one site the only unserialized
+// control caller.
 //
 // So nothing here narrows a critical section. m.mu keeps exactly the scope it
 // has; what changes is that the I/O performed under it becomes SHORT once a

@@ -236,8 +236,17 @@ type Manager struct {
 	// build, surfaced via ProcessStatus.ZoneIDCollisions and the
 	// xpf_userspace_zone_id_collision gauge. nil/empty means no active
 	// collision.
-	lastZoneIDCollisions  []string
+	lastZoneIDCollisions []string
+	// policySchedulerActive is the APPLIED scheduler-state view exposed to
+	// show surfaces. It changes only after a snapshot carrying the state has
+	// been accepted by the helper; a failed/deferred publication leaves it at
+	// the state the helper is still enforcing.
 	policySchedulerActive map[string]bool
+	// policySchedulerDesired is the scheduler state staged by the daemon before
+	// a full apply or partial republish. It is build input, not an applied/show
+	// view, so a failed publication may leave it ahead of policySchedulerActive.
+	policySchedulerDesired    map[string]bool
+	policySchedulerDesiredSet bool
 	// routeOverlay is the ip-monitoring effective-route overlay
 	// (#1827 PR-1b). Cached so the FULL apply path
 	// (buildSnapshotWithSchedulerState in ApplyConfig) preserves the

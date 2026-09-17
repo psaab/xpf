@@ -48,10 +48,10 @@ func TestLegacyDataPlaneAdapterForwardsOptionalInterfaces(t *testing.T) {
 	}
 	seeder.SetPolicySchedulerActiveState(map[string]bool{"workhours": true})
 	m.mu.Lock()
-	seeded := m.policySchedulerActive["workhours"]
+	seeded := m.policySchedulerDesired["workhours"]
 	m.mu.Unlock()
 	if !seeded {
-		t.Fatal("adapter did not forward policy scheduler active-state seed")
+		t.Fatal("adapter did not forward policy scheduler active-state seed to desired state")
 	}
 
 	m.mu.Lock()

@@ -486,7 +486,14 @@ func TestUpdatePolicyScheduleStateWithoutHelperDoesNotMutateSnapshot(t *testing.
 	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || m.lastSnapshot.Policies[0].Inactive {
 		t.Fatalf("lastSnapshot mutated without helper: %+v", m.lastSnapshot)
 	}
-	if got, ok := m.policySchedulerActive["workhours"]; !ok || got {
-		t.Fatalf("policySchedulerActive[workhours] = %t, present=%t; want false and present", got, ok)
+	m.mu.Lock()
+	desired, desiredOK := m.policySchedulerDesired["workhours"]
+	applied, appliedOK := m.policySchedulerActive["workhours"]
+	m.mu.Unlock()
+	if !desiredOK || desired {
+		t.Fatalf("policySchedulerDesired[workhours] = %t, present=%t; want false and present", desired, desiredOK)
+	}
+	if appliedOK {
+		t.Fatalf("policySchedulerActive[workhours] = %t, present=true; want absent because no helper applied the state", applied)
 	}
 }

@@ -84,6 +84,9 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		// Debt stays set — the status loop retries on the next tick.
 		return fmt.Errorf("re-arm deferred workers: %w", err)
 	}
+	// The helper accepted the re-arm snapshot, so commit any scheduler state
+	// it carries to the applied/show cache (mirrors the overlay publish).
+	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "deferred-worker-arm")
 	// Publish succeeded — commit the generation it carried (#9520: a
 	// content-conflict republish moves it past nextGeneration).
