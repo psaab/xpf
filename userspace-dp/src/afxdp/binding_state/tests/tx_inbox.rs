@@ -203,24 +203,20 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
         64,
         "#6304: ...nor its ALIGNMENT"
     );
-    // F-149 (#9904): `tx_shared_recycle_unknown_slot_rescued` moves both
-    // offsets +8 in BOTH builds (unconditional field), matching the updated
-    // compile-time literals in `binding_state/mod.rs`. #9956 F-051:
-    // `flowless_forward_packets/bytes` move both +16 more (2224/2352).
-    // #9752: `table_unavailable_packets/drops` move both +16 more
-    // (2240/2368); `size_of` grows to 2432 (new 64-byte unit).
+    // #10021: `policy_revoked_sessions` is an unconditional release-visible
+    // atomic inserted before these sentinels. It shifts both pinned offsets
+    // by +8 in BOTH builds (2240/2368 -> 2248/2376), while the 2432-byte
+    // size and 64-byte alignment remain unchanged.
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2240,
-        "#6304/#6114: ...nor the OFFSET of the admission counter whose \
-         cacheline this is all about. A `cfg(test)` field ahead of it moves \
-         this to 2160 while leaving the size assert above satisfied"
+        2248,
+        "#6304/#10021: ...nor the OFFSET of the admission counter whose \
+         cacheline this is all about"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2368,
-        "#6304: ...nor the offset of the last-declared field, which is the \
-         sentinel for a `cfg(test)` member appended at the END of the struct — \
-         that shape moves this to 2288 and trips nothing else"
+        2376,
+        "#6304/#10021: ...nor the offset of the last-declared field, which is \
+         the sentinel for a cfg(test) member appended at the END of the struct"
     );
 }

@@ -282,6 +282,10 @@ type ProcessStatus struct {
 	// are omitempty for wire-compat with older helpers.
 	NegNeighFastFailTotal           uint64 `json:"neg_neigh_fast_fail_total,omitempty"`
 	PendingNeighDuplicateDropsTotal uint64 `json:"pending_neigh_duplicate_drops_total,omitempty"`
+	// #10021: cumulative established-session revocations by live zone policy.
+	// Counts revoked SESSIONS, not dropped packets; exported separately from
+	// packet-drop totals. Omit on older helpers for wire compatibility.
+	PolicyRevokedSessionsTotal uint64 `json:"policy_revoked_sessions_total,omitempty"`
 	// #1902: GRE-decapped MissingNeighbor packets refused pending_neigh
 	// admission — buffering the outer UMEM frame with the post-decap
 	// inner meta would retry-TX a mis-rewritten outer packet once the

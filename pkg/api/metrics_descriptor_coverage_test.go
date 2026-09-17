@@ -361,6 +361,8 @@ func populatedCoverageStatus() dpuserspace.ProcessStatus {
 		DynamicNeighborKeys:            []string{"7 10.0.61.1", "9 172.16.80.200"},
 		// #1789: failed USERSPACE_SESSIONS publish counter (always emits).
 		SessionPublishErrorsTotal: 5,
+		// #10021: policy-revoked-sessions total (always emits).
+		PolicyRevokedSessionsTotal: 13,
 		// #2244: failed dnat_table reverse-NAT publish counter (always
 		// emits).
 		DnatPublishErrorsTotal: 6,
@@ -573,6 +575,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_dynamic_neighbor_learn_cap_drops_total",             // #5673 neighbor-map cap (pre-policy flood bound)
 		"xpf_userspace_dynamic_neighbor_present",                           // #1782 cold-start H2 dump
 		"xpf_userspace_session_publish_errors_total",                       // #1789 publish failures
+		"xpf_userspace_policy_revoked_sessions_total",                       // #10021 policy-revoked sessions
 		"xpf_userspace_dnat_publish_errors_total",                          // #2244 dnat_table reverse-NAT publish failures
 		"xpf_userspace_session_nat_reverse_key_shared_displacements_total", // #1760 W3' shared displacements
 		"xpf_userspace_worker_command_queue_poison_recoveries_total",       // #1807 poison recoveries

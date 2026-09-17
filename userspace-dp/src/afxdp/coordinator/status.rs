@@ -88,6 +88,19 @@ impl super::Coordinator {
             .sum()
     }
 
+    /// #10021: sum established-session revocations by live zone policy across
+    /// every binding. This is the release-visible counterpart of the
+    /// debug-log `policy_revoked_sessions` fold and counts sessions rather
+    /// than packets. Surfaced as
+    /// `xpf_userspace_policy_revoked_sessions_total`.
+    pub fn policy_revoked_sessions_total(&self) -> u64 {
+        self.workers
+            .live
+            .values()
+            .map(|live| live.policy_revoked_sessions.load(Ordering::Relaxed))
+            .sum()
+    }
+
     /// #1782: sum of per-binding `pending_neigh_duplicate_drops` across
     /// every `BindingLiveState`. Counts ONLY the H5 sibling drops where
     /// the `(egress_ifindex, next_hop)` key was already pending — not

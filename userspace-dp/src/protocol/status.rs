@@ -257,6 +257,12 @@ pub(crate) struct ProcessStatus {
     pub neg_neigh_fast_fail_total: u64,
     #[serde(rename = "pending_neigh_duplicate_drops_total", default)]
     pub pending_neigh_duplicate_drops_total: u64,
+    /// #10021: cluster-wide cumulative established-session revocations by
+    /// live zone policy. This counts revoked SESSIONS, not dropped packets,
+    /// so it is intentionally a standalone signal rather than a
+    /// `Packets dropped` component. Additive/defaulted for older helpers.
+    #[serde(rename = "policy_revoked_sessions_total", default)]
+    pub policy_revoked_sessions_total: u64,
     /// #1902: GRE-decapped MissingNeighbor packets refused
     /// `pending_neigh` admission (buffering the outer UMEM frame with
     /// the post-decap inner meta would retry-TX a mis-rewritten outer

@@ -67,6 +67,9 @@ pub(super) struct DbgCounters {
     /// packet without revoking the session. Counted once per revoked SESSION,
     /// not per dropped packet.
     pub(super) filter_revoked_sessions: u64,
+    /// #8356: established sessions REVOKED because the live ZONE POLICY denies
+    /// the flow. Counted once per revoked session, not per dropped packet.
+    pub(super) policy_revoked_sessions: u64,
     pub(super) ha_inactive: u64,
     pub(super) no_egress_binding: u64,
     pub(super) build_fail: u64,
@@ -123,6 +126,7 @@ impl DbgCounters {
         self.policy_deny += dbg_poll.policy_deny;
         self.host_inbound_deny += dbg_poll.host_inbound_deny;
         self.filter_revoked_sessions += dbg_poll.filter_revoked_sessions;
+        self.policy_revoked_sessions += dbg_poll.policy_revoked_sessions;
         self.ha_inactive += dbg_poll.ha_inactive;
         self.no_egress_binding += dbg_poll.no_egress_binding;
         self.build_fail += dbg_poll.build_fail;
@@ -178,7 +182,7 @@ pub(super) fn emit_periodic_report(
     let secs = elapsed as f64 / 1_000_000_000.0;
     eprintln!(
         "DBG w{}: {:.1}s rx={} tx={} fwd={} local={} sess_hit={} sess_miss={} sess_create={} \
-         no_route={} miss_neigh={} neg_ff={} pol_deny={} hib_deny={} filt_revoked={} ha_inact={} no_egress={} build_fail={} \
+         no_route={} miss_neigh={} neg_ff={} pol_deny={} hib_deny={} filt_revoked={} pol_revoked={} ha_inact={} no_egress={} build_fail={} \
          tx_err={} meta_err={} other={} enq_ok={} enq_ip={} enq_dir={} enq_cp={} sessions={} \
          DIR:trust_rx={}/wan_rx={}/t2w={}/w2t={} NAT:snat={}/dnat={}/none={}/bld_none={} RST:rx={}/tx={} \
          SIZE:rx_avg={}/rx_max={}/tx_avg={}/tx_max={}/rx_over_1514={}/seg_miss={} \
@@ -200,6 +204,7 @@ pub(super) fn emit_periodic_report(
         dbg.policy_deny,
         dbg.host_inbound_deny,
         dbg.filter_revoked_sessions,
+        dbg.policy_revoked_sessions,
         dbg.ha_inactive,
         dbg.no_egress_binding,
         dbg.build_fail,
@@ -541,4 +546,31 @@ pub(super) fn build_binding_summary(
         binding_summary.push(']');
     }
     binding_summary
+}
+
+/// #10021: the debug fold must carry `policy_revoked_sessions` — the sibling
+/// `filter_revoked_sessions` has been folded since #7212, but the policy
+/// revocation counter was omitted, so the per-second `DBG` report never
+/// showed it. RED-on-revert: dropping the field or the `accumulate` line
+/// fails to compile (surface absent) or asserts here.
+#[cfg(test)]
+mod policy_revoked_sessions_fold_tests {
+    use super::*;
+
+    #[test]
+    fn accumulate_carries_policy_revoked_sessions_10021() {
+        let mut poll = DebugPollCounters::default();
+        poll.policy_revoked_sessions = 7;
+        poll.filter_revoked_sessions = 3;
+        let mut interval = DbgCounters::default();
+        interval.accumulate(&poll);
+        assert_eq!(
+            interval.policy_revoked_sessions, 7,
+            "the fold must carry policy revocations into the interval counters"
+        );
+        assert_eq!(
+            interval.filter_revoked_sessions, 3,
+            "control: the sibling fold still carries filter revocations"
+        );
+    }
 }

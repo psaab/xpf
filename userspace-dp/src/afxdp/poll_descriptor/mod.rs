@@ -1141,6 +1141,10 @@ pub(super) fn poll_binding_process_descriptor(
                                 &mut binding.scratch.scratch_filter_revoked_keys,
                             );
                             telemetry.dbg.policy_revoked_sessions += 1;
+                            binding
+                                .live
+                                .policy_revoked_sessions
+                                .fetch_add(1, Ordering::Relaxed);
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }

@@ -3357,3 +3357,28 @@ fn syn_cookie_key_ring_is_secret_and_additive_both_ways_9173() {
         .expect("an unknown field must be ignored, or an older helper breaks on this upgrade");
     assert_eq!(parsed.syn_cookie_master_key, "00112233445566778899aabbccddeeff");
 }
+
+// #10021: `policy_revoked_sessions_total` is additive/skew-tolerant on the
+// helper→Go status wire. Carried when present; an older helper that omits it
+// decodes to 0 (the #3070/#3082 doctrine above).
+#[test]
+fn process_status_policy_revoked_sessions_total_roundtrip_10021() {
+    let mut status = ProcessStatus::default();
+    status.policy_revoked_sessions_total = 9;
+    let mut value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["policy_revoked_sessions_total"], 9);
+
+    let back: ProcessStatus =
+        serde_json::from_value(value.clone()).expect("deserialize ProcessStatus");
+    assert_eq!(back.policy_revoked_sessions_total, 9);
+
+    // Skew: an older helper omits the key — must decode to 0, not fail.
+    value
+        .as_object_mut()
+        .expect("status serializes to an object")
+        .remove("policy_revoked_sessions_total");
+    let legacy: ProcessStatus =
+        serde_json::from_value(value).expect("a status without the key must decode");
+    assert_eq!(legacy.policy_revoked_sessions_total, 0);
+}

@@ -1001,6 +1001,7 @@
     "pending_neigh_decap_drops_total": 0,
     "pending_neigh_duplicate_drops_total": 0,
     "pid": 0,
+    "policy_revoked_sessions_total": 0,
     "policy_rule_counters": [],
     "queues": [],
     "recent_exceptions": [],
@@ -1096,6 +1097,7 @@
     "next_hops": [],
     "next_table": "",
     "preference": 0,
+    "rule_priority": 0,
     "table": ""
   },
   "screen_missing_profile_ref": {

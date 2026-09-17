@@ -225,6 +225,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) session_delta_high_water: AtomicU64,
     pub(super) session_delta_drained: AtomicU64,
     pub(super) policy_denied_packets: AtomicU64,
+    /// #10021: established sessions revoked by live zone policy. This is the
+    /// release-visible counterpart of `DebugPollCounters::policy_revoked_sessions`;
+    /// the coordinator sums it into `ProcessStatus` for the Go Prometheus
+    /// surface. Counted once per revoked session, not per dropped packet.
+    pub(super) policy_revoked_sessions: AtomicU64,
     /// #3326: host-bound (LocalDelivery) packets dropped by the zone
     /// host-inbound admission gate (`host_inbound_admits` => false). These
     /// denies bypass the `policy_denied_packets` disposition path, so before
@@ -970,9 +975,13 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #6664: both builds shift identically and one triple of literals makes both
 // green — verified by building BOTH the production (`cargo check`) and test
 // (`--all-targets`) configurations.
+// #10021 adds `policy_revoked_sessions` as an unconditional release-visible
+// atomic. The 2432-byte alignment unit still has room, so size is unchanged;
+// both pinned offsets move by 8 bytes (2240 -> 2248 and 2368 -> 2376) in
+// production and test configurations.
 const _: [(); 2432] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2240] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2368] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2248] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2376] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1028,6 +1037,7 @@ impl BindingLiveState {
             session_delta_dropped: AtomicU64::new(0),
             session_delta_drained: AtomicU64::new(0),
             policy_denied_packets: AtomicU64::new(0),
+            policy_revoked_sessions: AtomicU64::new(0),
             host_inbound_denied_packets: AtomicU64::new(0),
             screen_drops: AtomicU64::new(0),
             // #3343: one atomic per published screen-reason drop ordinal.

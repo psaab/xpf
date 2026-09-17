@@ -310,6 +310,12 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"reconcile) (#1789).",
 		nil, nil,
 	)
+	c.userspacePolicyRevokedSessions = prometheus.NewDesc(
+		"xpf_userspace_policy_revoked_sessions_total",
+		"Cumulative established sessions revoked because the live zone policy "+
+			"denied them. This counts sessions, not dropped packets (#10021).",
+		nil, nil,
+	)
 	c.userspaceDnatPublishErrors = prometheus.NewDesc(
 		"xpf_userspace_dnat_publish_errors_total",
 		"Failed dnat_table reverse-SNAT BPF-map publishes across "+
