@@ -803,6 +803,9 @@ func TestClockSyncRetiredConnDisconnectRejected_9915(t *testing.T) {
 	if got := ss.peerClockOffset.Load(); got != 0 {
 		t.Fatalf("FIXTURE: offset = %d after disconnect, want 0", got)
 	}
+	if ac.clockSynced.Load() {
+		t.Fatal("retired connection remained clock-synced after disconnect")
+	}
 	// The already-read frame resumes after retirement: must drop.
 	ss.handleMessage(ac, syncMsgClockSync, buf[:])
 	if got := ss.peerClockOffset.Load(); got != 0 {
@@ -936,12 +939,10 @@ func TestClockSyncPublicationLockProbes_9915(t *testing.T) {
 		}
 	}
 	ss.testClockPublishBeforeStore = func() {
-		assertHeld("P1")
 		close(p1Entered)
 		<-releaseP1
 	}
 	ss.testClockPublishAfterStore = func() {
-		assertHeld("P2")
 		close(p2Entered)
 		<-releaseP2
 	}
@@ -955,12 +956,14 @@ func TestClockSyncPublicationLockProbes_9915(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("ClockSync did not reach the P1 membership-checked publication gate")
 	}
+	assertHeld("P1")
 	close(releaseP1)
 	select {
 	case <-p2Entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("ClockSync did not reach the P2 post-store publication gate")
 	}
+	assertHeld("P2")
 	close(releaseP2)
 	select {
 	case <-published:
