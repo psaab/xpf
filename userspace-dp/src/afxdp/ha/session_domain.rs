@@ -106,6 +106,12 @@ pub(crate) struct SessionDomain {
     /// caller has established that the mutex is held.
     #[cfg(test)]
     pub(in crate::afxdp) ha_refresh_proceed: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+    /// #9629 test-only witness sent immediately after acquiring ha_mutex.
+    /// The bool is true only when a same-mutex try_lock observes contention,
+    /// so removing the production lock cannot satisfy the race closer.
+    #[cfg(test)]
+    pub(in crate::afxdp) ha_refresh_acquired:
+        Arc<Mutex<Option<std::sync::mpsc::Sender<bool>>>>,
 }
 impl SessionDomain {
     /// #9629 test-only rendezvous: notify immediately before the fast path
@@ -137,6 +143,17 @@ impl SessionDomain {
             .lock()
             .expect("HA refresh proceed hook lock") = Some(proceed);
     }
+    /// #9629 test-only acquisition witness paired with the pre-lock rendezvous.
+    #[cfg(test)]
+    pub(crate) fn set_ha_refresh_acquired_sender_for_test(
+        &self,
+        sender: std::sync::mpsc::Sender<bool>,
+    ) {
+        *self
+            .ha_refresh_acquired
+            .lock()
+            .expect("HA refresh acquired hook lock") = Some(sender);
+    }
     /// Build a handle from the coordinator's own shared parts.
     ///
     /// Takes borrows of the live fields rather than an `&Coordinator`, so it
@@ -166,6 +183,8 @@ impl SessionDomain {
             ha_refresh_attempt: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             ha_refresh_proceed: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            ha_refresh_acquired: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -305,6 +324,20 @@ impl SessionDomain {
         // decision and the store would recreate the stale-overwrite race this
         // mutex exists to close.
         let _held = lock_ha_recover(&self.ha_mutex);
+        #[cfg(test)]
+        {
+            let contended = self.ha_mutex.try_lock().is_err();
+            if let Some(sender) = self
+                .ha_refresh_acquired
+                .lock()
+                .expect("HA refresh acquired hook lock")
+                .take()
+            {
+                sender
+                    .send(contended)
+                    .expect("signal HA refresh mutex acquisition");
+            }
+        }
         // Incoming empty is a CLEAR (standalone `clearHelperHAStateLocked` is
         // the only producer; `syncHAStateLocked` early-returns on empty).
         // Owned by the main path, never silently skipped or acked here.

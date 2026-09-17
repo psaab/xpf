@@ -647,6 +647,113 @@ func TestSessionHAContendedMergePreservesFullSetAndScalarThrottle9629(t *testing
 	}
 }
 
+// A pending Go demotion must reach the degraded session arm even while its
+// authoritative main-socket request is blocked. With an expired stored-active
+// lease, Rust's mismatch branch keeps the stored entry expired; sending the
+// acknowledged Active=true bit would instead take the matching branch and
+// resurrect it.
+func TestSessionHAContendedDemotionIntentDoesNotRenewExpiredOwner9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 1},
+	})
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.xskLivenessProven = true
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	mainEntered := make(chan struct{})
+	mainRelease := make(chan struct{})
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			close(mainEntered)
+			<-mainRelease
+			*status = *readyHelperStatus()
+		}
+		return nil
+	}
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+		}
+		return nil
+	}
+	m.mu.Unlock()
+
+	demoteDone := make(chan error, 1)
+	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
+	select {
+	case <-mainEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("authoritative demotion never reached its blocked main request")
+	}
+
+	if err := m.UpdateHAWatchdog(1, 100); err != nil {
+		close(mainRelease)
+		<-demoteDone
+		t.Fatalf("contended demotion refresh: %v", err)
+	}
+	if len(sent) != 1 || sent[0].RGID != 1 || sent[0].Active ||
+		sent[0].WatchdogTimestamp != 100 {
+		t.Fatalf("contended demotion payload = %+v, want RG1 inactive at timestamp 100", sent)
+	}
+	close(mainRelease)
+	if err := <-demoteDone; err != nil {
+		t.Fatalf("authoritative demotion: %v", err)
+	}
+}
+
+// The locked session arm uses the same helper-compatible inventory as the
+// degraded arm. This covers the pending-XSK-startup/deferred-apply window
+// where m.haGroups has already been reseeded but the helper still owns 16 keys.
+func TestSessionHALockedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9629(t *testing.T) {
+	helperGroups := make([]HAGroupStatus, 0, 16)
+	initial := make(map[int]HAGroupStatus, 16)
+	for rgID := range 16 {
+		group := HAGroupStatus{RGID: rgID, Active: rgID == 1}
+		initial[rgID] = group
+		helperGroups = append(helperGroups, group)
+	}
+	m := sessionTestManager9629(t, initial)
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = append([]HAGroupStatus(nil), helperGroups...)
+	m.publishHAWatchdogSnapshotLocked()
+	m.seedHAGroupInventoryLocked(&config.Config{
+		Chassis: config.ChassisConfig{
+			Cluster: &config.ClusterConfig{
+				RedundancyGroups: []*config.RedundancyGroup{{ID: 1}},
+			},
+		},
+	})
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+		}
+		return nil
+	}
+	m.mu.Unlock()
+
+	if err := m.UpdateHAWatchdog(1, 100); err != nil {
+		t.Fatalf("locked reseeded refresh: %v", err)
+	}
+	if len(sent) != 16 || !sent[1].Active || sent[1].WatchdogTimestamp != 100 {
+		t.Fatalf("locked reseeded payload = %+v, want 16 entries with active RG1 timestamp 100", sent)
+	}
+
+}
+
 // A config apply reseeds m.haGroups to the configured RGs before replaying the
 // helper's fixed 16-entry inventory. The actual entry point must keep sending
 // all acknowledged helper entries while m.mu is held, or Rust rejects the
@@ -655,7 +762,7 @@ func TestSessionHAContendedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9
 	helperGroups := make([]HAGroupStatus, 0, 16)
 	initial := make(map[int]HAGroupStatus, 16)
 	for rgID := range 16 {
-		group := HAGroupStatus{RGID: rgID, Active: rgID == 0}
+		group := HAGroupStatus{RGID: rgID, Active: rgID == 1 || rgID == 2}
 		initial[rgID] = group
 		helperGroups = append(helperGroups, group)
 	}
@@ -695,6 +802,12 @@ func TestSessionHAContendedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9
 		if group.RGID != i {
 			t.Fatalf("reseeded payload order/group[%d] = %+v, want RGID %d", i, group, i)
 		}
+	}
+	if !sent[1].Active {
+		t.Fatalf("RG1 active bit = false, want the active helper entry")
+	}
+	if sent[2].Active {
+		t.Fatalf("removed RG2 active bit = true, want obsolete helper owner demoted")
 	}
 	if sent[1].WatchdogTimestamp != 100 {
 		t.Fatalf("RG1 watchdog timestamp = %d, want 100", sent[1].WatchdogTimestamp)

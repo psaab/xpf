@@ -690,7 +690,9 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     let (tx, rx) = mpsc::channel();
     let (attempt_tx, attempt_rx) = mpsc::channel();
     let (proceed_tx, proceed_rx) = mpsc::channel();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
     domain.set_ha_refresh_rendezvous_for_test(attempt_tx, proceed_rx);
+    domain.set_ha_refresh_acquired_sender_for_test(acquired_tx);
     let worker = std::thread::spawn(move || {
         let outcome = domain.try_refresh_ha_leases(&[HAGroupStatus {
             rg_id: 1,
@@ -710,12 +712,20 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     proceed_tx
         .send(())
         .expect("allow worker to attempt the held HA mutex");
-    // While held, the refresh cannot complete (it needs the mutex).
+    // While held, the refresh cannot complete (it needs the mutex). The
+    // acquisition witness below also fails if the production lock is removed.
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
         "fast path returned while ha_mutex was held — it does not serialize"
     );
     drop(_guard);
+    let acquired_while_contended = acquired_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker never acquired the HA mutex");
+    assert!(
+        acquired_while_contended,
+        "refresh acquired ha_mutex without observing the held guard"
+    );
     let outcome = rx
         .recv_timeout(Duration::from_secs(5))
         .expect("outcome after release");

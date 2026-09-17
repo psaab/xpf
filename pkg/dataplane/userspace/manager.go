@@ -262,6 +262,9 @@ type Manager struct {
 	// UpdateHAWatchdog without a loaded BPF map. Defaults to
 	// bpfShim.UpdateHAWatchdog (set in New()); nil-safe at the call site.
 	haWatchdogMapWrite func(rgID int, timestamp uint64) error
+	// haRGActiveMapWrite is a map-free test seam for the first operation in
+	// UpdateRGActive. Production leaves it nil and uses bpfShim.UpdateRGActive.
+	haRGActiveMapWrite func(rgID int, active bool) error
 	// haWatchdogIPCSynced tracks, per RG, the watchdog timestamp and Active
 	// state last published to the helper via the update_ha_state socket IPC.
 	// It throttles that IPC (see UpdateHAWatchdog): the shim map write above

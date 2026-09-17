@@ -787,7 +787,13 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	// Update BPF rg_active UNDER the lock so the periodic poll can't
 	// read the new BPF value and sync to the helper before we do.
 	// This prevents the race where the poll eats the demotion delta.
-	if err := m.bpfShim.UpdateRGActive(rgID, active); err != nil {
+	var updateRGActive func(int, bool) error
+	if m.haRGActiveMapWrite != nil {
+		updateRGActive = m.haRGActiveMapWrite
+	} else {
+		updateRGActive = m.bpfShim.UpdateRGActive
+	}
+	if err := updateRGActive(rgID, active); err != nil {
 		return err
 	}
 
@@ -904,9 +910,10 @@ type haWatchdogSnapshot struct {
 // before replaying the fixed 16-entry kernel maps; using that narrowed map for
 // a contended session refresh would make Rust reject every request as a
 // membership change. Keep the old helper keys until the next full main-path
-// publish lands, while overlaying only watchdog timestamps. Active ownership
-// remains the acknowledged helper value until UpdateRGActive's main request
-// succeeds, preserving the transition fence.
+// publish lands. A known Go-side demotion intent is overlaid as inactive so
+// an expired stored-active lease cannot be renewed while the authoritative
+// main request is blocked; activation remains at the acknowledged value until
+// UpdateRGActive succeeds.
 func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
 	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
 		return nil
@@ -918,8 +925,15 @@ func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
 	groups := make([]HAGroupStatus, 0, len(m.haWatchdogHelperInventory))
 	for _, prior := range m.haWatchdogHelperInventory {
 		group := prior
-		if current, ok := desired[prior.RGID]; ok &&
-			current.WatchdogTimestamp > group.WatchdogTimestamp {
+		current, ok := desired[prior.RGID]
+		// A Go-side demotion is authoritative intent even before its
+		// main-socket request is acknowledged. Missing desired entries are
+		// demotions too: retain their keys for helper membership compatibility
+		// but never renew an obsolete active owner.
+		if !ok || !current.Active {
+			group.Active = false
+		}
+		if ok && current.WatchdogTimestamp > group.WatchdogTimestamp {
 			group.WatchdogTimestamp = current.WatchdogTimestamp
 		}
 		groups = append(groups, group)
@@ -1241,13 +1255,17 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 		m.mu.Unlock()
 		return err
 	}
-	// Snapshot the full group set under the lock (deterministic RGID order,
-	// matching syncHAStateLocked); the send below runs outside m.mu.
-	groups := make([]HAGroupStatus, 0, len(m.haGroups))
-	for _, g := range m.haGroups {
-		groups = append(groups, g)
+	// Prefer the helper-compatible acknowledged inventory in the session arm,
+	// including any pending demotion intent. Bare/legacy fixtures without a
+	// published helper inventory retain the direct manager view.
+	groups := m.haWatchdogGroupsLocked()
+	if len(groups) == 0 {
+		groups = make([]HAGroupStatus, 0, len(m.haGroups))
+		for _, g := range m.haGroups {
+			groups = append(groups, g)
+		}
+		sort.Slice(groups, func(i, j int) bool { return groups[i].RGID < groups[j].RGID })
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].RGID < groups[j].RGID })
 	sessionSocketPath := m.sessionSocketPath()
 	processGen := m.haWatchdogProcessGen.Load()
 	// Record the baseline BEFORE the send (same no-storm rationale as above).
