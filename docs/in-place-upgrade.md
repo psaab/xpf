@@ -293,10 +293,15 @@ xpfd upgrade --rollback --rolling [--target <version>]
 ```
 
 Without `--rolling`, the command is for a standalone node and refuses when
-`/etc/xpf/node-id` marks the node as clustered. On HA, run the rolling form on
-one node at a time. It checks peer liveness, session-sync and takeover
-readiness, drains the node, performs the stop → snapshot restore → re-flip →
-start sequence, then waits for sync and confirms every redundancy group has
+`/etc/xpf/node-id` marks the node as clustered. On HA, run the rolling form
+externally sequenced secondary-first, one node at a time: roll the passive
+node, wait for sync re-establishment and per-redundancy-group rejoin, then
+roll the other node. Before demoting, it gates in order on rollback
+preflight (restorable target, current snapshot, envelope compatibility),
+peer liveness, session-sync established, HA-protocol compatibility,
+session-sync-wire compatibility, and peer takeover readiness; then it
+drains the node, performs the stop → snapshot restore → re-flip → start
+sequence, then waits for sync and confirms every redundancy group has
 rejoined before reporting `rolling rollback complete`. A standalone success
 prints `rollback complete`; failures are reported on stderr with the
 `upgrade --rollback...:` prefix.
