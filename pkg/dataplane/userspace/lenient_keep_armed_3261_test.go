@@ -522,18 +522,22 @@ func TestFeedPlusConcreteAddressSetIsRepresentable(t *testing.T) {
 //     >= 1 live prefix) -> the top-level r && c gate passes -> the set is
 //     representable and ENFORCES the feed (no sentinel), instead of the
 //     pre-#3294 empty-row reject. This is fail-closed BY ENFORCING the deny.
-//   - EMPTY feed: the row stays empty, so the feed member is (representable,
-//     NOT concrete) and the feed-only set has no concrete contribution -> the
-//     r && c gate REJECTS it via the #3261 sentinel (fail-CLOSED). A `deny`
-//     over an all-empty set is therefore NOT silently dropped — it upgrades to
-//     the whole-snapshot keep-armed reject, exactly as the pre-#3294
-//     feed-only-set case did. (A DIRECT empty-feed token is different: it
-//     short-circuits in addrRepresentable as representable match-none per the
-//     #2049 single-token precedent and never reaches this set gate.)
+//   - EMPTY feed: for an ordinary/unbound feed overlay, the row stays empty,
+//     so the feed member is (representable, NOT concrete) and the feed-only set
+//     has no concrete contribution -> the r && c gate REJECTS it via the #3261
+//     sentinel (fail-CLOSED). A `deny` over an all-empty set is therefore NOT
+//     silently dropped — it upgrades to the whole-snapshot keep-armed reject,
+//     exactly as the pre-#3294 feed-only-set case did. A declared `fail-mode
+//     drop` binding is the separate #10014 provenance: its present-empty row
+//     is an explicit DROP and is concrete inside a nested set. (A DIRECT
+//     empty-feed token is different: it short-circuits in addrRepresentable as
+//     representable match-none per the #2049 single-token precedent and never
+//     reaches this set gate.)
 //
-// The empty-feed control pins that the concrete bit is gated on LIVE prefix
-// count (NOT set unconditionally), so a transiently/permanently empty feed
-// inside a set stays fail-closed rather than fail-open.
+// The empty-feed control pins that an ordinary/unbound present-empty feed is
+// NOT concrete (rather than making every empty overlay row concrete), so a
+// transiently/permanently empty feed inside a set stays fail-closed rather than
+// fail-open. The declared `fail-mode drop` provenance is covered by #10014.
 func TestFeedOnlySetEnforcesUnderA(t *testing.T) {
 	t.Run("live-feed-enforces", func(t *testing.T) {
 		cfg, overlay := unrepresentableAddressCfg("feed-only-set")

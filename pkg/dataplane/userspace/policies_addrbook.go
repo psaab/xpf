@@ -157,16 +157,20 @@ func buildAddressBookTable(cfg *config.Config) ([]AddressBookSnapshot, map[strin
 //
 // An overlay name that IS present but carries no prefixes still produces a
 // (possibly empty) bucket and a nameToID entry, so the policy token routes as a
-// book reference to an empty set (match-none). NOTE (#5645): the daemon's
-// feeds.Manager.SnapshotForBindings no longer EMITS such a present-but-empty
-// entry for an UNREADY feed (before its first successful fetch / after a
-// hold-interval drop) — it OMITS the name so the token is unresolved and the
-// referencing policy fails CLOSED (unrepresentable -> __unsupported_address__
-// -> whole-snapshot reject; see buildPolicySnapshots' addrRepresentable and
-// #3261). Publishing an empty entry was a DENY fail-open (match-none = the deny
-// never fires). This empty-bucket path is therefore now only reachable for a
-// non-daemon caller that hands in an explicit empty slice; it is retained as
-// defensive, no-panic handling, not a live fail-open.
+// book reference to an empty set (match-none). NOTE (#5645/#9689): the daemon
+// omits such a present-but-empty entry for an UNREADY feed in the ordinary
+// `retain`/default case (before its first successful fetch, after a
+// hold-interval drop, or for an unknown feed), so the token is unresolved and
+// the referencing policy fails CLOSED (unrepresentable ->
+// __unsupported_address__ -> whole-snapshot reject; see buildPolicySnapshots'
+// addrRepresentable and #3261). The explicit `fail-mode drop` +
+// all-hold-dropped case intentionally DOES publish an empty entry: it is the
+// operator's match-none DROP intent, including when the feed name is nested
+// inside an address-set (#10014). Publishing an empty entry for any other
+// unresolved case remains a DENY fail-open (match-none = the deny never
+// fires). This empty-bucket path is therefore reachable for the deliberate
+// drop case and for a non-daemon caller that hands in an explicit empty slice;
+// it is retained as defensive, no-panic handling outside that provenance.
 //
 // When the static AddressBook is nil but a feed overlay is present, the table
 // is still built from the overlay alone (the pre-#2049 early-return only fired

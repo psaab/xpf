@@ -57,15 +57,21 @@ func allAddressTokensRepresentable(addrRepresentable func(tok string) bool, addr
 // MIXING a feed member and a concrete member is representable AND its row
 // carries BOTH (the feed-portion under-deny is closed). A feed-ONLY set is
 // representable+enforced when its feed is live, and #3261-rejected (sentinel,
-// fail-closed) only when the feed is currently empty (an empty row -> MatchNone
-// -> the deny would otherwise drop silently).
+// fail-closed) when an ordinary present-empty feed has no concrete prefix. The
+// #10014 exception is a present-empty overlay for a declared `fail-mode drop`
+// binding: that row is an explicit match-none DROP and is concrete for the
+// enclosing set, while genuinely unresolved bindings remain absent and fail
+// closed.
 func nameRepresentable(ab *config.AddressBook, feedOverlay map[string][]string, bindings map[string]*config.AddressBinding, name string, visited map[string]bool) bool {
 	// The closure must be BOTH structurally resolvable AND contribute >=1
-	// concrete prefix. The >=1-concrete requirement is enforced HERE, exactly
-	// once at the top, mirroring strict's single `count==0` reject after
-	// resolve(name) succeeds. An empty / pure-cycle / feed-only top-level set is
-	// structurally resolvable (r=true) but has no concrete contribution (c=false)
-	// -> rejected; a mutual-cycle-with-concrete set is (true,true) -> accepted.
+	// concrete prefix, except for the explicit #10014 drop row described above.
+	// The >=1-concrete requirement is enforced HERE, exactly once at the top,
+	// mirroring strict's single `count==0` reject after resolve(name) succeeds.
+	// An empty / pure-cycle / ordinary feed-only top-level set is structurally
+	// resolvable (r=true) but has no concrete contribution (c=false) -> rejected;
+	// a mutual-cycle-with-concrete set is (true,true) -> accepted. A declared
+	// fail-mode drop member with a present-empty overlay is (true,true) because
+	// the empty row is the operator's explicit drop.
 	// (A direct feed name never reaches here — addrRepresentable short-circuits
 	// it via feedOverlay, preserving the #2049 direct-feed exemption.)
 	//
@@ -81,11 +87,13 @@ func nameRepresentable(ab *config.AddressBook, feedOverlay map[string][]string, 
 
 // nameRepresentability returns (representable, concrete) for an address-book
 // name as TWO INDEPENDENT bits — structural-resolvability is DECOUPLED from
-// concrete-ness. This is the parity contract with the strict commit validator
-// `policyMatchAddressBookResolves` (pkg/config/compiler_validate_strict.go):
-// the dataplane's accept/reject decision must EXACTLY equal strict's so a
-// commit-valid config never has its snapshot silently over-rejected (Codex
-// MERGE-NEEDS-MAJOR).
+// concrete-ness. For ordinary static/feed rows this is the parity contract
+// with the strict commit validator `policyMatchAddressBookResolves`
+// (pkg/config/compiler_validate_strict.go): the dataplane's accept/reject
+// decision must EXACTLY equal strict's so a commit-valid config never has its
+// snapshot silently over-rejected (Codex MERGE-NEEDS-MAJOR). The #10014
+// fail-mode-drop empty row is runtime provenance supplied by SnapshotForBindings
+// and is intentionally the concrete DROP exception to the literal-prefix rule.
 //
 //   - `representable` (structurally resolvable) is false ONLY if a member is
 //     structurally invalid: an empty-string ref, an Address with Value=="",
@@ -99,10 +107,12 @@ func nameRepresentable(ab *config.AddressBook, feedOverlay map[string][]string, 
 //     feed-bound name whose feed currently has >= 1 live prefix (#3294 (A′):
 //     its prefixes ARE now merged into the enclosing set's row by
 //     expandBookNameRecursive), or a nested set that itself has a concrete
-//     contribution. A feed-bound name with an EMPTY feed and a cycle revisit are
-//     representable-but-NOT-concrete (an empty feed contributes no prefix, and a
-//     cycle revisit contributes nothing, matching expandBookNameRecursive's
-//     nil-on-revisit).
+//     contribution. A present-empty feed-bound name is normally
+//     representable-but-NOT-concrete (an empty feed contributes no prefix),
+//     except when its declared binding is `fail-mode drop` (#10014): that
+//     empty row is an explicit match-none DROP and counts as concrete for its
+//     enclosing set. A cycle revisit contributes nothing, matching
+//     expandBookNameRecursive's nil-on-revisit.
 //
 // The SET branch returns (hasMember, anyConcrete): an empty set is
 // (false,false) (matches strict's resolvedAny==false reject); a structurally
@@ -151,14 +161,25 @@ func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]strin
 		// Feed-bound name. #3294 (A′): expandBookNameRecursive now merges the
 		// feed prefixes into an enclosing set's row, so a feed-bound member
 		// with >= 1 live prefix IS a concrete contribution toward the set's
-		// representability (a `deny <set>` enforces the feed portion). An
-		// EMPTY feed (overlay key present, no live prefixes) stays
-		// representable-but-NOT-concrete: match-none by #2049 design, NOT a
-		// reject — so the concrete bit is gated on live prefix count, not set
-		// unconditionally. A top-level direct feed token never reaches here
-		// (addrRepresentable short-circuits it via feedOverlay BEFORE
-		// nameRepresentable), preserving the #2049 direct-feed exemption.
-		return true, len(feeds) > 0
+		// representability (a `deny <set>` enforces the feed portion).
+		//
+		// #10014: SnapshotForBindings intentionally publishes a PRESENT-but-
+		// EMPTY overlay row only for a declared `fail-mode drop` binding after
+		// every unready constituent has been hold-dropped. That empty row is
+		// the operator's explicit drop intent: inside a nested set it must
+		// count as a concrete DROP (the enclosing book row is empty/match-none),
+		// not as an unresolved set that poisons the whole snapshot. A declared
+		// binding absent from feedOverlay still takes the unresolved branch
+		// below, preserving #5753/#5645 fail-closed behavior. Non-drop
+		// present-empty entries remain representable-but-NOT-concrete.
+		if len(feeds) > 0 || (bindings[name] != nil && bindings[name].FailMode == "drop") {
+			return true, true
+		}
+		// An EMPTY feed (overlay key present without the explicit drop
+		// provenance above) stays representable-but-NOT-concrete: match-none
+		// by #2049 design, and a nested set with no concrete member must
+		// refuse rather than silently under-enforce a deny.
+		return true, false
 	}
 	// #5753: a DECLARED dynamic-address binding that is ABSENT from feedOverlay is
 	// UNRESOLVED (at least one feed constituent has no installed snapshot yet —

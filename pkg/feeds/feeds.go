@@ -616,26 +616,30 @@ func (m *Manager) GetPrefixes(name string) []string {
 // Resolution semantics:
 //   - A binding's FeedNames are unioned (a binding may aggregate several
 //     feeds). Prefixes are deduped across feeds and returned sorted.
-//   - A binding is ENFORCEABLE only when EVERY one of its feed constituents has
-//     an installed snapshot. If ANY feed is unready — before its first
-//     successful fetch, an unknown/typo'd feed name, or after an explicit
-//     hold-interval drop — the binding is UNRESOLVED and its name is OMITTED
-//     from the returned map entirely (#5645, tightened to all-constituent
-//     readiness by codex-182). Publishing the READY subset of a composite
-//     binding, or a present-but-empty slice for an all-unready one, made the
-//     daemon compile a direct feed-bound name to a PARTIAL / match-none address
-//     book row: correct for a PERMIT (permit-none / permit-subset), but a DENY
+//   - A binding is ENFORCEABLE when EVERY one of its feed constituents has an
+//     installed snapshot. If ANY feed is unready — before its first successful
+//     fetch, an unknown/typo'd feed name, or after an explicit hold-interval
+//     drop — the default/`retain` binding is UNRESOLVED and its name is
+//     OMITTED from the returned map (#5645, tightened to all-constituent
+//     readiness by codex-182). `fail-mode drop` is the deliberate exception:
+//     when EVERY unready constituent was hold-dropped, the binding is published
+//     with a PRESENT-BUT-EMPTY slice so the operator's drop intent is visible
+//     to policy lowering (#9689/#10014). A ready constituent can never produce
+//     an empty slice (zero-prefix fetches are rejected), so this empty row
+//     means all constituents were hold-dropped. Publishing a READY subset of a
+//     composite binding, or an empty slice for any other unready case, would
+//     compile a direct feed-bound name to a PARTIAL / match-none address-book
+//     row: correct for a PERMIT (permit-none / permit-subset), but a DENY
 //     policy referencing that name then under-matched (or never fired) and the
-//     traffic it must block was PERMITTED for the whole window until every feed
-//     succeeded (fail-OPEN). Omitting the whole binding leaves the name
-//     unresolved, so the policy lowering treats it as unrepresentable
-//     (addrRepresentable -> __unsupported_address__ -> whole-snapshot preflight
-//     reject) and the referencing policy fails CLOSED — the same action-agnostic
-//     contract #3261 gives an empty static book, and the first-fetch analogue of
-//     the #5282 re-fetch window. The daemon ALSO treats a declared-but-omitted
-//     binding as unrepresentable even when a STATIC address-book alias of the
-//     same name exists (pkg/dataplane/userspace addrRepresentable), so the
-//     static subset cannot resurrect a partial deny.
+//     traffic it must block was PERMITTED for the whole window until every
+//     feed succeeded (fail-OPEN). Omitting a genuinely unresolved binding
+//     leaves the name unresolved, so policy lowering treats it as
+//     unrepresentable (addrRepresentable -> __unsupported_address__ ->
+//     whole-snapshot preflight reject) and the referencing policy fails CLOSED.
+//     The daemon ALSO treats a declared-but-omitted binding as unrepresentable
+//     even when a STATIC address-book alias of the same name exists
+//     (pkg/dataplane/userspace addrRepresentable), so the static subset cannot
+//     resurrect a partial deny.
 //
 // Reading the live last-good snapshot here means a persistent fetch failure
 // keeps enforcing the retained prefixes (the #2050 fail-safe). A persisted
@@ -660,10 +664,12 @@ func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[st
 		// as suspect — see readFeed), so "no installed snapshot" is exactly
 		// len(fs.prefixes) == 0 (before the first successful fetch, an unknown/
 		// typo'd feed name, or after an explicit hold-interval drop) — never a
-		// legitimately-empty successful fetch. If ANY constituent is unready, OMIT
-		// the whole binding: publishing the ready subset (or an all-unready empty
-		// slice) would enforce only a PARTIAL / match-none set, and for a DENY that
-		// under-match is fail-OPEN. Omitting keeps the name UNRESOLVED so the
+		// legitimately-empty successful fetch. If ANY constituent is unready,
+		// omit the whole binding UNLESS fail-mode is `drop` AND every unready
+		// constituent was hold-dropped. That explicit #9689 path publishes a
+		// PRESENT-BUT-EMPTY row when all constituents were dropped; the empty row
+		// is the operator's match-none DROP intent, not an unresolved feed. For
+		// every other unready case, omitting keeps the name UNRESOLVED so the
 		// referencing policy fails CLOSED (see the doc comment). A persisted feed
 		// carried forward across a reconfigure (#5282) still has its last-good
 		// prefixes here, so this never re-opens the re-fetch window.
@@ -686,9 +692,10 @@ func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[st
 		// is byte-identical to the unsized version.
 		//
 		// Doing readiness here rather than inside the merge is the second
-		// half: a binding with any unready constituent is OMITTED, and the
-		// old shape discovered that only after merging every prefix of every
-		// feed ahead of the unready one. That work was always discarded.
+		// half: a binding with any unready constituent is OMITTED unless the
+		// explicit #9689 fail-mode-drop/all-hold-dropped exception applies. The
+		// old shape discovered readiness only after merging every prefix of
+		// every feed ahead of the unready one; that work was always discarded.
 		total := 0
 		allReady := true
 		// #9689: whether every unready constituent was dropped by its
