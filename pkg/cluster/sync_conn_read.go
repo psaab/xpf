@@ -712,6 +712,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// block honest lower-seq pushes until the sender catches up.
 		s.recvSeqMu.Lock()
 		admit := s.dhcpV4RecvSeq.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
@@ -758,9 +759,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// released, so a consumer can never deadlock on the widely-taken
 		// receive mutex. Lock order dhcpApplyMu -> recvSeqMu ->
 		// peerDHCPLeasesMu, taken only here.
+		if s.testDHCPPreCommit != nil {
+			s.testDHCPPreCommit()
+		}
 		s.dhcpApplyMu.Lock()
 		s.recvSeqMu.Lock()
-		applied := s.dhcpV4RecvSeq.advanceIfNewer(incarnation, seq)
+		applied := s.recvEpoch == commitEpoch && s.dhcpV4RecvSeq.advanceIfNewer(incarnation, seq)
 		if applied {
 			s.storePeerDHCPLeases(4, leases)
 		}
@@ -768,7 +772,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if !applied {
 			s.dhcpApplyMu.Unlock()
 			// Lost a duplicate-fabric race to a newer set that already
-			// applied: drop rather than regress the held set.
+			// applied, or lapped by a receiver reset (epoch changed under
+			// us): drop rather than regress the held set or resurrect a
+			// dead high-water.
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
 			slog.Warn("cluster sync: dropping out-of-order DHCP v4 lease set (stale sequence) — standby retains newer set",
 				"incarnation", incarnation, "seq", seq)
@@ -786,6 +792,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// only on apply.
 		s.recvSeqMu.Lock()
 		admit := s.dhcpV6RecvSeq.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
@@ -818,16 +825,19 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// Atomic commit: see the v4 twin (dhcpApplyMu spans commit+callback;
 		// recvSeqMu only mark+store; the callback must not reenter DHCP
 		// receive paths).
+		if s.testDHCPPreCommit != nil {
+			s.testDHCPPreCommit()
+		}
 		s.dhcpApplyMu.Lock()
 		s.recvSeqMu.Lock()
-		applied := s.dhcpV6RecvSeq.advanceIfNewer(incarnation, seq)
+		applied := s.recvEpoch == commitEpoch && s.dhcpV6RecvSeq.advanceIfNewer(incarnation, seq)
 		if applied {
 			s.storePeerDHCPLeases(6, leases)
 		}
 		s.recvSeqMu.Unlock()
 		if !applied {
 			s.dhcpApplyMu.Unlock()
-			// Lost a duplicate-fabric race: see the v4 twin.
+			// Lost a duplicate-fabric race or lapped by a reset: see the v4 twin.
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
 			slog.Warn("cluster sync: dropping out-of-order DHCP v6 lease set (stale sequence) — standby retains newer set",
 				"incarnation", incarnation, "seq", seq)

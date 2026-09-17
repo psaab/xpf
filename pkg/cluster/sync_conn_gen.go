@@ -854,6 +854,11 @@ func (s *SessionSync) resetRecvGen() {
 	for _, g := range s.fullSetGuardsLocked() {
 		g.reset()
 	}
+		// Fold-2 HIGH-2: bump the commit epoch with the guard resets (same
+		// critical section): a DHCP commit that checked newer() before this
+		// reset must fail its re-verification instead of restoring the dead
+		// boot's high-water over the replacement's.
+		s.recvEpoch++
 	s.recvSeqMu.Unlock()
 }
 

@@ -997,3 +997,141 @@ func TestFenceAckAnswersOnReceivingConn_9915(t *testing.T) {
 	}
 	<-done
 }
+
+// Fold-2 HIGH-1: production order ClockSync → changed-BulkStart → session
+// preserves the kept conn's offset. handleNewConnection sends ClockSync
+// BEFORE the cold-prime bulk, and ClockSync is never re-sent — so a
+// replacement installed pre-evidence gets its ClockSync ACCEPTED, and when
+// its BulkStart triggers the switch that offset is new-boot truth learned
+// seconds ago, not dead-boot state. Erasing it rebases new-boot sessions
+// with 0 unboundedly (no re-sync trigger exists). RED against blanket
+// clearing; GREEN via provenance-preserving switch.
+func TestClockOffsetPreservedOnPrimedSwitch_9915(t *testing.T) {
+	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.testClockNow = func() uint64 { return 1000000 }
+	local0, remote0 := net.Pipe()
+	defer local0.Close()
+	defer remote0.Close()
+	local1, remote1 := net.Pipe()
+	defer local1.Close()
+	defer remote1.Close()
+	ac0 := &authConn{Conn: local0}
+	ac1 := &authConn{Conn: local1}
+	ss.installConn(0, ac0)
+	// Old boot A primes on the OLD conn first (production order: the recorded
+	// boot predates the replacement's arrival, so its BulkStart is what makes
+	// the replacement's prime a *changed* boot id).
+	incA := incarnation6910(0xA1)
+	ss.handleMessage(ac0, syncMsgBulkStart, bulkStartPayload6910(1, incA))
+	// Replacement installed pre-evidence (empty slot, no advance), then its
+	// ClockSync is ACCEPTED — offset +100000 from the NEW boot.
+	ss.installConn(1, ac1)
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], 900000)
+	ss.handleMessage(ac1, syncMsgClockSync, buf[:])
+	if got := ss.peerClockOffset.Load(); got != 100000 {
+		t.Fatalf("FIXTURE: offset = %d, want +100000", got)
+	}
+	// The replacement's FIRST BulkStart carries the new boot id and triggers
+	// the switch keeping fabric 1.
+	incB := incarnation6910(0xB2)
+	if incB == incA {
+		t.Fatal("FIXTURE: boot ids must differ")
+	}
+	ss.handleMessage(ac1, syncMsgBulkStart, bulkStartPayload6910(2, incB))
+	// Prove the switch fired (else preservation below is vacuous).
+	ss.mu.Lock()
+	inc, c0, c1 := ss.peerIncarnation, ss.conn0, ss.conn1
+	ss.mu.Unlock()
+	if inc != 1 {
+		t.Fatalf("FIXTURE: peerIncarnation = %d, want 1 (switch did not fire)", inc)
+	}
+	if c0 != nil {
+		t.Fatal("FIXTURE: fabric 0 not evicted by the switch")
+	}
+	if c1 != ac1 {
+		t.Fatal("FIXTURE: fabric 1 does not hold the priming conn")
+	}
+	// The fresh offset survives: per-conn, global fallback, and the session.
+	if got := ss.clockOffsetFor(ac1); got != 100000 {
+		t.Fatalf("clockOffsetFor(kept) = %d, want preserved +100000 (HIGH-1)", got)
+	}
+	if got := ss.peerClockOffset.Load(); got != 100000 {
+		t.Fatalf("peerClockOffset = %d, want preserved +100000 (HIGH-1)", got)
+	}
+	key := dataplane.SessionKey{Protocol: 6, SrcPort: 0x9917, DstPort: 80}
+	key.SrcIP = [4]byte{192, 0, 2, 118}
+	val := dataplane.SessionValue{State: dataplane.SessStateEstablished, IngressZone: 1, EgressZone: 2,
+		Created: 100, LastSeen: 100}
+	ss.handleMessage(ac1, syncMsgSessionV4, encodeSessionV4Payload(key, val))
+	got, ok := dp.v4sessions[key]
+	if !ok {
+		t.Fatal("session on kept conn did not land after switch")
+	}
+	if got.Created != 100100 || got.LastSeen != 100100 {
+		t.Fatalf("installed Created/LastSeen = %d/%d, want 100100/100100 (offset erased — HIGH-1)", got.Created, got.LastSeen)
+	}
+}
+
+// Fold-2 HIGH-2: a DHCP commit spanning a receiver reset must die, not
+// resurrect the dead boot's high-water over the replacement's. Deterministic
+// interleave via testDHCPPreCommit: old-boot set pauses pre-commit, the main
+// goroutine resets + applies the replacement, the old handler resumes into
+// an epoch mismatch. No sleeps; channel-orchestrated (the hook rendezvous
+// also gives -race its happens-before edges).
+func TestDHCPCommitSpanningResetIsDropped_9915(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	mkLease := func(addr string) dhcpserver.SyncLease {
+		return dhcpserver.SyncLease{Family: 4, Address: addr, HWAddress: "aa:bb:cc:dd:ee:01",
+			SubnetID: 1, ValidLife: 3600, Remaining: 1800}
+	}
+	oldPayload := appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{mkLease("10.0.0.10")}), 9000, 20)
+	newPayload := appendFullSetSeq(encodeDHCPLeasePayload([]dhcpserver.SyncLease{mkLease("10.0.0.11")}), 100, 1)
+	reached := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	ss.testDHCPPreCommit = func() {
+		select {
+		case reached <- struct{}{}:
+		default: // single-fire: only the first commit attempt pauses
+		}
+		<-resume
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ss.handleMessage(nil, syncMsgDHCPLeaseV4, oldPayload)
+	}()
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old-boot handler never reached pre-commit")
+	}
+	// Interleaving: reset + replacement apply fully while old handler waits.
+	// Nil-ing the hook past first fire keeps the replacement synchronous.
+	ss.resetRecvGen()
+	ss.testDHCPPreCommit = nil
+	ss.handleMessage(nil, syncMsgDHCPLeaseV4, newPayload)
+	if held := ss.PeerDHCPLeases4(); len(held) != 1 || held[0].Address != "10.0.0.11" {
+		t.Fatalf("FIXTURE: replacement did not apply cleanly: %v", held)
+	}
+	close(resume)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old-boot handler never resumed")
+	}
+	// Old commit must have died on the epoch fence: held set + mark intact.
+	if held := ss.PeerDHCPLeases4(); len(held) != 1 || held[0].Address != "10.0.0.11" {
+		t.Fatalf("held set = %v, want replacement: old-boot commit resurrected across reset (HIGH-2)", held)
+	}
+	ss.recvSeqMu.Lock()
+	inc, seq := ss.dhcpV4RecvSeq.incarnation, ss.dhcpV4RecvSeq.seq
+	ss.recvSeqMu.Unlock()
+	if inc != 100 || seq != 1 {
+		t.Fatalf("guard mark = (%d,%d), want (100,1): dead high-water restored (HIGH-2)", inc, seq)
+	}
+	if got := ss.Stats().DHCPLeasesStaleIgnored; got != 1 {
+		t.Fatalf("DHCPLeasesStaleIgnored = %d, want 1 (fenced commit must count as stale)", got)
+	}
+}

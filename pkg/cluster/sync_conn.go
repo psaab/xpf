@@ -262,20 +262,30 @@ func (s *SessionSync) connIsCurrentIncarnationLocked(conn net.Conn) bool {
 func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.peerIncarnation++
 	s.peerHeartbeatAckEver.Store(false)
-	s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
-	// #9915 F-118 review: clear the kept connection's per-connection clock
-	// state HERE, before eviction and all other work. clockOffsetFor reads
-	// those atomics lock-free, so a concurrent session on the kept conn
-	// would otherwise use the retired offset in the window between the
-	// global clear above and a later clear. Anything stored before this
-	// switch is old-boot by definition; anything after re-syncs fresh.
-	// Evicted conns need no clearing: they are closed, and the publish gate
-	// rejects their in-flight frames by membership.
+	// Clock provenance (fold-2 HIGH-1): the kept conn primed the new boot —
+	// its BulkStart carried the changed id that triggered this switch (the
+	// sole caller passes the priming slot) — so any ClockSync it carried
+	// came over its own socket from the NEW boot, including ClockSyncs
+	// accepted before the switch: handleNewConnection sends ClockSync
+	// before the cold-prime bulk, and ClockSync is never re-sent, so
+	// erasure would be unbounded. Preserve a proven-new offset and bind
+	// the global to it, so unsynced/new conns fall back to new-boot truth.
+	// Only a kept conn that never primed the new boot (unprimed direct
+	// switch: test-only shape) takes the clear path — the pre-existing
+	// unknown-posture. One socket carries exactly one boot, so a primed
+	// kept conn's offset cannot be dead-boot state.
+	var kept net.Conn
 	switch keepIdx {
 	case 0:
-		clearConnClockState(s.conn0)
+		kept = s.conn0
 	case 1:
-		clearConnClockState(s.conn1)
+		kept = s.conn1
+	}
+	if ac, ok := kept.(*authConn); ok && ac.clockSynced.Load() && ac.bootIncarnation.known() && ac.bootIncarnation == s.peerBootIncarnation {
+		s.peerClockOffset.Store(ac.clockOffset.Load())
+	} else {
+		clearConnClockState(kept)
+		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
 	}
 	// #7762: rebase the boot-epoch baseline onto THIS incarnation.
 	//

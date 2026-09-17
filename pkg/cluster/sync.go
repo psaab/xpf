@@ -1600,6 +1600,20 @@ type SessionSync struct {
 	// on it. Taken only by the DHCP arms; the callback must not reenter DHCP
 	// receive paths (see OnDHCPLeasesReceived).
 	dhcpApplyMu sync.Mutex
+	// recvEpoch fences full-set DHCP commits against receiver resets
+	// (fold-2 HIGH-2): bumped under recvSeqMu by resetRecvGen alongside
+	// the guard resets. DHCP arms capture it with the newer-check and
+	// re-verify it inside the commit; a commit spanning a reset is dropped
+	// as stale instead of resurrecting the dead boot's high-water over
+	// the replacement's. Guarded by recvSeqMu.
+	recvEpoch uint64
+	// testDHCPPreCommit, when non-nil, runs after DHCP decode+filter and
+	// before the commit, with NO locks held (so the test may drive reset
+	// + replacement paths from the hook rendezvous). Test-only hook for
+	// deterministic reset/commit interleavings; nil in prod.
+	// Single-fire discipline: the cell disables it before driving the
+	// replacement push.
+	testDHCPPreCommit func()
 }
 
 // configApplyItem is one config-sync payload queued for ordered apply by the
