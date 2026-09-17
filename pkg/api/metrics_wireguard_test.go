@@ -79,36 +79,37 @@ func TestEmitWireguardTelemetrySeriesSet(t *testing.T) {
 			// #4094 PR-B initiator cookie-replies consumed (50, off-ladder).
 			HsRxCookieConsumed: 50,
 			// #4094 PR-A responder cookie mechanism (46.. continuing).
-			HsCookieRepliesSent:       46,
-			HsRxUnderLoadNoMac2:       47,
-			HsRxUnderLoadMac2Ok:       48,
-			HsCookieReplyBudgetDrops:  49,
-			RxUnknownType:             12,
-			HsSendErrors:              13,
-			HsRequestsArmed:           14,
-			DecapPackets:              15,
-			DecapBytes:                16,
-			DecapKeepalives:           17,
-			DecapDropsMalformedHeader: 18,
-			DecapDropsUnknownSession:  19,
-			DecapDropsCounterCeiling:  20,
-			DecapDropsCrypto:          21,
-			DecapDropsReplay:          22,
-			DecapDropsAllowedIPs:      23,
-			DecapDropsMalformedInner:  24,
-			DecapDropsBuffer:          25,
-			RxUnsteeredTransportDrops: 55,
-			RxDegradedTransitDrops:    91,
-			EncapPackets:              26,
-			EncapBytes:                27,
-			EncapDropsNoSession:       28,
-			EncapDropsUnconfirmed:     29,
-			EncapDropsRekeyRequired:   30,
-			EncapDropsOther:           31,
-			EncapMtuDrops:             32,
-			TransportSendErrors:       33,
-			TunWriteErrors:            34,
-			TunRxDropsNoEndpoint:      0, // zero on purpose: must still emit
+			HsCookieRepliesSent:         46,
+			HsRxUnderLoadNoMac2:         47,
+			HsRxUnderLoadMac2Ok:         48,
+			HsRxUnderLoadAdmissionDrops: 56,
+			HsCookieReplyBudgetDrops:    49,
+			RxUnknownType:               12,
+			HsSendErrors:                13,
+			HsRequestsArmed:             14,
+			DecapPackets:                15,
+			DecapBytes:                  16,
+			DecapKeepalives:             17,
+			DecapDropsMalformedHeader:   18,
+			DecapDropsUnknownSession:    19,
+			DecapDropsCounterCeiling:    20,
+			DecapDropsCrypto:            21,
+			DecapDropsReplay:            22,
+			DecapDropsAllowedIPs:        23,
+			DecapDropsMalformedInner:    24,
+			DecapDropsBuffer:            25,
+			RxUnsteeredTransportDrops:   55,
+			RxDegradedTransitDrops:      91,
+			EncapPackets:                26,
+			EncapBytes:                  27,
+			EncapDropsNoSession:         28,
+			EncapDropsUnconfirmed:       29,
+			EncapDropsRekeyRequired:     30,
+			EncapDropsOther:             31,
+			EncapMtuDrops:               32,
+			TransportSendErrors:         33,
+			TunWriteErrors:              34,
+			TunRxDropsNoEndpoint:        0, // zero on purpose: must still emit
 			// #1888 S5 timer telemetry (36.. continuing the ladder).
 			EncapDropsExpired:                 36,
 			DecapDropsExpired:                 37,
@@ -172,6 +173,7 @@ func TestEmitWireguardTelemetrySeriesSet(t *testing.T) {
 		"xpf_userspace_wg_handshake_rx_drops_total,reason=replayed_init,tunnel=wg0":                 45,
 		"xpf_userspace_wg_handshake_rx_drops_total,reason=cookie_unsupported,tunnel=wg0":            11,
 		"xpf_userspace_wg_handshake_rx_drops_total,reason=under_load_no_mac2,tunnel=wg0":            47,
+		"xpf_userspace_wg_handshake_rx_drops_total,reason=under_load_admission,tunnel=wg0":          56,
 		"xpf_userspace_wg_handshake_rx_drops_total,reason=cookie_reply_budget,tunnel=wg0":           49,
 		"xpf_userspace_wg_cookie_replies_total,event=sent,tunnel=wg0":                               46,
 		"xpf_userspace_wg_cookie_replies_total,event=mac2_ok,tunnel=wg0":                            48,
@@ -307,26 +309,26 @@ func TestEmitWireguardTelemetryNeverHandshakedGauge(t *testing.T) {
 			t.Errorf("last-handshake gauge emitted for a never-handshaked tunnel")
 		}
 	}
-	// 2 completions + 3 singles + 9 hs reasons (incl. replayed_init,
-	// #4092) + 2 pkts + 2 bytes + 1 keepalive + 15 drop reasons (incl.
-	// 2x expired, #1888) + 4 send kinds + 1 confirmed (per-peer, #1434;
-	// one peer here) + 3 rekey reasons + 2 keepalive-sent kinds +
-	// 1 sessions-expired + 1 attempts-aborted; +2 hs reasons #4094
-	// (under_load_no_mac2 + cookie_reply_budget) + 3 cookie-reply events
-	// #4094 (sent + mac2_ok [PR-A] + consumed [PR-B]) = 51;
-	// + 4 endpoint-resolution outcomes (#7936) = 55;
-	// + 1 unsteered-port decap drop reason (#9521) = 56;
-	// + 1 degraded-transit decap drop reason (#9594) = 57.
+	// 2 completions + 3 singles + 10 hs reasons (incl. replayed_init,
+	// #4092, under_load_no_mac2 + cookie_reply_budget, #4094, and
+	// under_load_admission, #9908) + 2 pkts + 2 bytes + 1 keepalive +
+	// 15 drop reasons (incl. 2x expired, #1888) + 4 send kinds + 1
+	// confirmed (per-peer, #1434; one peer here) + 3 rekey reasons +
+	// 2 keepalive-sent kinds + 1 sessions-expired + 1 attempts-aborted +
+	// 3 cookie-reply events #4094 (sent + mac2_ok [PR-A] + consumed
+	// [PR-B]) = 52; + 4 endpoint-resolution outcomes (#7936) = 56;
+	// + 1 unsteered-port decap drop reason (#9521) = 57; + 1
+	// degraded-transit decap drop reason (#9594) = 58.
 	//
-	// The four #7936 series are emitted for a zeroed tunnel ON PURPOSE, and
-	// this count is where that decision is pinned. A tunnel whose peers are all
-	// IP literals starts no resolver at all, so its counters are legitimately
-	// zero — and suppressing the series would make "no resolver configured"
-	// indistinguishable from "the exporter does not know about this tunnel",
-	// which is the difference between a dashboard reading zero and a dashboard
-	// reading nothing.
-	if count != 57 {
-		t.Errorf("emitted %d series for a zeroed tunnel, want 57 (zeros are real signals)", count)
+	// The four #7936 series are emitted for a zeroed tunnel ON PURPOSE,
+	// and this count is where that decision is pinned. A tunnel whose
+	// peers are all IP literals starts no resolver at all, so its
+	// counters are legitimately zero — and suppressing the series would
+	// make "no resolver configured" indistinguishable from "the exporter
+	// does not know about this tunnel", which is the difference between a
+	// dashboard reading zero and a dashboard reading nothing.
+	if count != 58 {
+		t.Errorf("emitted %d series for a zeroed tunnel, want 58 (zeros are real signals)", count)
 	}
 }
 

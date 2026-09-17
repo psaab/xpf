@@ -767,13 +767,28 @@ is exactly that layer.
   vector this hardening could otherwise introduce. The refill obeys the same
   monotonic-clock discipline as the SYN-cookie token bucket (#4330/#4321): a
   backwards `now_ns` credits nothing (`saturating_sub`) and never lowers a
-  bucket's `last_ns` high-water mark, so a clock glitch cannot be replayed into
-  an over-credit. Per-source throttle drops (and the full-table fail-closed) are
-  counted with the global-budget family under `hs_cookie_reply_budget_drops`.
+  bucket's `last_ns` high-water mark, so a clock glitch cannot be replayed
+  into an over-credit. Per-source throttle drops (and the full-table
+  fail-closed) are counted with the global-budget family under
+  `hs_cookie_reply_budget_drops`.
+- **Valid-MAC2 handshake admission (#9908)** — a non-spoofed source can
+  legitimately obtain a cookie and replay the same valid-MAC2 initiation.
+  Under load, after MAC1/MAC2 verification and BEFORE the responder Noise
+  read, `CookieChecker::source_handshake_allowed(src_ip, now)` applies an
+  independent per-source token bucket: 20 admissions/s, burst 5. A tracked
+  source that exhausts its bucket is returned as `Drop` and increments
+  `hs_rx_under_load_admission_drops`; it never reaches
+  `consume_initiation_create_response`/the responder DH on that packet.
+  The handshake bucket has the same 2048-entry fail-closed cap and GC as
+  the reply bucket, and keys on source IP (not UDP port). It does not alter
+  MAC2, cookie, or TAI64N semantics. This is deliberately a rate bound,
+  rather than an exact-replay cache, because rotating a valid-cookie
+  initiation must not restore an unbounded Noise admission path.
 - **Counters** — `hs_cookie_replies_sent`, `hs_rx_under_load_no_mac2`,
-  `hs_rx_under_load_mac2_ok`, `hs_cookie_reply_budget_drops` (Prometheus:
+  `hs_rx_under_load_mac2_ok`, `hs_rx_under_load_admission_drops`, and
+  `hs_cookie_reply_budget_drops` (Prometheus:
   `xpf_userspace_wg_cookie_replies_total{event}` +
-  `xpf_userspace_wg_handshake_rx_drops_total{reason=under_load_no_mac2|cookie_reply_budget}`).
+  `xpf_userspace_wg_handshake_rx_drops_total{reason=under_load_no_mac2|under_load_admission|cookie_reply_budget}`).
 
 ## Initiator cookie-reply consume (#4094 PR-B)
 

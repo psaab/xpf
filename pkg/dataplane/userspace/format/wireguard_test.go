@@ -247,3 +247,25 @@ func TestFormatWireguardDegradedTransitDrops9594(t *testing.T) {
 		t.Errorf("detail reason table must name the degraded-transit drops:\n%s", out)
 	}
 }
+
+// #9908: valid-MAC2 initiations refused by the per-source pre-Noise
+// admission bucket must be visible in the operator status, not just JSON
+// and Prometheus. A replay flood that drops 95 pre-Noise shows only the 4
+// post-DH replayed-init drops in the summary while hiding the 95 admission
+// drops — and a legitimate rekey rejected by the source limit is invisible
+// in the detail table. Same rule as #9521/#9594: counted in the summary's
+// handshake total AND named in the detail table.
+func TestFormatWireguardUnderLoadAdmissionDrops9908(t *testing.T) {
+	now := time.Unix(1_770_000_090, 0)
+	st := wgFmtFixture()
+	st.WgTunnels[0].HsRxDropsMac1Mismatch = 0
+	st.WgTunnels[0].HsRxDropsReplayedInit = 4
+	st.WgTunnels[0].HsRxUnderLoadAdmissionDrops = 95
+	if out := FormatWireguardStatus(st, false, now); !strings.Contains(out, "2 receive, 3 transmit, 99 handshake, 1 I/O errors") {
+		t.Errorf("summary handshake total must include the 95 admission drops (4 replayed-init + 95):\n%s", out)
+	}
+	out := FormatWireguardStatus(st, true, now)
+	if !regexp.MustCompile(`(?m)^\s*under-load-admission\s+95\s*$`).MatchString(out) {
+		t.Errorf("detail reason table must name the under-load admission drops:\n%s", out)
+	}
+}

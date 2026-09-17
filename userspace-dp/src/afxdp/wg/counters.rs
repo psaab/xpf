@@ -30,7 +30,8 @@
 //! initiation whose TAI64N is `<=` the greatest already accepted from
 //! that peer). The responder cookie-reply / MAC2 under-load path is now
 //! counted too (#4094 PR-A): `hs_cookie_replies_sent`,
-//! `hs_rx_under_load_no_mac2`, `hs_rx_under_load_mac2_ok`, and
+//! `hs_rx_under_load_no_mac2`, `hs_rx_under_load_mac2_ok`,
+//! `hs_rx_under_load_admission_drops` (#9908), and
 //! `hs_cookie_reply_budget_drops`. The initiator-side cookie-reply CONSUME
 //! (#4094 PR-B) is now counted: `hs_rx_cookie_consumed` (a cookie-reply we
 //! decrypted and stored, arming a valid MAC2 on our next initiation) and
@@ -100,6 +101,10 @@ pub(crate) struct WgCounters {
     /// were allowed through to the handshake (the cookie mechanism working
     /// end-to-end — a primed peer completing under load).
     pub(crate) hs_rx_under_load_mac2_ok: AtomicU64,
+    /// #9908: under-load valid-MAC2 initiations dropped by the per-source
+    /// handshake-admission bucket before the responder Noise read. Distinct
+    /// from `hs_rx_drops_replayed_init`, which is reached only after DH.
+    pub(crate) hs_rx_under_load_admission_drops: AtomicU64,
     /// #4094 PR-A: under-load initiations dropped WITHOUT a cookie reply.
     /// Primarily the per-window cookie-reply emission budget being exhausted
     /// (item 6 storm bound) — non-zero means the generated-reply budget is

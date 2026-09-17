@@ -387,6 +387,52 @@ fn source_table_cap_fails_closed() {
     );
 }
 
+/// #9908: valid-MAC2 admission has its own bounded source table and
+/// token bucket. The reply table's cap must not be the only bound: a
+/// spoofed-IP flood that reaches the admission seam cannot grow the new
+/// map without limit.
+#[test]
+fn handshake_source_bucket_burst_and_table_cap() {
+    let cc = CookieChecker::new(&[0x86u8; 32]);
+    let source = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+    let now = 10_000_000_000u64;
+    let mut granted = 0u64;
+    for _ in 0..(SOURCE_HANDSHAKE_BURST + 5) {
+        if cc.source_handshake_allowed(source, now) {
+            granted += 1;
+        }
+    }
+    assert_eq!(
+        granted, SOURCE_HANDSHAKE_BURST,
+        "one source gets exactly the bounded handshake burst"
+    );
+    assert!(cc.source_handshake_allowed(
+        source,
+        now + HANDSHAKE_PACKET_COST_NS
+    ));
+    assert!(!cc.source_handshake_allowed(
+        source,
+        now + HANDSHAKE_PACKET_COST_NS
+    ));
+
+    for i in 0..(SOURCE_TABLE_MAX - 1) {
+        let ip = IpAddr::V6(std::net::Ipv6Addr::from(i as u128));
+        assert!(cc.source_handshake_allowed(ip, now));
+    }
+    assert_eq!(
+        cc.handshake_source_table_len_for_test(),
+        SOURCE_TABLE_MAX,
+        "the handshake source table reaches, but does not exceed, its cap"
+    );
+    let overflow = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 2));
+    assert!(!cc.source_handshake_allowed(overflow, now));
+    assert_eq!(
+        cc.handshake_source_table_len_for_test(),
+        SOURCE_TABLE_MAX,
+        "a new over-cap source is denied without map growth"
+    );
+}
+
 /// GC reclaims buckets idle for a full [`SOURCE_GC_INTERVAL_NS`]: as
 /// spoofed sources come and go the table shrinks back, so a burst of
 /// short-lived sources does not permanently pin the map at its cap.

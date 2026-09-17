@@ -2678,6 +2678,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
         hs_cookie_replies_sent: 46,
         hs_rx_under_load_no_mac2: 47,
         hs_rx_under_load_mac2_ok: 48,
+        hs_rx_under_load_admission_drops: 56,
         hs_cookie_reply_budget_drops: 49,
         rx_unknown_type: 12,
         hs_send_errors: 13,
@@ -2749,6 +2750,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
     assert_eq!(wire_row["hs_cookie_replies_sent"], 46);
     assert_eq!(wire_row["hs_rx_cookie_consumed"], 50);
     assert_eq!(wire_row["hs_rx_under_load_no_mac2"], 47);
+    assert_eq!(wire_row["hs_rx_under_load_admission_drops"], 56);
     // #7936: the four counters AND the error string. The string is asserted
     // because it is the half a counter cannot carry — `endpoint_family_mismatch`
     // says how often, this says which name and which family, and only the pair
@@ -2789,6 +2791,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
     assert_eq!(b.keepalives_tx_passive, 42);
     assert_eq!(b.pending_aborted_attempt_window, 44);
     assert_eq!(b.hs_rx_under_load_mac2_ok, 48);
+    assert_eq!(b.hs_rx_under_load_admission_drops, 56);
     assert_eq!(b.hs_cookie_reply_budget_drops, 49);
 
     // EMPTY-INVARIANT: a ProcessStatus with no WG tunnels serializes

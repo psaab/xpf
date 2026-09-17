@@ -2228,6 +2228,11 @@ fn handshake_admission_9908_replay_flood_bounded_and_counted() {
         processed as u64,
         "mac2_ok counts admissions that reached the handshake"
     );
+    assert_eq!(
+        c.hs_rx_under_load_admission_drops.load(Ordering::Relaxed),
+        dropped as u64,
+        "every over-burst valid-MAC2 replay is counted as a pre-Noise admission drop"
+    );
 }
 
 /// #9908 control: while attacker A replays a primed initiation (exhausting
