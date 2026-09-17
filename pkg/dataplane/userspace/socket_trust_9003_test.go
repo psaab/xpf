@@ -411,7 +411,7 @@ func (e endlessReader) Read(p []byte) (int, error) {
 func TestEveryHelperResponseDecodeIsBounded9003(t *testing.T) {
 	sites := map[string][]string{
 		"boot_probe.go":                  {"ProbeStatus"},
-		"process_control.go":             {"requestDetailedLocked", "requestSessionSyncLocked", "requestHAWatchdogSessionLocked"},
+		"process_control.go":             {"requestDetailedLocked", "requestSessionSyncLocked", "requestHAWatchdogSessionLockedAtPath"},
 		"../../dhcpserver/lease_sync.go": {"keaControl"},
 	}
 	decodeRe := regexp.MustCompile(`json\.NewDecoder\(([^)]*)`)

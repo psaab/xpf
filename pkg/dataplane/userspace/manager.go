@@ -172,7 +172,15 @@ type Manager struct {
 	// Cleared in resetAfterHelperGoneLocked: a new helper starts with an empty
 	// inventory, so the fact that the PREVIOUS one was told says nothing.
 	helperHAStatePublished bool
-	generation             uint64
+	// haWatchdogHelperInventory is the last FULL group set acknowledged by the
+	// current helper. During an apply, seedHAGroupInventoryLocked intentionally
+	// narrows m.haGroups to the new config before the maps are replayed; retain
+	// this acknowledged membership in the lock-free watchdog snapshot so a
+	// contended refresh remains compatible with the helper's 16-entry inventory.
+	// Guarded by m.mu; cleared with helperHAStatePublished on helper reset.
+	haWatchdogHelperInventory []HAGroupStatus
+
+	generation uint64
 	// neighborReplaceGen is a dedicated monotonic counter for the #6034
 	// manager-neighbor replace-generation envelope. Every authoritative
 	// update_neighbors replace (RegenerateNeighborSnapshot, BumpFIBGeneration)
@@ -272,15 +280,29 @@ type Manager struct {
 	// one atomic load observes a consistent group-set generation. Nil until
 	// the first publish (bare Manager literals remain valid test fixtures).
 	haWatchdogSnapshot atomic.Pointer[haWatchdogSnapshot]
-	// haDegradedMu guards haDegradedLastSent. It is a leaf held only across
-	// a throttle check/update, never across socket I/O, so snapshot application
-	// cannot wedge the degraded watchdog path.
+	// haWatchdogProcessGen is the lock-free current helper-session epoch paired
+	// with haWatchdogSnapshot.processGen. It advances independently of procGen:
+	// crash teardown must retire the epoch before reset publishes its
+	// processLive=false snapshot, even though the restart timer still uses the
+	// dead helper's procGen. Every stop/crash/start also fences sessionMu.
+	haWatchdogProcessGen atomic.Uint64
+
+	// haDegradedMu is a leaf held only across the degraded merge/throttle
+	// decision, never across socket I/O, so snapshot application cannot wedge
+	// the degraded watchdog path.
 	haDegradedMu sync.Mutex
-	// haDegradedLastSent is the throttle baseline for the degraded (m.mu
-	// contended) watchdog path. It is separate from haWatchdogIPCSynced,
-	// which requires m.mu. The baselines may briefly disagree after an apply,
-	// costing at most one redundant idempotent refresh.
+	// haDegradedCurrent is the monotonic, merged watchdog payload for the
+	// contended path. It carries every RG's freshest timestamp seen while the
+	// manager lock is unavailable, so one full-set refresh does not regress
+	// another RG's timestamp.
+	haDegradedCurrent map[int]haWatchdogIPCSyncState
+	// haDegradedLastSent is the last full payload acknowledged/attempted by the
+	// degraded path. Active changes are compared against it for immediate sends.
 	haDegradedLastSent map[int]haWatchdogIPCSyncState
+	// haDegradedLastSentAt is the scalar full-set backstop. A heartbeat batch
+	// sends at most once per 3-second window, regardless of RG iteration order.
+	haDegradedLastSentAt   uint64
+	haDegradedHaveLastSent bool
 	// fabricSnapshotBuilder resolves the fabric snapshots (with live peer/local
 	// MACs from kernel neighbor + link state) that SyncFabricState pushes to the
 	// helper. Indirected through a field so tests can inject a deterministic
@@ -476,6 +498,11 @@ type Manager struct {
 	// nothing CI runs, the #6994 failure mode).
 	sessionRequestHook func(ControlRequest, *ProcessStatus) error
 
+	// haWatchdogSessionLockHook is a test-only rendezvous immediately before
+	// the generation-fenced watchdog sender takes sessionMu. Production leaves
+	// it nil; it makes the queued-on-sessionMu restart fence deterministic.
+	haWatchdogSessionLockHook func()
+
 	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
 	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate
 	// a successful respawn without spawning a helper process. Teardown
@@ -609,6 +636,7 @@ func New() *Manager {
 		haGroups:            make(map[int]HAGroupStatus),
 		haWatchdogMapWrite:  bpfShim.UpdateHAWatchdog,
 		haWatchdogIPCSynced: make(map[int]haWatchdogIPCSyncState),
+		haDegradedCurrent:   make(map[int]haWatchdogIPCSyncState),
 		haDegradedLastSent:  make(map[int]haWatchdogIPCSyncState),
 	}
 	m.publishHAWatchdogSnapshotLocked()

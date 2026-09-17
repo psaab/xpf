@@ -19,8 +19,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // fakeProc9629 fakes a live helper process (throttle-test precedent). Cells
@@ -59,13 +62,14 @@ func TestRequestHAWatchdogSessionNeverTakesManagerMu9629(t *testing.T) {
 	dir := shortSockDir9770(t)
 	m := New()
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
-	fakeSessionSocket9770(t, m.sessionSocketPath(), ControlResponse{OK: true}, nil)
+	sockPath := m.sessionSocketPath()
+	fakeSessionSocket9770(t, sockPath, ControlResponse{OK: true}, nil)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	done := make(chan error, 1)
 	go func() {
-		done <- m.requestHAWatchdogSession([]HAGroupStatus{{RGID: 1, Active: true}})
+		done <- m.requestHAWatchdogSessionAtPath([]HAGroupStatus{{RGID: 1, Active: true}}, sockPath)
 	}()
 	select {
 	case err := <-done:
@@ -87,8 +91,14 @@ func TestUpdateHAWatchdogEntryPointNeverWaitsOnManagerMu9629(t *testing.T) {
 	defer m.mu.Unlock()
 	m.helperStatusObserved = true
 	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{{RGID: 1, Active: true}}
 	m.publishHAWatchdogSnapshotLocked()
-	m.sessionRequestHook = func(ControlRequest, *ProcessStatus) error { return nil }
+	got := make(chan ControlRequest, 1)
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		got <- req
+		return nil
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- m.UpdateHAWatchdog(1, 100)
@@ -101,6 +111,222 @@ func TestUpdateHAWatchdogEntryPointNeverWaitsOnManagerMu9629(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("UpdateHAWatchdog blocked while m.mu was held; entry point still depends on snapshot mutex")
 	}
+	select {
+	case req := <-got:
+		if req.Type != "update_ha_state" || req.HAState == nil ||
+			len(req.HAState.Groups) != 1 ||
+			req.HAState.Groups[0].RGID != 1 ||
+			req.HAState.Groups[0].WatchdogTimestamp != 100 {
+			t.Fatalf("session hook saw %+v, want one RG1 update_ha_state at timestamp 100", req)
+		}
+	default:
+		t.Fatal("session hook saw no positive update_ha_state witness")
+	}
+}
+
+// Config applies publish the control-socket path under m.mu while watchdog
+// calls send after releasing it. This cell exercises those operations together
+// so -race catches any sender that reads m.cfg after the unlock.
+func TestUpdateHAWatchdogAndConfigMutationRace9629(t *testing.T) {
+	dir := t.TempDir()
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{1: {Active: true}})
+	m.mu.Lock()
+	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{{RGID: 1, Active: true}}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			m.mu.Lock()
+			m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
+			m.publishHAWatchdogSnapshotLocked()
+			m.mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for tick := range 200 {
+			_ = m.UpdateHAWatchdog(1, uint64(100+tick))
+		}
+	}()
+	wg.Wait()
+}
+
+// A watchdog refresh can pass its first snapshot-generation check and queue on
+// sessionMu while the helper is being retired. The final check must discard it
+// before it can reach a replacement helper. Holding sessionMu first, then
+// advancing the retired generation under m.mu, makes this race deterministic.
+func TestHARefreshQueuedOnSessionMuDropsAfterRestart9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{1: {Active: true}})
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{{RGID: 1, Active: true}}
+	m.publishHAWatchdogSnapshotLocked()
+	oldGen := m.haWatchdogProcessGen.Load()
+	m.mu.Unlock()
+
+	m.sessionMu.Lock()
+	m.mu.Lock()
+	attempted := make(chan struct{})
+	m.haWatchdogSessionLockHook = func() { close(attempted) }
+	sent := false
+	m.sessionRequestHook = func(ControlRequest, *ProcessStatus) error {
+		sent = true
+		return nil
+	}
+	type result struct {
+		handled bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		handled, err := m.tryUpdateHAWatchdogWhileManagerMuHeld(1, 100)
+		done <- result{handled: handled, err: err}
+	}()
+	<-attempted
+
+	// This mirrors stopLocked's generation retirement while the queued sender
+	// is still behind sessionMu: atomic publication precedes the unlock.
+	m.procGen = oldGen + 1
+	m.haWatchdogProcessGen.Store(m.procGen)
+	m.mu.Unlock()
+	m.sessionMu.Unlock()
+
+	got := <-done
+	if !got.handled || got.err != nil {
+		t.Fatalf("queued old-generation refresh returned handled=%v err=%v, want throttle-success no-op",
+			got.handled, got.err)
+	}
+	if sent {
+		t.Fatal("queued old-generation refresh reached the session request hook")
+	}
+}
+
+// The unexpected-exit path must retire the independent session epoch too.
+// Otherwise a refresh queued behind sessionMu can pass its final check during
+// the crash-to-restart gap, when procGen still equals the dead generation.
+func TestHARefreshQueuedAcrossUnexpectedExitDropsBeforeRestart9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{1: {Active: true}})
+	m.restartTimerFn = func(time.Duration, func()) {}
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{{RGID: 1, Active: true}}
+	m.publishHAWatchdogSnapshotLocked()
+	oldGen := m.haWatchdogProcessGen.Load()
+	m.mu.Unlock()
+
+	m.sessionMu.Lock()
+	m.mu.Lock()
+	attempted := make(chan struct{})
+	m.haWatchdogSessionLockHook = func() { close(attempted) }
+	sent := false
+	m.sessionRequestHook = func(ControlRequest, *ProcessStatus) error {
+		sent = true
+		return nil
+	}
+	type refreshResult struct {
+		handled bool
+		err     error
+	}
+	refreshDone := make(chan refreshResult, 1)
+	go func() {
+		handled, err := m.tryUpdateHAWatchdogWhileManagerMuHeld(1, 100)
+		refreshDone <- refreshResult{handled: handled, err: err}
+	}()
+	<-attempted
+	m.mu.Unlock()
+
+	crashDone := make(chan struct{})
+	go func() {
+		m.mu.Lock()
+		m.handleUnexpectedHelperExitLocked(&helperGeneration{
+			gen: m.procGen,
+			cmd: &exec.Cmd{},
+		})
+		m.mu.Unlock()
+		close(crashDone)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for m.haWatchdogProcessGen.Load() == oldGen && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if m.haWatchdogProcessGen.Load() == oldGen {
+		m.sessionMu.Unlock()
+		t.Fatal("unexpected-exit path never retired the helper-session epoch")
+	}
+	m.sessionMu.Unlock()
+
+	refresh := <-refreshDone
+	if !refresh.handled || refresh.err != nil {
+		t.Fatalf("queued pre-crash refresh returned handled=%v err=%v, want throttle-success no-op",
+			refresh.handled, refresh.err)
+	}
+	if sent {
+		t.Fatal("queued pre-crash refresh reached the session request hook")
+	}
+	select {
+	case <-crashDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unexpected-exit bookkeeping did not complete")
+	}
+	m.mu.Lock()
+	snapshot := m.haWatchdogSnapshot.Load()
+	m.mu.Unlock()
+	if snapshot == nil || snapshot.processLive {
+		t.Fatalf("unexpected-exit snapshot = %+v, want processLive=false", snapshot)
+	}
+}
+
+// A restarted helper increments both procGen and the independent session
+// epoch, while a crash increments only the epoch before the restart timer
+// runs. The locked watchdog path must capture the epoch, not procGen, or every
+// post-restart refresh is silently classified stale.
+func TestUpdateHAWatchdogAfterCrashRestartUsesSessionEpoch9629(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{1: {Active: true}})
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{{RGID: 1, Active: true}}
+	// Model the production crash retirement, then the new helper's supervisor
+	// generation. procGen advances once; the session epoch advances twice.
+	m.haWatchdogProcessGen.Add(1)
+	m.procGen++
+	m.haWatchdogProcessGen.Add(1)
+	m.publishHAWatchdogSnapshotLocked()
+	sent := make(chan ControlRequest, 1)
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		sent <- req
+		return nil
+	}
+	m.mu.Unlock()
+
+	if err := m.UpdateHAWatchdog(1, 100); err != nil {
+		t.Fatalf("post-restart watchdog refresh: %v", err)
+	}
+	select {
+	case req := <-sent:
+		if req.Type != "update_ha_state" || req.HAState == nil ||
+			len(req.HAState.Groups) != 1 ||
+			req.HAState.Groups[0].RGID != 1 ||
+			req.HAState.Groups[0].WatchdogTimestamp != 100 {
+			t.Fatalf("post-restart session hook saw %+v, want RG1 timestamp 100", req)
+		}
+	default:
+		t.Fatal("post-restart watchdog refresh was dropped by a stale generation fence")
+	}
 }
 
 // NeedsLock classification, both legs: the socket classifier maps a prefixed
@@ -111,9 +337,11 @@ func TestHARefreshNeedsLockClassifier9629(t *testing.T) {
 		dir := shortSockDir9770(t)
 		m := New()
 		m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
-		fakeSessionSocket9770(t, m.sessionSocketPath(),
+		sockPath := m.sessionSocketPath()
+		fakeSessionSocket9770(t, sockPath,
 			ControlResponse{OK: false, Error: haRefreshNeedsControlPrefix + "transition"}, nil)
-		err := m.requestHAWatchdogSession([]HAGroupStatus{{RGID: 1, Active: true}})
+		err := m.requestHAWatchdogSessionAtPath(
+			[]HAGroupStatus{{RGID: 1, Active: true}}, sockPath)
 		if !errors.Is(err, errHARefreshNeedsControlSocket) {
 			t.Fatalf("prefixed refusal classified as %v, want errHARefreshNeedsControlSocket", err)
 		}
@@ -122,9 +350,11 @@ func TestHARefreshNeedsLockClassifier9629(t *testing.T) {
 		dir := shortSockDir9770(t)
 		m := New()
 		m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
-		fakeSessionSocket9770(t, m.sessionSocketPath(),
+		sockPath := m.sessionSocketPath()
+		fakeSessionSocket9770(t, sockPath,
 			ControlResponse{OK: false, Error: "boom"}, nil)
-		err := m.requestHAWatchdogSession([]HAGroupStatus{{RGID: 1, Active: true}})
+		err := m.requestHAWatchdogSessionAtPath(
+			[]HAGroupStatus{{RGID: 1, Active: true}}, sockPath)
 		if err == nil {
 			t.Fatal("unprefixed helper error returned nil")
 		}
@@ -335,6 +565,139 @@ func TestSessionHAPublishesOneIPCPerTickAcrossRGs9629(t *testing.T) {
 	}
 	if len(sent) != 3 || sent[0].RGID != 1 || sent[1].RGID != 2 || sent[2].RGID != 3 {
 		t.Fatalf("published groups = %+v, want full set [1 2 3] in RGID order", sent)
+	}
+}
+
+// The contended entry point must merge every RG into one immutable full-set
+// payload. Repeated calls for different RGs while m.mu is held must not let a
+// stale per-RG snapshot overwrite a fresher timestamp or reset the scalar
+// backstop deadline.
+func TestSessionHAContendedMergePreservesFullSetAndScalarThrottle9629(t *testing.T) {
+	const baseline uint64 = 100
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: baseline},
+		2: {Active: true, WatchdogTimestamp: baseline},
+		3: {Active: true, WatchdogTimestamp: baseline},
+	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: baseline},
+		{RGID: 2, Active: true, WatchdogTimestamp: baseline},
+		{RGID: 3, Active: true, WatchdogTimestamp: baseline},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	var sent [][]HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append(sent, append([]HAGroupStatus(nil), req.HAState.Groups...))
+		}
+		return nil
+	}
+	for _, rgID := range []int{1, 2, 3} {
+		if err := m.UpdateHAWatchdog(rgID, baseline); err != nil {
+			t.Fatalf("baseline RG%d: %v", rgID, err)
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("baseline session IPCs = %d, want one full-set send", len(sent))
+	}
+	if len(sent[0]) != 3 || sent[0][0].RGID != 1 || sent[0][1].RGID != 2 || sent[0][2].RGID != 3 {
+		t.Fatalf("baseline payload = %+v, want sorted full set [1 2 3]", sent[0])
+	}
+	for _, group := range sent[0] {
+		if group.WatchdogTimestamp != baseline {
+			t.Fatalf("baseline payload = %+v, want timestamp %d for every RG", sent[0], baseline)
+		}
+	}
+
+	for _, rgID := range []int{1, 2, 3} {
+		if err := m.UpdateHAWatchdog(rgID, 101); err != nil {
+			t.Fatalf("sub-backstop RG%d: %v", rgID, err)
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sub-backstop session IPCs = %d, want one", len(sent))
+	}
+	if err := m.UpdateHAWatchdog(2, 103); err != nil {
+		t.Fatalf("backstop RG2: %v", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("backstop session IPCs = %d, want two", len(sent))
+	}
+	if got := sent[1]; len(got) != 3 || got[0].WatchdogTimestamp != 101 ||
+		got[1].WatchdogTimestamp != 103 || got[2].WatchdogTimestamp != 101 {
+		t.Fatalf("backstop payload = %+v, want merged timestamps [101 103 101]", got)
+	}
+
+	// An acknowledged ownership change bypasses the scalar timer immediately.
+	m.haWatchdogHelperInventory[0].Active = false
+	m.publishHAWatchdogSnapshotLocked()
+	if err := m.UpdateHAWatchdog(1, 104); err != nil {
+		t.Fatalf("active transition RG1: %v", err)
+	}
+	if len(sent) != 3 || sent[2][0].Active {
+		t.Fatalf("active transition sends = %+v, want immediate RG1 demotion", sent)
+	}
+	if sent[2][0].WatchdogTimestamp < sent[1][0].WatchdogTimestamp {
+		t.Fatalf("RG1 timestamp regressed from %d to %d", sent[1][0].WatchdogTimestamp, sent[2][0].WatchdogTimestamp)
+	}
+}
+
+// A config apply reseeds m.haGroups to the configured RGs before replaying the
+// helper's fixed 16-entry inventory. The actual entry point must keep sending
+// all acknowledged helper entries while m.mu is held, or Rust rejects the
+// refresh as a membership change and the lease eventually starves.
+func TestSessionHAContendedRefreshRetainsSixteenEntryHelperInventoryAfterReseed9629(t *testing.T) {
+	helperGroups := make([]HAGroupStatus, 0, 16)
+	initial := make(map[int]HAGroupStatus, 16)
+	for rgID := range 16 {
+		group := HAGroupStatus{RGID: rgID, Active: rgID == 0}
+		initial[rgID] = group
+		helperGroups = append(helperGroups, group)
+	}
+	m := sessionTestManager9629(t, initial)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = append([]HAGroupStatus(nil), helperGroups...)
+	m.publishHAWatchdogSnapshotLocked()
+
+	cfg := &config.Config{
+		Chassis: config.ChassisConfig{
+			Cluster: &config.ClusterConfig{
+				RedundancyGroups: []*config.RedundancyGroup{{ID: 1}},
+			},
+		},
+	}
+	m.seedHAGroupInventoryLocked(cfg)
+	m.publishHAWatchdogSnapshotLocked()
+
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+		}
+		return nil
+	}
+	if err := m.UpdateHAWatchdog(1, 100); err != nil {
+		t.Fatalf("reseeded contended refresh: %v", err)
+	}
+	if len(sent) != 16 {
+		t.Fatalf("reseeded payload has %d groups, want all 16 acknowledged entries: %+v", len(sent), sent)
+	}
+	for i, group := range sent {
+		if group.RGID != i {
+			t.Fatalf("reseeded payload order/group[%d] = %+v, want RGID %d", i, group, i)
+		}
+	}
+	if sent[1].WatchdogTimestamp != 100 {
+		t.Fatalf("RG1 watchdog timestamp = %d, want 100", sent[1].WatchdogTimestamp)
 	}
 }
 

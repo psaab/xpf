@@ -195,9 +195,9 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	// requestSessionSyncLocked — the dedicated SESSION socket, not this one.
 	//                            Flat sessionSyncRoundtripDeadline (3s), already
 	//                            inside the stop budget by construction.
-	// requestHAWatchdogSessionLocked — same session socket + flat 3s deadline
-	//                            as its sync sibling, and it never takes m.mu
-	//                            (proven by
+	// requestHAWatchdogSessionLockedAtPath — same session socket + flat 3s
+	//                            deadline as its sync sibling, and it never
+	//                            takes m.mu (proven by
 	//                            TestRequestHAWatchdogSessionNeverTakesManagerMu9629),
 	//                            so there is no lock hold for the stop bound
 	//                            to cap. SessionMu-only by construction.
@@ -205,11 +205,11 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	//                            Manager and holds no lock; its deadline is the
 	//                            caller's own timeout argument.
 	want := map[string]bool{
-		"armControlIO":                   true,
-		"cutInFlightControlIOLocked":     true,
-		"requestSessionSyncLocked":       true,
-		"requestHAWatchdogSessionLocked": true,
-		"ProbeStatus":                    true,
+		"armControlIO":                         true,
+		"cutInFlightControlIOLocked":           true,
+		"requestSessionSyncLocked":             true,
+		"requestHAWatchdogSessionLockedAtPath": true,
+		"ProbeStatus":                          true,
 	}
 
 	facts := analyzeControlCalls8526(t, ".")

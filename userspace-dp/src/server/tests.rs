@@ -445,16 +445,18 @@ fn update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629() {
 
     let (holding_tx, holding_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let (released_tx, released_rx) = mpsc::channel();
+    let (sample_tx, sample_rx) = mpsc::channel();
     let holder_state = state.clone();
     let holder = std::thread::spawn(move || {
         let _guard = holder_state.lock().expect("state lock");
+        let deadline = Instant::now() + Duration::from_millis(HOLD_MS);
         holding_tx.send(()).expect("signal holding");
-        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
-        // Hold witness (verdict item 6): the sampler below asserts this signal
-        // has NOT arrived, proving the sample landed inside the hold even if
-        // the scheduler slips either sleep.
-        released_tx.send(()).expect("signal released");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sample_rx
+            .recv_timeout(remaining)
+            .expect("sampler never established the in-hold observation");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = release_rx.recv_timeout(remaining);
     });
     holding_rx
         .recv_timeout(Duration::from_secs(5))
@@ -492,18 +494,17 @@ fn update_ha_state_lease_stays_active_while_the_state_lock_is_held_9629() {
     // Sample AFTER the seed expired but BEFORE the hold releases, through the
     // lock-free handle — no mutex, exactly as the per-packet path observes it.
     std::thread::sleep(Duration::from_millis(SAMPLE_AT_MS));
-    // Hold witness: fail LOUDLY (not as a lease FAIL) if scheduler slip moved
-    // the sample outside the hold — without this the timing margins below
-    // would be asserted on faith.
-    assert!(
-        released_rx.try_recv().is_err(),
-        "sample slipped past the mutex release (11.5s sleep outlasted the 12s hold?) — test timing broken, not the lease"
-    );
+    // The holder cannot begin its release wait until this rendezvous arrives,
+    // so the sample below and the gate together prove the mutex was held
+    // through the observation rather than merely checking a prior signal.
     let mid_hold = session_domain.ha_group_status(RG);
     let mid_hold_active = mid_hold
         .as_ref()
         .map(|status| status.forwarding_active)
         .unwrap_or(false);
+    sample_tx
+        .send(())
+        .expect("signal that the in-hold sample was taken");
 
     let (resp, elapsed) = resp_rx
         .recv_timeout(Duration::from_secs(20))
@@ -567,16 +568,18 @@ fn update_ha_state_fast_proxy_9629() {
 
     let (holding_tx, holding_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let (released_tx, released_rx) = mpsc::channel();
+    let (sample_tx, sample_rx) = mpsc::channel();
     let holder_state = state.clone();
     let holder = std::thread::spawn(move || {
         let _guard = holder_state.lock().expect("state lock");
+        let deadline = Instant::now() + Duration::from_millis(HOLD_MS);
         holding_tx.send(()).expect("signal holding");
-        let _ = release_rx.recv_timeout(Duration::from_millis(HOLD_MS));
-        // Hold witness (verdict item 6): the sampler below asserts this signal
-        // has NOT arrived, proving the sample landed inside the hold even if
-        // the scheduler slips either sleep.
-        released_tx.send(()).expect("signal released");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sample_rx
+            .recv_timeout(remaining)
+            .expect("sampler never established the in-hold observation");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = release_rx.recv_timeout(remaining);
     });
     holding_rx
         .recv_timeout(Duration::from_secs(5))
@@ -610,18 +613,17 @@ fn update_ha_state_fast_proxy_9629() {
     // Sample AFTER the seed expired but BEFORE the hold releases, through the
     // lock-free handle — no mutex, exactly as the per-packet path observes it.
     std::thread::sleep(Duration::from_millis(SAMPLE_AT_MS));
-    // Hold witness: fail LOUDLY (not as a lease FAIL) if scheduler slip moved
-    // the sample outside the hold — without this the timing margins below
-    // would be asserted on faith.
-    assert!(
-        released_rx.try_recv().is_err(),
-        "sample slipped past the mutex release (3s sleep outlasted the 4s hold?) — test timing broken, not the lease"
-    );
+    // The holder cannot begin its release wait until this rendezvous arrives,
+    // so the sample below and the gate together prove the mutex was held
+    // through the observation rather than merely checking a prior signal.
     let mid_hold = session_domain.ha_group_status(RG);
     let mid_hold_active = mid_hold
         .as_ref()
         .map(|status| status.forwarding_active)
         .unwrap_or(false);
+    sample_tx
+        .send(())
+        .expect("signal that the in-hold sample was taken");
 
     let (resp, elapsed) = resp_rx
         .recv_timeout(Duration::from_secs(10))
@@ -687,7 +689,8 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
     let _guard = held.lock().expect("ha mutex");
     let (tx, rx) = mpsc::channel();
     let (attempt_tx, attempt_rx) = mpsc::channel();
-    domain.set_ha_refresh_attempt_sender_for_test(attempt_tx);
+    let (proceed_tx, proceed_rx) = mpsc::channel();
+    domain.set_ha_refresh_rendezvous_for_test(attempt_tx, proceed_rx);
     let worker = std::thread::spawn(move || {
         let outcome = domain.try_refresh_ha_leases(&[HAGroupStatus {
             rg_id: 1,
@@ -697,12 +700,16 @@ fn ha_fast_path_waits_on_ha_mutex_then_serves_9629() {
         }]);
         tx.send(outcome).expect("send outcome");
     });
-    // The test-only rendezvous fires immediately before the production call
-    // attempts `ha_mutex`, so the following absence proves lock contention,
-    // not merely a delayed thread spawn.
+    // The attempt signal is followed by a test-controlled proceed gate. The
+    // worker cannot reach the lock statement until this test has established
+    // that the guard is held, removing the notification-before-acquisition
+    // scheduling ambiguity.
     attempt_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("worker never reached the HA mutex attempt");
+        .expect("worker never reached the HA mutex rendezvous");
+    proceed_tx
+        .send(())
+        .expect("allow worker to attempt the held HA mutex");
     // While held, the refresh cannot complete (it needs the mutex).
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
@@ -1000,7 +1007,7 @@ fn update_ha_state_session_membership_diff_needs_lock_while_held_9629() {
 /// watchdog snapshot can never populate or repopulate helper inventory.
 #[test]
 fn update_ha_state_session_refuses_inventory_creation_9629() {
-    // All-inactive on empty stored: Served.
+    // All-inactive on empty stored: NeedsLock.
     let state = new_state(ProcessStatus::default());
     let domain = state.lock().expect("state").afxdp.session_domain().clone();
     let mut request = req("update_ha_state");

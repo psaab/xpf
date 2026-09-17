@@ -215,10 +215,11 @@ func TestSessionHANamesTheResponseCap9629(t *testing.T) {
 		dir := shortSockDir9322(t)
 		ctrl := filepath.Join(dir, "control.sock")
 		m := managerOnSocket9322(t, ctrl)
-		startFakeHelper9322(t, m.sessionSocketPath(), reply)
+		sockPath := m.sessionSocketPath()
+		startFakeHelper9322(t, sockPath, reply)
 		m.sessionMu.Lock()
 		defer m.sessionMu.Unlock()
-		return m.requestHAWatchdogSessionLocked([]HAGroupStatus{{RGID: 1, Active: true}})
+		return m.requestHAWatchdogSessionLockedAtPath([]HAGroupStatus{{RGID: 1, Active: true}}, sockPath)
 	}
 	oversize := func(t *testing.T) error { return run(t, oversizeReply9322) }
 	control := func(t *testing.T) error { return run(t, preReplyClose9322) }

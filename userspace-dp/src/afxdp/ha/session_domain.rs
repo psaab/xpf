@@ -101,6 +101,11 @@ pub(crate) struct SessionDomain {
     /// #9629 test-only rendezvous sender, absent from release builds.
     #[cfg(test)]
     pub(in crate::afxdp) ha_refresh_attempt: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+    /// #9629 test-only proceed gate paired with `ha_refresh_attempt`. It
+    /// prevents the test worker from reaching the lock statement until the
+    /// caller has established that the mutex is held.
+    #[cfg(test)]
+    pub(in crate::afxdp) ha_refresh_proceed: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 impl SessionDomain {
     /// #9629 test-only rendezvous: notify immediately before the fast path
@@ -115,6 +120,22 @@ impl SessionDomain {
             .ha_refresh_attempt
             .lock()
             .expect("HA refresh test hook lock") = Some(sender);
+    }
+
+    /// #9629 test-only rendezvous that gates the lock attempt after the
+    /// pre-lock notification. The gate makes the held-mutex witness
+    /// schedule-deterministic instead of relying on notification timing.
+    #[cfg(test)]
+    pub(crate) fn set_ha_refresh_rendezvous_for_test(
+        &self,
+        sender: std::sync::mpsc::Sender<()>,
+        proceed: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.set_ha_refresh_attempt_sender_for_test(sender);
+        *self
+            .ha_refresh_proceed
+            .lock()
+            .expect("HA refresh proceed hook lock") = Some(proceed);
     }
     /// Build a handle from the coordinator's own shared parts.
     ///
@@ -143,6 +164,8 @@ impl SessionDomain {
             synced_import_cap_override: Arc::clone(synced_import_cap_override),
             #[cfg(test)]
             ha_refresh_attempt: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            ha_refresh_proceed: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -267,6 +290,16 @@ impl SessionDomain {
             if let Some(sender) = attempt {
                 sender.send(()).expect("signal HA refresh mutex attempt");
             }
+            let proceed = self
+                .ha_refresh_proceed
+                .lock()
+                .expect("HA refresh proceed hook lock")
+                .take();
+            if let Some(receiver) = proceed {
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("proceed HA refresh mutex attempt");
+            }
         }
         // Lock FIRST, before the load — a transition landing between a pre-lock
         // decision and the store would recreate the stale-overwrite race this
@@ -335,13 +368,13 @@ impl SessionDomain {
                 // elsewhere, and minting on a dead lease would re-arm
                 // forwarding for an owner the control plane already dropped.
                 //
-                // Dual-active bound (≈12s): each mint extends stored ownership
-                // by ≤11s wall; the old owner keeps forwarding only while its
-                // own lease stays valid via ticks, and a landed main demotion
-                // flips stored immediately. Persistent dual-active needs
-                // persistent main-path failure, bounded separately by the
-                // UpdateRGActive + 2s-reconcile retry and the 30-poll
-                // helper-wedge recovery — not by this path.
+                // Each receipt extends stored ownership by at most 11s wall
+                // (the ~12s dual-active bound for one receipt). A continuously
+                // renewed stale ownership can remain active until authoritative
+                // demotion or bounded recovery finally lands; this path does
+                // not promise an absolute wall-clock cap across such renewals.
+                // The expired-stored-active check above is unconditional:
+                // expired ownership is never resurrected.
                 if stored_runtime.is_forwarding_active(now_secs) {
                     state.insert(
                         *rg_id,
