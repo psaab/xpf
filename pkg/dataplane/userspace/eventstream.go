@@ -44,6 +44,11 @@ type pendingCallbackFrame struct {
 	// IN ORDER (#6558). See markDroppedFrameApplied for why a refused frame
 	// has to enter the queue at all.
 	dropped bool
+
+	// resyncCoalesced marks a FullResync barrier whose export work is covered by
+	// the preceding in-flight barrier. The marker remains in the FIFO so its
+	// sequence can be acknowledged only after all earlier frames have applied.
+	resyncCoalesced bool
 }
 
 // EventStream manages the daemon-side event socket for receiving session events
@@ -110,6 +115,34 @@ type EventStream struct {
 	pendingFlushMu        sync.Mutex
 	pendingMu             sync.Mutex
 	pendingCallbackFrames []pendingCallbackFrame
+
+	// #9630: single coalescing FullResync worker. The callback performs a
+	// complete owner-RG export through many bounded helper passes (1024-slot
+	// scans, 256-emission caps, and 500us slices); it must not run inline on
+	// the reader goroutine:
+	// while it runs no frame is read, the helper's write backlog fills, and
+	// the reconnect replays past the 4096-frame window, requesting the next
+	// FullResync. The worker runs the export off-reader; the reader keeps
+	// reading bytes and queues followers behind the barrier. The barrier's
+	// markFrameApplied (and therefore the cumulative ACK) happens only when
+	// the export reports success, preserving #9767 fail-closed semantics.
+	// A second barrier arriving while one runs coalesces (updates no sequence
+	// watermark); its own queue marker is retained and is retired in FIFO order
+	// after the one export completes. resyncGen invalidates a worker whose
+	// callback was swapped (SetOnFullResync), whose queue was discarded
+	// (clearPendingCallbackFrames on reconnect), or whose stream closed: its
+	// completion is ignored and the still-queued barrier retries with the new
+	// generation. Lock order: pendingFlushMu -> resyncMu -> pendingMu
+	// (worker completion never holds resyncMu while acquiring pendingFlushMu).
+	resyncMu        sync.Mutex
+	resyncInFlight  bool
+	resyncWorkerGen uint64
+	resyncGen       uint64
+	resyncClosed    bool
+	// resyncWorkerClosed records that Close invalidated the currently running
+	// generation. It remains set across a restart until a new worker launches,
+	// so an old completion can never flush stale work onto the new listener.
+	resyncWorkerClosed bool
 
 	// DrainComplete signaling for demotion prep.
 	drainCompleteMu sync.Mutex
@@ -197,9 +230,20 @@ func (es *EventStream) SetOnRawDataplaneEvent(fn func(seq uint64, payload []byte
 
 // SetOnFullResync sets the callback for full resync requests. The callback
 // returns true only after the resync request has been acted on.
+//
+// #9630: callback replacement is a generation boundary. An export already
+// running against the old callback may finish, but it must not retire a
+// barrier queued for the new callback or advance its ACK watermark.
 func (es *EventStream) SetOnFullResync(fn func() bool) {
 	es.callbackMu.Lock()
+	// Publish the callback and generation under both locks. A worker start
+	// cannot capture the replacement until its generation is visible, and an
+	// old completion cannot observe the replacement without also seeing the
+	// generation boundary.
+	es.resyncMu.Lock()
 	es.onFullResync = fn
+	es.resyncGen++
+	es.resyncMu.Unlock()
 	es.callbackMu.Unlock()
 	es.flushPendingCallbackFrames()
 }
@@ -265,6 +309,9 @@ func (es *EventStream) Start(ctx context.Context) error {
 	es.listener = ln
 	es.socketLock = lockFile
 	es.ownsSocket = true
+	es.resyncMu.Lock()
+	es.resyncClosed = false
+	es.resyncMu.Unlock()
 	releaseLock = false
 	es.listening.Store(true)
 	slog.Info("event stream: listening", "path", es.socketPath)
@@ -309,6 +356,16 @@ func (es *EventStream) ListenerBound() bool {
 func (es *EventStream) Close() {
 	es.lifecycleMu.Lock()
 	es.listening.Store(false)
+	// Do not join an in-flight owner-RG export: it may be waiting on the
+	// daemon's Manager/session-sync locks. Invalidate its completion instead,
+	// so it cannot acknowledge a frame after the stream has closed (#9630).
+	es.resyncMu.Lock()
+	es.resyncClosed = true
+	if es.resyncInFlight {
+		es.resyncWorkerClosed = true
+	}
+	es.resyncGen++
+	es.resyncMu.Unlock()
 	if es.listener != nil {
 		_ = es.listener.Close()
 		es.listener = nil
@@ -666,14 +723,13 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			}
 			// #5362: the FullResync(S) barrier re-baselines the sequence — the
 			// producer emits it in wire==seq order (#5361) and the next live
-			// delta is S+1. Advance prevSeq (and the persistent watermark) so
-			// that S+1 is contiguous and does NOT trip the session-sync gap
-			// check (seq > prevSeq+1), which would otherwise force one spurious
-			// reconnect on the active-traffic recovery path. This mirrors the
-			// delta cases' prevSeq/lastRecvSeq advance; markFrameApplied already
-			// ran inside dispatchOrQueueFullResyncFrame. Only the successful-
-			// dispatch path advances here — the drop paths use
-			// markDroppedFrameApplied, which advances prevSeq itself.
+			// delta is S+1. Advance prevSeq (and the receive watermark) so that
+			// S+1 is contiguous and does NOT trip the session-sync gap check.
+			// The worker advances lastAppliedSeq only after the export succeeds;
+			// this keeps the cumulative ACK behind the pending barrier while
+			// followers are read and queued. Only the successful-dispatch path
+			// advances prevSeq; the drop paths use markDroppedFrameApplied,
+			// which advances prevSeq itself.
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 
@@ -1174,27 +1230,135 @@ func (es *EventStream) dispatchOrQueueSessionFrame(typ uint8, seq uint64, delta 
 }
 
 func (es *EventStream) dispatchOrQueueFullResyncFrame(seq uint64) bool {
+	if !es.enqueueFullResyncFrame(seq) {
+		return false
+	}
+	// #9630: never call the potentially minutes-long paged export on this
+	// reader goroutine. flushPendingCallbackFrames starts one coalescing worker
+	// and leaves this barrier at the FIFO head until that worker completes.
+	es.flushPendingCallbackFrames()
+	return true
+}
+
+// enqueueFullResyncFrame appends a FullResync marker without invoking its
+// callback. A marker arriving while another marker is pending or its export is
+// running shares that export, but remains in the FIFO so no cumulative ACK can
+// jump over session frames between the two barriers.
+func (es *EventStream) enqueueFullResyncFrame(seq uint64) bool {
+	es.resyncMu.Lock()
+	coalesced := es.resyncInFlight
+	es.pendingMu.Lock()
+	if !coalesced {
+		for _, pending := range es.pendingCallbackFrames {
+			if pending.typ == EventTypeFullResync {
+				coalesced = true
+				break
+			}
+		}
+	}
+	if len(es.pendingCallbackFrames) >= pendingCallbackFramesLimit {
+		es.pendingMu.Unlock()
+		es.resyncMu.Unlock()
+		slog.Error("event stream: pending callback queue full; closing helper stream to force replay",
+			"limit", pendingCallbackFramesLimit, "type", EventTypeFullResync, "seq", seq)
+		return false
+	}
+	es.pendingCallbackFrames = append(es.pendingCallbackFrames, pendingCallbackFrame{
+		typ:             EventTypeFullResync,
+		seq:             seq,
+		resyncCoalesced: coalesced,
+	})
+	es.pendingMu.Unlock()
+	es.resyncMu.Unlock()
+	return true
+}
+
+// startFullResyncWorker starts one callback for the FullResync barrier at the
+// pending FIFO head. It deliberately has no synthetic-trigger mode: gap and
+// decode recovery retain their established inline watermark semantics, while
+// the wire FullResync path is the one whose bulk export can starve this reader.
+func (es *EventStream) startFullResyncWorker(seq uint64) bool {
 	es.callbackMu.RLock()
 	onFullResync := es.onFullResync
+	es.resyncMu.Lock()
+	if onFullResync == nil || es.resyncInFlight || es.resyncClosed {
+		es.resyncMu.Unlock()
+		es.callbackMu.RUnlock()
+		return false
+	}
+	es.resyncWorkerClosed = false
+	gen := es.resyncGen
+	es.resyncInFlight = true
+	es.resyncWorkerGen = gen
+	es.resyncMu.Unlock()
 	es.callbackMu.RUnlock()
-	if onFullResync == nil || es.hasPendingCallbackFrames() {
-		if !es.enqueuePendingCallbackFrame(pendingCallbackFrame{
-			typ: EventTypeFullResync,
-			seq: seq,
-		}) {
-			return false
-		}
-		es.flushPendingCallbackFrames()
-		return true
-	}
-	if !onFullResync() {
-		return es.enqueuePendingCallbackFrame(pendingCallbackFrame{
-			typ: EventTypeFullResync,
-			seq: seq,
-		})
-	}
-	es.markFrameApplied(seq)
+	go es.runFullResyncWorker(onFullResync, gen, seq)
 	return true
+}
+
+func (es *EventStream) runFullResyncWorker(
+	onFullResync func() bool,
+	gen, seq uint64,
+) {
+	ok := onFullResync()
+	es.completeFullResyncWorker(ok, gen, seq)
+}
+
+// completeFullResyncWorker retires only the worker's own generation. A stale
+// completion (callback replacement, reconnect, or Close) cannot acknowledge a
+// barrier belonging to a newer connection/callback. Successful barriers are
+// removed and marked applied before followers are flushed, preserving FIFO ACK
+// ordering.
+func (es *EventStream) completeFullResyncWorker(
+	ok bool,
+	gen, seq uint64,
+) {
+	es.pendingFlushMu.Lock()
+	es.resyncMu.Lock()
+	if !es.resyncInFlight || es.resyncWorkerGen != gen {
+		es.resyncMu.Unlock()
+		es.pendingFlushMu.Unlock()
+		return
+	}
+	stale := es.resyncGen != gen
+	workerClosed := es.resyncWorkerClosed
+	es.resyncInFlight = false
+	if stale || !ok {
+		es.pendingMu.Lock()
+		for i := range es.pendingCallbackFrames {
+			if es.pendingCallbackFrames[i].typ == EventTypeFullResync &&
+				es.pendingCallbackFrames[i].resyncCoalesced {
+				es.pendingCallbackFrames[i].resyncCoalesced = false
+			}
+		}
+		es.pendingMu.Unlock()
+		es.resyncMu.Unlock()
+		es.pendingFlushMu.Unlock()
+		if stale && !workerClosed {
+			es.flushPendingCallbackFrames()
+		}
+		return
+	}
+	removed := false
+	es.pendingMu.Lock()
+	if len(es.pendingCallbackFrames) > 0 {
+		head := &es.pendingCallbackFrames[0]
+		if head.typ == EventTypeFullResync && !head.resyncCoalesced && head.seq == seq {
+			copy(es.pendingCallbackFrames, es.pendingCallbackFrames[1:])
+			es.pendingCallbackFrames = es.pendingCallbackFrames[:len(es.pendingCallbackFrames)-1]
+			removed = true
+		}
+	}
+	es.pendingMu.Unlock()
+	if removed {
+		// The callback's true result is the admission gate for the
+		// cumulative ACK (#9767). Followers remain queued until this
+		// monotonic advance is visible.
+		es.markFrameApplied(seq)
+	}
+	es.resyncMu.Unlock()
+	es.pendingFlushMu.Unlock()
+	es.flushPendingCallbackFrames()
 }
 
 func (es *EventStream) dispatchOrQueueDataplaneFrame(
@@ -1248,6 +1412,13 @@ func (es *EventStream) enqueuePendingCallbackFrame(frame pendingCallbackFrame) b
 func (es *EventStream) clearPendingCallbackFrames() {
 	es.pendingFlushMu.Lock()
 	defer es.pendingFlushMu.Unlock()
+	// A reconnect invalidates a callback worker from the prior connection.
+	// Keep the worker detached (Close/reconnect must not join a bulk export);
+	// its completion observes this generation and cannot advance the new
+	// connection's ACK watermark.
+	es.resyncMu.Lock()
+	es.resyncGen++
+	es.resyncMu.Unlock()
 	es.pendingMu.Lock()
 	es.pendingCallbackFrames = nil
 	es.pendingMu.Unlock()
@@ -1293,15 +1464,35 @@ func (es *EventStream) flushPendingCallbackFrames() {
 				return
 			}
 		case EventTypeFullResync:
-			es.callbackMu.RLock()
-			onFullResync := es.onFullResync
-			es.callbackMu.RUnlock()
-			if onFullResync == nil {
+			if frame.resyncCoalesced {
+				// The preceding export owns the callback. Its completion will
+				// re-enter this flush; never retire this marker while that
+				// export is still running.
+				es.resyncMu.Lock()
+				running := es.resyncInFlight
+				es.resyncMu.Unlock()
+				if running {
+					return
+				}
+				es.markFrameApplied(frame.seq)
+				es.pendingMu.Lock()
+				if len(es.pendingCallbackFrames) > 0 &&
+					es.pendingCallbackFrames[0].typ == EventTypeFullResync &&
+					es.pendingCallbackFrames[0].seq == frame.seq &&
+					es.pendingCallbackFrames[0].resyncCoalesced {
+					copy(es.pendingCallbackFrames, es.pendingCallbackFrames[1:])
+					es.pendingCallbackFrames = es.pendingCallbackFrames[:len(es.pendingCallbackFrames)-1]
+				}
+				es.pendingMu.Unlock()
+				continue
+			}
+			// #9630: start the potentially long paged export away from the
+			// reader. The barrier stays at the FIFO head and therefore keeps
+			// the ACK watermark honest while followers are read and queued.
+			if !es.startFullResyncWorker(frame.seq) {
 				return
 			}
-			if !onFullResync() {
-				return
-			}
+			return
 		case EventFrameTypePolicyDeny, EventFrameTypeScreenDrop, EventFrameTypeFilterLog,
 			EventFrameTypeSessionClose, EventFrameTypeSessionCreate:
 			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()

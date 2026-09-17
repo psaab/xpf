@@ -1602,9 +1602,9 @@ pub(crate) fn worker_loop(
         // here, coordinator BUSY); an in-progress window resumes. Every active
         // pass drains first so the ring starts empty, then runs ONE budgeted
         // slice: direct conversion into the worker's export buffer (the
-        // control leg) + paced ring+flush echo (today's exact echo
-        // bytes/RTFLOW/fallback, preserved until #9630 keys suppression on
-        // CommandExport provenance). Backpressure (Full), emit cap, slice
+        // control leg) + paced ring+flush echo (binding/recent consumers still
+        // run; the event-stream HA/RT_FLOW echo is suppressed for CommandExport
+        // provenance per #9630). Backpressure (Full), emit cap, slice
         // budget, or deadline pauses WITHOUT advancing past the failed slot;
         // completion acks and clears.
         if !exported_sequences.is_empty() || worker_export.is_some() {
@@ -1714,9 +1714,9 @@ pub(crate) fn worker_loop(
                 } else {
                     ResumeAt(state.cursor)
                 };
-                // Echo leg: the SAME visited opens through today's ring+flush
-                // path (bytes/RTFLOW/fallback identical) — #9630 owns
-                // suppression, keyed on CommandExport provenance.
+                // Echo leg: the SAME visited opens through the ring+flush path
+                // (binding/recent consumers identical); the event-stream echo
+                // is suppressed for CommandExport provenance (#9630).
                 for (key, decision, metadata, origin) in export_echo_scratch.drain(..) {
                     sessions.emit_open_delta_with_provenance(
                         key,

@@ -3005,8 +3005,8 @@ fn owner_rg_export_direct_matches_ring_bytes_9856() {
 }
 
 /// #9856 M2c: the echo leg still emits every visited open through the
-/// ring+flush path (today's exact echo bytes) — #9630 owns suppression,
-/// and until then the export must not starve the echo. Small n (under
+/// ring+flush path (today's exact echo bytes) to binding and recent consumers;
+/// #9630 suppresses only its CommandExport event-stream echo. Small n (under
 /// every cap: 8 < 64 recent, 8 < 4096 live) so both counts are exact.
 #[test]
 fn owner_rg_export_echo_still_emits_every_visit_9856() {
@@ -6959,6 +6959,155 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
             .iter()
             .any(|info| info.event == "open"),
         "open delta must still reach the recent-deltas buffer"
+    );
+}
+
+/// #9630 FAIL-ON-REVERT: a CommandExport already delivered the complete
+/// paged control response, so its event-stream echo must not be sent again.
+/// Incremental and LossResync deltas retain their event-stream deliveries.
+///
+/// Reverting the provenance guard makes the CommandExport case enqueue an HA
+/// session-sync frame. The LossResync case proves the full branch, including
+/// its RT_FLOW session-create frame, remains active.
+#[test]
+fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
+    let key = test_key();
+    let decision = test_decision();
+    let metadata = test_metadata();
+    let make_delta = |provenance, log_session_init| {
+        let mut metadata = metadata.clone();
+        metadata.log_session_init = log_session_init;
+        SessionDelta {
+            kind: SessionDeltaKind::Open,
+            key: key.clone(),
+            decision,
+            metadata,
+            origin: SessionOrigin::ForwardFlow,
+            fabric_redirect_sync: false,
+            provenance,
+            created_ns: 0,
+            last_seen_ns: 0,
+            counters: crate::session::SessionCounters::default(),
+            observed_tos: 0,
+            observed_tcp_flags: 0,
+            session_id: 0,
+            bulk_resync: false,
+            tcp_close_class: 0,
+            purge_retirement: false,
+        }
+    };
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let forwarding = ForwardingState::default();
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from(""),
+        ifindex: -1,
+    };
+    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
+    let mut worker_lossless_wedged = false;
+
+    let (command_handle, command_rx) = crate::event_stream::test_worker_handle_connected(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let command_event_stream = Some(command_handle);
+    let command_export = make_delta(crate::session::ExportProvenance::CommandExport(7), true);
+    assert!(
+        !flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &dnat_fds,
+            &[command_export],
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &command_event_stream,
+            &forwarding,
+            &__r3_reader,
+            &mut worker_lossless_wedged,
+        ),
+        "CommandExport echo must not arm loss-of-sync",
+    );
+    assert!(
+        std::iter::from_fn(|| command_rx.try_recv().ok())
+            .next()
+            .is_none(),
+        "CommandExport must not re-announce an event-stream frame",
+    );
+
+    let (loss_handle, loss_rx) = crate::event_stream::test_worker_handle_connected(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let loss_event_stream = Some(loss_handle);
+    let loss_resync = make_delta(crate::session::ExportProvenance::LossResync, true);
+    assert!(
+        !flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &dnat_fds,
+            &[loss_resync],
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &loss_event_stream,
+            &forwarding,
+            &__r3_reader,
+            &mut worker_lossless_wedged,
+        ),
+        "LossResync event-stream delivery must remain lossless",
+    );
+    let loss_frames: Vec<_> = std::iter::from_fn(|| loss_rx.try_recv().ok()).collect();
+    assert_eq!(
+        loss_frames.len(),
+        2,
+        "LossResync open must emit HA and RT_FLOW frames",
+    );
+    assert_eq!(
+        loss_frames
+            .iter()
+            .filter(|frame| frame.dataplane_event_payload().is_some())
+            .count(),
+        1,
+        "LossResync open must retain its RT_FLOW frame",
+    );
+    assert_eq!(
+        loss_frames
+            .iter()
+            .filter(|frame| frame.dataplane_event_payload().is_none())
+            .count(),
+        1,
+        "LossResync open must retain its HA session-sync frame",
     );
 }
 

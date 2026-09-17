@@ -371,9 +371,9 @@ pub(in crate::afxdp) fn session_delta_info(
 /// Converts the SAME Open delta `open_export_delta` builds to
 /// `SessionDeltaInfo` WITHOUT pushing ring/flush/echo itself (no
 /// `push_delta`, no binding buffer). The worker loop runs paced ring+flush
-/// echo slices ALONGSIDE (today's exact echo bytes/RTFLOW/fallback
-/// preserved) until #9630 keys suppression on `CommandExport` provenance
-/// after fail-closed v2. Byte-equivalence with the ring leg holds by
+/// echo slices ALONGSIDE for binding/recent consumers; the event-stream
+/// HA/RT_FLOW branch is suppressed for `CommandExport` provenance (#9630).
+/// Byte-equivalence with the ring leg holds by
 /// construction (one delta builder + one converter). Returns None for
 /// reverse entries.
 pub(in crate::afxdp) fn export_open_direct(
@@ -564,6 +564,16 @@ pub(super) fn flush_session_deltas(
             }
         }
         // Push to event stream (new path) alongside existing RPC fallback.
+        // #9630: CommandExport has a complete, paged control response
+        // (including its fail-closed token/drop accounting). Re-announcing
+        // the same deltas on the event stream duplicates the completed
+        // control result and can force a replay-gap FullResync cascade.
+        // Keep Incremental and LossResync provenance on the full event-stream
+        // path; only explicit CommandExport origin is suppressed.
+        if !matches!(
+            delta.provenance,
+            crate::session::ExportProvenance::CommandExport(_)
+        ) {
         if let Some(es) = event_stream {
             // #2874: route the correctness-critical HA session open/close delta
             // through the LOSSLESS producer instead of the lossy `push_delta`.
@@ -683,6 +693,7 @@ pub(super) fn flush_session_deltas(
                 );
                 es.emit_session_create_rt_flow(delta, app_id, ident.ifindex as u32);
             }
+        }
         }
         if let Ok(mut recent) = recent_session_deltas.lock() {
             push_recent_session_delta(&mut recent, info);
