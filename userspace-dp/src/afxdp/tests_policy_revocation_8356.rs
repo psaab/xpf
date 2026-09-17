@@ -48,6 +48,7 @@ use crate::tcp_flags::TCP_ACK;
 
 const LAN_IFINDEX: i32 = 24;
 const WAN_IFINDEX: i32 = 12;
+const DMZ_IFINDEX: i32 = 26;
 /// A MAC-less egress: routable, but absent from the unambiguous zone ledger.
 const MACLESS_IFINDEX: i32 = 77;
 const SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
@@ -729,6 +730,185 @@ fn the_type_constrained_predicate_is_per_protocol_8618() {
     assert!(
         !forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_TCP),
         "a non-ICMP protocol can never be type-dependent"
+    );
+}
+
+/// #9949: A type-constrained PERMIT and DENY for the same owner zone pair
+/// share the typeless ICMP session key by construction. The real poll path must
+/// ask policy for the packet's type on an OWNER hit: type 8 keeps forwarding,
+/// type 13 is dropped and counted, and the established session survives.
+///
+/// This is deliberately a live-session cell, not a direct helper test. The
+/// session is installed before the packets arrive, so a reverted Owner arm
+/// (which returns the cached decision without policy) makes the type-13
+/// assertion RED by forwarding it.
+fn icmp_type_rule_9949(name: &str, action: &str, icmp_type: u8) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: name.into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec![name.into()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: name.into(),
+            protocol: "icmp".into(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: Some(icmp_type),
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: action.into(),
+        ..Default::default()
+    }
+}
+
+fn forwarding_with_icmp_type_split_9949() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ_IFINDEX,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+    });
+    snapshot
+        .policies
+        .push(icmp_type_rule_9949("echo-permit", "permit", 8));
+    snapshot
+        .policies
+        .push(icmp_type_rule_9949("timestamp-deny", "deny", 13));
+    build_forwarding_state(&snapshot)
+}
+
+fn icmp_frame_type_9949(icmp_type: u8) -> Vec<u8> {
+    let mut frame = build_icmp_echo_frame_v4(SRC, DST, 64);
+    frame[34] = icmp_type;
+    // Keep the repro wire-valid when changing the type byte.
+    frame[36..38].copy_from_slice(&[0, 0]);
+    let checksum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&checksum.to_be_bytes());
+    frame
+}
+
+fn drive_owner_icmp_type_9949(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    icmp_type: u8,
+) -> DebugPollCounters {
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let frame = icmp_frame_type_9949(icmp_type);
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        sessions,
+        forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+    );
+    dbg
+}
+fn drive_foreign_icmp_type_9949(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    icmp_type: u8,
+) -> DebugPollCounters {
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth2.0");
+    let frame = icmp_frame_type_9949(icmp_type);
+    let mut meta = txn_meta_v4(DMZ_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        sessions,
+        forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+    );
+    dbg
+}
+
+#[test]
+fn a_denied_icmp_type_cannot_ride_a_permitted_owner_session_9949() {
+    let forwarding = forwarding_with_icmp_type_split_9949();
+    assert!(
+        forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "the fixture must arm the ICMP type predicate, or the owner-hit \
+         assertion below is vacuous"
+    );
+    let mut sessions = SessionTable::new();
+
+    // Admit the permitted type through the REAL miss path. This proves the
+    // later type-13 packet hits the same typeless session key rather than
+    // exercising a synthetic table entry.
+    let permitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        (permitted.session_hit, permitted.session_create, permitted.tx, permitted.policy_deny),
+        (0, 2, 1, 0),
+        "the permitted echo type must miss, install, and forward before the \
+         denied type is tried"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the admitted ICMP flow must install forward and reverse entries"
+    );
+    // The same type-13 bytes from dmz are FOREIGN, not OWNER. The existing
+    // dmz->wan permit must adjudicate them and leave the owner's session
+    // untouched; applying the Owner check to every hit would drop this packet.
+    let foreign = drive_foreign_icmp_type_9949(&forwarding, &mut sessions, 13);
+    assert_eq!(foreign.session_hit, 1);
+    assert_eq!(foreign.tx, 1, "foreign policy still permits dmz->wan");
+    assert_eq!(foreign.foreign_authority_drops, 0);
+    assert_eq!(foreign.policy_deny, 0);
+    assert_eq!(session_count(&sessions), 2);
+
+
+    let denied = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 13);
+    assert_eq!(
+        denied.session_hit, 1,
+        "timestamp must hit the same typeless key"
+    );
+    assert_eq!(
+        denied.tx, 0,
+        "a denied timestamp type must not ride the permitted echo session"
+    );
+    assert_eq!(
+        denied.policy_deny, 1,
+        "the owner-hit type denial must feed the existing policy-deny counter"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the denied packet is rejected without tearing down the owner's live session"
+    );
+
+    let permitted_again = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        (permitted_again.session_hit, permitted_again.tx, permitted_again.policy_deny),
+        (1, 1, 0),
+        "a denied type must not poison the permitted type's live session"
     );
 }
 
