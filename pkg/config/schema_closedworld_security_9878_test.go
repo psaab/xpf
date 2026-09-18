@@ -7,24 +7,22 @@ import (
 	"testing"
 )
 
-// #9878 — closed-world arm on `security zones` + `security policies`.
+// #9878 + #10078 — closed-world arms on the security grammar.
 //
-// Both subtrees were open-world, so a typo silently dropped a whole stanza
-// with a clean commit while `show configuration` still displayed it:
-// fail-open under default-permit, availability loss under default-deny.
-// `from-zone` inherits the arm from `policies` (childClosed propagation in
-// walkSchemaNode); no separate flag needed.
+// #9878 arms `security zones` and `security policies`, so typos under either
+// subtree fail closed instead of silently dropping a stanza while `show
+// configuration` still displays it. `from-zone` inherits the policies arm
+// (childClosed propagation in walkSchemaNode); no separate flag is needed.
 //
-// SCOPE (verified, not assumed): this arm rejects typos UNDER either
-// subtree. A typo OF a subtree root keyword itself (`policie` for
-// `policies`) is a sibling-level unknown under the still-open `security`
-// node and needs the security-level arm — filed follow-up #10078, which
-// false-rejects today (`security flow tcp-mss all-tcp`,
-// TestShippedHAConfigsCheckCleanOnBothNodes_9619; tcp-mss is an
-// intentionally-opaque value grammar per #1979).
+// #10078 completes the sibling-level arm on `security` itself. A typo of a
+// modeled top-level keyword (`policie` for `policies`) now fails closed too.
+// Compiler-owned heterogeneous tails remain explicit opaque boundaries:
+// `security flow tcp-mss all-tcp` is a valid value grammar per #1979 and is
+// validated by its dedicated controls rather than by invented child keywords.
 //
-// Each rejection cell is RED with the flags reverted (open-world
-// silent-accept) and GREEN with them armed.
+// Each rejection cell is RED with the relevant arm reverted (open-world
+// silent-accept) and GREEN with the arm present.
+//
 func cwSecurity9878Set(bodyLines ...string) []string {
 	out := []string{}
 	for _, l := range bodyLines {
@@ -226,33 +224,132 @@ func TestClosedWorldSecurity9878_HierarchicalShapes(t *testing.T) {
 	}
 }
 
-// TestClosedWorldSecurity9878_PolicieStillOpen9878 pins the KNOWN-OPEN
-// residual (parent verdict A): a typo OF a subtree root keyword (`policie`
-// for `policies`) is a sibling-level unknown under the still-open
-// `security` node, in BOTH serializations. Filed follow-up #10078.
-// Contrast rip_neighbor_absorption_9206_test.go:65 — same tripwire shape:
-// RED here means someone closed the residual, which is good news, and this
-// cell must then be rewritten to assert the stronger property rather than
-// deleted.
-func TestClosedWorldSecurity9878_PolicieStillOpen9878(t *testing.T) {
+// TestClosedWorldSecurity10078_PolicieRejected pins the security-level arm:
+// `policie` is a sibling-level typo of `policies`, so the #9878 subtree arms
+// could not catch it. Both flat-set and hierarchical forms must now reject it
+// naming the authored token. Reverting the security arm makes this RED.
+func TestClosedWorldSecurity10078_PolicieRejected(t *testing.T) {
 	flat := buildTree(t, cwSecurity9878Set(
 		"policie from-zone trust to-zone untrust policy p1 then permit",
 	))
-	if err := SchemaValidate(flat, nil); err != nil {
-		t.Logf("#10078 CLOSED: subtree-root typo now refused (%v). Rewrite this cell.", err)
-		t.Errorf("#9878: this cell pins a KNOWN-OPEN residual and it is no longer open — " +
-			"update it deliberately rather than leaving a cell that documents a gap that " +
-			"has been fixed.")
+	if err := SchemaValidate(flat, nil); err == nil {
+		t.Fatal("flat `policie` must be rejected at the security boundary")
+	} else if !strings.Contains(err.Error(), "policie") || !strings.Contains(err.Error(), "closed-world") {
+		t.Fatalf("flat rejection must name `policie` and closed-world, got: %v", err)
 	}
 	hier, perrs := NewParser(`security { policie { from-zone trust to-zone untrust { policy p1 { then permit; } } } }`).Parse()
 	if len(perrs) > 0 {
-		t.Fatalf("tripwire fixture does not parse: %v", perrs)
+		t.Fatalf("hierarchical fixture does not parse: %v", perrs)
+	}
+	if err := SchemaValidate(hier, nil); err == nil {
+		t.Fatal("hierarchical `policie` must be rejected at the security boundary")
+	} else if !strings.Contains(err.Error(), "policie") || !strings.Contains(err.Error(), "closed-world") {
+		t.Fatalf("hierarchical rejection must name `policie` and closed-world, got: %v", err)
+	}
+}
+
+// TestClosedWorldSecurity10078_TCPMSSOpaqueGrammar pins the #1979 exception.
+// The security-level arm must still accept the shipped `all-tcp` grammar in
+// both AST shapes, while the modeled kind list rejects a typo kind. Reverting
+// either the kind modeling or the opaque-tail boundary makes one half RED.
+func TestClosedWorldSecurity10078_TCPMSSOpaqueGrammar(t *testing.T) {
+	flat := buildTree(t, []string{"set security flow tcp-mss all-tcp 1350"})
+	if err := SchemaValidate(flat, nil); err != nil {
+		t.Fatalf("flat all-tcp MSS must survive the security arm: %v", err)
+	}
+	cfg, err := CompileConfig(flat)
+	if err != nil {
+		t.Fatalf("flat all-tcp MSS must compile: %v", err)
+	}
+	if got := cfg.Security.Flow.TCPMSSAllTCP; got != 1350 {
+		t.Fatalf("flat all-tcp MSS compiled as %d, want 1350", got)
+	}
+
+	hier, perrs := NewParser(`security { flow { tcp-mss { all-tcp { mss 1360; } } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("hierarchical all-tcp fixture does not parse: %v", perrs)
 	}
 	if err := SchemaValidate(hier, nil); err != nil {
-		t.Logf("#10078 CLOSED (hierarchical): subtree-root typo now refused (%v). Rewrite this cell.", err)
-		t.Errorf("#9878: this cell pins a KNOWN-OPEN residual and it is no longer open — " +
-			"update it deliberately rather than leaving a cell that documents a gap that " +
-			"has been fixed.")
+		t.Fatalf("hierarchical all-tcp MSS must survive the security arm: %v", err)
+	}
+	cfg, err = CompileConfig(hier)
+	if err != nil {
+		t.Fatalf("hierarchical all-tcp MSS must compile: %v", err)
+	}
+	if got := cfg.Security.Flow.TCPMSSAllTCP; got != 1360 {
+		t.Fatalf("hierarchical all-tcp MSS compiled as %d, want 1360", got)
+	}
+
+	bad := buildTree(t, []string{"set security flow tcp-mss all-tpc 1350"})
+	if err := SchemaValidate(bad, nil); err == nil {
+		t.Fatal("misspelled tcp-mss kind must be rejected by the security arm")
+	} else if !strings.Contains(err.Error(), "all-tpc") || !strings.Contains(err.Error(), "closed-world") {
+		t.Fatalf("tcp-mss kind rejection must name all-tpc and closed-world, got: %v", err)
+	}
+}
+
+// TestClosedWorldSecurity10078_PackedLogRunExpansion pins the compiler/schema
+// parity for SetPath's nested packed stream shape. `expandFlatRun` hoists the
+// valid category sibling before the closed-world walk; a misspelled sibling
+// must remain visible and reject rather than pass through an opaque port leaf.
+func TestClosedWorldSecurity10078_PackedLogRunExpansion(t *testing.T) {
+	valid := buildTree(t, []string{
+		"set security log stream s1 port 5514 category policy",
+	})
+	if err := SchemaValidate(valid, nil); err != nil {
+		t.Fatalf("valid packed stream run must survive the security arm: %v", err)
+	}
+	bad := buildTree(t, []string{
+		"set security log stream s1 port 5514 categroy policy",
+	})
+	if err := SchemaValidate(bad, nil); err == nil {
+		t.Fatal("misspelled packed stream sibling must be rejected under closed-world")
+	} else if !strings.Contains(err.Error(), "categroy") || !strings.Contains(err.Error(), "closed-world") {
+		t.Fatalf("packed stream rejection must name categroy and closed-world, got: %v", err)
+	}
+}
+// TestClosedWorldSecurity10078_PackedDestinationPortArity ensures the
+// address-plus-port Junos suffix consumes exactly the declared port value.
+// A trailing token must return to the pool-level schema walk and be rejected,
+// rather than being absorbed into the address leaf and overwritten by the
+// compiler's packed-address scanner.
+func TestClosedWorldSecurity10078_PackedDestinationPortArity(t *testing.T) {
+	valid := buildTree(t, []string{
+		"set security nat destination pool p1 address 192.0.2.1 port 80",
+	})
+	if err := SchemaValidate(valid, nil); err != nil {
+		t.Fatalf("valid packed destination port must survive the security arm: %v", err)
+	}
+	bad := buildTree(t, []string{
+		"set security nat destination pool p1 address 192.0.2.1 port 80 192.0.2.2",
+	})
+	if err := SchemaValidate(bad, nil); err == nil {
+		t.Fatal("trailing token after packed destination port must be rejected")
+	} else if !strings.Contains(err.Error(), "192.0.2.2") || !strings.Contains(err.Error(), "closed-world") {
+		t.Fatalf("trailing-token rejection must name 192.0.2.2 and closed-world, got: %v", err)
+	}
+}
+
+
+// TestClosedWorldSecurity10078_CompletionPinsSubtrees verifies the same
+// modeled keywords drive config-mode completion. This keeps the closed-world
+// inventory and the user-facing schema surface from drifting apart.
+func TestClosedWorldSecurity10078_CompletionPinsSubtrees(t *testing.T) {
+	flow := CompleteSetPathWithValues([]string{"security", "flow", "tcp-mss"}, nil)
+	for _, want := range []string{"all-tcp", "gre-in", "gre-out", "ipsec-vpn"} {
+		if !containsCompletionName(flow, want) {
+			t.Fatalf("flow tcp-mss completion missing %q: %v", want, completionNames(flow))
+		}
+	}
+	alg := CompleteSetPathWithValues([]string{"security", "alg", "d"}, nil)
+	if !containsCompletionName(alg, "dns") {
+		t.Fatalf("ALG class completion missing dns: %v", completionNames(alg))
+	}
+	ike := CompleteSetPathWithValues([]string{"security", "ike", "proposal", "p1", "a"}, nil)
+	for _, want := range []string{"authentication-method", "authentication-algorithm"} {
+		if !containsCompletionName(ike, want) {
+			t.Fatalf("IKE proposal completion missing %q: %v", want, completionNames(ike))
+		}
 	}
 }
 

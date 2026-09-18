@@ -313,6 +313,7 @@ routing-instances xpfname protocols bgp multipath multiple-as	empty
 routing-instances xpfname protocols isis overload	empty
 routing-instances xpfname protocols isis wide-metrics-only	empty
 routing-instances xpfname protocols ospf passive	empty
+security nat destination pool xpfarg port	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg scheduler-name	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then permit	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then reject	empty

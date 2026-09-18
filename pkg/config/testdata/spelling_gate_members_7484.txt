@@ -756,10 +756,11 @@ COMPARED	schedulers scheduler <*> wednesday stop-time
 COMPARED	security address-book global address-set <*> address
 COMPARED	security address-book global address-set <*> address-set
 unreachable (leaf changed nothing)	security address-book global address-set <*> description
-unreachable (leaf changed nothing)	security alg dns
-unreachable (leaf changed nothing)	security alg ftp
-unreachable (leaf changed nothing)	security alg sip
-unreachable (leaf changed nothing)	security alg tftp
+unreachable (leaf changed nothing)	security alg <*> disable
+flag (read, but value-less)	security alg dns disable
+flag (read, but value-less)	security alg ftp disable
+flag (read, but value-less)	security alg sip disable
+flag (read, but value-less)	security alg tftp disable
 COMPARED	security dynamic-address address-name <*> profile fail-mode
 COMPARED	security dynamic-address address-name <*> profile feed-name
 COMPARED	security dynamic-address feed-server <*> feed-name <*> path
@@ -777,7 +778,10 @@ flag (read, but value-less)	security flow power-mode-disable
 flag (read, but value-less)	security flow preserve-incoming-fragment-size
 COMPARED	security flow route-change-timeout
 flag (read, but value-less)	security flow sync-icmp-session
-unreachable (leaf changed nothing)	security flow tcp-mss
+COMPARED	security flow tcp-mss all-tcp
+COMPARED	security flow tcp-mss gre-in
+COMPARED	security flow tcp-mss gre-out
+COMPARED	security flow tcp-mss ipsec-vpn
 COMPARED	security flow tcp-session closing-timeout
 COMPARED	security flow tcp-session established-timeout
 COMPARED	security flow tcp-session initial-timeout
@@ -877,6 +881,8 @@ COMPARED	security log stream <*> source-interface
 unreachable (leaf changed nothing)	security log stream <*> transport protocol
 advisory (read, value ignored, warning says so)	security log stream <*> transport tls-profile
 COMPARED	security nat destination pool <*> address
+COMPARED	security nat destination pool <*> port
+COMPARED	security nat destination pool <*> routing-instance
 COMPARED	security nat destination rule-set <*> from interface
 COMPARED	security nat destination rule-set <*> from routing-instance
 COMPARED	security nat destination rule-set <*> from zone

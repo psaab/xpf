@@ -387,7 +387,10 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // are intentional consequences of making malformed spellings inert.
 // #9984 adds the value-bearing event-options plant-class leaf; the spelling
 // census moved one leaf into COMPARED, so tighten the floor 764 -> 765.
-const gateCoverageFloor = 765
+// #10078 models security tcp-mss kinds and destination-pool fields. Six
+// additional spellings become comparable (the remaining ALG kinds are
+// value-less flags), so the measured floor tightens 765 -> 771.
+const gateCoverageFloor = 771
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -571,9 +574,10 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// isolated differential probe cannot materialize a valid group without the
 	// sibling prerequisites. The compared floor therefore rises
 	// 763 -> 765, unreachable tightens 140 -> 136, and advisory rises 26 -> 28.
-	// The remaining v6 `server-group` leaf stays unreachable because its
-	// group-level probe has no independently materialized output.
-	gateBlindUnreachable: 137,
+	// group-level probe has no independently materialized output. #10078's
+	// security declarations also remove four unreachable ALG kind roots, so
+	// tighten this ceiling 137 -> 133 from the measured member registry.
+	gateBlindUnreachable: 133,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
@@ -688,7 +692,9 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// this class for COMPARED once the packed-shape reader recorded it (see
 	// the gateCoverageFloor paragraph). Tightening, not slack: the leaf is
 	// named in the members registry diff, not just counted.
-	gateBlindFlag: 239, // 209 -> 201, issue 8939; coverage cost tracked at issue 8971
+	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
+	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
+	gateBlindFlag: 243, // 209 -> 201, issue 8939; coverage cost tracked at issue 8971
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile

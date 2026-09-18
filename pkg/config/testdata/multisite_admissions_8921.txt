@@ -147,6 +147,7 @@ policy proposal-set	security/ike/policy,security/ipsec/policy
 policy proposals	security/ike/policy,security/ipsec/policy
 policy then	event-options/policy,security/policies/from-zone/policy,security/policies/global/policy,services/ip-monitoring/policy
 pool address	security/nat/destination/pool,security/nat/source/pool
+pool routing-instance	security/nat/destination/pool,security/nat/source/pool
 pool dns-server	system/services/dhcp-local-server/group/pool,system/services/dhcpv6-local-server/group/pool
 pool static-binding	system/services/dhcp-local-server/group/pool,system/services/dhcpv6-local-server/group/pool
 prefix-limit maximum	protocols/bgp/group/family/inet/unicast/prefix-limit,protocols/bgp/group/family/inet6/unicast/prefix-limit,protocols/bgp/group/neighbor/family/inet/unicast/prefix-limit,protocols/bgp/group/neighbor/family/inet6/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/family/inet/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/family/inet6/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/neighbor/family/inet/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/neighbor/family/inet6/unicast/prefix-limit

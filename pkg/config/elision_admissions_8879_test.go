@@ -1431,10 +1431,15 @@ func TestDepth2UnadmittedPopulation8929(t *testing.T) {
 	// drop and does not belong in knownDropping. The baseline row is what makes
 	// the SAME verdict non-vacuous: without it, "both spellings agree" would
 	// also be satisfied by both compiling to nothing.
-	// #9553 added `(dhcp-relay, dhcpv6)`. The dedicated DHCPv6 shape cell
-	// compares the braced and relay-elided spellings: both compile to the
-	// typed v6 relay, so this remains an unadmitted but non-dropping pair.
-	wantPopulation = 26
+	// #10078 models the four ALG protocol kinds (`dns`, `ftp`, `sip`, and
+	// `tftp`) beneath the newly closed security arm. Each now declares a
+	// `disable` child, so the depth-2 census correctly gains one un-admitted
+	// pair per protocol. A direct non-vacuous probe measured baseline
+	// `disable=false`, then `disable=true` for both fully-braced and
+	// doubly-elided spellings of every protocol (the wider #8823 cell covers
+	// the two intermediate spellings too). These pairs therefore read SAME,
+	// not drops, and belong in the population lower bound.
+	wantPopulation = 30
 
 	parentAdmitted := func(mid string) bool {
 		for stanza := range setSchema.children {

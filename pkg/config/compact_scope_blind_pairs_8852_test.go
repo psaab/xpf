@@ -134,6 +134,10 @@ var knownBlindScopePairs8852 = map[string]string{
 	"flow aging":        "plain-container",
 	"flow icmp-session": "plain-container",
 	"flow tcp-session":  "plain-container",
+	// #10078: tcp-mss is now a declared kind container so the arm can reject
+	// misspelled kinds while its value tail stays opaque. The compact census
+	// therefore sees a plain container again and emits no site for this pair.
+	"flow tcp-mss":      "plain-container",
 	"flow traceoptions": "plain-container",
 	"flow udp-session":  "plain-container",
 	// #8943, the nat family; shapes derived by the sentinel method.
@@ -194,11 +198,9 @@ var knownBlindScopePairs8852 = map[string]string{
 	"security address-book":    "plain-container",
 	"system ntp":               "plain-container",
 	"security ike":             "plain-container",
-	"security nat":             "plain-container",
 	"system syslog":            "plain-container",
 	"policy then":              "plain-container",
 	"routing-options static":   "plain-container",
-	"security alg":             "plain-container",
 	"security flow":            "plain-container",
 	// #8850 admitted ("firewall","family") so an elided `firewall family inet
 	// { filter ... }` compiles its filters instead of silently producing zero.
@@ -265,6 +267,7 @@ var knownBlindScopePairs8852 = map[string]string{
 	// only when arm 2 generates a site for it. Registration records that this
 	// arm does not measure them; it is not a claim that they are unfixed.
 	"security policies":                  "plain-container",
+	"security nat":                       "plain-container",
 	"security screen":                    "plain-container",
 	"security zones":                     "plain-container",
 	"security-zone address-book":         "plain-container",
@@ -291,19 +294,25 @@ var knownBlindScopePairs8852 = map[string]string{
 	// rewritten, these entries stay exactly as they are.
 	"address-book address":    "multi-arg",
 	"global address":          "multi-arg",
-	"gateway local-identity":  "multi-arg",
 	"gateway remote-identity": "multi-arg",
 	"policies from-zone":      "multi-arg",
 	"policy pre-shared-key":   "multi-arg",
-	// #9056 RETIRED FOUR `zero-arg-leaf` ENTRIES, and the retirement is the
-	// change working rather than a loosening. `flow tcp-mss`, `match
+	"gateway local-identity":  "multi-arg",
+	// #9056 RETIRED THREE `zero-arg-leaf` ENTRIES, and the retirement is the
+	// change working rather than a loosening. `match
 	// {source,destination}-address-excluded` and `services
 	// application-identification` were blind because collectCompactSites
 	// admitted a site only when the head declared an `args` token or a
 	// wildcard, so a VALUELESS head yielded nothing to adjudicate. The census
-	// now enumerates that shape with a PRESENCE discriminator, so all four are
-	// adjudicated by TestCompactNormalizeScopePreservesCompiledResult8690 and a
-	// registration for them would be a claim that is no longer true.
+	// now enumerates those shapes with a PRESENCE discriminator, so they are
+	// adjudicated by TestCompactNormalizeScopePreservesCompiledResult8690.
+	//
+	// #10078 deliberately re-introduces `flow tcp-mss` above: the arm models
+	// its four kind keywords as children so kind typos reject, while the
+	// heterogeneous value tail remains opaque. That changes the node back to
+	// a plain-container shape for this census, so its registration records a
+	// real structural blind spot rather than claiming the old zero-arg census
+	// coverage still applies.
 	//
 	// The `zero-arg-leaf` branch of blindShape8852 is KEPT: it still describes
 	// the shape correctly, and the classifier must be able to name it if a

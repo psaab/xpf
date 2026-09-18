@@ -562,7 +562,7 @@ func TestTunnelSchemaResolvesBothPositions9156(t *testing.T) {
 //     because the flat-set axis was restored — the braced-only gate found 26
 //     rows of which ZERO were reachable, and missed the one that was.
 //     `port` is untyped, so `set security log stream s1 port 5514 category
-//     rt-flow` committed CLEAN with the category dropped, and Categories == 0
+//     policy` committed CLEAN with the category dropped, and Categories == 0
 //     means ALL (pkg/logging/syslog.go) — so the operator's NARROWING was
 //     silently inverted into "export every category" to a collector scoped for
 //     one. Over-export, not a blind spot.

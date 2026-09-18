@@ -611,6 +611,16 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 			if _, isSibling := parent.children[tok]; !isSibling {
 				continue
 			}
+			// A packed sibling may be rendered on the same statement as a
+			// preceding token-packed leaf. Admit only the exact suffix arity;
+			// SetPath leaves any remainder as a separate node for the
+			// closed-world walk below to reject.
+			if tok == parent.packedValueSibling && childSchema.groupReplace {
+				if sibling := parent.children[tok]; sibling != nil &&
+					len(node.Keys) == declaredKeyTokens+1+sibling.args {
+					continue
+				}
+			}
 			if tok == keyword {
 				continue // a repeat of this leaf, not a foreign statement
 			}
@@ -710,8 +720,8 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// (`schedulers { be { ... } }` → node Keys=["schedulers"], child
 	// Keys=["be"]). When fewer key tokens were available than the schema
 	// declares, the missing instance-name args are supplied by nested AST
-	// children: peel those name levels (the compiler's namedInstances does
-	// the same) and validate each instance's children at the child schema.
+	// children: peel those name levels (the compiler's namedInstances
+	// does the same) and validate each instance's children at the child schema.
 	// Inherit closed-world enforcement into this container's descent (#4313):
 	// a subtree that opts in (childSchema.closedWorld) closes every level
 	// below it, and an already-closed ancestor keeps it closed.
@@ -728,6 +738,14 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// suites GREEN while false-rejecting the mixed shape, because no existing
 	// cell authors it under a closed subtree.
 	if childSchema.multi && childSchema.children == nil {
+		childClosed = false
+	}
+	// #10078 / #1979: tcp-mss is a deliberately opaque compiler-owned
+	// grammar. Its child tokens are value/kind positions (`all-tcp 1396`,
+	// `all-tcp { mss 1396; }`), not schema keywords. End inherited
+	// closed-world enforcement exactly at this node; the tcp-mss keyword
+	// itself remains closed by its declared parent (`flow`).
+	if childSchema.closedWorldOpaque {
 		childClosed = false
 	}
 
@@ -785,7 +803,13 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// would reject a configuration that behaves identically either way.
 	walkChildren := node.Children
 	if childSchema.packedTail && len(node.Keys) > consumed {
+		// The packed body is authored on the container line.
 		walkChildren = packedBodyChildren(node, childSchema)
+	} else if childSchema.packedFlatRun && len(node.Children) > 0 {
+		// `stream s1 port 5514 category policy` as a child chain
+		// (`port` -> `category`). Use the same expansion as compileLog
+		// before walking under the inherited closed-world arm.
+		walkChildren = expandFlatRun(node.Children, childSchema)
 	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)
 }

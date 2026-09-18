@@ -46,7 +46,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 	for _, inst := range namedInstances(node.FindChildren("pool")) {
 		pool := &NATPool{Name: inst.name}
 
-		for _, prop := range inst.node.Children {
+		for _, prop := range expandFlatRun(inst.node.Children, schemaForPath("security", "nat", "destination", "pool")) {
 			switch prop.Name() {
 			case "address":
 				// DNAT pool address grammar (Junos):
@@ -83,7 +83,28 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			}
 		}
 
-		sec.NAT.Destination.Pools[pool.Name] = pool
+		if existing := sec.NAT.Destination.Pools[pool.Name]; existing != nil {
+			// A repeated hierarchical pool block is the same named object
+			// as its flat-set counterpart. Merge fields instead of replacing
+			// the prior object, otherwise a block carrying only `port` or
+			// `routing-instance` silently discards the address from the first
+			// block (and vice versa).
+			if pool.Address != "" {
+				existing.Address = pool.Address
+			}
+			if len(pool.Addresses) > 0 {
+				existing.Addresses = append(existing.Addresses, pool.Addresses...)
+			}
+			if pool.PortRaw != "" {
+				existing.PortRaw = pool.PortRaw
+				existing.Port = pool.Port
+			}
+			if pool.RoutingInstance != "" {
+				existing.RoutingInstance = pool.RoutingInstance
+			}
+		} else {
+			sec.NAT.Destination.Pools[pool.Name] = pool
+		}
 	}
 
 	// Parse rule-sets
