@@ -62,14 +62,15 @@ func snmpServeFairFactor(active int) float64 {
 }
 
 // snmpSourceBucket is one source's token bucket, with separate timestamps for
-// expensive demand and a pending newcomer. lastSeen is deliberately NOT
-// refreshed by cheap traffic: a low-cost Sybil must not reserve a fair-share
-// contender slot indefinitely. everExpensive lets a previously measured
-// source re-enter the pending set if it keeps demanding during a global dip.
+// measured expensive service and a pending newcomer. expensiveSeen is written
+// only by account after measured expensive service; cheap traffic must not
+// retain a fair-share contender slot indefinitely. everExpensive lets a
+// previously measured source re-enter the pending set if it keeps demanding
+// during a global dip.
 type snmpSourceBucket struct {
 	tokens        float64
 	last          time.Time
-	lastSeen      time.Time
+	expensiveSeen time.Time
 	pendingSeen   time.Time
 	expensive     bool
 	everExpensive bool
@@ -121,8 +122,8 @@ func (b *snmpServeBudget) clock() time.Time {
 // expireExpensiveLocked releases quiet expensive demand and pending newcomers.
 // The sweep is bounded by snmpServeMaxSources and runs at most once per
 // interval, so the serial Serve hot path never scans the table per packet.
-// lastSeen changes only on expensive service or a throttled expensive retry;
-// pendingSeen tracks a newcomer independently.
+// expensiveSeen changes only after measured expensive service; pendingSeen
+// tracks a newcomer independently.
 func (b *snmpServeBudget) expireExpensiveLocked(now time.Time) {
 	if !b.lastExpirySweep.IsZero() &&
 		now.Sub(b.lastExpirySweep) < snmpServeExpirySweepInterval {
@@ -130,7 +131,7 @@ func (b *snmpServeBudget) expireExpensiveLocked(now time.Time) {
 	}
 	b.lastExpirySweep = now
 	for _, bkt := range b.perSource {
-		if bkt.expensive && now.Sub(bkt.lastSeen) >= snmpServeExpensiveIdle {
+		if bkt.expensive && now.Sub(bkt.expensiveSeen) >= snmpServeExpensiveIdle {
 			bkt.expensive = false
 			if b.activeExpensive > 0 {
 				b.activeExpensive--
@@ -202,13 +203,6 @@ func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 			}
 			bkt.last = now
 		}
-		if bkt.expensive && bkt.tokens < 1 {
-			// Refresh expensive demand before expiry. Continue through the
-			// global bucket so a scarce source can reserve a one-shot probe;
-			// the per-source check below still prevents spending a global
-			// credit until its own bucket has refilled.
-			bkt.lastSeen = now
-		}
 	}
 	b.expireExpensiveLocked(now)
 
@@ -235,9 +229,11 @@ func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 		bkt.pendingSeen = now
 		b.pendingSources++
 	}
-	// bucket is actually scarce. Surplus credits remain work-conserving, so a
-	// silent newcomer cannot stall admitted managers after a flood ends.
-	if b.globalTokens <= float64(b.pendingSources) && b.pendingSources > 0 &&
+	// The reservation is scarce only when admitting this request would leave
+	// fewer than one whole global token per pending source. Surplus credits
+	// remain work-conserving, so a silent newcomer cannot stall managers after
+	// a flood ends.
+	if b.globalTokens < float64(b.pendingSources+1) && b.pendingSources > 0 &&
 		bkt.admitted && !bkt.pending {
 		b.shed.Add(1)
 		return false
@@ -308,7 +304,7 @@ func (b *snmpServeBudget) account(srcIP net.IP, elapsed time.Duration) {
 			bkt.expensive = true
 			b.activeExpensive++
 		}
-		bkt.lastSeen = now
+		bkt.expensiveSeen = now
 		factor = snmpServeFairFactor(b.activeExpensive)
 	}
 	bkt.tokens -= secs * snmpServeRatePerSource * factor

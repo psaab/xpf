@@ -193,6 +193,44 @@ func TestServeBudgetFairShareCheapSybilExpires10113(t *testing.T) {
 	}
 }
 
+// TestServeBudgetFairShareDepletedSybilExpiry10113 ensures denied retries do
+// not keep a depleted historical contender active across repeated sweeps.
+// Only measured expensive service may refresh expensiveSeen; a source that
+// has no per-source credit can be requalified by a later one-shot probe.
+func TestServeBudgetFairShareDepletedSybilExpiry10113(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := newSNMPServeBudget()
+	b.now = func() time.Time { return now }
+	ip := net.ParseIP("10.10.0.1")
+	admitExpensive10113(t, b, ip, 1, 10*time.Millisecond)
+	raw := ip.To16()
+	var key [16]byte
+	copy(key[:], raw)
+
+	// Keep the bucket depleted and retry every 900ms. The retry cadence
+	// crosses each one-second sweep but is frequent enough to expose any
+	// attempt-based expensive timestamp refresh.
+	now = now.Add(900 * time.Millisecond)
+	for i := 0; i < 6; i++ {
+		b.mu.Lock()
+		b.perSource[key].tokens = 0
+		b.perSource[key].last = now
+		b.mu.Unlock()
+		if b.allow(ip) {
+			t.Fatalf("depleted retry %d unexpectedly admitted", i)
+		}
+		now = now.Add(900 * time.Millisecond)
+	}
+
+	b.mu.Lock()
+	active := b.activeExpensive
+	expensive := b.perSource[key].expensive
+	b.mu.Unlock()
+	if active != 0 || expensive {
+		t.Fatalf("depleted retries retained expensive state: active=%d expensive=%t", active, expensive)
+	}
+}
+
 // TestServeBudgetFairShareSplitsGlobalHalf10113 is the #10113 enforcement cell:
 // ten saturated expensive sources split the global half equally even when one
 // offers 10x the arrival pressure. The scripted arrival pattern (aggressor
@@ -288,6 +326,22 @@ func TestServeBudgetFairSharePendingExpiry10113(t *testing.T) {
 	pending := net.ParseIP("10.12.0.2")
 	if b.allow(pending) {
 		t.Fatal("pending newcomer admitted with empty global bucket")
+	}
+	// With 1.5 credits, admitting an existing source would leave less than
+	// one whole credit for the pending newcomer.
+	b.mu.Lock()
+	b.globalTokens = 1.5
+	b.globalLast = now
+	b.mu.Unlock()
+	if b.allow(existing) {
+		t.Fatal("existing source consumed a pending newcomer credit")
+	}
+	b.mu.Lock()
+	b.globalTokens = 2
+	b.globalLast = now
+	b.mu.Unlock()
+	if !b.allow(existing) {
+		t.Fatal("existing source blocked with one credit beyond pending reserve")
 	}
 	now = now.Add(500 * time.Millisecond)
 	if !b.allow(existing) {
