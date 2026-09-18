@@ -640,38 +640,14 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 // reloaded active) or parsed as a junk path literally starting "deactivate".
 // hasFlatVerb reports whether a line begins with one of the flat config-edit
 // verbs that applyEditLine can actually replay (set/delete/deactivate/
-// activate) followed by at least one path token. It is the fail-closed gate
-// for the service-mode load paths (LoadMerge flat branch + LoadSet): a line
-// that does not start with one of those verbs is malformed input, NOT a bare
-// path.
+// activate) followed by at least one path token. It delegates to the shared
+// predicate in pkg/config so the service-mode load paths and their
+// authorization gate classify every body identically (#10305).
 //
-// The verb set is deliberately EXACTLY the set applyEditLine -> ParseSetVerb
-// dispatches. The interactive structural-edit verbs annotate/copy/insert/
-// rename (pkg/cli/cli_dispatch.go, pkg/cmdtree ConfigTopLevel) are NOT
-// recognized here on purpose: they have distinct multi-clause grammar
-// (`copy X to Y`, `insert X before Y`, `annotate X "comment"`), are handled
-// only by the interactive CLI, and never appear in a flat-load artifact —
-// `show | display set` (ConfigTree.FormatSet) emits only `set`/`deactivate`
-// lines. Pre-#3442 such a line was silently turned into a junk `set
-// annotate ...` node by the bare-path default, so rejecting it is correct,
-// not a regression of any previously-working load.
-//
-// The first token is matched against the verb set after splitting on any
-// whitespace, so a tab between the verb and the path (the lexer treats tabs
-// as whitespace) is tolerated as well as a space.
+// The first token is matched after splitting on any whitespace, so a tab
+// between the verb and path is accepted by the same rule as the lexer.
 func hasFlatVerb(line string) bool {
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		// A blank line or a bare verb with no path is not a replayable
-		// flat command.
-		return false
-	}
-	switch fields[0] {
-	case "set", "delete", "deactivate", "activate":
-		return true
-	default:
-		return false
-	}
+	return config.IsFlatLoadLine(line)
 }
 
 func applyEditLine(tree *config.ConfigTree, line string) error {
