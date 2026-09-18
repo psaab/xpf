@@ -694,9 +694,10 @@ impl SlowPathReinjector {
             state.next_retry_tick = state.tick;
         }
         if delegated_degraded && !state.was_degraded {
-            // A newly observed degraded edge is an explicit re-arm signal.
-            state.attempts = 0;
-            state.attempt_ticks = [0; MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW as usize];
+            // A newly observed degraded edge re-arms the next retry without
+            // erasing the rolling attempt history. Clearing `attempts` here
+            // could exceed the three-attempt bound when an outlet becomes
+            // degraded as the result of the retry that just ran.
             state.next_retry_tick = state.tick;
         }
         while state.attempts > 0
@@ -826,13 +827,10 @@ impl SlowPathReinjector {
     pub fn status(&self) -> SlowPathStatus {
         self.status.snapshot()
     }
-
     /// Snapshot of the delegated outlet's status (live MTU, degraded, active,
-    /// counters). Consumed by reconcile_mtu internals and the partial-failure
-    /// pin; operator-surface reporting of the delegated outlet (status wire
-    /// + metrics) is filed follow-up #10069 — the kernel destination
-    /// counters already observe its traffic, and construction/MTU failures
-    /// log per-device causes.
+    /// counters). Consumed by reconcile_mtu internals, the partial-failure
+    /// pin, and the Coordinator's operator-facing status-wire and metrics
+    /// projections.
     pub fn delegated_status(&self) -> SlowPathStatus {
         self.status_delegated.snapshot()
     }
