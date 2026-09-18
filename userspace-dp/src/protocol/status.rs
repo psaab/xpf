@@ -334,6 +334,16 @@ pub(crate) struct ProcessStatus {
     /// for backward compatibility with older daemons.
     #[serde(rename = "dynamic_neighbor_learn_cap_drops_total", default)]
     pub dynamic_neighbor_learn_cap_drops_total: u64,
+    /// #10097: cumulative NDP Neighbor Advertisement learns refused because
+    /// the IPv6 chain carried a Fragment header (RFC 6980 §5). Additive /
+    /// defaulted for backward compatibility with older daemons.
+    #[serde(rename = "ndp_na_frag_refused_total", default)]
+    pub ndp_na_frag_refused_total: u64,
+    /// #10097: cumulative NDP Neighbor Advertisement learns refused because
+    /// the IPv6 source was not valid on-link unicast. Additive / defaulted
+    /// for backward compatibility with older daemons.
+    #[serde(rename = "ndp_na_bad_source_refused_total", default)]
+    pub ndp_na_bad_source_refused_total: u64,
     /// #1789: total failed USERSPACE_SESSIONS BPF-map publishes
     /// (per-binding worker-poll sites summed with the shared no-binding
     /// sites: HA upsert, session-glue worker publish, post-reconcile

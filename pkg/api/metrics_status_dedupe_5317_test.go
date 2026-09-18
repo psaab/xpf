@@ -140,8 +140,12 @@ func TestMetricsCollectFetchesUserspaceStatusOncePerScrape(t *testing.T) {
 			{Family: "inet", FilterName: "fin", TermName: "t1", Packets: 777},
 		},
 		// Consumed ONLY by collectUserspaceStatus (emitNeighborColdStartCapture),
-		// emitted unconditionally.
-		NegNeighFastFailTotal: 42,
+		// emitted unconditionally. Refusal counters are intentionally distinct
+		// values so a missing or cross-wired export fails this end-to-end pin.
+		NegNeighFastFailTotal:             42,
+		DynamicNeighborLearnCapDropsTotal: 41,
+		NDPNAFragRefusedTotal:             43,
+		NDPNABadSourceRefusedTotal:        44,
 	}
 	c, dp := newStatusCountingScrape(t, status, nil)
 
@@ -163,6 +167,16 @@ func TestMetricsCollectFetchesUserspaceStatusOncePerScrape(t *testing.T) {
 	if got, ok := findSample(samples, "xpf_userspace_neg_neigh_fast_fail_total", nil); !ok || got != 42 {
 		t.Errorf("xpf_userspace_neg_neigh_fast_fail_total = %v (present=%v); "+
 			"want 42 from the shared status NegNeighFastFailTotal", got, ok)
+	}
+	// Existing neighbor refusal counter remains independently observable.
+	if got, ok := findSample(samples, "xpf_userspace_dynamic_neighbor_learn_cap_drops_total", nil); !ok || got != 41 {
+		t.Errorf("xpf_userspace_dynamic_neighbor_learn_cap_drops_total = %v (present=%v); want 41", got, ok)
+	}
+	if got, ok := findSample(samples, "xpf_userspace_ndp_na_frag_refused_total", nil); !ok || got != 43 {
+		t.Errorf("xpf_userspace_ndp_na_frag_refused_total = %v (present=%v); want 43", got, ok)
+	}
+	if got, ok := findSample(samples, "xpf_userspace_ndp_na_bad_source_refused_total", nil); !ok || got != 44 {
+		t.Errorf("xpf_userspace_ndp_na_bad_source_refused_total = %v (present=%v); want 44", got, ok)
 	}
 }
 

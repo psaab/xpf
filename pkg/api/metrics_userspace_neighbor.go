@@ -52,6 +52,17 @@ func (c *xpfCollector) emitNeighborColdStartCapture(ch chan<- prometheus.Metric,
 		prometheus.CounterValue,
 		float64(status.DynamicNeighborLearnCapDropsTotal),
 	)
+	// #10097: NDP Neighbor Advertisement learn-refusal counters.
+	ch <- prometheus.MustNewConstMetric(
+		c.ndpNaFragRefusedTotal,
+		prometheus.CounterValue,
+		float64(status.NDPNAFragRefusedTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.ndpNaBadSourceRefusedTotal,
+		prometheus.CounterValue,
+		float64(status.NDPNABadSourceRefusedTotal),
+	)
 	for _, key := range status.DynamicNeighborKeys {
 		// Each key is rendered "ifindex ip" by the helper. Split on the
 		// single space into the two gauge labels; skip a malformed entry

@@ -49,14 +49,13 @@ const NDP_REQUIRED_HOP_LIMIT: u8 = 255;
 /// #9893: NA learns refused because the IPv6 chain carried a Fragment header
 /// (RFC 6980 §5 MUST-discards). Bumped only for NA-shaped frames (proto 58 +
 /// type 136 confirmed) so ordinary fragmented transit does not pollute the
-/// series — this probe runs per-packet. Test-visible; Prometheus export is
-/// #10097 (deferred to keep #9893 SMALL per the
-/// `SHARED_SESSION_POISON_RECOVERIES` precedent).
+/// series — this probe runs per-packet. Exported through the coordinator
+/// status reader as `xpf_userspace_ndp_na_frag_refused_total`.
 pub(crate) static NDP_NA_FRAG_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// #9893: NA learns refused because the IPv6 source was not a valid on-link
-/// unicast (unspecified/loopback/multicast). Same NA-shape gating and
-/// test-visible status as `NDP_NA_FRAG_REFUSED`; Prometheus export likewise
-/// #10097.
+/// unicast (unspecified/loopback/multicast). Same NA-shape gating and status
+/// export as `NDP_NA_FRAG_REFUSED`, via
+/// `xpf_userspace_ndp_na_bad_source_refused_total`.
 pub(crate) static NDP_NA_BAD_SOURCE_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// #9893: serializes tests sampling the two refusal counters above.
 /// The counters are process-wide statics and every `#9893` sampling test

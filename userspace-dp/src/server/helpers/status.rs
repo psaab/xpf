@@ -111,6 +111,12 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // being bounded rather than inflating the shared map.
     state.status.dynamic_neighbor_learn_cap_drops_total =
         state.afxdp.dynamic_neighbor_learn_cap_drops_total();
+    // #10097: process-global NDP NA learn-refusal counters. These are read
+    // from the same coordinator status surface as the existing neighbor
+    // counters, then carried in ProcessStatus for Prometheus.
+    state.status.ndp_na_frag_refused_total = state.afxdp.ndp_na_frag_refused_total();
+    state.status.ndp_na_bad_source_refused_total =
+        state.afxdp.ndp_na_bad_source_refused_total();
     // #1789: total failed USERSPACE_SESSIONS BPF-map publishes
     // (per-binding worker-poll sites + shared no-binding sites). The
     // cause-side signal for rising XDP-shim NO_SESSION fallbacks.

@@ -41,6 +41,22 @@ impl super::Coordinator {
         self.neighbors.dynamic.learn_cap_drops()
     }
 
+    /// #10097: cumulative NDP Neighbor Advertisement learns refused because
+    /// the IPv6 chain carried a Fragment header. The parser counter is a
+    /// process-global atomic: every worker uses the same parser, so this
+    /// reads it directly. Surfaced as
+    /// `xpf_userspace_ndp_na_frag_refused_total`.
+    pub fn ndp_na_frag_refused_total(&self) -> u64 {
+        crate::afxdp::parser::NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed)
+    }
+
+    /// #10097: cumulative NDP Neighbor Advertisement learns refused because
+    /// the IPv6 source was not valid on-link unicast. Surfaced as
+    /// `xpf_userspace_ndp_na_bad_source_refused_total`.
+    pub fn ndp_na_bad_source_refused_total(&self) -> u64 {
+        crate::afxdp::parser::NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed)
+    }
+
     /// #3773 (M13): cumulative count of fabric links skipped for a MALFORMED
     /// value (invalid parent ifindex / unparseable peer address / a NON-EMPTY
     /// unparseable local|peer MAC). Surfaced as

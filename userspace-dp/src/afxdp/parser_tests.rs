@@ -866,6 +866,11 @@ fn parse_ndp_na_9893_non_first_fragment_refused_and_counted() {
         src_before,
         "a fragment refusal must not pollute the bad-source series"
     );
+    assert_eq!(
+        crate::afxdp::coordinator::Coordinator::new().ndp_na_frag_refused_total(),
+        frag_before + 1,
+        "the fragment refusal must be readable through the coordinator status surface"
+    );
 }
 
 #[test]
@@ -886,6 +891,8 @@ fn parse_ndp_na_9893_first_and_atomic_fragments_refused() {
 #[test]
 fn parse_ndp_na_9893_bad_source_refused_and_counted() {
     let _g = ndp_na_refusal_counter_test_lock();
+    let status_before =
+        crate::afxdp::coordinator::Coordinator::new().ndp_na_bad_source_refused_total();
     for (name, src) in [
         ("unspecified", [0u8; 16]),
         ("loopback", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
@@ -915,6 +922,11 @@ fn parse_ndp_na_9893_bad_source_refused_and_counted() {
             "a source refusal must not pollute the fragment series"
         );
     }
+    assert_eq!(
+        crate::afxdp::coordinator::Coordinator::new().ndp_na_bad_source_refused_total(),
+        status_before + 3,
+        "the bad-source refusals must be readable through the coordinator status surface"
+    );
 }
 
 #[test]
