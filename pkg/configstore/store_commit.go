@@ -111,7 +111,15 @@ func (s *Store) Commit() (*config.Config, error) {
 func (s *Store) CommitWithDescription(description string) (*config.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.commitWithDescriptionLocked(description)
+	return s.commitWithDescriptionLocked(description, UnknownPrincipal)
+}
+
+// CommitWithDescriptionAs is the standalone caller variant with an explicit
+// journal principal.
+func (s *Store) CommitWithDescriptionAs(principal, description string) (*config.Config, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitWithDescriptionLocked(description, principal)
 }
 
 // CommitWithDescriptionGen is CommitWithDescription bound to an expected
@@ -161,12 +169,12 @@ func (s *Store) CommitWithDescriptionGenAs(
 		return nil, fmt.Errorf("%w (examined generation %d, current %d)",
 			ErrCandidateGenerationConflict, expectedGen, s.candidateGen)
 	}
-	return s.commitWithDescriptionLocked(description)
+	return s.commitWithDescriptionLocked(description, authority.JournalPrincipal())
 }
 
 // commitWithDescriptionLocked is the shared body of CommitWithDescription and
 // the generation-bound CommitWithDescriptionGen. Caller holds s.mu.Lock.
-func (s *Store) commitWithDescriptionLocked(description string) (*config.Config, error) {
+func (s *Store) commitWithDescriptionLocked(description, principal string) (*config.Config, error) {
 	// #3893: reject a user-session commit on a read-only secondary. The
 	// internal HA-sync ingress (SyncApply) and the commit-confirmed timeout
 	// revert (PromoteRollback) promote the active config directly and never
@@ -306,6 +314,7 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 		Action:     "commit",
 		Detail:     description,
 		ConfigHash: journalConfigHash(s.active),
+		Principal:  principal,
 	})
 
 	s.saveRollbackFiles()
@@ -423,7 +432,15 @@ const MaxCommitConfirmedMinutes = 65535
 func (s *Store) CommitConfirmed(minutes int) (*config.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.commitConfirmedLocked(minutes)
+	return s.commitConfirmedLocked(minutes, UnknownPrincipal)
+}
+
+// CommitConfirmedAs is the standalone caller variant with an explicit journal
+// principal.
+func (s *Store) CommitConfirmedAs(principal string, minutes int) (*config.Config, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitConfirmedLocked(minutes, principal)
 }
 
 // CommitConfirmedGen is CommitConfirmed bound to an expected candidate
@@ -462,12 +479,12 @@ func (s *Store) CommitConfirmedGenAs(
 		return nil, fmt.Errorf("%w (examined generation %d, current %d)",
 			ErrCandidateGenerationConflict, expectedGen, s.candidateGen)
 	}
-	return s.commitConfirmedLocked(minutes)
+	return s.commitConfirmedLocked(minutes, authority.JournalPrincipal())
 }
 
 // commitConfirmedLocked is the shared body of CommitConfirmed and the
 // generation-bound CommitConfirmedGen. Caller holds s.mu.Lock.
-func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
+func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Config, error) {
 	// #3893: reject a user-session commit-confirmed on a read-only secondary
 	// (same gate as CommitWithDescription).
 	if err := s.ensureWritableLocked(); err != nil {
@@ -646,6 +663,7 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	s.journalLog(&JournalEntry{
 		Action:     "commit_confirmed",
 		ConfigHash: journalConfigHash(s.active),
+		Principal:  principal,
 	})
 
 	s.saveRollbackFiles()
@@ -755,8 +773,9 @@ func (s *Store) noteConfirmArmFailureLocked(rec *confirmRecord, err error) {
 	// record for a window that has since been confirmed or rolled back.
 	s.confirmArmGen = s.confirmGen
 	s.journalLog(&JournalEntry{
-		Action: "confirm_arm_error",
-		Detail: fmt.Sprintf("durable write of the pending commit-confirmed record failed; auto-rollback would not survive a crash: %v", err),
+		Action:    "confirm_arm_error",
+		Detail:    fmt.Sprintf("durable write of the pending commit-confirmed record failed; auto-rollback would not survive a crash: %v", err),
+		Principal: "system:configstore",
 	})
 	s.ensurePersistRetryLoopLocked()
 }
@@ -895,8 +914,9 @@ func (s *Store) noteConfirmRemoveFailureLocked(action string, err error) {
 		"action", action, "err", err, "issue", "#5835")
 	s.confirmRemoveDegraded = true
 	s.journalLog(&JournalEntry{
-		Action: "confirm_remove_error",
-		Detail: fmt.Sprintf("%s: durable removal of pending commit-confirmed record failed: %v", action, err),
+		Action:    "confirm_remove_error",
+		Detail:    fmt.Sprintf("%s: durable removal of pending commit-confirmed record failed: %v", action, err),
+		Principal: "system:configstore",
 	})
 	s.ensurePersistRetryLoopLocked()
 }
@@ -1254,6 +1274,7 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 	s.journalLog(&JournalEntry{
 		Action:     "auto_rollback",
 		ConfigHash: journalConfigHash(s.active),
+		Principal:  "system:commit-confirmed-timeout",
 	})
 
 	return prevCfg, true
@@ -1377,31 +1398,20 @@ func (s *Store) ListCommitHistory(limit int) ([]*JournalEntry, error) {
 	return commits, nil
 }
 
-// LogSystemAction appends a `system_action` audit entry (action name +
-// timestamp) to the commit journal and fsyncs it (#4108 F8). It is the
-// tamper-evident record for the destructive maintenance verbs — reboot,
-// halt, power-off, zeroize — which otherwise leave NO durable trail: the
-// slog.Warn line goes to journald, which does not survive a zeroize, so
-// post-incident attribution had nothing to read.
-//
-// The caller MUST invoke this BEFORE running the action, because the append
-// is synchronous and fsynced (journal.Log), so the record is durable on disk
-// before the box goes down or the config is wiped. For reboot/halt/power-off
-// the on-disk record persists across the reboot. For `zeroize` the wipe now
-// deliberately REMOVES `.config.journal` (#4576 — a completed factory reset
-// must not hand its audit log to the next tenant), so the cross-wipe trail is
-// the pre-execution fsync (an interrupted wipe still leaves it) plus remote
-// syslog — this supersedes the earlier journal-survives-zeroize belt-and-braces.
-//
-// Journaling must never block a confirmed power/wipe action, so an append
-// failure is warned (journalLog), not returned. Detail carries the action
-// name; the local gRPC transport is unauthenticated (127.0.0.1, trusted) so
-// no operator identity is available to attribute — action + timestamp is the
-// best-effort record.
+// LogSystemAction appends an unattributed system-action entry for legacy and
+// direct callers. Transport handlers that already know the authenticated
+// principal use LogSystemActionAs instead.
 func (s *Store) LogSystemAction(action string) {
+	s.LogSystemActionAs(action, UnknownPrincipal)
+}
+
+// LogSystemActionAs appends a destructive-maintenance audit entry with the
+// explicit actor/source label supplied by the caller.
+func (s *Store) LogSystemActionAs(action, principal string) {
 	s.journalLog(&JournalEntry{
-		Action: "system_action",
-		Detail: action,
+		Action:    "system_action",
+		Detail:    action,
+		Principal: principal,
 	})
 }
 
@@ -1530,8 +1540,9 @@ func (s *Store) saveRollbackFiles() {
 	// best-effort text rollback copies are affected.
 	if degraded && !s.rollbackPersistDegraded {
 		s.journalLog(&JournalEntry{
-			Action: "rollback_persist_error",
-			Detail: "one or more rollback history files failed to persist; rollback history may be stale after restart",
+			Action:    "rollback_persist_error",
+			Detail:    "one or more rollback history files failed to persist; rollback history may be stale after restart",
+			Principal: "system:configstore",
 		})
 	}
 	s.rollbackPersistDegraded = degraded

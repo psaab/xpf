@@ -94,19 +94,21 @@ func (d *Daemon) restCommitConfirmedFn() func(context.Context, configstore.Commi
 	}
 }
 
-// shellCommitFn is the in-process shell CLI's commit seam. The local shell
-// carries no config-lock session id, so it commits as an EXPLICIT internal
-// committer (#6808) rather than by omitting the authority — "this caller has no
-// holder" must be a written statement, not a zero value.
+// shellCommitFn is the in-process shell CLI's commit seam. The CLI carries
+// its kernel-derived username/class in the callback context; preserve that
+// attribution while keeping the explicit internal authority required for a
+// no-config-lock-session commit.
 func (d *Daemon) shellCommitFn() func(context.Context, string) (*config.Config, error) {
 	return func(ctx context.Context, comment string) (*config.Config, error) {
-		return d.commitAndApplyOperator(ctx, configstore.InternalCommitter(), comment)
+		authority := configstore.InternalCommitterAs(configstore.JournalPrincipalFromContext(ctx))
+		return d.commitAndApplyOperator(ctx, authority, comment)
 	}
 }
 
 func (d *Daemon) shellCommitConfirmedFn() func(context.Context, int) (*config.Config, error) {
 	return func(ctx context.Context, minutes int) (*config.Config, error) {
-		return d.commitConfirmedAndApplyOperator(ctx, configstore.InternalCommitter(), minutes)
+		authority := configstore.InternalCommitterAs(configstore.JournalPrincipalFromContext(ctx))
+		return d.commitConfirmedAndApplyOperator(ctx, authority, minutes)
 	}
 }
 

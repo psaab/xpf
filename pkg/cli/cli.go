@@ -122,6 +122,7 @@ type CLI struct {
 	kernelUpgradeStatusFn func() upgrade.ChannelStatus
 	hostname              string
 	username              string
+	uid                   int
 	userClass             string
 	// pendingPipeSuffix carries the output-pipe suffix that cliterm.SplitPipe
 	// removed, so the #7172 command gate can match the command as the operator
@@ -213,7 +214,8 @@ func New(store *configstore.Store, dp cliRuntime, eventBuf *logging.EventBuffer,
 	// read-only operator and to anyone reading over their shoulder. An
 	// unresolvable identity renders as `uid-<n>` rather than a fabricated
 	// plausible account name.
-	username := osident.Current().String()
+	identity := osident.Current()
+	username := identity.String()
 
 	return &CLI{
 		store:       store,
@@ -229,6 +231,7 @@ func New(store *configstore.Store, dp cliRuntime, eventBuf *logging.EventBuffer,
 		cluster:     cm,
 		hostname:    hostname,
 		username:    username,
+		uid:         identity.UID,
 	}
 }
 

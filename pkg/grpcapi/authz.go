@@ -113,6 +113,11 @@ import (
 // connPeerKey is the context key for the per-connection peer identity.
 type connPeerKey struct{}
 
+// authorizedPrincipalKey carries the exact principal admitted by the unary
+// authorization boundary. Handlers must use it instead of re-resolving
+// against a later active-config snapshot.
+type authorizedPrincipalKey struct{}
+
 // connPeer is one connection's peer identity, resolved once at connection setup
 // and read by every RPC on that connection.
 //
@@ -235,7 +240,15 @@ const grpcDenialRemedy = " — grant the account the permission with " +
 // authz.Authorize. The alternative — an early return for the unidentified
 // caller — would render a second denial sentence for the same state, which is
 // how the two surfaces start disagreeing about what a denial means.
+// authorizeRPC is the compatibility wrapper used by direct gate tests and
+// stream re-authorization. Unary dispatch uses authorizeRPCContext so the
+// exact admitted principal reaches the handler.
 func (s *Server) authorizeRPC(ctx context.Context, fullMethod string, req any) error {
+	_, err := s.authorizeRPCContext(ctx, fullMethod, req)
+	return err
+}
+
+func (s *Server) authorizeRPCContext(ctx context.Context, fullMethod string, req any) (context.Context, error) {
 	required, mapped := methodPermission(fullMethod, req)
 	if !mapped {
 		// Unreachable while TestEveryServiceMethodHasAPermission_5278 passes;
@@ -248,7 +261,7 @@ func (s *Server) authorizeRPC(ctx context.Context, fullMethod string, req any) e
 	cfg := s.activeConfig()
 	p := principalFromContext(ctx, cfg)
 	if err := authz.Authorize(cfg, p, required); err != nil {
-		return denyRPC(fullMethod, required, p, err)
+		return nil, denyRPC(fullMethod, required, p, err)
 	}
 
 	// #9324: the method table prices ShowConfig at PermView, but ConfigTarget's
@@ -261,7 +274,7 @@ func (s *Server) authorizeRPC(ctx context.Context, fullMethod string, req any) e
 	// check, so a new candidate-reading RPC cannot be added with its
 	// continuation ungated.
 	if err := s.authorizeRPCConfigTargetRead(cfg, p, fullMethod, req); err != nil {
-		return denyRPC(fullMethod, config.PermConfig, p, err)
+		return nil, denyRPC(fullMethod, config.PermConfig, p, err)
 	}
 
 	// #7172 cut 5b: the class's fine-grained `deny-commands` regexes, AFTER the
@@ -274,16 +287,16 @@ func (s *Server) authorizeRPC(ctx context.Context, fullMethod string, req any) e
 	// p.Class is empty for a superuser anyway.
 	if !p.Superuser {
 		if err := s.authorizeRPCCommand(cfg, p.Class, fullMethod, req); err != nil {
-			return denyRPC(fullMethod, required, p, err)
+			return nil, denyRPC(fullMethod, required, p, err)
 		}
 		// #9154: the class's `*-configuration` regexes, which this surface did
 		// not consult at all. #7172's acceptance says both dispatch surfaces
 		// must use them and "neither may be gated alone"; only pkg/cli did.
 		if err := s.authorizeRPCConfigMutation(cfg, p.Class, fullMethod, req); err != nil {
-			return denyRPC(fullMethod, required, p, err)
+			return nil, denyRPC(fullMethod, required, p, err)
 		}
 	}
-	return nil
+	return context.WithValue(ctx, authorizedPrincipalKey{}, p), nil
 }
 
 // principalFromContext reads the identity TagConn fixed for this connection.
@@ -297,6 +310,13 @@ func principalFromContext(ctx context.Context, cfg *config.Config) authz.Princip
 		return authz.Unauthenticated("connection identity was not captured at accept")
 	}
 	return principalForPeer(cfg, cp.id)
+}
+
+// authorizedPrincipalFromContext returns the immutable principal captured by
+// authorizeRPCContext at the admission boundary.
+func authorizedPrincipalFromContext(ctx context.Context) (authz.Principal, bool) {
+	p, ok := ctx.Value(authorizedPrincipalKey{}).(authz.Principal)
+	return p, ok
 }
 
 // denyRPC renders a denial for the caller and records it for the operator.
@@ -332,10 +352,11 @@ func denyRPC(fullMethod string, required config.LoginClassPermission, p authz.Pr
 // multiplexed method up to its destructive floor the way pkg/api's
 // body-agnostic middleware must.
 func (s *Server) principalUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	if err := s.authorizeRPC(ctx, info.FullMethod, req); err != nil {
+	authorizedCtx, err := s.authorizeRPCContext(ctx, info.FullMethod, req)
+	if err != nil {
 		return nil, err
 	}
-	return handler(ctx, req)
+	return handler(authorizedCtx, req)
 }
 
 // principalStreamInterceptor authorizes a streaming RPC on the primary

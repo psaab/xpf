@@ -18,6 +18,7 @@
 package configstore
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -36,6 +37,60 @@ import (
 // subpackage since #1896 (compact v2 entries: no config payloads —
 // full trees live in the rollback slots; see journal.Entry).
 type JournalEntry = journal.Entry
+
+// UnknownPrincipal is the explicit attribution used when a caller cannot
+// know who or what initiated an action. It is never replaced with a guess.
+const UnknownPrincipal = journal.UnknownPrincipal
+
+// FormatJournalPrincipal builds the redacted actor label carried by a
+// transport-bound commit authority. User/class/source are non-secret identity
+// metadata; the session token is represented only by a short SHA-256 prefix
+// so the audit journal cannot become a bearer-token leak.
+func FormatJournalPrincipal(source string, uid uint32, user, class, sessionID string) string {
+	source = strings.TrimSpace(source)
+	user = strings.TrimSpace(user)
+	class = strings.TrimSpace(class)
+	sessionID = strings.TrimSpace(sessionID)
+	if source == "" && uid == 0 && user == "" && class == "" && sessionID == "" {
+		return UnknownPrincipal
+	}
+	session := "none"
+	if sessionID != "" {
+		sum := sha256.Sum256([]byte(sessionID))
+		session = "sha256:" + hex.EncodeToString(sum[:])[:16]
+	}
+	return fmt.Sprintf("source=%s;uid=%d;user=%s;class=%s;session=%s",
+		escapeJournalPrincipalComponent(source),
+		uid,
+		escapeJournalPrincipalComponent(user),
+		escapeJournalPrincipalComponent(class),
+		session)
+}
+
+func escapeJournalPrincipalComponent(component string) string {
+	if component == "" {
+		return UnknownPrincipal
+	}
+	return strings.NewReplacer("%", "%25", ";", "%3B", "=", "%3D").Replace(component)
+}
+
+type journalPrincipalContextKey struct{}
+
+// WithJournalPrincipal carries an already-derived, non-secret actor label
+// across an in-process commit callback boundary.
+func WithJournalPrincipal(ctx context.Context, principal string) context.Context {
+	return context.WithValue(ctx, journalPrincipalContextKey{}, principal)
+}
+
+// JournalPrincipalFromContext returns the actor label carried by
+// WithJournalPrincipal, or UnknownPrincipal when absent.
+func JournalPrincipalFromContext(ctx context.Context) string {
+	if principal, ok := ctx.Value(journalPrincipalContextKey{}).(string); ok &&
+		strings.TrimSpace(principal) != "" {
+		return principal
+	}
+	return UnknownPrincipal
+}
 
 // MaxConfigSize bounds a single configuration payload accepted by any parse
 // entry point: LoadOverride, LoadMerge, LoadSet, and the HA SyncApply ingress.
@@ -984,6 +1039,7 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	s.journalLog(&JournalEntry{
 		Action:     "config_sync",
 		ConfigHash: journalConfigHash(s.active),
+		Principal:  "system:cluster-sync",
 	})
 
 	s.saveRollbackFiles()

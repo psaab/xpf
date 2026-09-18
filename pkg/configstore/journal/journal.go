@@ -45,9 +45,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
@@ -57,6 +59,11 @@ import (
 // — tolerant decode drops them — and the rollback files (the canonical
 // full-config history, saveRollbackFiles in pkg/configstore) carry the
 // trees instead.
+//
+// Principal is the redacted actor/source string for the action. It is
+// additive within schema v2: older rows have no field and are read as
+// UnknownPrincipal, so existing history remains readable without rewriting
+// the append-only journal.
 type Entry struct {
 	// Schema is 2 for entries written by this package and 0 for
 	// legacy v1 lines. Forensic marker only — decode is tolerant in
@@ -79,6 +86,53 @@ type Entry struct {
 	// guarantee. Empty for entries that carry no config
 	// (persist_error / persist_recovered).
 	ConfigHash string `json:"config_hash,omitempty"`
+	// Principal is the redacted actor/source. A missing field in a legacy
+	// row is migrated in memory to UnknownPrincipal by parseLine.
+	Principal string `json:"principal,omitempty"`
+}
+
+// UnknownPrincipal is the explicit attribution used when a caller cannot
+// know who or what initiated an action. It is never replaced with a guess.
+const UnknownPrincipal = "unknown"
+
+// maxPrincipalBytes keeps an untrusted identity label from defeating the
+// journal's bounded record/tail guarantees.
+const maxPrincipalBytes = 256
+
+// normalizePrincipal applies the journal's redaction rules. Principal values
+// are labels, not credentials: controls are replaced so a journal consumer
+// cannot be forged with newlines, and long labels are UTF-8 safely truncated
+// with an explicit marker. Empty/whitespace-only values become the explicit
+// unknown sentinel.
+func normalizePrincipal(principal string) string {
+	principal = strings.TrimSpace(principal)
+	if principal == "" {
+		return UnknownPrincipal
+	}
+
+	var clean strings.Builder
+	clean.Grow(len(principal))
+	for _, r := range principal {
+		if r < 0x20 || r == 0x7f {
+			r = '?'
+		}
+		clean.WriteRune(r)
+	}
+	principal = clean.String()
+	if len(principal) <= maxPrincipalBytes {
+		return principal
+	}
+
+	marker := fmt.Sprintf("…[truncated %d bytes]", len(principal)-maxPrincipalBytes)
+	keep := maxPrincipalBytes - len(marker)
+	if keep < 0 {
+		keep = 0
+	}
+	cut := principal[:keep]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + marker
 }
 
 // SchemaV2 marks entries written by this package.
@@ -363,6 +417,7 @@ func (j *Journal) Log(entry *Entry) error {
 	if entry.Schema == 0 {
 		entry.Schema = SchemaV2
 	}
+	entry.Principal = normalizePrincipal(entry.Principal)
 
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -950,5 +1005,8 @@ func parseLine(line []byte) *Entry {
 	if e.Action == "" && e.Timestamp.IsZero() {
 		return nil
 	}
+	// #10301 migration: old v1/v2 rows omitted Principal. Backfill in
+	// memory rather than rewriting an append-only history file.
+	e.Principal = normalizePrincipal(e.Principal)
 	return e
 }

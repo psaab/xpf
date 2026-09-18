@@ -103,6 +103,16 @@ func (s *Server) mutationPlantClass(r *http.Request) (string, error) {
 	return p.Class, nil
 }
 
+// journalPrincipalForRequest renders the already-authorized REST principal
+// without logging the bearer-like config-session token itself.
+func journalPrincipalForRequest(r *http.Request, sessionID string) string {
+	p, ok := authorizedMutationPrincipal(r)
+	if !ok {
+		return configstore.UnknownPrincipal
+	}
+	return configstore.FormatJournalPrincipal(p.Source.String(), p.UID, p.Username, p.Class, sessionID)
+}
+
 func (s *Server) configEnterHandler(w http.ResponseWriter, r *http.Request) {
 	// An absent header starts a new session. Supplying the token returned by an
 	// earlier successful enter re-enters that same session and refreshes its
@@ -270,7 +280,7 @@ func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
 	// stages different edits — and this already-authorized commit would promote
 	// the NEW holder's candidate. The authority is re-verified against the live
 	// holder epoch at promotion, under the store lock.
-	authority, err := s.store.AuthorizeCommit(sessionID)
+	authority, err := s.store.AuthorizeCommitAs(sessionID, journalPrincipalForRequest(r, sessionID))
 	if err != nil {
 		writeConfigMutationError(w, err)
 		return
@@ -575,7 +585,7 @@ func (s *Server) configCommitConfirmedHandler(w http.ResponseWriter, r *http.Req
 	// stages different edits — and this already-authorized commit would promote
 	// the NEW holder's candidate. The authority is re-verified against the live
 	// holder epoch at promotion, under the store lock.
-	authority, err := s.store.AuthorizeCommit(sessionID)
+	authority, err := s.store.AuthorizeCommitAs(sessionID, journalPrincipalForRequest(r, sessionID))
 	if err != nil {
 		writeConfigMutationError(w, err)
 		return

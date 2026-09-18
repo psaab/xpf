@@ -395,17 +395,18 @@ func printConfigWarnings(warnings []string) {
 // waiting for the apply lock (e.g. a long-running peer-sync apply
 // holding it).
 func (c *CLI) runCommit(comment string) (*config.Config, error) {
+	principal := c.journalPrincipal()
 	if c.commitFn != nil {
 		ctx, done := c.commitCtx()
 		defer done()
-		return c.commitFn(ctx, comment)
+		return c.commitFn(configstore.WithJournalPrincipal(ctx, principal), comment)
 	}
 	var compiled *config.Config
 	var err error
 	if comment != "" {
-		compiled, err = c.store.CommitWithDescription(comment)
+		compiled, err = c.store.CommitWithDescriptionAs(principal, comment)
 	} else {
-		compiled, err = c.store.Commit()
+		compiled, err = c.store.CommitWithDescriptionAs(principal, "")
 	}
 	if err != nil {
 		return nil, err
@@ -415,16 +416,24 @@ func (c *CLI) runCommit(comment string) (*config.Config, error) {
 
 // runCommitConfirmed is the commit-confirmed analogue of runCommit.
 func (c *CLI) runCommitConfirmed(minutes int) (*config.Config, error) {
+	principal := c.journalPrincipal()
 	if c.commitConfirmedFn != nil {
 		ctx, done := c.commitCtx()
 		defer done()
-		return c.commitConfirmedFn(ctx, minutes)
+		return c.commitConfirmedFn(configstore.WithJournalPrincipal(ctx, principal), minutes)
 	}
-	compiled, err := c.store.CommitConfirmed(minutes)
+	compiled, err := c.store.CommitConfirmedAs(principal, minutes)
 	if err != nil {
 		return nil, err
 	}
 	return c.commitApply(compiled), nil
+}
+
+func (c *CLI) journalPrincipal() string {
+	if c == nil {
+		return configstore.UnknownPrincipal
+	}
+	return configstore.FormatJournalPrincipal("local-shell", uint32(c.uid), c.username, c.userClass, "")
 }
 
 // commitCtx returns a cancellable context registered with the CLI's

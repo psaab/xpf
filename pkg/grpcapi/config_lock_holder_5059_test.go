@@ -8,13 +8,13 @@ import (
 	"sync"
 	"testing"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // clientCtx returns a context carrying a distinct gRPC peer address, so
@@ -23,10 +23,17 @@ func clientCtx(port int) context.Context {
 	ctx := peer.NewContext(context.Background(), &peer.Peer{
 		Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port},
 	})
-	return context.WithValue(ctx, connPeerKey{}, &connPeer{
+	ctx = context.WithValue(ctx, connPeerKey{}, &connPeer{
 		id: authz.PeerIdentity{UID: 0, OK: true, Local: true},
 	})
+	// Direct handler tests bypass the production interceptor; publish the
+	// principal those root-owned calls are modeling so attribution remains
+	// explicit without re-resolving against a later config snapshot.
+	return context.WithValue(ctx, authorizedPrincipalKey{}, authz.Principal{
+		Source: authz.SourcePeerUID, UID: 0, Username: "root", Superuser: true,
+	})
 }
+
 func wantCode(t *testing.T, err error, want codes.Code, what string) {
 	t.Helper()
 	if err == nil {

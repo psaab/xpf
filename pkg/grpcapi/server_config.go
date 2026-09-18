@@ -25,6 +25,17 @@ func configMutationStatus(err error) error {
 	return status.Errorf(codes.InvalidArgument, "%v", err)
 }
 
+// journalPrincipalForContext consumes the principal captured by the
+// authorization interceptor. A direct handler call without an admission
+// context is intentionally unattributed.
+func journalPrincipalForContext(_ *Server, ctx context.Context, sessionID string) string {
+	p, ok := authorizedPrincipalFromContext(ctx)
+	if !ok {
+		return configstore.UnknownPrincipal
+	}
+	return configstore.FormatJournalPrincipal(p.Source.String(), p.UID, p.Username, p.Class, sessionID)
+}
+
 // commitApplyStatus maps a non-nil commit-callback error (commitFn /
 // commitConfirmedFn) to the right gRPC status code (#5742). The daemon commit
 // path (commitAndApply / commitConfirmedAndApply → applyAndSyncCommitted)
@@ -262,7 +273,7 @@ func (s *Server) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitR
 	// ConnEnd from a separate goroutine with no coordination with an in-flight
 	// commit, so an ordinary disconnect while this commit waits on the apply
 	// semaphore is enough.
-	authority, err := s.store.AuthorizeCommit(sessionID)
+	authority, err := s.store.AuthorizeCommitAs(sessionID, journalPrincipalForContext(s, ctx, sessionID))
 	if err != nil {
 		return nil, configMutationStatus(err)
 	}
@@ -313,7 +324,8 @@ func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedReq
 	// ConnEnd from a separate goroutine with no coordination with an in-flight
 	// commit, so an ordinary disconnect while this commit waits on the apply
 	// semaphore is enough.
-	authority, err := s.store.AuthorizeCommit(connSessionID(ctx))
+	sessionID := connSessionID(ctx)
+	authority, err := s.store.AuthorizeCommitAs(sessionID, journalPrincipalForContext(s, ctx, sessionID))
 	if err != nil {
 		return nil, configMutationStatus(err)
 	}

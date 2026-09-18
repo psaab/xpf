@@ -80,6 +80,9 @@ func TestRESTCommitPassesBoundAuthority_6808(t *testing.T) {
 			"the session that passed the gate, or it binds nothing",
 			got.SessionID(), testRESTConfigSessionID)
 	}
+	if got.JournalPrincipal() == configstore.UnknownPrincipal {
+		t.Error("REST commit authority lost the already-authorized transport principal")
+	}
 }
 
 // TestRESTCommitConfirmedPassesBoundAuthority_6808 is the commit-confirmed half.
@@ -123,6 +126,9 @@ func TestRESTCommitConfirmedPassesBoundAuthority_6808(t *testing.T) {
 	if got.SessionID() != testRESTConfigSessionID {
 		t.Errorf("commit-confirmed authority SessionID = %q, want %q",
 			got.SessionID(), testRESTConfigSessionID)
+	}
+	if got.JournalPrincipal() == configstore.UnknownPrincipal {
+		t.Error("REST commit-confirmed authority lost the already-authorized transport principal")
 	}
 }
 

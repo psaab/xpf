@@ -75,6 +75,9 @@ func TestGRPCCommitPassesBoundAuthority_6808(t *testing.T) {
 		t.Errorf("commit authority SessionID = %q, want %q — it must bind the session that "+
 			"passed the gate", got.SessionID(), sessionID)
 	}
+	if got.JournalPrincipal() == configstore.UnknownPrincipal {
+		t.Error("gRPC commit authority lost the already-authorized transport principal")
+	}
 }
 
 // TestGRPCCommitConfirmedPassesBoundAuthority_6808 is the commit-confirmed half.
@@ -110,6 +113,9 @@ func TestGRPCCommitConfirmedPassesBoundAuthority_6808(t *testing.T) {
 	}
 	if got.SessionID() != sessionID {
 		t.Errorf("commit-confirmed authority SessionID = %q, want %q", got.SessionID(), sessionID)
+	}
+	if got.JournalPrincipal() == configstore.UnknownPrincipal {
+		t.Error("gRPC commit-confirmed authority lost the already-authorized transport principal")
 	}
 }
 

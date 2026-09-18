@@ -392,11 +392,11 @@ var apiSchedulePowerAction = func(systemctlArg string) {
 // Best-effort: a nil store (standalone build / unit test without a store) is
 // skipped, and the store layer never blocks the confirmed action on a journal
 // write failure.
-func (s *Server) logSystemAction(action string) {
+func (s *Server) logSystemAction(action string, r *http.Request) {
 	if s.store == nil {
 		return
 	}
-	s.store.LogSystemAction(action)
+	s.store.LogSystemActionAs(action, journalPrincipalForRequest(r, ""))
 }
 
 func (s *Server) systemActionHandler(w http.ResponseWriter, r *http.Request) {
@@ -409,12 +409,12 @@ func (s *Server) systemActionHandler(w http.ResponseWriter, r *http.Request) {
 	case "reboot":
 		// Journal BEFORE the box goes down: the fsynced record survives the
 		// reboot even though the journald line does not (#4108 F8 / #4484 L-1).
-		s.logSystemAction("reboot")
+		s.logSystemAction("reboot", r)
 		apiSchedulePowerAction("reboot")
 		writeOK(w, map[string]string{"message": "System going down for reboot NOW!"})
 
 	case "halt":
-		s.logSystemAction("halt")
+		s.logSystemAction("halt", r)
 		apiSchedulePowerAction("halt")
 		writeOK(w, map[string]string{"message": "System halting NOW!"})
 
