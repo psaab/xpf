@@ -6,6 +6,7 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -115,17 +116,62 @@ func (c *CLI) showActiveConfigPath(path []string) string {
 	return c.store.ShowActivePath(path)
 }
 
+// showSystemRollbackCompare reports whether the operational `show system
+// rollback` handler will read the shared candidate for a compare request.
+//
+// The first spelling is `show system rollback compare N`; the second is
+// `show system rollback N ... compare`, which the handler recognizes with its
+// substring check. Keep this predicate aligned with handleShowSystem: its
+// `| display set` branch wins over the second spelling, while the first
+// spelling is checked before any display suffix. The system token is resolved
+// here exactly as handleShow does, so an unambiguous abbreviation cannot
+// bypass the candidate-read price.
+func showSystemRollbackCompare(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	system, err := resolveCommand(args[0], keysFromTree(operationalTree["show"].Children))
+	if err != nil || system != "system" || args[1] != "rollback" {
+		return false
+	}
+
+	// `show system rollback compare N` is the handler's first branch.
+	if args[2] == "compare" {
+		if len(args) < 4 {
+			return false
+		}
+		n, err := strconv.Atoi(args[3])
+		return err == nil && n >= 1
+	}
+
+	// `show system rollback N ... compare` is the handler's second branch.
+	n, err := strconv.Atoi(args[2])
+	if err != nil || n < 1 {
+		return false
+	}
+	rest := strings.Join(args[3:], " ")
+	if strings.Contains(rest, "| display set") {
+		return false
+	}
+	return strings.Contains(rest, "compare")
+}
+
 // requiredPermission returns the login-class permission a resolved operational
 // command needs. Gating is on the top-level word (parts[0]) for almost every
-// command, with one important exception: `monitor traffic` spawns a root
-// tcpdump live packet capture, so it must require the same control-level
-// permission as the `request`/shell-out command family rather than the plain
-// view permission the rest of `monitor` (interface stats, flow trace) uses.
-// Without this a read-only / config-viewer class — intended only to VIEW
-// config and status — could run an unprivileged root packet capture and read
-// other users' cleartext traffic (#4067).
+// command, with a few privileged subcommands needing a finer gate.
 func requiredPermission(parts []string) config.LoginClassPermission {
 	action := parts[0]
+
+	// #10094/#9889: ShowCompare's two operational console spellings both
+	// render a diff against the shared CANDIDATE. Reading another session's
+	// uncommitted configuration is a configure-mode activity, so price only
+	// those compare paths at PermConfig while the rest of `show` remains
+	// PermView. This mirrors #9889's gRPC contract; the in-process console's
+	// single coarse command price is intentionally a replacement (like the
+	// REST twin), rather than gRPC's additive method-table-plus-gate price.
+	if action == "show" && showSystemRollbackCompare(parts[1:]) {
+		return config.PermConfig
+	}
 
 	// `monitor traffic` = privileged capture (root tcpdump). Gate it at the
 	// control level even though the `monitor` top-level word is view-level.
