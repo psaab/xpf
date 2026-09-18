@@ -56,10 +56,14 @@ func fabricCfg6791() *config.Config {
 }
 
 // withFabricEnsure swaps the overlay-creation seam for the duration of a test.
+// Existing tests exercise propagation/retry ownership rather than MTU input;
+// adapt their three-argument callback to the production four-argument seam.
 func withFabricEnsure(t *testing.T, fn func(parent, name string, addrs []string) error) {
 	t.Helper()
 	prev := fabricEnsureFn
-	fabricEnsureFn = fn
+	fabricEnsureFn = func(parent, name string, addrs []string, _ int) error {
+		return fn(parent, name, addrs)
+	}
 	t.Cleanup(func() { fabricEnsureFn = prev })
 }
 

@@ -91,10 +91,12 @@ func (d *Daemon) rebindFabricOverlaysToMgmtVRF(cfg *config.Config) {
 func (d *Daemon) createDeferredFabricOverlays(overlays []deferredIPVLAN) {
 	for _, ov := range overlays {
 		slog.Info("XSK bound — creating deferred fabric IPVLAN",
-			"parent", ov.parent, "name", ov.name)
-		if err := fabricEnsureFn(ov.parent, ov.name, ov.addrs); err != nil {
-			slog.Error("deferred fabric IPVLAN creation failed",
-				"parent", ov.parent, "name", ov.name, "err", err)
+			"parent", ov.parent, "name", ov.name,
+			"mtu", fabricMTU10216(ov.mtu))
+		if err := fabricEnsureFn(ov.parent, ov.name, ov.addrs, ov.mtu); err != nil {
+			slog.Error("deferred fabric IPVLAN creation/reconciliation failed",
+				"parent", ov.parent, "name", ov.name,
+				"mtu", fabricMTU10216(ov.mtu), "err", err)
 			continue
 		}
 		if _, err := d.bindFabricOverlayToMgmtVRF(ov.name); err != nil {

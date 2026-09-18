@@ -23,11 +23,12 @@ import (
 // device per tick forever.
 var fabricIPVLANReassertInterval = 30 * time.Second
 
-// fabricEnsureFn is the overlay-creation entry point, overridable in tests so
-// the retry owner can be observed without a real IPVLAN. Package-level rather
-// than a Daemon field because ensureFabricIPVLAN is a package function and the
-// apply path calls it directly; routing BOTH through one seam is what makes the
-// re-drive assertable.
+// fabricEnsureFn is the overlay-creation and configured-MTU reconciliation
+// entry point, overridable in tests so the retry owner can be observed
+// without a real IPVLAN. Package-level rather than a Daemon field because
+// ensureFabricIPVLAN is a package function and the apply path calls it
+// directly; routing BOTH through one seam is what makes the re-drive
+// assertable.
 var fabricEnsureFn = ensureFabricIPVLAN
 
 // fabricIPVLANRetryDelay spaces applyFabricIPVLAN's in-line retries. A var so a
@@ -68,7 +69,7 @@ func (d *Daemon) fabricIPVLANReassertLoop(ctx context.Context) {
 }
 
 // missingFabricOverlays returns the configured fabric overlays that are absent
-// or down, as (parent, name, addrs) triples ready for ensureFabricIPVLAN.
+// or down, as (parent, name, addrs, mtu) tuples ready for ensureFabricIPVLAN.
 //
 // This is the CHEAP gate. On a healthy node it is one netlink name lookup per
 // configured fab device — at most two — and returns nothing, so the loop costs
@@ -96,6 +97,7 @@ func (d *Daemon) missingFabricOverlays(cfg *config.Config) []deferredIPVLAN {
 			parent: config.LinuxIfName(ifCfg.LocalFabricMember),
 			name:   fabLinux,
 			addrs:  addrs,
+			mtu:    ifCfg.MTU,
 		})
 	})
 	return out
@@ -188,13 +190,16 @@ func (d *Daemon) reassertFabricIPVLANOnce(ctx context.Context) {
 	}
 	for _, ov := range d.missingFabricOverlays(cfg) {
 		slog.Warn("fabric IPVLAN missing — re-asserting",
-			"parent", ov.parent, "name", ov.name)
-		if err := fabricEnsureFn(ov.parent, ov.name, ov.addrs); err != nil {
+			"parent", ov.parent, "name", ov.name,
+			"mtu", fabricMTU10216(ov.mtu))
+		if err := fabricEnsureFn(ov.parent, ov.name, ov.addrs, ov.mtu); err != nil {
 			slog.Error("fabric IPVLAN re-assert failed; will retry",
-				"parent", ov.parent, "name", ov.name, "err", err)
+				"parent", ov.parent, "name", ov.name,
+				"mtu", fabricMTU10216(ov.mtu), "err", err)
 			continue
 		}
-		slog.Info("fabric IPVLAN re-asserted", "parent", ov.parent, "name", ov.name)
+		slog.Info("fabric IPVLAN re-asserted", "parent", ov.parent,
+			"name", ov.name, "mtu", fabricMTU10216(ov.mtu))
 	}
 
 	// #9813: bind AFTER the ensure, so an overlay this pass just re-created is

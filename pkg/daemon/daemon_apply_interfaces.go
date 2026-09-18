@@ -15,13 +15,13 @@ import (
 )
 
 // deferredIPVLAN names one fabric overlay to (re)create: the physical parent,
-// the fab* device name, and the addresses it carries. Shared by the deferred
-// (OnXSKBound) creation path and the #6791 re-assert loop so both describe the
-// work the same way.
+// the fab* device name, the addresses it carries, and the configured MTU that
+// must be reconciled after userspace XSK binding.
 type deferredIPVLAN struct {
 	parent string
 	name   string
 	addrs  []string
+	mtu    int
 }
 
 // applyFabricIPVLAN creates the fabric-member IPVLAN overlays (fab0/fab1) for
@@ -76,37 +76,35 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 						"name", fabLinux)
 				}
 				deferredOverlays = append(deferredOverlays, deferredIPVLAN{
-					parent: parentLinux, name: fabLinux, addrs: addrs,
+					parent: parentLinux, name: fabLinux, addrs: addrs, mtu: ifCfg.MTU,
 				})
 				slog.Info("deferring fabric IPVLAN creation until XSK binds complete",
-					"parent", parentLinux, "name", fabLinux)
+					"parent", parentLinux, "name", fabLinux, "mtu", fabricMTU10216(ifCfg.MTU))
 				// continue // DISABLED: deferred IPVLAN broke forwarding
 			}
 			// XSK already bound — fall through to reconcile.
 		}
-		if err := fabricEnsureFn(parentLinux, fabLinux, addrs); err != nil {
+		if err := fabricEnsureFn(parentLinux, fabLinux, addrs, ifCfg.MTU); err != nil {
 			// Fabric overlay is critical for cluster heartbeat and VRRP.
 			// Retry up to 5 times with 1s delay — the parent interface
 			// might not be ready yet after a power cycle.
 			var retryErr error
 			for retry := 0; retry < 5; retry++ {
 				time.Sleep(fabricIPVLANRetryDelay)
-				slog.Info("retrying fabric IPVLAN creation",
-					"parent", parentLinux, "name", fabLinux, "attempt", retry+2)
-				retryErr = fabricEnsureFn(parentLinux, fabLinux, addrs)
+				slog.Info("retrying fabric IPVLAN creation/reconciliation",
+					"parent", parentLinux, "name", fabLinux,
+					"mtu", fabricMTU10216(ifCfg.MTU), "attempt", retry+2)
+				retryErr = fabricEnsureFn(parentLinux, fabLinux, addrs, ifCfg.MTU)
 				if retryErr == nil {
 					break
 				}
 			}
 			if retryErr != nil {
-				slog.Error("CRITICAL: fabric IPVLAN creation failed after retries — cluster heartbeat will not work",
-					"parent", parentLinux, "name", fabLinux, "err", retryErr)
-				// #6791: this log line said the cluster heartbeat will not
-				// work and then returned success. ensureFabricIPVLAN only
-				// returns an error when there is no usable overlay (address
-				// failures are warn-only inside it and AddrReplace is
-				// idempotent), so every error reaching here is terminal for
-				// fabric function, not a benign already-exists.
+				slog.Error("CRITICAL: fabric IPVLAN creation/reconciliation failed after retries — cluster heartbeat will not work",
+					"parent", parentLinux, "name", fabLinux,
+					"mtu", fabricMTU10216(ifCfg.MTU), "err", retryErr)
+				// #6791/#10216: do not acknowledge a fabric whose overlay
+				// or configured MTU has no usable writer.
 				fabricErrs = append(fabricErrs, fmt.Errorf(
 					"fabric IPVLAN %s on %s: %w", fabLinux, parentLinux, retryErr))
 			}
