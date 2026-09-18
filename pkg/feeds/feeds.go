@@ -1049,7 +1049,9 @@ func (m *Manager) fetchFeed(ctx context.Context, fs *feedState) {
 // not silently wipe an enforced set). The transport itself is bounded by the
 // client's httpClientTimeout (slow-loris protection).
 func (m *Manager) readFeed(ctx context.Context, fs *feedState) (fetchResult, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", fs.url, nil)
+	fetchCtx, cancelFetch := context.WithTimeout(ctx, httpClientTimeout)
+	defer cancelFetch()
+	req, err := http.NewRequestWithContext(fetchCtx, "GET", fs.url, nil)
 	if err != nil {
 		return fetchResult{}, fmt.Errorf("invalid URL: %w", err)
 	}
@@ -1061,10 +1063,11 @@ func (m *Manager) readFeed(ctx context.Context, fs *feedState) (fetchResult, err
 		return fetchResult{}, fmt.Errorf("invalid URL: unsupported feed destination scheme")
 	}
 
-	// Resolve and validate exactly once. The pinned client below retains the
-	// hostname in req.URL (for Host/TLS SNI) while dialing only this validated
-	// address set, so a DNS answer cannot change between validation and dial.
-	ips, err := m.resolveAndValidateFeedDestination(ctx, req.URL.Hostname())
+	// Resolve and validate exactly once under the same deadline as the request.
+	// The pinned client below retains the hostname in req.URL (for Host/TLS SNI)
+	// while dialing only this validated address set, so a DNS answer cannot
+	// change between validation and dial.
+	ips, err := m.resolveAndValidateFeedDestination(fetchCtx, req.URL.Hostname())
 	if err != nil {
 		return fetchResult{}, fmt.Errorf("feed destination refused: %w", err)
 	}
@@ -1072,6 +1075,10 @@ func (m *Manager) readFeed(ctx context.Context, fs *feedState) (fetchResult, err
 	if err != nil {
 		return fetchResult{}, fmt.Errorf("feed destination refused: %w", err)
 	}
+	// Each fetch gets a cloned transport so its dialer can be pinned. Close
+	// idle connections after the body is consumed; otherwise a zero
+	// IdleConnTimeout would retain one transport/read-loop per refresh.
+	defer client.CloseIdleConnections()
 
 	resp, err := client.Do(req)
 	if err != nil {
