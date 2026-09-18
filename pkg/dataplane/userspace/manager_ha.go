@@ -65,6 +65,12 @@ func (m *Manager) syncHAStateLocked() error {
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
 	}
+	// The helper has acknowledged this full inventory. Clear the persistent
+	// obligation before reconciling the returned status or desired forwarding:
+	// either later step may fail, but repeating an acknowledged inventory on
+	// the next tick would violate the no-double-apply contract.
+	m.pendingHAStateReplay = false
+
 	// Record the exact full group set the current helper acknowledged before
 	// applying its returned status. A later apply may reseed m.haGroups to a
 	// smaller configured set while the helper still owns this inventory; the
@@ -172,7 +178,47 @@ func (m *Manager) retryPendingHAStateClearLocked() {
 	}
 }
 
+// retryPendingHAStateReplayLocked retries a clustered inventory publish that
+// followed a successful snapshot retry-debt convergence. Snapshot publication
+// and update_ha_state are separate RPCs; the former can settle the generation
+// gate while the latter fails. Keep this obligation independent of
+// publishedSnapshot so every status tick remains a consumer until the helper
+// acknowledges a non-empty inventory.
+func (m *Manager) retryPendingHAStateReplayLocked() error {
+	if !m.pendingHAStateReplay || !m.clusterHA {
+		return nil
+	}
+	if err := m.refreshHAStateFromMapsLocked(); err != nil {
+		return err
+	}
+	if err := m.syncHAStateLocked(); err != nil {
+		return err
+	}
+	// syncHAStateLocked clears the obligation immediately after that request
+	// ACK; later returned-status failures are deliberately not retried as a
+	// duplicate inventory publish.
+	return nil
+}
+
+// armPendingHAStateReplayLocked carries retry-debt convergence across a
+// successful full snapshot publish. Direct republish callers (scheduler,
+// overlay, and deferred-worker recovery) must use the same arm point as
+// syncSnapshotLocked: apply_snapshot success settles the generation debt, but
+// update_ha_state may still be outstanding.
+func (m *Manager) armPendingHAStateReplayLocked(wasDebt bool) {
+	if !wasDebt || !m.clusterHA {
+		return
+	}
+	m.pendingHAStateReplay = true
+	m.helperHAStatePublished = false
+	m.haWatchdogHelperInventory = nil
+	m.publishHAWatchdogSnapshotLocked()
+}
+
 func (m *Manager) refreshHAStateFromMapsLocked() error {
+	if m.refreshHAStateFromMapsHook != nil {
+		return m.refreshHAStateFromMapsHook()
+	}
 	rgMap := m.bpfShim.Map("rg_active")
 	if rgMap == nil {
 		return errors.New("rg_active map not loaded")
@@ -230,6 +276,7 @@ func (m *Manager) seedHAGroupInventoryLocked(cfg *config.Config) {
 			m.haWatchdogIntentGen.Add(1)
 		}
 		m.haGroups = cleared
+		m.pendingHAStateReplay = false
 		m.publishHAWatchdogSnapshotLocked()
 		return
 	}
@@ -909,6 +956,12 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
 	}
+	// #10034: this election publish is a full-inventory ACK through the same
+	// contract as syncHAStateLocked. Clear a failed replay obligation a debt
+	// convergence may hold; otherwise the next tick resends this just-ACKed
+	// inventory and holds ctrl one extra tick during takeover. Safe: the Active
+	// bits just written to rg_active are the ones the helper acknowledged.
+	m.pendingHAStateReplay = false
 	m.helperHAStatePublished = true
 	m.haWatchdogHelperInventory = append(m.haWatchdogHelperInventory[:0], groups...)
 	m.publishHAWatchdogSnapshotLocked()

@@ -39,6 +39,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	if !m.pendingWorkerArm {
 		return nil
 	}
+	wasDebt := m.snapshotRetryDebtLocked()
 	if m.proc == nil || m.proc.Process == nil || m.lastSnapshot == nil {
 		// Helper not running / nothing published yet: there is no live
 		// workerless snapshot to re-arm. A helper (re)start replays through
@@ -101,6 +102,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		m.lastSnapshotHash = h
 	}
 	m.pendingWorkerArm = false
+	m.armPendingHAStateReplayLocked(wasDebt)
 	m.resolvePartialOutcomesLocked(resampled)
 	slog.Info("userspace: armed deferred AF_XDP workers after deferred-MAC re-apply retry",
 		"generation", next.Generation)

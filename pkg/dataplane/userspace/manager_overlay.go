@@ -103,6 +103,7 @@ func (m *Manager) SetFeedSnapshots(overlay map[string][]string) {
 func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (published bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	wasDebt := m.snapshotRetryDebtLocked()
 
 	// #3760: do NOT advance the cached desired overlay before the publish
 	// is known not to have failed. buildRouteSnapshots below builds
@@ -284,6 +285,7 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)
+	m.armPendingHAStateReplayLocked(wasDebt)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		slog.Warn("userspace: failed to sync helper status after route overlay publish", "err", err)
 	}

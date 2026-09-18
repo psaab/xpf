@@ -978,6 +978,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	wasDebt := m.snapshotRetryDebtLocked()
 
 	m.policySchedulerDesired = activeCopy
 	m.policySchedulerDesiredSet = true
@@ -1071,6 +1072,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)
+	m.armPendingHAStateReplayLocked(wasDebt)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		// #3780: the snapshot DID land (generation bumped, lastSnapshot
 		// updated above) — the schedule transition converged. A status

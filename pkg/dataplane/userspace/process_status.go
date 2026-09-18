@@ -11,6 +11,12 @@ func (m *Manager) syncSnapshotLocked() error {
 	if m.proc == nil || m.proc.Process == nil || m.lastSnapshot == nil {
 		return nil
 	}
+	// The successful publish below clears applySnapshotOutcomeUnknown. Keep
+	// this episode bit before entering it so only retry-debt convergence
+	// replays the HA tail; an ordinary deferred publish must keep its existing
+	// ordering and consumers.
+	retryDebtConvergence := m.snapshotRetryDebtLocked()
+
 	planKey := snapshotBindingPlanKey(m.lastSnapshot)
 	if m.publishedSnapshot >= m.lastSnapshot.Generation {
 		return nil
@@ -212,9 +218,35 @@ func (m *Manager) syncSnapshotLocked() error {
 	if hashOK {
 		m.lastSnapshotHash = hash
 	}
+
+	// Arm this obligation immediately after apply_snapshot succeeds. The
+	// subsequent helper-status reconcile can fail too, and the snapshot gate
+	// is already settled by then; setting it earlier keeps the inventory retry
+	// reachable on the next status tick.
+	m.armPendingHAStateReplayLocked(retryDebtConvergence)
+
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return fmt.Errorf("sync helper status: %w", err)
 	}
+	// #10034: Compile's successful apply tail also replays the HA inventory.
+	// A timeout-but-landed apply_snapshot is adopted as retry debt and
+	// converges through this function, so repeat that tail here before
+	// returning. Keep clustered replay outstanding independently of the
+	// snapshot generation gate: the snapshot RPC can succeed while the
+	// inventory RPC fails.
+	if retryDebtConvergence {
+		if m.clusterHA {
+			if err := m.retryPendingHAStateReplayLocked(); err != nil {
+				return fmt.Errorf("replay userspace HA state: %w", err)
+			}
+		} else {
+			m.pendingHAStateReplay = false
+			if err := m.clearHelperHAStateWithDebtEnsureRetryLocked(); err != nil {
+				return fmt.Errorf("clear userspace HA state: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -288,6 +320,11 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				continue
 			}
 			prevActiveSig := activeHAGroupSignature(m.haGroups)
+			// A successful debt convergence clears pendingHAStateReplay before
+			// this tick reaches the periodic HA backstop. Preserve the episode
+			// bit locally so that backstop cannot republish the same inventory,
+			// and use it to avoid a second retry after an HA RPC failure.
+			haReplayAttemptedThisTick := false
 			var status ProcessStatus
 			if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
 				// #9651: an answered poll resets the wedge count.
@@ -307,6 +344,7 @@ func (m *Manager) statusLoop(ctx context.Context) {
 					repaired := m.verifyBindingsMapLocked()
 					m.maybeAutoRebindBusyBindingsLocked(time.Now(), repaired)
 					if m.lastSnapshot != nil && m.publishedSnapshot < m.lastSnapshot.Generation {
+						haReplayAttemptedThisTick = m.clusterHA && m.snapshotRetryDebtLocked()
 						if err := m.syncSnapshotLocked(); err != nil {
 							// #9642: an indebted failure retries next tick. Warn
 							// on the transition and at most once a minute while
@@ -348,12 +386,19 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				// the idempotent clear here (ungated by clusterHA, but only while
 				// standalone) until it succeeds.
 				m.retryPendingHAStateClearLocked()
+				pendingHAReplay := m.pendingHAStateReplay && m.clusterHA
+				if pendingHAReplay && !haReplayAttemptedThisTick {
+					haReplayAttemptedThisTick = true
+					if err := m.retryPendingHAStateReplayLocked(); err != nil {
+						slog.Warn("userspace dataplane HA inventory replay failed; will retry next tick", "err", err)
+					}
+				}
 				helperActiveSig := activeHAGroupSignatureSlice(status.HAGroups)
-				if m.clusterHA {
+				if m.clusterHA && !haReplayAttemptedThisTick {
 					_ = m.refreshHAStateFromMapsLocked()
 				}
 				newActiveSig := activeHAGroupSignature(m.haGroups)
-				if m.clusterHA && newActiveSig != "" && time.Since(m.lastRGActivateTime) >= 2*time.Second {
+				if m.clusterHA && !haReplayAttemptedThisTick && newActiveSig != "" && time.Since(m.lastRGActivateTime) >= 2*time.Second {
 					// Only sync watchdog updates to the helper from the poll.
 					// Do NOT sync active/inactive transitions here — that's
 					// handled by UpdateRGActive which must be the sole source
@@ -378,7 +423,9 @@ func (m *Manager) statusLoop(ctx context.Context) {
 					// standby must already be forwarding-ready; otherwise
 					// TakeoverReady() should have blocked the handoff earlier.
 				}
-				if err := m.syncDesiredForwardingStateLocked(); err != nil {
+				if m.pendingHAStateReplay {
+					slog.Debug("userspace dataplane forwarding sync deferred; HA inventory replay pending")
+				} else if err := m.syncDesiredForwardingStateLocked(); err != nil {
 					slog.Warn("userspace dataplane forwarding sync failed", "err", err)
 				}
 			} else {

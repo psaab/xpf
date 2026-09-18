@@ -463,8 +463,11 @@ func (m *Manager) blindFailClosedUserspaceCtrlLocked(
 // on the fail-closed path — so it is deliberately NOT bundled into this round.
 // What this buys is the difference between "unbound" and "bound one level in".
 func (m *Manager) ctrlMustStayDisabledLocked(statusEnabled bool) bool {
+	// #10034: a snapshot retry may have settled while its clustered HA
+	// inventory replay is still outstanding. Keep ctrl fail-closed until the
+	// acknowledged update_ha_state clears that obligation.
 	return statusEnabled && (m.rgTransitionInFlight.Load() || m.linkCycleInFlight() ||
-		m.snapshotRetryDebtLocked())
+		m.snapshotRetryDebtLocked() || m.pendingHAStateReplay)
 }
 
 // snapshotRetryDebtLocked reports whether an unknown-outcome full-snapshot
