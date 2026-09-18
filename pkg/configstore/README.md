@@ -1676,30 +1676,39 @@ reported as `chassis cluster peer node<N>: ...` wrapping the gate's own error.
 owned by the `journal/` subpackage.
 
 - **Compact v2 entries** — `{v, timestamp, action, detail,
-  config_hash}`. The v1 format appended the FULL compiled config per
-  commit (read by nobody — `show system commit` prints only
-  timestamp/action/detail) so the file grew by a config snapshot per
-  commit and leaked config content (incl. secrets) into a 0644 file.
-  Full trees live in the rollback files (above), which remain the
-  canonical config history.
+  config_hash, principal}`. The v1 format appended the FULL compiled config
+  per commit (read by nobody — `show system commit` prints only
+  timestamp/action/detail) so the file grew by a config snapshot per commit
+  and leaked config content (incl. secrets) into a 0644 file. Full trees live
+  in the rollback files (above), which remain the canonical config history.
+- **`principal` attribution (#10301)** — every newly appended row carries an
+  actor/source string. Transport-bound REST/gRPC commits use
+  `source=<peer-or-credential>;uid=<uid>;user=<name>;class=<login-class>;session=<sha256-prefix>`;
+  the session token is hashed and never written verbatim. The local shell
+  carries its kernel UID/name and daemon-resolved class. Autonomous paths use
+  explicit `system:event-engine`, `system:bootstrap`, and other
+  `system:<subsystem>` labels, while callers that cannot know an actor use the
+  literal `unknown` (never a fabricated identity). Delimiters are escaped,
+  controls are replaced, and over-long labels are UTF-8 safely truncated with
+  a marker. Existing v1/v2 rows without `principal` are migrated in memory to
+  `unknown`; the append-only history file is never rewritten.
 - **`system_action` entries (#4108 F8)** — `Store.LogSystemAction(verb)`
-  appends a `{action: "system_action", detail: <verb>}` record for the
-  destructive maintenance verbs `reboot`/`halt`/`power-off`/`zeroize`
-  (written by `grpcapi.Server.SystemAction` BEFORE the action runs). The
-  append is fsynced, so the record is durable on disk before the box goes
-  down or the config is wiped — the `slog.Warn` line only reaches
-  journald, which does not survive a reboot. For `reboot`/`halt`/`power-off`
-  the on-disk record persists across the reboot. For `zeroize`, the wipe
-  now **removes `.config.journal`** (and its rotated `.config.journal.N`
-  segments) as part of the factory reset (#4576 — a completed reset must
-  not hand its audit log / commit history / comments to the next tenant,
-  and legacy v1 fat lines could carry full config incl. secrets in a 0644
-  file). The cross-wipe trail is therefore the pre-execution fsync (an
-  *interrupted* wipe still leaves the record) plus remote syslog — not
-  on-box journal survival. `system_action` is deliberately EXCLUDED from
-  `ListCommitHistory` (`show system commit` shows config commits only). The
-  local gRPC transport is unauthenticated, so no operator identity is
-  attributed — action + timestamp is the best-effort record.
+  appends an unattributed `{action: "system_action", detail: <verb>}`
+  record; the REST/gRPC handlers use `LogSystemActionAs` with their
+  already-authorized principal before destructive maintenance verbs
+  `reboot`/`halt`/`power-off`/`zeroize` run. The append is fsynced, so the
+  record is durable on disk before the box goes down or the config is wiped —
+  the `slog.Warn` line only reaches journald, which does not survive a reboot.
+  For `reboot`/`halt`/`power-off` the on-disk record persists across the reboot.
+  For `zeroize`, the wipe now **removes `.config.journal`** (and its rotated
+  `.config.journal.N` segments) as part of the factory reset (#4576 — a
+  completed reset must not hand its audit log / commit history / comments to
+  the next tenant, and legacy v1 fat lines could carry full config incl.
+  secrets in a 0644 file). The cross-wipe trail is therefore the
+  pre-execution fsync (an *interrupted* wipe still leaves the record) plus
+  remote syslog — not on-box journal survival. `system_action` is deliberately
+  EXCLUDED from `ListCommitHistory` (`show system commit` shows config commits
+  only).
 - **`config_hash`** — sha256 hex of the post-action active tree's
   `Format()` text, the same text `saveRollbackFiles` writes: while a
   slot is retained, `sha256sum <config>.N` correlates the rollback
