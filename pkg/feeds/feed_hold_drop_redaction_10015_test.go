@@ -142,7 +142,7 @@ func TestDuplicateFeedNameWarnRedactsCredentialURL10015(t *testing.T) {
 	}))
 	defer winner.Close()
 
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 	// "aaa" sorts first and wins; "bbb" is the duplicate whose URL is logged.
 	// Empty Path keeps the token URL byte-identical into the Warn.
 	daCfg := &config.DynamicAddressConfig{

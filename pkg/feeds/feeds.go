@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
@@ -161,6 +162,13 @@ type Manager struct {
 	mu     sync.RWMutex
 	feeds  map[string]*feedState // keyed by feed-name (or feed-server name for single-feed servers)
 	client *http.Client
+
+	// privateFeedAllowlist is the explicit lab override for destinations that
+	// would otherwise be refused by the feed SSRF guard. It is global to this
+	// manager rather than attached to a feed, so a lab process can make one
+	// deliberate reachability decision for all of its fixtures.
+	privateFeedAllowlist []netip.Prefix
+
 	// onUpdate is the publish callback invoked when a feed refresh produces
 	// content that must be (re-)applied to the dataplane. It RETURNS the apply
 	// result: a nil return means the content was ACCEPTED (applied), a non-nil
@@ -255,6 +263,157 @@ func New(onUpdate func() error) *Manager {
 		onUpdate: onUpdate,
 		now:      time.Now,
 	}
+}
+
+// SetPrivateFeedAllowlist installs the explicit lab override for private feed
+// destinations. An empty slice restores the default-deny policy. Invalid
+// prefixes are ignored; valid prefixes are masked before storage so the
+// allowlist has deterministic network semantics.
+//
+// This is intentionally a manager-level escape hatch rather than a feed-server
+// configuration knob. A private destination is reachable only when the lab
+// process makes one deliberate decision for the manager that owns its feeds.
+func (m *Manager) SetPrivateFeedAllowlist(prefixes []netip.Prefix) {
+	valid := make([]netip.Prefix, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if prefix.IsValid() {
+			valid = append(valid, prefix.Masked())
+		}
+	}
+	m.mu.Lock()
+	m.privateFeedAllowlist = valid
+	m.mu.Unlock()
+}
+
+// blockedFeedDestinationPrefixes contains address space that is not a public
+// feed destination. netip.Addr's classification methods cover the RFC1918,
+// RFC4193, loopback, and link-local classes; these explicit prefixes add the
+// cloud metadata/CGNAT and special-purpose ranges that are still otherwise
+// classified as global unicast by the standard library.
+var blockedFeedDestinationPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT; Alibaba metadata is within it.
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments.
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking/special-purpose.
+}
+
+func (m *Manager) privateFeedAllowlistSnapshot() []netip.Prefix {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]netip.Prefix(nil), m.privateFeedAllowlist...)
+}
+
+func feedDestinationAllowed(ip netip.Addr, allowlist []netip.Prefix) bool {
+	ip = ip.Unmap()
+	for _, prefix := range allowlist {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func feedDestinationBlocked(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !ip.IsValid() ||
+		ip.IsPrivate() ||
+		ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsUnspecified() ||
+		!ip.IsGlobalUnicast() {
+		return true
+	}
+	for _, prefix := range blockedFeedDestinationPrefixes {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveAndValidateFeedDestination resolves a feed hostname once and
+// validates every answer before the transport is allowed to dial. Refusing
+// the whole answer set when any member is forbidden prevents a resolver from
+// selecting a private answer after a public answer was observed.
+func (m *Manager) resolveAndValidateFeedDestination(ctx context.Context, host string) ([]netip.Addr, error) {
+	if host == "" {
+		return nil, fmt.Errorf("empty feed destination host")
+	}
+
+	var (
+		ips []netip.Addr
+		err error
+	)
+	if literal, parseErr := netip.ParseAddr(host); parseErr == nil {
+		ips = []netip.Addr{literal.Unmap()}
+	} else {
+		ips, err = net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve feed destination: %w", err)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve feed destination returned no addresses")
+	}
+
+	allowlist := m.privateFeedAllowlistSnapshot()
+	unique := make([]netip.Addr, 0, len(ips))
+	seen := make(map[netip.Addr]struct{}, len(ips))
+	for _, ip := range ips {
+		ip = ip.Unmap()
+		if !ip.IsValid() {
+			return nil, fmt.Errorf("feed destination resolved to an invalid address")
+		}
+		if feedDestinationBlocked(ip) && !feedDestinationAllowed(ip, allowlist) {
+			return nil, fmt.Errorf("feed destination resolves to a blocked address")
+		}
+		if _, exists := seen[ip]; exists {
+			continue
+		}
+		seen[ip] = struct{}{}
+		unique = append(unique, ip)
+	}
+	return unique, nil
+}
+
+// pinnedFeedClient clones the feed transport with a dialer that uses only the
+// already-validated addresses. The request URL retains its hostname for Host
+// and TLS SNI, but no later transport operation can perform a fresh DNS
+// lookup, closing the resolve/check/dial TOCTOU window.
+func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.Client, error) {
+	if base == nil {
+		return nil, fmt.Errorf("feed client is nil")
+	}
+	baseTransport, ok := base.Transport.(*http.Transport)
+	if !ok || baseTransport == nil {
+		return nil, fmt.Errorf("feed client transport cannot pin destination")
+	}
+	transport := baseTransport.Clone()
+	transport.DialTLSContext = nil
+	dialer := &net.Dialer{}
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var lastErr error
+		for _, ip := range ips {
+			switch {
+			case network == "tcp4" && !ip.Is4():
+				continue
+			case network == "tcp6" && !ip.Is6():
+				continue
+			}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no validated address matches network %q", network)
+	}
+	client := *base
+	client.Transport = transport
+	return &client, nil
 }
 
 // resolveBaseURL returns the base URL for a feed server.
@@ -867,8 +1026,27 @@ func (m *Manager) readFeed(ctx context.Context, fs *feedState) (fetchResult, err
 	if err != nil {
 		return fetchResult{}, fmt.Errorf("invalid URL: %w", err)
 	}
+	if req.URL.Hostname() == "" {
+		return fetchResult{}, fmt.Errorf("invalid URL: empty feed destination host")
+	}
+	port := feedOriginPort(req.URL)
+	if port == "" {
+		return fetchResult{}, fmt.Errorf("invalid URL: unsupported feed destination scheme")
+	}
 
-	resp, err := m.client.Do(req)
+	// Resolve and validate exactly once. The pinned client below retains the
+	// hostname in req.URL (for Host/TLS SNI) while dialing only this validated
+	// address set, so a DNS answer cannot change between validation and dial.
+	ips, err := m.resolveAndValidateFeedDestination(ctx, req.URL.Hostname())
+	if err != nil {
+		return fetchResult{}, fmt.Errorf("feed destination refused: %w", err)
+	}
+	client, err := pinnedFeedClient(m.client, ips, port)
+	if err != nil {
+		return fetchResult{}, fmt.Errorf("feed destination refused: %w", err)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fetchResult{}, fmt.Errorf("fetch failed: %w", err)
 	}

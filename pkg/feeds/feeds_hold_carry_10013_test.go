@@ -32,7 +32,7 @@ import (
 // flip it healthy to test recovery).
 func applyNoopReconfigAfterHoldDrop10013(t *testing.T, feedName string) (*Manager, *config.DynamicAddressConfig, *bodyServer) {
 	t.Helper()
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 	down := &bodyServer{}
 	down.set("hijacked-or-error", http.StatusInternalServerError)
 	downTS := httptest.NewServer(down.handler())
@@ -129,7 +129,7 @@ func TestContinuedFailureAfterReconfigPreservesDrop10013(t *testing.T) {
 // first snapshot must stay unmarked across the reconfig and keep the #5645
 // fail-closed omission under both modes.
 func TestNoopReconfigDoesNotInventHoldDrop10013(t *testing.T) {
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 	down := &bodyServer{}
 	down.set("hijacked-or-error", http.StatusInternalServerError)
 	downTS := httptest.NewServer(down.handler())
