@@ -526,8 +526,8 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 					"from": {desc: "Match conditions", children: map[string]*schemaNode{
 						"source-address":          {desc: "Match source address", args: 1, multi: true, placeholder: "<address>", children: nil},
 						"destination-address":     {desc: "Match destination address", args: 1, multi: true, placeholder: "<address>", children: nil},
-						"source-prefix-list":      {desc: "Match source addresses from a prefix list", children: nil},
-						"destination-prefix-list": {desc: "Match destination addresses from a prefix list", children: nil},
+						"source-prefix-list":      {desc: "Match source addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
+						"destination-prefix-list": {desc: "Match destination addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
 						"protocol":                {desc: "Match IP protocol", args: 1, multi: true, placeholder: "<protocol>", children: nil},
 						// #8781: the IPv6 spelling of `protocol`. Declared for the same
 						// reason `traffic-class` is declared here (#8773) — the compiler
@@ -642,8 +642,8 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 					"from": {desc: "Match conditions", children: map[string]*schemaNode{
 						"source-address":          {desc: "Match source address", args: 1, multi: true, placeholder: "<address>", children: nil},
 						"destination-address":     {desc: "Match destination address", args: 1, multi: true, placeholder: "<address>", children: nil},
-						"source-prefix-list":      {desc: "Match source addresses from a prefix list", children: nil},
-						"destination-prefix-list": {desc: "Match destination addresses from a prefix list", children: nil},
+						"source-prefix-list":      {desc: "Match source addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
+						"destination-prefix-list": {desc: "Match destination addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
 						"protocol":                {desc: "Match IP protocol (IPv4 spelling of next-header; accepted in family inet6 — advisory at commit)", args: 1, multi: true, placeholder: "<protocol>", children: nil},
 						// #8781: the Junos spelling for IPv6, and the one that was
 						// SILENTLY DROPPED in the packed form — a correctly-authored

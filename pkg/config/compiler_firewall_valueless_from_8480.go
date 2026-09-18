@@ -96,45 +96,66 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	valued := map[string]bool{}
 	termSchema := schemaForPath("firewall", "family", "inet", "filter", "term")
 	termBody := packedBody(termNode, termSchema)
-	for _, from := range termBody.Children {
+	fromNodes := append([]*Node(nil), termBody.Children...)
+	ambiguousFrom := map[*Node]bool{}
+	// #10073: preserve a raw packed `from` node when the operand has the
+	// same spelling as its prefix-list leaf. The schema now declares one
+	// argument, so packedBody would otherwise reinterpret that operand as a
+	// child statement; the normalizer deliberately preserves this ambiguous
+	// raw spelling for the gate to resolve conservatively.
+	if packedFrom := firewallPackedTermFromNode(termNode, termSchema); packedFrom != nil {
+		ambiguous := false
+		for i := 1; i < len(packedFrom.Keys); i++ {
+			leaf := packedFrom.Keys[i]
+			if (leaf == "source-prefix-list" || leaf == "destination-prefix-list") &&
+				i+1 < len(packedFrom.Keys) &&
+				!packedFrom.KeyQuoted(i+1) &&
+				packedFrom.Keys[i+1] == leaf {
+				ambiguous = true
+				break
+			}
+		}
+		if ambiguous {
+			fromNodes = nil
+			ambiguousFrom[packedFrom] = true
+		}
+		fromNodes = append(fromNodes, packedFrom)
+	}
+	for _, from := range fromNodes {
 		if from.Name() != "from" {
 			continue
 		}
-		// GPT-F2/#10081: packedBody reinterprets a keyword-shaped OPERAND
-		// as another statement (the prefix-list leaf schema declares zero
-		// args), so `from source-prefix-list "source-prefix-list";`
-		// synthesizes valueless children for a valued ref — where an AAA
-		// operand bails the expansion entirely. Read the operand
-		// distinction from the RAW tail: the token following the leaf
-		// keyword is its operand UNLESS it opens a new statement, i.e. an
-		// unquoted schema-known head (packedBody's own rule, plus the
-		// quoting it ignores). Quoted keyword-shaped names are legitimate
-		// operands (#9029); a non-keyword token is always an operand.
-		// Only a tail-END leaf, or one followed by a new statement head,
-		// is valueless here. (Unquoted keyword operand, `from
-		// source-prefix-list source-prefix-list;`, therefore reads as two
-		// valueless statements and rejects — while the braced reader
-		// quote-blindly keeps it as a ref. The grammar genuinely cannot
-		// tell them apart; #9029 legitimizes the quoted spelling, and an
-		// unquoted keyword-named list is dangling-gated on the braced
-		// side too. Statement splitting inside packed tails otherwise
-		// stays #10081's to own.)
+		ambiguousSelf := ambiguousFrom[from]
+		// Read the operand distinction from the RAW tail: the token
+		// following a leaf keyword is its operand unless it opens another
+		// unquoted schema-known statement. Quoted keyword-shaped names and
+		// non-keyword tokens are operands.
 		for i := 1; i < len(from.Keys); i++ {
 			leaf := from.Keys[i]
 			if leaf != "source-prefix-list" && leaf != "destination-prefix-list" {
 				continue
 			}
 			seen[leaf] = true
+			if i+1 < len(from.Keys) && !from.KeyQuoted(i+1) && from.Keys[i+1] == leaf {
+				ambiguousSelf = true
+				continue
+			}
 			if i+1 < len(from.Keys) && (from.KeyQuoted(i+1) || resolveSchemaChild(fromSchema, from.Keys[i+1]) == nil) {
 				valued[leaf] = true
 			}
 		}
+		ambiguousFrom[from] = ambiguousSelf
 		for _, child := range packedBody(from, fromSchema).Children {
 			name := child.Name()
 			if !firewallValueBearingFromLeaf[name] {
 				continue
 			}
 			seen[name] = true
+			if ambiguousSelf &&
+				(name == "source-prefix-list" || name == "destination-prefix-list") &&
+				len(child.Keys) > 1 && !child.KeyQuoted(1) && child.Keys[1] == name {
+				continue
+			}
 			// #9875: the two prefix-list leaves are read through their own
 			// dual-shape reader (firewallPrefixListRefs, #3843) — the SAME
 			// reader compileFilterFrom uses — not the general
