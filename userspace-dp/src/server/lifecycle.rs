@@ -395,6 +395,8 @@ pub(crate) fn run() -> Result<(), String> {
             io_uring_write_refused_bytes_total: 0,
             pending_neigh_capacity_drops_total: 0,
             dynamic_neighbor_learn_cap_drops_total: 0,
+            ndp_na_frag_refused_total: 0,
+            ndp_na_bad_source_refused_total: 0,
             session_publish_errors_total: 0,
             // #4800 new-flow-install contention surface.
             shared_session_publishes_total: 0,

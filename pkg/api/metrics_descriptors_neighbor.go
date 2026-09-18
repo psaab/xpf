@@ -45,6 +45,16 @@ func (c *xpfCollector) initNeighborDescriptors() {
 		"Per-key presence gauge (always 1) dumped from the helper userspace dynamic_neighbors mirror so the cold-start capture harness can grep the pre-connect t0' next-hop membership (the H2 absence fingerprint) (#1782). DEBUG-ONLY: gated behind the helper's XPF_DEBUG_NEIGHBOR_KEYS env var and absent by default — an absent metric family means the dump is disabled, NOT that dynamic_neighbors is empty.",
 		[]string{"ifindex", "ip"}, nil,
 	)
+	c.ndpNaFragRefusedTotal = prometheus.NewDesc(
+		"xpf_userspace_ndp_na_frag_refused_total",
+		"NDP Neighbor Advertisement learns refused because the IPv6 chain carried a Fragment header; this is the RFC 6980 learn-refusal counter (#10097).",
+		nil, nil,
+	)
+	c.ndpNaBadSourceRefusedTotal = prometheus.NewDesc(
+		"xpf_userspace_ndp_na_bad_source_refused_total",
+		"NDP Neighbor Advertisement learns refused because the IPv6 source was not valid on-link unicast (#10097).",
+		nil, nil,
+	)
 	// #1769: on-demand neighbor-resolver telemetry — operator-visible
 	// signal for the MissingNeighbor negative-cache stuck-state.
 	c.neighborResolverQueueDepth = prometheus.NewDesc(

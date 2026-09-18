@@ -332,6 +332,11 @@ type ProcessStatus struct {
 	// inflate the map.
 	DynamicNeighborLearnCapDropsTotal uint64   `json:"dynamic_neighbor_learn_cap_drops_total,omitempty"`
 	DynamicNeighborKeys               []string `json:"dynamic_neighbor_keys,omitempty"`
+	// #10097: cumulative NDP Neighbor Advertisement learn refusals. These
+	// counters are process-global in the Rust parser and are additive so an
+	// older helper can omit them without rejecting the whole status payload.
+	NDPNAFragRefusedTotal      uint64 `json:"ndp_na_frag_refused_total,omitempty"`
+	NDPNABadSourceRefusedTotal uint64 `json:"ndp_na_bad_source_refused_total,omitempty"`
 	// #1789: total failed USERSPACE_SESSIONS BPF-map publishes (per-binding
 	// worker-poll sites summed with the shared no-binding sites: HA upsert,
 	// session-glue worker publish, post-reconcile replay, activation/reverse

@@ -762,6 +762,9 @@ type xpfCollector struct {
 	// dynamic-neighbor map cap (spoofed-source pre-policy flood bound).
 	dynamicNeighborLearnCapDropsTotal *prometheus.Desc
 	dynamicNeighborPresent            *prometheus.Desc
+	// #10097: NDP Neighbor Advertisement learn-refusal counters.
+	ndpNaFragRefusedTotal      *prometheus.Desc
+	ndpNaBadSourceRefusedTotal *prometheus.Desc
 	// #1769: on-demand neighbor-resolver telemetry — the operator-visible
 	// signal for the MissingNeighbor stuck-state.
 	neighborResolverQueueDepth        *prometheus.Desc
@@ -1203,6 +1206,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.pendingNeighCapacityDropsTotal
 	ch <- c.dynamicNeighborLearnCapDropsTotal
 	ch <- c.dynamicNeighborPresent
+	ch <- c.ndpNaFragRefusedTotal
+	ch <- c.ndpNaBadSourceRefusedTotal
 	ch <- c.neighborResolverQueueDepth
 	ch <- c.neighborResolverEnqueueDropsTotal
 	ch <- c.neighborResolverDisconnectedTotal

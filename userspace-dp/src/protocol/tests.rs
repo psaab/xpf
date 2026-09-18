@@ -337,6 +337,36 @@ fn process_status_dynamic_neighbor_learn_cap_drops_roundtrip() {
     assert_eq!(legacy.dynamic_neighbor_learn_cap_drops_total, 0);
 }
 
+// #10097: both NDP NA learn-refusal counters must stay aligned across the
+// Rust ProcessStatus wire and the Go status reader/Prometheus collector.
+#[test]
+fn process_status_ndp_na_refusal_counters_roundtrip() {
+    let status = ProcessStatus {
+        ndp_na_frag_refused_total: 17,
+        ndp_na_bad_source_refused_total: 19,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["ndp_na_frag_refused_total"], 17);
+    assert_eq!(value["ndp_na_bad_source_refused_total"], 19);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.ndp_na_frag_refused_total, 17);
+    assert_eq!(back.ndp_na_bad_source_refused_total, 19);
+
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    let object = legacy_value
+        .as_object_mut()
+        .expect("ProcessStatus serializes to an object");
+    object.remove("ndp_na_frag_refused_total");
+    object.remove("ndp_na_bad_source_refused_total");
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("pre-#10097 payload decodes");
+    assert_eq!(legacy.ndp_na_frag_refused_total, 0);
+    assert_eq!(legacy.ndp_na_bad_source_refused_total, 0);
+}
+
 // #1807: round-trip + backward-compat pin for the worker-command-queue
 // poison-recovery counter. The wire key feeds
 // pkg/dataplane/userspace/protocol.go and the Prometheus counter

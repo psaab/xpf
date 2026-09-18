@@ -573,6 +573,8 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_pending_neigh_decap_drops_total",                    // #1902 decap-refusal gate
 		"xpf_userspace_pending_neigh_capacity_drops_total",                 // #2375 distinct-hop exhaustion
 		"xpf_userspace_dynamic_neighbor_learn_cap_drops_total",             // #5673 neighbor-map cap (pre-policy flood bound)
+		"xpf_userspace_ndp_na_frag_refused_total",                          // #10097 NDP NA frag refusal (RFC 6980)
+		"xpf_userspace_ndp_na_bad_source_refused_total",                    // #10097 NDP NA bad-source refusal
 		"xpf_userspace_dynamic_neighbor_present",                           // #1782 cold-start H2 dump
 		"xpf_userspace_session_publish_errors_total",                       // #1789 publish failures
 		"xpf_userspace_policy_revoked_sessions_total",                       // #10021 policy-revoked sessions
