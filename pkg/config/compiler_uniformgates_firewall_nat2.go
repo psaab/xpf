@@ -10,7 +10,6 @@ import "fmt"
 // strict ordering (invariant #6) and the tolerant warning-accumulation
 // order (invariant #7) are preserved. See runUniformGates.
 func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts) error {
-	// #2217 Finding A: firewall-filter `then policer <name>` cross-reference.
 	// A term naming a policer that is not defined under `firewall policer` /
 	// `firewall three-color-policer` compiled cleanly and the rate-limit
 	// silently never applied (fail-open — the term's traffic passed
@@ -69,7 +68,17 @@ func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts
 			return err
 		}
 	}
-
+	// #7273: the prefix-list reference gate above proves only the list NAME
+	// resolves. Reject malformed entries in the referenced list before the
+	// resolver can silently narrow the term to its parseable subset.
+	if err := validateFirewallPrefixListEntriesStrict(cfg); err != nil {
+		if opts.lenientFirewallRefs {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall prefix-list entry (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #5456: firewall-filter term rule-expansion advisory. A term whose
 	// source×destination×dest-port×src-port cross-product (prefix-list prefixes
 	// folded into src/dst) exceeds MaxFilterTermExpansion is COMMITTED, not
@@ -278,6 +287,17 @@ func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts
 			// Set only here, so a non-empty slice means precisely "admitted
 			// leniently" — the strict branch below returns instead.
 			cfg.LenientNATTerminalActionRules = natTerminalActionCardinalityOffenders(cfg)
+		} else {
+			return err
+		}
+	}
+	// #10294: term-level children outside `from`/`then`, and unknown
+	// source-NAT action children, previously compiled away without a
+	// diagnostic. Strict commit rejects; tolerant load/peer-sync warns.
+	if err := validateFirewallUnknownChildrenStrict(cfg); err != nil {
+		if opts.lenientFirewallRefs {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall unknown child (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
 		}

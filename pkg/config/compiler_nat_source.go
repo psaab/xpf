@@ -1099,6 +1099,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			// review).
 			for _, thenNode := range ruleInst.node.FindChildren("then") {
 				rule.Then = NATThen{}
+				recordSourceNATUnknownThen(rule, thenNode)
 				// #7014: the FULLY-COMPACT authoring `then source-nat off;`
 				// packs every token onto the `then` node itself, so there is no
 				// `source-nat` CHILD for the loop below to find and the action
@@ -1193,6 +1194,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 
 		// Expand Cartesian product of from-scopes × to-scopes (#3096).
 		for _, fs := range fromScopes {
+
 			for _, ts := range toScopes {
 				rs := &NATRuleSet{
 					Name:  rsInst.name,
@@ -1205,6 +1207,82 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 		}
 	}
 	return nil
+}
+
+// recordSourceNATUnknownThen records source-NAT action keywords that the
+// compiler does not consume. The `pool <name> persistent-nat ...` tail is
+// deliberately left open because it is a valid compiler-owned extension
+// (#10078); unknown siblings of the source-nat action itself are not.
+func recordSourceNATUnknownThen(rule *NATRule, thenNode *Node) {
+	if rule == nil || thenNode == nil {
+		return
+	}
+	add := func(keyword string) {
+		if keyword == "" {
+			return
+		}
+		for _, existing := range rule.unknownThenLeaves {
+			if existing == keyword {
+				return
+			}
+		}
+		rule.unknownThenLeaves = append(rule.unknownThenLeaves, keyword)
+	}
+	scan := func(tokens []string) {
+		for i := 0; i < len(tokens); i++ {
+			switch tokens[i] {
+			case "interface", "off":
+				// Known terminal modes; repeated modes are accepted by
+				// #7033's cardinality gate.
+			case "pool":
+				// Consume the pool name and leave the compiler-owned
+				// persistent-nat tail open (#10078).
+				if i+1 < len(tokens) {
+					i++
+				}
+				return
+			default:
+				add(tokens[i])
+			}
+		}
+	}
+	var scanNode func(*Node)
+	scanNode = func(node *Node) {
+		if node == nil {
+			return
+		}
+		switch node.Name() {
+		case "interface", "off":
+			for _, child := range node.Children {
+				scanNode(child)
+			}
+		case "pool":
+			// The pool node owns the open persistent-nat tail.
+		default:
+			// Do not descend into an unrecognised container: #7033's
+			// zero-action ordering must remain owned by NAT cardinality.
+			add(node.Name())
+	}
+	}
+
+	// Fully compact: `then source-nat <action> ...;`.
+	if len(thenNode.Keys) >= 2 && thenNode.Keys[1] == "source-nat" {
+		scan(thenNode.Keys[2:])
+	}
+
+	// Hierarchical and packed-child forms: `then { source-nat ... }`.
+	for _, child := range thenNode.Children {
+		if child.Name() != "source-nat" {
+			add(child.Name())
+			continue
+		}
+		if len(child.Keys) >= 2 {
+			scan(child.Keys[1:])
+		}
+		for _, leaf := range child.Children {
+			scanNode(leaf)
+		}
+	}
 }
 
 // applyPackedNATThenTokens7014 reads a terminal action packed onto the `then`

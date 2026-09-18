@@ -1452,6 +1452,11 @@ type FirewallFilter struct {
 // FirewallFilterTerm is a single match/action term within a filter.
 type FirewallFilterTerm struct {
 	Name              string
+	// unknownChildren records direct term-body children other than `from` and
+	// `then` (and compact tail keywords after the term name). The compiler
+	// records them so strict commit cannot silently widen a term by dropping
+	// an unmodeled sibling.
+	unknownChildren []string
 	SourceAddresses   []string        // CIDRs
 	DestAddresses     []string        // CIDRs
 	SourcePrefixLists []PrefixListRef // source-prefix-list references
