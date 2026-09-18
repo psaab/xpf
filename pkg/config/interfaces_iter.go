@@ -100,12 +100,14 @@ func LookupInterface(cfg *Config, name string) (*InterfaceConfig, bool) {
 //   - nil-safe (#5886 doctrine): nil cfg, nil map, and present-but-nil slots
 //     (exact and scan paths alike) are a miss, never a panic.
 //
-// Placement rule: call sites stay strictly inside a HasUnit arm (for a bare
-// ref base==member, so a helper call there WOULD be whole-member alias
-// matching) — with ONE exception, the daemon bind's bare fan-down, which
-// deliberately alias-matches a bare member onto a stanza in the daemon layer
-// that owns linux-name matching (#8829 precedent). The shared resolver's
-// bare arm never consults this helper.
+// Placement rule: unit call sites stay strictly inside a HasUnit arm (for a
+// bare ref base==member, a helper call WOULD be whole-member alias matching).
+// TWO deliberate bare sites exist: the daemon bind fans a bare member down
+// through its own first-sorted twin scan (resolveMemberDeclaredBase — that
+// path never calls this helper), and the userspace FIB maps a bare member
+// onto the declared stanza through this helper (#10174). Both own
+// linux-name matching (#8829 precedent). The shared resolver's bare arm
+// never consults this helper.
 func LookupInterfaceByLinuxName(cfg *Config, base string) (string, *InterfaceConfig, bool) {
 	if ifc, ok := LookupInterface(cfg, base); ok {
 		return base, ifc, true

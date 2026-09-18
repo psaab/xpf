@@ -782,10 +782,10 @@ func canonicalRoutePrefix(s string) string {
 // down onto, never overwriting a key pass 0 already holds.
 //
 // A member may use the operational Linux spelling while its interface stanza
-// uses the config spelling (#10173). The snapshot rows are keyed by the
-// declared stanza, so a cross-spelled unit reference needs its declared key
-// before it can scope a row. Bare fan-down aliases remain the follow-up
-// exception handled in #10174.
+// uses the config spelling (#10173/#10174). The snapshot rows are keyed by
+// the declared stanza, so a cross-spelled unit reference needs its declared
+// key before it can scope a row. Bare fan-down aliases are handled below
+// (#10174).
 //
 // Two properties come out of that shape, and both are worth stating because
 // they are what make the change reviewable:
@@ -796,6 +796,11 @@ func canonicalRoutePrefix(s string) string {
 //   - same-spelling refs retain the pre-alias key and fanout byte-for-byte;
 //     aliasing only changes the runtime key when LookupInterfaceByLinuxName
 //     finds a differently-spelled declared stanza.
+//
+// routingInstanceInterfaceKeysForRef maps one RI member to the snapshot keys
+// it scopes: the runtime primary plus any bare fanout. Stacking: the #10174
+// bare arm layers on the #10173 helper and call sites, so reverting #10173
+// requires reverting #10174 first (a direct revert of #10173 conflicts here).
 func routingInstanceInterfaceKeysForRef(cfg *config.Config, raw string) (primary string, fanout []string) {
 	keys := config.InterfaceUnitRefKeys(cfg, raw)
 	if len(keys) == 0 {
@@ -812,9 +817,9 @@ func routingInstanceInterfaceKeysForRef(cfg *config.Config, raw string) (primary
 		return primary, fanout
 	}
 	if s.HasUnit {
-		// #10173: unit aliases resolve against the declared stanza, while
-		// bare aliases deliberately remain outside this helper until the
-		// daemon/userspace follow-up (#10174).
+		// #10173: unit aliases resolve against the declared stanza; the
+		// bare alias below (#10174) is the companion exception in this
+		// same helper.
 		if suffix, ok := strings.CutPrefix(s.Literal, s.Base); ok {
 			return stanzaKey + suffix, nil
 		}
