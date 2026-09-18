@@ -281,13 +281,33 @@ expect_field "ha-smoke with 0 passed and 0 failed -> VOID (ran no assertions)" h
 
 printf '  Failover test: 21 passed, 0 failed\n' >"$LOG"
 expect_field "ha-smoke summary says 0 failed but rc!=0 -> VOID (they disagree)" ha-smoke 1 1 VOID
-printf '  WireGuard interop: 8 passed, 0 failed\n' >"$LOG"
-expect_field "wg-interop taint summary with rc=2 -> VOID" smoke-cells 2 1 VOID
-if [[ "$(adapt_field smoke-cells 2 2)" == *"rc=2"* ]]; then
-	ok "wg-interop taint VOID names rc=2"
+# The all-run taint path exits rc=2 after teardown. Its summary must be emitted
+# BEFORE that exit so the smoke-cells adapter can classify the tainted run as
+# VOID instead of a missing-result refusal. Pin the REAL harness source, not a
+# synthetic log that would stay green if the summary call were deleted.
+WG_SOURCE="$SCRIPT_DIR/wg-interop.sh"
+WG_TAINT_LINE=$(grep -nF 'if [ "${TAINTS}" -gt 0 ]; then' "$WG_SOURCE" |
+	awk -F: 'NR == 1 { print $1 }')
+if [[ -z "$WG_TAINT_LINE" ]]; then
+	bad "wg-interop taint source pin: TAINTS>0 block is missing"
 else
-	bad "wg-interop taint VOID does not name rc=2"
+	ok "wg-interop taint source pin: TAINTS>0 block exists"
+	WG_SUMMARY_LINE=$(awk -v start="$WG_TAINT_LINE" '
+		NR > start && NR <= start + 8 &&
+		$0 ~ /^[[:space:]]+summary[[:space:]]*$/ { print NR; exit }
+	' "$WG_SOURCE")
+	WG_EXIT_LINE=$(awk -v start="$WG_TAINT_LINE" '
+		NR > start && NR <= start + 8 &&
+		$0 ~ /^[[:space:]]+exit 2[[:space:]]*$/ { print NR; exit }
+	' "$WG_SOURCE")
+	if [[ -n "$WG_SUMMARY_LINE" && -n "$WG_EXIT_LINE" &&
+		"$WG_SUMMARY_LINE" -lt "$WG_EXIT_LINE" ]]; then
+		ok "wg-interop taint source pin: summary precedes exit 2"
+	else
+		bad "wg-interop taint source pin: summary must precede exit 2"
+	fi
 fi
+
 
 # A LAST-match, so an intermediate tally cannot be read as the result. Both
 # adapters: the summary parse is shared.
