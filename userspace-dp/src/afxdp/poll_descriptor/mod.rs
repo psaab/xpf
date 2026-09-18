@@ -4395,7 +4395,7 @@ pub(super) fn poll_binding_process_descriptor(
                             now_secs,
                             ingress_zone_override,
                         ) {
-                            EmbeddedIcmpReversal::Queued => {
+                            EmbeddedIcmpReversal::Queued { related_untranslated } => {
                                 let policy_allowed = binding
                                     .scratch
                                     .scratch_forwards
@@ -4410,6 +4410,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 worker_ctx,
                                                 now_ns,
                                                 now_secs,
+                                                related_untranslated,
                                             ),
                                         ),
                                         _ => None,
@@ -4436,14 +4437,14 @@ pub(super) fn poll_binding_process_descriptor(
                             EmbeddedIcmpReversal::NotHandled => {}
                         }
                     }
-                    // #5690: an inbound non-query ICMP error referencing a NAT'd
-                    // flow is FLOWLESS (#3290 discards its metadata pseudo-port so
-                    // it never seeds a session). Attempt the generic embedded-ICMP
-                    // NAT reversal HERE, on the path these errors actually take:
-                    // reverse-translate the inner quoted packet back to the
-                    // pre-NAT tuple and forward the error to the real internal
-                    // host. A match rebuilds + queues the reversed error and
-                    // consumes the descriptor; a miss / no-rewrite / unbuildable
+                    // #5690: an inbound non-query ICMP error referencing a
+                    // live session is FLOWLESS (#3290 discards its metadata
+                    // pseudo-port so it never seeds a session). Attempt the
+                    // generic embedded-ICMP admission HERE, on the path these
+                    // errors actually take: NAT'd quotes are reverse-translated
+                    // back to the pre-NAT tuple, while un-NAT'd quotes are
+                    // forwarded unchanged as RELATED. A match rebuilds + queues
+                    // the error and consumes the descriptor; a miss / unbuildable
                     // frame falls through to the normal flowless L3 enforcement
                     // below. The reversal was previously wired only into the
                     // flow-backed session-miss arm and could never run in
@@ -4478,7 +4479,7 @@ pub(super) fn poll_binding_process_descriptor(
                             now_secs,
                             ingress_zone_override,
                         ) {
-                            EmbeddedIcmpReversal::Queued => {
+                            EmbeddedIcmpReversal::Queued { related_untranslated } => {
                                 // Reversed error queued as a prebuilt forward;
                                 // authorize the actual rewritten wire identity
                                 // before allowing the request to own the desc.
@@ -4496,6 +4497,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 worker_ctx,
                                                 now_ns,
                                                 now_secs,
+                                                related_untranslated,
                                             ),
                                         ),
                                         _ => None,
