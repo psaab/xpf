@@ -127,13 +127,14 @@ func TestDHCPV6LinkLocalOnlyRelaysForward10198(t *testing.T) {
 	}
 }
 
-func TestDHCPV6UpstreamBindAddrIgnoresLinkLocalIdentity10198(t *testing.T) {
+func TestDHCPV6UpstreamBindAddrScopesLinkLocalIdentity10198(t *testing.T) {
 	linkAddr := net.ParseIP("fe80::1")
 	if !linkAddr.IsLinkLocalUnicast() {
 		t.Fatalf("test link-address %v is not link-local", linkAddr)
 	}
-	got := dhcpV6UpstreamBindAddr(linkAddr, dhcpv6RelayPort)
-	want := (&net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6RelayPort}).String()
+	const ifaceName = "ix0"
+	got := dhcpV6UpstreamBindAddr(linkAddr, ifaceName, dhcpv6RelayPort)
+	want := (&net.UDPAddr{IP: linkAddr, Zone: ifaceName, Port: dhcpv6RelayPort}).String()
 	if got != want {
 		t.Fatalf("upstream bind address for link-local Relay-Forw = %q, want %q", got, want)
 	}
@@ -141,8 +142,8 @@ func TestDHCPV6UpstreamBindAddrIgnoresLinkLocalIdentity10198(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve upstream bind address %q: %v", got, err)
 	}
-	if !resolved.IP.IsUnspecified() || resolved.Port != dhcpv6RelayPort {
-		t.Fatalf("resolved upstream bind address = %v, want [::]:%d", resolved, dhcpv6RelayPort)
+	if !resolved.IP.Equal(linkAddr) || resolved.Zone != ifaceName || resolved.Port != dhcpv6RelayPort {
+		t.Fatalf("resolved upstream bind address = %v, want %s", resolved, want)
 	}
 }
 
@@ -184,7 +185,7 @@ func TestDHCPv6PerInterfaceServerBindDemux10198(t *testing.T) {
 		t.Skipf("need two local GUA/ULA addresses for real-socket demux, found %d", len(addresses))
 	}
 	listenConfig := dhcpV6ListenConfig("")
-	firstAddr := dhcpV6UpstreamBindAddr(addresses[0], 0)
+	firstAddr := dhcpV6UpstreamBindAddr(addresses[0], "", 0)
 	firstRaw, err := listenConfig.ListenPacket(context.Background(), "udp6", firstAddr)
 	if err != nil {
 		t.Fatalf("listen first exact upstream address %q: %v", firstAddr, err)
@@ -195,7 +196,7 @@ func TestDHCPv6PerInterfaceServerBindDemux10198(t *testing.T) {
 		t.Fatalf("first upstream listener type = %T, want *net.UDPConn", firstRaw)
 	}
 	port := first.LocalAddr().(*net.UDPAddr).Port
-	secondAddr := dhcpV6UpstreamBindAddr(addresses[1], port)
+	secondAddr := dhcpV6UpstreamBindAddr(addresses[1], "", port)
 	secondRaw, err := listenConfig.ListenPacket(context.Background(), "udp6", secondAddr)
 	if err != nil {
 		t.Fatalf("listen second exact upstream address %q: %v", secondAddr, err)
@@ -244,5 +245,127 @@ func TestDHCPv6PerInterfaceServerBindDemux10198(t *testing.T) {
 	}
 	if string(secondData[:n]) != "reply-two" {
 		t.Fatalf("second per-interface socket received %q, want reply-two", secondData[:n])
+	}
+}
+
+func TestDHCPv6PerLinkLocalServerBindDemux10198(t *testing.T) {
+	type candidate struct {
+		ip    net.IP
+		iface string
+	}
+	var candidates []candidate
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("list interfaces: %v", err)
+	}
+	for _, iface := range interfaces {
+		ifaceAddrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range ifaceAddrs {
+			var ip net.IP
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip == nil || ip.To16() == nil || ip.To4() != nil || !ip.IsLinkLocalUnicast() {
+				continue
+			}
+			duplicate := false
+			for _, existing := range candidates {
+				if existing.iface == iface.Name && existing.ip.Equal(ip) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				candidates = append(candidates, candidate{
+					ip:    append(net.IP(nil), ip.To16()...),
+					iface: iface.Name,
+				})
+			}
+		}
+	}
+	var first, second candidate
+	for _, candidate := range candidates {
+		if first.ip == nil {
+			first = candidate
+			continue
+		}
+		if candidate.iface != first.iface {
+			second = candidate
+			break
+		}
+	}
+	if second.ip == nil {
+		t.Skipf("need link-local addresses on two interfaces for real-socket demux, found %d candidates", len(candidates))
+	}
+
+	firstConfig := dhcpV6ListenConfig(first.iface)
+	firstAddr := dhcpV6UpstreamBindAddr(first.ip, first.iface, 0)
+	firstRaw, err := firstConfig.ListenPacket(context.Background(), "udp6", firstAddr)
+	if err != nil {
+		t.Fatalf("listen first scoped link-local address %q: %v", firstAddr, err)
+	}
+	defer firstRaw.Close()
+	firstSocket, ok := firstRaw.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("first link-local listener type = %T, want *net.UDPConn", firstRaw)
+	}
+	port := firstSocket.LocalAddr().(*net.UDPAddr).Port
+
+	secondConfig := dhcpV6ListenConfig(second.iface)
+	secondAddr := dhcpV6UpstreamBindAddr(second.ip, second.iface, port)
+	secondRaw, err := secondConfig.ListenPacket(context.Background(), "udp6", secondAddr)
+	if err != nil {
+		t.Fatalf("listen second scoped link-local address %q: %v", secondAddr, err)
+	}
+	defer secondRaw.Close()
+	secondSocket, ok := secondRaw.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("second link-local listener type = %T, want *net.UDPConn", secondRaw)
+	}
+
+	firstSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: first.ip, Port: port, Zone: first.iface})
+	if err != nil {
+		t.Fatalf("dial first link-local destination: %v", err)
+	}
+	defer firstSender.Close()
+	secondSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: second.ip, Port: port, Zone: second.iface})
+	if err != nil {
+		t.Fatalf("dial second link-local destination: %v", err)
+	}
+	defer secondSender.Close()
+	if _, err := firstSender.Write([]byte("link-local-one")); err != nil {
+		t.Fatalf("send first link-local reply: %v", err)
+	}
+	if _, err := secondSender.Write([]byte("link-local-two")); err != nil {
+		t.Fatalf("send second link-local reply: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	if err := firstSocket.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set first link-local read deadline: %v", err)
+	}
+	if err := secondSocket.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set second link-local read deadline: %v", err)
+	}
+	firstData := make([]byte, 64)
+	n, _, err := firstSocket.ReadFromUDP(firstData)
+	if err != nil {
+		t.Fatalf("read first link-local reply: %v", err)
+	}
+	if string(firstData[:n]) != "link-local-one" {
+		t.Fatalf("first link-local socket received %q, want link-local-one", firstData[:n])
+	}
+	secondData := make([]byte, 64)
+	n, _, err = secondSocket.ReadFromUDP(secondData)
+	if err != nil {
+		t.Fatalf("read second link-local reply: %v", err)
+	}
+	if string(secondData[:n]) != "link-local-two" {
+		t.Fatalf("second link-local socket received %q, want link-local-two", secondData[:n])
 	}
 }

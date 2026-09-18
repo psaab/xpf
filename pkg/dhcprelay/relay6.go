@@ -313,14 +313,20 @@ func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr ne
 		return dhcpV6Sockets{}, fmt.Errorf("join DHCPv6 relay multicast group: %w", err)
 	}
 
-	// The upstream socket is deliberately NOT SO_BINDTODEVICE-bound: server
-	// replies to a global helper must use the normal IPv6 routing table. The
-	// bind address is therefore the only kernel-visible per-interface
-	// discriminator ahead of SO_REUSEPORT fanout, so GUA/ULA identities keep
-	// their exact-IP bind and only a link-local identity — which cannot bind
-	// without a zone — falls back to the shared unspecified bind.
-	serverListen := dhcpV6ListenConfig("")
-	serverAddr := dhcpV6UpstreamBindAddr(linkAddr, dhcpv6RelayPort)
+	// The upstream socket is not SO_BINDTODEVICE-bound for GUA/ULA identities:
+	// server replies to a global helper use the normal IPv6 routing table.
+	// Every identity still gets an exact-IP bind for the kernel's SO_REUSEPORT
+	// demultiplexer. Link-local identities additionally carry the interface
+	// zone and device pin, which disambiguates duplicate fe80 addresses across
+	// links. This makes link-local upstream sockets link-egress-scoped; a
+	// cross-interface server route for a link-local relay is outside this
+	// link-local-downstream fallback's supported boundary.
+	serverInterface := ""
+	if linkAddr != nil && linkAddr.IsLinkLocalUnicast() {
+		serverInterface = ifaceName
+	}
+	serverListen := dhcpV6ListenConfig(serverInterface)
+	serverAddr := dhcpV6UpstreamBindAddr(linkAddr, ifaceName, dhcpv6RelayPort)
 	server, err := serverListen.ListenPacket(ctx, "udp6", serverAddr)
 	if err != nil {
 		_ = client.LeaveGroup(iface, group)
@@ -330,9 +336,12 @@ func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr ne
 	return dhcpV6Sockets{client: client, server: server, iface: iface, group: group}, nil
 }
 
-func dhcpV6UpstreamBindAddr(linkAddr net.IP, port int) string {
+func dhcpV6UpstreamBindAddr(linkAddr net.IP, ifaceName string, port int) string {
 	if linkAddr != nil && linkAddr.To16() != nil && linkAddr.To4() == nil && !linkAddr.IsUnspecified() && !linkAddr.IsMulticast() && !linkAddr.IsLoopback() && !linkAddr.IsLinkLocalUnicast() && linkAddr.IsGlobalUnicast() {
 		return (&net.UDPAddr{IP: linkAddr, Port: port}).String()
+	}
+	if linkAddr != nil && linkAddr.To16() != nil && linkAddr.To4() == nil && linkAddr.IsLinkLocalUnicast() && ifaceName != "" {
+		return (&net.UDPAddr{IP: linkAddr, Zone: ifaceName, Port: port}).String()
 	}
 	return (&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String()
 }
@@ -615,11 +624,14 @@ func (m *dhcpV6Manager) runDHCPV6Session(relay *dhcpV6Relay, ctx context.Context
 		close(closeDone)
 		closeDHCPV6Sockets(sockets)
 	}()
-	// The client socket is SO_BINDTODEVICE-pinned while the server socket binds
-	// the selected GUA/ULA exact IP or uses an unspecified, route-selected bind
-	// for a link-local fallback. Re-resolve the client interface index and
-	// selected link identity during a live session; either drift makes this
-	// session stale and the supervisor reopens both sockets (#2347/#3960, P2-3).
+	// The client socket is SO_BINDTODEVICE-pinned. The server socket binds the
+	// selected GUA/ULA exact IP without a device pin, or a scoped link-local
+	// exact IP with the link-local interface's device pin. Re-resolve the
+	// client interface index and selected link identity during a live session;
+	// either drift makes this session stale and the supervisor reopens both
+	// sockets (#2347/#3960, P2-3). Link-local upstream sockets are
+	// link-egress-scoped; cross-interface server routes are outside this
+	// link-local-downstream fallback boundary.
 	var boundIfindex int
 	if m.resolveIfindex != nil {
 		if idx, err := m.resolveIfindex(relay.kernelName); err == nil && idx != 0 {
