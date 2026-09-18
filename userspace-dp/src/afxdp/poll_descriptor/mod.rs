@@ -5839,6 +5839,12 @@ pub(super) fn poll_binding_process_descriptor(
                                         IpAddr::V4(_) => None,
                                     }
                                 });
+                                // #10267: retain the matched application's idle
+                                // timeout until the seed install below. The
+                                // flow-backed policy result is scoped to its
+                                // deny gate, but the MissingNeighbor seed is
+                                // created later in this same arm.
+                                let mut seed_inactivity_timeout = None;
                                 // #1913 (Codex r2/r3): evaluate policy for the
                                 // MissingNeighbor cold path BEFORE any forwarding
                                 // OR neighbor-resolution side-effect. The
@@ -5928,6 +5934,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         policy_icmp,
                                         desc.len as u64,
                                     );
+                                    seed_inactivity_timeout = policy_result.inactivity_timeout;
                                     if cp_sample_tag {
                                         let t_out = crate::afxdp::cold_path_hist::sample_tsc_end();
                                         let q32 = binding.cold_path.ns_per_tsc_q32;
@@ -6551,6 +6558,9 @@ pub(super) fn poll_binding_process_descriptor(
                                         meta.ingress_vlan_id,
                                         packet_fabric_ingress,
                                         pending_decision,
+                                        // #10267: preserve the policy-matched
+                                        // application timeout on the seed.
+                                        seed_inactivity_timeout,
                                     );
                                     let pending_installed = sessions.install_with_protocol_with_origin(
                                         flow.forward_key.clone(),

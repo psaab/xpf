@@ -944,6 +944,13 @@ pub(super) fn build_missing_neighbor_session_metadata(
     ingress_vlan_id: u16,
     fabric_ingress: bool,
     decision: SessionDecision,
+    // #10267: the policy result is already available on the flow-backed
+    // MissingNeighbor path. Preserve its matched application timeout on the
+    // seed; the retry sweep never reinstalls this entry, so dropping the value
+    // here silently falls back to the global per-protocol timeout for the
+    // flow's entire lifetime. `None`/0 keeps the global-timeout sentinel for
+    // default-timeout and flowless paths.
+    inactivity_timeout: Option<u32>,
 ) -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex,
@@ -960,8 +967,11 @@ pub(super) fn build_missing_neighbor_session_metadata(
         // #3056: a neighbor-seed session is a transient pre-resolution stub,
         // not a policy-admitted flow, so it carries no admitting policy ID.
         policy_id: 0,
-        // #3227: a neighbor-seed stub is not policy-app-matched; use global.
-        inactivity_timeout_ns: None,
+        // #10267: a permitted flow-backed seed may be admitted by an
+        // application with its own idle window. Convert through the shared
+        // authority so zero stays the use-global sentinel and corrupt wire
+        // values remain bounded by the commit-time maximum.
+        inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(inactivity_timeout),
         // #3073: a neighbor-seed stub is not policy-admitted; no hit counter.
         policy_counter_idx: 0,
         policy_counter: None,
@@ -975,6 +985,9 @@ mod mirror_tests;
 #[cfg(test)]
 #[path = "neighbor_dispatch_deferred_verdict_tests.rs"]
 mod deferred_verdict_tests;
+#[cfg(test)]
+#[path = "neighbor_dispatch_seed_timeout_10267_tests.rs"]
+mod seed_timeout_10267_tests;
 
 #[cfg(test)]
 mod cold_start_probe_schedule_tests {
