@@ -80,7 +80,8 @@ fi
 # probe also proves that the fixture functions remain available without taking
 # the destructive lock or invoking main.
 dhcp_gate="$SCRIPT_DIR/dhcp-lease-failover.sh"
-dhcp_guard_count=$(grep -Fxc 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then' "$dhcp_gate" || true)
+dhcp_guard="if [[ \"\${BASH_SOURCE[0]}\" == \"\$0\" ]]; then"
+dhcp_guard_count=$(grep -Fxc "$dhcp_guard" "$dhcp_gate" || true)
 dhcp_selftest_refs=$(grep -Fc 'DHCP_LEASE_FAILOVER_SELFTEST' "$dhcp_gate" || true)
 dhcp_source_probe="$(
 	DHCP_LEASE_FAILOVER_SELFTEST=1 bash -c '
@@ -159,6 +160,54 @@ if [[ "$dhcp_restore_timeout" == *"TIMEOUT_CAUSE=cleanup:config-restore-timeout"
 	ok "DHCP config restore timeout emits a structured cause"
 else
 	bad "DHCP config restore timeout lost its cause: $dhcp_restore_timeout"
+fi
+
+dhcp_ns_transport="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		NS_A=ns-a; NS_B=ns-b; DHCP_CLIENT=client
+		ssh_fw() { return 7; }
+		if verify_client_namespaces; then exit 1; fi
+		[[ "$ABORT_CAUSE" == "cleanup:client-namespace-unverifiable" ]] || exit 1
+		printf "TRANSPORT_CAUSE=%s\n" "$ABORT_CAUSE"
+	' _ "$dhcp_gate" 2>&1
+)"
+if [[ "$dhcp_ns_transport" == *"TRANSPORT_CAUSE=cleanup:client-namespace-unverifiable"* ]]; then
+	ok "DHCP namespace transport failure is unverifiable, never absent"
+else
+	bad "DHCP namespace transport failure was misclassified: $dhcp_ns_transport"
+fi
+
+dhcp_ns_present="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		NS_A=ns-a; NS_B=ns-b; DHCP_CLIENT=client
+		ssh_fw() { printf PRESENT; }
+		if verify_client_namespaces; then exit 1; fi
+		[[ "$ABORT_CAUSE" == "cleanup:client-namespace-left" ]] || exit 1
+		printf "PRESENT_CAUSE=%s\n" "$ABORT_CAUSE"
+	' _ "$dhcp_gate" 2>&1
+)"
+if [[ "$dhcp_ns_present" == *"PRESENT_CAUSE=cleanup:client-namespace-left"* ]]; then
+	ok "DHCP namespace presence remains a cleanup failure"
+else
+	bad "DHCP namespace presence was not rejected: $dhcp_ns_present"
+fi
+
+dhcp_ns_absent="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		NS_A=ns-a; NS_B=ns-b; DHCP_CLIENT=client
+		ssh_fw() { printf ABSENT; }
+		verify_client_namespaces
+		[[ -z "$ABORT_CAUSE" ]] || exit 1
+		printf "ABSENT_OK\n"
+	' _ "$dhcp_gate" 2>&1
+)"
+if [[ "$dhcp_ns_absent" == *"ABSENT_OK"* && "$dhcp_ns_absent" != *"ABORT_CAUSE="* ]]; then
+	ok "DHCP namespace absence is verified without an abort marker"
+else
+	bad "DHCP namespace absence emitted an unexpected failure: $dhcp_ns_absent"
 fi
 
 dhcp_die_probe="$(
