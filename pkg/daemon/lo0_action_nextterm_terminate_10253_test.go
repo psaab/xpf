@@ -191,7 +191,7 @@ func TestLo0PayloadActionNextTermShadowsLaterDeny10253(t *testing.T) {
 	payload := buildLo0FilterPayload(cfg, "lo0-in", "")
 
 	if !strings.Contains(payload, "meta l4proto 6 accept") {
-		t.Fatalf("accept + next-term emitted no terminating accept in the lo0 payload " +
+		t.Fatalf("accept + next-term emitted no terminating accept in the lo0 payload "+
 			"(fell through while Rust terminates, #10253):\n%s", payload)
 	}
 	if !strings.Contains(payload, "th dport 22 drop") {

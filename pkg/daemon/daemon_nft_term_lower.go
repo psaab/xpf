@@ -436,26 +436,26 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 		parts = append(parts, nftFlexMatchExpr(*fm))
 	}
 
-	// Disposition. Mirror the userspace lo0 evaluator
-	// (pkg/dataplane/userspace/filters.go:89) so the kernel lo0 chain enforces the
+	// Disposition. Mirror the Rust userspace-dp lo0 evaluator (`continue_term`
+	// in userspace-dp/src/filter/compiler.rs) so the kernel lo0 chain enforces the
 	// SAME term semantics. The XDP shim shunts ordinary host-bound traffic to the
 	// Linux kernel before it reaches userspace-dp, so this chain is the PRIMARY
 	// enforcement for host traffic — a wrong terminating verdict here is a real
 	// control-plane mis-enforcement, not a cosmetic shadow.
 	//
-	// #3427: a term with NO terminating action is a FALL-THROUGH in Junos — apply
-	// the term's modifiers and continue to the NEXT term. This covers both the
-	// explicit `then next term` (term.NextTerm) and a modifier-only term
-	// (Action=="" carrying only count/log/forwarding-class/policer/dscp). The
-	// pre-fix code mapped Action=="" to a terminating nft `accept`, which SHADOWED
-	// every later discard/reject term in the kernel mirror — a fail-OPEN that
-	// diverged from userspace (e.g. `from protocol tcp then next term` followed by
-	// `from destination-port 22 then discard` accepted SSH at term 1, leaving the
-	// drop unreachable). Emit NOTHING for a fall-through term: the kernel chain
-	// does not mirror counters/log, so the term contributes no enforcement and the
-	// subsequent terms must run. Returning "" makes buildLo0FilterPayload skip the
-	// rule.
-	//
+	// #3427: a term with NO terminating action is a FALL-THROUGH in Junos —
+	// apply its modifiers and continue to the NEXT term. An explicit
+	// `then next term` is in this class only when `Action == ""`; a
+	// contradictory real-action + `NextTerm` term is handled as terminating
+	// per the Rust evaluator (#10253). Modifier-only terms carry Action==""
+	// with only count/log/forwarding-class/policer/dscp.
+	// The pre-fix code mapped Action=="" to a terminating nft `accept`, which
+	// SHADOWED every later discard/reject term in the kernel mirror — a fail-OPEN
+	// that diverged from userspace (e.g. `from protocol tcp then next term`
+	// followed by `from destination-port 22 then discard` accepted SSH at term 1,
+	// leaving the drop unreachable). A fall-through with no honored modifier
+	// contributes no rule. When log/count is honored, the emitted rule carries
+	// only those non-terminating statements, so later terms remain reachable.
 	// A routing-instance (PBR) term is explicitly NOT a fall-through: userspace
 	// sets continue_term=false when routing_instance is non-empty
 	// (pkg/dataplane/userspace compiler.rs) and the evaluator TERMINATES the
@@ -517,13 +517,17 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 		return []string{joinNftFields(match, "meta l4proto 6", modStr, "drop")}
 	}
 
-	// Fall-through (#3427): a term with NO terminating action (explicit `then
-	// next term` or a modifier-only term) APPLIES its modifiers and continues to
-	// the next term. Emit the honored modifiers as a NON-TERMINATING rule (no
-	// verdict) so the per-term log/count fires while later discard/reject terms
-	// stay reachable — nft falls through any rule that carries no verdict. With
-	// no honored modifier the term contributes nothing: return no rule (the
-	// pre-#3445 behavior), which keeps the subsequent terms reachable.
+	// Fall-through (#3427/#10253): ONLY a term with no terminating action
+	// (`Action == ""`) and no routing-instance applies its modifiers and
+	// continues to the next term. An explicit `then next term` paired with a
+	// real action is contradictory input; Rust `continue_term` is false for
+	// that shape, so it must reach the terminating verdict below. A
+	// modifier-only term applies its honored modifiers as a NON-TERMINATING
+	// rule (no verdict) so the per-term log/count fires while later
+	// discard/reject terms stay reachable — nft falls through any rule that
+	// carries no verdict. With no honored modifier the term contributes
+	// nothing: return no rule (the pre-#3445 behavior), which keeps the
+	// subsequent terms reachable.
 	if term.Action == "" && term.RoutingInstance == "" {
 		if modStr == "" {
 			return nil

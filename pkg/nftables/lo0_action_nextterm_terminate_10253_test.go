@@ -28,8 +28,8 @@ func netlinkActionNextTermRules10253(t *testing.T, term Lo0FilterTerm) string {
 
 func TestNetlinkActionNextTermTerminatesMirroringRust10253(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		action     string
+		name        string
+		action      string
 		wantVerdict string
 	}{
 		{"accept", "accept", "verdict(1)"},
