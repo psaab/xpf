@@ -282,9 +282,16 @@ verify_dhcp_config() {
 }
 
 verify_client_namespaces() {
-	local ns
+	local ns state ssh_rc
 	for ns in "$NS_A" "$NS_B"; do
-		if ! ssh_fw "$DHCP_CLIENT" "test ! -e /run/netns/'$ns'"; then
+		ssh_rc=0
+		state="$(ssh_fw "$DHCP_CLIENT" "if test -e /run/netns/'$ns'; then echo PRESENT; else echo ABSENT; fi")" || ssh_rc=$?
+		if ((ssh_rc != 0)) || [[ "$state" != "PRESENT" && "$state" != "ABSENT" ]]; then
+			note_abort_cause "cleanup:client-namespace-unverifiable"
+			echo "FATAL: cleanup could not verify DHCP client namespace $ns on $DHCP_CLIENT (transport rc=$ssh_rc); owner=test-dhcp-lease-failover" >&2
+			return 1
+		fi
+		if [[ "$state" == "PRESENT" ]]; then
 			note_abort_cause "cleanup:client-namespace-left"
 			echo "FATAL: cleanup left DHCP client namespace $ns behind on $DHCP_CLIENT; owner=test-dhcp-lease-failover" >&2
 			return 1
