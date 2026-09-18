@@ -60,7 +60,6 @@ type dhcpV6ReplyDispatcher struct {
 	running          bool
 	targets          map[string][]*dhcpV6ReplyTarget
 	newServer        func(context.Context) (net.PacketConn, error)
-	retryInterval    time.Duration
 	droppedParse     atomic.Uint64
 	droppedEmptyIID  atomic.Uint64
 	droppedUnknown   atomic.Uint64
@@ -69,9 +68,8 @@ type dhcpV6ReplyDispatcher struct {
 
 func newDHCPV6ReplyDispatcher() *dhcpV6ReplyDispatcher {
 	return &dhcpV6ReplyDispatcher{
-		targets:       make(map[string][]*dhcpV6ReplyTarget),
-		newServer:     defaultDHCPV6ServerFactory,
-		retryInterval: startupRetryInterval,
+		targets:   make(map[string][]*dhcpV6ReplyTarget),
+		newServer: defaultDHCPV6ServerFactory,
 	}
 }
 
@@ -630,11 +628,7 @@ func (d *dhcpV6ReplyDispatcher) restart(failed net.PacketConn) net.PacketConn {
 
 		server, err := factory(generationCtx)
 		if err != nil {
-			interval := d.retryInterval
-			if interval <= 0 {
-				interval = startupRetryInterval
-			}
-			timer := time.NewTimer(interval)
+			timer := time.NewTimer(10 * time.Millisecond)
 			select {
 			case <-generationCtx.Done():
 				timer.Stop()
