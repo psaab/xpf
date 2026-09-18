@@ -84,6 +84,10 @@ pub(super) fn stage_flow_cache_hit(
     meta: UserspaceDpMeta,
     flow: &SessionFlow,
     packet_fabric_ingress: bool,
+    // #10314: this is the actual parent-or-overlay arrival identity. It is
+    // separate from the validated stamp/overlay flag above because an
+    // unstamped parent frame must not serve a cached FabricRedirect.
+    fabric_link_ingress: bool,
     validation: ValidationState,
     sessions: &mut SessionTable,
     now_ns: u64,
@@ -116,9 +120,12 @@ pub(super) fn stage_flow_cache_hit(
         // NOT evict this flow (the #5147 map-wide-thrash fix). The check reads
         // only this flow's own shard slot: a single indexed relaxed atomic
         // load + compare. A mismatch means the cached dst_mac may be stale;
-        // evict and re-resolve on the slow path.
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
+        // evict and re-resolve on the slow path.
         if neighbor_mac_stale
+            || (fabric_link_ingress
+                && cached.decision.resolution.disposition
+                    == ForwardingDisposition::FabricRedirect)
             || !cached_flow_decision_valid(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,

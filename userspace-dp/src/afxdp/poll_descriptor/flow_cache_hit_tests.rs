@@ -1012,6 +1012,9 @@ struct StageSeed {
     /// `None` installs from the cached entry's key, which is every pre-#8262
     /// caller's behaviour.
     install_key: Option<crate::session::SessionKey>,
+    /// Physical parent-or-overlay arrival identity for the anti-loop cache
+    /// guard. Defaults false for ordinary non-fabric cache fixtures.
+    fabric_link_ingress: bool,
     /// The `now_ns` handed to `stage_flow_cache_hit`. Separate from
     /// `install_ns` so a cell can choose whether the session is STALE at call
     /// time, which is the only axis `touch_if_stale` branches on.
@@ -1025,10 +1028,11 @@ impl Default for StageSeed {
             // Cache-hit admission now requires this backing session. Keep
             // explicit `None` available for miss-path fixtures.
             session: Some((1_000_000, PROTO_TCP, 0x10)),
-            now_ns: 1_000_000,
             flow: None,
             tx_headroom: None,
             install_key: None,
+            fabric_link_ingress: false,
+            now_ns: 1_000_000,
         }
     }
 }
@@ -1142,6 +1146,7 @@ fn run_stage_seeded(
         meta,
         &flow,
         false,
+        seed.fabric_link_ingress,
         ValidationState::default(),
         &mut sessions,
         seed.now_ns,
@@ -3466,5 +3471,38 @@ fn a_route_that_skips_the_poll_loop_mutation_is_a_key_mismatch_8262() {
         "a diverged key misses with NO HANDLE; if it ever starts bumping the \
          stale-handle or key-mismatch counters instead, the note above is stale \
          and the reasoning that rests on it needs re-checking"
+    );
+}
+
+/// #10314: a cached FabricRedirect is not admissible for a physical
+/// parent/overlay arrival, even when the packet has no validated stamp.
+#[test]
+fn fabric_arrival_invalidates_cached_fabric_redirect_10314() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.fabric_redirect = true;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "parent/overlay arrival must not serve a cached FabricRedirect"
+    );
+    assert!(
+        run.scratch.scratch_forwards.is_empty(),
+        "cache invalidation must not enqueue the cached fabric redirect"
     );
 }

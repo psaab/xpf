@@ -2282,6 +2282,7 @@ pub(super) fn resolve_flow_session_decision(
         ingress_ifindex,
         ingress_vlan_id,
         fabric_ingress,
+        fabric_ingress,
         ha_startup_grace_until_secs,
         worker_id,
     )
@@ -2311,7 +2312,11 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     // zone ledger is keyed by. A caller with no VLAN context passes 0, which
     // resolves logical == physical for every untagged port.
     ingress_vlan_id: u16,
+    // `fabric_ingress` is the validated stamp/overlay semantic used by
+    // session policy; `fabric_link_ingress` is the physical parent-or-overlay
+    // arrival semantic used by the anti-loop redirect guard.
     fabric_ingress: bool,
+    fabric_link_ingress: bool,
     ha_startup_grace_until_secs: u64,
     // #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
     // in the worker loop. A peer-synced reservation is held by every worker, so
@@ -2440,7 +2445,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         decision.resolution = redirect_session_via_fabric_if_needed(
             forwarding,
             enforced_resolution,
-            fabric_ingress,
+            fabric_link_ingress,
             resolved.metadata.ingress_zone,
         );
         // #9752: a terminal outcome arms this worker's purge walk (D8).
@@ -2581,7 +2586,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     decision.resolution = redirect_session_via_fabric_if_needed(
         forwarding,
         enforced_resolution,
-        fabric_ingress,
+        fabric_link_ingress,
         resolved.metadata.ingress_zone,
     );
     // #9752: terminal observation arms the purge walk (D8; reverse arm).
