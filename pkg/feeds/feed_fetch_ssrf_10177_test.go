@@ -5,6 +5,8 @@ package feeds
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -158,5 +160,72 @@ func TestPinnedFeedClientAvoidsDNSReResolution10177(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("pinned request status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestFeedFetcherPinsPublicAnswerAgainstRebind10177 exercises the complete
+// resolve/check/dial boundary through readFeed. The first resolver answer is a
+// synthetic public address mapped to the local fixture by the test dialer. If
+// readFeed hands the original hostname to that dialer, the simulated second
+// lookup returns loopback and the request fails; the fixed path supplies only
+// the validated public address and succeeds without a second lookup.
+func TestFeedFetcherPinsPublicAnswerAgainstRebind10177(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("203.0.113.0/24\n"))
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("test server URL %q unparseable: %v", server.URL, err)
+	}
+	const hostname = "dns-rebind.invalid"
+	public := netip.MustParseAddr("198.51.100.10")
+	private := netip.MustParseAddr("127.0.0.1")
+	var resolverCalls, internalAttempts atomic.Int32
+
+	m := New(nil)
+	m.resolveFeedIPs = func(_ context.Context, host string) ([]netip.Addr, error) {
+		if host != hostname {
+			return nil, fmt.Errorf("unexpected resolver host %q", host)
+		}
+		if resolverCalls.Add(1) == 1 {
+			return []netip.Addr{public}, nil
+		}
+		return []netip.Addr{private}, nil
+	}
+	transport := m.client.Transport.(*http.Transport)
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if host == public.String() {
+			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+		}
+		if host == hostname {
+			answers, resolveErr := m.resolveFeedIPs(ctx, host)
+			if resolveErr == nil && len(answers) == 1 && answers[0].Unmap() == private {
+				internalAttempts.Add(1)
+			}
+			return nil, fmt.Errorf("simulated DNS rebinding to internal address")
+		}
+		return nil, fmt.Errorf("unexpected dial target %q", host)
+	}
+
+	fs := &feedState{name: "public-rebind", url: "http://" + hostname + ":" + u.Port() + "/feed"}
+	res, err := m.readFeed(context.Background(), fs)
+	if err != nil {
+		t.Fatalf("public answer was not fetched through its pinned address: %v", err)
+	}
+	if len(res.prefixes) != 1 || res.prefixes[0] != "203.0.113.0/24" {
+		t.Fatalf("public-rebind prefixes = %v, want [203.0.113.0/24]", res.prefixes)
+	}
+	if got := resolverCalls.Load(); got != 1 {
+		t.Fatalf("resolver calls = %d, want exactly one", got)
+	}
+	if got := internalAttempts.Load(); got != 0 {
+		t.Fatalf("dial attempted the rebinding internal answer %d times", got)
 	}
 }

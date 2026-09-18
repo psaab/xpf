@@ -169,6 +169,11 @@ type Manager struct {
 	// deliberate reachability decision for all of its fixtures.
 	privateFeedAllowlist []netip.Prefix
 
+	// resolveFeedIPs is nil in production and exists only as a package-local
+	// seam for deterministic resolver-rebinding tests. The production path uses
+	// net.DefaultResolver and never re-resolves after validation.
+	resolveFeedIPs func(context.Context, string) ([]netip.Addr, error)
+
 	// onUpdate is the publish callback invoked when a feed refresh produces
 	// content that must be (re-)applied to the dataplane. It RETURNS the apply
 	// result: a nil return means the content was ACCEPTED (applied), a non-nil
@@ -331,6 +336,17 @@ func feedDestinationBlocked(ip netip.Addr) bool {
 	return false
 }
 
+func resolveFeedIPs(ctx context.Context, host string) ([]netip.Addr, error) {
+	if literal, parseErr := netip.ParseAddr(host); parseErr == nil {
+		return []netip.Addr{literal.Unmap()}, nil
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve feed destination: %w", err)
+	}
+	return ips, nil
+}
+
 // resolveAndValidateFeedDestination resolves a feed hostname once and
 // validates every answer before the transport is allowed to dial. Refusing
 // the whole answer set when any member is forbidden prevents a resolver from
@@ -344,13 +360,16 @@ func (m *Manager) resolveAndValidateFeedDestination(ctx context.Context, host st
 		ips []netip.Addr
 		err error
 	)
-	if literal, parseErr := netip.ParseAddr(host); parseErr == nil {
-		ips = []netip.Addr{literal.Unmap()}
+	m.mu.RLock()
+	resolve := m.resolveFeedIPs
+	m.mu.RUnlock()
+	if resolve != nil {
+		ips, err = resolve(ctx, host)
 	} else {
-		ips, err = net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil {
-			return nil, fmt.Errorf("resolve feed destination: %w", err)
-		}
+		ips, err = resolveFeedIPs(ctx, host)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("resolve feed destination returned no addresses")
@@ -390,6 +409,7 @@ func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.C
 	}
 	transport := baseTransport.Clone()
 	transport.DialTLSContext = nil
+	baseDialContext := baseTransport.DialContext
 	dialer := &net.Dialer{}
 	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var lastErr error
@@ -400,7 +420,14 @@ func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.C
 			case network == "tcp6" && !ip.Is6():
 				continue
 			}
-			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			target := net.JoinHostPort(ip.String(), port)
+			var conn net.Conn
+			var err error
+			if baseDialContext != nil {
+				conn, err = baseDialContext(ctx, network, target)
+			} else {
+				conn, err = dialer.DialContext(ctx, network, target)
+			}
 			if err == nil {
 				return conn, nil
 			}
