@@ -32,6 +32,13 @@ type fakeSystem struct {
 	// verifyPass controls the verify-dataplane gate result.
 	verifyPass bool
 	verifyErr  error
+	// verifyHook, if set, runs inside VerifyDataplane (used to simulate an
+	// operator commit landing mid-VERIFY while the daemon is still live,
+	// i.e. after the PREFLIGHT snapshot but before the STOP cut boundary).
+	verifyHook func()
+	// stopHook, if set, runs at StopUnit entry, while the old daemon is still
+	// live. It models the final commit/confirmation race at the cut boundary.
+	stopHook func()
 	// readerVersion/readerErr model the target binary's pure envelope probe.
 	readerVersion int
 	readerErr     error
@@ -78,7 +85,16 @@ func newFakeSystem(t *testing.T, ver string) *fakeSystem {
 }
 
 func (f *fakeSystem) log(s string)          { f.calls = append(f.calls, s) }
-func (f *fakeSystem) StopUnit(string) error { f.log("stop"); f.unitRunning = false; return nil }
+func (f *fakeSystem) StopUnit(string) error {
+	f.log("stop")
+	if f.stopHook != nil {
+		hook := f.stopHook
+		f.stopHook = nil
+		hook()
+	}
+	f.unitRunning = false
+	return nil
+}
 func (f *fakeSystem) StartUnit(string) error {
 	f.log("start")
 	// startFailVersions: fail StartUnit while the target is the named
@@ -109,6 +125,9 @@ func (f *fakeSystem) WriteUnitDropin(_, _, content string) error {
 }
 func (f *fakeSystem) VerifyDataplane(string, []string) (bool, error) {
 	f.log("verify")
+	if f.verifyHook != nil {
+		f.verifyHook()
+	}
 	return f.verifyPass, f.verifyErr
 }
 func (f *fakeSystem) BinaryVersion(string) (string, error) { return f.stagedVersion, nil }
