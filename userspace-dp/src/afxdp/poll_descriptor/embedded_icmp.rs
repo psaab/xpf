@@ -26,18 +26,22 @@ use super::*;
 
 /// Outcome of [`try_reverse_embedded_icmp_error`].
 pub(super) enum EmbeddedIcmpReversal {
-    /// A NAT'd flow matched and the reverse-translated error frame was queued
-    /// as a prebuilt forward toward the original client. The original
-    /// descriptor is now owned by that `PendingForwardRequest`; the caller MUST
-    /// then pop + recycle on deny and MUST stop processing this descriptor.
-    Queued,
+    /// A live session matched and the related error frame was queued as a
+    /// prebuilt forward toward the quoted packet's original source. NAT'd
+    /// matches are reverse-translated; untranslated matches preserve the wire
+    /// tuple. The original descriptor is now owned by that
+    /// `PendingForwardRequest`; the caller MUST then pop + recycle on deny and
+    /// MUST stop processing this descriptor. `related_untranslated` is true
+    /// only for the untranslated admission; NAT and NAT64 callers keep it
+    /// false.
+    Queued { related_untranslated: bool },
     /// A NAT'd flow matched and a reversed frame was built, but the egress
     /// CoS / output classification dropped it. The caller MUST recycle the
     /// descriptor and stop processing it (fail-closed: never generate an ICMP
     /// error in response to an ICMP error).
     Dropped,
-    /// No NAT match / no source rewrite / unbuildable reversed frame. The
-    /// caller falls through to normal flowless enforcement, unchanged.
+    /// No matching session / unbuildable reversed frame. The caller falls
+    /// through to normal flowless enforcement, unchanged.
     NotHandled,
 }
 
@@ -113,38 +117,20 @@ pub(super) fn try_reverse_embedded_icmp_error(
             icmp_match.resolution.neighbor_mac,
         );
     }
-    // Reverse whenever the forward flow recorded ANY translation. Decline only
-    // a genuinely untranslated flow, whose inner quote already matches what the
-    // client sent.
+    // A matched quote with no NAT rewrite is an untranslated live session.
+    // Keep it on this related-error path: the existing session is the
+    // admission authority, while ordinary flowless reverse-zone policy would
+    // incorrectly classify the error as a new packet and drop PMTUD.
     //
-    // #9030: this gate used to read `rewrite_src.is_none()` — SNAT-only — and
-    // the comment it carried ("a flow with no source translation leaves the
-    // inner quoted source unchanged, so no reversal is required") is true of
-    // the SOURCE and says nothing about the destination. For a pure-DNAT flow
-    // the decision is `rewrite_dst: Some(_), rewrite_src: None`, so the gate
-    // fired and returned NotHandled — which made every builder, struct field
-    // and regression test #3112 landed for exactly that case unreachable from
-    // production. `build_nat_reversed_icmp_error_v4/v6` have one production
-    // caller each, below this line.
-    //
-    // The builders were already complete for the widened set, which is why this
-    // is a pure reachability change and touches no builder: the destination
-    // ADDRESS restore is guarded by `had_dst_nat` (rewrite_dst), the
-    // destination PORT restore by `rewrite_dst_port || rewrite_dst`, and the
-    // source restores by `rewrite_src_port || rewrite_src`. Each arm tests its
-    // own field, so admitting DNAT-only, port-only or static-NAT flows cannot
-    // half-restore a quote — an arm whose field is None simply does not fire.
-    if icmp_match.nat.rewrite_src.is_none()
+    // #9030 widened the old SNAT-only gate to test every rewrite field so
+    // pure-DNAT, port-only, and composed NAT sessions reach their builders.
+    // The same all-fields predicate now identifies the no-rewrite RELATED
+    // case. Each builder independently guards its address/port writes, so the
+    // untranslated output remains wire-identical apart from checksum refresh.
+    let untranslated_related = icmp_match.nat.rewrite_src.is_none()
         && icmp_match.nat.rewrite_dst.is_none()
         && icmp_match.nat.rewrite_src_port.is_none()
-        && icmp_match.nat.rewrite_dst_port.is_none()
-    {
-        #[cfg(feature = "debug-log")]
-        if icmpv6_trace {
-            debug_log!("ICMPV6_EMBED: no_rewrite nat={:?}", icmp_match.nat);
-        }
-        return EmbeddedIcmpReversal::NotHandled;
-    }
+        && icmp_match.nat.rewrite_dst_port.is_none();
     let icmp_resolution = finalize_embedded_icmp_resolution_parts(
         worker_ctx.forwarding,
         worker_ctx.ha_state,
@@ -189,7 +175,7 @@ pub(super) fn try_reverse_embedded_icmp_error(
         }
         return EmbeddedIcmpReversal::NotHandled;
     };
-    queue_prebuilt_embedded_icmp_error(
+    let queued = queue_prebuilt_embedded_icmp_error(
         desc,
         meta,
         binding_index,
@@ -200,7 +186,13 @@ pub(super) fn try_reverse_embedded_icmp_error(
         rewritten_frame,
         #[cfg(feature = "debug-log")]
         icmpv6_trace,
-    )
+    );
+    match queued {
+        EmbeddedIcmpReversal::Queued { .. } => EmbeddedIcmpReversal::Queued {
+            related_untranslated: untranslated_related,
+        },
+        other => other,
+    }
 }
 
 /// Shared tail of the embedded-ICMP error paths (#5690 same-family
@@ -295,7 +287,9 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         dscp_rewrite: cos.dscp_rewrite,
         cos_tx_selection_resolved: true,
     });
-    EmbeddedIcmpReversal::Queued
+    EmbeddedIcmpReversal::Queued {
+        related_untranslated: false,
+    }
 }
 
 /// Authorize the queued disposition and, for locally forwardable frames, apply
@@ -316,6 +310,7 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
     worker_ctx: &WorkerContext,
     now_ns: u64,
     now_secs: u64,
+    related_untranslated: bool,
 ) -> bool {
     // A queued prebuilt never reaches the later flowless disposition arms:
     // both callers continue after this adjudicator and TX dispatch sends a
@@ -323,6 +318,14 @@ pub(super) fn enforce_queued_embedded_icmp_policy(
     // exception: #3291 adjudicates it on the owning peer, and TX #1946
     // explicitly transmits its prebuilt frame across the fabric.
     if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        return true;
+    }
+    // An untranslated error quoting a live session is admitted by the
+    // allow-embedded-icmp RELATED contract. Keep HA/route dispositions
+    // authoritative, but do not re-run the reverse flowless zone pair: that
+    // pair describes the error's arrival direction, not the permitted flow
+    // it quotes. NAT-translated errors retain the policy gate below.
+    if related_untranslated && resolution.disposition == ForwardingDisposition::ForwardCandidate {
         return true;
     }
     // Every terminal/non-sendable disposition must fail closed here rather
