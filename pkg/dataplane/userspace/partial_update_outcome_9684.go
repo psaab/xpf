@@ -26,9 +26,11 @@ import (
 // publish is held, and no extra control round trip is made:
 //   - A verb failure whose outcome is unknown marks its section
 //     (recordPartialUpdateFailureLocked). An in-band refusal marks nothing,
-//     because the helper answered and kept what it had. Neither does a #6034
-//     fence (#9696: any nonzero ACK other than the sent generation retains
-//     retry debt without marking).
+//     because the helper answered and kept what it had. A #6034/#9696/#10035
+//     fence also marks nothing: the explicit `neighbor_replace_applied=false`
+//     bit (or, for older helpers, any nonzero ACK other than the sent
+//     generation) proves the helper kept its prior content, so the cached
+//     section remains retry debt rather than unknown helper content.
 //   - Each publish that starts from m.lastSnapshot re-samples every marked
 //     section into the snapshot it sends (resampleUnresolvedSectionsLocked).
 //     The sample is taken after the lost update's, so it can only move the
@@ -36,9 +38,10 @@ import (
 //   - A section is unmarked once Go has recorded exactly the copy the helper
 //     accepted (resolvePartialOutcomesLocked). That is one of:
 //       - a verb round trip whose response proves the update applied; for
-//         update_neighbors that means an ACK of exactly the generation sent, or
-//         0 from a helper without the ACK. An ACK above it is a #6034 fence
-//         (#9696) that retains retry debt and leaves the section marked;
+//         update_neighbors that means an explicit applied=true bit, or the
+//         legacy ACK of exactly the generation sent / 0 from a helper without
+//         the outcome bit. A present false bit is a #10035 fence, even when
+//         its ACK equals the sent generation;
 //       - a successful apply_snapshot that carried a re-sampled copy.
 //   - Compile builds its snapshot outside m.mu, so a partial update can run
 //     between the build and the publish, and the build's older sample would roll

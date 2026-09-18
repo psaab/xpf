@@ -39,14 +39,19 @@ pub(super) fn update(
         }
         resolved.push((neigh.ifindex, ip, afxdp::NeighborEntry { mac }));
     }
-    // #6034: carry the replace-generation envelope. `apply_manager_neighbors`
-    // fences a stale / reordered replace (generation <= last applied) and
-    // returns false without touching the table; `refresh_status` still runs so
-    // the ACK (ProcessStatus.manager_neighbor_generation) reflects the current
-    // applied generation and the Go manager can retain retry debt.
+    // #6034/#10035: carry the replace-generation envelope. The helper fences
+    // a stale / reordered replace (generation <= last applied) and returns
+    // false without touching the table; `refresh_status` still runs so the
+    // ACK (`ProcessStatus.manager_neighbor_generation`) reflects the current
+    // applied generation. The additive outcome bit distinguishes an
+    // exact-match fence from a successful apply: both have the same ACK
+    // generation, but only the latter reports `neighbor_replace_applied=true`.
     let applied = guard
         .afxdp
         .apply_manager_neighbors(replace, generation, &resolved);
+    if replace {
+        guard.status.neighbor_replace_applied = Some(applied);
+    }
     if !applied {
         eprintln!(
             "update_neighbors: fenced stale replace generation {} (last applied {})",

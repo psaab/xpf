@@ -374,6 +374,7 @@ pub(crate) fn run() -> Result<(), String> {
             neighbor_cache_capacity: 0,
             neighbor_generation: 0,
             manager_neighbor_generation: 0,
+            neighbor_replace_applied: None,
             route_entries: 0,
             worker_heartbeats: Vec::new(),
             worker_runtime: Vec::new(),

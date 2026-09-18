@@ -217,6 +217,16 @@ pub(crate) struct ProcessStatus {
     /// assume applied", preserving pre-#6034 behavior).
     #[serde(rename = "manager_neighbor_generation", default)]
     pub manager_neighbor_generation: u64,
+    /// #10035: outcome of the most recent `update_neighbors` replace the
+    /// helper processed — `Some(true)` applied, `Some(false)` fenced as
+    /// stale/reordered (#6034). This distinguishes a fenced exact-match
+    /// (sent generation == applied, ACK == sent) from a successful apply.
+    ///
+    /// Presence-tracked and omitted when `None`: older Go helpers that ignore
+    /// the key retain the #9696 ACK-equality fallback, while Go reads a
+    /// missing key as the legacy/no-outcome case.
+    #[serde(rename = "neighbor_replace_applied", default, skip_serializing_if = "Option::is_none")]
+    pub neighbor_replace_applied: Option<bool>,
     #[serde(rename = "route_entries", default)]
     pub route_entries: usize,
     #[serde(rename = "worker_heartbeats", default)]

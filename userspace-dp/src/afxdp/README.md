@@ -1181,7 +1181,7 @@ sync.
     as a miss, so an untagged fixture passes under the defect for the wrong
     reason.
 
-## Manager-neighbor replace generation envelope (#5864 → #6034)
+## Manager-neighbor replace generation envelope (#5864 → #6034 → #10035)
 
 The Go control plane pushes an authoritative manager-neighbor table to the
 helper over the `update_neighbors` control message (handler
@@ -1200,21 +1200,24 @@ data-path learn, and the on-demand resolver are the others).
   generation, ..)` REJECTS a replace whose `generation <= last applied`
   (`NeighborManager::applied_manager_generation`) — a stale / reordered
   delivery must not clobber a newer table — and returns `false` without
-  touching the table. This is defense-in-depth: the single synchronous control
+  touching the table. This is defense-in-depth: the single synchronous
   socket does not itself reorder. The applied generation is ACK'd back in
   `ProcessStatus.manager_neighbor_generation` (distinct from
-  `neighbor_generation`, the dynamic ARP/NDP resolver epoch); the Go send path
-  advances its cached neighbor view only when the ACK is 0 or exactly the sent
-  generation (#9696) — an ACK above it is this fence answering with its newer
-  applied generation, while an ACK below it (other than 0) is unexpected from
-  the current helper and handled defensively the same way — otherwise it
-  RETAINS retry debt and the
-  next event-driven / 60s-safety regeneration re-diffs and retries with a
-  strictly higher generation. **Backward-compatible:** a `generation == 0`
-  (unversioned / pre-#6034) push bypasses the fence and never advances it, and
-  an older helper that omits the ACK field decodes 0 on the Go side → "no ACK
-  support, assume applied" (pre-#6034 behavior). The retry piggybacks the
-  existing regeneration cadence — it adds NO new control-socket caller.
+  `neighbor_generation`, the dynamic ARP/NDP resolver epoch).
+- **#10035 exact-match fence outcome:** the additive
+  `ProcessStatus.neighbor_replace_applied` bit carries the helper's actual
+  outcome for the most recent authoritative replace: `true` means applied and
+  `false` means fenced. This bit is presence-tracked and omitted by older
+  helpers, so the wire remains compatible. It resolves the one ambiguity the
+  generation ACK cannot: a fence at `generation == last applied` returns an
+  ACK equal to the sent generation, byte-identical to success. Go treats a
+  present false bit as a fence even on that exact match, while a missing bit
+  retains #9696's nonzero-ACK mismatch fence and legacy ACK-0 success fallback.
+  A `generation == 0` (unversioned / pre-#6034) push bypasses the fence and
+  never advances it. A fence retains retry debt; the next event-driven / 60s
+  safety regeneration re-diffs and retries with a strictly higher generation.
+  The retry piggybacks the existing regeneration cadence — it adds NO new
+  control-socket caller.
 
 ## Worker command-queue poison policy (#1790 → #1807)
 

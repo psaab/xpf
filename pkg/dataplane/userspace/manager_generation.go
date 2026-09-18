@@ -115,15 +115,12 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		}, &status); err != nil {
 			slog.Warn("userspace: failed to publish neighbor update", "err", err)
 			m.recordPartialUpdateFailureLocked(partialNeighbors, err)
-		} else if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration != gen {
-			// #6034/#9696: an ACK above `gen` identifies a #6034 fence — the
-			// helper is ahead and kept what it had. Retain the cached neighbor
-			// view so the next bump re-diffs and retries with a strictly higher
-			// generation; an ACK below `gen` is unexpected from the current
-			// helper and is handled defensively the same way. An ACK of 0 =
-			// older helper without ACK support, treated as applied. This arm
-			// skips only the neighbor writeback below and falls through to the
-			// FIB bump, whose invalidation is orthogonal.
+		} else if neighborReplaceWasFenced(&status, gen) {
+			// #6034/#9696/#10035: a present false outcome bit catches an
+			// exact-match fence, while a missing bit preserves #9696's
+			// nonzero-ACK mismatch fence and legacy ACK-0 success fallback.
+			// This arm skips only neighbor writeback and falls through to
+			// the FIB bump, whose invalidation is orthogonal.
 			m.seedNeighborReplaceGenerationLocked(status.ManagerNeighborGeneration)
 			slog.Warn("userspace: neighbor update not acknowledged; retaining retry debt",
 				"sent_generation", gen,
@@ -133,10 +130,11 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			// a transient failure doesn't suppress future retries.
 			m.lastSnapshot.Neighbors = newNeighbors
 			m.rebuildNeighborIndex() // #1197
-			// #9684/#9696: the fence arm above handled every nonzero ACK other
-			// than gen, so a nonzero ACK here means exactly gen — which proves
-			// this replace applied (modulo the exact-match residual, fenced
-			// helper-side yet ACKed == gen; structurally closed in-tree).
+			// #9684/#9696/#10035: after the fence arm above, this path
+			// represents an explicit applied=true outcome or a legacy
+			// response with ACK 0 / exact ACK equality. The explicit bit
+			// closes the exact-match ambiguity; a missing bit retains the
+			// additive #9696 compatibility fallback.
 			if status.ManagerNeighborGeneration == 0 || status.ManagerNeighborGeneration == gen {
 				m.resolvePartialOutcomesLocked(partialNeighbors)
 			}
