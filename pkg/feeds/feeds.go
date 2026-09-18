@@ -100,6 +100,12 @@ const maxFeedPrefixes = 1 << 20 // 1,048,576 entries
 // fetch open indefinitely (#3934). The next refresh tick retries.
 const httpClientTimeout = 30 * time.Second
 
+// feedDialAttemptTimeout bounds each pinned dial attempt so a blackholed
+// first answer cannot consume the whole shared fetch budget and starve
+// reachable later answers (serial fallback without Happy Eyeballs). It is a
+// var so tests can shrink it; production stays well under httpClientTimeout.
+var feedDialAttemptTimeout = 5 * time.Second
+
 // maxFeedRedirects preserves net/http's built-in redirect bound after the
 // client installs the feed-specific CheckRedirect policy below.
 const maxFeedRedirects = 10
@@ -421,13 +427,15 @@ func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.C
 				continue
 			}
 			target := net.JoinHostPort(ip.String(), port)
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, feedDialAttemptTimeout)
 			var conn net.Conn
 			var err error
 			if baseDialContext != nil {
-				conn, err = baseDialContext(ctx, network, target)
+				conn, err = baseDialContext(attemptCtx, network, target)
 			} else {
-				conn, err = dialer.DialContext(ctx, network, target)
+				conn, err = dialer.DialContext(attemptCtx, network, target)
 			}
+			cancelAttempt()
 			if err == nil {
 				return conn, nil
 			}

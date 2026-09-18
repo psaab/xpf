@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 var labFeedAllowlist10177 = []netip.Prefix{
@@ -227,5 +228,72 @@ func TestFeedFetcherPinsPublicAnswerAgainstRebind10177(t *testing.T) {
 	}
 	if got := internalAttempts.Load(); got != 0 {
 		t.Fatalf("dial attempted the rebinding internal answer %d times", got)
+	}
+}
+
+// TestPinnedFeedClientFallsBackAfterBlackholedAnswer10177 keeps a reachable
+// later resolver answer usable. A per-attempt timeout must expire the first
+// blackholed address without consuming the shared fetch deadline.
+func TestPinnedFeedClientFallsBackAfterBlackholedAnswer10177(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("203.0.113.0/24\n"))
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("test server URL %q unparseable: %v", server.URL, err)
+	}
+	const hostname = "multi-answer.invalid"
+	blackhole := netip.MustParseAddr("198.51.100.11")
+	reachable := netip.MustParseAddr("198.51.100.10")
+	var blackholeAttempts, reachableAttempts atomic.Int32
+
+	previousAttemptTimeout := feedDialAttemptTimeout
+	feedDialAttemptTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { feedDialAttemptTimeout = previousAttemptTimeout })
+
+	m := New(nil)
+	m.resolveFeedIPs = func(_ context.Context, host string) ([]netip.Addr, error) {
+		if host != hostname {
+			return nil, fmt.Errorf("unexpected resolver host %q", host)
+		}
+		return []netip.Addr{blackhole, reachable}, nil
+	}
+	transport := m.client.Transport.(*http.Transport)
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		switch host {
+		case blackhole.String():
+			blackholeAttempts.Add(1)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		case reachable.String():
+			reachableAttempts.Add(1)
+			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+		default:
+			return nil, fmt.Errorf("unexpected dial target %q", host)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	fs := &feedState{name: "multi-answer", url: "http://" + hostname + ":" + u.Port() + "/feed"}
+	res, err := m.readFeed(ctx, fs)
+	if err != nil {
+		t.Fatalf("reachable later answer was starved by blackholed first answer: %v", err)
+	}
+	if len(res.prefixes) != 1 || res.prefixes[0] != "203.0.113.0/24" {
+		t.Fatalf("multi-answer prefixes = %v, want [203.0.113.0/24]", res.prefixes)
+	}
+	if got := blackholeAttempts.Load(); got != 1 {
+		t.Fatalf("blackholed address attempts = %d, want 1", got)
+	}
+	if got := reachableAttempts.Load(); got != 1 {
+		t.Fatalf("reachable address attempts = %d, want 1", got)
 	}
 }
