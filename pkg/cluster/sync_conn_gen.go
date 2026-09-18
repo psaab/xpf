@@ -38,10 +38,10 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // value) and grows by doubling, per side, whenever a map is full of LIVE
 // entries with nothing evictable. Cross-epoch ceiling shrinks clamp the stored
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
-// (sentCap/recvCap); the receiver side is additionally reclaimed at each bulk
-// barrier (resetRecvGen), while sender maps self-drain on delete-echo. All ten
-// families are evicted on delete; the cap is a safety valve for keys whose
-// delete never arrives (e.g. dropped close delta).
+// (sentCap/recvCap); the receiver side is additionally reclaimed at a
+// namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
+// delete-echo. All ten families are evicted on delete; the cap is a safety
+// valve for keys whose delete never arrives (e.g. dropped close delta).
 //
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
 // genuinely fills, and per-map=wired is coverage-correct — one family can hold
@@ -261,9 +261,9 @@ func (s *SessionSync) nextInstallGen() uint64 {
 // incarnation always supersedes (a peer restart draws a fresh epoch), and
 // within an incarnation the per-type seq orders the pushes. A LOWER
 // incarnation is stale and refused — EXCEPT that the guard is reset() to zero
-// on a peer bulk re-prime (resetRecvGen), so an OS-rebooted peer whose
-// monotonic epoch restarts LOWER is re-accepted from its fresh set rather than
-// stranded on the pre-reboot set (the #2198 F2 stale-RETAIN inverse, applied
+// on a namespace-reset peer bulk re-prime (resetRecvGen), so an OS-rebooted
+// peer whose monotonic epoch restarts LOWER is re-accepted from its fresh set
+// rather than stranded on the pre-reboot set (the #2198 F2 stale-RETAIN
 // to full-set sync). The zero value is the initial/legacy state.
 //
 // Access is serialized by SessionSync.recvSeqMu because the two fabric
@@ -344,9 +344,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	g := s.nextInstallGen()
 	val.Generation = g
 	// #7095: stamp the cluster-stable ingress fold on the same pass that
-	// stamps the generation — one place per family, covering both the
-	// incremental and the bulk send paths, which both call this immediately
-	// before encoding.
+	// stamps the generation. Incremental sends stamp immediately before
+	// encoding; table-truth bulk sends stamp at their source decision
+	// boundary, before BulkStart and any row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
 	// #5274: stamp the admitting config epoch = the config-sync generation
 	// (#3931) this node currently holds. A session still present in the local
@@ -428,9 +428,9 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	g := s.nextInstallGen()
 	val.Generation = g
 	// #7095: stamp the cluster-stable ingress fold on the same pass that
-	// stamps the generation — one place per family, covering both the
-	// incremental and the bulk send paths, which both call this immediately
-	// before encoding.
+	// stamps the generation. Incremental sends stamp immediately before
+	// encoding; table-truth bulk sends stamp at their source decision
+	// boundary, before BulkStart and any row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
 	// #5274: stamp the admitting config epoch (see stampInstallGenV4).
 	val.ConfigEpoch = s.configGenCounter.Load()
@@ -523,6 +523,11 @@ func (s *SessionSync) stampCloseClassSentV6(key dataplane.SessionKeyV6, sessionI
 // delete only while it holds a NEWER generation for the key, which is the
 // correct answer.
 func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
+	if hook := s.testBeforeDeleteGen; hook != nil {
+		hook()
+	}
+	s.bulkSnapshotGenMu.Lock()
+	defer s.bulkSnapshotGenMu.Unlock()
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
 	// #9412: the incarnation is being deleted; forget its close class. Before the
@@ -546,10 +551,19 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 		return 0
 	}
 	delete(s.genSentV4, key)
-	return s.nextInstallGen()
+	gen := s.nextInstallGen()
+	if hook := s.testAfterDeleteGen; hook != nil {
+		hook()
+	}
+	return gen
 }
 
 func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
+	if hook := s.testBeforeDeleteGen; hook != nil {
+		hook()
+	}
+	s.bulkSnapshotGenMu.Lock()
+	defer s.bulkSnapshotGenMu.Unlock()
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
 	// #9412: the incarnation is being deleted; forget its close class. Before the
@@ -568,7 +582,11 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 		return 0
 	}
 	delete(s.genSentV6, key)
-	return s.nextInstallGen()
+	gen := s.nextInstallGen()
+	if hook := s.testAfterDeleteGen; hook != nil {
+		hook()
+	}
+	return gen
 }
 
 // installGenGuardV4 implements the receiver-side install-side guard (#2170 SMR
@@ -710,9 +728,10 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 // generation and still applies (incoming > tombstone). A gen-0 (legacy) delete
 // evicts (no tombstone to record) — the legacy unconditional path is unchanged.
 // Tombstones are bounded by the effective receiver cap (and the absolute
-// genGuardMapCap ceiling) and cleared by the bulk barrier (resetRecvGen), so a
-// churning workload cannot grow the map without limit and a cross-boot
-// generation regression is handled at BulkStart.
+// genGuardMapCap ceiling). They survive a same-incarnation resetRecvGen so a
+// post-fence delete continues to refuse an older snapshot row; a known
+// peer-boot switch explicitly drops them because the sender's generation
+// namespace has restarted and the old values are no longer comparable.
 //
 // #9719: a tombstone never frees its entry, so between bulks the map used to
 // fill with tombstones of closed sessions and then skip-record every NEW key.
@@ -781,36 +800,84 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 	return true
 }
 
-// resetRecvGen clears the receiver-side stored-generation maps. It is called
-// when the peer begins a fresh bulk transfer (#2198 F2): a reconnecting peer
-// may have REBOOTED, which legitimately restarts its sender genCounter (it is
-// seeded from CLOCK_MONOTONIC nanos, which resets at OS boot). Its bulk
-// re-prime then carries generations that may be LOWER than the generations we
-// stored from the peer's previous boot. Without this reset the install guard
-// would refuse the bulk re-prime as "stale" (stored > incoming) — the inverse
-// of the #2170 bug (stale-RETAIN) — and the cold-start re-prime would silently
-// fail to land.
-//
-// This is safe against opening a stale-delete window: deletes are only acted
-// on after the bulk completes (reconcileStaleSessions runs at BulkEnd), and
-// the bulk re-prime re-establishes the live set (re-recording each key's fresh
-// generation) before any such delete is processed. A delete that arrives
-// mid-bulk for a key the bulk has not yet re-recorded falls back to gen-0
-// (stored==0 after reset) → unconditional, which is the legacy-safe behavior.
-func (s *SessionSync) resetRecvGen() {
+// resetRecvSessionGen resets only receiver-side session generation maps. A
+// same-incarnation bulk uses preserve=true to reclaim live high-waters while
+// retaining delete tombstones and without resetting comparable config/full-set
+// namespaces.
+func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 	// #9715: under applyMu, so an install on the other receive loop that passed
 	// its guard before this reset cannot record its pre-reboot generation after
-	// it. That stale high-water would refuse the rebooted peer's lower re-prime
-	// generations: the stale-RETAIN this reset exists to prevent.
+	// it.
 	s.applyMu.Lock()
 	s.recvGenMu.Lock()
-	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
-	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
-	s.recvTombV4.reset() // #9719: the tombstone order describes the maps just cleared.
-	s.recvTombV6.reset()
-	s.recvGenGuardCap = 0 // #9915 F-044: new epoch, recount demand from the default.
+	if preserve {
+		// Keep exactly the map entries indexed by the tombstone order. Every
+		// live entry is discarded, while the order itself remains in place and
+		// continues to bound/evict tombstones normally.
+		recvGenV4 := make(map[dataplane.SessionKey]uint64, s.recvTombV4.size())
+		for key := range s.recvTombV4.elems {
+			if gen, ok := s.recvGenV4[key]; ok {
+				recvGenV4[key] = gen
+			}
+		}
+		recvGenV6 := make(map[dataplane.SessionKeyV6]uint64, s.recvTombV6.size())
+		for key := range s.recvTombV6.elems {
+			if gen, ok := s.recvGenV6[key]; ok {
+				recvGenV6[key] = gen
+			}
+		}
+		s.recvGenV4 = recvGenV4
+		s.recvGenV6 = recvGenV6
+		preserved := len(recvGenV4)
+		if len(recvGenV6) > preserved {
+			preserved = len(recvGenV6)
+		}
+		// Keep the smallest growth tier that can contain the retained
+		// tombstones. A test ceiling below the historical default is also
+		// honored because recvCap's zero value intentionally ignores overrides.
+		maxCap := s.maxCap()
+		cap := genGuardMapDefaultCap
+		if maxCap < cap {
+			cap = maxCap
+		}
+		for cap < preserved && cap < maxCap {
+			next := cap * 2
+			if next > maxCap {
+				next = maxCap
+			}
+			cap = next
+		}
+		if cap == genGuardMapDefaultCap && maxCap >= genGuardMapDefaultCap {
+			s.recvGenGuardCap = 0
+		} else {
+			s.recvGenGuardCap = cap
+		}
+	} else {
+		s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
+		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
+		s.recvTombV4.reset()
+		s.recvTombV6.reset()
+		// #9915 F-044: a namespace reset starts the next epoch at the
+		// default cap and clears all session tombstones.
+		s.recvGenGuardCap = 0
+	}
 	s.recvGenMu.Unlock()
 	s.applyMu.Unlock()
+}
+
+// reclaimRecvLiveGen preserves delete tombstones while reclaiming live
+// high-waters for a same-incarnation authoritative bulk. Config and full-set
+// generations remain comparable and are deliberately untouched.
+func (s *SessionSync) reclaimRecvLiveGen() {
+	s.resetRecvSessionGen(true)
+}
+
+// resetRecvGen performs the full receiver namespace reset for an un-incarnated
+// legacy prime or a known boot-incarnation switch. It clears session,
+// config, and full-set high-waters so a lower-generation rebooted namespace can
+// re-prime.
+func (s *SessionSync) resetRecvGen() {
+	s.resetRecvSessionGen(false)
 	// #3931: also reset the last-applied config generation. A reconnecting
 	// peer may have REBOOTED, restarting its monotonic configGenCounter at a
 	// value LOWER than the generation we stored from its previous boot.

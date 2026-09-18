@@ -293,14 +293,22 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.bulkZoneSnapshot = zoneSnap
 		s.bulkMu.Unlock()
 		// The generation reset moves to the ACCEPTED path only. It is the
-		// #2198 F2 remedy for a re-priming peer, and running it for a stale
-		// BulkStart discarded the generations of a bulk that was still valid.
+		// #2198 F2 remedy for a re-priming peer. A DIFFERENT known boot
+		// incarnation, or an un-incarnated legacy BulkStart, has no comparable
+		// generation namespace and therefore gets the historical full reset.
+		// A SAME known incarnation still reclaims live high-waters from the
+		// previous authoritative window while retaining delete tombstones for
+		// post-fence stale rows.
 		//
 		// It stays OUTSIDE `bulkMu`, where it has always been. `resetRecvGen`
 		// takes `recvGenMu`, and pulling it inside would add a bulkMu ->
 		// recvGenMu edge to the lock graph as a side effect of a correctness
 		// fix -- a change nothing here needs and nobody would look for.
-		s.resetRecvGen()
+		if !inc.known() || switched {
+			s.resetRecvGen()
+		} else {
+			s.reclaimRecvLiveGen()
+		}
 		// #9177 V052: the bulk TELEMETRY belongs on the accepted path too, and
 		// it used to run above the accept. A REFUSED BulkStart -- the reordered
 		// one #8966's own text calls "the ordinary case" with two fabric
