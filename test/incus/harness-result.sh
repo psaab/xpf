@@ -135,7 +135,7 @@ harness_adapt() {
 # (failover, double, stress, chained, active-active) and keep ha-smoke;
 # eight emit cells only (connectivity, wire-properties, ha-crash,
 # persistent-nat, dhcp-lease, private-rg, restart-connectivity, wg-interop)
-# smoke-cells. The Makefile mapping is census-checked against "calls
+# and take smoke-cells. The Makefile mapping is census-checked against "calls
 # iperf_throughput_verdict" in harness-result-selftest.sh, so a future
 # mis-mapping reds there instead of silently switching headline families.
 #
