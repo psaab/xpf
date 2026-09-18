@@ -132,7 +132,7 @@ func TestDHCPV6UpstreamBindAddrIgnoresLinkLocalIdentity10198(t *testing.T) {
 	if !linkAddr.IsLinkLocalUnicast() {
 		t.Fatalf("test link-address %v is not link-local", linkAddr)
 	}
-	got := dhcpV6UpstreamBindAddr()
+	got := dhcpV6UpstreamBindAddr(linkAddr, dhcpv6RelayPort)
 	want := (&net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6RelayPort}).String()
 	if got != want {
 		t.Fatalf("upstream bind address for link-local Relay-Forw = %q, want %q", got, want)
@@ -143,5 +143,106 @@ func TestDHCPV6UpstreamBindAddrIgnoresLinkLocalIdentity10198(t *testing.T) {
 	}
 	if !resolved.IP.IsUnspecified() || resolved.Port != dhcpv6RelayPort {
 		t.Fatalf("resolved upstream bind address = %v, want [::]:%d", resolved, dhcpv6RelayPort)
+	}
+}
+
+func TestDHCPv6PerInterfaceServerBindDemux10198(t *testing.T) {
+	var addresses []net.IP
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("list interfaces: %v", err)
+	}
+	for _, iface := range interfaces {
+		ifaceAddrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range ifaceAddrs {
+			var ip net.IP
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip == nil || ip.To16() == nil || ip.To4() != nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || !ip.IsGlobalUnicast() {
+				continue
+			}
+			duplicate := false
+			for _, candidate := range addresses {
+				if candidate.Equal(ip) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				addresses = append(addresses, append(net.IP(nil), ip.To16()...))
+			}
+		}
+	}
+	if len(addresses) < 2 {
+		t.Skipf("need two local GUA/ULA addresses for real-socket demux, found %d", len(addresses))
+	}
+	listenConfig := dhcpV6ListenConfig("")
+	firstAddr := dhcpV6UpstreamBindAddr(addresses[0], 0)
+	firstRaw, err := listenConfig.ListenPacket(context.Background(), "udp6", firstAddr)
+	if err != nil {
+		t.Fatalf("listen first exact upstream address %q: %v", firstAddr, err)
+	}
+	defer firstRaw.Close()
+	first, ok := firstRaw.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("first upstream listener type = %T, want *net.UDPConn", firstRaw)
+	}
+	port := first.LocalAddr().(*net.UDPAddr).Port
+	secondAddr := dhcpV6UpstreamBindAddr(addresses[1], port)
+	secondRaw, err := listenConfig.ListenPacket(context.Background(), "udp6", secondAddr)
+	if err != nil {
+		t.Fatalf("listen second exact upstream address %q: %v", secondAddr, err)
+	}
+	defer secondRaw.Close()
+	second, ok := secondRaw.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("second upstream listener type = %T, want *net.UDPConn", secondRaw)
+	}
+
+	firstSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: addresses[0], Port: port})
+	if err != nil {
+		t.Fatalf("dial first upstream destination: %v", err)
+	}
+	defer firstSender.Close()
+	secondSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: addresses[1], Port: port})
+	if err != nil {
+		t.Fatalf("dial second upstream destination: %v", err)
+	}
+	defer secondSender.Close()
+	if _, err := firstSender.Write([]byte("reply-one")); err != nil {
+		t.Fatalf("send first upstream reply: %v", err)
+	}
+	if _, err := secondSender.Write([]byte("reply-two")); err != nil {
+		t.Fatalf("send second upstream reply: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	if err := first.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set first read deadline: %v", err)
+	}
+	if err := second.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set second read deadline: %v", err)
+	}
+	firstData := make([]byte, 32)
+	n, _, err := first.ReadFromUDP(firstData)
+	if err != nil {
+		t.Fatalf("read first per-interface reply: %v", err)
+	}
+	if string(firstData[:n]) != "reply-one" {
+		t.Fatalf("first per-interface socket received %q, want reply-one", firstData[:n])
+	}
+	secondData := make([]byte, 32)
+	n, _, err = second.ReadFromUDP(secondData)
+	if err != nil {
+		t.Fatalf("read second per-interface reply: %v", err)
+	}
+	if string(secondData[:n]) != "reply-two" {
+		t.Fatalf("second per-interface socket received %q, want reply-two", secondData[:n])
 	}
 }
