@@ -815,6 +815,18 @@ type SessionSync struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	sendCh     chan []byte // buffered channel for outgoing messages
+	// queuedFrameMu protects the accepted/resolved watermark used by an
+	// authoritative table-truth bulk. Producers increment queuedFrameSeq while
+	// enqueuing; sendLoop increments queuedFrameResolved after a frame is
+	// delivered or abandoned (and queuedFrameFailures records the latter).
+	// BulkStart snapshots the sequence and failure count while holding this
+	// mutex, so the watermark is an exact pre-marker cut and a failed frame
+	// aborts rather than allowing an incomplete authoritative window to
+	// reconcile.
+	queuedFrameMu       sync.Mutex
+	queuedFrameSeq      uint64
+	queuedFrameResolved uint64
+	queuedFrameFailures uint64
 
 	// incrementalPauseDepth temporarily pauses background incremental producers
 	// during ordered handoff operations.
@@ -1233,11 +1245,19 @@ type SessionSync struct {
 	peerHeartbeatAckEver atomic.Bool
 	readDeadline         time.Duration
 	peerSilenceLimit     time.Duration
-	bulkSendMu           sync.Mutex
-	bulkSendNext         atomic.Uint64
-	pendingBulkAckEpoch  atomic.Uint64
-	pendingBulkAckSince  atomic.Int64
-	bulkEverCompleted    atomic.Bool
+	// bulkStartMu serializes queued incremental writes with the
+	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
+	// while reading BulkSnapshotSource and until BulkStart is written under
+	// writeMu; sendLoop takes it for every queued frame, so an incremental
+	// cannot land ahead of the marker. The queue's existing order and install
+	// generations then remain authoritative for session opens followed by
+	// closes in the gap.
+	bulkStartMu         sync.Mutex
+	bulkSendMu          sync.Mutex
+	bulkSendNext        atomic.Uint64
+	pendingBulkAckEpoch atomic.Uint64
+	pendingBulkAckSince atomic.Int64
+	bulkEverCompleted   atomic.Bool
 	// outboundBulkAcked is set ONLY when the peer acks OUR outbound bulk
 	// (syncMsgBulkAck), i.e. the peer has received our complete session
 	// table. It is DISTINCT from bulkEverCompleted, which is also set by an
@@ -1630,7 +1650,7 @@ type SessionSync struct {
 	persistentNatLeaseApplyMu sync.Mutex
 	// dhcpApplyMu serializes each DHCP arm's commit (high-water advance +
 	// held-set store) with its callback (#9915 F-117 review), so commit order
-	// == callback order across the two fabric receiveLoops. It nests recvSeqMu
+	// == callback order across the two fabric receive loops. It nests recvSeqMu
 	// (mark+store) inside and is released only after the callback; recvSeqMu
 	// is never held across the callback itself, so a consumer cannot deadlock
 	// on it. Taken only by the DHCP arms; the callback must not reenter DHCP
@@ -1640,9 +1660,19 @@ type SessionSync struct {
 	// (fold-2 HIGH-2): bumped under recvSeqMu by resetRecvGen alongside
 	// the guard resets. DHCP arms capture it with the newer-check and
 	// re-verify it inside the commit; a commit spanning a reset is dropped
-	// as stale instead of resurrecting the dead boot's high-water over
-	// the replacement's. Guarded by recvSeqMu.
+	// as stale instead of resurrecting the dead boot's high-water over the
+	// replacement's. Guarded by recvSeqMu.
 	recvEpoch uint64
+	// #10283: testAfterBulkSnapshot runs after a table-truth source returns but
+	// before BulkStart is written. It is test-only and nil in production. The
+	// production doBulkSync path holds bulkStartMu while invoking it; a
+	// fail-on-revert test can TryLock that mutex on the old path and park the
+	// marker until queued frames have definitely crossed the wire.
+	testAfterBulkSnapshot func()
+	// testBeforeQueuedWrite cancels a test send just before its queued frame
+	// would be written, exercising the watermark failure path without
+	// disconnecting the active connection in production.
+	testBeforeQueuedWrite func()
 	// testDHCPPreCommit, when non-nil, runs after DHCP decode+filter and
 	// before the commit, with NO locks held (so the test may drive reset
 	// + replacement paths from the hook rendezvous). Test-only hook for

@@ -341,7 +341,9 @@ func TestAnAckedBulkWhoseSnapshotPredatesTheMoveKeepsTheFence_9508(t *testing.T)
 		}
 		ss.installConn(0, fab0)
 		ss.QueueSessionV4(key9508(), val9508())
-		waitForFrame9508(t, fab0, syncMsgSessionV4)
+		// #10283 holds queued incrementals until BulkStart; the watermark
+		// flush proves this frame lands before BulkEnd. Waiting here would
+		// deadlock the source callback against the intentional gap fence.
 		return BulkSnapshot{}, nil
 	}
 	if err := ss.doBulkSync(); err != nil {
