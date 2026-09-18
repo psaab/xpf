@@ -48,8 +48,8 @@ func TestVlanUnitMTUHierarchicalRejected9837(t *testing.T) {
 
 // The two no-check cases from the issue, plus the boundary, all still
 // commit. The two-family interaction lives in
-// TestVlanUnitMTUFamilyOrderMatchesRuntime9837, where family ORDER decides
-// the compiled value.
+// TestVlanUnitMTUFamilyOrderMatchesRuntime9837, where both authoring orders
+// now compile the same minimum family MTU.
 func TestVlanUnitMTUControlsAccepted9837(t *testing.T) {
 	cases := map[string][]string{
 		// An untagged unit's MTU replaces the parent's: cannot exceed it.
@@ -89,46 +89,35 @@ func TestVlanUnitMTUControlsAccepted9837(t *testing.T) {
 	}
 }
 
-// Family ORDER decides the compiled unit MTU — a pre-existing compiler
-// quirk, out of scope here: the inet arm OVERWRITES unit.MTU unconditionally
-// while the inet6 arm takes the MIN, so inet-before-inet6 (the conventional
-// order) compiles the lower of the two family values and inet6-before-inet
-// compiles the inet value. The gate judges exactly the compiled value the
-// dataplane would write (applyVLANSubInterfaceMTU9757 reads the same
-// unit.MTU), so gate and runtime agree in BOTH orders: accept with 1300
-// compiled, reject with 9000 compiled. The reject leg reads the compiled
-// value back through the lenient path, where strict returns no config.
+// The compiled unit MTU is the MIN of its family MTUs, independent of
+// authored order. The gate judges exactly the compiled value the dataplane
+// would write (applyVLANSubInterfaceMTU9757 reads the same unit.MTU), so gate
+// and runtime agree in BOTH orders: each compiles 1300 and is accepted.
 func TestVlanUnitMTUFamilyOrderMatchesRuntime9837(t *testing.T) {
 	base := []string{
 		"set interfaces ge-0-0-2 vlan-tagging",
 		"set interfaces ge-0-0-2 mtu 1400",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 	}
-	t.Run("inet before inet6 compiles min, gate accepts", func(t *testing.T) {
-		sets := append(append([]string{}, base...),
+	cases := map[string][]string{
+		"inet before inet6": {
 			"set interfaces ge-0-0-2 unit 50 family inet mtu 9000",
 			"set interfaces ge-0-0-2 unit 50 family inet6 mtu 1300",
-		)
-		cfg := assertCommitAccepts(t, flatTreeFromSets(t, sets...))
-		if got := cfg.Interfaces.Interfaces["ge-0-0-2"].Units[50].MTU; got != 1300 {
-			t.Errorf("compiled unit.MTU = %d, want 1300 (the min the dataplane would write)", got)
-		}
-	})
-	t.Run("inet6 before inet compiles overwrite, gate rejects", func(t *testing.T) {
-		sets := append(append([]string{}, base...),
+		},
+		"inet6 before inet": {
 			"set interfaces ge-0-0-2 unit 50 family inet6 mtu 1300",
 			"set interfaces ge-0-0-2 unit 50 family inet mtu 9000",
-		)
-		assertCommitRejects(t, flatTreeFromSets(t, sets...),
-			"family mtu 9000 exceeds interface mtu 1400")
-		cfg, err := CompileConfigLenient(flatTreeFromSets(t, sets...))
-		if err != nil {
-			t.Fatalf("lenient compile: %v", err)
-		}
-		if got := cfg.Interfaces.Interfaces["ge-0-0-2"].Units[50].MTU; got != 9000 {
-			t.Errorf("compiled unit.MTU = %d, want 9000 (the overwrite the dataplane would write)", got)
-		}
-	})
+		},
+	}
+	for name, order := range cases {
+		t.Run(name, func(t *testing.T) {
+			sets := append(append([]string{}, base...), order...)
+			cfg := assertCommitAccepts(t, flatTreeFromSets(t, sets...))
+			if got := cfg.Interfaces.Interfaces["ge-0-0-2"].Units[50].MTU; got != 1300 {
+				t.Errorf("compiled unit.MTU = %d, want 1300 (the min the dataplane would write)", got)
+			}
+		})
+	}
 }
 
 // `family inet6 mtu` compiles into the same unit.MTU: an inet6-only

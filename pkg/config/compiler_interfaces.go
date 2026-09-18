@@ -616,7 +616,15 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						if mtuNode := afNode.FindChild("mtu"); mtuNode != nil {
 							if v := nodeVal(mtuNode); v != "" {
 								if n, err := strconv.Atoi(v); err == nil {
-									unit.MTU = n
+									// A unit's effective MTU is the minimum of
+									// its family MTUs. Keep the fold
+									// order-independent: family nodes are
+									// visited in authored order, but unit.MTU
+									// feeds both the #9837 gate and the
+									// dataplane VLAN-child writer.
+									if n < unit.MTU || unit.MTU == 0 {
+										unit.MTU = n
+									}
 								}
 							}
 						}

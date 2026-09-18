@@ -45,13 +45,10 @@ import (
 // The tagged side stays shape-based (no zone requirement), matching the
 // issue's mandate; the sibling side is runtime-based, matching the kernel.
 
-// The compiled unit MTU is ORDER-dependent — a pre-existing compiler quirk,
-// out of scope here: the inet arm OVERWRITES unit.MTU unconditionally while
-// the inet6 arm takes the MIN, so inet-before-inet6 (the conventional order)
-// yields the lower of the two family values but inet6-before-inet yields the
-// inet value. The gate judges exactly the compiled value the dataplane would
-// write, so gate and runtime agree in both orders; it introduces no new
-// refusal shape.
+// The compiled unit MTU is the MIN of its family MTUs, independent of authored
+// order. The gate judges that same compiled value the dataplane writes, so a
+// mixed-family unit now has one order-independent commit verdict as well as
+// one runtime target.
 //
 // Strict on the commit / commit-check path; downgraded to a cfg.Warnings
 // entry on the tolerant load / peer-sync path (flag lenientVlanUnitMTU) so an
