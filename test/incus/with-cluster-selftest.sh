@@ -16,6 +16,9 @@ WC="${SCRIPT_DIR}/with-cluster.sh"
 T=$(mktemp -d /tmp/xpf-lock-selftest.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 export XPF_CLUSTER_LOCK="$T/lock"
+# #10126 keeps the persistent epoch sidecar separate from the lock
+# inode so legacy `9>` probes cannot erase it.
+export XPF_CLUSTER_EPOCH="$T/epoch"
 # Hermetic: never probe a real cluster for build identity (the lock cell
 # samples it at acquire/release; these cases are about the LOCK).
 export XPF_CLUSTER_BUILD_PROBE=0

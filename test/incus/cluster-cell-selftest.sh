@@ -185,6 +185,9 @@ ok "static: test-connectivity.sh test_standalone stays probe-free"
 T=$(mktemp -d /tmp/xpf-cell-selftest.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 export XPF_CLUSTER_LOCK="$T/lock"
+# #10126 keeps the persistent epoch sidecar separate from the lock
+# inode so legacy `9>` probes cannot erase it.
+export XPF_CLUSTER_EPOCH="$T/epoch"
 # Hermetic: never probe a real cluster for build identity (the lock cell
 # samples it at acquire/release; these cases are about the LOCK).
 export XPF_CLUSTER_BUILD_PROBE=0
@@ -247,19 +250,41 @@ set -e
 [[ $C_RC -eq 0 ]] || fail "(c) reentrant fixture inside a cell failed/deadlocked (rc=$C_RC)"
 [[ -f "$T/c.start" ]] || fail "(c) reentrant fixture body did not run"
 ok "destructive run inside a with-cluster.sh cell runs lock-free (reentrant, no deadlock)"
-
-# ── BEHAVIORAL F-158: the idleness probe itself, not just its wiring ───
+# ── BEHAVIORAL F-158/#10126: the idleness probe itself, not just its
+# wiring ──────────────────────────────────────────────────────────────
 # The static greps above pin that test_cluster CALLS
 # xpf_assert_cluster_lock_idle, but a `return 0` no-op passes every grep
 # (RED-demonstrated via a SCRIPT_DIR overlay: stubbed probe still ALL
 # PASS). These cells source the REAL cluster-lock.sh and eval-extract the
-# REAL probe from test-connectivity.sh, then exercise all four branches
-# hermetically against the PRIVATE $XPF_CLUSTER_LOCK.
+# REAL probe from test-connectivity.sh, then exercise the original edge
+# branches, RED/GREEN whole-window proof, endpoint overlap, no-lock
+# cleanliness, and epoch publication failure modes hermetically against
+# the PRIVATE $XPF_CLUSTER_LOCK and $XPF_CLUSTER_EPOCH.
 # shellcheck source=test/incus/cluster-lock.sh
 source "${SCRIPT_DIR}/cluster-lock.sh"
 _F158_SRC="$(sed -n '/^xpf_assert_cluster_lock_idle() {/,/^}/p' "${SCRIPT_DIR}/test-connectivity.sh")"
 [[ -n "$_F158_SRC" ]] || fail "F-158: could not extract xpf_assert_cluster_lock_idle from test-connectivity.sh (sed range empty — helper renamed?)"
 eval "$_F158_SRC"
+
+# A literal pre-#10126 copy is kept only as a RED witness: it polls
+# flock at each endpoint and has no epoch snapshot. The whole-window
+# cell below must pass through this helper before the repaired probe is
+# shown to void the same overlap.
+eval '
+xpf_assert_cluster_lock_idle_pre10126() {
+	local phase="$1"
+	[[ "$FW0" == *:* ]] || return 0
+	if xpf_cluster_lock_held; then
+		return 0
+	fi
+	if ! ( flock -n 9 || exit 1 ) 9>"$XPF_CLUSTER_LOCK"; then
+		echo "VOID: shared-cluster lock ${XPF_CLUSTER_LOCK} is held by another lane at connectivity ${phase} probe" >&2
+		exit 77
+	fi
+}
+'
+declare -F xpf_assert_cluster_lock_idle_pre10126 >/dev/null \
+	|| fail "F-158 RED witness helper did not define"
 declare -F xpf_assert_cluster_lock_idle >/dev/null || fail "F-158: eval-extracted probe did not define xpf_assert_cluster_lock_idle"
 
 # waitfor expects its command to SUCCEED, so the lock-state predicates
@@ -311,6 +336,151 @@ unset XPF_CLUSTER_LOCK_HELD || true
 [[ $_F158_RC -eq 0 ]] || fail "F-158 (b) idle lock + remote FW0 expected 0, got $_F158_RC"
 ok "F-158 (b) idle lock + remote FW0 passes with 0"
 
+# F-158 (e) RED: the pre-#10126 polling probes miss a complete
+# with-cluster acquire+release between START and END. This is the
+# hermetic pre-fix witness required by #10126.
+export FW0="loss:fw0"
+unset XPF_CLUSTER_LOCK_HELD || true
+xpf_assert_cluster_lock_idle_pre10126 "start"
+FIX_START="$T/f158-whole-red.start" FIX_SLEEP=1 "$FIX" >"$T/f158-whole-red.out" 2>&1 &
+_F158_RED_PID=$!
+waitfor 5 "F-158 (e) RED whole-window holder started" test -f "$T/f158-whole-red.start"
+wait "$_F158_RED_PID" || fail "F-158 (e) RED fixture cell failed"
+set +e
+xpf_assert_cluster_lock_idle_pre10126 "end" >"$T/f158-whole-red-probe.out" 2>&1
+_F158_RED_RC=$?
+set -e
+[[ $_F158_RED_RC -eq 0 ]] \
+	|| fail "F-158 (e) RED pre-fix whole-window probe unexpectedly voided (rc=$_F158_RED_RC)"
+ok "F-158 (e) RED pre-fix polling probes miss whole-window acquire+release"
+
+# F-158 (e2): a legacy endpoint probe that truncates the lock inode
+# must not erase the persistent acquisition witness.
+_F158_LEGACY_EPOCH_BEFORE=$(cat "$XPF_CLUSTER_EPOCH" 2>/dev/null || true)
+xpf_assert_cluster_lock_idle_pre10126 "start"
+_F158_LEGACY_EPOCH_AFTER=$(cat "$XPF_CLUSTER_EPOCH" 2>/dev/null || true)
+[[ "$_F158_LEGACY_EPOCH_AFTER" == "$_F158_LEGACY_EPOCH_BEFORE" ]] \
+	|| fail "F-158 (e2) legacy 9> probe changed the epoch sidecar"
+ok "F-158 (e2) legacy lock probe cannot erase persistent epoch"
+
+# F-158 (f) GREEN: the repaired owner-epoch endpoint comparison voids
+# the identical whole-window overlap, even though the lock is idle again
+# at END. Keep START, holder, release, and END in one shell so the
+# snapshot variables are the real probe's state.
+set +e
+(
+	export FW0="loss:fw0"
+	unset XPF_CLUSTER_LOCK_HELD || true
+	xpf_assert_cluster_lock_idle "start"
+	FIX_START="$T/f158-whole-green.start" FIX_SLEEP=1 "$FIX" >"$T/f158-whole-green.out" 2>&1 &
+	_F158_GREEN_PID=$!
+	waitfor 5 "F-158 (f) GREEN whole-window holder started" test -f "$T/f158-whole-green.start"
+	wait "$_F158_GREEN_PID"
+	xpf_assert_cluster_lock_idle "end"
+) >"$T/f158-whole-green-probe.out" 2>&1
+_F158_GREEN_RC=$?
+set -e
+[[ $_F158_GREEN_RC -eq 77 ]] \
+	|| fail "F-158 (f) GREEN whole-window epoch probe expected VOID 77, got $_F158_GREEN_RC"
+grep -q "owner epoch/identity changed" "$T/f158-whole-green-probe.out" \
+	|| fail "F-158 (f) GREEN epoch-change VOID diagnostic missing"
+ok "F-158 (f) GREEN owner epoch catches whole-window acquire+release"
+
+# F-158 (g): endpoint overlap remains fail-fast. The holder starts
+# only after START has completed, then END runs while it owns the lock.
+(
+	export FW0="loss:fw0"
+	unset XPF_CLUSTER_LOCK_HELD || true
+	xpf_assert_cluster_lock_idle "start"
+	: >"$T/f158-edge.ready"
+	waitfor 5 "F-158 (g) probe handoff" test -f "$T/f158-edge.go"
+	xpf_assert_cluster_lock_idle "end"
+) >"$T/f158-edge.out" 2>&1 &
+_F158_EDGE_PROBE=$!
+waitfor 5 "F-158 (g) START probe completed" test -f "$T/f158-edge.ready"
+flock "$XPF_CLUSTER_LOCK" sleep 30 </dev/null >/dev/null 2>&1 &
+_F158_EDGE_HOLDER=$!
+waitfor 5 "F-158 (g) edge holder owns lock" _xpf_lock_held_now
+touch "$T/f158-edge.go"
+set +e
+wait "$_F158_EDGE_PROBE"
+_F158_EDGE_RC=$?
+set -e
+_xpf_kill_flock_holder "$_F158_EDGE_HOLDER"
+[[ $_F158_EDGE_RC -eq 77 ]] \
+	|| fail "F-158 (g) END edge overlap expected VOID 77, got $_F158_EDGE_RC"
+grep -q "held by another lane" "$T/f158-edge.out" \
+	|| fail "F-158 (g) END edge VOID diagnostic missing"
+ok "F-158 (g) END edge overlap still voids with 77"
+
+# F-158 (h): no lock activity across the window remains clean.
+set +e
+(
+	export FW0="loss:fw0"
+	unset XPF_CLUSTER_LOCK_HELD || true
+	xpf_assert_cluster_lock_idle "start"
+	xpf_assert_cluster_lock_idle "end"
+) >"$T/f158-no-lock.out" 2>&1
+_F158_NOLOCK_RC=$?
+set -e
+[[ $_F158_NOLOCK_RC -eq 0 ]] \
+	|| fail "F-158 (h) no-lock window expected clean rc 0, got $_F158_NOLOCK_RC"
+ok "F-158 (h) no-lock window stays clean (no false positive)"
+
+# F-158 (i): the witness uses a pre-existing mode-0666 inode and
+# atomic replacement in a non-sticky state directory. This is the
+# permission shape required for cross-user operation; this unprivileged
+# selftest cannot chown a file to a second UID, so it does not misreport
+# same-owner coverage as a different-owner proof.
+chmod 0666 "$XPF_CLUSTER_EPOCH"
+_F158_EPOCH_BEFORE=$(cat "$XPF_CLUSTER_EPOCH" 2>/dev/null || true)
+FIX_START="$T/f158-perm.start" FIX_SLEEP=0 "$FIX" >"$T/f158-perm.out" 2>&1 \
+	|| fail "F-158 (i) writable epoch permission-shaped fixture failed"
+_F158_EPOCH_AFTER=$(cat "$XPF_CLUSTER_EPOCH" 2>/dev/null || true)
+[[ "$(stat -c %a "$XPF_CLUSTER_EPOCH")" == 666 ]] \
+	|| fail "F-158 (i) epoch witness is not mode 0666 for cross-user replacement"
+[[ "$_F158_EPOCH_AFTER" != "$_F158_EPOCH_BEFORE" ]] \
+	|| fail "F-158 (i) writable epoch did not publish a new acquisition token"
+ok "F-158 (i) existing mode-0666 epoch atomically replaces acquisition token"
+
+# F-158 (j): an invalid sidecar parent is fail-closed — with-cluster
+# refuses to run the destructive body rather than reopening the
+# whole-window hole. A regular file in the parent position makes
+# mkdir/mktemp fail with ENOTDIR independent of UID privileges.
+printf 'not-a-directory\n' >"$T/epoch-deny"
+set +e
+XPF_CLUSTER_EPOCH="$T/epoch-deny/epoch" FIX_START="$T/f158-deny.start" \
+	FIX_SLEEP=0 "$FIX" >"$T/f158-deny.out" 2>&1
+_F158_DENY_RC=$?
+set -e
+rm -f "$T/epoch-deny"
+[[ $_F158_DENY_RC -eq 73 ]] \
+	|| fail "F-158 (j) invalid epoch parent expected lock-cell refusal 73, got $_F158_DENY_RC"
+[[ ! -e "$T/f158-deny.start" ]] \
+	|| fail "F-158 (j) invalid epoch parent let destructive fixture body run"
+grep -q "cannot create state directory" "$T/f158-deny.out" \
+	|| fail "F-158 (j) refusal diagnostic missing"
+ok "F-158 (j) invalid epoch parent refuses cell before body"
+
+# F-158 (j2): if chmod cannot make the temporary sidecar cross-user
+# readable, publication fails closed before the destructive body. The
+# fake chmod is deterministic and does not depend on host privileges.
+mkdir "$T/no-chmod-bin"
+printf '#!/bin/sh\nexit 1\n' >"$T/no-chmod-bin/chmod"
+"$(command -v chmod)" 755 "$T/no-chmod-bin/chmod"
+set +e
+PATH="$T/no-chmod-bin:$PATH" XPF_CLUSTER_EPOCH="$T/epoch-chmod-deny" \
+	FIX_START="$T/f158-chmod-deny.start" FIX_SLEEP=0 \
+	"$FIX" >"$T/f158-chmod-deny.out" 2>&1
+_F158_CHMOD_DENY_RC=$?
+set -e
+[[ $_F158_CHMOD_DENY_RC -eq 73 ]] \
+	|| fail "F-158 (j2) chmod failure expected lock-cell refusal 73, got $_F158_CHMOD_DENY_RC"
+[[ ! -e "$T/f158-chmod-deny.start" ]] \
+	|| fail "F-158 (j2) chmod failure let destructive fixture body run"
+grep -q "cannot make temporary epoch cross-user readable" "$T/f158-chmod-deny.out" \
+	|| fail "F-158 (j2) chmod failure diagnostic missing"
+ok "F-158 (j2) chmod failure refuses cell before body"
 # F-158 (c): held lock + bare FW0 → rc 0 (dedicated local instance no
 # other lane touches — the probe must not fire).
 unset XPF_CLUSTER_LOCK_HELD || true

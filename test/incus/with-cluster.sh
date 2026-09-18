@@ -74,10 +74,30 @@ else
 fi
 
 while :; do
-	# Append-only open: NEVER truncate (a concurrent holder's inode
-	# must not be disturbed) and never rm (cluster-lock.sh header).
-	exec 9>>"$XPF_CLUSTER_LOCK"
+	# The first writer creates the inode mode 0666. Once present, open
+	# read-only: O_CREAT on an existing 0666 file in sticky /tmp is
+	# rejected for another user by Linux protected_regular=2. The epoch
+	# witness is a separate persistent sidecar, so legacy endpoint
+	# probes may truncate this lock inode without erasing the witness.
+	if [[ ! -e "$XPF_CLUSTER_LOCK" ]]; then
+		# noclobber makes the first creation atomic: a concurrent
+		# starter that wins the race leaves this inode untouched, and
+		# the loser simply opens that existing inode below.
+		if ( umask 000; set -o noclobber; : >"$XPF_CLUSTER_LOCK" ) 2>/dev/null; then
+			chmod 0666 "$XPF_CLUSTER_LOCK" 2>/dev/null || true
+		elif [[ ! -e "$XPF_CLUSTER_LOCK" ]]; then
+			echo "[with-cluster] ABORT: cannot create ${XPF_CLUSTER_LOCK}" >&2
+			exit 73  # EX_CANTCREAT
+		fi
+	fi
+	# Restore the documented shared mode when we own an older inode;
+	# this is harmlessly denied for another user's inode, which then
+	# fails closed at lock acquisition or sidecar publication.
 	chmod 0666 "$XPF_CLUSTER_LOCK" 2>/dev/null || true
+	exec 9<"$XPF_CLUSTER_LOCK" || {
+		echo "[with-cluster] ABORT: cannot open ${XPF_CLUSTER_LOCK} for lock acquisition" >&2
+		exit 73  # EX_CANTCREAT
+	}
 
 	# Contend in (up to) 30s flock windows so a holder release is
 	# picked up immediately, while still reporting the named holder
@@ -135,6 +155,16 @@ if [[ -n "$OWNER_LINE" ]]; then
 			exit 70  # EX_SOFTWARE
 		fi
 	fi
+fi
+
+# #10126: record this successful acquisition while fd 9 is held.
+# The persistent sidecar is atomically replaced in its cooperative
+# non-sticky state directory; nested cells return above before this
+# point and therefore do not bump it.
+if ! xpf_cluster_epoch_bump; then
+	echo "[with-cluster] ABORT: cannot publish the lock owner epoch — refusing to run the cell (#10126)" >&2
+	exec 9>&-
+	exit 73  # EX_CANTCREAT
 fi
 
 # Acquired. Publish owner metadata atomically (tmp + mv), clean it up

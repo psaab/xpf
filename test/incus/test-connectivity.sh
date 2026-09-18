@@ -54,13 +54,17 @@ skip()  { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
 # suspect → reason + exit 77 (no summary → the harness wrapper records
 # VOID and the results are discarded).
 #
-# STATED LIMITATION (TOCTOU): this is polling, not holding. A lane that
-# acquires the lock mid-window, between the two probes, slips through
-# undetected. What it DOES catch is steady-state contention — destructive
-# lanes hold the lock for minutes, so an overlap at either edge is the
-# common case. Today: zero detection. The residual whole-window hole is
-# tracked in #10126 (periodic re-probe vs owner-epoch vs blocking flock —
-# each needs its own design); this member is DONE for edge detection.
+# #10126 closes the F-158 whole-window hole for the canonical
+# with-cluster.sh holders. START records both the visible owner identity
+# and the persistent owner-epoch sidecar BEFORE its non-blocking flock
+# check. END performs the flock check first, then reads owner identity
+# followed by the epoch (the final observation) and compares both.
+# A with-cluster cell that acquired and released entirely between the
+# probes therefore leaves the lock idle at END but changes the epoch and
+# is voided. The epoch is primary; raw per-command flock holders do not
+# publish an epoch and remain covered only when they overlap an endpoint.
+# Blocking flock is deliberately not used: read-only gates must not hold
+# the shared-cluster lock.
 #
 # The probe fires only when FW0 is remote-qualified (contains ':'):
 # 'loss:xpf-userspace-fw0' samples the SHARED cluster, while a bare
@@ -70,16 +74,57 @@ skip()  { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
 # skipped — the cell already owns the cluster, and probing our own
 # ancestor's lock would self-report contention (wg-interop.sh inc()
 # precedent: skip the flock when xpf_cluster_lock_held).
+XPF_CLUSTER_LOCK_IDLE_START_EPOCH=""
+XPF_CLUSTER_LOCK_IDLE_START_OWNER=""
+XPF_CLUSTER_LOCK_IDLE_START_SET=0
 xpf_assert_cluster_lock_idle() {
 	local phase="$1"
+	local epoch owner
 	[[ "$FW0" == *:* ]] || return 0
 	if xpf_cluster_lock_held; then
 		return 0
 	fi
-	if ! ( flock -n 9 || exit 1 ) 9>"$XPF_CLUSTER_LOCK"; then
-		echo "VOID: shared-cluster lock ${XPF_CLUSTER_LOCK} is held by another lane at connectivity ${phase} probe — samples taken under contention are discarded (no summary)" >&2
-		exit 77
-	fi
+	case "$phase" in
+	start)
+		# Read before flock: an acquire+release after this snapshot but
+		# before the endpoint is caught by the changed epoch even if the
+		# lock is idle again by the time flock runs.
+		epoch="$(xpf_cluster_epoch_read)"
+		owner="$(xpf_cluster_owner_identity)"
+		if [[ -e "$XPF_CLUSTER_LOCK" ]] \
+			&& ! ( flock -n 9 || exit 1 ) 9<"$XPF_CLUSTER_LOCK"; then
+			echo "VOID: shared-cluster lock ${XPF_CLUSTER_LOCK} is held by another lane at connectivity ${phase} probe — samples taken under contention are discarded (no summary)" >&2
+			exit 77
+		fi
+		XPF_CLUSTER_LOCK_IDLE_START_EPOCH="$epoch"
+		XPF_CLUSTER_LOCK_IDLE_START_OWNER="$owner"
+		XPF_CLUSTER_LOCK_IDLE_START_SET=1
+		;;
+	end)
+		# Check the endpoint first: an active holder is the original
+		# F-158 edge case, and must be voided before reading metadata.
+		if [[ -e "$XPF_CLUSTER_LOCK" ]] \
+			&& ! ( flock -n 9 || exit 1 ) 9<"$XPF_CLUSTER_LOCK"; then
+			echo "VOID: shared-cluster lock ${XPF_CLUSTER_LOCK} is held by another lane at connectivity ${phase} probe — samples taken under contention are discarded (no summary)" >&2
+			exit 77
+		fi
+		[[ "$XPF_CLUSTER_LOCK_IDLE_START_SET" -eq 1 ]] || {
+			echo "VOID: connectivity END lock-idleness probe has no START owner-epoch snapshot — samples are discarded (no summary)" >&2
+			exit 77
+		}
+		owner="$(xpf_cluster_owner_identity)"
+		epoch="$(xpf_cluster_epoch_read)"
+		if [[ "$epoch" != "$XPF_CLUSTER_LOCK_IDLE_START_EPOCH" \
+			|| "$owner" != "$XPF_CLUSTER_LOCK_IDLE_START_OWNER" ]]; then
+			echo "VOID: shared-cluster lock owner epoch/identity changed during connectivity sampling window — samples taken across lock contention are discarded (no summary)" >&2
+			exit 77
+		fi
+		;;
+	*)
+		echo "invalid lock-idleness probe phase: ${phase}" >&2
+		return 2
+		;;
+	esac
 }
 
 instance_running() {
