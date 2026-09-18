@@ -2242,6 +2242,21 @@ fn wire_invariant_default_specimens() {
             active_flows: 4,
         }),
     );
+    // #10203: a POPULATED ProcessStatus specimen, for the same reason as
+    // #8121 above: the three linked-version fields carry
+    // `skip_serializing_if = "String::is_empty"`, so the default
+    // `process_status` specimen omits their spellings entirely and a serde
+    // rename would ship green. Synthetic sentinel values, never real host
+    // versions, so the Go agreement cell proves it read THESE bytes.
+    s.insert(
+        "process_status_linked_lib_versions".into(),
+        dump(&ProcessStatus {
+            linked_libelf_version: "10203-elf-sentinel".into(),
+            linked_zlib_version: "10203-zlib-sentinel".into(),
+            linked_zstd_version: "10203-zstd-sentinel".into(),
+            ..Default::default()
+        }),
+    );
     s.insert("cos_active_flow_count_status".into(), dump(&CoSActiveFlowCountStatus::default()));
     s.insert("cos_dscp_classifier_entry_snapshot".into(), dump(&CoSDSCPClassifierEntrySnapshot::default()));
     s.insert("cos_dscp_classifier_snapshot".into(), dump(&CoSDSCPClassifierSnapshot::default()));
@@ -2349,6 +2364,31 @@ fn wire_invariant_default_specimens() {
             tmp.display(),
             fixture_path.display(),
             tmp.display(),
+        );
+    }
+}
+
+// #10203: the populated linked-versions specimen pins the three serde keys.
+// A rename of any key (or a revert to omitting them) fails here AND in the
+// Go agreement cell, which reads the same specimen bytes from the fixture.
+#[test]
+fn linked_lib_versions_populated_specimen_pins_wire_keys_10203() {
+    let specimen = ProcessStatus {
+        linked_libelf_version: "10203-elf-sentinel".into(),
+        linked_zlib_version: "10203-zlib-sentinel".into(),
+        linked_zstd_version: "10203-zstd-sentinel".into(),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&specimen).expect("linked-versions specimen serializes");
+    for (key, want) in [
+        ("linked_libelf_version", "10203-elf-sentinel"),
+        ("linked_zlib_version", "10203-zlib-sentinel"),
+        ("linked_zstd_version", "10203-zstd-sentinel"),
+    ] {
+        assert_eq!(
+            value.get(key).and_then(serde_json::Value::as_str),
+            Some(want),
+            "specimen must carry {key}={want}"
         );
     }
 }
