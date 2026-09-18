@@ -67,8 +67,9 @@ func TestLoadOfADeniedPathIsRefused9892(t *testing.T) {
 		// same bypass one level in.
 		//
 		// This row does NOT prove the flat-verb table is complete, and the
-		// mutation matrix is what established that rather than reading: deleting
-		// `"deactivate"` from loadFlatVerbs leaves this row GREEN. The fixture's
+		// mutation matrix is what established that rather than reading:
+		// deleting `"deactivate"` from loadMutationVerbs leaves this row
+		// GREEN. The fixture's
 		// rule is `deny-configuration "system root-authentication"`, UNANCHORED,
 		// so `deactivate system root-authentication` still contains the pattern
 		// and the denial fires either way — the matcher absorbs exactly the
@@ -153,19 +154,10 @@ func TestRollbackZeroStaysAvailableButNIsRefused9892(t *testing.T) {
 	}
 }
 
-// #9892 M6: the flat-verb table decides whether a body is taken VERBATIM or
-// re-parsed — and re-parsing MANGLES THE PATH.
-//
-// Measured: `deactivate system root-authentication` renders as
-// ["deactivate system root-authentication"] with the verb in the table, and as
-// ["set deactivate system root-authentication"] without it — the verb folds
-// into the PATH. A substring deny regex still matches the mangled form, which
-// is why the first version of this file's deactivate case passed under a
-// mutant that dropped the verb: it was denied for the wrong reason.
-//
-// An ANCHORED regex does not. This class denies `^system root-authentication`,
-// which matches the correct rendering and NOT the mangled one — so this cell
-// fails exactly when a verb is missing from the table, which is the defect.
+// #9892 M6 / #10305: the shared flat-line predicate decides whether a body is
+// taken VERBATIM or re-parsed. It must match the store's four replay verbs and
+// its path-token requirement exactly; structural CLI verbs are hierarchical
+// content to the load parser, not flat load commands.
 const configAnchored9892 = `
 system {
     host-name authz-9892a;
@@ -178,7 +170,7 @@ system {
 }
 `
 
-func TestEveryFlatVerbIsTakenVerbatimNotReparsed9892(t *testing.T) {
+func TestStoreFlatLoadVerbsAreTakenVerbatim9892(t *testing.T) {
 	tree, errs := NewParser(configAnchored9892).Parse()
 	if len(errs) > 0 {
 		t.Fatalf("fixture does not parse: %v", errs)
@@ -191,25 +183,39 @@ func TestEveryFlatVerbIsTakenVerbatimNotReparsed9892(t *testing.T) {
 		t.Fatalf("fixture class is not regex-restricted (restricted=%v err=%v)", restricted, err)
 	}
 
-	// PREMISE, measured: the anchored regex must actually deny the plain `set`
-	// spelling. If it does not, every row below is vacuous.
+	// PREMISE, measured: the anchored regex must actually deny the plain
+	// `set` spelling. If it does not, every row below is vacuous.
 	if err := AuthorizeConfigLoad(cfg, "anchored", "merge", "set system root-authentication x"); err == nil {
 		t.Fatal("premise failed: the anchored deny does not refuse `set system root-authentication`, " +
 			"so this cell cannot distinguish a verbatim rendering from a mangled one")
 	}
 
-	for _, verb := range []string{"set", "delete", "deactivate", "activate", "copy", "rename", "insert", "annotate"} {
+	for _, verb := range []string{"set", "delete", "deactivate", "activate"} {
 		line := verb + " system root-authentication"
-		// The renderer must return the line VERBATIM — first token still the verb.
+		if !IsFlatLoadLine(line) {
+			t.Errorf("IsFlatLoadLine(%q) = false; store would route this replayable command "+
+				"through its hierarchical parser (#10305)", line)
+		}
+		// The renderer must return the line VERBATIM — first token still
+		// the verb — and the anchored deny must refuse it.
 		got := LoadMutationLines(line)
 		if len(got) != 1 || got[0] != line {
-			t.Errorf("LoadMutationLines(%q) = %q; a verb missing from loadFlatVerbs makes the body "+
-				"re-parse, folding the verb into the PATH", line, got)
+			t.Errorf("LoadMutationLines(%q) = %q; a replayable flat verb was re-parsed", line, got)
 		}
-		// And the consequence: an anchored deny must still refuse it.
 		if err := AuthorizeConfigLoad(cfg, "anchored", "merge", line); err == nil {
-			t.Errorf("load merge of %q was ALLOWED under an anchored deny — the verb was folded "+
-				"into the path, so `^system root-authentication` no longer matches (#9892)", line)
+			t.Errorf("load merge of %q was ALLOWED under an anchored deny — the verb was "+
+				"folded into the path (#9892)", line)
+		}
+	}
+
+	// These are interactive structural-edit verbs, not commands accepted by
+	// the store's flat replay branch. Their presence must NOT classify a body
+	// as flat; this is the exact half of #10305 that previously diverged.
+	for _, verb := range []string{"copy", "rename", "insert", "annotate"} {
+		line := verb + " system root-authentication"
+		if IsFlatLoadLine(line) {
+			t.Errorf("IsFlatLoadLine(%q) = true; the store would route this "+
+				"structural line hierarchical, but the gate called it flat (#10305)", line)
 		}
 	}
 }

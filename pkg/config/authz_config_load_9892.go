@@ -33,12 +33,32 @@ import (
 // also why the gRPC implementation moved here rather than being duplicated —
 // #9633's logic is the reference, and there is now exactly one of it.
 
-// loadFlatVerbs are the first words that make a load body set-format. They are
-// the mutation verbs AuthorizeConfigMutation gates, because a set-format body
-// is a sequence of exactly those lines.
-var loadFlatVerbs = map[string]bool{
+// loadMutationVerbs are the first words whose lines can carry a mutation in
+// a set-format body. They are collected verbatim only after IsFlatLoadLine
+// has classified the WHOLE body using the store's routing predicate.
+var loadMutationVerbs = map[string]bool{
 	"set": true, "delete": true, "deactivate": true, "activate": true,
 	"copy": true, "rename": true, "insert": true, "annotate": true,
+}
+
+// IsFlatLoadLine is the single flat-vs-hierarchical predicate shared by the
+// load authorization gate and the config store (#10305).
+//
+// A load body is routed to the flat replay branch only when at least one line
+// begins with a verb that applyEditLine can replay AND carries a path token.
+// Keep this in pkg/config rather than copying the rule at either ingress: the
+// gate must adjudicate the representation the store will actually apply.
+func IsFlatLoadLine(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "set", "delete", "deactivate", "activate":
+		return true
+	default:
+		return false
+	}
 }
 
 // LoadMutationLines returns the set-form mutation lines a load body writes.
@@ -53,8 +73,10 @@ func LoadMutationLines(content string) []string {
 	flat := false
 	for _, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
-		if f := strings.Fields(line); len(f) > 0 && loadFlatVerbs[f[0]] {
+		if IsFlatLoadLine(line) {
 			flat = true
+		}
+		if f := strings.Fields(line); len(f) > 0 && loadMutationVerbs[f[0]] {
 			lines = append(lines, line)
 		}
 	}
