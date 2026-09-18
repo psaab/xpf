@@ -3348,6 +3348,16 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
   IGNORES the trailer (clean backward compat); a legacy sender's `(0,0)` is
   accept-always. See `docs/sync-protocol.md` "Full-set state-sync ordering
   (#5706)".
+- **Authority and takeover scope (#10170)** — authority-bearing pushes append
+  an explicit snapshot generation plus canonical pool CIDR/RG scope records,
+  including `Served` and per-family successful Kea `Applied` proof. Receipt is
+  stored even for a valid zero-lease full set, distinct from never receiving a
+  frame. The receiver validates generations, family/CIDR/RG metadata, reserved
+  flags, and duplicate scopes before storing it. Pre-start memfile seeding and
+  post-start `lease{4,6}-add` use the same filter: only scopes present in the
+  receiver's unambiguous emission and served by its current RG state are
+  narrowed; omitted, mixed, moved, malformed, or unproven scopes retain the
+  conservative whole-union behavior.
 - **Clock invariant** — each lease carries REMAINING LIFETIME, never an
   absolute wall-clock expiry (the channel only syncs a MONOTONIC offset). The
   promoting node re-anchors to its LOCAL clock at seed (`expire = now + remaining`),

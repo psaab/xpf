@@ -947,21 +947,45 @@ func PeerLeasesForAuthority(peer LeaseSyncSnapshot, family int, authority LeaseS
 	if len(peerScopes) == 0 || len(localScopes) == 0 {
 		return familyRows(peer.Leases)
 	}
-	eligible := make([]LeaseScopeAuthority, 0, len(peerScopes))
-	for _, scope := range peerScopes {
-		if servedScopeMatches(scope, localScopes) {
-			eligible = append(eligible, scope)
-		}
-	}
-	if len(eligible) == 0 {
+	matched, eligible := partitionPeerScopes(peerScopes, localScopes)
+	if len(matched) == 0 {
 		return familyRows(peer.Leases)
 	}
+	return peerLeasesForScopes(peer, family, matched, eligible)
+}
+func partitionPeerScopes(peerScopes, localScopes []LeaseScopeAuthority) (matched, eligible []LeaseScopeAuthority) {
+	for _, peerScope := range peerScopes {
+		var exact *LeaseScopeAuthority
+		conflict := false
+		for i := range localScopes {
+			localScope := &localScopes[i]
+			if !scopeCIDREqual(peerScope.CIDR, localScope.CIDR) {
+				continue
+			}
+			if localScope.RGID != peerScope.RGID || exact != nil {
+				conflict = true
+				break
+			}
+			exact = localScope
+		}
+		if conflict || exact == nil {
+			continue
+		}
+		matched = append(matched, peerScope)
+		if exact.Served {
+			eligible = append(eligible, peerScope)
+		}
+	}
+	return matched, eligible
+}
+
+func peerLeasesForScopes(peer LeaseSyncSnapshot, family int, known, eligible []LeaseScopeAuthority) []SyncLease {
 	out := make([]SyncLease, 0, len(peer.Leases))
 	for _, lease := range peer.Leases {
 		if lease.Family != family {
 			continue
 		}
-		if !leaseInAnyScope(lease.Address, peerScopes) ||
+		if !leaseInAnyScope(lease.Address, known) ||
 			leaseInAnyScope(lease.Address, eligible) {
 			out = append(out, lease)
 		}
@@ -999,53 +1023,47 @@ func mergeLeasesByAuthority(local []SyncLease, peer LeaseSyncSnapshot, family in
 		return mergeLeasesByIdentity(local, peer.Leases, family)
 	}
 
-	// A peer scope is eligible only when exactly one currently served local
-	// scope has the same canonical CIDR. This intersection prevents a snapshot
-	// containing RG2+RG3 from seeding RG3 while this node takes RG2.
-	eligiblePeerScopes := make([]LeaseScopeAuthority, 0, len(peerScopes))
-	for _, peerScope := range peerScopes {
-		if servedScopeMatches(peerScope, localScopes) {
-			eligiblePeerScopes = append(eligiblePeerScopes, peerScope)
-		}
-	}
-	if len(eligiblePeerScopes) == 0 {
+	matchedPeerScopes, eligiblePeerScopes := partitionPeerScopes(peerScopes, localScopes)
+	if len(matchedPeerScopes) == 0 {
 		return mergeLeasesByIdentity(local, peer.Leases, family)
 	}
-
 	filteredLocal := make([]SyncLease, 0, len(local))
 	for _, lease := range local {
 		if lease.Family != family {
 			continue
 		}
-		if localLeaseServed(lease.Address, localScopes) ||
-			!leaseInAnyScope(lease.Address, peerScopes) {
+		served, known := localLeaseState(lease.Address, localScopes)
+		if served || !known || !leaseInAnyScope(lease.Address, matchedPeerScopes) {
 			filteredLocal = append(filteredLocal, lease)
 		}
 	}
-
-	return mergeLeasesByIdentity(filteredLocal, PeerLeasesForAuthority(peer, family, authority), family)
+	return mergeLeasesByIdentity(filteredLocal,
+		peerLeasesForScopes(peer, family, matchedPeerScopes, eligiblePeerScopes), family)
 }
 
-func servedScopeMatches(peerScope LeaseScopeAuthority, localScopes []LeaseScopeAuthority) bool {
-	matches := 0
-	for _, localScope := range localScopes {
-		if scopeCIDREqual(peerScope.CIDR, localScope.CIDR) {
-			matches++
-			if !localScope.Served {
-				return false
-			}
-		}
+func localLeaseState(address string, scopes []LeaseScopeAuthority) (served, known bool) {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false, false
 	}
-	return matches == 1
-}
-
-func localLeaseServed(address string, scopes []LeaseScopeAuthority) bool {
+	bestPrefix := -1
+	ambiguous := false
 	for _, scope := range scopes {
-		if scope.Served && leaseAddressInCIDR(address, scope.CIDR) {
-			return true
+		_, network, err := net.ParseCIDR(scope.CIDR)
+		if err != nil || !network.Contains(ip) {
+			continue
+		}
+		prefix, _ := network.Mask.Size()
+		switch {
+		case prefix > bestPrefix:
+			bestPrefix = prefix
+			served = scope.Served
+			ambiguous = false
+		case prefix == bestPrefix:
+			ambiguous = true
 		}
 	}
-	return false
+	return served && !ambiguous, bestPrefix >= 0 && !ambiguous
 }
 
 func leaseInAnyScope(address string, scopes []LeaseScopeAuthority) bool {

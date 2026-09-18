@@ -711,14 +711,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDHCPLeaseV4:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)
-		leasePayload, snapshot, _, metadataValid := stripDHCPLeaseSnapshotMeta(base)
-		if !metadataValid {
-			s.stats.MalformedRecordsDropped.Add(1)
-			slog.Warn("cluster sync: dropping malformed DHCP v4 authority snapshot")
-			return
-		}
-		// #9915 F-117 review: check the mark BEFORE decode, but advance it
-		// only when the set actually applies (see advanceIfNewer below).
+		// #9915 F-117 review: do the cheap sequence admission BEFORE
+		// metadata/lease decoding, but advance only when the set applies.
 		s.recvSeqMu.Lock()
 		admit := s.dhcpV4RecvSeq.newer(incarnation, seq)
 		commitEpoch := s.recvEpoch
@@ -727,6 +721,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
 			slog.Warn("cluster sync: dropping out-of-order DHCP v4 lease set (stale sequence) — standby retains newer set",
 				"incarnation", incarnation, "seq", seq)
+			return
+		}
+		leasePayload, snapshot, metadataPresent, metadataValid := stripDHCPLeaseSnapshotMeta(base)
+		if !metadataValid || (metadataPresent && !validDHCPLeaseSnapshotFamily(snapshot, 4)) {
+			s.stats.MalformedRecordsDropped.Add(1)
+			slog.Warn("cluster sync: dropping malformed DHCP v4 lease authority snapshot")
 			return
 		}
 		leases, ok := decodeDHCPLeasePayload(leasePayload)
@@ -799,14 +799,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDHCPLeaseV6:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)
-		leasePayload, snapshot, _, metadataValid := stripDHCPLeaseSnapshotMeta(base)
-		if !metadataValid {
-			s.stats.MalformedRecordsDropped.Add(1)
-			slog.Warn("cluster sync: dropping malformed DHCP v6 authority snapshot")
-			return
-		}
-		// #9915 F-117 review: see the v4 twin — check before decode, advance
-		// only on apply.
+		// #9915 F-117 review: do the cheap sequence admission BEFORE
+		// metadata/lease decoding, but advance only when the set applies.
 		s.recvSeqMu.Lock()
 		admit := s.dhcpV6RecvSeq.newer(incarnation, seq)
 		commitEpoch := s.recvEpoch
@@ -815,6 +809,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.stats.DHCPLeasesStaleIgnored.Add(1)
 			slog.Warn("cluster sync: dropping out-of-order DHCP v6 lease set (stale sequence) — standby retains newer set",
 				"incarnation", incarnation, "seq", seq)
+			return
+		}
+		leasePayload, snapshot, metadataPresent, metadataValid := stripDHCPLeaseSnapshotMeta(base)
+		if !metadataValid || (metadataPresent && !validDHCPLeaseSnapshotFamily(snapshot, 6)) {
+			s.stats.MalformedRecordsDropped.Add(1)
+			slog.Warn("cluster sync: dropping malformed DHCP v6 lease authority snapshot")
 			return
 		}
 		leases, ok := decodeDHCPLeasePayload(leasePayload)

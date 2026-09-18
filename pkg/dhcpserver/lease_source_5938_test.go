@@ -169,11 +169,10 @@ func TestDisplayLeases_UnreadableSiblingDegraded_5938(t *testing.T) {
 
 // ---- Invariant 3: reader handling of intermediates -------------------------
 
-// TestKeaLFCIntermediatesIgnored_5938 proves the display/DDNS reader ignores
-// kea-lfc's `.output`, while honoring a lease-bearing `.completed` with Kea's
-// startup precedence when it exists. `.output` is redundant because it is
-// built from `.1`/.2; `.completed` is authoritative over those older files.
-func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
+// TestKeaLFCOutputIgnoredCompletedAuthoritative_5938 proves the display reader
+// ignores kea-lfc's `.output` but honors the lease-bearing `.completed` source
+// Kea startup selects instead of older `.1`/`.2` generations.
+func TestKeaLFCOutputIgnoredCompletedAuthoritative_5938(t *testing.T) {
 	now := lfcNow
 	dir := t.TempDir()
 	cur := filepath.Join(dir, "leases4.csv")
@@ -206,25 +205,21 @@ func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
 		"10.0.0.77,aa:bb:cc:dd:ee:77,,3600,"+lfcFuture+",1,0,1,ONLY-in-output,0\n")
 	writeCSV(t, cur+".completed", lfcV4Header+"\n"+
 		"10.0.0.11,aa:bb:cc:dd:ee:11,,3600,"+lfcFuture+",1,0,1,host-b,0\n"+
-		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,0\n")
-
+		"10.0.0.88,aa:bb:cc:dd:ee:88,,3600,"+lfcFuture+",1,0,1,ONLY-in-completed,0\n")
 	after, err := parseLeaseCSV(cur, now)
 	if err != nil {
 		t.Fatalf("parseLeaseCSV with intermediates: %v", err)
 	}
 	afterSet := addrSet(after)
 
-	// (1) The output intermediate does NOT change the resolved set.
-	if len(after) != len(base) || !sameSet(baseSet, afterSet) {
-		t.Fatalf(".output changed the resolved set: base=%+v after=%+v", base, after)
+	// (1) `.completed` is selected over the older `.1`/.2 generation.
+	if len(after) != 2 || !afterSet["10.0.0.11"] || !afterSet["10.0.0.88"] ||
+		afterSet["10.0.0.10"] {
+		t.Fatalf("completed source was not selected authoritatively: base=%+v after=%+v", base, after)
 	}
 	// (2) The lease living ONLY in .output is NOT present — .output is ignored.
 	if afterSet["10.0.0.77"] {
 		t.Fatalf(".output was READ (lease 10.0.0.77 leaked into the display) — must be ignored")
-	}
-	// (3) A lease reachable through .output (A) is still covered by .1.
-	if !afterSet["10.0.0.10"] {
-		t.Fatalf("lease A must remain covered by .1 independent of .output: %+v", after)
 	}
 }
 
@@ -234,16 +229,4 @@ func addrSet(ls []Lease) map[string]bool {
 		m[l.Address] = true
 	}
 	return m
-}
-
-func sameSet(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
 }

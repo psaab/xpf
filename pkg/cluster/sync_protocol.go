@@ -1202,10 +1202,11 @@ func stripDHCPLeaseSnapshotMeta(payload []byte) (base []byte, snapshot dhcpserve
 	off += 8
 	count := int(binary.LittleEndian.Uint32(meta[off:]))
 	off += 4
-	if count > (len(meta)-off)/16 {
+	if snapshot.Generation == 0 || count > (len(meta)-off)/16 {
 		return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
 	}
 	scopes := make([]dhcpserver.LeaseScopeAuthority, 0, count)
+	seen := make(map[string]struct{}, count)
 	for range count {
 		if off+16 > len(meta) {
 			return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
@@ -1216,11 +1217,24 @@ func stripDHCPLeaseSnapshotMeta(payload []byte) (base []byte, snapshot dhcpserve
 		rgID := int(int32(binary.LittleEndian.Uint32(meta[off+4:])))
 		generation := binary.LittleEndian.Uint64(meta[off+8:])
 		off += 16
-		if cidrLen > len(meta)-off {
+		if family != 4 && family != 6 || flags&^byte(3) != 0 ||
+			rgID < 0 || generation != snapshot.Generation ||
+			cidrLen == 0 || cidrLen > len(meta)-off {
 			return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
 		}
+		cidr := string(meta[off : off+cidrLen])
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil || network.String() != cidr ||
+			(family == 4) != (network.IP.To4() != nil) {
+			return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+		}
+		key := fmt.Sprintf("%d|%d|%s", family, rgID, cidr)
+		if _, duplicate := seen[key]; duplicate {
+			return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+		}
+		seen[key] = struct{}{}
 		scopes = append(scopes, dhcpserver.LeaseScopeAuthority{
-			Family: family, CIDR: string(meta[off : off+cidrLen]), RGID: rgID,
+			Family: family, CIDR: cidr, RGID: rgID,
 			Generation: generation, Served: flags&1 != 0, Applied: flags&2 != 0,
 		})
 		off += cidrLen
@@ -1231,6 +1245,17 @@ func stripDHCPLeaseSnapshotMeta(payload []byte) (base []byte, snapshot dhcpserve
 	snapshot.Scopes = scopes
 	snapshot.Received = true
 	return payload[:metaStart], snapshot, true, true
+}
+func validDHCPLeaseSnapshotFamily(snapshot dhcpserver.LeaseSyncSnapshot, family int) bool {
+	if snapshot.Generation == 0 {
+		return false
+	}
+	for _, scope := range snapshot.Scopes {
+		if scope.Family != family || scope.Generation != snapshot.Generation {
+			return false
+		}
+	}
+	return true
 }
 
 // ipsecFullSetDelim separates the newline-joined IPsec SA name list from its

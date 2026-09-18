@@ -978,10 +978,19 @@ type SessionSync struct {
 	OnPeerDisconnected func()
 	peerIPsecSAs       []string
 	peerIPsecSAsMu     sync.Mutex
-	// #2239/#10170: the standby holds each peer full-set snapshot, including
-	// explicit receipt state, ownership generation, and served-scope proof.
-	// The legacy slices below remain the aged lease view used by existing
-	// callers; snapshot accessors expose the authority contract.
+	// #2239/#10170: the standby holds the peer's most-recent full lease
+	// snapshot per family (the peerIPsecSAs precedent), including explicit
+	// receipt state, ownership generation, and served-scope proof. The
+	// legacy slices remain the aged lease view used by existing callers.
+	//
+	// #4871: peerDHCPLeases{4,6}RecvAt records WHEN this node received each
+	// family's held set. SyncLease.Remaining is seconds-of-lifetime-left at the
+	// SENDER's read time and carries no sample epoch, so a set held on the
+	// standby ages only if the receiver subtracts its own residence before
+	// seeding — otherwise a lease held for minutes is re-anchored to
+	// now_local+Remaining on takeover and RESURRECTED past its true expiry
+	// (duplicate allocation). RecvAt is a time.Now() reading (monotonic in
+	// production), so PeerDHCPLeases{4,6} subtract a monotonic residence.
 	peerDHCPLeases4        []dhcpserver.SyncLease
 	peerDHCPLeases6        []dhcpserver.SyncLease
 	peerDHCPLeaseSnapshot4 dhcpserver.LeaseSyncSnapshot
@@ -2301,10 +2310,20 @@ func (s *SessionSync) PeerDHCPLeases4() []dhcpserver.SyncLease {
 func (s *SessionSync) PeerDHCPLeases6() []dhcpserver.SyncLease {
 	return s.peerDHCPLeaseSnapshotAged(6, time.Now()).Leases
 }
-func (s *SessionSync) peerDHCPLeasesAged(family int, now time.Time) []dhcpserver.SyncLease {
-	return s.peerDHCPLeaseSnapshotAged(family, now).Leases
-}
 
+// peerDHCPLeaseSnapshotAged returns a copy of the held peer lease set for a
+// family with each lease's Remaining lifetime reduced by this node's standby
+// RESIDENCE — the monotonic time elapsed since the set was received — and
+// leases that have aged to zero DROPPED (#4871). Remaining is seconds of
+// lifetime left at the SENDER's read time and carries no sample epoch.
+// Without this subtraction a lease held on the standby for minutes is
+// re-anchored at seed to now_local+Remaining and resurrected past its true
+// expiry, so the promoted node could re-allocate an address/prefix the
+// original server already reassigned (duplicate allocation). A lease at or
+// below zero is dropped, NOT floored to one second — a floor would revive an
+// expired binding just as surely. now is injected for tests; production passes
+// time.Now(), whose monotonic reading makes the residence immune to wall-clock
+// steps.
 func (s *SessionSync) peerDHCPLeaseSnapshotAged(family int, now time.Time) dhcpserver.LeaseSyncSnapshot {
 	s.peerDHCPLeasesMu.Lock()
 	defer s.peerDHCPLeasesMu.Unlock()
@@ -2345,6 +2364,9 @@ func (s *SessionSync) peerDHCPLeaseSnapshotAged(family int, now time.Time) dhcps
 	return snap
 }
 
+// ageDHCPLeases ages PreferredRemaining by the same residence as Remaining.
+// A deprecated lease held on the standby is never revived at seed, and the
+// invariant PreferredRemaining <= Remaining survives the residence adjustment.
 func ageDHCPLeases(src []dhcpserver.SyncLease, residence int) []dhcpserver.SyncLease {
 	out := make([]dhcpserver.SyncLease, 0, len(src))
 	for _, l := range src {

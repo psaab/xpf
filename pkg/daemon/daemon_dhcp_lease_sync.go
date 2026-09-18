@@ -264,11 +264,13 @@ func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []
 	generation := d.dhcpLeaseSync.authorityGeneration
 	d.dhcpLeaseSync.authorityMu.Unlock()
 
-	scopes := dhcpLeaseScopeAuthorities(cfg, family, generation, false, d.snapshotRethMasterState())
+	masters := d.snapshotRethMasterState()
+	scopes := dhcpLeaseScopeAuthorities(cfg, family, generation, false, masters)
 	if reader, ok := d.dhcpServer.(interface {
 		LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool)
 	}); ok {
-		if resultGeneration, resultScopes, _ := reader.LeaseAuthorityResult(family); resultGeneration == generation {
+		if resultGeneration, resultScopes, _ := reader.LeaseAuthorityResult(family); resultGeneration == generation &&
+			dhcpLeaseAuthorityScopesMatchCurrent(scopes, resultScopes, family, generation) {
 			scopes = resultScopes
 		}
 	}
@@ -278,6 +280,51 @@ func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []
 		Scopes:     scopes,
 		Received:   true,
 	}
+}
+
+func dhcpLeaseAuthorityScopesMatchCurrent(current, result []dhcpserver.LeaseScopeAuthority, family int, generation uint64) bool {
+	if len(current) != len(result) {
+		return false
+	}
+	remaining := make(map[string]bool, len(current))
+	for _, scope := range current {
+		if scope.Family != family || scope.Generation != generation {
+			return false
+		}
+		cidr := canonicalLeaseScopeCIDR(scope.CIDR)
+		if cidr == "" {
+			return false
+		}
+		key := fmt.Sprintf("%d|%d|%s", family, scope.RGID, cidr)
+		if remaining[key] {
+			return false
+		}
+		remaining[key] = scope.Served
+	}
+	for _, scope := range result {
+		if scope.Family != family || scope.Generation != generation {
+			return false
+		}
+		cidr := canonicalLeaseScopeCIDR(scope.CIDR)
+		if cidr == "" {
+			return false
+		}
+		key := fmt.Sprintf("%d|%d|%s", family, scope.RGID, cidr)
+		served, ok := remaining[key]
+		if !ok || served != scope.Served {
+			return false
+		}
+		delete(remaining, key)
+	}
+	return len(remaining) == 0
+}
+
+func canonicalLeaseScopeCIDR(cidr string) string {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return ""
+	}
+	return network.String()
 }
 
 // maybePushFamily pushes the family's lease set when force=true or the set
@@ -537,33 +584,12 @@ func dhcpLeaseScopeAuthorities(cfg *config.Config, family int, generation uint64
 	return scopes
 }
 
-func dhcpLeaseRGForInterface(cfg *config.Config, iface string, owners map[string]int) (int, bool) {
-	normalized := strings.TrimSuffix(iface, ".0")
+func dhcpLeaseRGForInterface(_ *config.Config, iface string, owners map[string]int) (int, bool) {
 	base := strings.SplitN(iface, ".", 2)[0]
-	resolved := cfg.ResolveReth(iface)
-	resolvedBase := cfg.ResolveReth(base)
-	var (
-		rg   int
-		hits int
-	)
-	for owner, ownerRG := range owners {
-		if ownerRG <= 0 {
-			continue
-		}
-		ownerNormalized := strings.TrimSuffix(owner, ".0")
-		ownerBase := strings.SplitN(owner, ".", 2)[0]
-		if iface != owner &&
-			normalized != ownerNormalized &&
-			resolved != cfg.ResolveReth(owner) &&
-			resolvedBase != cfg.ResolveReth(ownerBase) {
-			continue
-		}
-		rg = ownerRG
-		hits++
-	}
-	return rg, hits == 1
+	rg, ok := owners[base]
+	return rg, ok && rg > 0
 }
-func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config) dhcpserver.LeaseApplyAuthority {
+func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config, masterState ...map[int]bool) dhcpserver.LeaseApplyAuthority {
 	d.dhcpLeaseSync.authorityMu.Lock()
 	if d.dhcpLeaseSync.authorityGeneration == 0 {
 		d.dhcpLeaseSync.authorityGeneration = 1
@@ -572,22 +598,33 @@ func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config) dhcpserver.Leas
 	}
 	generation := d.dhcpLeaseSync.authorityGeneration
 	d.dhcpLeaseSync.authorityMu.Unlock()
-	masters := d.snapshotRethMasterState()
+	var masters map[int]bool
+	if len(masterState) > 0 {
+		masters = masterState[0]
+	} else {
+		masters = d.snapshotRethMasterState()
+	}
 	return dhcpserver.LeaseApplyAuthority{
 		Generation: generation,
 		Scopes4:    dhcpLeaseScopeAuthorities(cfg, 4, generation, false, masters),
 		Scopes6:    dhcpLeaseScopeAuthorities(cfg, 6, generation, false, masters),
 	}
 }
+
 func (d *Daemon) enqueueDHCPApply(cfg *config.DHCPServerConfig, reason string) {
+	masters := d.snapshotRethMasterState()
+	fullCfg := d.store.ActiveConfig()
+	d.enqueueDHCPApplyWithAuthorityState(cfg, reason, fullCfg, masters)
+}
+
+func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) {
 	if d.dhcpServer == nil {
 		return
 	}
-	fullCfg := d.store.ActiveConfig()
 	if cfg == nil {
 		fullCfg = nil
 	}
-	authority := d.nextDHCPLeaseApplyAuthority(fullCfg)
+	authority := d.nextDHCPLeaseApplyAuthority(fullCfg, masters)
 	if applier, ok := d.dhcpServer.(interface {
 		ApplyAsyncWithLeaseAuthority(*config.DHCPServerConfig, string, dhcpserver.LeaseApplyAuthority)
 	}); ok {
