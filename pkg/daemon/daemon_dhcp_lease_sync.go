@@ -266,13 +266,10 @@ func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []
 
 	masters := d.snapshotRethMasterState()
 	scopes := dhcpLeaseScopeAuthorities(cfg, family, generation, false, masters)
-	if reader, ok := d.dhcpServer.(interface {
-		LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool)
-	}); ok {
-		if resultGeneration, resultScopes, _ := reader.LeaseAuthorityResult(family); resultGeneration == generation &&
-			dhcpLeaseAuthorityScopesMatchCurrent(scopes, resultScopes, family, generation) {
-			scopes = resultScopes
-		}
+	resultGeneration, resultScopes, _ := d.dhcpServer.LeaseAuthorityResult(family)
+	if resultGeneration == generation &&
+		dhcpLeaseAuthorityScopesMatchCurrent(scopes, resultScopes, family, generation) {
+		scopes = resultScopes
 	}
 	return dhcpserver.LeaseSyncSnapshot{
 		Leases:     leases,

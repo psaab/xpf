@@ -98,8 +98,11 @@ func (r *recordingDHCPApplier9349) ApplyAsyncWithLeaseAuthority(cfg *config.DHCP
 func (r *recordingDHCPApplier9349) ClaimApplyRetry(time.Time) bool { return false }
 func (r *recordingDHCPApplier9349) SetLeaseSyncEnabled(bool)       {}
 func (r *recordingDHCPApplier9349) Shutdown() error                { return nil }
-func (r *recordingDHCPApplier9349) IsRunning() bool                { return false }
-func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool    { return false }
+func (r *recordingDHCPApplier9349) LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool) {
+	return 0, nil, false
+}
+func (r *recordingDHCPApplier9349) IsRunning() bool             { return false }
+func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool { return false }
 func (r *recordingDHCPApplier9349) GetLeasesWithSource4() ([]dhcpserver.Lease, dhcpserver.LeaseSource) {
 	return nil, dhcpserver.LeaseSource{}
 }
