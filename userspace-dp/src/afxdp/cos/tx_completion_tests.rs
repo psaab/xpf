@@ -574,6 +574,7 @@ fn apply_cos_send_result_nonempty_retry_readds_restored_bytes() {
         cos_queue_id: Some(1),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }]);
     apply_cos_send_result(
@@ -652,6 +653,7 @@ fn apply_cos_prepared_result_nonempty_retry_readds_restored_bytes() {
         cos_queue_id: Some(1),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }]);
     apply_cos_prepared_result(

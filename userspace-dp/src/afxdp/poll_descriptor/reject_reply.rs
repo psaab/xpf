@@ -451,6 +451,7 @@ fn enqueue_reject_reply(
         cos_queue_id: verdict.cos_queue_id,
         dscp_rewrite: verdict.dscp_rewrite,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     });
     counters.touched = true;

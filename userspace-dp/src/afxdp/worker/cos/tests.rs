@@ -34,6 +34,7 @@ fn test_tx_request(ifindex: i32) -> TxRequest {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }
 }

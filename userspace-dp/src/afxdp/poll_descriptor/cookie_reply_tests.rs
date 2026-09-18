@@ -11,6 +11,7 @@ fn dummy_tx_request() -> TxRequest {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }
 }

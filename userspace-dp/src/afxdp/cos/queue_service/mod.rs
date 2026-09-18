@@ -1743,9 +1743,15 @@ pub(in crate::afxdp) fn settle_exact_local_fifo_submission(
     let mut sent_bytes = 0u64;
     for _ in 0..sent {
         match queue.hot.items.pop_front() {
-            Some(CoSPendingTxItem::Local(req)) => {
+            Some(CoSPendingTxItem::Local(mut req)) => {
                 sent_packets += 1;
                 sent_bytes += req.bytes.len() as u64;
+                // #10285: the kernel accepted this desc — commit its overlap
+                // admissions (drop without commit would fail them and pin the
+                // entry until TTL, starving exact-queued fragments of reclaim).
+                if let Some(mut admissions) = req.overlap_admissions.take() {
+                    admissions.commit();
+                }
                 // #6310: the committed buffer's bytes were copied into a
                 // UMEM TX frame during the drain build, so the buffer is
                 // dead here. Return it to the per-worker pool that feeds
@@ -1800,14 +1806,18 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
         .unwrap_or(0);
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
-    while let Some((offset, req)) = scratch_local_tx.pop() {
+    while let Some((offset, mut req)) = scratch_local_tx.pop() {
         if scratch_local_tx.len() >= inserted {
             free_tx_frames.push_front(offset);
             cos_queue_push_front(queue, CoSPendingTxItem::Local(req));
         } else {
+            // #10285: the kernel accepted this desc — commit its overlap
+            // admissions before accounting/recycling the request.
+            if let Some(mut admissions) = req.overlap_admissions.take() {
+                admissions.commit();
+            }
             // #9900 F-092 (GPT-2): kernel-accepted — record ownership.
             in_flight_untracked_tx.insert(offset);
-            // Committed: account the TX bytes against the bucket
             // now_ns is sampled once per batch by the caller; this
             // scope reuses that single value for every packet.
             let bytes = req.bytes.len() as u64;
@@ -1854,7 +1864,13 @@ pub(in crate::afxdp) fn settle_exact_prepared_fifo_submission(
     let mut sent_bytes = 0u64;
     for _ in 0..sent {
         match queue.hot.items.pop_front() {
-            Some(CoSPendingTxItem::Prepared(req)) => {
+            Some(CoSPendingTxItem::Prepared(mut req)) => {
+                // #10285: exact prepared TX acceptance commits overlap
+                // admissions; otherwise successful exact traffic remains
+                // pinned until TTL.
+                if let Some(mut admissions) = req.overlap_admissions.take() {
+                    admissions.commit();
+                }
                 remember_prepared_recycle(
                     in_flight_prepared_recycles,
                     in_flight_untracked_tx,
@@ -1895,10 +1911,14 @@ fn settle_exact_prepared_scratch_submission_flow_fair(
         .unwrap_or(0);
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
-    while let Some(req) = scratch_prepared_tx.pop() {
+    while let Some(mut req) = scratch_prepared_tx.pop() {
         if scratch_prepared_tx.len() >= inserted {
             cos_queue_push_front(queue, CoSPendingTxItem::Prepared(req));
         } else {
+            // #10285: the kernel accepted this prepared exact request.
+            if let Some(mut admissions) = req.overlap_admissions.take() {
+                admissions.commit();
+            }
             let bytes = req.len as u64;
             if let Some(ff) = queue.flow_fair_state.as_mut() {
                 let bucket = cos_flow_bucket_index(flow_hash_seed, req.flow_key.as_ref()) as u16;

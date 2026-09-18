@@ -392,6 +392,8 @@ fn compute_forwarded_egress_ptb(
 struct CopyFallbackInputs<'a> {
     source_frame: &'a [u8],
     request: &'a PendingForwardRequest,
+    overlap_admissions:
+        Option<crate::fragment_overlap::OverlapAdmissionTokens>,
     expected_ports: Option<(u16, u16)>,
     is_nat64: bool,
     forwarding: &'a ForwardingState,
@@ -433,21 +435,20 @@ struct CopyFallbackInputs<'a> {
 /// packet for no benefit; #4404 is the precedent for not splitting this cascade.
 #[inline(always)]
 fn enqueue_copy_fallback_frame(
-    inputs: &CopyFallbackInputs<'_>,
+    inputs: &mut CopyFallbackInputs<'_>,
     target_binding: &mut BindingWorker,
     flow_key: &mut Option<SessionKey>,
     dbg: &mut DebugPollCounters,
     counters: &mut BatchCounters,
 ) -> (bool, bool) {
-    let CopyFallbackInputs {
-        source_frame,
-        request,
-        expected_ports,
-        is_nat64,
-        forwarding,
-        ingress_ident,
-        recent_exceptions,
-    } = *inputs;
+    let source_frame = inputs.source_frame;
+    let request = inputs.request;
+    let overlap_admissions = &mut inputs.overlap_admissions;
+    let expected_ports = inputs.expected_ports;
+    let is_nat64 = inputs.is_nat64;
+    let forwarding = inputs.forwarding;
+    let ingress_ident = inputs.ingress_ident;
+    let recent_exceptions = inputs.recent_exceptions;
     let mut build_failed = false;
     let mut fallback_to_slow_path = false;
     match if is_nat64 {
@@ -534,6 +535,7 @@ fn enqueue_copy_fallback_frame(
                     cos_queue_id: request.cos_queue_id,
                     dscp_rewrite: request.dscp_rewrite,
                     mirror_clone: false,
+                    overlap_admissions: overlap_admissions.take(),
                     enqueue_ns: 0,
                 };
                 if enqueue_local_request_to_target_or_owner(target_binding, req)
@@ -652,6 +654,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     // values through the iterator path was still forcing per-request memcpy
     // traffic before any forwarding work started.
     for request in pending_forwards.iter_mut() {
+        let mut overlap_admissions = request.overlap_admissions.take();
         let source_offset = request.desc.addr;
         let ingress_slot = ingress_binding.slot;
         // #hb166 T-7: the deferred CoS-TX-selection resolution that used to
@@ -728,6 +731,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 cos_queue_id: request.cos_queue_id,
                 dscp_rewrite: request.dscp_rewrite,
                 mirror_clone: false,
+                overlap_admissions: overlap_admissions.take(),
                 enqueue_ns: 0,
             };
             if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
@@ -924,6 +928,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     request.apply_nat_on_fabric,
                     expected_ports,
                 ) {
+                    drop(overlap_admissions.take());
                     for frame in segmented {
                         if cfg!(feature = "debug-log") {
                             let source_ports = live_frame_ports_from_meta_bytes(
@@ -974,6 +979,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 cos_queue_id: request.cos_queue_id,
                                 dscp_rewrite: request.dscp_rewrite,
                                 mirror_clone: false,
+                                overlap_admissions: None,
                                 enqueue_ns: 0,
                             });
                         bound_pending_tx_local(target_binding);
@@ -1098,6 +1104,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     expected_addr_family: request.meta.addr_family,
                                     expected_protocol: request.meta.protocol,
                                     flow_key: flow_key.take(),
+                                    overlap_admissions: overlap_admissions.take(),
                                     egress_ifindex: request.decision.resolution.egress_ifindex,
                                     cos_queue_id: request.cos_queue_id,
                                     dscp_rewrite: request.dscp_rewrite,
@@ -1119,16 +1126,18 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                             retained_source_frame = true;
                         }
                         None => {
+                            let mut fallback_inputs = CopyFallbackInputs {
+                                source_frame,
+                                request,
+                                overlap_admissions: overlap_admissions.take(),
+                                expected_ports,
+                                is_nat64,
+                                forwarding,
+                                ingress_ident,
+                                recent_exceptions,
+                            };
                             let (bf, fs) = enqueue_copy_fallback_frame(
-                                &CopyFallbackInputs {
-                                    source_frame,
-                                    request,
-                                    expected_ports,
-                                    is_nat64,
-                                    forwarding,
-                                    ingress_ident,
-                                    recent_exceptions,
-                                },
+                                &mut fallback_inputs,
                                 target_binding,
                                 &mut flow_key,
                                 dbg,
@@ -1299,6 +1308,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         expected_addr_family: request.meta.addr_family,
                                         expected_protocol: request.meta.protocol,
                                         flow_key: flow_key.take(),
+                                        overlap_admissions: overlap_admissions.take(),
                                         egress_ifindex: request.decision.resolution.egress_ifindex,
                                         cos_queue_id: request.cos_queue_id,
                                         dscp_rewrite: request.dscp_rewrite,
@@ -1349,16 +1359,18 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                             }
                             None => {}
                         }
+                        let mut fallback_inputs = CopyFallbackInputs {
+                            source_frame,
+                            request,
+                            overlap_admissions: overlap_admissions.take(),
+                            expected_ports,
+                            is_nat64,
+                            forwarding,
+                            ingress_ident,
+                            recent_exceptions,
+                        };
                         let (bf, fs) = enqueue_copy_fallback_frame(
-                            &CopyFallbackInputs {
-                                source_frame,
-                                request,
-                                expected_ports,
-                                is_nat64,
-                                forwarding,
-                                ingress_ident,
-                                recent_exceptions,
-                            },
+                            &mut fallback_inputs,
                             target_binding,
                             &mut flow_key,
                             dbg,
@@ -1453,6 +1465,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                         cos_queue_id: verdict.cos_queue_id,
                         dscp_rewrite: verdict.dscp_rewrite,
                         mirror_clone: false,
+                        overlap_admissions: None,
                         enqueue_ns: 0,
                     });
                 bound_pending_tx_local(ingress_binding);

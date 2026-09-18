@@ -145,6 +145,7 @@ fn cos_exact_drain_throughput_micro_bench() {
                     cos_queue_id: Some(5),
                     dscp_rewrite: None,
                     mirror_clone: false,
+                    overlap_admissions: None,
                     enqueue_ns: 0,
                 }));
             queue.hot.queued_bytes += packet.len() as u64;
@@ -350,6 +351,7 @@ fn bench_pop_commit_settle_publish() {
                 cos_queue_id: Some(0),
                 dscp_rewrite: None,
                 mirror_clone: false,
+                overlap_admissions: None,
                 enqueue_ns: 0,
             };
             let _ = req.bytes.len();

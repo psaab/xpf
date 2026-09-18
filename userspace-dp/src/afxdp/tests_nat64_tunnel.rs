@@ -537,6 +537,9 @@ fn frag_overlap_attribution_flushes_to_live_and_snapshot_10131() {
             dropped: true,
             reason: Some(OverlapDropReason::Overlap),
             lifetime_evictions: 2,
+            completion: None,
+            admission: None,
+            tracker: None,
         },
         false,
     );
@@ -545,6 +548,9 @@ fn frag_overlap_attribution_flushes_to_live_and_snapshot_10131() {
             dropped: true,
             reason: Some(OverlapDropReason::Overflow),
             lifetime_evictions: 1,
+            completion: None,
+            admission: None,
+            tracker: None,
         },
         false,
     );
@@ -553,6 +559,9 @@ fn frag_overlap_attribution_flushes_to_live_and_snapshot_10131() {
             dropped: true,
             reason: Some(OverlapDropReason::ShardFull),
             lifetime_evictions: 1,
+            completion: None,
+            admission: None,
+            tracker: None,
         },
         false,
     );
@@ -561,6 +570,9 @@ fn frag_overlap_attribution_flushes_to_live_and_snapshot_10131() {
             dropped: true,
             reason: Some(OverlapDropReason::Overlap),
             lifetime_evictions: 3,
+            completion: None,
+            admission: None,
+            tracker: None,
         },
         true,
     );

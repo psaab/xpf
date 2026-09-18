@@ -296,7 +296,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     reason: &'static str,
     forwarding: &ForwardingState,
-) {
+) -> bool {
     let meta = meta.into();
     let Some(packet) = extract_l3_packet_with_nat(frame, meta, decision.nat) else {
         live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
@@ -309,7 +309,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
             None,
             forwarding,
         );
-        return;
+        return false;
     };
     let packet_len = packet.len() as u64;
     let tunnel_delivery = if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
@@ -323,9 +323,10 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
         None
     };
     if let Some(delivery) = tunnel_delivery {
-        match delivery.try_send(packet) {
+        let accepted = match delivery.try_send(packet) {
             Ok(()) => {
                 live.record_slow_path_accept(decision.resolution.disposition, reason, packet_len);
+                true
             }
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
@@ -338,6 +339,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                     None,
                     forwarding,
                 );
+                false
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                 live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
@@ -350,9 +352,10 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                     None,
                     forwarding,
                 );
+                false
             }
-        }
-        return;
+        };
+        return accepted;
     }
     // #1873 R-C (blanket gate, plan v4): a tunnel-marked inner packet
     // is NEVER enqueued to the kernel slow-path TUN. Reinjection hands
@@ -380,7 +383,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
             None,
             forwarding,
         );
-        return;
+        return false;
     }
     let selected_path = slow_path.cloned();
     let Some(slow_path) = selected_path else {
@@ -394,7 +397,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
             None,
             forwarding,
         );
-        return;
+        return false;
     };
     // #9637 operator narrowing: the outlet IS the authorization proof the
     // kernel accept keys on. Trusted ⟺ the caller verified host
@@ -405,9 +408,10 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
     } else {
         slow_path.enqueue_delegated(packet)
     };
-    match enqueue_outcome {
+    let accepted = match enqueue_outcome {
         Ok(EnqueueOutcome::Accepted) => {
             live.record_slow_path_accept(decision.resolution.disposition, reason, packet_len);
+            true
         }
         Ok(EnqueueOutcome::RateLimited) => {
             live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
@@ -425,6 +429,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 Some(meta),
                 None,
             );
+            false
         }
         Ok(EnqueueOutcome::QueueFull) => {
             live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
@@ -437,6 +442,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 Some(meta),
                 None,
             );
+            false
         }
         // #2471: the slow path is degraded (MTU programming failed); the live
         // TUN is at 1500 and this frame is jumbo. Refused at enqueue with a
@@ -452,6 +458,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 Some(meta),
                 None,
             );
+            false
         }
         Err(err) => {
             live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
@@ -465,8 +472,10 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
                 Some(meta),
                 None,
             );
+            false
         }
-    }
+    };
+    accepted
 }
 
 #[allow(dead_code)]

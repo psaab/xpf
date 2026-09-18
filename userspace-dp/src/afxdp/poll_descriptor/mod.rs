@@ -84,9 +84,10 @@ use session_hit_authority::{
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
-    SynCookieAckOutcome, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
-    stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn, stage_wg_decap,
-    stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss,
+    SynCookieAckOutcome, reinject_ipsec_passthrough, stage_classify_fabric_ingress,
+    stage_ipsec_passthrough_check, stage_link_layer_classify, stage_native_gre_decap,
+    stage_parse_flow_and_learn, stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss,
+    stage_wg_decap,
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
@@ -393,6 +394,9 @@ pub(super) fn poll_binding_process_descriptor(
                 // Residuals: the SYN-cookie-challenge path above `continue`s before this
                 // hook, and ESP/AH outer fragments are checked while their encrypted
                 // inner is unknowable — both documented, neither silently closed.
+                let mut overlap_admission_9950: Option<
+                    crate::fragment_overlap::OverlapAdmissionTokens,
+                > = None;
                 let (overlap_pre_9950, overlap_skip_cache_9950) = match packet_frame
                     .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
                     .map(|l3| {
@@ -402,7 +406,12 @@ pub(super) fn poll_binding_process_descriptor(
                 {
                     crate::fragment_overlap::OverlapParse::NonFragment => (None, false),
                     crate::fragment_overlap::OverlapParse::Unreadable => (None, true),
-                    crate::fragment_overlap::OverlapParse::Fragment(mut okey, start, end) => {
+                    crate::fragment_overlap::OverlapParse::Fragment(
+                        mut okey,
+                        start,
+                        end,
+                        is_last,
+                    ) => {
                         // Routing domain from the same SSOT as session keys (the parsed
                         // flow's stamped value when present, else the identical ingress
                         // expression) so flow-backed and flowless agree by construction.
@@ -421,19 +430,25 @@ pub(super) fn poll_binding_process_descriptor(
                                     },
                                 )
                             });
-                        let overlap = worker_ctx.forwarding.nat64.frag_overlap.check_overlap_detailed(
-                            okey,
-                            start,
-                            end,
-                            now_ns,
-                            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
-                        );
+                        let overlap = worker_ctx
+                            .forwarding
+                            .nat64
+                            .frag_overlap
+                            .check_overlap_fragment_detailed(
+                                okey,
+                                start,
+                                end,
+                                is_last,
+                                now_ns,
+                                &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                            );
+                        let overlap_dropped = overlap.dropped;
                         telemetry.counters.record_frag_overlap_result(overlap, false);
-                        if overlap.dropped {
+                        if overlap_dropped {
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        (Some((okey, start, end)), true)
+                        (Some((okey, start, end, is_last)), true)
                     }
                 };
                 // #946 Phase 1 stage 11: IPsec passthrough. ESP
@@ -457,22 +472,41 @@ pub(super) fn poll_binding_process_descriptor(
                 ) {
                     IpsecPassthroughOutcome::NotClaimed => {}
                     IpsecPassthroughOutcome::Passthrough => {
-                        // #9950: plant admitted ranges — local delivery IS admission (the frame
-                        // was already reinjected above), so later tails of this datagram compare
-                        // against the first. Already overlap-checked pre-IPsec; the bool is moot
-                        if let Some((okey, start, end)) = overlap_pre_9950 {
-                            let overlap = worker_ctx
+                        // Reserve and settle fragment ownership before handing
+                        // the frame to XFRM. A terminal fragment must never be
+                        // reinjected before the late overlap check can reject it.
+                        let mut admission_to_commit = None;
+                        if let Some((okey, start, end, is_last)) = overlap_pre_9950 {
+                            let mut overlap = worker_ctx
                                 .forwarding
                                 .nat64
                                 .frag_overlap
-                                .check_and_record_detailed(
+                                .check_and_record_fragment_detailed(
                                     okey,
                                     start,
                                     end,
+                                    is_last,
                                     now_ns,
                                     &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
                                 );
+                            let admission = overlap.admission.take();
+                            let overlap_dropped = overlap.dropped;
                             telemetry.counters.record_frag_overlap_result(overlap, false);
+                            if overlap_dropped {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            admission_to_commit = admission;
+                        }
+                        let accepted =
+                            reinject_ipsec_passthrough(packet_frame, meta, &binding.live, worker_ctx);
+                        if let Some(admission) = admission_to_commit {
+                            let tracker = &worker_ctx.forwarding.nat64.frag_overlap;
+                            if accepted {
+                                tracker.commit_admission(admission);
+                            } else {
+                                tracker.fail_admission(admission);
+                            }
                         }
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
@@ -5036,6 +5070,80 @@ pub(super) fn poll_binding_process_descriptor(
                         decision.resolution = redirect;
                     }
                 }
+                // #9950 post-commit overlap record + translated re-check. Keep
+                // this before forward/session/zone accounting so shard-full and
+                // overlap drops are not counted as forwarded candidates.
+                if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
+                    && let Some((pre_key, start, end, is_last)) = overlap_pre_9950
+                {
+                    let mut pre_overlap = worker_ctx
+                        .forwarding
+                        .nat64
+                        .frag_overlap
+                        .check_and_record_fragment_detailed(
+                            pre_key,
+                            start,
+                            end,
+                            is_last,
+                            now_ns,
+                            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                        );
+                    let mut pre_admission = pre_overlap.admission.take();
+                    let pre_overlap_dropped = pre_overlap.dropped;
+                    telemetry.counters.record_frag_overlap_result(pre_overlap, false);
+                    if pre_overlap_dropped {
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
+                    let egress_domain = if worker_ctx.forwarding.has_routing_domains {
+                        worker_ctx
+                            .forwarding
+                            .ifindex_to_routing_domain
+                            .get(&decision.resolution.egress_ifindex)
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let frag_overlap = worker_ctx.forwarding.nat64.frag_overlap.clone();
+                    let mut admissions =
+                        crate::fragment_overlap::OverlapAdmissionTokens::new(
+                            frag_overlap.clone(),
+                            pre_admission,
+                            None,
+                        );
+                    if let Some(post_key) = crate::fragment_overlap::translated_overlap_key(
+                        &pre_key,
+                        &decision.nat,
+                        egress_domain,
+                    ) {
+                        if post_key != pre_key {
+                            let mut post_overlap = worker_ctx
+                                .forwarding
+                                .nat64
+                                .frag_overlap
+                                .check_and_record_fragment_detailed(
+                                    post_key,
+                                    start,
+                                    end,
+                                    is_last,
+                                    now_ns,
+                                    &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
+                                );
+                            admissions.post = post_overlap.admission.take();
+                            let post_overlap_dropped = post_overlap.dropped;
+                            telemetry.counters.record_frag_overlap_result(
+                                post_overlap,
+                                true,
+                            );
+                            if post_overlap_dropped {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
+                    }
+                    overlap_admission_9950 = Some(admissions);
+                }
                 if matches!(
                     decision.resolution.disposition,
                     ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
@@ -5324,75 +5432,6 @@ pub(super) fn poll_binding_process_descriptor(
                     if decision.nat.nat64 {
                         telemetry.counters.nat64_translations += 1;
                     }
-                    // #9950 post-commit overlap record + translated re-check (single site:
-                    // flow-backed and flowless decisions funnel through here). Only admitted
-                    // (ForwardCandidate) fragments record — refused traffic never plants ranges,
-                    // so a refused cross-domain tail cannot poison a later same-domain tail.
-                    // The pre-key re-check under the shard lock closes the cross-worker race
-                    // between the early check and this commit; the translated-key check covers
-                    // post-NAT reassembly identity (same-family re-addressing, NAT64 v6→v4
-                    // ident truncation). Ranges are identical pre/post (translation preserves
-                    // fragmentation geometry); identical keys skip (same key+range would
-                    // self-overlap — pure port-PAT needs no check).
-                    if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
-                        && let Some((pre_key, start, end)) = overlap_pre_9950
-                    {
-                        let overlap = worker_ctx
-                            .forwarding
-                            .nat64
-                            .frag_overlap
-                            .check_and_record_detailed(
-                                pre_key,
-                                start,
-                                end,
-                                now_ns,
-                                &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
-                            );
-                        telemetry.counters.record_frag_overlap_result(overlap, false);
-                        if overlap.dropped {
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                        let egress_domain = if worker_ctx.forwarding.has_routing_domains {
-                            worker_ctx
-                                .forwarding
-                                .ifindex_to_routing_domain
-                                .get(&decision.resolution.egress_ifindex)
-                                .copied()
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        if let Some(post_key) =
-                            crate::fragment_overlap::translated_overlap_key(
-                                &pre_key,
-                                &decision.nat,
-                                egress_domain,
-                            )
-                        {
-                            let post_overlap = if post_key != pre_key {
-                                let overlap = worker_ctx
-                                    .forwarding
-                                    .nat64
-                                    .frag_overlap
-                                    .check_and_record_detailed(
-                                        post_key,
-                                        start,
-                                        end,
-                                        now_ns,
-                                        &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
-                                    );
-                                telemetry.counters.record_frag_overlap_result(overlap, true);
-                                overlap.dropped
-                            } else {
-                                false
-                            };
-                            if post_overlap {
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
-                            }
-                        }
-                    }
                     if let Some(mut request) = build_live_forward_request_from_frame(
                         worker_ctx.binding_lookup,
                         binding_index,
@@ -5495,6 +5534,7 @@ pub(super) fn poll_binding_process_descriptor(
                             }
                         }
                         let request_target_binding_index = request.target_binding_index;
+                        request.overlap_admissions = overlap_admission_9950.take();
                         binding.scratch.scratch_forwards.push(request);
                         recycle_now = false;
                         // ── Flow cache population ────────────────────
@@ -5531,6 +5571,7 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                         // ── End flow cache population ────────────────
                     } else {
+                        drop(overlap_admission_9950.take());
                         telemetry.dbg.build_fail += 1;
                         if cfg!(feature = "debug-log") {
                             if telemetry.dbg.build_fail <= 3 {

@@ -26,6 +26,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             cos_queue_id: None,
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
     );
@@ -44,6 +45,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             cos_queue_id: None,
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
     );
@@ -65,6 +67,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             cos_queue_id: None,
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
     );
@@ -157,6 +160,7 @@ fn transmit_batch_oversized_unwind_preserves_pending_order() {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         // enqueue_ns doubles as an identity marker for order assertions.
         enqueue_ns: id,
     };
@@ -235,6 +239,7 @@ fn tx_retry_tail_is_allocation_free_4971() {
         egress_ifindex: 0,
         cos_queue_id: None,
         dscp_rewrite: None,
+        overlap_admissions: None,
         mirror_clone: false,
         // enqueue_ns doubles as an identity marker for FIFO assertions.
         enqueue_ns: id,
@@ -314,6 +319,7 @@ fn tx_retry_outcome_codes_4971() {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 1,
     }]);
     let mut shared_recycles = Vec::with_capacity(8);

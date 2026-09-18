@@ -283,6 +283,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         // by routing it flowless in the first place.
         flow_key: None,
         nat64_reverse: None,
+        overlap_admissions: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,
         cos_tx_selection_resolved: true,

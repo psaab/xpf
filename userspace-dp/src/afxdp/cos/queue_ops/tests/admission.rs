@@ -37,6 +37,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }),
     );
@@ -52,6 +53,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }),
     );
@@ -93,6 +95,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -108,6 +111,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -125,6 +129,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 
@@ -222,6 +227,7 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 
@@ -300,6 +306,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -317,6 +324,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -332,6 +340,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 

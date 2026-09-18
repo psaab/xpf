@@ -923,6 +923,7 @@ fn admission_ecn_skips_prepared_when_umem_slice_out_of_range() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     });
 

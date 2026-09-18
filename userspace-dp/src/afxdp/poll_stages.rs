@@ -1394,6 +1394,20 @@ pub(super) fn stage_ipsec_passthrough_check(
             }
         }
     }
+    IpsecPassthroughOutcome::Passthrough
+}
+
+/// Reinject an IPsec packet only after the caller has completed every
+/// fragment-overlap admission check. Keeping this side effect separate from
+/// [`stage_ipsec_passthrough_check`] prevents a terminal fragment from being
+/// delivered to XFRM before its late overlap reservation can reject it.
+#[inline]
+pub(super) fn reinject_ipsec_passthrough(
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    binding_live: &BindingLiveState,
+    worker_ctx: &WorkerContext,
+) -> bool {
     let ipsec_decision = ipsec_passthrough_decision();
     maybe_reinject_slow_path_from_frame(
         &worker_ctx.ident,
@@ -1403,17 +1417,11 @@ pub(super) fn stage_ipsec_passthrough_check(
         packet_frame,
         meta,
         ipsec_decision,
-        // #9637 operator narrowing: synthetic IPsec passthrough (ESP/AH,
-        // ESP-in-UDP/NAT-T, seeded IKE — unconditionally exempt, never
-        // gate-passed; IKE-new passes its own gate but rides this
-        // unfiltered site) takes the delegated outlet: the destination
-        // judges it on the same token set with identical verdicts.
         false,
         worker_ctx.recent_exceptions,
         "slow_path",
         worker_ctx.forwarding,
-    );
-    IpsecPassthroughOutcome::Passthrough
+    )
 }
 
 #[cfg(test)]

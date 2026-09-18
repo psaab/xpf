@@ -386,6 +386,7 @@ fn tx_retry_status_lock_free_4971() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: now_ns,
     }]);
     let mut shared_recycles = Vec::new();
@@ -445,6 +446,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -460,6 +462,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -477,6 +480,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 
@@ -541,6 +545,7 @@ fn drain_exact_local_fifo_drops_mirror_clone_before_tx_reserve() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: true,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }),
     );
@@ -603,6 +608,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -618,6 +624,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     let mut free_tx_frames = VecDeque::from([64, 128]);
@@ -668,6 +675,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
         codel_target_ns: 0,
         }],
     );
+    let tracker = crate::fragment_overlap::OverlapTracker::new();
     root.queues[0]
         .hot
         .items
@@ -681,6 +689,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: Some(test_overlap_admissions_10285(&tracker, 1)),
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -696,6 +705,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: Some(test_overlap_admissions_10285(&tracker, 2)),
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -711,6 +721,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: Some(test_overlap_admissions_10285(&tracker, 3)),
             enqueue_ns: 0,
         }));
     let mut free_tx_frames = VecDeque::new();
@@ -738,6 +749,11 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
     assert_eq!(sent_packets, 1);
     assert_eq!(sent_bytes, 1);
     assert!(scratch_local_tx.is_empty());
+    assert_eq!(
+        tracker.len(),
+        2,
+        "accepted FIFO prefix commits its admission; retry suffix stays held"
+    );
     assert_eq!(free_tx_frames, VecDeque::from([128, 192]));
     assert_eq!(root.queues[0].hot.items.len(), 2);
     match root.queues[0]
@@ -796,6 +812,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     let frame = unsafe { area.slice_mut_unchecked(64, 4) }.expect("frame");
@@ -847,6 +864,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
         codel_target_ns: 0,
         }],
     );
+    let tracker = crate::fragment_overlap::OverlapTracker::new();
     root.queues[0]
         .hot
         .items
@@ -862,6 +880,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: Some(test_overlap_admissions_10285(&tracker, 11)),
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -879,6 +898,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: Some(test_overlap_admissions_10285(&tracker, 12)),
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -896,6 +916,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: Some(test_overlap_admissions_10285(&tracker, 13)),
             enqueue_ns: 0,
         }));
     let mut scratch_prepared_tx = vec![
@@ -920,6 +941,11 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
         1,
     );
 
+    assert_eq!(
+        tracker.len(),
+        2,
+        "accepted prepared FIFO prefix commits; retry suffix stays held"
+    );
     assert_eq!(sent_packets, 1);
     assert_eq!(sent_bytes, 1);
     assert!(scratch_prepared_tx.is_empty());

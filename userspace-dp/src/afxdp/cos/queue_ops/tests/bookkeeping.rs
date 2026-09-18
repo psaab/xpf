@@ -33,6 +33,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     let req_b = TxRequest {
@@ -45,6 +46,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     let bucket_a = cos_flow_bucket_index(

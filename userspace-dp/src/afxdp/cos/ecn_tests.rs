@@ -186,6 +186,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert!(maybe_mark_ecn_ce(&mut req));
@@ -204,6 +205,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert!(maybe_mark_ecn_ce(&mut req));
@@ -224,6 +226,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert!(!maybe_mark_ecn_ce(&mut req));
@@ -264,6 +267,7 @@ fn maybe_mark_ecn_ce_handles_single_vlan_tagged_frame() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert!(
@@ -301,6 +305,7 @@ fn maybe_mark_ecn_ce_rejects_unknown_ethertype() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert_eq!(ethernet_l3(&req.bytes), None);
@@ -347,6 +352,7 @@ fn ethernet_l3_rejects_qinq_until_explicitly_supported() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert!(!maybe_mark_ecn_ce(&mut req));

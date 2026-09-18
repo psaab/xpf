@@ -8,8 +8,8 @@ use super::tests_support::*;
 use super::*;
 use crate::test_zone_ids::*;
 use crate::{
-    DestinationNATRuleSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
-    SourceNATRuleSnapshot,
+    DestinationNATRuleSnapshot, FirewallFilterSnapshot, FirewallTermSnapshot, NeighborSnapshot,
+    PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
 };
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -207,6 +207,447 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
             "{label}: overlap-drop counter delta"
         );
     }
+}
+
+/// A queued fragment that fails the production TTL rewrite must fail its
+/// overlap admission. Otherwise the late overlap check can reclaim the
+/// recorded datagram and admit a subsequent overlapping fragment.
+#[test]
+fn f035_ttl_rewrite_failure_keeps_overlap_anchored_10285() {
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let head = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xA285, 0x2000, &[0xAA; 16]);
+    let tail = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xA285, 0x0002, &[0xBB; 8]);
+    let overlap = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xA285, 0x0001, &[0xCC; 16]);
+    let head_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, head.len() as u16);
+    let tail_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, tail.len() as u16);
+    let overlap_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
+
+    let (_batch, first_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &head,
+        head_meta,
+    );
+    assert_eq!(first_dbg.forward, 1, "head must establish the overlap anchor");
+    let mut head_request = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("head pending TX request");
+    head_request
+        .overlap_admissions
+        .take()
+        .expect("head overlap admissions")
+        .commit();
+    drop(head_request);
+
+    let (_batch, tail_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        tail_meta,
+    );
+    assert_eq!(tail_dbg.forward, 1, "adjacent terminal tail must queue");
+    let pending = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("terminal tail pending TX request");
+    let desc = pending.desc;
+    let area = binding.umem.area();
+    {
+        let frame = unsafe { area.slice_mut_unchecked(desc.addr as usize, tail.len()) }
+            .expect("mutable tail UMEM frame");
+        frame[14 + 8] = 1;
+        frame[14 + 10..14 + 12].fill(0);
+        let ip_sum = checksum16(&frame[14..34]);
+        frame[14 + 10..14 + 12].copy_from_slice(&ip_sum.to_be_bytes());
+    }
+    assert!(
+        crate::afxdp::frame::rewrite_forwarded_frame_in_place(
+            area,
+            desc,
+            tail_meta,
+            &pending.decision,
+            pending.apply_nat_on_fabric,
+            pending.expected_ports,
+            0,
+        )
+        .is_none(),
+        "TTL=1 must be refused by the production TX rewrite"
+    );
+    drop(pending);
+
+    let drops_before = crate::fragment_overlap::FRAG_OVERLAP_DROPPED
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let (_batch, overlap_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &overlap,
+        overlap_meta,
+    );
+    assert_eq!(
+        overlap_dbg.forward, 0,
+        "a later overlapping fragment must stay blocked after TTL refusal"
+    );
+    assert_eq!(
+        crate::fragment_overlap::FRAG_OVERLAP_DROPPED
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .wrapping_sub(drops_before),
+        1,
+        "the overlap detector must attribute the blocked tail"
+    );
+}
+
+/// A refused non-terminal middle fragment must invalidate the datagram's
+/// eventual terminal completion. The terminal fragment is allowed and queued,
+/// but a later overlap remains blocked by the failed middle admission.
+#[test]
+fn f035_middle_ttl_rewrite_failure_then_terminal_keeps_overlap_anchored_10285() {
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let head = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD286, 0x2000, &[0xAA; 16]);
+    let middle =
+        ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD286, 0x2002, &[0xBB; 8]);
+    let terminal =
+        ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD286, 0x0003, &[0xCC; 8]);
+    let overlap =
+        ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD286, 0x0001, &[0xDD; 16]);
+    let head_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, head.len() as u16);
+    let middle_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, middle.len() as u16);
+    let terminal_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, terminal.len() as u16);
+    let overlap_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
+
+    let (_batch, head_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &head,
+        head_meta,
+    );
+    assert_eq!(head_dbg.forward, 1, "head must establish the overlap anchor");
+    let mut head_request = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("head pending TX request");
+    head_request
+        .overlap_admissions
+        .take()
+        .expect("head overlap admissions")
+        .commit();
+    drop(head_request);
+
+    let (_batch, middle_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &middle,
+        middle_meta,
+    );
+    assert_eq!(
+        middle_dbg.forward, 1,
+        "the non-terminal middle must queue before the rewrite refusal"
+    );
+    let mut middle_request = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("middle pending TX request");
+    assert!(
+        middle_request.overlap_admissions.is_some(),
+        "middle request must carry its overlap admission into dispatch"
+    );
+    let middle_desc = middle_request.desc;
+    let area = binding.umem.area();
+    {
+        let frame =
+            unsafe { area.slice_mut_unchecked(middle_desc.addr as usize, middle.len()) }
+                .expect("mutable middle UMEM frame");
+        frame[14 + 8] = 1;
+        frame[14 + 10..14 + 12].fill(0);
+        let ip_sum = checksum16(&frame[14..34]);
+        frame[14 + 10..14 + 12].copy_from_slice(&ip_sum.to_be_bytes());
+    }
+    assert!(
+        crate::afxdp::frame::rewrite_forwarded_frame_in_place(
+            area,
+            middle_desc,
+            middle_meta,
+            &middle_request.decision,
+            middle_request.apply_nat_on_fabric,
+            middle_request.expected_ports,
+            0,
+        )
+        .is_none(),
+        "TTL=1 must refuse the middle request in the production rewrite"
+    );
+    drop(middle_request);
+    assert_eq!(
+        forwarding.nat64.frag_overlap.len(),
+        1,
+        "failed middle admission must retain the datagram entry"
+    );
+
+    let (_batch, terminal_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &terminal,
+        terminal_meta,
+    );
+    assert_eq!(
+        terminal_dbg.forward, 1,
+        "the adjacent terminal fragment must still forward"
+    );
+    assert_eq!(
+        terminal_dbg.tx, 1,
+        "the allowed terminal fragment must queue for TX"
+    );
+    let mut terminal_request = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("terminal pending TX request");
+    terminal_request
+        .overlap_admissions
+        .take()
+        .expect("terminal overlap admissions")
+        .commit();
+    drop(terminal_request);
+    assert_eq!(
+        forwarding.nat64.frag_overlap.len(),
+        1,
+        "failed middle keeps the complete datagram protected after terminal TX acceptance"
+    );
+
+    let (_batch, overlap_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &overlap,
+        overlap_meta,
+    );
+    assert_eq!(
+        overlap_dbg.forward, 0,
+        "a later overlap must remain blocked after middle rewrite failure"
+    );
+}
+
+/// A terminal fragment refused by a DSCP output filter must not release the
+/// recorded datagram. The next overlapping fragment remains denied.
+#[test]
+fn f035_terminal_tail_dscp_output_refusal_keeps_overlap_anchored_10285() {
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "wan-drop-ef".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "drop-ef-udp".into(),
+            protocols: vec!["udp".into()],
+            dscp_values: vec![46],
+            action: "discard".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.interfaces[1].filter_output_v4 = "wan-drop-ef".into();
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let head = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD285, 0x2000, &[0xAA; 16]);
+    let mut tail = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD285, 0x0002, &[0xBB; 8]);
+    tail[14 + 1] = 46 << 2;
+    tail[14 + 10..14 + 12].fill(0);
+    let tail_sum = checksum16(&tail[14..34]);
+    tail[14 + 10..14 + 12].copy_from_slice(&tail_sum.to_be_bytes());
+    let head_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, head.len() as u16);
+    let mut tail_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, tail.len() as u16);
+    tail_meta.dscp = 46;
+
+    let (_batch, head_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &head,
+        head_meta,
+    );
+    assert_eq!(head_dbg.forward, 1, "head must establish the overlap anchor");
+    let mut head_request = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("head pending TX request");
+    head_request
+        .overlap_admissions
+        .take()
+        .expect("head overlap admissions")
+        .commit();
+    drop(head_request);
+
+    let drops_before_tail = crate::fragment_overlap::FRAG_OVERLAP_DROPPED
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let (_batch, tail_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        tail_meta,
+    );
+    assert_eq!(
+        tail_dbg.tx, 0,
+        "the terminal DSCP-refused tail must not queue for TX"
+    );
+    assert_eq!(
+        crate::fragment_overlap::FRAG_OVERLAP_DROPPED
+            .load(std::sync::atomic::Ordering::Relaxed),
+        drops_before_tail,
+        "the terminal tail must reach the output filter, not the overlap gate"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "output-filter refusal must not leave a forward request"
+    );
+
+    let overlap = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD285, 0x0001, &[0xCC; 16]);
+    let overlap_meta =
+        frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
+    let (_batch, overlap_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &overlap,
+        overlap_meta,
+    );
+    assert_eq!(
+        overlap_dbg.forward, 0,
+        "a later overlapping fragment must remain blocked"
+    );
+}
+
+#[test]
+fn f035_shard_full_drop_is_not_forward_accounted_10285() {
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    let forwarding = build_forwarding_state(&snapshot);
+    let tracker = &forwarding.nat64.frag_overlap;
+    let base = crate::fragment_overlap::OverlapKey {
+        addr_family: libc::AF_INET as u8,
+        src: IpAddr::V4(src),
+        dst: IpAddr::V4(dst),
+        ident: 0,
+        protocol: PROTO_UDP,
+        routing_domain: 0,
+    };
+    let shard = crate::fragment_overlap::overlap_shard_index(&base);
+    let mut keys = Vec::new();
+    for ident in 0u32.. {
+        let mut key = base;
+        key.ident = ident;
+        if crate::fragment_overlap::overlap_shard_index(&key) == shard {
+            keys.push(key);
+            if keys.len() == crate::fragment_overlap::OVERLAP_CAP_PER_SHARD + 1 {
+                break;
+            }
+        }
+    }
+    for key in keys.iter().take(crate::fragment_overlap::OVERLAP_CAP_PER_SHARD) {
+        assert!(!tracker.check_and_record_fragment(
+            *key,
+            0,
+            8,
+            false,
+            123_000_000_000,
+            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+        ));
+    }
+    let full0 = crate::fragment_overlap::FRAG_OVERLAP_SHARD_FULL_DROPPED
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let frame = ipv4_frag_frame_9950(
+        src,
+        dst,
+        PROTO_UDP,
+        keys[crate::fragment_overlap::OVERLAP_CAP_PER_SHARD].ident as u16,
+        0x2000,
+        &[0xAA; 16],
+    );
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let (batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        frag_meta_9950(
+            24,
+            PROTO_UDP,
+            0,
+            src,
+            dst,
+            frame.len() as u16,
+        ),
+    );
+    assert_eq!(
+        crate::fragment_overlap::FRAG_OVERLAP_SHARD_FULL_DROPPED
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .wrapping_sub(full0),
+        1,
+        "single-tenant shard flood must be observable as SHARD_FULL"
+    );
+    assert_eq!(
+        dbg.forward, 0,
+        "a shard-full fragment drop is not a forwarded packet"
+    );
+    assert_eq!(
+        batch.forward_candidate_packets, 0,
+        "a shard-full fragment drop is not forward-accounted"
+    );
+    assert_eq!(tracker.len(), crate::fragment_overlap::OVERLAP_CAP_PER_SHARD);
 }
 
 /// F-036: DNAT reply non-first fragments must carry the translated source on

@@ -175,7 +175,7 @@ pub(in crate::afxdp) fn prepared_cos_request_stays_on_current_tx_binding(
 #[inline]
 pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
     binding: &mut BindingWorker,
-    req: PreparedTxRequest,
+    mut req: PreparedTxRequest,
     current_worker_id: u32,
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
     shared_recycles: Option<&mut Vec<(u32, u64)>>,
@@ -207,25 +207,27 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
     else {
         return Err(req);
     };
-    let local_req = req.to_local_request(frame);
-    if redirect_local_cos_request_to_owner(
+    let local_req = req.into_local_request(frame);
+    match redirect_local_cos_request_to_owner(
         &binding.cos.cos_fast_interfaces,
         local_req,
         current_worker_id,
         worker_commands_by_id,
-    )
-    .is_ok()
-    {
-        recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
-        return Ok(());
+    ) {
+        Ok(()) => {
+            recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
+            Ok(())
+        }
+        Err(mut local_req) => {
+            req.overlap_admissions = local_req.overlap_admissions.take();
+            Err(req)
+        }
     }
-    Err(req)
 }
-
 #[inline]
 pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
     binding: &mut BindingWorker,
-    req: PreparedTxRequest,
+    mut req: PreparedTxRequest,
     shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), PreparedTxRequest> {
     let Some((iface_fast, queue_fast)) = cos_fast_queue(
@@ -258,12 +260,17 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
     else {
         return Err(req);
     };
-    let local_req = req.to_local_request(frame);
-    if owner_live.enqueue_tx(local_req).is_ok() {
-        recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
-        return Ok(());
+    let local_req = req.into_local_request(frame);
+    match owner_live.try_enqueue_tx_owned(local_req) {
+        Ok(()) => {
+            recycle_prepared_immediately_with_shared(binding, &req, shared_recycles);
+            Ok(())
+        }
+        Err(mut local_req) => {
+            req.overlap_admissions = local_req.overlap_admissions.take();
+            Err(req)
+        }
     }
-    Err(req)
 }
 
 #[cfg(test)]

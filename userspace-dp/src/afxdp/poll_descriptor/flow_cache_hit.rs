@@ -535,6 +535,7 @@ pub(super) fn stage_flow_cache_hit(
                         cos_queue_id: cached_queue_id,
                         dscp_rewrite: cached_dscp_rewrite,
                         mirror_clone: false,
+                        overlap_admissions: None,
                         enqueue_ns: 0,
                     });
                     tx_counters.pending_in_place_tx_packets += 1;

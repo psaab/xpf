@@ -39,6 +39,7 @@ fn test_tx_request(payload: u8, egress_ifindex: i32) -> TxRequest {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }
 }
@@ -1013,6 +1014,7 @@ fn live_mirror_owner_drops_before_consuming_tx_frame_reserve() {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: true,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }]);
     let mut shared_recycles = Vec::new();
@@ -1061,6 +1063,7 @@ fn queue_full_drop_counter() {
                 cos_queue_id: None,
                 dscp_rewrite: None,
                 mirror_clone: true,
+                overlap_admissions: None,
                 enqueue_ns: 0,
             });
     }

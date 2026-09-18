@@ -174,6 +174,7 @@ pub(in crate::afxdp) fn test_cos_item(len: usize) -> CoSPendingTxItem {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     })
 }
@@ -189,6 +190,7 @@ pub(in crate::afxdp) fn test_flow_cos_item(src_port: u16, len: usize) -> CoSPend
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     })
 }
@@ -210,6 +212,7 @@ pub(in crate::afxdp) fn test_flow_prepared_cos_item(
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     })
 }
@@ -444,6 +447,7 @@ pub(in crate::afxdp) fn test_local_ipv4_item(tos: u8) -> CoSPendingTxItem {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     })
 }
@@ -587,6 +591,7 @@ pub(in crate::afxdp) fn test_prepared_item_in_umem(
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     })
 }

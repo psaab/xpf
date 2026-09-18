@@ -2313,6 +2313,17 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
         dbg1.forward, 1,
         "#9956 F-051 precondition: the first fragment must forward"
     );
+    let mut first_request = binding
+        .scratch
+        .scratch_forwards
+        .pop()
+        .expect("#10285: first fragment pending TX request");
+    first_request
+        .overlap_admissions
+        .take()
+        .expect("#10285: first fragment overlap admission")
+        .commit();
+    drop(first_request);
 
     // (2) NON-first fragment: offset 1, SAME id 0xbeef. Flowless (#2344):
     //     forwards with no session to charge (RED-on-revert guard for the
@@ -2384,5 +2395,22 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
         c.fwd_bytes + flowless_bytes,
         (first.len() + non_first.len()) as u64,
         "#9956 F-051: session + flowless bytes must match the forwarded volume"
+    );
+    assert_eq!(
+        forwarding.nat64.frag_overlap.len(),
+        1,
+        "#10285: queued non-first request retains the overlap entry until \
+         TX acceptance"
+    );
+    for mut request in binding.scratch.scratch_forwards.drain(..) {
+        if let Some(mut admissions) = request.overlap_admissions.take() {
+            admissions.commit();
+        }
+    }
+    assert_eq!(
+        forwarding.nat64.frag_overlap.len(),
+        0,
+        "#10285: queued first+last requests settle their overlap admissions \
+         only after explicit TX acceptance"
     );
 }

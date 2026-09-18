@@ -26,6 +26,7 @@ fn test_tx_request_for_inbox(payload: u8) -> TxRequest {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }
 }

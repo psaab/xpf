@@ -651,6 +651,7 @@ pub(super) fn retry_pending_neigh(
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         };
         if target_idx == binding_index {
@@ -708,6 +709,7 @@ pub(super) fn retry_pending_neigh(
                     cos_queue_id: req.cos_queue_id,
                     dscp_rewrite: req.dscp_rewrite,
                     mirror_clone: req.mirror_clone,
+                    overlap_admissions: None,
                     enqueue_ns: req.enqueue_ns,
                 });
                 target.tx_counters.neighbor_retry_cross_umem_copies += 1;

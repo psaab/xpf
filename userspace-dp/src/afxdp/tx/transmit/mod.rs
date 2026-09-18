@@ -386,11 +386,14 @@ pub(in crate::afxdp) fn transmit_batch(
     // → [t3, t4, ...]) — same ordering the prior `retry_tail` +
     // `.rev()` produced, now allocation-free. free_tx_frames order is
     // fungible.
-    while let Some((offset, req)) = binding.scratch.scratch_local_tx.pop() {
+    while let Some((offset, mut req)) = binding.scratch.scratch_local_tx.pop() {
         let idx = binding.scratch.scratch_local_tx.len();
         if idx < inserted as usize {
             sent_packets += 1;
             sent_bytes += req.bytes.len() as u64;
+            if let Some(mut admissions) = req.overlap_admissions.take() {
+                admissions.commit();
+            }
             // #9900 F-092 (GPT-2): the kernel accepted this desc — record
             // ownership so its completion (and ONLY a first completion for
             // it) can return the frame to the free pool.
