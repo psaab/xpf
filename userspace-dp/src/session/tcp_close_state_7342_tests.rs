@@ -307,3 +307,94 @@ fn a_session_installed_by_a_fin_is_closing_not_time_wait_7342() {
         CLOSING_SECS * 1_000_000_000,
     );
 }
+
+/// #10287: exercise the full reuse transition, not just the eviction gate.
+///
+/// The old incarnation closes, a bare SYN reuses the tuple immediately, and
+/// the new pair completes a real three-way handshake. The new pair must start
+/// on OPENING (20 s), promote to ESTABLISHED (300 s), survive an opening-window
+/// idle gap, and accept a server-first packet after that gap.
+fn reused_tuple_completes_handshake_after_close(close_flags: u8) {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let old_reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_ACK);
+    let old_session_id = table.session_id_for(&forward);
+    assert!(table.lookup(&forward, now + 1_000_000, close_flags).is_some());
+    let _ = table.drain_deltas(8);
+
+    let reuse = now + 10_000_000;
+    let (evicted_forward, evicted_reverse) = table
+        .evict_closing_tcp_pair_for_syn(&forward, crate::tcp_flags::TCP_SYN)
+        .expect("a bare SYN inside the close window must evict the old pair");
+    assert_eq!(evicted_forward, forward);
+    assert_eq!(evicted_reverse, old_reverse);
+    assert!(table.entry_by_key(&forward).is_none());
+    assert!(table.entry_by_key(&old_reverse).is_none());
+
+    let reverse = install_forward_reverse_pair(
+        &mut table,
+        &forward,
+        reuse,
+        crate::tcp_flags::TCP_SYN,
+    );
+    let new_session_id = table.session_id_for(&forward);
+    assert_ne!(
+        new_session_id, old_session_id,
+        "tuple reuse must allocate a fresh session incarnation id"
+    );
+    assert_eq!(
+        table.entry_by_key(&forward).expect("new opening forward").expires_after_ns,
+        DEFAULT_TCP_OPENING_TIMEOUT_NS,
+        "tuple reuse must arm the fresh 20 s OPENING window"
+    );
+    assert_eq!(
+        table.entry_by_key(&reverse).expect("new opening reverse").expires_after_ns,
+        DEFAULT_TCP_OPENING_TIMEOUT_NS,
+        "the fresh companion must also start on OPENING"
+    );
+
+    assert!(table
+        .lookup(&reverse, reuse + 1_000_000, crate::tcp_flags::TCP_SYN | TCP_ACK)
+        .is_some());
+    assert!(table
+        .lookup(&forward, reuse + 2_000_000, TCP_ACK)
+        .is_some());
+    // Refresh the responder half once after handshake completion so BOTH
+    // halves visibly carry the 300 s established window before the idle-gap
+    // / server-first assertion.
+    assert!(table
+        .lookup(&reverse, reuse + 3_000_000, TCP_ACK)
+        .is_some());
+    for (label, key) in [("forward", &forward), ("reverse", &reverse)] {
+        let entry = table.entry_by_key(key).expect("established reused entry");
+        assert!(
+            entry.established,
+            "{label}: a completed handshake must promote the new incarnation"
+        );
+        assert_eq!(
+            entry.expires_after_ns,
+            DEFAULT_TCP_SESSION_TIMEOUT_NS,
+            "{label}: the new incarnation must use the full 300 s idle window"
+        );
+    }
+
+    let idle = reuse + TCP_CLOSING_TIMEOUT_NS + 5_000_000_000;
+    table.last_gc_ns = idle - 2_000_000_000;
+    let _ = table.expire_stale_entries(idle);
+    assert!(
+        table.lookup(&reverse, idle + 1_000_000, TCP_ACK).is_some(),
+        "server-first traffic after an opening-window idle gap must hit the \
+         newly established tuple, not a reaped close-window entry"
+    );
+}
+
+#[test]
+fn fin_tuple_reuse_gets_fresh_opening_and_established_windows_10287() {
+    reused_tuple_completes_handshake_after_close(TCP_FIN);
+}
+
+#[test]
+fn rst_tuple_reuse_gets_fresh_opening_and_established_windows_10287() {
+    reused_tuple_completes_handshake_after_close(TCP_RST);
+}

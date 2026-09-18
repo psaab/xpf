@@ -343,6 +343,59 @@ impl SessionTable {
         self.push_to_wheel(&actual_key, now_ns);
         Some(result)
     }
+    /// #10287: evict a live closing TCP incarnation before admitting a bare
+    /// SYN on the same tuple as a new connection.
+    ///
+    /// A closing entry is the old connection's state. Reusing that entry would
+    /// preserve its sticky close/reset/FIN bits and short reap window, so the
+    /// new connection would be reaped while its endpoints still consider it
+    /// established. Remove both local halves instead and let the normal
+    /// session-miss path install a fresh pair (new ids, OPENING timeout, and
+    /// the ordinary handshake promotion).
+    ///
+    /// This is deliberately limited to an initial bare SYN. A SYN-ACK is a
+    /// retransmission of the old handshake and all non-SYN packets retain the
+    /// existing close/TIME-WAIT behavior. On success, returns the exact
+    /// `(forward_key, reverse_key)` pair so callers with shared-map access can
+    /// retire every old alias before the miss path runs.
+    pub(crate) fn evict_closing_tcp_pair_for_syn(
+        &mut self,
+        key: &SessionKey,
+        tcp_flags: u8,
+    ) -> Option<(SessionKey, SessionKey)> {
+        if !matches!(key.protocol, PROTO_TCP)
+            || !is_initial_syn(tcp_flags)
+            || is_closing(tcp_flags)
+        {
+            return None;
+        }
+        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
+        let (canonical_key, nat, is_reverse) = {
+            let record = self.entries.get(handle as usize)?;
+            if !Self::lookup_record_matches_key(record, key, via_alias)
+                || !record.entry.closing
+            {
+                return None;
+            }
+            (
+                record.key.clone(),
+                record.entry.decision.nat,
+                record.entry.metadata.is_reverse,
+            )
+        };
+        let companion_key = reverse_session_key(&canonical_key, nat);
+        let (forward_key, reverse_key) = if is_reverse {
+            (companion_key.clone(), canonical_key.clone())
+        } else {
+            (canonical_key.clone(), companion_key.clone())
+        };
+        let _ = self.remove_entry(&canonical_key, RemovalKind::Replace);
+        if companion_key != canonical_key {
+            let _ = self.remove_entry(&companion_key, RemovalKind::Replace);
+        }
+        Some((forward_key, reverse_key))
+    }
+
 
     pub fn find_forward_nat_match(&self, reply_key: &SessionKey) -> Option<ForwardSessionMatch> {
         self.find_forward_nat_match_inner(reply_key, None)
