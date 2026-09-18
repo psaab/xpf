@@ -165,6 +165,9 @@ func TestSweepResendKeepsTheAnnouncedInstallTableV610068(t *testing.T) {
 		t.Fatalf("FIXTURE: the v6 delta path must queue one stamped frame, got %v", got)
 	}
 	if got := func() [][2]uint32 {
+		if v := dp.v6sessions[key]; v.InstallTableDomain != 0 || v.InstallTableCheck != 0 {
+			t.Fatal("FIXTURE: the v6 mirror row must carry (0,0), or the sweep could copy the stamp from the row")
+		}
 		ss.syncSweep()
 		return sentTablesV610068(t, ss)
 	}(); len(got) != 1 || got[0] != [2]uint32{525590, 3318534811} {
