@@ -33,6 +33,13 @@ source "${SCRIPT_DIR}/wire-gate-lib.sh"
 restore_application_cmd() {
     [[ -z "${APP_SNAP:-}" ]] && printf 'delete applications\n'
 }
+# A CLI census may retain an idle entry until the next packet triggers lazy
+# expiry. Only completed wire evidence can prove stale forwarding.
+wire_conntrack_stale_present() {
+    local expired_wire_leak="${1:-}"
+    wire_num "$expired_wire_leak" || return 2
+    ((10#$expired_wire_leak > 0)) && printf '1' || printf '0'
+}
 
 if [[ "$MODE" == selftest ]]; then
     pass=0; fail=0
@@ -64,6 +71,16 @@ if [[ "$MODE" == selftest ]]; then
         echo "  FAIL  pre-existing applications are preserved on restore"; fail=$((fail + 1))
     fi
     unset APP_SNAP
+    if [[ "$(wire_conntrack_stale_present 0)" == 0 ]]; then
+        echo "  PASS  dropped expired tuple is not stale"; pass=$((pass + 1))
+    else
+        echo "  FAIL  dropped expired tuple is not stale"; fail=$((fail + 1))
+    fi
+    if [[ "$(wire_conntrack_stale_present 1000)" == 1 ]]; then
+        echo "  PASS  leaked expired tuple is stale"; pass=$((pass + 1))
+    else
+        echo "  FAIL  leaked expired tuple is stale"; fail=$((fail + 1))
+    fi
     check "create witness expire and drops pass" PASS 0 1 1 0 1000 0 1000 0 1500 1500 1 0
     check "stale session fails" FAIL 1 1 1 1 1000 0 1000 0 1500 1500 1 0
     check "expired subject leak fails" FAIL 1 1 1 0 1000 1 1000 0 1500 1500 1 0
@@ -259,8 +276,6 @@ sleep "$IDLE_WAIT"
 if ! $SG "incus exec ${LAN_REF} -- sh -c 'pid=\$(cat ${CREATE_PID_FILE} 2>/dev/null) && kill -0 \"\$pid\" 2>/dev/null && grep -q CONNECTED ${CREATE_LOG} && ! grep -q Traceback ${CREATE_LOG}'" >/dev/null 2>&1; then
     fail_void harness-void
 fi
-STALE=0
-if n="$(session_count "$LIFECYCLE_PORT")"; then ((n > 0)) && STALE=1; else QUERY_BAD=1; fi
 # Keep the lifecycle application permitted for the post-expiry probes.  The
 # expired tuple and the never-created tuple differ from the control only by
 # conntrack state and SYN-ness; deleting the application here would make a
@@ -302,6 +317,10 @@ EXP_LEAK="$(grep -cE "\\.${LIFECYCLE_SRC_PORT} > .*\\.${LIFECYCLE_PORT}:" "$CAPL
 FRESH_LEAK="$(grep -cE "\\.${FRESH_SOURCE_PORT} > .*\\.${LIFECYCLE_PORT}:" "$CAPLOG" 2>/dev/null || true)"
 SYN_OBS="$(grep -cE "\\.${LIFECYCLE_PORT}: Flags \\[S\\]" "$CAPLOG" 2>/dev/null || true)"
 for v in EXP_LEAK FRESH_LEAK SYN_OBS; do [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '0'; done
+if ! STALE="$(wire_conntrack_stale_present "$EXP_LEAK")"; then
+    QUERY_BAD=1
+    STALE=0
+fi
 CTRL_SESS=0
 if n="$(session_count "$LIFECYCLE_PORT")"; then CTRL_SESS="$n"; else QUERY_BAD=1; fi
 CK="$(grep -ciE 'bad (tcp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"; [[ "$CK" =~ ^[0-9]+$ ]] || CK=0
