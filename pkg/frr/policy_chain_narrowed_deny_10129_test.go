@@ -322,3 +322,51 @@ func TestNarrowedAliasCannotEqualEmptiedDeny10129(t *testing.T) {
 		t.Fatalf("alias %q lost its disambiguating narrowed marker", alias)
 	}
 }
+
+func TestNarrowedTelemetryClearsAfterApplyFullNil10129(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "frr.conf")
+	if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{frrConf: confPath, exec: &fakeExecutor{}}
+	m.recordNarrowed([]narrowedChainSite{
+		{Where: "neighbor 10.0.2.1 import", Kept: []string{"ACCEPTER"}, SurvivorShape: "fall-through"},
+	})
+	if got := m.NarrowedPolicyChainShapes()["fall-through"]; got != 1 {
+		t.Fatalf("seed narrowed shape=%d, want 1", got)
+	}
+	if err := m.ApplyFull(nil); err != nil {
+		t.Fatalf("ApplyFull(nil): %v", err)
+	}
+	if got := m.NarrowedPolicyChains(); len(got) != 0 {
+		t.Fatalf("narrowed descriptors after successful clear=%v, want empty", got)
+	}
+	if got := m.NarrowedPolicyChainShapes(); len(got) != 0 {
+		t.Fatalf("narrowed shapes after successful clear=%v, want empty", got)
+	}
+}
+
+func TestNarrowedTelemetryClearsAfterFailedClear10129(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "frr.conf")
+	if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		frrConf: confPath,
+		exec:    &fakeExecutor{frrReloadPyErr: fmt.Errorf("injected reload failure")},
+	}
+	m.recordNarrowed([]narrowedChainSite{
+		{Where: "neighbor 10.0.2.1 import", Kept: []string{"ACCEPTER"}, SurvivorShape: "fall-through"},
+	})
+	if err := m.Clear(); err == nil {
+		t.Fatal("Clear unexpectedly succeeded with injected reload failure")
+	}
+	if got := m.NarrowedPolicyChains(); len(got) != 0 {
+		t.Fatalf("narrowed descriptors after failed clear=%v, want empty", got)
+	}
+	if got := m.NarrowedPolicyChainShapes(); len(got) != 0 {
+		t.Fatalf("narrowed shapes after failed clear=%v, want empty", got)
+	}
+}

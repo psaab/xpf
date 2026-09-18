@@ -828,7 +828,13 @@ func (m *Manager) commitManagedSection(section string) error {
 // (including ErrFRRReloadDegraded) instead of discarding it — `xpfd
 // cleanup` logs it loudly while still exiting 0 (#1880).
 func (m *Manager) Clear() error {
-	return m.commitManagedSection("")
+	err := m.commitManagedSection("")
+	// A clear attempt removes the managed section from the desired
+	// configuration. Reset the narrowing gauges even when reload reports a
+	// degraded outcome: its retry may later remove the section, and leaving
+	// the old survivor set would make the telemetry permanently stale.
+	m.resetNarrowed()
+	return err
 }
 
 // writeManagedSection replaces the xpf-managed section in frr.conf.
