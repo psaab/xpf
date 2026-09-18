@@ -1403,31 +1403,69 @@ func firewallPackedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 	if node == nil || schema == nil || len(node.Keys) == 0 {
 		return nil
 	}
-	consumed, _ := consumeNodeKeys(node.Keys, schema)
-	if consumed >= len(node.Keys) {
+	// If the generic expander recognized the whole packed tail, all keys are
+	// represented by synthesized children (including nested chains such as
+	// `flexible-match-range range r`). Only inspect the raw tail when expansion
+	// declined it, which is the opaque-unknown case this fallback owns.
+	if packedBody(node, schema) != node {
 		return nil
 	}
+	consumed, current := consumeNodeKeys(node.Keys, schema)
+	if consumed >= len(node.Keys) || current == nil {
+		return nil
+	}
+
+	// Keep the same open-schema stack as packedBodyChildren. A fallback scan
+	// must recognize a known descendant (`range` under `flexible-match-range`)
+	// before deciding that the token is an unknown root leaf; otherwise a
+	// mixed known/unknown tail reports the descendant instead of the authored
+	// unknown leaf.
+	levels := []*schemaNode{current}
 	var out []string
 	for i := consumed; i < len(node.Keys); {
+		at := -1
 		var childSchema *schemaNode
 		if !node.KeyQuoted(i) {
-			childSchema = resolveSchemaChild(schema, node.Keys[i])
+			for level := len(levels) - 1; level >= 0; level-- {
+				if candidate := resolveSchemaChild(levels[level], node.Keys[i]); candidate != nil {
+					at = level
+					childSchema = candidate
+					break
+				}
+			}
 		}
 		if childSchema != nil {
-			n, _ := consumeNodeKeys(node.Keys[i:], childSchema)
+			n, refined := consumeNodeKeys(node.Keys[i:], childSchema)
+			if childSchema.multi && childSchema.children == nil && n > 1 &&
+				node.KeyBracketed(i+n-1) {
+				for n < len(node.Keys)-i && node.KeyBracketed(i+n) {
+					n++
+				}
+			}
 			if n <= 0 {
 				n = 1
 			}
+			levels = append(levels[:at+1], refined)
 			i += n
 			continue
 		}
+
 		if node.Keys[i] != "" {
 			out = append(out, node.Keys[i])
 		}
 		i++
 		for i < len(node.Keys) {
-			if !node.KeyQuoted(i) && resolveSchemaChild(schema, node.Keys[i]) != nil {
-				break
+			if !node.KeyQuoted(i) {
+				known := false
+				for level := len(levels) - 1; level >= 0; level-- {
+					if resolveSchemaChild(levels[level], node.Keys[i]) != nil {
+						known = true
+						break
+					}
+				}
+				if known {
+					break
+				}
 			}
 			i++
 		}

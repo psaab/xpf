@@ -49,4 +49,30 @@ func TestFilterPackedUnknownFromStrict10071(t *testing.T) {
 	if _, err := CompileConfig(clean); err != nil {
 		t.Fatalf("supported valued from control must remain clean: %v", err)
 	}
+
+	mixed, perrs := NewParser(`firewall { family inet { filter F { term T { from flexible-match-range range r byte-offset 9 ttl 64; then accept; } } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("mixed known/unknown packed from fixture did not parse: %v", perrs)
+	}
+	if _, err := CompileConfig(mixed); err == nil || !strings.Contains(err.Error(), "ttl") {
+		t.Fatalf("mixed packed from must reject naming ttl, got %v", err)
+	}
+	mixedLenient, err := CompileConfigLenient(mixed)
+	if err != nil {
+		t.Fatalf("mixed known/unknown packed from must warn, not fail: %v", err)
+	}
+	mixedTerm := firstInetTerm(t, mixedLenient, "F")
+	if len(mixedTerm.UnknownFrom) != 1 || mixedTerm.UnknownFrom[0] != "ttl" {
+		t.Fatalf("mixed packed UnknownFrom = %v, want [ttl]", mixedTerm.UnknownFrom)
+	}
+
+	// #6818 is the adjacent packed-tail control: a known nested firewall
+	// chain must not be mistaken for an opaque unknown `from` leaf.
+	known, perrs := NewParser(`firewall { family inet { filter F { term T { from flexible-match-range range r { byte-offset 9; } } } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("known nested packed-tail control did not parse: %v", perrs)
+	}
+	if _, err := CompileConfig(known); err != nil {
+		t.Fatalf("known nested packed-tail control must remain clean: %v", err)
+	}
 }
