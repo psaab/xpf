@@ -510,6 +510,7 @@ pub(crate) fn run() -> Result<(), String> {
             source_nat_pools: Vec::new(),
             last_resolution: None,
             slow_path: SlowPathStatus::default(),
+            slow_path_delegated: SlowPathStatus::default(),
             debug_worker_threads: 0,
             debug_identity_slots: 0,
             debug_live_slots: 0,

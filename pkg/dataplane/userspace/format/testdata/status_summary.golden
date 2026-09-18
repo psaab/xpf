@@ -134,6 +134,19 @@ Three-color policers:
   Slow path write errors:    1
   Slow path last error:      write EIO
   Slow path per-binding:     6 pkts / 2 drops
+  Slow path delegated active: true
+  Slow path delegated DEGRADED: true (live MTU 1500 < configured; jumbo frames refused)
+  Slow path delegated live MTU: 1500
+  Slow path delegated device: slow1
+  Slow path delegated mode: sync
+  Slow path delegated queued: 5
+  Slow path delegated injected: 70 pkts / 14000 bytes
+  Slow path delegated dropped: 3 pkts / 600 bytes
+  Slow path delegated rate-limited: 2
+  Slow path delegated queue-full: 1
+  Slow path delegated MTU-exceeded: 2
+  Slow path delegated write errors: 2
+  Slow path delegated last error: delegated EIO
   Recent exceptions:         1
   Worker 0 heartbeat age:    unknown
   Worker 1 heartbeat age:    unknown

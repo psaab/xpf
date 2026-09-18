@@ -255,9 +255,13 @@ type ProcessStatus struct {
 	SourceNATPools             []SourceNATPoolStatus     `json:"source_nat_pools,omitempty"`
 	LastResolution             *PacketResolution         `json:"last_resolution,omitempty"`
 	SlowPath                   SlowPathStatus            `json:"slow_path,omitempty"`
-	LastCacheFlushAt           uint64                    `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
-	DataplaneMode              string                    `json:"dataplane_mode,omitempty"`      // Current active mode: "ebpf_only", "userspace_compat", "userspace_strict"
-	ConfiguredMode             string                    `json:"configured_mode,omitempty"`     // Desired mode from config
+	// SlowPathDelegated (#10069) is the outlet used for frames that did not
+	// pass the userspace host-inbound gate. It mirrors the trusted outlet's
+	// live MTU, degraded state, and reinject counters.
+	SlowPathDelegated SlowPathStatus `json:"slow_path_delegated,omitempty"`
+	LastCacheFlushAt  uint64         `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
+	DataplaneMode     string         `json:"dataplane_mode,omitempty"`      // Current active mode: "ebpf_only", "userspace_compat", "userspace_strict"
+	ConfiguredMode    string         `json:"configured_mode,omitempty"`     // Desired mode from config
 	// SnapshotRetryDebt (#9642) reports unknown-outcome publish debt beside
 	// (never instead of) the backend classification: true while an attempted
 	// snapshot is unpublished with ctrl held at 0. Skew-safe additive

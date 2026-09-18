@@ -1896,6 +1896,40 @@ fn app_catalog_entry_roundtrip() {
     assert_eq!(back.dst_port_low, 53);
 }
 
+/// #10069 Gap 2: the coordinator's delegated outlet snapshot reaches the
+/// status wire with independent MTU/degraded/counter values.
+#[test]
+fn delegated_slow_path_status_wire_roundtrip_10069() {
+    let mut status = ProcessStatus::default();
+    status.slow_path = SlowPathStatus {
+        active: true,
+        live_mtu: 9000,
+        ..Default::default()
+    };
+    status.slow_path_delegated = SlowPathStatus {
+        active: true,
+        degraded: true,
+        live_mtu: 1500,
+        device_name: "xpf-usp1".into(),
+        injected_packets: 7,
+        mtu_dropped_packets: 3,
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&status).expect("serialize ProcessStatus");
+    assert_eq!(value["slow_path"]["live_mtu"], 9000);
+    assert_eq!(value["slow_path_delegated"]["active"], true);
+    assert_eq!(value["slow_path_delegated"]["degraded"], true);
+    assert_eq!(value["slow_path_delegated"]["live_mtu"], 1500);
+    assert_eq!(value["slow_path_delegated"]["device_name"], "xpf-usp1");
+    assert_eq!(value["slow_path_delegated"]["injected_packets"], 7);
+    assert_eq!(value["slow_path_delegated"]["mtu_dropped_packets"], 3);
+
+    let decoded: ProcessStatus =
+        serde_json::from_value(value).expect("decode ProcessStatus");
+    assert_eq!(decoded.slow_path_delegated.live_mtu, 1500);
+    assert!(decoded.slow_path_delegated.degraded);
+}
+
 // ---------------------------------------------------------------------------
 // #1325: differential wire-format invariant.
 //

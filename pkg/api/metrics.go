@@ -621,6 +621,21 @@ type xpfCollector struct {
 	userspaceIPv6ExtHeaderDropped *prometheus.Desc
 	userspaceFlowCacheActiveFlows *prometheus.Desc
 	userspaceFlowCacheCapacity    *prometheus.Desc
+	// #10069: dual slow-path outlet health/counters, labelled by outlet
+	// (`trusted` or `delegated`) so the delegated TUN does not disappear from
+	// Prometheus when its MTU or reinject counters diverge.
+	userspaceSlowPathActive            *prometheus.Desc
+	userspaceSlowPathDegraded          *prometheus.Desc
+	userspaceSlowPathLiveMTU           *prometheus.Desc
+	userspaceSlowPathQueuedPackets     *prometheus.Desc
+	userspaceSlowPathInjectedPackets   *prometheus.Desc
+	userspaceSlowPathInjectedBytes     *prometheus.Desc
+	userspaceSlowPathDroppedPackets    *prometheus.Desc
+	userspaceSlowPathDroppedBytes      *prometheus.Desc
+	userspaceSlowPathRateLimited       *prometheus.Desc
+	userspaceSlowPathQueueFull         *prometheus.Desc
+	userspaceSlowPathWriteErrors       *prometheus.Desc
+	userspaceSlowPathMTUDroppedPackets *prometheus.Desc
 	// #1379: daemon-side userspace event-stream transport counters.
 	userspaceEventStreamFramesTotal          *prometheus.Desc
 	userspaceEventStreamProducerFramesTotal  *prometheus.Desc
@@ -1083,6 +1098,18 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSyncedImportReserveRefused
 	ch <- c.userspaceSyncedImportUnknownRoutingDomain
 	ch <- c.userspaceGreDecapEcnIllegalDrops
+	ch <- c.userspaceSlowPathActive
+	ch <- c.userspaceSlowPathDegraded
+	ch <- c.userspaceSlowPathLiveMTU
+	ch <- c.userspaceSlowPathQueuedPackets
+	ch <- c.userspaceSlowPathInjectedPackets
+	ch <- c.userspaceSlowPathInjectedBytes
+	ch <- c.userspaceSlowPathDroppedPackets
+	ch <- c.userspaceSlowPathDroppedBytes
+	ch <- c.userspaceSlowPathRateLimited
+	ch <- c.userspaceSlowPathQueueFull
+	ch <- c.userspaceSlowPathWriteErrors
+	ch <- c.userspaceSlowPathMTUDroppedPackets
 	ch <- c.userspaceWgDecapEcnIllegalDrops
 	ch <- c.userspaceGreEncapDfOversizeDrops
 	ch <- c.userspaceGreDecapChecksumInvalidDrops

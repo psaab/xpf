@@ -67,6 +67,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitBindingTXCompletionTelemetry(ch, status)
 	c.emitBindingVMinThrottleCounters(ch, status)
 	c.emitBindingSlowPathReinjectCounters(ch, status)
+	c.emitUserspaceSlowPathStatus(ch, status)
 	c.emitCoSActiveFlowCount(ch, status)
 	c.emitThreeColorPolicerCounters(ch, status)
 	c.emitUserspaceSourceNATPoolMetrics(ch, status)
