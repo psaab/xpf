@@ -778,27 +778,57 @@ func canonicalRoutePrefix(s string) string {
 }
 
 // #9132: walk every routing-instance interface reference twice — pass 0 binds
-// the reference AS WRITTEN, pass 1 adds the units a BARE reference fans down
-// onto, never overwriting a key pass 0 already holds.
+// the reference's runtime key, pass 1 adds the units a BARE reference fans
+// down onto, never overwriting a key pass 0 already holds.
+//
+// A member may use the operational Linux spelling while its interface stanza
+// uses the config spelling (#10173). The snapshot rows are keyed by the
+// declared stanza, so a cross-spelled unit reference needs its declared key
+// before it can scope a row. Bare fan-down aliases remain the follow-up
+// exception handled in #10174.
 //
 // Two properties come out of that shape, and both are worth stating because
 // they are what make the change reviewable:
 //
-//   - pass 0 is byte-for-byte the pre-#9132 loop, so the fix is PURELY
-//     ADDITIVE on these maps: every key master produced still carries master's
-//     value, and the only new keys are unit keys of bare references.
-//   - an EXPLICIT unit reference always beats a unit key reached by fanning a
-//     bare reference down. A single pass with plain assignment would resolve
-//     `ge-0/0/0` in tenant-a against `ge-0/0/0.1` in tenant-b by CONFIG ORDER,
-//     which is a silent order-dependent VRF binding for a contradictory config.
-//     `cfg.RoutingInstances` is a slice, so that order is at least
-//     deterministic — it is still not a rule anyone chose.
+//   - pass 0 binds every explicit reference before pass 1 considers fanout,
+//     so an EXPLICIT unit reference always beats a unit key reached by fanning
+//     a BARE reference down, regardless of cfg.RoutingInstances order.
+//   - same-spelling refs retain the pre-alias key and fanout byte-for-byte;
+//     aliasing only changes the runtime key when LookupInterfaceByLinuxName
+//     finds a differently-spelled declared stanza.
+func routingInstanceInterfaceKeysForRef(cfg *config.Config, raw string) (primary string, fanout []string) {
+	keys := config.InterfaceUnitRefKeys(cfg, raw)
+	if len(keys) == 0 {
+		return "", nil
+	}
+	primary = keys[0]
+	fanout = keys[1:]
+	if cfg == nil {
+		return primary, fanout
+	}
+	s := cfg.SplitInterfaceUnitRef(raw)
+	stanzaKey, _, ok := config.LookupInterfaceByLinuxName(cfg, s.Base)
+	if !ok || stanzaKey == s.Base {
+		return primary, fanout
+	}
+	if s.HasUnit {
+		// #10173: unit aliases resolve against the declared stanza, while
+		// bare aliases deliberately remain outside this helper until the
+		// daemon/userspace follow-up (#10174).
+		if suffix, ok := strings.CutPrefix(s.Literal, s.Base); ok {
+			return stanzaKey + suffix, nil
+		}
+		return primary, fanout
+	}
+	return primary, fanout
+}
+
 func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, key string)) {
 	if cfg == nil {
 		return
 	}
 	seen := make(map[string]struct{})
-	for pass := 0; pass < 2; pass++ {
+	for pass := range 2 {
 		for _, ri := range cfg.RoutingInstances {
 			if ri == nil || ri.Name == "" {
 				continue
@@ -807,19 +837,16 @@ func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, ke
 				if ifname == "" {
 					continue
 				}
-				// #5878 phase 2: canonicalize the .<unit> suffix so ge-0/0/0.01
-				// binds the same table as ge-0/0/0.1 (the per-unit snapshot
-				// consumer keys these maps by the canonical "%s.%d" unit name).
-				keys := config.InterfaceUnitRefKeys(cfg, ifname)
-				if len(keys) == 0 {
+				primary, fanout := routingInstanceInterfaceKeysForRef(cfg, ifname)
+				if primary == "" {
 					continue
 				}
 				if pass == 0 {
-					seen[keys[0]] = struct{}{}
-					bind(ri.Name, keys[0])
+					seen[primary] = struct{}{}
+					bind(ri.Name, primary)
 					continue
 				}
-				for _, key := range keys[1:] {
+				for _, key := range fanout {
 					if _, exists := seen[key]; exists {
 						continue
 					}
@@ -844,8 +871,8 @@ func buildInterfaceRouteTables(cfg *config.Config) (map[string]string, map[strin
 // buildInterfaceRoutingInstances maps each interface (config name, e.g.
 // "ge-0-0-1.80") to the routing-instance it belongs to. A BARE reference is
 // fanned down onto every configured unit (#9132) — see
-// forEachRoutingInstanceInterfaceKey and config.InterfaceUnitRefKeys. The default
-// instance is the empty string. This mirrors buildInterfaceRouteTables'
+// forEachRoutingInstanceInterfaceKey and config.InterfaceUnitRefKeys. The
+// default instance is the empty string. This mirrors buildInterfaceRouteTables'
 // membership lookup, but carries the bare instance NAME so the Rust
 // dataplane can scope its rebuilt-from-interface connected routes to the
 // owning routing table (#2388): without it, the Rust connected store is
@@ -872,12 +899,13 @@ func buildInterfaceRoutingInstances(cfg *config.Config) map[string]string {
 const QuarantinedRoutingInstanceDomain uint32 = 2
 
 // quarantinedInterfaceKeys expands every quarantined routing instance's
-// interface refs to the snapshot keys they address, using the same
-// config.InterfaceUnitRefKeys expansion (as-written keys[0] AND fanout
-// keys[1:]) the survivor maps use — so a quarantined BARE ref fans down onto
-// its units exactly like #9132. That fanout reads cfg.Interfaces.Units, never
-// cfg.RoutingInstances, so the dropped instances expand normally. Returns nil
-// when nothing was quarantined (the common case).
+// interface refs to the same alias and fanout contract as the survivor maps —
+// cross-spelled unit keys are translated to their declared stanza, while
+// existing same-spelling bare refs retain their normal fanout. A survivor map
+// always wins later in routingDomainForInterfaceKey, so these extra keys
+// cannot overwrite a surviving claim. That fanout reads cfg.Interfaces.Units,
+// never cfg.RoutingInstances, so dropped instances expand normally. Returns
+// nil when nothing was quarantined (the common case).
 func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
 	if cfg == nil || len(cfg.QuarantinedRoutingInstances) == 0 {
 		return nil
@@ -891,7 +919,12 @@ func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
 			if ifname == "" {
 				continue
 			}
-			for _, key := range config.InterfaceUnitRefKeys(cfg, ifname) {
+			primary, fanout := routingInstanceInterfaceKeysForRef(cfg, ifname)
+			if primary == "" {
+				continue
+			}
+			out[primary] = struct{}{}
+			for _, key := range fanout {
 				out[key] = struct{}{}
 			}
 		}
