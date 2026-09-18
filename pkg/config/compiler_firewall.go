@@ -1472,12 +1472,12 @@ func firewallPackedTermFromNodes(termNode *Node, termSchema *schemaNode) []*Node
 	consumed, _ := consumeNodeKeys(termNode.Keys, termSchema)
 	var out []*Node
 	for i := consumed; i < len(termNode.Keys); i++ {
-		if termNode.KeyQuoted(i) || termNode.Keys[i] != "from" {
+		if termNode.KeyQuoted(i) || termNode.KeyBracketed(i) || termNode.Keys[i] != "from" {
 			continue
 		}
 		end := i + 1
 		for end < len(termNode.Keys) {
-			if !termNode.KeyQuoted(end) &&
+			if !termNode.KeyQuoted(end) && !termNode.KeyBracketed(end) &&
 				(termNode.Keys[end] == "from" || termNode.Keys[end] == "then") {
 				break
 			}
