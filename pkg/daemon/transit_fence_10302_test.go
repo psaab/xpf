@@ -1,0 +1,148 @@
+package daemon
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/vishvananda/netlink"
+)
+
+type fenceRuntime10302 struct {
+	dataplane.RuntimeDataPlane
+	ifindexes []int
+}
+
+func (r *fenceRuntime10302) AttachedXDPIfindexes() []int {
+	return append([]int(nil), r.ifindexes...)
+}
+
+func TestArmedForwardFenceDropsUnownedTransit10302(t *testing.T) {
+	oldLinks := transitFenceLinkList
+	t.Cleanup(func() { transitFenceLinkList = oldLinks })
+	transitFenceLinkList = func() ([]netlink.Link, error) {
+		return []netlink.Link{
+			&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "xdp-owned0", Index: 101}},
+			&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "leave-alone0", Index: 102}},
+			&netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "xfrm1", Index: 103}},
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: "xpf-usp0", Index: 104},
+				Mode:      netlink.TUNTAP_MODE_TUN,
+			},
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 105},
+				Mode:      netlink.TUNTAP_MODE_TUN,
+			},
+		}, nil
+	}
+
+	f := withBarrierRecorder(t)
+	d := &Daemon{}
+	d.setDataplane(&fenceRuntime10302{ifindexes: []int{101}})
+
+	if err := d.applyTransitBarrier(true); err != nil {
+		t.Fatalf("armed fence install: %v", err)
+	}
+	if len(f.fenceCalls10302) != 1 || f.fenceCalls10302[0] != "install" {
+		t.Fatalf("armed transit must install the explicit forward fence, calls=%v barrier=%v", f.fenceCalls10302, f.barrierCalls)
+	}
+	if len(f.fenceSpecs10302) != 1 {
+		t.Fatalf("armed transit must supply exactly one forward-fence spec, got %d", len(f.fenceSpecs10302))
+	}
+	got := f.fenceSpecs10302[0].AllowedIfnames
+	want := []string{"xdp-owned0", armedTransitReinjectIfname}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("armed pinholes = %v, want only tracked XDP + delegated reinject TUN %v", got, want)
+	}
+	for _, name := range got {
+		if name == "leave-alone0" || name == "unmanaged0" || name == "xfrm1" || name == "xpf-usp0" {
+			t.Fatalf("unowned/unadjudicated or LocalDelivery fixture %q must not be an armed forward pinhole: %v", name, got)
+		}
+	}
+}
+
+func TestArmedForwardFenceResolverFailureKeepsGateClosed10302(t *testing.T) {
+	oldLinks := transitFenceLinkList
+	t.Cleanup(func() { transitFenceLinkList = oldLinks })
+	transitFenceLinkList = func() ([]netlink.Link, error) {
+		return nil, errors.New("netlink unavailable")
+	}
+
+	f := withBarrierRecorder(t)
+	d := &Daemon{}
+	d.setDataplane(&fenceRuntime10302{ifindexes: []int{101}})
+
+	if err := d.applyTransitBarrier(true); err == nil {
+		t.Fatal("armed transit must fail closed when kernel link provenance cannot be resolved")
+	}
+	if len(f.fenceCalls10302) != 0 {
+		t.Fatalf("resolver failure must not install an armed fence: %v", f.fenceCalls10302)
+	}
+}
+
+func TestArmedForwardFenceAllTrackedIfindexesUnresolvedKeepsGateClosed10302(t *testing.T) {
+	oldLinks := transitFenceLinkList
+	t.Cleanup(func() { transitFenceLinkList = oldLinks })
+	transitFenceLinkList = func() ([]netlink.Link, error) {
+		return []netlink.Link{
+			&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 105},
+				Mode:      netlink.TUNTAP_MODE_TUN,
+			},
+		}, nil
+	}
+
+	f := withBarrierRecorder(t)
+	d := &Daemon{}
+	d.setDataplane(&fenceRuntime10302{ifindexes: []int{101}})
+
+	if err := d.applyTransitBarrier(true); err == nil {
+		t.Fatal("armed transit must fail closed when all tracked XDP ifindexes are unresolved")
+	}
+	if len(f.fenceCalls10302) != 0 {
+		t.Fatalf("unresolved XDP provenance must not install a fence with only xpf-usp1: %v", f.fenceCalls10302)
+	}
+}
+
+func TestArmedFenceReassertFailureRestoresBarrier10302(t *testing.T) {
+	withTempTransitForwardSysctls(t, "1")
+	oldLinks := transitFenceLinkList
+	t.Cleanup(func() { transitFenceLinkList = oldLinks })
+	transitFenceLinkList = func() ([]netlink.Link, error) {
+		return []netlink.Link{
+			&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "xdp-owned0", Index: 101}},
+		}, nil
+	}
+
+	f := withBarrierRecorder(t)
+	d := &Daemon{}
+	d.setDataplane(&fenceRuntime10302{ifindexes: []int{101}})
+	if err := d.applyTransitBarrier(true); err != nil {
+		t.Fatalf("initial armed fence install: %v", err)
+	}
+	f.barrierCalls = nil
+	transitFenceLinkList = func() ([]netlink.Link, error) {
+		return nil, errors.New("link list failed during reassert")
+	}
+
+	if opened := d.writeTransitGateLocked("reassert", true); opened {
+		t.Fatal("reassert with unresolved provenance must stay closed")
+	}
+	if got := lastBarrierCall(f); got != "install" {
+		t.Fatalf("open-path failure must restore unconditional barrier, got %q (calls=%v)", got, f.barrierCalls)
+	}
+}
+
+func TestUnarmedTransitBarrierRemainsUnconditional10302(t *testing.T) {
+	f := withBarrierRecorder(t)
+	d := &Daemon{}
+	if err := d.applyTransitBarrier(false); err != nil {
+		t.Fatalf("unarmed barrier install: %v", err)
+	}
+	if got := lastBarrierCall(f); got != "install" {
+		t.Fatalf("unarmed transit must install the unconditional barrier, got %q", got)
+	}
+	if len(f.fenceCalls10302) != 0 {
+		t.Fatalf("unarmed transit must not install an armed pinhole fence: %v", f.fenceCalls10302)
+	}
+}

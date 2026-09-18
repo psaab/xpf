@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	gnft "github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -94,4 +95,46 @@ func transitBarrierFakeInstaller9852(inetErr, bridgeErr error) *netlinkInstaller
 			return nil, nil
 		}))
 	})
+}
+
+func TestArmedTransitFencePlanShape10302(t *testing.T) {
+	p := newBuildPlan(t, "xpf_transit_10302", *gnft.ChainPriorityFilter)
+	chain := transitBarrierChain(p.table)
+	if chain.Hooknum != gnft.ChainHookForward {
+		t.Fatalf("transit fence hook = %v, want forward", chain.Hooknum)
+	}
+	if chain.Policy == nil || *chain.Policy != gnft.ChainPolicyDrop {
+		t.Fatalf("transit fence policy = %v, want DROP", chain.Policy)
+	}
+	p.chain = chain
+	emitTransitFencePinhole(p, ForwardFenceSpec{AllowedIfnames: []string{"xdp-owned0"}})
+	if p.err != nil {
+		t.Fatalf("armed pinhole plan failed: %v", p.err)
+	}
+	if len(p.rules) != 1 {
+		t.Fatalf("armed fence emitted %d rules, want one explicit pinhole", len(p.rules))
+	}
+	rule := p.rules[0]
+	if len(rule) < 3 {
+		t.Fatalf("armed pinhole expression count = %d, want iifname comparison plus verdict", len(rule))
+	}
+	if meta, ok := rule[0].(*expr.Meta); !ok || meta.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("armed pinhole first expression = %#v, want iifname meta", rule[0])
+	}
+	if cmp, ok := rule[1].(*expr.Cmp); !ok || cmp.Op != expr.CmpOpEq {
+		t.Fatalf("armed pinhole second expression = %#v, want iifname equality", rule[1])
+	}
+	if verdict, ok := rule[len(rule)-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictAccept {
+		t.Fatalf("armed pinhole verdict = %#v, want ACCEPT", rule[len(rule)-1])
+	}
+
+	empty := newBuildPlan(t, "xpf_transit_10302_empty", *gnft.ChainPriorityFilter)
+	empty.chain = transitBarrierChain(empty.table)
+	emitTransitFencePinhole(empty, ForwardFenceSpec{})
+	if empty.err != nil {
+		t.Fatalf("empty fence plan failed: %v", empty.err)
+	}
+	if len(empty.rules) != 0 {
+		t.Fatalf("empty armed fence emitted %d ACCEPT rules, want none", len(empty.rules))
+	}
 }

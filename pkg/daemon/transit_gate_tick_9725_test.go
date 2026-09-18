@@ -59,14 +59,14 @@ func TestTransitGateStaysClosedUntilXDPAttach9725(t *testing.T) {
 
 	waitTransitKnobs9725(t, v4, v6, "0")
 	if got := lastBarrierCall(f); got != "install" {
-		t.Fatalf("after Start before attach barrier = %q, want install", got)
+		t.Fatalf("after Start before attach unconditional barrier = %q, want install", got)
 	}
 
 	rt.setCount(1, false)
 	d.reassertTransitGate("test-attach")
 	waitTransitKnobs9725(t, v4, v6, "1")
-	if got := lastBarrierCall(f); got != "remove" {
-		t.Fatalf("after kernel-proven attach barrier = %q, want remove", got)
+	if got := lastFenceCall10302(f); got != "install" {
+		t.Fatalf("after kernel-proven attach armed transit fence = %q, want install", got)
 	}
 
 	rt.setCount(0, false)
@@ -138,7 +138,6 @@ func TestTransitGateUncertainCountFailsClosed9725(t *testing.T) {
 	d.reassertTransitGate("uncertain")
 	waitTransitKnobs9725(t, v4, v6, "0")
 }
-
 
 // armedRecorderDP models the successful attach path in older gate tests. Its
 // fixed count keeps those assertions focused on the behaviour under test while

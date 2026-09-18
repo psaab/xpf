@@ -17,18 +17,17 @@ import (
 )
 
 // #7547: AttachXDP/DetachXDP are read-modify-write sequences whose atomicity
-// rests on a claim in a comment (loader.go: "the link maps are
-// lifecycle-serialized ... under the daemon's applySem") that nothing tested.
+// rests on a claim in a comment. #10302 adds the XDP ownership lease that
+// serializes each whole attach/detach transition, including the kernel syscall,
+// against the armed forward-fence actuation.
 //
-// #6740 made every INDIVIDUAL map access safe. It deliberately did NOT put the
-// syscall under the lock — l.Close() must not run under the mutex the 1 Hz
-// status path needs — so the sequence is guarded read, UNLOCKED Close, guarded
-// delete. That is correct and must stay; a wider m.mu would reintroduce exactly
-// what #6740 removed.
+// #6740 made every INDIVIDUAL map access safe. The dedicated ownership lease is
+// separate from m.mu, so l.Close() does not run under the broad registry mutex
+// needed by the 1 Hz status path. The lease is held only against other XDP
+// ownership transitions and the fence's read side.
 //
-// What follows is therefore not a fix. It is the two things the claim was
-// missing: an executable statement of the hazard, and a census of the callers
-// the safety actually depends on.
+// The executable cell below pins the per-ifindex serialization that prevents
+// two concurrent callers from closing the same cilium/ebpf link.
 
 // countingLink7547 is a link.Link that touches no kernel state and records
 // whether two goroutines are ever inside Close() at the same instant.
@@ -59,104 +58,60 @@ func (f *countingLink7547) Close() error {
 	return nil
 }
 
-// TestDetachXDPIsNotSelfSerializing7547 is a DELIBERATE TRIPWIRE pinning
-// today's behaviour, in the same spirit as #6790's misclassification cell.
-//
-// It asserts that DetachXDP does NOT serialize itself: two concurrent calls for
-// one ifindex both Unpin() and both Close() the SAME handle, with both
-// goroutines inside Close simultaneously. That is not a hypothetical — it is
-// what this cell measures.
-//
-// WHY THAT MATTERS, in the real thing rather than in this fake: cilium/ebpf's
-// FD.Close is idempotent SEQUENTIALLY (`if fd.raw < 0 { return nil }`) but
-// Disown() writes fd.raw with no lock and no atomic, so two concurrent closes
-// are a DATA RACE on fd.raw and issue two unix.Close(N) calls on the same fd
-// number. The second either fails EBADF or, if that number has been reused in
-// between, closes an unrelated file. So this is a correctness hazard, not a
-// noisy one — conditional entirely on whether two callers can be concurrent,
-// which is what the census below is about.
-//
-// IF THIS CELL EVER REDS: someone added per-ifindex exclusion, which is the fix
-// the issue contemplates. That is a GOOD change. Invert this cell, and consider
-// whether TestEveryAttachDetachCallerIsSerialized7547 can be relaxed — it
-// exists only because this property holds.
-func TestDetachXDPIsNotSelfSerializing7547(t *testing.T) {
+// TestDetachXDPIsSerializedWithFenceLease7547 pins the #10302 ownership lease.
+// Two concurrent calls for one ifindex must not both Unpin/Close the same
+// handle; the second call waits until the first removes the registry entry.
+func TestDetachXDPIsSerializedWithFenceLease7547(t *testing.T) {
 	m := New()
 	fl := &countingLink7547{release: make(chan struct{})}
 	m.setXDPLink(7547, fl)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		wg.Add(1)
 		go func() { defer wg.Done(); _ = m.DetachXDP(7547) }()
 	}
-	// Hold both goroutines inside Close so the overlap is observed rather than
-	// raced for. A bounded spin, not a sleep: if the second never arrives the
-	// release below unblocks the first and the assertions report what happened.
-	//
-	// #8218 clause 2: the spin MUST yield. Without runtime.Gosched() this is a
-	// busy loop that never gives up its P, so on a loaded box the second
-	// goroutine is never scheduled, the spin expires, the first completes its
-	// whole sequence INCLUDING deleteXDPLink, and the second then finds no link
-	// and returns without ever calling Close. That reports "measured nothing"
-	// and reds an unrelated gate. Measured: GOMAXPROCS=1 degenerates 30/30
-	// without the yield and 0/30 with it, and the loop needs 1-93 iterations
-	// against this bound. The bound stays as the anti-hang guard — if someone
-	// adds the per-ifindex exclusion this cell exists to detect, the second
-	// goroutine never enters Close and this must terminate, not block.
-	for i := 0; i < 1_000_000 && fl.inClose.Load() < 2; i++ {
+	// Let the first call enter Close, then release it. The second call cannot
+	// enter Close while the first holds the XDP ownership write lease.
+	for range 1_000_000 {
+		if fl.inClose.Load() >= 1 {
+			break
+		}
 		runtime.Gosched()
 	}
 	close(fl.release)
 	wg.Wait()
 
-	if got := fl.closes.Load(); got != 2 {
-		t.Errorf("Close() called %d times, want 2 — DetachXDP now serializes itself, "+
-			"or the two detaches otherwise failed to overlap. Since #8218 the fixture "+
-			"yields, so scheduler starvation is no longer a plausible cause: read this "+
-			"as per-ifindex exclusion having been added, which is the GOOD change this "+
-			"tripwire exists to detect. Invert the cell rather than repairing it.", got)
+	if got := fl.closes.Load(); got != 1 {
+		t.Fatalf("Close() called %d times, want one serialized close", got)
 	}
-	// Simultaneity is a bonus observation, not the assertion. The load-bearing
-	// fact is that Close() ran TWICE on one handle; whether the two calls
-	// overlapped depends on scheduling. Reported rather than asserted — and
-	// deliberately NOT a t.Skip, which after the Errorf above would muddle a
-	// real failure with an unobserved nicety.
-	t.Logf("closes=%d unpins=%d overlapped=%v",
-		fl.closes.Load(), fl.unpins.Load(), fl.overlap.Load())
+	if got := fl.unpins.Load(); got != 1 {
+		t.Fatalf("Unpin() called %d times, want one serialized unpin", got)
+	}
+	if fl.overlap.Load() {
+		t.Fatal("concurrent DetachXDP calls entered Close simultaneously")
+	}
 }
 
 // serializingAuthority records, for each call site of AttachXDP/DetachXDP, what
-// actually prevents two of them running concurrently. This is the census the
-// #7547 claim was missing: the safety is a property of the CALLERS, so it has
-// to be asserted where the callers are.
+// keeps the caller within the dataplane's ownership protocol. The #10302 lease
+// now serializes the functions themselves; the census still ensures every
+// caller reaches those leased methods rather than bypassing them.
 //
 // Keyed "<pkg-relative path>:<enclosing func>".
 var serializingAuthority = map[string]string{
 	// Measured, not assumed — the census below rejected an earlier hand-written
 	// version of this map, which is the point of having it.
-	//
-	// Neither Compile nor CompileUserspaceShim takes m.applyMu; that mutex
-	// guards apply.go's generation bookkeeping, not these sequences. So within
-	// pkg/dataplane there is NO in-package serialization at all, and the entire
-	// safety of both sites is the daemon's applySem around applyConfigLocked —
-	// which is exactly the claim #7547 was filed to test.
-	"pkg/dataplane/compiler.go:Compile":                                   "daemon applySem (applyConfigLocked holds it; Compile takes no lock of its own)",
-	"pkg/dataplane/loader.go:attachUserspaceShimXDP":                      "daemon applySem (reached via CompileUserspaceShim from the same apply path)",
-	"pkg/dataplane/userspace/manager_compile.go:syncInterfaceAttachments": "userspace Manager m.mu (applyCompiledSnapshot holds it for the whole call) AND the daemon applySem above it",
+	"pkg/dataplane/compiler.go:Compile":                                   "dataplane XDP ownership lease plus daemon applySem",
+	"pkg/dataplane/loader.go:attachUserspaceShimXDP":                      "dataplane XDP ownership lease plus daemon applySem",
+	"pkg/dataplane/userspace/manager_compile.go:syncInterfaceAttachments": "userspace Manager m.mu plus dataplane XDP ownership lease",
 }
 
 // TestEveryAttachDetachCallerIsSerialized7547 is the guard the issue asks for.
 //
-// The atomicity of these sequences is not a property of the functions — the
-// tripwire above shows they do not serialize themselves — it is a property of
-// their CALLERS. A property of call sites silently stops holding when a new
-// call site appears, and nothing in the suite would notice: the new caller
-// compiles, passes vet, and passes every existing test.
-//
-// So this enumerates the call sites and requires each to be registered with the
-// authority that serializes it. Adding a caller without adding a row reds, and
-// writing the row forces the author to name what makes their call safe.
+// This enumerates the call sites and requires each to be registered with the
+// ownership protocol. Adding a caller without adding a row reds, and writing
+// the row forces the author to name what makes the call safe.
 //
 // Deliberately EXACT in both directions: a stale row for a call site that no
 // longer exists is worse than no row, because it reads as coverage.

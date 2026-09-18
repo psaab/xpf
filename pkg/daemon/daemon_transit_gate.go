@@ -1,10 +1,15 @@
 package daemon
 
 import (
-	"github.com/psaab/xpf/pkg/cluster"
+	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/cluster"
+	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/vishvananda/netlink"
 )
 
 // #5275 — the transit-forwarding fail-closed gate.
@@ -43,36 +48,34 @@ import (
 // full transit barrier in docs/research/5275-arm-failclosed/plan.md §6
 // (inet FORWARD drop + bridge-family barrier + flowtable disable).
 //
-// #7191 added the nftables legs. The barrier is now BOTH the `ip_forward=0`
+// #7191 added the nftables legs. The closed gate has BOTH the `ip_forward=0`
 // sysctl and an unconditional forward-hook DROP in the inet AND bridge
-// families (pkg/nftables/transit_barrier.go), installed and removed from the
-// same mark* helpers below so there is one arm state driving both. The bridge
-// leg matters because `ip_forward` does not govern bridged frames at all, and
-// this repo creates bridge domains.
+// families (pkg/nftables/transit_barrier.go). #10302 extends the same owning
+// boundary to the armed/open state: the forward hook remains policy-DROP and
+// admits only the runtime-owned XDP links plus the daemon-owned adjudicated
+// reinjection TUN. The bridge leg matters because `ip_forward` does not govern
+// bridged frames at all, and this repo creates bridge domains.
 //
 // The plan's third leg, a flowtable disable, is a NO-OP today and is
 // deliberately unwritten: xpf creates no flowtable, so there is nothing to
 // flush. TestNoFlowtableIsEverCreated7191 pins that assumption so this
 // sentence cannot rot into a false claim.
 //
-// CRITICALLY, the nftables legs are scoped to the CLOSED gate window only —
-// the same window in which the transit sysctls are already 0 — so they close
-// nothing that was open. Once both arm state and a live XDP link are proven,
-// the barrier is removed so kernel-forwarded paths remain usable.
+// The armed fence is installed before the transit sysctls are raised. If the
+// fence cannot be installed, the sysctls remain zero. A closed-gate transition
+// always restores the unconditional barrier before writing zero, so a stale
+// pinhole set cannot survive a detach race.
 //
 // #7191 added the post-attach arm-coverage proof. Coverage still gates the
 // arm bit, while #9725 additionally requires a fresh kernel XDP-link census
 // before opening the transit knobs.
 //
-// WHY THE OPEN CASE IS PRESERVED. The AF_XDP fast path does not need
-// `ip_forward` at all — measured in docs/image-validation.md ("Discriminator —
-// this is the xpf dataplane, not the guest kernel"): with the transit sysctls
-// at 0 on the appliance, ping stayed at 0% loss and iperf3 moved 4.29 Gbit/s
-// (v4) / 3.02 Gbit/s (v6). But some attached paths DO XDP_PASS to the kernel
-// and rely on it — route-based-VPN plaintext leaving an xfrm interface and
-// SNAT'd frames passed up for kernel routing. Once a live XDP link is proven,
-// the gate keeps the desired value "1", byte-identical to the pre-#9725
-// behavior.
+// The AF_XDP fast path does not need `ip_forward` at all — measured in
+// docs/image-validation.md ("Discriminator — this is the xpf dataplane, not the
+// guest kernel"): with the transit sysctls at 0 on the appliance, ping stayed
+// at 0% loss and iperf3 moved 4.29 Gbit/s (v4) / 3.02 Gbit/s (v6). The only
+// kernel-forwarded pinholes are the explicit ownership paths above; route-based
+// XFRM plaintext and arbitrary leave-alone transit remain dropped.
 // ipv4ForwardSysctlPath / ipv6ForwardSysctlPath are the two kernel knobs
 // that decide whether the kernel routes TRANSIT packets. They are the ONLY
 // two sysctls the arm gate owns — host posture (accept_ra, l3mdev_accept,
@@ -81,6 +84,98 @@ import (
 // Package vars, not consts, for the same reason sshKnownHostsPath is one
 // (daemon_system.go): tests drive the gate against a temp dir instead of
 // /proc. Never reassigned in production.
+
+// attachedXDPIfindexSource is the provenance-bearing runtime capability used
+// by the armed forward fence. It intentionally exposes the tracked xpf link
+// set, not a global netlink "any XDP" scan: an unrelated XDP program on a
+// leave-alone NIC is not an xpf policy proof.
+type attachedXDPIfindexSource interface {
+	AttachedXDPIfindexes() []int
+}
+
+type attachedXDPFenceLease interface {
+	WithAttachedXDPFence(func([]int) error) error
+}
+
+// transitFenceLinkList is a test seam around the kernel name lookup. Production
+// uses netlink's live list; tests supply links whose ifindexes and types model
+// owned, unmanaged, and lookalike devices without changing kernel state.
+var transitFenceLinkList = netlink.LinkList
+
+const armedTransitReinjectIfname = "xpf-usp1"
+
+// armedTransitFenceSpec resolves the only ingress pinholes permitted while
+// armed:
+//   - tracked runtime XDP links whose kernel names still resolve;
+//   - the daemon-owned delegated slow-path TUN xpf-usp1, when the live link is
+//     a TUN under the fixed name.
+//
+// xpf-usp1 is a deliberately documented residual: the delegated outlet
+// multiplexes xfrm/reinject traffic and destination-judged delegated traffic,
+// which are indistinguishable at the FORWARD hook by iifname today. xpf-usp0
+// is LocalDelivery/gated-only and is not a FORWARD pinhole.
+//
+// Missing capability, an unknown ifindex alongside another resolved ifindex, or
+// a mismatched link type all produce fewer pinholes, never a broader one. If
+// every supplied tracked ifindex is unknown, or kernel link enumeration fails,
+// arming is fatal and leaves the gate closed. Direct route-based IPsec plaintext
+// arrives on its daemon-owned xfrmi and remains absent from the allowlist;
+// kernel-XFRM reinjection instead arrives through xpf-usp1.
+func (d *Daemon) armedTransitFenceSpec() (xnft.ForwardFenceSpec, error) {
+	var ifindexes []int
+	if src, ok := d.dataplane().(attachedXDPIfindexSource); ok && src != nil {
+		ifindexes = src.AttachedXDPIfindexes()
+	}
+	return d.armedTransitFenceSpecForIfindexes(ifindexes)
+}
+
+func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.ForwardFenceSpec, error) {
+	tracked := make(map[int]struct{}, len(ifindexes))
+	for _, ifindex := range ifindexes {
+		if ifindex > 0 {
+			tracked[ifindex] = struct{}{}
+		}
+	}
+	links, err := transitFenceLinkList()
+	if err != nil {
+		return xnft.ForwardFenceSpec{}, fmt.Errorf("resolve armed transit fence interfaces: %w", err)
+	}
+	names := make([]string, 0, len(tracked)+1)
+	resolvedTracked := false
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			continue
+		}
+		attrs := link.Attrs()
+		if _, ok := tracked[attrs.Index]; ok {
+			names = append(names, attrs.Name)
+			delete(tracked, attrs.Index)
+			resolvedTracked = true
+		}
+		if attrs.Name != armedTransitReinjectIfname {
+			continue
+		}
+		tun, ok := link.(*netlink.Tuntap)
+		if ok && tun.Mode == netlink.TUNTAP_MODE_TUN {
+			names = append(names, attrs.Name)
+		}
+	}
+	if len(ifindexes) > 0 && !resolvedTracked {
+		return xnft.ForwardFenceSpec{}, fmt.Errorf(
+			"resolve armed transit interfaces: none of %d tracked XDP ifindexes found",
+			len(ifindexes))
+	}
+	sort.Strings(names)
+	out := names[:0]
+	for _, name := range names {
+		if name == "" || (len(out) > 0 && out[len(out)-1] == name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return xnft.ForwardFenceSpec{AllowedIfnames: out}, nil
+}
+
 var (
 	ipv4ForwardSysctlPath = "/proc/sys/net/ipv4/ip_forward"
 	ipv6ForwardSysctlPath = "/proc/sys/net/ipv6/conf/all/forwarding"
@@ -143,11 +238,11 @@ func (d *Daemon) markDataplaneArmed(stage string) {
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(true)
 	ready := d.attachedXDPLinks() > 0
-	d.writeTransitGateLocked(stage, ready)
-	d.applyDataplaneReadyTrack(ready)
+	opened := d.writeTransitGateLocked(stage, ready)
+	d.applyDataplaneReadyTrack(opened)
 	d.transitGateMu.Unlock()
 	slog.Info("dataplane armed; transit gate re-evaluated", "stage", stage,
-		"kernel_transit_open", d.transitOpen())
+		"kernel_transit_open", opened)
 }
 
 // applyDataplaneReadyTrack mirrors the ready-to-serve predicate into
@@ -204,7 +299,7 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 	d.dataplaneArmed.Store(false)
 	// #7191: install the nft barrier FIRST on the closing path. Both legs
 	// close, so the order only affects how early closure is complete.
-	d.writeTransitGateLocked(stage, false)
+	_ = d.writeTransitGateLocked(stage, false)
 	d.applyDataplaneReadyTrack(false)
 	d.transitGateMu.Unlock()
 	slog.Error("dataplane arm FAILED; kernel transit forwarding DISABLED (fail-closed, degraded): "+
@@ -246,43 +341,72 @@ func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
 		"stage", stage, "reason", reason)
 }
 
-// applyTransitBarrier drives the #7191 nftables half of the barrier from the
-// SAME arm state that drives the sysctls. armed==true REMOVES it; armed==false
-// INSTALLS it.
-//
-// One source, deliberately: the barrier is never derived independently of
-// dataplaneArmed. A second notion of "should the barrier be up" is precisely
-// how a stale barrier survives arming and black-holes a healthy box.
-//
-// FAILURE DIRECTION IS ASYMMETRIC, and that asymmetry is the safety argument:
-//
-//   - failing to INSTALL (closing) is logged and swallowed, exactly as
-//     writeTransitForwardSysctls does. The sysctl leg has already closed
-//     transit; the barrier is belt to those braces, so a barrier that did not
-//     install leaves the box no worse than pre-#7191, and propagating it would
-//     brick management on a boot path.
-//   - failing to REMOVE (opening) is logged at ERROR, because that is the
-//     black-hole direction: a barrier that outlives arming drops the armed
-//     paths that deliberately rely on kernel forwarding — route-based IPsec
-//     plaintext off an xfrm interface, SNAT'd frames passed up for kernel
-//     routing, and the #7409 slow-path reinject. The apply tail re-asserts on
-//     every commit, so a transient failure self-heals; a persistent one is loud.
-func (d *Daemon) applyTransitBarrier(armed bool) {
+func (d *Daemon) openTransitGateLocked() error {
 	if nftInstaller == nil {
-		return
+		writeTransitForwardSysctls(true)
+		return nil
+	}
+	if lease, ok := d.dataplane().(attachedXDPFenceLease); ok && lease != nil {
+		return lease.WithAttachedXDPFence(func(ifindexes []int) error {
+			if len(ifindexes) == 0 {
+				return fmt.Errorf("armed transit fence has no kernel-proven XDP links")
+			}
+			spec, err := d.armedTransitFenceSpecForIfindexes(ifindexes)
+			if err != nil {
+				return err
+			}
+			if err := nftInstaller.InstallArmedTransitFence(spec); err != nil {
+				if xnft.IsTransitBarrierBridgeUnsupportedOnly(err) {
+					slog.Warn("armed transit inet fence installed; bridge forward fence unsupported by kernel",
+						"err", err)
+				} else {
+					return err
+				}
+			}
+			writeTransitForwardSysctls(true)
+			return nil
+		})
+	}
+	if err := d.applyTransitBarrier(true); err != nil {
+		return err
+	}
+	writeTransitForwardSysctls(true)
+	return nil
+}
+
+// applyTransitBarrier drives the nftables forward fence from the same arm
+// state that drives the sysctls. An armed state installs a policy DROP with
+// provenance-scoped XDP_PASS pinholes; an unarmed state installs the existing
+// unconditional DROP. It never removes the forward fence while the gate is
+// being opened.
+func (d *Daemon) applyTransitBarrier(armed bool) error {
+	if nftInstaller == nil {
+		return nil
 	}
 	if armed {
-		if err := nftInstaller.RemoveTransitBarrier(); err != nil {
-			slog.Error("failed to REMOVE the unarmed transit barrier while armed; "+
-				"kernel-forwarded paths that rely on an open FORWARD hook (route-based "+
-				"IPsec plaintext, SNAT'd frames, slow-path reinject) may be dropped until "+
-				"the next apply re-asserts", "err", err)
+		spec, err := d.armedTransitFenceSpec()
+		if err != nil {
+			slog.Error("failed to resolve the armed transit forward fence; "+
+				"kernel transit will remain closed", "err", err)
+			return err
 		}
-		return
+		if err := nftInstaller.InstallArmedTransitFence(spec); err != nil {
+			if xnft.IsTransitBarrierBridgeUnsupportedOnly(err) {
+				slog.Warn("armed transit inet fence installed; bridge forward fence unsupported by kernel",
+					"err", err)
+				return nil
+			}
+			slog.Error("failed to install the armed transit forward fence; "+
+				"kernel transit will remain closed", "err", err)
+			return err
+		}
+		return nil
 	}
 	if err := nftInstaller.InstallTransitBarrier(); err != nil {
 		slog.Warn("failed to install the unarmed transit barrier; ip_forward=0 still "+
 			"closes transit, so this is a loss of defence-in-depth rather than an "+
 			"open forwarding path", "err", err)
+		return err
 	}
+	return nil
 }

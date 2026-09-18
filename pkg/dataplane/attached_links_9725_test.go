@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -32,6 +33,34 @@ func TestAttachedXDPLinkCountUsesKernelTruth9725(t *testing.T) {
 	}
 	if got := m.AttachedXDPLinkCount(); got != 1 {
 		t.Fatalf("AttachedXDPLinkCount = %d, want one kernel-proven link", got)
+	}
+}
+
+func TestAttachedXDPIfindexesUsesMatchingKernelTruth10302(t *testing.T) {
+	m := New()
+	owned := &countLink9725{}
+	mismatch := &countLink9725{}
+	uncertain := &countLink9725{}
+	m.SetLinkForTest(101, owned, nil)
+	m.SetLinkForTest(102, mismatch, nil)
+	m.SetLinkForTest(103, uncertain, nil)
+
+	old := xdpLinkIfindexFn
+	t.Cleanup(func() { xdpLinkIfindexFn = old })
+	xdpLinkIfindexFn = func(l link.Link) (int, bool) {
+		switch l {
+		case owned:
+			return 101, true
+		case mismatch:
+			return 999, true
+		case uncertain:
+			return 0, false
+		default:
+			return 0, false
+		}
+	}
+	if got, want := m.AttachedXDPIfindexes(), []int{101}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("AttachedXDPIfindexes = %v, want matching tracked kernel ifindexes %v", got, want)
 	}
 }
 

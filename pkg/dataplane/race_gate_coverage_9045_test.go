@@ -12,14 +12,13 @@ import (
 
 // #9045: `test-race-dp` races three packages. pkg/daemon and pkg/cluster each
 // carry a canary that fails when their leg's `-run` pattern narrows.
-// pkg/dataplane had none, and its pattern -- `ArmedGate|PreArm` -- matched 15
-// of the package's 463 tests and NOT ONE of its goroutine-driven probes:
+// pkg/dataplane's race recipe now names all concurrency probes:
 //
 //	TestPersistentNATTable_AllConcurrentSaveNoRace   NO MATCH
 //	TestStatusPathReadRacesCompileWrite_6740         NO MATCH
-//	TestDetachXDPIsNotSelfSerializing7547            NO MATCH
+//	TestDetachXDPIsSerializedWithFenceLease7547      matched after #10302
 //
-// THE FIRST ONE IS THE ARGUMENT FOR THIS FILE. Measured on its body: 47 lines,
+// THE FIRST TWO are the argument for this file. Their bodies are pure race
 // **zero** `t.Error`/`t.Fatal` of any kind. It is a pure race probe -- the only
 // way it can fail is the race detector firing -- so outside the race leg it is
 // not a weak test, it is a test that CANNOT fail. It spent its life green

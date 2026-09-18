@@ -13,6 +13,10 @@ import (
 
 var _ dataplane.DataPlane = (*LegacyDataPlaneAdapter)(nil)
 var _ dataplane.RuntimeDataPlane = (*LegacyDataPlaneAdapter)(nil)
+var _ interface {
+	AttachedXDPIfindexes() []int
+	WithAttachedXDPFence(func([]int) error) error
+} = (*LegacyDataPlaneAdapter)(nil)
 
 // #1516 sub-#1451 S1 — guard against signature drift on the
 // LegacyDataPlaneAdapter cursor-pagination delegation methods. The
@@ -127,6 +131,31 @@ func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
 		return 0
 	}
 	return m.AttachedXDPLinkCount()
+}
+
+// AttachedXDPIfindexes forwards the provenance-bearing kernel-truth census
+// through the runtime adapter published to the daemon. The daemon uses this
+// set to scope armed forward-fence pinholes; a missing manager yields no
+// pinholes.
+func (a *LegacyDataPlaneAdapter) AttachedXDPIfindexes() []int {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil
+	}
+	return m.AttachedXDPIfindexes()
+}
+
+// WithAttachedXDPFence serializes armed-fence installation with XDP ownership
+// changes through the manager retained by this runtime adapter.
+func (a *LegacyDataPlaneAdapter) WithAttachedXDPFence(fn func([]int) error) error {
+	if fn == nil {
+		return nil
+	}
+	m, err := a.managerOrErr()
+	if err != nil {
+		return fn(nil)
+	}
+	return m.WithAttachedXDPFence(fn)
 }
 
 // SetAttachedLinksObserver forwards the wake-only link-change notification.
