@@ -869,7 +869,7 @@ mod slow_path_mtu_tests {
     /// unchanged snapshots retry only delegated, at most three times in any
     /// rolling eight-reconcile window.
     #[test]
-    fn partial_delegated_mtu_failure_stays_visible_and_deduped() {
+    fn partial_delegated_mtu_failure_recovers_bounded() {
         let reinjector = SlowPathReinjector::new_without_worker(1500);
         reinjector.force_mtu_state_for_test(9000, 1500, true);
         let mut last_acted = 0i32;
@@ -917,14 +917,16 @@ mod slow_path_mtu_tests {
         assert_eq!(
             calls + retry_calls, 5,
             "including the two establishing ioctls, this episode issues exactly \
-             five ioctls and no more"
+             five ioctls in this 8-tick window (persistent failure retries \
+             3-per-8 forever by design)"
         );
     }
 
+    /// #10069 Gap 1 fix-pin: trusted converged + delegated lagging must
     /// recover on unchanged snapshots, but persistent delegated failures are
     /// bounded to three ioctl attempts in any rolling eight-reconcile window.
     #[test]
-    fn converged_trusted_lagging_delegated_skips_recovery() {
+    fn converged_trusted_lagging_delegated_recovers_bounded() {
         let reinjector = SlowPathReinjector::new_without_worker(1500);
         reinjector.force_mtu_state_for_test(9000, 9000, false);
 
@@ -968,7 +970,8 @@ mod slow_path_mtu_tests {
             setup_calls + retry_ioctls,
             5,
             "including the two establishing ioctls, this episode issues exactly \
-             five ioctls and no more"
+             five ioctls in this 8-tick window (persistent failure retries \
+             3-per-8 forever by design)"
         );
     }
 
