@@ -66,16 +66,33 @@ func (s *SessionSync) doBulkSync() error {
 		}
 	}
 	if src := s.BulkSnapshotSource; src != nil {
+		// #10283: the table-truth snapshot is read before bulkSyncWindow can
+		// write BulkStart. Hold queued incremental writes across BOTH operations
+		// so a gap-opened session cannot land before the receive window and then
+		// be deleted by BulkEnd's authoritative reconcile.
+		// P1: acquire bulkSendMu BEFORE bulkStartMu. sendLoop takes only
+		// bulkStartMu, so this order is cycle-free; a second concurrent bulk
+		// then waits on bulkSendMu without holding bulkStartMu and parking
+		// sendLoop under the in-window bulk's watermark wait.
+		s.bulkSendMu.Lock()
+		s.bulkStartMu.Lock()
 		// #9508: capture the fence BEFORE the snapshot is read; only a snapshot
 		// read after the capture holds every delta written before it.
 		fence := s.captureBarrierFenceForBulk()
 		snap, err := src()
 		if err != nil {
+			s.bulkStartMu.Unlock()
+			s.bulkSendMu.Unlock()
 			// Fail closed — see the doc comment above.
 			return fmt.Errorf("bulk sync table-truth snapshot: %w", err)
 		}
+		if hook := s.testAfterBulkSnapshot; hook != nil {
+			hook()
+		}
 		walk := snapshotBulkWalk(snap)
 		walk.fence = fence
+		walk.holdBulkStart = true
+		walk.holdBulkSend = true
 		return s.bulkSyncWindow(walk)
 	}
 	return s.BulkSync()
@@ -131,6 +148,22 @@ type bulkWalk struct {
 	// window captures for them there.
 	fence             uint64
 	readsDuringWindow bool
+	// holdBulkStart is true only for doBulkSync's table-truth source. The caller
+	// has already locked bulkStartMu before reading the source; bulkSyncWindow
+	// releases it immediately after the BulkStart write, or on any pre-marker
+	// error. Direct BulkSync/BulkSyncSnapshot walks leave it false.
+	holdBulkStart bool
+	// holdBulkSend is paired with holdBulkStart for doBulkSync. The caller
+	// acquires bulkSendMu first, then bulkStartMu, and bulkSyncWindow releases
+	// bulkSendMu on every return. Direct walks acquire bulkSendMu in this
+	// function.
+	holdBulkSend bool
+	// queuedFrameWatermark and queuedFrameFailures are captured with
+	// queuedFrameMu while BulkStart is written. They are only populated for
+	// the held table-truth source; before BulkEnd that source waits for every
+	// pre-marker queued frame to be delivered and aborts if one fails.
+	queuedFrameWatermark uint64
+	queuedFrameFailures  uint64
 	// stampsAuthoritative reports whether yielded values carry true stamps
 	// (#9752 round 5 item 1). A table-truth snapshot does (helper deltas);
 	// a store-mirror walk rebuilds sync-only fields as (0,0), so its
@@ -194,6 +227,27 @@ func snapshotBulkWalk(snap BulkSnapshot) *bulkWalk {
 // install-generation stamping, the record-then-send bulk-ack discipline
 // (#3912), and the writeMu direct writes. Only the session SOURCE differs.
 func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
+	releaseBulkStart := walk.holdBulkStart
+	if releaseBulkStart {
+		// The caller acquired this before reading its table-truth source.
+		// Keep a deferred release for every pre-marker return; the successful
+		// BulkStart path releases explicitly immediately after the marker write.
+		defer func() {
+			if releaseBulkStart {
+				s.bulkStartMu.Unlock()
+			}
+		}()
+	}
+	releaseBulkSend := walk.holdBulkSend
+	if !releaseBulkSend {
+		s.bulkSendMu.Lock()
+		releaseBulkSend = true
+	}
+	defer func() {
+		if releaseBulkSend {
+			s.bulkSendMu.Unlock()
+		}
+	}()
 	// #9752 round 4: latched refusal — a previous window in this peer
 	// incarnation already hit the install fence. Skip quietly (no walk, no
 	// BulkStart): retrying every tick would burn full-table walks that all
@@ -210,8 +264,6 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 			return errBulkFencedForPeer
 		}
 	}
-	s.bulkSendMu.Lock()
-	defer s.bulkSendMu.Unlock()
 
 	conn := s.getActiveConn()
 	if conn == nil {
@@ -247,6 +299,17 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// the frame that declares it current, so no connection is ever installed
 	// with an unknown incarnation.
 	startPayload := appendBootIncarnation(epochBuf[:], localBootIncarnation())
+	if walk.holdBulkStart {
+		// Producers take queuedFrameMu for the channel send and sequence
+		// increment. Snapshot the accepted watermark while bulkStartMu is held;
+		// queued frames accepted after this cut are necessarily written after
+		// BulkStart because sendLoop still cannot take bulkStartMu. Do not hold
+		// queuedFrameMu across network I/O.
+		s.queuedFrameMu.Lock()
+		walk.queuedFrameWatermark = s.queuedFrameSeq
+		walk.queuedFrameFailures = s.queuedFrameFailures
+		s.queuedFrameMu.Unlock()
+	}
 	s.writeMu.Lock()
 	moved := s.noteStreamConnLocked(conn) // #9508
 	if walk.readsDuringWindow {
@@ -261,6 +324,13 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		s.clearPendingBulkAck()
 		s.handleDisconnect(conn)
 		return err
+	}
+	if releaseBulkStart {
+		// BulkStart is now serialized ahead of every queued incremental. The
+		// remainder of this authoritative window may interleave queued frames;
+		// the receiver is in bulkInProgress and records them normally.
+		s.bulkStartMu.Unlock()
+		releaseBulkStart = false
 	}
 
 	var count int
@@ -368,6 +438,9 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		"source", walk.source,
 		"sessions", count,
 		"skipped", walk.skipped)
+	if walk.holdBulkStart && !s.waitQueuedFrameWatermark(walk.queuedFrameWatermark, walk.queuedFrameFailures) {
+		return fmt.Errorf("bulk sync queued incremental watermark did not complete")
+	}
 
 	// Record the pending bulk-ack epoch BEFORE writing the BulkEnd marker
 	// to the wire (record-then-send, mirroring the #2170/#2198 gen-guard
@@ -411,10 +484,34 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		s.handleDisconnect(conn)
 		return err
 	}
-
 	s.stats.BulkSyncs.Add(1)
+
 	slog.Info("cluster sync: bulk sync complete", "source", walk.source, "sessions", count, "skipped", walk.skipped, "epoch", epoch)
 	return nil
+}
+
+// waitQueuedFrameWatermark waits until every frame accepted before BulkStart
+// has been delivered by sendLoop. A cancellation/failure is terminal for the
+// cut: the caller must abort before BulkEnd, because reconciling without that
+// frame would turn a transient send failure into a destructive stale delete.
+func (s *SessionSync) waitQueuedFrameWatermark(target, failures uint64) bool {
+	if target == 0 {
+		return true
+	}
+	deadline := time.Now().Add(syncWriteDeadline)
+	for {
+		s.queuedFrameMu.Lock()
+		resolved := s.queuedFrameResolved
+		failed := s.queuedFrameFailures
+		s.queuedFrameMu.Unlock()
+		if failed != failures || resolved >= target {
+			return failed == failures && resolved >= target
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // PendingBulkAck reports the latest outbound bulk epoch that is still awaiting
@@ -614,12 +711,22 @@ func (s *SessionSync) writeBarrierMessage(payload []byte, timeout time.Duration)
 	// already-queued session messages. The peer's ack must prove it
 	// processed every earlier delta, not just the barrier itself.
 	msg := encodeRawMessage(syncMsgBarrier, payload)
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case s.sendCh <- msg:
-	case <-timer.C:
-		return fmt.Errorf("timed out queueing session sync barrier")
+	deadline := time.Now().Add(timeout)
+	for {
+		if s.enqueueQueuedFrame(msg) {
+			break
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("timed out queueing session sync barrier")
+		}
+		poll := remaining
+		if poll > pacedQueuePoll {
+			poll = pacedQueuePoll
+		}
+		timer := time.NewTimer(poll)
+		<-timer.C
+		timer.Stop()
 	}
 	seq := binary.LittleEndian.Uint64(payload)
 	slog.Info("cluster sync: barrier queued (ordered)",

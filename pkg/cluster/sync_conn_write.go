@@ -33,21 +33,48 @@ func (s *SessionSync) ResumeIncrementalSync(reason string) {
 		slog.Info("cluster sync: incremental sync resumed", "reason", reason, "sessions_sent", stats.SessionsSent, "sessions_received", stats.SessionsReceived, "sessions_installed", stats.SessionsInstalled, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
 	}
 }
+
+// enqueueQueuedFrame appends one frame to sendCh and advances the accepted
+// watermark while holding queuedFrameMu. The same mutex is held around
+// BulkStart's write, making the watermark an exact wire-order cut: frames
+// accepted before that write belong to the gap; later frames are post-marker.
+func (s *SessionSync) enqueueQueuedFrame(msg []byte) bool {
+	s.queuedFrameMu.Lock()
+	defer s.queuedFrameMu.Unlock()
+	select {
+	case s.sendCh <- msg:
+		s.queuedFrameSeq++
+		return true
+	default:
+		return false
+	}
+}
+func (s *SessionSync) queuedFrameDelivered() {
+	s.queuedFrameMu.Lock()
+	s.queuedFrameResolved++
+	s.queuedFrameMu.Unlock()
+}
+
+func (s *SessionSync) queuedFrameFailed() {
+	s.queuedFrameMu.Lock()
+	s.queuedFrameResolved++
+	s.queuedFrameFailures++
+	s.queuedFrameMu.Unlock()
+}
+
 func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, source string) bool {
 	if !s.stats.Connected.Load() {
 		return false
 	}
-	select {
-	case s.sendCh <- msg:
+	if s.enqueueQueuedFrame(msg) {
 		sentCounter.Add(1)
 		return true
-	default:
-		s.stats.Errors.Add(1)
-		if s.syncBackfillNeeded.CompareAndSwap(false, true) {
-			slog.Warn("cluster sync: send queue full, enabling sweep replay", "source", source, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
-		}
-		return false
 	}
+	s.stats.Errors.Add(1)
+	if s.syncBackfillNeeded.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: send queue full, enabling sweep replay", "source", source, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
+	}
+	return false
 }
 
 // QueueSessionV4 queues a v4 session for synchronization to the peer. The
@@ -116,11 +143,9 @@ func (s *SessionSync) queueMessagePaced(msg []byte, sentCounter *atomic.Uint64, 
 		}
 	}()
 	for s.stats.Connected.Load() {
-		select {
-		case s.sendCh <- msg:
+		if s.enqueueQueuedFrame(msg) {
 			sentCounter.Add(1)
 			return true
-		default:
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -132,12 +157,10 @@ func (s *SessionSync) queueMessagePaced(msg []byte, sentCounter *atomic.Uint64, 
 		} else {
 			timer.Reset(poll)
 		}
-		select {
-		case s.sendCh <- msg:
-			sentCounter.Add(1)
-			return true
-		case <-timer.C:
-		}
+		// A timer wake only retries the bounded enqueue. The helper owns the
+		// watermark lock for the actual channel send, so no accepted frame can
+		// race the BulkStart cut.
+		<-timer.C
 	}
 	return false
 }
@@ -612,21 +635,58 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 
 func (s *SessionSync) sendLoop(ctx context.Context) {
 	sendOne := func(msg []byte) {
+		delivered := false
+		defer func() {
+			if delivered {
+				s.queuedFrameDelivered()
+			} else {
+				// A frame abandoned because the send loop is cancelled never
+				// satisfies a bulk watermark. The pending bulk sees the
+				// failure and aborts before BulkEnd instead of reconciling an
+				// incomplete set.
+				s.queuedFrameFailed()
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
+			// #10283: take the gate before selecting the connection. A
+			// snapshot may hold it across a slow source read; selecting first
+			// could leave this frame bound to a connection that moved while
+			// the sender waited.
+			s.bulkStartMu.Lock()
 			conn := s.getActiveConn()
 			if conn == nil {
+				s.bulkStartMu.Unlock()
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
+			if hook := s.testBeforeQueuedWrite; hook != nil {
+				s.testBeforeQueuedWrite = nil
+				hook()
+			}
+			select {
+			case <-ctx.Done():
+				s.bulkStartMu.Unlock()
+				return
+			default:
+			}
+			// #10283: doBulkSync holds bulkStartMu while reading the
+			// table-truth snapshot and writing BulkStart. Take the same mutex
+			// for the actual ordered-stream write, not merely while queueing:
+			// otherwise a gap-opened incremental can win the writeMu race,
+			// install before bulkInProgress, and be deleted at BulkEnd. Lock
+			// every queued frame so existing sendCh order is preserved for a
+			// gap open followed by a close (no install can be replayed after
+			// its delete).
 			s.writeMu.Lock()
 			moved := s.noteStreamConnLocked(conn) // #9508: before the write
 			err := writeFull(conn, msg)
 			s.writeMu.Unlock()
+			s.bulkStartMu.Unlock()
 			if moved {
 				s.onStreamMoved(true)
 			}
@@ -637,6 +697,7 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
+			delivered = true
 			return
 		}
 	}
