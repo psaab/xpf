@@ -437,7 +437,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 			at:            rg.ManualFailoverAt,
 			state:         rg.State,
 			weight:        rg.Weight,
-			restoreWeight: rg.State == StateSecondary && rg.Weight == 0,
+			restoreWeight: rg.Weight != m.debtDerivedWeightLocked(rg),
 			generation:    m.failoverGen[rgID],
 		}
 		rg.ManualFailover = false
@@ -607,6 +607,17 @@ func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 	delete(m.remoteTransferOutLeaseReqID, rgID)
 }
 
+// debtDerivedWeightLocked returns the monitor-derived weight for an RG without
+// changing it. Caller must hold m.mu.
+func (m *Manager) debtDerivedWeightLocked(rg *RedundancyGroupState) int {
+	totalLost := 0
+	for _, iface := range rg.MonitorFails {
+		key := monitorKey{rgID: rg.GroupID, iface: iface}
+		totalLost += m.monitorWeights[key]
+	}
+	return rgWeightFromDebt(totalLost)
+}
+
 // manualFailoverRestoreWeightLocked recomputes an RG's monitor-derived weight
 // after ManualFailover is cleared. It is used by the dual-resign guard and the
 // transfer-out lease expiry in electRG, and by handlePeerTimeout's peer-loss
@@ -615,12 +626,7 @@ func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 // electSingleNode would promote every group before the disable-rg-confirmed
 // fence. Caller holds m.mu.
 func (m *Manager) manualFailoverRestoreWeightLocked(rg *RedundancyGroupState) {
-	totalLost := 0
-	for _, iface := range rg.MonitorFails {
-		key := monitorKey{rgID: rg.GroupID, iface: iface}
-		totalLost += m.monitorWeights[key]
-	}
-	rg.Weight = rgWeightFromDebt(totalLost)
+	rg.Weight = m.debtDerivedWeightLocked(rg)
 }
 
 // FinalizePeerTransferOut completes a previously acknowledged transfer-out
@@ -1005,7 +1011,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 				at:            rg.ManualFailoverAt,
 				state:         rg.State,
 				weight:        rg.Weight,
-				restoreWeight: rg.State == StateSecondary && rg.Weight == 0,
+				restoreWeight: rg.Weight != m.debtDerivedWeightLocked(rg),
 				generation:    m.failoverGen[rgID],
 			}
 			rg.ManualFailover = false
