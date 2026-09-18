@@ -432,13 +432,15 @@ for ((i = 0; i < 6; i++)); do
     MATRIX+=("$key" "$CELL_P64O" "$CELL_P64B" "$CELL_P1400O" "$CELL_P1400B" "$CELL_C64O" "$CELL_C64B" "$CELL_C1400O" "$CELL_C1400B")
 done
 
-# Do not let the EXIT trap race the restore: score provisionally, detach the
-# trap, restore and verify, then emit exactly one final row. A dirty restore
-# downgrades even a measured PASS to harness-void.
+# Keep the EXIT trap active while the multi-commit restore runs.  Ignore
+# interrupts until exact snapshot verification completes; a cancellation here
+# must not release the cluster lock with a half-restored fixture.  The EXIT
+# trap's second cleanup is harmless because RESTORE_NEEDED becomes zero.
 FINAL_OUT="$(wire_matrix_verdict "$CKSUM_BAD" 12 "${MATRIX[@]}")"
 FINAL_RC=$?
-trap - EXIT INT TERM
+trap '' INT TERM
 cleanup
+trap - INT TERM
 if ((RESTORE_OK == 0)); then
     printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void cells_measured=0 cells_failed=0 deny_cells=0 permit_cells=0 permit64_offered=0 permit64_observed=0 permit1400_offered=0 permit1400_observed=0 deny_leaked=0 permit_missing=0 control_missing=0 duplicate_frames=0 cksum_bad=0\n'
     exit 2
