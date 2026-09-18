@@ -476,7 +476,8 @@ harness_adapt_wire_gate() {
 			return 0
 		fi
 	else
-		case " env-void row-timeout no-prober harness-void capture-blind under-sampled uncalibrated dut-void " in
+		local closed_reasons=" env-void row-timeout no-prober harness-void capture-blind under-sampled uncalibrated dut-void "
+		case "$closed_reasons" in
 		*" $reason "*) ;;
 		*)
 			printf 'VOID\tharness-void: WIRE_GATE %s VOID carries unknown slug reason=%s (design §8 closed taxonomy)\t\t\t\n' "$gate" "$reason"
