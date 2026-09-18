@@ -45,23 +45,24 @@ func wgUnitBase9909(t *testing.T, iface, unit, port, priv, peer string) []string
 	}
 }
 
-// TestWireguardTunnelRoutingInstanceStanzaRejected9909: a WireGuard tunnel
-// carrying the `tunnel routing-instance` stanza must be refused at strict
-// commit, naming the tunnel AND the instance: the inner wgN device would be
-// VRF-bound while the outer UDP socket binds the main table (#9909).
+// TestWireguardTunnelRoutingInstanceBound9909 covers the explicit
+// `tunnel routing-instance` path. Once the userspace outer socket binds
+// `vrf-<instance>`, supported VRF instances commit cleanly; a forwarding
+// instance still has no VRF device and remains refused.
 //
-// Fail-on-revert: delete the gate (or its runTailGates wiring) and this goes
-// RED — the config commits clean again with no operator signal, which is
-// the defect.
-func TestWireguardTunnelRoutingInstanceStanzaRejected9909(t *testing.T) {
+// Fail-on-revert: removing the Rust bind path while relaxing the gate leaves
+// the supported case apparently clean but the outer socket on the main table;
+// the Rust socket cells and protocol bump catch that regression.
+func TestWireguardTunnelRoutingInstanceBound9909(t *testing.T) {
 	cases := []struct {
-		name  string
-		lines []string
-		tun   string
-		ri    string
+		name       string
+		lines      []string
+		tun        string
+		ri         string
+		wantReject bool
 	}{
 		{
-			name: "interface-level",
+			name: "interface-level VRF",
 			lines: append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
 				"set interfaces wg0 tunnel routing-instance destination blue",
 				"set routing-instances blue instance-type virtual-router",
@@ -70,7 +71,7 @@ func TestWireguardTunnelRoutingInstanceStanzaRejected9909(t *testing.T) {
 			ri:  "blue",
 		},
 		{
-			name: "per-unit",
+			name: "per-unit VRF",
 			lines: append(wgUnitBase9909(t, "wg1", "0", "51821", wgKeyB, wgKeyA),
 				"set interfaces wg1 unit 0 tunnel routing-instance destination blue",
 				"set routing-instances blue instance-type virtual-router",
@@ -78,13 +79,28 @@ func TestWireguardTunnelRoutingInstanceStanzaRejected9909(t *testing.T) {
 			tun: "wg1",
 			ri:  "blue",
 		},
+		{
+			name: "forwarding has no VRF device",
+			lines: append(wgBase9909(t, "wg2", "51822", wgKeyC, wgKeyA),
+				"set interfaces wg2 tunnel routing-instance destination fwd",
+				"set routing-instances fwd instance-type forwarding",
+			),
+			tun:        "wg2",
+			ri:         "fwd",
+			wantReject: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := buildTree4953(t, tc.lines)
-			_, err := CompileConfig(tree)
+			_, err := CompileConfig(buildTree4953(t, tc.lines))
+			if !tc.wantReject {
+				if err != nil {
+					t.Fatalf("supported WireGuard + VRF scope rejected: %v", err)
+				}
+				return
+			}
 			if err == nil {
-				t.Fatalf("strict commit accepted WireGuard + routing-instance; want reject naming tunnel %q + instance %q", tc.tun, tc.ri)
+				t.Fatalf("strict commit accepted unsupported WireGuard scope; want reject naming tunnel %q + instance %q", tc.tun, tc.ri)
 			}
 			msg := err.Error()
 			if !strings.Contains(msg, tc.tun) || !strings.Contains(msg, tc.ri) {
@@ -97,19 +113,19 @@ func TestWireguardTunnelRoutingInstanceStanzaRejected9909(t *testing.T) {
 	}
 }
 
-// TestWireguardRoutingInstanceMemberRejected9909: the same escape through the
-// SECOND scoping path — the routing-instance `interface` list (daemon step 0a
-// binds the member, the tunnel manager observes the claim, the outer socket
-// still binds main). Bare and unit-ref spellings must both be refused for
-// interface-level and per-unit WireGuard declarations.
-func TestWireguardRoutingInstanceMemberRejected9909(t *testing.T) {
+// TestWireguardRoutingInstanceMemberBound9909 covers the second scope path —
+// `routing-instances <ri> interface <member>`. Supported VRF members now
+// commit cleanly because the snapshot row supplies the effective transport
+// table; forwarding members remain refused because no VRF device exists.
+func TestWireguardRoutingInstanceMemberBound9909(t *testing.T) {
 	cases := []struct {
-		name   string
-		lines  []string
-		member string
-		tun    string
-		riType string
-		ri     string
+		name       string
+		lines      []string
+		member     string
+		tun        string
+		riType     string
+		ri         string
+		wantReject bool
 	}{
 		{
 			name:   "interface-level bare",
@@ -148,12 +164,13 @@ func TestWireguardRoutingInstanceMemberRejected9909(t *testing.T) {
 			tun:    "gr-0-0-1u1",
 		},
 		{
-			name:   "forwarding-type",
-			lines:  wgBase9909(t, "wg2", "51824", wgKeyC, wgKeyA),
-			member: "wg2",
-			tun:    "wg2",
-			riType: "forwarding",
-			ri:     "fwd1",
+			name:       "forwarding-type",
+			lines:      wgBase9909(t, "wg2", "51824", wgKeyC, wgKeyA),
+			member:     "wg2",
+			tun:        "wg2",
+			riType:     "forwarding",
+			ri:         "fwd1",
+			wantReject: true,
 		},
 	}
 	for _, tc := range cases {
@@ -170,10 +187,15 @@ func TestWireguardRoutingInstanceMemberRejected9909(t *testing.T) {
 				"set routing-instances "+ri+" instance-type "+riType,
 				"set routing-instances "+ri+" interface "+tc.member,
 			)
-			tree := buildTree4953(t, lines)
-			_, err := CompileConfig(tree)
+			_, err := CompileConfig(buildTree4953(t, lines))
+			if !tc.wantReject {
+				if err != nil {
+					t.Fatalf("supported WireGuard member + VRF scope rejected: %v", err)
+				}
+				return
+			}
 			if err == nil {
-				t.Fatalf("strict commit accepted WG tunnel as member %q of routing-instance; want reject naming %s + %s", tc.member, tc.tun, ri)
+				t.Fatalf("strict commit accepted unsupported WG member %q of routing-instance %q", tc.member, ri)
 			}
 			msg := err.Error()
 			if !strings.Contains(msg, tc.tun) || !strings.Contains(msg, ri) {
@@ -183,11 +205,10 @@ func TestWireguardRoutingInstanceMemberRejected9909(t *testing.T) {
 	}
 }
 
-// TestWireguardRIListMemberRejected9909 covers the runtime-normalized scope
-// field the daemon stamps while collecting routing-instance members. This
-// defensive check keeps the compiler gate aligned with that runtime handoff
-// and prevents an unguarded snapshot path.
-func TestWireguardRIListMemberRejected9909(t *testing.T) {
+// TestWireguardRIListMemberBound9909 covers the runtime-normalized scope
+// field the daemon stamps while collecting routing-instance members. The
+// positive path is accepted because the named instance has a VRF device.
+func TestWireguardRIListMemberBound9909(t *testing.T) {
 	lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
 		"set routing-instances blue instance-type virtual-router",
 	)
@@ -197,10 +218,37 @@ func TestWireguardRIListMemberRejected9909(t *testing.T) {
 	}
 	tc := cfg.Interfaces.Interfaces["wg0"].Tunnel
 	tc.RIListMember = "blue"
-	if _, err := validateWireguardRoutingInstance9909(cfg, false); err == nil {
-		t.Fatal("strict gate accepted runtime RIListMember on WireGuard tunnel")
-	} else if !strings.Contains(err.Error(), "wg0") || !strings.Contains(err.Error(), "blue") {
-		t.Fatalf("runtime RIListMember reject %q omits tunnel or instance", err)
+	if _, err := validateWireguardRoutingInstance9909(cfg, false); err != nil {
+		t.Fatalf("supported runtime RIListMember rejected: %v", err)
+	}
+}
+
+// A shared interface-level WG device cannot serve two different VRF tables.
+// Units 0 and 1 both resolve to wg0, so accepting blue + red would leave the
+// socket scope order-dependent and could put outer traffic in the wrong VRF.
+func TestWireguardConflictingVRFMembersRefused10196(t *testing.T) {
+	lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
+		"set interfaces wg0 unit 0 family inet address 192.0.2.1/31",
+		"set interfaces wg0 unit 1 family inet address 192.0.2.3/31",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface wg0.0",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface wg0.1",
+	)
+	if _, err := CompileConfig(buildTree4953(t, lines)); err == nil {
+		t.Fatal("strict commit accepted two VRF claims for one shared WireGuard device")
+	} else if !strings.Contains(err.Error(), "blue") || !strings.Contains(err.Error(), "red") {
+		t.Fatalf("conflict reject %q omits one of the two routing instances", err)
+	}
+	cfg, err := CompileConfigLenient(buildTree4953(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant conflict load rejected instead of quarantining: %v", err)
+	}
+	if len(wgVRF9909Warnings(cfg)) != 1 || !strings.Contains(wgVRF9909Warnings(cfg)[0], "conflicting") {
+		t.Fatalf("want one conflict warning, got %v", cfg.Warnings)
+	}
+	if ifc := cfg.Interfaces.Interfaces["wg0"]; ifc == nil || ifc.Tunnel != nil {
+		t.Fatalf("conflicting shared WG endpoint survived tolerant quarantine: %+v", ifc)
 	}
 }
 
@@ -212,7 +260,7 @@ func TestWireguardRIListMemberRejected9909(t *testing.T) {
 func TestWireguardRoutingInstanceLenientSkips9909(t *testing.T) {
 	lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
 		"set interfaces wg0 tunnel routing-instance destination blue",
-		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue instance-type forwarding",
 		"set interfaces wg9 tunnel mode wireguard",
 		"set interfaces wg9 tunnel wireguard listen-port 51822",
 		"set interfaces wg9 tunnel wireguard private-key "+wgKeyC,
@@ -246,7 +294,7 @@ func TestWireguardRoutingInstanceLenientSkips9909(t *testing.T) {
 // (inner VRF bind) nor the snapshot builder (outer socket spawn) ever sees it.
 func TestWireguardRoutingInstanceMemberLenientSkips9909(t *testing.T) {
 	lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
-		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue instance-type forwarding",
 		"set routing-instances blue interface wg0.0",
 		"set interfaces ge0 unit 0 family inet address 192.0.2.1/24",
 		"set routing-instances blue interface ge0.0",
@@ -295,7 +343,7 @@ func TestWireguardRoutingInstanceMemberLenientSkips9909(t *testing.T) {
 func TestWireguardSharedDeviceLenientQuarantine9909(t *testing.T) {
 	lines := append(wgBase9909(t, "wg0", "51820", wgKeyA, wgKeyB),
 		"set interfaces wg0 unit 0 tunnel routing-instance destination blue",
-		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue instance-type forwarding",
 	)
 	cfg, err := CompileConfigLenient(buildTree4953(t, lines))
 	if err != nil {
@@ -323,7 +371,7 @@ func TestWireguardBareMemberLenientNarrowing9909(t *testing.T) {
 		"set interfaces gr-0/0/0 unit 0 tunnel wireguard peer " + wgKeyB + " allowed-ips 10.1.0.0/24",
 		"set interfaces gr-0/0/0 unit 1 tunnel source 10.0.0.1",
 		"set interfaces gr-0/0/0 unit 1 tunnel destination 10.0.0.2",
-		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue instance-type forwarding",
 		"set routing-instances blue interface gr-0/0/0",
 		"set system dataplane-type userspace",
 	}
@@ -439,7 +487,7 @@ func TestWireguardBareMemberNarrowingDeduplicatesExplicit9909(t *testing.T) {
 		"set interfaces gr-0/0/0 unit 0 tunnel wireguard peer " + wgKeyB + " allowed-ips 10.1.0.0/24",
 		"set interfaces gr-0/0/0 unit 1 tunnel source 10.0.0.1",
 		"set interfaces gr-0/0/0 unit 1 tunnel destination 10.0.0.2",
-		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue instance-type forwarding",
 		"set routing-instances blue interface gr-0/0/0",
 		"set routing-instances blue interface gr-0/0/0.1",
 		"set system dataplane-type userspace",
@@ -474,7 +522,7 @@ func TestWireguardBareMemberVLANUnitZeroNarrowing9909(t *testing.T) {
 		"set interfaces gr-0/0/9 unit 1 tunnel wireguard listen-port 51826",
 		"set interfaces gr-0/0/9 unit 1 tunnel wireguard private-key " + wgKeyA,
 		"set interfaces gr-0/0/9 unit 1 tunnel wireguard peer " + wgKeyB + " allowed-ips 10.1.0.0/24",
-		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue instance-type forwarding",
 		"set routing-instances blue interface gr-0/0/9",
 		"set system dataplane-type userspace",
 	}

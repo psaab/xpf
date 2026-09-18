@@ -203,20 +203,48 @@ func EmitTunnelEndpointNames(cfg *Config) []TunnelEndpointName {
 // the strict-tunnel validators and the endpoint-collision gate read
 // ep.Tunnel.WgPeers directly and never see the builder's sort.
 //
-// Returns the interface-level object UNCHANGED, same pointer, when no unit
-// contributes a peer. That keeps the overwhelmingly common WireGuard config
-// allocation-free through this path and leaves every existing endpoint
-// byte-identical.
+// Returns the interface-level object unchanged when no unit contributes peers
+// and there is no unit-level routing scope to carry. A unit-only scope on a
+// shared interface-level WG must clone the tunnel so the singleton endpoint
+// cannot silently fall back to the main table (#10196).
 func mergeWireguardUnitPeers(iface *InterfaceConfig, unitNums []int) *TunnelConfig {
+	if iface == nil || iface.Tunnel == nil {
+		return nil
+	}
+	scopes := make(map[string]struct{}, 1+len(unitNums))
+	addScope := func(tunnel *TunnelConfig) {
+		if tunnel == nil {
+			return
+		}
+		if tunnel.RoutingInstance != "" {
+			scopes[tunnel.RoutingInstance] = struct{}{}
+		}
+		if tunnel.RIListMember != "" {
+			scopes[tunnel.RIListMember] = struct{}{}
+		}
+	}
+	addScope(iface.Tunnel)
 	contributes := false
 	for _, unitNum := range unitNums {
 		unit := iface.Units[unitNum]
-		if unit != nil && unit.Tunnel != nil && len(unit.Tunnel.WgPeers) > 0 {
+		if unit == nil || unit.Tunnel == nil {
+			continue
+		}
+		if unit.Tunnel.Name == iface.Tunnel.Name {
+			addScope(unit.Tunnel)
+		}
+		if len(unit.Tunnel.WgPeers) > 0 {
 			contributes = true
-			break
 		}
 	}
-	if !contributes {
+	effectiveRI := ""
+	if len(scopes) == 1 {
+		for ri := range scopes {
+			effectiveRI = ri
+		}
+	}
+	if !contributes &&
+		(effectiveRI == "" || effectiveRI == iface.Tunnel.RoutingInstance) {
 		return iface.Tunnel
 	}
 
@@ -225,6 +253,9 @@ func mergeWireguardUnitPeers(iface *InterfaceConfig, unitNums []int) *TunnelConf
 	// into the interface-level tunnel every sibling also reads. The name is
 	// preserved -- this endpoint is still the interface-level device.
 	merged := iface.Tunnel.cloneForUnit(iface.Tunnel.Name)
+	if effectiveRI != "" {
+		merged.RoutingInstance = effectiveRI
+	}
 	seen := make(map[string]bool, len(merged.WgPeers))
 	for _, p := range merged.WgPeers {
 		seen[p.PublicKeyHex] = true

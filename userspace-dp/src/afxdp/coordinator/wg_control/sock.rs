@@ -4,9 +4,10 @@
 //! the RFC 6040 §4.2 decap ECN combine), and the poll(2) wait layer
 //! the control loop blocks on when both directions are idle (#1889).
 
+use std::ffi::CString;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 
 /// poll(2) timeout cap when both directions are idle (#1889). Bounds
 /// stop/join latency and worker-edge (relaxed atomic) pickup latency at
@@ -83,12 +84,11 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
 /// hardened kernel forbids it), fall back to a v4 bind so v4 peers — the
 /// common case — are never left unserved.
 ///
-/// VRF/routing-instance note (Codex BLOCKER, S2a known limitation): this
-/// socket binds the wildcard address in the MAIN routing table. A WG
-/// tunnel placed inside a routing-instance whose peer route lives only in
-/// that VRF is NOT yet supported — SO_BINDTODEVICE/VRF-fd binding is
-/// owned by the S6 multi-instance work (#1434). S2a single-tunnel scope
-/// is the default table.
+/// VRF/routing-instance binding is selected from the endpoint's transport table
+/// by `wg_outer_bind_device_for_transport_table`. A socket with a named
+/// transport table is bound to the matching `vrf-<instance>` master before its
+/// wildcard address is bound, so both receive and outer egress stay in that
+/// routing domain. The default `inet[6].0` tables remain unbound.
 ///
 /// IPV6_V6ONLY must be cleared BEFORE bind (Linux rejects it post-bind
 /// with EINVAL — Codex r3 MAJOR), so the v6 socket is created with raw
@@ -97,20 +97,114 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
 /// Returns the socket plus whether it is the AF_INET6 dual-stack one
 /// (v4 send targets must then be v4-mapped — see `wg_send_to`).
 pub(super) fn bind_wg_socket(port: u16) -> io::Result<(UdpSocket, bool)> {
-    match bind_dual_stack_v6(port) {
+    bind_wg_socket_with_device(port, None)
+}
+
+/// Bind the WG listen socket, optionally pinning both receive and transmit
+/// routing to a VRF master. A requested device is fail-closed: an invalid or
+/// inaccessible `SO_BINDTODEVICE` is returned rather than being swallowed by
+/// the v4 fallback.
+pub(super) fn bind_wg_socket_with_device(
+    port: u16,
+    bind_device: Option<&str>,
+) -> io::Result<(UdpSocket, bool)> {
+    match bind_dual_stack_v6(port, bind_device) {
         Ok(sock) => Ok((sock, true)),
-        // #9594: the v4 fallback cannot set the option before bind, so it is set
-        // immediately after — the window is the two syscalls between.
-        Err(_) => UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).map(|s| {
-            set_recv_pktinfo_options(s.as_raw_fd(), false);
-            (s, false)
-        }),
+        Err(err) if !v6_bind_can_fallback_with_device(&err, bind_device) => Err(err),
+        // A v4 fallback is allowed only when the v6 family/socket or its
+        // v6-only capability is unavailable. The requested device is carried
+        // into bind_v4, so a capability fallback cannot lose VRF scope.
+        Err(_) => bind_v4(port, bind_device).map(|sock| (sock, false)),
     }
 }
 
+pub(super) fn v6_bind_can_fallback_with_device(err: &io::Error, _bind_device: Option<&str>) -> bool {
+    v6_bind_can_fallback(err)
+}
+
+/// The default transport tables have no VRF master. Named tables are rendered
+/// as `<instance>.inet.0` / `<instance>.inet6.0` by the Go snapshot builder.
+pub(crate) fn wg_outer_bind_device_for_transport_table(table: &str) -> Option<String> {
+    if table == "inet.0" || table == "inet6.0" {
+        return None;
+    }
+    let instance = table
+        .strip_suffix(".inet.0")
+        .or_else(|| table.strip_suffix(".inet6.0"))
+        .filter(|instance| !instance.is_empty())?;
+    Some(format!("vrf-{instance}"))
+}
+
+fn v6_bind_can_fallback(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT | libc::EINVAL)
+    )
+}
+
+fn set_socket_bind_device(fd: i32, bind_device: Option<&str>) -> io::Result<()> {
+    let Some(bind_device) = bind_device else {
+        return Ok(());
+    };
+    let device = CString::new(bind_device).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "WireGuard VRF device name contains NUL",
+        )
+    })?;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            device.as_ptr() as *const libc::c_void,
+            device.as_bytes_with_nul().len() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn bind_v4(port: u16, bind_device: Option<&str>) -> io::Result<UdpSocket> {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let sock = unsafe { UdpSocket::from_raw_fd(fd) };
+    set_socket_bind_device(fd, bind_device)?;
+    set_recv_pktinfo_options(fd, false);
+    let addr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: port.to_be(),
+        sin_addr: libc::in_addr { s_addr: 0 },
+        sin_zero: [0; 8],
+    };
+    let rc = unsafe {
+        libc::bind(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(sock)
+}
+
 /// Create a `[::]:port` UDP socket with IPV6_V6ONLY cleared before bind.
-pub(super) fn bind_dual_stack_v6(port: u16) -> io::Result<UdpSocket> {
-    use std::os::fd::FromRawFd;
+fn bind_dual_stack_v6(
+    port: u16,
+    bind_device: Option<&str>,
+) -> io::Result<UdpSocket> {
     // socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0)
     let fd = unsafe {
         libc::socket(
@@ -138,11 +232,10 @@ pub(super) fn bind_dual_stack_v6(port: u16) -> io::Result<UdpSocket> {
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    // #9594: ask for the receiving interface BEFORE bind, so no datagram can be
-    // queued without it. A record queued first carries no pktinfo, reads as an
-    // unplaceable ingress, and would have its transit refused and counted as a
-    // degraded-transit drop on a healthy box every time a control thread spawns
-    // under traffic — a false operator signal, not just a lost packet.
+    // The device pin MUST precede bind: it scopes both wildcard receive and
+    // every later sendto(2) on this socket.
+    set_socket_bind_device(fd, bind_device)?;
+    // #9594: ask for the receiving interface BEFORE bind.
     set_recv_pktinfo_options(fd, true);
     // bind([::]:port)
     let addr = libc::sockaddr_in6 {

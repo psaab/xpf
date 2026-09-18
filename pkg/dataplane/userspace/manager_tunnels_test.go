@@ -209,6 +209,99 @@ func TestBuildTunnelEndpointSnapshotsPopulatesWireGuard(t *testing.T) {
 	}
 }
 
+// The RI member may use the kernel spelling while the endpoint emitter uses
+// the authored Junos spelling. Both rows name the same tunnel device, so the
+// builder must recover the transport table through ResolveKernelIfName rather
+// than relying on an exact InterfaceSnapshot.Name lookup (#10196).
+func TestBuildTunnelEndpointSnapshotsResolvesWireguardRIByKernelIdentity10196(t *testing.T) {
+	const (
+		privHex = "a01010101010101010101010101010101010101010101010101010101010101a"
+		peerHex = "b02020202020202020202020202020202020202020202020202020202020202b"
+	)
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{{
+			Name:         "blue",
+			InstanceType: "virtual-router",
+			Interfaces:   []string{"gr-0-0-0"},
+		}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"gr-0/0/0": {
+			Name:  "gr-0/0/0",
+			Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
+			Tunnel: &config.TunnelConfig{
+				Name:              "gr-0-0-0",
+				Mode:              "wireguard",
+				WgListenPort:      51820,
+				WgLocalPrivkeyHex: privHex,
+				WgPeers: []config.WgPeerConfig{{
+					PublicKeyHex: peerHex,
+					Endpoint:     "[2001:db8::1]:51820",
+				}},
+			},
+		},
+	}
+	endpoints := buildTunnelEndpointSnapshots(cfg, []InterfaceSnapshot{{
+		Name:      "gr-0/0/0.0",
+		LinuxName: "gr-0-0-0",
+		Ifindex:   42,
+	}})
+	if len(endpoints) != 1 {
+		t.Fatalf("len(endpoints) = %d, want 1", len(endpoints))
+	}
+	if got := endpoints[0].TransportTable; got != "blue.inet6.0" {
+		t.Fatalf("transport table = %q, want blue.inet6.0 from kernel-identity RI membership", got)
+	}
+	if endpoints[0].OuterFamily != "inet6" {
+		t.Fatalf("outer family = %q, want inet6 for the IPv6 peer", endpoints[0].OuterFamily)
+	}
+}
+
+// An interface-level WG owns one socket even when a unit-only tunnel stanza
+// adds the routing-instance. The emitter's singleton merge must carry that
+// unique scope into the endpoint snapshot (#10196).
+func TestBuildTunnelEndpointSnapshotsCarriesSharedUnitWireguardScope10196(t *testing.T) {
+	const (
+		privHex = "a01010101010101010101010101010101010101010101010101010101010101a"
+		peerHex = "b02020202020202020202020202020202020202020202020202020202020202b"
+	)
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"wg0": {
+			Name: "wg0",
+			Tunnel: &config.TunnelConfig{
+				Name:              "wg0",
+				Mode:              "wireguard",
+				WgListenPort:      51820,
+				WgLocalPrivkeyHex: privHex,
+				WgPeers: []config.WgPeerConfig{{
+					PublicKeyHex: peerHex,
+					Endpoint:     "203.0.113.1:51820",
+				}},
+			},
+			Units: map[int]*config.InterfaceUnit{
+				0: {
+					Number: 0,
+					Tunnel: &config.TunnelConfig{
+						Name:            "wg0",
+						Mode:            "wireguard",
+						RoutingInstance: "blue",
+					},
+				},
+			},
+		},
+	}
+	endpoints := buildTunnelEndpointSnapshots(cfg, []InterfaceSnapshot{{
+		Name: "wg0.0", LinuxName: "wg0", Ifindex: 42,
+	}})
+	if len(endpoints) != 1 {
+		t.Fatalf("len(endpoints) = %d, want one shared WG endpoint", len(endpoints))
+	}
+	if got := endpoints[0].TransportTable; got != "blue.inet.0" {
+		t.Fatalf("transport table = %q, want blue.inet.0 from unit-only scope", got)
+	}
+}
+
 // A GRE tunnel must be unaffected by the WG relaxation: a GRE endpoint
 // with no source/destination is still dropped.
 func TestBuildTunnelEndpointSnapshotsGREStillRequiresSourceDest(t *testing.T) {

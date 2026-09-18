@@ -147,19 +147,23 @@ pub(crate) struct WgControlEntry {
     /// thread when they diverge, so both packet origins enforce the
     /// SAME current outer MTU.
     pub(in crate::afxdp) spawned_outer_mtu: usize,
+    /// #10196: the VRF master captured by the control-thread socket at
+    /// spawn. An unchanged WireGuard engine can still require a restart when
+    /// the effective transport table moves between default and named VRFs.
+    pub(in crate::afxdp) spawned_outer_bind_device: Option<String>,
     /// #5291: the resolved OUTER (underlay) egress MTU captured at spawn
-    /// PER PEER (keyed by peer public key), handed by value into
+    /// PER PEER (keyed by peer public key), handed by value into the
     /// `wg_control_loop` alongside `spawned_outer_mtu`. The TUN-origin
     /// egress guard selects the peer that owns the inner destination's
     /// AllowedIPs and must size that peer's encap against ITS OWN
     /// underlay MTU — the AF_XDP transit path already resolves per-peer
     /// (#2845/#3219). Only peers with a CONFIGURED endpoint (resolvable
-    /// while `forwarding` is reachable) appear here; a peer absent from
-    /// the map falls back to `spawned_outer_mtu`. The apply-time stale
-    /// prune compares this against a fresh `resolve_wg_per_peer_outer_mtus`
-    /// (alongside the scalar) and restarts the thread when they diverge,
-    /// so a NON-first peer's underlay MTU change — which moves no
-    /// scalar — still refreshes the TUN-origin guard.
+    /// while `forwarding` is reachable) appear here; a peer absent from the
+    /// map falls back to `spawned_outer_mtu`. The apply-time stale prune
+    /// compares this against a fresh `resolve_wg_per_peer_outer_mtus`
+    /// (alongside the scalar) and restarts the thread when they diverge, so a
+    /// NON-first peer's underlay MTU change — which moves no scalar — still
+    /// refreshes the TUN-origin guard.
     pub(in crate::afxdp) spawned_per_peer_outer_mtu: std::collections::HashMap<[u8; 32], usize>,
     /// Stamped at EVERY spawn attempt (success or failure), before the
     /// outcome is known. Tombstone-respawn backoff keys off this.

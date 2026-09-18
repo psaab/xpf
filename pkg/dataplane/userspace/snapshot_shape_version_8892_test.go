@@ -350,7 +350,10 @@ const (
 	// not any ConfigSnapshot struct walked by this digest. The shared protocol
 	// version still moves so the manager can fence old helpers before lease
 	// verbs, while this shape's field set and golden remain unchanged.
-	snapshotShapeVersion8892 = 25
+	// v25 -> v26 STANDS (#10196): WireGuard changes the meaning of the existing
+	// transport_table value; the ConfigSnapshot field set and this shape golden
+	// remain unchanged, but old helpers must be fenced before they install it.
+	snapshotShapeVersion8892 = 26
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

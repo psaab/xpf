@@ -593,12 +593,22 @@ impl super::Coordinator {
                         // change moves no scalar, so compare the whole map so
                         // every peer's TUN-origin guard stays current.
                         Some("outer_mtu_changed")
+                    } else if crate::afxdp::coordinator::wg_control::wg_outer_bind_device_for_transport_table(
+                        &self.forwarding.tunnel_endpoints[id].transport_table,
+                    ) != entry.spawned_outer_bind_device
+                    {
+                        // #10196: socket SO_BINDTODEVICE is captured at
+                        // spawn. A same-engine refresh that moves a tunnel
+                        // between the default table and VRF-A/VRF-B must
+                        // restart the control thread, or its already-bound
+                        // UDP socket keeps using the old routing domain.
+                        Some("outer_bind_device_changed")
                     } else if self.wg_kernel_transport_for_endpoint(*id)
                         != entry.spawned_kernel_transport
                     {
                         // #9521/#9587: the snapshot re-steered WireGuard (set
-                        // membership changed — a tunnel added or removed, or a
-                        // port moved in or out of the steered set), so this
+                        // membership changed — a tunnel added or removed, or
+                        // a port moved in or out of the steered set), so this
                         // plaintext changed. The decision is captured by value
                         // at spawn, so only a restart applies it.
                         Some("kernel_transport_changed")
@@ -864,6 +874,10 @@ impl super::Coordinator {
         };
         let spawned_ifindex = endpoint.logical_ifindex;
         let listen_port = endpoint.wg_listen_port;
+        let outer_bind_device =
+            crate::afxdp::coordinator::wg_control::wg_outer_bind_device_for_transport_table(
+                &endpoint.transport_table,
+            );
         let kernel_transport = self.wg_kernel_transport_for_endpoint(id);
         // #9594: the same worker-visible runtime handle the GRE local-tunnel
         // source threads receive (#1881 D.1), for the kernel-path posture.
@@ -872,6 +886,7 @@ impl super::Coordinator {
         let stop_clone = stop.clone();
         let recent_exceptions = self.recent_exceptions.clone();
         let thread_tunnel_name = tunnel_name.clone();
+        let thread_outer_bind_device = outer_bind_device.clone();
         let thread_per_peer_outer_mtu = per_peer_outer_mtu.clone();
         // #7158: peers authored with a DNS hostname endpoint. Empty for a
         // literal-only tunnel, which then starts no resolver thread — every
@@ -909,7 +924,7 @@ impl super::Coordinator {
         let thread_shared_forward_wire_sessions = self.sessions.forward_wire.clone();
         let thread_shared_owner_rg_indexes = self.sessions.owner_rg_indexes.clone();
         eprintln!(
-            "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} kernel_transport={kernel_transport:?}"
+            "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} device={outer_bind_device:?} kernel_transport={kernel_transport:?}"
         );
         let join = spawn_supervised_aux(
             format!("xpf-wg-control-{tunnel_name}"),
@@ -919,6 +934,7 @@ impl super::Coordinator {
                     id,
                     engine,
                     listen_port,
+                    thread_outer_bind_device,
                     kernel_transport,
                     shared_runtime,
                     outer_mtu,
@@ -967,6 +983,7 @@ impl super::Coordinator {
                 spawned_ifindex,
                 spawned_tunnel_name: tunnel_name,
                 spawned_outer_mtu: outer_mtu,
+                spawned_outer_bind_device: outer_bind_device,
                 spawned_per_peer_outer_mtu: per_peer_outer_mtu,
                 last_spawn_attempt_ns: monotonic_nanos(),
                 resolver_telemetry: Some(resolver_telemetry),

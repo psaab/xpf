@@ -310,7 +310,11 @@ const (
 	// v24 -> v25 (#10018): persistent-NAT lease identity gained RoutingScope.
 	// The manager gates both lease-control verbs on an observed v25 helper;
 	// without that gate an old helper would ignore the field and merge two VRFs.
-	ProtocolVersion = 25
+	// v25 -> v26 (#10196): a named WireGuard transport table now means the
+	// outer UDP socket is bound to `vrf-<instance>` via SO_BINDTODEVICE. An
+	// old Rust helper would accept the same snapshot but keep that socket in
+	// the main table, reopening #9909's containment escape.
+	ProtocolVersion = 26
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -435,16 +439,16 @@ type IdleLeaseWire struct {
 // never reaches zero, and no GC path reclaims it. Keeping the display record
 // distinct means that rule cannot be undone by a later edit to a shared struct.
 type DisplayLeaseWire struct {
-	Pool           string `json:"pool"`
-	Protocol       uint8  `json:"protocol"`
-	SrcIP          string `json:"src_ip"`
-	SrcPort        uint16 `json:"src_port"`
+	Pool           string  `json:"pool"`
+	Protocol       uint8   `json:"protocol"`
+	SrcIP          string  `json:"src_ip"`
+	SrcPort        uint16  `json:"src_port"`
 	RoutingScope   *uint32 `json:"routing_scope"`
-	RemoteIP       string `json:"remote_ip,omitempty"`
-	RemotePort     uint16 `json:"remote_port,omitempty"`
-	TranslatedIP   string `json:"translated_ip"`
-	TranslatedPort uint16 `json:"translated_port"`
-	AddressOnly    bool   `json:"address_only,omitempty"`
+	RemoteIP       string  `json:"remote_ip,omitempty"`
+	RemotePort     uint16  `json:"remote_port,omitempty"`
+	TranslatedIP   string  `json:"translated_ip"`
+	TranslatedPort uint16  `json:"translated_port"`
+	AddressOnly    bool    `json:"address_only,omitempty"`
 	// RemainingNs is RAW and is meaningful only when ActiveFlows == 0. While
 	// flows are live the allocator does not refresh the deadline (it is
 	// rewritten when the last flow closes), so this is routinely 0 for a
