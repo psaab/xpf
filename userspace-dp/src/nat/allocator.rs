@@ -473,6 +473,33 @@ impl AddressOnlyReverseKey {
         }
     }
 }
+/// #10190: the exact PAT reverse identity used by the same-allocator
+/// cross-domain guard. PAT allocations normally need only the per-address
+/// bitmap, but an address-only reservation keys the full reverse tuple
+/// (including the remote endpoint). Keeping this compact key in a count map
+/// gives address-only admission an O(1) PAT-domain lookup without changing
+/// the bitmap's address/port semantics.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct PatReverseKey {
+    protocol: u8,
+    translated_ip: IpAddr,
+    translated_port: u16,
+    dst_ip: IpAddr,
+    dst_port: u16,
+}
+
+impl PatReverseKey {
+    fn for_flow(flow: &SourceNatFlowKey, translated: TranslatedTuple) -> Self {
+        Self {
+            protocol: flow.protocol,
+            translated_ip: translated.ip,
+            translated_port: translated.port,
+            dst_ip: flow.dst_ip,
+            dst_port: flow.dst_port,
+        }
+    }
+}
+
 
 /// #4559: IPv4 deterministic CGNAT (mode 1) block-allocation parameters,
 /// precomputed by the Go compiler and carried on the source-NAT rule. The
@@ -780,6 +807,10 @@ pub(super) struct PortAllocatorLiveState {
     // `rollback_flow` for an `address_only` `LiveAllocation`. Distinct from the
     // per-address occupancy bitmap, which tracks PAT port ownership.
     address_only_owners: FxHashMap<AddressOnlyReverseKey, SourceNatFlowKey>,
+    // #10190: exact PAT reverse identities for same-allocator address-only
+    // admission. A count is required because persistent-NAT flows can share
+    // one translated tuple while holding separate `live_by_flow` records.
+    pat_owners: FxHashMap<PatReverseKey, u32>,
     gc_counter: u32,
 }
 
@@ -790,7 +821,64 @@ impl PortAllocatorLiveState {
             ..Self::default()
         }
     }
+    /// #10190: the allocator intentionally has two ownership domains:
+    /// `address_only_owners` for preserved ports and the occupancy bitmap for
+    /// PAT. The cross-allocator overlap guard skips peers sharing this
+    /// allocator because one allocator normally is one wire-identity domain.
+    /// A `no-translation` rule and a PAT rule are the exception: they share
+    /// the allocator key but issue different tokens. Keep this check local to
+    /// the allocator rather than widening the key — key widening would split
+    /// live leases and would require a carry-over migration.
+    fn address_only_owns_wire_identity(
+        &self,
+        flow: &SourceNatFlowKey,
+        translated: TranslatedTuple,
+    ) -> bool {
+        self.address_only_owners
+            .contains_key(&AddressOnlyReverseKey::for_flow(
+                flow,
+                translated.ip,
+                translated.port,
+            ))
+    }
+
+    /// Record one live PAT owner of an exact reverse identity. Persistent NAT
+    /// can place multiple forward flows on one translated tuple, so this is a
+    /// count rather than a single owner flow.
+    fn record_pat_owner(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
+        let count = self
+            .pat_owners
+            .entry(PatReverseKey::for_flow(flow, translated))
+            .or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    /// Remove one live PAT owner from the exact reverse-identity count.
+    fn remove_pat_owner(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
+        let key = PatReverseKey::for_flow(flow, translated);
+        let Some(count) = self.pat_owners.get_mut(&key) else {
+            return;
+        };
+        if *count <= 1 {
+            self.pat_owners.remove(&key);
+        } else {
+            *count -= 1;
+        }
+    }
+
+    /// #10190: O(1) lookup for a PAT owner of the exact reverse wire
+    /// identity an address-only flow would preserve. The destination endpoint
+    /// remains part of the key, so another remote is admissible.
+    fn pat_owns_wire_identity(
+        &self,
+        flow: &SourceNatFlowKey,
+        translated: TranslatedTuple,
+    ) -> bool {
+        self.pat_owners
+            .contains_key(&PatReverseKey::for_flow(flow, translated))
+    }
 }
+
 
 /// #7174 (M13): the FIFO recycle ring plus a per-offset "already queued" bitset,
 /// held together under ONE mutex so a port can hold AT MOST ONE token.
@@ -1488,6 +1576,10 @@ enum LeaseReuse {
     /// A LIVE address-only lease holds this source. It is left standing, and the
     /// caller must serve the flow WITHOUT persistence (no lease insert).
     LiveModeMismatch,
+    /// The existing PAT lease's exact reverse identity is held by an
+    /// address-only flow in this allocator. Leave the lease untouched and
+    /// allocate this flow without joining it.
+    WireIdentityConflict,
 }
 
 impl PortAllocator {
@@ -1648,6 +1740,7 @@ impl PortAllocator {
                 holders: NatHolder::Untracked.bit(),
             },
         );
+        live.record_pat_owner(&flow, translated);
     }
 
     /// Test-only: clear a synthetic owner seeded via `debug_seed_owner`
@@ -2032,79 +2125,111 @@ impl PortAllocator {
                 let Some(occ) = self.shared.occupancy.get(abs) else {
                     continue;
                 };
-                let Some(port) = occ.claim() else {
-                    continue;
-                };
-                let translated = TranslatedTuple {
-                    ip: family_addresses.ip_at(rel),
-                    port,
-                };
-                // #4676: run the amortized expiry GC OFF the insert critical
-                // section — chunked, the alloc mutex released between batches,
-                // reclaimed ports freed lock-free. GC touches only the
-                // persistent-lease maps + occupancy while the insert CS below
-                // touches only `live_by_flow`, so the two are disjoint and the
-                // insert CS stays genuinely tiny (the port is already claimed on
-                // the lock-free bitmap, so GC here is opportunistic cleanup, not
-                // load-bearing for this allocation).
-                self.gc_expired_chunked(now_ns, ALLOCATION_GC_BUDGET);
-                let mut live = self.lock_live();
-                if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-                    // Idempotent re-entry for an already-allocated flow (a second
-                    // packet racing session install). Give back the port we just
-                    // claimed and return the existing translation.
-// #9145: record this worker as a HOLDER on the idempotent-reuse
-                    // return. `reserve_flow_maybe_persistent` and
-                    // `reserve_address_only_maybe_persistent` already do it here
-                    // and say why (#6211 F2): this early return is where workers
-                    // 2..N land, so it is exactly where a new holder must be
-                    // recorded. Without it a worker-0 `release_flow` clears the
-                    // occupancy bit for a translation worker 1 still holds --
-                    // the NAT source collision the mask exists to prevent.
-                    //
-                    // OR is idempotent, so a refresh cannot inflate the mask;
-                    // that is why this is a bitmask and not a counter. The
-                    // direction is the safe one `drop_holder_locked`'s own doc
-                    // prefers: this can only ever cause an UNDER-release, never
-                    // an over-release.
-                    slot.holders |= holder.bit();
-                    let existing = slot.translated;
-                    self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                let mut rejected_ports = Vec::new();
+                'ports: loop {
+                    let Some(port) = occ.claim() else {
+                        for rejected_port in rejected_ports.drain(..) {
+                            self.free_translated_port(abs, rejected_port, true);
+                        }
+                        break;
+                    };
+                    let translated = TranslatedTuple {
+                        ip: family_addresses.ip_at(rel),
+                        port,
+                    };
+                    // #4676: run the amortized expiry GC OFF the insert critical
+                    // section — chunked, the alloc mutex released between batches,
+                    // reclaimed ports freed lock-free. GC touches only the
+                    // persistent-lease maps + occupancy while the insert CS below
+                    // touches only `live_by_flow`, so the two are disjoint and the
+                    // insert CS stays genuinely tiny (the port is already claimed on
+                    // the lock-free bitmap, so GC here is opportunistic cleanup, not
+                    // load-bearing for this allocation).
+                    self.gc_expired_chunked(now_ns, ALLOCATION_GC_BUDGET);
+                    let mut live = self.lock_live();
+                    if let Some(slot) = live.live_by_flow.get_mut(&flow) {
+                        // Idempotent re-entry for an already-allocated flow (a second
+                        // packet racing session install). Give back the port we just
+                        // claimed and return the existing translation.
+                        // #9145: record this worker as a HOLDER on the idempotent-reuse
+                        // return. `reserve_flow_maybe_persistent` and
+                        // `reserve_address_only_maybe_persistent` already do it here
+                        // and say why (#6211 F2): this early return is where workers
+                        // 2..N land, so it is exactly where a new holder must be
+                        // recorded. Without it a worker-0 `release_flow` clears the
+                        // occupancy bit for a translation worker 1 still holds —
+                        // the NAT source collision the mask exists to prevent.
+                        //
+                        // OR is idempotent, so a refresh cannot inflate the mask;
+                        // that is why this is a bitmask and not a counter. The
+                        // direction is the safe one `drop_holder_locked`'s own doc
+                        // prefers: this can only ever cause an UNDER-release, never
+                        // an over-release.
+                        slot.holders |= holder.bit();
+                        let existing = slot.translated;
+                        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                        drop(live);
+                        self.free_translated_port(abs, port, true);
+                        for rejected_port in rejected_ports.drain(..) {
+                            self.free_translated_port(abs, rejected_port, true);
+                        }
+                        return Ok(existing);
+                    }
+                    // #10190: address-only owns a reverse token rather than a
+                    // bitmap bit. The same allocator is intentionally skipped by
+                    // the peer guard, so close this second ownership domain here,
+                    // after claiming the PAT bit and before publishing the flow.
+                    // The exact remote endpoint remains part of the identity:
+                    // another remote is a distinct reverse tuple.
+                    if live.address_only_owns_wire_identity(&flow, translated) {
+                        drop(live);
+                        // The colliding port is unavailable to this reverse
+                        // identity, but another PAT port on the same address may
+                        // still be free. Keep it claimed while probing so the
+                        // reuse ring cannot return it to this loop.
+                        rejected_ports.push(port);
+                        continue 'ports;
+                    }
+                    if live.live_by_flow.len() >= self.shared.max_tracked_flows {
+                        // Exact cap (F4): `live_by_flow.len()` under the mutex is
+                        // authoritative — no overshoot. Give back the claimed port.
+                        self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                        drop(live);
+                        self.free_translated_port(abs, port, true);
+                        for rejected_port in rejected_ports.drain(..) {
+                            self.free_translated_port(abs, rejected_port, true);
+                        }
+                        return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+                    }
+                    live.live_by_flow.insert(
+                        flow,
+                        LiveAllocation {
+                            translated,
+                            persistent_key: None,
+                            addr_index: abs,
+                            deterministic: false,
+                            address_only: false,
+                            // #6522: the ALLOCATING worker's holder bit. A locally-born session is
+                            // replicated to every SIBLING worker (`replicate_session_upsert` fans a
+                            // `WorkerLocalImport` entry to `peer_worker_commands`, which EXCLUDES
+                            // this worker) and each sibling reserves against this same record, so
+                            // without this bit the mask holds every worker EXCEPT the one actually
+                            // forwarding — and the last sibling replica to age-reap frees a
+                            // `(pool_addr, port)` still in use. Recording the owner here makes the
+                            // mask complete, so the port survives until the owner itself releases.
+                            holders: holder.bit(),
+                        },
+                    );
+                    live.record_pat_owner(&flow, translated);
+                    self.shared
+                        .allocations_total
+                        .fetch_add(1, Ordering::Relaxed);
                     drop(live);
-                    self.free_translated_port(abs, port, true);
-                    return Ok(existing);
+                    for rejected_port in rejected_ports.drain(..) {
+                        self.free_translated_port(abs, rejected_port, true);
+                    }
+                    return Ok(translated);
                 }
-                if live.live_by_flow.len() >= self.shared.max_tracked_flows {
-                    // Exact cap (F4): `live_by_flow.len()` under the mutex is
-                    // authoritative — no overshoot. Give back the claimed port.
-                    self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
-                    drop(live);
-                    self.free_translated_port(abs, port, true);
-                    return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
-                }
-                live.live_by_flow.insert(
-                    flow,
-                    LiveAllocation {
-                        translated,
-                        persistent_key: None,
-                        addr_index: abs,
-                        deterministic: false,
-                        address_only: false,
-                        // #6522: the ALLOCATING worker's holder bit. A locally-born session is
-                        // replicated to every SIBLING worker (`replicate_session_upsert` fans a
-                        // `WorkerLocalImport` entry to `peer_worker_commands`, which EXCLUDES
-                        // this worker) and each sibling reserves against this same record, so
-                        // without this bit the mask holds every worker EXCEPT the one actually
-                        // forwarding — and the last sibling replica to age-reap frees a
-                        // `(pool_addr, port)` still in use. Recording the owner here makes the
-                        // mask complete, so the port survives until the owner itself releases.
-                        holders: holder.bit(),
-                    },
-                );
-                self.shared
-                    .allocations_total
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(translated);
             }
             // Every target address's bitmap was full on the fast (non-GC'd)
             // view. Fall through to the pressured, GC-first locked path.
@@ -2198,6 +2323,11 @@ impl PortAllocator {
                 // the insert below would overwrite the live lease even if the
                 // reuse function had kept it -- the #9158 trap.
                 LeaseReuse::LiveModeMismatch => persistent_key = None,
+                // #10190: an address-only flow already owns the exact reverse
+                // identity of the existing PAT lease. Keep that lease pinned,
+                // but serve this flow through the fresh unpinned path so it
+                // chooses a different available PAT port.
+                LeaseReuse::WireIdentityConflict => persistent_key = None,
             }
         }
 
@@ -2224,65 +2354,84 @@ impl PortAllocator {
                 }
             }
 
-            let mut port = self.shared.occupancy[abs].claim();
-            if port.is_none() {
-                // Pressure handling is budgeted, not strict O(1). A
-                // non-address-persistent full family can visit each
-                // family-compatible address and run at most
-                // PRESSURE_GC_BUDGET expiry checks for that selected
-                // address before declaring exhaustion.
-                self.gc_expired_for_addr_locked(&mut live, abs, now_ns, PRESSURE_GC_BUDGET);
-                port = self.shared.occupancy[abs].claim();
-            }
-            let Some(port) = port else {
-                continue;
-            };
-            let translated = TranslatedTuple {
-                ip: translated_ip,
-                port,
-            };
-            if let Some(key) = persistent_key {
-                let expires_at_ns =
-                    now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
-                live.persistent_by_source.insert(
-                    key,
-                    PersistentLease {
+            let mut rejected_ports = Vec::new();
+            'ports: loop {
+                let mut port = self.shared.occupancy[abs].claim();
+                if port.is_none() {
+                    // Pressure handling is budgeted, not strict O(1). A
+                    // non-address-persistent full family can visit each
+                    // family-compatible address and run at most
+                    // PRESSURE_GC_BUDGET expiry checks for that selected
+                    // address before declaring exhaustion.
+                    self.gc_expired_for_addr_locked(&mut live, abs, now_ns, PRESSURE_GC_BUDGET);
+                    port = self.shared.occupancy[abs].claim();
+                }
+                let Some(port) = port else {
+                    for rejected_port in rejected_ports.drain(..) {
+                        self.free_translated_port(abs, rejected_port, true);
+                    }
+                    break;
+                };
+                let translated = TranslatedTuple {
+                    ip: translated_ip,
+                    port,
+                };
+                // #10190: the address-only token is a second ownership domain
+                // inside this allocator. Treat its exact reverse identity as
+                // occupied before a PAT record or persistent lease is inserted.
+                if live.address_only_owns_wire_identity(&flow, translated) {
+                    // Keep colliding claims held while probing so the reuse ring
+                    // cannot return the same rejected port indefinitely.
+                    rejected_ports.push(port);
+                    continue 'ports;
+                }
+                if let Some(key) = persistent_key {
+                    let expires_at_ns =
+                        now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
+                    live.persistent_by_source.insert(
+                        key,
+                        PersistentLease {
+                            translated,
+                            addr_index: abs,
+                            expires_at_ns,
+                            timeout_ns: persistent_nat_timeout_ns.max(NS_PER_SEC),
+                            active_flows: 1,
+                            completed_flows: 0,
+                            activation_saw_completion: false,
+                            activation_previous_expires_at_ns: 0,
+                            activation_had_previous_lease: false,
+                            address_only: false,
+                        },
+                    );
+                }
+                live.live_by_flow.insert(
+                    flow,
+                    LiveAllocation {
                         translated,
+                        persistent_key,
                         addr_index: abs,
-                        expires_at_ns,
-                        timeout_ns: persistent_nat_timeout_ns.max(NS_PER_SEC),
-                        active_flows: 1,
-                        completed_flows: 0,
-                        activation_saw_completion: false,
-                        activation_previous_expires_at_ns: 0,
-                        activation_had_previous_lease: false,
+                        deterministic: false,
                         address_only: false,
+                        // #6522: the ALLOCATING worker's holder bit. A locally-born session is
+                        // replicated to every SIBLING worker (`replicate_session_upsert` fans a
+                        // `WorkerLocalImport` entry to `peer_worker_commands`, which EXCLUDES
+                        // this worker) and each sibling reserves against this same record, so
+                        // without this bit the mask holds every worker EXCEPT the one actually
+                        // forwarding — and the last sibling replica to age-reap frees a
+                        // `(pool_addr, port)` still in use. Recording the owner here makes the
+                        // mask complete, so the port survives until the owner itself releases.
+                        holders: holder.bit(),
                     },
                 );
+                live.record_pat_owner(&flow, translated);
+                self.shared
+                    .allocations_total
+                    .fetch_add(1, Ordering::Relaxed);
+                for rejected_port in rejected_ports.drain(..) {
+                    self.free_translated_port(abs, rejected_port, true);
+                }
+                return Ok(translated);
             }
-            live.live_by_flow.insert(
-                flow,
-                LiveAllocation {
-                    translated,
-                    persistent_key,
-                    addr_index: abs,
-                    deterministic: false,
-                    address_only: false,
-                    // #6522: the ALLOCATING worker's holder bit. A locally-born session is
-                    // replicated to every SIBLING worker (`replicate_session_upsert` fans a
-                    // `WorkerLocalImport` entry to `peer_worker_commands`, which EXCLUDES
-                    // this worker) and each sibling reserves against this same record, so
-                    // without this bit the mask holds every worker EXCEPT the one actually
-                    // forwarding — and the last sibling replica to age-reap frees a
-                    // `(pool_addr, port)` still in use. Recording the owner here makes the
-                    // mask complete, so the port survives until the owner itself releases.
-                    holders: holder.bit(),
-                },
-            );
-            self.shared
-                .allocations_total
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(translated);
         }
 
         self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
@@ -2322,6 +2471,18 @@ impl PortAllocator {
     ) -> LeaseReuse {
         if !live.persistent_by_source.contains_key(&key) {
             return LeaseReuse::NoLease;
+        }
+        // #10190: joining an existing PAT lease is another PAT admission
+        // path, so it must check the same-allocator address-only index before
+        // mutating the lease. This catches an idle lease (still within its
+        // timeout) and a live lease whose prior flow used another remote.
+        if let Some(lease) = live.persistent_by_source.get(&key) {
+            if !lease.address_only
+                && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                && live.address_only_owns_wire_identity(&flow, lease.translated)
+            {
+                return LeaseReuse::WireIdentityConflict;
+            }
         }
         let mut reusable = None;
         let mut expired = None;
@@ -2416,6 +2577,7 @@ impl PortAllocator {
                     holders: holder.bit(),
                 },
             );
+            live.record_pat_owner(&flow, translated);
             self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
             return LeaseReuse::Reused(translated);
         }
@@ -2563,6 +2725,11 @@ impl PortAllocator {
                 dst_ip: flow.dst_ip,
                 dst_port: flow.dst_port,
             });
+        } else {
+            // #10190: keep the O(1) same-allocator PAT identity index in
+            // lockstep with the shared live-record teardown. Persistent NAT
+            // decrements a count because several flows may share one tuple.
+            live.remove_pat_owner(flow, existing.translated);
         }
         if existing.persistent_key.is_none() && !existing.address_only {
             self.free_translated_port(
@@ -2934,6 +3101,15 @@ impl PortAllocator {
             self.free_translated_port(ip_idx, port, false);
             return Ok(existing);
         }
+        // #10190: deterministic PAT also claims only the bitmap. Reject a
+        // same-allocator address-only token for this exact reverse identity
+        // before publishing the deterministic record.
+        if live.address_only_owns_wire_identity(&flow, translated) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            drop(live);
+            self.free_translated_port(ip_idx, port, false);
+            return Err(SourceNatFailureReason::AllocatorExhausted);
+        }
         if live.live_by_flow.len() >= self.shared.max_tracked_flows {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             drop(live);
@@ -2959,6 +3135,7 @@ impl PortAllocator {
                 holders: holder.bit(),
             },
         );
+        live.record_pat_owner(&flow, translated);
         self.shared
             .allocations_total
             .fetch_add(1, Ordering::Relaxed);
@@ -3092,6 +3269,15 @@ impl PortAllocator {
             self.free_translated_port(ip_idx, port, false);
             return Ok(existing);
         }
+        // #10190: deterministic NAT64 PAT also claims only the bitmap. Reject
+        // a same-allocator address-only token for this exact reverse identity
+        // before publishing the deterministic record.
+        if live.address_only_owns_wire_identity(&flow, translated) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            drop(live);
+            self.free_translated_port(ip_idx, port, false);
+            return Err(SourceNatFailureReason::AllocatorExhausted);
+        }
         if live.live_by_flow.len() >= self.shared.max_tracked_flows {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             drop(live);
@@ -3117,6 +3303,7 @@ impl PortAllocator {
                 holders: holder.bit(),
             },
         );
+        live.record_pat_owner(&flow, translated);
         self.shared
             .allocations_total
             .fetch_add(1, Ordering::Relaxed);
@@ -3457,6 +3644,12 @@ impl PortAllocator {
             self.unlink_live_allocation_locked(&mut live, &flow, existing);
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
+        // #10190: synced PAT reservations use the same local allocator as
+        // address-only mints. The address-only token has no bitmap bit, so
+        // reject its exact reverse identity before joining/minting a PAT lease.
+        if live.address_only_owns_wire_identity(&flow, translated) {
+            return false;
+        }
         // #7360: a PERSISTENT synced flow joins its source's lease instead of
         // reserving the port again.
         //
@@ -3533,6 +3726,7 @@ impl PortAllocator {
                         holders: holder.bit(),
                     },
                 );
+                live.record_pat_owner(&flow, translated);
                 return true;
             }
         }
@@ -3598,6 +3792,7 @@ impl PortAllocator {
                 holders: holder.bit(),
             },
         );
+        live.record_pat_owner(&flow, translated);
         true
     }
 
@@ -3732,6 +3927,14 @@ impl PortAllocator {
         // capacity limit. `flow` is not in `live_by_flow` here (checked above),
         // so any existing owner is necessarily a different flow.
         if live.address_only_owners.contains_key(&rkey) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+        }
+        // #10190: PAT owns the bitmap token in this SAME allocator. Check its
+        // exact reverse identity too; the cross-allocator guard deliberately
+        // skips this allocator instance, so the local admission path must
+        // close the two-token gap.
+        if live.pat_owns_wire_identity(&flow, translated) {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
@@ -4232,6 +4435,13 @@ impl PortAllocator {
                 // the SAME `release_flow` free the token.
                 port: flow.src_port,
             };
+            // #10190: an existing PAT owner in this allocator occupies the
+            // exact reverse identity even though it has no address-only token.
+            // Try another pool address when round-robin address selection can
+            // provide one; a different remote remains admissible.
+            if live.pat_owns_wire_identity(&flow, translated) {
+                continue;
+            }
             live.address_only_owners.insert(rkey, flow);
             live.live_by_flow.insert(
                 flow,
@@ -4480,7 +4690,13 @@ impl PortAllocator {
             // Pinned by an existing lease: single probe, no rotation.
             Some((ip, idx)) => {
                 let rkey = rkey_for(ip);
-                (!live.address_only_owners.contains_key(&rkey)).then_some((ip, idx, rkey))
+                let translated = TranslatedTuple {
+                    ip,
+                    port: flow.src_port,
+                };
+                (!live.address_only_owners.contains_key(&rkey)
+                    && !live.pat_owns_wire_identity(&flow, translated))
+                    .then_some((ip, idx, rkey))
             }
             None => {
                 let abs =
@@ -4494,11 +4710,13 @@ impl PortAllocator {
                     .find_map(|rel| {
                         let ip = family_addresses.ip_at(rel);
                         let rkey = rkey_for(ip);
-                        (!live.address_only_owners.contains_key(&rkey)).then_some((
+                        let translated = TranslatedTuple {
                             ip,
-                            family_offset + rel,
-                            rkey,
-                        ))
+                            port: flow.src_port,
+                        };
+                        (!live.address_only_owners.contains_key(&rkey)
+                            && !live.pat_owns_wire_identity(&flow, translated))
+                            .then_some((ip, family_offset + rel, rkey))
                     })
             }
         };
