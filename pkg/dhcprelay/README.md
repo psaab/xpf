@@ -705,12 +705,14 @@ when no GUA/ULA is available, and the peer address of the received packet
 (normally link-local, but global and ULA unicast peers are accepted), then sent
 to every configured server on UDP/547. A link-local link-address always carries
 the Interface-ID option because it cannot identify the return link by itself.
-The upstream socket binds to the selected GUA/ULA exact IP to preserve
-per-interface SO_REUSEPORT demultiplexing. A link-local fallback binds the
-selected address with its interface zone and pins the socket to that interface
-to disambiguate duplicate `fe80::/64` addresses before SO_REUSEPORT fanout.
-This makes link-local upstream egress interface-scoped; a cross-interface
-server route for a link-local relay is outside this fallback's boundary.
+GUA/ULA upstream sockets retain exact-IP binds for their existing
+per-interface SO_REUSEPORT demultiplexing. A link-local fallback uses the
+manager's shared unspecified, route-selected upstream socket; its receive
+dispatcher routes Relay-Reply packets by Interface-ID instead of relying on
+SO_REUSEPORT fanout, so link identity stays independent of the wire source.
+When an override shares one Interface-ID across relays, the dispatcher further
+matches the outer LinkAddr to the selected link-address and drops absent or
+ambiguous matches.
 Configured Relay-Reply sources and the outer Interface-ID are validated; the
 inner message is sent to the peer on UDP/546. The existing HA master-state gate
 applies before forwarding client messages.
