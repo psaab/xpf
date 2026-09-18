@@ -88,8 +88,12 @@ xpf_assert_cluster_lock_idle() {
 	start)
 		# Read before flock: an acquire+release after this snapshot but
 		# before the endpoint is caught by the changed epoch even if the
-		# lock is idle again by the time flock runs.
-		epoch="$(xpf_cluster_epoch_read)"
+		# lock is idle again by the time flock runs. A present but
+		# unreadable witness is fail-closed, never an empty snapshot.
+		if ! epoch="$(xpf_cluster_epoch_read)"; then
+			echo "VOID: shared-cluster epoch ${XPF_CLUSTER_EPOCH} is unreadable at connectivity START — samples are discarded (no summary)" >&2
+			exit 77
+		fi
 		owner="$(xpf_cluster_owner_identity)"
 		if [[ -e "$XPF_CLUSTER_LOCK" ]] \
 			&& ! ( flock -n 9 || exit 1 ) 9<"$XPF_CLUSTER_LOCK"; then
@@ -113,7 +117,10 @@ xpf_assert_cluster_lock_idle() {
 			exit 77
 		}
 		owner="$(xpf_cluster_owner_identity)"
-		epoch="$(xpf_cluster_epoch_read)"
+		if ! epoch="$(xpf_cluster_epoch_read)"; then
+			echo "VOID: shared-cluster epoch ${XPF_CLUSTER_EPOCH} is unreadable at connectivity END — samples are discarded (no summary)" >&2
+			exit 77
+		fi
 		if [[ "$epoch" != "$XPF_CLUSTER_LOCK_IDLE_START_EPOCH" \
 			|| "$owner" != "$XPF_CLUSTER_LOCK_IDLE_START_OWNER" ]]; then
 			echo "VOID: shared-cluster lock owner epoch/identity changed during connectivity sampling window — samples taken across lock contention are discarded (no summary)" >&2

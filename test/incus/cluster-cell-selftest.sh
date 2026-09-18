@@ -427,6 +427,38 @@ set -e
 	|| fail "F-158 (h) no-lock window expected clean rc 0, got $_F158_NOLOCK_RC"
 ok "F-158 (h) no-lock window stays clean (no false positive)"
 
+# F-158 (h2): a read-side failure must not collapse to empty==empty.
+# Selective cat failure makes END reject the otherwise unchanged epoch.
+mkdir "$T/selective-cat-bin"
+cat >"$T/selective-cat-bin/cat" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "$XPF_CLUSTER_EPOCH" ]; then
+	exit 1
+fi
+exec /bin/cat "$@"
+EOF
+chmod 755 "$T/selective-cat-bin/cat"
+set +e
+( export PATH="$T/selective-cat-bin:$PATH"; xpf_assert_cluster_lock_idle "start" ) \
+	>"$T/f158-unreadable-epoch-start.out" 2>&1
+_F158_UNREADABLE_EPOCH_START_RC=$?
+set -e
+[[ $_F158_UNREADABLE_EPOCH_START_RC -eq 77 ]] \
+	|| fail "F-158 (h2) unreadable epoch START expected VOID 77, got $_F158_UNREADABLE_EPOCH_START_RC"
+grep -q "epoch .*unreadable at connectivity START" "$T/f158-unreadable-epoch-start.out" \
+	|| fail "F-158 (h2) unreadable epoch START diagnostic missing"
+xpf_assert_cluster_lock_idle "start"
+set +e
+( export PATH="$T/selective-cat-bin:$PATH"; xpf_assert_cluster_lock_idle "end" ) \
+	>"$T/f158-unreadable-epoch.out" 2>&1
+_F158_UNREADABLE_EPOCH_RC=$?
+set -e
+[[ $_F158_UNREADABLE_EPOCH_RC -eq 77 ]] \
+	|| fail "F-158 (h2) unreadable epoch expected VOID 77, got $_F158_UNREADABLE_EPOCH_RC"
+grep -q "epoch .*unreadable at connectivity END" "$T/f158-unreadable-epoch.out" \
+	|| fail "F-158 (h2) unreadable epoch diagnostic missing"
+ok "F-158 (h2) unreadable epoch fails closed instead of empty==empty"
+
 # F-158 (i): the witness uses a pre-existing mode-0666 inode and
 # atomic replacement in a non-sticky state directory. This is the
 # permission shape required for cross-user operation; this unprivileged
