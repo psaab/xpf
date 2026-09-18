@@ -1139,6 +1139,100 @@ func stripFullSetSeq(payload []byte) (base []byte, incarnation, seq uint64) {
 	return payload, 0, 0
 }
 
+// dhcpLeaseSnapshotMagic marks the #10170 authority trailer. It sits BEFORE
+// the existing full-set sequence trailer so pre-#10170 receivers still decode
+// every length-prefixed lease and ignore both trailing fields.
+var dhcpLeaseSnapshotMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'D', 'H', 'A'}
+var dhcpLeaseSnapshotEndMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'D', 'H', 'Z'}
+
+func appendDHCPLeaseSnapshotMeta(base []byte, snapshot dhcpserver.LeaseSyncSnapshot) []byte {
+	scopes := make([]dhcpserver.LeaseScopeAuthority, 0, len(snapshot.Scopes))
+	for _, scope := range snapshot.Scopes {
+		if len(scope.CIDR) <= 0xffff {
+			scopes = append(scopes, scope)
+		}
+	}
+	meta := make([]byte, 0, 32)
+	meta = append(meta, dhcpLeaseSnapshotMagic[:]...)
+	meta = binary.LittleEndian.AppendUint64(meta, snapshot.Generation)
+	meta = binary.LittleEndian.AppendUint32(meta, uint32(len(scopes)))
+	for _, scope := range scopes {
+		meta = append(meta, byte(scope.Family))
+		var flags byte
+		if scope.Served {
+			flags |= 1
+		}
+		if scope.Applied {
+			flags |= 2
+		}
+		meta = append(meta, flags)
+		meta = binary.LittleEndian.AppendUint16(meta, uint16(len(scope.CIDR)))
+		meta = binary.LittleEndian.AppendUint32(meta, uint32(int32(scope.RGID)))
+		meta = binary.LittleEndian.AppendUint64(meta, scope.Generation)
+		meta = append(meta, scope.CIDR...)
+	}
+	out := make([]byte, 0, len(base)+len(meta)+12)
+	out = append(out, base...)
+	out = append(out, meta...)
+	out = binary.LittleEndian.AppendUint32(out, uint32(len(meta)))
+	out = append(out, dhcpLeaseSnapshotEndMagic[:]...)
+	return out
+}
+
+// stripDHCPLeaseSnapshotMeta removes and decodes the optional authority
+// trailer. present=false is a legacy frame; present=true, valid=false is a
+// malformed authority frame that must not replace the held set. The
+// length+end-marker envelope is parsed from the end so bytes in lease fields
+// cannot be mistaken for a trailer marker.
+func stripDHCPLeaseSnapshotMeta(payload []byte) (base []byte, snapshot dhcpserver.LeaseSyncSnapshot, present, valid bool) {
+	const envelope = 4 + 8
+	if len(payload) < envelope ||
+		!bytes.Equal(payload[len(payload)-8:], dhcpLeaseSnapshotEndMagic[:]) {
+		return payload, dhcpserver.LeaseSyncSnapshot{}, false, true
+	}
+	metaLen := int(binary.LittleEndian.Uint32(payload[len(payload)-12 : len(payload)-8]))
+	metaStart := len(payload) - envelope - metaLen
+	if metaLen < 20 || metaStart < 0 || metaStart+metaLen > len(payload) ||
+		!bytes.Equal(payload[metaStart:metaStart+8], dhcpLeaseSnapshotMagic[:]) {
+		return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+	}
+	meta := payload[metaStart : metaStart+metaLen]
+	off := 8
+	snapshot.Generation = binary.LittleEndian.Uint64(meta[off:])
+	off += 8
+	count := int(binary.LittleEndian.Uint32(meta[off:]))
+	off += 4
+	if count > (len(meta)-off)/16 {
+		return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+	}
+	scopes := make([]dhcpserver.LeaseScopeAuthority, 0, count)
+	for range count {
+		if off+16 > len(meta) {
+			return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+		}
+		family := int(meta[off])
+		flags := meta[off+1]
+		cidrLen := int(binary.LittleEndian.Uint16(meta[off+2:]))
+		rgID := int(int32(binary.LittleEndian.Uint32(meta[off+4:])))
+		generation := binary.LittleEndian.Uint64(meta[off+8:])
+		off += 16
+		if cidrLen > len(meta)-off {
+			return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+		}
+		scopes = append(scopes, dhcpserver.LeaseScopeAuthority{
+			Family: family, CIDR: string(meta[off : off+cidrLen]), RGID: rgID,
+			Generation: generation, Served: flags&1 != 0, Applied: flags&2 != 0,
+		})
+		off += cidrLen
+	}
+	if off != len(meta) {
+		return nil, dhcpserver.LeaseSyncSnapshot{}, true, false
+	}
+	snapshot.Scopes = scopes
+	snapshot.Received = true
+	return payload[:metaStart], snapshot, true, true
+}
+
 // ipsecFullSetDelim separates the newline-joined IPsec SA name list from its
 // trailing (incarnation, seq) full-set trailer. encodeIPsecSAPayload joins
 // names with '\n' and appends NO terminator, so without this delimiter

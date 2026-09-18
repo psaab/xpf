@@ -1,5 +1,7 @@
 package dhcpserver
 
+import "os"
+
 // Kea Lease File Cleanup (LFC) file-set naming + read order (#5796).
 //
 // Kea's memfile backend never rewrites the lease file in place between LFC
@@ -29,44 +31,57 @@ package dhcpserver
 //	<f>.pid        kea-lfc's pid file.
 //
 // Kea's startup loader gives .completed precedence over .2/.1 when it exists
-// (memfile_lease_mgr.cc loadLeasesFromFiles); a stale orphan can therefore
-// resurrect rows even though the generation files were replaced. The display
-// and DDNS reader below intentionally ignores .output and .completed, because
-// its candidate-path contract reads only .2, .1, and the current file.
+// (memfile_lease_mgr.cc loadLeasesFromFiles). The reader must use the same
+// source selection: an existing .completed is authoritative over the older
+// generation files, while the current append log remains newer. If no
+// .completed exists, the reader falls back to .2 → .1 → current.
 //
 // #5938 Invariant 3 — crash-interrupted-cleanup handling for the display/DDNS
-// reader. A cleanup can leave `.output` and/or `.completed` behind, so this
-// reader intentionally skips both. `.output` is safe to skip because it is
-// built by merging INPUT (.1) and PREVIOUS (.2); every lease key it could
-// contain is already in the .1/.2 union.
+// reader. A cleanup can leave `.output` and/or `.completed` behind. `.output`
+// is safe to skip because it is built by merging INPUT (.1) and PREVIOUS (.2);
+// every lease key it could contain is already in the .1/.2 union. `.completed`
+// is different: it is lease-bearing and Kea startup gives it precedence over
+// `.2`/.1. Kea's rotation removes old `.2`, removes `.1`, then renames
+// `.completed` to `.2`; a crash between those removals and the rename can leave
+// leases only in `.completed`. The reader therefore recovers it and preserves
+// Kea's precedence instead of treating it as an ignored intermediate.
 //
-// `.completed` is different: it is lease-bearing and Kea startup gives it
-// precedence over `.2`/.1. Kea's rotation removes old `.2`, removes `.1`, then
-// renames `.completed` to `.2`; a crash between those removals and the rename
-// can leave leases only in `.completed`. The display/DDNS reader would then
-// miss those leases. This is a known reader gap, not a proof that ignoring
-// `.completed` is safe; destructive pre-seed replacement removes the orphan
-// before promoted Kea starts, and the reader gap remains a follow-up.
+// NOTE the suffix mapping: .1 is INPUT and .2 is PREVIOUS. Without a
+// .completed file, the chronological read order (oldest → newest) is
+// .2 → .1 → current: previous-compacted snapshot first, then input file, then
+// current append log.
 //
-// TestKeaLFCIntermediatesIgnored pins only the current reader contract when
-// `.2` and `.1` remain present: `.output`/`.completed` do not change its
-// resolved lease set, and a lease living in `.output` is already covered by
-// `.2`/`.1`.
-//
-// NOTE the suffix mapping: .1 is INPUT and .2 is PREVIOUS — so the
-// CHRONOLOGICAL read order (oldest → newest) is .2 → .1 → current, i.e. the
-// previous-compacted snapshot first, then the input file, then the current
-// append log.
-//
-// keaLFCLeaseFilePaths returns the candidate paths in that chronological order.
-// A reader that OPENS each in turn (treating a missing file as simply absent —
-// skip, not an error) and replays the rows through the SAME append-only,
-// last-row-wins dedup the single-file parsers already use gets Kea's own final
-// disposition per lease key: a newer row in INPUT or CURRENT supersedes an older
-// row in PREVIOUS, and a release/expiry row still tombstones a lease that a
-// later re-allocation can reclaim. On a steady-state box with no LFC in progress
-// (.1/.2 absent) the set collapses to exactly the current file, so behavior is
-// byte-identical to the pre-#5796 single-file read.
+// keaLFCLeaseFileSetPaths returns all names whose identity matters to a
+// stability check. Selection is intentionally separate: callers snapshot this
+// complete set BEFORE deciding which generation to parse, so a `.completed`
+// file that appears during selection cannot be missed by the rotation guard.
+func keaLFCLeaseFileSetPaths(current string) []string {
+	return []string{current + ".completed", current + ".2", current + ".1", current}
+}
+
+// keaLFCLeaseFilePaths returns the candidate paths in Kea's source-selection
+// order. It is the convenience form for callers without an already captured
+// identity snapshot; parseActiveLeases uses keaLFCLeaseFileSetPaths plus
+// keaLFCLeaseFilePathsFromIdentity to close the selection/stability race.
 func keaLFCLeaseFilePaths(current string) []string {
-	return []string{current + ".2", current + ".1", current}
+	all := keaLFCLeaseFileSetPaths(current)
+	return keaLFCLeaseFilePathsFromIdentity(all, leaseSetIdentity(all))
+}
+
+// keaLFCLeaseFilePathsFromIdentity selects Kea's authoritative source from a
+// pre-read identity snapshot. An existing or inaccessible `.completed` is
+// selected so its parser fails closed instead of silently falling back.
+func keaLFCLeaseFilePathsFromIdentity(all []string, identities []os.FileInfo) []string {
+	if len(all) > 0 && len(identities) > 0 {
+		if identities[0] != nil {
+			return []string{all[0], all[len(all)-1]}
+		}
+		if _, err := os.Stat(all[0]); err == nil || !os.IsNotExist(err) {
+			return []string{all[0], all[len(all)-1]}
+		}
+	}
+	if len(all) < 1 {
+		return nil
+	}
+	return all[1:]
 }

@@ -123,6 +123,39 @@ type SyncLease struct {
 	State int // Kea lease state (0=default/active)
 }
 
+// LeaseScopeAuthority proves which RG serves a canonical pool subnet in a lease
+// snapshot. CIDR is the identity, not SyncLease.SubnetID: Kea may resolve a
+// hash collision against the current rendered set, while ownership is defined
+// by address membership in the configured pool. A scope is emitted only when
+// the sender can attribute every pool in the DHCP group to one RG; mixed-RG
+// groups intentionally remain unattributed and retain conservative whole-union
+// behavior on takeover.
+type LeaseScopeAuthority struct {
+	Family     int
+	CIDR       string
+	RGID       int
+	Generation uint64
+	Served     bool
+	Applied    bool
+}
+
+// LeaseSyncSnapshot is a full-set peer lease snapshot plus the ownership
+// authority that was true when the sender read it. Received is explicit so a
+// valid empty snapshot is distinguishable from never having received one.
+type LeaseSyncSnapshot struct {
+	Leases     []SyncLease
+	Generation uint64
+	Scopes     []LeaseScopeAuthority
+	Received   bool
+}
+
+// LeaseSyncAuthority is the receiver's local proof state. It describes the
+// canonical scopes this node currently serves; the peer snapshot supplies the
+// sender-side Applied proof for a scope before negative exclusion is allowed.
+type LeaseSyncAuthority struct {
+	Scopes []LeaseScopeAuthority
+}
+
 // clampPreferredRemaining enforces the #5073 invariant 0 <= pref <= remaining.
 // The preferred lifetime can never outlive the valid lifetime (RFC 8415 §6.3),
 // and a negative computed remainder (a deprecated lease whose preferred deadline
@@ -809,6 +842,36 @@ func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, n
 	return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
 }
 
+// PreSeedMemfileMerged4WithAuthority is the #10170 authority-aware v4
+// counterpart. It is additive so older callers retain the conservative
+// whole-union contract.
+func (m *Manager) PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
+	local, live, err := m.getSyncLeasesWithSource(ctx, 4, now)
+	if err != nil {
+		return fmt.Errorf("pre-seed v4: local lease read failed, not overwriting memfile: %w", err)
+	}
+	if !live && !stillMastering {
+		return m.writeMemfile4ReplacingLFC(
+			m.leaseFile(4), mergeLeasesByAuthority(nil, peer, 4, authority, stillMastering), now)
+	}
+	return m.writeMemfile4(
+		m.leaseFile(4), mergeLeasesByAuthority(local, peer, 4, authority, stillMastering), now)
+}
+
+// PreSeedMemfileMerged6WithAuthority is the #10170 authority-aware v6 twin.
+func (m *Manager) PreSeedMemfileMerged6WithAuthority(ctx context.Context, peer LeaseSyncSnapshot, now time.Time, stillMastering bool, authority LeaseSyncAuthority) error {
+	local, live, err := m.getSyncLeasesWithSource(ctx, 6, now)
+	if err != nil {
+		return fmt.Errorf("pre-seed v6: local lease read failed, not overwriting memfile: %w", err)
+	}
+	if !live && !stillMastering {
+		return m.writeMemfile6ReplacingLFC(
+			m.leaseFile(6), mergeLeasesByAuthority(nil, peer, 6, authority, stillMastering), now)
+	}
+	return m.writeMemfile6(
+		m.leaseFile(6), mergeLeasesByAuthority(local, peer, 6, authority, stillMastering), now)
+}
+
 // mergeLeasesByIdentity returns the lease set the takeover pre-seed writes for
 // one family (#5040), with ONE owner per address (#9791).
 //
@@ -850,6 +913,163 @@ func mergeLeasesByIdentity(local, peer []SyncLease, family int) []SyncLease {
 		seen[l.IdentityKey()] = struct{}{}
 	}
 	return oneOwnerPerAddress9791(union)
+}
+
+// PeerLeasesForAuthority returns the peer rows eligible for this receiver's
+// family and served-scope authority. It is shared by memfile and post-start
+// seeding so both takeover paths make the same conservative decision.
+func PeerLeasesForAuthority(peer LeaseSyncSnapshot, family int, authority LeaseSyncAuthority) []SyncLease {
+	familyRows := func(rows []SyncLease) []SyncLease {
+		out := make([]SyncLease, 0, len(rows))
+		for _, lease := range rows {
+			if lease.Family == family {
+				out = append(out, lease)
+			}
+		}
+		return out
+	}
+	if !peer.Received || peer.Generation == 0 {
+		return familyRows(peer.Leases)
+	}
+	peerScopes := make([]LeaseScopeAuthority, 0, len(peer.Scopes))
+	for _, scope := range peer.Scopes {
+		if scope.Family == family && scope.CIDR != "" &&
+			scope.Generation == peer.Generation && scope.Served && scope.Applied {
+			peerScopes = append(peerScopes, scope)
+		}
+	}
+	localScopes := make([]LeaseScopeAuthority, 0, len(authority.Scopes))
+	for _, scope := range authority.Scopes {
+		if scope.Family == family && scope.CIDR != "" {
+			localScopes = append(localScopes, scope)
+		}
+	}
+	if len(peerScopes) == 0 || len(localScopes) == 0 {
+		return familyRows(peer.Leases)
+	}
+	eligible := make([]LeaseScopeAuthority, 0, len(peerScopes))
+	for _, scope := range peerScopes {
+		if servedScopeMatches(scope, localScopes) {
+			eligible = append(eligible, scope)
+		}
+	}
+	if len(eligible) == 0 {
+		return familyRows(peer.Leases)
+	}
+	out := make([]SyncLease, 0, len(peer.Leases))
+	for _, lease := range peer.Leases {
+		if lease.Family != family {
+			continue
+		}
+		if !leaseInAnyScope(lease.Address, peerScopes) ||
+			leaseInAnyScope(lease.Address, eligible) {
+			out = append(out, lease)
+		}
+	}
+	return out
+}
+
+// mergeLeasesByAuthority applies the #10170 scope/generation gate before the
+// existing identity/address arbitration. Unknown scopes, unreceived snapshots,
+// generation mismatches, unapplied sender state, and ambiguous groups retain
+// the old whole-union behavior. Explicit authority proof narrows both local
+// stale rows and peer rows during staggered multi-RG takeover.
+func mergeLeasesByAuthority(local []SyncLease, peer LeaseSyncSnapshot, family int, authority LeaseSyncAuthority, _ bool) []SyncLease {
+	if !peer.Received || peer.Generation == 0 {
+		return mergeLeasesByIdentity(local, peer.Leases, family)
+	}
+
+	peerScopes := make([]LeaseScopeAuthority, 0, len(peer.Scopes))
+	for _, scope := range peer.Scopes {
+		if scope.Family == family &&
+			scope.CIDR != "" &&
+			scope.Generation == peer.Generation &&
+			scope.Served &&
+			scope.Applied {
+			peerScopes = append(peerScopes, scope)
+		}
+	}
+	localScopes := make([]LeaseScopeAuthority, 0, len(authority.Scopes))
+	for _, scope := range authority.Scopes {
+		if scope.Family == family && scope.CIDR != "" {
+			localScopes = append(localScopes, scope)
+		}
+	}
+	if len(peerScopes) == 0 || len(localScopes) == 0 {
+		return mergeLeasesByIdentity(local, peer.Leases, family)
+	}
+
+	// A peer scope is eligible only when exactly one currently served local
+	// scope has the same canonical CIDR. This intersection prevents a snapshot
+	// containing RG2+RG3 from seeding RG3 while this node takes RG2.
+	eligiblePeerScopes := make([]LeaseScopeAuthority, 0, len(peerScopes))
+	for _, peerScope := range peerScopes {
+		if servedScopeMatches(peerScope, localScopes) {
+			eligiblePeerScopes = append(eligiblePeerScopes, peerScope)
+		}
+	}
+	if len(eligiblePeerScopes) == 0 {
+		return mergeLeasesByIdentity(local, peer.Leases, family)
+	}
+
+	filteredLocal := make([]SyncLease, 0, len(local))
+	for _, lease := range local {
+		if lease.Family != family {
+			continue
+		}
+		if localLeaseServed(lease.Address, localScopes) ||
+			!leaseInAnyScope(lease.Address, peerScopes) {
+			filteredLocal = append(filteredLocal, lease)
+		}
+	}
+
+	return mergeLeasesByIdentity(filteredLocal, PeerLeasesForAuthority(peer, family, authority), family)
+}
+
+func servedScopeMatches(peerScope LeaseScopeAuthority, localScopes []LeaseScopeAuthority) bool {
+	matches := 0
+	for _, localScope := range localScopes {
+		if scopeCIDREqual(peerScope.CIDR, localScope.CIDR) {
+			matches++
+			if !localScope.Served {
+				return false
+			}
+		}
+	}
+	return matches == 1
+}
+
+func localLeaseServed(address string, scopes []LeaseScopeAuthority) bool {
+	for _, scope := range scopes {
+		if scope.Served && leaseAddressInCIDR(address, scope.CIDR) {
+			return true
+		}
+	}
+	return false
+}
+
+func leaseInAnyScope(address string, scopes []LeaseScopeAuthority) bool {
+	for _, scope := range scopes {
+		if leaseAddressInCIDR(address, scope.CIDR) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeCIDREqual(left, right string) bool {
+	_, leftNet, leftErr := net.ParseCIDR(left)
+	_, rightNet, rightErr := net.ParseCIDR(right)
+	return leftErr == nil && rightErr == nil && leftNet.String() == rightNet.String()
+}
+
+func leaseAddressInCIDR(address, cidr string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false
+	}
+	_, network, err := net.ParseCIDR(cidr)
+	return err == nil && network.Contains(ip)
 }
 
 // oneOwnerPerAddress9791 keeps, for each address, the row with the most recent

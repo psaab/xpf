@@ -219,6 +219,9 @@ type Manager struct {
 	// the sync.Once keeps it at 1 across ApplyAsync bursts.
 	asyncWorkerStarts atomic.Int32
 
+	authorityMu      sync.Mutex
+	authorityResults [2]leaseAuthorityResult
+
 	// #2239 HA DHCP-server lease synchronization (PATH C). When
 	// leaseSyncEnabled is set (cluster + `dhcp-lease-synchronization`
 	// knob), the generated Kea config gains a unix control-socket and the
@@ -259,13 +262,43 @@ func (m *Manager) SetLeaseSyncEnabled(enabled bool) {
 	m.leaseSyncEnabled.Store(enabled)
 }
 
+// LeaseApplyAuthority binds one apply request to the ownership scopes that
+// were used to generate its Kea configuration. Manager publishes the result
+// only from the exact per-family apply branch, so receivers never infer
+// authority from a later socket read or a newer config.
+type LeaseApplyAuthority struct {
+	Generation uint64
+	Scopes4    []LeaseScopeAuthority
+	Scopes6    []LeaseScopeAuthority
+}
+
+type leaseAuthorityResult struct {
+	generation uint64
+	scopes     []LeaseScopeAuthority
+	applied    bool
+}
+
+// LeaseAuthorityResult returns the immutable result of the most recent
+// authority-bearing apply for family 4 or 6.
+func (m *Manager) LeaseAuthorityResult(family int) (generation uint64, scopes []LeaseScopeAuthority, applied bool) {
+	if family != 4 && family != 6 {
+		return 0, nil, false
+	}
+	m.authorityMu.Lock()
+	defer m.authorityMu.Unlock()
+	r := m.authorityResults[authorityResultIndex(family)]
+	return r.generation, append([]LeaseScopeAuthority(nil), r.scopes...), r.applied
+}
+
 // asyncApplyReq is one desired DHCP-server state for the ApplyAsync
 // worker. gen orders it against every other applier (sync and async);
 // reason is logging context only (which VRRP transition asked).
+// Lease authority is optional for compatibility with callers outside HA DHCP.
 type asyncApplyReq struct {
-	gen    uint64
-	cfg    *config.DHCPServerConfig
-	reason string
+	gen       uint64
+	cfg       *config.DHCPServerConfig
+	reason    string
+	authority *LeaseApplyAuthority
 }
 
 // New creates a new DHCP server manager.
@@ -279,48 +312,34 @@ func New() *Manager {
 	}
 }
 
-// Apply reconciles the Kea DHCP servers with the xpf DHCP server
-// config. For each address family that is configured it regenerates
-// the Kea config and restarts the unit; for each family that is NOT
-// configured (including cfg == nil) it stops the unit if systemd
-// reports it active — regardless of whether this process started it —
-// and removes the generated config file.
-//
-// Fail-closed (#1778): a restart failure (or a failure to stop an
-// active unit that is no longer in config) is returned to the caller
-// so a config commit surfaces the failure instead of reporting
-// success while no DHCP service is running. A nil return can also
-// mean the request was superseded by a newer applier (gen ordering);
-// being superseded is not a failure — the newer desired state won.
+// Apply reconciles the Kea DHCP servers with the xpf DHCP server.
 func (m *Manager) Apply(cfg *config.DHCPServerConfig) error {
 	return m.apply(m.applyGen.Add(1), cfg, true)
 }
 
 // ApplyClusterCommit reconciles for a cluster-mode config commit
-// (#1835 F3). Configured families ALWAYS get a freshly generated
-// config file — so a dhcp-server config change is not lost until the
-// next VRRP transition — but the unit is restarted only when systemd
-// reports it active: an active unit means this node is currently
-// serving (VRRP MASTER for the relevant RGs), so the change must
-// reach the running Kea now. Inactive units stay stopped with the
-// fresh config on disk; the next VRRP MASTER transition's Apply
-// starts them. Unconfigured families are cleared exactly as in Apply.
-// Fail-closed like Apply: generate/restart/stop failures are returned
-// so the commit surfaces them.
+// (#1835 F3). Configured families ALWAYS get a freshly generated config file.
 func (m *Manager) ApplyClusterCommit(cfg *config.DHCPServerConfig) error {
 	return m.apply(m.applyGen.Add(1), cfg, false)
 }
 
-// apply is the shared reconcile body for every applier (sync Apply,
-// sync ApplyClusterCommit, async worker). gen is the caller's
-// generation, allocated at call entry; a request older than the
-// newest applied desired state is skipped (superseded — Codex hole 2
-// on PR #1835: without this, a queued async request could be applied
-// OVER a later synchronous commit's fresh config). restartInactive
-// selects whether a configured family's unit is restarted
-// unconditionally (standalone / VRRP-MASTER semantics) or only when
-// already active (cluster commit semantics, see ApplyClusterCommit).
-func (m *Manager) apply(gen uint64, cfg *config.DHCPServerConfig, restartInactive bool) error {
+// ApplyAsyncWithLeaseAuthority is the HA transition entry point. The
+// authority payload is copied into the request and published only when the
+// corresponding family reaches its exact successful apply branch.
+func (m *Manager) ApplyAsyncWithLeaseAuthority(cfg *config.DHCPServerConfig, reason string, authority LeaseApplyAuthority) {
+	cp := authority
+	cp.Scopes4 = append([]LeaseScopeAuthority(nil), authority.Scopes4...)
+	cp.Scopes6 = append([]LeaseScopeAuthority(nil), authority.Scopes6...)
+	m.enqueueAsync(&asyncApplyReq{
+		gen:       m.applyGen.Add(1),
+		cfg:       cfg,
+		reason:    reason,
+		authority: &cp,
+	})
+}
+
+// apply is the shared reconcile body for every applier.
+func (m *Manager) apply(gen uint64, cfg *config.DHCPServerConfig, restartInactive bool, authority ...*LeaseApplyAuthority) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -345,29 +364,47 @@ func (m *Manager) apply(gen uint64, cfg *config.DHCPServerConfig, restartInactiv
 	}
 
 	var errs []error
+	var auth *LeaseApplyAuthority
+	if len(authority) != 0 {
+		auth = authority[0]
+	} else {
+		m.clearLeaseAuthority()
+	}
 
 	want4 := cfg != nil && cfg.DHCPLocalServer != nil && len(cfg.DHCPLocalServer.Groups) > 0
 	want6 := cfg != nil && cfg.DHCPv6LocalServer != nil && len(cfg.DHCPv6LocalServer.Groups) > 0
 
+	var err4 error
 	if want4 {
-		if err := m.generateKea4Config(cfg); err != nil {
-			errs = append(errs, fmt.Errorf("generate kea4 config: %w", err))
-		} else if err := m.reconcileFamilyRestart(kea4Svc, restartInactive); err != nil {
-			errs = append(errs, err)
+		if err4 = m.generateKea4Config(cfg); err4 != nil {
+			err4 = fmt.Errorf("generate kea4 config: %w", err4)
+			errs = append(errs, err4)
+		} else if err4 = m.reconcileFamilyRestart(kea4Svc, restartInactive); err4 != nil {
+			errs = append(errs, err4)
 		}
-	} else if err := m.clearFamilyLocked(kea4Svc, m.confPath4); err != nil {
-		errs = append(errs, err)
+	} else {
+		err4 = m.clearFamilyLocked(kea4Svc, m.confPath4)
+		if err4 != nil {
+			errs = append(errs, err4)
+		}
 	}
+	m.publishLeaseAuthority(4, auth, err4 == nil)
 
+	var err6 error
 	if want6 {
-		if err := m.generateKea6Config(cfg); err != nil {
-			errs = append(errs, fmt.Errorf("generate kea6 config: %w", err))
-		} else if err := m.reconcileFamilyRestart(kea6Svc, restartInactive); err != nil {
-			errs = append(errs, err)
+		if err6 = m.generateKea6Config(cfg); err6 != nil {
+			err6 = fmt.Errorf("generate kea6 config: %w", err6)
+			errs = append(errs, err6)
+		} else if err6 = m.reconcileFamilyRestart(kea6Svc, restartInactive); err6 != nil {
+			errs = append(errs, err6)
 		}
-	} else if err := m.clearFamilyLocked(kea6Svc, m.confPath6); err != nil {
-		errs = append(errs, err)
+	} else {
+		err6 = m.clearFamilyLocked(kea6Svc, m.confPath6)
+		if err6 != nil {
+			errs = append(errs, err6)
+		}
 	}
+	m.publishLeaseAuthority(6, auth, err6 == nil)
 
 	m.lastAppliedGen = gen
 	err := errors.Join(errs...)
@@ -379,6 +416,45 @@ func (m *Manager) apply(gen uint64, cfg *config.DHCPServerConfig, restartInactiv
 	// intact.
 	m.noteApplyOutcome(err)
 	return err
+}
+func (m *Manager) publishLeaseAuthority(family int, authority *LeaseApplyAuthority, applied bool) {
+	if authority == nil || authority.Generation == 0 {
+		return
+	}
+	var scopes []LeaseScopeAuthority
+	switch family {
+	case 4:
+		scopes = authority.Scopes4
+	case 6:
+		scopes = authority.Scopes6
+	default:
+		return
+	}
+	cp := append([]LeaseScopeAuthority(nil), scopes...)
+	for i := range cp {
+		cp[i].Generation = authority.Generation
+		cp[i].Applied = applied
+	}
+	m.authorityMu.Lock()
+	defer m.authorityMu.Unlock()
+	m.authorityResults[authorityResultIndex(family)] = leaseAuthorityResult{
+		generation: authority.Generation,
+		scopes:     cp,
+		applied:    applied,
+	}
+}
+
+func authorityResultIndex(family int) int {
+	if family == 6 {
+		return 1
+	}
+	return 0
+}
+
+func (m *Manager) clearLeaseAuthority() {
+	m.authorityMu.Lock()
+	defer m.authorityMu.Unlock()
+	m.authorityResults = [2]leaseAuthorityResult{}
 }
 
 // noteApplyOutcome records whether a completed apply converged. Separate from
@@ -517,7 +593,7 @@ func (m *Manager) applyAsyncWorker() {
 		if req == nil {
 			continue
 		}
-		if err := m.apply(req.gen, req.cfg, true); err != nil {
+		if err := m.apply(req.gen, req.cfg, true, req.authority); err != nil {
 			slog.Warn("async DHCP server apply failed",
 				"reason", req.reason, "gen", req.gen, "err", err)
 		}
@@ -1079,6 +1155,13 @@ func stableSubnetID(subnet string) int {
 	_, _ = h.Write([]byte(subnet))
 	// Fold uint32 into [1, keaSubnetIDMax].
 	return int(h.Sum32()%keaSubnetIDMax) + 1
+}
+
+// StableSubnetIDForLeaseSync exposes the same CIDR-derived Kea subnet identity
+// used by the renderer so lease-sync authority can attribute a lease without
+// duplicating the hashing rule in the daemon.
+func StableSubnetIDForLeaseSync(subnet string) int {
+	return stableSubnetID(subnet)
 }
 
 // subnetProbeStep derives a DETERMINISTIC probe step from the subnet CIDR

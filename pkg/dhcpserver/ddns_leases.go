@@ -161,53 +161,41 @@ func (a *ddnsLeaseAccum) note(addr string) {
 }
 
 // parseActiveLeases reads the Kea memfile lease set for `family` and returns
-// only the active leases. `path` is the CURRENT lease file; #5796: it reads the
-// FULL Kea LFC file set (previous `.2`, input `.1`, current) via
-// keaLFCLeaseFilePaths in chronological order and MERGES them with the same
-// append-only, last-row-wins dedup Kea itself uses, so a lease that currently
-// lives only in the compacted PREVIOUS or INPUT file (e.g. right after LFC
-// rotated a fresh header-only current file) is NOT lost and a header-only
-// current file cannot by itself trigger the destructive DDNS trusted-empty path.
+// only the active leases. `path` is the CURRENT lease file; #5796: it reads
+// Kea's selected LFC source set (completed,current when `.completed` exists;
+// otherwise previous `.2`, input `.1`, current) via keaLFCLeaseFilePaths in
+// source order and MERGES it with the same append-only, last-row-wins dedup
+// Kea itself uses. A lease that currently lives only in the compacted previous
+// or input file (e.g. right after LFC rotated a fresh header-only current file)
+// is NOT lost and a header-only current file cannot by itself trigger the
+// destructive DDNS trusted-empty path.
 //
 // The #1387/Codex fail-safe is preserved and EXTENDED across the set: any
 // EXISTING file that is headerless / mangled-header / ragged makes the whole
 // family untrusted (error → Reconcile SKIPS the destructive diff). Trusted-empty
-// (nil, nil) is returned only when every existing file in the set validates AND
-// the merged active set is empty — a genuinely-missing `.1`/`.2`/current file
-// (os.IsNotExist) simply contributes nothing.
+// (nil, nil) is returned only when every selected existing file validates AND
+// the merged active set is empty — a genuinely-missing generation file simply
+// contributes nothing.
 func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, error) {
-	paths := keaLFCLeaseFilePaths(path)
+	allPaths := keaLFCLeaseFileSetPaths(path)
+	before := leaseSetIdentity(allPaths)
+	paths := keaLFCLeaseFilePathsFromIdentity(allPaths, before)
 
-	// #8597 (muse-004 K52): the three files are opened SEQUENTIALLY, so a
-	// SUCCESSFUL kea-lfc rotation landing mid-read silently drops rows.
+	// #8597 (muse-004 K52): the complete four-name file set is opened
+	// SEQUENTIALLY, so a SUCCESSFUL kea-lfc rotation landing mid-read silently
+	// drops rows unless the post-read identity check sees it.
 	//
-	// lease_lfc.go documents the success swap as ".output -> .2, unlink .1". If
-	// that lands between our open(.2) and our open(.1) we read:
-	//
-	//	old .2      the stale compacted set
-	//	.1          MISSING (just unlinked) — every append since the last
-	//	            compaction, gone
-	//	current     near-empty (just rotated)
-	//
-	// and the merged result is a plausible-looking set that is missing all
-	// recent leases. The destructive DDNS diff's precondition is a
-	// "trusted-empty / trusted-set" read, and a routine successful rotation
-	// violates it with nothing to show for it.
+	// The snapshot includes `.completed` even when it was absent during source
+	// selection. This is deliberate: a rotation can create `.completed` and
+	// remove `.2`/`.1` after the selection snapshot; comparing all four names
+	// afterward catches that transition and refuses a potentially incomplete
+	// trusted set.
 	//
 	// This is NOT the case §Invariant-3 argues about. That argument is about a
-	// CRASH-interrupted cleanup, where .1 stays intact and is read, and it is
+	// CRASH-interrupted cleanup, where `.1` stays intact and is read, and it is
 	// sound — I am not disputing it. The gap is the SUCCESSFUL rotation, where
-	// .1 is deliberately removed.
-	//
-	// The fix is DETECTION rather than prevention, and it reuses the fail-safe
-	// this file already has: any anomaly makes the whole family untrusted, the
-	// error propagates, and Reconcile SKIPS the destructive diff for one cycle.
-	// Preventing the race would mean holding all three descriptors open across
-	// the parse, which narrows the window without closing it — the rotation can
-	// still land between the first two opens. Detecting it closes the harmful
-	// outcome outright, and a skipped reconcile cycle self-heals on the next
-	// one.
-	before := leaseSetIdentity(paths)
+	// `.1` is deliberately removed. Detection closes the harmful outcome
+	// outright, and a skipped reconcile cycle self-heals on the next one.
 
 	acc := newDDNSLeaseAccum()
 	for _, f := range paths {
@@ -216,7 +204,7 @@ func parseActiveLeases(path string, family int, now time.Time) ([]ddnsLease, err
 		}
 	}
 
-	if after := leaseSetIdentity(paths); !leaseSetIdentityStable(before, after) {
+	if after := leaseSetIdentity(allPaths); !leaseSetIdentityStable(before, after) {
 		return nil, fmt.Errorf(
 			"kea lease file set rotated during read (%s): a successful kea-lfc swap "+
 				"landed mid-read, so the merged set may be missing every lease appended "+
