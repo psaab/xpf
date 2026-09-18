@@ -71,10 +71,14 @@ the userspace dataplane admission boundary is in
   on-demand-resolver installs are never capped. The RX-learn caller
   short-circuits the bulk lock once its pre-check sees every candidate key
   new-and-at-cap, so a steady flood no longer serializes the shards. Refusals
-  are surfaced as `xpf_userspace_dynamic_neighbor_learn_cap_drops_total`.
-  **The shard index is seeded per process (#7752)** so that cap cannot be
-  aimed. `FxHash` is a fixed public function, so with an unseeded index an
-  attacker who chooses neighbour addresses could compute offline a set landing
+  are surfaced as `xpf_userspace_dynamic_neighbor_learn_cap_drops_total`;
+  NDP Neighbor Advertisement learn refusals are separately surfaced as
+  `xpf_userspace_ndp_na_frag_refused_total` (RFC 6980 Fragment header) and
+  `xpf_userspace_ndp_na_bad_source_refused_total` (invalid on-link-unicast
+  source), so cap pressure is not conflated with malformed-control-plane
+  learns. **The shard index is seeded per process (#7752)** so that cap
+  cannot be aimed. `FxHash` is a fixed public function, so with an unseeded
+  index, an attacker who chooses neighbour addresses could compute offline a set
   in ONE shard — filling it for 2048 entries against an aggregate capacity of
   131,072, a 64x discount, and choosing WHICH later addresses are refused,
   since a new learn into a full shard is denied. A random per-process seed
