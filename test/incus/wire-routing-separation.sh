@@ -165,6 +165,8 @@ VETH_OWNED=0
 ADDR_OWNED=0
 REMOTE_PROBE_OWNED=0
 RULE_MUTATED=0
+BASELINE_CAPTURED=0
+KERNEL_BASELINE_CAPTURED=0
 RESTORE_OK=1
 WIRE_GATE_FINAL_OUT=""
 WIRE_GATE_FINAL_RC=2
@@ -242,7 +244,7 @@ cleanup() {
         wait "$CAP_PID" >/dev/null 2>&1 || true
         CAP_PID=""
     fi
-    if ((RULE_MUTATED)); then
+    if ((KERNEL_BASELINE_CAPTURED && RULE_MUTATED)); then
         remote "ip -4 rule add pref 2000 l3mdev unreachable" >/dev/null 2>&1 || RESTORE_OK=0
         [[ "$(remote 'ip -4 rule show pref 2000' 2>/dev/null || true)" == "$RULE_2000" ]] || RESTORE_OK=0
         RULE_MUTATED=0
@@ -267,35 +269,39 @@ cleanup() {
         cli_commit_ri delete || RESTORE_OK=0
         RI_OWNED=0
     fi
-    local restore_i
-    for ((restore_i=0; restore_i<60; restore_i++)); do
-        if [[ -z "$(remote "ip link show ${VRF_NAME}" 2>/dev/null || true)" &&
-            "$(remote 'ip -4 rule show' 2>/dev/null || true)" == "$RULE_SNAPSHOT" ]]; then
-            break
-        fi
-        sleep 1
-    done
-    [[ -z "$(remote "ip link show ${VRF_NAME}" 2>/dev/null || true)" ]] || RESTORE_OK=0
-    [[ -z "$(remote "ip link show ${VETH}" 2>/dev/null || true)" ]] || RESTORE_OK=0
-    [[ -z "$(remote "ip netns list | grep -E '^${NS}( |$)'" 2>/dev/null || true)" ]] || RESTORE_OK=0
-    [[ -z "${VRF_TABLE:-}" || "$(remote "ip -4 route show table ${VRF_TABLE}" 2>/dev/null || true)" == "$TABLE_SNAPSHOT" ]] || RESTORE_OK=0
-    [[ "$(remote 'ip -4 rule show' 2>/dev/null || true)" == "$RULE_SNAPSHOT" ]] || RESTORE_OK=0
+    if ((KERNEL_BASELINE_CAPTURED)); then
+        local restore_i
+        for ((restore_i=0; restore_i<60; restore_i++)); do
+            if [[ -z "$(remote "ip link show ${VRF_NAME}" 2>/dev/null || true)" &&
+                "$(remote 'ip -4 rule show' 2>/dev/null || true)" == "$RULE_SNAPSHOT" ]]; then
+                break
+            fi
+            sleep 1
+        done
+        [[ -z "$(remote "ip link show ${VRF_NAME}" 2>/dev/null || true)" ]] || RESTORE_OK=0
+        [[ -z "$(remote "ip link show ${VETH}" 2>/dev/null || true)" ]] || RESTORE_OK=0
+        [[ -z "$(remote "ip netns list | grep -E '^${NS}( |$)'" 2>/dev/null || true)" ]] || RESTORE_OK=0
+        [[ -z "${VRF_TABLE:-}" || "$(remote "ip -4 route show table ${VRF_TABLE}" 2>/dev/null || true)" == "$TABLE_SNAPSHOT" ]] || RESTORE_OK=0
+        [[ "$(remote 'ip -4 rule show' 2>/dev/null || true)" == "$RULE_SNAPSHOT" ]] || RESTORE_OK=0
+    fi
 
-    if ! snapshot_node "$NODE0" "$POST0_RAW"; then
-        RESTORE_OK=0
-    else
-        normalize_config "$POST0_RAW" >"$POST0_NORM"
-        cmp -s "$BASE0_NORM" "$POST0_NORM" || RESTORE_OK=0
+    if ((BASELINE_CAPTURED)); then
+        if ! snapshot_node "$NODE0" "$POST0_RAW"; then
+            RESTORE_OK=0
+        else
+            normalize_config "$POST0_RAW" >"$POST0_NORM"
+            cmp -s "$BASE0_NORM" "$POST0_NORM" || RESTORE_OK=0
+        fi
+        if ! snapshot_node "$NODE1" "$POST1_RAW"; then
+            RESTORE_OK=0
+        else
+            normalize_config "$POST1_RAW" >"$POST1_NORM"
+            cmp -s "$BASE1_NORM" "$POST1_NORM" || RESTORE_OK=0
+        fi
+        printf 'config_archive=%s pre_fw0_sha=%s post_fw0_sha=%s\n' \
+            "$ARCHIVE_DIR" "$(sha256sum "$BASE0_NORM" 2>/dev/null | awk '{print $1}')" \
+            "$(sha256sum "$POST0_NORM" 2>/dev/null | awk '{print $1}')"
     fi
-    if ! snapshot_node "$NODE1" "$POST1_RAW"; then
-        RESTORE_OK=0
-    else
-        normalize_config "$POST1_RAW" >"$POST1_NORM"
-        cmp -s "$BASE1_NORM" "$POST1_NORM" || RESTORE_OK=0
-    fi
-    printf 'config_archive=%s pre_fw0_sha=%s post_fw0_sha=%s\n' \
-        "$ARCHIVE_DIR" "$(sha256sum "$BASE0_NORM" 2>/dev/null | awk '{print $1}')" \
-        "$(sha256sum "$POST0_NORM" 2>/dev/null | awk '{print $1}')"
     trap - INT TERM
     return "$saved_rc"
 }
@@ -310,17 +316,23 @@ snapshot_node "$NODE1" "$BASE1_RAW" || void_now env-void
 normalize_config "$BASE0_RAW" >"$BASE0_NORM"
 normalize_config "$BASE1_RAW" >"$BASE1_NORM"
 [[ -s "$BASE0_NORM" && -s "$BASE1_NORM" ]] || void_now env-void
+BASELINE_CAPTURED=1
 if grep -qE 'wire-10136|xpf10136|10\.201\.36' "$BASE0_NORM" ||
     grep -qE 'wire-10136|xpf10136|10\.201\.36' "$BASE1_NORM"; then
+    void_now env-void
+fi
+if grep -qE "^set routing-instances ${RI_NAME}[[:space:]]" "$BASE0_NORM" ||
+    grep -qE "^set routing-instances ${RI_NAME}[[:space:]]" "$BASE1_NORM"; then
     void_now env-void
 fi
 [[ "$PORT" =~ ^[0-9]+$ && "$PROBE_BURST" =~ ^[0-9]+$ &&
     "$CONTROL_BURST" =~ ^[0-9]+$ ]] || void_now harness-void
 if remote "ip link show ${VRF_NAME}" >/dev/null 2>&1; then void_now env-void; fi
 if remote "ip link show ${VETH}" >/dev/null 2>&1; then void_now env-void; fi
-if remote "ip netns list | grep -q '^${NS}( |$)'" >/dev/null 2>&1; then void_now env-void; fi
+if remote "ip netns list | grep -Eq '^${NS}( |$)'" >/dev/null 2>&1; then void_now env-void; fi
 RULE_SNAPSHOT="$(remote 'ip -4 rule show' 2>/dev/null || true)"
 RULE_2000="$(remote 'ip -4 rule show pref 2000' 2>/dev/null || true)"
+KERNEL_BASELINE_CAPTURED=1
 if [[ -z "$RULE_2000" ]] &&
     grep -qE '^set routing-instances [^ ]+ instance-type (vrf|virtual-router)' "$BASE0_NORM"; then
     void_now env-void
@@ -334,17 +346,17 @@ wait_managed_vrf || void_now harness-void
 [[ "$VRF_TABLE" =~ ^[0-9]+$ ]] || void_now harness-void
 TABLE_SNAPSHOT="$(remote "ip -4 route show table ${VRF_TABLE}" 2>/dev/null || true)"
 [[ -z "$TABLE_SNAPSHOT" ]] || void_now env-void
-remote "ip netns add ${NS}" >/dev/null 2>&1 || void_now harness-void
 NS_OWNED=1
-remote "ip link add ${VETH} type veth peer name ${VETH_PEER}" >/dev/null 2>&1 || void_now harness-void
+remote "ip netns add ${NS}" >/dev/null 2>&1 || void_now harness-void
 VETH_OWNED=1
+remote "ip link add ${VETH} type veth peer name ${VETH_PEER}" >/dev/null 2>&1 || void_now harness-void
 remote "ip link set ${VETH_PEER} netns ${NS}" >/dev/null 2>&1 || void_now harness-void
  # Leave the ingress unmastered for the control: it follows the already
  # proven main-table VLAN-80 path. The identical veth is enslaved to the
  # empty VRF only after the control burst.
 remote "ip link set ${VETH} up" >/dev/null 2>&1 || void_now harness-void
-remote "ip addr add ${VETH_ADDR}/24 dev ${VETH}" >/dev/null 2>&1 || void_now harness-void
 ADDR_OWNED=1
+remote "ip addr add ${VETH_ADDR}/24 dev ${VETH}" >/dev/null 2>&1 || void_now harness-void
 remote "ip netns exec ${NS} ip link set lo up" >/dev/null 2>&1 || void_now harness-void
 remote "ip netns exec ${NS} ip link set ${VETH_PEER} up" >/dev/null 2>&1 || void_now harness-void
 remote "ip netns exec ${NS} ip addr add ${PEER_ADDR}/24 dev ${VETH_PEER}" >/dev/null 2>&1 || void_now harness-void
@@ -373,13 +385,16 @@ MISS_LOOKUP="$(remote "ip -4 route get ${DEST_IP} vrf ${VRF_NAME} 2>&1 || true")
 if [[ -n "${WIRE_BROKEN_FIXTURE:-}" ]]; then
     # Fault injection: remove ONLY the l3mdev terminator. The same empty
     # table miss now falls through to the already-proven main route.
-    remote 'ip -4 rule del pref 2000' >/dev/null 2>&1 || void_now harness-void
     RULE_MUTATED=1
+    remote 'ip -4 rule del pref 2000' >/dev/null 2>&1 || void_now harness-void
     FAULT_LOOKUP="$(remote "ip -4 route get ${DEST_IP} vrf ${VRF_NAME} 2>&1 || true")"
     [[ "$FAULT_LOOKUP" == *"${EGRESS_DEV}"* ]] || void_now env-void
 fi
 SENT_PROBE="$(remote "ip netns exec ${NS} python3 ${REMOTE_PROBE} --src ${PEER_ADDR} --source-port ${PORT} --dst ${DEST_IP} --port ${PORT} --count ${PROBE_BURST} --tag P --rate ${RATE}" 2>&1 || true)"
 sleep 3
+if ! kill -0 "$CAP_PID" >/dev/null 2>&1; then
+    void_now no-prober
+fi
 kill "$CAP_PID" >/dev/null 2>&1 || true
 wait "$CAP_PID" >/dev/null 2>&1 || true
 CAP_PID=""
