@@ -515,6 +515,15 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	}
 
 	out = applyRouteOverlay(out, overlay)
+	// #10046: forwarding-instance static routes may use a gateway on an
+	// interface that remains in the default routing instance. The Rust FIB
+	// deliberately scopes bare-gateway inference to the route's own table
+	// (#4446), so qualify those snapshots with the interface the kernel route
+	// resolves through. This keeps VRF inference isolated while making FBF
+	// forwarding-instance defaults usable on the AF_XDP path. Apply this
+	// after overlays because an ip-monitoring replacement has the same route
+	// semantics and must not reintroduce a bare gateway.
+	qualifyForwardingInstanceNextHops(cfg, interfaces, out)
 
 	// #3770 (M10): stable sort with a TOTAL order. The old comparator
 	// keyed only on Table/Family/Destination, so two same-prefix routes
@@ -560,6 +569,94 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		return a.Preference < b.Preference
 	})
 	return out, capped, nil
+}
+
+// qualifyForwardingInstanceNextHops makes a forwarding-instance route's
+// gateway interface explicit when the gateway is reachable through a
+// same-instance or default-instance connected prefix. A bare gateway in a
+// virtual-router must remain bare: #4446 intentionally prevents that route
+// from borrowing an overlapping connected prefix from another table.
+func qualifyForwardingInstanceNextHops(cfg *config.Config, interfaces []InterfaceSnapshot, routes []RouteSnapshot) {
+	if cfg == nil || len(interfaces) == 0 || len(routes) == 0 {
+		return
+	}
+	forwardingTables := make(map[string]string)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType != "forwarding" {
+			continue
+		}
+		forwardingTables[ri.Name+".inet.0"] = ri.Name
+		forwardingTables[ri.Name+".inet6.0"] = ri.Name
+	}
+	if len(forwardingTables) == 0 {
+		return
+	}
+	for i := range routes {
+		riName, ok := forwardingTables[routes[i].Table]
+		if !ok {
+			continue
+		}
+		for j, nextHop := range routes[i].NextHops {
+			if nextHop == "" || strings.Contains(nextHop, "@") {
+				continue
+			}
+			ip := net.ParseIP(nextHop)
+			if ip == nil {
+				continue
+			}
+			iface := forwardingGatewayInterface(riName, routes[i].Family, ip, interfaces)
+			if iface != "" {
+				routes[i].NextHops[j] = nextHop + "@" + iface
+			}
+		}
+	}
+}
+
+// forwardingGatewayInterface returns the deterministic interface to use for a
+// forwarding-instance bare gateway. Same-instance links win, then links in
+// the default instance. A gateway that only matches a different VRF remains
+// unresolved rather than crossing the VRF boundary.
+func forwardingGatewayInterface(riName, family string, gateway net.IP, interfaces []InterfaceSnapshot) string {
+	bestRank := 3
+	bestName := ""
+	for _, iface := range interfaces {
+		rank := 2
+		switch iface.RoutingInstance {
+		case riName:
+			rank = 0
+		case "":
+			rank = 1
+		default:
+			continue
+		}
+		name := iface.Name
+		if name == "" {
+			name = iface.LinuxName
+		}
+		if name == "" || rank > bestRank || (rank == bestRank && name >= bestName && bestName != "") {
+			continue
+		}
+		matched := false
+		for _, addr := range iface.Addresses {
+			if addr.Scope != 0 && addr.Scope != int(netlink.SCOPE_UNIVERSE) {
+				continue
+			}
+			prefix, addrFamily, ok := config.ConnectedNetworkPrefix(addr.Address)
+			if !ok || addrFamily != family {
+				continue
+			}
+			_, network, err := net.ParseCIDR(prefix)
+			if err == nil && network.Contains(gateway) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			bestRank = rank
+			bestName = name
+		}
+	}
+	return bestName
 }
 
 // applyRouteOverlay folds the winner-resolved ip-monitoring overlay
