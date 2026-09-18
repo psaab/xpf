@@ -601,12 +601,14 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	}
 	sort.Strings(losers)
 
-	// #10078's security-level schema completion adds seven eligible containers
-	// and one collector route, moving the measured census from
-	// `walked=111,vacuous=38,unmeasured=88` to
-	// `walked=111,vacuous=36,unmeasured=91`; the three loser rows are
-	// byte-for-byte unchanged, so no loss signal was cleared. This is a
-	// population-count ratchet update, not a loser-set relaxation.
+	// #10078's security-level schema completion changes the combined-tree
+	// population from the current-master baseline
+	// `walked=111,vacuous=38,unmeasured=80` to
+	// `walked=111,vacuous=36,unmeasured=83`; the three loser rows are
+	// byte-for-byte unchanged, so no loss signal was cleared. Collector reach
+	// moves from 379/139 to 385/140 as the schema population is admitted.
+	// This is a measured population-count ratchet update, not a loser-set
+	// relaxation.
 	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
