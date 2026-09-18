@@ -15,40 +15,32 @@ func TestControlLinkAuthStatus(t *testing.T) {
 	tests := []struct {
 		name         string
 		key          []byte
-		peerAuthSeen bool
 		wantEngaged  bool   // "engaged" vs "dual-accept"
 		wantContains string // a stable discriminating substring
 	}{
 		{
 			name:         "no key configured -> dual-accept",
 			key:          nil,
-			peerAuthSeen: false,
 			wantEngaged:  false,
 			wantContains: "no control-link key configured",
 		},
 		{
-			name:         "key configured, peer not yet authenticated -> dual-accept grace",
+			name:         "key configured before peer authentication -> engaged",
 			key:          []byte("shared-psk-16byte"),
-			peerAuthSeen: false,
-			wantEngaged:  false,
-			wantContains: "peer not yet authenticated",
+			wantEngaged:  true,
+			wantContains: "unauthenticated heartbeat frames rejected",
 		},
 		{
-			name:         "key configured, peer authenticated -> engaged",
+			name:         "key configured after peer authentication -> engaged",
 			key:          []byte("shared-psk-16byte"),
-			peerAuthSeen: true,
 			wantEngaged:  true,
-			wantContains: "unauthenticated frames rejected",
+			wantContains: "unauthenticated heartbeat frames rejected",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Manager{controlAuthKey: tc.key}
-			r := &heartbeatReceiver{mgr: m, auth: m.heartbeatAuthState()}
-			m.hbReceiver = r
-			r.auth.peerAuthSeen.Store(tc.peerAuthSeen)
-
 			got := m.controlLinkAuthStatus()
 			engaged := strings.HasPrefix(got, "engaged")
 			if engaged != tc.wantEngaged {

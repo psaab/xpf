@@ -28,13 +28,16 @@ func (m *Manager) peerHeartbeatFreshLocked() bool {
 
 // HeartbeatPeerAuthSeen reports whether the heartbeat receiver has ever
 // accepted a valid HMAC-authenticated heartbeat from the peer (#4107). It is
-// the fast-arming signal the gRPC fabric listener reuses to enforce its PSK
+// the fast-arming signal the gRPC fabric listener reuses for its PSK
 // downgrade-guard: heartbeats flow continuously (~200ms), so this arms within
 // one interval of a keyed peer coming up — closing the post-restart window
 // where nothing had yet dialed the fabric listener on-demand to arm its own
-// sticky flag. Returns false when the peer has never authenticated (a node
-// with no PSK, or a rolling upgrade where the peer is not yet signing), so
-// those keep the dual-accept grace.
+// sticky flag. Returns false when the peer has never authenticated.
+//
+// Heartbeat admission itself does NOT use this process-lifetime flag. A node
+// with a local ControlLinkAuthKey rejects an unsigned heartbeat from the first
+// datagram onward; the flag remains exported only for the separate gRPC
+// fabric downgrade guard.
 //
 // #5086: this reads the Manager's process-lifetime auth state, NOT the current
 // heartbeatReceiver. The flag must be sticky for the life of the process, and
@@ -42,10 +45,8 @@ func (m *Manager) peerHeartbeatFreshLocked() bool {
 // StopHeartbeat nils m.hbReceiver and StartHeartbeat installs a fresh one, so
 // every RestartHeartbeat (a DHCP-triggered VRF rebind retries the bind for up
 // to ~5s) silently disarmed the fabric listener's downgrade-guard and re-armed
-// it only after the next authenticated heartbeat landed. An unsigned fabric
-// RPC inside that window was accepted from a peer already known to hold the
-// key. The state now outlives the socket, so the guard cannot be reset by
-// restarting the heartbeat.
+// it only after the next authenticated heartbeat landed. The state now outlives
+// the socket, so the guard cannot be reset by restarting the heartbeat.
 func (m *Manager) HeartbeatPeerAuthSeen() bool {
 	return m.heartbeatAuthState().peerAuthenticated()
 }

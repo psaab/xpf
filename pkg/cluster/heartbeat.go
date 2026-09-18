@@ -816,8 +816,9 @@ type heartbeatAuthState struct {
 	mu     sync.Mutex
 	replay heartbeatAuthReplay
 
-	// rejectWarn bounds the per-frame rejection warning (#6669 r18, finding 8).
-	// Its own mutex, so it is not serialized behind the admission path.
+	// rejectWarn bounds the per-frame authentication rejection warning (#6669
+	// r18, finding 8). Its own mutex, so it is not serialized behind the
+	// admission path.
 	rejectWarn heartbeatRejectWarnLimiter
 
 	// highEpoch is the #6169 across-reboot floor: the highest boot epoch ever
@@ -1238,7 +1239,7 @@ func (m *Manager) heartbeatAuthState() *heartbeatAuthState {
 	return &m.hbAuth
 }
 
-// heartbeatAuthDecision applies the #4107 dual-accept policy for one received
+// heartbeatAuthDecision applies the #4107 fail-closed policy for one received
 // heartbeat and returns whether to accept it (and, when rejected, a short
 // reason for logging — never the key or packet bytes).
 //
@@ -1246,19 +1247,16 @@ func (m *Manager) heartbeatAuthState() *heartbeatAuthState {
 //	present       — the frame carried an auth trailer.
 //	macOK         — the trailer's HMAC verified (only meaningful when present).
 //	nonceFresh    — the nonce passed anti-replay (only meaningful when macOK).
-//	peerAuthSeen  — we have previously accepted an authenticated heartbeat from
-//	                the peer (sticky: proves the peer holds the key, so both
-//	                nodes are keyed and an unauthenticated frame is now forged).
 //
 // Policy:
 //   - No local key: dual-accept everything — this node cannot verify and may be
-//     the not-yet-upgraded / not-yet-keyed side of a rolling upgrade.
+//     the not-yet-keyed side of a rolling upgrade.
 //   - Local key + auth trailer: enforce — reject a bad HMAC or a replayed nonce.
-//   - Local key + no trailer + peer never authenticated: dual-accept — the peer
-//     has not started signing yet (rolling upgrade / key not yet synced).
-//   - Local key + no trailer + peer HAS authenticated: reject — a downgrade to
-//     cleartext once both nodes are keyed is an attack.
-func heartbeatAuthDecision(keyConfigured, present, macOK, nonceFresh, peerAuthSeen bool) (bool, string) {
+//   - Local key + no trailer: reject unconditionally. A keyed node must not
+//     grant a first-contact grace to a legacy peer; #5078 removed the
+//     identical session-sync bypass because an unauthenticated active sender
+//     can exploit it before any sticky auth flag arms.
+func heartbeatAuthDecision(keyConfigured, present, macOK, nonceFresh bool) (bool, string) {
 	if !keyConfigured {
 		return true, ""
 	}
@@ -1271,10 +1269,7 @@ func heartbeatAuthDecision(keyConfigured, present, macOK, nonceFresh, peerAuthSe
 		}
 		return true, ""
 	}
-	if peerAuthSeen {
-		return false, "missing auth trailer (enforced: peer previously authenticated)"
-	}
-	return true, ""
+	return false, "missing auth trailer (enforced: local key configured)"
 }
 
 // heartbeatNonce returns the next control-channel anti-replay nonce for a
@@ -1716,11 +1711,12 @@ func (r *heartbeatReceiver) readLoop() {
 // cluster-id and duplicate-node-id checks that run first.
 func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool {
 	// #4107 control-channel authentication. When a PSK is configured the
-	// heartbeat/election channel is HMAC-authenticated; a forged or
-	// replayed heartbeat is rejected HERE, before it can refresh peer
-	// liveness (lastSeen) or drive election (handlePeerHeartbeat).
-	// Dual-accept keeps a mixed-version / not-yet-keyed cluster from
-	// splitting — see heartbeatAuthDecision. The key is never logged.
+	// heartbeat/election channel is HMAC-authenticated; a forged or replayed
+	// heartbeat is rejected HERE, before it can refresh peer liveness (lastSeen)
+	// or drive election (handlePeerHeartbeat).
+	// A mixed-version / not-yet-keyed cluster remains interoperable only when
+	// this node has no local key. Once a key is configured, every accepted
+	// heartbeat must carry a valid, fresh authentication trailer.
 	// #6630: verify against EVERY accepted key, not just the signing key. A
 	// rotation is otherwise a planned outage: while the two nodes hold
 	// different keys each receives a present-but-invalid HMAC from the other,
@@ -1776,7 +1772,7 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 	// SET being non-empty — not `len(key) > 0`, which since #6630 is nil
 	// whenever verification failed and would collapse a keyed node's rejection
 	// into the unkeyed dual-accept arm.
-	accept, reason := heartbeatAuthDecision(len(keys) > 0, present, macOK, nonceFresh, r.peerAuthenticated())
+	accept, reason := heartbeatAuthDecision(len(keys) > 0, present, macOK, nonceFresh)
 	if !accept {
 		r.recvErrors.Add(1)
 		// #6669: prefer the epoch gate's own reason when it has one.
@@ -1807,10 +1803,10 @@ func (r *heartbeatReceiver) admitFrame(frame []byte, pkt *HeartbeatPacket) bool 
 		return false
 	}
 	if macOK {
-		// The peer proved it holds the key — from now on an
-		// unauthenticated frame from it is a downgrade attack. This also
-		// arms the gRPC fabric listener's downgrade-guard (via
-		// Manager.HeartbeatPeerAuthSeen).
+		// The peer proved it holds the key. Keep the process-lifetime fact for
+		// the gRPC fabric downgrade guard, but it is deliberately NOT consulted
+		// by heartbeat admission: local key configuration alone requires every
+		// accepted heartbeat to be authenticated.
 		r.auth.notePeerAuthenticated()
 		// #6630: record WHICH accepted key the peer is signing with, so
 		// `show chassis cluster statistics` can answer the one question a
