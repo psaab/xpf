@@ -36,18 +36,18 @@ import (
 // THE SPLIT BETWEEN WHAT IS CACHED AND WHAT IS LIVE is the load-bearing design
 // decision here:
 //
-//   - the ADDRESS SET and the REDUNDANCY-GROUP ID are snapshotted at reconcile.
-//     Both are pure config, changing only on commit, and re-deriving them per
-//     ARP frame would put config walking on a path an attacker can drive at
-//     line rate.
+//   - the ADDRESS SET, REDUNDANCY-GROUP ID, interface identity, and current
+//     interface MAC are snapshotted at reconcile. The address/config values
+//     change only on commit; the MAC is re-read on every reconcile because a
+//     live virtual-MAC update keeps the socket running.
 //   - OWNERSHIP OF THAT GROUP is read per request. It changes on failover,
 //     between reconciles, and answering from a stale snapshot is precisely the
 //     failure #8405 measured: the RETH virtual MAC is PER NODE, so a standby
 //     that answers draws the traffic to itself.
 //
-// Caching the second would reintroduce the bug this responder exists to help
-// fix, from the other direction. Snapshotting the first two is what keeps the
-// per-frame work to two map lookups.
+// Caching ownership would reintroduce the bug this responder exists to help
+// fix, from the other direction. Snapshotting the config/address/MAC state is
+// what keeps the per-frame work bounded while still tracking live failover.
 
 // proxyARPResponders owns one goroutine per interface that has proxy-ARP pool
 // addresses configured on it.
@@ -59,20 +59,53 @@ type proxyARPResponders struct {
 type proxyARPResponder struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
+
+	// addrsMu guards the reconcile snapshot: addresses, interface identity,
+	// redundancy-group ownership input, and the current interface MAC. A
+	// responder stays alive across reconcile, so all of these fields can
+	// change while its receive goroutine is answering requests.
+	addrsMu  sync.RWMutex
 	junosRef string
 	// rgID is the redundancy group of the interface, resolved from config at
 	// reconcile. 0 means the interface belongs to no group, which answers
 	// unconditionally — there is no ownership question to ask.
 	rgID int
-
-	// addrsMu guards the snapshotted address set, which reconcile replaces
-	// wholesale rather than mutating.
-	addrsMu sync.RWMutex
-	addrs   map[string]struct{} // canonical IPv4 string -> present
+	addrs map[string]struct{} // canonical IPv4 string -> present
+	mac   net.HardwareAddr    // current interface MAC, refreshed on reconcile
+	// macSet distinguishes "reconcile deliberately cleared the MAC after a
+	// failed lookup" from a responder that has not opened its socket yet.
+	macSet bool
 }
 
 func newProxyARPResponders() *proxyARPResponders {
 	return &proxyARPResponders{running: map[string]*proxyARPResponder{}}
+}
+// proxyARPInterfaceByName is a seam for the reconcile-time MAC lookup. The
+// production function reads the live kernel interface so a virtual-MAC live
+// set is observed even though the AF_PACKET socket remains open.
+var proxyARPInterfaceByName = net.InterfaceByName
+
+func proxyARPCurrentMAC(ifName string) (net.HardwareAddr, error) {
+	iface, err := proxyARPInterfaceByName(ifName)
+	if err != nil {
+		return nil, err
+	}
+	return append(net.HardwareAddr(nil), iface.HardwareAddr...), nil
+}
+
+func (r *proxyARPResponder) currentMAC() net.HardwareAddr {
+	r.addrsMu.RLock()
+	defer r.addrsMu.RUnlock()
+	return append(net.HardwareAddr(nil), r.mac...)
+}
+// snapshot returns one coherent reconcile view. In particular, junosRef and
+// rgID are read under the same lock that publishes them; the receive goroutine
+// must never pair a new address set with an old ownership identity.
+func (r *proxyARPResponder) snapshot(target string) (proxied bool, junosRef string, rgID int) {
+	r.addrsMu.RLock()
+	defer r.addrsMu.RUnlock()
+	_, proxied = r.addrs[target]
+	return proxied, r.junosRef, r.rgID
 }
 
 // proxyARPPoolAddressesByInterface derives, from config alone, the IPv4
@@ -120,9 +153,7 @@ func (d *Daemon) answerPolicyFor(r *proxyARPResponder) cluster.ARPAnswerPolicy {
 		if v4 == nil {
 			return false
 		}
-		r.addrsMu.RLock()
-		_, proxied := r.addrs[v4.String()]
-		r.addrsMu.RUnlock()
+		proxied, _, rgID := r.snapshot(v4.String())
 		if !proxied {
 			return false
 		}
@@ -136,7 +167,7 @@ func (d *Daemon) answerPolicyFor(r *proxyARPResponder) cluster.ARPAnswerPolicy {
 		// gives — answering twice is a defect, answering zero times is a bigger
 		// one — and a double answer is corrected by the next announce, whereas
 		// a silent non-answer is the bug this responder exists to fix.
-		return !d.proxyARPSuppressedForRG(r.rgID)
+		return !d.proxyARPSuppressedForRG(rgID)
 	}
 }
 
@@ -152,6 +183,16 @@ func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *pro
 			"iface", ifName, "err", err)
 		return
 	}
+	// Publish the MAC returned with the socket only when reconcile has not
+	// already published a newer snapshot. Without this conditional, the
+	// interleaving "socket opens with M1; reconcile stores M2; socket-open path
+	// stores M1" would leave stale answers until a later reconcile.
+	r.addrsMu.Lock()
+	if !r.macSet {
+		r.mac = append(net.HardwareAddr(nil), mac...)
+		r.macSet = true
+	}
+	r.addrsMu.Unlock()
 	// The fd is closed EXACTLY ONCE, by whichever of the two paths gets there
 	// first: the watcher goroutine below (to unblock a parked Recvfrom on
 	// shutdown) or this function's own exit. A plain `defer unix.Close(fd)`
@@ -188,7 +229,7 @@ func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *pro
 			slog.Debug("proxy-arp responder: recv", "iface", ifName, "err", err)
 			return
 		}
-		if err := respondToARPFrame(fd, ifIndex, ifName, mac, policy, buf[:n]); err != nil {
+		if err := respondToARPFrame(fd, ifIndex, ifName, r, policy, buf[:n]); err != nil {
 			slog.Debug("proxy-arp responder: send reply", "iface", ifName, "err", err)
 		}
 	}
@@ -208,7 +249,8 @@ var arpReplySend = func(fd int, pkt []byte, addr unix.Sockaddr) error {
 // from inside the loop, and the link-layer destination is set here rather than
 // by the frame builder — a reply with correct contents sent to the wrong
 // link-layer address teaches nobody anything.
-func respondToARPFrame(fd, ifIndex int, ifName string, mac net.HardwareAddr, policy cluster.ARPAnswerPolicy, frame []byte) error {
+func respondToARPFrame(fd, ifIndex int, ifName string, r *proxyARPResponder, policy cluster.ARPAnswerPolicy, frame []byte) error {
+	mac := r.currentMAC()
 	reply, req, verdict := cluster.HandleARPFrame(frame, mac, ifName, policy)
 	if verdict != cluster.ARPReplyAnswer || reply == nil || req == nil {
 		return nil
@@ -319,11 +361,22 @@ func (d *Daemon) syncProxyARPResponders(cfg *config.Config, want map[string]stri
 			// Running: swap the snapshot rather than restart. A restart would
 			// drop requests during the socket rebuild for no reason — the
 			// address set is the only thing that changed.
+			mac, err := proxyARPCurrentMAC(name)
+			if err != nil {
+				slog.Warn("proxy-arp responder: cannot refresh interface MAC; "+
+					"pausing answers until the next successful reconcile",
+					"iface", name, "err", err, "issue", "#10316")
+			}
 			r.addrsMu.Lock()
 			r.addrs = addrs
-			r.addrsMu.Unlock()
 			r.junosRef = junosRef
 			r.rgID = rgID
+			// Do not retain an old MAC after a failed lookup: answering with a
+			// stale virtual MAC is worse than suppressing one reconcile's
+			// request. The next reconcile retries the live lookup.
+			r.mac = append(net.HardwareAddr(nil), mac...)
+			r.macSet = true
+			r.addrsMu.Unlock()
 			continue
 		}
 		ctx, cancel := context.WithCancel(d.proxyARPResponderCtx())

@@ -821,6 +821,13 @@ type heartbeatAuthState struct {
 	// admission path.
 	rejectWarn heartbeatRejectWarnLimiter
 
+	// The read loop performs two pre-authentication validation checks before it
+	// can reach admitFrame. Keep their warnings independently rate-limited and
+	// Manager-scoped, so malformed or wrong-cluster floods cannot emit one line
+	// per datagram or reset their burst budget on every heartbeat restart.
+	invalidWarn      heartbeatRejectWarnLimiter
+	wrongClusterWarn heartbeatRejectWarnLimiter
+
 	// highEpoch is the #6169 across-reboot floor: the highest boot epoch ever
 	// accepted from the peer. It is O(1) state (one uint64) that gives the
 	// receiver an ORDER over peer incarnations, which the session ring cannot
@@ -1663,15 +1670,21 @@ func (r *heartbeatReceiver) readLoop() {
 		pkt, err := UnmarshalHeartbeat(buf[:n])
 		if err != nil {
 			r.recvErrors.Add(1)
-			slog.Warn("cluster: invalid heartbeat", "err", err)
+			if emit, suppressed := r.auth.invalidWarn.admit(); emit {
+				slog.Warn("cluster: invalid heartbeat", "err", err,
+					"suppressed_since_last", suppressed)
+			}
 			continue
 		}
 
 		// Validate cluster ID.
 		if int(pkt.ClusterID) != r.mgr.ClusterID() {
 			r.recvErrors.Add(1)
-			slog.Warn("cluster: heartbeat from wrong cluster",
-				"got", pkt.ClusterID, "want", r.mgr.ClusterID())
+			if emit, suppressed := r.auth.wrongClusterWarn.admit(); emit {
+				slog.Warn("cluster: heartbeat from wrong cluster",
+					"got", pkt.ClusterID, "want", r.mgr.ClusterID(),
+					"suppressed_since_last", suppressed)
+			}
 			continue
 		}
 
