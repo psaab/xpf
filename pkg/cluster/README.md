@@ -1644,20 +1644,19 @@ peer liveness (`lastSeen`) or drive election.
     and durable. Declining costs only backward-clock-step protection, and only
     until the next resolve succeeds, because the wall-clock epoch is already
     published and on the wire.
-  - **Layering with #4107's `peerAuthSeen` — two gates, neither redundant.**
-    `peerAuthSeen` latches "the peer proved it holds the PSK" and refuses
-    UNSIGNED frames; `epochSeen` latches "the peer proved it runs an
-    epoch-capable build" and refuses SIGNED-BUT-EPOCH-LESS ones. A replayed
-    pre-upgrade capture is genuinely signed (it came off a keyed cluster), so it
-    passes the first gate and is stopped only by the second — which is precisely
-    why the epoch latch was needed. An unsigned frame never reaches the epoch
-    gate: `heartbeatReceiver.admitFrame` — the single implementation of the
-    receive-side gate, called by `readLoop` for every datagram and by the epoch
-    fixtures instead of a restated copy — reads the epoch and calls
-    `admitAuthed` only when the MAC verified. The one path skipping BOTH is a
-    cluster with no key configured at all, where there is no MAC to verify and
-    the key-derived marker cannot exist; that is #6624's domain (an unkeyed
-    chassis cluster is refused at commit), not the epoch's.
+- **Layering with #4107's keyed gate — two gates, neither redundant.**
+    A local control-link key rejects UNSIGNED frames immediately; the
+    process-lifetime `peerAuthSeen` flag is not part of heartbeat admission.
+    `epochSeen` separately latches "the peer proved it runs an epoch-capable
+    build" and refuses SIGNED-BUT-EPOCH-LESS ones. A replayed pre-upgrade
+    capture is genuinely signed (it came off a keyed cluster), so it passes
+    the HMAC gate and is stopped only by the epoch latch — precisely why the
+    second gate is needed. An unsigned frame never reaches the epoch gate:
+    `heartbeatReceiver.admitFrame` reads the epoch and calls `admitAuthed` only
+    when the MAC verified. The one path skipping BOTH is a cluster with no key
+    configured at all, where there is no MAC to verify and the key-derived
+    marker cannot exist; that is #6624's domain (an unkeyed chassis cluster is
+    refused at commit), not the epoch's.
 
     **The wiring at both ends is bound by an end-to-end test, not by
     inspection.** `TestBootEpochTraversesTheRealSendAndReceivePath_6169` drives
@@ -1747,9 +1746,8 @@ peer liveness (`lastSeen`) or drive election.
     deliberate rollback to a pre-#6169 build (A/B image rollback, #1930).
     That peer IS refused: this node declares it dead and takes over, and the
     rolled-back node cannot see that it is being refused. This is a real,
-    deliberate trade — the same one #4107's sticky `peerAuthSeen` already
-    makes for the auth trailer. It is bounded and
-    operator-visible:
+    deliberate trade — the epoch latch is independent of the keyed heartbeat
+    gate and remains operator-visible:
       - a cluster that has never run an epoch-capable build is never latched,
         so a plain rolling upgrade in either direction is unaffected;
       - the rejection logs a rate-limited, actionable warning naming the
@@ -2145,35 +2143,30 @@ peer liveness (`lastSeen`) or drive election.
   captured older epoch and re-arms the latch, so the exposure is bounded by
   the peer speaking rather than by the ring alone. With a SILENT peer the
   window stays open until it returns — see the boot-epoch residuals above.
-- **Dual-accept (rolling upgrade), `heartbeatAuthDecision`.** Mirrors
-  the #4126 VRRP-checksum dual-accept migration:
-  - No local key → accept everything (this node cannot verify; may be
-    the not-yet-keyed side of an upgrade). No regression.
-  - Local key + auth trailer → enforce: reject a bad HMAC or a replayed
-    nonce.
-  - Local key + no trailer + peer has NOT yet authenticated → accept
-    (the peer has not started signing; key not yet synced).
-  - Local key + no trailer + peer HAS authenticated (sticky
-    `peerAuthSeen`, set only by a verified frame) → reject: a downgrade
-    to cleartext once both nodes are keyed is an attack.
+- **Fail-closed keyed heartbeat, `heartbeatAuthDecision` (#10315).** The
+  heartbeat gate mirrors the #5078 session-sync decision:
+  - No local key → accept everything (this node cannot verify; it may be the
+    not-yet-keyed side of an upgrade). No regression.
+  - Local key + auth trailer → enforce: reject a bad HMAC or a replayed nonce.
+  - Local key + no trailer → reject unconditionally, including the peer's first
+    contact after this process starts. There is no `peerAuthSeen` grace window:
+    an unsigned frame must never refresh liveness or feed election.
 
-  Enforcement therefore engages only once BOTH nodes carry the key and
-  are observed signing — a mixed-version / mid-key-rollout cluster never
-  splits.
+  Enforcement therefore begins when this node has a key configured. A mixed
+  keyed/unkeyed pair is intentionally not admitted by the keyed side; operators
+  must key both nodes before enabling the cluster. `peerAuthSeen` remains a
+  process-lifetime signal for the separate gRPC fabric downgrade guard, not a
+  heartbeat admission input.
 - **Operator surface (#4484 L-9).** `FormatControlPlaneStatistics`
   (`show chassis cluster control-plane-statistics`) renders an
   `Authentication:` line derived from `controlLinkAuthStatus()`, so an
   operator can tell whether the control link's HMAC auth is actually
-  **engaged** (`engaged (peer authenticated; unauthenticated frames
-  rejected)` — both nodes keyed and signing) or running in
-  **dual-accept** grace (`dual-accept (no control-link key configured)`
-  or `dual-accept (key configured; peer not yet authenticated)`). It is
-  computed from the SAME two facts the auth gates use —
-  `ControlLinkAuthKey` presence + `HeartbeatPeerAuthSeen` — so the line
-  tracks the real enforcement decision, and it inspects only `len(key)`
-  so the secret is never rendered. Before this line, a control link
-  silently degraded to dual-accept (e.g. a peer that stopped signing)
-  was invisible.
+  **engaged** (`engaged (local key configured; unauthenticated heartbeat frames
+  rejected)`) or running in **dual-accept** mode
+  (`dual-accept (no control-link key configured)`). A session-sync connection
+  established before keying is called out separately when the provider reports
+  it as still unauthenticated. The status inspects only `len(key)`, so the
+  secret is never rendered.
 - **Secret hygiene.** The key is `config.Secret`, redacted on every
   JSON/YAML/`String()` path and masked as `##SECRET-DATA##` in raw-AST
   renders (`authentication-key` is already in `ast_redact.go`'s secret
@@ -2272,11 +2265,12 @@ connection is authenticated, then seals every subsequent frame.
   is, so it became unreachable — `syncPeerAuthSeen` ended with zero callers
   and `syncAuthedEver` write-only — and was deleted along with the
   `HeartbeatPeerAuthSeen()` requirement on `SyncAuthProvider`. The **#4107
-  heartbeat downgrade-guard is separate state** (`heartbeatAuthDecision`
-  over `heartbeatAuthState.peerAuthenticated`) and is unchanged, as is the
+  heartbeat downgrade-guard is separate state** (`heartbeatAuthDecision`;
+  since #10315 it no longer consults `heartbeatAuthState.peerAuthenticated`
+  — keyed nodes reject unsigned frames including first contact), as is the
   #4357 fabric guard that arms off it via `Manager.HeartbeatPeerAuthSeen`
-  — that method is still exported and still consumed, just no longer by
-  this interface.
+  — that method is still exported and still consumed by the gRPC fabric
+  listener, just no longer by this interface or the status string.
 - **Wiring.** `SessionSync.SetAuthProvider(*Manager)` (`daemon_ha_sync.go`)
   supplies `ControlLinkAuthKey()`. No new
   config leaf — the same `set chassis cluster authentication-key` secret
@@ -2674,22 +2668,22 @@ the stream.
 
 Confirm the posture with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) reads as follows:
-- `engaged (peer authenticated; unauthenticated frames rejected)` once both
-  nodes are keyed and no pre-key session-sync connection survives;
-- `dual-accept (...)` means the channel is still unauthenticated in practice;
+- `engaged (local key configured; unauthenticated heartbeat frames rejected)`
+  whenever this node has a control-link key and no pre-key session-sync
+  connection survives;
+- `dual-accept (no control-link key configured)` means the heartbeat channel
+  cannot verify frames locally;
 - since #9717 the line also covers the session-sync channel. While an
   established session-sync connection has not authenticated, it reads
-  `heartbeat engaged (peer authenticated); N session-sync connection(s) NOT
+  `heartbeat engaged (local key); N session-sync connection(s) NOT
   authenticated, frames still accepted without HMAC: <remote>, ...` and names
   each such connection.
 
-**Rolling BACK is not symmetric.** `peerAuthSeen` is sticky in memory and
-clears only on an **xpfd restart** — since #5086 it lives on the `Manager`,
-so restarting the heartbeat (VRF rebind, comms restart) no longer clears it
-— so a node that has seen its peer authenticate will
-reject that peer's unsigned heartbeats. Returning one node to an unkeyed
-config or an older binary while the other stays armed produces the same
-split-brain described under rotation.
+**Rolling BACK is not symmetric.** A keyed node rejects unsigned heartbeats
+from the first datagram, regardless of whether this process has previously
+seen the peer authenticate. Returning one node to an unkeyed config or an
+older binary while the other stays keyed therefore requires the same
+controlled recovery described under rotation.
 
 ### Rotation
 
@@ -2780,7 +2774,7 @@ outage this replaces.
 #### Knowing when it is safe to finalize
 
 ```
-Authentication:             engaged (peer authenticated; unauthenticated frames rejected)
+Authentication:             engaged (local key configured; unauthenticated heartbeat frames rejected)
 Key rotation:               in progress (signing 4f2a9c31, also accepting 8b70de55);
                             peer is signing 4f2a9c31 — safe to finalize:
                             `delete chassis cluster additional-authentication-key`
@@ -2809,9 +2803,11 @@ finalize unsafe again rather than staying green.
 
 #### Notes
 
-- Restarting `xpfd` is still required to clear the sticky `peerAuthSeen` if you
-  are rolling *back* to an unkeyed config — see "Rolling BACK is not
-  symmetric" above. A forward rotation between two real keys needs no restart.
+- A heartbeat restart does not clear the process-lifetime `peerAuthSeen`
+  signal used by the separate fabric downgrade guard (#5086). That signal is
+  not required for heartbeat enforcement: a configured local key rejects
+  unsigned frames immediately. A forward rotation between two real keys needs
+  no restart.
 - Rotation remains the **anti-replay capture-invalidation** step (below), and
   making it rolling does not change that: after step 5 the retired key no
   longer verifies anything.
@@ -2870,7 +2866,7 @@ finalize unsafe again rather than staying green.
 >
 > **The latch only enforces while a PSK is configured, so read it together with
 > the `Authentication:` line** in `show chassis cluster control-plane
-> statistics`. `engaged (peer authenticated; unauthenticated frames rejected)`
+> statistics`. `engaged (local key configured; unauthenticated heartbeat frames rejected)`
 > means the latch is being applied; `dual-accept (no control-link key
 > configured)` means it is not, whatever the note says.
 >
