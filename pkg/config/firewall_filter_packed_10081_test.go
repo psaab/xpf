@@ -89,9 +89,11 @@ func parsePrefixList10081(t *testing.T, src string) *ConfigTree {
 // TestFilterPackedPrefixListCensus10081 is the dual-shape census guard. The
 // valued row proves that a packed reference survives as a named typed ref; the
 // valueless row proves that the same packed site remains loud and records its
-// leaf rather than widening to an unconstrained term. A schema revert from
-// args:1 to args:0 reds the valued half because AAA then disappears from the
-// compiled ref, which is the exact #10081 failure mode.
+// leaf rather than widening to an unconstrained term. Reverting the #10073
+// schema consumption reds the valued half at strict commit (the AAA tail is
+// rejected before the ref assertions run), which differs from the original
+// silent-drop shape; the named-ref and braced/packed-equivalence assertions
+// independently guard the compiled ref by construction.
 func TestFilterPackedPrefixListCensus10081(t *testing.T) {
 	for _, row := range prefixListPackedCensusRows10081(t) {
 		t.Run(row.site, func(t *testing.T) {
