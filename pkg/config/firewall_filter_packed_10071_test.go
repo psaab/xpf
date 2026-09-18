@@ -116,3 +116,21 @@ func TestFilterPackedUnknownFromStrict10071(t *testing.T) {
 		t.Fatalf("known nested packed-tail control must remain clean: %v", err)
 	}
 }
+
+// A bracketed keyword-shaped prefix-list name is a value, not a packed
+// statement delimiter. The raw fallback must preserve that provenance.
+func TestFilterPackedBracketedKeywordValue10071(t *testing.T) {
+	tree, perrs := NewParser(`policy-options { prefix-list from { 10.0.0.0/8; } }
+firewall { family inet { filter F { term T from source-prefix-list [ from ]; } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("bracketed keyword-shaped prefix-list fixture did not parse: %v", perrs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("bracketed keyword-shaped prefix-list value must compile: %v", err)
+	}
+	term := firstInetTerm(t, cfg, "F")
+	if len(term.SourcePrefixLists) != 1 || term.SourcePrefixLists[0].Name != "from" {
+		t.Fatalf("SourcePrefixLists = %v, want [{Name:from Except:false}]", term.SourcePrefixLists)
+	}
+}
