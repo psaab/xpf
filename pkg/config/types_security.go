@@ -1195,6 +1195,11 @@ type NATPool struct {
 	// valid range. `json:"-"`: a compile-time parse artifact recomputed on every
 	// compile, never serialized to the helper (like PortRaw above).
 	PortRangeInvalidSpec string `json:"-"`
+	// UnknownLeaves records source-NAT pool child keywords that the compiler
+	// does not model. It is a compile-time diagnostic artifact consumed by the
+	// #10291 strict uniform gate, never serialized to the dataplane or config
+	// JSON.
+	UnknownLeaves []string `json:"-"`
 	// PortNoTranslation records the source-pool `port no-translation` modifier
 	// (#3906). When true the pool translates the source ADDRESS but PRESERVES
 	// the original source port (Junos 1:1 source-port behaviour) — the
