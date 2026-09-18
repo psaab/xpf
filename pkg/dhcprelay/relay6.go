@@ -1136,6 +1136,18 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 		if err != nil {
 			return
 		}
+		if !rateBucket.allow() {
+			relay.requestsDroppedRateLimit.Add(1)
+			if !warnedRateLimit {
+				slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
+					"interface", relay.ifaceName, "rate_pps", rate, "src", source)
+				warnedRateLimit = true
+			} else {
+				slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
+					"interface", relay.ifaceName, "src", source)
+			}
+			continue
+		}
 		if n > 0 && dhcpv6.MessageType(buf[0]) == dhcpv6.MessageTypeRelayReply {
 			packet, err := dhcpv6.FromBytes(buf[:n])
 			if err != nil {
@@ -1146,18 +1158,6 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			}
 			if dispatcher := m.replyDispatcherSnapshot(); dispatcher != nil {
 				dispatcher.dispatch(packet, source)
-			}
-			continue
-		}
-		if !rateBucket.allow() {
-			relay.requestsDroppedRateLimit.Add(1)
-			if !warnedRateLimit {
-				slog.Warn("dhcpv6-relay: client request rate limit exceeded, dropping excess",
-					"interface", relay.ifaceName, "rate_pps", rate, "src", source)
-				warnedRateLimit = true
-			} else {
-				slog.Debug("dhcpv6-relay: client request rate limit exceeded, dropping",
-					"interface", relay.ifaceName, "src", source)
 			}
 			continue
 		}

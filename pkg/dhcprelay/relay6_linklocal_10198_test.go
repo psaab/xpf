@@ -558,6 +558,42 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 	if ambiguousClientA.writeCount() != 0 || ambiguousClientB.writeCount() != 0 {
 		t.Fatalf("ambiguous Interface-ID was forwarded: writes=%d/%d", ambiguousClientA.writeCount(), ambiguousClientB.writeCount())
 	}
+	parseBefore := dispatcher.droppedParse.Load()
+	emptyBefore := dispatcher.droppedEmptyIID.Load()
+	unknownBefore := dispatcher.droppedUnknown.Load()
+	emptyReply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    ambiguousLink,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	emptyReply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	unknownReply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    ambiguousLink,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	unknownReply.AddOption(dhcpv6.OptInterfaceID([]byte("unknown")))
+	unknownReply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	server.push([]byte{byte(dhcpv6.MessageTypeRelayReply)})
+	server.push(emptyReply.ToBytes())
+	server.push(unknownReply.ToBytes())
+	deadline = time.Now().Add(time.Second)
+	for (dispatcher.droppedParse.Load() == parseBefore ||
+		dispatcher.droppedEmptyIID.Load() == emptyBefore ||
+		dispatcher.droppedUnknown.Load() == unknownBefore) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := dispatcher.droppedParse.Load(); got != parseBefore+1 {
+		t.Fatalf("dispatcher parse drops=%d, want %d", got, parseBefore+1)
+	}
+	if got := dispatcher.droppedEmptyIID.Load(); got != emptyBefore+1 {
+		t.Fatalf("dispatcher empty-IID drops=%d, want %d", got, emptyBefore+1)
+	}
+	if got := dispatcher.droppedUnknown.Load(); got != unknownBefore+1 {
+		t.Fatalf("dispatcher unknown-IID drops=%d, want %d", got, unknownBefore+1)
+	}
 }
 
 func TestDHCPv6ReplyDispatcherStatsSyntheticRow10198(t *testing.T) {
@@ -606,18 +642,19 @@ func TestDHCPv6ServerLoopRoutesMismatchedInterfaceID10198(t *testing.T) {
 		kernelName: "lo",
 		linkAddr:   net.ParseIP("2001:db8:50::1"),
 	}
-	allowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
-	_, release, err := dispatcher.register(context.Background(), targetRelay, targetClient, allowed, []byte("target"))
+	targetAllowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
+	_, release, err := dispatcher.register(context.Background(), targetRelay, targetClient, targetAllowed, []byte("target"))
 	if err != nil {
 		t.Fatalf("register mismatched-IID target: %v", err)
 	}
 	defer release()
 
 	relay := &dhcpV6Relay{ifaceName: "ll-mismatch-owner", kernelName: "lo"}
+	ownerAllowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 2), Port: 68}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		(&dhcpV6Manager{}).runDHCPV6ServerLoop(ctx, relay, server, newFakeConn(), allowed, []byte("owner"), dispatcher)
+		(&dhcpV6Manager{}).runDHCPV6ServerLoop(ctx, relay, server, newFakeConn(), ownerAllowed, []byte("owner"), dispatcher)
 		close(done)
 	}()
 	reply := &dhcpv6.RelayMessage{
@@ -648,7 +685,7 @@ func TestDHCPv6ServerLoopRoutesMismatchedInterfaceID10198(t *testing.T) {
 	}
 }
 
-func TestDHCPv6ClientReplyDispatchBypassesRateLimit10198(t *testing.T) {
+func TestDHCPv6ClientReplyDispatchRateLimited10198(t *testing.T) {
 	client := newFakeDHCPV6Conn()
 	client.srcAddr = &net.UDPAddr{IP: net.ParseIP("fe80::2"), Port: dhcpv6ClientPort}
 	upstream := newFakeConn()
@@ -686,18 +723,6 @@ func TestDHCPv6ClientReplyDispatchBypassesRateLimit10198(t *testing.T) {
 		m.runDHCPV6ClientLoop(ctx, relay, client, server, relay.linkAddr, servers, nil)
 		close(done)
 	}()
-	request := newDHCPV6TestMessage(t).ToBytes()
-	for range 8 {
-		client.push(request)
-	}
-	deadline := time.Now().Add(time.Second)
-	for server.writeCount()+int(relay.requestsDroppedRateLimit.Load()) < 8 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := server.writeCount() + int(relay.requestsDroppedRateLimit.Load()); got != 8 {
-		t.Fatalf("client request processing=%d, want 8 (writes=%d drops=%d)", got, server.writeCount(), relay.requestsDroppedRateLimit.Load())
-	}
-	dropsBeforeReply := relay.requestsDroppedRateLimit.Load()
 
 	inner := newDHCPV6TestMessage(t)
 	reply := &dhcpv6.RelayMessage{
@@ -708,16 +733,22 @@ func TestDHCPv6ClientReplyDispatchBypassesRateLimit10198(t *testing.T) {
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("ll-rate-reply")))
 	reply.AddOption(dhcpv6.OptRelayMessage(inner))
-	client.push(reply.ToBytes())
-	deadline = time.Now().Add(time.Second)
-	for replyClient.writeCount() == 0 && time.Now().Before(deadline) {
+	for range 8 {
+		client.push(reply.ToBytes())
+	}
+	deadline := time.Now().Add(time.Second)
+	for replyClient.writeCount()+int(relay.requestsDroppedRateLimit.Load()) < 8 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if replyClient.writeCount() != 1 {
-		t.Fatalf("rate-limited client Relay-Reply writes=%d, want 1", replyClient.writeCount())
+	if got := replyClient.writeCount() + int(relay.requestsDroppedRateLimit.Load()); got != 8 {
+		t.Fatalf("client Relay-Reply processing=%d, want 8 (writes=%d drops=%d)", got, replyClient.writeCount(), relay.requestsDroppedRateLimit.Load())
 	}
-	if got := relay.requestsDroppedRateLimit.Load(); got != dropsBeforeReply {
-		t.Fatalf("client Relay-Reply changed rate-limit drops from %d to %d", dropsBeforeReply, got)
+	wantWrites := relayBurstFor(relay.maxPacketRate)
+	if got := replyClient.writeCount(); got != wantWrites {
+		t.Fatalf("client Relay-Reply writes=%d, want burst %d", got, wantWrites)
+	}
+	if got := relay.requestsDroppedRateLimit.Load(); got != uint64(8-wantWrites) {
+		t.Fatalf("client Relay-Reply rate-limit drops=%d, want %d", got, 8-wantWrites)
 	}
 	cancel()
 	_ = client.Close()
