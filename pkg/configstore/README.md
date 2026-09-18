@@ -34,6 +34,7 @@ re-created 0600 on the next commit.
 | Unshared-commit mark (#9530) | `.configdb/unshared.json` | 0600 | `unshared_9530.go WriteUnshared` |
 | `master.key` | `.configdb/master.key` | 0600 | `crypto.go readOrCreateMasterKey` |
 | Text rollback slots | `<config>.N` (e.g. `xpf.conf.1`) | 0600 | `store_commit.go saveRollbackFiles` |
+| Rollback slot metadata (#10299) | `.configdb/rollback-meta.json` | 0600 | `store_commit.go saveRollbackFiles` |
 | Rescue config | `rescue.conf` | 0600 | `store_persist.go SaveRescueConfig` |
 | Config archives | `<archive-dir>/config-<ts>.<seq>.conf` | 0600 | `store_persist.go writeArchive` |
 | Audit journal (#4579 A4-02, migrate #5188) | `.config.journal`(+`.N`) | 0600 | `journal/journal.go Log` / `migratePermsLocked` |
