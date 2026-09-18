@@ -2,48 +2,80 @@ package userspace
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-// #10203: the #9931 linked libelf/zlib/zstd versions recorded by the Rust
-// ProcessStatus must survive a Go decode→encode round-trip. The fields use
-// omitempty so helpers predating #9931 still decode with empty versions and
-// retain their old wire shape when re-encoded.
-func TestLinkedLibVersionsSurviveGoRoundTrip10203(t *testing.T) {
-	const rustJSON = `{"pid":4242,` +
-		`"linked_libxdp_version":"1.6.3",` +
-		`"linked_libbpf_version":"1.6.3",` +
-		`"build_host_libbpf_version":"1.7.0",` +
-		`"linked_libelf_version":"0.195",` +
-		`"linked_zlib_version":"1.3.2",` +
-		`"linked_zstd_version":"1.5.7"}`
-	var st ProcessStatus
-	if err := json.Unmarshal([]byte(rustJSON), &st); err != nil {
-		t.Fatalf("decode Rust-shaped status: %v", err)
+func linkedLibVersionSpecimenFields10203(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "userspace-dp", "tests", "fixtures",
+		"protocol_wire_v1.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read Rust wire fixture %s: %v", path, err)
 	}
-	if st.PID != 4242 {
-		t.Fatalf("control: PID = %d, want 4242; the key assertions below would prove nothing", st.PID)
+	var fixture map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("parse Rust wire fixture %s: %v", path, err)
+	}
+	specimen, ok := fixture["process_status_linked_lib_versions"]
+	if !ok {
+		t.Fatalf("Rust wire fixture has no process_status_linked_lib_versions specimen")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(specimen, &fields); err != nil {
+		t.Fatalf("parse linked-version Rust specimen: %v", err)
+	}
+	return fields
+}
+
+// #10203: the #9931 linked libelf/zlib/zstd versions recorded by the Rust
+// ProcessStatus must survive a Go decode→encode round-trip. The input is the
+// populated Rust serde specimen from protocol_wire_v1.json, not a parallel Go
+// literal: a serde/json-tag rename must make this agreement cell fail.
+func TestLinkedLibVersionsSurviveGoRoundTrip10203(t *testing.T) {
+	rustFields := linkedLibVersionSpecimenFields10203(t)
+	specimen, err := json.Marshal(rustFields)
+	if err != nil {
+		t.Fatalf("marshal Rust specimen fields: %v", err)
+	}
+	var st ProcessStatus
+	if err := json.Unmarshal(specimen, &st); err != nil {
+		t.Fatalf("decode Rust ProcessStatus specimen: %v", err)
 	}
 	out, err := json.Marshal(st)
 	if err != nil {
 		t.Fatalf("re-encode status: %v", err)
 	}
-	var round map[string]any
-	if err := json.Unmarshal(out, &round); err != nil {
+	var goFields map[string]json.RawMessage
+	if err := json.Unmarshal(out, &goFields); err != nil {
 		t.Fatalf("decode re-encoded status: %v", err)
 	}
-	for key, want := range map[string]string{
-		"linked_libelf_version": "0.195",
-		"linked_zlib_version":   "1.3.2",
-		"linked_zstd_version":   "1.5.7",
+	for _, key := range []string{
+		"linked_libelf_version",
+		"linked_zlib_version",
+		"linked_zstd_version",
 	} {
-		got, ok := round[key]
+		rustValue, ok := rustFields[key]
 		if !ok {
-			t.Errorf("re-encoded status drops %q (want %q): Go has no mirror field", key, want)
+			t.Fatalf("Rust specimen omits required %q", key)
+		}
+		var want string
+		if err := json.Unmarshal(rustValue, &want); err != nil || want == "" {
+			t.Fatalf("Rust specimen %q is not populated: %s", key, rustValue)
+		}
+		goValue, ok := goFields[key]
+		if !ok {
+			t.Errorf("Go re-encoding drops Rust specimen key %q", key)
 			continue
 		}
+		var got string
+		if err := json.Unmarshal(goValue, &got); err != nil {
+			t.Fatalf("decode Go value for %q: %v", key, err)
+		}
 		if got != want {
-			t.Errorf("re-encoded %q = %v, want %q", key, got, want)
+			t.Errorf("Go %q = %q, Rust specimen = %q", key, got, want)
 		}
 	}
 }
