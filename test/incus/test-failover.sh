@@ -68,8 +68,6 @@ V6_RECHECK_DELAY=30     # #6934: seconds between the two post-failover samples
 IPERF_DURATION=120      # seconds — long enough to span retries + reboot + failback
 IPERF_STREAMS=8
 MIN_SESSIONS=4          # minimum established sessions (control + some data streams)
-KNOWN=0
-KNOWN_ISSUES=()
 SYNC_WAIT=5             # seconds to wait for session sync sweep
 REBOOT_WAIT=60          # max WALL-CLOCK seconds to wait for fw0 to come back (#1880)
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
@@ -97,29 +95,6 @@ ERRORS=()
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
-# known_gap records a defect that is OPEN and TRACKED, so a shared smoke does
-# not go red for something nobody is regressing — while still failing if the
-# gap stops reproducing.
-#
-# A plain fail() here would make every lane's `make test-failover` red for a
-# bug none of them touched, and a smoke that is red by default is a smoke people
-# stop reading. But a gap that merely prints and passes is worse: the day it is
-# FIXED, nothing says so, the cell keeps reporting a gap that no longer exists,
-# and the real assertion it should have become is never written.
-#
-# So this asserts in BOTH directions. Still broken -> KNOWN, not counted as a
-# failure. No longer broken -> FAIL, naming the promotion that is now owed.
-#   known_gap <issue> <description> <still_broken 0|1>
-known_gap() {
-	local issue="$1" desc="$2" broken="$3"
-	if [[ "$broken" == 1 ]]; then
-		echo "  KNOWN #$issue  $desc"
-		KNOWN=$((KNOWN + 1))
-		KNOWN_ISSUES+=("#$issue")
-	else
-		fail "#$issue no longer reproduces ($desc). This cell asserts a KNOWN-BROKEN state precisely so a fix cannot land unnoticed: promote it to a real assertion and drop the known_gap wrapper"
-	fi
-}
 
 die() { echo "FATAL: $*" >&2; exit 2; }
 
@@ -789,12 +764,9 @@ check_proxy_arp_ownership "after the crash failover AND the manual failback"
 # would satisfy "a pool-translated session exists" without a single new claim,
 # which is a cell that passes without entering the state it names.
 #
-# NOTE this asserts the ALLOCATION, not data-path liveness. Pool-mode TCP
-# cannot complete a handshake on this cluster today — #8297: both nodes install
-# the NTF_PROXY entry for the pool address regardless of RG ownership, so the
-# upstream sees one IP at two RETH virtual MACs. The traffic-survival assertion
-# is owed here once #8297 lands; asserting it now would fail for a reason that
-# has nothing to do with the allocator.
+# The allocator and data path are both asserted below. #8297 fixed the
+# proxy-ARP ownership needed for a pool-mode handshake; #10146 promotes the
+# formerly known-gap #8341 data-path check to a real assertion.
 if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 	incus exec "$FW0" -- cli -c "clear security flow session source-prefix ${POOL_SRC}" &>/dev/null || true
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
@@ -805,19 +777,20 @@ if [[ "$POOL_NAT_SMOKE" == 1 && -n "$POOL_LAN_IF" ]]; then
 		fail "#8280: the post-failback session query returned no listing, so the allocator's state after the role change was NOT MEASURED — see the admission note above. A VOID here is NOT evidence the allocator is healthy. Query stderr: ${POOL_QUERY_ERR:-<none>}"
 	elif [[ "$post_pool" -ge 1 ]]; then
 		pass "the pool allocator still hands out a translation after a full primary->secondary->primary cycle"
-		# #8297 landed, so pool-mode TCP can now complete a handshake and the
-		# DATA-PATH half of this phase is finally assertable. Until then this
-		# would have failed for a reason unrelated to the allocator.
-		# #8341, NOT #8297. Measured: with the proxy-ARP entry installed on the
-		# RG OWNER ONLY — the exact state a correct #8297 fix produces — a
-		# pool-mode TCP flow still times out while an interface-mode control
-		# from the same host in the same run reaches 6.29 Gbit/s. Labelling this
-		# cell #8297 would make it go green when #8297 is fixed and read as
-		# validating a fix it does not touch.
-		if incus exec "$CLUSTER_LAN_HOST" -- grep -qE "unable to connect|Connection timed out" /tmp/iperf3-pool-8280-post.log 2>/dev/null; then
-			known_gap 8341 "a pool-mode TCP flow cannot connect even though the allocator handed out a translation; ICMP through the same pool works, so this is pre-egress and TCP-specific" 1
+		# #8297 fixed the proxy-ARP ownership needed for a pool-mode handshake,
+		# so the data-path half of this phase is now assertable. #8341 is a
+		# separate regression: the allocator can hand out a translation while
+		# TCP still fails before egress. The assertion below keeps those two
+		# observations distinct.
+		# #10146 promotes the formerly known-gap #8341 check to a real
+		# assertion. A successful iperf3 run emits `iperf Done.`; matching
+		# that positive result avoids treating an arbitrary error message as
+		# proof that the pool-mode TCP flow connected.
+		if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-pool-8280-post.log 2>/dev/null; then
+			pass "a pool-mode TCP flow connects after the role change (data path, not just allocation)"
 		else
-			known_gap 8341 "a pool-mode TCP flow connects after the role change (data path, not just allocation)" 0
+			pool_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-pool-8280-post.log 2>&1 || echo "(pool probe log unreadable)")
+			fail "a pool-mode TCP flow did not complete after the role change; the #8341 TCP-specific data-path defect may have returned. Pool probe log tail: ${pool_log}"
 		fi
 	else
 		fail "after the crash failover AND the manual failback, a FRESH flow from ${POOL_SRC} got NO pool translation. The ports fw1 imported as reservations while it was standby are the ones a reserve/recycle lifecycle bug strands, and this is the only assertion in this suite that enters that state (#8280 / #7174 M13)"
@@ -894,27 +867,8 @@ FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
 *)       fail "iperf3 throughput: unrecognised verdict from iperf_throughput_verdict: ${throughput_verdict}" ;;
 esac
 
-# ── Results ──────────────────────────────────────────────────────────
-
-echo
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-# #8344: the known-gap tally is a SEPARATE line, and deliberately does not use
-# the words the ledger's HA-smoke adapter parses.
-#
-# harness-result-selftest.sh requires EXACTLY ONE echo matching
-# `passed, ...failed` per gate — two summaries and the adapter cannot know which
-# run a recorded row describes — and harness-result.sh greps
-# `[0-9]+ passed, [0-9]+ failed` out of the log. So the canonical summary below
-# is left byte-identical to what it was, and this line is worded so it cannot
-# match either.
-#
-# The counts are NOT folded in. A known-gap cell is neither a pass nor a
-# failure, and rolling it into "passed" would report 22 passed on a run where
-# two assertions are known-broken — a number indistinguishable from a healthy
-# one, which is the exact failure mode this harness exists to catch.
-if [[ $KNOWN -gt 0 ]]; then
-	echo "  Known gaps (tracked, NOT counted as assertions): $KNOWN — ${KNOWN_ISSUES[*]}"
-fi
+# The summary is the one line the harness ledger parses. Every measured cell
+# is now an ordinary pass/fail assertion; there is no known-gap tally.
 echo "  Failover test: $PASS passed, $FAIL failed"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
