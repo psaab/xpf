@@ -64,6 +64,17 @@ def recv_exact(conn: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+def reserve(address: str, port: int, duration: float) -> None:
+    """Hold one local TCP source port so kernel bursts cannot reuse it."""
+    end = time.monotonic() + duration
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((address, port))
+        sock.listen(1)
+        print(f"RESERVED address={address} port={port}", flush=True)
+        while time.monotonic() < end:
+            time.sleep(0.5)
+
+
 
 
 def client(
@@ -123,6 +134,7 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--serve", type=int)
     group.add_argument("--client", nargs=2, metavar=("HOST", "PORT"))
+    group.add_argument("--reserve", nargs=2, metavar=("ADDRESS", "PORT"))
     parser.add_argument("--duration", type=float, default=120.0)
     parser.add_argument("--heartbeat", type=float, default=1.0)
     parser.add_argument("--silent-after", type=float, default=None)
@@ -132,6 +144,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.serve is not None:
         serve(args.serve, args.duration)
+    elif args.reserve is not None:
+        reserve(args.reserve[0], int(args.reserve[1]), args.duration)
     else:
         client(
             args.client[0],
