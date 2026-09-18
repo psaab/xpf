@@ -181,10 +181,93 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 						return nil, err
 					}
 				}
+				// #10293: interface filter LISTS, uRPF, and input/output
+				// policer bindings are accepted by the parser but have no
+				// InterfaceUnit field or dataplane consumer. A single-name
+				// filter input/output binding remains supported; these
+				// unbound siblings must fail closed rather than promise
+				// enforcement and silently do nothing.
+				for _, knob := range unsupportedInterfaceFilterKnobs(fam) {
+					if err := emit(
+						"interfaces %s unit %s family %s: `%s` is not "+
+							"supported (xpf has no consumer for this interface "+
+							"binding; remove it) (#10293)",
+						ifName, unitID, famName, knob); err != nil {
+						return nil, err
+					}
+				}
 			}
 		}
 	}
 	return warnings, nil
+}
+
+// unsupportedInterfaceFilterKnobs returns the exact interface family-level
+// children that compileInterfaces does not consume. It handles both AST
+// shapes: flat-set statements keep the tail in Keys, while hierarchical
+// statements put the leaf under the filter/policer container.
+func unsupportedInterfaceFilterKnobs(fam *Node) []string {
+	if fam == nil {
+		return nil
+	}
+	var knobs []string
+	add := func(knob string) {
+		for _, existing := range knobs {
+			if existing == knob {
+				return
+			}
+		}
+		knobs = append(knobs, knob)
+	}
+	for _, c := range fam.Children {
+		switch c.Name() {
+		case "rpf-check":
+			add("rpf-check")
+		case "filter":
+			for i, key := range c.Keys[1:] {
+				switch key {
+				case "input-list", "output-list":
+					add("filter " + key)
+				case "input", "output":
+					// A packed filter child with more than one value
+					// leaves every value after nodeVal's first one
+					// unenforced.
+					if len(c.Keys[1:]) > i+2 {
+						add("filter " + key)
+					}
+				}
+			}
+			for _, leaf := range c.Children {
+				switch leaf.Name() {
+				case "input-list", "output-list":
+					add("filter " + leaf.Name())
+				case "input", "output":
+					// Count every authored value across the parser's
+					// bracket, block, and packed-child shapes. nodeVal
+					// consumes only the first.
+					values := len(leaf.Keys) - 1
+					for _, child := range leaf.Children {
+						values += len(child.Keys)
+					}
+					if values > 1 {
+						add("filter " + leaf.Name())
+					}
+				}
+			}
+		case "policer":
+			for _, key := range c.Keys[1:] {
+				if key == "input" || key == "output" {
+					add("policer " + key)
+				}
+			}
+			for _, leaf := range c.Children {
+				if leaf.Name() == "input" || leaf.Name() == "output" {
+					add("policer " + leaf.Name())
+				}
+			}
+		}
+	}
+	return knobs
 }
 
 // unitIdentity returns the unit number token for an error message. The
