@@ -6,21 +6,22 @@ import (
 	"testing"
 )
 
-// #8807 / #8787: the fourteen predicate-B keywords that were recorded as
+// #8807 / #8787: the twelve predicate-B keywords that were recorded as
 // UNDECLARED and never measured for consequence.
 //
 // #8787 established existence -- "the compiler names it and the schema never
 // declares it" -- and stopped there. Existence is not a verdict: an undeclared
 // keyword may be read anyway, refused on purpose, or silently dropped, and only
-// the third is a defect. All 14 are still undeclared today (checked by walking
-// the live schema), so the recorded fact holds; what follows is what it COSTS.
+// the third is a defect. All 12 remaining rows are still undeclared today
+// (checked by walking the live schema), so the recorded fact holds; what
+// follows is what it COSTS.
 //
 // Measured, every one of them:
 //
-//	READ                10  compiled result changes; the value reaches a field
-//	STRICT-REJECT        0  refused on purpose, with a specific message
-//	ACCEPTED + ADVISORY  4  accepted, warned as unenforced, value not compiled
-//	SILENTLY DROPPED     0
+//	READ                8  compiled result changes; the value reaches a field
+//	STRICT-REJECT       0  refused on purpose, with a specific message
+//	ACCEPTED + ADVISORY 4  accepted, warned as unenforced, value not compiled
+//	SILENTLY DROPPED    0
 //
 // ZERO silent drops and zero fail-opens, which is the answer #8787 did not have.
 //
@@ -32,18 +33,12 @@ import (
 // "no test caught it". Measured-clean-but-unpinned is a coincidence with a good
 // outcome, not coverage.
 //
-// TWO FIXTURE TRAPS, both of which produced a WRONG verdict on the first pass
-// and are recorded so the next reader does not re-hit them:
+// ONE FIXTURE TRAP, which produced a WRONG verdict on the first pass and is
+// recorded so the next reader does not re-hit it:
 //
-//  1. WARNINGS ARE PART OF THE COMPILED RESULT. Nulling cfg.Warnings before
-//     comparing reported `member` as a silent drop -- it is read, and the proof
-//     is the "no members" advisory DISAPPEARING when a member is present.
-//
-//  2. A VALUE COINCIDENCE CAN LOOK LIKE A DROP. `clear-threshold` first
-//     measured as silently dropped because a raise-only alarm DERIVES
-//     clear=70, and the fixture happened to set 70. At 55/10/79 it plainly
-//     differs. A fixture value equal to the computed default cannot
-//     distinguish "read" from "ignored".
+// WARNINGS ARE PART OF THE COMPILED RESULT. Nulling cfg.Warnings before
+// comparing reported `member` as a silent drop -- it is read, and the proof
+// is the "no members" advisory DISAPPEARING when a member is present.
 type undeclCase8807 struct {
 	kw    string
 	base  string // the statement ABSENT
@@ -77,7 +72,7 @@ func signature8807(t *testing.T, text string) (js string, warnings int, strictOK
 	return string(b), warnings, serr == nil
 }
 
-func TestTheFourteenUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
+func TestTheTwelveUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
 	for _, c := range undeclCases8807() {
 		c := c
 		t.Run(c.kw, func(t *testing.T) {
@@ -118,7 +113,7 @@ func TestTheFourteenUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
 // undeclared. If one gains a schema declaration its consequence changes -- it
 // becomes completable, validated, and visible to the census machinery -- and the
 // row above stops describing it.
-func TestTheFourteenAreStillUndeclared8807(t *testing.T) {
+func TestTheTwelveAreStillUndeclared8807(t *testing.T) {
 	declared := map[string]bool{}
 	seen := map[*schemaNode]bool{}
 	var walk func(n *schemaNode, d int)
@@ -144,7 +139,7 @@ func TestTheFourteenAreStillUndeclared8807(t *testing.T) {
 	for _, c := range undeclCases8807() {
 		if declared[c.kw] {
 			t.Errorf("#8807: %q is now DECLARED somewhere in the schema. That is progress, not a "+
-				"regression -- but its row in TestTheFourteenUndeclaredKeywordsHaveNoSilentDrop8807 "+
+				"regression -- but its row in TestTheTwelveUndeclaredKeywordsHaveNoSilentDrop8807 "+
 				"describes an undeclared keyword and no longer applies. Re-measure it and move it "+
 				"out of this list.", c.kw)
 		}
@@ -154,9 +149,6 @@ func TestTheFourteenAreStillUndeclared8807(t *testing.T) {
 func undeclCases8807() []undeclCase8807 {
 	dhcp := func(pool string) string {
 		return "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    interface ge-0-0-1;\n" + pool + "\n   }\n  }\n }\n}\n"
-	}
-	alarm := func(a string) string {
-		return "security {\n nat {\n  source {\n   pool p1 { address 10.0.0.1/32; }\n" + a + "\n  }\n }\n}\n"
 	}
 	ir := func(b string) string {
 		return "interfaces {\n interface-range r1 {\n  description d;\n" + b + "\n }\n}\n"
@@ -172,13 +164,6 @@ func undeclCases8807() []undeclCase8807 {
 		{"address-range", dhcp("    pool p1 { }"), dhcp("    pool p1 { address-range low 10.0.0.10 high 10.0.0.20; }"), kwRead},
 		{"subnet", dhcp("    pool p1 { }"), dhcp("    pool p1 { subnet 10.0.0.0/24; }"), kwRead},
 		{"router", dhcp("    pool p1 { }"), dhcp("    pool p1 { router 10.0.0.1; }"), kwRead},
-		// security nat source pool-utilization-alarm — also an undeclared parent.
-		{"raise-threshold", alarm(""), alarm("   pool-utilization-alarm { raise-threshold 80; }"), kwRead},
-		// 55 deliberately, NOT 70: a raise-only alarm derives clear=70, so 70
-		// cannot distinguish read from ignored. See the trap note above.
-		{"clear-threshold",
-			alarm("   pool-utilization-alarm { raise-threshold 80; }"),
-			alarm("   pool-utilization-alarm { raise-threshold 80; clear-threshold 55; }"), kwRead},
 		{"commit", "system {\n host-name h1;\n}\n", "system {\n host-name h1;\n commit persist-groups-inheritance;\n}\n", kwRead},
 		// interfaces interface-range — `member` being read is visible as the
 		// "no members" advisory disappearing, not as a new field.

@@ -236,7 +236,7 @@ func findChildInRun9088(vpn *Node, name string) *Node {
 	if vpn == nil {
 		return nil
 	}
-	for _, c := range expandFlatRun(vpn.Children, ipsecVPNRunSchema9088()) {
+	for _, c := range expandIPsecVPNRun9088(vpn) {
 		if c != nil && c.Name() == name {
 			return c
 		}

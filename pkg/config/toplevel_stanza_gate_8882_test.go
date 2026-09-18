@@ -18,16 +18,16 @@ import (
 // WHY THIS IS NOT setSchema.closedWorld, which is the obvious fix and is wrong.
 // The closed-world flag INHERITS (`childClosed := closed || childSchema.closedWorld`),
 // so arming it at the root closes every subtree below it, and the schema does
-// not model the tree exhaustively. Measured against the shipped and example
-// configs: 9 of 10 rejected --
+// configs: the pre-#10078 census had 9 of 10 rejected --
 //
 //	chassis cluster redundancy-group 1 interface-monitor
 //	system services dhcp-local-server group <g> pool
 //	interfaces <if> unit 0 family inet6 dhcpv6
-//	security flow tcp-mss all-tcp
+//	security flow tcp-mss all-tcp (historical; admitted by #10078's
+//	opaque tcp-mss boundary)
 //
-// That is an operational blackout on the commit path. The gate closes exactly
-// ONE level and inherits nothing.
+// That pre-#10078 figure represented an operational blackout on the commit
+// path. The gate closes exactly ONE level and inherits nothing.
 
 func schemaCheck8882(t *testing.T, text string) error {
 	t.Helper()
