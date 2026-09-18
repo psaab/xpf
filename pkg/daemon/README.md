@@ -2137,11 +2137,13 @@ never lock an operator out of a remote box it manages.
   a signature/ownership change rather than a bound. Filed as #8660.
 
 - **An unarmed dataplane stops kernel transit forwarding (#5275).** Kernel
-  transit forwarding is CONDITIONAL on the dataplane being armed. The daemon
-  tracks that as `Daemon.dataplaneArmed` (accessor `DataplaneArmed()`), set
-  true only after `rt.Start()` (→ `LoadUserspaceShim`) returns nil, and the
-  gate in `daemon_transit_gate.go` drives `/proc/sys/net/ipv4/ip_forward` and
-  `/proc/sys/net/ipv6/conf/all/forwarding` to match it.
+  transit forwarding is CONDITIONAL on the dataplane being armed **and on a
+  live XDP attachment with a successfully installed armed forward fence**. The
+  daemon tracks the arm state as `Daemon.dataplaneArmed` (accessor
+  `DataplaneArmed()`), set true only after `rt.Start()` (→ `LoadUserspaceShim`)
+  returns nil; the gate in `daemon_transit_gate.go` also requires the
+  kernel-truth XDP census before it raises
+  `/proc/sys/net/ipv4/ip_forward` and `/proc/sys/net/ipv6/conf/all/forwarding`.
   - **Why.** A successful config *compile* followed by an *arm* failure took a
     branch that logged "running in config-only mode", cleared the dataplane
     cell, and fell through to `applyConfig` — while bring-up had already
@@ -2158,13 +2160,15 @@ never lock an operator out of a remote box it manages.
     `applyBootTransitPolicy`); and the first-commit-confirmed rollback, whose
     `runBootstrapTeardownSteps` step 4 DETACHES an already-armed dataplane
     without passing through either arm writer.
-  - **When it re-opens.** A successful arm. Recovery does NOT need a daemon
-    restart on the bootstrap path: the bootstrap-exit arm on the first
-    compilable `commit confirmed` (or cluster `SyncApply`) re-enables both
-    knobs. There is, however, **no re-arm path after a NON-bootstrap boot arm
+  - **When it re-opens.** Only after a successful arm, a live kernel-proven
+    XDP attachment, and a successful armed-fence install. Recovery does NOT
+    need a daemon restart on the bootstrap path: the bootstrap-exit arm on the
+    first compilable `commit confirmed` (or cluster `SyncApply`) re-evaluates
+    the XDP census and re-installs the fence before re-enabling both knobs.
+    There is, however, **no re-arm path after a NON-bootstrap boot arm
     failure** — `rt.Start` has exactly two call sites (boot and bootstrap
-    exit), and the boot one runs once — so that node stays transit-closed
-    until xpfd restarts. Fixing the config and re-committing is not enough;
+    exit), and the boot one runs once — so that node stays transit-closed until
+    xpfd restarts. Fixing the config and re-committing is not enough;
     `systemctl restart xpfd` is.
   - **How to tell.** The failure logs at **Error**: `dataplane arm FAILED;
     kernel transit forwarding DISABLED (fail-closed, degraded)` with a
@@ -2176,8 +2180,8 @@ never lock an operator out of a remote box it manages.
     input` host-inbound chains are untouched. The daemon does NOT exit. The
     #7191 nftables barrier is likewise forward-hook only and carries no
     management exemption *because it needs none* — management is INPUT.
-  - **How deep the barrier goes (#7191).** The gate is no longer the sysctl
-    alone. While unarmed the daemon also installs `xpf_transit_barrier`, an
+  - **How deep the barrier goes (#7191/#10302).** The gate is no longer the
+    sysctl alone. While unarmed the daemon also installs `xpf_transit_barrier`, an
     unconditional forward-hook DROP, in **both** the `inet` and `bridge`
     families (`pkg/nftables/transit_barrier.go`). The bridge leg exists
     because `ip_forward` does not govern bridged frames at all, and this repo
@@ -2186,15 +2190,22 @@ never lock an operator out of a remote box it manages.
     unit, an operator, or any future code path — was the only thing between an
     unarmed box and kernel routing.
 
-    The barrier is installed and removed from the same `mark*` helpers that
-    drive the sysctls, and re-asserted on every apply tail, so a stale barrier
-    self-heals rather than silently black-holing armed transit. It is scoped
-    strictly to the unarmed window, which is the window `ip_forward=0` already
-    covers — so it closes nothing that was open. That scoping is not a detail:
-    several ARMED paths deliberately rely on an open kernel forward hook
-    (route-based IPsec plaintext off an xfrm interface, SNAT'd frames passed up
-    for kernel routing, the #7409 slow-path reinject), and a barrier live while
-    armed would drop all three.
+    The same table is re-rendered from the same `mark*`/apply-tail gate
+    helpers. In the unarmed state it has an unconditional DROP policy. In the
+    armed state (#10302) it retains that default DROP and adds only ingress
+    ACCEPT pinholes for runtime-tracked XDP links whose live kernel names still
+    resolve, plus the daemon-owned `xpf-usp1` delegated TUN reinjection path.
+    `xpf-usp1` is a deliberate residual: it multiplexes xfrm/reinject traffic
+    and destination-judged delegated traffic, which are indistinguishable at
+    the FORWARD hook by iifname today. The `xpf-usp0` LocalDelivery/gated-only
+    TUN is not a FORWARD pinhole. A configured-but-unzoned or device-map
+    leave-alone interface, an unrelated host XDP program, and an xfrm
+    interface itself are not pinholes and remain dropped. The fence is
+    installed before the sysctls are raised; if nftables cannot install the
+    inet fence, the sysctls stay at zero. A kernel with bridge nf_tables
+    unavailable is a documented degraded exception: the inet fence remains
+    active and the armed gate may raise the sysctls, while bridged transit
+    remains outside nftables enforcement on that kernel.
 
     Plan §6's third leg, a flowtable disable, is a deliberate no-op: xpf creates
     no flowtable, so there is nothing to flush.
