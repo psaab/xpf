@@ -214,6 +214,16 @@ func findCleanupCallers(t *testing.T, root string) []cleanupCaller {
 			return err
 		}
 		if info.IsDir() {
+			// Dot-directories and underscore-directories are not production
+			// source: the Go tool ignores them when loading packages, so nothing
+			// below them is importable or built.
+			// #10154: `.claude/worktrees/*` holds nested checkouts of this
+			// repo, and the walk counted each copy's `cmd/xpfd/main.go` as a
+			// production Cleanup() caller — a red test with zero production
+			// change. Skipping them keeps the walk to this checkout's source.
+			if strings.HasPrefix(info.Name(), ".") || strings.HasPrefix(info.Name(), "_") {
+				return filepath.SkipDir
+			}
 			switch info.Name() {
 			// Vendored / generated / build-output trees carry no production
 			// call sites and would make this walk slow and noisy.
