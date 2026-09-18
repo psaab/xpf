@@ -215,6 +215,48 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 			}
 		}
 	})
+	t.Run("different IDs keep parity across peer and successive paths", func(t *testing.T) {
+		orders := []struct {
+			name, inner string
+		}{
+			{
+				name:  "same ID promotes first",
+				inner: `vrrp-group 1 priority 200; vrrp-group 2 priority 150 virtual-address 10.0.61.3/24;`,
+			},
+			{
+				name:  "different ID reaches peer path first",
+				inner: `vrrp-group 2 priority 150 virtual-address 10.0.61.3/24; vrrp-group 1 priority 200;`,
+			},
+		}
+		prioritiesByOrder := make(map[string]map[int]int, len(orders))
+		for _, order := range orders {
+			t.Run(order.name, func(t *testing.T) {
+				tree := parseHierarchical(t,
+					group(order.inner)+addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`))
+				cfg, err := CompileConfig(tree)
+				if err != nil {
+					t.Fatalf("CompileConfig: %v", err)
+				}
+				if err := SchemaValidate(tree, cfg); err != nil {
+					t.Fatalf("SchemaValidate: %v", err)
+				}
+				unit := cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0]
+				priority := make(map[int]int, len(unit.VRRPGroups))
+				for _, group := range unit.VRRPGroups {
+					priority[group.ID] = group.Priority
+				}
+				prioritiesByOrder[order.name] = priority
+				if len(priority) != 2 || priority[1] != 200 || priority[2] != 150 {
+					t.Fatalf("order %q: VRRP priorities = %v, want ID1=200, ID2=150", order.inner, priority)
+				}
+			})
+		}
+		first := prioritiesByOrder[orders[0].name]
+		second := prioritiesByOrder[orders[1].name]
+		if first[1] != second[1] || first[2] != second[2] {
+			t.Fatalf("source-order divergence: first=%v second=%v", first, second)
+		}
+	})
 }
 
 // TestPackedGroupLeafTypoTailKeepsOverride9855 pins the conservative bail:

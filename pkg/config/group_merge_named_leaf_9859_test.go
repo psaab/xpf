@@ -665,24 +665,55 @@ func TestGroupPackedDifferentInstanceAdopts9859(t *testing.T) {
 
 // TestGroupPackedDifferentInstanceParity10056 runs the same source leaves in
 // both orders. Promotion of one same-keyword instance must not make the other
-// instance depend on source ordering.
+// instance depend on source ordering. The forward order reaches the
+// successive-merge guard after promotion; the reverse order reaches the
+// #9859 peer-path admission before promotion. Both paths must keep the same
+// result, including the bare-leaf suppression boundary.
 func TestGroupPackedDifferentInstanceParity10056(t *testing.T) {
-	for _, group := range []string{
-		`host 10.0.0.1 any any; host 10.0.0.2 local0 info;`,
-		`host 10.0.0.2 local0 info; host 10.0.0.1 any any;`,
-	} {
+	cases := []struct {
+		name, forward, reverse string
+		wantB                  []SyslogFacility
+	}{
+		{
+			name:    "facility tail",
+			forward: `host 10.0.0.1 any any; host 10.0.0.2 local0 info;`,
+			reverse: `host 10.0.0.2 local0 info; host 10.0.0.1 any any;`,
+			wantB:   []SyslogFacility{{Facility: "local0", Severity: "info"}},
+		},
+		{
+			name:    "bare leaf",
+			forward: `host 10.0.0.1 any any; host 10.0.0.2;`,
+			reverse: `host 10.0.0.2; host 10.0.0.1 any any;`,
+			wantB:   nil,
+		},
+	}
+	collect := func(t *testing.T, group string) map[string][]SyslogFacility {
+		t.Helper()
 		hosts := compileSyslogHosts9855(t,
 			`groups { G { system { syslog { `+group+` } } } } apply-groups G; system { syslog { host 10.0.0.1; } }`)
 		if len(hosts) != 2 {
 			t.Fatalf("group order %q: hosts = %+v, want two", group, hosts)
 		}
-		seen := map[string]bool{}
+		out := make(map[string][]SyslogFacility, len(hosts))
 		for _, host := range hosts {
-			seen[host.Address] = true
+			out[host.Address] = host.Facilities
 		}
-		if !seen["10.0.0.1"] || !seen["10.0.0.2"] {
-			t.Fatalf("group order %q: hosts = %+v, want both addresses", group, hosts)
-		}
+		return out
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forward, reverse := collect(t, tc.forward), collect(t, tc.reverse)
+			if !slices.Equal(forward["10.0.0.1"], reverse["10.0.0.1"]) ||
+				!slices.Equal(forward["10.0.0.2"], reverse["10.0.0.2"]) {
+				t.Fatalf("source-order divergence:\nforward=%v\nreverse=%v", forward, reverse)
+			}
+			if !slices.Equal(forward["10.0.0.1"], []SyslogFacility{{Facility: "any", Severity: "any"}}) {
+				t.Fatalf("host A = %+v, want the promoted group facility", forward["10.0.0.1"])
+			}
+			if !slices.Equal(forward["10.0.0.2"], tc.wantB) {
+				t.Fatalf("host B = %+v, want facilities %+v", forward["10.0.0.2"], tc.wantB)
+			}
+		})
 	}
 }
 

@@ -240,8 +240,21 @@ func rawInstanceContainer9855(ancestorPath [][]string, dst []*Node, s *Node) *No
 }
 
 // suppressSuccessiveLeaf9855 reports whether a group leaf with no raw peer
-// must be suppressed instead of adopted. Two successive-merge hazards share
-// it, and both restore what the base did before promotion existed:
+// must be suppressed instead of adopted. TWO paths at the #9859 boundary must
+// evolve together: namedLeafPeer9859's keyword/identity override when a peer
+// exists, and this successive-merge guard when a promoted sibling exists but
+// no raw peer remains. If the first path admits a different-instance leaf, the
+// second must admit its counterpart too, or the same pair resolves differently
+// by source order relative to promotion (#10056).
+//
+// A nested-group promotion can also surface as a container source against a
+// leaf destination (container-src versus leaf-dst), the pre-existing braced
+// group plus inline-leaf class. Such twins coalesce at compile (#10048 syslog;
+// VRRP merges by group ID last-wins); future changes on this branch must treat
+// nested-promoted sources consistently.
+//
+// Two successive-merge hazards share it, and both restore what the base did
+// before promotion existed:
 //
 //   - a BARE twin of a promoted container (`host A;` trailing `host A any
 //     any;`) names an instance already present and adds nothing — adopting
