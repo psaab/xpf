@@ -190,6 +190,7 @@ func zeroizeUpgradeDBSnapshots(versionsDir string) error {
 		}
 	}
 	var skipped []configstore.SymlinkedTarget
+	var hardlinks []configstore.HardlinkedPath
 	// Re-read under the lock: the pre-lock listing is only used to decide
 	// whether locking is warranted, and a cut may have finished since.
 	entries, err = os.ReadDir(versionsDir)
@@ -200,19 +201,32 @@ func zeroizeUpgradeDBSnapshots(versionsDir string) error {
 		if !isDBSnapshotName(e.Name()) {
 			continue
 		}
+		dir := filepath.Join(versionsDir, e.Name())
+		found, herr := configstore.CollectHardlinkedFiles(dir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
 		skipped = append(skipped,
-			zeroizeDBCopyDir(filepath.Join(versionsDir, e.Name()),
-				"upgrade DB snapshot "+e.Name(), fail)...)
+			zeroizeDBCopyDir(dir, "upgrade DB snapshot "+e.Name(), fail)...)
 	}
 	// Make every unlink durable before the reboot that completes the reset.
 	fail(zeroizeSyncDir(versionsDir))
 
+	var result []error
 	if len(skipped) > 0 {
-		symErr := &configstore.FactoryResetSymlinkError{Skipped: skipped}
-		if firstErr != nil {
-			return errors.Join(symErr, firstErr)
-		}
-		return symErr
+		result = append(result, &configstore.FactoryResetSymlinkError{Skipped: skipped})
 	}
-	return firstErr
+	if len(hardlinks) > 0 {
+		result = append(result, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+	}
+	if firstErr != nil {
+		result = append(result, firstErr)
+	}
+	switch len(result) {
+	case 0:
+		return nil
+	case 1:
+		return result[0]
+	default:
+		return errors.Join(result...)
+	}
 }

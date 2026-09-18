@@ -142,6 +142,7 @@ func zeroizeConfigDir(configDir, configBase string) error {
 	// and has no non-test caller), which is exactly how a guard lands on one of
 	// a pair and silently misses the reachable one.
 	var skipped []configstore.SymlinkedTarget
+	var hardlinks []configstore.HardlinkedPath
 
 	dbDir := filepath.Join(configDir, ".configdb")
 	// #9013: this precedes EVERY removal in the DB block, and the ordering is the
@@ -158,6 +159,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			"dir", sk.Path, "target", sk.Target)
 		skipped = append(skipped, sk)
 	} else {
+		found, herr := configstore.CollectHardlinkedFiles(dbDir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
 		// #10100 R-1: census ANY interior symlink BEFORE the master.key
 		// check, excluding exactly the root-child master.key the
 		// inverse-shape branch owns. Runs in BOTH the link and key-first
@@ -233,6 +237,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 		if _, statErr := os.Lstat(copyDir); statErr != nil {
 			continue
 		}
+		found, herr := configstore.CollectHardlinkedFiles(copyDir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
 		skipped = append(skipped,
 			zeroizeDBCopyDir(copyDir, ".configdb"+suffix, fail)...)
 	}
@@ -253,6 +260,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			"dir", sk.Path, "target", sk.Target)
 		skipped = append(skipped, sk)
 	} else {
+		found, herr := configstore.CollectHardlinkedFiles(tlsDir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
 		// #10100 R-1: a real tls/ holding a symlinked key.pem/cert.pem has
 		// the link unlinked while the private key survives. Census ANY
 		// interior link (no exclusion: tls has no master.key shape), still
@@ -302,6 +312,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			isTextRollbackFile(name, configBase) || // <configBase>.<N> text slots
 			isFsatomicTemp(name) {
 			full := filepath.Join(configDir, name)
+			found, herr := configstore.CollectHardlinkedFiles(full, "")
+			hardlinks = append(hardlinks, found...)
+			fail(herr)
 			// #9013: the live config, the rescue config, the audit journal and the
 			// numbered rollback slots each carry the full config TEXT with
 			// cleartext secret leaves. os.Remove on a symlink unlinks the link and
@@ -324,18 +337,24 @@ func zeroizeConfigDir(configDir, configBase string) error {
 	// reported as a clean zeroize. ErrNotExist (configDir absent) is excluded
 	// by fail().
 	fail(zeroizeSyncDir(configDir))
-	// #9013: a SKIPPED erase outranks a FAILED one — an erasure that did not
-	// happen AT ALL is strictly worse than one that failed, because only the
-	// latter announces itself (the #7173 doctrine, stated for the archive).
-	// Joined so a real I/O failure is not swallowed; errors.As finds either.
+	var result []error
 	if len(skipped) > 0 {
-		symErr := &configstore.FactoryResetSymlinkError{Skipped: skipped}
-		if firstErr != nil {
-			return errors.Join(symErr, firstErr)
-		}
-		return symErr
+		result = append(result, &configstore.FactoryResetSymlinkError{Skipped: skipped})
 	}
-	return firstErr
+	if len(hardlinks) > 0 {
+		result = append(result, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+	}
+	if firstErr != nil {
+		result = append(result, firstErr)
+	}
+	switch len(result) {
+	case 0:
+		return nil
+	case 1:
+		return result[0]
+	default:
+		return errors.Join(result...)
+	}
 }
 
 // isTextRollbackFile reports whether name is a numbered text rollback slot for
@@ -433,10 +452,14 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 	// secrets survive on the target volume. Order pinned: frr, swanctl,
 	// kea4, kea6, then per-dir temp sweeps in dedup slice order.
 	var skipped []configstore.SymlinkedTarget
+	var hardlinks []configstore.HardlinkedPath
 	// FRR: strip only the xpf-managed section (the routing-auth secrets); the
 	// file may carry operator content outside the markers. StripManagedSectionFile
 	// already treats an absent file as a no-op (nil) and leaves an unmanaged
 	// frr.conf untouched.
+	found, herr := configstore.CollectHardlinkedFiles(frrConf, "")
+	hardlinks = append(hardlinks, found...)
+	fail(herr)
 	if sk, isLink := configstore.SymlinkTarget(frrConf); isLink {
 		slog.Warn("zeroize: frr.conf is a symlink; NOT stripping it — stripping would "+
 			"modify the target through the link",
@@ -462,6 +485,9 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 		{"kea4 config", kea4},
 		{"kea6 config", kea6},
 	} {
+		found, herr := configstore.CollectHardlinkedFiles(leg.path, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
 		if sk, isLink := configstore.SymlinkTarget(leg.path); isLink {
 			slog.Warn("zeroize: rendered config is a symlink; NOT erasing it — removing "+
 				"it would unlink the link and leave the rendered secrets",
@@ -486,7 +512,9 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 			continue
 		}
 		swept[dir] = true
-		skipped = append(skipped, sweepFsatomicTemps(dir, fail)...)
+		sweepSkipped, sweepHardlinks := sweepFsatomicTemps(dir, fail)
+		skipped = append(skipped, sweepSkipped...)
+		hardlinks = append(hardlinks, sweepHardlinks...)
 	}
 	// #10100 R-2: a SKIPPED erase outranks a FAILED one (same doctrine as
 	// zeroizeConfigDir #9013): an erasure that did not happen AT ALL is
@@ -494,14 +522,24 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 	// not swallowed; errors.As finds either. performZeroizeWipe Join-aggregates
 	// every leg's error, so this leg's Skipped set is never dropped when
 	// another leg also fails.
+	var result []error
 	if len(skipped) > 0 {
-		symErr := &configstore.FactoryResetSymlinkError{Skipped: skipped}
-		if firstErr != nil {
-			return errors.Join(symErr, firstErr)
-		}
-		return symErr
+		result = append(result, &configstore.FactoryResetSymlinkError{Skipped: skipped})
 	}
-	return firstErr
+	if len(hardlinks) > 0 {
+		result = append(result, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+	}
+	if firstErr != nil {
+		result = append(result, firstErr)
+	}
+	switch len(result) {
+	case 0:
+		return nil
+	case 1:
+		return result[0]
+	default:
+		return errors.Join(result...)
+	}
 }
 
 // sweepFsatomicTemps removes crash-leaked fsatomic write temps
@@ -521,16 +559,20 @@ func zeroizeRenderedConfigs(frrConf, swanctlSnippet, kea4, kea6 string) error {
 // classic swap-after-Lstat residual (accepted, like #9013 Lstat-then-act).
 // A symlinked sweep DIR itself follows (intermediate doctrine, parent-write
 // root-only) — out of scope per #10100 bounded R-2 file legs.
-func sweepFsatomicTemps(dir string, fail func(error)) []configstore.SymlinkedTarget {
+func sweepFsatomicTemps(dir string, fail func(error)) ([]configstore.SymlinkedTarget, []configstore.HardlinkedPath) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		fail(err)
-		return nil
+		return nil, nil
 	}
 	var skipped []configstore.SymlinkedTarget
+	var hardlinks []configstore.HardlinkedPath
 	for _, e := range entries {
 		if name := e.Name(); isFsatomicTemp(name) {
 			full := filepath.Join(dir, name)
+			found, herr := configstore.CollectHardlinkedFiles(full, "")
+			hardlinks = append(hardlinks, found...)
+			fail(herr)
 			if sk, isLink := configstore.SymlinkTarget(full); isLink {
 				slog.Warn("zeroize: rendered temp is a symlink; NOT erasing it — removing "+
 					"it would unlink the link and leave the cleartext render",
@@ -541,7 +583,12 @@ func sweepFsatomicTemps(dir string, fail func(error)) []configstore.SymlinkedTar
 			fail(os.Remove(full))
 		}
 	}
-	return skipped
+	return skipped, hardlinks
+}
+func attestHardlinkPath(path string, hardlinks *[]configstore.HardlinkedPath, fail func(error)) {
+	found, herr := configstore.CollectHardlinkedFiles(path, "")
+	*hardlinks = append(*hardlinks, found...)
+	fail(herr)
 }
 
 // zeroize login-account teardown paths (#4598). These mirror the production
@@ -664,11 +711,12 @@ func zeroizeRootAuthorizedKeysPath() string {
 // (removeMarker=true) only when BOTH revocations succeeded — an already-absent
 // authorized_keys (os.ErrNotExist) is the goal, not a failure, and does not
 // block marker removal.
-func zeroizeRootLoginAccount(fail func(error)) (removeMarker bool) {
+func zeroizeRootLoginAccount(fail func(error), attest func(string)) (removeMarker bool) {
 	removeMarker = true
 	// Kill the SSH-key vector first (survives a password-lock failure). An
 	// already-absent file is the desired end state, not an error.
 	keysFile := zeroizeRootAuthorizedKeysPath()
+	attest(keysFile)
 	if err := os.Remove(keysFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Error("zeroize: failed to remove root authorized_keys; retaining marker, reset incomplete",
 			"file", keysFile, "err", err)
@@ -824,6 +872,10 @@ func zeroizeLoginAccounts() error {
 			firstErr = err
 		}
 	}
+	var hardlinks []configstore.HardlinkedPath
+	attest := func(path string) {
+		attestHardlinkPath(path, &hardlinks, fail)
+	}
 
 	// (A) Sweep the xpf sudoers namespace. Removing every xpf-<user> drop-in
 	// guarantees no passwordless-root grant survives, independent of the marker
@@ -836,7 +888,9 @@ func zeroizeLoginAccounts() error {
 			if e.IsDir() || !strings.HasPrefix(name, zeroizeSudoersPrefix) {
 				continue
 			}
-			fail(os.Remove(filepath.Join(zeroizeSudoersDir, name)))
+			full := filepath.Join(zeroizeSudoersDir, name)
+			attest(full)
+			fail(os.Remove(full))
 		}
 	}
 
@@ -856,7 +910,7 @@ func zeroizeLoginAccounts() error {
 		// still be erased even when the registry root is absent/unreadable.
 		fail(err)
 	} else {
-		zeroizeTearDownProvisionedUsers(entries, retained, fail)
+		zeroizeTearDownProvisionedUsers(entries, retained, fail, attest)
 	}
 	// Drop the now-empty registry directory (best-effort; ENOTEMPTY after a
 	// retained marker is fine and must not gate the factory reset).
@@ -874,8 +928,15 @@ func zeroizeLoginAccounts() error {
 	// tenant SSH login — the #4598 credential-leak class, asymmetric with the
 	// day-2 deprovisionLoginUser which enumerates the UNION and DOES remove that
 	// file.
-	zeroizeSweepResourceMarkerRoot(zeroizeProvisionedPasswordsDir(), retained, fail)
-	zeroizeSweepProvisionedKeys(zeroizeProvisionedKeysDir(), retained, fail)
+	zeroizeSweepResourceMarkerRoot(zeroizeProvisionedPasswordsDir(), retained, fail, attest)
+	zeroizeSweepProvisionedKeys(zeroizeProvisionedKeysDir(), retained, fail, attest)
+	if len(hardlinks) > 0 {
+		hardErr := &configstore.FactoryResetHardlinkError{Paths: hardlinks}
+		if firstErr != nil {
+			return errors.Join(hardErr, firstErr)
+		}
+		return hardErr
+	}
 	return firstErr
 }
 
@@ -886,7 +947,7 @@ func zeroizeLoginAccounts() error {
 // fail-closed retry (userdel failure, ownership uncertainty, out-of-band
 // recreate) is recorded in retained so the resource-root sweep keeps its
 // password/key markers alongside the retained registry marker.
-func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]struct{}, fail func(error)) {
+func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]struct{}, fail func(error), attest func(string)) {
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -903,7 +964,8 @@ func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]
 			// on UID 0 and can abort the reset (#5520). Revoke it IN PLACE
 			// (remove /root/.ssh/authorized_keys + lock the password); drop the
 			// marker only when the revocation fully succeeded (fail-closed).
-			if zeroizeRootLoginAccount(fail) {
+			if zeroizeRootLoginAccount(fail, attest) {
+				attest(markerFile)
 				fail(os.Remove(markerFile))
 			} else {
 				// Revocation failed (fail-closed): retain root's registry marker
@@ -949,6 +1011,7 @@ func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]
 			// passwd READ OK and the account is genuinely ABSENT — a real
 			// out-of-band userdel; it cannot authenticate. Best-effort clean up
 			// any orphaned key residue; nothing to userdel; drop the stale marker.
+			attest(keysFile)
 			fail(os.Remove(keysFile))
 		case curUID != recordedUID:
 			// Proven UID-mismatch: the live account under this name has a
@@ -967,6 +1030,7 @@ func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]
 			// curUID == recordedUID → the exact account xpf provisioned. Kill
 			// the SSH-key vector first (survives a userdel failure), then remove
 			// the account (userdel -r drops /etc/shadow + /etc/passwd + home).
+			attest(keysFile)
 			fail(os.Remove(keysFile))
 			if out, derr := zeroizeUserdel(name); derr != nil {
 				slog.Error("zeroize: failed to remove xpf-provisioned login account",
@@ -978,6 +1042,7 @@ func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]
 			}
 		}
 		if removeMarker {
+			attest(markerFile)
 			fail(os.Remove(markerFile))
 		} else {
 			// Fail-closed retry: keep the registry marker AND (via retained) this
@@ -1006,7 +1071,7 @@ func zeroizeTearDownProvisionedUsers(entries []os.DirEntry, retained map[string]
 // registry root) and must not gate the factory reset. os.ErrNotExist is not an
 // error (an already-absent root is the goal); a real ReadDir error IS surfaced
 // via fail so a silently-incomplete sweep is not reported as a clean reset.
-func zeroizeSweepResourceMarkerRoot(dir string, retained map[string]struct{}, fail func(error)) {
+func zeroizeSweepResourceMarkerRoot(dir string, retained map[string]struct{}, fail func(error), attest func(string)) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		fail(err) // absent root → ErrNotExist, excluded by fail()
@@ -1020,7 +1085,9 @@ func zeroizeSweepResourceMarkerRoot(dir string, retained map[string]struct{}, fa
 		if _, keep := retained[name]; keep {
 			continue // this account's registry teardown was retained (fail-closed)
 		}
-		fail(os.Remove(filepath.Join(dir, name)))
+		full := filepath.Join(dir, name)
+		attest(full)
+		fail(os.Remove(full))
 	}
 	// Drop the now-(hopefully-)empty root; a retained marker leaves it non-empty,
 	// which is fine and must not gate the factory reset.
@@ -1088,7 +1155,7 @@ func zeroizeSweepResourceMarkerRoot(dir string, retained map[string]struct{}, fa
 // but the FIRST real error is surfaced via fail so a silently-incomplete sweep
 // is not reported as a clean reset. Discipline mirrors zeroizeConfigDir /
 // zeroizeTearDownProvisionedUsers.
-func zeroizeSweepProvisionedKeys(dir string, retained map[string]struct{}, fail func(error)) {
+func zeroizeSweepProvisionedKeys(dir string, retained map[string]struct{}, fail func(error), attest func(string)) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		fail(err) // absent root → ErrNotExist, excluded by fail()
@@ -1112,6 +1179,7 @@ func zeroizeSweepProvisionedKeys(dir string, retained map[string]struct{}, fail 
 			// zeroizeRootLoginAccount in the registry phase (#5520), never at
 			// /home/root. Only erase root's keys marker here (residue); never
 			// touch a /home/root key file.
+			attest(markerFile)
 			fail(os.Remove(markerFile))
 			continue
 		}
@@ -1144,7 +1212,7 @@ func zeroizeSweepProvisionedKeys(dir string, retained map[string]struct{}, fail 
 			// key-removal error the residue SURVIVES, so RETAIN the marker so a
 			// retried reset re-enumerates this account instead of forgetting the
 			// still-present key (zeroizeRemoveKeyFileThenMarker, #6201).
-			zeroizeRemoveKeyFileThenMarker(name, keysFile, markerFile, fail)
+			zeroizeRemoveKeyFileThenMarker(name, keysFile, markerFile, fail, attest)
 		case curUID != recordedUID:
 			// Proven UID-mismatch: the live account under this name has a DIFFERENT
 			// UID than the one xpf wrote the key for — an out-of-band
@@ -1162,7 +1230,7 @@ func zeroizeSweepProvisionedKeys(dir string, retained map[string]struct{}, fail 
 			// path shape, an I/O error) the key SURVIVES, so RETAIN the marker so a
 			// retried reset re-enumerates and re-attempts the removal
 			// (zeroizeRemoveKeyFileThenMarker, #6201).
-			zeroizeRemoveKeyFileThenMarker(name, keysFile, markerFile, fail)
+			zeroizeRemoveKeyFileThenMarker(name, keysFile, markerFile, fail, attest)
 		}
 	}
 	// Drop the now-(hopefully-)empty root; a retained marker leaves it non-empty,
@@ -1193,11 +1261,12 @@ func zeroizeSweepProvisionedKeys(dir string, retained map[string]struct{}, fail 
 // os.ErrNotExist is not an error (an already-absent key/marker is the goal) — it
 // is excluded by fail() and, treated as success here, does not block the marker
 // removal.
-func zeroizeRemoveKeyFileThenMarker(name, keysFile, markerFile string, fail func(error)) {
+func zeroizeRemoveKeyFileThenMarker(name, keysFile, markerFile string, fail func(error), attest func(string)) {
+	attest(keysFile)
 	keyErr := os.Remove(keysFile)
 	fail(keyErr)
 	if keyErr == nil || errors.Is(keyErr, os.ErrNotExist) {
-		// Key removed (or already absent): safe to forget the account.
+		attest(markerFile)
 		fail(os.Remove(markerFile))
 		return
 	}
