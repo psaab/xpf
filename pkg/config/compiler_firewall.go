@@ -681,8 +681,8 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// unknown-leaf contract by giving compileFilterFrom the
 					// synthetic `from` statement so it can record the leaf.
 					if termBody == termInst.node {
-						if packedFrom := firewallPackedTermFromNode(termInst.node,
-							schemaForPath("firewall", "family", af, "filter", "term")); packedFrom != nil {
+						for _, packedFrom := range firewallPackedTermFromNodes(termInst.node,
+							schemaForPath("firewall", "family", af, "filter", "term")) {
 							rangeNames = compileFilterFrom(packedBody(packedFrom, fromSchema),
 								term, af, rangeNames)
 						}
@@ -1473,15 +1473,16 @@ func firewallPackedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 	return out
 }
 
-// firewallPackedTermFromNode extracts the packed `from` statement from a
+// firewallPackedTermFromNodes extracts every packed `from` statement from a
 // firewall term when the generic expander bails out on a schema-unknown leaf.
-// `then` is a term-level sibling, so it bounds the from tail. The returned node
-// is fresh and carries quote provenance for any known operands.
-func firewallPackedTermFromNode(termNode *Node, termSchema *schemaNode) *Node {
+// `then` is a term-level sibling, so it bounds each from tail. The returned
+// nodes are fresh and carry quote and bracket provenance for every operand.
+func firewallPackedTermFromNodes(termNode *Node, termSchema *schemaNode) []*Node {
 	if termNode == nil || termSchema == nil || len(termNode.Keys) == 0 {
 		return nil
 	}
 	consumed, _ := consumeNodeKeys(termNode.Keys, termSchema)
+	var out []*Node
 	for i := consumed; i < len(termNode.Keys); i++ {
 		if termNode.KeyQuoted(i) || termNode.Keys[i] != "from" {
 			continue
@@ -1497,13 +1498,16 @@ func firewallPackedTermFromNode(termNode *Node, termSchema *schemaNode) *Node {
 		keys := append([]string{"from"}, termNode.Keys[i+1:end]...)
 		from := &Node{Keys: keys}
 		quoted := make([]bool, len(keys))
+		bracketed := make([]bool, len(keys))
 		for j := i + 1; j < end; j++ {
 			quoted[j-i] = termNode.KeyQuoted(j)
+			bracketed[j-i] = termNode.KeyBracketed(j)
 		}
 		from.setKeysQuoted(quoted)
-		return from
+		from.setKeysBracketed(bracketed)
+		out = append(out, from)
 	}
-	return nil
+	return out
 }
 
 // compileFilterFrom compiles a firewall-filter term's `from` match block. The

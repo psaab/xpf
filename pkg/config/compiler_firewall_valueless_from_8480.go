@@ -103,23 +103,30 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	// argument, so packedBody would otherwise reinterpret that operand as a
 	// child statement; the normalizer deliberately preserves this ambiguous
 	// raw spelling for the gate to resolve conservatively.
-	if packedFrom := firewallPackedTermFromNode(termNode, termSchema); packedFrom != nil {
+	if packedFroms := firewallPackedTermFromNodes(termNode, termSchema); len(packedFroms) > 0 {
 		ambiguous := false
-		for i := 1; i < len(packedFrom.Keys); i++ {
-			leaf := packedFrom.Keys[i]
-			if (leaf == "source-prefix-list" || leaf == "destination-prefix-list") &&
-				i+1 < len(packedFrom.Keys) &&
-				!packedFrom.KeyQuoted(i+1) &&
-				packedFrom.Keys[i+1] == leaf {
-				ambiguous = true
+		for _, packedFrom := range packedFroms {
+			for i := 1; i < len(packedFrom.Keys); i++ {
+				leaf := packedFrom.Keys[i]
+				if (leaf == "source-prefix-list" || leaf == "destination-prefix-list") &&
+					i+1 < len(packedFrom.Keys) &&
+					!packedFrom.KeyQuoted(i+1) &&
+					packedFrom.Keys[i+1] == leaf {
+					ambiguous = true
+					break
+				}
+			}
+			if ambiguous {
 				break
 			}
 		}
 		if ambiguous {
 			fromNodes = nil
-			ambiguousFrom[packedFrom] = true
 		}
-		fromNodes = append(fromNodes, packedFrom)
+		for _, packedFrom := range packedFroms {
+			ambiguousFrom[packedFrom] = ambiguous
+			fromNodes = append(fromNodes, packedFrom)
+		}
 	}
 	for _, from := range fromNodes {
 		if from.Name() != "from" {
@@ -202,6 +209,12 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	return out
 }
 
+// validateFirewallFilterValuelessFromStrict walks the group-expanded `firewall`
+// subtree and rejects a term whose `from` writes a value-bearing leaf with no
+// operand (#8480).
+//
+// Strict (commit / commit-check): the FIRST offending term is a hard error
+// naming the family, filter, term and every valueless leaf, so the operator is
 // told exactly which line to fix rather than which file.
 //
 // Lenient (load / peer-sync): every offending term is returned as a warning and
