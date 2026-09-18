@@ -380,10 +380,16 @@ pub(super) fn flowless_fragment_requires_nat_translation(
     //     interface-SNAT / pool-SNAT / static-SNAT). Matched on the source
     //     address + ingress/egress zones + egress scope, all L3-only. ---
     if let IpAddr::V6(src_v6) = l3_flow.src_ip {
-        // NPTv6 outbound translates the SOURCE prefix on egress; probe a copy.
+        // An Untranslatable NPTv6 result is NAT-relevant too: a non-first
+        // fragment must not fall through and forward the address unchanged.
         let mut probe = src_v6;
-        if forwarding.nptv6.translate_outbound(&mut probe, to_zone) {
-            return true;
+        match forwarding
+            .nptv6
+            .translate_outbound_result(&mut probe, to_zone)
+        {
+            crate::nptv6::Nptv6Translation::NoMatch => {}
+            crate::nptv6::Nptv6Translation::Translated
+            | crate::nptv6::Nptv6Translation::Untranslatable => return true,
         }
     }
     // Interface / pool / static SNAT — the read-only probe reports a match
@@ -418,10 +424,14 @@ pub(super) fn flowless_fragment_requires_nat_translation(
         ingress_zone_override,
     );
     if let IpAddr::V6(dst_v6) = l3_flow.dst_ip {
-        // NPTv6 inbound translates the DESTINATION prefix on ingress.
         let mut probe = dst_v6;
-        if forwarding.nptv6.translate_inbound(&mut probe, scope.zone_name) {
-            return true;
+        match forwarding
+            .nptv6
+            .translate_inbound_result(&mut probe, scope.zone_name)
+        {
+            crate::nptv6::Nptv6Translation::NoMatch => {}
+            crate::nptv6::Nptv6Translation::Translated
+            | crate::nptv6::Nptv6Translation::Untranslatable => return true,
         }
     }
     if !forwarding.dnat_table.is_empty()

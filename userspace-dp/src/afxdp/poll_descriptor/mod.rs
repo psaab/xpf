@@ -1705,14 +1705,23 @@ pub(super) fn poll_binding_process_descriptor(
                                 // INGRESS zone so a rule-set scoped `from zone X`
                                 // never translates traffic arriving from another
                                 // zone (security-domain crossing).
-                                if worker_ctx
+                                match worker_ctx
                                     .forwarding
                                     .nptv6
-                                    .translate_inbound(&mut dst_v6, ingress_zone_name)
+                                    .translate_inbound_result(&mut dst_v6, ingress_zone_name)
                                 {
-                                    Some(dst_v6)
-                                } else {
-                                    None
+                                    crate::nptv6::Nptv6Translation::Translated => Some(dst_v6),
+                                    crate::nptv6::Nptv6Translation::NoMatch => None,
+                                    crate::nptv6::Nptv6Translation::Untranslatable => {
+                                        // Untranslatable is terminal: RFC
+                                        // §3.7's all-zero IID is an explicit
+                                        // MUST-drop; §3.2 directs discard of
+                                        // the unmapped internal subnet. The
+                                        // all-ones edge is the scoped review
+                                        // rule. Never route or NAT unchanged.
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
                                 }
                             } else {
                                 None
@@ -2965,20 +2974,34 @@ pub(super) fn poll_binding_process_descriptor(
                                     // via another zone (security-domain crossing).
                                     let nptv6_snat =
                                         if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
-                                            if worker_ctx
+                                            match worker_ctx
                                                 .forwarding
                                                 .nptv6
-                                                .translate_outbound(&mut src_v6, to_zone)
+                                                .translate_outbound_result(&mut src_v6, to_zone)
                                             {
-                                                Some(NatDecision {
-                                                    rewrite_src: Some(IpAddr::V6(src_v6)),
-                                                    rewrite_dst: None,
-                                                    nat64: false,
-                                                    nptv6: true,
-                                                    ..NatDecision::default()
-                                                })
-                                            } else {
-                                                None
+                                                crate::nptv6::Nptv6Translation::Translated => {
+                                                    Some(NatDecision {
+                                                        rewrite_src: Some(IpAddr::V6(src_v6)),
+                                                        rewrite_dst: None,
+                                                        nat64: false,
+                                                        nptv6: true,
+                                                        ..NatDecision::default()
+                                                    })
+                                                }
+                                                crate::nptv6::Nptv6Translation::NoMatch => None,
+                                                crate::nptv6::Nptv6Translation::Untranslatable => {
+                                                    // Untranslatable is terminal:
+                                                    // §3.7's all-zero IID is
+                                                    // an explicit MUST-drop;
+                                                    // §3.2 directs discard of
+                                                    // an unmapped internal
+                                                    // subnet, and all-ones is
+                                                    // the scoped review edge.
+                                                    // Do not fall through to
+                                                    // static/interface SNAT.
+                                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                                    continue;
+                                                }
                                             }
                                         } else {
                                             None
@@ -6457,20 +6480,36 @@ pub(super) fn poll_binding_process_descriptor(
                                         // the source of traffic leaving via another zone.
                                         let nptv6_snat =
                                             if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
-                                                if worker_ctx
+                                                match worker_ctx
                                                     .forwarding
                                                     .nptv6
-                                                    .translate_outbound(&mut src_v6, to_zone)
+                                                    .translate_outbound_result(&mut src_v6, to_zone)
                                                 {
-                                                    Some(NatDecision {
-                                                        rewrite_src: Some(IpAddr::V6(src_v6)),
-                                                        rewrite_dst: None,
-                                                        nat64: false,
-                                                        nptv6: true,
-                                                        ..NatDecision::default()
-                                                    })
-                                                } else {
-                                                    None
+                                                    crate::nptv6::Nptv6Translation::Translated => {
+                                                        Some(NatDecision {
+                                                            rewrite_src: Some(IpAddr::V6(src_v6)),
+                                                            rewrite_dst: None,
+                                                            nat64: false,
+                                                            nptv6: true,
+                                                            ..NatDecision::default()
+                                                        })
+                                                    }
+                                                    crate::nptv6::Nptv6Translation::NoMatch => None,
+                                                    crate::nptv6::Nptv6Translation::Untranslatable => {
+                                                        // Untranslatable is
+                                                        // terminal: §3.7's
+                                                        // all-zero IID is an
+                                                        // explicit MUST-drop;
+                                                        // §3.2 directs discard
+                                                        // of an unmapped
+                                                        // internal subnet, and
+                                                        // all-ones is the
+                                                        // scoped review edge.
+                                                        // Do not seed/fallback
+                                                        // this packet as SNAT.
+                                                        break 'missing_neighbor
+                                                            StageOutcome::RecycleAndContinue;
+                                                    }
                                                 }
                                             } else {
                                                 None
