@@ -1552,6 +1552,13 @@ pub(crate) struct BindingLiveSnapshot {
     /// (SNAT / static-NAT / DNAT / NPTv6), snapshotted from BindingLiveState.
     /// The same-family sibling of `nat64_frag_dropped`.
     pub(crate) nat_frag_untranslated_dropped: u64,
+    /// #10131: binding-local fragment-overlap attribution, copied from
+    /// BindingLiveState after each worker batch flush.
+    pub(crate) frag_overlap_dropped: u64,
+    pub(crate) frag_overlap_overflow_dropped: u64,
+    pub(crate) frag_overlap_shard_full_dropped: u64,
+    pub(crate) frag_overlap_post_nat_dropped: u64,
+    pub(crate) frag_overlap_max_lifetime_evictions: u64,
     pub(crate) slow_path_packets: u64,
     pub(crate) slow_path_bytes: u64,
     pub(crate) slow_path_local_delivery_packets: u64,

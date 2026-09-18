@@ -675,6 +675,19 @@ pub(crate) struct BindingStatus {
     /// and Go/Rust read 0).
     #[serde(rename = "nat_frag_untranslated_dropped", default)]
     pub nat_frag_untranslated_dropped: u64,
+    /// #10131: binding-local fragment-overlap attribution. The matching global
+    /// atomics remain process-wide alert sources; these fields identify the
+    /// worker/binding that observed each event.
+    #[serde(rename = "frag_overlap_dropped", default)]
+    pub frag_overlap_dropped: u64,
+    #[serde(rename = "frag_overlap_overflow_dropped", default)]
+    pub frag_overlap_overflow_dropped: u64,
+    #[serde(rename = "frag_overlap_shard_full_dropped", default)]
+    pub frag_overlap_shard_full_dropped: u64,
+    #[serde(rename = "frag_overlap_post_nat_dropped", default)]
+    pub frag_overlap_post_nat_dropped: u64,
+    #[serde(rename = "frag_overlap_max_lifetime_evictions", default)]
+    pub frag_overlap_max_lifetime_evictions: u64,
     #[serde(rename = "slow_path_packets", default)]
     pub slow_path_packets: u64,
     #[serde(rename = "slow_path_bytes", default)]

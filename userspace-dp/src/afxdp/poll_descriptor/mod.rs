@@ -64,6 +64,7 @@ use frag_assoc::{
     nat64_consult_forward_fragment_assoc,
     nat64_install_forward_fragment_assoc, nat_consult_forward_fragment_assoc,
     nat_install_forward_fragment_assoc,
+    session_gated_reverse_fragment_requires_nat_translation,
 };
 use flowless_verdict::{
     FlowlessLocalVerdict, flowless_base_resolution, flowless_local_delivery_verdict,
@@ -420,13 +421,15 @@ pub(super) fn poll_binding_process_descriptor(
                                     },
                                 )
                             });
-                        if worker_ctx.forwarding.nat64.frag_overlap.check_overlap(
+                        let overlap = worker_ctx.forwarding.nat64.frag_overlap.check_overlap_detailed(
                             okey,
                             start,
                             end,
                             now_ns,
                             &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
-                        ) {
+                        );
+                        telemetry.counters.record_frag_overlap_result(overlap, false);
+                        if overlap.dropped {
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -457,15 +460,19 @@ pub(super) fn poll_binding_process_descriptor(
                         // #9950: plant admitted ranges — local delivery IS admission (the frame
                         // was already reinjected above), so later tails of this datagram compare
                         // against the first. Already overlap-checked pre-IPsec; the bool is moot
-                        // (a race-overlap counts but the frame recycles either way).
                         if let Some((okey, start, end)) = overlap_pre_9950 {
-                            worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
-                                okey,
-                                start,
-                                end,
-                                now_ns,
-                                &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
-                            );
+                            let overlap = worker_ctx
+                                .forwarding
+                                .nat64
+                                .frag_overlap
+                                .check_and_record_detailed(
+                                    okey,
+                                    start,
+                                    end,
+                                    now_ns,
+                                    &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                                );
+                            telemetry.counters.record_frag_overlap_result(overlap, false);
                         }
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
@@ -1483,14 +1490,14 @@ pub(super) fn poll_binding_process_descriptor(
                         // commit-site helpers: they self-gate on first-fragment + rewrite +
                         // ForwardCandidate + neighbor, and store the hit decision (which for a
                         // reply is already the reverse via NatDecision::reverse). NAT64 gated
-                        // on v6 (v4 installs are never consulted, pure shard churn).
+                        // on v6 (v4 installs carry the reverse info for #10132).
                         if foreign_arrival_zone.is_none() && overlap_pre_9950.is_some() {
                             if let Some(l3_packet) = packet_frame.get(
                                 verified_l3_or_stamp(
                                     packet_frame,
                                     meta.l3_offset,
                                     meta.addr_family,
-                                )..
+                                )..,
                             ) {
                                 // Raw stage-9 override (mirrors the commit-site capture —
                                 // arm-scoped shadows below do not reach this tail).
@@ -1500,16 +1507,15 @@ pub(super) fn poll_binding_process_descriptor(
                                     meta,
                                     frag_authority_zone_override,
                                 );
-                                if meta.addr_family as i32 == libc::AF_INET6
-                                    && nat64_install_forward_fragment_assoc(
-                                        worker_ctx.forwarding,
-                                        l3_packet,
-                                        meta.addr_family as i32,
-                                        frag_authority,
-                                        &resolved.decision,
-                                        now_ns,
-                                    )
-                                {
+                                if nat64_install_forward_fragment_assoc(
+                                    worker_ctx.forwarding,
+                                    l3_packet,
+                                    meta.addr_family as i32,
+                                    frag_authority,
+                                    &resolved.decision,
+                                    now_ns,
+                                    session_nat64_reverse,
+                                ) {
                                     telemetry.counters.record_nat64_frag_assoc_evicted();
                                 }
                                 if nat_install_forward_fragment_assoc(
@@ -3305,50 +3311,28 @@ pub(super) fn poll_binding_process_descriptor(
                                         // (offset 0, MF=1) carrying a same-family
                                         // rewrite; the cross-family NAT64 path
                                         // installs its own association (with
-                                        // reverse info) earlier on the cold path.
+                                        // reverse info) at the same commit site.
                                         if let Some(l3_packet) = packet_frame.get(
                                             verified_l3_or_stamp(
                                                 packet_frame,
                                                 meta.l3_offset,
                                                 meta.addr_family,
-                                            )
-                                            ..,
+                                            )..,
                                         )
                                         {
                                             // #5146: publish the NAT64 (cross-
                                             // family) first-fragment association
-                                            // ONLY now — the flow has COMMITTED
+                                            // after the flow has COMMITTED
                                             // (past `can_admit` and a successful
-                                            // forward session install). Publishing
-                                            // it at source-allocation time left the
-                                            // association live behind every
-                                            // rollback arm (hop-limit ICMP-TE,
-                                            // admission refusal, install-partial),
-                                            // and the rollback releases only the
-                                            // pool port — so a non-first fragment
-                                            // of a rolled-back first fragment
-                                            // inherited a rolled-back verdict AND a
-                                            // now-reusable translation (#5146). Both
-                                            // helpers self-gate (NAT64 vs ordinary
-                                            // same-family), so exactly one fires for
-                                            // a given committed first fragment.
-                                            // #5798: stamp the association with the
-                                            // ingress domain that ADMITTED this first
-                                            // fragment, so only a non-first fragment
-                                            // from the SAME domain can inherit it.
+                                            // forward session install).
+                                            // Both helpers self-gate (NAT64 vs
+                                            // ordinary same-family), so exactly
+                                            // one fires for a given fragment.
                                             let frag_authority = frag_ingress_authority(
                                                 worker_ctx.forwarding,
                                                 meta,
                                                 frag_authority_zone_override,
                                             );
-                                            // #7054: both installs report
-                                            // whether they had to sacrifice a
-                                            // still-LIVE association to a full
-                                            // shard. Counting it separates
-                                            // capacity pressure from the
-                                            // ordinary reorder/orphan miss the
-                                            // victim's later fragments will be
-                                            // dropped as.
                                             if nat64_install_forward_fragment_assoc(
                                                 worker_ctx.forwarding,
                                                 l3_packet,
@@ -3356,6 +3340,7 @@ pub(super) fn poll_binding_process_descriptor(
                                                 frag_authority,
                                                 &decision,
                                                 now_ns,
+                                                None,
                                             ) {
                                                 telemetry
                                                     .counters
@@ -4097,6 +4082,10 @@ pub(super) fn poll_binding_process_descriptor(
                             worker_ctx.ha_state,
                             now_secs,
                         )
+                        .map(|(decision, reverse)| {
+                            session_nat64_reverse = reverse;
+                            decision
+                        })
                         // #5689: fall back to the ORDINARY same-family NAT /
                         // NPTv6 fragment association so a non-first fragment of
                         // a SNAT/DNAT/static-NAT/NPTv6 flow inherits its
@@ -4728,7 +4717,9 @@ pub(super) fn poll_binding_process_descriptor(
                         // the association, so it never reaches here); a plain
                         // (no-NAT) fragment matches no rule and forwards normally,
                         // preserving ordinary fragmented forwarding.
-                        if crate::afxdp::frame::frame_is_non_first_fragment(packet_frame, meta)
+                        let is_non_first =
+                            crate::afxdp::frame::frame_is_non_first_fragment(packet_frame, meta);
+                        if is_non_first
                             && flowless_fragment_requires_nat_translation(
                                 worker_ctx.forwarding,
                                 l3_flow,
@@ -4747,20 +4738,18 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        // #9950 residual — owned by #10130 (session-gated reverse
-                        // discriminator; this comment + docs/log/9950.md + the issue quote
-                        // each other). The #6122 check above sees FORWARD-direction rules
-                        // only, so a REPLY tail that misses its #9950 reply association
-                        // (reorder, TTL straddle, flood eviction, generation bump, HA
-                        // non-sync, LAG/ECMP split) forwards untranslated: DNAT-without-SNAT
-                        // discloses the internal source (F-036). SNAT-covered reply misses
-                        // already drop via `source_nat_would_translate_fragment`. Distinct-pool
-                        // misses resolve next-hop == pool: MissingNeighbor buffers/retries
-                        // (not a terminal drop) and, with a pool neighbor/route present, the
-                        // fragment forwards untranslated to the pool (misdelivery of the dst
-                        // field — demonstrated by the F-053 fixture — not topology disclosure).
-                        // Rules-only reverse arms over-drop (plain outbound from a DNAT target
-                        // matches naive src-in-pool checks), hence the session-gated design.
+                        // #10130: session-gated reverse discriminator for the
+                        // residual left by #9950. The #6122 check above sees
+                        // FORWARD-direction rules only. The live forward-session
+                        // L3 reverse index closes a REPLY tail miss when its
+                        // `(src,dst,protocol)` identity proves reverse NAT would
+                        // apply; a plain outbound packet from the translated
+                        // target has no matching session and keeps forwarding.
+                        // SNAT-covered reply misses still drop through #6122.
+                        // Distinct-pool misses still resolve next-hop == pool:
+                        // MissingNeighbor buffers/retries (not a terminal drop)
+                        // and a reachable pool may forward the untranslated dst
+                        // (misdelivery, not topology disclosure).
                     }
 
                     // #6835: the CROSS-FAMILY sibling of the #6122 gate above,
@@ -4936,6 +4925,25 @@ pub(super) fn poll_binding_process_descriptor(
                                 continue;
                             }
                         }
+                    }
+                    // #10130: a live forward NAT session is the discriminator
+                    // for a reply tail after the association miss. Apply this
+                    // after transit/host policy (so deny precedence is stable)
+                    // but before any disposition-specific terminal arm. In
+                    // particular, interface-SNAT replies addressed to a local
+                    // public address must not reach host-inbound handling with
+                    // their untranslated source.
+                    let is_non_first =
+                        crate::afxdp::frame::frame_is_non_first_fragment(packet_frame, meta);
+                    if is_non_first
+                        && let Some(l3_flow) = l3_ctx.as_ref()
+                        && session_gated_reverse_fragment_requires_nat_translation(
+                            sessions, l3_flow, meta, now_ns,
+                        )
+                    {
+                        telemetry.counters.record_nat_frag_untranslated_dropped();
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
                     }
                     SessionDecision {
                         resolution: final_resolution,
@@ -5305,13 +5313,19 @@ pub(super) fn poll_binding_process_descriptor(
                     if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
                         && let Some((pre_key, start, end)) = overlap_pre_9950
                     {
-                        if worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
-                            pre_key,
-                            start,
-                            end,
-                            now_ns,
-                            &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
-                        ) {
+                        let overlap = worker_ctx
+                            .forwarding
+                            .nat64
+                            .frag_overlap
+                            .check_and_record_detailed(
+                                pre_key,
+                                start,
+                                end,
+                                now_ns,
+                                &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+                            );
+                        telemetry.counters.record_frag_overlap_result(overlap, false);
+                        if overlap.dropped {
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -5331,17 +5345,28 @@ pub(super) fn poll_binding_process_descriptor(
                                 &decision.nat,
                                 egress_domain,
                             )
-                            && post_key != pre_key
-                            && worker_ctx.forwarding.nat64.frag_overlap.check_and_record(
-                                post_key,
-                                start,
-                                end,
-                                now_ns,
-                                &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
-                            )
                         {
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
+                            let post_overlap = if post_key != pre_key {
+                                let overlap = worker_ctx
+                                    .forwarding
+                                    .nat64
+                                    .frag_overlap
+                                    .check_and_record_detailed(
+                                        post_key,
+                                        start,
+                                        end,
+                                        now_ns,
+                                        &crate::fragment_overlap::FRAG_OVERLAP_POST_NAT_DROPPED,
+                                    );
+                                telemetry.counters.record_frag_overlap_result(overlap, true);
+                                overlap.dropped
+                            } else {
+                                false
+                            };
+                            if post_overlap {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                         }
                     }
                     if let Some(mut request) = build_live_forward_request_from_frame(

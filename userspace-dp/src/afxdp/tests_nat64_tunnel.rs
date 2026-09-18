@@ -523,6 +523,62 @@ fn record_nat64_frag_dropped_bumps_counter() {
     assert_eq!(batch.nat64_pool_exhausted, 0);
 }
 
+// #10131: reasoned fragment-overlap results must survive the worker batch
+// boundary and become binding-local status fields without losing the global
+// alert classification.
+#[test]
+fn frag_overlap_attribution_flushes_to_live_and_snapshot_10131() {
+    use crate::fragment_overlap::{OverlapCheckResult, OverlapDropReason};
+
+    let live = BindingLiveState::new();
+    let mut batch = BatchCounters::default();
+    batch.record_frag_overlap_result(
+        OverlapCheckResult {
+            dropped: true,
+            reason: Some(OverlapDropReason::Overlap),
+            lifetime_evictions: 2,
+        },
+        false,
+    );
+    batch.record_frag_overlap_result(
+        OverlapCheckResult {
+            dropped: true,
+            reason: Some(OverlapDropReason::Overflow),
+            lifetime_evictions: 1,
+        },
+        false,
+    );
+    batch.record_frag_overlap_result(
+        OverlapCheckResult {
+            dropped: true,
+            reason: Some(OverlapDropReason::ShardFull),
+            lifetime_evictions: 1,
+        },
+        false,
+    );
+    batch.record_frag_overlap_result(
+        OverlapCheckResult {
+            dropped: true,
+            reason: Some(OverlapDropReason::Overlap),
+            lifetime_evictions: 3,
+        },
+        true,
+    );
+    batch.flush(&live);
+
+    assert_eq!(batch.frag_overlap_dropped, 0);
+    assert_eq!(batch.frag_overlap_overflow_dropped, 0);
+    assert_eq!(batch.frag_overlap_shard_full_dropped, 0);
+    assert_eq!(batch.frag_overlap_post_nat_dropped, 0);
+    assert_eq!(batch.frag_overlap_max_lifetime_evictions, 0);
+    let snap = live.snapshot();
+    assert_eq!(snap.frag_overlap_dropped, 1);
+    assert_eq!(snap.frag_overlap_overflow_dropped, 1);
+    assert_eq!(snap.frag_overlap_shard_full_dropped, 1);
+    assert_eq!(snap.frag_overlap_post_nat_dropped, 1);
+    assert_eq!(snap.frag_overlap_max_lifetime_evictions, 7);
+}
+
 // === #1873 R-C: blanket tunnel gate at the slow-path chokepoint ===
 
 
@@ -1190,20 +1246,15 @@ fn nat64_v4_frag_frame(
     frame
 }
 
-// #9957: the reverse non-first builder's `nat64_reverse` input has no
-// production producer. A reverse first fragment is a session hit and carries
-// the session's NAT64 reverse info, but the reverse (AF_INET) fragment-assoc
-// install is intentionally absent; the following non-first fragment is
-// flowless and cannot build a request with that info.
+// #9957: an admitted reverse NAT64 first fragment is a session hit. The
+// record site must persist its `Nat64ReverseInfo` on the AF_INET association,
+// so the following flowless reply tail can consult it and build IPv6 L3.
 //
-// RED on revert: wiring `reverse: Some(..)` into the reverse association (and
-// enabling its consult) makes the direct reverse-key lookup below HIT and the
-// non-first reply translate + forward. Updating the #9957 expiry rationale is
-// required at that point: the first production NAT64 install caller that gives
-// `FragAssoc::install` a reverse value must also replace this
-// non-reachability pin with coverage for the now-live builder.
+// RED on revert: omit the reverse payload from `FragAssoc::install`, keep the
+// v4 consult disabled, or fail to thread the consult payload into the request:
+// the reverse association lookup / translation assertions below go RED.
 #[test]
-fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
+fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
     let src_v6: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("client v6");
     let dst_v6: Ipv6Addr = "64:ff9b::808:808".parse().expect("NAT64 destination");
     let pool_v4: Ipv4Addr = "172.16.80.50".parse().expect("pool v4");
@@ -1246,10 +1297,8 @@ fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
     assert_eq!(forward_batch.nat64_translations, 1);
     assert_eq!(sessions.len(), 2, "the forward and reverse sessions must install");
     assert_eq!(forwarding.nat64.frag_assoc.len(), 1, "the v6-side association is the control");
-    // The production NAT64 install is pinned: its live v6-side association
-    // carries no reverse payload. The reverse production install is absent
-    // today; the direct reverse-key assertion below pins that AF_INET path
-    // separately if it is ever wired.
+    // The v6-side association is decision-only; reverse metadata is reserved
+    // for the AF_INET reply association installed below.
     let forward_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
         &forwarding,
         nat64_v6_frag_meta(forward_first.len(), src_v6, dst_v6),
@@ -1286,6 +1335,38 @@ fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
     assert_ne!(translated_port, 0, "the reverse session must expose its translated port");
 
     let ident = 0x4321;
+    let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    wan_binding.interface = Arc::<str>::from("reth0.80");
+    let reverse_nonfirst = nat64_v4_frag_frame(
+        0x0003,
+        ident,
+        server_v4,
+        pool_v4,
+        0,
+        0,
+        0,
+    );
+    let (early_batch, early_dbg) = txn_run_descriptor(
+        &mut wan_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &reverse_nonfirst,
+        {
+            let mut m = txn_meta_v4(12, 0, reverse_nonfirst.len() as u16);
+            m.flow_src_addr[..4].copy_from_slice(&server_v4.octets());
+            m.flow_dst_addr[..4].copy_from_slice(&pool_v4.octets());
+            m
+        },
+    );
+    assert_eq!(
+        early_dbg.tx, 0,
+        "#10130: a reverse NAT64 tail arriving before its first fragment must drop"
+    );
+    assert_eq!(
+        early_batch.nat_frag_untranslated_dropped, 1,
+        "#10130: the missing reverse NAT64 association must be a dedicated untranslated drop"
+    );
     const TCP_SYN_ACK: u8 = TCP_FLAG_SYN | 0x10;
     let reverse_first = nat64_v4_frag_frame(
         0x2000,
@@ -1296,8 +1377,6 @@ fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
         translated_port,
         TCP_SYN_ACK,
     );
-    let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
-    wan_binding.interface = Arc::<str>::from("reth0.80");
     let reverse_first_meta = txn_meta_v4(12, TCP_SYN_ACK, reverse_first.len() as u16);
     let (reverse_batch, reverse_dbg) = txn_run_descriptor(
         &mut wan_binding,
@@ -1311,8 +1390,8 @@ fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
     assert_eq!(reverse_batch.nat64_translations, 1);
     assert_eq!(
         forwarding.nat64.frag_assoc.len(),
-        1,
-        "the AF_INET reverse first fragment must not install a second association"
+        2,
+        "the AF_INET reverse first fragment must install a second association"
     );
 
     let reverse_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
@@ -1326,47 +1405,43 @@ fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
         reverse_authority,
     )
     .expect("reverse first-fragment key");
+    let (_, reverse_info) = forwarding
+        .nat64
+        .frag_assoc
+        .lookup(
+            &reverse_key,
+            123_000_000_100,
+            forwarding.nat64.build_generation,
+            |_| true,
+        )
+        .expect("AF_INET reverse association remains live");
     assert!(
-        forwarding
-            .nat64
-            .frag_assoc
-            .lookup(
-                &reverse_key,
-                123_000_000_100,
-                forwarding.nat64.build_generation,
-                |_| true,
-            )
-            .is_none(),
-        "#9957: no production AF_INET reverse association may be installed"
+        reverse_info.is_some(),
+        "#9957: the reverse association must carry Nat64ReverseInfo"
     );
-
     // The same datagram's non-first reply fragment has no L4 tuple. It is
-    // therefore flowless, the v4 association consult is absent, and the
-    // NAT64 reverse non-first builder cannot be reached.
-    let reverse_nonfirst = nat64_v4_frag_frame(
-        0x0003,
-        ident,
-        server_v4,
-        pool_v4,
-        0,
-        0,
-        0,
-    );
+    // flowless, so the AF_INET association consult must supply the reverse
+    // info that the NAT64 builder requires.
     let (nonfirst_batch, nonfirst_dbg) = txn_run_descriptor(
         &mut wan_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reverse_nonfirst,
-        txn_meta_v4(12, 0, reverse_nonfirst.len() as u16),
+        {
+            let mut m = txn_meta_v4(12, 0, reverse_nonfirst.len() as u16);
+            m.flow_src_addr[..4].copy_from_slice(&server_v4.octets());
+            m.flow_dst_addr[..4].copy_from_slice(&pool_v4.octets());
+            m
+        },
     );
     assert_eq!(
-        nonfirst_batch.nat64_translations, 0,
-        "#9957: a non-first reply must not reach the reverse NAT64 builder"
+        nonfirst_batch.nat64_translations, 1,
+        "#9957: a non-first reply must reach the reverse NAT64 builder"
     );
     assert_eq!(
-        nonfirst_dbg.tx, 0,
-        "#9957: an unassociated reverse non-first fragment must be dropped"
+        nonfirst_dbg.tx, 1,
+        "#9957: an associated reverse non-first fragment must translate and forward"
     );
 }
 
@@ -1485,6 +1560,85 @@ fn nat64_committed_first_fragment_publishes_frag_assoc_and_nonfirst_inherits_514
     assert_eq!(
         b2.nat64_translations, 1,
         "#5146: the inherited non-first fragment must be NAT64-translated (the #2562 feature)"
+    );
+}
+
+// #10132: a NAT64 first fragment on an ESTABLISHED v6 forward session is a
+// session hit, not a new-flow commit. The hit record-site must publish the
+// v6-side association so the following flowless tail inherits the translation.
+// The reverse v4-side association is also wired for the reply-tail increment
+// and covered by `nat64_reverse_nonfirst_reply_fragment_translates_9957`.
+#[test]
+fn nat64_session_hit_first_fragment_records_v6_assoc_10132() {
+    let forwarding = build_forwarding_state(&nat64_frag_snapshot());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+
+    let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
+
+    // Establish the NAT64 forward/reverse session with an unfragmented SYN.
+    let syn = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let (syn_batch, syn_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        nat64_v6_syn_meta(syn.len(), src, dst),
+    );
+    assert_eq!(syn_dbg.tx, 1, "the establishing NAT64 SYN must forward");
+    assert_eq!(syn_batch.nat64_translations, 1);
+    assert_eq!(sessions.len(), 2, "the forward and reverse sessions must install");
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 0);
+
+    // This first fragment has the same 5-tuple as the established session,
+    // therefore it reaches the #9950 hit-tail record site.
+    let ident = 0x1013_2001;
+    let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
+    let (first_batch, first_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        nat64_v6_frag_meta(first.len(), src, dst),
+    );
+    assert_eq!(
+        first_dbg.tx, 1,
+        "#10132: a session-hit NAT64 first fragment must forward"
+    );
+    assert_eq!(
+        first_batch.nat64_translations, 1,
+        "#10132: the session-hit first fragment must translate"
+    );
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        1,
+        "#10132: the v6 session-hit record site must publish one association"
+    );
+
+    // The tail is flowless (no L4 ports) and can only forward by consulting
+    // the association planted by the session-hit first fragment.
+    let tail = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
+    let (tail_batch, tail_dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        nat64_v6_frag_meta(tail.len(), src, dst),
+    );
+    assert_eq!(
+        tail_dbg.tx, 1,
+        "#10132: the session-hit first fragment's flowless tail must inherit and forward"
+    );
+    assert_eq!(
+        tail_batch.nat64_translations, 1,
+        "#10132: the inherited flowless tail must use the NAT64 translation"
     );
 }
 

@@ -94,6 +94,12 @@ type statusSummaryAggregates struct {
 	// drops (SNAT / static-NAT / DNAT / NPTv6). Same-family sibling of
 	// nat64FragDropped.
 	natFragUntranslatedDropped uint64
+	// #10131: binding-attributed fragment-overlap reasons.
+	fragOverlapDropped              uint64
+	fragOverlapOverflowDropped      uint64
+	fragOverlapShardFullDropped     uint64
+	fragOverlapPostNATDropped       uint64
+	fragOverlapMaxLifetimeEvictions uint64
 
 	txPackets                       uint64
 	txBytes                         uint64
@@ -234,6 +240,11 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.nat64NoSourcePool += binding.Nat64NoSourcePool
 		agg.nat64PoolExhausted += binding.Nat64PoolExhausted
 		agg.nat64FragDropped += binding.Nat64FragDropped
+		agg.fragOverlapDropped += binding.FragOverlapDropped
+		agg.fragOverlapOverflowDropped += binding.FragOverlapOverflowDropped
+		agg.fragOverlapShardFullDropped += binding.FragOverlapShardFullDropped
+		agg.fragOverlapPostNATDropped += binding.FragOverlapPostNATDropped
+		agg.fragOverlapMaxLifetimeEvictions += binding.FragOverlapMaxLifetimeEvictions
 		agg.nat64IneligibleSource += binding.Nat64IneligibleSource
 		agg.nat64IneligibleDest += binding.Nat64IneligibleDest
 		agg.nat64ExthdrIneligible += binding.Nat64ExthdrIneligible
@@ -531,6 +542,11 @@ func writeNATCountersSection(b *strings.Builder, agg statusSummaryAggregates) {
 	fmt.Fprintf(b, "  NAT64 tunnel encap unsupported drops:%d\n", agg.nat64TunnelEncapUnsupported)
 	fmt.Fprintf(b, "  NAT64 ineligible-protocol drops:%d\n", agg.nat64IneligibleProtocol)
 	fmt.Fprintf(b, "  NAT frag untranslated drops:%d\n", agg.natFragUntranslatedDropped)
+	fmt.Fprintf(b, "  Fragment overlap drops:    %d\n", agg.fragOverlapDropped)
+	fmt.Fprintf(b, "  Fragment overlap overflow drops:%d\n", agg.fragOverlapOverflowDropped)
+	fmt.Fprintf(b, "  Fragment overlap shard-full drops:%d\n", agg.fragOverlapShardFullDropped)
+	fmt.Fprintf(b, "  Fragment overlap post-NAT drops:%d\n", agg.fragOverlapPostNATDropped)
+	fmt.Fprintf(b, "  Fragment overlap max-lifetime evictions:%d\n", agg.fragOverlapMaxLifetimeEvictions)
 }
 
 // writeSourceNATPoolsSection renders the per-pool source-NAT table, sorted by
