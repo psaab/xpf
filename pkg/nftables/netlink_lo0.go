@@ -259,7 +259,7 @@ func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
 	// Fall-through (#3427): a term with no terminating action applies its honored
 	// modifiers and continues. Emit a non-terminating rule (no verdict) only when
 	// there is a modifier to honor; otherwise emit no rule.
-	if (t.NextTerm || t.Action == "") && t.RoutingInstance == "" {
+	if t.Action == "" && t.RoutingInstance == "" {
 		if !t.Log && t.Count == "" {
 			return
 		}

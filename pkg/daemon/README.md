@@ -3158,18 +3158,20 @@ never lock an operator out of a remote box it manages.
   `vrf-mgmt`-`LinkAdd`-failing `NewManagerWithLinkOpsForTest` fake; direct
   `rebindManagementVRFIfaces` surfaces-bind / tolerates-success / empty-noop; and
   the `applyTailReconciles` commit-join wiring proof).
-  **Per-term disposition mirrors userspace (#3427):** `nftRulesFromTerm` maps a
-  term's `then` action to the kernel verdict the SAME way the userspace lo0
-  evaluator does (`pkg/dataplane/userspace/filters.go` `NextTerm =
-  (term.NextTerm || term.Action == "") && term.RoutingInstance == ""`). A term
-  with NO terminating action is a Junos FALL-THROUGH (explicit `then next term`
-  or a modifier-only term): it emits no TERMINATING verdict and the subsequent
-  terms run. Pre-#3445 such a term emitted NOTHING; now it emits its honored
-  modifiers (`then log`/`then count`, see the modifier bullet below) as a
-  NON-TERMINATING rule (modifier statements, no verdict) so the per-term log /
-  count fires while the chain still falls through to later terms (nft continues
-  past any rule carrying no verdict). A fall-through term with no honored
-  modifier still emits nothing. The pre-#3427 code mapped an empty action to a
+  **Per-term disposition mirrors userspace (#3427, #10253):**
+  `nftRulesFromTerm` maps a term's `then` action to the kernel verdict the SAME
+  way the Rust userspace-dp evaluator does: a term falls through only when
+  `Action == "" && RoutingInstance == ""` (`continue_term =
+  action.is_empty() && routing_instance.is_empty()`). The Go
+  `pkg/dataplane/userspace/filters.go` `NextTerm` field records the advisory
+  wire bit for snapshot/render disclosure, but it MUST NOT override a real
+  action. A term with NO terminating action is a Junos FALL-THROUGH (explicit
+  `then next term` or a modifier-only term): it emits no TERMINATING verdict
+  and the subsequent terms run. Pre-#3445 such a term emitted NOTHING; now it emits
+  its honored modifiers (`then log`/`then count`, see the modifier bullet below) as a
+  NON-TERMINATING rule (modifier statements, no verdict) so the per-term log / count
+  fires while the chain still falls through to later terms (nft continues past any
+  rule carrying no verdict). A fall-through term with no honored modifier still emits nothing. The pre-#3427 code mapped an empty action to a
   terminating `accept`, which SHADOWED every later discard/reject term — a
   control-plane fail-OPEN diverging from userspace (`from protocol tcp then next
   term` followed by `from destination-port 22 then discard` accepted SSH at term
