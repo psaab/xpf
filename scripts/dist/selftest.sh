@@ -599,8 +599,21 @@ if XPF_IMAGE_PUBKEY="$WORK/img.pub" $PY "$DIST/publish.py" \
 else
     ok "publish refuses a validated:false (--skip-validate) image (#4904 A)"
 fi
-# Positive control: flip validated -> true, re-sign the same set -> PASSES.
 prov_sidecar "$PROV/xpf-$VER.manifest" true
+# A content change after the first signature is a drift, even when the flag
+# is repaired. #10120 requires a fresh bake/sign rather than laundering the
+# changed sidecar through re-sign.
+if XPF_IMAGE_PUBKEY="$WORK/img.pub" $PY "$DIST/sign.py" sign-manifest \
+     --manifest "$PROV/xpf-$VER.SHA256SUMS" --seckey "$WORK/img.sec" \
+     --comment "selftest-drift" "$PROV/xpf-$VER.qcow2" \
+     "$PROV/xpf-$VER.incus-metadata.tar.gz" "$PROV/xpf-$VER.manifest" \
+     "$PROV/xpf-$VER.pkgs" >/dev/null 2>&1; then
+    bad "re-sign MUST refuse repaired-but-drifted sidecar (#10120)"
+else
+    ok "re-sign refuses repaired-but-drifted sidecar (#10120)"
+fi
+# A fresh manifest is the positive path after that deliberate drift.
+rm -f "$PROV/xpf-$VER.SHA256SUMS" "$PROV/xpf-$VER.SHA256SUMS.minisig"
 XPF_IMAGE_PUBKEY="$WORK/img.pub" $PY "$DIST/sign.py" sign-manifest \
     --manifest "$PROV/xpf-$VER.SHA256SUMS" --seckey "$WORK/img.sec" \
     --comment "selftest-validated" "$PROV/xpf-$VER.qcow2" \
@@ -677,7 +690,11 @@ fi
 # present-but-empty record satisfies a presence check and answers nothing.
 inv_reset
 make_pkgs "$INV/xpf-$VER.pkgs" 3
-resign_inv "$INV/xpf-$VER.pkgs"
+# #10120: changing the already-recorded inventory also drifts bytes; use the
+# low-level primitive to model a signed bad set reaching publish.
+direct_sign "$INV" "$VER" "$INV/xpf-$VER.qcow2" \
+    "$INV/xpf-$VER.incus-metadata.tar.gz" "$INV/xpf-$VER.manifest" \
+    "$INV/xpf-$VER.pkgs"
 if inv_publish; then
     bad "publish MUST refuse a HOLLOW inventory but PASSED (#6500)"
 else
@@ -687,7 +704,9 @@ fi
 # 8j-4: the two authenticated records DISAGREE about the kernel.
 inv_reset
 make_pkgs "$INV/xpf-$VER.pkgs" 60 "9.9.9-other"
-resign_inv "$INV/xpf-$VER.pkgs"
+direct_sign "$INV" "$VER" "$INV/xpf-$VER.qcow2" \
+    "$INV/xpf-$VER.incus-metadata.tar.gz" "$INV/xpf-$VER.manifest" \
+    "$INV/xpf-$VER.pkgs"
 if inv_publish; then
     bad "publish MUST refuse a manifest/inventory kernel mismatch but PASSED (#6500)"
 else
