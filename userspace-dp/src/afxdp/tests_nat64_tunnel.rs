@@ -1222,6 +1222,7 @@ fn nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957() {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
+        ..Default::default()
     });
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();

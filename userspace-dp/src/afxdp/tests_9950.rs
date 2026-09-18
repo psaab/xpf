@@ -253,6 +253,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         match_icmp_type: None,
         match_icmp_code: None,
         off: false,
+        ..Default::default()
     }];
     // Default route via wan gateway + neighbors for gateway and internal host.
     snapshot.routes = vec![RouteSnapshot {
@@ -275,6 +276,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
             state: "reachable".to_string(),
             router: true,
             link_local: false,
+            ..Default::default()
         },
         NeighborSnapshot {
             interface: "reth1.0".to_string(),
@@ -285,6 +287,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
             state: "reachable".to_string(),
             router: false,
             link_local: false,
+            ..Default::default()
         },
     ];
     // No source_nat_rules / static / NPTv6: pure DNAT.
@@ -467,6 +470,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
             state: "reachable".to_string(),
             router: true,
             link_local: false,
+            ..Default::default()
         },
         NeighborSnapshot {
             interface: "reth1.0".to_string(),
@@ -477,6 +481,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
             state: "reachable".to_string(),
             router: false,
             link_local: false,
+            ..Default::default()
         },
         // The pool address itself needs a neighbor so the UNTRANSLATED base
         // behavior (dst == pool, next-hop == dst) forwards rather than dying
@@ -491,6 +496,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
             state: "reachable".to_string(),
             router: false,
             link_local: false,
+            ..Default::default()
         },
     ];
     let forwarding = build_forwarding_state(&snapshot);
@@ -682,6 +688,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             state: "reachable".to_string(),
             router: true,
             link_local: false,
+            ..Default::default()
         },
         NeighborSnapshot {
             interface: "reth1.0".to_string(),
@@ -692,6 +699,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             state: "reachable".to_string(),
             router: false,
             link_local: false,
+            ..Default::default()
         },
         NeighborSnapshot {
             interface: "ge-0-0-0.80".to_string(),
@@ -702,6 +710,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             state: "reachable".to_string(),
             router: false,
             link_local: false,
+            ..Default::default()
         },
     ];
     let forwarding = build_forwarding_state(&snapshot);
@@ -1065,6 +1074,7 @@ fn f035_overlap_v6_denied_both_orders_9950() {
             state: "reachable".to_string(),
             router: false,
             link_local: false,
+            ..Default::default()
         });
         let forwarding = build_forwarding_state(&snapshot);
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);

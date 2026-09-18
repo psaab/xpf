@@ -5088,6 +5088,7 @@ fn update_fabrics_plan_change_forces_rebind_on_next_apply_9803() {
         local_mac: "02:bf:72:ff:00:01".into(),
         peer_mac: "00:aa:bb:cc:dd:ee".into(),
         up: true,
+        ..Default::default()
     };
     let apply = |generation: u64, fabrics: Vec<FabricSnapshot>| {
         let mut request = req("apply_snapshot");
