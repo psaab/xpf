@@ -1442,3 +1442,87 @@ fn session_close_frame_carries_the_purge_retirement_marker_9752() {
         );
     }
 }
+
+/// #10068 cell 2: v6 parity of
+/// `session_close_frame_carries_the_purge_retirement_marker_9752`. The marker
+/// must be the close frame's last byte for a v6 key too. The address-family
+/// byte and payload-length pins fail the cell on a v4-only code path (a v4
+/// layout would read AF 4 with a 36-byte payload, not AF 6 with 60).
+#[test]
+fn session_close_frame_carries_the_purge_retirement_marker_v6_10068() {
+    for (retire, want) in [(true, 1u8), (false, 0u8)] {
+        let frame = EventFrame::encode_session_close(
+            7,
+            &test_key_v6(),
+            1,
+            0,
+            300,
+            1000,
+            retire,
+        );
+        let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+        assert_eq!(
+            payload[0], 6,
+            "retire={retire}: a v6 close must carry wire AF 6"
+        );
+        assert_eq!(
+            payload.len(),
+            60,
+            "retire={retire}: v6 close payload must be 60 bytes \
+             (6 fixed + 32 addrs + 4 rg + 1 flags + 4 zones + 8 discriminator \
+             + 4 domain + 1 marker)"
+        );
+        assert_eq!(
+            payload[payload.len() - 1],
+            want,
+            "retire={retire}: marker must be the frame's last byte"
+        );
+    }
+}
+
+/// #10068 cell 1 (GW-4) KNOWN-GAP, pinned — not fixed.
+///
+/// Table 1 GW-4 row (docs/log/9752.md §Fold-2.1: "close/wire-gap sweep halves"
+/// among the 7 Go-wire legs): close frames predate the install-table tail on
+/// the event-stream binary leg. Open/update frames carry the (domain, check)
+/// pair (`session_frames_carry_the_install_table_identity_9752`); close frames
+/// end at the purge-retirement marker with no stamp after it. The gap exists
+/// on master independent of #9752 and needs the owning lane's layout change.
+///
+/// This cell pins the gap signature for both families: exact no-tail payload
+/// lengths (36 v4 / 60 v6) with the frame ending [routing_domain u32][marker
+/// u8]. When the layout change lands (an 8-byte stamp tail after the marker)
+/// the lengths grow and this cell REDs — replace it then with the
+/// close-carrying-a-stamp round-trip cell. A green cell with a longer frame
+/// would mean the gap closed silently, which is exactly what this forbids.
+#[test]
+fn close_frame_carries_no_install_table_tail_known_gap_10068() {
+    let domain_wire = crate::session::routing_domain_to_wire(0).to_le_bytes();
+    for (key, want_af, want_len) in
+        [(test_key_v4(), 4u8, 36usize), (test_key_v6(), 6u8, 60usize)]
+    {
+        let frame = EventFrame::encode_session_close(7, &key, 1, 0, 300, 1000, true);
+        let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+        assert_eq!(
+            payload[0], want_af,
+            "AF {want_af}: close must carry its own wire family"
+        );
+        assert_eq!(
+            payload.len(),
+            want_len,
+            "AF {want_af}: close payload must be {want_len} bytes with no \
+             install-table tail; a longer frame means the owning lane's layout \
+             change landed and this KNOWN-GAP cell must become the round-trip cell"
+        );
+        assert_eq!(
+            &payload[payload.len() - 5..payload.len() - 1],
+            &domain_wire,
+            "AF {want_af}: routing domain must sit directly before the marker"
+        );
+        assert_eq!(
+            payload[payload.len() - 1],
+            1,
+            "AF {want_af}: the purge marker must still be the frame's last byte"
+        );
+    }
+}

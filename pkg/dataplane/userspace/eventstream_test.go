@@ -2601,3 +2601,57 @@ func TestDecodeSessionCloseEventCarriesThePurgeRetirementMarker9752(t *testing.T
 		t.Fatal("legacy close decoded PurgeRetirement=true")
 	}
 }
+
+// TestDecodeSessionCloseEventCarriesThePurgeRetirementMarkerV610068 mirrors
+// TestDecodeSessionCloseEventCarriesThePurgeRetirementMarker9752 for a v6
+// close key. The family-specific payload length and address bytes make this
+// RED on a v4-only decoder/fixture rather than merely re-running the v4 path.
+func TestDecodeSessionCloseEventCarriesThePurgeRetirementMarkerV610068(t *testing.T) {
+	payload := make([]byte, 47) // fixed fields + v6 addresses + zones
+	payload[0] = 6
+	payload[1] = 6 // TCP
+	binary.LittleEndian.PutUint16(payload[2:4], 54321)
+	binary.LittleEndian.PutUint16(payload[4:6], 443)
+	copy(payload[6:22], []byte{
+		0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0xbf, 0x01,
+		0, 0, 0, 0, 0, 0, 0, 0x01,
+	})
+	copy(payload[22:38], []byte{
+		0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0xbf, 0x02,
+		0, 0, 0, 0, 0, 0, 0, 0x02,
+	})
+	binary.LittleEndian.PutUint32(payload[38:42], 7)
+	binary.LittleEndian.PutUint16(payload[43:45], 300)
+	binary.LittleEndian.PutUint16(payload[45:47], 1000)
+	payload = append(payload,
+		make([]byte, 8)..., // tunnel discriminator
+	)
+	payload = append(payload,
+		0, 0, 0, 0, // routing domain
+		1, // purge-retirement marker
+	)
+	if len(payload) != 60 {
+		t.Fatalf("v6 close fixture len = %d, want 60", len(payload))
+	}
+	d, ok := decodeSessionCloseEvent(payload)
+	if !ok {
+		t.Fatal("decodeSessionCloseEvent returned false for v6 close")
+	}
+	if d.AddrFamily != dataplane.AFInet6 || d.BinAddrLen != 16 {
+		t.Fatalf("v6 close family/length = (%d,%d), want (%d,16)",
+			d.AddrFamily, d.BinAddrLen, dataplane.AFInet6)
+	}
+	if d.SrcAddr[15] != 1 || d.DstAddr[15] != 2 {
+		t.Fatalf("v6 close addresses lost: src=%x dst=%x", d.SrcAddr, d.DstAddr)
+	}
+	if !d.PurgeRetirement {
+		t.Fatal("#10068: v6 close marker decoded PurgeRetirement=false")
+	}
+	legacy, ok := decodeSessionCloseEvent(payload[:len(payload)-1])
+	if !ok {
+		t.Fatal("decodeSessionCloseEvent returned false for legacy v6 close")
+	}
+	if legacy.PurgeRetirement {
+		t.Fatal("legacy v6 close decoded PurgeRetirement=true")
+	}
+}

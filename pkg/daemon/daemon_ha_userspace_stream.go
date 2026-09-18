@@ -787,11 +787,11 @@ func (q queueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.Session
 	// #9752: forward the purge-retirement marker the converter set from the
 	// helper's close: the peer must retract exactly this key, not companions
 	// the purge preserved.
-	q.ss.QueueDeleteV4(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
+	q.ss.QueueDeleteV4(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 
 func (q queueDeltaSink) deleteV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
-	q.ss.QueueDeleteV6(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
+	q.ss.QueueDeleteV6(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 
 // pacedQueueDeltaSink is queueDeltaSink for the FullResync export. Each install
@@ -829,11 +829,11 @@ func (p *pacedQueueDeltaSink) openV6(key dataplane.SessionKeyV6, val dataplane.S
 }
 
 func (p *pacedQueueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.SessionValue) {
-	p.ss.QueueDeleteV4(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
+	p.ss.QueueDeleteV4(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 
 func (p *pacedQueueDeltaSink) deleteV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
-	p.ss.QueueDeleteV6(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
+	p.ss.QueueDeleteV6(key, cluster.PurgeRetirementOnly(val.LogFlags))
 }
 
 // snapshotDeltaSink accumulates a point-in-time set of LIVE sessions for one

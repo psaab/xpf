@@ -448,6 +448,15 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	return buf[:off]
 }
 
+// PurgeRetirementOnly is the one cluster-owned interpretation of the
+// userspace purge-retirement marker. Daemon delta sinks use this pure
+// predicate before handing a close to QueueDeleteV4/V6; keeping the bit
+// interpretation here gives the sink-to-cluster seam an observable contract
+// instead of four package-private bit expressions.
+func PurgeRetirementOnly(logFlags uint8) bool {
+	return logFlags&dataplane.LogFlagPurgeRetirementOnly != 0
+}
+
 // encodeDeleteV4 emits a delete message for a v4 session key. The 16-byte
 // 5-tuple payload grows to 24 bytes with a length-gated trailing #2170
 // install Generation: an old decoder reads only the first 16 bytes (its

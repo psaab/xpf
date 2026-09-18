@@ -116,3 +116,59 @@ func TestDeleteEvictsTheInstallTableMemo9752(t *testing.T) {
 		t.Fatalf("#9752: after the session's delete the memo must be gone, but the sweep sent %v", got)
 	}
 }
+
+func installTableFixtureV610068(t *testing.T, sessionID uint64) (*SessionSync, *mockSweepDP, dataplane.SessionKeyV6) {
+	t.Helper()
+	base := monotonicSeconds()
+	key := rtflowKeyV6(47913)
+	dp := &mockSweepDP{
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			key: {State: dataplane.SessStateEstablished, Created: base - 5, SessionID: sessionID},
+		},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.stats.Connected.Store(true)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = base - 10
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|
+			capFlagPurgeRetirementForwardOnly|capFlagInstallTableIdentity))
+	return ss, dp, key
+}
+
+func sentTablesV610068(t *testing.T, ss *SessionSync) [][2]uint32 {
+	t.Helper()
+	var out [][2]uint32
+	for len(ss.sendCh) > 0 {
+		msg := <-ss.sendCh
+		if len(msg) < syncHeaderSize || msg[4] != syncMsgSessionV6 {
+			continue
+		}
+		_, val, ok := decodeSessionV6Payload(msg[syncHeaderSize:])
+		if !ok {
+			t.Fatal("undecodable queued v6 session frame")
+		}
+		out = append(out, [2]uint32{val.InstallTableDomain, val.InstallTableCheck})
+	}
+	return out
+}
+
+// TestSweepResendKeepsTheAnnouncedInstallTableV610068 mirrors the current
+// v4 sender memo contract on the v6 sweep leg.
+func TestSweepResendKeepsTheAnnouncedInstallTableV610068(t *testing.T) {
+	ss, dp, key := installTableFixtureV610068(t, 77)
+	upd := dp.v6sessions[key]
+	upd.InstallTableDomain, upd.InstallTableCheck = 525590, 3318534811
+	ss.QueueSessionV6(key, upd)
+	if got := sentTablesV610068(t, ss); len(got) != 1 || got[0] != [2]uint32{525590, 3318534811} {
+		t.Fatalf("FIXTURE: the v6 delta path must queue one stamped frame, got %v", got)
+	}
+	if got := func() [][2]uint32 {
+		ss.syncSweep()
+		return sentTablesV610068(t, ss)
+	}(); len(got) != 1 || got[0] != [2]uint32{525590, 3318534811} {
+		t.Fatalf("#10068: the v6 sweep resent the session with %v, not the "+
+			"identity already sent for this incarnation", got)
+	}
+}
