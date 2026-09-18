@@ -165,6 +165,7 @@ func TestConfigEpochNoRejectAgainstZeroBaseline5274(t *testing.T) {
 func TestSessionWireRoundTripConfigEpoch5274V4(t *testing.T) {
 	key := configEpochKeyV4(40001)
 	val := dataplane.SessionValue{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            dataplane.SessStateEstablished,
 		IngressZone:      1,
 		EgressZone:       2,
@@ -195,14 +196,16 @@ func TestSessionWireRoundTripConfigEpoch5274V4(t *testing.T) {
 	// #5212 RTFlowSessionID (8 bytes), the #7095 IngressIfaceFold (4 bytes) AND
 	// the #7188 TunnelDiscriminator (8 bytes) so the frame ends after
 	// PolicyCounterIdx (an old peer that stops there). Decode must still succeed
-	// with epoch 0 and the #3301 fields + Generation preserved.
-	legacy := payload[:len(payload)-40]
+	legacy := payload[:len(payload)-42]
 	_, lVal, ok := decodeSessionV4Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
 	}
 	if lVal.ConfigEpoch != 0 {
 		t.Fatalf("legacy frame ConfigEpoch = %#x, want 0", lVal.ConfigEpoch)
+	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v4 frame origin flags=%#x, want clear", lVal.Flags)
 	}
 	if lVal.Generation != val.Generation || lVal.PolicyCounterIdx != 7 {
 		t.Fatalf("legacy frame corrupted prior fields: gen=%#x idx=%d", lVal.Generation, lVal.PolicyCounterIdx)
@@ -212,6 +215,7 @@ func TestSessionWireRoundTripConfigEpoch5274V4(t *testing.T) {
 func TestSessionWireRoundTripConfigEpoch5274V6(t *testing.T) {
 	key := configEpochKeyV6(40002)
 	val := dataplane.SessionValueV6{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            dataplane.SessStateEstablished,
 		IngressZone:      1,
 		EgressZone:       2,
@@ -244,13 +248,16 @@ func TestSessionWireRoundTripConfigEpoch5274V6(t *testing.T) {
 	// #7188 TunnelDiscriminator (8 bytes) so the frame ends after Nat64SnatV4
 	// (an old peer stops there). Decode still succeeds with epoch 0 and the
 	// NAT64 source preserved.
-	legacy := payload[:len(payload)-40]
+	legacy := payload[:len(payload)-42]
 	_, lVal, ok := decodeSessionV6Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) v6 decode failed")
 	}
 	if lVal.ConfigEpoch != 0 {
 		t.Fatalf("legacy v6 frame ConfigEpoch = %#x, want 0", lVal.ConfigEpoch)
+	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v6 frame origin flags=%#x, want clear", lVal.Flags)
 	}
 	if lVal.Nat64SnatV4 != val.Nat64SnatV4 {
 		t.Fatalf("legacy v6 frame Nat64SnatV4 corrupted: got %v want %v", lVal.Nat64SnatV4, val.Nat64SnatV4)

@@ -448,12 +448,13 @@ struct BpfSessionKeyV4 {
 #[derive(Clone, Copy)]
 struct BpfSessionValueV4 {
     state: u8,
-    // __u16 to fit SESS_FLAG_NPTV6 (bit 8, 0x100), which overflows a u8 (#5460).
-    // The compiler inserts one pad byte after `state` and two before
-    // `app_timeout`; the layout matches C `struct session_value` and the Go
-    // `bpfSessionValue` mirror (size-asserted at 152 in bpf_map_tests.rs --
-    // 144 before #9546 appended `routing_domain`, 136 before #4983 added the
-    // ingress-identity pair below).
+    // __u16 to fit SESS_FLAG_NPTV6 (bit 8, 0x100), which overflows a u8
+    // (#5460), and the cluster-origin bit (bit 9, #10227). The compiler
+    // inserts one pad byte after `state` and two before `app_timeout`; the
+    // layout matches C `struct session_value` and the Go `bpfSessionValue`
+    // mirror (size-asserted at 152 in bpf_map_tests.rs -- 144 before #9546
+    // appended `routing_domain`, 136 before #4983 added the ingress-identity
+    // pair below).
     flags: u16,
     tcp_state: u8,
     is_reverse: u8,
@@ -586,10 +587,10 @@ fn bpf_session_key_v6(
 #[derive(Clone, Copy)]
 struct BpfSessionValueV6 {
     state: u8,
-    // __u16 to fit SESS_FLAG_NPTV6 (bit 8), see BpfSessionValueV4::flags (#5460).
-    // Layout matches C `struct session_value_v6` (size-asserted at 200 -- 192
+    // __u16 to fit SESS_FLAG_NPTV6 (bit 8), the cluster-origin bit (bit 9,
+    // #10227), see BpfSessionValueV4::flags (#5460). Layout matches C
+    // `struct session_value_v6` (size-asserted at 200 -- 192
     // before #9546 appended `routing_domain`, 184 before #4983 added the
-    // ingress-identity pair below).
     flags: u16,
     tcp_state: u8,
     is_reverse: u8,
@@ -689,11 +690,28 @@ const _: [(); 144] = [(); std::mem::offset_of!(BpfSessionValueV4, routing_domain
 const _: [(); 192] = [(); std::mem::offset_of!(BpfSessionValueV6, routing_domain)];
 
 /// Session flag constants matching C SESS_FLAG_* defines. `u16` because the
-/// `session_value.flags` field is `__u16` (SESS_FLAG_NPTV6 is bit 8, #5460).
+/// `session_value.flags` field is `__u16` (SESS_FLAG_NPTV6 is bit 8 and
+/// SessFlagClusterSynced is bit 9, #5460/#10227).
 const SESS_FLAG_SNAT: u16 = 1 << 0;
 const SESS_FLAG_DNAT: u16 = 1 << 1;
+const SESS_FLAG_CLUSTER_SYNCED: u16 = 1 << 9;
+#[inline]
+fn cluster_synced_flags(flags: u16, peer_synced: bool) -> u16 {
+    if peer_synced {
+        flags | SESS_FLAG_CLUSTER_SYNCED
+    } else {
+        flags & !SESS_FLAG_CLUSTER_SYNCED
+    }
+}
 /// Session state constants matching C SESS_STATE_* defines.
 const SESS_STATE_ESTABLISHED: u8 = 4;
+
+#[inline]
+fn refresh_cluster_synced_flags(flags: u16, origin: Option<SessionOrigin>) -> u16 {
+    origin.map_or(flags, |origin| {
+        cluster_synced_flags(flags, origin.is_cluster_synced_origin())
+    })
+}
 
 /// Write a session entry to the BPF conntrack map so `show security flow session`
 /// displays correct zone and interface information for helper-managed sessions.
@@ -729,6 +747,7 @@ pub(super) struct ConntrackPublishRecord {
     pub(super) egress_zone: u16,
     pub(super) app_id: u16,
     pub(super) session_id: u64,
+    pub(super) cluster_synced: bool,
 }
 
 // #8105: the recorder is THREAD-LOCAL, not process-global.
@@ -760,6 +779,7 @@ thread_local! {
     static CONNTRACK_PUBLISHES: std::cell::RefCell<Vec<ConntrackPublishRecord>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
+
 
 /// #6965/#8105: clear this thread's recorder so a sampling test starts from a
 /// known-empty state.
@@ -812,6 +832,7 @@ pub(super) fn publish_bpf_conntrack_entry(
     // #8125: the session's own inactivity window in whole seconds
     // (SessionTable::timeout_secs_for); 0 = no live entry.
     timeout_secs: u32,
+    origin: SessionOrigin,
 ) {
     // #6965: record the call BEFORE the `fd >= 0` gate below. The gate is what
     // makes this a no-op under a unit test's `-1` fds, and the property the
@@ -828,6 +849,7 @@ pub(super) fn publish_bpf_conntrack_entry(
                 egress_zone: metadata.egress_zone,
                 app_id,
                 session_id,
+                cluster_synced: origin.is_cluster_synced_origin(),
             });
         });
     }
@@ -835,7 +857,6 @@ pub(super) fn publish_bpf_conntrack_entry(
     // name→id lookup the old code did is gone.
     let ingress_zone_id = metadata.ingress_zone;
     let egress_zone_id = metadata.egress_zone;
-
     let now_secs = monotonic_nanos() / 1_000_000_000;
 
     let mut flags: u16 = 0;
@@ -845,6 +866,7 @@ pub(super) fn publish_bpf_conntrack_entry(
     if decision.nat.rewrite_dst.is_some() {
         flags |= SESS_FLAG_DNAT;
     }
+    flags = cluster_synced_flags(flags, origin.is_cluster_synced_origin());
 
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
@@ -958,51 +980,18 @@ pub(super) fn delete_bpf_conntrack_entry(
 /// zero that can never advance: only `account_packet` moves counters, and it
 /// runs where the packets land.
 ///
-/// Every worker then refreshes its OWN table into the SAME row — the walk
-/// applies no origin filter, the refresh skips only `is_reverse`, and publish
-/// and refresh build the key with the same `bpf_session_key_v4`. So a
-/// non-owning worker's lookup hits the owner's row and its `BPF_EXIST` update
-/// succeeds, writing zeros over live volume.
+/// Every worker then refreshes its OWN table into the SAME row. The walk skips
+/// reverse entries, but all forward entries remain refreshable, including
+/// packet-receiving `WorkerLocalImport` replicas. Before the full
+/// `BPF_EXIST` write, refresh normalizes only bit 9 from the live origin:
+/// `SyncImport` and `SharedMaterialize` retain the peer stamp, while a
+/// `WorkerLocalImport` replica clears it. A sibling read that races a
+/// promotion's RMW clear therefore cannot resurrect a deletable stamp.
 ///
-/// WHAT THIS IS NOT, stated first because the issue number invites the wrong
-/// reading. This is NOT the cause of #7919's reported symptom, and it must not
-/// be cited as one. Measured on the reference cluster, same box, same workload,
-/// deployed sha verified at deploy and re-checked at end of cell: a build WITH
-/// this gate and a build with it reverted produce the IDENTICAL pattern — one
-/// data flow mirroring live counters and advancing, another reading zero on
-/// both. The gate changes nothing observable there, which also means the
-/// fan-out replicas are not reaching this row in production the way the
-/// hermetic path shows they can. #7919's real cause is still open; the current
-/// evidence is two rows rendering one 5-tuple, one live and one zero.
-///
-/// So this is a HARDENING for a hazard that is demonstrable in-process and not
-/// currently observed in production, not a fix for the reported defect. It is
-/// kept because the write it prevents is never desirable — a zero-counter entry
-/// has nothing to contribute to a row that has volume — and because the
-/// replication types make the hazard structural rather than incidental: it
-/// cannot be argued away by a change to timing or ordering, only by a change to
-/// which workers hold the entry.
-///
-/// WHY THE RULE IS "HAS NOTHING TO CONTRIBUTE" RATHER THAN AN ORIGIN TEST.
-/// Every predicate over `SessionOrigin` gets this wrong somewhere:
-///
-///   - skipping `is_peer_synced()` entries ENTIRELY would also stop refreshing
-///     `last_seen`, which drives idle/expiry — on a STANDBY every entry is
-///     `SyncImport`, so that expires synced sessions early. `last_seen` and
-///     `policy_id` are still refreshed unconditionally; only these four fields
-///     are gated.
-///   - excluding `is_peer_synced()` from the COUNTER write is wrong too: it
-///     covers `SharedMaterialize`, which is precisely the origin a worker takes
-///     when it RECEIVES traffic for a shared session
-///     (`materialized_shared_hit_origin`). Excluding it would freeze the
-///     counters for post-failover traffic specifically — a regression no test
-///     written before a failover can see.
-///
-/// Counters are monotonic per session (`SessionCounters::account` only
-/// `saturating_add`s) and `publish_bpf_conntrack_entry` re-zeroes the row at
-/// install with `BPF_ANY`, so "an all-zero entry does not overwrite the row" is
-/// origin-agnostic, needs no new wire or table state, and stays correct across
-/// promotion and materialization.
+/// #7919's counter guard remains necessary for the separate volume race: a
+/// zero-counter sibling must not overwrite live volume. The origin
+/// normalization above protects the provenance bit; `mirrored_counters`
+/// independently protects the four counter fields.
 ///
 /// KNOWN LIMIT, stated so it is not mistaken for coverage: if per-session
 /// accounting ever broke outright, every entry would be all-zero and the row
@@ -1024,6 +1013,7 @@ pub(super) fn mirrored_counters(
         live.rev_bytes,
     )
 }
+
 
 /// What one budgeted refresh slice observed, beyond advancing the cursor.
 ///
@@ -1066,6 +1056,11 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
         if metadata.is_reverse {
             return;
         }
+        // Read the origin alongside the table row. Refresh must retain the
+        // normal packet/counter behavior for every replica; after the lookup,
+        // it re-stamps only bit 9 from authoritative provenance so a stale
+        // sibling read cannot resurrect a cleared local-origin bit.
+        let origin = sessions.entry_with_origin(key).map(|(_, _, origin)| origin);
         // #7919: sample BEFORE the map work and independently of whether the
         // BPF lookup below succeeds — this measures what the worker's TABLE
         // holds, which is the question. Folding it in after a successful update
@@ -1129,6 +1124,10 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
                     value.fwd_bytes = fb;
                     value.rev_packets = rp;
                     value.rev_bytes = rb;
+                    // The lookup value may carry an origin bit from a stale
+                    // sibling read. Re-stamp only that bit from the live table
+                    // provenance before the full-value BPF_EXIST write.
+                    value.flags = refresh_cluster_synced_flags(value.flags, origin);
                     let _ = unsafe {
                         libbpf_sys::bpf_map_update_elem(
                             conntrack_v4_fd,
@@ -1175,6 +1174,10 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
                     value.fwd_bytes = fb;
                     value.rev_packets = rp;
                     value.rev_bytes = rb;
+                    // Keep refresh provenance aligned with the live session;
+                    // this prevents a sibling read/clear/write from restoring
+                    // a deletable peer-origin stamp.
+                    value.flags = refresh_cluster_synced_flags(value.flags, origin);
                     let _ = unsafe {
                         libbpf_sys::bpf_map_update_elem(
                             conntrack_v6_fd,
@@ -1230,6 +1233,79 @@ pub(super) fn publish_session_map_entry_for_session_with_origin(
     )
 }
 
+/// Update only the receiver-origin bit in an existing conntrack-map row.
+///
+/// Transition paths (helper promotion/demotion) already have a complete row
+/// with counters, timestamps, NAT state, and creation time. Rebuilding that
+/// row through `publish_bpf_conntrack_entry` would overwrite those fields, so
+/// this path does a read/modify/write and preserves every byte except bit 9.
+pub(super) fn update_session_cluster_synced_origin(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    peer_synced: bool,
+) {
+    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
+        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+            let bpf_key = bpf_session_key_v4(
+                src.octets(),
+                dst.octets(),
+                key.src_port,
+                key.dst_port,
+                key.protocol,
+            );
+            let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+            let found = unsafe {
+                libbpf_sys::bpf_map_lookup_elem(
+                    conntrack_v4_fd,
+                    (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                    (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
+                )
+            };
+            if found == 0 {
+                value.flags = cluster_synced_flags(value.flags, peer_synced);
+                let _ = unsafe {
+                    libbpf_sys::bpf_map_update_elem(
+                        conntrack_v4_fd,
+                        (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                        (&value as *const BpfSessionValueV4).cast::<c_void>(),
+                        libbpf_sys::BPF_EXIST as u64,
+                    )
+                };
+            }
+        }
+        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+            let bpf_key = bpf_session_key_v6(
+                src.octets(),
+                dst.octets(),
+                key.src_port,
+                key.dst_port,
+                key.protocol,
+            );
+            let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+            let found = unsafe {
+                libbpf_sys::bpf_map_lookup_elem(
+                    conntrack_v6_fd,
+                    (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                    (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
+                )
+            };
+            if found == 0 {
+                value.flags = cluster_synced_flags(value.flags, peer_synced);
+                let _ = unsafe {
+                    libbpf_sys::bpf_map_update_elem(
+                        conntrack_v6_fd,
+                        (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                        (&value as *const BpfSessionValueV6).cast::<c_void>(),
+                        libbpf_sys::BPF_EXIST as u64,
+                    )
+                };
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn publish_session_map_entry_for_session_with_conntrack(
     map: SteeringMap<'_>,
     key: &SessionKey,
@@ -1271,6 +1347,7 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
                 ctx.app_id,
                 ctx.session_id,
                 ctx.timeout_secs,
+                origin,
             );
         }
         return Ok(());
@@ -1289,6 +1366,7 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
             ctx.app_id,
             ctx.session_id,
             ctx.timeout_secs,
+            origin,
         );
     }
     result

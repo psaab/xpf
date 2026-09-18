@@ -1883,10 +1883,10 @@ func (s *SessionSync) SetVRFDevice(dev string) {
 // session synchronization.
 func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 	s.zoneRGMu.Lock()
-	// #9655: only a map with different contents is a change. The daemon re-sets
-	// the map on every config apply, and a bulk must not lose its reconcile to
-	// a commit that moved no zone.
-	if !maps.Equal(s.zoneRGMap, m) {
+	// #9655/#10227: nil (unwired) and an installed empty map have different
+	// reconcile safety semantics, so a nil↔empty transition is a generation
+	// change even though maps.Equal treats both as equal.
+	if (s.zoneRGMap == nil) != (m == nil) || !maps.Equal(s.zoneRGMap, m) {
 		s.zoneRGMapGen++
 	}
 	s.zoneRGMap = m
@@ -2095,24 +2095,22 @@ type zoneOwnershipSnapshot struct {
 }
 
 // shouldSync reports whether a zone's sessions are KEPT by this reconcile. It
-// answers from the zone->RG map the bulk started with; a zone that map does not
-// name is kept whole (#9655).
-//
-// Keeping is the conservative answer, and it is deliberate. The live sweep
-// answers an unmapped zone with RG 0 ownership, and the first attempt at this
-// issue had the reconcile do the same, so a stale peer-owned session there
-// would finally be deleted on the RG 0 secondary. The measurement stopped it: a
-// zone of node-local, non-RETH interfaces is RG-unmapped too, and no
-// cluster-mode commit rule rejects one, so that answer deletes the node's OWN
-// live flows in such a zone at every bulk and a TCP flow dies on its next
-// non-SYN packet. Deleting only the SYNCED copy needs a per-session origin bit,
-// which the session_value/HA-wire prerequisite carries. Until then an unmapped
-// zone is kept whole and #9655 stays open for that half.
+// answers from the zone->RG map the bulk started with. An unmapped zone is not
+// assigned an RG answer here: the dataplane reconcile uses the per-session
+// origin bit to delete only peer-synced rows there (#10227/#9655).
 func (z *zoneOwnershipSnapshot) shouldSync(zoneID uint16) bool {
 	if v, ok := z.zones[zoneID]; ok {
 		return v
 	}
-	return true
+	return false
+}
+
+// isMapped reports whether the zone was named by the same ownership snapshot.
+// It is separate from shouldSync because false means both "mapped to the
+// peer" and "unmapped"; only the latter needs the per-session origin guard.
+func (z *zoneOwnershipSnapshot) isMapped(zoneID uint16) bool {
+	_, ok := z.zones[zoneID]
+	return ok
 }
 
 func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
@@ -2120,13 +2118,12 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	m := s.zoneRGMap
 	gen := s.zoneRGMapGen
 	s.zoneRGMu.RUnlock()
-	// No zone the map names means nothing this reconcile can judge by, whether
-	// the daemon has not wired zone ownership yet (nil) or the config maps no
-	// zone to an RG (installed but empty). Take no snapshot; the reconcile skips
-	// and the next bulk tries again. Judging an unnamed zone is exactly what
-	// shouldSync refuses to do, so a snapshot over an empty map could only ever
-	// answer "not ours" for every zone and delete the node's own sessions.
-	if len(m) == 0 {
+	// #9655/#10227: an unwired nil zone map has no ownership answers, so it
+	// takes no snapshot and the bulk skips. An installed empty map is different:
+	// it is an authoritative all-unmapped snapshot, and #10227's origin gate
+	// lets the dataplane delete only peer-synced rows while preserving promoted
+	// local rows.
+	if m == nil {
 		return nil
 	}
 	snap := &zoneOwnershipSnapshot{zones: make(map[uint16]bool, len(m)), mapGen: gen}
@@ -2171,9 +2168,9 @@ func (s *SessionSync) reconcileStaleSessions() {
 		return
 	}
 	// #9655: a bulk with no zone snapshot has nothing to judge ownership by, and
-	// deleting on a guess is the failure this reconcile can cause. Both shapes
-	// take no snapshot: a zone map that was never installed (ownership is not
-	// wired yet) and one installed naming no zone. See snapshotZoneOwnership.
+	// deleting on a guess is the failure this reconcile can cause. Only a nil
+	// (unwired) zone map takes no snapshot; an installed empty map is the
+	// all-unmapped snapshot whose rows are filtered by #10227 origin gating.
 	if zoneSnap == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no zone snapshot)")
 		return
@@ -2192,13 +2189,16 @@ func (s *SessionSync) reconcileStaleSessions() {
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map
 	// does not name is not judged; see zoneOwnershipSnapshot.shouldSync for why
-	// the RG 0 answer the live sweep uses is NOT applied here.
+	// #10227: for unmapped zones the dataplane origin bit is the only
+	// authority; mapped zones retain the existing RG ownership answer.
 	shouldSyncAtBulkStart := zoneSnap.shouldSync
+	isZoneMappedAtBulkStart := zoneSnap.isMapped
 	var deleted int
 	result, err := s.sessions.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
 		ReceivedV4:     recvV4,
 		ReceivedV6:     recvV6,
 		ShouldSyncZone: shouldSyncAtBulkStart,
+		IsZoneMapped:   isZoneMappedAtBulkStart,
 		DeleteReason:   dataplane.DeleteReasonClusterStale,
 	})
 	deleted = result.DeletedV4 + result.DeletedV6

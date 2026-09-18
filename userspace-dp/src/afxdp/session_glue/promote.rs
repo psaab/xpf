@@ -66,11 +66,13 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
 /// kernel session map, mirrored into the shared maps under
 /// `SharedPromote` origin, and replicated to peer worker commands.
 ///
-/// Behavior unchanged from the pre-#1346 free function; only the
-/// signature changed (16 → 13 params via `SharedSessionRefs`).
-pub(in crate::afxdp) fn maybe_promote_synced_session(
+/// The compatibility wrapper keeps the pre-#1346 13-argument shape for tests;
+/// the production variant adds the two conntrack fds to invalidate only origin.
+pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     forwarding: &ForwardingState,
@@ -105,6 +107,15 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         protocol,
         tcp_flags,
     }) {
+        // The helper's promotion flips a peer-synced row to local ownership.
+        // Clear only the origin bit in the conntrack mirror; counters,
+        // timestamps, NAT state, and creation time remain untouched.
+        crate::afxdp::bpf_map::update_session_cluster_synced_origin(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            key,
+            false,
+        );
         // #1789: count a failed shared-promote publish (shim would miss the
         // key -> NO_SESSION degraded path for the promoted flow).
         if publish_session_map_entry_for_session(
@@ -148,6 +159,40 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         replicate_session_upsert(peer_worker_commands, &promoted_entry);
     }
     promoted
+}
+
+pub(in crate::afxdp) fn maybe_promote_synced_session(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared: SharedSessionRefs<'_>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: SessionMetadata,
+    origin: SessionOrigin,
+    fabric_ingress: bool,
+    now_ns: u64,
+    protocol: u8,
+    tcp_flags: u8,
+) -> SessionMetadata {
+    maybe_promote_synced_session_with_conntrack(
+        sessions,
+        session_map,
+        -1,
+        -1,
+        shared,
+        peer_worker_commands,
+        forwarding,
+        key,
+        decision,
+        metadata,
+        origin,
+        fabric_ingress,
+        now_ns,
+        protocol,
+        tcp_flags,
+    )
 }
 
 /// Purge a translated peer-synced hit: drop the entry from the shared

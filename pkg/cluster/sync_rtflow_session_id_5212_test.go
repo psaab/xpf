@@ -33,6 +33,7 @@ func rtflowKeyV6(srcPort uint16) dataplane.SessionKeyV6 {
 func TestSessionWireRoundTripRTFlowSessionID5212V4(t *testing.T) {
 	key := rtflowKeyV4(41001)
 	val := dataplane.SessionValue{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            dataplane.SessStateEstablished,
 		IngressZone:      1,
 		EgressZone:       2,
@@ -66,7 +67,7 @@ func TestSessionWireRoundTripRTFlowSessionID5212V4(t *testing.T) {
 	// #7188 TunnelDiscriminator — so the frame ends after ConfigEpoch, which is
 	// where an old peer stops. Decode must still succeed with id 0 and the
 	// epoch + prior fields preserved.
-	legacy := payload[:len(payload)-32]
+	legacy := payload[:len(payload)-34]
 	_, lVal, ok := decodeSessionV4Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
@@ -77,11 +78,15 @@ func TestSessionWireRoundTripRTFlowSessionID5212V4(t *testing.T) {
 	if lVal.ConfigEpoch != val.ConfigEpoch {
 		t.Fatalf("legacy frame corrupted the ConfigEpoch: got %#x want %#x", lVal.ConfigEpoch, val.ConfigEpoch)
 	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v4 frame origin flags=%#x, want clear", lVal.Flags)
+	}
 }
 
 func TestSessionWireRoundTripRTFlowSessionID5212V6(t *testing.T) {
 	key := rtflowKeyV6(41002)
 	val := dataplane.SessionValueV6{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            dataplane.SessStateEstablished,
 		IngressZone:      1,
 		EgressZone:       2,
@@ -109,10 +114,11 @@ func TestSessionWireRoundTripRTFlowSessionID5212V6(t *testing.T) {
 	}
 
 	// Mixed-version: truncate the trailing 8-byte id AND everything appended
-	// behind it — the 4-byte #7095 IngressIfaceFold and the 8-byte #7188
-	// TunnelDiscriminator — so the frame ends after ConfigEpoch, which is where
-	// an old peer stops. Decode still succeeds with id 0 and the epoch preserved.
-	legacy := payload[:len(payload)-32]
+	// behind it — the 4-byte #7095 IngressIfaceFold, the 8-byte
+	// #7188 TunnelDiscriminator and the #10227 high-flags byte — so the frame
+	// ends after ConfigEpoch, which is where an old peer stops. Decode still
+	// succeeds with id 0 and the epoch preserved.
+	legacy := payload[:len(payload)-34]
 	_, lVal, ok := decodeSessionV6Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) v6 decode failed")
@@ -122,5 +128,8 @@ func TestSessionWireRoundTripRTFlowSessionID5212V6(t *testing.T) {
 	}
 	if lVal.ConfigEpoch != val.ConfigEpoch {
 		t.Fatalf("legacy v6 frame corrupted the ConfigEpoch: got %#x want %#x", lVal.ConfigEpoch, val.ConfigEpoch)
+	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v6 frame origin flags=%#x, want clear", lVal.Flags)
 	}
 }

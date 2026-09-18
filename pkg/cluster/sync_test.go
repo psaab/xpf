@@ -2202,6 +2202,37 @@ func TestSetZoneRGMap(t *testing.T) {
 	ss.zoneRGMu.RUnlock()
 }
 
+func TestSetZoneRGMapDistinguishesNilAndEmpty10227(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	ss.zoneRGMu.RLock()
+	initial := ss.zoneRGMapGen
+	ss.zoneRGMu.RUnlock()
+
+	ss.SetZoneRGMap(map[uint16]int{})
+	ss.zoneRGMu.RLock()
+	emptyGen := ss.zoneRGMapGen
+	emptyIsNonNil := ss.zoneRGMap != nil
+	ss.zoneRGMu.RUnlock()
+	if !emptyIsNonNil || emptyGen <= initial {
+		t.Fatalf("installed empty map did not advance generation: initial=%d empty=%d nonnil=%v",
+			initial, emptyGen, emptyIsNonNil)
+	}
+
+	if snap := ss.snapshotZoneOwnership(); snap == nil || len(snap.zones) != 0 {
+		t.Fatalf("installed empty map must create an all-unmapped snapshot, got %#v", snap)
+	}
+
+	ss.SetZoneRGMap(nil)
+	ss.zoneRGMu.RLock()
+	nilGen := ss.zoneRGMapGen
+	nilIsNil := ss.zoneRGMap == nil
+	ss.zoneRGMu.RUnlock()
+	if !nilIsNil || nilGen <= emptyGen {
+		t.Fatalf("unwired nil map did not advance generation: empty=%d nil=%d isNil=%v",
+			emptyGen, nilGen, nilIsNil)
+	}
+}
+
 func TestConcurrentSyncWriters(t *testing.T) {
 	// Verify that concurrent writers cannot produce corrupted/interleaved messages.
 	// 5 goroutines write sessions via sendCh, 5 write control messages via writeMsg.

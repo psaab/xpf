@@ -1222,11 +1222,12 @@ const SNATModeOff = 0xFF // source-nat off: match but don't translate
 // (bpf/headers/xpf_common.h) and are stored in SessionValue.Flags (uint16).
 // SessFlagNPTV6 is bit 8, which is why Flags is uint16 and not a byte (#5460).
 const (
-	SessFlagSNAT      = 1 << 0
-	SessFlagDNAT      = 1 << 1
-	SessFlagStaticNAT = 1 << 6
-	SessFlagNAT64     = 1 << 7
-	SessFlagNPTV6     = 1 << 8 // bit 8 -- requires uint16 Flags
+	SessFlagSNAT          = 1 << 0
+	SessFlagDNAT          = 1 << 1
+	SessFlagStaticNAT     = 1 << 6
+	SessFlagNAT64         = 1 << 7
+	SessFlagNPTV6         = 1 << 8 // bit 8 -- requires uint16 Flags
+	SessFlagClusterSynced = 1 << 9 // #10227 peer-synced origin marker
 )
 
 // StaticNATKeyV4 mirrors the C struct static_nat_key_v4.

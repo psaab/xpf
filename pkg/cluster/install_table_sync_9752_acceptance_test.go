@@ -50,8 +50,9 @@ func TestTheInstallTableCrossesTheClusterWire9752(t *testing.T) {
 	if got.TCPCloseClass != 3 {
 		t.Fatalf("TCPCloseClass corrupted: %d", got.TCPCloseClass)
 	}
-	// A peer from before the fields stops eight bytes earlier.
-	_, legacy, ok := decodeSessionV4Payload(payload[:len(payload)-8])
+	// A peer from before the fields stops nine bytes earlier (the new
+	// high-flags trailer is also absent).
+	_, legacy, ok := decodeSessionV4Payload(payload[:len(payload)-9])
 	if !ok {
 		t.Fatal("legacy (truncated) v4 decode failed")
 	}
@@ -60,6 +61,9 @@ func TestTheInstallTableCrossesTheClusterWire9752(t *testing.T) {
 	}
 	if legacy.RoutingDomain != 100007 || legacy.TCPCloseClass != 3 {
 		t.Fatalf("legacy v4 record lost a prefix field: domain=%d class=%d", legacy.RoutingDomain, legacy.TCPCloseClass)
+	}
+	if legacy.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v4 record decoded origin flags=%#x, want clear", legacy.Flags)
 	}
 
 	var val6 dataplane.SessionValueV6

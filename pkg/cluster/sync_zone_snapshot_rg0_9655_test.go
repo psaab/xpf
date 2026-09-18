@@ -6,29 +6,23 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-// #9655, first half. The zone-ownership snapshot a bulk's reconcile judges by
-// is taken at bulk start, and two of its properties were wrong:
+// #9655/#10227: the zone-ownership snapshot a bulk's reconcile judges by is
+// taken at bulk start, and its safety rules cover both failover transitions:
 //
-//   - a zone map installed DURING the bulk left the snapshot judging by
-//     ownership that no longer applied, so a zone moved to this node had its
-//     sessions deleted;
-//   - "no snapshot" and "a snapshot naming no zone" were not distinguished.
-//
-// Both are fixed here. What is NOT fixed here is the issue's headline: a stale
-// peer-owned session in an RG-UNMAPPED zone still survives the reconcile.
-//
-// Answering an unmapped zone the way the live sweep does — RG 0 ownership — was
-// implemented and then withdrawn on measurement. A zone of node-local, non-RETH
-// interfaces is RG-unmapped too, and no cluster-mode commit rule rejects one, so
-// on the RG 0 secondary that answer deletes the node's OWN live flows in such a
-// zone at every bulk; a TCP flow then dies on its next non-SYN packet. Deleting
-// only the SYNCED copy needs a per-session origin bit, which the
-// session_value/HA-wire prerequisite carries. Until then an unmapped zone is
-// kept whole, and this issue stays open for that half.
+//   - a zone map installed DURING the bulk leaves the snapshot judging by the
+//     ownership that applied at bulk start, so a moved zone cannot delete flows
+//     this node now owns;
+//   - a nil zone map takes no snapshot, while an installed empty map is an
+//     authoritative all-unmapped snapshot; origin gating deletes only peer
+//     rows there and preserves promoted/local rows;
+//   - with a non-empty snapshot, a zone it does not name is RG-unmapped. The
+//     dataplane origin bit deletes only peer-synced rows there, while a row
+//     promoted to local ownership during failover survives.
 
 var (
 	staleUnmapped9655 = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 50}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 42000, DstPort: 5201}
 	ownRG1Local9655   = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 2, 1}, Protocol: 6, SrcPort: 3001, DstPort: 22}
+	promotedUnmapped9655 = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 51}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 42001, DstPort: 5201}
 	stalePeerRG9655   = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 5, 77}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 43000, DstPort: 5201}
 )
 
@@ -50,9 +44,10 @@ func emptyWindowSender9655(t *testing.T) *SessionSync {
 func receiver9655(t *testing.T, rg0Primary bool, zoneRG map[uint16]int) (*SessionSync, *mockSweepDP) {
 	t.Helper()
 	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
-		staleUnmapped9655: establishedIn(unmappedZone9655),
-		ownRG1Local9655:   establishedIn(1),
-		stalePeerRG9655:   establishedIn(5),
+		staleUnmapped9655:    {State: dataplane.SessStateEstablished, IngressZone: unmappedZone9655, Flags: dataplane.SessFlagClusterSynced},
+		promotedUnmapped9655: establishedIn(unmappedZone9655),
+		ownRG1Local9655:      establishedIn(1),
+		stalePeerRG9655:      establishedIn(5),
 	}}
 	ss := NewSessionSync(":0", "10.0.0.3:4785", dp)
 	ss.IsPrimaryFn = func() bool { return rg0Primary }
@@ -63,20 +58,20 @@ func receiver9655(t *testing.T, rg0Primary bool, zoneRG map[uint16]int) (*Sessio
 	return ss, dp
 }
 
-// An RG-unmapped zone is NOT judged: its sessions are kept, on either node.
-// This is the withheld half, pinned so the RG 0 answer cannot return without a
-// cell changing — and the cell that changes says why it must not.
+// An RG-unmapped zone is judged only by the per-session origin bit: a stale
+// peer-synced row is removed, while a row promoted to local ownership during
+// failover survives. This is the #10227 failover-with-unmapped-zones repro.
 func TestUnmappedZoneSessionSurvivesTheReconcile_9655(t *testing.T) {
 	rx, dp := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
 	pumpBulk(t, emptyWindowSender9655(t), rx)
-	if _, ok := dp.v4sessions[staleUnmapped9655]; !ok {
-		t.Errorf("#9655: a session in an RG-unmapped zone was reconciled away on the RG 0 secondary. An unmapped " +
-			"zone may be node-local (non-RETH) interfaces, so this deletes the node's OWN live flows at every " +
-			"bulk and a TCP flow dies on its next non-SYN packet. Deleting only the SYNCED copy needs the " +
-			"per-session origin bit")
+	if _, ok := dp.v4sessions[staleUnmapped9655]; ok {
+		t.Errorf("#10227: stale peer-synced row in an RG-unmapped zone survived the reconcile")
+	}
+	if _, ok := dp.v4sessions[promotedUnmapped9655]; !ok {
+		t.Errorf("#10227: failover-promoted local row in an RG-unmapped zone was deleted")
 	}
 	if _, ok := dp.v4sessions[stalePeerRG9655]; ok {
-		t.Errorf("control: the stale session in the peer-owned MAPPED zone was not reconciled, so this fixture is not reconciling at all")
+		t.Errorf("control: the stale session in the peer-owned MAPPED zone was not reconciled")
 	}
 	if _, ok := dp.v4sessions[ownRG1Local9655]; !ok {
 		t.Errorf("this node's own RG 1 session was reconciled away")
@@ -86,49 +81,64 @@ func TestUnmappedZoneSessionSurvivesTheReconcile_9655(t *testing.T) {
 func TestUnmappedZoneSessionIsKeptOnTheRG0Primary_9655(t *testing.T) {
 	rx, dp := receiver9655(t, true, map[uint16]int{1: 1, 5: 5})
 	pumpBulk(t, emptyWindowSender9655(t), rx)
-	if _, ok := dp.v4sessions[staleUnmapped9655]; !ok {
-		t.Errorf("#9655: a session in an RG-unmapped zone was deleted on the RG 0 primary. The zone is not judged " +
-			"at all now, so the answer must not depend on which node runs the reconcile")
+	if _, ok := dp.v4sessions[staleUnmapped9655]; ok {
+		t.Errorf("#10227: stale peer-synced row in an RG-unmapped zone survived on the RG 0 primary")
+	}
+	if _, ok := dp.v4sessions[promotedUnmapped9655]; !ok {
+		t.Errorf("#10227: failover-promoted local row in an RG-unmapped zone was deleted on the RG 0 primary")
 	}
 	if _, ok := dp.v4sessions[stalePeerRG9655]; ok {
 		t.Errorf("control: the stale session in the peer-owned mapped zone was not reconciled")
 	}
 }
 
-// A snapshot that names NO zone judges nothing, whether the map was never
-// installed (nil) or installed naming no zone (buildZoneRGMap's empty map). Both
-// skip, so every session is kept — including, deliberately, the stale one.
-// TestReconcileSkipsNonEmptyBulkWithoutZoneSnapshot keeps the nil guard from
-// master; this cell adds the installed-empty case beside it.
+// An unwired nil map still takes no snapshot. An installed empty map is an
+// all-unmapped snapshot: #10227's origin gate removes stale peer-synced rows
+// but keeps promoted/local rows.
 func TestAZoneMapNamingNoZoneSkipsTheReconcile_9655(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		zoneRG map[uint16]int
+		name    string
+		zoneRG  map[uint16]int
+		nilSnap bool
 	}{
-		{"installed but naming no zone", map[uint16]int{}},
-		{"never installed", nil},
+		{"installed but naming no zone", map[uint16]int{}, false},
+		{"never installed", nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rx, dp := receiver9655(t, false, tc.zoneRG)
-			// THE PROPERTY: no snapshot is taken at all. Asserting only that
-			// nothing was deleted cannot see this — with an empty snapshot every
-			// zone falls to shouldSync's unnamed-zone default, which KEEPS, so a
-			// bulk that wrongly snapshots deletes nothing either and the cell
-			// passes for the wrong reason.
-			if snap := rx.snapshotZoneOwnership(); snap != nil {
-				t.Errorf("#9655: a zone map naming no zone produced a snapshot (%d zones, mapGen %d); the "+
-					"reconcile must take none and skip, so the next bulk can judge by a real map",
-					len(snap.zones), snap.mapGen)
+			snap := rx.snapshotZoneOwnership()
+			if tc.nilSnap {
+				if snap != nil {
+					t.Fatalf("#9655: nil zone map produced a snapshot (%d zones, mapGen %d)",
+						len(snap.zones), snap.mapGen)
+				}
+			} else if snap == nil || len(snap.zones) != 0 {
+				t.Fatalf("#10227: installed empty zone map must produce an all-unmapped snapshot, got %#v", snap)
 			}
 			pumpBulk(t, emptyWindowSender9655(t), rx)
-			for what, key := range map[string]dataplane.SessionKey{
-				"the session in an RG-unmapped zone": staleUnmapped9655,
-				"the session in the mapped zone 5":   stalePeerRG9655,
-				"this node's own RG 1 session":       ownRG1Local9655,
-			} {
-				if _, ok := dp.v4sessions[key]; !ok {
-					t.Errorf("#9655: %s was reconciled away, but the snapshot named no zone: there is nothing to "+
-						"judge ownership by, so the bulk must delete nothing and let the next one try", what)
+			if tc.nilSnap {
+				for what, key := range map[string]dataplane.SessionKey{
+					"the peer-synced row in an RG-unmapped zone": staleUnmapped9655,
+					"the promoted row in an RG-unmapped zone":     promotedUnmapped9655,
+					"the session in the mapped zone 5":            stalePeerRG9655,
+					"this node's own RG 1 session":                ownRG1Local9655,
+				} {
+					if _, ok := dp.v4sessions[key]; !ok {
+						t.Errorf("#9655: %s was reconciled away without a zone snapshot", what)
+					}
+				}
+			} else {
+				if _, ok := dp.v4sessions[staleUnmapped9655]; ok {
+					t.Error("#10227: empty all-unmapped snapshot kept stale peer-synced row")
+				}
+				for what, key := range map[string]dataplane.SessionKey{
+					"the promoted row in an RG-unmapped zone": promotedUnmapped9655,
+					"the session in the mapped zone 5":         stalePeerRG9655,
+					"this node's own RG 1 session":             ownRG1Local9655,
+				} {
+					if _, ok := dp.v4sessions[key]; !ok {
+						t.Errorf("#10227: empty all-unmapped snapshot deleted %s", what)
+					}
 				}
 			}
 		})

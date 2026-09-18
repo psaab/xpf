@@ -205,6 +205,15 @@ struct icmp6hdr {
 #define SESS_FLAG_STATIC_NAT   (1 << 6)
 #define SESS_FLAG_NAT64        (1 << 7)
 #define SESS_FLAG_NPTV6        (1 << 8)   /* bit 8 -- requires __u16 flags */
+/* #10227 (#9655 second half): set on a row installed from a cluster peer
+ * (Go putClusterSynced* or userspace publish with a peer origin). Fresh local
+ * installs clear it, and promotion clears it with a read/modify/write, so the
+ * bit records the row's current provenance: set means peer-synced, clear means
+ * locally authoritative (or legacy). The cluster wire carries it as a
+ * trailing length-gated high-flags byte (the #5460 prescription); the
+ * receiver stamps it at install and bulk reconcile deletes a stale row only
+ * when it is set, so a genuinely local row is never reconciled away. */
+#define SESS_FLAG_CLUSTER_SYNCED (1 << 9)
 
 /* pkt_meta.meta_flags bits */
 #define META_FLAG_EMBEDDED_ICMP      (1 << 0)

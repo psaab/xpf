@@ -32,6 +32,8 @@ use super::super::*;
 pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -53,6 +55,14 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
             else {
                 continue;
             };
+            // Demotion retags a local owner as SyncImport, so the receiver
+            // mirror must become peer-synced without rebuilding its row.
+            crate::afxdp::bpf_map::update_session_cluster_synced_origin(
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &demoted_key,
+                true,
+            );
             let flow = SessionFlow {
                 src_ip: demoted_key.src_ip,
                 dst_ip: demoted_key.dst_ip,

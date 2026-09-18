@@ -609,6 +609,67 @@ fn build_conntrack_value_stamps_stable_session_id_v6() {
     );
 }
 
+#[test]
+fn publish_conntrack_records_origin_bit_10227() {
+    let key = plain_key();
+    let decision = local_delivery_decision(0);
+    let metadata = synced_forward_metadata();
+    let zone_ids = FastMap::default();
+    for (origin, want_cluster_synced) in [
+        (SessionOrigin::SyncImport, true),
+        (SessionOrigin::SharedMaterialize, true),
+        (SessionOrigin::WorkerLocalImport, false),
+        (SessionOrigin::ForwardFlow, false),
+        (SessionOrigin::SharedPromote, false),
+    ] {
+        let _guard = take_conntrack_publish_guard();
+        publish_bpf_conntrack_entry(
+            -1,
+            -1,
+            &key,
+            decision,
+            &metadata,
+            &zone_ids,
+            0,
+            0,
+            0,
+            0,
+            origin,
+        );
+        let records = conntrack_publishes();
+        assert_eq!(records.len(), 1, "origin={origin:?}");
+        assert_eq!(
+            records[0].cluster_synced, want_cluster_synced,
+            "origin={origin:?}"
+        );
+    }
+}
+
+#[test]
+fn cluster_synced_origin_flip_preserves_v4_v6_flags_10227() {
+    let preserved = SESS_FLAG_SNAT | SESS_FLAG_DNAT | (1u16 << 8) | (1u16 << 15);
+    for peer_synced in [false, true] {
+        let expected = if peer_synced {
+            preserved | SESS_FLAG_CLUSTER_SYNCED
+        } else {
+            preserved & !SESS_FLAG_CLUSTER_SYNCED
+        };
+        let mut v4: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+        v4.flags = cluster_synced_flags(v4.flags | preserved, peer_synced);
+        assert_eq!(
+            v4.flags, expected,
+            "v4 origin flip must preserve unrelated flag bits (peer={peer_synced})"
+        );
+
+        let mut v6: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+        v6.flags = cluster_synced_flags(v6.flags | preserved, peer_synced);
+        assert_eq!(
+            v6.flags, expected,
+            "v6 origin flip must preserve unrelated flag bits (peer={peer_synced})"
+        );
+    }
+}
+
 // #5287 FAIL-ON-REVERT: `refresh_bpf_conntrack_last_seen` is an INCREMENTAL,
 // budgeted slice — NOT a full-table pass. It must advance a persistent cursor
 // by at most `budget` slab slots per call and resume across calls, so no single
@@ -710,6 +771,39 @@ fn refresh_bpf_conntrack_last_seen_is_budgeted_across_slices() {
     assert!(
         slices > 1,
         "full table must span more than one budgeted slice, got {slices}"
+    );
+}
+
+// #10227 FAIL-ON-REVERT: refresh writeback must normalize bit 9 from the live
+// origin rather than replaying the lookup value read before a promotion.
+#[test]
+fn refresh_normalizes_origin_bit_for_v4_v6_10227() {
+    let preserved = SESS_FLAG_SNAT | SESS_FLAG_DNAT | (1u16 << 8) | (1u16 << 15);
+    let initial = preserved | SESS_FLAG_CLUSTER_SYNCED;
+    for origin in [
+        SessionOrigin::SyncImport,
+        SessionOrigin::SharedMaterialize,
+        SessionOrigin::WorkerLocalImport,
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::SharedPromote,
+    ] {
+        let expected = if origin.is_cluster_synced_origin() {
+            initial
+        } else {
+            initial & !SESS_FLAG_CLUSTER_SYNCED
+        };
+        let mut v4: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+        v4.flags = refresh_cluster_synced_flags(v4.flags | initial, Some(origin));
+        assert_eq!(v4.flags, expected, "v4 origin={origin:?}");
+
+        let mut v6: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+        v6.flags = refresh_cluster_synced_flags(v6.flags | initial, Some(origin));
+        assert_eq!(v6.flags, expected, "v6 origin={origin:?}");
+    }
+    assert_eq!(
+        refresh_cluster_synced_flags(initial, None),
+        initial,
+        "missing origin must not rewrite an occupied row"
     );
 }
 

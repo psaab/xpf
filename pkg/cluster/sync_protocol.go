@@ -128,9 +128,10 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// #7188 TunnelDiscriminator. All length-gated: an old decoder stops after
 	// the field it knows and ignores the rest.
 	// #7239 RoutingDomain (4) and #9412 TCPCloseClass (1) ride behind the
-	// fields above, then #9752 InstallTableDomain+Check (4+4). Over-allocating
-	// is harmless: the result is buf[:off].
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8)
+	// fields above, then #9752 InstallTableDomain+Check (4+4), and #10227
+	// high SessionValue.Flags (1). Over-allocating is harmless: the result is
+	// buf[:off].
+	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -144,12 +145,10 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	off += 4
 	buf[off] = val.State
 	off++
-	// #5460: SessionValue.Flags is uint16, but the HA sync wire carries only the
-	// low byte here. All SESS_FLAG_* bits currently set on a session are 0-7
-	// (SNAT..NAT64); bit 8 (SessFlagNPTV6) is never set today, so truncating to a
-	// byte is loss-free. If session-level NPTv6 flagging is ever added, carry the
-	// high byte as a trailing length-gated field (like Generation) rather than
-	// widening this fixed-offset byte in place — that would be a wire flag-day.
+	// #5460/#10227: SessionValue.Flags is uint16. The fixed-offset wire byte
+	// carries bits 0-7; the trailing length-gated byte written below carries
+	// bits 8-15. Keep the low byte at this offset for mixed-version peers and
+	// append new high-byte flags rather than widening the fixed layout.
 	buf[off] = byte(val.Flags)
 	off++
 	buf[off] = val.TCPState
@@ -284,6 +283,13 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	off += 4
 	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableCheck)
 	off += 4
+	// #10227: high SessionValue.Flags, length-gated after the existing
+	// install-table trailer. Old decoders stop before this byte; a new decoder
+	// reading an old payload defaults the high byte to zero. This preserves the
+	// mixed-version-safe default (legacy rows are treated as peer-owned by the
+	// receiver install path, while the map bit is never guessed on decode).
+	buf[off] = byte(val.Flags >> 8)
+	off++
 	return buf[:off]
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
@@ -309,12 +315,10 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	off += 4
 	buf[off] = val.State
 	off++
-	// #5460: SessionValue.Flags is uint16, but the HA sync wire carries only the
-	// low byte here. All SESS_FLAG_* bits currently set on a session are 0-7
-	// (SNAT..NAT64); bit 8 (SessFlagNPTV6) is never set today, so truncating to a
-	// byte is loss-free. If session-level NPTv6 flagging is ever added, carry the
-	// high byte as a trailing length-gated field (like Generation) rather than
-	// widening this fixed-offset byte in place — that would be a wire flag-day.
+	// #5460/#10227: SessionValue.Flags is uint16. The fixed-offset wire byte
+	// carries bits 0-7; the trailing length-gated byte written below carries
+	// bits 8-15. Keep the low byte at this offset for mixed-version peers and
+	// append new high-byte flags rather than widening the fixed layout.
 	buf[off] = byte(val.Flags)
 	off++
 	buf[off] = val.TCPState
@@ -432,8 +436,7 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	off += 4
 	// #9412: the TCP close class (u8), length-gated after the routing domain.
 	// 0 = not carried or not closing. A decoder that predates this byte stops
-	// after RoutingDomain and imports the session exactly as before. Like every
-	// trailing field since #2170 it does NOT bump SessionSyncWireVersion.
+	// after RoutingDomain and imports the session exactly as before.
 	buf[off] = val.TCPCloseClass
 	off++
 	// #9752: the installing-table identity (domain u32 LE + check u32 LE),
@@ -445,6 +448,11 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	off += 4
 	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableCheck)
 	off += 4
+	// #10227: high SessionValue.Flags, length-gated after the existing
+	// install-table trailer. Old decoders stop before this byte; a new decoder
+	// reading an old payload defaults the high byte to zero.
+	buf[off] = byte(val.Flags >> 8)
+	off++
 	return buf[:off]
 }
 
@@ -580,8 +588,8 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 	}
 	val.State = payload[off]
 	off++
-	// #5460: low byte only — see the encoder. Flags is uint16; the high byte
-	// (bits >=8, SessFlagNPTV6) is not carried on the wire and defaults to 0.
+	// #5460/#10227: the fixed-offset byte carries bits 0-7; the optional
+	// trailing byte after the complete extension trailer restores bits 8-15.
 	val.Flags = uint16(payload[off])
 	off++
 	val.TCPState = payload[off]
@@ -742,10 +750,16 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 	}
 	// #9752: length-gated trailing installing-table identity. Absent => (0,0)
 	// (default table), which is what a peer predating these bytes sends.
+	// #10227: high SessionValue.Flags follows only after the complete table
+	// trailer. A partial legacy tail cannot be reinterpreted as origin bits.
 	if off+8 <= len(payload) {
 		val.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
 		val.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
 		off += 8
+		if off+1 <= len(payload) {
+			val.Flags |= uint16(payload[off]) << 8
+			off++
+		}
 	}
 	return key, val, true
 }
@@ -774,8 +788,8 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 	}
 	val.State = payload[off]
 	off++
-	// #5460: low byte only — see the encoder. Flags is uint16; the high byte
-	// (bits >=8, SessFlagNPTV6) is not carried on the wire and defaults to 0.
+	// #5460/#10227: the fixed-offset byte carries bits 0-7; the optional
+	// trailing byte after the complete extension trailer restores bits 8-15.
 	val.Flags = uint16(payload[off])
 	off++
 	val.TCPState = payload[off]
@@ -922,10 +936,16 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 	}
 	// #9752: length-gated trailing installing-table identity. Absent => (0,0)
 	// (default table), which is what a peer predating these bytes sends.
+	// #10227: high SessionValue.Flags follows only after the complete table
+	// trailer. A partial legacy tail cannot be reinterpreted as origin bits.
 	if off+8 <= len(payload) {
 		val.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
 		val.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
 		off += 8
+		if off+1 <= len(payload) {
+			val.Flags |= uint16(payload[off]) << 8
+			off++
+		}
 	}
 	return key, val, true
 }
