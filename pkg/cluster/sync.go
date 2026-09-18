@@ -2140,19 +2140,20 @@ func (s *SessionSync) WaitForIdle(timeout time.Duration, stableSamples int, samp
 type zoneOwnershipSnapshot struct {
 	// zones is ShouldSyncZone's answer for each zone the zone->RG map names.
 	zones map[uint16]bool
+	// fallbackPrimary is the RG 0 IsPrimaryFn answer captured at bulk start.
+	// Zones absent from the map use this answer, matching live ShouldSyncZone.
+	fallbackPrimary bool
 	// mapGen is the zone->RG map generation the snapshot was taken from.
 	mapGen uint64
 }
 
 // shouldSync reports whether a zone's sessions are KEPT by this reconcile. It
-// answers from the zone->RG map the bulk started with. An unmapped zone is not
-// assigned an RG answer here: the dataplane reconcile uses the per-session
-// origin bit to delete only peer-synced rows there (#10227/#9655).
+// answers from the zone->RG map and RG 0 fallback the bulk started with.
 func (z *zoneOwnershipSnapshot) shouldSync(zoneID uint16) bool {
 	if v, ok := z.zones[zoneID]; ok {
 		return v
 	}
-	return false
+	return z.fallbackPrimary
 }
 
 // isMapped reports whether the zone was named by the same ownership snapshot.
@@ -2170,13 +2171,20 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	s.zoneRGMu.RUnlock()
 	// #9655/#10227: an unwired nil zone map has no ownership answers, so it
 	// takes no snapshot and the bulk skips. An installed empty map is different:
-	// it is an authoritative all-unmapped snapshot, and #10227's origin gate
-	// lets the dataplane delete only peer-synced rows while preserving promoted
-	// local rows.
+	// it is an authoritative all-unmapped snapshot. Capture the RG 0 fallback
+	// once here so absent zones agree with live ShouldSyncZone for this bulk.
 	if m == nil {
 		return nil
 	}
-	snap := &zoneOwnershipSnapshot{zones: make(map[uint16]bool, len(m)), mapGen: gen}
+	fallbackPrimary := false
+	if s.IsPrimaryFn != nil {
+		fallbackPrimary = s.IsPrimaryFn()
+	}
+	snap := &zoneOwnershipSnapshot{
+		zones:          make(map[uint16]bool, len(m)),
+		fallbackPrimary: fallbackPrimary,
+		mapGen:         gen,
+	}
 	for zoneID := range m {
 		snap.zones[zoneID] = s.ShouldSyncZone(zoneID)
 	}
@@ -2238,9 +2246,9 @@ func (s *SessionSync) reconcileStaleSessions() {
 		return
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map
-	// does not name is not judged; see zoneOwnershipSnapshot.shouldSync for why
-	// #10227: for unmapped zones the dataplane origin bit is the only
-	// authority; mapped zones retain the existing RG ownership answer.
+	// does not name uses the captured RG 0 fallback.
+	// #10227: when that absent-zone answer is false, the dataplane origin bit
+	// preserves local rows while allowing stale peer-synced rows to be deleted.
 	shouldSyncAtBulkStart := zoneSnap.shouldSync
 	isZoneMappedAtBulkStart := zoneSnap.isMapped
 	var deleted int
