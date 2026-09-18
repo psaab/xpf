@@ -524,7 +524,7 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// stay reachable — nft falls through any rule that carries no verdict. With
 	// no honored modifier the term contributes nothing: return no rule (the
 	// pre-#3445 behavior), which keeps the subsequent terms reachable.
-	if (term.NextTerm || term.Action == "") && term.RoutingInstance == "" {
+	if term.Action == "" && term.RoutingInstance == "" {
 		if modStr == "" {
 			return nil
 		}
