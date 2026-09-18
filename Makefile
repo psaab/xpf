@@ -965,6 +965,16 @@ test-wire-conntrack-lifecycle:
 test-wire-conntrack-lifecycle-lib:
 	./test/incus/wire-conntrack-lifecycle.sh --selftest
 
+.PHONY: test-wg-interop
+# #10118 / #1736: independent kernel-WireGuard interop gate. The harness
+# owns the shared-cluster lock discipline; harness-result records its
+# PASS/FAIL/VOID envelope and keeps the gate in the ledger census.
+test-wg-interop:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-wg-interop --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wg-interop.sh all
+
+
 # #1922 rollback functional gate, both arms (#9531 adds Arm B). Two wrapper
 # invocations in one recipe — Arm B runs even if Arm A fails (rc captured,
 # not short-circuited), because on exactly the broken-revert runs Arm B's

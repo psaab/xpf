@@ -19,6 +19,7 @@ test-private-rg no rows in the tracked ledger; needs a recorded private-RG elect
 test-restart-connectivity no rows in the tracked ledger; needs a recorded daemon-restart run (cluster + iperf3 server)
 test-stress-failover no rows in the tracked ledger; needs a recorded stress-failover run (cluster + iperf3 server)
 test-wire-properties no rows in the tracked ledger; needs a recorded run (read gate, hermetic wrap)
+test-wg-interop no rows in the tracked ledger; needs a measured #10118 independent-kernel-WireGuard run on the loss userspace cluster (PASS expected after deploying this branch)
 wire_appmatch_twins no rows in the tracked ledger; needs a recorded run of the #9531 appmatch-twins gate on the loss cluster
 wire_policy_deny no rows in the tracked ledger; needs a recorded run of the #9531 wire-deny gate on the loss cluster
 wire_hostinbound_deny no rows in the tracked ledger; needs a recorded run of the #10029 host-inbound deny gate on the loss cluster
