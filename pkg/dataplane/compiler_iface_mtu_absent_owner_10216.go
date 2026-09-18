@@ -16,8 +16,9 @@ import (
 // present; an interface legitimately absent on this chassis has no operator
 // statement to diagnose. Explicit interface- or unit-level MTUs are different:
 // they are configuration promises and must be surfaced when no device can
-// receive them.
-func recordAbsentInterfaceMTU10216(result *CompileResult, pd *physDesired, physName, cfgName string) {
+// receive them. presenceKnown is false when netdev enumeration failed, so the
+// detail must not claim the interface is absent in that case.
+func recordAbsentInterfaceMTU10216(result *CompileResult, pd *physDesired, physName, cfgName string, presenceKnown bool) {
 	if result == nil || pd == nil || physName == "" || cfgName == "" {
 		return
 	}
@@ -25,10 +26,15 @@ func recordAbsentInterfaceMTU10216(result *CompileResult, pd *physDesired, physN
 		return
 	}
 
-	detail := fmt.Sprintf("configured MTU %d could not be reconciled: netdev %s is absent; no owner can apply it",
-		pd.mtu, physName)
-	slog.Warn("configured interface MTU has no owner; recording unconverged state",
-		"interface", physName, "config", cfgName, "mtu", pd.mtu, "err", "netdev absent", "issue", "#10216")
+	status := fmt.Sprintf("netdev %s is absent; no owner can apply it", physName)
+	if !presenceKnown {
+		status = fmt.Sprintf("netdev %s lookup failed; presence is unknown and no owner can verify it", physName)
+	}
+	detail := fmt.Sprintf("configured MTU %d could not be reconciled: %s",
+		pd.mtu, status)
+	slog.Warn("configured interface MTU could not be reconciled",
+		"interface", physName, "config", cfgName, "mtu", pd.mtu,
+		"presence_known", presenceKnown, "issue", "#10216")
 	result.recordMTUUnconverged(MTUUnconverged{
 		Name:          physName,
 		ConfigRef:     cfgName,

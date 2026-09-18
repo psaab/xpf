@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,46 @@ func TestFabricConfiguredMTUAboveFloorIsAppliedAndVerified_10216(t *testing.T) {
 	}
 	if lookups != 1 {
 		t.Fatalf("fresh MTU readback lookups = %d, want exactly 1", lookups)
+	}
+}
+
+// TestFabricMTUDecreaseLowersOverlayBeforeParent_10216 protects the reverse
+// transition. A parent cannot be lowered below an attached IPVLAN's current
+// MTU, so parent-first ordering can strand a 9500 overlay when the target
+// returns to the 9000 floor.
+func TestFabricMTUDecreaseLowersOverlayBeforeParent_10216(t *testing.T) {
+	parent := &fakeFabricLink{attrs: netlink.LinkAttrs{Name: "ge-0-0-0", Index: 10, MTU: 9500}}
+	overlay := &fakeFabricLink{attrs: netlink.LinkAttrs{Name: "fab0", ParentIndex: 10, MTU: 9500}}
+	var writes []string
+	oldLookup, oldSet := fabricLinkByName10216, fabricLinkSetMTU10216
+	links := map[string]netlink.Link{"ge-0-0-0": parent, "fab0": overlay}
+	fabricLinkByName10216 = func(name string) (netlink.Link, error) {
+		link, ok := links[name]
+		if !ok {
+			return nil, errors.New("no such device")
+		}
+		return link, nil
+	}
+	fabricLinkSetMTU10216 = func(link netlink.Link, mtu int) error {
+		name := link.Attrs().Name
+		writes = append(writes, name)
+		if name == "ge-0-0-0" && mtu < link.Attrs().MTU && overlay.Attrs().MTU > mtu {
+			return errors.New("parent MTU cannot undercut IPVLAN")
+		}
+		link.Attrs().MTU = mtu
+		return nil
+	}
+	t.Cleanup(func() { fabricLinkByName10216, fabricLinkSetMTU10216 = oldLookup, oldSet })
+
+	if err := reconcileFabricMTUPair10216("ge-0-0-0", parent, "fab0", overlay, 9000); err != nil {
+		t.Fatalf("reconcileFabricMTUPair10216: %v", err)
+	}
+	if want := []string{"fab0", "ge-0-0-0"}; !reflect.DeepEqual(writes, want) {
+		t.Fatalf("MTU write order = %v, want %v", writes, want)
+	}
+	if parent.Attrs().MTU != 9000 || overlay.Attrs().MTU != 9000 {
+		t.Fatalf("transition MTUs = parent %d, overlay %d; want both 9000",
+			parent.Attrs().MTU, overlay.Attrs().MTU)
 	}
 }
 

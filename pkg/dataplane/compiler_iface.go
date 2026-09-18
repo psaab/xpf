@@ -761,9 +761,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// that promise with no writer. Keep the compile soft (the existing
 		// absent-interface policy is intentional), but publish the MTU
 		// divergence so commit/show surfaces a reconcile-or-reject diagnostic.
-		if !missing.StillForwarding {
-			recordAbsentInterfaceMTU10216(result, st.physDesired[physName], physName, cfgName)
-		}
+		recordAbsentInterfaceMTU10216(result, st.physDesired[physName], physName, cfgName, !missing.StillForwarding)
 		return nil
 	}
 
