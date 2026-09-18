@@ -766,30 +766,27 @@ packet handlers, and MIB view that call into them.
   forms with one shared snapshot. `ifSnapshot` is not safe for concurrent use;
   each request builds its own. Fail-on-revert guard:
   `TestV2cGetBulk_SingleLinkListPerPDU`.
-- **The Serve loop budgets requests per source IP (#9917 F-139).** The loop
-  stays strictly serial — which is what keeps the `lastPacket` v3-auth pattern
-  safe — so one fast manager or valid-credential flood would otherwise stall
-  all polling. Each source gets 100 requests/second sustained with a 200 burst
-  (`snmpServeBudget`, checked before any MIB work, so shed requests cost no
-  LinkList snapshot); the excess sheds silently, as with unknown-community
+- **The Serve loop budgets requests per source IP (#9917 F-139, #10113).** The
+  loop stays strictly serial — which is what keeps the `lastPacket` v3-auth
+  pattern safe — so one fast manager or valid-credential flood would otherwise
+  stall all polling. Each source gets 100 requests/second sustained with a 200
+  burst (`snmpServeBudget`, checked before any MIB work, so shed requests cost
+  no LinkList snapshot); the excess sheds silently, as with unknown-community
   drops. Shed is silent rather than `tooBig` because a `tooBig` reply costs a
   decode plus near-full USM framing for v3, defeating the shed. Admitted
-  requests are additionally debited their loop time at 10x, so a source
-  feeding back-to-back expensive PDUs converges to ~1/10 of loop share
-  instead of replenishing its token while the loop is busy with its own
-  request; cheap polls are dominated by the admission token instead. A global
-  backstop (2000/s + 4000 burst, expensive aggregate charged at 2x toward
-  ~1/2 of loop share) bounds what rotating-spoof floods — one fresh bucket
-  per packet — can take. At most 1024 sources are tracked; past the cap a
-  newcomer displaces a random incumbent, so no refreshed set of entries can
-  lock legitimate managers out and no scan ever runs per packet. Typical
-  polls cost microseconds, so legitimate polling and walk bursts pass
-  untouched. Residual, documented not fixed: within the global half the loop
-  is first-come FIFO, so N distinct expensive sources split it with no
-  fairness guarantee (#10113 tracks fair-share scheduling); a flood that
-  saturates the socket buffer ahead of userspace is likewise out of reach;
-  and per-source fairness assumes non-spoofed sources — spoofed-rotating
-  floods are bounded only by the global aggregate.
+  requests are additionally debited their loop time at 10x; once N expensive
+  sources are active, each source's service charge scales to `max(10, 2N)`,
+  so they converge to equal ~1/(2N) shares of the global half rather than
+  racing FIFO. The global backstop remains on every admission (2000/s + 4000
+  burst, aggregate service charged at 2x); when it is empty, admitted sources
+  yield the next credit to a newcomer that has already reached userspace.
+  Pending/expensive state expires after one second via a bounded sweep, and at
+  most 1024 sources are tracked; past the cap a newcomer displaces a random
+  incumbent. Typical polls cost microseconds and remain on the ordinary
+  admission factor, so legitimate polling and walk bursts pass untouched.
+  This bounds userspace multi-source FIFO unfairness (#10113); a flood that
+  saturates the socket buffer ahead of userspace is likewise out of reach,
+  and spoofed-rotating floods remain bounded by the global aggregate.
 - **Trap delivery is asynchronous and bounded (#2991).** Link-state traps
   are emitted from the daemon's netlink link-monitor goroutine.
   `sendLinkTraps` builds the v2c packet on the caller's goroutine (cheap,
