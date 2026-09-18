@@ -5398,6 +5398,63 @@ fn update_neighbors_none_without_replace_is_noop_5864() {
     );
 }
 
+// #10035: manager-neighbor ACKs need an explicit outcome bit because a
+// generation-equal fence returns the same applied-generation counter as a
+// successful replace.
+#[test]
+fn update_neighbors_response_distinguishes_apply_and_exact_fence_10035() {
+    let state = new_state(ProcessStatus::default());
+    let target = crate::NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet".to_string(),
+        ip: "10.0.0.1".to_string(),
+        mac: "02:00:00:00:00:01".to_string(),
+        state: "REACHABLE".to_string(),
+        ..crate::NeighborSnapshot::default()
+    };
+
+    let mut applied = req("update_neighbors");
+    applied.neighbor_replace = true;
+    applied.neighbor_generation = 7;
+    applied.neighbors = Some(vec![target.clone()]);
+    let applied_response = run_request(state.clone(), applied);
+    assert!(applied_response.ok, "applied replace failed: {}", applied_response.error);
+    assert_eq!(
+        applied_response
+            .status
+            .as_ref()
+            .and_then(|status| status.neighbor_replace_applied),
+        Some(true),
+        "an accepted replace must carry an explicit applied=true outcome"
+    );
+
+    let mut fenced = req("update_neighbors");
+    fenced.neighbor_replace = true;
+    fenced.neighbor_generation = 7;
+    let mut changed = target;
+    changed.mac = "02:00:00:00:00:02".to_string();
+    fenced.neighbors = Some(vec![changed]);
+    let fenced_response = run_request(state, fenced);
+    assert!(fenced_response.ok, "fenced replace failed: {}", fenced_response.error);
+    assert_eq!(
+        fenced_response
+            .status
+            .as_ref()
+            .and_then(|status| status.neighbor_replace_applied),
+        Some(false),
+        "an exact-match fence must carry an explicit applied=false outcome"
+    );
+    assert_eq!(
+        fenced_response
+            .status
+            .as_ref()
+            .map(|status| status.manager_neighbor_generation),
+        Some(7),
+        "fenced ACK must retain the applied generation"
+    );
+}
+
 // -------------------------------------------------------------
 // #5294: a state-file write failure must NOT lose a drained
 // session-delta batch (pop-then-fallible-write transactionality).

@@ -35,6 +35,7 @@ type fenceHook9696 struct {
 	mu           sync.Mutex
 	mode         string
 	fixed        uint64
+	applied      *bool
 	fibErr       error
 	fibSeen      int
 	neighborGens []uint64
@@ -51,7 +52,11 @@ func (h *fenceHook9696) hook(req ControlRequest, status *ProcessStatus) error {
 			ack = req.NeighborGeneration
 		}
 		if status != nil {
-			*status = ProcessStatus{PID: 4321, ManagerNeighborGeneration: ack}
+			*status = ProcessStatus{
+				PID:                      4321,
+				ManagerNeighborGeneration: ack,
+				NeighborReplaceApplied:   h.applied,
+			}
 		}
 		return nil
 	case "bump_fib_generation":

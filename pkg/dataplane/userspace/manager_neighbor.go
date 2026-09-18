@@ -37,6 +37,19 @@ func (m *Manager) seedNeighborReplaceGenerationLocked(appliedGeneration uint64) 
 	}
 }
 
+// neighborReplaceWasFenced reports whether an update_neighbors response says
+// the sent replace did not apply. The explicit bit closes #10035: an
+// exact-match fence has the same applied-generation ACK as success, so ACK
+// equality alone cannot classify it. A missing bit is the additive
+// mixed-version fallback; #9696's nonzero ACK mismatch remains a fence.
+func neighborReplaceWasFenced(status *ProcessStatus, sentGeneration uint64) bool {
+	if status.NeighborReplaceApplied != nil && !*status.NeighborReplaceApplied {
+		return true
+	}
+	return status.ManagerNeighborGeneration != 0 &&
+		status.ManagerNeighborGeneration != sentGeneration
+}
+
 // rebuildNeighborIndex updates m.neighborIndex from the current
 // m.lastSnapshot.Neighbors slice. Caller MUST hold m.mu. Called
 // after every assignment to lastSnapshot.Neighbors.
@@ -116,16 +129,13 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 		m.recordPartialUpdateFailureLocked(partialNeighbors, err)
 		return
 	}
-	// #6034/#9696: retain retry debt if the helper did not acknowledge applying
-	// this replace generation. A helper that supports the ACK echoes the
-	// applied generation. An ACK above `gen` identifies a #6034 fence: the
-	// helper is ahead and kept what it had, so we leave the cached neighbor
-	// view untouched and the next regeneration re-diffs and retries with a
-	// strictly higher generation. An ACK below `gen` is unexpected from the
-	// current helper (its fence always ACKs >= gen) and is handled
-	// defensively the same way. An ACK of 0 means an older helper without
-	// ACK support — assume applied (preserves pre-#6034 behavior).
-	if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration != gen {
+	// #6034/#9696/#10035: retain retry debt if the helper did not acknowledge
+	// applying this replace generation. A present false outcome bit identifies
+	// a fence even when its ACK equals `gen` (the exact-match case); a present
+	// true bit proves the replace applied. A missing bit is the additive
+	// mixed-version fallback, where #9696's nonzero ACK mismatch still fences
+	// and ACK 0 still means "assume applied" for an older helper.
+	if neighborReplaceWasFenced(&status, gen) {
 		m.seedNeighborReplaceGenerationLocked(status.ManagerNeighborGeneration)
 		slog.Warn("userspace: neighbor regeneration not acknowledged; retaining retry debt",
 			"sent_generation", gen,
@@ -134,19 +144,18 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 	}
 	m.lastSnapshot.Neighbors = newNeighbors
 	m.rebuildNeighborIndex() // #1197 (after publish success)
-	// #9684/#9696: the fence arm above handled every nonzero ACK other than
-	// gen, so a nonzero ACK here means exactly gen — which proves this replace
-	// applied (modulo the exact-match residual: a pre-seed gen == applied is
-	// fenced helper-side yet ACKs == gen; structurally closed in-tree). An ACK
-	// of 0 is a helper without the ACK.
+	// #9684/#9696/#10035: after the fence helper above, this path represents
+	// either an explicit applied=true outcome or a legacy response with ACK 0
+	// / exact ACK equality. The explicit bit closes the exact-match ambiguity;
+	// a missing bit retains the additive #9696 compatibility fallback.
+	// Advance publishedSnapshot + refresh lastSnapshotHash so the status loop
+	// does not see the bumped generation as unpublished and force a redundant
+	// apply_snapshot, and so churn in filtered-out rows cannot leak through
+	// hash-dedup.
+	//
 	if status.ManagerNeighborGeneration == 0 || status.ManagerNeighborGeneration == gen {
 		m.resolvePartialOutcomesLocked(partialNeighbors)
 	}
-	// Copilot review: advance publishedSnapshot + refresh lastSnapshotHash,
-	// so the status loop does not see the bumped generation as unpublished and
-	// force a redundant apply_snapshot, and churn in filtered-out rows cannot
-	// leak through hash-dedup.
-	//
 	// #6986: both of those only when the full snapshot ALREADY was published.
 	// update_neighbors is a PARTIAL update — the helper does not have the rest
 	// of this generation's content — so claiming "published" over a
