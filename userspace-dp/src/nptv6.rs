@@ -6,19 +6,29 @@
 //!
 //! Translation algorithm:
 //! - Rewrite the prefix words (3 for /48, 4 for /64).
-//! - Adjust the next word (word[3] for /48, word[4] for /64) using
-//!   ones-complement arithmetic to maintain checksum neutrality.
+//! - For /48, reject an internal 0xFFFF subnet (RFC 6296 §3.2).
+//! - For /64, inspect IID words 4..7 in order and adjust the first word
+//!   that was not initially 0xFFFF (RFC 6296 §3.5).
+//! - Reject an all-zero IID (an explicit RFC 6296 §3.7 MUST) and a /64 IID
+//!   with no adjustable word (the scoped reviewer edge).
+//! - Use ones-complement arithmetic to maintain checksum neutrality.
 //! - If the adjusted word becomes 0xFFFF, replace with 0x0000.
-//! - **#3233 corner (RFC 6296 §3.7):** when the internal and external prefixes
-//!   have EQUAL ones-complement sums (a *checksum-neutral* prefix pair) the
-//!   precomputed adjustment is ones-complement zero, so NO interface-ID word
-//!   fixup is required — the translation is a pure prefix swap. The fixup is
-//!   SKIPPED in that case ([`adjust_word`] is not applied). Applying it anyway
-//!   would fold a host whose adjustment word is 0xFFFF down to 0x0000 (and the
+//! - **#3233 corner:** when the internal and external prefixes have EQUAL
+//!   ones-complement sums (a *checksum-neutral* prefix pair), the precomputed
+//!   adjustment is ones-complement zero, so NO interface-ID word fixup is
+//!   required — the translation is a pure prefix swap. The fixup is SKIPPED
+//!   in that case ([`adjust_word`] is not applied). Applying it anyway would
+//!   fold a host whose adjustment word is 0xFFFF down to 0x0000 (and the
 //!   inbound side never restores it), collapsing that host onto the 0x0000
 //!   host. Note that `compute_adjustment` represents ones-complement zero as
 //!   `0xFFFF` (NOT `0x0000`) for a checksum-neutral pair — see
-//!   [`is_zero_adjustment`].
+//!   [`is_zero_adjustment`]. This neutral-pair behavior is distinct from the
+//!   RFC 6296 §3.7 all-zero-IID MUST.
+//!
+//! A translation that cannot satisfy a scoped RFC discard rule or the
+//! reviewer-scoped all-ones-IID edge returns
+//! [`Nptv6Translation::Untranslatable`]; packet callers must drop it rather
+//! than treating it as a prefix miss and forwarding unchanged.
 //!
 //! Two module invariants the rest of the crate relies on:
 //!
@@ -100,6 +110,29 @@ impl Nptv6Rule {
     }
 }
 
+/// `Untranslatable` is distinct from `NoMatch`: §3.2 directs discard for an
+/// unmapped internal subnet, and §3.7 contains the explicit all-zero-IID MUST.
+/// The all-ones-IID outcome is the scoped reviewer reading of §3.5's
+/// first-available-word selection plus §3.7's reserved-anycast note. Packet
+/// callers must not let any of these outcomes fall through to ordinary
+/// forwarding or a different NAT rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Nptv6Translation {
+    /// No configured rule matched the address.
+    NoMatch,
+    /// A configured rule matched and rewrote the address in place.
+    Translated,
+    /// A configured rule matched, but the scoped mapping rules refuse it.
+    Untranslatable,
+}
+
+impl Nptv6Translation {
+    #[inline]
+    pub(crate) fn is_translated(self) -> bool {
+        matches!(self, Self::Translated)
+    }
+}
+
 /// Aggregated NPTv6 state built from config snapshots.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Nptv6State {
@@ -159,14 +192,34 @@ fn adjust_word(word: u16, adj: u16) -> u16 {
 /// (negative zero in ones-complement: `S + !S = 0xFFFF`), and it never produces
 /// the positive-zero `0x0000` representation, but both are accepted defensively.
 ///
-/// When this holds the translator MUST skip [`adjust_word`]: applying it would
-/// fold a host whose adjustment word is `0xFFFF` to `0x0000` outbound and never
-/// restore it inbound, collapsing the `0xFFFF` host onto the `0x0000` host. The
-/// RFC-6296-mandated `0xFFFF -> 0x0000` fold is preserved for the general
-/// (non-neutral, adjustment != ones-complement-zero) case.
+/// For the #3233 neutral-pair invariant, this implementation skips
+/// [`adjust_word`]: applying it would fold a host whose adjustment word is
+/// `0xFFFF` to `0x0000` outbound and never restore it inbound, collapsing the
+/// `0xFFFF` host onto the `0x0000` host. The RFC-6296-mandated
+/// `0xFFFF -> 0x0000` fold is preserved for the general (non-neutral,
+/// adjustment != ones-complement-zero) case.
 #[inline]
 fn is_zero_adjustment(adj: u16) -> bool {
     adj == 0x0000 || adj == 0xFFFF
+}
+
+/// Return the first RFC 6296 §3.5 adjustment word for a /64 IID.
+///
+/// The caller must inspect the original address before rewriting its prefix.
+/// The scoped reviewer reading treats a /64 IID made entirely of 0xFFFF words
+/// as having no usable adjustment word and therefore no stateless mapping.
+#[inline]
+fn first_non_ffff_iid_word(words: &[u16; 8], prefix_words: usize) -> Option<usize> {
+    if prefix_words < 4 {
+        return Some(3);
+    }
+    (4..8).find(|&index| words[index] != 0xFFFF)
+}
+
+/// RFC 6296 §3.7 rejects an all-zero IID for mappings with a longer prefix.
+#[inline]
+fn iid_is_all_zero(words: &[u16; 8], prefix_words: usize) -> bool {
+    prefix_words >= 4 && words[4..8].iter().all(|&word| word == 0)
 }
 
 /// Extract 16-bit words from an Ipv6Addr.
@@ -387,73 +440,119 @@ impl Nptv6State {
     }
 
     /// Translate an inbound packet's destination address.
-    /// If `dst` matches an external prefix, rewrites it in-place to the
-    /// internal prefix and returns `true`.
+    ///
+    /// This compatibility wrapper preserves the historical boolean API for
+    /// helper callers that only need to know whether a rule translated. Packet
+    /// paths that must distinguish a prefix miss from a scoped untranslatable
+    /// outcome use [`Self::translate_inbound_result`].
+    #[inline]
+    pub(crate) fn translate_inbound(&self, dst: &mut Ipv6Addr, ingress_zone: &str) -> bool {
+        self.translate_inbound_result(dst, ingress_zone).is_translated()
+    }
+
+    /// Translate an inbound packet and expose scoped untranslatable
+    /// addresses as a distinct outcome.
     ///
     /// #5176: `ingress_zone` is the packet's ingress security zone. A rule
     /// matches only when its `from_zone` scope is empty (wildcard) or equals
     /// `ingress_zone` — a rule scoped `from zone X` must NOT translate traffic
     /// arriving from a different zone (security-domain crossing).
-    pub(crate) fn translate_inbound(&self, dst: &mut Ipv6Addr, ingress_zone: &str) -> bool {
+    pub(crate) fn translate_inbound_result(
+        &self,
+        dst: &mut Ipv6Addr,
+        ingress_zone: &str,
+    ) -> Nptv6Translation {
         let mut words = ipv6_to_words(dst);
         for rule in &self.inbound {
             if rule.zone_matches(ingress_zone)
                 && prefix_matches(&words, &rule.external_prefix, rule.prefix_words)
             {
+                // RFC 6296 §3.7 explicitly says an all-zero IID MUST be
+                // dropped. The all-ones/no-available-word refusal is the
+                // scoped reviewer edge, not an RFC2119 MUST.
+                if iid_is_all_zero(&words, rule.prefix_words) {
+                    return Nptv6Translation::Untranslatable;
+                }
+                let adj_word = match first_non_ffff_iid_word(&words, rule.prefix_words) {
+                    Some(index) => index,
+                    None => return Nptv6Translation::Untranslatable,
+                };
                 // Rewrite prefix words to internal prefix.
                 for i in 0..rule.prefix_words {
                     words[i] = rule.internal_prefix[i];
                 }
-                // Adjust the word after the prefix: inbound uses ~adjustment.
-                // #3233: skip the fixup entirely for a checksum-neutral prefix
-                // pair (ones-complement-zero adjustment) so a valid 0xFFFF
-                // host-ID word survives the round trip; a pure prefix swap is
-                // already checksum-neutral.
+                // Adjust the selected word after the prefix: inbound uses
+                // !adjustment. #3233 skips the fixup for a neutral pair, but
+                // still selects a stable word so the mapping remains explicit.
                 if !is_zero_adjustment(rule.adjustment) {
-                    let adj_word = if rule.prefix_words >= 4 { 4 } else { 3 };
                     let inv_adj = !rule.adjustment; // ones-complement NOT
                     words[adj_word] = adjust_word(words[adj_word], inv_adj);
                 }
                 *dst = words_to_ipv6(&words);
-                return true;
+                return Nptv6Translation::Translated;
             }
         }
-        false
+        Nptv6Translation::NoMatch
     }
 
     /// Translate an outbound packet's source address.
-    /// If `src` matches an internal prefix, rewrites it in-place to the
-    /// external prefix and returns `true`.
+    ///
+    /// This compatibility wrapper preserves the historical boolean API.
+    #[inline]
+    pub(crate) fn translate_outbound(&self, src: &mut Ipv6Addr, egress_zone: &str) -> bool {
+        self.translate_outbound_result(src, egress_zone).is_translated()
+    }
+
+    /// Translate an outbound packet and expose scoped untranslatable
+    /// addresses as a distinct outcome.
     ///
     /// #5176: `egress_zone` is the packet's egress security zone. A rule
     /// matches only when its `from_zone` scope is empty (wildcard) or equals
     /// `egress_zone` — a rule scoped `from zone X` must NOT translate the
     /// source of traffic leaving via a different zone (security-domain
     /// crossing).
-    pub(crate) fn translate_outbound(&self, src: &mut Ipv6Addr, egress_zone: &str) -> bool {
+    pub(crate) fn translate_outbound_result(
+        &self,
+        src: &mut Ipv6Addr,
+        egress_zone: &str,
+    ) -> Nptv6Translation {
         let mut words = ipv6_to_words(src);
         for rule in &self.outbound {
             if rule.zone_matches(egress_zone)
                 && prefix_matches(&words, &rule.internal_prefix, rule.prefix_words)
             {
+                // RFC 6296 §3.2 says to discard a non-neutral internal /48
+                // subnet of 0xFFFF because it has no one-to-one mapping
+                // (the section does not use RFC2119 MUST language). A neutral
+                // pair is a pure prefix swap, so 0xFFFF remains representable
+                // there (#3233). §3.7's all-zero IID discard is an explicit
+                // MUST; the all-ones edge is the scoped reviewer reading.
+                if (rule.prefix_words == 3
+                    && words[3] == 0xFFFF
+                    && !is_zero_adjustment(rule.adjustment))
+                    || iid_is_all_zero(&words, rule.prefix_words)
+                {
+                    return Nptv6Translation::Untranslatable;
+                }
+                let adj_word = match first_non_ffff_iid_word(&words, rule.prefix_words) {
+                    Some(index) => index,
+                    None => return Nptv6Translation::Untranslatable,
+                };
                 // Rewrite prefix words to external prefix.
                 for i in 0..rule.prefix_words {
                     words[i] = rule.external_prefix[i];
                 }
-                // Adjust the word after the prefix: outbound uses adjustment directly.
-                // #3233: skip the fixup entirely for a checksum-neutral prefix
-                // pair (ones-complement-zero adjustment) — the prefix swap is
-                // already checksum-neutral, and applying adjust_word would fold
-                // a valid 0xFFFF host-ID word to 0x0000.
+                // Adjust the selected word after the prefix: outbound uses
+                // `adjustment` directly. #3233 skips the fixup for a neutral
+                // pair, whose prefix swap is already checksum-neutral.
                 if !is_zero_adjustment(rule.adjustment) {
-                    let adj_word = if rule.prefix_words >= 4 { 4 } else { 3 };
                     words[adj_word] = adjust_word(words[adj_word], rule.adjustment);
                 }
                 *src = words_to_ipv6(&words);
-                return true;
+                return Nptv6Translation::Translated;
             }
         }
-        false
+        Nptv6Translation::NoMatch
     }
 
     /// Returns true if there are any NPTv6 rules configured.

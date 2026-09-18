@@ -1049,3 +1049,219 @@ fn parse_prefix_mask_is_ascii_digits_only_7077() {
         );
     }
 }
+
+// #10290 (issue acceptance): a NON-neutral /64 pair must translate the
+// 0xFFFF-first-word host and its 0x0000 sibling to DISTINCT external
+// addresses, and inbound must demap each to its own host. Pre-fix both
+// collapsed onto one external address (fixed word-4 adjustment) and the
+// ffff-host's replies were delivered to the sibling.
+#[test]
+fn ffff_vs_0000_sibling_collision_non_neutral_64_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    // Pin the non-neutral trigger: without a real adjustment the #3233 skip
+    // path (pure prefix swap) would satisfy this test vacuously.
+    let adj = compute_adjustment(
+        &[0xfd00, 0x0001, 0x0002, 0x0003],
+        &[0x2001, 0x0db8, 0x0001, 0x0002],
+        4,
+    );
+    assert!(
+        !is_zero_adjustment(adj),
+        "test pair must be non-neutral so the adjustment word is really exercised"
+    );
+    let mut host_ffff: Ipv6Addr = "fd00:1:2:3:ffff:0:0:1".parse().unwrap();
+    let mut host_0000: Ipv6Addr = "fd00:1:2:3:0:0:0:1".parse().unwrap();
+    assert!(state.translate_outbound(&mut host_ffff, ""));
+    assert!(state.translate_outbound(&mut host_0000, ""));
+    assert_ne!(
+        host_ffff, host_0000,
+        "the 0xFFFF-first-word host must not collapse onto its 0x0000 sibling"
+    );
+    // Inbound demaps each external address back to ITS OWN host.
+    let mut back_ffff = host_ffff;
+    let mut back_0000 = host_0000;
+    assert!(state.translate_inbound(&mut back_ffff, ""));
+    assert!(state.translate_inbound(&mut back_0000, ""));
+    assert_eq!(
+        back_ffff, "fd00:1:2:3:ffff:0:0:1".parse::<Ipv6Addr>().unwrap(),
+        "inbound for the ffff-host's external must return to the ffff-host, not the sibling"
+    );
+    assert_eq!(
+        back_0000, "fd00:1:2:3:0:0:0:1".parse::<Ipv6Addr>().unwrap(),
+        "inbound for the 0000-host's external must return to the 0000-host"
+    );
+}
+
+// #10290 RFC 6296 §3.5: with a /64 rule the adjustment goes to the FIRST
+// IID word (bits 64..79, 80..95, 96..111, 112..127 in that order) that is
+// not initially 0xFFFF — not unconditionally to word 4. A host whose
+// first IID word is 0xFFFF keeps it and is adjusted at word 5.
+#[test]
+fn ffff_first_word_adjusts_next_word_64_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let original: Ipv6Addr = "fd00:1:2:3:ffff:1234:5678:9abc".parse().unwrap();
+    let mut addr = original;
+    assert!(state.translate_outbound(&mut addr, ""));
+    let words = ipv6_to_words(&addr);
+    assert_eq!(words[0], 0x2001);
+    assert_eq!(words[1], 0x0db8);
+    assert_eq!(words[2], 0x0001);
+    assert_eq!(words[3], 0x0002);
+    assert_eq!(
+        words[4], 0xffff,
+        "an initially-0xFFFF first IID word must be skipped, not adjusted"
+    );
+    // adjustment for this pair is 0xcf4a: 0x1234 + 0xcf4a = 0xe17e.
+    assert_eq!(words[5], 0xe17e, "the first non-0xFFFF IID word takes the adjustment");
+    assert_eq!(words[6], 0x5678);
+    assert_eq!(words[7], 0x9abc);
+    // Round-trip is identity: inbound selects the same word.
+    assert!(state.translate_inbound(&mut addr, ""));
+    assert_eq!(addr, original, "scanned-word round-trip must preserve the address");
+}
+
+// #10290 §3.5: the scan skips EVERY leading 0xFFFF word — with words 4
+// and 5 at 0xFFFF the adjustment lands on word 6.
+#[test]
+fn multiple_leading_ffff_adjusts_first_non_ffff_64_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let original: Ipv6Addr = "fd00:1:2:3:ffff:ffff:9abc:def0".parse().unwrap();
+    let mut addr = original;
+    assert!(state.translate_outbound(&mut addr, ""));
+    let words = ipv6_to_words(&addr);
+    assert_eq!(words[4], 0xffff);
+    assert_eq!(words[5], 0xffff);
+    // 0x9abc + 0xcf4a = 0x16a06 -> fold -> 0x6a07.
+    assert_eq!(words[6], 0x6a07, "the first non-0xFFFF IID word takes the adjustment");
+    assert_eq!(words[7], 0xdef0);
+    assert!(state.translate_inbound(&mut addr, ""));
+    assert_eq!(addr, original, "scanned-word round-trip must preserve the address");
+}
+
+// #10290 §3.5 plus the scoped reviewer edge: an IID of all-ones has NO
+// adjustable word (every candidate is initially 0xFFFF), so the datagram is
+// untranslatable and refused in BOTH directions. RFC §3.7's explicit MUST
+// applies to all-zero IID, not this reserved-anycast/all-ones reading.
+#[test]
+fn all_ones_iid_untranslatable_64_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let mut src: Ipv6Addr = "fd00:1:2:3:ffff:ffff:ffff:ffff".parse().unwrap();
+    let original_src = src;
+    assert!(
+        !state.translate_outbound(&mut src, ""),
+        "a /64 all-ones IID has no adjustable word and must be refused outbound"
+    );
+    assert_eq!(src, original_src, "a refused address must be left untouched");
+    let mut dst: Ipv6Addr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+    let original_dst = dst;
+    assert!(
+        !state.translate_inbound(&mut dst, ""),
+        "a /64 all-ones IID has no adjustable word and must be refused inbound"
+    );
+    assert_eq!(dst, original_dst, "a refused address must be left untouched");
+}
+
+// #10290 RFC 6296 §3.7: "If an NPTv6 Translator discovers a datagram
+// with an IID of all-zeros while performing address mapping, that
+// datagram MUST be dropped." Both directions refuse, address untouched.
+#[test]
+fn all_zeros_iid_dropped_64_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let mut src: Ipv6Addr = "fd00:1:2:3::".parse().unwrap();
+    let original_src = src;
+    assert_eq!(
+        state.translate_outbound_result(&mut src, ""),
+        Nptv6Translation::Untranslatable,
+        "a /64 all-zeros IID MUST be dropped outbound (RFC 6296 §3.7)"
+    );
+    assert_eq!(src, original_src, "a refused address must be left untouched");
+    let mut dst: Ipv6Addr = "2001:db8:1:2::".parse().unwrap();
+    let original_dst = dst;
+    assert_eq!(
+        state.translate_inbound_result(&mut dst, ""),
+        Nptv6Translation::Untranslatable,
+        "a /64 all-zeros IID MUST be dropped inbound (RFC 6296 §3.7)"
+    );
+    assert_eq!(dst, original_dst, "a refused address must be left untouched");
+}
+
+// #10290 RFC 6296 §3.2: "If the internal subnet number has no mapping,
+// such as being 0xFFFF ..., discard the datagram." For a /48 rule the
+// subnet field is bits 48..63 (word 3): a non-neutral 0xFFFF internal
+// subnet aliases subnet 0 under the fixed-word adjustment instead of being
+// dropped. A checksum-neutral pair is a pure prefix swap, so 0xFFFF remains
+// representable there (#3233 pins that neutral corner).
+#[test]
+fn ffff_subnet_dropped_48_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1::/48".to_string(),
+        external_prefix: "2001:db8:1::/48".to_string(),
+    }]);
+    let adj = compute_adjustment(
+        &[0xfd00, 0x0001, 0x0000, 0x0000],
+        &[0x2001, 0x0db8, 0x0001, 0x0000],
+        3,
+    );
+    assert!(
+        !is_zero_adjustment(adj),
+        "test pair must be non-neutral so the subnet word is really adjusted"
+    );
+    let mut src: Ipv6Addr = "fd00:1:0:ffff::1".parse().unwrap();
+    let original_src = src;
+    assert_eq!(
+        state.translate_outbound_result(&mut src, ""),
+        Nptv6Translation::Untranslatable,
+        "a /48 0xFFFF subnet is directed to discard by RFC 6296 §3.2 (not RFC2119 MUST)"
+    );
+    assert_eq!(src, original_src, "a refused address must be left untouched");
+    // §3.2 is an INTERNAL-subnet rule: inbound external 0xFFFF is not the
+    // prohibited internal subnet and is handled by the inverse arithmetic.
+}
+
+// #10290 control: whichever IID word takes the adjustment, the
+// translation stays checksum-neutral (ones-complement sum preserved).
+#[test]
+fn scanned_word_checksum_neutral_64_10290() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "w03".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let original: Ipv6Addr = "fd00:1:2:3:ffff:1234:5678:9abc".parse().unwrap();
+    let orig_sum = ones_complement_sum(&ipv6_to_words(&original));
+    let mut translated = original;
+    assert!(state.translate_outbound(&mut translated, ""));
+    let xlat_sum = ones_complement_sum(&ipv6_to_words(&translated));
+    assert_eq!(
+        orig_sum, xlat_sum,
+        "scanned-word translation must stay checksum-neutral"
+    );
+}

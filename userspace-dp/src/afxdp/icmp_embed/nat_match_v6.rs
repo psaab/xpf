@@ -79,10 +79,16 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         .map(|s| s.as_str())
         .unwrap_or("");
     let mut emb_src_lookup_v6 = hdr.src_wire;
-    let _nptv6_reverse = ctx
-        .forwarding
-        .nptv6
-        .translate_inbound(&mut emb_src_lookup_v6, ingress_zone);
+    if matches!(
+        ctx.forwarding
+            .nptv6
+            .translate_inbound_result(&mut emb_src_lookup_v6, ingress_zone),
+        crate::nptv6::Nptv6Translation::Untranslatable
+    ) {
+        // An Untranslatable quote cannot be reverse-mapped under the scoped
+        // NPTv6 constraints; do not look up the prohibited wire address.
+        return EmbeddedMatchOutcome::NoMatch;
+    }
     let emb_src_lookup = IpAddr::V6(emb_src_lookup_v6);
 
     // #7160 (#2387): the embedded tuple names the ORIGINAL flow, so its key
