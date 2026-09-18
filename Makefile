@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib
 
 all: generate build build-ctl
 
@@ -359,12 +359,31 @@ test-race-dp:
 # reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499 with "attempt to
 # add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
 # cold build, ~65 s run (2489 tests).
-test-rust:
+test-rust: check-userspace-dt-needed
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml \
 		--bins --tests -- --test-threads=1 frame nat session checksum
+
+# #10204: prove the release helper's static snapshot provenance and dynamic
+# dependency boundary on every Rust gate. The map must come from a fresh
+# relink; an empty/stale map would make zero archive-member counts look like a
+# false pass.
+check-userspace-dt-needed:
+	@set -eu; \
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)"); \
+	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh); \
+	target_dir=$${CARGO_TARGET_DIR:-userspace-dp/target}; \
+	map="$$target_dir/xpf-userspace-dp-10204.map"; \
+	bin="$$target_dir/release/xpf-userspace-dp"; \
+	rm -f "$$map"; \
+	touch userspace-dp/src/main.rs; \
+	XPF_LINKED_LIBS_STAMP="$$stamp" "$(CARGO)" +$$pinned rustc --manifest-path userspace-dp/Cargo.toml --release --bin xpf-userspace-dp -- -C link-arg=-Wl,-Map,"$$map"; \
+	test -s "$$map" || { echo "#10204: cargo rustc produced no non-empty linker map: $$map" >&2; exit 1; }; \
+	test -x "$$bin" || { echo "#10204: cargo rustc produced no executable: $$bin" >&2; exit 1; }; \
+	python3 scripts/check-userspace-dt-needed-10204.py "$$bin" "$$map"
+
 
 # #9499 member 2: UB detection. `make test-rust` above makes an integer WRAP an
 # executed failure; nothing makes undefined behaviour one. The crate carries
