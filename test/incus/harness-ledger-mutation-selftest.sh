@@ -295,8 +295,8 @@ MUTATIONS = {
     ),
     "abort-cause-dropped": (
         SH_FILE, "sh",
-        '\t\tfatal_line=$(grep -E \'^FATAL: \' "$log" | tail -1)',
-        '\t\tfatal_line=""',
+        '\tfatal_line=$(grep -E \'^FATAL: \' "$1" | tail -1)',
+        '\tfatal_line=""',
         "the #10122 abort cause and owner attached to a summary-less VOID",
     ),
     "void-without-a-reason-accepted": (
