@@ -946,33 +946,53 @@ mod slow_path_mtu_tests {
         assert!(reinjector.delegated_status().degraded);
 
         let mut last_acted = 9000;
-        let mut retry_ioctls = 0;
-        for _ in 0..8 {
+        let mut retry_attempts = 0;
+        let mut retry_ticks = Vec::new();
+        for tick in 1..=16 {
             let _ = reconcile_preserved_slow_path_mtu(
                 &reinjector,
                 9000,
                 &mut last_acted,
                 |_name, _mtu| {
-                    retry_ioctls += 1;
-                    Err("SIOCSIFMTU: persistent delegated failure".to_string())
+                    retry_attempts += 1;
+                    retry_ticks.push(tick);
+                    if retry_attempts <= 3 {
+                        Err("SIOCSIFMTU: transient delegated failure".to_string())
+                    } else {
+                        Ok(())
+                    }
                 },
             );
         }
+        assert_eq!(
+            retry_ticks,
+            vec![1, 2, 4, 9],
+            "the fourth retry must occur only after the first 8-tick window ages"
+        );
         assert!(
-            retry_ioctls > 0,
-            "a lagging delegated outlet must be retried even when trusted is converged"
+            retry_ticks.iter().any(|&tick| tick > 8),
+            "retry budget must age out and re-arm after tick 8"
         );
         assert_eq!(
-            retry_ioctls, 3,
-            "persistent delegated failure reaches the bounded retry cap"
+            reinjector.delegated_status().live_mtu,
+            9000,
+            "a later retry must recover the delegated outlet"
         );
-        assert_eq!(
-            setup_calls + retry_ioctls,
-            5,
-            "including the two establishing ioctls, this episode issues exactly \
-             five ioctls in this 8-tick window (persistent failure retries \
-             3-per-8 forever by design)"
+        assert!(
+            !reinjector.delegated_status().degraded,
+            "successful delegated recovery clears degraded status"
         );
+        for window_start in 1..=16 {
+            let window_end = window_start + 7;
+            let attempts = retry_ticks
+                .iter()
+                .filter(|&&tick| window_start <= tick && tick <= window_end)
+                .count();
+            assert!(
+                attempts <= 3,
+                "sliding window {window_start}..={window_end} issued {attempts} retries"
+            );
+        }
     }
 
     /// #6097 fail-on-revert (item 2, WIRING — primary deliverable): drive the
