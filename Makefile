@@ -1224,11 +1224,16 @@ test-persistent-nat-failover:
 		--gate test-persistent-nat-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/persistent-nat-failover.sh
 
-# #9729: a Kea lease survives a hard failover (#2261). DESTRUCTIVE and
-# self-locking. Needs the lab DHCP fixture (dhcp-lease-synchronization plus a
-# dhcp-local-server pool); without it the preflight refuses and the row is VOID.
+# #9729: a Kea lease survives a hard failover (#2261). DESTRUCTIVE.
+#
+# Keep the gate and its executable attestation in ONE #1875 lock cell. The
+# DHCP script's cluster-cell is re-entrant under this wrapper; without the
+# outer cell it releases the lock before harness-result.sh reads the running
+# binaries, so another lane can deploy between the measurement and
+# exe_check (the two MISMATCH VOID rows in #10122).
 test-dhcp-lease-failover:
-	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+	./test/incus/with-cluster.sh "test-dhcp-lease-failover #10122" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-dhcp-lease-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/dhcp-lease-failover.sh
 

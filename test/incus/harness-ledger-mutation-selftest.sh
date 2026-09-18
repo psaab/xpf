@@ -293,6 +293,12 @@ MUTATIONS = {
         '\t\tprintf \'PASS\\tno "<n> passed, <n> failed" summary line',
         "the VOID for a smoke that died before its summary",
     ),
+    "abort-cause-dropped": (
+        SH_FILE, "sh",
+        '\t\tfatal_line=$(grep -E \'^FATAL: \' "$log" | tail -1)',
+        '\t\tfatal_line=""',
+        "the #10122 abort cause and owner attached to a summary-less VOID",
+    ),
     "void-without-a-reason-accepted": (
         SH_FILE, "sh",
         '\tif [[ "$verdict" == "VOID" && -z "$void_reason" ]]; then',
