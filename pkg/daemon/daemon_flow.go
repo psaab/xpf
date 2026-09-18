@@ -934,19 +934,47 @@ func (d *Daemon) archiveToSites(sites []string) {
 // archiveConfig behind the Daemon.archiveTransfer seam so tests can inject a
 // capturing transfer and assert archiveConfig serializes the CURRENT active
 // config rather than the stale boot file (#3867).
+//
+// #10298: host-key trust is enforced against the rendered
+// security { ssh-known-hosts } file (sshKnownHostsPath, written by
+// applySSHKnownHosts in daemon_system.go). StrictHostKeyChecking=yes plus
+// UserKnownHostsFile=<rendered> and GlobalKnownHostsFile=/dev/null make the
+// rendered file the sole trust source. A MITM'd archival endpoint — or a
+// legitimately rotated key the operator has not yet re-trusted — FAILS the
+// transfer instead of being silently accepted (the pre-fix
+// StrictHostKeyChecking=no accepted any presented key). BatchMode=yes is
+// retained so a verification failure fails fast instead of prompting.
+// A missing or empty rendered trust file fails closed here, before exec,
+// with an actionable error: archival without configured trust must never
+// silently fall back to unchecked mode. Rotation flow: update
+// security { ssh-known-hosts { host <archive-host> { ...; }; }; }, commit
+// (applySSHKnownHosts re-renders before archiveConfig runs), and the next
+// transfer trusts the new key.
 func scpArchiveTransfer(ctx context.Context, srcPath, dest string) error {
-	// #4589 A7 F-02: `--` end-of-options separator before the positional
-	// src/dest. `dest` is an operator-configured `archive-sites` URL taken
-	// verbatim (compiler_system.go); without the separator a leading-dash
-	// value (`-oProxyCommand=...`) is parsed by scp's getopt as an OPTION,
-	// not a destination — CWE-88 argv injection running as the xpfd root
-	// user. After `--`, getopt stops scanning so src/dest are always
-	// positional. Belt-and-suspenders with the commit-time leading-dash
-	// reject in compiler_system.go.
+	knownHosts := sshKnownHostsPath
+	if fi, err := os.Stat(knownHosts); err != nil || fi.Size() == 0 {
+		if err == nil {
+			return fmt.Errorf("config archival refused: SSH host-key trust file %s is empty — configure security { ssh-known-hosts { host <archive-host> { ...; }; }; } and commit", knownHosts)
+		}
+		if os.IsNotExist(err) {
+			return fmt.Errorf("config archival refused: no SSH host-key trust at %s — configure security { ssh-known-hosts { host <archive-host> { ...; }; }; } and commit", knownHosts)
+		}
+		return fmt.Errorf("config archival refused: cannot stat SSH host-key trust file %s: %w", knownHosts, err)
+	}
+	if strings.HasPrefix(dest, "-") {
+		return fmt.Errorf("config archival refused: archive-site destination must not begin with '-'")
+	}
+	// #4589 A7 F-02: `dest` is an operator-configured `archive-sites` URL
+	// taken verbatim (compiler_system.go). A leading-dash value is rejected
+	// both at commit and at this transport boundary, preventing it from being
+	// parsed by scp's getopt as an OPTION — CWE-88 argv injection running as
+	// the xpfd root user. The source is an absolute temp-file path, so no
+	// option-like source can reach scp.
 	out, err := exec.CommandContext(ctx, "scp",
-		"-o", "StrictHostKeyChecking=no",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile="+knownHosts,
+		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "BatchMode=yes",
-		"--",
 		srcPath, dest,
 	).CombinedOutput()
 	if err != nil {

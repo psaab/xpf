@@ -139,15 +139,22 @@ deferred (#6856). And the HKDF info string `xpf-configstore-master-password`
 derivation: it is misleading, but changing it re-keys **every existing DB**, so
 it must ride with that migration rather than being corrected casually.
 
-**Off-box copy — `transfer-on-commit`:** the honest place to control the
-residual is the off-box transfer, not on-box encryption. When
+**Off-box copy — `transfer-on-commit` (#10298):** the honest place to
+control the residual is the off-box transfer, not on-box encryption. When
 `system archival configuration transfer-on-commit` is set, the daemon
 `scp`s the raw config file (cleartext secret leaves included) to the
-operator-configured archive sites on every commit
-(`daemon_flow.go scpArchiveTransfer`, `StrictHostKeyChecking=no`). This
-is the one genuine off-box copy of the secrets; the operator must secure
-the destination host and transport (extends the #651 warning about
-inline archive-site passwords).
+operator-configured archive sites on every commit. The transfer uses the
+daemon-rendered `/etc/ssh/ssh_known_hosts` as `UserKnownHostsFile`, disables
+the system-wide known-hosts files with `GlobalKnownHostsFile=/dev/null`, and
+sets `StrictHostKeyChecking=yes` plus `BatchMode=yes`; a missing/empty rendered
+trust file or a host-key mismatch fails closed rather than accepting an
+untrusted endpoint. To rotate an archive host key, configure the replacement
+key under `security ssh-known-hosts` for the archive host and commit that
+change; the daemon rewrites the managed file before the next archival
+transfer. Remove the old key only after all intended endpoints have moved to
+the replacement key. This is the one genuine off-box copy of the secrets; the
+operator must secure the destination host and transport (including the
+inline archive-site-password warning in #651).
 
 ## Entry points
 
