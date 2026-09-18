@@ -274,7 +274,7 @@ func TestPeerDHCPLeasesAged(t *testing.T) {
 	}
 	s.peerDHCPLeases4RecvAt = recvAt
 
-	got := s.peerDHCPLeasesAged(4, now)
+	got := s.peerDHCPLeaseSnapshotAged(4, now).Leases
 	if len(got) != 1 {
 		t.Fatalf("aged set: got %d leases, want 1 (the expired one must be dropped): %+v", len(got), got)
 	}
@@ -453,7 +453,7 @@ func TestPeerDHCPLeasesAged_PreferredRemaining(t *testing.T) {
 	}
 	s.peerDHCPLeases6RecvAt = recvAt
 
-	got := s.peerDHCPLeasesAged(6, now)
+	got := s.peerDHCPLeaseSnapshotAged(6, now).Leases
 	if len(got) != 2 {
 		t.Fatalf("aged set: got %d leases, want 2: %+v", len(got), got)
 	}

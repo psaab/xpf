@@ -1763,10 +1763,11 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// marked rgID active before this call, so the snapshot includes it.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-master-rg%d", rgID))
 	if d.dhcpServer != nil {
-		// Same desired state as the commit path and the #6535 converger.
-		// The MASTER edge deliberately does NOT apply a nil desired state —
-		// clearing is the BACKUP edge's job — so the nil guard stays.
-		dhcpCfg := d.desiredClusterDHCPConfig(cfg)
+		// Snapshot ownership once and use it for both the filtered Kea config
+		// and its lease-authority proof. A transition racing either derivation
+		// must not make the applied config and advertised Served scopes disagree.
+		masters := d.snapshotRethMasterState()
+		dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
 		if dhcpCfg != nil {
 			// #2239 Q3: pre-seed the held peer leases into the Kea
 			// memfile BEFORE the (re)start so Kea loads the in-use
@@ -1783,7 +1784,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// still MASTER; only the first/pure-backup takeover may replace
 			// them with the peer set.
 			stillMastering := false
-			for otherRG, isMaster := range d.snapshotRethMasterState() {
+			for otherRG, isMaster := range masters {
 				if otherRG != rgID && isMaster {
 					stillMastering = true
 					break
@@ -1795,7 +1796,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// block this VRRP event loop. Latest-wins coalescing in
 			// the manager keeps final state correct; failures are
 			// logged by the worker with this reason.
-			d.enqueueDHCPApply(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID))
+			d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
 			slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
 			// #2239: after the async Kea start, seed the held peer
 			// leases via lease{4,6}-add (the reinitiateIPsecSAs
@@ -1876,9 +1877,11 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	}
 
 	// Check if any other RG is still master — if so, reapply services for
-	// those RGs only; otherwise clear everything.
+	// those RGs only; otherwise clear everything. Reuse this ownership
+	// snapshot for both filtered config and lease-authority proof.
+	masters := d.snapshotRethMasterState()
 	anyOtherMaster := false
-	for otherRG, isMaster := range d.snapshotRethMasterState() {
+	for otherRG, isMaster := range masters {
 		if otherRG != rgID && isMaster {
 			anyOtherMaster = true
 			break
@@ -1902,10 +1905,11 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 		if anyOtherMaster {
 			// Reapply DHCP with only the remaining master RGs'
 			// interfaces (nil when none match → clear).
-			d.enqueueDHCPApply(d.desiredClusterDHCPConfig(cfg),
-				fmt.Sprintf("vrrp BACKUP rg%d (other RG still MASTER)", rgID))
+			dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
+			d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
+				fmt.Sprintf("vrrp BACKUP rg%d (other RG still MASTER)", rgID), cfg, masters)
 		} else {
-			d.enqueueDHCPApply(nil, fmt.Sprintf("vrrp BACKUP rg%d", rgID))
+			d.enqueueDHCPApplyWithAuthorityState(nil, fmt.Sprintf("vrrp BACKUP rg%d", rgID), nil, masters)
 			slog.Info("vrrp: DHCP server stop enqueued (BACKUP)", "rg", rgID)
 		}
 	}
@@ -1958,6 +1962,10 @@ func stripUntaggedUnitSuffix(iface string) string {
 // copies with a test would not be enough — there is no legitimate reason for
 // them to differ.
 func (d *Daemon) desiredClusterDHCPConfig(cfg *config.Config) *config.DHCPServerConfig {
+	return d.desiredClusterDHCPConfigWithMasters(cfg, d.snapshotRethMasterState())
+}
+
+func (d *Daemon) desiredClusterDHCPConfigWithMasters(cfg *config.Config, masters map[int]bool) *config.DHCPServerConfig {
 	if cfg == nil {
 		return nil
 	}
@@ -1973,7 +1981,7 @@ func (d *Daemon) desiredClusterDHCPConfig(cfg *config.Config) *config.DHCPServer
 	// which is what made the in-place rewrite invisible — the copy was a shallow
 	// struct copy over pointer/map/slice fields, so the resolve wrote straight
 	// through to cfg. The claim is now true.
-	return d.filterDHCPConfigForMasterRGs(cfg)
+	return d.filterDHCPConfigForMasterRGsWithMasters(cfg, masters)
 }
 
 // reconcileClusterDHCPServices is the periodic converger for the Kea applier
@@ -2003,9 +2011,10 @@ func (d *Daemon) reconcileClusterDHCPServices(reason string) {
 	if cfg == nil {
 		return
 	}
-	desired := d.desiredClusterDHCPConfig(cfg)
+	masters := d.snapshotRethMasterState()
+	desired := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
 	slog.Info("reconcile: retrying failed DHCP server apply", "reason", reason)
-	d.enqueueDHCPApply(desired, "reconcile: "+reason)
+	d.enqueueDHCPApplyWithAuthorityState(desired, "reconcile: "+reason, cfg, masters)
 }
 
 // filterDHCPConfigForMasterRGs returns the DHCP config this node should serve
@@ -2030,11 +2039,15 @@ func (d *Daemon) reconcileClusterDHCPServices(reason string) {
 // The two sets are derived from ONE walker (rethInterfacesMatchingRG) so
 // "RG-scoped" and "mastered" cannot resolve a RETH member differently.
 func (d *Daemon) filterDHCPConfigForMasterRGs(cfg *config.Config) *config.DHCPServerConfig {
+	return d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
+}
+
+func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, masters map[int]bool) *config.DHCPServerConfig {
 	// Collect all interfaces belonging to master RGs. Normalize the untagged
 	// ".0" suffix (#4647) so the set is keyed by the bare member name that the
 	// resolved group interface also normalizes to below.
 	masterIfaces := make(map[string]bool)
-	for rgID, isMaster := range d.snapshotRethMasterState() {
+	for rgID, isMaster := range masters {
 		if !isMaster {
 			continue
 		}
@@ -2170,7 +2183,7 @@ func (d *Daemon) applyRethServices() {
 	if d.dhcpServer != nil && (cfg.System.DHCPServer.DHCPLocalServer != nil || cfg.System.DHCPServer.DHCPv6LocalServer != nil) {
 		dhcpCfg := resolveDHCPRethInterfaces(cfg.System.DHCPServer, cfg)
 		// ApplyAsync (#1835 F2): see applyRethServicesForRG.
-		d.dhcpServer.ApplyAsync(&dhcpCfg, "vrrp MASTER (legacy all-RG)")
+		d.enqueueDHCPApply(&dhcpCfg, "vrrp MASTER (legacy all-RG)")
 		slog.Info("vrrp: DHCP server apply enqueued (MASTER)")
 	}
 }
@@ -2191,7 +2204,7 @@ func (d *Daemon) clearRethServices() {
 	if d.dhcpServer != nil {
 		// ApplyAsync(nil) == authoritative clear (#1835 F2): see
 		// clearRethServicesForRG.
-		d.dhcpServer.ApplyAsync(nil, "vrrp BACKUP (legacy all-RG)")
+		d.enqueueDHCPApply(nil, "vrrp BACKUP (legacy all-RG)")
 		slog.Info("vrrp: DHCP server stop enqueued (BACKUP)")
 	}
 }

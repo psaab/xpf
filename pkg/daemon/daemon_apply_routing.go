@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/routing"
 )
@@ -133,7 +134,17 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			// cfg) — passing the shared active config by pointer and letting the
 			// resolver rewrite its group interface lists in place.
 			desired := desiredStandaloneDHCPConfig(cfg)
-			if err := d.dhcpServer.Apply(&desired); err != nil {
+			masters := d.snapshotRethMasterState()
+			authority := d.nextDHCPLeaseApplyAuthority(cfg, masters)
+			var err error
+			if applier, ok := d.dhcpServer.(interface {
+				ApplyWithLeaseAuthority(*config.DHCPServerConfig, dhcpserver.LeaseApplyAuthority) error
+			}); ok {
+				err = applier.ApplyWithLeaseAuthority(&desired, authority)
+			} else {
+				err = d.dhcpServer.Apply(&desired)
+			}
+			if err != nil {
 				slog.Warn("failed to apply DHCP server config", "err", err)
 				dhcpServerErr = fmt.Errorf("apply DHCP server config: %w", err)
 			}
@@ -143,8 +154,18 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			// state from (config, current master-RG set), because a
 			// converger that disagreed with the edge would fight it every
 			// 2s tick.
-			dhcpCfg := d.desiredClusterDHCPConfig(cfg)
-			if err := d.dhcpServer.ApplyClusterCommit(dhcpCfg); err != nil {
+			masters := d.snapshotRethMasterState()
+			dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
+			authority := d.nextDHCPLeaseApplyAuthority(cfg, masters)
+			var err error
+			if applier, ok := d.dhcpServer.(interface {
+				ApplyClusterCommitWithLeaseAuthority(*config.DHCPServerConfig, dhcpserver.LeaseApplyAuthority) error
+			}); ok {
+				err = applier.ApplyClusterCommitWithLeaseAuthority(dhcpCfg, authority)
+			} else {
+				err = d.dhcpServer.ApplyClusterCommit(dhcpCfg)
+			}
+			if err != nil {
 				slog.Warn("failed to reconcile DHCP server (cluster commit)", "err", err)
 				dhcpServerErr = fmt.Errorf("apply DHCP server config: %w", err)
 			}
