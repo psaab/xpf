@@ -369,6 +369,7 @@ run_bash test/incus/wire-appmatch-twins.sh --selftest
 run_bash test/incus/wire-zone-matrix.sh --selftest
 run_bash test/incus/wire-hostinbound-deny.sh --selftest
 run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
+run_bash test/incus/wire-config-snapshot-selftest.sh
 run_bash test/incus/wire-routing-separation.sh --selftest
 # #7159: the mouse-latency elephant generator's remote lifecycle. Hermetic --
 # a fake iperf3 plus an unprivileged PID namespace; no incus, no cluster. The
