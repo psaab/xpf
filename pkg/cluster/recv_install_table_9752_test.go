@@ -23,7 +23,8 @@ import (
 // the mirror itself cannot hold it.
 type lossyMirrorDP9752 struct {
 	*mockSweepDP
-	sets []dataplane.SessionValue
+	sets   []dataplane.SessionValue
+	setsV6 []dataplane.SessionValueV6
 }
 
 // dropSyncOnly9752 mirrors the production loss field-for-field
@@ -80,6 +81,7 @@ func (f *lossyMirrorDP9752) BatchIterateSessions(fn func(dataplane.SessionKey, d
 }
 
 func (f *lossyMirrorDP9752) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
+	f.setsV6 = append(f.setsV6, val)
 	dropSyncOnlyV69752(&val)
 	return f.mockSweepDP.SetSessionV6(key, val)
 }
@@ -237,5 +239,51 @@ func TestLossyMirrorMatchesProductionLossExactly9752(t *testing.T) {
 	}
 	if read != want {
 		t.Fatalf("lossy Get diverges from production loss:\n got %+v\nwant %+v", read, want)
+	}
+}
+
+func lastSetV610068(t *testing.T, dp *lossyMirrorDP9752) dataplane.SessionValueV6 {
+	t.Helper()
+	if len(dp.setsV6) == 0 {
+		t.Fatal("no v6 Set reached the mirror")
+	}
+	return dp.setsV6[len(dp.setsV6)-1]
+}
+
+// TestRecvMemoRestoresOverLossyMirrorV610068 mirrors the current production
+// shape of the removed v4 keep-rule cells: the received install memo, not the
+// lossy BPF mirror, restores an old sender's stamp-less v6 resend.
+func TestRecvMemoRestoresOverLossyMirrorV610068(t *testing.T) {
+	fwd := rtflowKeyV6(41001)
+	ss, dp := lossyRecvSync9752(t)
+	ss.installClusterSyncedV6(fwd, dataplane.SessionValueV6{
+		SessionID: 77, RTFlowSessionID: 77, Generation: 10,
+		InstallTableDomain: 525590, InstallTableCheck: 3318534811,
+	})
+	if got := lastSetV610068(t, dp); got.InstallTableDomain != 525590 {
+		t.Fatal("FIXTURE: stamped v6 install did not land")
+	}
+	wire := encodeSessionV6(fwd, dataplane.SessionValueV6{
+		SessionID: 77, RTFlowSessionID: 77, Generation: 11,
+	})
+	payload := wire[syncHeaderSize:]
+	truncated := payload[:len(payload)-8]
+	key, val, ok := decodeSessionV6Payload(truncated)
+	if !ok {
+		t.Fatal("FIXTURE: truncated v6 resend did not decode")
+	}
+	if key != fwd {
+		t.Fatal("FIXTURE: decoded v6 resend key does not name the installed session")
+	}
+	if val.SessionID != 77 || val.Generation != 11 {
+		t.Fatalf("FIXTURE: decoded v6 resend lost identity (sid=%d gen=%d)",
+			val.SessionID, val.Generation)
+	}
+	ss.installClusterSyncedV6(key, val)
+	got := lastSetV610068(t, dp)
+	if got.InstallTableDomain != 525590 || got.InstallTableCheck != 3318534811 {
+		t.Fatalf("#10068: a stamp-less v6 resend over a lossy mirror installed "+
+			"(%d,%d); the receive record must restore it from Go memory",
+			got.InstallTableDomain, got.InstallTableCheck)
 	}
 }
