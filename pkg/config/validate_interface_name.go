@@ -113,7 +113,7 @@ func ValidateInterfaceName(raw string, _ *Config) error {
 					"the generated .network file's [Match] Name=, which systemd reads as a "+
 					"WHITESPACE-SEPARATED list of globs — a name with a space matches, and "+
 					"claims, more than one interface", raw, i)
-		case c == '*' || c == '?' || c == '[' || c == ']':
+		case rendersafe.IsGlobMetacharacter(c):
 			return fmt.Errorf(
 				"interface name %q contains the glob metacharacter %q at byte %d; the name is "+
 					"rendered into the generated .network file's [Match] Name=, which systemd "+

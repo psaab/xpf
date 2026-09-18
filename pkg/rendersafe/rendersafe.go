@@ -99,13 +99,38 @@ func ReplaceControlBytes(s string, repl byte) string {
 //     names; strings.Fields would split them, which is why this predicate
 //     does not use it. A pre-gate config carrying one keeps booting.
 //
-// What this predicate does NOT check: glob metacharacters (*?[]) are exactly
-// one pattern and PASS here. They are refused at commit for interfaces
-// (#6834) but have no render-side belt yet; that is #10089, not this
-// predicate. A caller that needs "one LITERAL pattern" must check the glob
-// class itself until #10089 lands.
+// Glob metacharacters pass because each is one pattern. Callers that require
+// one literal pattern must also reject FirstGlobMetacharacter (#10089).
 func RendersAsOnePattern(name string) bool {
 	return name != "" && !strings.ContainsAny(name, " \t\n\v\f\r")
+}
+
+// IsGlobMetacharacter reports whether c is one of the ASCII shell-style glob
+// metacharacters understood by systemd's [Match] Name= grammar.
+func IsGlobMetacharacter(c byte) bool {
+	switch c {
+	case '*', '?', '[', ']':
+		return true
+	default:
+		return false
+	}
+}
+
+// FirstGlobMetacharacter returns the first ASCII shell-style glob
+// metacharacter in name. It deliberately reports the token so render callers
+// can name the exact character they refused; an empty string means no glob
+// metacharacter was found.
+//
+// This is separate from RendersAsOnePattern: a glob occupies one systemd
+// match-list slot, but it is still unsafe when the caller needs one literal
+// device name (#10089).
+func FirstGlobMetacharacter(name string) string {
+	for i := range name {
+		if IsGlobMetacharacter(name[i]) {
+			return name[i : i+1]
+		}
+	}
+	return ""
 }
 
 // containsControlBytes reports whether s carries any ASCII control byte (C0
