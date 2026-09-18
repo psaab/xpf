@@ -106,6 +106,7 @@ IDLE_WAIT="${IDLE_WAIT:-15}"
 APP_TIMEOUT="${APP_TIMEOUT:-10}"
 SUBJECT_DURATION="${SUBJECT_DURATION:-90}"
 STEP_TIMEOUT="${STEP_TIMEOUT:-90}"
+RESERVE_DURATION=$((STEP_TIMEOUT * 3 + 30))
 APP_SET="wire-10030-lifecycle-set"
 APP_LIFECYCLE="wire-10030-lifecycle"
 HOLD_SRC="${SCRIPT_DIR}/wire_tcp_hold.py"
@@ -251,7 +252,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 ((CONTROL_READY)) || fail_void harness-void
 $SG "incus exec ${LAN_REF} -- rm -f ${RESERVE_LOG} ${RESERVE_PID_FILE}" >/dev/null 2>&1 || fail_void harness-void
-$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --reserve ${LAN_ADDR} ${FRESH_SOURCE_PORT} --duration ${STEP_TIMEOUT} >${RESERVE_LOG} 2>&1 & echo \$! >${RESERVE_PID_FILE}'" >/dev/null 2>&1 || fail_void harness-void
+$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --reserve ${LAN_ADDR} ${FRESH_SOURCE_PORT} --duration ${RESERVE_DURATION} >${RESERVE_LOG} 2>&1 & echo \$! >${RESERVE_PID_FILE}'" >/dev/null 2>&1 || fail_void harness-void
 RESERVED=0
 for _ in 1 2 3 4 5; do
     $SG "incus exec ${LAN_REF} -- grep -q RESERVED ${RESERVE_LOG}" >/dev/null 2>&1 && { RESERVED=1; break; }
@@ -265,6 +266,7 @@ CAP_PID=$!
 sleep 2
 EXP_RAW="$($SG "incus exec ${LAN_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_RAW} --src ${LAN_ADDR} --dst ${SINK_ADDR} --sport ${LIFECYCLE_SRC_PORT} --dport ${LIFECYCLE_PORT} --count ${EXPIRED_BURST} --payload-size 64 --rate 2000" 2>&1 || true)"
 FRESH_RAW="$($SG "incus exec ${LAN_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_RAW} --src ${LAN_ADDR} --dst ${SINK_ADDR} --sport ${FRESH_SOURCE_PORT} --dport ${LIFECYCLE_PORT} --count ${FRESH_BURST} --payload-size 64 --rate 2000" 2>&1 || true)"
+$SG "incus exec ${LAN_REF} -- sh -c 'pid=\$(cat ${RESERVE_PID_FILE} 2>/dev/null) && kill -0 \"\$pid\" 2>/dev/null'" >/dev/null 2>&1 || fail_void harness-void
 SENT="$($SG "incus exec ${LAN_REF} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_PROBE} --dst ${SINK_ADDR} --tcp-timeout 0.2 --tcp-leg ${LIFECYCLE_PORT}:${CONTROL_BURST}" 2>&1 || true)"
 sleep 8
 $SG "incus exec ${SINK_REF} -- pkill -f '[t]cpdump.*${LIFECYCLE_PORT}'" >/dev/null 2>&1 || true
