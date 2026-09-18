@@ -290,7 +290,7 @@ func computeDHCPV6Desired(cfg *config.DHCPRelayV6Config, resolveIfName func(stri
 	return desired
 }
 
-func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr net.IP) (dhcpV6Sockets, error) {
+func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, _ net.IP) (dhcpV6Sockets, error) {
 	clientListen := dhcpV6ListenConfig(ifaceName)
 	clientRaw, err := clientListen.ListenPacket(ctx, "udp6", "[::]:547")
 	if err != nil {
@@ -318,7 +318,7 @@ func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr ne
 	// client link but is not necessarily the source address for the
 	// server-facing route.
 	serverListen := dhcpV6ListenConfig("")
-	serverAddr := (&net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6RelayPort}).String()
+	serverAddr := dhcpV6UpstreamBindAddr()
 	server, err := serverListen.ListenPacket(ctx, "udp6", serverAddr)
 	if err != nil {
 		_ = client.LeaveGroup(iface, group)
@@ -326,6 +326,10 @@ func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr ne
 		return dhcpV6Sockets{}, err
 	}
 	return dhcpV6Sockets{client: client, server: server, iface: iface, group: group}, nil
+}
+
+func dhcpV6UpstreamBindAddr() string {
+	return (&net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6RelayPort}).String()
 }
 
 func dhcpV6ListenConfig(ifaceName string) net.ListenConfig {
