@@ -40,20 +40,7 @@ func TestTreeIsGofmtClean(t *testing.T) {
 	var unformatted []string
 	var scanned int
 	for _, root := range roots {
-		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if info.IsDir() {
-				// Vendored and build-output trees are not ours to format.
-				if name := info.Name(); name == "vendor" || name == "target" || name == "testdata" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(path, ".go") {
-				return nil
-			}
+		err := walkGofmtSources(root, func(path string) error {
 			src, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -94,5 +81,85 @@ func TestTreeIsGofmtClean(t *testing.T) {
 			"is indistinguishable from the backlog, which is exactly how one "+
 			"got shipped.",
 			len(unformatted), strings.Join(unformatted, "\n  "))
+	}
+}
+
+// isNestedGofmtCheckout reports whether path roots a checkout below root. A
+// linked worktree has a .git file; a full clone has a .git directory. The scan
+// root itself is exempt because a linked worktree can be the root under test.
+func isNestedGofmtCheckout(root, path string) bool {
+	if filepath.Clean(root) == filepath.Clean(path) {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
+func walkGofmtSources(root string, visit func(path string) error) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if isNestedGofmtCheckout(root, path) {
+				return filepath.SkipDir
+			}
+			// Vendored and build-output trees are not ours to format.
+			if name := info.Name(); name == "vendor" || name == "target" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		return visit(path)
+	})
+}
+
+func TestGofmtWalkSkipsNestedCheckout_10339(t *testing.T) {
+	tests := []struct {
+		name          string
+		marker        string
+		markerContent string
+	}{
+		{name: "git-file", marker: ".git", markerContent: "gitdir: /tmp/gofmt-nested-10339\n"},
+		{name: "git-directory", marker: filepath.Join(".git", "HEAD"), markerContent: "ref: refs/heads/master\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			top := filepath.Join(root, "top.go")
+			if err := os.WriteFile(top, []byte("package top\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			nested := filepath.Join(root, "nested")
+			if err := os.MkdirAll(nested, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(nested, tc.marker)
+			if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(marker, []byte(tc.markerContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(nested, "bad.go"),
+				[]byte("package nested\n\nvar   intentionally   unformatted   = 1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var visited []string
+			err := walkGofmtSources(root, func(path string) error {
+				visited = append(visited, path)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("walk fixture: %v", err)
+			}
+			if len(visited) != 1 || visited[0] != top {
+				t.Fatalf("walk visited %v, want only top-level %s", visited, top)
+			}
+		})
 	}
 }

@@ -158,6 +158,19 @@ func repoRootFromPackage(t *testing.T) string {
 	}
 }
 
+// isNestedCheckout reports whether path roots a checkout below root. A
+// linked worktree stores a gitdir pointer in a .git file; a full clone stores
+// its repository metadata in a .git directory. The scan root itself is
+// intentionally exempt because the test normally runs from a linked worktree
+// whose own .git is also a file.
+func isNestedCheckout(root, path string) bool {
+	if filepath.Clean(root) == filepath.Clean(path) {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
 // declSiteKey names the enclosing declaration for a key, QUALIFIED BY RECEIVER
 // TYPE when it is a method: "(*Daemon).programRethMACWithWorkerJoin".
 //
@@ -554,6 +567,9 @@ func callSitesOf(t *testing.T, root, method string) methodRefs {
 			return err
 		}
 		if info.IsDir() {
+			if isNestedCheckout(root, path) {
+				return filepath.SkipDir
+			}
 			switch info.Name() {
 			case ".git", "vendor", "node_modules", "target":
 				return filepath.SkipDir
@@ -685,6 +701,9 @@ func testFuncNamed(t *testing.T, root, name string) bool {
 			return err
 		}
 		if info.IsDir() {
+			if isNestedCheckout(root, path) {
+				return filepath.SkipDir
+			}
 			switch info.Name() {
 			case ".git", "vendor", "node_modules", "target":
 				return filepath.SkipDir
@@ -913,5 +932,121 @@ func TestLinkCycleLeaseIsAcquiredOnlyByPrepare_6871(t *testing.T) {
 		t.Errorf("PrepareLinkCycle no longer acquires the lease (%s not found). Either "+
 			"the acquisition moved — in which case this guard now constrains nothing — "+
 			"or the lease is not being taken at all", site)
+	}
+}
+
+// #10339: the tree-wide scan must not descend into nested checkouts.
+//
+// Agent worktrees live under the control checkout's root, so an unfiltered
+// walk re-reports every allowlisted production site from every live lane.
+// These fixture cells exercise both checkout layouts without relying on a
+// particular live worktree: linked worktrees have a .git file, while full
+// clones have a .git directory.
+const leaseScanFixtureCall = `package fixture
+
+type link struct{}
+
+func (l *link) PrepareLinkCycle() {}
+
+func acquire(l *link) { l.PrepareLinkCycle() }
+`
+
+func writeLeaseScanFixture(t *testing.T, dir, name, content string) {
+	t.Helper()
+	full := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", full, err)
+	}
+}
+
+func writeLeaseScanNestedFixture(t *testing.T, marker, markerContent string) string {
+	t.Helper()
+	root := t.TempDir()
+	writeLeaseScanFixture(t, root, "top.go", leaseScanFixtureCall)
+	writeLeaseScanFixture(t, root, filepath.Join("nested", marker), markerContent)
+	writeLeaseScanFixture(t, root, "nested/copy.go", leaseScanFixtureCall)
+	return root
+}
+
+func requireOnlyTopSite(t *testing.T, refs methodRefs) {
+	t.Helper()
+	if len(refs.escapes) != 0 {
+		t.Fatalf("fixture produced escapes, not calls: %v", refs.escapes)
+	}
+	if len(refs.calls) != 1 {
+		keys := make([]string, 0, len(refs.calls))
+		for k := range refs.calls {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		t.Fatalf("want exactly the top-level site, got %d keys: %v", len(refs.calls), keys)
+	}
+	for key := range refs.calls {
+		if !strings.HasPrefix(key, "top.go:") {
+			t.Fatalf("surviving site is not the top-level one: %q", key)
+		}
+	}
+}
+
+func TestCallSitesOfSkipsNestedWorktreeGitFile_10339(t *testing.T) {
+	root := writeLeaseScanNestedFixture(t, ".git", "gitdir: /elsewhere/worktrees/nested\n")
+	requireOnlyTopSite(t, callSitesOf(t, root, "PrepareLinkCycle"))
+}
+
+func TestCallSitesOfSkipsNestedCloneGitDir_10339(t *testing.T) {
+	root := writeLeaseScanNestedFixture(t, filepath.Join(".git", "HEAD"), "ref: refs/heads/master\n")
+	requireOnlyTopSite(t, callSitesOf(t, root, "PrepareLinkCycle"))
+}
+
+// This is the mutation probe: excluding nested checkouts must not hide a
+// genuinely new site in the top checkout. The allowlist comparison must still
+// report the second sibling as added.
+func TestCallSitesOfStillReportsGenuineSecondSite_10339(t *testing.T) {
+	root := t.TempDir()
+	writeLeaseScanFixture(t, root, "a.go", leaseScanFixtureCall)
+	writeLeaseScanFixture(t, root, "b.go", strings.Replace(leaseScanFixtureCall, "func acquire(", "func acquireElsewhere(", 1))
+
+	refs := callSitesOf(t, root, "PrepareLinkCycle")
+	if len(refs.calls) != 2 {
+		t.Fatalf("want both sibling sites, got %d: %v", len(refs.calls), refs.calls)
+	}
+	var first string
+	for key := range refs.calls {
+		if strings.HasPrefix(key, "a.go:") {
+			first = key
+		}
+	}
+	if first == "" {
+		t.Fatalf("a.go site missing from %v", refs.calls)
+	}
+	added, _, _ := compareToAllowlist(refs.calls, map[string]acquisitionSite{first: {occurrences: 1}})
+	if len(added) != 1 || !strings.HasPrefix(added[0], "b.go:") {
+		t.Fatalf("second site not flagged as added: %v", added)
+	}
+}
+
+func TestFuncNamedIgnoresProofsOnlyInNestedCheckouts_10339(t *testing.T) {
+	root := t.TempDir()
+	writeLeaseScanFixture(t, root, "nested/.git", "gitdir: /elsewhere\n")
+	writeLeaseScanFixture(t, root, "nested/proof_test.go", `package fixture
+
+import "testing"
+
+func TestNestedOnlyProof_10339(t *testing.T) {}
+`)
+	if testFuncNamed(t, root, "TestNestedOnlyProof_10339") {
+		t.Fatal("testFuncNamed is satisfied by a proof only in a nested checkout")
+	}
+	writeLeaseScanFixture(t, root, "top_test.go", `package fixture
+
+import "testing"
+
+func TestTopProof_10339(t *testing.T) {}
+`)
+	if !testFuncNamed(t, root, "TestTopProof_10339") {
+		t.Fatal("testFuncNamed misses a top-level proof in a temp root")
 	}
 }
