@@ -136,7 +136,8 @@ func ValidateInterfaceName(raw string, _ *Config) error {
 // The body lives in pkg/rendersafe (#9886): the networkd render belt must
 // answer the same question, and duplicating it would let the two copies drift.
 // The grammar facts (ASCII separator set, unicode-space pass-through, glob
-// deferral to #10089) are documented there, beside the body.
+// pass-through to #10089's separate render-stage belt) are documented there,
+// beside the body.
 func interfaceNameRendersAsOnePattern(name string) bool {
 	return rendersafe.RendersAsOnePattern(name)
 }
