@@ -1023,6 +1023,15 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 		"Rule.UnknownMatchLeaves.all", "Rule.UnknownMatchLeaves[0]",
 	),
 	fixtureConstantAxes6812(
+		"#10294 compile-time diagnostic state: unknown source-NAT action children "+
+			"are recorded for the strict/tolerant open-world gate. The fixture uses "+
+			"only valid pool actions, so all unknown-child columns remain empty here; "+
+			"they vary for malformed production input and nothing sorts or compares "+
+			"on them.",
+		"Rule.unknownThenLeaves.nil", "Rule.unknownThenLeaves.len",
+		"Rule.unknownThenLeaves.all", "Rule.unknownThenLeaves[0]",
+	),
+	fixtureConstantAxes6812(
 		"#7013 compile-time diagnostic state: what ONE `then` container authored, kept "+
 			"so validateNATTerminalActionCardinalityStrict can see a pool the resolved "+
 			"NATThen scalar already discarded. Constant at exactly one authored pool "+

@@ -1039,6 +1039,13 @@ type NATRule struct {
 	// synced tree text); it must not join golden JSON, ConfigFingerprint, or
 	// config-sync payloads (the MappedPortRaw/ThenTargetCount precedent).
 	UnknownMatchLeaves []string `json:"-"`
+	// unknownThenLeaves records source-NAT action keywords that are not one
+	// of interface/off/pool. The source-NAT compiler previously ignored those
+	// children, so a typo could commit and leave the rule's translation action
+	// empty or different from what the operator authored. The strict/tolerant
+	// gate reports this field; the valid compiler-owned persistent-nat tail
+	// after pool remains intentionally open (#10078).
+	unknownThenLeaves []string
 }
 
 // NATMatch defines what traffic a NAT rule matches.

@@ -644,6 +644,25 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					term := &FirewallFilterTerm{
 						Name: termInst.name,
 					}
+					// #10294: a term-level child other than `from` or
+					// `then` is never read by the term loop. In compact
+					// form the first tail token is the child head; valid
+					// `term t1 then accept` / `term t1 from ...` tails
+					// must not be mistaken for unknown children.
+					if len(termInst.node.Keys) >= 3 {
+						switch termInst.node.Keys[2] {
+						case "from", "then":
+						default:
+							term.unknownChildren = append(term.unknownChildren, termInst.node.Keys[2])
+						}
+					}
+					for _, child := range termInst.node.Children {
+						switch child.Name() {
+						case "from", "then":
+						default:
+							term.unknownChildren = append(term.unknownChildren, child.Name())
+						}
+					}
 
 					// #3850: apply EVERY `from {}` block, not just the first via
 					// FindChild — a duplicate block (a `load merge`/`load
