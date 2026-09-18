@@ -471,10 +471,25 @@ type Manager struct {
 	// OUTSIDE the clusterHA guard, until the helper reports no groups.
 	pendingHAStateClear bool
 
+	// pendingHAStateReplay records a clustered inventory publish that is not yet
+	// acknowledged by the helper after retry-debt convergence. Snapshot
+	// publication can succeed while update_ha_state fails, so the snapshot
+	// generation gate alone cannot drive this retry. Keep the obligation until
+	// a non-empty update_ha_state is acknowledged; helper restart state does
+	// not clear it.
+	pendingHAStateReplay bool
+
 	// clearHelperHAStateHook, when non-nil, replaces the update_ha_state RPC in
 	// clearHelperHAStateLocked so tests can inject a transient clear failure
 	// without a control socket (#5487). Production leaves it nil.
 	clearHelperHAStateHook func() error
+
+	// refreshHAStateFromMapsHook, when non-nil, replaces the BPF-map-backed
+	// merge in refreshHAStateFromMapsLocked so the debt-convergence HA replay
+	// is reachable without privileged maps (#10034). Production leaves it nil.
+	// The stub owns the m.haGroups state under test (seeded directly); the map
+	// merge itself stays pinned by the privileged mergeHAStateFromMaps cells.
+	refreshHAStateFromMapsHook func() error
 
 	lookupUserspaceCtrlForFailClosedHook userspaceCtrlLookupHook
 
