@@ -197,7 +197,7 @@ func TestApplyAndSyncCommittedReturnsMTUWarnings9841(t *testing.T) {
 // response copy carries the line.
 func TestCommittedDigestStableAcrossMTUSync9841(t *testing.T) {
 	d := applyMarkerDaemon9175(t)
-	promote9175(t, d, "system host-name mtu-test\n")
+	promote9175(t, d, "system host-name mtu-test;\n")
 	dp := &runtimeOnlyApplyTestDP{applyResult: &dataplane.ApplyResult{UnconvergedMTUs: mtuTestRecords9841()}}
 	d.setDataplane(dp)
 
