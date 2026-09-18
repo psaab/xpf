@@ -2226,10 +2226,10 @@ fn wg_socket_vrf_bind_failure_is_not_swallowed_10196() {
     );
 }
 
-/// #10196: an IPv6 capability failure may fall back to AF_INET even when a
-/// scoped device was requested, but a real bind-device failure may not.
+/// #10196: only IPv6 capability failures are eligible for the v4 fallback;
+/// a real bind-device failure remains fail-closed.
 #[test]
-fn wg_socket_v6_capability_fallback_preserves_requested_device_10196() {
+fn wg_socket_v6_capability_fallback_predicate_10196() {
     let capability = io::Error::from_raw_os_error(libc::EAFNOSUPPORT);
     assert!(v6_bind_can_fallback(&capability));
     let missing_device = io::Error::from_raw_os_error(libc::ENODEV);
