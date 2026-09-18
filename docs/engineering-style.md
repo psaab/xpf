@@ -1355,16 +1355,20 @@ body does not save you.
 GitHub's documented grammar plus the two measured shapes above. It refuses a
 close pair that follows a negation, or a scoping heading, within its own clause,
 and names the issue and the spellings that pass. Verdicts are per pair, so a
-`Closes #N` in the same body goes through. It runs in two places today, and a
-third is written but not installed:
+`Closes #N` in the same body goes through. It runs automatically on the
+commit path and in the repository selftest; the PR-body workflow is preserved
+as a human step until the owner grants the required `workflow` OAuth scope:
 
+- `make selftest` first runs `make close-keyword-lint`, which checks every
+  commit message in this branch (`origin/master..HEAD`), then runs
+  `scripts/run-selftests.sh`. This is the merge-gate command for the current
+  tree.
 - `scripts/close_keyword_lint_ci.sh` holds both pull-request legs (the PR body
-  and every commit message in the range). The GitHub Actions job that would call
-  it on every pull request is **not in the tree**: pushing a workflow file needs
-  an OAuth token with `workflow` scope, which the token in use does not have
-  (#9551). Until it lands, nothing checks a PR BODY unless someone runs
-  `make close-keyword-lint PR=<n>`. `master` is not branch-protected either, so
-  even with the job a red check would not block `gh pr merge`.
+  and every commit message in the range). The exact GitHub Actions job,
+  including `opened`, `edited`, `synchronize`, and `reopened` triggers plus
+  `fetch-depth: 0`, is recorded in the "Human step: workflow wiring" section
+  of `docs/log/9551.md`. It passes the body through `env`, never interpolated
+  into a command line.
 - `make close-keyword-lint` checks this branch's commit messages
   (`origin/master..HEAD`); with `PR=<n>` it checks that PR's body and commit
   messages.
