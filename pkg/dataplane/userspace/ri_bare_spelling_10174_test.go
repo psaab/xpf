@@ -104,3 +104,34 @@ func TestFIBBareCrossSpelledMemberFansDown10174(t *testing.T) {
 		})
 	}
 }
+
+// #10174: a quarantined instance's bare cross-spelled member must quarantine
+// the DECLARED base and every addressed unit row — else those rows inherit
+// the default session domain (the #9956 defect shape, in the other spelling,
+// for the whole port).
+func TestFIBQuarantineCoversCrossSpelledBareMember10174(t *testing.T) {
+	for _, tc := range []struct {
+		stanza string
+		member string
+	}{
+		{"ge-0/0/0", "ge-0-0-0"},
+		{"ge-0-0-0", "ge-0/0/0"},
+	} {
+		t.Run(tc.stanza+"/"+tc.member, func(t *testing.T) {
+			cfg := spellingCfg10174(tc.stanza, tc.member)
+			cfg.QuarantinedRoutingInstances = cfg.RoutingInstances
+			cfg.RoutingInstances = nil
+			for _, rowKey := range []string{tc.stanza, tc.stanza + ".0", tc.stanza + ".1"} {
+				if _, ok := quarantinedInterfaceKeys(cfg)[rowKey]; !ok {
+					t.Errorf("#10174: stanza %q bare member %q: quarantined set misses %q (have %v)",
+						tc.stanza, tc.member, rowKey, quarantinedInterfaceKeys(cfg))
+				}
+				snap := snapshotByName9132(t, buildInterfaceSnapshots(cfg), rowKey)
+				if snap.RoutingDomain != QuarantinedRoutingInstanceDomain {
+					t.Errorf("#10174: stanza %q bare member %q: snapshot %q RoutingDomain = %d, want sentinel %d (0 = default-domain aliasing)",
+						tc.stanza, tc.member, rowKey, snap.RoutingDomain, QuarantinedRoutingInstanceDomain)
+				}
+			}
+		})
+	}
+}
