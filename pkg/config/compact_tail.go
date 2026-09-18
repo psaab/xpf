@@ -190,6 +190,18 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 			return node.Children
 		}
 		n, refined := consumeNodeKeys(tail, childSchema)
+		// A multi-value leaf authored as `keyword [ A B ]` is one
+		// statement even though the parser flattens the bracket contents into
+		// Keys. Consume the contiguous bracketed run as part of this
+		// synthesized leaf; without the structural mask the conservative
+		// "outside the modelled grammar" bailout remains unchanged.
+		if childSchema.multi && childSchema.children == nil &&
+			len(tailBracketed) == len(tail) && n > 1 &&
+			tailBracketed[n-1] {
+			for n < len(tail) && tailBracketed[n] {
+				n++
+			}
+		}
 		if n <= 0 {
 			return node.Children
 		}

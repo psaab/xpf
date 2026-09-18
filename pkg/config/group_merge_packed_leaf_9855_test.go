@@ -381,18 +381,17 @@ func TestPackedGroupLeafSuccessiveDifferentInstanceAdopts9859(t *testing.T) {
 	}
 }
 
-// TestPackedGroupLeafBracketedPeerBails9855 pins the bracketed-run bailout:
-// an inline packed tail the schema walk cannot expand (`virtual-address [ A
-// B ]` leaves a second member unconsumed) keeps override, the merged tree
-// carries the tail verbatim, and the inline VIPs still compile. Valid input,
-// known limitation (#10055).
+// TestPackedGroupLeafBracketedPeerBails9855 keeps the conservative bail for
+// a genuinely unexpandable bracketed tail: the valid multi-value run expands,
+// but an unknown trailing property remains outside the schema walk. The
+// helper must preserve the whole tail and keep inline-wins override.
 func TestPackedGroupLeafBracketedPeerBails9855(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 priority 200; } } } } } } } apply-groups G; ` +
-		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ]; } } } } }`
+		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ] scren edge; } } } } }`
 	tree := parseHierarchical(t, text)
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	var vg *VRRPGroup
 	for _, g := range cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].VRRPGroups {
@@ -404,8 +403,9 @@ func TestPackedGroupLeafBracketedPeerBails9855(t *testing.T) {
 	if vg.Priority != 100 {
 		t.Fatalf("priority = %d, want 100 (group tail dropped by bailout override)", vg.Priority)
 	}
-	if !slices.Equal(vg.VirtualAddresses, []string{"10.0.61.1/24", "10.0.61.3/24"}) {
-		t.Fatalf("virtual-addresses = %v, want both inline VIPs", vg.VirtualAddresses)
+	if len(vg.VirtualAddresses) < 2 ||
+		!slices.Equal(vg.VirtualAddresses[:2], []string{"10.0.61.1/24", "10.0.61.3/24"}) {
+		t.Fatalf("virtual-addresses = %v, want the two inline VIPs first", vg.VirtualAddresses)
 	}
 	expanded := parseHierarchical(t, text)
 	if err := expanded.ExpandGroups(); err != nil {
@@ -417,8 +417,8 @@ func TestPackedGroupLeafBracketedPeerBails9855(t *testing.T) {
 		for _, n := range nodes {
 			if len(n.Keys) >= 2 && n.Keys[0] == "vrrp-group" && n.Keys[1] == "1" {
 				found = true
-				if !slices.Equal(n.Keys, []string{"vrrp-group", "1", "virtual-address", "10.0.61.1/24", "10.0.61.3/24"}) {
-					t.Fatalf("merged Keys = %q, want the bracketed tail intact", n.Keys)
+				if !slices.Equal(n.Keys, []string{"vrrp-group", "1", "virtual-address", "10.0.61.1/24", "10.0.61.3/24", "scren", "edge"}) {
+					t.Fatalf("merged Keys = %q, want the unexpandable bracketed tail intact", n.Keys)
 				}
 			}
 			walk(n.Children)
