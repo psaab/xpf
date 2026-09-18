@@ -700,9 +700,13 @@ RFC 8415 Table 1 and Section 19.1.2.
 
 The client socket listens on UDP/547 and joins `ff02::1:2` on each authored
 interface. Each direct client message is wrapped in Relay-Forw with the
-selected global IPv6 link-address and the peer address of the received packet
+selected global IPv6 link-address, or with the interface's link-local address
+when no GUA/ULA is available, and the peer address of the received packet
 (normally link-local, but global and ULA unicast peers are accepted), then sent
-to every configured server on UDP/547. Configured Relay-Reply sources and the
+to every configured server on UDP/547. A link-local link-address always carries
+the Interface-ID option because it cannot identify the return link by itself.
+The upstream socket uses an unspecified, route-selected local bind rather than
+binding to the Relay-Forw link-address. Configured Relay-Reply sources and the
 outer Interface-ID are validated; the inner message is sent to the peer on
 UDP/546. The existing HA master-state gate applies before forwarding client
 messages.
@@ -720,9 +724,10 @@ visible in the `inet6` row returned by `Manager.Stats`; reply source, parse,
 Interface-ID, nested-chain, and validation drops are visible there too.
 
 The link resolver uses the first usable global address returned by
-`net.Interface.Addrs`; Linux does not expose address-deprecation state through
-that portable API, so address order is the documented selection policy. A
-running session rechecks the bound interface index and selected link address;
+`net.Interface.Addrs`; when no GUA/ULA exists, it falls back to the first
+usable link-local address. Linux does not expose address-deprecation state
+through that portable API, so address order is the documented selection policy.
+A running session rechecks the bound interface index and selected link address;
 drift closes both sockets and the supervisor rebuilds them.
 
 ### HA master-state gate (#2456)

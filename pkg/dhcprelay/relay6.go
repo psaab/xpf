@@ -313,11 +313,12 @@ func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr ne
 		return dhcpV6Sockets{}, fmt.Errorf("join DHCPv6 relay multicast group: %w", err)
 	}
 
-	// The upstream socket is deliberately NOT SO_BINDTODEVICE-bound. The
-	// client socket is pinned to the client interface for multicast fanout, but
-	// server replies to a global helper must use the normal IPv6 routing table.
+	// Keep the upstream socket route-selected rather than binding it to the
+	// Relay-Forw link-address. A link-local link-address identifies the
+	// client link but is not necessarily the source address for the
+	// server-facing route.
 	serverListen := dhcpV6ListenConfig("")
-	serverAddr := (&net.UDPAddr{IP: linkAddr, Port: dhcpv6RelayPort}).String()
+	serverAddr := (&net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6RelayPort}).String()
 	server, err := serverListen.ListenPacket(ctx, "udp6", serverAddr)
 	if err != nil {
 		_ = client.LeaveGroup(iface, group)
@@ -372,18 +373,29 @@ func defaultDHCPV6LinkResolver(ifaceName string) (net.IP, error) {
 
 // selectDHCPv6LinkAddress chooses an address usable as Relay-Forw
 // link-address. RFC 8415 uses this field to identify the client link to the
-// server; unspecified, multicast, loopback, IPv4, and link-local addresses
-// cannot provide that routed link identity.
+// server. The first global unicast address (GUA or ULA) remains preferred;
+// a link-local address is retained as a fallback for link-local-only links.
 func selectDHCPv6LinkAddress(addrs []net.IP) (net.IP, error) {
+	var linkLocal net.IP
 	for _, ip := range addrs {
-		if ip == nil || ip.To4() != nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		if ip == nil || ip.To4() != nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() {
 			continue
 		}
-		if ip.IsGlobalUnicast() {
-			return append(net.IP(nil), ip.To16()...), nil
+		if ip.IsLinkLocalUnicast() {
+			if linkLocal == nil {
+				linkLocal = append(net.IP(nil), ip.To16()...)
+			}
+			continue
 		}
+		if !ip.IsGlobalUnicast() {
+			continue
+		}
+		return append(net.IP(nil), ip.To16()...), nil
 	}
-	return nil, fmt.Errorf("no usable global IPv6 link-address")
+	if linkLocal != nil {
+		return linkLocal, nil
+	}
+	return nil, fmt.Errorf("no usable IPv6 link-address")
 }
 
 func effectiveDHCPv6InterfaceID(override, authoredInterface string) []byte {
@@ -397,7 +409,7 @@ func effectiveDHCPv6InterfaceID(override, authoredInterface string) []byte {
 // Relay-Forw. A downstream relay's global or ULA source identifies the link
 // itself, so the new outer layer carries an unspecified link-address. A
 // client or link-local downstream relay still needs the receiving interface's
-// global link-address for server link selection.
+// selected link-address for server link selection.
 func relayForwardV6LinkAddress(interfaceLink, source net.IP, nested bool) net.IP {
 	if nested && source != nil && source.IsGlobalUnicast() && !source.IsLinkLocalUnicast() {
 		return net.IPv6unspecified
@@ -456,8 +468,11 @@ func buildRelayForwardV6(msg dhcpv6.DHCPv6, linkAddr, peerAddr net.IP, interface
 		return nil, err
 	}
 	allowUnspecified := msg.IsRelay()
-	if linkAddr == nil || linkAddr.To16() == nil || linkAddr.To4() != nil || (!allowUnspecified && linkAddr.IsUnspecified()) || linkAddr.IsMulticast() || linkAddr.IsLinkLocalUnicast() {
+	if linkAddr == nil || linkAddr.To16() == nil || linkAddr.To4() != nil || (!allowUnspecified && linkAddr.IsUnspecified()) || linkAddr.IsMulticast() {
 		return nil, fmt.Errorf("invalid DHCPv6 Relay-Forw link-address")
+	}
+	if !allowUnspecified && linkAddr.IsLinkLocalUnicast() && len(interfaceID) == 0 {
+		return nil, fmt.Errorf("link-local DHCPv6 Relay-Forw requires Interface-ID")
 	}
 	if allowUnspecified && (linkAddr.To16() == nil || linkAddr.To4() != nil || linkAddr.IsMulticast() || linkAddr.IsLinkLocalUnicast()) {
 		return nil, fmt.Errorf("invalid DHCPv6 nested Relay-Forw link-address")
@@ -591,11 +606,11 @@ func (m *dhcpV6Manager) runDHCPV6Session(relay *dhcpV6Relay, ctx context.Context
 		close(closeDone)
 		closeDHCPV6Sockets(sockets)
 	}()
-
-	// The client socket is SO_BINDTODEVICE-pinned and the server socket is
-	// bound to the resolved link address. Re-resolve both identity inputs
-	// during a live session; either drift makes this session stale and the
-	// supervisor reopens both sockets (#2347/#3960, P2-3).
+	// The client socket is SO_BINDTODEVICE-pinned while the server socket uses
+	// an unspecified, route-selected local bind. Re-resolve the client
+	// interface index and selected link identity during a live session; either
+	// drift makes this session stale and the supervisor reopens both sockets
+	// (#2347/#3960, P2-3).
 	var boundIfindex int
 	if m.resolveIfindex != nil {
 		if idx, err := m.resolveIfindex(relay.kernelName); err == nil && idx != 0 {
