@@ -1605,3 +1605,307 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
         "the imported cross-chassis session must survive"
     );
 }
+
+/// #10314 helpers: inactive RG runtime (peer-owned egress).
+fn inactive_rg_10314(watchdog_timestamp: u64) -> HAGroupRuntime {
+    HAGroupRuntime {
+        active: false,
+        watchdog_timestamp,
+        lease: HAForwardingLease::Inactive,
+    }
+}
+
+fn lan_binding_10314() -> BindingWorker {
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-1");
+    binding
+}
+
+/// #10314 cell A (RED pre-fix): unstamped frame on the fabric PARENT with an
+/// HAInactive egress must NOT be redirected back onto the fabric. Pre-fix the
+/// gate keys on `!packet_fabric_ingress` (validated stamp OR overlay only),
+/// so parent arrival (flag=false) redirects out the parent unstamped — the
+/// TTL-bounded ping-pong. Post-fix the gate keys on parent-or-overlay
+/// arrival and the frame stays HAInactive (counted, recycled, no forward).
+#[test]
+fn unstamped_parent_not_redirected_10314() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Egress RG 1 (WAN default route) inactive locally -> HAInactive.
+    let ha_state = BTreeMap::from([
+        (1, inactive_rg_10314(now_secs)),
+        (2, active_rg(now_secs)),
+    ]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+    );
+    // Good dst (our fabric MAC) so only the anti-loop guard is exercised;
+    // unstamped src (peer MAC, not 02:bf:72:fe...) on the fabric parent.
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "unstamped parent arrival must not redirect (RED pre-fix: queued {})",
+        binding.scratch.scratch_forwards.len()
+    );
+}
+
+/// #10314 cell B1 (guard, unchanged): overlay arrival with HAInactive never
+/// redirects, pre and post (both gates already block overlay).
+#[test]
+fn overlay_arrival_not_redirected_10314() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, inactive_rg_10314(now_secs)),
+        (2, active_rg(now_secs)),
+    ]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12346,
+        443,
+        TCP_FLAG_SYN,
+    );
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    let meta = txn_meta_v4(101, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "overlay arrival must not redirect (guard: expected empty, got {})",
+        binding.scratch.scratch_forwards.len()
+    );
+}
+
+/// #10314 cell B2 (guard, unchanged): validated-stamp arrival with HAInactive
+/// never redirects, pre and post (stamp implies fabric arrival).
+#[test]
+fn stamped_parent_not_redirected_10314() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Dual-inactive so the lan stamp validates (V1b: claimed-zone RG not
+    // locally active) and the WAN egress resolves HAInactive.
+    let ha_state = BTreeMap::from([
+        (1, inactive_rg_10314(now_secs)),
+        (2, inactive_rg_10314(now_secs)),
+    ]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12347,
+        443,
+        TCP_FLAG_SYN,
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "stamped parent arrival must not redirect (guard: expected empty, got {})",
+        binding.scratch.scratch_forwards.len()
+    );
+}
+
+/// #10314 cell B3 (guard, unchanged): legitimate LAN arrival with good dst
+/// MAC and HAInactive egress MUST still redirect (the fix must not break
+/// the working path by blocking all redirects).
+#[test]
+fn lan_good_mac_still_redirects_10314() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, inactive_rg_10314(now_secs)),
+        (2, active_rg(now_secs)),
+    ]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12348,
+        443,
+        TCP_FLAG_SYN,
+    );
+    // LAN ingress MAC (reth1.0) + LAN host src; default frame already carries
+    // these, set explicitly so the test does not depend on the builder.
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = lan_binding_10314();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "LAN good-MAC HAInactive must still redirect (guard against over-blocking)"
+    );
+}
+
+/// #10314 cell C (RED pre-fix): LAN arrival with wrong-unicast dst MAC must
+/// be dropped pre-L3, never relayed. Pre-fix there is no dst-MAC check
+/// (NIC filter is the only guard), so the otherhost frame redirects via the
+/// HAInactive path. Post-fix the OTHERHOST drop recycles pre-L3.
+#[test]
+fn lan_wrong_unicast_dst_dropped_pre_l3_10314() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, inactive_rg_10314(now_secs)),
+        (2, active_rg(now_secs)),
+    ]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12349,
+        443,
+        TCP_FLAG_SYN,
+    );
+    // Wrong unicast dst: not ours, not broadcast/multicast/VRRP.
+    frame[0..6].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x66]);
+    frame[6..12].copy_from_slice(&[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = lan_binding_10314();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "wrong-unicast dst must drop pre-L3 (RED pre-fix: queued {})",
+        binding.scratch.scratch_forwards.len()
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "wrong-unicast dst must not seed a session pre-L3"
+    );
+}
+
+/// #10314 session-hit arm: an unstamped parent arrival must not become a
+/// FabricRedirect after an inactive-owner revalidation. This specifically
+/// covers the path that runs before the HAInactive safety net.
+#[test]
+fn unstamped_parent_session_hit_not_redirected_10314() {
+    // Keep the parent in the LAN policy domain so the local-origin session
+    // hit reaches HAInactive revalidation rather than a zone-policy revoke.
+    let mut snapshot = nat_snapshot_with_fabric();
+    for iface in &mut snapshot.interfaces {
+        if iface.ifindex == 21 {
+            iface.zone = "lan".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, inactive_rg_10314(now_secs)),
+        (2, active_rg(now_secs)),
+    ]);
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: 12350,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let metadata = SessionMetadata {
+        // Parent 21 is explicitly in LAN above; matching the arrival zone
+        // keeps the session-hit authority path on the HA resolution arm.
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        // Model a session whose observed ingress was the fabric parent. The
+        // current packet is another frame on that same parent, but unstamped.
+        ingress_ifindex: 21,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut sessions = SessionTable::new();
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key,
+            decision,
+            metadata,
+            SessionOrigin::ForwardFlow,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "session-hit fixture must install"
+    );
+
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12350,
+        443,
+        TCP_FLAG_ACK,
+    );
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    let meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let (_batch, dbg) =
+        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(
+        dbg.session_hit, 1,
+        "parent frame must exercise the session-hit arm"
+    );
+    assert_eq!(
+        dbg.ha_inactive, 1,
+        "parent session hit must remain HAInactive rather than become FabricRedirect \
+         (ha={}, other={}, forward={}, local={}, no_route={}, missing_neigh={}, \
+          policy={}, revoked={}, foreign={})",
+        dbg.ha_inactive,
+        dbg.disposition_other,
+        dbg.forward,
+        dbg.local,
+        dbg.no_route,
+        dbg.missing_neigh,
+        dbg.policy_deny,
+        dbg.policy_revoked_sessions,
+        dbg.foreign_authority_drops
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "unstamped parent session hit must not redirect back onto fabric (RED pre-fix: queued {})",
+        binding.scratch.scratch_forwards.len()
+    );
+}

@@ -1074,6 +1074,7 @@ fn new_flow_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
         now_secs,
         routed,
         false,
+        false,
         24,
         state.zone_name_to_id.get(&from_zone).copied().unwrap_or(0),
         0,
@@ -1095,7 +1096,7 @@ fn new_flow_from_fabric_keeps_forward_candidate_when_owner_rg_inactive() {
     let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
     let routed = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
     let resolved =
-        finalize_new_flow_ha_resolution(&state, &ha_state, now_secs, routed, true, 21, 1, 0);
+        finalize_new_flow_ha_resolution(&state, &ha_state, now_secs, routed, true, true, 21, 1, 0);
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -6947,4 +6948,22 @@ fn parse_packet_destination_falls_back_on_wrong_stamp_9900() {
     };
     meta.l3_offset = 14;
     assert_eq!(parse_packet_destination(&tiny, tiny_desc, meta), None);
+}
+
+#[test]
+fn ingress_destination_mac_guard_fails_closed_without_local_mac_10314() {
+    let forwarding = ForwardingState::default();
+    let mut unicast = vec![0u8; 14];
+    unicast[0..6].copy_from_slice(&[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    assert!(
+        !ingress_destination_mac_accepted(&forwarding, 999, 0, &unicast),
+        "an unknown ingress MAC must fail closed instead of trusting NIC filtering"
+    );
+
+    let mut broadcast = unicast.clone();
+    broadcast[0..6].copy_from_slice(&[0xff; 6]);
+    assert!(
+        ingress_destination_mac_accepted(&forwarding, 999, 0, &broadcast),
+        "broadcast remains accepted under PACKET_OTHERHOST semantics"
+    );
 }

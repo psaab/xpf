@@ -196,6 +196,21 @@ pub(super) fn poll_binding_process_descriptor(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
+                // #10314: perform destination acceptance before ARP/NDP
+                // classification as well as before decap, source-neighbor
+                // learning, and all L3 resolution.
+                let fabric_link_ingress =
+                    ingress_is_fabric(worker_ctx.forwarding, meta.ingress_ifindex as i32);
+                if !ingress_destination_mac_accepted(
+                    worker_ctx.forwarding,
+                    meta.ingress_ifindex as i32,
+                    meta.ingress_vlan_id,
+                    raw_frame,
+                ) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #946 Phase 1 stage 5: ARP / NDP link-layer
                 // classification. ARP frames recycle without
                 // transiting; NDP NA learns and falls through.
@@ -562,6 +577,7 @@ pub(super) fn poll_binding_process_descriptor(
                         meta,
                         flow,
                         packet_fabric_ingress,
+                        fabric_link_ingress,
                         validation,
                         sessions,
                         now_ns,
@@ -681,6 +697,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // keying `ifindex_to_zone_id` on the raw physical index.
                         meta.ingress_vlan_id,
                         packet_fabric_ingress,
+                        fabric_link_ingress,
                         ha_startup_grace_until_secs,
                         worker_id,
                     ) {
@@ -2334,6 +2351,7 @@ pub(super) fn poll_binding_process_descriptor(
                             now_secs,
                             decision.resolution,
                             packet_fabric_ingress,
+                            fabric_link_ingress,
                             meta.ingress_ifindex as i32,
                             from_zone_id,
                             ha_startup_grace_until_secs,
@@ -3997,7 +4015,7 @@ pub(super) fn poll_binding_process_descriptor(
                             }
                         } else if decision.resolution.disposition
                             == ForwardingDisposition::HAInactive
-                            && !packet_fabric_ingress
+                            && !fabric_link_ingress
                         {
                             let owner_rg_id =
                                 owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
@@ -4646,7 +4664,7 @@ pub(super) fn poll_binding_process_descriptor(
                     // redirect when the egress RG is inactive.
                     let final_resolution = if base_resolution.disposition
                         == ForwardingDisposition::HAInactive
-                        && !packet_fabric_ingress
+                        && !fabric_link_ingress
                     {
                         resolve_fabric_redirect(worker_ctx.forwarding).unwrap_or(base_resolution)
                     } else {
@@ -5023,7 +5041,7 @@ pub(super) fn poll_binding_process_descriptor(
                 let egress_rg = owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
                 if decision.resolution.disposition == ForwardingDisposition::HAInactive
                     && egress_rg > 0
-                    && !packet_fabric_ingress
+                    && !fabric_link_ingress
                 {
                     if flow_cache_owner_rg_id <= 0 {
                         flow_cache_owner_rg_id = egress_rg;

@@ -183,6 +183,60 @@ pub(in crate::afxdp) fn ingress_is_fabric(forwarding: &ForwardingState, ingress_
         fabric.parent_ifindex == ingress_ifindex || fabric.overlay_ifindex == ingress_ifindex
     })
 }
+/// Returns whether the Ethernet destination is accepted on the observed
+/// ingress link. The AF_XDP shim normally receives only frames accepted by
+/// the NIC's unicast filter, but promiscuous / bridged / virtual devices can
+/// deliver PACKET_OTHERHOST frames too; those must not enter L3 forwarding.
+///
+/// Group destinations retain normal Ethernet semantics (broadcast and
+/// multicast are accepted). Unicast destinations must match the logical
+/// ingress interface's source MAC. A fabric parent/overlay uses the fabric
+/// link MAC because the overlay is not an egress row in every snapshot.
+/// A production AF_XDP ingress always has a configured MAC; if forwarding
+/// cannot identify one, fail closed rather than relying on the NIC filter.
+#[inline]
+pub(in crate::afxdp) fn ingress_destination_mac_accepted(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    frame: &[u8],
+) -> bool {
+    let Some(dst_mac) = frame.get(..6) else {
+        return false;
+    };
+    // I/G bit: broadcast and multicast are delivered to every listener on
+    // the link, so they are not PACKET_OTHERHOST unicast frames.
+    if dst_mac[0] & 1 != 0 {
+        return true;
+    }
+
+    let logical_ifindex =
+        resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
+            .unwrap_or(ingress_ifindex);
+    let expected_mac = forwarding
+        .egress
+        .get(&logical_ifindex)
+        .map(|egress| egress.src_mac)
+        .filter(|mac| *mac != [0; 6])
+        .or_else(|| {
+            forwarding
+                .egress
+                .get(&ingress_ifindex)
+                .map(|egress| egress.src_mac)
+                .filter(|mac| *mac != [0; 6])
+        })
+        .or_else(|| {
+            fabric_for_ingress(forwarding, ingress_ifindex)
+                .map(|fabric| fabric.local_mac)
+                .filter(|mac| *mac != [0; 6])
+        });
+
+    match expected_mac {
+        Some(expected) => dst_mac == expected,
+        None => false,
+    }
+}
+
 
 /// #6458: the fabric link whose parent OR overlay ifindex is
 /// `ingress_ifindex`, or `None` when the ingress is not a fabric. Single

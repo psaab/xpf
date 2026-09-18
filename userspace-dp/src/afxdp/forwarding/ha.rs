@@ -231,7 +231,12 @@ pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
     resolution: ForwardingResolution,
+    // `fabric_ingress` retains the validated stamp/overlay semantic used by
+    // the existing HA resolution behavior. `fabric_link_ingress` is the
+    // physical parent-or-overlay arrival semantic used only by anti-loop
+    // redirect suppression.
     fabric_ingress: bool,
+    fabric_link_ingress: bool,
     ingress_ifindex: i32,
     ingress_zone: u16,
     ha_startup_grace_until_secs: u64,
@@ -250,7 +255,7 @@ pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(
     super::session_glue::redirect_session_via_fabric_if_needed(
         forwarding,
         enforced,
-        fabric_ingress,
+        fabric_link_ingress,
         ingress_zone,
     )
 }
