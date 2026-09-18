@@ -128,6 +128,44 @@ var restConfigContentRoutes = map[string]string{
 	"POST /api/v1/config/rollback": "rollback",
 }
 
+// decodeRESTConfigBody applies the same single json.Decoder.Decode operation
+// the eventual REST handler applies to its request struct (#10306).
+//
+// The authorization layer has already buffered and restored r.Body. Decode
+// the exact handler-owned struct rather than a wider gate-only struct:
+// unknown fields are ignored, and trailing data after the first JSON value is
+// ignored, just as it is by decodeJSONBody. A decode/read error is a
+// disagreement with the handler's successful path and therefore FAILS CLOSED.
+func decodeRESTConfigBody(r *http.Request, dst any) error {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	raw, err := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	if err != nil {
+		return fmt.Errorf("permission denied: cannot read config request body: %w", err)
+	}
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(dst); err != nil {
+		return fmt.Errorf("permission denied: cannot decode config request body: %w", err)
+	}
+	return nil
+}
+
+// restConfigClassRestricted avoids decoding a body when the caller's class has
+// no configuration regex gate at all. The handler remains the sole decoder for
+// unrestricted classes (including the built-in `super-user` class), preserving
+// its own 400 response for malformed input; restricted classes must pass the
+// exact gate/handler decode below.
+func restConfigClassRestricted(cfg *config.Config, class string) (bool, error) {
+	_, restricted, err := config.ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return false, fmt.Errorf(
+			"permission denied: login class %q has an invalid configuration regex: %w",
+			class, err)
+	}
+	return restricted, nil
+}
+
 // authorizeRESTConfigLoad adjudicates the content-gated routes (#9892).
 //
 // It reads the ALREADY-BUFFERED body and puts it back, as the path gate does,
@@ -137,38 +175,44 @@ func (s *Server) authorizeRESTConfigLoad(r *http.Request, cfg *config.Config, p 
 	if !gated || p.Class == "" || p.Superuser {
 		return nil
 	}
-	if r.Body == nil || r.Body == http.NoBody {
-		return nil
-	}
-	raw, err := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(raw))
+	restricted, err := restConfigClassRestricted(cfg, p.Class)
 	if err != nil {
-		return nil
+		return err
 	}
-	var req struct {
-		Mode    string `json:"mode"`
-		Content string `json:"content"`
-		N       int    `json:"n"`
-	}
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if !restricted {
 		return nil
 	}
 	switch verb {
 	case "load":
+		var req ConfigLoadRequest
+		if err := decodeRESTConfigBody(r, &req); err != nil {
+			return err
+		}
 		return config.AuthorizeConfigLoad(cfg, p.Class, req.Mode, req.Content)
 	case "rollback":
+		// ConfigRollbackRequest is the handler's exact type. In particular,
+		// a gate-only `mode` field cannot make Decode fail before `n` is
+		// adjudicated.
+		var req ConfigRollbackRequest
+		if err := decodeRESTConfigBody(r, &req); err != nil {
+			return err
+		}
 		return config.AuthorizeConfigRollback(cfg, p.Class, req.N)
+	default:
+		// FAIL CLOSED, for the same reason the path gate does: a row added
+		// here whose adjudication nobody wrote must not pass through
+		// unexamined.
+		return fmt.Errorf("config route %s %s has no content adjudication", r.Method, r.URL.Path)
 	}
-	// FAIL CLOSED, for the same reason the path gate does: a row added here
-	// whose adjudication nobody wrote must not pass through unexamined.
-	return fmt.Errorf("config route %s %s has no content adjudication", r.Method, r.URL.Path)
 }
 
 // authorizeRESTConfigMutation adjudicates a config-mutating REST request
 // against the caller's `*-configuration` regexes.
 //
 // It reads the ALREADY-BUFFERED body and puts it back, so the handler still
-// decodes the same bytes.
+// decodes the same bytes. Each route is decoded into the exact request type
+// its handler uses; a wider gate-only struct would turn an unknown field with
+// the wrong JSON type into a gate/handler disagreement (#10306).
 func (s *Server) authorizeRESTConfigMutation(r *http.Request, cfg *config.Config, p authz.Principal) error {
 	route, gated := restConfigMutationRoutes[r.Method+" "+r.URL.Path]
 	if !gated || p.Class == "" {
@@ -180,38 +224,32 @@ func (s *Server) authorizeRESTConfigMutation(r *http.Request, cfg *config.Config
 	if p.Superuser {
 		return nil
 	}
-	if r.Body == nil || r.Body == http.NoBody {
-		return nil
-	}
-	raw, err := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(raw))
+	restricted, err := restConfigClassRestricted(cfg, p.Class)
 	if err != nil {
-		// The handler will report its own decode failure, which is a better
-		// message than a permission denial for a body we could not read.
+		return err
+	}
+	if !restricted {
 		return nil
 	}
-	var req struct {
-		Input string `json:"input"`
-		Path  string `json:"path"`
-	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		return nil
-	}
-	// Read the field this ROUTE declares, never both-and-whichever-is-set.
-	// Falling back between them would re-create the defect in a subtler form:
-	// a route whose handler reads `path` but whose gate found `input` would be
-	// adjudicating a string the store never acts on.
 	var input string
 	switch route.field {
 	case pathFromInput:
+		var req ConfigSetRequest
+		if err := decodeRESTConfigBody(r, &req); err != nil {
+			return err
+		}
 		input = strings.TrimSpace(req.Input)
 	case pathFromPath:
+		var req AnnotateRequest
+		if err := decodeRESTConfigBody(r, &req); err != nil {
+			return err
+		}
 		input = strings.TrimSpace(req.Path)
 	default:
 		// FAIL CLOSED. An unrecognised field means this table gained a row
-		// whose extraction nobody wrote, and allowing the request would be the
-		// exact silence #9890 was: a mutation passing through a gate that
-		// examined nothing.
+		// whose extraction nobody wrote, and allowing the request would be
+		// the exact silence #9890 was: a mutation passing through a gate
+		// that examined nothing.
 		return fmt.Errorf("config route %s %s declares no path field", r.Method, r.URL.Path)
 	}
 	if input == "" {
