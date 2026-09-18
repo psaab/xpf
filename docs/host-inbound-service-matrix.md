@@ -1322,12 +1322,13 @@ configuration doesn't apply to this interface anymore"). No vendor text was foun
 describing a per-leaf inheritance, so none is implemented — a per-leaf rule would
 be a guess, and a guess that silently widens admission.
 
-**Junos's own narrowing idiom is `except`, which xpf does not implement.** The
+**Junos's narrowing idiom is `except`, now implemented by xpf (#10292).** The
 worked example in the Juniper topic narrows a second interface with
-`system-services all` plus `ftp except` / `http except`. xpf's schema has no
-`except` keyword, so the only way to narrow an interface here is to author the
-narrower token list directly. That is a separate parity gap, not a consequence of
-this change.
+`system-services all` plus `ftp except` / `http except`. xpf accepts the
+nested, value-tail, and flat-set spellings for service and protocol exclusions.
+The compiler expands `all`, subtracts the authored exclusions, preserves
+unknown modifiers for strict validation, and emits the existing positive-token
+representation consumed by both enforcement paths.
 
 **What upgrading takes away.** For every interface that declares a stanza, the
 lost set is the zone-level tokens the interface stanza does not repeat (after
