@@ -532,6 +532,42 @@ func (s *Server) showRoutingInstancesDetail(cfg *config.Config, buf *strings.Bui
 					}
 				}
 			}
+			if len(ri.Inet6StaticRoutes) > 0 {
+				fmt.Fprintf(buf, "  Static routes (inet6.0): %d\n", len(ri.Inet6StaticRoutes))
+				for _, sr := range ri.Inet6StaticRoutes {
+					if sr.Discard {
+						fmt.Fprintf(buf, "    %s -> discard\n", sr.Destination)
+						if reason := staticExcluded[sr]; reason != "" {
+							fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+						}
+						continue
+					}
+					if sr.Reject {
+						fmt.Fprintf(buf, "    %s -> reject\n", sr.Destination)
+						if reason := staticExcluded[sr]; reason != "" {
+							fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+						}
+						continue
+					}
+					if sr.NextTable != "" {
+						fmt.Fprintf(buf, "    %s -> next-table %s\n", sr.Destination, sr.NextTable)
+						if reason := staticExcluded[sr]; reason != "" {
+							fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+						}
+						continue
+					}
+					for _, nh := range sr.NextHops {
+						nhStr := nh.Address
+						if nh.Interface != "" {
+							nhStr += " via " + nh.Interface
+						}
+						fmt.Fprintf(buf, "    %s -> %s\n", sr.Destination, nhStr)
+					}
+					if reason := staticExcluded[sr]; reason != "" {
+						fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
+					}
+				}
+			}
 			if ri.InterfaceRoutesRibGroup != "" {
 				fmt.Fprintf(buf, "  Interface routes rib-group: %s\n", ri.InterfaceRoutesRibGroup)
 			}

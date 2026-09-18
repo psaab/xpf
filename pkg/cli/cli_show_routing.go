@@ -1112,6 +1112,34 @@ func (c *CLI) showRoutingInstances(detail bool) error {
 				printStaticRouteNotInstalled(staticExcluded, sr)
 			}
 		}
+		if len(ri.Inet6StaticRoutes) > 0 {
+			fmt.Printf("  Static routes (inet6.0): %d\n", len(ri.Inet6StaticRoutes))
+			for _, sr := range ri.Inet6StaticRoutes {
+				if sr.Discard {
+					fmt.Printf("    %s -> discard\n", sr.Destination)
+					printStaticRouteNotInstalled(staticExcluded, sr)
+					continue
+				}
+				if sr.Reject {
+					fmt.Printf("    %s -> reject\n", sr.Destination)
+					printStaticRouteNotInstalled(staticExcluded, sr)
+					continue
+				}
+				if sr.NextTable != "" {
+					fmt.Printf("    %s -> next-table %s\n", sr.Destination, sr.NextTable)
+					printStaticRouteNotInstalled(staticExcluded, sr)
+					continue
+				}
+				for _, nh := range sr.NextHops {
+					nhStr := nh.Address
+					if nh.Interface != "" {
+						nhStr += " via " + nh.Interface
+					}
+					fmt.Printf("    %s -> %s\n", sr.Destination, nhStr)
+				}
+				printStaticRouteNotInstalled(staticExcluded, sr)
+			}
+		}
 		if ri.InterfaceRoutesRibGroup != "" {
 			fmt.Printf("  Interface routes rib-group: %s\n", ri.InterfaceRoutesRibGroup)
 		}
