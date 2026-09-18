@@ -52,20 +52,45 @@ type dhcpV6ReplyTarget struct {
 }
 
 type dhcpV6ReplyDispatcher struct {
-	mu           sync.Mutex
-	server       net.PacketConn
-	shared       *dhcpV6SharedPacketConn
-	serverCtx    context.Context
-	serverCancel context.CancelFunc
-	running      bool
-	targets      map[string][]*dhcpV6ReplyTarget
-	newServer    func(context.Context) (net.PacketConn, error)
+	mu               sync.Mutex
+	server           net.PacketConn
+	shared           *dhcpV6SharedPacketConn
+	serverCtx        context.Context
+	serverCancel     context.CancelFunc
+	running          bool
+	targets          map[string][]*dhcpV6ReplyTarget
+	newServer        func(context.Context) (net.PacketConn, error)
+	retryInterval    time.Duration
+	droppedParse     atomic.Uint64
+	droppedEmptyIID  atomic.Uint64
+	droppedUnknown   atomic.Uint64
+	droppedAmbiguous atomic.Uint64
 }
 
 func newDHCPV6ReplyDispatcher() *dhcpV6ReplyDispatcher {
 	return &dhcpV6ReplyDispatcher{
-		targets:   make(map[string][]*dhcpV6ReplyTarget),
-		newServer: defaultDHCPV6ServerFactory,
+		targets:       make(map[string][]*dhcpV6ReplyTarget),
+		newServer:     defaultDHCPV6ServerFactory,
+		retryInterval: startupRetryInterval,
+	}
+}
+
+type dhcpV6ReplyDispatcherStats struct {
+	parse     uint64
+	emptyIID  uint64
+	unknown   uint64
+	ambiguous uint64
+}
+
+func (d *dhcpV6ReplyDispatcher) stats() dhcpV6ReplyDispatcherStats {
+	if d == nil {
+		return dhcpV6ReplyDispatcherStats{}
+	}
+	return dhcpV6ReplyDispatcherStats{
+		parse:     d.droppedParse.Load(),
+		emptyIID:  d.droppedEmptyIID.Load(),
+		unknown:   d.droppedUnknown.Load(),
+		ambiguous: d.droppedAmbiguous.Load(),
 	}
 }
 
@@ -272,6 +297,16 @@ func newDHCPV6Manager() *dhcpV6Manager {
 	}
 }
 
+func (m *dhcpV6Manager) replyDispatcherSnapshot() *dhcpV6ReplyDispatcher {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	dispatcher := m.replyDispatcher
+	m.mu.Unlock()
+	return dispatcher
+}
+
 func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config, resolveIfName func(string) string, shouldRelay func(string) bool) {
 	if m == nil {
 		return
@@ -438,7 +473,7 @@ func defaultDHCPV6ConnFactory(ctx context.Context, ifaceName string, linkAddr ne
 	if linkAddr != nil && linkAddr.IsLinkLocalUnicast() {
 		// Link-local relays use the manager's centralized route-selected
 		// receive socket so Interface-ID, not SO_REUSEPORT, chooses the relay.
-		return dhcpV6Sockets{client: client, iface: iface, group: group}, nil
+		return dhcpV6Sockets{client: client, serverShared: true, iface: iface, group: group}, nil
 	}
 	serverListen := dhcpV6ListenConfig("")
 	serverAddr := dhcpV6UpstreamBindAddr(linkAddr, "", dhcpv6RelayPort)
@@ -595,8 +630,17 @@ func (d *dhcpV6ReplyDispatcher) restart(failed net.PacketConn) net.PacketConn {
 
 		server, err := factory(generationCtx)
 		if err != nil {
-			timer := time.NewTimer(10 * time.Millisecond)
-			<-timer.C
+			interval := d.retryInterval
+			if interval <= 0 {
+				interval = startupRetryInterval
+			}
+			timer := time.NewTimer(interval)
+			select {
+			case <-generationCtx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
 			continue
 		}
 
@@ -635,6 +679,31 @@ func (d *dhcpV6ReplyDispatcher) restart(failed net.PacketConn) net.PacketConn {
 	}
 }
 
+func (d *dhcpV6ReplyDispatcher) dispatch(packet dhcpv6.DHCPv6, source net.Addr) bool {
+	if d == nil {
+		return false
+	}
+	interfaceID := dhcpV6RelayReplyInterfaceID(packet)
+	if len(interfaceID) == 0 {
+		d.droppedEmptyIID.Add(1)
+		return false
+	}
+	d.mu.Lock()
+	targets := d.targets[string(interfaceID)]
+	target := dhcpV6ReplyTargetForPacket(packet, targets)
+	d.mu.Unlock()
+	if target == nil {
+		if len(targets) > 1 {
+			d.droppedAmbiguous.Add(1)
+		} else {
+			d.droppedUnknown.Add(1)
+		}
+		return false
+	}
+	processDHCPV6ServerPacket(target.relay, target.client, packet, source, target.servers, target.interfaceID)
+	return true
+}
+
 func (d *dhcpV6ReplyDispatcher) run(server net.PacketConn) {
 	buf := make([]byte, readBufSize)
 	for {
@@ -648,19 +717,10 @@ func (d *dhcpV6ReplyDispatcher) run(server net.PacketConn) {
 		}
 		packet, err := dhcpv6.FromBytes(buf[:n])
 		if err != nil {
+			d.droppedParse.Add(1)
 			continue
 		}
-		interfaceID := dhcpV6RelayReplyInterfaceID(packet)
-		if len(interfaceID) == 0 {
-			continue
-		}
-		d.mu.Lock()
-		target := dhcpV6ReplyTargetForPacket(packet, d.targets[string(interfaceID)])
-		d.mu.Unlock()
-		if target == nil {
-			continue
-		}
-		processDHCPV6ServerPacket(target.relay, target.client, packet, source, target.servers, target.interfaceID)
+		d.dispatch(packet, source)
 	}
 }
 
@@ -919,7 +979,7 @@ func (m *dhcpV6Manager) run(relay *dhcpV6Relay, ctx context.Context, servers []*
 			continue
 		}
 		var releaseReplyDispatcher func()
-		if sockets.server == nil {
+		if sockets.serverShared && sockets.server == nil {
 			m.mu.Lock()
 			if m.replyDispatcher == nil {
 				m.replyDispatcher = newDHCPV6ReplyDispatcher()
@@ -1064,7 +1124,8 @@ func (m *dhcpV6Manager) runDHCPV6Session(relay *dhcpV6Relay, ctx context.Context
 		go func() {
 			defer wg.Done()
 			defer cancel()
-			m.runDHCPV6ServerLoop(sessionCtx, relay, sockets.server, sockets.client, servers, effectiveDHCPv6InterfaceID(relay.spec.interfaceID, relay.ifaceName))
+			m.runDHCPV6ServerLoop(sessionCtx, relay, sockets.server, sockets.client, servers,
+				effectiveDHCPv6InterfaceID(relay.spec.interfaceID, relay.ifaceName), m.replyDispatcherSnapshot())
 		}()
 	}
 	wg.Wait()
@@ -1080,6 +1141,19 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 		n, source, err := client.ReadFrom(buf)
 		if err != nil {
 			return
+		}
+		if n > 0 && dhcpv6.MessageType(buf[0]) == dhcpv6.MessageTypeRelayReply {
+			packet, err := dhcpv6.FromBytes(buf[:n])
+			if err != nil {
+				if dispatcher := m.replyDispatcherSnapshot(); dispatcher != nil {
+					dispatcher.droppedParse.Add(1)
+				}
+				continue
+			}
+			if dispatcher := m.replyDispatcherSnapshot(); dispatcher != nil {
+				dispatcher.dispatch(packet, source)
+			}
+			continue
 		}
 		if !rateBucket.allow() {
 			relay.requestsDroppedRateLimit.Add(1)
@@ -1099,7 +1173,7 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			continue
 		}
 		packet, err := dhcpv6.FromBytes(buf[:n])
-		if err != nil || packet.Type() == dhcpv6.MessageTypeRelayReply {
+		if err != nil {
 			relay.requestsDroppedParse.Add(1)
 			continue
 		}
@@ -1147,7 +1221,7 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 	}
 }
 
-func (m *dhcpV6Manager) runDHCPV6ServerLoop(ctx context.Context, relay *dhcpV6Relay, server, client net.PacketConn, servers []*net.UDPAddr, expectedInterfaceID []byte) {
+func (m *dhcpV6Manager) runDHCPV6ServerLoop(ctx context.Context, relay *dhcpV6Relay, server, client net.PacketConn, servers []*net.UDPAddr, expectedInterfaceID []byte, dispatcher *dhcpV6ReplyDispatcher) {
 	allowed := make([]*net.UDPAddr, 0, len(servers))
 	for _, server := range servers {
 		if server != nil {
@@ -1164,6 +1238,18 @@ func (m *dhcpV6Manager) runDHCPV6ServerLoop(ctx context.Context, relay *dhcpV6Re
 		if err != nil {
 			relay.repliesDroppedParse.Add(1)
 			continue
+		}
+		if packet.Type() == dhcpv6.MessageTypeRelayReply {
+			if outer, ok := packet.(*dhcpv6.RelayMessage); ok {
+				if got := outer.Options.InterfaceID(); got != nil && !bytes.Equal(got, expectedInterfaceID) {
+					if dispatcher != nil {
+						dispatcher.dispatch(packet, source)
+						continue
+					}
+					relay.repliesDroppedIID.Add(1)
+					continue
+				}
+			}
 		}
 		processDHCPV6ServerPacket(relay, client, packet, source, allowed, expectedInterfaceID)
 		select {

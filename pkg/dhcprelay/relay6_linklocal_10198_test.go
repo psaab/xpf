@@ -258,6 +258,133 @@ func TestDHCPv6PerInterfaceServerBindDemux10198(t *testing.T) {
 	}
 }
 
+func TestDHCPv6ExactWildcardCoexistence10198(t *testing.T) {
+	var address net.IP
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("list interfaces: %v", err)
+	}
+	for _, iface := range interfaces {
+		ifaceAddrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range ifaceAddrs {
+			var ip net.IP
+			switch value := addr.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			if ip != nil && ip.To16() != nil && ip.To4() == nil &&
+				!ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLoopback() &&
+				!ip.IsLinkLocalUnicast() && ip.IsGlobalUnicast() {
+				address = append(net.IP(nil), ip.To16()...)
+				break
+			}
+		}
+		if address != nil {
+			break
+		}
+	}
+	if address == nil {
+		t.Skip("need one local GUA/ULA for exact-vs-wildcard coexistence")
+	}
+
+	listenConfig := dhcpV6ListenConfig("")
+	exactRaw, err := listenConfig.ListenPacket(context.Background(), "udp6",
+		dhcpV6UpstreamBindAddr(address, "", 0))
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("exact UDP6 listener requires network capability: %v", err)
+		}
+		t.Fatalf("listen exact upstream address: %v", err)
+	}
+	defer exactRaw.Close()
+	exact, ok := exactRaw.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("exact listener type = %T, want *net.UDPConn", exactRaw)
+	}
+	port := exact.LocalAddr().(*net.UDPAddr).Port
+	wildcardRaw, err := listenConfig.ListenPacket(context.Background(), "udp6",
+		(&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String())
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("wildcard UDP6 listener requires network capability: %v", err)
+		}
+		t.Fatalf("listen wildcard upstream address: %v", err)
+	}
+	defer wildcardRaw.Close()
+	wildcard, ok := wildcardRaw.(*net.UDPConn)
+	if !ok {
+		t.Fatalf("wildcard listener type = %T, want *net.UDPConn", wildcardRaw)
+	}
+
+	const packets = 20
+	senders := make([]*net.UDPConn, 0, packets)
+	defer func() {
+		for _, sender := range senders {
+			_ = sender.Close()
+		}
+	}()
+	for i := 0; i < packets; i++ {
+		sender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: address, Port: port})
+		if err != nil {
+			t.Fatalf("dial exact destination %d: %v", i, err)
+		}
+		senders = append(senders, sender)
+		if _, err := sender.Write([]byte{byte(i), 0x5a}); err != nil {
+			t.Fatalf("send exact destination %d: %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	if err := exact.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set exact read deadline: %v", err)
+	}
+	seen := make(map[byte]bool, packets)
+	for i := 0; i < packets; i++ {
+		payload := make([]byte, 2)
+		n, _, err := exact.ReadFromUDP(payload)
+		if err != nil {
+			t.Fatalf("read exact packet %d: %v", i, err)
+		}
+		if n != len(payload) || payload[1] != 0x5a {
+			t.Fatalf("exact packet %d payload = %x, want two-byte marker", i, payload[:n])
+		}
+		seen[payload[0]] = true
+	}
+	if len(seen) != packets {
+		t.Fatalf("exact socket received %d distinct packets, want %d", len(seen), packets)
+	}
+	if err := wildcard.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("set wildcard exact-phase deadline: %v", err)
+	}
+	if n, _, err := wildcard.ReadFromUDP(make([]byte, 2)); err == nil {
+		t.Fatalf("wildcard socket received %d exact-destination bytes", n)
+	}
+
+	wildcardSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: net.IPv6loopback, Port: port})
+	if err != nil {
+		t.Fatalf("dial wildcard destination: %v", err)
+	}
+	defer wildcardSender.Close()
+	if _, err := wildcardSender.Write([]byte("wildcard")); err != nil {
+		t.Fatalf("send wildcard destination: %v", err)
+	}
+	if err := wildcard.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set wildcard read deadline: %v", err)
+	}
+	payload := make([]byte, 32)
+	n, _, err := wildcard.ReadFromUDP(payload)
+	if err != nil {
+		t.Fatalf("read wildcard destination: %v", err)
+	}
+	if string(payload[:n]) != "wildcard" {
+		t.Fatalf("wildcard payload = %q, want wildcard", payload[:n])
+	}
+}
+
 func TestDHCPv6ReplyDispatcherRoutesByInterfaceID10198(t *testing.T) {
 	dispatcher := newDHCPV6ReplyDispatcher()
 	dispatcher.newServer = func(ctx context.Context) (net.PacketConn, error) {
@@ -395,6 +522,210 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 	}
 	if got := clientB.firstWrite(t); !bytes.Equal(got, innerB.ToBytes()) {
 		t.Fatalf("duplicate Interface-ID link-address B payload = %x, want %x", got, innerB.ToBytes())
+	}
+	ambiguousClientA := newFakeConn()
+	ambiguousClientB := newFakeConn()
+	ambiguousLink := net.ParseIP("2001:db8:30::1")
+	ambiguousRelayA := &dhcpV6Relay{ifaceName: "ll-ambiguous-a", kernelName: "lo", linkAddr: ambiguousLink}
+	ambiguousRelayB := &dhcpV6Relay{ifaceName: "ll-ambiguous-b", kernelName: "lo", linkAddr: ambiguousLink}
+	_, releaseAmbiguousA, err := dispatcher.register(context.Background(), ambiguousRelayA, ambiguousClientA, allowed, []byte("ambiguous"))
+	if err != nil {
+		t.Fatalf("register first ambiguous target: %v", err)
+	}
+	defer releaseAmbiguousA()
+	_, releaseAmbiguousB, err := dispatcher.register(context.Background(), ambiguousRelayB, ambiguousClientB, allowed, []byte("ambiguous"))
+	if err != nil {
+		t.Fatalf("register second ambiguous target: %v", err)
+	}
+	defer releaseAmbiguousB()
+	ambiguousDrops := dispatcher.droppedAmbiguous.Load()
+	ambiguousReply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    ambiguousLink,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	ambiguousReply.AddOption(dhcpv6.OptInterfaceID([]byte("ambiguous")))
+	ambiguousReply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	server.push(ambiguousReply.ToBytes())
+	deadline = time.Now().Add(time.Second)
+	for dispatcher.droppedAmbiguous.Load() == ambiguousDrops && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := dispatcher.droppedAmbiguous.Load(); got != ambiguousDrops+1 {
+		t.Fatalf("ambiguous Interface-ID drops=%d, want %d", got, ambiguousDrops+1)
+	}
+	if ambiguousClientA.writeCount() != 0 || ambiguousClientB.writeCount() != 0 {
+		t.Fatalf("ambiguous Interface-ID was forwarded: writes=%d/%d", ambiguousClientA.writeCount(), ambiguousClientB.writeCount())
+	}
+}
+
+func TestDHCPv6ReplyDispatcherStatsSyntheticRow10198(t *testing.T) {
+	m := NewManager()
+	m.v6.mu.Lock()
+	m.v6.relays["ll-stats-a"] = &dhcpV6Relay{ifaceName: "ll-stats-a", kernelName: "lo"}
+	m.v6.relays["ll-stats-b"] = &dhcpV6Relay{ifaceName: "ll-stats-b", kernelName: "lo"}
+	dispatcher := m.v6.replyDispatcher
+	dispatcher.droppedParse.Add(1)
+	dispatcher.droppedEmptyIID.Add(2)
+	dispatcher.droppedUnknown.Add(3)
+	dispatcher.droppedAmbiguous.Add(4)
+	m.v6.mu.Unlock()
+
+	var dispatcherRows int
+	var got RelayStats
+	for _, stat := range m.Stats() {
+		if stat.Interface != "<dhcpv6-reply-dispatcher>" {
+			continue
+		}
+		dispatcherRows++
+		got = stat
+	}
+	if dispatcherRows != 1 {
+		t.Fatalf("dispatcher Stats rows=%d, want one synthetic row", dispatcherRows)
+	}
+	if got.Family != "inet6" ||
+		got.RepliesDroppedDispatcherParse != 1 ||
+		got.RepliesDroppedDispatcherEmptyIID != 2 ||
+		got.RepliesDroppedDispatcherUnknownIID != 3 ||
+		got.RepliesDroppedDispatcherAmbiguous != 4 {
+		t.Fatalf("dispatcher Stats row = %+v, want aggregate 1/2/3/4", got)
+	}
+}
+
+func TestDHCPv6ServerLoopRoutesMismatchedInterfaceID10198(t *testing.T) {
+	server := newFakeConn()
+	dispatcherServer := newFakeConn()
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(context.Context) (net.PacketConn, error) {
+		return dispatcherServer, nil
+	}
+	targetClient := newFakeConn()
+	targetRelay := &dhcpV6Relay{
+		ifaceName:  "ll-mismatch-target",
+		kernelName: "lo",
+		linkAddr:   net.ParseIP("2001:db8:50::1"),
+	}
+	allowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
+	_, release, err := dispatcher.register(context.Background(), targetRelay, targetClient, allowed, []byte("target"))
+	if err != nil {
+		t.Fatalf("register mismatched-IID target: %v", err)
+	}
+	defer release()
+
+	relay := &dhcpV6Relay{ifaceName: "ll-mismatch-owner", kernelName: "lo"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		(&dhcpV6Manager{}).runDHCPV6ServerLoop(ctx, relay, server, newFakeConn(), allowed, []byte("owner"), dispatcher)
+		close(done)
+	}()
+	reply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    targetRelay.linkAddr,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	reply.AddOption(dhcpv6.OptInterfaceID([]byte("target")))
+	reply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	server.push(reply.ToBytes())
+	deadline := time.Now().Add(time.Second)
+	for targetClient.writeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if targetClient.writeCount() != 1 {
+		t.Fatalf("mismatched Interface-ID target writes=%d, want 1", targetClient.writeCount())
+	}
+	if relay.repliesDroppedIID.Load() != 0 {
+		t.Fatalf("mismatched Interface-ID owner drops=%d, want 0 after dispatch", relay.repliesDroppedIID.Load())
+	}
+	cancel()
+	_ = server.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("mismatched-IID server loop did not stop")
+	}
+}
+
+func TestDHCPv6ClientReplyDispatchBypassesRateLimit10198(t *testing.T) {
+	client := newFakeDHCPV6Conn()
+	client.srcAddr = &net.UDPAddr{IP: net.ParseIP("fe80::2"), Port: dhcpv6ClientPort}
+	upstream := newFakeConn()
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(context.Context) (net.PacketConn, error) {
+		return upstream, nil
+	}
+	replyClient := newFakeConn()
+	replyRelay := &dhcpV6Relay{
+		ifaceName:  "ll-rate-reply",
+		kernelName: "lo",
+		linkAddr:   net.ParseIP("2001:db8:40::1"),
+	}
+	allowed := []*net.UDPAddr{{IP: net.ParseIP("fe80::2"), Port: dhcpv6ClientPort}}
+	_, release, err := dispatcher.register(context.Background(), replyRelay, replyClient, allowed, []byte("ll-rate-reply"))
+	if err != nil {
+		t.Fatalf("register rate-limit reply target: %v", err)
+	}
+	defer release()
+
+	m := newDHCPV6Manager()
+	m.replyDispatcher = dispatcher
+	m.now = func() time.Time { return time.Unix(123, 0) }
+	relay := &dhcpV6Relay{
+		ifaceName:     "ll-rate-client",
+		kernelName:    "lo",
+		linkAddr:      net.ParseIP("2001:db8:41::1"),
+		maxPacketRate: 1,
+	}
+	server := newFakeConn()
+	servers := []*net.UDPAddr{{IP: net.ParseIP("2001:db8:42::1"), Port: dhcpv6RelayPort}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		m.runDHCPV6ClientLoop(ctx, relay, client, server, relay.linkAddr, servers, nil)
+		close(done)
+	}()
+	request := newDHCPV6TestMessage(t).ToBytes()
+	for range 8 {
+		client.push(request)
+	}
+	deadline := time.Now().Add(time.Second)
+	for server.writeCount()+int(relay.requestsDroppedRateLimit.Load()) < 8 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := server.writeCount() + int(relay.requestsDroppedRateLimit.Load()); got != 8 {
+		t.Fatalf("client request processing=%d, want 8 (writes=%d drops=%d)", got, server.writeCount(), relay.requestsDroppedRateLimit.Load())
+	}
+	dropsBeforeReply := relay.requestsDroppedRateLimit.Load()
+
+	inner := newDHCPV6TestMessage(t)
+	reply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    replyRelay.linkAddr,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	reply.AddOption(dhcpv6.OptInterfaceID([]byte("ll-rate-reply")))
+	reply.AddOption(dhcpv6.OptRelayMessage(inner))
+	client.push(reply.ToBytes())
+	deadline = time.Now().Add(time.Second)
+	for replyClient.writeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if replyClient.writeCount() != 1 {
+		t.Fatalf("rate-limited client Relay-Reply writes=%d, want 1", replyClient.writeCount())
+	}
+	if got := relay.requestsDroppedRateLimit.Load(); got != dropsBeforeReply {
+		t.Fatalf("client Relay-Reply changed rate-limit drops from %d to %d", dropsBeforeReply, got)
+	}
+	cancel()
+	_ = client.Close()
+	_ = server.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("rate-limit client loop did not stop")
 	}
 }
 

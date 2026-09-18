@@ -726,8 +726,11 @@ applies before forwarding client messages.
 The default client-facing admission rate is 100 packets per second per
 interface, with a two-second burst. Drops by rate limit, HA state, malformed
 packet, source port/address, nested trust boundary, and build validation are
-visible in the `inet6` row returned by `Manager.Stats`; reply source, parse,
-Interface-ID, nested-chain, and validation drops are visible there too.
+visible in the per-interface `inet6` row returned by `Manager.Stats`; reply
+source, parse, Interface-ID, nested-chain, and validation drops are visible
+there too. Shared dispatcher pre-dispatch drops (parse, empty/unknown
+Interface-ID, and ambiguous duplicate matches) appear once in the synthetic
+`inet6` row whose Interface is `<dhcpv6-reply-dispatcher>`.
 
 The link resolver uses the first usable global address returned by
 `net.Interface.Addrs`; when no GUA/ULA exists, it falls back to the first

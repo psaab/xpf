@@ -328,6 +328,13 @@ type RelayStats struct {
 	RepliesDroppedParse   uint64
 	RepliesDroppedInvalid uint64
 	RepliesDroppedNested  uint64
+	// Shared DHCPv6 dispatcher pre-dispatch drops are aggregate across active
+	// IPv6 relays and appear once on the synthetic inet6 dispatcher row whose
+	// Interface is "<dhcpv6-reply-dispatcher>".
+	RepliesDroppedDispatcherParse      uint64
+	RepliesDroppedDispatcherEmptyIID   uint64
+	RepliesDroppedDispatcherUnknownIID uint64
+	RepliesDroppedDispatcherAmbiguous  uint64
 }
 
 // l2Replier is the raw-L2 unicast seam. *l2Sender implements it in production;
@@ -1157,6 +1164,7 @@ func (m *Manager) Stats() []RelayStats {
 	}
 	if m.v6 != nil {
 		m.v6.mu.Lock()
+		dispatcherStats := m.v6.replyDispatcher.stats()
 		for _, relay := range m.v6.relays {
 			stats = append(stats, RelayStats{
 				Family:                      "inet6",
@@ -1176,6 +1184,17 @@ func (m *Manager) Stats() []RelayStats {
 				RepliesDroppedParse:         relay.repliesDroppedParse.Load(),
 				RepliesDroppedInvalid:       relay.repliesDroppedInvalid.Load(),
 				RepliesDroppedNested:        relay.repliesDroppedNested.Load(),
+			})
+		}
+		if dispatcherStats.parse != 0 || dispatcherStats.emptyIID != 0 ||
+			dispatcherStats.unknown != 0 || dispatcherStats.ambiguous != 0 {
+			stats = append(stats, RelayStats{
+				Family:                             "inet6",
+				Interface:                          "<dhcpv6-reply-dispatcher>",
+				RepliesDroppedDispatcherParse:      dispatcherStats.parse,
+				RepliesDroppedDispatcherEmptyIID:   dispatcherStats.emptyIID,
+				RepliesDroppedDispatcherUnknownIID: dispatcherStats.unknown,
+				RepliesDroppedDispatcherAmbiguous:  dispatcherStats.ambiguous,
 			})
 		}
 		m.v6.mu.Unlock()
