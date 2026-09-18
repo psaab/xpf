@@ -1255,6 +1255,12 @@ type SessionSync struct {
 	bulkStartMu         sync.Mutex
 	bulkSendMu          sync.Mutex
 	bulkSendNext        atomic.Uint64
+	// bulkSnapshotGenMu serializes an authoritative table snapshot read and its
+	// install-generation decisions with queue-time delete-generation draws. A
+	// close observed while the source is reading therefore linearizes either
+	// before the snapshot or after every snapshot row is stamped, never between
+	// a row read and its stamp (#10284).
+	bulkSnapshotGenMu sync.Mutex
 	pendingBulkAckEpoch atomic.Uint64
 	pendingBulkAckSince atomic.Int64
 	bulkEverCompleted   atomic.Bool
@@ -1430,7 +1436,8 @@ type SessionSync struct {
 	recvGenV6          map[dataplane.SessionKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
 	// map at its effective cap evicts the oldest tombstone to record a new key instead
-	// of skip-recording it (#9719). Guarded by recvGenMu, and reset with the maps.
+	// of skip-recording it (#9719). Guarded by recvGenMu; retained across same-namespace
+	// resets and cleared by a namespace reset.
 	recvTombV4 genTombstoneOrder[dataplane.SessionKey]
 	recvTombV6 genTombstoneOrder[dataplane.SessionKeyV6]
 	// applyMu serializes the receive-side session APPLY across receive loops
@@ -1669,6 +1676,19 @@ type SessionSync struct {
 	// fail-on-revert test can TryLock that mutex on the old path and park the
 	// marker until queued frames have definitely crossed the wire.
 	testAfterBulkSnapshot func()
+	// testBeforeBulkRows runs after BulkStart is written and before the first
+	// bulk row is stamped/serialized. It is test-only and nil in production;
+	// a fail-on-revert cell can queue a close/delete in that exact marker-to-row
+	// interleaving.
+	testBeforeBulkRows func()
+	// testBeforeDeleteGen runs immediately before a test delete attempts its
+	// sender-generation critical section. It is nil in production and exists
+	// only to pin a source-read/delete interleaving for #10284.
+	testBeforeDeleteGen func()
+	// testAfterDeleteGen runs after a test delete draws its sender generation,
+	// while the sender-generation locks remain held. It is nil in production
+	// and only makes the source-read race observable for #10284.
+	testAfterDeleteGen func()
 	// testBeforeQueuedWrite cancels a test send just before its queued frame
 	// would be written, exercising the watermark failure path without
 	// disconnecting the active connection in production.

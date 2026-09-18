@@ -79,13 +79,20 @@ func (s *SessionSync) doBulkSync() error {
 		// #9508: capture the fence BEFORE the snapshot is read; only a snapshot
 		// read after the capture holds every delta written before it.
 		fence := s.captureBarrierFenceForBulk()
+		s.bulkSnapshotGenMu.Lock()
 		snap, err := src()
 		if err != nil {
+			s.bulkSnapshotGenMu.Unlock()
 			s.bulkStartMu.Unlock()
 			s.bulkSendMu.Unlock()
 			// Fail closed — see the doc comment above.
 			return fmt.Errorf("bulk sync table-truth snapshot: %w", err)
 		}
+		// #10284: serialize the complete source read with queue-time delete
+		// generation draws. A close that races a row read waits for this
+		// critical section, then draws strictly after every snapshot stamp.
+		snap = s.stampBulkSnapshotLocked(snap)
+		s.bulkSnapshotGenMu.Unlock()
 		if hook := s.testAfterBulkSnapshot; hook != nil {
 			hook()
 		}
@@ -126,7 +133,28 @@ func (s *SessionSync) BulkSync() error {
 // same lossless BulkStart -> sessions -> BulkEnd direct-write window BulkSync
 // uses (#6031). It needs no backend session store: the snapshot IS the source.
 func (s *SessionSync) BulkSyncSnapshot(snap BulkSnapshot) error {
+	s.bulkSnapshotGenMu.Lock()
+	snap = s.stampBulkSnapshotLocked(snap)
+	s.bulkSnapshotGenMu.Unlock()
 	return s.bulkSyncWindow(snapshotBulkWalk(snap))
+}
+
+// stampBulkSnapshotLocked requires bulkSnapshotGenMu. Copy the slices first
+// so BulkSyncSnapshot does not mutate a caller-owned snapshot backing array.
+func (s *SessionSync) stampBulkSnapshotLocked(snap BulkSnapshot) BulkSnapshot {
+	if len(snap.V4) != 0 {
+		snap.V4 = append([]dataplane.SessionEntryV4(nil), snap.V4...)
+		for i := range snap.V4 {
+			s.stampInstallGenV4(snap.V4[i].Key, &snap.V4[i].Value)
+		}
+	}
+	if len(snap.V6) != 0 {
+		snap.V6 = append([]dataplane.SessionEntryV6(nil), snap.V6...)
+		for i := range snap.V6 {
+			s.stampInstallGenV6(snap.V6[i].Key, &snap.V6[i].Value)
+		}
+	}
+	return snap
 }
 
 // bulkWalk supplies the forward sessions one authoritative window frames. Each
@@ -170,6 +198,10 @@ type bulkWalk struct {
 	// unstamped values are suspect when unannounced (see
 	// suppressUnannouncedForPBRActivePeer) rather than genuine.
 	stampsAuthoritative bool
+	// stampedAtDecision means table-truth rows were assigned their install
+	// generation when the snapshot was captured. Store-mirror rows are read
+	// during the window and remain stamped at their per-row send decision.
+	stampedAtDecision bool
 }
 
 func (s *SessionSync) storeBulkWalk() *bulkWalk {
@@ -202,7 +234,7 @@ func (s *SessionSync) storeBulkWalk() *bulkWalk {
 }
 
 func snapshotBulkWalk(snap BulkSnapshot) *bulkWalk {
-	w := &bulkWalk{source: "table-truth", stampsAuthoritative: true}
+	w := &bulkWalk{source: "table-truth", stampsAuthoritative: true, stampedAtDecision: true}
 	w.forEachV4 = func(yield func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
 		for _, e := range snap.V4 {
 			if !yield(e.Key, e.Value) {
@@ -224,8 +256,9 @@ func snapshotBulkWalk(snap BulkSnapshot) *bulkWalk {
 
 // bulkSyncWindow is the single lossless send core behind BulkSync and
 // BulkSyncSnapshot: it owns the epoch, the BulkStart/BulkEnd markers, the
-// install-generation stamping, the record-then-send bulk-ack discipline
-// (#3912), and the writeMu direct writes. Only the session SOURCE differs.
+// snapshot-decision or per-row install-generation stamping, the record-then-send
+// bulk-ack discipline (#3912), and the writeMu direct writes. Only the session
+// SOURCE differs.
 func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	releaseBulkStart := walk.holdBulkStart
 	if releaseBulkStart {
@@ -332,6 +365,9 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		s.bulkStartMu.Unlock()
 		releaseBulkStart = false
 	}
+	if hook := s.testBeforeBulkRows; hook != nil {
+		hook()
+	}
 
 	var count int
 	slog.Info("cluster sync: bulk sync iterating v4", "epoch", epoch, "source", walk.source)
@@ -339,7 +375,9 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	fenced := false
 	err = walk.forEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		announced := s.installTableAnnouncedV4(key)
-		s.stampInstallGenV4(key, &val)
+		if !walk.stampedAtDecision {
+			s.stampInstallGenV4(key, &val)
+		}
 		// #9752 round 4: the bulk is its own transmission path — it must
 		// judge the fence, not bypass it. A refusal ABORTS the window (no
 		// BulkEnd): skipping would finish an incomplete authoritative
@@ -397,7 +435,9 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	fenced = false
 	err = walk.forEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		announced := s.installTableAnnouncedV6(key)
-		s.stampInstallGenV6(key, &val)
+		if !walk.stampedAtDecision {
+			s.stampInstallGenV6(key, &val)
+		}
 		// #9752 round 4: v6 twin of the bulk fence above — refusal aborts.
 		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v6") {
 			fenced = true
