@@ -56,7 +56,9 @@ set -euo pipefail
 _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=cluster-cell.sh
 source "${_CELL_DIR}/cluster-cell.sh"
-xpf_enter_destructive_cluster_cell "dhcp-lease-failover $*" "$0" "$@"
+if [[ "${DHCP_LEASE_FAILOVER_SELFTEST:-0}" != "1" ]]; then
+	xpf_enter_destructive_cluster_cell "dhcp-lease-failover $*" "$0" "$@"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
@@ -109,7 +111,7 @@ ERRORS=()
 info() { echo "==> $*"; }
 pass() { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
-die()  { echo "FATAL: $*" >&2; exit 2; }
+die()  { echo "FATAL: owner=test-dhcp-lease-failover: $*" >&2; exit 2; }
 
 ssh_fw() { incus exec "$1" -- bash -lc "$2"; }
 
@@ -124,6 +126,204 @@ rg0_primary_node() {
 	primary*/*) echo "$FW0" ;;
 	*/primary*) echo "$FW1" ;;
 	esac
+}
+
+# The reboot moves every redundancy group that was primary on the node we
+# restart. Record all owners (and their manual-pin state) before provisioning
+# anything, then restore and verify that exact state from the EXIT trap. A
+# destructive smoke that leaves the shared cluster inverted poisons the next
+# lane even when its own cells passed (#10122).
+declare -A ORIGINAL_RG_PRIMARY=()
+declare -A ORIGINAL_RG_MANUAL=()
+ORIGINAL_STATE_RECORDED=0
+
+cluster_status() {
+	local status
+	status="$(ssh_fw "$FW0" '/usr/local/sbin/cli -c "show chassis cluster status" 2>/dev/null' || true)"
+	[[ -n "$status" ]] || status="$(ssh_fw "$FW1" '/usr/local/sbin/cli -c "show chassis cluster status" 2>/dev/null' || true)"
+	printf '%s\n' "$status"
+}
+
+# Parse the chassis-cluster status table into RG, node, role, manual-pin rows.
+# Keeping this parser pure lets the fixture selftest exercise the exact
+# production cleanup selector against a captured status, without a live cluster.
+cluster_state_rows() {
+	awk '
+		/^Redundancy group:[[:space:]]/ { rg=$3; next }
+		$1 ~ /^node[01]$/ { print rg, $1, $3, $5 }
+	'
+}
+
+cluster_primary_node_from_status() {
+	local want="$1"
+	awk -v want="$want" '$1 == want && $3 == "primary" { print $2; exit }'
+}
+
+record_cluster_state() {
+	local status rg node role manual owners=""
+	status="$(cluster_status)"
+	while read -r rg node role manual; do
+		[[ "$role" == "primary" ]] || continue
+		ORIGINAL_RG_PRIMARY["$rg"]="$node"
+		ORIGINAL_RG_MANUAL["$rg"]="$manual"
+	done < <(printf '%s\n' "$status" | cluster_state_rows)
+	[[ -n "${ORIGINAL_RG_PRIMARY[0]:-}" ]] ||
+		die "cannot record the original RG0 owner before the destructive run"
+	ORIGINAL_STATE_RECORDED=1
+	for rg in "${!ORIGINAL_RG_PRIMARY[@]}"; do
+		owners+=" RG${rg}=${ORIGINAL_RG_PRIMARY[$rg]}/manual=${ORIGINAL_RG_MANUAL[$rg]}"
+	done
+	info "recorded original cluster ownership:${owners}"
+}
+
+declare -a ORIGINAL_DHCP_CHASSIS=()
+declare -a ORIGINAL_DHCP_LOCAL=()
+CONFIG_STATE_RECORDED=0
+
+record_dhcp_config_state() {
+	local i node
+	for i in 0 1; do
+		if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
+		if ! ORIGINAL_DHCP_CHASSIS[$i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null')"; then
+			die "cannot snapshot chassis configuration on $node before the destructive run"
+		fi
+		if ! ORIGINAL_DHCP_LOCAL[$i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null')"; then
+			die "cannot snapshot dhcp-local-server configuration on $node before the destructive run"
+		fi
+	done
+	CONFIG_STATE_RECORDED=1
+	info "snapshotted DHCP fixture configuration on both nodes before provisioning"
+}
+
+verify_dhcp_config() {
+	[[ "$CONFIG_STATE_RECORDED" == "1" ]] || return 0
+	local i node chassis local_config
+	for i in 0 1; do
+		if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
+		chassis="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null' || true)"
+		local_config="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null' || true)"
+		if [[ "$chassis" != "${ORIGINAL_DHCP_CHASSIS[$i]}" ||
+			"$local_config" != "${ORIGINAL_DHCP_LOCAL[$i]}" ]]; then
+			echo "FATAL: cleanup did not restore DHCP configuration on $node; owner=test-dhcp-lease-failover" >&2
+			echo "  chassis before: ${ORIGINAL_DHCP_CHASSIS[$i]}" >&2
+			echo "  chassis after:  $chassis" >&2
+			echo "  local before:   ${ORIGINAL_DHCP_LOCAL[$i]}" >&2
+			echo "  local after:    $local_config" >&2
+			return 1
+		fi
+	done
+	info "cleanup verified DHCP fixture configuration matches the pre-run snapshots"
+	return 0
+}
+
+verify_client_namespaces() {
+	local ns
+	for ns in "$NS_A" "$NS_B"; do
+		if ! ssh_fw "$DHCP_CLIENT" "test ! -e /run/netns/'$ns'"; then
+			echo "FATAL: cleanup left DHCP client namespace $ns behind on $DHCP_CLIENT; owner=test-dhcp-lease-failover" >&2
+			return 1
+		fi
+	done
+	info "cleanup verified DHCP client namespaces are absent"
+	return 0
+}
+
+restore_cluster_state() {
+	[[ "$ORIGINAL_STATE_RECORDED" == "1" ]] || return 0
+	local rg target_node current_node current_instance target_instance
+	local status all_ok current_role current_manual try
+
+	# A hard reboot can leave every RG on the survivor. Transfer each one
+	# back from its current primary, after clearing stale manual pins on both
+	# nodes. The request is intentionally made on the current primary: this is
+	# the same CLI shape used by the existing HA failover gates.
+	for rg in "${!ORIGINAL_RG_PRIMARY[@]}"; do
+		target_node="${ORIGINAL_RG_PRIMARY[$rg]}"
+		current_node="$(cluster_status | cluster_state_rows | cluster_primary_node_from_status "$rg")"
+		[[ "$current_node" == "$target_node" ]] && continue
+		for node in "$FW0" "$FW1"; do
+			incus exec "$node" -- /usr/local/sbin/cli -c \
+				"request chassis cluster failover reset redundancy-group $rg" \
+				>/dev/null 2>&1 || true
+		done
+		case "$current_node" in
+		node0) current_instance="$FW0" ;;
+		node1) current_instance="$FW1" ;;
+		*) echo "FATAL: cleanup cannot identify the current RG${rg} primary; owner=test-dhcp-lease-failover" >&2; return 1 ;;
+		esac
+		incus exec "$current_instance" -- /usr/local/sbin/cli -c \
+			"request chassis cluster failover redundancy-group $rg" \
+			>/dev/null 2>&1 || true
+	done
+
+	# The transfer request creates a manual pin. Wait for ownership to land
+	# before clearing it; resetting immediately races the election and can
+	# leave the cluster on the survivor even though the CLI returned success.
+	all_ok=0
+	for ((try = 0; try < 30; try++)); do
+		status="$(cluster_status)"
+		all_ok=1
+		for rg in "${!ORIGINAL_RG_PRIMARY[@]}"; do
+			current_node="$(printf '%s\n' "$status" | cluster_state_rows | cluster_primary_node_from_status "$rg")"
+			[[ "$current_node" == "${ORIGINAL_RG_PRIMARY[$rg]}" ]] || all_ok=0
+		done
+		((all_ok)) && break
+		sleep 2
+	done
+	if (( ! all_ok )); then
+		echo "FATAL: cleanup could not restore the recorded cluster owners before pin cleanup; owner=test-dhcp-lease-failover" >&2
+		printf '%s\n' "$status" >&2
+		return 1
+	fi
+
+	# Reproduce the recorded manual state only after every owner is correct.
+	# The normal lab state has manual=no, so reset both nodes to clear the
+	# transfer pins; a pre-existing manual=yes state is explicitly re-pinned.
+	for rg in "${!ORIGINAL_RG_PRIMARY[@]}"; do
+		target_node="${ORIGINAL_RG_PRIMARY[$rg]}"
+		if [[ "${ORIGINAL_RG_MANUAL[$rg]:-no}" == "yes" ]]; then
+			case "$target_node" in
+			node0) target_instance="$FW0" ;;
+			node1) target_instance="$FW1" ;;
+			*) echo "FATAL: cleanup has an invalid recorded RG${rg} owner '$target_node'; owner=test-dhcp-lease-failover" >&2; return 1 ;;
+			esac
+			incus exec "$target_instance" -- /usr/local/sbin/cli -c \
+				"request chassis cluster failover redundancy-group $rg node ${target_node#node}" \
+				>/dev/null 2>&1 || true
+		else
+			for node in "$FW0" "$FW1"; do
+				incus exec "$node" -- /usr/local/sbin/cli -c \
+					"request chassis cluster failover reset redundancy-group $rg" \
+					>/dev/null 2>&1 || true
+			done
+		fi
+	done
+
+	for ((try = 0; try < 30; try++)); do
+		status="$(cluster_status)"
+		all_ok=1
+		for rg in "${!ORIGINAL_RG_PRIMARY[@]}"; do
+			current_node=""
+			current_role=""
+			read -r current_node current_role current_manual < <(
+				printf '%s\n' "$status" | cluster_state_rows |
+					awk -v want="$rg" '$1 == want && $3 == "primary" { print $2, $3, $4; exit }'
+			) || true
+			if [[ "$current_node" != "${ORIGINAL_RG_PRIMARY[$rg]}" ||
+				"$current_role" != "primary" ||
+				"$current_manual" != "${ORIGINAL_RG_MANUAL[$rg]}" ]]; then
+				all_ok=0
+			fi
+		done
+		if ((all_ok)); then
+			info "cleanup verified original cluster ownership and manual-pin state"
+			return 0
+		fi
+		sleep 2
+	done
+	echo "FATAL: cleanup could not restore the recorded cluster ownership/manual-pin state; owner=test-dhcp-lease-failover" >&2
+	printf '%s\n' "$status" >&2
+	return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -209,25 +409,48 @@ provision_dhcp() {
 # removed only if this run committed it. Both nodes are tried, because the
 # primary may have moved and a secondary simply refuses.
 restore_dhcp() {
+	local cleanup_failed=0
 	ns_down "$NS_A"
 	ns_down "$NS_B"
 	incus exec "$DHCP_CLIENT" -- rm -f "$CLIENT_SCRIPT" >/dev/null 2>&1 || true
-	[ "$PROVISIONED_KNOB" = "1" ] || return 0
-	info "Restoring: removing what this run committed (knob; group=${PROVISIONED_GROUP})"
-	local node
-	for node in "$FW0" "$FW1"; do
-		{
-			echo configure
-			echo "rollback 0"
-			echo "delete chassis cluster dhcp-lease-synchronization"
-			if [ "$PROVISIONED_GROUP" = "1" ]; then
-				echo "delete system services dhcp-local-server group ${DHCP_GROUP}"
-			fi
-			echo commit
-			echo exit
-			echo quit
-		} | incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 || true
-	done
+	if [ "$PROVISIONED_KNOB" = "1" ]; then
+		info "Restoring: removing what this run committed (knob; group=${PROVISIONED_GROUP})"
+		local node
+		for node in "$FW0" "$FW1"; do
+			{
+				echo configure
+				echo "rollback 0"
+				echo "delete chassis cluster dhcp-lease-synchronization"
+				if [ "$PROVISIONED_GROUP" = "1" ]; then
+					echo "delete system services dhcp-local-server group ${DHCP_GROUP}"
+				fi
+				echo commit
+				echo exit
+				echo quit
+			} | incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 || true
+		done
+	fi
+	verify_client_namespaces || cleanup_failed=1
+	verify_dhcp_config || cleanup_failed=1
+	if ! restore_cluster_state; then
+		cleanup_failed=1
+	fi
+	# A cleanup failure must make the wrapper record VOID rather than
+	# publishing a PASS while the shared lab or its fixture remains dirty.
+	((cleanup_failed == 0)) || return 1
+}
+
+cleanup_on_exit() {
+	local run_rc="$?"
+	trap - EXIT
+	set +e
+	restore_dhcp
+	local cleanup_rc="$?"
+	if ((cleanup_rc != 0)); then
+		echo "DHCP failover cleanup failed after the detailed cause; owner=test-dhcp-lease-failover" >&2
+		exit 2
+	fi
+	exit "$run_rc"
 }
 
 # install_client_script puts a dhclient script on the LAN host that ONLY
@@ -312,12 +535,22 @@ assert_memfile_header() {
 }
 
 main() {
-	trap restore_dhcp EXIT
+	trap cleanup_on_exit EXIT
+	record_cluster_state
+	record_dhcp_config_state
 	preflight
 
+	local original_rg0
 	PRIMARY="$(rg0_primary_node "$FW0")"
 	[ -n "$PRIMARY" ] || PRIMARY="$(rg0_primary_node "$FW1")"
 	[ -n "$PRIMARY" ] || die "cannot read the RG0 primary from either node"
+	case "${ORIGINAL_RG_PRIMARY[0]}" in
+	node0) original_rg0="$FW0" ;;
+	node1) original_rg0="$FW1" ;;
+	*) die "recorded RG0 owner is invalid: ${ORIGINAL_RG_PRIMARY[0]}" ;;
+	esac
+	[ "$PRIMARY" = "$original_rg0" ] ||
+		die "RG0 owner changed during preflight (was $original_rg0, now $PRIMARY)"
 	if [ "$PRIMARY" = "$FW0" ]; then STANDBY="$FW1"; else STANDBY="$FW0"; fi
 	info "roles: RG0 primary=$PRIMARY standby=$STANDBY"
 
@@ -477,4 +710,6 @@ main() {
 	fi
 }
 
-main "$@"
+if [[ "${DHCP_LEASE_FAILOVER_SELFTEST:-0}" != "1" ]]; then
+	main "$@"
+fi

@@ -45,6 +45,36 @@ FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
+# #10122: the cleanup owner selector is exercised against a captured chassis
+# status, not a hand-written one-line approximation. This keeps a parser
+# regression from silently restoring only RG0 or losing the manual-pin column.
+dhcp_fixture_rows="$(
+	DHCP_LEASE_FAILOVER_SELFTEST=1 bash -c '
+		source "$1"
+		cluster_state_rows
+	' _ "$SCRIPT_DIR/dhcp-lease-failover.sh" <<'STATUS'
+Monitor Failure codes:
+Node   Priority Status         Preempt  Manual   Monitor-failures
+Redundancy group: 0 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+node1  100      secondary-hold no       no       None
+Redundancy group: 1 , Failover count: 0
+node0  200      primary        no       no       None
+  Transfer ready: yes
+node1  100      secondary-hold no       no       None
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary-hold no       no       None
+STATUS
+)"
+dhcp_fixture_expected=$'0 node0 primary no\n0 node1 secondary-hold no\n1 node0 primary no\n1 node1 secondary-hold no\n2 node0 primary no\n2 node1 secondary-hold no'
+if [[ "$dhcp_fixture_rows" == "$dhcp_fixture_expected" ]]; then
+	ok "DHCP cleanup parser keeps all RG owners and manual-pin fields"
+else
+	bad "DHCP cleanup parser changed: expected captured all-RG status rows, got '$dhcp_fixture_rows'"
+fi
+
 WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-harness-result-selftest.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/gate.log"
@@ -301,6 +331,7 @@ expect_field "ha-smoke with 0 passed and 0 failed -> VOID (ran no assertions)" h
 
 printf '  Failover test: 21 passed, 0 failed\n' >"$LOG"
 expect_field "ha-smoke summary says 0 failed but rc!=0 -> VOID (they disagree)" ha-smoke 1 1 VOID
+
 # The all-run taint path exits rc=2 after teardown. Its summary must be emitted
 # BEFORE that exit so the smoke-cells adapter can classify the tainted run as
 # VOID instead of a missing-result refusal. Pin the REAL harness source, not a
@@ -326,6 +357,20 @@ else
 	else
 		bad "wg-interop taint source pin: summary must precede exit 2"
 	fi
+fi
+
+
+printf '  Results: 21 passed, 0 failed\nFATAL: cleanup failed: owner=lab-harness\n' >"$LOG"
+if [[ "$(adapt_field ha-smoke 1 2)" == *"FATAL: cleanup failed: owner=lab-harness"* ]]; then
+	ok "ha-smoke rc mismatch VOID carries a cleanup FATAL cause and owner"
+else
+	bad "ha-smoke rc mismatch VOID omitted cleanup cause: $(adapt_field ha-smoke 1 2)"
+fi
+printf '  Results: 21 passed, 0 failed\nFATAL: cleanup failed: owner=lab-harness\n' >"$LOG"
+if [[ "$(adapt_field smoke-cells 1 2)" == *"FATAL: cleanup failed: owner=lab-harness"* ]]; then
+	ok "smoke-cells rc mismatch VOID carries a cleanup FATAL cause and owner"
+else
+	bad "smoke-cells rc mismatch VOID omitted cleanup cause: $(adapt_field smoke-cells 1 2)"
 fi
 
 

@@ -152,6 +152,16 @@ harness_adapt() {
 # before its summary prints no pair at all; today that is indistinguishable
 # from a clean run to anything reading only the tail. Here it is a VOID with a
 # reason, which is the one thing it must never be confused with.
+
+_ha_smoke_abort_suffix() {
+	local fatal_line
+	fatal_line=$(grep -E '^FATAL: ' "$1" | tail -1)
+	fatal_line=${fatal_line//$'\t'/ }
+	if [[ -n "$fatal_line" ]]; then
+		printf '; %s' "${fatal_line:0:300}"
+	fi
+	return 0
+}
 _ha_smoke_summary() {
 	local log="$1" rc="$2"
 	local line p f skipped=""
@@ -166,10 +176,8 @@ _ha_smoke_summary() {
 		# re-derived by hand. A tab would shift the TAB-separated fields,
 		# so it folds to a space; no FATAL line degrades to the bare
 		# reason, which is the previous behaviour exactly.
-		local fatal_line fatal_suffix=""
-		fatal_line=$(grep -E '^FATAL: ' "$log" | tail -1)
-		fatal_line=${fatal_line//$'\t'/ }
-		[[ -n "$fatal_line" ]] && fatal_suffix="; ${fatal_line:0:300}"
+		local fatal_suffix
+		fatal_suffix="$(_ha_smoke_abort_suffix "$log")"
 		printf 'VOID\tno "<n> passed, <n> failed" summary line in the output (rc=%s) — the smoke aborted before reaching its summary%s\t\t\t\n' "$rc" "$fatal_suffix"
 		return 1
 	fi
@@ -228,7 +236,9 @@ harness_adapt_ha_smoke() {
 	# disagree, so we do not know what happened. That is a VOID, not a pass --
 	# and not a FAIL either, because no cell reported one.
 	if [[ "$rc" != "0" ]]; then
-		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree\t\t\t\n' "$rc"
+		local fatal_suffix
+		fatal_suffix="$(_ha_smoke_abort_suffix "$log")"
+		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree%s\t\t\t\n' "$rc" "$fatal_suffix"
 		return 0
 	fi
 	# A PASS summary with no anchored figure is a pass the throughput band
@@ -257,7 +267,9 @@ harness_adapt_smoke_cells() {
 		return 0
 	fi
 	if [[ "$rc" != "0" ]]; then
-		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree\t\t\t\n' "$rc"
+		local fatal_suffix
+		fatal_suffix="$(_ha_smoke_abort_suffix "$log")"
+		printf 'VOID\tsummary reports 0 failed but the smoke exited rc=%s — the summary and the exit status disagree%s\t\t\t\n' "$rc" "$fatal_suffix"
 		return 0
 	fi
 	printf 'PASS\t\tcells_passed\thigher-better\t%s\n' "$metrics"
