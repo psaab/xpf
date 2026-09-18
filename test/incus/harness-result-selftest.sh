@@ -281,6 +281,13 @@ expect_field "ha-smoke with 0 passed and 0 failed -> VOID (ran no assertions)" h
 
 printf '  Failover test: 21 passed, 0 failed\n' >"$LOG"
 expect_field "ha-smoke summary says 0 failed but rc!=0 -> VOID (they disagree)" ha-smoke 1 1 VOID
+printf '  WireGuard interop: 8 passed, 0 failed\n' >"$LOG"
+expect_field "wg-interop taint summary with rc=2 -> VOID" smoke-cells 2 1 VOID
+if [[ "$(adapt_field smoke-cells 2 2)" == *"rc=2"* ]]; then
+	ok "wg-interop taint VOID names rc=2"
+else
+	bad "wg-interop taint VOID does not name rc=2"
+fi
 
 # A LAST-match, so an intermediate tally cannot be read as the result. Both
 # adapters: the summary parse is shared.

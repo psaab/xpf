@@ -1312,6 +1312,7 @@ case "${CMD}" in
         teardown
         CLEANED=1
         if [ "${TAINTS}" -gt 0 ]; then
+            summary
             warn "${TAINTS} recovery restart(s) used — evidence TAINTED; rerun clean for merge evidence"
             exit 2
         fi ;;
