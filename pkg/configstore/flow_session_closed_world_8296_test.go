@@ -173,17 +173,69 @@ func TestFlowSessionClosedWorldDoesNotBrickABoot8296(t *testing.T) {
 	}
 }
 
-// SCOPE BOUNDARY, asserted so it reads as deliberate rather than as an
-// oversight: an unknown stanza directly under `security {}` is STILL accepted.
-// Closing that is the wider #8296 design question — groups/apply-groups, legacy
-// files and forward compatibility all bear on it — and a blanket flip would
-// refuse valid-but-unmodelled Junos stanzas, which is a much larger call than
-// three leaf-complete subtrees.
+// SCOPE BOUNDARY, re-decided by #10078 (#10337 cohort). When #8296 landed,
+// an unknown stanza directly under `security {}` was STILL accepted on every
+// path, and closing that was deliberately left open as the wider #8296 design
+// question. #10078 (PR #10327) has since armed closedWorld at the `security`
+// root, which IS that decision on the strict side: an operator typo at this
+// level now rejects at commit, naming the token. This cell therefore no
+// longer asserts strict acceptance — it pins the LENIENT half of the new
+// contract: the tolerant load path (Store.Load at boot, SyncApply on peer
+// sync) must still ACCEPT the stanza, with a warning, so a node whose
+// on-disk config already carries it boots instead of bricking (#1960).
+// The strict half is pinned by TestUnknownSecurityStanzaStrictRejects10337
+// below: strict rejects, lenient warns-and-loads.
 func TestUnknownSecurityStanzaIsStillAccepted8296(t *testing.T) {
-	if _, err := CheckText("security {\n    flow { allow-dns-reply; }\n    flooby { wibble 42; }\n}\n", 0); err != nil {
-		t.Errorf("an unknown stanza under security{} is now REJECTED: %v\n  that is "+
-			"the wider #8296 question and was deliberately NOT decided here; if it "+
-			"is being decided, it needs the census that question asks for", err)
+	text := "security {\n    flow { allow-dns-reply; }\n    flooby { wibble 42; }\n}\n"
+	tree, perrs := config.NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs)
+	}
+	if _, err := config.CompileConfigLenient(tree); err != nil {
+		t.Errorf("the tolerant compile REFUSED an unknown security stanza: %v\n  that path "+
+			"backs Store.Load and SyncApply, so this would refuse to boot a node "+
+			"whose on-disk config already carries it", err)
+	}
+	// The store leg, with the downgrade warning captured: the stanza must be
+	// visible, not silently swallowed.
+	buf := captureWarnLogs(t)
+	s := newTestStore(t)
+	if _, err := s.compileTreeLenient(tree); err != nil {
+		t.Fatalf("the tolerant store path REFUSED an unknown security stanza: %v", err)
+	}
+	if !strings.Contains(buf.String(), "flooby") {
+		t.Errorf("expected the lenient downgrade warning to name %q, log = %q", "flooby", buf.String())
+	}
+	// The real boot path, not a proxy for it.
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	boot, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := boot.Load(); err != nil {
+		t.Errorf("Store.Load REFUSED an on-disk config with an unknown security stanza: %v", err)
+	}
+}
+
+// STRICT HALF of the rescoped #8296 boundary (#10337 cohort). #10078 armed
+// closedWorld at the `security` root, deciding the wider #8296 question on
+// the operator path: an unknown stanza directly under `security {}` is a
+// typo-class shape (the `policie`/`frum-zone` family #10078 exists to catch)
+// and must REJECT at commit-check, naming the token. The lenient half —
+// warn-and-load — is pinned by TestUnknownSecurityStanzaIsStillAccepted8296
+// above. RED-on-revert: disarm the security root and this commits clean.
+func TestUnknownSecurityStanzaStrictRejects10337(t *testing.T) {
+	_, err := CheckText("security {\n    flow { allow-dns-reply; }\n    flooby { wibble 42; }\n}\n", 0)
+	if err == nil {
+		t.Fatal("an unknown stanza under security{} committed CLEAN — the #10078 " +
+			"closedWorld arm is not rejecting at the security root")
+	}
+	if !strings.Contains(err.Error(), "flooby") {
+		t.Errorf("the rejection does not name %q, so it does not tell the "+
+			"operator which keyword to fix.\n  got: %v", "flooby", err)
 	}
 }
 
