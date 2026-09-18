@@ -45,8 +45,15 @@ type ProcessStatus struct {
 	// libbpf it linked. BuildHostLibbpfVersion is the build host's libbpf
 	// (pkg-config); it is not linked, and it does not identify what libxdp was
 	// compiled against (#9726). Empty from a helper that predates them.
+	//
+	// The remaining three fields are the versions of the private static
+	// snapshots for libelf, zlib and zstd (#9931/#10203). They are empty when
+	// reported by a helper predating the snapshot status fields.
 	LinkedLibxdpVersion    string                `json:"linked_libxdp_version,omitempty"`
 	LinkedLibbpfVersion    string                `json:"linked_libbpf_version,omitempty"`
+	LinkedLibelfVersion    string                `json:"linked_libelf_version,omitempty"`
+	LinkedZlibVersion      string                `json:"linked_zlib_version,omitempty"`
+	LinkedZstdVersion      string                `json:"linked_zstd_version,omitempty"`
 	BuildHostLibbpfVersion string                `json:"build_host_libbpf_version,omitempty"`
 	StartedAt              time.Time             `json:"started_at"`
 	ControlSocket          string                `json:"control_socket"`
@@ -132,9 +139,9 @@ type ProcessStatus struct {
 	// helper omitted the additive field (older helper or no replace outcome),
 	// so the send path falls back to #9696's ACK classifier. A present false
 	// bit fences; a present true bit confirms application.
-	NeighborReplaceApplied *bool `json:"neighbor_replace_applied,omitempty"`
-	RouteEntries              int         `json:"route_entries,omitempty"`
-	WorkerHeartbeats          []time.Time `json:"worker_heartbeats,omitempty"`
+	NeighborReplaceApplied *bool       `json:"neighbor_replace_applied,omitempty"`
+	RouteEntries           int         `json:"route_entries,omitempty"`
+	WorkerHeartbeats       []time.Time `json:"worker_heartbeats,omitempty"`
 	// #869: per-worker busy/idle runtime telemetry.
 	WorkerRuntime []WorkerRuntimeStatus `json:"worker_runtime,omitempty"`
 	HAGroups      []HAGroupStatus       `json:"ha_groups,omitempty"`

@@ -314,6 +314,14 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintln(b, "Userspace dataplane helper:")
 	fmt.Fprintf(b, "  PID:                       %d\n", status.PID)
 	fmt.Fprintf(b, "  Helper mode:               %s\n", status.HelperMode)
+	// #10203: expose the versions of the private static snapshots recorded by
+	// the Rust helper. Conditional rendering preserves the old status surface
+	// for helpers predating these fields.
+	if status.LinkedLibelfVersion != "" || status.LinkedZlibVersion != "" || status.LinkedZstdVersion != "" {
+		fmt.Fprintf(b, "  Linked libelf version:     %s\n", status.LinkedLibelfVersion)
+		fmt.Fprintf(b, "  Linked zlib version:       %s\n", status.LinkedZlibVersion)
+		fmt.Fprintf(b, "  Linked zstd version:       %s\n", status.LinkedZstdVersion)
+	}
 	fmt.Fprintf(b, "  io_uring active:           %t\n", status.IOUringActive)
 	if status.IOUringMode != "" {
 		fmt.Fprintf(b, "  io_uring mode:             %s\n", status.IOUringMode)
