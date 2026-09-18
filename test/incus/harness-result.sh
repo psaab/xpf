@@ -528,6 +528,21 @@ harness_adapt_wire_gate() {
 		headline="deny_leaked"
 		direction="lower-better"
 		;;
+	wire_zone_matrix)
+		required="cells_measured cells_failed deny_cells permit_cells deny_leaked permit_missing control_missing duplicate_frames permit64_offered permit64_observed permit1400_offered permit1400_observed"
+		headline="cells_failed"
+		direction="lower-better"
+		;;
+	wire_hostinbound_deny)
+		required="cells_measured syn_offered handshake_completed refused_total exposed_total reply_frames ctrl_offered ctrl_observed"
+		headline="exposed_total"
+		direction="lower-better"
+		;;
+	wire_conntrack_lifecycle)
+		required="created witnessed evicted stale_present exp_offered exp_leaked fresh_offered fresh_leaked syn_offered syn_observed ctrl_sess lifecycle_bad"
+		headline="lifecycle_bad"
+		direction="lower-better"
+		;;
 	test-host-inbound | test-host-inbound-failover)
 		required="cells_passed cells_failed"
 		headline="cells_failed"

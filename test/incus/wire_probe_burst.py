@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--tcp-leg", action="append", default=[],
                     metavar="PORT:COUNT",
                     help="repeatable TCP-connect burst (twins TCP legs)")
+    ap.add_argument("--tcp-timeout", type=float, default=5.0,
+                    help="per-connect timeout for TCP legs")
     ap.add_argument("--count", type=int, default=1000)
     ap.add_argument("--sizes", default="64,1400")
     ap.add_argument("--rate", type=float, default=200.0,
@@ -195,7 +197,8 @@ def tcp_legs_mode(args):
         offered = 0
         notes = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=50) as pool:
-            futs = [pool.submit(tcp_leg_attempt, args.dst, port, 5.0)
+            futs = [pool.submit(tcp_leg_attempt, args.dst, port,
+                                args.tcp_timeout)
                     for _ in range(count)]
             for f in concurrent.futures.as_completed(futs):
                 good, note = f.result()
@@ -210,7 +213,6 @@ def tcp_legs_mode(args):
             " ".join("%s=%d" % kv for kv in sorted(notes.items()))),
             file=sys.stderr)
     print("SENT tcplegs=%s" % ",".join(results))
-    return 0 if ok else 1
     return 0 if ok else 1
 
 

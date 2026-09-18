@@ -29,6 +29,7 @@ def main():
         print("bind %d failed: %s" % (args.port, exc), file=sys.stderr)
         return 2
     srv.listen(100)
+    print("LISTENING %d" % args.port, flush=True)
     srv.settimeout(1.0)
     accepted = 0
     end = time.time() + args.duration
