@@ -121,9 +121,10 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			// loop -- which is the point of enumerating rather than remembering.
 			//
 			// `failoverInProgress` is the sharpest: it exists so "a second
-			// request for the same RG is rejected immediately", so a stale TRUE
-			// on a same-id re-add makes that RG permanently un-failoverable --
-			// a wedge, not a 20 s window like the override.
+			// request for the same RG is rejected immediately". Its owner
+			// token must be purged so a same-id re-add starts with no stale
+			// reservation, while an old request's token-matched cleanup cannot
+			// touch a newer reservation on the fresh incarnation.
 			//
 			// Purging `failoverGen` is the SAFE direction and worth stating,
 			// because resetting a generation counter usually is not. The

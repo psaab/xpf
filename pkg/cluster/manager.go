@@ -578,12 +578,16 @@ type Manager struct {
 	// "control-link" transport. Displayed in CLI status.
 	syncTransport string
 
-	// failoverInProgress tracks per-RG failover serialization. When a
-	// ManualFailover is in progress for an RG (including the preHook
-	// barrier wait), a second request for the same RG is rejected
-	// immediately. This prevents back-to-back failover/failback from
-	// racing and hitting "session sync disconnected during barrier wait".
-	failoverInProgress map[int]bool
+	// failoverInProgress tracks the owner token for each per-RG failover
+	// reservation. A non-zero token means a ManualFailover or peer-transfer
+	// request owns the RG. Cleanup is token-matched so an old request cannot
+	// delete a newer request's reservation after a same-id remove+re-add.
+	failoverInProgress map[int]uint64
+
+	// failoverOwnerSeq monotonically allocates failoverInProgress owner tokens
+	// under m.mu. The sequence is separate from failoverGen because config
+	// removal purges the generation and allocates a fresh RG incarnation.
+	failoverOwnerSeq uint64
 
 	// failoverGen is a per-RG monotonic generation bumped by ResetFailover
 	// (#5246). ManualFailover / ManualFailoverBatch snapshot it under m.mu
@@ -704,7 +708,7 @@ func NewManager(nodeID, clusterID int) *Manager {
 		degradedPromoteTimeout:         DefaultDegradedPromoteTimeout,
 		preManualFailoverRetryTimeout:  DefaultPreManualFailoverRetryTimeout,
 		preManualFailoverRetryInterval: DefaultPreManualFailoverRetryInterval,
-		failoverInProgress:             make(map[int]bool),
+		failoverInProgress:             make(map[int]uint64),
 		failoverGen:                    make(map[int]uint64),
 		bootEpochReady:                 make(chan struct{}),
 	}
