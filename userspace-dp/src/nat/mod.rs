@@ -135,6 +135,9 @@ mod tests_pool_overlap_6979;
 #[path = "tests_pool_overlap_8115.rs"]
 mod tests_pool_overlap_8115;
 #[cfg(test)]
+#[path = "tests_pool_shared_notrans_pat_10190.rs"]
+mod tests_pool_shared_notrans_pat_10190;
+#[cfg(test)]
 #[path = "tests_iface_pool_drain_7717.rs"]
 mod tests_iface_pool_drain_7717;
 #[cfg(test)]
