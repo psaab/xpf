@@ -84,7 +84,24 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 		// operator pasting `set …`) must not become `set set …`, so the prefix
 		// is added only when it is absent.
 		if r, okReq := req.(*pb.SetRequest); okReq {
-			if line := strings.TrimSpace(r.GetInput()); line != "" {
+			input := r.GetInput()
+			// Server.Set routes these inputs by their leading verb instead of
+			// sending them through SetFromInput. Keep the exact handler-routed
+			// line so the configuration gate adjudicates the real path(s):
+			// copy/rename have two endpoints, while insert and
+			// activate/deactivate have one. Prepending "set " here turns, for
+			// example, "copy <src> to <dst>" into one unrelated path and lets
+			// an anchored deny bypass the gate (#10304, #9938 F-029).
+			if strings.HasPrefix(input, "copy ") ||
+				strings.HasPrefix(input, "rename ") ||
+				strings.HasPrefix(input, "insert ") {
+				return input, true
+			}
+			if fields := strings.Fields(input); len(fields) > 0 &&
+				(fields[0] == "deactivate" || fields[0] == "activate") {
+				return input, true
+			}
+			if line := strings.TrimSpace(input); line != "" {
 				if !strings.HasPrefix(line, "set ") {
 					line = "set " + line
 				}
