@@ -236,7 +236,9 @@ if n="$(session_count "$LIFECYCLE_PORT")"; then CTRL_SESS="$n"; else QUERY_BAD=1
 CK="$(grep -ciE 'bad (tcp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"; [[ "$CK" =~ ^[0-9]+$ ]] || CK=0
 if ((QUERY_BAD)); then WITNESSED=0; CTRL_SESS=0; fi
 FINAL_OUT="$(wire_conntrack_verdict "$CREATED" "$WITNESSED" "$STALE" "$EXP_OFFER" "$EXP_LEAK" "$FRESH_OFFER" "$FRESH_LEAK" "$SYN_OFFER" "$SYN_OBS" "$CTRL_SESS" "$CK")"; FINAL_RC=$?
-trap - EXIT INT TERM; cleanup
+trap '' INT TERM
+cleanup
+trap - INT TERM
 if ((RESTORE_OK == 0)); then
     printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0\n'; exit 2
 fi
