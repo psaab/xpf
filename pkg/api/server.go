@@ -317,8 +317,11 @@ type Config struct {
 	// section (#8363). Its LENGTH feeds xpf_frr_policy_chains_narrowed.
 	// FRRNarrowedPolicyChainsDenySafeFn returns the subset whose undefined
 	// members form a suffix. Optional; if nil the gauges are not published.
+	// FRRNarrowedPolicyChainShapesFn returns the survivor-body shape counts
+	// for the same narrowed population (#10129).
 	FRRNarrowedPolicyChainsFn         func() []string
 	FRRNarrowedPolicyChainsDenySafeFn func() []string
+	FRRNarrowedPolicyChainShapesFn    func() map[string]int
 
 	// NATLenientTerminalActionRulesFn returns the identities of NAT rules in
 	// the ACTIVE config that the tolerant path admitted despite the strict
@@ -577,6 +580,7 @@ type Server struct {
 	frrQuarantinedRouteMapsFn            func() []string
 	frrNarrowedPolicyChainsFn            func() []string
 	frrNarrowedPolicyChainsDenySafeFn    func() []string
+	frrNarrowedPolicyChainShapesFn       func() map[string]int
 	natLenientTerminalActionRulesFn      func() []string
 	ipsecRebindPendingFn                 func() bool
 	hostInboundConntrackRevocationOwedFn func() bool
@@ -701,6 +705,7 @@ func NewServer(cfg Config) *Server {
 		frrQuarantinedRouteMapsFn:            cfg.FRRQuarantinedRouteMapsFn,
 		frrNarrowedPolicyChainsFn:            cfg.FRRNarrowedPolicyChainsFn,
 		frrNarrowedPolicyChainsDenySafeFn:    cfg.FRRNarrowedPolicyChainsDenySafeFn,
+		frrNarrowedPolicyChainShapesFn:       cfg.FRRNarrowedPolicyChainShapesFn,
 		natLenientTerminalActionRulesFn:      cfg.NATLenientTerminalActionRulesFn,
 		ipsecRebindPendingFn:                 cfg.IPsecRebindPendingFn,
 		hostInboundConntrackRevocationOwedFn: cfg.HostInboundConntrackRevocationOwedFn,

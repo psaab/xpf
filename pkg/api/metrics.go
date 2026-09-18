@@ -250,6 +250,7 @@ type xpfCollector struct {
 	frrRouteMapsQuarantined         *prometheus.Desc
 	frrPolicyChainsNarrowed         *prometheus.Desc
 	frrPolicyChainsNarrowedDenySafe *prometheus.Desc
+	frrPolicyChainsNarrowedShape    *prometheus.Desc
 	// #4899: 0/1 gauge — 1 while the last DHCP-lease-change IPsec rebind
 	// failed and swanctl local_addrs are still bound to a stale lease
 	// address (the retry loop has not yet reconverged).
@@ -944,6 +945,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.frrRouteMapsQuarantined
 	ch <- c.frrPolicyChainsNarrowed
 	ch <- c.frrPolicyChainsNarrowedDenySafe
+	ch <- c.frrPolicyChainsNarrowedShape
 	ch <- c.natRulesLenientTerminalAction
 	ch <- c.ipsecRebindPending
 	ch <- c.schedulerRepublishFailed
@@ -1371,6 +1373,13 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	if c.srv.frrNarrowedPolicyChainsDenySafeFn != nil {
 		ch <- prometheus.MustNewConstMetric(c.frrPolicyChainsNarrowedDenySafe,
 			prometheus.GaugeValue, float64(len(c.srv.frrNarrowedPolicyChainsDenySafeFn())))
+	}
+	if c.srv.frrNarrowedPolicyChainShapesFn != nil {
+		shapes := c.srv.frrNarrowedPolicyChainShapesFn()
+		for _, shape := range []string{"empty", "fall-through", "match-all", "quarantined", "terminating-default", "unknown"} {
+			ch <- prometheus.MustNewConstMetric(c.frrPolicyChainsNarrowedShape,
+				prometheus.GaugeValue, float64(shapes[shape]), shape)
+		}
 	}
 
 	// #4899: IPsec DHCP-lease-change rebind-pending is a control-plane

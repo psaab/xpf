@@ -630,6 +630,12 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 			}
 			return d.frr.NarrowedPolicyChainsSuffixShape()
 		},
+		FRRNarrowedPolicyChainShapesFn: func() map[string]int {
+			if d.frr == nil {
+				return nil
+			}
+			return d.frr.NarrowedPolicyChainShapes()
+		},
 		// #7640: NAT rules the tolerant load / peer-sync / rollback path
 		// admitted despite the strict terminal-action cardinality gate. Read
 		// from the ACTIVE config, so it tracks what the node is actually

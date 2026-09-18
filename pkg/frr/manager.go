@@ -143,6 +143,9 @@ type Manager struct {
 	// #8363: narrowing set + its lock. See resetNarrowed/recordNarrowed.
 	narrowedMu sync.Mutex
 	narrowed   []narrowedChainSite
+	// #10129 test-only mechanism switch. Production remains warn-only until
+	// the survivor-shape census authorizes the load-time behavior flip.
+	narrowedAliasesEnabled10129 bool
 
 	// retryMu guards the degraded-retry episode fields below. Lock
 	// order: reloadMu → retryMu (retryMu is a leaf).
@@ -284,6 +287,24 @@ func (m *Manager) narrowedDescriptors(keep func(narrowedChainSite) bool) []strin
 			s.Where, strings.Join(s.Kept, ","), strings.Join(s.Dropped, ",")))
 	}
 	sort.Strings(out)
+	return out
+}
+
+// NarrowedPolicyChainShapes returns the survivor-body shape counts for the
+// narrowed attachments in the last rendered managed section (#10129). The
+// shape dimension is intentionally additive to the existing total and
+// suffix gauges so existing alerts/history keep their meaning.
+func (m *Manager) NarrowedPolicyChainShapes() map[string]int {
+	m.narrowedMu.Lock()
+	defer m.narrowedMu.Unlock()
+	out := make(map[string]int)
+	for _, site := range m.narrowed {
+		shape := site.SurvivorShape
+		if shape == "" {
+			shape = "unknown"
+		}
+		out[shape]++
+	}
 	return out
 }
 
@@ -545,6 +566,11 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 	// no new BGP/IGP redistribution leak — rather than emitting a colliding
 	// route-map FRR would merge.
 	if fc.PolicyOptions != nil {
+		if m.narrowedAliasesEnabled10129 {
+			if err := narrowedAliasCollision10129(fc); err != nil {
+				return err
+			}
+		}
 		if err := redistAliasCollision(fc.PolicyOptions, collectAllBGPAcceptDefault(fc)); err != nil {
 			return err
 		}
@@ -676,6 +702,9 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 		// here beside the per-policy route-maps; FRR resolves the neighbor's
 		// `route-map <name>` reference regardless of definition order.
 		b.WriteString(m.renderComposedBGPChains(fc))
+		if m.narrowedAliasesEnabled10129 {
+			b.WriteString(m.renderNarrowedAliases10129(fc))
+		}
 	}
 	// #7625: the bounded deny an EMPTIED policy chain attaches. Emitted OUTSIDE
 	// the PolicyOptions guard above — a nil PolicyOptions makes every authored

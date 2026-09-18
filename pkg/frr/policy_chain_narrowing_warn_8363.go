@@ -70,6 +70,11 @@ type narrowedChainSite struct {
 	Authored []string
 	Kept     []string
 	Dropped  []string
+	// SurvivorShape records the body shape of the kept chain for the
+	// #10129 measurement gauge. It is independent of GhostsAreSuffix:
+	// position decides whether a synthesized member deletes survivors,
+	// while body shape decides whether a trailing deny is reachable.
+	SurvivorShape string
 	// GhostsAreSuffix reports whether every undefined member sits AFTER every
 	// surviving one. That is the #8363 safety condition for ever synthesizing a
 	// deny here: renderComposedRouteMap breaks on the first member with a
@@ -129,7 +134,11 @@ func narrowedChainSites(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) [
 			return
 		}
 		out = append(out, narrowedChainSite{
-			Where: where, Authored: authored, Kept: kept, Dropped: dropped,
+			Where:           where,
+			Authored:        authored,
+			Kept:            kept,
+			Dropped:         dropped,
+			SurvivorShape:   narrowedSurvivorShape10129(kept, po),
 			GhostsAreSuffix: suffix,
 		})
 	}
