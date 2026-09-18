@@ -1016,16 +1016,14 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	// beside a complete-looking stale_v4/stale_v6 pair and cannot tell which
 	// number to distrust.
 	var errs []error
-	// An unmapped zone can be node-local and therefore must not be judged by
-	// the RG ownership answer. Once the caller supplies the snapshot's
-	// membership predicate, only rows explicitly marked as peer-synced are
-	// eligible for stale deletion there. A nil predicate preserves the
-	// historical mapped-zone behavior for standalone callers.
+	// An unmapped zone uses the bulk-start RG 0 fallback. When that fallback
+	// says this node is primary, keep every row; when it says secondary, only
+	// local-origin rows are kept. Mapped zones retain the existing RG answer.
 	var staleV4 []SessionEntryV4
 	if err := s.ForEachV4(func(key SessionKey, val SessionValue) bool {
 		mapped := input.IsZoneMapped == nil || input.IsZoneMapped(val.IngressZone)
-		if (mapped && input.ShouldSyncZone(val.IngressZone)) ||
-			(!mapped && val.Flags&SessFlagClusterSynced == 0) {
+		shouldSync := input.ShouldSyncZone(val.IngressZone)
+		if shouldSync || (!mapped && val.Flags&SessFlagClusterSynced == 0) {
 			return true
 		}
 		if val.IsReverse == 0 {
@@ -1048,8 +1046,8 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	var staleV6 []SessionEntryV6
 	if err := s.ForEachV6(func(key SessionKeyV6, val SessionValueV6) bool {
 		mapped := input.IsZoneMapped == nil || input.IsZoneMapped(val.IngressZone)
-		if (mapped && input.ShouldSyncZone(val.IngressZone)) ||
-			(!mapped && val.Flags&SessFlagClusterSynced == 0) {
+		shouldSync := input.ShouldSyncZone(val.IngressZone)
+		if shouldSync || (!mapped && val.Flags&SessFlagClusterSynced == 0) {
 			return true
 		}
 		if val.IsReverse == 0 {

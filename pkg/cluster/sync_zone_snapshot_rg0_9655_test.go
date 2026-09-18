@@ -12,12 +12,11 @@ import (
 //   - a zone map installed DURING the bulk leaves the snapshot judging by the
 //     ownership that applied at bulk start, so a moved zone cannot delete flows
 //     this node now owns;
-//   - a nil zone map takes no snapshot, while an installed empty map is an
-//     authoritative all-unmapped snapshot; origin gating deletes only peer
-//     rows there and preserves promoted/local rows;
-//   - with a non-empty snapshot, a zone it does not name is RG-unmapped. The
-//     dataplane origin bit deletes only peer-synced rows there, while a row
-//     promoted to local ownership during failover survives.
+//   - a nil zone map takes no snapshot, while an installed empty map is a
+//     valid all-unmapped snapshot that still reconciles using the RG 0 fallback;
+//   - with a non-empty snapshot, a zone it does not name uses that fallback.
+//     On the RG 0 secondary, the dataplane origin bit deletes only peer-synced
+//     rows while a row promoted to local ownership during failover survives.
 
 var (
 	staleUnmapped9655 = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 50}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 42000, DstPort: 5201}
@@ -58,9 +57,9 @@ func receiver9655(t *testing.T, rg0Primary bool, zoneRG map[uint16]int) (*Sessio
 	return ss, dp
 }
 
-// An RG-unmapped zone is judged only by the per-session origin bit: a stale
-// peer-synced row is removed, while a row promoted to local ownership during
-// failover survives. This is the #10227 failover-with-unmapped-zones repro.
+// An RG-unmapped zone uses the RG 0 fallback captured at bulk start. On the
+// RG 0 secondary, the origin bit removes stale peer-synced rows while keeping
+// rows promoted to local ownership during failover; the primary keeps both.
 func TestUnmappedZoneSessionSurvivesTheReconcile_9655(t *testing.T) {
 	rx, dp := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
 	pumpBulk(t, emptyWindowSender9655(t), rx)
@@ -81,8 +80,8 @@ func TestUnmappedZoneSessionSurvivesTheReconcile_9655(t *testing.T) {
 func TestUnmappedZoneSessionIsKeptOnTheRG0Primary_9655(t *testing.T) {
 	rx, dp := receiver9655(t, true, map[uint16]int{1: 1, 5: 5})
 	pumpBulk(t, emptyWindowSender9655(t), rx)
-	if _, ok := dp.v4sessions[staleUnmapped9655]; ok {
-		t.Errorf("#10227: stale peer-synced row in an RG-unmapped zone survived on the RG 0 primary")
+	if _, ok := dp.v4sessions[staleUnmapped9655]; !ok {
+		t.Error("#9655: stale peer-synced row in an RG-unmapped zone was deleted on the RG 0 primary")
 	}
 	if _, ok := dp.v4sessions[promotedUnmapped9655]; !ok {
 		t.Errorf("#10227: failover-promoted local row in an RG-unmapped zone was deleted on the RG 0 primary")
@@ -92,9 +91,35 @@ func TestUnmappedZoneSessionIsKeptOnTheRG0Primary_9655(t *testing.T) {
 	}
 }
 
-// An unwired nil map still takes no snapshot. An installed empty map is an
-// all-unmapped snapshot: #10227's origin gate removes stale peer-synced rows
-// but keeps promoted/local rows.
+// The fallback is immutable for the bulk: flipping the live RG 0 answer after
+// BulkStart must not change the answer used by BulkEnd's reconcile.
+func TestUnmappedZoneUsesRG0FallbackCapturedAtBulkStart_9655(t *testing.T) {
+	rx, dp := receiver9655(t, true, map[uint16]int{1: 1, 5: 5})
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.IsPrimaryFn = func() bool { return false }
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+	if _, ok := dp.v4sessions[staleUnmapped9655]; !ok {
+		t.Fatal("#9655: the bulk re-queried live RG 0 ownership instead of using its start snapshot")
+	}
+}
+
+// An installed empty map is still a real snapshot. It must reconcile on the
+// RG 0 primary using the captured fallback rather than silently skipping.
+func TestInstalledEmptyZoneMapUsesRG0Fallback_9655(t *testing.T) {
+	rx, dp := receiver9655(t, true, map[uint16]int{})
+	snap := rx.snapshotZoneOwnership()
+	if snap == nil || len(snap.zones) != 0 {
+		t.Fatalf("#9655: installed empty map did not produce a valid empty snapshot: %#v", snap)
+	}
+	pumpBulk(t, emptyWindowSender9655(t), rx)
+	if _, ok := dp.v4sessions[staleUnmapped9655]; !ok {
+		t.Fatal("#9655: valid empty snapshot skipped RG 0 fallback reconciliation")
+	}
+}
+
+// An unwired nil map still takes no snapshot. An installed empty map is a
+// valid all-unmapped snapshot and reconciles using the captured RG 0 fallback:
+// the secondary's origin gate removes stale peer-synced rows but keeps local.
 func TestAZoneMapNamingNoZoneSkipsTheReconcile_9655(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
