@@ -31,7 +31,7 @@ import (
 // backend build that follow in Run(). Extracted verbatim from Run()'s PHASE 3
 // (#4662 Increment 4); the creation order is load-bearing (e.g. the
 // event-options engine registers an RPM callback and must exist before the
-// first applyConfig reconciles RPM). configCompileFailed is the #1960
+// first applyConfig reconciles RPM). failClosed is the #1960/#10297
 // fail-closed flag threaded from PHASE 1 (read-only here, at
 // clearFRRForFailClosedBoot). Returns a non-nil error only on a fatal DHCP
 // manager-create failure (the sole early return in the original block), which
@@ -44,7 +44,7 @@ import (
 // EXPLICITLY and needs them live during teardown; a startup signal aborts at the
 // phase boundary (runStartupPhases), it must not kill these runtimes underneath
 // the teardown (#5807).
-func (d *Daemon) initManagers(configCompileFailed bool) error {
+func (d *Daemon) initManagers(failClosed bool) error {
 	// Initialize routing, FRR, and IPsec managers
 	if !d.opts.NoDataplane {
 		rm, err := routing.New()
@@ -72,7 +72,7 @@ func (d *Daemon) initManagers(configCompileFailed bool) error {
 		// proof of live forwarding (a graceful stop leaves the pins but disarms
 		// forwarding). Freeze-in-last-known-good for management (#1960) is
 		// preserved: no .network/.link removal, no link-cycle.
-		d.clearFRRForFailClosedBoot(configCompileFailed)
+		d.clearFRRForFailClosedBoot(failClosed)
 		d.ipsec = ipsec.New()
 		d.ra = ra.New()
 		d.networkd = networkd.New()
@@ -270,9 +270,10 @@ func (d *Daemon) initManagers(configCompileFailed bool) error {
 // the text config file), enforces the #1917 fatal-on-parse floor, runs
 // bootstrapFromFile when required, and derives the boot class + node-id state.
 // Extracted verbatim from Run()'s PHASE 1 (#4662 Increment 5). Returns the
-// #1960 configCompileFailed fail-closed flag (threaded onward to initManagers)
-// and a non-nil error only for the fatal 'DB present but unreadable' floor,
-// which Run propagates unchanged (fail closed, never a blind bootstrap).
+// combined #1960/#10297 fail-closed load flag (threaded onward to
+// initManagers) and a non-nil error only for the fatal 'DB present but
+// unreadable' floor, which Run propagates unchanged (fail closed, never a
+// blind bootstrap).
 func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// Load persisted configuration from DB, falling back to text config file.
 	//
@@ -293,11 +294,13 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// here).
 	// configCompileFailed records the #1960 fail-closed case: a PRESENT,
 	// previously-committed active.json read+parsed fine but no longer
-	// compiles. It must NOT fall back to bootstrapFromFile() (which would
-	// blind-import the text config file over a broken-but-present committed
-	// DB — the same silently-wrong takeover this issue closes) and it forces
-	// bootstrap mode below regardless of computeBootClass's other inputs.
+	// compiles. absentActiveWithHistory records #10297's parallel fail-closed
+	// case: active.json is gone but rollback markers prove the box was
+	// previously committed. Neither case may fall back to bootstrapFromFile()
+	// (which would blind-import the stale day-0 text config over surviving
+	// state) and both force bootstrap mode below.
 	configCompileFailed := false
+	absentActiveWithHistory := false
 	switch loadErr := d.store.Load(); classifyLoadError(loadErr) {
 	case loadFatalUnreadable:
 		// Point recovery at the actual unreadable artifact — the config
@@ -323,18 +326,28 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			"positional claim-all). Fix the config from the CLI/gRPC and 'commit confirmed', "+
 			"or repair/remove the on-disk config DB",
 			"db_path", dbPath, "err", loadErr)
+	case loadAbsentWithHistory:
+		// #10297 fail-closed: active.json disappeared while rollback
+		// markers survived, so this is a deleted/lost DB rather than a
+		// never-booted store. Do not import the stale day-0 xpf.conf: its
+		// commit would overwrite the surviving history. Keep management
+		// alive in the lifeline-safe bootstrap state and leave rollback
+		// history available for explicit recovery.
+		absentActiveWithHistory = true
+		slog.Error("active config DB is absent but rollback history survives; refusing "+
+			"blind text-config bootstrap and entering BOOTSTRAP/lifeline safe state",
+			"db_path", filepath.Join(filepath.Dir(d.opts.ConfigFile), ".configdb", "active.json"),
+			"config_file", d.opts.ConfigFile, "err", loadErr)
 	case loadOtherError:
 		slog.Warn("failed to load config from db", "err", loadErr)
 	case loadOK:
 		// nil error: absent DB (start-fresh) or a valid loaded config.
 	}
 
-	// If DB had no active config, bootstrap from the text config file.
-	//
-	// #1960: but NOT when a present committed config failed to compile —
-	// importing the text xpf.conf there would silently swap in a different
-	// config and then take over interfaces, defeating the fail-closed intent.
-	if shouldBootstrapFromFile(d.store.ActiveConfig() != nil, configCompileFailed) {
+	// #10297: an absent active.json with surviving rollback markers is
+	// another fail-closed case; importing xpf.conf would clobber history.
+	if shouldBootstrapFromFile(d.store.ActiveConfig() != nil,
+		configCompileFailed || absentActiveWithHistory) {
 		if err := d.bootstrapFromFile(); err != nil {
 			// #4186 (H-17): a missing text config file is the EXPECTED
 			// factory/fresh-boot state, not a failure — log it at Info, not
@@ -375,9 +388,12 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	//
 	// #1960: configCompileFailed forces bootstrap here — a previously-committed
 	// config that no longer compiles must fail closed (no positional claim-all)
-	// regardless of the other inputs, including the HA-node guard.
+	// regardless of the other inputs, including the HA-node guard. #10297's
+	// absentActiveWithHistory condition has the same safe-boot requirement:
+	// active.json is gone, but surviving rollback markers prove prior state.
 	nodeIDPresent := hasNodeIDFile()
-	bootClass := computeBootClass(d.store.ActiveConfig() != nil, d.store.EverCommitted(), nodeIDPresent, configCompileFailed)
+	failClosedLoad := configCompileFailed || absentActiveWithHistory
+	bootClass := computeBootClass(d.store.ActiveConfig() != nil, d.store.EverCommitted(), nodeIDPresent, failClosedLoad)
 	if bootClass == bootClassBootstrap {
 		d.bootstrapMode.Store(true)
 		detail := "management control plane (gRPC/REST/CLI) runs normally, but interface " +
@@ -389,6 +405,9 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			// longer compiles". The Error log above already named the DB path.
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: committed configuration no longer compiles",
 				"detail", detail)
+		} else if absentActiveWithHistory {
+			slog.Warn("xpf daemon entering BOOTSTRAP mode: active configuration DB is absent but "+
+				"rollback history survives; explicit recovery is required", "detail", detail)
 		} else {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: no committed configuration found",
 				"detail", detail)
@@ -414,7 +433,7 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			"automatically when that config arrives (no restart required)",
 			"node_id_file", nodeIDFile)
 	}
-	return configCompileFailed, nil
+	return failClosedLoad, nil
 }
 
 // setupDataplaneAndInitialConfig builds the runtime dataplane backend (unless

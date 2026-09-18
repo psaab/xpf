@@ -35,11 +35,23 @@ func (s *Store) Load() error {
 		return fmt.Errorf("read config: %w: %w", ErrConfigDBUnreadable, err)
 	}
 	if tree == nil {
-		// Absent DB: start fresh. everCommitted stays false (a never-booted
-		// store has never committed); the daemon's bootstrapFromFile may
-		// import a preseeded xpf.conf, which resolves NOT-bootstrap on its
-		// own (case 2). The #1922 step-0 marker only governs the DB-present
-		// disambiguation.
+		// An absent active.json is the genuine fresh-store signal ONLY when
+		// no rollback/.configdb markers survive. A numbered text rollback
+		// slot (the canonical history), a DB rollback slot, or a pending
+		// confirm record proves this store previously persisted configuration.
+		// Treating that deleted active DB as fresh would import the stale
+		// day-0 xpf.conf and the next commit would overwrite surviving history
+		// (#10297). A master.key alone is deliberately NOT a marker: encrypted
+		// first-boot persistence creates it before the active write, so a
+		// failed first write must not brick the next genuine bootstrap.
+		if s.absentActiveHasRecoveryMarkers() {
+			s.everCommitted = true
+			s.persistMarkerCommitted = true
+			s.loadRollbackHistory()
+			return ErrConfigAbsentWithHistory
+		}
+		// No persisted marker: this is a never-booted store. everCommitted
+		// stays false and the daemon may bootstrap from xpf.conf.
 		return nil
 	}
 	// #1922 step-0 marker: record whether the on-disk DB represents a
@@ -133,6 +145,39 @@ func (s *Store) Load() error {
 	// success in that state — see recoverPendingConfirmLocked.
 	s.loadUnsharedMarkLocked() // #9530
 	return s.recoverPendingConfirmLocked()
+}
+
+// absentActiveHasRecoveryMarkers reports whether an absent active.json is
+// distinguishable from a never-created DB. It deliberately checks both the
+// canonical numbered text rollback slots and the .configdb recovery artifacts:
+// older/current deployments can leave either set behind after active.json is
+// deleted. An error while checking a marker is treated as present so a
+// permission/namespace failure cannot be laundered into a blind bootstrap.
+func (s *Store) absentActiveHasRecoveryMarkers() bool {
+	for i := 1; i <= s.history.MaxSize(); i++ {
+		if _, err := os.Lstat(s.rollbackPath(i)); err == nil {
+			return true
+		} else if !os.IsNotExist(err) {
+			return true
+		}
+	}
+	if s.db == nil {
+		return false
+	}
+	entries, err := os.ReadDir(s.db.dir)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case strings.HasPrefix(name, "rollback.") && strings.HasSuffix(name, ".json"):
+			return true
+		case name == "confirm.json":
+			return true
+		}
+	}
+	return false
 }
 
 // recoverPendingConfirmLocked restores a commit-confirmed window that was
