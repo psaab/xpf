@@ -109,12 +109,14 @@ xpf_cluster_owner_report() {
 
 # xpf_cluster_epoch_read — print the #10126 owner-epoch witness from
 # the persistent sidecar. The path is absent before the first lock
-# cell, or unreadable if the state directory is misconfigured; in
-# either case the empty snapshot is stable for a no-lock run. Callers
-# compare snapshots as opaque strings — any change (including
-# present→absent) is a mid-window acquire signal.
+# cell, which is a valid empty snapshot; once present, a read failure
+# is propagated so a gate cannot mistake an unreadable witness for a
+# stable empty epoch.
 xpf_cluster_epoch_read() {
-	cat "$XPF_CLUSTER_EPOCH" 2>/dev/null || true
+	if [[ ! -e "$XPF_CLUSTER_EPOCH" ]]; then
+		return 0
+	fi
+	cat "$XPF_CLUSTER_EPOCH" 2>/dev/null
 }
 
 # xpf_cluster_owner_identity — print the stable holder identity used
