@@ -205,9 +205,8 @@ func TestFilterSelfNamedPrefixListCommits9875(t *testing.T) {
 // TestFilterFromMarkerGateEquivalence9875 pins gate-verdict == marker-verdict
 // per spelling (Codex B4): a marked lenient term must be strict-rejected (a
 // committed config never carries the marker), and a strict-rejected shape
-// must leave its record — EXCEPT the declared term-packed exclusions, which
-// escape BOTH identically (#10071/#10072, strict-path packing defects with
-// their own filings — pinned here so any drift reds).
+// must leave its record. #10071 closes the packed unknown rows; #10072 keeps
+// its term-packed valueless exclusion until its own gate fix lands.
 func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 	rows := []struct {
 		name         string
@@ -237,18 +236,12 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 		{"braced unknown leaf", func(t *testing.T) *ConfigTree {
 			return fwTree9875(t, `term T { from { protocol tcp; ttl 64; } then { accept; } }`)
 		}, true, "ttl", "UnknownFrom"},
-		{"from-packed unknown leaf escapes both (#10071)", func(t *testing.T) *ConfigTree {
-			// `from ttl 64;` parses Keys-packed with no children, and the
-			// schema-unknown key is dropped by packing before
-			// compileFilterFrom ever sees it — the from-level half of the
-			// #10071 packing defect (term-level is pinned two rows down).
-			// Both the strict uniform gate (which reads the compiled
-			// UnknownFrom) and the marker escape identically.
+		{"from-packed unknown leaf (#10071)", func(t *testing.T) *ConfigTree {
 			return fwTree9875(t, `term T { from ttl 64; then accept; }`)
-		}, false, "", ""},
-		{"term-packed unknown leaf escapes both (#10071)", func(t *testing.T) *ConfigTree {
+		}, true, "ttl", "UnknownFrom"},
+		{"term-packed unknown leaf (#10071)", func(t *testing.T) *ConfigTree {
 			return fwTree9875(t, `term T from ttl 64;`)
-		}, false, "", ""},
+		}, true, "ttl", "UnknownFrom"},
 		{"flat valued control", func(t *testing.T) *ConfigTree {
 			return buildFilterTree(t, "set firewall family inet filter F term T from protocol tcp",
 				"set firewall family inet filter F term T then accept")
@@ -269,11 +262,6 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 			return fwSplitTree9875(t, `term T { from { protocol tcp; } then { accept; } }`)
 		}, false, "", ""},
 		{"from-packed valueless prefix-list (GLM-F1)", func(t *testing.T) *ConfigTree {
-			// The normalizer declines (from,source-prefix-list), so
-			// pre-fix this compiled-but-unmarked with the strict gate
-			// missing it too — the gate/mark pair agreed only for
-			// admitted pairs, by scope-accident. The helper now reads
-			// packed tails via packedBody, structurally.
 			return fwTree9875(t, `term T { from source-prefix-list; then { discard; } }`)
 		}, true, "source-prefix-list", "ValuelessFrom"},
 		{"from-packed valued prefix-list control = 2419 boundary (GLM-F1)", func(t *testing.T) *ConfigTree {
@@ -281,8 +269,8 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 			// fire — but compilation drops the ref (the normalizer
 			// declines the pair and no reader consumes the packed tail).
 			// That silent drop is #2419-CLASS but uninventoried (the
-			// census probes only the valueless shape for these
-			// flag-modelled leaves) — flagged to parent as a found gap.
+			// census probes only the valueless shape for these flag-modelled
+			// leaves) — flagged to parent as a found gap.
 			// Strict passes AND unmarked = gate/mark equivalent; the
 			// drop itself is not this lane's to fix.
 			return fwTree9875(t, `term T { from source-prefix-list AAA; then { discard; } }`)

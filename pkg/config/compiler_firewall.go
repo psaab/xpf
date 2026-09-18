@@ -661,6 +661,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					termBody := packedBody(termInst.node,
 						schemaForPath("firewall", "family", af, "filter", "term"))
 
+					fromSchema := schemaForPath("firewall", "family", af, "filter", "term", "from")
 					var rangeNames map[string]bool
 					for _, fromNode := range termBody.FindChildren("from") {
 						// A `from` written as a one-line STATEMENT inside the term
@@ -670,9 +671,21 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 						// reads children, so the condition was dropped and the term
 						// matched EVERYTHING. Found by comparing the two spellings
 						// for #6685, where this is the NESTED side.
-						rangeNames = compileFilterFrom(packedBody(fromNode,
-							schemaForPath("firewall", "family", af, "filter", "term", "from")),
+						rangeNames = compileFilterFrom(packedBody(fromNode, fromSchema),
 							term, af, rangeNames)
+					}
+					// #10071: when a schema-unknown `from` leaf is packed onto
+					// the term itself, packedBody deliberately leaves the original
+					// node unchanged rather than guessing how many operands the
+					// unknown leaf owns. Preserve the filter compiler's existing
+					// unknown-leaf contract by giving compileFilterFrom the
+					// synthetic `from` statement so it can record the leaf.
+					if termBody == termInst.node {
+						if packedFrom := firewallPackedTermFromNode(termInst.node,
+							schemaForPath("firewall", "family", af, "filter", "term")); packedFrom != nil {
+							rangeNames = compileFilterFrom(packedBody(packedFrom, fromSchema),
+								term, af, rangeNames)
+						}
 					}
 					// Finalize only after all same-name range fragments have
 					// merged, including fragments in later `from` blocks (#9899).
@@ -1379,10 +1392,97 @@ func firewallPrefixListRefs(child *Node) []PrefixListRef {
 	return refs
 }
 
+// firewallPackedUnknownFromLeaves returns schema-unknown leaves carried on a
+// packed `from` node. The generic packed-body expander cannot safely synthesize
+// an unknown leaf because its operand arity is not in the schema, but the
+// firewall compiler already has an explicit UnknownFrom contract for exactly
+// that case. Consume the unknown leaf's opaque tail until the next unquoted
+// schema-known `from` head; this preserves the first leaf name without
+// mistaking its value for another leaf.
+func firewallPackedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
+	if node == nil || schema == nil || len(node.Keys) == 0 {
+		return nil
+	}
+	consumed, _ := consumeNodeKeys(node.Keys, schema)
+	if consumed >= len(node.Keys) {
+		return nil
+	}
+	var out []string
+	for i := consumed; i < len(node.Keys); {
+		var childSchema *schemaNode
+		if !node.KeyQuoted(i) {
+			childSchema = resolveSchemaChild(schema, node.Keys[i])
+		}
+		if childSchema != nil {
+			n, _ := consumeNodeKeys(node.Keys[i:], childSchema)
+			if n <= 0 {
+				n = 1
+			}
+			i += n
+			continue
+		}
+		if node.Keys[i] != "" {
+			out = append(out, node.Keys[i])
+		}
+		i++
+		for i < len(node.Keys) {
+			if !node.KeyQuoted(i) && resolveSchemaChild(schema, node.Keys[i]) != nil {
+				break
+			}
+			i++
+		}
+	}
+	return out
+}
+
+// firewallPackedTermFromNode extracts the packed `from` statement from a
+// firewall term when the generic expander bails out on a schema-unknown leaf.
+// `then` is a term-level sibling, so it bounds the from tail. The returned node
+// is fresh and carries quote provenance for any known operands.
+func firewallPackedTermFromNode(termNode *Node, termSchema *schemaNode) *Node {
+	if termNode == nil || termSchema == nil || len(termNode.Keys) == 0 {
+		return nil
+	}
+	consumed, _ := consumeNodeKeys(termNode.Keys, termSchema)
+	for i := consumed; i < len(termNode.Keys); i++ {
+		if termNode.KeyQuoted(i) || termNode.Keys[i] != "from" {
+			continue
+		}
+		end := i + 1
+		for end < len(termNode.Keys) {
+			if !termNode.KeyQuoted(end) &&
+				(termNode.Keys[end] == "from" || termNode.Keys[end] == "then") {
+				break
+			}
+			end++
+		}
+		keys := append([]string{"from"}, termNode.Keys[i+1:end]...)
+		from := &Node{Keys: keys}
+		quoted := make([]bool, len(keys))
+		for j := i + 1; j < end; j++ {
+			quoted[j-i] = termNode.KeyQuoted(j)
+		}
+		from.setKeysQuoted(quoted)
+		return from
+	}
+	return nil
+}
+
 // compileFilterFrom compiles a firewall-filter term's `from` match block. The
 // family ("inet" / "inet6") selects the ICMPv4 vs ICMPv6 icmp-type name table
 // when resolving symbolic icmp-type values (#3205).
 func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rangeNames map[string]bool) map[string]bool {
+	fromSchema := schemaForPath("firewall", "family", family, "filter", "term", "from")
+	if fromSchema == nil {
+		// Family-independent fallback for family-less / unknown AST shapes.
+		fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
+	}
+	for _, unknown := range firewallPackedUnknownFromLeaves(node, fromSchema) {
+		// The packed scanner emits each opaque leaf once; retaining the
+		// existing append semantics for ordinary child nodes keeps duplicate
+		// authored leaves observable to the existing strict gate.
+		term.UnknownFrom = append(term.UnknownFrom, unknown)
+	}
 	for _, child := range node.Children {
 		switch child.Name() {
 		case "dscp", "traffic-class":
