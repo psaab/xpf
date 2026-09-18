@@ -1805,7 +1805,7 @@ never lock an operator out of a remote box it manages.
   fatal via #1917 D1). The **HA-node guard** keys on `/etc/xpf/node-id` FILE
   presence (NOT the config-derived `clusterMode`): a node-id node always
   resolves NOT-bootstrap.
-- **Fail-closed on compile failure (#1960):** a PRESENT, previously-committed
+- **Fail-closed on compile failure (#1960):** A PRESENT, previously-committed
   `active.json` that is valid JSON but no longer COMPILES (even through the
   tolerant `compileTreeLenient` path) is the dangerous tuple
   `ActiveConfig()==nil` + `EverCommitted()==true`. Without a guard, that
@@ -1813,10 +1813,10 @@ never lock an operator out of a remote box it manages.
   box whose intended config is unknown. `Store.Load` now tags this error with
   `configstore.ErrConfigCompile`; `Run` classifies it via `classifyLoadError`,
   logs it loudly (Error), SKIPS `bootstrapFromFile` (so the text `xpf.conf` is
-  not blind-imported over the broken DB), and passes `configCompileFailed=true`
-  to `computeBootClass`, which forces **bootstrap** — overriding even the
-  HA-node guard. The control plane stays up so the operator can recover
-  in-band. A daemon hard-exit is deliberately NOT used (it would also strand
+  not blind-imported over the broken DB), and passes the combined fail-closed
+  load flag to `computeBootClass`, which forces **bootstrap** — overriding even
+  the HA-node guard. The control plane stays up so the operator can recover
+  in-band. A daemon hard-exit is deliberately NOT used (that would also strand
   mgmt). Distinct from `ErrConfigDBUnreadable` (#1917 D1, which IS a fatal exit
   because the bytes themselves cannot be read).
   - **The boot commit-confirmed recovery reaches the same guard (#6538).** A
@@ -1869,7 +1869,7 @@ never lock an operator out of a remote box it manages.
     `show | compare rollback N` reach prior good configs, and a
     `commit confirmed` of either promotes a working config. Repairing/removing
     the on-disk DB remains the out-of-band fallback.
-  - **FRR managed section is cleared on a compile-failed boot unless forwarding
+  - **FRR managed section is cleared on a fail-closed boot unless forwarding
     is genuinely live (#1993).** `frr` is an independent service that starts from
     its persisted `frr.conf` (the managed section from the last good
     `applyConfig`), which freeze-in-last-known-good leaves intact. On a
@@ -1877,9 +1877,10 @@ never lock an operator out of a remote box it manages.
     otherwise still form peerings and advertise the last-good prefixes — peers
     route transit to this node's physical IPs and it blackholes them rather than
     failing over to the HA partner. To close that cross-daemon gap, the
-    compile-failure boot path calls
-    `clearFRRForFailClosedBoot(configCompileFailed)` immediately after the FRR
-    manager is constructed (`d.frr = frr.New()`).
+    fail-closed boot path calls
+    `clearFRRForFailClosedBoot(failClosedLoad)` immediately after the FRR
+    manager is constructed (`d.frr = frr.New()`), for both compile-failed and
+    absent-active-with-history boots.
     - **The preserve decision requires LIVE FORWARDING, not just pins.** Pins on
       `/sys/fs/bpf/xpf/links` prove only that an XDP link is *attached*, not that
       forwarding is *live*: a graceful hitless shutdown (`dp.Close()` →
@@ -1928,6 +1929,14 @@ never lock an operator out of a remote box it manages.
       drop (peer hold-down then carries transit on the partner). A unit-ordering
       change (`xpfd` clears FRR before FRR forms peerings) would shrink the
       window further but is a separable follow-up, not required for the Go fix.
+- **Fail-closed when active DB disappears (#10297):** An absent `active.json`
+  is treated as fresh only when no canonical text rollback slots or
+  `.configdb` rollback/confirm markers survive. `Store.Load` returns
+  `configstore.ErrConfigAbsentWithHistory`, sets `EverCommitted()==true`, and
+  reloads the surviving history. `Run` skips stale day-0 `xpf.conf` import and
+  enters lifeline **bootstrap** with rollback recovery still available; a
+  key-only `.configdb` left by a failed first encrypted write remains a genuine
+  fresh-boot state.
 - **Bootstrap mode** (`d.bootstrapMode` atomic): runs gRPC/REST/CLI normally
   but SUPPRESSES interface takeover ACTIONS — the full rename loop, host
   tunables, `enableForwarding`, dataplane arm (`dp.Start`), the boot-time

@@ -89,6 +89,27 @@ func TestColdBootCompileFailedClearsFRR(t *testing.T) {
 	}
 }
 
+// TestColdBootAbsentActiveHistoryClearsFRR covers #10297's fail-closed load
+// flag at the same FRR boundary as the compile-failure path: absent active.json
+// with surviving rollback history suppresses takeover, so stale managed
+// advertisements must be removed when forwarding is not live.
+func TestColdBootAbsentActiveHistoryClearsFRR(t *testing.T) {
+	withFailClosedBootPinnedXDPProbe(t, func() (bool, error) { return false, nil })
+	confPath, sentinel := seededFRRConf(t)
+	rec := &frr.RecordingExecutor{}
+	d := &Daemon{frr: frr.NewForTest(confPath, rec)}
+
+	d.clearFRRForFailClosedBoot(true)
+
+	got := readConf(t, confPath)
+	if strings.Contains(got, sentinel) {
+		t.Fatalf("absent-active-with-history boot must strip stale managed section; frr.conf still has %q:\n%s", sentinel, got)
+	}
+	if rec.ReloadCalls != 1 {
+		t.Fatalf("absent-active-with-history boot expected one FRR reload, got %d", rec.ReloadCalls)
+	}
+}
+
 // TestColdBootNormalDoesNotClearFRR is the critical "don't wipe a healthy node"
 // guard: on a normal / no-config bootstrap boot (configCompileFailed=false) the
 // managed section must be UNTOUCHED and FRR must NOT be reloaded.
