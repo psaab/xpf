@@ -26,6 +26,14 @@ BROKEN_FIXTURE="${XPF_WIRE_BROKEN_FIXTURE:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/wire-gate-lib.sh"
 
+# Emit the parent-container delete only when the pre-run applications subtree
+# was empty. `show configuration applications | display set` can hide an
+# empty container while whole-config display still preserves it; cleanup must
+# remove that residue without deleting unrelated pre-existing applications.
+restore_application_cmd() {
+    [[ -z "${APP_SNAP:-}" ]] && printf 'delete applications\n'
+}
+
 if [[ "$MODE" == selftest ]]; then
     pass=0; fail=0
     check() {
@@ -43,6 +51,19 @@ if [[ "$MODE" == selftest ]]; then
     else
         echo "  FAIL  cleanup finalizer shields restore"; fail=$((fail + 1))
     fi
+    APP_SNAP=""
+    if [[ "$(restore_application_cmd)" == "delete applications" ]]; then
+        echo "  PASS  empty applications container is removed on restore"; pass=$((pass + 1))
+    else
+        echo "  FAIL  empty applications container is removed on restore"; fail=$((fail + 1))
+    fi
+    APP_SNAP="set applications application preexisting protocol tcp"
+    if [[ -z "$(restore_application_cmd)" ]]; then
+        echo "  PASS  pre-existing applications are preserved on restore"; pass=$((pass + 1))
+    else
+        echo "  FAIL  pre-existing applications are preserved on restore"; fail=$((fail + 1))
+    fi
+    unset APP_SNAP
     check "create witness expire and drops pass" PASS 0 1 1 0 1000 0 1000 0 1500 1500 1 0
     check "stale session fails" FAIL 1 1 1 1 1000 0 1000 0 1500 1500 1 0
     check "expired subject leak fails" FAIL 1 1 1 0 1000 1 1000 0 1500 1500 1 0
@@ -146,8 +167,10 @@ session_count() {
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
     local log=/tmp/xpf-wire-conntrack-restore.log
-    local cmds line
+    local cmds line app_cmd
     cmds="configure\ndelete security policies from-zone lan to-zone wan policy allow-all match application\ndelete applications application-set ${APP_SET}\ndelete applications application ${APP_LIFECYCLE}\n"
+    app_cmd="$(restore_application_cmd)"
+    [[ -z "$app_cmd" ]] || cmds+="${app_cmd}"$'\n'
     while IFS= read -r line; do
         case "$line" in
         set\ security\ policies\ from-zone\ lan\ to-zone\ wan\ policy\ allow-all\ match\ application\ *)
