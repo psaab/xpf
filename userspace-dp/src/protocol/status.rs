@@ -966,6 +966,10 @@ pub(crate) struct ProcessStatus {
     pub last_resolution: Option<PacketResolution>,
     #[serde(rename = "slow_path", default)]
     pub slow_path: SlowPathStatus,
+    /// #10069: delegated slow-path outlet status mirrors the trusted outlet so
+    /// operators can see its live MTU, degraded state, and counters.
+    #[serde(rename = "slow_path_delegated", default)]
+    pub slow_path_delegated: SlowPathStatus,
     #[serde(rename = "debug_worker_threads", default)]
     pub debug_worker_threads: usize,
     #[serde(rename = "debug_identity_slots", default)]

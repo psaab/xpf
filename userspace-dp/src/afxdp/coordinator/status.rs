@@ -906,6 +906,13 @@ impl super::Coordinator {
             .map(|slow| slow.status())
             .unwrap_or_else(|| self.last_slow_path_status.clone())
     }
+    /// #10069: operator-facing snapshot of the delegated slow-path outlet.
+    pub fn slow_path_delegated_status(&self) -> SlowPathStatus {
+        self.slow_path
+            .as_ref()
+            .map(|slow| slow.delegated_status())
+            .unwrap_or_else(|| self.last_slow_path_delegated_status.clone())
+    }
 
     pub fn cos_statuses(&self) -> Vec<crate::protocol::CoSInterfaceStatus> {
         let snapshots: Vec<Vec<_>> = self

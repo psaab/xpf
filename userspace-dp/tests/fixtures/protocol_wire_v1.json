@@ -1052,6 +1052,23 @@
       "rate_limited_packets": 0,
       "write_errors": 0
     },
+    "slow_path_delegated": {
+      "active": false,
+      "degraded": false,
+      "device_name": "",
+      "dropped_bytes": 0,
+      "dropped_packets": 0,
+      "injected_bytes": 0,
+      "injected_packets": 0,
+      "last_error": "",
+      "live_mtu": 0,
+      "mode": "",
+      "mtu_dropped_packets": 0,
+      "queue_full_packets": 0,
+      "queued_packets": 0,
+      "rate_limited_packets": 0,
+      "write_errors": 0
+    },
     "source_nat_match_consulted_total": 0,
     "source_nat_match_matched_total": 0,
     "source_nat_match_no_match_total": 0,

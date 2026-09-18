@@ -33,6 +33,25 @@ const IFF_NO_PI: libc::c_short = 0x1000;
 /// TUN egress, so the reinjector must refuse them with a counter and the
 /// status must report the degraded state rather than a plain `active`.
 const DEFAULT_TUN_MTU: i32 = 1500;
+/// #10069: cap delegated MTU recovery to three attempts per eight reconcile
+/// ticks. The retry state is logical-tick based so tests can pin the exact
+/// ioctl bound without sleeping, while production reconciles naturally advance
+/// the same bounded window.
+const MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW: u8 = 3;
+const MTU_RETRY_WINDOW_TICKS: u32 = 8;
+
+#[derive(Default)]
+struct MtuRetryState {
+    desired_mtu: i32,
+    tick: u32,
+    /// Ticks at which the last bounded attempts were issued, oldest first.
+    /// Keeping the fixed-size ring inline avoids allocations on reconcile.
+    attempt_ticks: [u32; MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW as usize],
+    attempts: u8,
+    next_retry_tick: u32,
+    was_degraded: bool,
+}
+
 
 #[derive(Clone, Debug, Default)]
 pub struct SlowPathStatus {
@@ -391,6 +410,10 @@ pub struct SlowPathReinjector {
     /// Per-outlet status for the delegated TUN (live MTU, degraded, active,
     /// counters). Admission and MTU gating read the outlet's own status.
     status_delegated: Arc<SharedStatus>,
+    /// #10069: logical-tick retry state for delegated MTU recovery. This is
+    /// preserved with the reinjector across snapshots and bounds SIOCSIFMTU
+    /// attempts under a persistent delegated failure.
+    mtu_retry: Mutex<MtuRetryState>,
     /// MTU the live slow-path TUN is currently programmed with. Set at
     /// creation (#2408) and, on a day-2 config MTU change (#5801), updated by
     /// [`Self::reconcile_mtu`]: the reinjector is PRESERVED across snapshot
@@ -518,6 +541,7 @@ impl SlowPathReinjector {
             )),
             status,
             status_delegated,
+            mtu_retry: Mutex::new(MtuRetryState::default()),
             mtu: AtomicI64::new(mtu as i64),
         })
     }
@@ -565,6 +589,7 @@ impl SlowPathReinjector {
             )),
             status,
             status_delegated,
+            mtu_retry: Mutex::new(MtuRetryState::default()),
             mtu: AtomicI64::new(mtu as i64),
         }
     }
@@ -635,6 +660,79 @@ impl SlowPathReinjector {
         self.mtu.store(live as i64, Ordering::Relaxed);
         live
     }
+    /// Reprogram only the delegated outlet. This is used once the trusted
+    /// outlet has converged, so recovery does not re-issue a trusted ioctl on
+    /// every delegated retry.
+    pub(crate) fn reconcile_delegated_mtu(
+        &self,
+        desired_mtu: i32,
+        mut programmer: impl FnMut(&str, i32) -> Result<(), String>,
+    ) -> i32 {
+        let live_delegated =
+            self.reconcile_outlet_mtu(&self.status_delegated, desired_mtu, &mut programmer);
+        let live_trusted = self.status.live_mtu.load(Ordering::Relaxed) as i32;
+        let live = live_trusted.min(live_delegated);
+        self.mtu.store(live as i64, Ordering::Relaxed);
+        live
+    }
+
+    /// #10069: admit one delegated retry in a rolling logical-tick window.
+    /// The degraded transition re-arms the counter, while old attempt ticks
+    /// age out. This permits eventual recovery after a persistent failure
+    /// without allowing one reconcile tick to issue an unbounded ioctl stream.
+    pub(crate) fn delegated_mtu_retry_permitted(
+        &self,
+        desired_mtu: i32,
+        delegated_degraded: bool,
+    ) -> bool {
+        let mut state = self.mtu_retry.lock().unwrap_or_else(|e| e.into_inner());
+        state.tick = state.tick.saturating_add(1);
+        if desired_mtu != state.desired_mtu {
+            state.desired_mtu = desired_mtu;
+            state.attempts = 0;
+            state.attempt_ticks = [0; MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW as usize];
+            state.next_retry_tick = state.tick;
+        }
+        if delegated_degraded && !state.was_degraded {
+            // A newly observed degraded edge is an explicit re-arm signal.
+            state.attempts = 0;
+            state.attempt_ticks = [0; MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW as usize];
+            state.next_retry_tick = state.tick;
+        }
+        while state.attempts > 0
+            && state.tick.saturating_sub(state.attempt_ticks[0]) >= MTU_RETRY_WINDOW_TICKS
+        {
+            state.attempts -= 1;
+            state.attempt_ticks.rotate_left(1);
+            let remaining = state.attempts as usize;
+            state.attempt_ticks[remaining] = 0;
+            if state.attempts == 0 {
+                state.next_retry_tick = state.tick;
+            }
+        }
+        state.was_degraded = delegated_degraded;
+        state.attempts < MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW
+            && state.tick >= state.next_retry_tick
+    }
+
+    /// Record the result of a delegated retry and apply exponential backoff
+    /// before the next logical reconcile tick.
+    pub(crate) fn record_delegated_mtu_retry(&self, succeeded: bool) {
+        let mut state = self.mtu_retry.lock().unwrap_or_else(|e| e.into_inner());
+        if succeeded {
+            state.attempts = 0;
+            state.attempt_ticks = [0; MTU_RETRY_MAX_ATTEMPTS_PER_WINDOW as usize];
+            state.next_retry_tick = state.tick;
+            state.was_degraded = false;
+            return;
+        }
+        let slot = state.attempts as usize;
+        state.attempt_ticks[slot] = state.tick;
+        state.attempts += 1;
+        let shift = state.attempts.saturating_sub(1).min(3) as u32;
+        state.next_retry_tick = state.tick.saturating_add(1u32 << shift);
+    }
+
 
     fn reconcile_outlet_mtu(
         &self,

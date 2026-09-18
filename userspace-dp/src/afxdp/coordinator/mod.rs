@@ -274,6 +274,9 @@ pub struct Coordinator {
     /// and is removed only when the endpoint leaves the desired set.
     pub(crate) wg_control_threads: BTreeMap<u16, WgControlEntry>,
     pub(crate) last_slow_path_status: SlowPathStatus,
+    /// #10069: last published status for the delegated slow-path outlet,
+    /// retained across teardown when no live reinjector is present.
+    pub(crate) last_slow_path_delegated_status: SlowPathStatus,
     /// #2408/#5801/#6097: the last snapshot slow-path MTU the day-2 reconcile
     /// ATTEMPTED on the live (preserved) reinjector. Since #5801 the reconcile
     /// reprograms the running TUN via `SIOCSIFMTU` rather than only warning, so
@@ -539,6 +542,7 @@ impl Coordinator {
             tunnel_sources: BTreeMap::new(),
             wg_control_threads: BTreeMap::new(),
             last_slow_path_status: SlowPathStatus::default(),
+            last_slow_path_delegated_status: SlowPathStatus::default(),
             last_slow_path_mtu_reconciled: 0,
             ha,
             cos: SharedCoSState::new(),
@@ -919,6 +923,11 @@ impl Coordinator {
             .slow_path
             .as_ref()
             .map(|slow| slow.status())
+            .unwrap_or_default();
+        self.last_slow_path_delegated_status = self
+            .slow_path
+            .as_ref()
+            .map(|slow| slow.delegated_status())
             .unwrap_or_default();
         self.slow_path = None;
         // #7209: ONE store of the whole set; the previous set's fds close when

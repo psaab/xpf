@@ -537,6 +537,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.cos_active_flow_counts_truncated = cos_active_flow_counts_truncated;
     state.status.last_resolution = state.afxdp.last_resolution();
     state.status.slow_path = state.afxdp.slow_path_status().into();
+    state.status.slow_path_delegated = state.afxdp.slow_path_delegated_status().into();
     if let Some(es_stats) = state.afxdp.event_stream_stats() {
         state.status.event_stream_connected = es_stats.connected;
         state.status.event_stream_seq = es_stats.seq;

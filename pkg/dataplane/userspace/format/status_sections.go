@@ -680,6 +680,32 @@ func writeSlowPathSection(b *strings.Builder, status userspace.ProcessStatus, ag
 		fmt.Fprintf(b, "  Slow path last error:      %s\n", status.SlowPath.LastError)
 	}
 	fmt.Fprintf(b, "  Slow path per-binding:     %d pkts / %d drops\n", agg.slowPathPackets, agg.slowPathDrops)
+	// #10069: expose the delegated outlet beside the trusted outlet. It has
+	// independent MTU/degraded/counter state and must not be inferred from the
+	// trusted outlet when the dual-outlet paths diverge.
+	fmt.Fprintf(b, "  Slow path delegated active: %t\n", status.SlowPathDelegated.Active)
+	if status.SlowPathDelegated.Degraded {
+		fmt.Fprintf(b, "  Slow path delegated DEGRADED: true (live MTU %d < configured; jumbo frames refused)\n", status.SlowPathDelegated.LiveMTU)
+	}
+	if status.SlowPathDelegated.LiveMTU != 0 {
+		fmt.Fprintf(b, "  Slow path delegated live MTU: %d\n", status.SlowPathDelegated.LiveMTU)
+	}
+	if status.SlowPathDelegated.DeviceName != "" {
+		fmt.Fprintf(b, "  Slow path delegated device: %s\n", status.SlowPathDelegated.DeviceName)
+	}
+	if status.SlowPathDelegated.Mode != "" {
+		fmt.Fprintf(b, "  Slow path delegated mode: %s\n", status.SlowPathDelegated.Mode)
+	}
+	fmt.Fprintf(b, "  Slow path delegated queued: %d\n", status.SlowPathDelegated.QueuedPackets)
+	fmt.Fprintf(b, "  Slow path delegated injected: %d pkts / %d bytes\n", status.SlowPathDelegated.InjectedPackets, status.SlowPathDelegated.InjectedBytes)
+	fmt.Fprintf(b, "  Slow path delegated dropped: %d pkts / %d bytes\n", status.SlowPathDelegated.DroppedPackets, status.SlowPathDelegated.DroppedBytes)
+	fmt.Fprintf(b, "  Slow path delegated rate-limited: %d\n", status.SlowPathDelegated.RateLimitedPackets)
+	fmt.Fprintf(b, "  Slow path delegated queue-full: %d\n", status.SlowPathDelegated.QueueFullPackets)
+	fmt.Fprintf(b, "  Slow path delegated MTU-exceeded: %d\n", status.SlowPathDelegated.MTUDroppedPackets)
+	fmt.Fprintf(b, "  Slow path delegated write errors: %d\n", status.SlowPathDelegated.WriteErrors)
+	if status.SlowPathDelegated.LastError != "" {
+		fmt.Fprintf(b, "  Slow path delegated last error: %s\n", status.SlowPathDelegated.LastError)
+	}
 }
 
 // writeWorkerSection renders the recent-exception count, per-worker heartbeat

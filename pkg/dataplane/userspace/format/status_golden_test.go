@@ -139,6 +139,11 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 			QueuedPackets: 4, InjectedPackets: 100, InjectedBytes: 20000, DroppedPackets: 2, DroppedBytes: 400,
 			RateLimitedPackets: 1, QueueFullPackets: 1, MTUDroppedPackets: 1, WriteErrors: 1, LastError: "write EIO",
 		},
+		SlowPathDelegated: userspace.SlowPathStatus{
+			Active: true, Degraded: true, LiveMTU: 1500, DeviceName: "slow1", Mode: "sync",
+			QueuedPackets: 5, InjectedPackets: 70, InjectedBytes: 14000, DroppedPackets: 3, DroppedBytes: 600,
+			RateLimitedPackets: 2, QueueFullPackets: 1, MTUDroppedPackets: 2, WriteErrors: 2, LastError: "delegated EIO",
+		},
 		RecentExceptions: []userspace.ExceptionStatus{
 			{Slot: 0, QueueID: 0, Interface: "ge-0-0-2", Reason: "metadata_parse", PacketLength: 128},
 		},
