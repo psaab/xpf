@@ -11,14 +11,17 @@ import (
 // never answered the #6628 in-place upgrade, stays unauthenticated for its lifetime unless the
 // opt-in strict-session-auth (#7441) evicts it. Its frames are accepted without HMAC.
 //
-// The status line said "engaged (peer authenticated; unauthenticated frames rejected)" from heartbeat
-// evidence alone, and nothing warned. These cells reuse the #6628/#7441 fixtures:
+// The status line must describe the local heartbeat enforcement posture: a
+// configured key rejects unsigned heartbeat frames even before the peer has
+// authenticated. A session-sync connection that predates keying remains a
+// separate residual and must be named until strict-session-auth evicts it.
+// These cells reuse the #6628/#7441 fixtures:
 //   - newUpgEnd installs an ESTABLISHED, never-authenticated authConn on a keyed SessionSync;
 //   - strictEnd additionally sets the posture and back-dates the grace anchor.
 
 const key9717 = "control-link-psk"
 
-const engagedLine9717 = "engaged (peer authenticated; unauthenticated frames rejected)"
+const engagedLine9717 = "engaged (local key configured; unauthenticated heartbeat frames rejected)"
 
 // keyedManagerWithAuthenticatedHeartbeat9717 builds the Manager side of the acceptance: keyed, with a
 // heartbeat peer that has proven the key, and wired to s as its session-sync provider.

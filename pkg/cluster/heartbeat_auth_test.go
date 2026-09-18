@@ -378,27 +378,28 @@ func TestHeartbeatReplayGatesLivenessRefresh(t *testing.T) {
 // drive election.
 func TestHeartbeatAuthDecision(t *testing.T) {
 	cases := []struct {
-		name                                                string
-		keyConfigured, present, macOK, nonceFresh, peerSeen bool
-		wantAccept                                          bool
+		name                                       string
+		keyConfigured, present, macOK, nonceFresh bool
+		wantAccept                                 bool
 	}{
 		// No local key -> dual-accept everything (cannot verify; may be the
 		// not-yet-keyed side of a rolling upgrade). No regression.
-		{"no-key/legacy", false, false, false, false, false, true},
-		{"no-key/authed-frame", false, true, false, false, false, true},
+		{"no-key/legacy", false, false, false, false, true},
+		{"no-key/authed-frame", false, true, false, false, true},
 
 		// Local key + authed frame -> enforce.
-		{"key/good-hmac-fresh", true, true, true, true, false, true},
-		{"key/bad-hmac", true, true, false, false, false, false},       // forged/tampered -> REJECT
-		{"key/good-hmac-replay", true, true, true, false, true, false}, // replayed nonce -> REJECT
+		{"key/good-hmac-fresh", true, true, true, true, true},
+		{"key/bad-hmac", true, true, false, false, false},       // forged/tampered -> REJECT
+		{"key/good-hmac-replay", true, true, true, false, false}, // replayed nonce -> REJECT
 
-		// Local key + no trailer.
-		{"key/legacy-peer-not-yet-authed", true, false, false, false, false, true}, // rolling upgrade dual-accept
-		{"key/legacy-after-peer-authed", true, false, false, false, true, false},   // downgrade -> REJECT
+		// Local key + no trailer is always rejected. There is no first-contact
+		// grace; this mirrors the #5078 session-sync fail-closed policy.
+		{"key/legacy-peer-not-yet-authed", true, false, false, false, false},
+		{"key/legacy-after-peer-authed", true, false, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := heartbeatAuthDecision(tc.keyConfigured, tc.present, tc.macOK, tc.nonceFresh, tc.peerSeen)
+			got, reason := heartbeatAuthDecision(tc.keyConfigured, tc.present, tc.macOK, tc.nonceFresh)
 			if got != tc.wantAccept {
 				t.Fatalf("accept = %v (reason %q), want %v", got, reason, tc.wantAccept)
 			}
@@ -411,10 +412,10 @@ func TestHeartbeatAuthDecision(t *testing.T) {
 
 // TestHeartbeatAuthDecision_ForgedFrameRejected is the end-to-end anti-forgery
 // assertion tying the wire path to the decision: a frame signed with the WRONG
-// key (an attacker who does not hold the PSK) is rejected when a key is
-// configured and the peer has authenticated. RED on revert: if the receiver
-// stops enforcing, macOK would be ignored and this forged frame would be
-// accepted -> forced election.
+// key (an attacker who does not hold the PSK) is rejected on a keyed node,
+// including before the peer has authenticated in this process. RED on revert:
+// if the receiver stops enforcing, macOK would be ignored and this forged
+// frame would be accepted -> forced election.
 func TestHeartbeatAuthDecision_ForgedFrameRejected(t *testing.T) {
 	realKey := []byte("real-cluster-psk")
 	forged := MarshalHeartbeatAuth(samplePkt(), []byte("attacker-psk"), 9, 1)
@@ -424,8 +425,7 @@ func TestHeartbeatAuthDecision_ForgedFrameRejected(t *testing.T) {
 	if macOK {
 		t.Fatal("forged frame verified under the real key — HMAC broken")
 	}
-	// peerAuthSeen=true (both nodes keyed, peer previously authed).
-	accept, reason := heartbeatAuthDecision(true, present, macOK, false, true)
+	accept, reason := heartbeatAuthDecision(true, present, macOK, false)
 	if accept {
 		t.Fatalf("forged heartbeat accepted (reason %q) — forged frame drives election", reason)
 	}
@@ -436,7 +436,7 @@ func TestHeartbeatAuthDecision_ForgedFrameRejected(t *testing.T) {
 	s, c, gp := heartbeatAuthTrailer(good)
 	goodMAC := gp && verifyHeartbeatMAC(good, realKey)
 	fresh := goodMAC && replay.admit(s, c)
-	if accept2, _ := heartbeatAuthDecision(true, gp, goodMAC, fresh, true); !accept2 {
+	if accept2, _ := heartbeatAuthDecision(true, gp, goodMAC, fresh); !accept2 {
 		t.Error("correctly-signed heartbeat rejected")
 	}
 }
@@ -512,7 +512,7 @@ func TestHeartbeatAuthDecisionReasonNamesTheArm_6968(t *testing.T) {
 	const (
 		reasonBadMAC  = "hmac verification failed"
 		reasonReplay  = "stale nonce (replay)"
-		reasonMissing = "missing auth trailer (enforced: peer previously authenticated)"
+		reasonMissing = "missing auth trailer (enforced: local key configured)"
 	)
 	// The binding is only as good as the strings being DIFFERENT. If two arms
 	// ever returned the same text, every assertion below would still pass while
@@ -529,30 +529,32 @@ func TestHeartbeatAuthDecisionReasonNamesTheArm_6968(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                                                string
-		keyConfigured, present, macOK, nonceFresh, peerSeen bool
-		wantAccept                                          bool
-		wantReason                                          string
+		name                                       string
+		keyConfigured, present, macOK, nonceFresh bool
+		wantAccept                                 bool
+		wantReason                                 string
 	}{
-		{"no-key/legacy", false, false, false, false, false, true, ""},
-		{"no-key/authed-frame", false, true, false, false, false, true, ""},
-		{"key/good-hmac-fresh", true, true, true, true, false, true, ""},
+		{"no-key/legacy", false, false, false, false, true, ""},
+		{"no-key/authed-frame", false, true, false, false, true, ""},
+		{"key/good-hmac-fresh", true, true, true, true, true, ""},
 
 		// THE CELL THIS TEST EXISTS FOR. macOK=false forces nonceFresh=false in
 		// the real caller, so both rejecting arms are live at once and only the
 		// ORDER decides the reason. `if !macOK` -> `if false` reds here.
-		{"key/bad-hmac", true, true, false, false, false, false, reasonBadMAC},
+		{"key/bad-hmac", true, true, false, false, false, reasonBadMAC},
 		// ...and its discriminating partner: a frame whose MAC is GOOD and whose
 		// nonce is stale must still say replay. Without this row the test could
 		// be satisfied by returning the bad-MAC reason unconditionally.
-		{"key/good-hmac-replay", true, true, true, false, true, false, reasonReplay},
+		{"key/good-hmac-replay", true, true, true, false, false, reasonReplay},
 
-		{"key/legacy-peer-not-yet-authed", true, false, false, false, false, true, ""},
-		{"key/legacy-after-peer-authed", true, false, false, false, true, false, reasonMissing},
+		// Both unsigned rows reject for the same local-key reason, regardless of
+		// whether the process has seen a genuine peer frame.
+		{"key/legacy-peer-not-yet-authed", true, false, false, false, false, reasonMissing},
+		{"key/legacy-after-peer-authed", true, false, false, false, false, reasonMissing},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := heartbeatAuthDecision(tc.keyConfigured, tc.present, tc.macOK, tc.nonceFresh, tc.peerSeen)
+			got, reason := heartbeatAuthDecision(tc.keyConfigured, tc.present, tc.macOK, tc.nonceFresh)
 			if got != tc.wantAccept {
 				t.Fatalf("accept = %v (reason %q), want %v", got, reason, tc.wantAccept)
 			}
@@ -591,7 +593,7 @@ func TestForgedHeartbeatIsNotReportedAsReplay_6968(t *testing.T) {
 		t.Fatal("forged frame verified under the real key — HMAC broken")
 	}
 
-	accept, reason := heartbeatAuthDecision(true, present, macOK, false, true)
+	accept, reason := heartbeatAuthDecision(true, present, macOK, false)
 	if accept {
 		t.Fatalf("forged heartbeat accepted (reason %q)", reason)
 	}

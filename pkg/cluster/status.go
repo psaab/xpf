@@ -761,52 +761,41 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // controlLinkAuthStatus summarizes the #4107 control-link authentication
 // posture for the operator (#4484 L-9). Before this surface existed, nothing
 // revealed whether the control link's HMAC authentication was actually
-// ENGAGED (frames are verified and an unauthenticated peer is rejected) or had
+// ENGAGED (frames are verified and an unauthenticated peer is rejected) or
 // silently degraded to DUAL-ACCEPT (an unauthenticated peer is still
-// accepted) — the rolling-upgrade grace #4107 deliberately keeps open. The
-// posture is derived from the SAME two facts heartbeatAuthDecision gates on —
-// the local key (ControlLinkAuthKey) and the sticky peer-authenticated flag
-// (HeartbeatPeerAuthSeen) — so for the HEARTBEAT this string tracks the real
-// enforcement decision rather than a separate estimate.
+// accepted). The posture is derived from the local key because a keyed
+// heartbeat node now rejects every frame without a valid authentication
+// trailer, including the peer's first contact; no process-lifetime auth flag
+// is needed to arm heartbeat enforcement.
 //
 // It does NOT track the session-sync channel. #5078 removed peerAuthSeen from
 // syncAuthDecision, so sync admission no longer consults the sticky flag this
-// string is built from; naming syncAuthDecision here would assert a coupling
-// that no longer exists.
+// string was previously built from. The session-sync residual is called out
+// separately below when a provider reports an established connection that
+// predates keying.
 //
 // #9717: the line used to stop there. It read "unauthenticated frames rejected"
-// from heartbeat evidence alone, while a session-sync connection established
-// BEFORE the key could still be accepted without HMAC; with strict-session-auth
-// off, nothing evicts it. The line now asks the session-sync provider for exactly
-// those connections, and when there are any it names them instead of claiming
-// rejection.
+// while a session-sync connection established BEFORE the key could still be
+// accepted without HMAC; with strict-session-auth off, nothing evicts it. The
+// line now asks the session-sync provider for exactly those connections, and
+// when there are any it names them instead of claiming rejection.
 //
 // It only inspects len(key) and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {
-	keyConfigured := len(m.ControlLinkAuthKey()) > 0
-	switch {
-	case !keyConfigured:
+	if len(m.ControlLinkAuthKey()) == 0 {
 		// No local key: this node cannot verify a peer and may be the
-		// not-yet-keyed side of a rolling upgrade — dual-accept grace.
+		// not-yet-keyed side of a rolling upgrade — dual-accept.
 		return "dual-accept (no control-link key configured)"
-	case m.HeartbeatPeerAuthSeen():
-		// #9717: the heartbeat's peer has proven the key, but an established
-		// session-sync connection that predates it may still be unauthenticated,
-		// with its frames accepted without HMAC. Name it rather than claim
-		// rejection for a channel the heartbeat fact does not describe.
-		if unauth := m.unauthenticatedSessionConns(); len(unauth) > 0 {
-			return fmt.Sprintf("heartbeat engaged (peer authenticated); %d session-sync connection(s) "+
-				"NOT authenticated, frames still accepted without HMAC: %s",
-				len(unauth), strings.Join(unauth, ", "))
-		}
-		// Both nodes are known-keyed and the peer has proven it: an
-		// unauthenticated frame is now rejected as a downgrade attack.
-		return "engaged (peer authenticated; unauthenticated frames rejected)"
-	default:
-		// Local key set but the peer has not authenticated yet (peer still
-		// upgrading / not signing): grace is still open.
-		return "dual-accept (key configured; peer not yet authenticated)"
 	}
+	// A local key is sufficient for heartbeat enforcement. An established
+	// session-sync connection that predates keying may still be unauthenticated,
+	// so name it rather than claiming every control channel is authenticated.
+	if unauth := m.unauthenticatedSessionConns(); len(unauth) > 0 {
+		return fmt.Sprintf("heartbeat engaged (local key; %d session-sync connection(s) "+
+			"NOT authenticated, frames still accepted without HMAC: %s",
+			len(unauth), strings.Join(unauth, ", "))
+	}
+	return "engaged (local key configured; unauthenticated heartbeat frames rejected)"
 }
 
 // controlLinkRotationStatus renders the #6630 rotation line, or "" when no
