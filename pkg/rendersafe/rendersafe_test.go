@@ -143,10 +143,10 @@ func TestFirstGlobMetacharacterNamesTheFirstToken(t *testing.T) {
 	}
 }
 
-// TestRendersAsOnePatternPassesGlobsDeferredTo10089 pins the known scope
+// TestRendersAsOnePatternPassesGlobsByDesign_10089 pins the intentional scope
 // boundary: glob metacharacters are exactly one pattern, so they PASS this
 // whitespace predicate. Render-side glob refusal is the separate #10089 belt.
-func TestRendersAsOnePatternPassesGlobsDeferredTo10089(t *testing.T) {
+func TestRendersAsOnePatternPassesGlobsByDesign_10089(t *testing.T) {
 	for _, name := range []string{"ge*", "ge?", "ge[0-9]", "*", "--help", "-x"} {
 		if !RendersAsOnePattern(name) {
 			t.Errorf("RendersAsOnePattern(%q) = false, want true (glob/argv classes are not this predicate's — see #10089/#9885)", name)

@@ -205,7 +205,8 @@ func TestLenientDropsRangeExpandedPoisonedMember_9886(t *testing.T) {
 // TestLenientKeepsWorkingSinglePatternNames_9886 is the anti-over-rejection
 // half: a clean config, a UTF-8 name, and a unicode-space name all compile on
 // the lenient path with the member PRESENT and no #9886 warning. The glob pins
-// the #10089 deferral end-to-end: one pattern, still compiled today.
+// the #10089 boundary end-to-end: one pattern, still compiled here — the
+// separate #10089 render-stage belt refuses it later, at the unit writers.
 func TestLenientKeepsWorkingSinglePatternNames_9886(t *testing.T) {
 	// NBSP spelled as an escape: it must be a real non-breaking space, which
 	// is invisible in source — a literal would be unreviewable.
