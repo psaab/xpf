@@ -109,6 +109,58 @@ func TestRotationDuringReadIsRefused_8597(t *testing.T) {
 	}
 }
 
+// TestCompletedAppearsDuringSelectionIsRefused_10170 covers the source-selection
+// race introduced by `.completed` recovery. A reader that selects the fallback
+// `.2/.1/current` set before the compaction completes must still compare all
+// four names afterward; otherwise the completed-only result can be mistaken for
+// a stable trusted-empty/current snapshot.
+func TestCompletedAppearsDuringSelectionIsRefused_10170(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "leases4.csv")
+	if err := os.WriteFile(base+".2", []byte(leaseHdr8597+leaseRow8597("10.0.0.10", "old")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base+".1", []byte(leaseHdr8597+leaseRow8597("10.0.0.11", "recent")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base, []byte(leaseHdr8597), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := parseLeaseFileFn
+	var seen int
+	parseLeaseFileFn = func(p string, family int, now time.Time, acc *ddnsLeaseAccum) error {
+		err := prev(p, family, now, acc)
+		seen++
+		if seen == 1 {
+			// Kea's completed output becomes authoritative while the reader is
+			// between source files. Remove the old generations to model the
+			// interrupted rename window and leave the lease in completed only.
+			if err := os.WriteFile(base+".completed", []byte(leaseHdr8597+leaseRow8597("10.0.0.10", "completed")), 0o644); err != nil {
+				t.Fatalf("write completed: %v", err)
+			}
+			if err := os.Remove(base + ".2"); err != nil {
+				t.Fatalf("remove .2: %v", err)
+			}
+			if err := os.Remove(base + ".1"); err != nil {
+				t.Fatalf("remove .1: %v", err)
+			}
+		}
+		return err
+	}
+	t.Cleanup(func() { parseLeaseFileFn = prev })
+
+	if _, err := parseActiveLeases(base, 4, time.Unix(1_700_000_000, 0)); err == nil {
+		t.Fatal("completed-only transition during source selection was trusted; " +
+			"the four-name stability guard must refuse the read")
+	} else if !strings.Contains(err.Error(), "rotated during read") {
+		t.Fatalf("refused for an unrelated reason: %v", err)
+	}
+	if seen < 2 {
+		t.Fatalf("the parse visited %d files; the transition was not interleaved", seen)
+	}
+}
+
 // TestQuiescentSetIsStillTrusted_8597 is the OVER-BROAD control, and the one
 // that decides whether a fail-closed detector can ship: refusing a quiescent
 // read would disable the destructive DDNS diff permanently.

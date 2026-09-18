@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -71,6 +72,14 @@ type dhcpLeaseSyncState struct {
 	lastSentMu sync.Mutex
 	lastSent4  string // last-pushed v4 set fingerprint (change-detect)
 	lastSent6  string // last-pushed v6 set fingerprint (change-detect)
+
+	// #10170: the sender's ownership generation stays stable across lease
+	// heartbeat pushes and advances on a MASTER apply. A snapshot is marked
+	// Applied only after the corresponding local Kea apply succeeds.
+	authorityMu            sync.Mutex
+	authorityGeneration    uint64
+	pendingApplyGeneration uint64
+	appliedGeneration      uint64
 
 	// loopMu guards the push-loop lifecycle (#4647). loopCancel is the
 	// cancel func of the currently-running push loop's context (nil when the
@@ -210,16 +219,16 @@ func (d *Daemon) dispatchDHCPLeasePush(ctx context.Context, force bool) {
 	}()
 }
 
-// pushDHCPLeasesOnce reads this node's active lease set and replicates it to the
-// peer, per family. Fail-open: a read/send error is logged + counted (Errors)
-// and never blocks serving. Only the RG-MASTER pushes (the gate).
+// pushDHCPLeasesOnce reads this node's active lease set and replicates it to
+// the peer, per family. Fail-open: a read/send error is logged + counted and
+// never blocks serving. Only the RG-MASTER pushes (the gate).
 func (d *Daemon) pushDHCPLeasesOnce(ctx context.Context, force bool) {
 	cc := d.clusterConfig()
-	if cc == nil || !cc.DHCPLeaseSync {
+	if cc == nil || !cc.DHCPLeaseSync || d.dhcpServer == nil {
 		return
 	}
 	if !d.dhcpLeaseSyncGateOpen() {
-		return // BACKUP for all RGs: hold the peer's set, push nothing.
+		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
@@ -229,34 +238,52 @@ func (d *Daemon) pushDHCPLeasesOnce(ctx context.Context, force bool) {
 	defer cancel()
 	now := time.Now()
 
-	want4 := cfg.System.DHCPServer.DHCPLocalServer != nil
-	want6 := cfg.System.DHCPServer.DHCPv6LocalServer != nil
-
-	if want4 {
+	if cfg.System.DHCPServer.DHCPLocalServer != nil {
 		leases, err := d.dhcpServer.GetSyncLeases4(rctx, now)
 		if err != nil {
 			slog.Debug("cluster: DHCP v4 lease read failed (retrying)", "err", err)
 		} else {
-			d.maybePushFamily(4, leases, force)
+			d.maybePushFamily(4, d.makeDHCPLeaseSnapshot(cfg, 4, leases), force)
 		}
 	}
-	if want6 {
+	if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
 		leases, err := d.dhcpServer.GetSyncLeases6(rctx, now)
 		if err != nil {
 			slog.Debug("cluster: DHCP v6 lease read failed (retrying)", "err", err)
 		} else {
-			d.maybePushFamily(6, leases, force)
+			d.maybePushFamily(6, d.makeDHCPLeaseSnapshot(cfg, 6, leases), force)
 		}
 	}
 }
 
+func (d *Daemon) makeDHCPLeaseSnapshot(cfg *config.Config, family int, leases []dhcpserver.SyncLease) dhcpserver.LeaseSyncSnapshot {
+	d.dhcpLeaseSync.authorityMu.Lock()
+	if d.dhcpLeaseSync.authorityGeneration == 0 {
+		d.dhcpLeaseSync.authorityGeneration = 1
+	}
+	generation := d.dhcpLeaseSync.authorityGeneration
+	d.dhcpLeaseSync.authorityMu.Unlock()
+
+	scopes := dhcpLeaseScopeAuthorities(cfg, family, generation, false, d.snapshotRethMasterState())
+	if reader, ok := d.dhcpServer.(interface {
+		LeaseAuthorityResult(int) (uint64, []dhcpserver.LeaseScopeAuthority, bool)
+	}); ok {
+		if resultGeneration, resultScopes, _ := reader.LeaseAuthorityResult(family); resultGeneration == generation {
+			scopes = resultScopes
+		}
+	}
+	return dhcpserver.LeaseSyncSnapshot{
+		Leases:     leases,
+		Generation: generation,
+		Scopes:     scopes,
+		Received:   true,
+	}
+}
+
 // maybePushFamily pushes the family's lease set when force=true or the set
-// changed since the last push (change-detect fingerprint). The fingerprint
-// ignores the per-lease Remaining countdown (it ticks every second and would
-// defeat change-detect); only identity/address/lifetime changes trigger an
-// on-grant push, while the heartbeat (force=true) carries refreshed Remaining.
-func (d *Daemon) maybePushFamily(family int, leases []dhcpserver.SyncLease, force bool) {
-	fp := dhcpLeaseSetFingerprint(leases)
+// changed since the last push.
+func (d *Daemon) maybePushFamily(family int, snapshot dhcpserver.LeaseSyncSnapshot, force bool) {
+	fp := dhcpLeaseSetFingerprint(snapshot.Leases)
 	d.dhcpLeaseSync.lastSentMu.Lock()
 	prev := d.dhcpLeaseSync.lastSent4
 	if family == 6 {
@@ -275,7 +302,7 @@ func (d *Daemon) maybePushFamily(family int, leases []dhcpserver.SyncLease, forc
 		return
 	}
 	if ss := d.getSessionSync(); ss != nil {
-		ss.QueueDHCPLeases(family, leases)
+		ss.QueueDHCPLeaseSnapshot(family, snapshot)
 	}
 }
 
@@ -337,33 +364,55 @@ func (d *Daemon) preSeedDHCPLeaseMemfile(stillMastering bool) {
 	if cc == nil || !cc.DHCPLeaseSync {
 		return
 	}
+	cfg := d.store.ActiveConfig()
 	ctx, cancel := context.WithTimeout(context.Background(), dhcpLeaseReadTimeout)
 	defer cancel()
 	now := time.Now()
-	if leases := ss.PeerDHCPLeases4(); len(leases) > 0 {
-		if err := d.dhcpServer.PreSeedMemfileMerged4(ctx, leases, now, stillMastering); err != nil {
-			slog.Warn("cluster: DHCP v4 lease memfile pre-seed failed (post-start lease-add is backstop)", "err", err)
+	for _, family := range []int{4, 6} {
+		var snapshot dhcpserver.LeaseSyncSnapshot
+		if family == 4 {
+			snapshot = ss.PeerDHCPLeaseSnapshot4()
 		} else {
-			slog.Info("cluster: DHCP v4 leases pre-seeded into memfile before Kea start", "count", len(leases))
+			snapshot = ss.PeerDHCPLeaseSnapshot6()
 		}
-	}
-	if leases := ss.PeerDHCPLeases6(); len(leases) > 0 {
-		if err := d.dhcpServer.PreSeedMemfileMerged6(ctx, leases, now, stillMastering); err != nil {
-			slog.Warn("cluster: DHCP v6 lease memfile pre-seed failed (post-start lease-add is backstop)", "err", err)
+		if !snapshot.Received {
+			continue
+		}
+		authority := d.dhcpLeaseAuthority(cfg, family)
+		if preSeeder, ok := d.dhcpServer.(interface {
+			PreSeedMemfileMerged4WithAuthority(context.Context, dhcpserver.LeaseSyncSnapshot, time.Time, bool, dhcpserver.LeaseSyncAuthority) error
+			PreSeedMemfileMerged6WithAuthority(context.Context, dhcpserver.LeaseSyncSnapshot, time.Time, bool, dhcpserver.LeaseSyncAuthority) error
+		}); ok {
+			var err error
+			if family == 4 {
+				err = preSeeder.PreSeedMemfileMerged4WithAuthority(ctx, snapshot, now, stillMastering, authority)
+			} else {
+				err = preSeeder.PreSeedMemfileMerged6WithAuthority(ctx, snapshot, now, stillMastering, authority)
+			}
+			if err != nil {
+				slog.Warn("cluster: DHCP lease memfile pre-seed failed (post-start lease-add is backstop)", "family", family, "err", err)
+			}
+			continue
+		}
+		leases := dhcpserver.PeerLeasesForAuthority(snapshot, family, authority)
+		var err error
+		if family == 4 {
+			err = d.dhcpServer.PreSeedMemfileMerged4(ctx, leases, now, stillMastering)
 		} else {
-			slog.Info("cluster: DHCP v6 leases pre-seeded into memfile before Kea start", "count", len(leases))
+			err = d.dhcpServer.PreSeedMemfileMerged6(ctx, leases, now, stillMastering)
+		}
+		if err != nil {
+			slog.Warn("cluster: DHCP lease memfile pre-seed failed (post-start lease-add is backstop)", "family", family, "err", err)
+		} else {
+			slog.Info("cluster: DHCP leases pre-seeded into memfile before Kea start", "family", family, "count", len(leases))
 		}
 	}
 }
 
 // seedDHCPLeasesFromPeer seeds the just-started Kea with the held peer leases
-// via lease{4,6}-add over the control socket (the reinitiateIPsecSAs
-// precedent). Runs ASYNC post-takeover (a goroutine, like reinitiateIPsecSAs)
-// so it never blocks the VRRP/takeover critical path. It waits a bounded time
-// for the control socket to come up, then re-anchors each lease's Remaining to
-// the local clock at seed (clock-skew immunity) and writes it. Idempotent: a
-// lease already present (from the memfile pre-seed or this node's own persisted
-// state) degrades to lease-update. Fail-open throughout.
+// via lease{4,6}-add over the control socket. It uses the same authority
+// filter as memfile pre-seeding, so an unproven or mismatched scope remains
+// conservative while a proven peer snapshot cannot seed another RG.
 func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 	ss := d.getSessionSync()
 	if ss == nil || d.dhcpServer == nil {
@@ -373,13 +422,15 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 	if cc == nil || !cc.DHCPLeaseSync {
 		return
 	}
-	leases4 := ss.PeerDHCPLeases4()
-	leases6 := ss.PeerDHCPLeases6()
+	cfg := d.store.ActiveConfig()
+	snap4 := ss.PeerDHCPLeaseSnapshot4()
+	snap6 := ss.PeerDHCPLeaseSnapshot6()
+	leases4 := dhcpserver.PeerLeasesForAuthority(snap4, 4, d.dhcpLeaseAuthority(cfg, 4))
+	leases6 := dhcpserver.PeerLeasesForAuthority(snap6, 6, d.dhcpLeaseAuthority(cfg, 6))
 	if len(leases4) == 0 && len(leases6) == 0 {
 		return
 	}
 	now := time.Now()
-	cfg := d.store.ActiveConfig()
 	want4 := cfg != nil && cfg.System.DHCPServer.DHCPLocalServer != nil && len(leases4) > 0
 	want6 := cfg != nil && cfg.System.DHCPServer.DHCPv6LocalServer != nil && len(leases6) > 0
 
@@ -409,4 +460,139 @@ func (d *Daemon) seedDHCPLeasesFromPeer(ctx context.Context) {
 			slog.Warn("cluster: DHCP v6 control socket not ready; relying on memfile pre-seed")
 		}
 	}
+}
+func (d *Daemon) dhcpLeaseAuthority(cfg *config.Config, family int) dhcpserver.LeaseSyncAuthority {
+	return dhcpserver.LeaseSyncAuthority{Scopes: dhcpLeaseScopeAuthorities(cfg, family, 0, false, d.snapshotRethMasterState())}
+}
+
+// dhcpLeaseScopeAuthorities derives ownership by configured subnet CIDR and
+// the RG that serves its unambiguous DHCP group. A group narrowed at runtime,
+// or spanning multiple RGs/node-local interfaces, is intentionally omitted:
+// without a pool-to-RG edge, excluding a row would be unsafe.
+func dhcpLeaseScopeAuthorities(cfg *config.Config, family int, generation uint64, applied bool, masters map[int]bool) []dhcpserver.LeaseScopeAuthority {
+	if cfg == nil {
+		return nil
+	}
+	var groups map[string]*config.DHCPServerGroup
+	switch family {
+	case 4:
+		if cfg.System.DHCPServer.DHCPLocalServer != nil {
+			groups = cfg.System.DHCPServer.DHCPLocalServer.Groups
+		}
+	case 6:
+		if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
+			groups = cfg.System.DHCPServer.DHCPv6LocalServer.Groups
+		}
+	}
+	owners := cfg.RethRGOwners()
+	var scopes []dhcpserver.LeaseScopeAuthority
+	for _, group := range groups {
+		if group == nil || group.MembersFiltered {
+			continue
+		}
+		rgs := make(map[int]struct{})
+		unattributed := false
+		for _, iface := range group.Interfaces {
+			rg, ok := dhcpLeaseRGForInterface(cfg, iface, owners)
+			if !ok {
+				unattributed = true
+				break
+			}
+			rgs[rg] = struct{}{}
+		}
+		if unattributed {
+			continue
+		}
+		if len(rgs) != 1 {
+			continue
+		}
+		var rgID int
+		for rg := range rgs {
+			rgID = rg
+		}
+		for _, pool := range group.Pools {
+			if pool == nil || pool.Subnet == "" {
+				continue
+			}
+			_, network, err := net.ParseCIDR(pool.Subnet)
+			if err != nil {
+				continue
+			}
+			scopes = append(scopes, dhcpserver.LeaseScopeAuthority{
+				Family:     family,
+				CIDR:       network.String(),
+				RGID:       rgID,
+				Generation: generation,
+				Served:     masters[rgID],
+				Applied:    applied,
+			})
+		}
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		if scopes[i].CIDR != scopes[j].CIDR {
+			return scopes[i].CIDR < scopes[j].CIDR
+		}
+		return scopes[i].RGID < scopes[j].RGID
+	})
+	return scopes
+}
+
+func dhcpLeaseRGForInterface(cfg *config.Config, iface string, owners map[string]int) (int, bool) {
+	normalized := strings.TrimSuffix(iface, ".0")
+	base := strings.SplitN(iface, ".", 2)[0]
+	resolved := cfg.ResolveReth(iface)
+	resolvedBase := cfg.ResolveReth(base)
+	var (
+		rg   int
+		hits int
+	)
+	for owner, ownerRG := range owners {
+		if ownerRG <= 0 {
+			continue
+		}
+		ownerNormalized := strings.TrimSuffix(owner, ".0")
+		ownerBase := strings.SplitN(owner, ".", 2)[0]
+		if iface != owner &&
+			normalized != ownerNormalized &&
+			resolved != cfg.ResolveReth(owner) &&
+			resolvedBase != cfg.ResolveReth(ownerBase) {
+			continue
+		}
+		rg = ownerRG
+		hits++
+	}
+	return rg, hits == 1
+}
+func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config) dhcpserver.LeaseApplyAuthority {
+	d.dhcpLeaseSync.authorityMu.Lock()
+	if d.dhcpLeaseSync.authorityGeneration == 0 {
+		d.dhcpLeaseSync.authorityGeneration = 1
+	} else {
+		d.dhcpLeaseSync.authorityGeneration++
+	}
+	generation := d.dhcpLeaseSync.authorityGeneration
+	d.dhcpLeaseSync.authorityMu.Unlock()
+	masters := d.snapshotRethMasterState()
+	return dhcpserver.LeaseApplyAuthority{
+		Generation: generation,
+		Scopes4:    dhcpLeaseScopeAuthorities(cfg, 4, generation, false, masters),
+		Scopes6:    dhcpLeaseScopeAuthorities(cfg, 6, generation, false, masters),
+	}
+}
+func (d *Daemon) enqueueDHCPApply(cfg *config.DHCPServerConfig, reason string) {
+	if d.dhcpServer == nil {
+		return
+	}
+	fullCfg := d.store.ActiveConfig()
+	if cfg == nil {
+		fullCfg = nil
+	}
+	authority := d.nextDHCPLeaseApplyAuthority(fullCfg)
+	if applier, ok := d.dhcpServer.(interface {
+		ApplyAsyncWithLeaseAuthority(*config.DHCPServerConfig, string, dhcpserver.LeaseApplyAuthority)
+	}); ok {
+		applier.ApplyAsyncWithLeaseAuthority(cfg, reason, authority)
+		return
+	}
+	d.dhcpServer.ApplyAsync(cfg, reason)
 }

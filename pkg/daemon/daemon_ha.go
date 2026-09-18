@@ -1795,7 +1795,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// block this VRRP event loop. Latest-wins coalescing in
 			// the manager keeps final state correct; failures are
 			// logged by the worker with this reason.
-			d.dhcpServer.ApplyAsync(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID))
+			d.enqueueDHCPApply(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID))
 			slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
 			// #2239: after the async Kea start, seed the held peer
 			// leases via lease{4,6}-add (the reinitiateIPsecSAs
@@ -1902,10 +1902,10 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 		if anyOtherMaster {
 			// Reapply DHCP with only the remaining master RGs'
 			// interfaces (nil when none match → clear).
-			d.dhcpServer.ApplyAsync(d.desiredClusterDHCPConfig(cfg),
+			d.enqueueDHCPApply(d.desiredClusterDHCPConfig(cfg),
 				fmt.Sprintf("vrrp BACKUP rg%d (other RG still MASTER)", rgID))
 		} else {
-			d.dhcpServer.ApplyAsync(nil, fmt.Sprintf("vrrp BACKUP rg%d", rgID))
+			d.enqueueDHCPApply(nil, fmt.Sprintf("vrrp BACKUP rg%d", rgID))
 			slog.Info("vrrp: DHCP server stop enqueued (BACKUP)", "rg", rgID)
 		}
 	}
@@ -2005,7 +2005,7 @@ func (d *Daemon) reconcileClusterDHCPServices(reason string) {
 	}
 	desired := d.desiredClusterDHCPConfig(cfg)
 	slog.Info("reconcile: retrying failed DHCP server apply", "reason", reason)
-	d.dhcpServer.ApplyAsync(desired, "reconcile: "+reason)
+	d.enqueueDHCPApply(desired, "reconcile: "+reason)
 }
 
 // filterDHCPConfigForMasterRGs returns the DHCP config this node should serve

@@ -711,11 +711,14 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDHCPLeaseV4:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)
+		leasePayload, snapshot, _, metadataValid := stripDHCPLeaseSnapshotMeta(base)
+		if !metadataValid {
+			s.stats.MalformedRecordsDropped.Add(1)
+			slog.Warn("cluster sync: dropping malformed DHCP v4 authority snapshot")
+			return
+		}
 		// #9915 F-117 review: check the mark BEFORE decode, but advance it
-		// only when the set actually applies (see advanceIfNewer below). An
-		// admitted-but-retained set (malformed, or filtered to empty) must not
-		// wedge the mark: an injected all-bad high-seq set would otherwise
-		// block honest lower-seq pushes until the sender catches up.
+		// only when the set actually applies (see advanceIfNewer below).
 		s.recvSeqMu.Lock()
 		admit := s.dhcpV4RecvSeq.newer(incarnation, seq)
 		commitEpoch := s.recvEpoch
@@ -726,14 +729,14 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"incarnation", incarnation, "seq", seq)
 			return
 		}
-		leases, ok := decodeDHCPLeasePayload(base)
+		leases, ok := decodeDHCPLeasePayload(leasePayload)
 		if !ok {
 			// #7175: a full-set push REPLACES the set, so storing a truncated
 			// prefix would delete every lease past the truncation point. Retain
 			// the prior set. The mark does not advance (see above).
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed DHCP v4 lease set — standby retains previous set",
-				"incarnation", incarnation, "seq", seq, "bytes", len(base))
+				"incarnation", incarnation, "seq", seq, "bytes", len(leasePayload))
 			return
 		}
 		// Every decoded set is identity-filtered, legacy or sequenced alike:
@@ -772,7 +775,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.recvSeqMu.Lock()
 		applied := s.recvEpoch == commitEpoch && s.dhcpV4RecvSeq.advanceIfNewer(incarnation, seq)
 		if applied {
-			s.storePeerDHCPLeases(4, leases)
+			snapshot.Leases = leases
+			snapshot.Received = true
+			s.storePeerDHCPLeaseSnapshot(4, snapshot)
 		}
 		s.recvSeqMu.Unlock()
 		if !applied {
@@ -794,6 +799,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDHCPLeaseV6:
 		s.stats.DHCPLeasesReceived.Add(1)
 		base, incarnation, seq := stripFullSetSeq(payload)
+		leasePayload, snapshot, _, metadataValid := stripDHCPLeaseSnapshotMeta(base)
+		if !metadataValid {
+			s.stats.MalformedRecordsDropped.Add(1)
+			slog.Warn("cluster sync: dropping malformed DHCP v6 authority snapshot")
+			return
+		}
 		// #9915 F-117 review: see the v4 twin — check before decode, advance
 		// only on apply.
 		s.recvSeqMu.Lock()
@@ -806,12 +817,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"incarnation", incarnation, "seq", seq)
 			return
 		}
-		leases, ok := decodeDHCPLeasePayload(base)
+		leases, ok := decodeDHCPLeasePayload(leasePayload)
 		if !ok {
 			// #7175: see the v4 twin — retain, no advance.
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed DHCP v6 lease set — standby retains previous set",
-				"incarnation", incarnation, "seq", seq, "bytes", len(base))
+				"incarnation", incarnation, "seq", seq, "bytes", len(leasePayload))
 			return
 		}
 		// Every decoded set is filtered: see the v4 twin.
@@ -838,7 +849,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.recvSeqMu.Lock()
 		applied := s.recvEpoch == commitEpoch && s.dhcpV6RecvSeq.advanceIfNewer(incarnation, seq)
 		if applied {
-			s.storePeerDHCPLeases(6, leases)
+			snapshot.Leases = leases
+			snapshot.Received = true
+			s.storePeerDHCPLeaseSnapshot(6, snapshot)
 		}
 		s.recvSeqMu.Unlock()
 		if !applied {

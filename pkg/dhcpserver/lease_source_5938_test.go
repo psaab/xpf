@@ -170,10 +170,9 @@ func TestDisplayLeases_UnreadableSiblingDegraded_5938(t *testing.T) {
 // ---- Invariant 3: reader handling of intermediates -------------------------
 
 // TestKeaLFCIntermediatesIgnored_5938 proves the display/DDNS reader ignores
-// kea-lfc's `.output`/`.completed` when the canonical `.2`/.1 set remains.
-// `.output` is redundant because it is built from `.1`/.2. Kea startup gives
-// `.completed` precedence, however, so a crash after deleting `.2`/.1 and
-// before renaming `.completed` remains a reader gap not covered by this test.
+// kea-lfc's `.output`, while honoring a lease-bearing `.completed` with Kea's
+// startup precedence when it exists. `.output` is redundant because it is
+// built from `.1`/.2; `.completed` is authoritative over those older files.
 func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
 	now := lfcNow
 	dir := t.TempDir()
@@ -200,11 +199,14 @@ func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
 	// `.output` is kea-lfc's in-progress merge of (.1,.2) — here we also add a
 	// BOGUS unique lease C that lives ONLY in .output, to PROVE the reader never
 	// opens it (in reality .output ⊆ .1∪.2, so C could not exist; the bogus row
-	// makes the skip observable).
+	// makes the skip observable). `.completed` contains the authoritative
+	// compacted set Kea would load instead of `.1`/.2.
 	writeCSV(t, cur+".output", lfcV4Header+"\n"+
 		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,0\n"+
 		"10.0.0.77,aa:bb:cc:dd:ee:77,,3600,"+lfcFuture+",1,0,1,ONLY-in-output,0\n")
-	writeCSV(t, cur+".completed", "") // empty fixture; reader still ignores .completed
+	writeCSV(t, cur+".completed", lfcV4Header+"\n"+
+		"10.0.0.11,aa:bb:cc:dd:ee:11,,3600,"+lfcFuture+",1,0,1,host-b,0\n"+
+		"10.0.0.10,aa:bb:cc:dd:ee:10,,3600,"+lfcFuture+",1,0,1,host-a,0\n")
 
 	after, err := parseLeaseCSV(cur, now)
 	if err != nil {
@@ -212,9 +214,9 @@ func TestKeaLFCIntermediatesIgnored_5938(t *testing.T) {
 	}
 	afterSet := addrSet(after)
 
-	// (1) The intermediates do NOT change the resolved set.
+	// (1) The output intermediate does NOT change the resolved set.
 	if len(after) != len(base) || !sameSet(baseSet, afterSet) {
-		t.Fatalf(".output/.completed changed the resolved set: base=%+v after=%+v", base, after)
+		t.Fatalf(".output changed the resolved set: base=%+v after=%+v", base, after)
 	}
 	// (2) The lease living ONLY in .output is NOT present — .output is ignored.
 	if afterSet["10.0.0.77"] {

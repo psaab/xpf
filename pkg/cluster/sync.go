@@ -978,25 +978,18 @@ type SessionSync struct {
 	OnPeerDisconnected func()
 	peerIPsecSAs       []string
 	peerIPsecSAsMu     sync.Mutex
-	// #2239: the standby holds the peer's most-recent full lease set per
-	// family (the peerIPsecSAs precedent). On takeover the daemon reads these
-	// and seeds the just-started Kea. Replaced wholesale on each full-set push.
-	//
-	// #4871: peerDHCPLeases{4,6}RecvAt records WHEN this node received each
-	// family's held set. SyncLease.Remaining is seconds-of-lifetime-left at the
-	// SENDER's read time and carries no sample epoch, so a set held on the
-	// standby ages only if the receiver subtracts its own residence before
-	// seeding — otherwise a lease held for minutes is re-anchored to
-	// now_local+Remaining on takeover and RESURRECTED past its true expiry
-	// (duplicate allocation). RecvAt is a time.Now() reading (monotonic in
-	// production), so PeerDHCPLeases{4,6} subtract a monotonic residence.
-	peerDHCPLeases4       []dhcpserver.SyncLease
-	peerDHCPLeases6       []dhcpserver.SyncLease
-	peerDHCPLeases4RecvAt time.Time
-	peerDHCPLeases6RecvAt time.Time
-	peerDHCPLeasesMu      sync.Mutex
-	// IsPrimaryFn reports whether the local node is primary for the default sync scope.
-	IsPrimaryFn func() bool
+	// #2239/#10170: the standby holds each peer full-set snapshot, including
+	// explicit receipt state, ownership generation, and served-scope proof.
+	// The legacy slices below remain the aged lease view used by existing
+	// callers; snapshot accessors expose the authority contract.
+	peerDHCPLeases4        []dhcpserver.SyncLease
+	peerDHCPLeases6        []dhcpserver.SyncLease
+	peerDHCPLeaseSnapshot4 dhcpserver.LeaseSyncSnapshot
+	peerDHCPLeaseSnapshot6 dhcpserver.LeaseSyncSnapshot
+	peerDHCPLeases4RecvAt  time.Time
+	peerDHCPLeases6RecvAt  time.Time
+	peerDHCPLeasesMu       sync.Mutex
+	IsPrimaryFn            func() bool
 	// IsPrimaryForRGFn reports whether the local node is primary for a given RG.
 	IsPrimaryForRGFn func(rgID int) bool
 	// PeerBootEpochFn reports the peer's across-reboot boot-epoch floor and
@@ -2285,40 +2278,61 @@ func (s *SessionSync) RecordDHCPLeasesSeeded(n int) {
 	}
 }
 
+// PeerDHCPLeaseSnapshot4 returns the v4 peer snapshot with standby residence
+// subtracted from lease lifetimes. Received remains true for a valid empty
+// snapshot, while a zero-value snapshot means no full set has arrived.
+func (s *SessionSync) PeerDHCPLeaseSnapshot4() dhcpserver.LeaseSyncSnapshot {
+	return s.peerDHCPLeaseSnapshotAged(4, time.Now())
+}
+
+// PeerDHCPLeaseSnapshot6 is the v6 counterpart.
+func (s *SessionSync) PeerDHCPLeaseSnapshot6() dhcpserver.LeaseSyncSnapshot {
+	return s.peerDHCPLeaseSnapshotAged(6, time.Now())
+}
+
 // PeerDHCPLeases4 returns the v4 lease set held from the peer, AGED by this
 // node's standby residence (#2239/#4871). The standby seeds these into Kea on
 // takeover.
 func (s *SessionSync) PeerDHCPLeases4() []dhcpserver.SyncLease {
-	return s.peerDHCPLeasesAged(4, time.Now())
+	return s.peerDHCPLeaseSnapshotAged(4, time.Now()).Leases
 }
 
-// PeerDHCPLeases6 returns the aged v6 lease set held from the peer (#2239/#4871).
+// PeerDHCPLeases6 returns the aged v6 peer set.
 func (s *SessionSync) PeerDHCPLeases6() []dhcpserver.SyncLease {
-	return s.peerDHCPLeasesAged(6, time.Now())
+	return s.peerDHCPLeaseSnapshotAged(6, time.Now()).Leases
+}
+func (s *SessionSync) peerDHCPLeasesAged(family int, now time.Time) []dhcpserver.SyncLease {
+	return s.peerDHCPLeaseSnapshotAged(family, now).Leases
 }
 
-// peerDHCPLeasesAged returns a copy of the held peer lease set for a family with
-// each lease's Remaining lifetime reduced by this node's standby RESIDENCE —
-// the monotonic time elapsed since the set was received — and leases that have
-// aged to zero DROPPED (#4871).
-//
-// Remaining is seconds-of-lifetime-left at the SENDER's read time and carries
-// no sample epoch. Without this subtraction a lease held on the standby for
-// minutes is re-anchored at seed to now_local+Remaining and resurrected past
-// its true expiry, so the promoted node could re-allocate an address/prefix the
-// original server already reassigned (duplicate allocation). A lease at or below
-// zero is dropped, NOT floored to one second — a floor would revive an expired
-// binding just as surely. now is injected for tests; production passes
-// time.Now() (which, like the stored RecvAt, carries a monotonic reading, so
-// the residence is a monotonic delta immune to wall-clock steps).
-func (s *SessionSync) peerDHCPLeasesAged(family int, now time.Time) []dhcpserver.SyncLease {
+func (s *SessionSync) peerDHCPLeaseSnapshotAged(family int, now time.Time) dhcpserver.LeaseSyncSnapshot {
 	s.peerDHCPLeasesMu.Lock()
 	defer s.peerDHCPLeasesMu.Unlock()
-	src := s.peerDHCPLeases4
-	recvAt := s.peerDHCPLeases4RecvAt
+	var snap dhcpserver.LeaseSyncSnapshot
+	var src []dhcpserver.SyncLease
+	var recvAt time.Time
 	if family == 6 {
+		snap = s.peerDHCPLeaseSnapshot6
 		src = s.peerDHCPLeases6
 		recvAt = s.peerDHCPLeases6RecvAt
+	} else {
+		snap = s.peerDHCPLeaseSnapshot4
+		src = s.peerDHCPLeases4
+		recvAt = s.peerDHCPLeases4RecvAt
+	}
+	if !snap.Received && src == nil && recvAt.IsZero() {
+		return snap
+	}
+	if !snap.Received {
+		// Tests and older in-process callers may populate the legacy slices
+		// directly; preserve that behavior while making receipt explicit.
+		snap = dhcpserver.LeaseSyncSnapshot{
+			Leases:   src,
+			Received: true,
+		}
+	}
+	if src == nil {
+		src = snap.Leases
 	}
 	var residence int
 	if !recvAt.IsZero() {
@@ -2326,17 +2340,18 @@ func (s *SessionSync) peerDHCPLeasesAged(family int, now time.Time) []dhcpserver
 			residence = d
 		}
 	}
+	snap.Leases = ageDHCPLeases(src, residence)
+	snap.Scopes = append([]dhcpserver.LeaseScopeAuthority(nil), snap.Scopes...)
+	return snap
+}
+
+func ageDHCPLeases(src []dhcpserver.SyncLease, residence int) []dhcpserver.SyncLease {
 	out := make([]dhcpserver.SyncLease, 0, len(src))
 	for _, l := range src {
-		l.Remaining -= residence // l is a value copy; the held set is untouched
+		l.Remaining -= residence
 		if l.Remaining <= 0 {
-			continue // aged out on the standby — drop, never resurrect at seed
+			continue
 		}
-		// #5073: the PREFERRED remaining counts down in the same real time as the
-		// valid remaining, so it must age by the same residence. Floor at 0
-		// (already-deprecated stays deprecated) and cap at the aged Remaining so
-		// the invariant PreferredRemaining <= Remaining survives residence. A
-		// deprecated lease held on the standby is never revived at seed.
 		l.PreferredRemaining -= residence
 		if l.PreferredRemaining < 0 {
 			l.PreferredRemaining = 0
@@ -2349,36 +2364,61 @@ func (s *SessionSync) peerDHCPLeasesAged(family int, now time.Time) []dhcpserver
 	return out
 }
 
-// SetPeerDHCPLeasesForTesting injects a held peer lease set for a family so
-// cross-package tests (pkg/daemon) can drive the takeover-seed path without a
-// live sync connection. Production fills this via the receive path.
+// SetPeerDHCPLeasesForTesting injects a held peer lease set for a family.
 func (s *SessionSync) SetPeerDHCPLeasesForTesting(family int, leases []dhcpserver.SyncLease) {
-	s.storePeerDHCPLeases(family, leases)
+	s.storePeerDHCPLeaseSnapshot(family, dhcpserver.LeaseSyncSnapshot{
+		Leases:     leases,
+		Generation: 1,
+		Received:   true,
+	})
 }
 
-// storePeerDHCPLeases replaces the held lease set for a family (full-set push
-// semantics). Called from the receive path.
+// SetPeerDHCPLeaseSnapshotForTesting injects a complete authority-bearing
+// snapshot for cross-package takeover tests.
+func (s *SessionSync) SetPeerDHCPLeaseSnapshotForTesting(family int, snapshot dhcpserver.LeaseSyncSnapshot) {
+	s.storePeerDHCPLeaseSnapshot(family, snapshot)
+}
+
 func (s *SessionSync) storePeerDHCPLeases(family int, leases []dhcpserver.SyncLease) {
-	// #4871: stamp the receipt time so PeerDHCPLeases{4,6} can subtract standby
-	// residence before seeding. time.Now() carries a monotonic reading, so the
-	// later now.Sub(recvAt) is a monotonic residence.
+	s.storePeerDHCPLeaseSnapshot(family, dhcpserver.LeaseSyncSnapshot{
+		Leases:   leases,
+		Received: true,
+	})
+}
+
+func (s *SessionSync) storePeerDHCPLeaseSnapshot(family int, snapshot dhcpserver.LeaseSyncSnapshot) {
 	recvAt := time.Now()
+	snapshot.Leases = append([]dhcpserver.SyncLease(nil), snapshot.Leases...)
+	snapshot.Scopes = append([]dhcpserver.LeaseScopeAuthority(nil), snapshot.Scopes...)
 	s.peerDHCPLeasesMu.Lock()
 	if family == 6 {
-		s.peerDHCPLeases6 = leases
+		s.peerDHCPLeaseSnapshot6 = snapshot
+		s.peerDHCPLeases6 = snapshot.Leases
 		s.peerDHCPLeases6RecvAt = recvAt
 	} else {
-		s.peerDHCPLeases4 = leases
+		s.peerDHCPLeaseSnapshot4 = snapshot
+		s.peerDHCPLeases4 = snapshot.Leases
 		s.peerDHCPLeases4RecvAt = recvAt
 	}
 	s.peerDHCPLeasesMu.Unlock()
 }
 
-// QueueDHCPLeases sends a full-set DHCP-server lease push for one family to the
-// peer over the sync channel (#2239). family must be 4 or 6. Fail-open: a write
-// error is logged + counted and disconnects the conn (the next reconnect
-// re-pushes), it NEVER blocks lease granting on this node. Mirrors QueueIPsecSA.
+// QueueDHCPLeases sends a legacy-compatible full-set DHCP-server lease push.
 func (s *SessionSync) QueueDHCPLeases(family int, leases []dhcpserver.SyncLease) {
+	s.queueDHCPLeaseSnapshot(family, dhcpserver.LeaseSyncSnapshot{
+		Leases:   leases,
+		Received: true,
+	})
+}
+
+// QueueDHCPLeaseSnapshot sends a full-set lease push with #10170 ownership
+// generation and served-scope proof. The old decoder ignores the trailing
+// metadata, so this is safe during rolling upgrades.
+func (s *SessionSync) QueueDHCPLeaseSnapshot(family int, snapshot dhcpserver.LeaseSyncSnapshot) {
+	s.queueDHCPLeaseSnapshot(family, snapshot)
+}
+
+func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.LeaseSyncSnapshot) {
 	conn := s.getActiveConn()
 	if conn == nil {
 		return
@@ -2389,12 +2429,12 @@ func (s *SessionSync) QueueDHCPLeases(family int, leases []dhcpserver.SyncLease)
 		msgType = syncMsgDHCPLeaseV6
 		seqCounter = &s.dhcpV6SeqCounter
 	}
-	// #5706: stamp the per-family (incarnation, seq) ordering trailer. v4 and v6
-	// draw from INDEPENDENT counters so a v4 push never gates a v6 one. An old
-	// receiver's lease decoder reads exactly its record count and ignores the
-	// trailer, so this stays backward compatible.
 	seq := seqCounter.Add(1)
-	payload := appendFullSetSeq(encodeDHCPLeasePayload(leases), s.syncEpoch, seq)
+	base := encodeDHCPLeasePayload(snapshot.Leases)
+	if snapshot.Generation != 0 || len(snapshot.Scopes) > 0 {
+		base = appendDHCPLeaseSnapshotMeta(base, snapshot)
+	}
+	payload := appendFullSetSeq(base, s.syncEpoch, seq)
 	s.writeMu.Lock()
 	err := writeMsg(conn, msgType, payload)
 	s.writeMu.Unlock()
@@ -2405,5 +2445,5 @@ func (s *SessionSync) QueueDHCPLeases(family int, leases []dhcpserver.SyncLease)
 		return
 	}
 	s.stats.DHCPLeasesSent.Add(1)
-	slog.Debug("cluster sync: DHCP lease set sent", "family", family, "count", len(leases))
+	slog.Debug("cluster sync: DHCP lease set sent", "family", family, "count", len(snapshot.Leases))
 }
