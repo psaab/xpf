@@ -194,7 +194,7 @@ func TestRollbackSlotOneDurableAndDirSync(t *testing.T) {
 	}
 
 	s := newTestStore(t)
-	// Two commits => slot1 (durable) + slot2 (atomic).
+	// Two commits => slot 1 and any present higher slot are durable.
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}

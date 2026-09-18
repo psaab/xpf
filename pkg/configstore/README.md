@@ -1795,11 +1795,11 @@ owned by the `journal/` subpackage.
   revert after a power cut).
 - Rollback text files (`<config>.N`) are the CANONICAL rollback
   history (`loadRollbackHistory` reads them at boot; the DB rollback
-  slots have no production callers). `saveRollbackFiles` writes slot 1
-  durably and slots 2..N atomically (never missing, never torn; they
-  may lag after a power cut), then one `fsatomic.SyncDir` makes the
-  shuffle and the stale-slot unlinks durable — a single dir fsync
-  instead of ~50 fsync pairs under the store mutex.
+  slots have no production callers). `saveRollbackFiles` writes every
+  slot durably with `fsatomic.WriteFileDurable`, including slots 2..N,
+  so a successful commit cannot leave a rollback target as a zero-length
+  or otherwise unsynced file after a power cut. A trailing `fsatomic.SyncDir`
+  also makes the whole shuffle and stale-slot unlinks durable.
 - Rollback-history degradation (#3441 L1): a rollback-slot write or the
   trailing dir-sync failing no longer just logs a warning. The commit
   still succeeds (the canonical active config already persisted via the

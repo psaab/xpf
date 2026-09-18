@@ -1458,15 +1458,11 @@ func (s *Store) rollbackPath(n int) string {
 // saveRollbackFiles writes rollback history entries to numbered files.
 // Must be called under write lock.
 //
-// Durability split (#1894, adjudicated in the plan round): these files
-// are the CANONICAL rollback history (loadRollbackHistory reads them at
-// boot; the DB rollback slots have no production callers). Slot 1 — the
-// immediate `rollback 1` target — is written durably; slots 2..N use
-// the atomic writer (never missing, never torn, so loadRollbackHistory's
-// break-on-first-missing stays sound; they may lag behind after a power
-// cut). One trailing SyncDir then makes the whole shuffle AND the
-// stale-slot unlinks durable for the cost of a single dir fsync,
-// instead of ~50 file+dir fsync pairs under the store mutex.
+// All slots are canonical rollback history (loadRollbackHistory reads them
+// at boot; the DB rollback slots have no production callers). Every slot is
+// written durably so a successful commit cannot leave any rollback target
+// as a zero-length or otherwise unsynced file after a power cut. One trailing
+// SyncDir also makes the whole shuffle and stale-slot unlinks durable.
 func (s *Store) saveRollbackFiles() {
 	if s.filePath == "" {
 		return
@@ -1494,7 +1490,7 @@ func (s *Store) saveRollbackFiles() {
 			// Writing the marker preserves #4810's file-must-exist requirement
 			// while guaranteeing the slot cannot masquerade as healthy config.
 			path := s.rollbackPath(i + 1)
-			if err := rbWriteFileAtomic(path, []byte(rollbackTombstoneMarker), 0600); err != nil {
+			if err := rbWriteFileDurable(path, []byte(rollbackTombstoneMarker), 0600); err != nil {
 				slog.Warn("failed to write rollback tombstone marker", "path", path, "err", err)
 				degraded = true
 			}
@@ -1509,11 +1505,9 @@ func (s *Store) saveRollbackFiles() {
 		// redact or encrypt. World-readable 0644 exposed every firewall
 		// secret to any local user; 0600 keeps them owner-only. The daemon
 		// owns the files, so loadRollbackHistory still reads them back.
-		if i == 0 {
-			err = rbWriteFileDurable(path, []byte(data), 0600)
-		} else {
-			err = rbWriteFileAtomic(path, []byte(data), 0600)
-		}
+		// Every slot uses the durable writer: slot positions 2..N are just
+		// as authoritative rollback targets after a restart as slot 1.
+		err = rbWriteFileDurable(path, []byte(data), 0600)
 		if err != nil {
 			slog.Warn("failed to write rollback file", "path", path, "err", err)
 			degraded = true
@@ -1611,6 +1605,16 @@ func (s *Store) loadRollbackHistory() {
 			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
 			continue
 		}
+		// #10296: a power cut can leave a rollback slot zero-length, and
+		// hand-edited/partially-written whitespace has the same parser shape.
+		// Keep the slot position but tombstone it; an empty rollback target
+		// must never be offered as a healthy config that can wipe active state.
+		if len(bytes.TrimSpace(data)) == 0 {
+			slog.Warn("skipping empty rollback file", "path", path)
+			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			continue
+		}
+
 		// #7176 (C179-056): an explicit tombstone written by saveRollbackFiles.
 		//
 		// THIS CHECK IS DIAGNOSTIC, NOT A CORRECTNESS GUARD, and the mutation
@@ -1652,6 +1656,15 @@ func (s *Store) loadRollbackHistory() {
 			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
 			continue
 		}
+		// #10296: comment-only files also parse successfully into an empty
+		// tree. Treat every parser-empty result as a tombstone, not a healthy
+		// rollback target, so `rollback N` cannot replace active with nothing.
+		if tree == nil || len(tree.Children) == 0 {
+			slog.Warn("skipping empty rollback configuration", "path", path)
+			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			continue
+		}
+
 		// Use file modification time as timestamp
 		info, _ := os.Stat(path)
 		ts := time.Now()
