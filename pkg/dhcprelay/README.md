@@ -705,11 +705,12 @@ when no GUA/ULA is available, and the peer address of the received packet
 (normally link-local, but global and ULA unicast peers are accepted), then sent
 to every configured server on UDP/547. A link-local link-address always carries
 the Interface-ID option because it cannot identify the return link by itself.
-The upstream socket uses an unspecified, route-selected local bind rather than
-binding to the Relay-Forw link-address. Configured Relay-Reply sources and the
-outer Interface-ID are validated; the inner message is sent to the peer on
-UDP/546. The existing HA master-state gate applies before forwarding client
-messages.
+The upstream socket binds to the selected GUA/ULA link-address to preserve
+per-interface SO_REUSEPORT demultiplexing; for a link-local fallback it binds
+unspecified so the normal IPv6 route selects the server-facing source. Configured
+Relay-Reply sources and the outer Interface-ID are validated; the inner message
+is sent to the peer on UDP/546. The existing HA master-state gate applies before
+forwarding client messages.
 
 - Nested downstream Relay-Forw requests and nested Relay-Reply responses are
   dropped by default: #9553 has no downstream trust knob, so an on-link sender
