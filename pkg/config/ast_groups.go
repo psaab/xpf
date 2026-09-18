@@ -468,6 +468,15 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		if contribExcluded9862(s, group, level) && (s.IsLeaf || !subtreeSurvives9862(s, group, level)) {
 			continue
 		}
+		// #10053: a nested union carries contributor ownership per member.
+		// Filter it before either leaf adoption or mergeLeafListInto so a
+		// collapsed Keys list and a block child list cannot ride through an
+		// exclusion atomically.
+		if haveExcept && len(level) > 0 && len(s.Keys) > 0 &&
+			isLeafListSchema(ancestorPath, s.Keys[0]) &&
+			!filterLeafListMembers9862(s, level) {
+			continue
+		}
 		if s.IsLeaf {
 			key := ""
 			if len(s.Keys) > 0 {
@@ -900,36 +909,51 @@ func leafListPeer(dst []*Node, key string) *Node {
 // ambiguous run was silently resolved -- and hidden from the gate -- whenever an
 // inline leaf of the same name existed. A QUOTED repeat is an ordinary member.
 func mergeLeafListInto(dst, src *Node) {
-	// #9862: a tagged dst is a group body being merged into (inner merge) or
-	// a previously merged node (outer merge), so this union can mix members
-	// across groups and the node's provenance is uncertain afterwards.
-	// Cleared: filters then fall back to the merge's outer group, which keeps
-	// the node unless the outer application is itself vetoed. Keeping either
-	// side's tag would over-exclude the other side's members; member-level
-	// provenance is a follow-up. The clearing is load-bearing only for inner
-	// merges (whose product becomes outer src); on outer dst it is harmless
-	// because dst-side tags are never consulted. Deliberately unconditional
-	// (no haveExcept here): untagged trees clear nothing.
+	// Keep a parallel ownership record when either side carries #9862
+	// provenance. Node-level fromGroups is still cleared for the historical
+	// fallback, but filtering can now distinguish each union member.
+	dstMembers := leafListMemberGroupsForNode9862(dst)
+	srcMembers := leafListMemberGroupsForNode9862(src)
+	trackMembers := len(dst.leafMemberGroups9862) > 0 ||
+		len(src.leafMemberGroups9862) > 0 ||
+		len(dst.fromGroups) > 0 || len(src.fromGroups) > 0
 	if dst.fromGroups != nil {
 		dst.fromGroups = nil
 	}
 	self := dst.Keys[0]
 	seen := make(map[string]bool)
-	for _, m := range leafListMembers9627(dst) {
+	for _, m := range dstMembers {
 		if m.value != self || m.quoted {
 			seen[m.value] = true
 		}
 	}
-	for _, m := range leafListMembers9627(src) {
+	for _, m := range srcMembers {
 		if m.value == self && !m.quoted {
 			dst.Keys = append(dst.Keys, m.value)
 			appendKeyQuoted9627(dst, false)
+			if trackMembers {
+				dstMembers = append(dstMembers, m)
+			}
 			continue
 		}
 		if seen[m.value] {
-			// #9862: the duplicate is owned by BOTH sides. Record src's
-			// ownership on the surviving member so excluding one owner
-			// keeps the member for the other (never over-excludes).
+			// #9862: a duplicate is owned by BOTH sides. Keep the member
+			// when either contributor survives; never over-excluding it.
+			if trackMembers {
+				for i := range dstMembers {
+					if dstMembers[i].value == m.value {
+						if len(dstMembers[i].groups) == 0 || len(m.groups) == 0 {
+							// Unknown/authored ownership is deliberately
+							// conservative: one uncertain side means the
+							// member must survive any group exclusion.
+							dstMembers[i].groups = nil
+						} else {
+							unionMemberGroups9862(&dstMembers[i].groups, m.groups)
+						}
+						break
+					}
+				}
+			}
 			mergeLeafListDupOwnership9862(dst, src, m.value)
 			continue
 		}
@@ -942,12 +966,19 @@ func mergeLeafListInto(dst, src *Node) {
 				Keys:          []string{m.value},
 				IsLeaf:        true,
 				InheritedFrom: src.InheritedFrom,
+				fromGroups:    append([]string(nil), m.groups...),
 			}
 			if m.quoted {
 				child.KeysQuoted = []bool{true}
 			}
 			dst.Children = append(dst.Children, child)
 		}
+		if trackMembers {
+			dstMembers = append(dstMembers, m)
+		}
+	}
+	if trackMembers {
+		dst.leafMemberGroups9862 = dstMembers
 	}
 }
 
