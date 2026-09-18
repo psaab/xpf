@@ -45,6 +45,11 @@ type physDesired struct {
 	// component, mtu is the explicit Linux default (#9985), so deleting a
 	// statement converges the live device instead of yielding.
 	mtu int
+	// mtuExplicit distinguishes an authored MTU from the materialized Linux
+	// default. It is part of the merged plan so an absent netdev can report
+	// exactly the value the planner selected, without re-deriving a different
+	// unit's value from map/zone traversal order (#10216).
+	mtuExplicit bool
 	// skipAddrs suppresses address reconciliation when any unit on the netdev
 	// is DHCP-managed, or the interface is a RETH member or fabric parent.
 	// Conservative on purpose: those addresses are owned by the DHCP client,
@@ -175,19 +180,22 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				// whose zone references were all tagged got no plan, and its
 				// interface-level mtu was never written. Two tagged references
 				// plan nothing when their resolved netdev is fabric-owned or a
-				// per-unit tunnel owns the child device. Fabric ownership is
-				// decided once for the resolved netdev before this zone walk,
-				// so direct references to a local fabric member cannot contest
-				// the fabric interface's MTU. A canonical bond name is included
-				// as an owner; a slash-bearing authored bond name is not, because
-				// bond.go passes that raw name to netlink and cannot create it.
+				// per-unit tunnel owns the child device.
+				// Fabric ownership is decided once for the resolved netdev
+				// before this zone walk, so direct references to a local fabric
+				// member cannot contest the fabric interface's MTU. A canonical
+				// bond name is included as an owner; a slash-bearing authored
+				// bond name is not, because bond.go passes that raw name to
+				// netlink and cannot create it.
 				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil && !mtuOwned[physName] {
 					// A tunnel owner is included in the pre-pass above, so
 					// every reference to its resolved netdev yields here.
 					pd := planFor(physName)
 					if mtuUnit[physName] == -2 {
 						pd.mtu = ifCfg.MTU
-						if pd.mtu <= 0 {
+						if pd.mtu > 0 {
+							pd.mtuExplicit = true
+						} else {
 							pd.mtu = defaultPhysicalMTU9985
 						}
 						mtuUnit[physName] = -1
@@ -205,6 +213,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 			}
 			if ifCfg.MTU > 0 && !mtuOwned[physName] && mtuUnit[physName] == -2 {
 				pd.mtu = ifCfg.MTU
+				pd.mtuExplicit = true
 				mtuUnit[physName] = -1
 			}
 			if !mtuOwned[physName] && mtuUnit[physName] == -2 {
@@ -232,6 +241,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				// between units.
 				if cur := mtuUnit[physName]; cur < 0 || unitNum < cur {
 					pd.mtu = unit.MTU
+					pd.mtuExplicit = true
 					mtuUnit[physName] = unitNum
 				}
 			}

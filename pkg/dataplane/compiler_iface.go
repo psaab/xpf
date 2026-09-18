@@ -754,7 +754,16 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// the record names the CONFIGURED surface: physName is already the
 		// resolved parent here, and every VLAN child of one absent parent
 		// would otherwise dedup onto that single name.
-		result.recordUnarmedSurface(missingInterfaceRecord(physName, vlanID, name, err))
+		missing := missingInterfaceRecord(physName, vlanID, name, err)
+		result.recordUnarmedSurface(missing)
+		// #10216: an explicit interface/unit MTU is a configured promise.
+		// When its resolved netdev is absent, the normal soft skip would leave
+		// that promise with no writer. Keep the compile soft (the existing
+		// absent-interface policy is intentional), but publish the MTU
+		// divergence so commit/show surfaces a reconcile-or-reject diagnostic.
+		if !missing.StillForwarding {
+			recordAbsentInterfaceMTU10216(result, st.physDesired[physName], physName, cfgName)
+		}
 		return nil
 	}
 

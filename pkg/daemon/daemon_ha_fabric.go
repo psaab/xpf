@@ -21,7 +21,10 @@ import (
 // fabric IP addressing. The parent keeps its ge-X-0-Y name (XDP/TC attaches
 // there); the IPVLAN carries the fabric IP used for session sync.
 // Idempotent: skips creation if the IPVLAN already exists on the correct parent.
-func ensureFabricIPVLAN(parent, name string, addrs []string) error {
+// configuredMTU is the fabric interface's configured MTU. The fabric floor
+// remains 9000 when it is absent or lower; a configured jumbo above that floor
+// is the exact value reconciled on both parent and overlay (#10216).
+func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) error {
 	parentLink, err := netlink.LinkByName(parent)
 	if err != nil {
 		return fmt.Errorf("parent %s: %w", parent, err)
@@ -30,21 +33,19 @@ func ensureFabricIPVLAN(parent, name string, addrs []string) error {
 	// Ensure parent is UP — IPVLAN inherits carrier from parent.
 	netlink.LinkSetUp(parentLink)
 
-	// Set jumbo MTU on parent for fabric throughput — IPVLAN inherits
-	// parent MTU as upper bound, so parent must be set first.
-	if parentLink.Attrs().MTU < 9000 {
-		if err := netlink.LinkSetMTU(parentLink, 9000); err != nil {
-			slog.Warn("fabric: failed to set parent MTU 9000",
-				"parent", parent, "err", err)
-		}
+	// Set the configured fabric MTU on the parent before creating/reconciling
+	// the overlay. The overlay cannot exceed its parent.
+	wantMTU := fabricMTU10216(configuredMTU)
+	if err := reconcileFabricMTU10216(parent, parentLink, wantMTU); err != nil {
+		return fmt.Errorf("fabric parent %s MTU reconciliation: %w", parent, err)
 	}
 
 	// Check if IPVLAN already exists on correct parent.
 	if existing, err := netlink.LinkByName(name); err == nil {
 		if existing.Attrs().ParentIndex == parentLink.Attrs().Index {
 			// Already correct — reconcile addresses, MTU, and ensure UP (#127).
-			if existing.Attrs().MTU < 9000 {
-				netlink.LinkSetMTU(existing, 9000)
+			if err := reconcileFabricMTU10216(name, existing, wantMTU); err != nil {
+				return fmt.Errorf("fabric IPVLAN %s MTU reconciliation: %w", name, err)
 			}
 			reconcileIPVLANAddrs(existing, name, addrs)
 			netlink.LinkSetUp(existing)
@@ -70,10 +71,11 @@ func ensureFabricIPVLAN(parent, name string, addrs []string) error {
 		return fmt.Errorf("find created IPVLAN %s: %w", name, err)
 	}
 
-	// Set jumbo MTU on IPVLAN overlay (must not exceed parent MTU).
-	if err := netlink.LinkSetMTU(link, 9000); err != nil {
-		slog.Warn("fabric IPVLAN: failed to set MTU 9000",
-			"name", name, "err", err)
+	// Set the overlay MTU exactly to the parent/configured target and verify
+	// through a fresh lookup; a warn-only write makes the desired state
+	// applied-by-nobody (#10216).
+	if err := reconcileFabricMTU10216(name, link, wantMTU); err != nil {
+		return fmt.Errorf("fabric IPVLAN %s MTU reconciliation: %w", name, err)
 	}
 
 	// Add configured addresses.
@@ -93,7 +95,7 @@ func ensureFabricIPVLAN(parent, name string, addrs []string) error {
 		return fmt.Errorf("bring up %s: %w", name, err)
 	}
 	slog.Info("created fabric IPVLAN", "name", name, "parent", parent,
-		"addrs", addrs)
+		"addrs", addrs, "mtu", wantMTU)
 	return nil
 }
 
