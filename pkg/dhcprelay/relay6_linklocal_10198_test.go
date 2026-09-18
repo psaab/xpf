@@ -126,3 +126,22 @@ func TestDHCPV6LinkLocalOnlyRelaysForward10198(t *testing.T) {
 		t.Fatalf("Relay-Forw Interface-ID = %q, want ge-0/0/0.0", got)
 	}
 }
+
+func TestDHCPV6UpstreamBindAddrIgnoresLinkLocalIdentity10198(t *testing.T) {
+	linkAddr := net.ParseIP("fe80::1")
+	if !linkAddr.IsLinkLocalUnicast() {
+		t.Fatalf("test link-address %v is not link-local", linkAddr)
+	}
+	got := dhcpV6UpstreamBindAddr()
+	want := (&net.UDPAddr{IP: net.IPv6unspecified, Port: dhcpv6RelayPort}).String()
+	if got != want {
+		t.Fatalf("upstream bind address for link-local Relay-Forw = %q, want %q", got, want)
+	}
+	resolved, err := net.ResolveUDPAddr("udp6", got)
+	if err != nil {
+		t.Fatalf("resolve upstream bind address %q: %v", got, err)
+	}
+	if !resolved.IP.IsUnspecified() || resolved.Port != dhcpv6RelayPort {
+		t.Fatalf("resolved upstream bind address = %v, want [::]:%d", resolved, dhcpv6RelayPort)
+	}
+}
