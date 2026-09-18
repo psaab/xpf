@@ -7341,6 +7341,244 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     );
 }
 
+/// #10309: an expiry tick larger than the 4096-slot delta ring must still
+/// deliver every Close to each binding-independent consumer. The returned
+/// `ExpiredSession::overflow_close` suffix is drained in 256-delta chunks,
+/// mirroring the worker loop's same-iteration flush. Reverting the expiry
+/// overflow handoff or any Close side effect makes one of the counts below
+/// red: shared-map teardown, sibling `DeleteSynced`, HA event frames, or
+/// SESSION_CLOSE RT_FLOW frames.
+#[test]
+fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
+    const N: usize = 5_000;
+    const RING_CAP: usize = 4_096;
+    const INSTALL_NS: u64 = 1_000_000_000;
+    const EXPIRE_NS: u64 = INSTALL_NS + 65_000_000_000;
+    let mut sessions = SessionTable::new();
+    for i in 0..N {
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)),
+            src_port: 1024 + (i / 250) as u16,
+            dst_port: 40_000 + (i % 250) as u16,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert!(sessions.install_with_protocol(
+            key,
+            test_decision(),
+            test_metadata(),
+            INSTALL_NS,
+            PROTO_UDP,
+            0,
+        ));
+        if i % 1024 == 1023 {
+            let _ = sessions.drain_deltas(RING_CAP);
+        }
+    }
+    let _ = sessions.drain_deltas(RING_CAP);
+    let expired = sessions.expire_stale_entries(EXPIRE_NS);
+    assert_eq!(expired.len(), N);
+    let mut ring_deltas = sessions.drain_deltas(usize::MAX);
+    let overflow_deltas: Vec<_> = expired
+        .iter()
+        .filter_map(|entry| entry.overflow_close.clone())
+        .collect();
+    assert_eq!(ring_deltas.len() + overflow_deltas.len(), N);
+    assert_eq!(overflow_deltas.len(), N - RING_CAP);
+    use std::sync::atomic::Ordering;
+    let _dnat_guard = crate::afxdp::checksum::dnat_counter_guard();
+    let dnat_before = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS
+        .load(Ordering::Relaxed);
+    let snat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(54_321),
+        ..NatDecision::default()
+    };
+    let dnat_delta = ring_deltas
+        .first_mut()
+        .expect("ring contains an expiry Close");
+    dnat_delta.decision.nat = snat;
+    crate::afxdp::checksum::add_dnat_steering_holder(&dnat_delta.key, snat);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let all_deltas = ring_deltas
+        .iter()
+        .chain(overflow_deltas.iter())
+        .collect::<Vec<_>>();
+    for delta in &all_deltas {
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &SyncedSessionEntry {
+                key: delta.key.clone(),
+                decision: delta.decision,
+                metadata: delta.metadata.clone(),
+                leak_incarnation: 0,
+                origin: delta.origin,
+                protocol: delta.key.protocol,
+                tcp_flags: delta.observed_tcp_flags,
+                generation: 0,
+                session_id: delta.session_id,
+                tcp_close_class: delta.tcp_close_class,
+            },
+        );
+    }
+    assert_eq!(
+        shared_sessions.lock().expect("shared sessions").len(),
+        N,
+        "precondition: every expiring forward session is shared"
+    );
+
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let forwarding = ForwardingState::default();
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from(""),
+        ifindex: 6,
+    };
+    let dnat_fds = crate::afxdp::checksum::DnatTableFds {
+        v4: Some(-1),
+        v6: None,
+    };
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle_connected(
+        N * 12,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let event_stream = Some(event_handle);
+    let runtime_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let runtime_reader = runtime_channel.reader();
+    let mut worker_lossless_wedged = false;
+    let mut flush = |deltas: &[SessionDelta]| {
+        flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &dnat_fds,
+            deltas,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &event_stream,
+            &forwarding,
+            &runtime_reader,
+            &mut worker_lossless_wedged,
+        );
+    };
+    let mut delete_count = 0usize;
+    for chunk in ring_deltas.chunks(256) {
+        flush(chunk);
+        let mut queue = peer_queue.lock().expect("peer queue");
+        delete_count += queue
+            .iter()
+            .filter(|command| matches!(command, WorkerCommand::DeleteSynced(_)))
+            .count();
+        queue.clear();
+    }
+    for chunk in overflow_deltas.chunks(256) {
+        flush(chunk);
+        let mut queue = peer_queue.lock().expect("peer queue");
+        delete_count += queue
+            .iter()
+            .filter(|command| matches!(command, WorkerCommand::DeleteSynced(_)))
+            .count();
+        queue.clear();
+    }
+    drop(flush);
+    let dnat_after = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        dnat_after - dnat_before,
+        1,
+        "the SNAT Close in the overflow population must attempt dnat deletion"
+    );
+
+    assert!(shared_sessions.lock().expect("shared sessions").is_empty());
+    assert!(shared_nat_sessions.lock().expect("shared NAT").is_empty());
+    assert!(
+        shared_forward_wire_sessions
+            .lock()
+            .expect("shared forward-wire")
+            .is_empty()
+    );
+    assert_eq!(delete_count, N * 2, "forward and reverse HA deletes must survive");
+    let recent_close_count = recent_session_deltas
+        .lock()
+        .expect("recent deltas")
+        .iter()
+        .filter(|delta| delta.event == "close")
+        .count();
+    assert!(recent_close_count > 0, "Close deltas must reach recent history");
+    let frames: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.dataplane_event_payload().is_some())
+            .count(),
+        N,
+        "every Close must emit SESSION_CLOSE RT_FLOW"
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.dataplane_event_payload().is_none())
+            .count(),
+        N,
+        "every Close must emit an HA session-sync frame"
+    );
+}
+
+/// #10309 wiring guard: the aggregate cell above drives the Close consumer,
+/// while this source pin protects the production bridge that extracts returned
+/// expiry overflow records from `ExpiredSession` and flushes them in the worker
+/// loop. Removing that bridge must make this test red even though a helper-level
+/// flush test can still pass.
+#[test]
+fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
+    let src = include_str!("../worker/loop_body/mod.rs");
+    let executable_lines: Vec<_> = src
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .collect();
+    let extraction = executable_lines
+        .iter()
+        .position(|line| line.starts_with("let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries"))
+        .expect("worker loop must extract returned expiry Close records");
+    let chunk_loop = executable_lines
+        .iter()
+        .position(|line| line.starts_with("for deltas in expiry_overflow_deltas.chunks(256)"))
+        .expect("worker loop must flush expiry overflow in bounded chunks");
+    let flush = executable_lines
+        .iter()
+        .position(|line| *line == "flush_drained_session_deltas!(deltas);")
+        .expect("worker loop must route each expiry overflow chunk to global consumers");
+    assert!(
+        extraction < chunk_loop && chunk_loop < flush,
+        "expiry overflow must be extracted, chunked, then flushed in that order"
+    );
+}
+
 /// #3416 FAIL-ON-REVERT (call-site WIRING pin): the permit-side RT_FLOW
 /// SESSION_CREATE / SESSION_CLOSE application id is resolved INSIDE
 /// `flush_session_deltas` via `AppCatalog::lookup_admitted`, which substitutes

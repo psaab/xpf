@@ -677,4 +677,10 @@ pub(crate) struct ExpiredSession {
     pub(crate) close_class: u8,
     /// Write-once install epoch of the removed incarnation.
     pub(crate) install_epoch: u64,
+    /// #10309: the exact expiry Close that did not fit in the bounded
+    /// incremental ring. The expiry pass returns it to the worker, which
+    /// flushes it in fixed-size chunks in the same GC iteration. `None`
+    /// means the Close was accepted by the ring (or this is a tombstone from
+    /// a removal path that does not emit an expiry Close).
+    pub(crate) overflow_close: Option<SessionDelta>,
 }

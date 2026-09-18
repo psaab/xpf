@@ -3211,6 +3211,7 @@ impl SessionTable {
                         session_id: entry.session_id,
                         close_class: entry.tcp_close_class_wire(),
                         install_epoch: entry.install_epoch,
+                        overflow_close: None,
                     });
                 }
             }
