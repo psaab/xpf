@@ -49,7 +49,7 @@ bad() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 # status, not a hand-written one-line approximation. This keeps a parser
 # regression from silently restoring only RG0 or losing the manual-pin column.
 dhcp_fixture_rows="$(
-	DHCP_LEASE_FAILOVER_SELFTEST=1 bash -c '
+	bash -c '
 		source "$1"
 		cluster_state_rows
 	' _ "$SCRIPT_DIR/dhcp-lease-failover.sh" <<'STATUS'
@@ -75,11 +75,147 @@ else
 	bad "DHCP cleanup parser changed: expected captured all-RG status rows, got '$dhcp_fixture_rows'"
 fi
 
+# #10122: only BASH_SOURCE-vs-$0 selects the executable path. The inherited
+# variable used by the old guard must not occur in the gate at all. The source
+# probe also proves that the fixture functions remain available without taking
+# the destructive lock or invoking main.
+dhcp_gate="$SCRIPT_DIR/dhcp-lease-failover.sh"
+dhcp_guard_count=$(grep -Fxc 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then' "$dhcp_gate" || true)
+dhcp_selftest_refs=$(grep -Fc 'DHCP_LEASE_FAILOVER_SELFTEST' "$dhcp_gate" || true)
+dhcp_source_probe="$(
+	DHCP_LEASE_FAILOVER_SELFTEST=1 bash -c '
+		source "$1"
+		declare -F cluster_state_rows
+		declare -F verify_dhcp_config
+	' _ "$dhcp_gate" 2>/dev/null || true
+)"
+if [[ "$dhcp_guard_count" == "2" && "$dhcp_selftest_refs" == "0" &&
+	"$dhcp_source_probe" == *"cluster_state_rows"* &&
+	"$dhcp_source_probe" == *"verify_dhcp_config"* ]]; then
+	ok "DHCP selftest mode is source-only; inherited env cannot bypass live guards"
+else
+	bad "DHCP selftest guard changed: guards=$dhcp_guard_count env_refs=$dhcp_selftest_refs probe='$dhcp_source_probe'"
+fi
+
 WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-harness-result-selftest.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/gate.log"
 LEDGER="$WORK/ledger.d"
 
+# Restore verification is hermetic: override the SSH backend after sourcing the
+# real gate, then make one poll fail before the exact snapshots become visible.
+dhcp_restore_flap="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		FW0=fw0; FW1=fw1
+		CONFIG_STATE_RECORDED=1
+		ORIGINAL_DHCP_CHASSIS[0]=chassisfw0; ORIGINAL_DHCP_CHASSIS[1]=chassisfw1
+		ORIGINAL_DHCP_LOCAL[0]=localfw0; ORIGINAL_DHCP_LOCAL[1]=localfw1
+		calls_file=$(mktemp)
+		printf "%s\n" 0 >"$calls_file"
+		ssh_fw() {
+			local calls
+			calls=$(( $(cat "$calls_file") + 1 ))
+			printf "%d\n" "$calls" >"$calls_file"
+			if ((calls <= 4)); then
+				printf mismatch
+			elif [[ "$2" == *chassis* ]]; then
+				printf chassis%s "$1"
+			else
+				printf local%s "$1"
+			fi
+		}
+		DHCP_RESTORE_WAIT=2
+		DHCP_RESTORE_POLL=0
+		verify_dhcp_config
+		calls=$(cat "$calls_file")
+		rm -f "$calls_file"
+		((calls > 4)) || exit 1
+		printf "FLAP_CALLS=%d\n" "$calls"
+	' _ "$dhcp_gate" 2>&1
+)"
+if [[ "$dhcp_restore_flap" == *"FLAP_CALLS="* ]]; then
+	ok "DHCP config restore polls through a transient mismatch"
+else
+	bad "DHCP config restore did not poll to a successful snapshot: $dhcp_restore_flap"
+fi
+
+dhcp_restore_timeout="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		FW0=fw0; FW1=fw1
+		CONFIG_STATE_RECORDED=1
+		ORIGINAL_DHCP_CHASSIS[0]=chassis0; ORIGINAL_DHCP_CHASSIS[1]=chassis1
+		ORIGINAL_DHCP_LOCAL[0]=local0; ORIGINAL_DHCP_LOCAL[1]=local1
+		ssh_fw() { printf mismatch; }
+		DHCP_RESTORE_WAIT=0
+		DHCP_RESTORE_POLL=0
+		if verify_dhcp_config; then exit 1; fi
+		[[ "$ABORT_CAUSE" == "cleanup:config-restore-timeout" ]] || exit 1
+		printf "TIMEOUT_CAUSE=%s\n" "$ABORT_CAUSE"
+	' _ "$dhcp_gate" 2>&1
+)"
+if [[ "$dhcp_restore_timeout" == *"TIMEOUT_CAUSE=cleanup:config-restore-timeout"* ]]; then
+	ok "DHCP config restore timeout emits a structured cause"
+else
+	bad "DHCP config restore timeout lost its cause: $dhcp_restore_timeout"
+fi
+
+dhcp_die_probe="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		die "fixture failed"
+	' _ "$dhcp_gate" 2>&1 || true
+)"
+dhcp_die_marker_count=$(grep -Fc 'ABORT_CAUSE=' <<<"$dhcp_die_probe" || true)
+if [[ "$dhcp_die_marker_count" == "1" &&
+	"$dhcp_die_probe" == *"ABORT_CAUSE=gate: fixture failed"* &&
+	"$dhcp_die_probe" == *"FATAL: owner=test-dhcp-lease-failover"* ]]; then
+	ok "DHCP die path emits exactly one structured abort cause"
+else
+	bad "DHCP die path lost or duplicated its structured cause: $dhcp_die_probe"
+fi
+
+dhcp_err_probe="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		install_abort_trap
+		set +e
+		false
+		rc=$?
+		set -e
+		printf "ERR_RC=%s CAUSE=%s\n" "$rc" "$ABORT_CAUSE"
+	' _ "$dhcp_gate" 2>&1
+)"
+dhcp_err_marker_count=$(grep -Fc 'ABORT_CAUSE=' <<<"$dhcp_err_probe" || true)
+dhcp_sub_err_probe="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		install_abort_trap
+		set +e
+		x=$(false)
+		rc=$?
+		set -e
+		printf "SUB_RC=%s CAUSE=%s\n" "$rc" "$ABORT_CAUSE"
+	' _ "$dhcp_gate" 2>&1
+)"
+dhcp_sub_err_marker_count=$(grep -Fc 'ABORT_CAUSE=' <<<"$dhcp_sub_err_probe" || true)
+dhcp_success_probe="$(
+	BPFRX_CLUSTER_ENV='' bash -c '
+		source "$1"
+		printf "%s\n" success
+	' _ "$dhcp_gate" 2>&1
+)"
+dhcp_success_marker_count=$(grep -Fc 'ABORT_CAUSE=' <<<"$dhcp_success_probe" || true)
+if [[ "$dhcp_err_marker_count" == "1" &&
+	"$dhcp_sub_err_marker_count" == "1" &&
+	"$dhcp_success_marker_count" == "0" &&
+	"$dhcp_err_probe" == *"ERR_RC=1 CAUSE=ERR: false (rc=1)"* &&
+	"$dhcp_sub_err_probe" == *"SUB_RC=1"* ]]; then
+	ok "DHCP ERR trap emits one cause per shell and success emits none"
+else
+	bad "DHCP ERR/success marker contract changed: err='$dhcp_err_probe' sub='$dhcp_sub_err_probe' success='$dhcp_success_probe'"
+fi
 # adapt_field <adapter> <rc> <n> -- nth TAB field of the adapter's line
 adapt_field() {
 	local adapter="$1" rc="$2" n="$3" out
@@ -324,6 +460,15 @@ if [[ "$(adapt_field ha-smoke 2 2)" == *"FATAL: fixture owner=lab-harness"* ]]; 
 	ok "ha-smoke VOID flattens tabs in the abort cause"
 else
 	bad "ha-smoke VOID leaked a tab into its reason: $(adapt_field ha-smoke 2 2)"
+fi
+
+# A structured marker is the primary cause; the legacy FATAL suffix remains
+# only for older logs that have no marker.
+printf 'ABORT_CAUSE=gate: fixture-failed\nFATAL: cleanup: owner=lab-harness\n' >"$LOG"
+if [[ "$(adapt_field ha-smoke 2 2)" == *"ABORT_CAUSE=gate: fixture-failed"* ]]; then
+	ok "ha-smoke VOID carries the structured abort marker"
+else
+	bad "ha-smoke VOID omitted the structured abort marker: $(adapt_field ha-smoke 2 2)"
 fi
 
 printf '  Results: 0 passed, 0 failed\n' >"$LOG"
