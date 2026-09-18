@@ -15,18 +15,12 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 		return nil
 	}
 	ifaceByName := make(map[string]InterfaceSnapshot, len(interfaces))
-	ifaceByLinuxName := make(map[string]InterfaceSnapshot, len(interfaces))
 	rgByAddress := make(map[string]int)
 	for _, iface := range interfaces {
 		if iface.Name == "" || iface.Ifindex <= 0 {
 			continue
 		}
 		ifaceByName[iface.Name] = iface
-		if iface.LinuxName != "" {
-			if _, exists := ifaceByLinuxName[iface.LinuxName]; !exists {
-				ifaceByLinuxName[iface.LinuxName] = iface
-			}
-		}
 		for _, addr := range iface.Addresses {
 			ip, _, err := net.ParseCIDR(addr.Address)
 			if err != nil || ip == nil {

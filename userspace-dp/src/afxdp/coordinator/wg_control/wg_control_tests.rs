@@ -2231,10 +2231,7 @@ fn wg_socket_vrf_bind_failure_is_not_swallowed_10196() {
 #[test]
 fn wg_socket_v6_capability_fallback_preserves_requested_device_10196() {
     let capability = io::Error::from_raw_os_error(libc::EAFNOSUPPORT);
-    assert!(v6_bind_can_fallback_with_device(&capability, Some("lo")));
+    assert!(v6_bind_can_fallback(&capability));
     let missing_device = io::Error::from_raw_os_error(libc::ENODEV);
-    assert!(!v6_bind_can_fallback_with_device(
-        &missing_device,
-        Some("vrf-10196-does-not-exist")
-    ));
+    assert!(!v6_bind_can_fallback(&missing_device));
 }
