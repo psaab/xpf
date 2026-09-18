@@ -21,6 +21,5 @@ test-stress-failover no rows in the tracked ledger; needs a recorded stress-fail
 test-wire-properties no rows in the tracked ledger; needs a recorded run (read gate, hermetic wrap)
 wire_appmatch_twins no rows in the tracked ledger; needs a recorded run of the #9531 appmatch-twins gate on the loss cluster
 wire_policy_deny no rows in the tracked ledger; needs a recorded run of the #9531 wire-deny gate on the loss cluster
-wire_zone_matrix no rows in the tracked ledger; needs a recorded run of the #10028 zone-matrix gate on the loss cluster
 wire_hostinbound_deny no rows in the tracked ledger; needs a recorded run of the #10029 host-inbound deny gate on the loss cluster
 wire_conntrack_lifecycle no rows in the tracked ledger; needs a recorded run of the #10030 conntrack lifecycle gate on the loss cluster
