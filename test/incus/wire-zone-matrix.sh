@@ -205,6 +205,11 @@ restore_routes() {
     done
     ROUTES_MUTATED=0
 }
+restore_stage_ok() {
+    local log="$1"
+    grep -qE 'commit (complete|succeeded)' "$log" 2>/dev/null &&
+        ! grep -qE '(^|[[:space:]])(error:|Error:|path not found)' "$log" 2>/dev/null
+}
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
     local restore_log=/tmp/xpf-wire-zone-matrix-restore.log
@@ -238,21 +243,21 @@ restore_config() {
         RESTORE_OK=0
     fi
     cat "$policy_log" >>"$restore_log"
-    grep -qE 'commit (complete|succeeded)' "$policy_log" 2>/dev/null || RESTORE_OK=0
+    restore_stage_ok "$policy_log" || RESTORE_OK=0
     if ((context_needed)); then
         context_cmds+="commit\nexit\n"
         if ! printf '%b' "$context_cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$context_log" 2>&1; then
             RESTORE_OK=0
         fi
         cat "$context_log" >>"$restore_log"
-        grep -qE 'commit (complete|succeeded)' "$context_log" 2>/dev/null || RESTORE_OK=0
+        restore_stage_ok "$context_log" || RESTORE_OK=0
     fi
-    if ! printf '%b' 'configure\ndelete security zones security-zone dmz\ndelete security zones security-zone wan interfaces reth0.50\ndelete security zones security-zone wan interfaces reth0.80\nset security zones security-zone wan interfaces reth0.50\nset security zones security-zone wan interfaces reth0.80\nset security policies default-policy deny-all\ncommit\nexit\n' |
+    if ! printf '%b' 'configure\ndelete security zones security-zone dmz\ndelete security zones security-zone wan interfaces reth0.80\nset security zones security-zone wan interfaces reth0.50\nset security zones security-zone wan interfaces reth0.80\nset security policies default-policy deny-all\ncommit\nexit\n' |
         $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$zone_log" 2>&1; then
         RESTORE_OK=0
     fi
     cat "$zone_log" >>"$restore_log"
-    grep -qE 'commit (complete|succeeded)' "$zone_log" 2>/dev/null || RESTORE_OK=0
+    restore_stage_ok "$zone_log" || RESTORE_OK=0
     local restored_policy restored_zone restored_apps
     restored_policy="$(snapshot 'show configuration security policies | display set')"
     restored_zone="$(snapshot 'show configuration security zones | display set')"
