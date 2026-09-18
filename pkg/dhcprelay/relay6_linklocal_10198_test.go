@@ -685,6 +685,65 @@ func TestDHCPv6ServerLoopRoutesMismatchedInterfaceID10198(t *testing.T) {
 	}
 }
 
+func TestDHCPv6ServerLoopRoutesSameInterfaceIDDifferentLink10198(t *testing.T) {
+	server := newFakeConn()
+	dispatcherServer := newFakeConn()
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(context.Context) (net.PacketConn, error) {
+		return dispatcherServer, nil
+	}
+	targetClient := newFakeConn()
+	targetRelay := &dhcpV6Relay{
+		ifaceName:  "ll-same-id-target",
+		kernelName: "lo",
+		linkAddr:   net.ParseIP("2001:db8:60::1"),
+	}
+	targetAllowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
+	_, release, err := dispatcher.register(context.Background(), targetRelay, targetClient, targetAllowed, []byte("shared"))
+	if err != nil {
+		t.Fatalf("register same-IID target: %v", err)
+	}
+	defer release()
+
+	owner := &dhcpV6Relay{
+		ifaceName: "gua-same-id-owner",
+		linkAddr:  net.ParseIP("2001:db8:61::1"),
+	}
+	ownerAllowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 2), Port: 68}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		(&dhcpV6Manager{}).runDHCPV6ServerLoop(ctx, owner, server, newFakeConn(), ownerAllowed, []byte("shared"), dispatcher)
+		close(done)
+	}()
+	reply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    targetRelay.linkAddr,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	reply.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
+	reply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
+	server.push(reply.ToBytes())
+	deadline := time.Now().Add(time.Second)
+	for targetClient.writeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if targetClient.writeCount() != 1 {
+		t.Fatalf("same-IID different-LinkAddr target writes=%d, want 1", targetClient.writeCount())
+	}
+	if owner.repliesDroppedIID.Load() != 0 {
+		t.Fatalf("same-IID different-LinkAddr owner drops=%d, want 0 after dispatch", owner.repliesDroppedIID.Load())
+	}
+	cancel()
+	_ = server.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("same-IID different-LinkAddr server loop did not stop")
+	}
+}
+
 func TestDHCPv6ClientReplyDispatchRateLimited10198(t *testing.T) {
 	client := newFakeDHCPV6Conn()
 	client.srcAddr = &net.UDPAddr{IP: net.ParseIP("fe80::2"), Port: dhcpv6ClientPort}

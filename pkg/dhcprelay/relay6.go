@@ -1235,7 +1235,10 @@ func (m *dhcpV6Manager) runDHCPV6ServerLoop(ctx context.Context, relay *dhcpV6Re
 		}
 		if packet.Type() == dhcpv6.MessageTypeRelayReply {
 			if outer, ok := packet.(*dhcpv6.RelayMessage); ok {
-				if got := outer.Options.InterfaceID(); got != nil && !bytes.Equal(got, expectedInterfaceID) {
+				got := outer.Options.InterfaceID()
+				iidMismatch := got != nil && !bytes.Equal(got, expectedInterfaceID)
+				linkAddrMismatch := !outer.LinkAddr.Equal(relay.linkAddr)
+				if iidMismatch || linkAddrMismatch {
 					if dispatcher != nil {
 						dispatcher.dispatch(packet, source)
 						continue
