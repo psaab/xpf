@@ -51,7 +51,7 @@ func TestApplyDeDupsDuplicateFeedNames(t *testing.T) {
 	ts := httptest.NewServer(cs.handler())
 	defer ts.Close()
 
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 	// Two servers "aaa" and "bbb" each declare the SAME feed name "dup" with a
 	// distinct path so the winner's URL is identifiable. Both hit the same
 	// counting server. Winner must be the sorted-first server, "aaa".

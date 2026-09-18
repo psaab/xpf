@@ -64,7 +64,7 @@ func TestStopAllJoinsRefreshGoroutines7174C12a(t *testing.T) {
 	defer ts.Close()
 	defer close(blocked)
 
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 	m.Apply(context.Background(), &config.DynamicAddressConfig{
 		FeedServers: map[string]*config.FeedServer{
 			"held": {

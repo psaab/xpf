@@ -46,7 +46,7 @@ func denyBindingCfg(feedName, url string) *config.DynamicAddressConfig {
 // the deny must not fail open. Reverting the SnapshotForBindings omission
 // publishes "denylist" as a non-nil empty slice, turning both assertions RED.
 func TestFirstFetchFailedDenyFeedNotPublishedMatchNone(t *testing.T) {
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 
 	// First (and only) fetch fails: the endpoint is DOWN (500). There is NO
 	// prior good snapshot — this is the first-fetch case, not the re-fetch window.
@@ -87,7 +87,7 @@ func TestFirstFetchFailedDenyFeedNotPublishedMatchNone(t *testing.T) {
 // feed (a PERMIT feed that fetches non-empty enforces those prefixes, and a
 // resolved DENY feed enforces its denylist).
 func TestFirstFetchSuccessPublishesFeed(t *testing.T) {
-	m := New(func() error { return nil })
+	m := newLabManager10177(func() error { return nil })
 
 	good := &bodyServer{}
 	good.set("203.0.113.0/24\n", http.StatusOK)

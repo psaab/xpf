@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,10 @@ func (b *bodyServer) handler() http.HandlerFunc {
 // newFeed wires a feedState pointing at url with the given hold window and
 // registers it on the manager so AllFeeds/GetPrefixes see it.
 func (m *Manager) newFeed(name, url string, hold time.Duration) *feedState {
+	m.SetPrivateFeedAllowlist([]netip.Prefix{
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("::1/128"),
+	})
 	fs := &feedState{name: name, url: url, holdInterval: hold}
 	m.mu.Lock()
 	m.feeds[name] = fs
