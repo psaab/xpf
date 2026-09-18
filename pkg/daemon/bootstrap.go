@@ -43,6 +43,14 @@ const (
 	// NOT exit (that strands mgmt too) and must NOT positional-claim-all;
 	// instead it enters the #1922 bootstrap/lifeline safe state.
 	loadCompileFailed
+	// loadAbsentWithHistory — ErrConfigAbsentWithHistory (#10297): active.json
+	// is ABSENT but rollback/.configdb markers survive, proving a prior
+	// commit. Like loadCompileFailed, the daemon must NOT exit (that strands
+	// mgmt too), must NOT blind-import the day-0 text config (that commit
+	// would delete the surviving history), and must NOT run positional
+	// claim-all; instead it enters the #1922 bootstrap/lifeline safe state
+	// with history loaded for explicit in-band recovery.
+	loadAbsentWithHistory
 	// loadOtherError — any other Load error (logged as a warning; the daemon
 	// proceeds and the boot predicate decides bootstrap vs normal as usual).
 	loadOtherError
@@ -58,6 +66,8 @@ func classifyLoadError(err error) loadErrorClass {
 		return loadFatalUnreadable
 	case errors.Is(err, configstore.ErrConfigCompile):
 		return loadCompileFailed
+	case errors.Is(err, configstore.ErrConfigAbsentWithHistory):
+		return loadAbsentWithHistory
 	default:
 		return loadOtherError
 	}
@@ -65,18 +75,19 @@ func classifyLoadError(err error) loadErrorClass {
 
 // shouldBootstrapFromFile reports whether Run should import the text config
 // file (xpf.conf) after Store.Load. The import runs only when there is no
-// active config to boot from AND the Load did not fail closed on a compile
-// error.
+// active config to boot from AND the Load did not fail closed on a config
+// error (a compile failure or absent active.json with surviving history).
 //
-// #1960: the `!configCompileFailed` clause is load-bearing, not cosmetic. On a
-// compile-failed load ActiveConfig() is nil (compiled stayed nil), so without
-// this guard the import would fire — silently swapping a DIFFERENT config
-// (whatever xpf.conf holds) in over the broken committed DB and then taking
-// over interfaces from it, defeating the fail-closed intent. This predicate is
-// the single source of truth for that decision (daemon_run.go calls it) so the
-// guard cannot be dropped without TestShouldBootstrapFromFile failing.
-func shouldBootstrapFromFile(hasActiveConfig, configCompileFailed bool) bool {
-	return !hasActiveConfig && !configCompileFailed
+// #1960/#10297: the `!failClosedLoad` clause is load-bearing, not cosmetic.
+// On either fail-closed load ActiveConfig() is nil (compiled stayed nil), so
+// without this guard the import would fire — silently swapping a DIFFERENT
+// config (whatever xpf.conf holds) in over the broken/missing committed DB
+// and then taking over interfaces, defeating the fail-closed intent. This
+// predicate is the single source of truth for that decision (daemon_run.go
+// calls it) so the guard cannot be dropped without TestShouldBootstrapFromFile
+// failing.
+func shouldBootstrapFromFile(hasActiveConfig, failClosedLoad bool) bool {
+	return !hasActiveConfig && !failClosedLoad
 }
 
 // lifelineRecordFile persists the management-NIC identity (PCI bus address +
@@ -276,26 +287,26 @@ func hasNodeIDFile() bool {
 //     loaded (case 2 import-clean or case 3 valid-active.json).
 //   - everCommitted: store.EverCommitted() — the #1922 step-0 marker.
 //   - nodeID: /etc/xpf/node-id presence (the HA-node guard, C2/C8).
-//   - configCompileFailed: a PRESENT, previously-committed active.json
-//     read+parsed fine but no longer COMPILES (#1960, Store.Load returned
-//     ErrConfigCompile). This is the highest-priority signal — see below.
+//   - failClosedLoad: Store.Load found a previously-committed state that must
+//     not drive takeover — either a PRESENT active.json that no longer
+//     compiles (#1960, ErrConfigCompile) or an ABSENT active.json with
+//     surviving rollback markers (#10297, ErrConfigAbsentWithHistory). This
+//     is the highest-priority signal — see below.
 //
 // Case 4 (corrupt/too-new) is handled by #1917 D1 fatal-on-parse in Run
 // BEFORE this is called, so it never reaches here.
-func computeBootClass(hasActiveConfig, everCommitted, nodeIDPresent, configCompileFailed bool) bootClass {
-	// #1960 fail-closed (checked FIRST, before the HA-node guard): a config
-	// that was previously committed but no longer compiles must NEVER drive a
-	// full takeover. With everCommitted=true and ActiveConfig()==nil (compiled
-	// stayed nil), every other branch below resolves to bootClassNormal —
-	// positional claim-all interface naming on a box whose intended config is
-	// unknown. That can mis-bind interfaces and strand management. Refusing
-	// takeover (bootstrap mode + lifeline + protected set) keeps mgmt
-	// reachable and leaves the control plane up so the operator can fix the
-	// config. This overrides EVEN the HA-node guard: claiming all NICs on a
-	// broken config is the exact lockout this issue closes, and an HA node
-	// with an uncompilable config is safer in the lifeline state than
-	// mis-binding (HA availability was already not promised in that state).
-	if configCompileFailed {
+func computeBootClass(hasActiveConfig, everCommitted, nodeIDPresent, failClosedLoad bool) bootClass {
+	// #1960/#10297 fail-closed (checked FIRST, before the HA-node guard): a
+	// previously-committed state that is unavailable for safe takeover must
+	// NEVER drive a full takeover. With everCommitted=true and
+	// ActiveConfig()==nil (compiled stayed nil or active.json was absent),
+	// every other branch below resolves to bootClassNormal — positional
+	// claim-all interface naming on a box whose intended config is unknown.
+	// That can mis-bind interfaces and strand management. Refusing takeover
+	// (bootstrap mode + lifeline + protected set) keeps mgmt reachable and
+	// leaves the control plane up so the operator can fix or explicitly
+	// recover the config. This overrides EVEN the HA-node guard.
+	if failClosedLoad {
 		return bootClassBootstrap
 	}
 
@@ -662,10 +673,9 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 }
 
 // clearFRRForFailClosedBoot is the #1993 fail-closed boot refinement: on a
-// boot where the previously-committed config no longer COMPILES (the #1960
-// fail-closed tuple — ActiveConfig()==nil + everCommitted=true →
-// bootClassBootstrap), the last-good `! BEGIN/END BPFRX MANAGED CONFIG`
-// section may still be on disk in /etc/frr/frr.conf. FRR is an independent
+// boot where the previously-committed config is unavailable for takeover
+// (#1960 compile failure or #10297 absent active DB with surviving history),
+// the last-good `! BEGIN/END BPFRX MANAGED CONFIG`
 // systemd service: if the node comes up with NO live dataplane attachments, it
 // starts from that persisted file, forms BGP/OSPF/IS-IS peerings, and
 // re-advertises last-good prefixes for routes this unarmed node cannot
@@ -684,7 +694,7 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 // SyncApply) re-renders FRR through applyConfigLocked → applyFRRConfig, which
 // re-installs the managed section. So this clear is fully reversible.
 //
-// Scope: gated on compileFailed AND on LIVE FORWARDING. The restart-preserve
+// Scope: gated on failClosedLoad AND on LIVE FORWARDING. The restart-preserve
 // decision requires the helper to be genuinely forwarding, not merely
 // "pins exist" (#1993 review MAJOR): on a graceful hitless shutdown the pins
 // are preserved while forwarding is STOPPED, so a pin-only guard would wrongly
@@ -712,8 +722,8 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 // disk (so a later FRR restart converges) and the degraded-retry loop
 // re-attempts. Management reachability beats a perfectly-clean FRR reload, so
 // boot must proceed regardless.
-func (d *Daemon) clearFRRForFailClosedBoot(compileFailed bool) {
-	if !compileFailed || d.frr == nil {
+func (d *Daemon) clearFRRForFailClosedBoot(failClosedLoad bool) {
+	if !failClosedLoad || d.frr == nil {
 		return
 	}
 	if !d.failClosedBootShouldClearFRR() {

@@ -31,7 +31,7 @@ func TestConsoleZeroizeSurfacesSymlinkSkip9013(t *testing.T) {
 	var stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string) error { return symErr }
+	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { return symErr }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	err := c.performConsoleZeroize()
