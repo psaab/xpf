@@ -604,7 +604,7 @@ forward-direction collision.
   `docs/session-sync-architecture.md`, "Tunnel Session-Identity Discriminator".
 - **Do NOT "decline the hit and fall through"** as a cheap mitigation.
   `install_with_protocol_with_origin` opens with an unconditional
-  `remove_entry(&key)` (`session/install.rs`), so the session-miss path
+  `remove_entry(&key, RemovalKind::Replace)` (`session/install.rs`), so the session-miss path
   would re-install under the same bare 5-tuple and evict the incumbent
   VRF's session — the two flows then evict each other per packet
   (per-packet SNAT re-allocation breaks both). The only coherent

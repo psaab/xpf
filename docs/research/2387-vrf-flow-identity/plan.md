@@ -188,7 +188,7 @@ resolved in favour of cheap.
 Worth recording because it is the first cheap-looking alternative anyone
 proposes to widening the identity. It does not work.
 `SessionTable::install_with_protocol_with_origin` opens with an unconditional
-`let _previous = self.remove_entry(&key);`
+`let _previous = self.remove_entry(&key, RemovalKind::Replace);`
 (`userspace-dp/src/session/install.rs:139`). So if the fast path merely
 *declines* a cross-domain hit and lets the packet take the session-miss path,
 that path re-installs under the same bare 5-tuple and **evicts the incumbent
