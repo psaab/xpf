@@ -631,3 +631,41 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
          ProcessStatus (#10021)"
     );
 }
+/// #10069: delegated slow-path status must cross the real server projection
+/// boundary. Seed the coordinator's retained status, run `refresh_status`, and
+/// inspect serialized `ProcessStatus` so the operator-facing field cannot
+/// silently remain trusted-only.
+#[test]
+fn refresh_status_projects_delegated_slow_path_status_10069() {
+    let mut coordinator = Coordinator::new();
+    coordinator.last_slow_path_delegated_status = crate::slowpath::SlowPathStatus {
+        active: true,
+        degraded: true,
+        live_mtu: 1420,
+        device_name: "xpf-usp1".into(),
+        mode: "delegated".into(),
+        last_error: "SIOCSIFMTU: delegated outlet".into(),
+        queued_packets: 11,
+        ..Default::default()
+    };
+
+    let mut state = crate::server::state::ServerState {
+        status: Default::default(),
+        snapshot: None,
+        afxdp: coordinator,
+        state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
+    };
+
+    crate::server::helpers::status::refresh_status(&mut state);
+
+    let json = serde_json::to_value(&state.status).expect("status serializes");
+    assert_eq!(json["slow_path_delegated"]["active"], true);
+    assert_eq!(json["slow_path_delegated"]["degraded"], true);
+    assert_eq!(json["slow_path_delegated"]["live_mtu"], 1420);
+    assert_eq!(
+        json["slow_path_delegated"]["last_error"],
+        "SIOCSIFMTU: delegated outlet"
+    );
+    assert_eq!(json["slow_path_delegated"]["queued_packets"], 11);
+}
