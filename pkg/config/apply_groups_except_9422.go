@@ -161,6 +161,188 @@ func unionNodeContrib9862(n *Node, contrib []string) {
 	}
 }
 
+// leafListMemberGroups9862 records one leaf-list member and the groups whose
+// bodies contributed it. The slice is aligned with leafListMembers9627 on the
+// owning node; a nil groups slice means authored-inline or uncertain
+// ownership, which is intentionally kept by exclusion filtering.
+type leafListMemberGroups9862 struct {
+	value  string
+	quoted bool
+	groups []string
+}
+
+func cloneLeafMemberGroups9862(in []leafListMemberGroups9862) []leafListMemberGroups9862 {
+	if in == nil {
+		return nil
+	}
+	out := make([]leafListMemberGroups9862, len(in))
+	for i, m := range in {
+		out[i] = leafListMemberGroups9862{
+			value:  m.value,
+			quoted: m.quoted,
+			groups: append([]string(nil), m.groups...),
+		}
+	}
+	return out
+}
+
+// leafListMemberGroupsForNode9862 returns a member-aligned ownership view.
+// Older/ordinary nodes have no parallel metadata, so their node-level
+// fromGroups tag is used for every member. A union node keeps the richer
+// parallel view.
+func leafListMemberGroupsForNode9862(n *Node) []leafListMemberGroups9862 {
+	if n == nil {
+		return nil
+	}
+	members := leafListMembers9627(n)
+	if len(members) == 0 {
+		return nil
+	}
+	if len(n.leafMemberGroups9862) == len(members) {
+		out := make([]leafListMemberGroups9862, len(n.leafMemberGroups9862))
+		for i, m := range n.leafMemberGroups9862 {
+			out[i] = leafListMemberGroups9862{
+				value:  m.value,
+				quoted: m.quoted,
+				groups: append([]string(nil), m.groups...),
+			}
+		}
+		return out
+	}
+	out := make([]leafListMemberGroups9862, len(members))
+	for i, m := range members {
+		out[i] = leafListMemberGroups9862{
+			value:  m.value,
+			quoted: m.quoted,
+			groups: append([]string(nil), n.fromGroups...),
+		}
+	}
+	return out
+}
+
+func unionMemberGroups9862(dst *[]string, src []string) {
+	for _, want := range src {
+		found := false
+		for _, have := range *dst {
+			if have == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			*dst = append(*dst, want)
+		}
+	}
+}
+
+// leafListMemberSurvives9862 applies the #9862 contributor rule to one
+// member: an uncertain/authored member survives, and a tagged member survives
+// when at least one of its contributors is not excluded.
+func leafListMemberSurvives9862(m leafListMemberGroups9862, excluded map[string]bool) bool {
+	if len(m.groups) == 0 {
+		return true
+	}
+	for _, group := range m.groups {
+		if !excluded[group] {
+			return true
+		}
+	}
+	return false
+}
+
+// filterLeafListMembers9862 removes only members whose every contributor is
+// excluded. It runs on a cloned group source immediately before adoption or
+// union, so collapsed (Keys) and block (child leaves) spellings share exactly
+// the same per-member policy.
+func filterLeafListMembers9862(n *Node, excluded map[string]bool) bool {
+	if n == nil || len(excluded) == 0 {
+		return true
+	}
+	members := leafListMemberGroupsForNode9862(n)
+	if len(members) == 0 {
+		return true
+	}
+	keep := make([]leafListMemberGroups9862, 0, len(members))
+	keptIndexes := make([]int, 0, len(members))
+	for i, m := range members {
+		if leafListMemberSurvives9862(m, excluded) {
+			keep = append(keep, m)
+			keptIndexes = append(keptIndexes, i)
+		}
+	}
+	if len(keep) == len(members) {
+		// Preserve the synthesized metadata even when no member was removed;
+		// a later outer merge may carry this node through another level.
+		n.leafMemberGroups9862 = keep
+		return true
+	}
+	if n.IsLeaf {
+		keys := append([]string{n.Keys[0]}, make([]string, 0, len(keep))...)
+		var quoted, bracketed []bool
+		if len(n.KeysQuoted) == len(n.Keys) {
+			quoted = append([]bool{n.KeysQuoted[0]}, make([]bool, 0, len(keep))...)
+		}
+		if len(n.KeysBracketed) == len(n.Keys) {
+			bracketed = append([]bool{n.KeysBracketed[0]}, make([]bool, 0, len(keep))...)
+		}
+		for _, index := range keptIndexes {
+			keys = append(keys, n.Keys[index+1])
+			if quoted != nil {
+				quoted = append(quoted, n.KeysQuoted[index+1])
+			}
+			if bracketed != nil {
+				bracketed = append(bracketed, n.KeysBracketed[index+1])
+			}
+		}
+		n.Keys = keys
+		n.setKeysQuoted(quoted)
+		n.setKeysBracketed(bracketed)
+	} else {
+		// A leaf-list block has one value-bearing child per member in the
+		// ordinary AST. Keep the general multi-key walk for synthesized trees.
+		memberIndex := 0
+		children := make([]*Node, 0, len(n.Children))
+		for _, child := range n.Children {
+			if child == nil {
+				continue
+			}
+			keys := make([]string, 0, len(child.Keys))
+			var quoted, bracketed []bool
+			if len(child.KeysQuoted) == len(child.Keys) {
+				quoted = make([]bool, 0, len(child.Keys))
+			}
+			if len(child.KeysBracketed) == len(child.Keys) {
+				bracketed = make([]bool, 0, len(child.Keys))
+			}
+			for i, key := range child.Keys {
+				if memberIndex >= len(members) {
+					break
+				}
+				if leafListMemberSurvives9862(members[memberIndex], excluded) {
+					keys = append(keys, key)
+					if quoted != nil {
+						quoted = append(quoted, child.KeysQuoted[i])
+					}
+					if bracketed != nil {
+						bracketed = append(bracketed, child.KeysBracketed[i])
+					}
+				}
+				memberIndex++
+			}
+			if len(keys) == 0 {
+				continue
+			}
+			child.Keys = keys
+			child.setKeysQuoted(quoted)
+			child.setKeysBracketed(bracketed)
+			children = append(children, child)
+		}
+		n.Children = children
+	}
+	n.leafMemberGroups9862 = keep
+	return len(keep) > 0
+}
+
 // addNodeContrib9862 union-adds each name in contrib to every node's subtree
 // provenance. It tags a group's context-walked clone (with the resolved group
 // name, before nested references expand) and inherits a packed-leaf source's

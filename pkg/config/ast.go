@@ -45,7 +45,16 @@ type Node struct {
 	// untagged — authored-inline, or a cross-group leaf-list union whose
 	// per-member provenance is uncertain (mergeLeafListInto clears it) — and
 	// filters fall back to the merge's outer group for those nodes.
+	// fromGroups remains the node-level fallback for ordinary leaves and
+	// containers. Union members use the parallel field below when available.
 	fromGroups []string
+
+	// leafMemberGroups9862 carries per-member contributor provenance for a
+	// cross-group leaf-list union. It is aligned with leafListMembers9627's
+	// flattened member order (Keys[1:] followed by child keys). A nil entry
+	// means the member is authored inline or its ownership is unknown, so the
+	// #9862 filter keeps it. This is compile-internal and never persisted.
+	leafMemberGroups9862 []leafListMemberGroups9862
 
 	// Inactive marks a node deactivated via the Junos `inactive:` statement
 	// marker (#2008 H1). The node is retained verbatim in the tree — it
@@ -641,10 +650,11 @@ func cloneNodes(nodes []*Node) []*Node {
 			// #4474 memo store/handout. Deep-copied: clones must never share the
 			// backing array (tag union-adds append). Nil-preserving, so untagged
 			// nodes allocate nothing.
-			fromGroups: append([]string(nil), n.fromGroups...),
-			Inactive:   n.Inactive,
-			Line:       n.Line,
-			Column:     n.Column,
+			fromGroups:           append([]string(nil), n.fromGroups...),
+			leafMemberGroups9862: cloneLeafMemberGroups9862(n.leafMemberGroups9862),
+			Inactive:             n.Inactive,
+			Line:                 n.Line,
+			Column:               n.Column,
 		}
 	}
 	return result
