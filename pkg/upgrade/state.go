@@ -124,8 +124,9 @@ type Journal struct {
 	// State is the last COMPLETED phase.
 	State State `json:"state"`
 
-	// DBSnapshotPath is the absolute path to the pre-upgrade config-DB
-	// snapshot taken in PREFLIGHT (for binary+DB-atomic rollback).
+	// DBSnapshotPath is the absolute path to the rollback config-DB snapshot.
+	// PREFLIGHT takes the initial snapshot and the cut boundary refreshes it
+	// after STOP, immediately before FLIP (for binary+DB-atomic rollback).
 	DBSnapshotPath string `json:"db_snapshot_path,omitempty"`
 	// RollbackDBRestored records the operator rollback's completed DB swap.
 	// It closes the crash window where the snapshot is installed and .old

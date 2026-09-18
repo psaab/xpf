@@ -222,8 +222,9 @@ ExecStart=%s
 // (standalone auto-rollback, plan §6.4). Order is mandatory:
 //
 //  1. stop the (failed) new daemon
-//  2. restore the config DB from the PREFLIGHT snapshot (so the old
-//     binary never boots against a too-new envelope DB and fatal-rejects)
+//  2. restore the config DB from the cut-boundary snapshot (the PREFLIGHT
+//     baseline is refreshed after STOP, so the old binary never boots against
+//     a too-new envelope DB and fatal-rejects)
 //  3. re-flip current/sbin/unit back to the previous version
 //  4. start the old daemon
 //

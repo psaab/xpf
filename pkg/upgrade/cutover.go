@@ -696,15 +696,39 @@ func (r *Runner) Run(opts Options) (err error) {
 			"would leave the daemon offline with no recovery target. Re-seed the "+
 			"versioned runtime (xpfd seed-runtime), then re-run the upgrade", j.TargetVersion)
 	}
-
-	// ---- STOP (live mutation #1) ----
+	// ---- STOP + CUT-BOUNDARY DB SNAPSHOT (live mutation #1) ----
+	//
+	// PREFLIGHT, COPY and VERIFY all run while the old daemon is live, so a
+	// commit can land after PREFLIGHT's snapshot even on an uninterrupted run.
+	// Stop the daemon first, then re-take the snapshot while it cannot accept
+	// another commit. Do not move the snapshot later: FLIP/START may migrate
+	// the DB to a format the previous binary cannot read.
 	if !j.State.atLeast(StateStopped) {
+		stoppedByRun := false
 		if !opts.UnitAlreadyStopped {
-			r.logf("upgrade: stopping %s before flip", r.cfg.Unit)
+			r.logf("upgrade: stopping %s before cut-boundary snapshot and flip", r.cfg.Unit)
 			if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
 				return fmt.Errorf("stop unit: %w", err)
 			}
+			stoppedByRun = true
 		}
+		restartAfterBoundaryFailure := func(cause error) error {
+			if !stoppedByRun {
+				return cause
+			}
+			if err := r.cfg.Sys.StartUnit(r.cfg.Unit); err != nil {
+				return fmt.Errorf("%w; restart old daemon after cut-boundary failure: %v", cause, err)
+			}
+			r.logf("upgrade: restarted old daemon after cut-boundary failure")
+			return cause
+		}
+		if err := r.snapshotConfigDB(j); err != nil {
+			return restartAfterBoundaryFailure(fmt.Errorf("cut-boundary snapshot config DB: %w", err))
+		}
+		if err := r.saveJournal(j); err != nil {
+			return restartAfterBoundaryFailure(fmt.Errorf("cut-boundary persist DB snapshot: %w", err))
+		}
+		r.logf("upgrade: captured cut-boundary config-DB snapshot after STOP")
 		if err := r.transition(j, StateStopped); err != nil {
 			return err
 		}
@@ -892,11 +916,12 @@ func (r *Runner) preflight(j *Journal) error {
 	return r.snapshotConfigDB(j)
 }
 
-// snapshotConfigDB takes (or RE-takes) the pre-upgrade config-DB snapshot and
-// stamps DBSnapshotPath / AdvancedStateFloor. Extracted from preflight in
-// #6556 because the resume path needs exactly this step and nothing else
-// around it.
-//
+// snapshotConfigDB takes (or RE-takes) the rollback config-DB snapshot and
+// stamps DBSnapshotPath / AdvancedStateFloor. PREFLIGHT takes the initial
+// snapshot; the cut boundary calls this again after STOP so uninterrupted
+// runs include every commit made while the old daemon was live. Extracted
+// from preflight in #6556 because the resume path needs exactly this step and
+// nothing else around it.
 // It re-classifies the config-DB directory itself rather than taking a
 // dbPresent argument: on a RE-snapshot the answer can legitimately have
 // changed since the original preflight, and a stale "present" would leave
