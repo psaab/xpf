@@ -711,7 +711,12 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 // for unit-shaped tunnel members in the legacy arm.
 func riMemberLinuxNames(cfg *config.Config, tunMap map[string]string, ifaceName string) []string {
 	s := cfg.SplitInterfaceUnitRef(ifaceName)
-	if s.HasUnit || cfg == nil || cfg.Interfaces.Interfaces[s.Base] == nil {
+	// #10174: resolve whole-member aliases in the daemon layer that owns
+	// Linux-name matching (#8829 precedent). A cross-spelled bare member is
+	// structurally the declared stanza even though SplitInterfaceUnitRef is
+	// deliberately alias-free.
+	claim := resolveMemberDeclaredBase(cfg, ifaceName)
+	if s.HasUnit || !claim.ok || claim.hasUnit {
 		// NOT a declared-bare member (unit ref, undeclared bare, nil cfg):
 		// the LEGACY flow, byte-identical modulo canon→Literal (step-4
 		// Literal ≡ legacy canon; the unit path normalizes multi-dot
@@ -748,9 +753,9 @@ func riMemberLinuxNames(cfg *config.Config, tunMap map[string]string, ifaceName 
 	// R2F1 KILL core: naive declared-first reparse CREATES binds). Generated
 	// keys probe tunMap by their own canonical spelling first (same key the
 	// singular would probe), else derive the producer-rule device.
-	refs := config.InterfaceUnitRefKeys(cfg, ifaceName)
+	refs := config.InterfaceUnitRefKeys(cfg, claim.base)
 	if len(refs) == 0 {
-		return []string{riMemberLinuxName(cfg, tunMap, ifaceName)}
+		return []string{riMemberLinuxName(cfg, tunMap, claim.base)}
 	}
 	seen := make(map[string]struct{}, len(refs))
 	out := make([]string, 0, len(refs))
@@ -766,7 +771,7 @@ func riMemberLinuxNames(cfg *config.Config, tunMap map[string]string, ifaceName 
 	}
 	bind(riMemberLinuxName(cfg, tunMap, refs[0]))
 	for _, ref := range refs[1:] {
-		bind(memberUnitLinuxName(cfg, tunMap, s.Base, ref))
+		bind(memberUnitLinuxName(cfg, tunMap, claim.base, ref))
 	}
 	return out
 }
