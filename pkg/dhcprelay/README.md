@@ -714,6 +714,7 @@ server route for a link-local relay is outside this fallback's boundary.
 Configured Relay-Reply sources and the outer Interface-ID are validated; the
 inner message is sent to the peer on UDP/546. The existing HA master-state gate
 applies before forwarding client messages.
+
 - Nested downstream Relay-Forw requests and nested Relay-Reply responses are
   dropped by default: #9553 has no downstream trust knob, so an on-link sender
   cannot steer the outer link-address, receive forwarded traffic, or amplify

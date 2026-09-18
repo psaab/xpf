@@ -2,7 +2,9 @@ package dhcprelay
 
 import (
 	"context"
+	"errors"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -127,23 +129,29 @@ func TestDHCPV6LinkLocalOnlyRelaysForward10198(t *testing.T) {
 	}
 }
 
-func TestDHCPV6UpstreamBindAddrScopesLinkLocalIdentity10198(t *testing.T) {
-	linkAddr := net.ParseIP("fe80::1")
-	if !linkAddr.IsLinkLocalUnicast() {
-		t.Fatalf("test link-address %v is not link-local", linkAddr)
+func TestDHCPV6UpstreamBindAddrSelection10198(t *testing.T) {
+	const (
+		ifaceName = "ix0"
+		port      = dhcpv6RelayPort
+	)
+	cases := []struct {
+		name string
+		ip   net.IP
+		want string
+	}{
+		{"gua exact", net.ParseIP("2001:db8:1::1"), (&net.UDPAddr{IP: net.ParseIP("2001:db8:1::1"), Port: port}).String()},
+		{"ula exact", net.ParseIP("fd00::1"), (&net.UDPAddr{IP: net.ParseIP("fd00::1"), Port: port}).String()},
+		{"link-local scoped exact", net.ParseIP("fe80::1"), (&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: ifaceName, Port: port}).String()},
+		{"nil fallback", nil, (&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String()},
+		{"unspecified fallback", net.IPv6unspecified, (&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String()},
 	}
-	const ifaceName = "ix0"
-	got := dhcpV6UpstreamBindAddr(linkAddr, ifaceName, dhcpv6RelayPort)
-	want := (&net.UDPAddr{IP: linkAddr, Zone: ifaceName, Port: dhcpv6RelayPort}).String()
-	if got != want {
-		t.Fatalf("upstream bind address for link-local Relay-Forw = %q, want %q", got, want)
-	}
-	resolved, err := net.ResolveUDPAddr("udp6", got)
-	if err != nil {
-		t.Fatalf("resolve upstream bind address %q: %v", got, err)
-	}
-	if !resolved.IP.Equal(linkAddr) || resolved.Zone != ifaceName || resolved.Port != dhcpv6RelayPort {
-		t.Fatalf("resolved upstream bind address = %v, want %s", resolved, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dhcpV6UpstreamBindAddr(tc.ip, ifaceName, port)
+			if got != tc.want {
+				t.Fatalf("dhcpV6UpstreamBindAddr(%v) = %q, want %q", tc.ip, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -308,6 +316,9 @@ func TestDHCPv6PerLinkLocalServerBindDemux10198(t *testing.T) {
 	firstAddr := dhcpV6UpstreamBindAddr(first.ip, first.iface, 0)
 	firstRaw, err := firstConfig.ListenPacket(context.Background(), "udp6", firstAddr)
 	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("link-local socket bind requires network capability: %v", err)
+		}
 		t.Fatalf("listen first scoped link-local address %q: %v", firstAddr, err)
 	}
 	defer firstRaw.Close()
@@ -321,6 +332,9 @@ func TestDHCPv6PerLinkLocalServerBindDemux10198(t *testing.T) {
 	secondAddr := dhcpV6UpstreamBindAddr(second.ip, second.iface, port)
 	secondRaw, err := secondConfig.ListenPacket(context.Background(), "udp6", secondAddr)
 	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("link-local socket bind requires network capability: %v", err)
+		}
 		t.Fatalf("listen second scoped link-local address %q: %v", secondAddr, err)
 	}
 	defer secondRaw.Close()
