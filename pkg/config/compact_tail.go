@@ -102,6 +102,9 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 	if len(tail) == 0 {
 		return node.Children
 	}
+	// #10057: this shared synthesis path serves both #9855 inline-leaf
+	// promotion and #7648 group-side container-peer merging. Token provenance
+	// must travel with every synthesized child for both callers.
 	// The tail's quote/bracket provenance travels with the tokens: a synthesized
 	// node that drops it reads every key as bare, so a quoted self-named value
 	// (`protocol "protocol"`) vanishes in firewallMatchValues exactly as if the
