@@ -3,11 +3,15 @@
 
 The sender runs inside a temporary namespace with one fixed source address
 and source port for both phases. The control burst uses the veth while it is
-unbound (main-table near miss); the identical probe burst uses that same veth
-after it is enslaved to the manager-created empty VRF. A successful ``sendto``
-is a frame handed to that ingress veth (the OFFERED side); local errors are
-not counted and therefore cannot manufacture a PASS. The tag is carried in
-the payload solely to separate the two bursts in one capture window.
+unbound (main-table near miss); the owned `wire-10136` routing-instance then
+creates the manager-owned empty `vrf-wire-10136`, and the identical probe
+burst uses that same veth after it is enslaved to the empty VRF. A clean
+VRF miss terminates at pref-2000; the fault fixture removes and restores only
+that terminator so the miss can fall through to the proven main route. A
+successful ``sendto`` is a frame handed to that ingress veth (the OFFERED
+side); local errors are not counted and therefore cannot manufacture a PASS.
+The tag is carried in the payload solely to separate the two bursts in one
+capture window.
 """
 
 from __future__ import annotations
