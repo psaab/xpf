@@ -820,7 +820,17 @@ func routingInstanceInterfaceKeysForRef(cfg *config.Config, raw string) (primary
 		}
 		return primary, fanout
 	}
-	return primary, fanout
+	// #10174: unlike unit aliases, a BARE cross-spelled member deliberately
+	// fans down here. The daemon bind has the same exception because it owns
+	// Linux-name matching; shared Config.SplitInterfaceUnitRef remains
+	// spelling-only for every other consumer.
+	declaredKeys := config.InterfaceUnitRefKeys(cfg, stanzaKey)
+	if len(declaredKeys) > 1 {
+		fanout = declaredKeys[1:]
+	} else {
+		fanout = nil
+	}
+	return stanzaKey, fanout
 }
 
 func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, key string)) {
