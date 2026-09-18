@@ -345,6 +345,11 @@ class ResignContentIntegrityTests(unittest.TestCase):
         self._assert_tampered_refused(
             ".incus-metadata.tar.gz", self._flip_first_byte)
 
+    def test_pkgs_byte_tamper_refused(self):
+        # kill: skip the pkgs member in the recorded-hash comparison loop.
+        self._assert_tampered_refused(
+            ".pkgs", self._flip_first_byte)
+
     def test_sidecar_byte_tamper_preserving_flags_refused(self):
         # kill: only compare sidecar flags, not all recorded sidecar bytes.
         self._assert_tampered_refused(
