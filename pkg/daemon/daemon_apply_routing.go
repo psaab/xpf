@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/routing"
 )
@@ -137,13 +136,7 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			masters := d.snapshotRethMasterState()
 			authority := d.nextDHCPLeaseApplyAuthority(cfg, masters)
 			var err error
-			if applier, ok := d.dhcpServer.(interface {
-				ApplyWithLeaseAuthority(*config.DHCPServerConfig, dhcpserver.LeaseApplyAuthority) error
-			}); ok {
-				err = applier.ApplyWithLeaseAuthority(&desired, authority)
-			} else {
-				err = d.dhcpServer.Apply(&desired)
-			}
+			err = d.dhcpServer.ApplyWithLeaseAuthority(&desired, authority)
 			if err != nil {
 				slog.Warn("failed to apply DHCP server config", "err", err)
 				dhcpServerErr = fmt.Errorf("apply DHCP server config: %w", err)
@@ -158,13 +151,7 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 			dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
 			authority := d.nextDHCPLeaseApplyAuthority(cfg, masters)
 			var err error
-			if applier, ok := d.dhcpServer.(interface {
-				ApplyClusterCommitWithLeaseAuthority(*config.DHCPServerConfig, dhcpserver.LeaseApplyAuthority) error
-			}); ok {
-				err = applier.ApplyClusterCommitWithLeaseAuthority(dhcpCfg, authority)
-			} else {
-				err = d.dhcpServer.ApplyClusterCommit(dhcpCfg)
-			}
+			err = d.dhcpServer.ApplyClusterCommitWithLeaseAuthority(dhcpCfg, authority)
 			if err != nil {
 				slog.Warn("failed to reconcile DHCP server (cluster commit)", "err", err)
 				dhcpServerErr = fmt.Errorf("apply DHCP server config: %w", err)
