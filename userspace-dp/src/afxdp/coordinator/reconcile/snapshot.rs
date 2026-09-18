@@ -524,8 +524,12 @@ pub(super) fn reconcile_preserved_slow_path_mtu(
         if !slow_path.delegated_mtu_retry_permitted(desired_mtu, delegated.degraded) {
             return false;
         }
-        let live = slow_path.reconcile_delegated_mtu(desired_mtu, &mut programmer);
-        let succeeded = live == desired_mtu;
+        // `reconcile_delegated_mtu` returns the aggregate minimum MTU for the
+        // reinjector. Retry state must instead follow the delegated outlet:
+        // the trusted outlet can already be at `desired_mtu` while delegated
+        // remains lagging and degraded.
+        slow_path.reconcile_delegated_mtu(desired_mtu, &mut programmer);
+        let succeeded = slow_path.delegated_status().live_mtu == desired_mtu;
         slow_path.record_delegated_mtu_retry(succeeded);
         if succeeded {
             eprintln!(
@@ -981,6 +985,76 @@ mod slow_path_mtu_tests {
         assert!(
             !reinjector.delegated_status().degraded,
             "successful delegated recovery clears degraded status"
+        );
+        for window_start in 1..=16 {
+            let window_end = window_start + 7;
+            let attempts = retry_ticks
+                .iter()
+                .filter(|&&tick| window_start <= tick && tick <= window_end)
+                .count();
+            assert!(
+                attempts <= 3,
+                "sliding window {window_start}..={window_end} issued {attempts} retries"
+            );
+        }
+    }
+
+    /// #10069 regression: a delegated-only episode can begin with the
+    /// delegated outlet healthy while the trusted outlet is the lagging leg.
+    /// The first delegated retry then creates the degraded edge. That edge must
+    /// re-arm backoff without erasing the rolling attempt history, or ticks
+    /// 1, 2, 3, and 5 would issue four ioctls in one eight-tick window.
+    #[test]
+    fn delegated_retry_rearm_preserves_rolling_window() {
+        let reinjector = SlowPathReinjector::new_without_worker(1500);
+        let mut setup_calls = 0;
+        let setup_live = reinjector.reconcile_mtu(9000, |_name, _mtu| {
+            setup_calls += 1;
+            if setup_calls == 1 {
+                Err("SIOCSIFMTU: trusted outlet failure".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(setup_live, 1500);
+        assert_eq!(reinjector.status().live_mtu, 1500);
+        assert!(reinjector.status().degraded);
+        assert_eq!(reinjector.delegated_status().live_mtu, 9000);
+        assert!(
+            !reinjector.delegated_status().degraded,
+            "the delegated-only episode must open healthy before its first retry"
+        );
+
+        let mut last_acted = 9000;
+        let mut retry_ticks = Vec::new();
+        for tick in 1..=16 {
+            let _ = reconcile_preserved_slow_path_mtu(
+                &reinjector,
+                1500,
+                &mut last_acted,
+                |_name, _mtu| {
+                    retry_ticks.push(tick);
+                    if retry_ticks.len() <= 3 {
+                        Err("SIOCSIFMTU: delegated transient failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+        }
+        assert_eq!(
+            retry_ticks,
+            vec![1, 2, 4, 9],
+            "re-arming the degraded edge must preserve the rolling retry history"
+        );
+        assert_eq!(
+            reinjector.delegated_status().live_mtu,
+            1500,
+            "the later retry recovers the delegated outlet at the new desired MTU"
+        );
+        assert!(
+            !reinjector.delegated_status().degraded,
+            "delegated success clears the degraded edge"
         );
         for window_start in 1..=16 {
             let window_end = window_start + 7;
