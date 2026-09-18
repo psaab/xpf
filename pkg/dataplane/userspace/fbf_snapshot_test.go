@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -51,11 +52,29 @@ func fbfTestConfig() *config.Config {
 	return cfg
 }
 
+func fbfTestInterfaces() []InterfaceSnapshot {
+	return []InterfaceSnapshot{
+		{
+			Name: "reth0.50",
+			Addresses: []InterfaceAddressSnapshot{
+				{Family: "inet", Address: "172.16.50.8/24"},
+			},
+		},
+		{
+			Name: "reth0.80",
+			Addresses: []InterfaceAddressSnapshot{
+				{Family: "inet", Address: "172.16.80.8/24"},
+				{Family: "inet6", Address: "2001:db8:80::8/64"},
+			},
+		},
+	}
+}
+
 // TestFBFForwardingInstanceRouteSnapshots: forwarding-instance statics
 // land in `<ri>.inet.0` / `<ri>.inet6.0` — the table the Rust PBR
 // lookup targets — and never in the master tables.
 func TestFBFForwardingInstanceRouteSnapshots(t *testing.T) {
-	routes, _, err := buildRouteSnapshots(fbfTestConfig(), nil, nil)
+	routes, _, err := buildRouteSnapshots(fbfTestConfig(), fbfTestInterfaces(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,16 +90,47 @@ func TestFBFForwardingInstanceRouteSnapshots(t *testing.T) {
 		}
 		if (r.Table == "inet.0" || r.Table == "inet6.0") &&
 			len(r.NextHops) == 1 &&
-			(r.NextHops[0] == "172.16.80.1" || r.NextHops[0] == "2001:db8:80::1") {
+			(strings.HasPrefix(r.NextHops[0], "172.16.80.1") ||
+				strings.HasPrefix(r.NextHops[0], "2001:db8:80::1")) {
 			t.Fatalf("forwarding-instance static leaked into master table: %+v", r)
 		}
 	}
-	if v4 == nil || len(v4.NextHops) != 1 || v4.NextHops[0] != "172.16.80.1" {
-		t.Fatalf("ISP-B.inet.0 default = %+v, want 172.16.80.1", v4)
+	if v4 == nil || len(v4.NextHops) != 1 || v4.NextHops[0] != "172.16.80.1@reth0.80" {
+		t.Fatalf("ISP-B.inet.0 default = %+v, want 172.16.80.1@reth0.80", v4)
 	}
-	if v6 == nil || len(v6.NextHops) != 1 || v6.NextHops[0] != "2001:db8:80::1" {
-		t.Fatalf("ISP-B.inet6.0 default = %+v, want 2001:db8:80::1", v6)
+	if v6 == nil || len(v6.NextHops) != 1 || v6.NextHops[0] != "2001:db8:80::1@reth0.80" {
+		t.Fatalf("ISP-B.inet6.0 default = %+v, want 2001:db8:80::1@reth0.80", v6)
 	}
+}
+
+// TestFBFQualificationLeavesVirtualRouterBare guards the #4446 boundary:
+// only forwarding-instance snapshots get an explicit external interface.
+// A virtual-router route must retain table-scoped bare-gateway inference so
+// an overlapping default-instance prefix can never select its egress.
+func TestFBFQualificationLeavesVirtualRouterBare(t *testing.T) {
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{{
+			Name:         "VRF-A",
+			InstanceType: "virtual-router",
+			StaticRoutes: []*config.StaticRoute{{
+				Destination: "0.0.0.0/0",
+				NextHops:    []config.NextHopEntry{{Address: "172.16.80.1"}},
+			}},
+		}},
+	}
+	routes, _, err := buildRouteSnapshots(cfg, fbfTestInterfaces(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range routes {
+		if route.Table == "VRF-A.inet.0" && route.Destination == "0.0.0.0/0" {
+			if len(route.NextHops) != 1 || route.NextHops[0] != "172.16.80.1" {
+				t.Fatalf("virtual-router default = %+v, want bare gateway", route)
+			}
+			return
+		}
+	}
+	t.Fatal("VRF-A default route missing")
 }
 
 // TestFBFFilterTermSnapshotCarriesSteeringAndCounter: the FBF steering
@@ -119,7 +169,7 @@ func TestFBFOverlayIntoForwardingInstance(t *testing.T) {
 	overlay := []config.RouteOverlayEntry{
 		{RoutingInstance: "ISP-B", Destination: "0.0.0.0/0", NextHop: "172.16.80.254", Policy: "wan-failover"},
 	}
-	routes, _, err := buildRouteSnapshots(fbfTestConfig(), nil, overlay)
+	routes, _, err := buildRouteSnapshots(fbfTestConfig(), fbfTestInterfaces(), overlay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +183,8 @@ func TestFBFOverlayIntoForwardingInstance(t *testing.T) {
 	if len(defaults) != 1 {
 		t.Fatalf("ISP-B.inet.0 defaults = %+v, want exactly one", defaults)
 	}
-	if len(defaults[0].NextHops) != 1 || defaults[0].NextHops[0] != "172.16.80.254" {
-		t.Fatalf("ISP-B.inet.0 default = %+v, want overlay next-hop 172.16.80.254", defaults[0])
+	if len(defaults[0].NextHops) != 1 || defaults[0].NextHops[0] != "172.16.80.254@reth0.80" {
+		t.Fatalf("ISP-B.inet.0 default = %+v, want overlay next-hop 172.16.80.254@reth0.80", defaults[0])
 	}
 	// Master table untouched.
 	for _, r := range routes {
