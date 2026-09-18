@@ -132,6 +132,11 @@ class BakeWiringTests(unittest.TestCase):
             "offline snippet must discover the TARGET kernel from "
             "the target root's /lib/modules, never `uname -r` (build host).",
         )
+        # Fixture overrides are opt-in only; the production bake path must
+        # not become bypassable through its environment.
+        snippet = bake.bridge_floor_offline_snippet()
+        self.assertNotIn("XPF_FLOOR_ROOT", snippet)
+        self.assertNotIn("XPF_FLOOR_KVER", snippet)
 
     def test_bake_splices_check_after_single_kernel_assert(self):
         src = (HERE / "bake.py").read_text()
