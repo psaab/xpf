@@ -80,6 +80,11 @@ func TestDualPathAdmittedPairsArePinned8763(t *testing.T) {
 	// the family-shape fold behaviour is unchanged, and the new no-family
 	// site compiles into the same inet pool.
 	//
+	// Every pair in this list is BENIGN at the family shape, so the blocker
+	// dissolves and no path context is needed. If this list changes, that
+	// conclusion does not carry to the new member and the measurement has
+	// to be retaken.
+	//
 	// #9882 added the `then forwarding-class` row: declaring the head under
 	// the policer and three-color-policer `then` containers moved the pair
 	// from family-only to dual-path. Its measurement was retaken from scratch
@@ -91,10 +96,6 @@ func TestDualPathAdmittedPairsArePinned8763(t *testing.T) {
 	// is deleted (the pair left that population); this row is where it lives
 	// now.
 	//
-	// Every pair in this list is BENIGN at the family shape, so the blocker
-	// dissolves and no path context is needed. If this list changes, that
-	// conclusion does not carry to the new member and the measurement has
-	// to be retaken.
 	want := []string{
 		"filter term",
 		"flexible-match-range range",

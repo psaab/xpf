@@ -264,16 +264,11 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 		{"from-packed valueless prefix-list (GLM-F1)", func(t *testing.T) *ConfigTree {
 			return fwTree9875(t, `term T { from source-prefix-list; then { discard; } }`)
 		}, true, "source-prefix-list", "ValuelessFrom"},
-		{"from-packed valued prefix-list control = 2419 boundary (GLM-F1)", func(t *testing.T) *ConfigTree {
-			// Valued-but-packed: the leaf has a value, so #8480 must NOT
-			// fire — but compilation drops the ref (the normalizer
-			// declines the pair and no reader consumes the packed tail).
-			// That silent drop is #2419-CLASS but uninventoried (the
-			// census probes only the valueless shape for these flag-modelled
-			// leaves) — flagged to parent as a found gap.
-			// Strict passes AND unmarked = gate/mark equivalent; the
-			// drop itself is not this lane's to fix.
-			return fwTree9875(t, `term T { from source-prefix-list AAA; then { discard; } }`)
+		{"from-packed valued prefix-list control (#10073)", func(t *testing.T) *ConfigTree {
+			// Defining the referenced list keeps this boundary focused on
+			// strict-gate/marker parity rather than #3307 dangling refs.
+			return fwRawTree9875(t, `policy-options { prefix-list AAA { 10.0.0.0/8; } }
+				firewall { family inet { filter F { term T { from source-prefix-list AAA; then { discard; } } } } }`)
 		}, false, "", ""},
 		{"nested filter-name valueless (GPT-F1)", func(t *testing.T) *ConfigTree {
 			return fwRawTree9875(t, `firewall { family inet { filter { F { term T { from { source-prefix-list; } then { discard; } } } } } }`)

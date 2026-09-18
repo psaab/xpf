@@ -172,6 +172,26 @@ var slotEscFilter6 = []string{"set firewall family inet6 filter F6 term t1 then 
 // #9899: the implicit-inet twin of slotEscFilter4 — the direct-root spelling
 // of the same filter the icmp-code rows below hang their prerequisites on.
 var slotEscFilterImplicit = []string{"set firewall filter F term t1 then accept"}
+var slotEscFilterPrefixListAny = []string{
+	"set policy-options prefix-list PL 10.0.0.0/8",
+	"set policy-options prefix-list PL 2001:db8::/32",
+	"set firewall family any filter F term t1 then accept",
+}
+
+var slotEscFilterPrefixListInet = []string{
+	"set policy-options prefix-list PL 10.0.0.0/8",
+	"set firewall family inet filter F term t1 then accept",
+}
+
+var slotEscFilterPrefixListInet6 = []string{
+	"set policy-options prefix-list PL 2001:db8::/32",
+	"set firewall family inet6 filter F6 term t1 then accept",
+}
+
+var slotEscFilterPrefixListImplicit = []string{
+	"set policy-options prefix-list PL 10.0.0.0/8",
+	"set firewall filter F term t1 then accept",
+}
 
 var slotEscRibGroup = []string{
 	"set routing-instances blue instance-type virtual-router",
@@ -416,6 +436,33 @@ func slotEscapeRows() []slotEscapeRow {
 			"set class-of-service classifiers inet-precedence c3 forwarding-class best-effort loss-priority low code-points", "3", "zzbogus"},
 
 		// -- firewall filters -------------------------------------------------------------
+		// #10073: one-line prefix-list refs became schema args=1 leaves;
+		// each family spelling needs a slot-escape verdict of its own.
+		{"filter any from source-prefix-list", "firewall family any filter <*> term <*> from source-prefix-list",
+			slotEscFilterPrefixListAny,
+			"set firewall family any filter F term t1 from source-prefix-list", "PL", "UNDEFINED"},
+		{"filter any from destination-prefix-list", "firewall family any filter <*> term <*> from destination-prefix-list",
+			slotEscFilterPrefixListAny,
+			"set firewall family any filter F term t1 from destination-prefix-list", "PL", "UNDEFINED"},
+		{"filter inet from source-prefix-list", "firewall family inet filter <*> term <*> from source-prefix-list",
+			slotEscFilterPrefixListInet,
+			"set firewall family inet filter F term t1 from source-prefix-list", "PL", "UNDEFINED"},
+		{"filter inet from destination-prefix-list", "firewall family inet filter <*> term <*> from destination-prefix-list",
+			slotEscFilterPrefixListInet,
+			"set firewall family inet filter F term t1 from destination-prefix-list", "PL", "UNDEFINED"},
+		{"filter inet6 from source-prefix-list", "firewall family inet6 filter <*> term <*> from source-prefix-list",
+			slotEscFilterPrefixListInet6,
+			"set firewall family inet6 filter F6 term t1 from source-prefix-list", "PL", "UNDEFINED"},
+		{"filter inet6 from destination-prefix-list", "firewall family inet6 filter <*> term <*> from destination-prefix-list",
+			slotEscFilterPrefixListInet6,
+			"set firewall family inet6 filter F6 term t1 from destination-prefix-list", "PL", "UNDEFINED"},
+		{"filter implicit-inet from source-prefix-list", "firewall filter <*> term <*> from source-prefix-list",
+			slotEscFilterPrefixListImplicit,
+			"set firewall filter F term t1 from source-prefix-list", "PL", "UNDEFINED"},
+		{"filter implicit-inet from destination-prefix-list", "firewall filter <*> term <*> from destination-prefix-list",
+			slotEscFilterPrefixListImplicit,
+			"set firewall filter F term t1 from destination-prefix-list", "PL", "UNDEFINED"},
+
 		{"filter inet from icmp-code", "firewall family inet filter <*> term <*> from icmp-code",
 			append(append([]string{}, slotEscFilter4...),
 				"set firewall family inet filter F term t1 from protocol icmp",
