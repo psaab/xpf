@@ -205,16 +205,6 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 		if validRouterID(ospfv3.RouterID) {
 			fmt.Fprintf(&b, " ospf6 router-id %s\n", ospfv3.RouterID)
 		}
-		for _, area := range ospfv3.Areas {
-			for _, iface := range area.Interfaces {
-				if validFRROSPFArea(area.ID) {
-					fmt.Fprintf(&b, " interface %s area %s\n", iface.Name, area.ID)
-				} else {
-					slog.Warn("frr: omitting an OSPFv3 interface area activation with an invalid area id (#9820)",
-						"area", sanitizeFRRValue(area.ID), "interface", sanitizeFRRValue(iface.Name))
-				}
-			}
-		}
 		// IPv6 OSPF ECMP mirrors the OSPFv4 block: FRR ospf6d requires an
 		// explicit "maximum-paths <N>" under "router ospf6" to install
 		// equal-cost multipath. OSPFv3 reuses the same global forwarding-table
@@ -227,44 +217,51 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault))
 		}
 		b.WriteString("exit\n!\n")
+		// OSPFv3 interface settings + per-interface area activation. FRR
+		// stable/10.6 moved area activation from the removed router-level
+		// `interface <name> area <id>` command to the INTERFACE_NODE form
+		// `ipv6 ospf6 area <id>`. Emit the interface block unconditionally so
+		// an interface with no optional settings still gets activated.
 		for _, area := range ospfv3.Areas {
 			for _, iface := range area.Interfaces {
-				if iface.Cost > 0 || iface.Passive || iface.BFD ||
-					iface.HelloInterval > 0 || iface.DeadInterval > 0 ||
-					iface.RetransmitInt > 0 || iface.HasPriority {
-					fmt.Fprintf(&b, "interface %s\n", iface.Name)
-					if iface.Passive {
-						b.WriteString(" ipv6 ospf6 passive\n")
-					}
-					if iface.Cost > 0 {
-						fmt.Fprintf(&b, " ipv6 ospf6 cost %d\n", frrClampInt("ospf3 cost", iface.Cost, 65535))
-					}
-					// Adjacency timers + DR priority (#4285): hello/dead must
-					// match the neighbor. HasPriority gates the priority line;
-					// priority 0 ("never DR") emits, unset omits.
-					if iface.HelloInterval > 0 {
-						fmt.Fprintf(&b, " ipv6 ospf6 hello-interval %d\n", iface.HelloInterval)
-					}
-					if iface.DeadInterval > 0 {
-						fmt.Fprintf(&b, " ipv6 ospf6 dead-interval %d\n", iface.DeadInterval)
-					}
-					if iface.RetransmitInt > 0 {
-						fmt.Fprintf(&b, " ipv6 ospf6 retransmit-interval %d\n", iface.RetransmitInt)
-					}
-					if iface.HasPriority {
-						fmt.Fprintf(&b, " ipv6 ospf6 priority %d\n", iface.Priority)
-					}
-					if iface.BFD {
-						if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
-							profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
-							bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
-							fmt.Fprintf(&b, " ipv6 ospf6 bfd profile %s\n", profile)
-						} else {
-							b.WriteString(" ipv6 ospf6 bfd\n")
-						}
-					}
-					b.WriteString("exit\n!\n")
+				fmt.Fprintf(&b, "interface %s\n", iface.Name)
+				if validFRROSPFArea(area.ID) {
+					fmt.Fprintf(&b, " ipv6 ospf6 area %s\n", area.ID)
+				} else {
+					slog.Warn("frr: omitting an OSPFv3 interface area activation with an invalid area id (#9820)",
+						"area", sanitizeFRRValue(area.ID), "interface", sanitizeFRRValue(iface.Name))
 				}
+				if iface.Passive {
+					b.WriteString(" ipv6 ospf6 passive\n")
+				}
+				if iface.Cost > 0 {
+					fmt.Fprintf(&b, " ipv6 ospf6 cost %d\n", frrClampInt("ospf3 cost", iface.Cost, 65535))
+				}
+				// Adjacency timers + DR priority (#4285): hello/dead must
+				// match the neighbor. HasPriority gates the priority line;
+				// priority 0 ("never DR") emits, unset omits.
+				if iface.HelloInterval > 0 {
+					fmt.Fprintf(&b, " ipv6 ospf6 hello-interval %d\n", iface.HelloInterval)
+				}
+				if iface.DeadInterval > 0 {
+					fmt.Fprintf(&b, " ipv6 ospf6 dead-interval %d\n", iface.DeadInterval)
+				}
+				if iface.RetransmitInt > 0 {
+					fmt.Fprintf(&b, " ipv6 ospf6 retransmit-interval %d\n", iface.RetransmitInt)
+				}
+				if iface.HasPriority {
+					fmt.Fprintf(&b, " ipv6 ospf6 priority %d\n", iface.Priority)
+				}
+				if iface.BFD {
+					if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
+						profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
+						bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
+						fmt.Fprintf(&b, " ipv6 ospf6 bfd profile %s\n", profile)
+					} else {
+						b.WriteString(" ipv6 ospf6 bfd\n")
+					}
+				}
+				b.WriteString("exit\n!\n")
 			}
 		}
 	}
