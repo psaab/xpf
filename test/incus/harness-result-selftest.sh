@@ -1227,6 +1227,10 @@ wire_log 'WIRE_GATE wire_routing_separation PASS reason=-- probe_offered=1000 pr
 wire_field_is "routing separation PASS transcribes" 0 1 "PASS"
 wire_field_is "routing separation headline is probe_leaked" 0 3 "probe_leaked"
 wire_field_has "routing separation keeps control offered" 0 5 "control_offered=1500"
+wire_log 'WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
+wire_field_is "routing separation early VOID transcribes" 0 1 "VOID"
+wire_field_is "routing separation early VOID keeps env-void" 0 2 "env-void"
+wire_field_has "routing separation early VOID keeps zero metrics" 0 5 "control_observed=0"
 wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\nWIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=1\n'
 wire_field_is "two gate IDs in one log is VOID" 0 1 "VOID"
 wire_field_has "two gate IDs says why" 0 2 "distinct WIRE_GATE gate IDs"

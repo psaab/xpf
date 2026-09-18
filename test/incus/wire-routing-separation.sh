@@ -229,7 +229,7 @@ RULE_2000=""
 TABLE_SNAPSHOT=""
 WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0'
 void_now() {
-    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_routing_separation VOID reason=$1"
+    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_routing_separation VOID reason=$1 probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0"
     WIRE_GATE_FINAL_RC=2
     exit 2
 }
