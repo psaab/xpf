@@ -126,12 +126,13 @@ info "apt repo tool: $TOOL, suite: $SUITE, arch: $ARCH, out: $APT"
 
 # NOTE(F-066/#9921): the COMPONENT/ARCH/ORIGIN/VALID_DAYS/GPG_KEY gate above
 # also covers this path's distributions file (allowlisted/digit/single-line
-# values cannot inject fields), but the Valid-Until count+value assert below
-# is flat-path-only: reprepro synthesizes its Release from its own database
-# plus the ValidFor knob and exits here. The reprepro operator (persistent
-# publisher holding the signing key) is the trusted actor for that synthesis;
-# post-hoc verification of reprepro's own emission is defense-in-depth tracked
-# in #10123 (needs a reprepro binary to verify the emission format).
+# values cannot inject fields). Reprepro synthesizes its Release from its own
+# database plus the ValidFor knob, so verify the emitted file after the final
+# includedeb/export rather than comparing against this process's NOW. This
+# Date-derived exact epoch is the legitimate reprepro delta from the flat
+# path: reprepro chooses Date during export, minutes before this check, while
+# the flat path pins Date before apt-ftparchive runs. Requiring one Date as
+# well as one Valid-Until makes that derivation unambiguous.
 if [ "$TOOL" = "reprepro" ]; then
     command -v reprepro >/dev/null 2>&1 || die "reprepro not found (apt-get install reprepro)"
     [ -n "${XPF_GPG_KEY:-}" ] || die "reprepro path requires XPF_GPG_KEY (signs Release)"
@@ -152,6 +153,24 @@ EOF
         info "reprepro includedeb $SUITE $d"
         reprepro -b "$APT" includedeb "$SUITE" "$d"
     done
+
+    REL="$APT/dists/$SUITE/Release"
+    [ -f "$REL" ] || die "reprepro emitted no Release at $REL"
+    _date_count=$(grep -c "^Date:" "$REL" 2>/dev/null || true)
+    [ "$_date_count" = "1" ] || die "reprepro Release has $_date_count Date fields, want exactly 1"
+    _vu_count=$(grep -c "^Valid-Until:" "$REL" 2>/dev/null || true)
+    [ "$_vu_count" = "1" ] || die "reprepro Release has $_vu_count Valid-Until fields, want exactly 1"
+    _date_line=$(grep "^Date:" "$REL")
+    _date_epoch=$(LC_ALL=C date -u -d "${_date_line#Date: }" +%s 2>/dev/null) \
+        || die "cannot parse reprepro Release Date '$_date_line' (need GNU date)"
+    _vu_line=$(grep "^Valid-Until:" "$REL")
+    _vu_epoch=$(LC_ALL=C date -u -d "${_vu_line#Valid-Until: }" +%s 2>/dev/null) \
+        || die "cannot parse reprepro Release Valid-Until '$_vu_line' (need GNU date)"
+    VALID_SECONDS=$((VALID_DAYS * 86400))
+    [ "$_vu_epoch" = "$((_date_epoch + VALID_SECONDS))" ] || die \
+        "reprepro Release Valid-Until '$_vu_line' != ValidFor-derived value \
+(want epoch $((_date_epoch + VALID_SECONDS)), got $_vu_epoch)"
+    info "reprepro Release validated ($_date_line; $_vu_line)"
     info "reprepro repo built at $APT"
     exit 0
 fi
