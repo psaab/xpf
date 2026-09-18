@@ -271,25 +271,16 @@ fn queue_planner_filters_non_data_interfaces() {
     assert!(bindings.iter().all(|b| b.registered));
 }
 
-// #2915 fail-on-revert: the plan-key hash and the queue planner MUST agree
-// on the binding interface set. Both must route through
+// #2915 / #10308 fail-on-revert: the plan-key hash and queue planner MUST
+// agree on the binding interface set. Both route through
 // `include_userspace_binding_interface` (the Rust mirror of the Go
-// authoritative allowlist), not the pre-#2915 prefix-only test. This test
-// pins three properties; any one of them goes RED if `replan_queues` reverts
-// to the divergent `ge-*`/`xe-*`/`et-*` prefix predicate:
-//
-//   1. A `ge-*` netdev in a mgmt/control zone is EXCLUDED by both the hash
-//      and the planner (the prefix-only predicate would plan it).
-//   2. Mutating a non-candidate (mgmt-zone) interface does NOT bump the
-//      plan key — change detection is scoped to the planned set.
-//   3. Mutating a candidate (zoned data) interface DOES bump the plan key
-//      AND that interface IS planned.
+// authoritative allowlist), whose exclusion is keyed on interface identity,
+// not a zone name. A data NIC in a `mgmt`/`control`-named zone is a candidate;
+// real lifeline names remain excluded.
 #[test]
 fn queue_planner_and_plan_key_agree_on_binding_set() {
     use crate::server::helpers::snapshot_binding_plan_key;
 
-    // A genuine data interface plus a `ge-*`-named interface that lives in a
-    // management zone (e.g. an out-of-band port the operator zoned `mgmt`).
     let mk = |mgmt_ifindex: i32, data_rx: usize| ConfigSnapshot {
         interfaces: vec![
             InterfaceSnapshot {
@@ -313,26 +304,27 @@ fn queue_planner_and_plan_key_agree_on_binding_set() {
     };
 
     let base = mk(99, 1);
-
-    // Property 1: the mgmt-zone `ge-*` is NOT planned; only the data iface is.
     let bindings = replan_queues(Some(&base), 1, &[], true).expect("plan");
-    assert!(
-        bindings.iter().all(|b| b.interface == "ge-0-0-1"),
-        "mgmt-zone ge-* must be excluded from the plan, got: {:?}",
-        bindings.iter().map(|b| &b.interface).collect::<Vec<_>>()
-    );
-    assert_eq!(bindings.len(), 1, "only the data interface should be planned");
+    let planned = bindings
+        .iter()
+        .map(|b| b.interface.clone())
+        .collect::<std::collections::BTreeSet<_>>();
 
-    // Property 2: mutating the non-candidate (mgmt) interface must NOT bump
-    // the plan key — it is outside the planned set, so it is outside the hash.
-    let mgmt_changed = mk(123, 1);
     assert_eq!(
+        planned,
+        ["ge-0-0-1".to_string(), "ge-0-0-9".to_string()]
+            .into_iter()
+            .collect(),
+        "mgmt-named data NIC must stay in the binding plan, got {planned:?}"
+    );
+    assert_eq!(bindings.len(), 2, "both data interfaces should be planned");
+
+    let mgmt_changed = mk(123, 1);
+    assert_ne!(
         snapshot_binding_plan_key(&base),
         snapshot_binding_plan_key(&mgmt_changed),
-        "a change to a non-candidate (mgmt-zone) interface must not bump the \
-         plan key — the hash and planner must share the exclusion contract"
+        "a change to a mgmt-named data interface must bump the plan key"
     );
-    // ...and the planned set is identical regardless of the mgmt change.
     let bindings_changed = replan_queues(Some(&mgmt_changed), 1, &[], true).expect("plan");
     assert_eq!(
         bindings.iter().map(|b| b.interface.clone()).collect::<Vec<_>>(),
@@ -340,15 +332,14 @@ fn queue_planner_and_plan_key_agree_on_binding_set() {
             .iter()
             .map(|b| b.interface.clone())
             .collect::<Vec<_>>(),
-        "mgmt-zone change must not alter the planned interface set"
+        "changing the mgmt-named data NIC must not alter the planned interface set"
     );
 
-    // Property 3: mutating the candidate (data) interface DOES bump the key.
     let data_changed = mk(99, 4);
     assert_ne!(
         snapshot_binding_plan_key(&base),
         snapshot_binding_plan_key(&data_changed),
-        "a change to a candidate (zoned data) interface must bump the plan key"
+        "a change to a trust-zoned data interface must bump the plan key"
     );
 }
 
@@ -4756,17 +4747,14 @@ fn orphan_vlan_child_still_rekeys_onto_an_unzoned_parent() {
 /// collapse) — so `ge-0/0/5` and `ge-0/0/5.0` arrive here as two rows on ONE
 /// netdev that disagree about whether it may be bound.
 ///
-/// THE BASE ROW IS mgmt-ZONED ON PURPOSE, and that is the only shape that makes
-/// this observable rather than merely inconsistent. `buildInterfaceZoneMap` keys
-/// a base off whichever zone entry sorts first, so `security-zone mgmt
-/// interfaces ge-0/0/5.0` + `security-zone trust interfaces ge-0/0/5.100` really
-/// does produce base=mgmt with a trust VLAN unit — the shape
-/// `TestParentRedirectKeepsAMgmtZonedParent` exists for. With the base excluded
-/// for a ROW reason it supplies no candidate of its own, so under the ANY rule
-/// the trust VLAN child's re-key was the netdev's only route into the plan and
-/// refusing it left the plan with NO binding for a netdev whose ifindex the Go
-/// ingress map still carries. An ifindex in the ingress map with no READY
-/// binding is `drop_degraded_transit` (BINDING_MISSING).
+/// THE BASE ROW IS UNZONED ON PURPOSE, and that is the shape that makes this
+/// observable rather than merely inconsistent. An empty zone excludes the
+/// base row for the ROW reason that remains after #10308; it is not a
+/// management/control-name exemption. The trust VLAN child's re-key is the
+/// netdev's only route into the plan under the ANY-owner rule, so refusing it
+/// would leave NO binding for a netdev whose ifindex the Go ingress map carries.
+/// An ifindex in the ingress map with no READY binding is `drop_degraded_transit`
+/// (BINDING_MISSING).
 ///
 /// FAIL-ON-REVERT: change `snapshot_refuses_parent_netdev` back to
 /// `.iter().any(...)` and this goes RED — planned came back without
@@ -4777,15 +4765,14 @@ fn a_netdev_with_a_bindable_owner_is_not_refused() {
         clear_rx_queue_count_override, include_userspace_binding_interface, replan_queues,
         set_rx_queue_count_override, userspace_unbindable_netdev,
     };
-
     clear_rx_queue_count_override();
     set_rx_queue_count_override("ge-0-0-5", 6);
 
-    // The base NIC. Bindable as a DEVICE; excluded only by its mgmt ZONE.
+    // The base NIC. Bindable as a DEVICE; excluded only because it is unzoned.
     let base = InterfaceSnapshot {
         name: "ge-0/0/5".to_string(),
         linux_name: "ge-0-0-5".to_string(),
-        zone: "mgmt".to_string(),
+        zone: String::new(),
         ifindex: 30,
         rx_queues: 6,
         ..Default::default()
@@ -4794,8 +4781,7 @@ fn a_netdev_with_a_bindable_owner_is_not_refused() {
     let tunnel_unit = InterfaceSnapshot {
         name: "ge-0/0/5.0".to_string(),
         linux_name: "ge-0-0-5".to_string(),
-        parent_linux_name: "ge-0-0-5".to_string(),
-        zone: "mgmt".to_string(),
+        zone: String::new(),
         tunnel: true,
         ifindex: 30,
         parent_ifindex: 30,
@@ -4826,7 +4812,7 @@ fn a_netdev_with_a_bindable_owner_is_not_refused() {
     );
     assert!(
         !include_userspace_binding_interface(&base),
-        "premise: the base must NOT be a candidate on its own (mgmt zone), or the \
+        "premise: the base must NOT be a candidate on its own (empty zone), or the \
          netdev enters the plan regardless and the refusal is unobservable"
     );
 

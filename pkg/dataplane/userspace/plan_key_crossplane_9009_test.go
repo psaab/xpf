@@ -134,10 +134,11 @@ func TestRefusedBindTargetRowIsNotHashed9009(t *testing.T) {
 func TestOrphanVLANChildHashesTheParentsQueueCount9009(t *testing.T) {
 	child := planKeyIface9009("ge-0/0/0.100", "ge-0-0-0.100", "ge-0-0-0", 8, 7, 100, 4)
 
-	// ORPHAN: no row binds the physical parent (its own row is in `mgmt`, the
-	// shipped shape from secure_tunnel_parent_redirect_6691_test.go).
+	// ORPHAN: no row binds the physical parent (its own row is UNZONED, so it
+	// is not a binding candidate). Management/control names no longer create
+	// this shape: #10308 treats them as ordinary data-zone labels.
 	orphan := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
-		{Name: "ge-0/0/0", Zone: "mgmt", LinuxName: "ge-0-0-0", Ifindex: 7},
+		{Name: "ge-0/0/0", Zone: "", LinuxName: "ge-0-0-0", Ifindex: 7},
 		child,
 	}}
 	// NON-ORPHAN: the parent is a binding candidate.

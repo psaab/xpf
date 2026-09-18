@@ -333,8 +333,10 @@ fn write_canonical_json(value: &serde_json::Value, out: &mut String) {
 /// two halves behave differently under a REDIRECT. `replan_queues` re-keys an
 /// orphan VLAN child onto its physical parent, so the child hands the planner a
 /// netdev that is not its own — and the classes below travel with the netdev,
-/// while the ones left in the caller (a mgmt/control ZONE, an empty zone, a
-/// local-fabric ROLE) describe the ROW and must not be inherited by a sibling.
+/// while the ones left in the caller (an empty zone or a local-fabric ROLE)
+/// describe the ROW and must not be inherited by a sibling. Zone names are
+/// deliberately absent: `mgmt`/`control` are operator-controlled labels, not
+/// lifeline identity (#10308).
 ///
 /// The Go control plane mirrors this split exactly in
 /// `userspaceUnbindableNetdev` (pkg/dataplane/userspace/ingress_exclusions.go).
@@ -438,7 +440,11 @@ pub(crate) fn include_userspace_binding_interface(iface: &InterfaceSnapshot) -> 
     if userspace_unbindable_netdev(iface) {
         return false;
     }
-    !matches!(iface.zone.as_str(), "mgmt" | "control")
+    // Zone names are operator-controlled labels, not lifeline identity.
+    // `mgmt`/`control` must not remove a data NIC from policy adjudication;
+    // lifeline names are excluded by userspace_unbindable_netdev instead
+    // (#10308). Keep this predicate identical to the Go row-side predicate.
+    true
 }
 
 /// #3091: a VLAN-child interface (e.g. `reth0.80` → Linux netdev
@@ -534,8 +540,9 @@ fn snapshot_has_parent_candidate(snapshot: &ConfigSnapshot, parent: &str) -> boo
 /// ships an unbindable `ge-0/0/5.0` row and a bindable `ge-0/0/5` row on ONE
 /// netdev. Under the ANY reading a zoned VLAN sibling of that NIC contributed no
 /// candidate at all — and when the NIC's own base row is excluded for a ROW
-/// reason (a `mgmt` zone, the shape `TestParentRedirectKeepsAMgmtZonedParent`
-/// exists for), nothing else supplied it either, so the plan lost a netdev whose
+/// reason (an empty zone or a local-fabric member — `mgmt`/`control` zone
+/// names no longer exclude rows since #10308), nothing else supplied it
+/// either, so the plan lost a netdev whose
 /// ifindex the Go ingress map still carries. An ifindex in the ingress map with
 /// no READY binding is `drop_degraded_transit` (BINDING_MISSING) — the unsafe
 /// direction, by this file's own invariant.
@@ -675,12 +682,12 @@ pub(crate) fn replan_queues(
             // (`update_snapshot_binding_plan_key`) and the Go authoritative
             // allowlist (`UserspaceBoundLinuxInterfaces`) both filter through
             // the binding exclusion contract — zoned, non-tunnel,
-            // non-local-fabric, excluding fxp*/em*/fab*/lo0 and mgmt/control
-            // zones. `replan_queues` MUST act on exactly that set; a
+            // non-local-fabric, excluding fxp*/em*/fab*/lo0 by interface
+            // identity. Zone names (`mgmt`/`control`) do not filter data NICs
+            // (#10308). `replan_queues` MUST act on exactly that set; a
             // prefix-only `ge-*`/`xe-*`/`et-*` test (the pre-#2915 predicate)
-            // let a `ge-*` netdev placed in a mgmt/control zone (or a
-            // tunnel/local-fabric context) be planned as an AF_XDP binding
-            // that neither the hash nor the control plane accounts for.
+            // let a tunnel/local-fabric context be planned as an AF_XDP
+            // binding that neither the hash nor the control plane accounts for.
             if !include_userspace_binding_interface(iface) {
                 continue;
             }

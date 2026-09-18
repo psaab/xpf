@@ -51,8 +51,9 @@ func planKeyVLANChildParent(iface InterfaceSnapshot, resolvedLinux string) strin
 // planKeyIncludesInterface is Go's `include_userspace_binding_interface`. It is
 // the pair the ingress loops already use, kept in one place so the plan key and
 // the alias builder cannot drift: zone-empty, plus the DEVICE half (unbindable)
-// and the ROW half (mgmt/control, local fabric member) that
-// userspaceSkipsIngressInterface owns.
+// and the ROW half (local-fabric member) that userspaceSkipsIngressInterface
+// owns. Zone names (`mgmt`/`control`) deliberately do not filter data NICs
+// (#10308).
 func planKeyIncludesInterface(iface InterfaceSnapshot) bool {
 	return iface.Zone != "" && !userspaceSkipsIngressInterface(iface)
 }
@@ -97,9 +98,9 @@ func planKeyEffectiveRXQueues(snapshotRXQueues int, linuxName string) int {
 // config snapshots" dismissal does not cover the orphan case — the divergence
 // persists across commits rather than being one number sampled at two instants.
 //
-// The orphan shape is SHIPPED, not hypothetical:
-// secure_tunnel_parent_redirect_6691_test.go builds base + unit-0 in `mgmt`
-// with `.100` in `trust`, so the parent is excluded and no candidate exists.
+// The orphan shape is SHIPPED, not hypothetical: the unzoned-parent fixture
+// in TestOrphanVLANChildHashesTheParentsQueueCount9009 has no candidate for
+// the parent (`mgmt`/`control` zone names no longer exclude rows since #10308).
 func planKeyRXQueues(snap *ConfigSnapshot, iface InterfaceSnapshot, resolvedLinux string) int {
 	if parent := planKeyVLANChildParent(iface, resolvedLinux); parent != "" {
 		if !planKeySnapshotHasParentCandidate(snap, parent) {

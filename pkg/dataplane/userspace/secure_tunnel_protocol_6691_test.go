@@ -141,7 +141,8 @@ func preV5HelperAcceptsSnapshot(version int) bool {
 
 // preV5HelperPlansBinding models a pre-v5 helper's binding admission: the
 // current predicate MINUS the `secure_tunnel` arm, which such a helper does not
-// have. Everything else is unchanged, so this isolates the one field.
+// have. Everything else is unchanged, including the #10308 rule that
+// management/control zone names do not filter data interfaces.
 func preV5HelperPlansBinding(iface InterfaceSnapshot) bool {
 	if iface.Zone == "" || iface.Tunnel || iface.LocalFabric != "" {
 		return false
@@ -158,10 +159,6 @@ func preV5HelperPlansBinding(iface InterfaceSnapshot) bool {
 		len(base) >= 2 && base[:2] == "em",
 		len(base) >= 3 && base[:3] == "fab",
 		base == "lo0":
-		return false
-	}
-	switch iface.Zone {
-	case "mgmt", "control":
 		return false
 	}
 	return true

@@ -1633,11 +1633,10 @@ func snapshotBindingPlanKey(snapshot *ConfigSnapshot) string {
 			// #9009 D5: Rust has no `logical_only` field at all, and the #8901
 			// adjudication justified keeping it here as "Rust excludes the row
 			// upstream via include_userspace_binding_interface". THAT IS FALSE:
-			// that function tests zone-empty, local_fabric_member,
-			// userspace_unbindable_netdev and mgmt/control; `logical_only`
-			// appears nowhere in userspace-dp, and the wire value is silently
-			// discarded by a serde struct that has no such field.
-			//
+			// that function tests zone-empty, local_fabric_member and
+			// userspace_unbindable_netdev; `logical_only` appears nowhere in
+			// userspace-dp, and the wire value is silently discarded by a serde
+			// struct that has no such field.
 			// The CONCLUSION survives, which is why the field stays: a
 			// LogicalOnly flip also swaps the row between a real and a synthetic
 			// ifindex (shouldUseLogicalOnlyParentBoundRethVLAN), and BOTH sides
