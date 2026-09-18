@@ -774,19 +774,24 @@ packet handlers, and MIB view that call into them.
   no LinkList snapshot); the excess sheds silently, as with unknown-community
   drops. Shed is silent rather than `tooBig` because a `tooBig` reply costs a
   decode plus near-full USM framing for v3, defeating the shed. Admitted
-  requests are additionally debited their loop time at 10x; once N expensive
-  sources are active, each source's service charge scales to `max(10, 2N)`,
-  so they converge to equal ~1/(2N) shares of the global half rather than
-  racing FIFO. The global backstop remains on every admission (2000/s + 4000
-  burst, aggregate service charged at 2x); when it is empty, admitted sources
-  yield the next credit to a newcomer that has already reached userspace.
-  Pending/expensive state expires after one second via a bounded sweep, and at
-  most 1024 sources are tracked; past the cap a newcomer displaces a random
-  incumbent. Typical polls cost microseconds and remain on the ordinary
-  admission factor, so legitimate polling and walk bursts pass untouched.
-  This bounds userspace multi-source FIFO unfairness (#10113); a flood that
-  saturates the socket buffer ahead of userspace is likewise out of reach,
-  and spoofed-rotating floods remain bounded by the global aggregate.
+  requests are additionally debited their measured loop time at 10x; once N
+  expensive sources are active, each source's service charge scales to
+  `max(10, 2N)`: for N <= 5 the 10x floor preserves the single-source 1/10
+  loop share, while N >= 5 converges to equal ~1/(2N) shares of the loop
+  (1/N of the global half) rather than racing FIFO. A request taking at least
+  1ms joins the expensive-demand set; cheap keepalives do not retain that
+  slot. The global backstop remains on every admission (2000/s + 4000 burst,
+  aggregate service charged at 2x); when it is scarce, admitted sources yield
+  one reserved credit per pending userspace newcomer while surplus remains
+  work-conserving. Pending/expensive state expires after one second via a
+  bounded sweep, and at most 1024 sources are tracked; past the cap a newcomer
+  displaces a random incumbent. Typical polls cost microseconds and retain the
+  ordinary 10x service factor, so legitimate polling and walk bursts pass
+  untouched. This bounds userspace multi-source FIFO unfairness (#10113);
+  per-source fairness assumes stable, non-spoofed source identities — stable
+  Sybils can consume contender slots but remain aggregate-bounded — while a
+  flood that saturates the socket buffer ahead of userspace is out of reach
+  and rotating-spoof floods remain bounded by the global aggregate.
 - **Trap delivery is asynchronous and bounded (#2991).** Link-state traps
   are emitted from the daemon's netlink link-monitor goroutine.
   `sendLinkTraps` builds the v2c packet on the caller's goroutine (cheap,

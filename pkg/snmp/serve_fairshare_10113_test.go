@@ -118,6 +118,81 @@ func TestServeBudgetFairShareExpiry10113(t *testing.T) {
 	}
 }
 
+// TestServeBudgetFairShareCheapSybilExpires10113 prevents cheap keepalives
+// from reserving an expensive contender slot. The legitimate expensive source
+// stays active while six Sybils are refreshed below the classifier threshold;
+// their scarce-global retries are only one-shot probes and the later source
+// must still receive the ordinary 10x factor.
+func TestServeBudgetFairShareCheapSybilExpires10113(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := newSNMPServeBudget()
+	b.now = func() time.Time { return now }
+	legit := net.ParseIP("10.9.0.1")
+	sybil := make([]net.IP, 6)
+	admitExpensive10113(t, b, legit, 1, 10*time.Millisecond)
+	for i := range sybil {
+		sybil[i] = net.ParseIP(fmt.Sprintf("10.9.0.%d", i+2))
+		admitExpensive10113(t, b, sybil[i], 1, 10*time.Millisecond)
+	}
+
+	now = now.Add(900 * time.Millisecond)
+	for _, ip := range sybil {
+		allowN10113(t, b, ip, 1)
+		b.account(ip, 999*time.Microsecond)
+	}
+	allowN10113(t, b, legit, 1)
+	b.account(legit, 10*time.Millisecond)
+
+	// This admitted cheap observer triggers expiry of the six Sybil slots.
+	now = now.Add(200 * time.Millisecond)
+	observer := net.ParseIP("10.9.0.8")
+	allowN10113(t, b, observer, 1)
+	b.mu.Lock()
+	b.globalTokens = 0
+	b.globalLast = now
+	b.mu.Unlock()
+	for _, ip := range sybil {
+		if b.allow(ip) {
+			t.Fatal("Sybil probe admitted with an empty global bucket")
+		}
+	}
+
+	// Refill enough global credits for all six pending probes, but keep the
+	// pending state younger than the one-second expiry sweep.
+	now = now.Add(900 * time.Millisecond)
+	for _, ip := range sybil {
+		allowN10113(t, b, ip, 1)
+		b.account(ip, 999*time.Microsecond)
+	}
+	// A second scarce-global retry must not re-enroll the cheap probe.
+	b.mu.Lock()
+	b.globalTokens = 0
+	b.globalLast = now
+	b.mu.Unlock()
+	if b.allow(sybil[0]) {
+		t.Fatal("second cheap Sybil retry admitted with an empty global bucket")
+	}
+	raw := sybil[0].To16()
+	var key [16]byte
+	copy(key[:], raw)
+	b.mu.Lock()
+	pendingCount := b.pendingSources
+	eligible := b.perSource[key].everExpensive
+	b.globalTokens = snmpServeGlobalBurst
+	b.mu.Unlock()
+	if pendingCount != 0 || eligible {
+		t.Fatalf("cheap probe re-enrolled: pending=%d everExpensive=%t", pendingCount, eligible)
+	}
+	allowN10113(t, b, legit, 1)
+	b.account(legit, 10*time.Millisecond)
+	fresh := net.ParseIP("10.9.0.9")
+	allowN10113(t, b, fresh, 1)
+	b.account(fresh, 125*time.Millisecond)
+	if got := drainAdmitCount10113(b, fresh, snmpServeBurstPerSource); got != 74 {
+		t.Fatalf("cheap Sybils retained contender slots: admitted %d, want 74 (factor 10)", got)
+	}
+}
+
 // TestServeBudgetFairShareSplitsGlobalHalf10113 is the #10113 enforcement cell:
 // ten saturated expensive sources split the global half equally even when one
 // offers 10x the arrival pressure. The scripted arrival pattern (aggressor
@@ -213,6 +288,10 @@ func TestServeBudgetFairSharePendingExpiry10113(t *testing.T) {
 	pending := net.ParseIP("10.12.0.2")
 	if b.allow(pending) {
 		t.Fatal("pending newcomer admitted with empty global bucket")
+	}
+	now = now.Add(500 * time.Millisecond)
+	if !b.allow(existing) {
+		t.Fatal("existing source blocked despite surplus global credits")
 	}
 	now = now.Add(2 * time.Second)
 	if !b.allow(existing) {
