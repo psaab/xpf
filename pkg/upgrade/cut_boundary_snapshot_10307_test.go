@@ -123,7 +123,7 @@ func TestRun_CutBoundarySnapshotDoesNotResurrectConfirmedState10307(t *testing.T
 		t.Fatalf("read config DB after rollback: %v", err)
 	}
 	if string(got) != committedAtStop {
-		t.Fatalf("rollback lost commit at STOP boundary: got %q, want %q", got, committedAtStop)
+		t.Errorf("rollback lost commit at STOP boundary: got %q, want %q", got, committedAtStop)
 	}
 	if _, err := os.Stat(confirmPath); !os.IsNotExist(err) {
 		t.Fatalf("confirm.json was resurrected by rollback: stat err=%v", err)
