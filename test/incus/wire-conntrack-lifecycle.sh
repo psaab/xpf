@@ -104,9 +104,10 @@ EXPIRED_BURST="${EXPIRED_BURST:-1000}"
 FRESH_BURST="${FRESH_BURST:-1000}"
 IDLE_WAIT="${IDLE_WAIT:-15}"
 APP_TIMEOUT="${APP_TIMEOUT:-10}"
-SUBJECT_DURATION="${SUBJECT_DURATION:-90}"
 STEP_TIMEOUT="${STEP_TIMEOUT:-90}"
 RESERVE_DURATION=$((STEP_TIMEOUT * 3 + 30))
+SUBJECT_DURATION="${SUBJECT_DURATION:-$((RESERVE_DURATION + IDLE_WAIT + 60))}"
+SINK_DURATION="${SINK_DURATION:-$((SUBJECT_DURATION + STEP_TIMEOUT + 60))}"
 APP_SET="wire-10030-lifecycle-set"
 APP_LIFECYCLE="wire-10030-lifecycle"
 HOLD_SRC="${SCRIPT_DIR}/wire_tcp_hold.py"
@@ -205,8 +206,7 @@ printf '%b' "$CONFIG" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >/tmp/xpf-wir
 grep -qE 'commit (complete|succeeded)' /tmp/xpf-wire-conntrack-commit.log || fail_void harness-void
 
 for p in "$LIFECYCLE_PORT"; do
-    $SG "incus exec ${SINK_REF} -- rm -f /tmp/xpf-wire-hold-${p}.log" >/dev/null 2>&1 || fail_void harness-void
-    $SG "incus exec ${SINK_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --serve ${p} --duration 120 >/tmp/xpf-wire-hold-${p}.log 2>&1 &'" >/dev/null 2>&1 || fail_void harness-void
+    $SG "incus exec ${SINK_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --serve ${p} --duration ${SINK_DURATION} >/tmp/xpf-wire-hold-${p}.log 2>&1 &'" >/dev/null 2>&1 || fail_void harness-void
 done
 for p in "$LIFECYCLE_PORT"; do
     for _ in 1 2 3 4 5 6 7 8 9 10; do
