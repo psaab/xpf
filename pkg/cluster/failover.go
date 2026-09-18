@@ -79,6 +79,28 @@ func (o FailoverOutcome) String() string {
 	return "applied"
 }
 
+// nextFailoverOwnerLocked allocates an identity for a failover reservation.
+// Caller must hold m.mu. A non-zero token is required because zero means that
+// no reservation exists in failoverInProgress.
+func (m *Manager) nextFailoverOwnerLocked() uint64 {
+	m.failoverOwnerSeq++
+	if m.failoverOwnerSeq == 0 {
+		// The sequence is practically unexhaustible, but never let uint64
+		// wrap make an old token equal to a future reservation.
+		m.failoverOwnerSeq++
+	}
+	return m.failoverOwnerSeq
+}
+
+// releaseFailoverLocked drops a reservation only when it still belongs to the
+// caller. An old request can outlive a remove+re-add and must not clear the
+// fresh incarnation's newer reservation. Caller must hold m.mu.
+func (m *Manager) releaseFailoverLocked(rgID int, owner uint64) {
+	if current, ok := m.failoverInProgress[rgID]; ok && current == owner {
+		delete(m.failoverInProgress, rgID)
+	}
+}
+
 func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	m.mu.Lock()
 	rg, ok := m.groups[rgID]
@@ -86,11 +108,12 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 		m.mu.Unlock()
 		return FailoverApplied, fmt.Errorf("redundancy group %d not found", rgID)
 	}
-	if m.failoverInProgress[rgID] {
+	if m.failoverInProgress[rgID] != 0 {
 		m.mu.Unlock()
 		return FailoverApplied, fmt.Errorf("failover already in progress for redundancy group %d, please wait", rgID)
 	}
-	m.failoverInProgress[rgID] = true
+	owner := m.nextFailoverOwnerLocked()
+	m.failoverInProgress[rgID] = owner
 	// Snapshot the per-RG failover generation before releasing m.mu for the
 	// pre-hook. A ResetFailover landing in the unlocked window bumps it, and
 	// the post-relock re-check below then abandons the trailing SecondaryHold
@@ -107,7 +130,7 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	// node-targeted form already refuses through the peer's transfer readiness.
 	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy group %d", rgID)); err != nil {
 		m.mu.Lock()
-		delete(m.failoverInProgress, rgID)
+		m.releaseFailoverLocked(rgID, owner)
 		m.mu.Unlock()
 		return FailoverApplied, err
 	}
@@ -151,7 +174,7 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	// Always clear the in-progress flag under the same lock acquisition
 	// that performs the state change, so there is no window where another
 	// caller can slip in between flag-clear and state-commit.
-	defer delete(m.failoverInProgress, rgID)
+	defer m.releaseFailoverLocked(rgID, owner)
 
 	if preHookErr != nil {
 		return FailoverApplied, preHookErr
@@ -289,6 +312,7 @@ func (m *Manager) FenceStatus() (action string, events []HistoryEvent) {
 // from resurrecting that newer operator decision. The abort also leaves any
 // newer hold already installed by another operator path untouched.
 type manualFailoverHoldSnapshot struct {
+	rg            *RedundancyGroupState
 	armed         bool
 	at            time.Time
 	state         NodeState
@@ -302,7 +326,7 @@ func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailo
 		return
 	}
 	rg, ok := m.groups[rgID]
-	if !ok {
+	if !ok || rg != snapshot.rg {
 		return
 	}
 	if rg.ManualFailover {
@@ -333,7 +357,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	// Reserve this RG for the whole request. Without the reservation, a
 	// concurrent request could consume the hold after this request clears it,
 	// then a late abort could restore the wrong request's snapshot.
-	if m.failoverInProgress[rgID] {
+	if m.failoverInProgress[rgID] != 0 {
 		m.mu.Unlock()
 		return fmt.Errorf("failover already in progress for redundancy group %d, please wait", rgID)
 	}
@@ -356,7 +380,8 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 			reasons,
 		)
 	}
-	m.failoverInProgress[rgID] = true
+	owner := m.nextFailoverOwnerLocked()
+	m.failoverInProgress[rgID] = owner
 	fn := m.peerFailoverFn
 	commitFn := m.peerFailoverCommitFn
 	transferReadyFn := m.transferReadinessFn
@@ -365,7 +390,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
-		delete(m.failoverInProgress, rgID)
+		m.releaseFailoverLocked(rgID, owner)
 		m.mu.Unlock()
 	}()
 
@@ -407,6 +432,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	// failure must not silently release the existing transfer-out state.
 	if rg.ManualFailover {
 		hold = manualFailoverHoldSnapshot{
+			rg:            rg,
 			armed:         true,
 			at:            rg.ManualFailoverAt,
 			state:         rg.State,
@@ -729,14 +755,17 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 			m.mu.Unlock()
 			return res, fmt.Errorf("redundancy group %d not found", rgID)
 		}
-		if m.failoverInProgress[rgID] {
+		if m.failoverInProgress[rgID] != 0 {
 			m.mu.Unlock()
 			return res, fmt.Errorf("failover already in progress for redundancy groups %v, please wait", ids)
 		}
 	}
 	batchGen := make(map[int]uint64, len(ids))
+	batchOwners := make(map[int]uint64, len(ids))
 	for _, rgID := range ids {
-		m.failoverInProgress[rgID] = true
+		owner := m.nextFailoverOwnerLocked()
+		m.failoverInProgress[rgID] = owner
+		batchOwners[rgID] = owner
 		// Snapshot each member's failover generation before releasing m.mu
 		// for the pre-hook so a ResetFailover on a member during the unlocked
 		// window is detected and its reset preserved (#5246).
@@ -752,7 +781,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy groups %v", ids)); err != nil {
 		m.mu.Lock()
 		for _, rgID := range ids {
-			delete(m.failoverInProgress, rgID)
+			m.releaseFailoverLocked(rgID, batchOwners[rgID])
 		}
 		m.mu.Unlock()
 		return res, err
@@ -801,7 +830,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	defer m.mu.Unlock()
 	defer func() {
 		for _, rgID := range ids {
-			delete(m.failoverInProgress, rgID)
+			m.releaseFailoverLocked(rgID, batchOwners[rgID])
 		}
 	}()
 
@@ -891,7 +920,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		}
 		// Validate all members before claiming any ownership, so a rejected
 		// batch never leaves a partial reservation behind.
-		if m.failoverInProgress[rgID] {
+		if m.failoverInProgress[rgID] != 0 {
 			m.mu.Unlock()
 			return fmt.Errorf("failover already in progress for redundancy groups %v, please wait", ids)
 		}
@@ -915,8 +944,11 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 			)
 		}
 	}
+	batchOwners := make(map[int]uint64, len(ids))
 	for _, rgID := range ids {
-		m.failoverInProgress[rgID] = true
+		owner := m.nextFailoverOwnerLocked()
+		m.failoverInProgress[rgID] = owner
+		batchOwners[rgID] = owner
 	}
 	fn := m.peerFailoverBatchFn
 	commitFn := m.peerFailoverCommitBatchFn
@@ -927,7 +959,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	defer func() {
 		m.mu.Lock()
 		for _, rgID := range ids {
-			delete(m.failoverInProgress, rgID)
+			m.releaseFailoverLocked(rgID, batchOwners[rgID])
 		}
 		m.mu.Unlock()
 	}()
@@ -968,6 +1000,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		rg := m.groups[rgID]
 		if rg != nil && rg.ManualFailover {
 			holdSnapshots[rgID] = manualFailoverHoldSnapshot{
+				rg:            rg,
 				armed:         true,
 				at:            rg.ManualFailoverAt,
 				state:         rg.State,
