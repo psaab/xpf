@@ -42,6 +42,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -178,12 +179,14 @@ class StrictSignManifestTests(unittest.TestCase):
         # The gate PASSES (honest set); minisign then fails on the bogus key —
         # and neither the live manifest nor the live .minisig may change.
         files, sums = _write_set(self.dir)
-        old_sums, sums_mtime = _freeze(sums, b"stale-live-manifest-bytes\n")
+        sign.write_manifest(sums, files)
+        old_sums, sums_mtime = _freeze(sums, Path(sums).read_bytes())
         old_sig, sig_mtime = _freeze(sums + ".minisig", b"stale-sig-bytes\n")
         rc, err = _run_main(["sign-manifest", "--manifest", sums,
                              "--seckey", "/nonexistent.sec"] + files)
         self.assertEqual(rc, 1)
         self.assertTrue(err.startswith("ERROR:"), err)
+        self.assertIn("minisign sign failed", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(Path(sums).read_bytes(), old_sums)
         self.assertEqual(os.stat(sums).st_mtime, sums_mtime)
@@ -288,6 +291,87 @@ class StrictSignManifestTests(unittest.TestCase):
                 sign_ok = False
             self.assertEqual(sign_ok, bake_ok,
                              f"sign vs bake disagree on {v!r}")
+
+
+@unittest.skipUnless(_HAVE_MINISIGN, "minisign not installed")
+class ResignContentIntegrityTests(unittest.TestCase):
+    """#10120: a re-sign must bind to the previously recorded file bytes."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="xpf-10120-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _signed_set(self):
+        sec = os.path.join(self.dir, "img.sec")
+        pub = os.path.join(self.dir, "img.pub")
+        subprocess.run(["minisign", "-G", "-W", "-p", pub, "-s", sec],
+                       check=True, capture_output=True)
+        files, sums = _write_set(self.dir)
+        rc, err = _run_main(["sign-manifest", "--manifest", sums,
+                             "--seckey", sec] + files)
+        self.assertEqual(rc, 0, err)
+        return sec, pub, files, sums
+
+    def _resign(self, sec, files, sums):
+        return _run_main(["sign-manifest", "--manifest", sums,
+                          "--seckey", sec] + files)
+
+    @staticmethod
+    def _flip_first_byte(path):
+        data = bytearray(path.read_bytes())
+        data[0] ^= 0xFF
+        path.write_bytes(data)
+
+    def _assert_tampered_refused(self, suffix, mutate):
+        sec, _pub, files, sums = self._signed_set()
+        target = next(path for path in files if path.endswith(suffix))
+        old_sums = Path(sums).read_bytes()
+        old_sig = Path(sums + ".minisig").read_bytes()
+        mutate(Path(target))
+        rc, err = self._resign(sec, files, sums)
+        self.assertEqual(rc, 1, err)
+        self.assertIn(os.path.basename(target), err)
+        self.assertIn("recorded hash", err)
+        self.assertEqual(Path(sums).read_bytes(), old_sums)
+        self.assertEqual(Path(sums + ".minisig").read_bytes(), old_sig)
+
+    def test_qcow2_byte_tamper_refused(self):
+        # kill: remove the recorded-hash comparison from the re-sign gate.
+        self._assert_tampered_refused(
+            ".qcow2", self._flip_first_byte)
+
+    def test_metadata_byte_tamper_refused(self):
+        # kill: remove the recorded-hash comparison from the re-sign gate.
+        self._assert_tampered_refused(
+            ".incus-metadata.tar.gz", self._flip_first_byte)
+
+    def test_sidecar_byte_tamper_preserving_flags_refused(self):
+        # kill: only compare sidecar flags, not all recorded sidecar bytes.
+        self._assert_tampered_refused(
+            ".manifest",
+            lambda path: path.write_bytes(
+                path.read_bytes() + b"# non-flag byte tamper\n"))
+
+    def test_untampered_resign_succeeds(self):
+        # kill: reject every existing manifest, including an honest recovery.
+        sec, pub, files, sums = self._signed_set()
+        rc, err = self._resign(sec, files, sums)
+        self.assertEqual(rc, 0, err)
+        verified = subprocess.run(
+            ["minisign", "-V", "-p", pub, "-m", sums,
+             "-x", sums + ".minisig"],
+            capture_output=True)
+        self.assertEqual(verified.returncode, 0,
+                         verified.stderr.decode())
+
+    def test_resign_uses_each_checked_hash_once(self):
+        # kill: re-hash live bytes again while rendering the signed manifest.
+        sec, _pub, files, sums = self._signed_set()
+        with mock.patch.object(sign, "sha256_file",
+                               wraps=sign.sha256_file) as hashed:
+            rc, err = self._resign(sec, files, sums)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(hashed.call_count, len(files))
 
 
 class OSErrorHandlingTests(unittest.TestCase):

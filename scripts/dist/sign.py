@@ -149,16 +149,18 @@ def assert_bake_set(manifest_path, files):
 
     Call BEFORE write_and_sign_manifest: every refusal raises SignError (the CLI maps
     it to `ERROR:` + exit 1) with the manifest and any pre-existing .minisig
-    left byte-identical. What this is NOT, stated so a reader does not
-    mistake the tripwire for authentication:
+    left byte-identical. The gate checks:
+      - the exact four-file bake set and sibling directory;
+      - the provenance flags below;
+      - when a recorded manifest already exists, every live file's bytes match
+        its recorded SHA256 before any re-sign.
+    What this is NOT:
       - it never verifies the OLD signature (a rotation may lack the old key;
         the actor here is the publisher/operator, not a remote party);
-      - it never compares current bytes to the recorded hashes — a byte
-        tamper that preserves the flags is re-hashed and signed (publish's
-        hash checks then pass; tracked as #10120, outside F-063's letter);
       - it does not check the inventory leg (hollow/mismatched pkgs stays
         publish's job — publish remains the full downstream gate).
     """
+
     base = os.path.basename(manifest_path)
     if not is_bake_manifest(manifest_path):
         raise SignError(
@@ -211,6 +213,29 @@ def assert_bake_set(manifest_path, files):
             f"{base}: provenance sidecar records no guest_kernel — refusing "
             "to sign a set whose traceability record cannot describe it "
             "(#9920; re-bake)")
+    # On re-sign, bind the live bytes to the hashes already recorded in the
+    # existing manifest. The initial sign has no manifest yet, so there is
+    # nothing to compare and the normal write path creates the record.
+    if os.path.exists(manifest_path):
+        try:
+            recorded = parse_manifest(manifest_path)
+        except (OSError, SignError) as e:
+            raise SignError(
+                f"{base}: cannot read recorded hashes for re-sign: {e} "
+                "(#10120)") from e
+        for path in files:
+            name = os.path.basename(path)
+            expected_hash = recorded.get(name)
+            if expected_hash is None:
+                raise SignError(
+                    f"{base}: no recorded hash for {name} — refusing to "
+                    f"re-sign (#10120)")
+            actual_hash = sha256_file(path)
+            if actual_hash != expected_hash:
+                raise SignError(
+                    f"{base}: {name} bytes differ from recorded hash — "
+                    "refusing to re-sign (#10120)")
+        return recorded
 
 
 def require_minisign():
@@ -252,13 +277,16 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def write_manifest(manifest_path, files):
+def write_manifest(manifest_path, files, recorded_hashes=None):
     """Write a sha256sum-format manifest listing `files` by BASENAME only.
 
     Basename-only (never a path) so the manifest is location-independent and
     a consumer that fetched the file to any directory can verify it. Refuses
     duplicate basenames at write time — a duplicate would make the
     {basename: hash} map ambiguous on the verify side.
+
+    When `recorded_hashes` is supplied by the strict re-sign gate, render
+    those already-checked digests instead of re-reading live artifact bytes.
     """
     seen = set()
     lines = []
@@ -267,7 +295,15 @@ def write_manifest(manifest_path, files):
         if base in seen:
             raise SignError(f"duplicate basename in manifest set: {base}")
         seen.add(base)
-        lines.append(f"{sha256_file(path)}  {base}\n")
+        if recorded_hashes is None:
+            digest = sha256_file(path)
+        else:
+            try:
+                digest = recorded_hashes[base]
+            except KeyError as e:
+                raise SignError(
+                    f"no recorded hash for {base} while writing manifest") from e
+        lines.append(f"{digest}  {base}\n")
     with open(manifest_path, "w") as f:
         f.writelines(lines)
     return manifest_path
@@ -298,7 +334,8 @@ def sign_manifest(manifest_path, seckey_path, comment=None, sig_path=None):
     return sig_path
 
 
-def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None):
+def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None,
+                             recorded_hashes=None):
     """Write + minisign-sign `manifest_path`, committing atomically (#10119).
 
     write_manifest() then sign_manifest() leaves a NEW manifest beside a
@@ -309,6 +346,10 @@ def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None):
     signing failure leaves the live manifest and the live .minisig
     byte-identical (mtime included). Existing permission bits are preserved
     across the replace.
+
+    `recorded_hashes`, when supplied by the strict bake re-sign gate, is
+    passed to write_manifest so the already-checked hashes are signed rather
+    than re-reading live artifact bytes after the check.
 
     Two renames cannot be one atomic step: a crash between them leaves a new
     manifest beside the OLD .minisig — which fails closed downstream (the old
@@ -325,7 +366,7 @@ def write_and_sign_manifest(manifest_path, files, seckey_path, comment=None):
         fd, tmp_manifest = tempfile.mkstemp(prefix="." + base + ".",
                                             suffix=".tmp", dir=manifest_dir)
         os.close(fd)
-        write_manifest(tmp_manifest, files)
+        write_manifest(tmp_manifest, files, recorded_hashes=recorded_hashes)
         if os.path.exists(manifest_path):
             shutil.copymode(manifest_path, tmp_manifest)
         tmp_sig = tmp_manifest + ".minisig"
@@ -550,10 +591,12 @@ def _main(argv):
             # manifest copied over a bake name is refused downstream —
             # gate_images requires the signed set to equal the bake four-file
             # set (parent review #10119).
+            recorded_hashes = None
             if is_bake_manifest(a.manifest):
-                assert_bake_set(a.manifest, a.files)
-            sig = write_and_sign_manifest(a.manifest, a.files, a.seckey,
-                                          a.comment)
+                recorded_hashes = assert_bake_set(a.manifest, a.files)
+            sig = write_and_sign_manifest(
+                a.manifest, a.files, a.seckey, a.comment,
+                recorded_hashes=recorded_hashes)
             print(f"signed: {a.manifest} -> {sig}")
             return 0
         if a.cmd == "verify":
