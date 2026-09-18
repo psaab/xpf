@@ -88,7 +88,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 					return tc.probeErr
 				}
 				if tc.old {
-					status.ConfigSnapshotProtocolVersion = ProtocolVersion - 1
+					status.ConfigSnapshotProtocolVersion = MinProtocolPersistentNatLeaseScope - 1
 				} else {
 					status.ConfigSnapshotProtocolVersion = ProtocolVersion
 				}

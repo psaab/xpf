@@ -95,7 +95,7 @@ use attempt::{
 use dispatch::{EncapOutcome, InboundOutcome, dispatch_inbound, encap_and_send};
 use sock::{
     PollWait, WgRecv, bind_wg_socket, bind_wg_socket_with_device, canonicalize_endpoint,
-    poll_timeout_ms, set_recv_tos_options, v6_bind_can_fallback, wg_poll_wait, wg_recvmsg,
+    poll_timeout_ms, set_recv_tos_options, wg_poll_wait, wg_recvmsg,
 };
 pub(super) use sock::wg_outer_bind_device_for_transport_table;
 
@@ -110,7 +110,8 @@ pub(super) use mtu::WG_DEFAULT_OUTER_MTU;
 use mtu::{wg_encapped_size, wg_inner_fits_outer_mtu};
 #[cfg(test)]
 use sock::{
-    CmsgBuf, WG_POLL_CAP_MS, parse_outer_ecn_from_cmsg, sockaddr_storage_to_socketaddr, wg_send_to,
+    CmsgBuf, WG_POLL_CAP_MS, parse_outer_ecn_from_cmsg, sockaddr_storage_to_socketaddr,
+    v6_bind_can_fallback, wg_send_to,
 };
 
 /// Socket/TUN read budget per poll tick — drains a bounded burst before
@@ -154,6 +155,7 @@ pub(super) fn wg_control_loop(
     // resolver's last-good endpoint in place; the UDP socket itself remains
     // correctly bound. A VRF-aware resolver is a separate follow-up.
     endpoint_hosts: Vec<([u8; 32], String)>,
+    // #7936: coordinator-owned resolver telemetry. Passed in rather than
     // created here for the same reason `recent_exceptions` is: this thread
     // writes it and the 1 Hz status path reads it, and the reader must not
     // depend on the writer still being alive.
