@@ -205,8 +205,8 @@ func TestFilterSelfNamedPrefixListCommits9875(t *testing.T) {
 // TestFilterFromMarkerGateEquivalence9875 pins gate-verdict == marker-verdict
 // per spelling (Codex B4): a marked lenient term must be strict-rejected (a
 // committed config never carries the marker), and a strict-rejected shape
-// must leave its record. #10071 closes the packed unknown rows; #10072 keeps
-// its term-packed valueless exclusion until its own gate fix lands.
+// must leave its record. #10071/#10072 close the packed unknown/valueless
+// escapes while keeping gate and marker on one packed view.
 func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 	rows := []struct {
 		name         string
@@ -225,9 +225,9 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 		{"from-packed valueless", func(t *testing.T) *ConfigTree {
 			return fwTree9875(t, `term T { from protocol; then discard; }`)
 		}, true, "protocol", "ValuelessFrom"},
-		{"term-packed valueless escapes both (#10072)", func(t *testing.T) *ConfigTree {
+		{"term-packed valueless (#10072)", func(t *testing.T) *ConfigTree {
 			return fwTree9875(t, `term T from protocol;`)
-		}, false, "", ""},
+		}, true, "protocol", "ValuelessFrom"},
 		{"flat unknown leaf", func(t *testing.T) *ConfigTree {
 			return buildFilterTree(t, "set firewall family inet filter F term T from protocol tcp",
 				"set firewall family inet filter F term T from ttl 64",
