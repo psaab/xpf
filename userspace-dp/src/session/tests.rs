@@ -9055,3 +9055,151 @@ fn tombstone_harvest_cap_transfers_drop_to_export_9856() {
         "overflow must transfer into the export buffer's fail-closed metric"
     );
 }
+
+// === #10309: over-capacity expiry must lose no Close =====================
+//
+// The session-expiry pass emits one Close delta per expired forward session
+// into the 4096-slot ring (`MAX_SESSION_DELTAS`). Pre-fix, a single 1 s GC
+// tick expiring more owned forward sessions than the ring holds DROPPED the
+// excess Closes (counted + latched, #2442) — and that delta is the ONLY
+// expiry-path carrier of the shared-session-map removal, the sibling
+// `DeleteSynced` fan-out, the `dnat_table` delete, the HA close and the
+// SESSION_CLOSE record. The stranded shared entry was then honoured as a
+// session hit with no age check, indefinitely: the #2442 resync re-emits
+// Opens only, so it can never convey the missing deletes.
+//
+// The fix retains ring-overflow Closes on the corresponding returned
+// `ExpiredSession`; the worker flushes those returned records in fixed-size
+// chunks immediately after the pass, in the same iteration — all-in-one-call
+// expiry is preserved and no Close is ever silently dropped. These cells pin
+// that contract. FAIL-ON-REVERT: pushing every Close through the bare ring
+// again reds both on `delta_drops` and on the Close count.
+//
+
+/// Install `n` forward UDP sessions sharing one expiration tick, draining
+/// install-time Opens along the way so the ring starts the tick empty.
+fn install_forward_udp_burst_10309(table: &mut SessionTable, n: usize, install_ns: u64) {
+    for i in 0..n {
+        let k = make_v4_key((i % 250) as u8, 1024 + (i / 250) as u16);
+        assert!(table.install_with_protocol(
+            k,
+            decision(),
+            metadata(),
+            install_ns,
+            PROTO_UDP,
+            0
+        ));
+        if i % 1024 == 1023 {
+            let _ = table.drain_deltas(MAX_SESSION_DELTAS);
+        }
+    }
+    let _ = table.drain_deltas(MAX_SESSION_DELTAS);
+    let _ = table.take_delta_loss();
+}
+
+/// Cell A: one over-capacity GC tick from an empty ring loses no Close.
+/// (RED probe: ring-only Close count; GREEN adds the overflow take.)
+#[test]
+fn expiry_over_capacity_tick_loses_no_close_10309() {
+    let mut table = SessionTable::new();
+    let install_ns = 1_000_000_000u64;
+    const N: usize = MAX_SESSION_DELTAS + 904; // 5000 forward sessions
+    install_forward_udp_burst_10309(&mut table, N, install_ns);
+    let drops_before = table.delta_drops();
+
+    let expired = table.expire_stale_entries(install_ns + 65 * WHEEL_TICK_NS);
+    assert_eq!(expired.len(), N, "all-in-one-call expiry must reap every due session");
+    assert_eq!(table.len(), 0, "reaped sessions must leave the table");
+    assert_eq!(
+        table.delta_drops(),
+        drops_before,
+        "an over-capacity GC tick must drop no Close (#10309)"
+    );
+    assert!(
+        !table.take_delta_loss(),
+        "no loss may latch when no Close is dropped"
+    );
+    let ring_closes = table
+        .drain_deltas(N + MAX_SESSION_DELTAS)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Close)
+        .count();
+    let overflow_closes = expired
+        .iter()
+        .filter(|entry| entry.overflow_close.is_some())
+        .count();
+    assert_eq!(
+        ring_closes + overflow_closes,
+        N,
+        "every expired forward session must yield its Close delta"
+    );
+    assert_eq!(
+        overflow_closes,
+        N - MAX_SESSION_DELTAS,
+        "only the ring-overflow suffix belongs to the returned spill"
+    );
+}
+
+/// Cell B: a tick that STARTS with a full ring still loses no Close.
+/// (RED probe: ring-only Close count; GREEN flushes returned overflow.)
+#[test]
+fn expiry_over_capacity_tick_with_full_ring_loses_no_close_10309() {
+    let mut table = SessionTable::new();
+    let install_ns = 1_000_000_000u64;
+    const N: usize = MAX_SESSION_DELTAS + 904;
+    // No draining: install-time Opens fill the ring, so the tick starts full.
+    for i in 0..N {
+        let k = make_v4_key((i % 250) as u8, 1024 + (i / 250) as u16);
+        assert!(table.install_with_protocol(
+            k,
+            decision(),
+            metadata(),
+            install_ns,
+            PROTO_UDP,
+            0
+        ));
+    }
+    // Install-time Open drops are out of scope (Opens are resync-recoverable);
+    // clear the latch and baseline the counter so the tick is measured alone.
+    let _ = table.take_delta_loss();
+    let drops_before = table.delta_drops();
+
+    let expired = table.expire_stale_entries(install_ns + 65 * WHEEL_TICK_NS);
+    assert_eq!(expired.len(), N, "all-in-one-call expiry must reap every due session");
+    assert_eq!(table.len(), 0, "reaped sessions must leave the table");
+    assert_eq!(
+        table.delta_drops(),
+        drops_before,
+        "a full ring must not cost a single Close (#10309)"
+    );
+    assert!(
+        !table.take_delta_loss(),
+        "no loss may latch when no Close is dropped"
+    );
+    let ring_batch = table.drain_deltas(N + MAX_SESSION_DELTAS);
+    let ring_closes = ring_batch
+        .iter()
+        .filter(|d| d.kind == SessionDeltaKind::Close)
+        .count();
+    let ring_opens = ring_batch
+        .iter()
+        .filter(|d| d.kind == SessionDeltaKind::Open)
+        .count();
+    let overflow_closes = expired
+        .iter()
+        .filter(|entry| entry.overflow_close.is_some())
+        .count();
+    assert_eq!(
+        ring_closes + overflow_closes,
+        N,
+        "every Close must survive a tick that starts with a full ring"
+    );
+    assert_eq!(
+        ring_opens, MAX_SESSION_DELTAS,
+        "the pre-existing Open backlog must survive too"
+    );
+    assert_eq!(
+        overflow_closes, N,
+        "every expiry Close spills when the tick starts with a full ring"
+    );
+}

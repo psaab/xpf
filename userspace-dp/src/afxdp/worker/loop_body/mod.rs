@@ -1120,6 +1120,29 @@ pub(crate) fn worker_loop(
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
         };
+        macro_rules! drain_and_flush_all {
+            () => {
+                while sessions.has_pending_deltas() {
+                    let deltas = sessions.drain_deltas(256);
+                    purge_queued_flows_for_closed_deltas(
+                        &mut bindings,
+                        &binding_lookup,
+                        &mut shared_recycles,
+                        &shared_runtime,
+                        &shared_sessions,
+                        &deltas,
+                    );
+                    // #2669: flush UNCONDITIONALLY. The binding-independent
+                    // consumers (shared session/conntrack tables, HA peer,
+                    // peer-worker commands, recent-deltas RPC buffer, event
+                    // stream) must receive every drained delta even when no
+                    // binding exists; only the per-binding RPC fallback push
+                    // is gated on a binding. Gating the whole flush would
+                    // drain-then-discard, silently desyncing HA/conntrack.
+                    flush_drained_session_deltas!(&deltas);
+                }
+            };
+        }
         let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
         // #2428: the "Current sessions" gauge Go derives as
         // (session_creates - session_expires) is a LOCAL-forwarding gauge.
@@ -1150,6 +1173,31 @@ pub(crate) fn worker_loop(
                     .live
                     .session_expires
                     .fetch_add(local_expired, Ordering::Relaxed);
+            }
+        }
+        // #10309: the expiry walk must remain all-in-one-call. A full ring
+        // may have accepted the first Close deltas and returned the suffix
+        // that did not fit on their `ExpiredSession` records. Drain the
+        // pre-existing ring first (preserving Open -> Close order), then
+        // flush the returned suffix in fixed-size chunks before processing
+        // another packet or control event. No shared entry can remain
+        // honoured merely because its Close missed the 4096-slot ring.
+        let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries
+            .into_iter()
+            .filter_map(|entry| entry.overflow_close)
+            .collect();
+        if !expiry_overflow_deltas.is_empty() {
+            drain_and_flush_all!();
+            for deltas in expiry_overflow_deltas.chunks(256) {
+                purge_queued_flows_for_closed_deltas(
+                    &mut bindings,
+                    &binding_lookup,
+                    &mut shared_recycles,
+                    &shared_runtime,
+                    &shared_sessions,
+                    deltas,
+                );
+                flush_drained_session_deltas!(deltas);
             }
         }
         // #7699: drain the PPTP control inbox — parse the TCP/1723 segments the
@@ -1357,31 +1405,6 @@ pub(crate) fn worker_loop(
         // overflows mid-chunk. Shared by the #2442 loss-of-sync resync and the
         // #2653 single-shot `ExportOwnerRGSessions` command path.
         const RESYNC_EXPORT_CHUNK: usize = 2048;
-        // Flush whatever is queued in the ring to the peer (shared with the
-        // pre-export backlog drain and each chunk's post-emit drain).
-        macro_rules! drain_and_flush_all {
-            () => {
-                while sessions.has_pending_deltas() {
-                    let deltas = sessions.drain_deltas(256);
-                    purge_queued_flows_for_closed_deltas(
-                        &mut bindings,
-                        &binding_lookup,
-                        &mut shared_recycles,
-                        &shared_runtime,
-                        &shared_sessions,
-                        &deltas,
-                    );
-                    // #2669: flush UNCONDITIONALLY. The binding-independent
-                    // consumers (shared session/conntrack tables, HA peer,
-                    // peer-worker commands, recent-deltas RPC buffer, event
-                    // stream) must receive every drained delta even when no
-                    // binding exists; only the per-binding RPC fallback push
-                    // is gated on a binding. Gating the whole flush would
-                    // drain-then-discard, silently desyncing HA/conntrack.
-                    flush_drained_session_deltas!(&deltas);
-                }
-            };
-        }
         // Chunked drain-as-you-export: collect the owned forward candidates
         // for `$owner_rgs` once, then emit them in ring-sized chunks, draining
         // and flushing each chunk to the peer before emitting the next. The
@@ -2431,6 +2454,7 @@ mod flow_cache_invalidation_tests {
             session_id: 0,
             close_class: 0,
             install_epoch: 0,
+            overflow_close: None,
         }
     }
 
@@ -3050,6 +3074,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             close_class: 0,
             install_epoch: 0,
             metadata: metadata(),
+            overflow_close: None,
         }
     }
 
@@ -3251,6 +3276,7 @@ mod gc_reap_nat64_release_tests_7740 {
             close_class: 0,
             install_epoch: 0,
             origin: SessionOrigin::ForwardFlow,
+            overflow_close: None,
         }
     }
 

@@ -34,6 +34,20 @@ impl SessionTable {
             self.wheel.initialized = true;
         }
     }
+    /// #10309: enqueue an expiry Close only when the bounded incremental
+    /// ring has room. A full ring is not a loss signal here: the caller
+    /// retains the exact Close on the returned `ExpiredSession` and the
+    /// worker flushes that suffix immediately in fixed-size chunks. Other
+    /// producers continue using `push_delta`, whose overflow remains the
+    /// #2442 loss-of-sync path.
+    #[inline]
+    fn push_expiry_close_delta(&mut self, delta: SessionDelta) -> bool {
+        if self.deltas.len() >= MAX_SESSION_DELTAS {
+            return false;
+        }
+        self.deltas.push_back(delta);
+        true
+    }
 
     /// #965: schedule (or re-schedule) `key` for an expiration check
     /// at the tick implied by its `last_seen_ns + expires_after_ns`.
@@ -362,12 +376,17 @@ impl SessionTable {
                         }
                         // #10038 item 5: TUN-origin never Closes (it never
                         // Opened — node-local, bounded by the publisher sweep).
-                        if !metadata.is_reverse
+                        // #10309: if the bounded incremental ring is full,
+                        // retain the exact Close on the returned expiry record
+                        // instead of dropping it. The worker flushes that
+                        // returned overflow in fixed-size chunks before this
+                        // GC iteration finishes.
+                        let overflow_close = if !metadata.is_reverse
                             && !removed.origin.is_peer_synced()
                             && !removed.origin.is_transient_local_seed()
                             && !removed.origin.is_local_tun_origin()
                         {
-                            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+                            let close = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
                             key: key.clone(),
                             decision,
                             metadata: metadata.clone(),
@@ -399,8 +418,11 @@ impl SessionTable {
                             session_id: removed.session_id,
                             bulk_resync: false,
                             tcp_close_class: 0,
-                            purge_retirement: false, });
-                        }
+                            purge_retirement: false, };
+                            (!self.push_expiry_close_delta(close.clone())).then_some(close)
+                        } else {
+                            None
+                        };
                         expired_entries.push(ExpiredSession {
                             key,
                             decision,
@@ -409,6 +431,7 @@ impl SessionTable {
                             session_id: removed.session_id,
                             close_class,
                             install_epoch: removed.install_epoch,
+                            overflow_close,
                         });
                     }
                 } else {
