@@ -39,6 +39,11 @@ type fakeCluster struct {
 	// that never confirms satisfies just as well; this counter is what
 	// distinguishes "requested the rejoin" from "confirmed it".
 	rejoinChecks int
+	// #10261: existing tests default bulk priming to the same healthy value as
+	// SyncEstablished. A test opts into an explicit false to model a daemon
+	// whose transport is up before its inbound bulk snapshot arrives.
+	bulkPrimed    bool
+	bulkPrimedSet bool
 	// #4717 test seams: when set, the predicate returns this error on EVERY
 	// poll (persistent transport failure), so a deadline miss must surface it.
 	peerAliveErr error
@@ -67,6 +72,13 @@ func (f *fakeCluster) SyncEstablished() (bool, error) {
 	return f.synced, nil
 }
 func (f *fakeCluster) HAProtocolCompatible() (bool, error) { return f.compatible, nil }
+
+func (f *fakeCluster) SessionSyncBulkPrimed() (bool, error) {
+	if f.bulkPrimedSet {
+		return f.bulkPrimed, nil
+	}
+	return f.synced, nil
+}
 func (f *fakeCluster) SessionSyncWireCompatible() (bool, string, error) {
 	f.syncWireChecks++
 	if f.syncWireErr != nil {

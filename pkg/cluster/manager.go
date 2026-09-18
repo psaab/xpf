@@ -565,14 +565,20 @@ type Manager struct {
 	degradedPromoteTimeout time.Duration
 
 	// syncReady is true once bulk session sync has been received (or the
-	// readiness timeout released it). See SetSyncReady in sync_state.go for the
-	// full account of what it does and does not gate.
+	// readiness timeout released the hold). See SetSyncReady in sync_state.go for
+	// the full account of what it does and does not gate.
 	//
 	// #7162: startup promotion in no-RETH / private-rg-election mode IS now
 	// gated — by Daemon.armNoRethSyncHold's BOUNDED hold, not by this flag.
 	// This flag remains unbounded while the sync channel is down and must not
 	// become a readiness conjunct (#110).
 	syncReady bool
+
+	// syncBulkPrimed records completion of the inbound bulk session snapshot
+	// for the current session-sync epoch. Unlike syncReady, this bit is never
+	// released by a timeout: rolling rejoin must not promote a restarted node
+	// until it has actually received the peer's complete session state (#10261).
+	syncBulkPrimed bool
 
 	// syncTransport records whether session sync uses "fabric" or
 	// "control-link" transport. Displayed in CLI status.

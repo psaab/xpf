@@ -212,6 +212,7 @@ func (m *Manager) FormatInformation() string {
 	configSyncFailing := m.configSyncFailing   // #6387
 	configSyncReason := m.configSyncFailReason // #6387
 	takeoverHold := m.takeoverHoldTime         // #103
+	syncBulkPrimed := m.syncBulkPrimed         // #10261
 	// #6495: the hold REASON, not just the flag (see FormatStatus).
 	kernelHold := ""
 	if m.kernelUpgradeHold {
@@ -395,6 +396,11 @@ func (m *Manager) FormatInformation() string {
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}
+	bulkPrimed := "no"
+	if syncBulkPrimed {
+		bulkPrimed = "yes"
+	}
+	fmt.Fprintf(&b, "  Bulk sync primed: %s\n", bulkPrimed)
 	fabEvents := m.history.Events(EventFabric)
 	if len(fabEvents) > 0 {
 		fmt.Fprintln(&b, "  Events:")

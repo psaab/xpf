@@ -80,6 +80,29 @@ func (m *Manager) IsSyncReady() bool {
 	return m.syncReady
 }
 
+// SetSyncBulkPrimed records whether the current session-sync epoch has
+// completed its inbound bulk session snapshot. It is deliberately separate
+// from SetSyncReady: the latter may be released by a bounded startup timeout,
+// while rolling rejoin must fail closed until the actual bulk arrives (#10261).
+func (m *Manager) SetSyncBulkPrimed(primed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.syncBulkPrimed == primed {
+		return
+	}
+	m.syncBulkPrimed = primed
+	slog.Info("cluster: sync bulk priming changed", "primed", primed)
+}
+
+// IsSyncBulkPrimed reports whether inbound bulk session state has completed in
+// the current session-sync epoch. Unlike IsSyncReady, this value is never
+// timeout-released and is safe for the rolling rejoin gate.
+func (m *Manager) IsSyncBulkPrimed() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.syncBulkPrimed
+}
+
 // SetSyncTransport records the active sync transport mode ("fabric" or "control-link").
 func (m *Manager) SetSyncTransport(transport string) {
 	m.mu.Lock()

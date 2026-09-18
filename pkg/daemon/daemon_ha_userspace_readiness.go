@@ -60,7 +60,9 @@ func wrapUserspaceManualFailoverPrepareError(err error) error {
 	if strings.Contains(msg, "previous demotion barrier still pending") ||
 		strings.Contains(msg, "session sync not ready before demotion") ||
 		strings.Contains(msg, "session sync peer not quiescent before demotion") ||
-		strings.Contains(msg, "demotion peer barrier failed") {
+		strings.Contains(msg, "demotion peer barrier failed") ||
+		strings.Contains(msg, "session sync not connected") ||
+		strings.Contains(msg, "session sync disconnected") {
 		return &cluster.RetryablePreFailoverError{Err: err}
 	}
 	return err
@@ -125,18 +127,30 @@ func (d *Daemon) userspaceTransferReadiness(rgID int) (bool, []string) {
 
 func (d *Daemon) prepareUserspaceManualFailover(rgID int) error {
 	return wrapUserspaceManualFailoverPrepareError(
-		d.prepareUserspaceRGDemotionWithTimeout(rgID, 60*time.Second),
+		d.prepareUserspaceRGDemotionWithTimeoutStrict(rgID, 60*time.Second, true),
 	)
 }
 
 func (d *Daemon) prepareUserspaceRGDemotionWithTimeout(rgID int, barrierTimeout time.Duration) error {
-	if !d.acquireUserspaceRGDemotionPrep(rgID, barrierTimeout) {
+	return d.prepareUserspaceRGDemotionWithTimeoutStrict(rgID, barrierTimeout, false)
+}
+
+// prepareUserspaceRGDemotionWithTimeoutStrict performs the session-sync
+// demotion barrier. Automatic reconciliation keeps the historical best-effort
+// behavior when sync is absent; an explicit ManualFailover/ISSU request must
+// fail closed instead, because it is about to hand ownership to the peer.
+func (d *Daemon) prepareUserspaceRGDemotionWithTimeoutStrict(rgID int, barrierTimeout time.Duration, requireConnected bool) error {
+	// Explicit demotion always attempts a fresh barrier, even if automatic
+	// reconciliation already owns the suppression lease. Track lease ownership
+	// separately so a failed strict attempt cannot delete another path's lease.
+	leaseOwned := d.acquireUserspaceRGDemotionPrep(rgID, barrierTimeout)
+	if !requireConnected && !leaseOwned {
 		slog.Info("userspace: skipping duplicate rg demotion prepare", "rg", rgID)
 		return nil
 	}
 	success := false
 	defer func() {
-		if !success {
+		if !success && leaseOwned {
 			d.releaseUserspaceRGDemotionPrep(rgID)
 		}
 	}()
@@ -146,6 +160,9 @@ func (d *Daemon) prepareUserspaceRGDemotionWithTimeout(rgID int, barrierTimeout 
 	// concurrent stopClusterComms could nil mid-flight.
 	ss := d.getSessionSync()
 	if ss == nil || !ss.IsConnected() {
+		if requireConnected {
+			return fmt.Errorf("session sync not connected before demotion")
+		}
 		// Release suppression window so a reconnect + retry can re-run
 		// the barrier check before the actual demotion proceeds.
 		d.releaseUserspaceRGDemotionPrep(rgID)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/clusterfailover"
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -78,6 +79,48 @@ func (g *grpcCluster) dial() (pb.BpfrxServiceClient, func(), error) {
 	return pb.NewBpfrxServiceClient(conn), func() { _ = conn.Close() }, nil
 }
 
+const (
+	rollingForceSecondaryBarrierTimeout = 60 * time.Second
+	rollingForceSecondaryRetrySlack     = 5 * time.Second
+	rollingForceSecondaryHandoffTimeout = 10 * time.Second
+	rollingForceSecondaryDeadlineMargin = 15 * time.Second
+)
+
+// rollingForceSecondaryActionTimeoutForRGs covers ForceSecondary's sequential
+// per-active-RG barrier waits, each RG's admission retry slack, and the
+// observed peer-handoff wait. The production caller uses the maximum
+// representable RG count: the daemon snapshots the active set only after the
+// RPC begins, so a conservative bound here prevents a status read/ForceSecondary
+// race from under-deadlining the action.
+func rollingForceSecondaryActionTimeoutForRGs(activeRGCount int) time.Duration {
+	if activeRGCount < 1 {
+		activeRGCount = 1
+	}
+	return time.Duration(activeRGCount)*
+		(rollingForceSecondaryBarrierTimeout+rollingForceSecondaryRetrySlack) +
+		rollingForceSecondaryHandoffTimeout + rollingForceSecondaryDeadlineMargin
+}
+
+func (g *grpcCluster) actionCtx(action string, activeRGCount int) (context.Context, context.CancelFunc) {
+	timeout := g.dialTimeout
+	if action == "in-service-upgrade" {
+		timeout = rollingForceSecondaryActionTimeoutForRGs(activeRGCount)
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func (g *grpcCluster) systemAction(action string) error {
+	cli, closeFn, err := g.dial()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	ctx, cancel := g.actionCtx(action, config.MaxRedundancyGroups)
+	defer cancel()
+	_, err = cli.SystemAction(ctx, &pb.SystemActionRequest{Action: action})
+	return err
+}
+
 func (g *grpcCluster) ctx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), g.dialTimeout)
 }
@@ -98,18 +141,6 @@ func (g *grpcCluster) information() (string, error) {
 	return resp.GetOutput(), nil
 }
 
-func (g *grpcCluster) systemAction(action string) error {
-	cli, closeFn, err := g.dial()
-	if err != nil {
-		return err
-	}
-	defer closeFn()
-	ctx, cancel := g.ctx()
-	defer cancel()
-	_, err = cli.SystemAction(ctx, &pb.SystemActionRequest{Action: action})
-	return err
-}
-
 func (g *grpcCluster) PeerAlive() (bool, error) {
 	s, err := g.information()
 	if err != nil {
@@ -124,6 +155,14 @@ func (g *grpcCluster) SyncEstablished() (bool, error) {
 		return false, err
 	}
 	return parseSyncEstablished(s), nil
+}
+
+func (g *grpcCluster) SessionSyncBulkPrimed() (bool, error) {
+	s, err := g.information()
+	if err != nil {
+		return false, err
+	}
+	return parseSessionSyncBulkPrimed(s), nil
 }
 
 func (g *grpcCluster) DrainComplete() (bool, error) {
@@ -288,6 +327,32 @@ func parseSyncEstablished(s string) bool {
 		}
 	}
 	// No sync-link Status line rendered: fail closed (do not assume sync is up).
+	return false
+}
+
+// parseSessionSyncBulkPrimed reports whether the local daemon has completed
+// receiving the inbound bulk session snapshot for the current sync epoch.
+// The line is scoped to the sync/fabric section and fails closed when absent
+// or malformed; a timeout-released startup readiness bit is intentionally not
+// sufficient for rolling rejoin (#10261).
+func parseSessionSyncBulkPrimed(s string) bool {
+	inSync := false
+	for _, line := range strings.Split(s, "\n") {
+		ll := strings.ToLower(strings.TrimSpace(line))
+		if !inSync {
+			if strings.HasPrefix(ll, "sync link statistics") ||
+				strings.HasPrefix(ll, "fabric link statistics") {
+				inSync = true
+			}
+			continue
+		}
+		if ll == "" {
+			return false
+		}
+		if strings.HasPrefix(ll, "bulk sync primed:") {
+			return strings.TrimSpace(strings.TrimPrefix(ll, "bulk sync primed:")) == "yes"
+		}
+	}
 	return false
 }
 

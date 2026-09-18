@@ -15,6 +15,11 @@ type RollingCluster interface {
 	PeerAlive() (bool, error)
 	// SyncEstablished reports whether session-sync is established/clean.
 	SyncEstablished() (bool, error)
+	// SessionSyncBulkPrimed reports whether this daemon has completed the
+	// inbound bulk session snapshot for its current sync epoch. It is distinct
+	// from SyncEstablished: the transport can be up while a restarted node is
+	// still missing the peer's session table (#10261).
+	SessionSyncBulkPrimed() (bool, error)
 	// HAProtocolCompatible reports whether the local and peer HA protocol
 	// versions are mutually compatible (else the release is not
 	// rolling-upgradable; the driver aborts to Path C image-replace).
