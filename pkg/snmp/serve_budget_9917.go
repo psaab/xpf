@@ -17,18 +17,26 @@ const (
 	// source may fire a walk-sized burst instantly before throttling to the
 	// sustained rate.
 	snmpServeBurstPerSource = 200
-	// snmpServeServiceFactor scales the post-handling service charge: each
-	// admitted request is debited its loop time at rate x factor, so a source
-	// saturating the loop with expensive PDUs converges to ~1/factor of loop
-	// share instead of replenishing its admission token while the loop is
-	// busy with its own request. Cheap polls (microseconds) are barely
-	// charged and throttle on the admission token instead.
+	// snmpServeServiceFactor is the minimum post-handling service charge:
+	// each admitted request is debited its loop time at rate x factor, so a
+	// source saturating the loop converges to ~1/factor of the loop share.
+	// The factor grows with the number of active expensive sources below.
 	snmpServeServiceFactor = 10
+	// snmpServeExpensiveThreshold separates normal polling from a request
+	// whose service time must participate in fair-share accounting. A
+	// millisecond is far above the normal microsecond-scale SNMP path while
+	// remaining below the ~33ms max-size ifXTable walk.
+	snmpServeExpensiveThreshold = time.Millisecond
+	// snmpServeExpensiveIdle is the quiet interval after which an expensive
+	// contender no longer reserves a fair-share slot. Expiry is checked by a
+	// bounded map sweep at most once per second, not on every packet.
+	snmpServeExpensiveIdle       = time.Second
+	snmpServeExpirySweepInterval = time.Second
 	// snmpServeMaxSources bounds tracked sources. Past the cap a newcomer
 	// displaces a random incumbent (O(1), no scan) -- admission is certain,
 	// so a spoofed-source flood refreshing entries can never lock legitimate
-	// newcomers out. There is no idle sweep: displacement is the only
-	// reclamation, and it runs only on the full-table path.
+	// newcomers out. Expensive and pending state use a bounded expiry sweep;
+	// displacement remains the only map reclamation.
 	snmpServeMaxSources = 1024
 	// snmpServeGlobalRate / snmpServeGlobalBurst bound AGGREGATE admissions
 	// across all sources: the backstop a rotating-spoof flood (fresh bucket
@@ -36,17 +44,33 @@ const (
 	// only floods bind here.
 	snmpServeGlobalRate  = 2000
 	snmpServeGlobalBurst = 4000
-	// snmpServeGlobalFactor scales the aggregate service charge the same way
-	// per-source factor does: sustained expensive load from all sources
-	// combined converges to ~1/factor of loop share.
+	// snmpServeGlobalFactor scales the aggregate service charge for every
+	// admitted request, preserving the #9917 global backstop while the
+	// independent per-source factor below provides fair-share ordering.
 	snmpServeGlobalFactor = 2
 )
 
+func snmpServeFairFactor(active int) float64 {
+	if active <= 0 {
+		return snmpServeServiceFactor
+	}
+	factor := 2 * active
+	if factor < snmpServeServiceFactor {
+		return snmpServeServiceFactor
+	}
+	return float64(factor)
+}
+
 // snmpSourceBucket is one source's token bucket: request tokens, sustained
-// refill rate, and the last refill point.
+// refill rate, and the last refill point. lastSeen tracks demand separately
+// so a source losing the global FIFO race remains an active contender.
 type snmpSourceBucket struct {
-	tokens float64
-	last   time.Time
+	tokens    float64
+	last      time.Time
+	lastSeen  time.Time
+	expensive bool
+	pending   bool
+	admitted  bool
 }
 
 // snmpServeBudget is the Serve loop's request budget (#9917 F-139). The loop
@@ -59,6 +83,13 @@ type snmpServeBudget struct {
 	mu        sync.Mutex
 	now       func() time.Time
 	perSource map[[16]byte]*snmpSourceBucket
+	// activeExpensive is the number of source buckets currently marked
+	activeExpensive int
+	lastExpirySweep time.Time
+	// pendingSources are sources that reached userspace while the global
+	// bucket was empty. Previously admitted sources yield future global
+	// credits to these onboarding contenders, preventing FIFO starvation.
+	pendingSources int
 	// Global backstop, refilled lazily (globalLast.IsZero means unstarted, so
 	// hand-built test budgets behave like constructed ones).
 	globalTokens float64
@@ -83,16 +114,43 @@ func (b *snmpServeBudget) clock() time.Time {
 	return b.now()
 }
 
+// expireExpensiveLocked releases quiet contenders and pending newcomers. The
+// sweep is bounded by snmpServeMaxSources and runs at most once per interval,
+// so the serial Serve hot path never scans the table per packet. lastSeen is
+// updated on every request attempt, including a global-budget denial, so a
+// continuously demanding source remains active even when FIFO order favors
+// another source.
+func (b *snmpServeBudget) expireExpensiveLocked(now time.Time) {
+	if !b.lastExpirySweep.IsZero() &&
+		now.Sub(b.lastExpirySweep) < snmpServeExpirySweepInterval {
+		return
+	}
+	b.lastExpirySweep = now
+	for _, bkt := range b.perSource {
+		if now.Sub(bkt.lastSeen) < snmpServeExpensiveIdle {
+			continue
+		}
+		if bkt.expensive {
+			bkt.expensive = false
+			if b.activeExpensive > 0 {
+				b.activeExpensive--
+			}
+		}
+		if bkt.pending {
+			bkt.pending = false
+			if b.pendingSources > 0 {
+				b.pendingSources--
+			}
+		}
+	}
+}
+
 // allow reports whether a request from srcIP may be served, consuming one
-// request token from both the global and the per-source bucket. It is O(1):
-// the map holds at most snmpServeMaxSources entries and a full table displaces
-// one random incumbent instead of scanning. Sources key on the normalized IP
-// only (never the UDP port, which would hand every request a fresh bucket); a
-// nil IP (non-IP transports, direct handlePacket callers) bypasses the budget,
-// as does a nil budget (bare-struct test agents).
-//
-// Neither bucket is consumed unless BOTH admit: a per-source-shed packet must
-// not burn the shared global budget for everyone else.
+// request token from both the global and the per-source bucket. It is O(1)
+// between bounded expiry sweeps: the map holds at most snmpServeMaxSources
+// entries and a full table displaces one random incumbent. Sources key on
+// normalized IP only (never UDP port); nil/unparseable IPs and nil budgets
+// bypass the budget for non-UDP/direct test callers.
 func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 	if b == nil || srcIP == nil {
 		return true
@@ -110,8 +168,54 @@ func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 	if b.perSource == nil {
 		b.perSource = make(map[[16]byte]*snmpSourceBucket)
 	}
-	// Global backstop first: no per-source state is touched for a request the
-	// aggregate budget already refuses.
+	b.expireExpensiveLocked(now)
+	bkt, ok := b.perSource[key]
+	if !ok {
+		if len(b.perSource) >= snmpServeMaxSources {
+			// Go map iteration is randomized, so the first key is a
+			// constant-time random incumbent. A displaced expensive
+			// contender or pending newcomer releases its slot.
+			for victim, incumbent := range b.perSource {
+				if incumbent.expensive && b.activeExpensive > 0 {
+					b.activeExpensive--
+				}
+				if incumbent.pending && b.pendingSources > 0 {
+					b.pendingSources--
+				}
+				delete(b.perSource, victim)
+				break
+			}
+		}
+		bkt = &snmpSourceBucket{tokens: snmpServeBurstPerSource, last: now, lastSeen: now}
+		b.perSource[key] = bkt
+	} else {
+		bkt.lastSeen = now
+		// Refill for time passed since this source's last request. Expensive
+		// buckets are checked before the global bucket so a FIFO aggressor
+		// cannot consume every global token while its fair share is exhausted.
+		if elapsed := now.Sub(bkt.last).Seconds(); elapsed > 0 {
+			bkt.tokens += elapsed * snmpServeRatePerSource
+			if bkt.tokens > snmpServeBurstPerSource {
+				bkt.tokens = snmpServeBurstPerSource
+			}
+			bkt.last = now
+		}
+		if bkt.expensive && bkt.tokens < 1 {
+			b.shed.Add(1)
+			return false
+		}
+	}
+
+	// Once a source has been admitted, a pending newcomer reserves the next
+	// global credit for itself. A pending source is allowed through the
+	// ordinary global check; after it admits, it leaves the pending set.
+	if b.pendingSources > 0 && bkt.admitted && !bkt.pending {
+		b.shed.Add(1)
+		return false
+	}
+
+	// Global backstop first for every request that reaches admission: no
+	// per-source token is consumed for a request the aggregate budget refuses.
 	if b.globalLast.IsZero() {
 		b.globalTokens = snmpServeGlobalBurst
 		b.globalLast = now
@@ -123,35 +227,12 @@ func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 		b.globalLast = now
 	}
 	if b.globalTokens < 1 {
+		if !bkt.admitted && !bkt.pending {
+			bkt.pending = true
+			b.pendingSources++
+		}
 		b.shed.Add(1)
 		return false
-	}
-	bkt, ok := b.perSource[key]
-	if !ok {
-		if len(b.perSource) >= snmpServeMaxSources {
-			// Displace a random incumbent: Go map iteration order is
-			// randomized, so the first key ranged is a uniform pick. The
-			// newcomer is ALWAYS admitted -- no set of refreshed entries
-			// can lock it out, and the scan-per-packet a sweep would cost
-			// under spoofed-source flood never happens.
-			for victim := range b.perSource {
-				delete(b.perSource, victim)
-				break
-			}
-		}
-		bkt = &snmpSourceBucket{tokens: snmpServeBurstPerSource, last: now}
-		b.perSource[key] = bkt
-	}
-	// Refill for time passed since the last request from this source. Elapsed
-	// <= 0 (frozen test clock, wall-clock step backward) refills nothing, and
-	// the burst cap bounds any refill after a forward jump -- a clock jump
-	// can neither grant unbounded tokens nor stall the bucket.
-	if elapsed := now.Sub(bkt.last).Seconds(); elapsed > 0 {
-		bkt.tokens += elapsed * snmpServeRatePerSource
-		if bkt.tokens > snmpServeBurstPerSource {
-			bkt.tokens = snmpServeBurstPerSource
-		}
-		bkt.last = now
 	}
 	if bkt.tokens < 1 {
 		b.shed.Add(1)
@@ -159,17 +240,23 @@ func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 	}
 	b.globalTokens--
 	bkt.tokens--
+	if bkt.pending {
+		bkt.pending = false
+		if b.pendingSources > 0 {
+			b.pendingSources--
+		}
+	}
+	bkt.admitted = true
 	return true
 }
 
 // account debits the loop time an admitted request consumed, scaled by the
-// service factors. Without it the refill during handling would replenish the
-// admission token of every request slower than 1/rate -- a source feeding
-// back-to-back expensive PDUs would never deplete and would hold the serial
-// loop forever. With it, sustained expensive load converges to ~1/factor of
-// loop share per source (and ~1/globalFactor aggregate), while cheap requests
-// are dominated by the admission token instead. A missing bucket (unit tests
-// calling account without allow) is silently skipped.
+// service factors. A request above snmpServeExpensiveThreshold joins the
+// active contender set. With N active expensive sources, each source's
+// independent token bucket is charged at max(10, 2N), which gives every
+// contender an equal ~1/(2N) share of the loop (the global half) regardless
+// of FIFO arrival order. Every admitted request still receives the #9917
+// global backstop charge. A missing bucket is silently skipped.
 func (b *snmpServeBudget) account(srcIP net.IP, elapsed time.Duration) {
 	if b == nil || srcIP == nil || elapsed <= 0 {
 		return
@@ -187,7 +274,17 @@ func (b *snmpServeBudget) account(srcIP net.IP, elapsed time.Duration) {
 	if !b.globalLast.IsZero() {
 		b.globalTokens -= secs * snmpServeGlobalRate * snmpServeGlobalFactor
 	}
-	if bkt, ok := b.perSource[key]; ok {
-		bkt.tokens -= secs * snmpServeRatePerSource * snmpServeServiceFactor
+	bkt, ok := b.perSource[key]
+	if !ok {
+		return
 	}
+	if elapsed >= snmpServeExpensiveThreshold && !bkt.expensive {
+		bkt.expensive = true
+		b.activeExpensive++
+	}
+	factor := float64(snmpServeServiceFactor)
+	if bkt.expensive {
+		factor = snmpServeFairFactor(b.activeExpensive)
+	}
+	bkt.tokens -= secs * snmpServeRatePerSource * factor
 }
