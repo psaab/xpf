@@ -2386,62 +2386,54 @@ bounded regardless of the window — a 71-min worst case is bounded by the SAME
 4096-source / 1024-entry caps as a 5-second window; a longer floor only defers
 reclamation of idle entries.
 
-## Strict-syn-check drop on the new-flow path (#4400)
+## Strict-syn-check drop on the new-flow path (#4400/#10270)
 
-A TCP packet that MISSES the session table and carries a connection-CLOSING
-control bit (FIN or RST) with **no SYN** can never legitimately OPEN a
-connection. A real flow starts with a SYN; a bare RST/FIN for a flow this
-node does not track is either a late segment for an already-GC'd session or
-an attack. The pre-#4400 code let such a packet flow through the ordinary
-session-miss install: policy evaluated, and
-`install_with_protocol_with_origin` seeded a fresh entry that
-`install.rs` immediately marked `closing`/`reset` from the packet's flags
-(the lines that set `closing: matches!(protocol, PROTO_TCP) && is_closing(...)`
-and `reset: ... && has_rst(...)`). The result was pure churn — an
-immediately-closing session with no forwarding value — and a cheap way for a
-RST/FIN flood to exhaust the per-worker table. Reported P6 (HIGH), confirmed
-four times.
+A TCP packet that MISSES the session table and carries **no SYN** cannot
+legitimately create a new transit session. A bare ACK/PSH/data tuple with no
+matching state is either a late segment for an already-GC'd session or a
+midstream tuple this firewall never observed; admitting it would forward
+traffic without conntrack state (#10270). A bare RST/FIN is the original
+#4400 subset: it can never open a connection and otherwise creates an
+immediately-closing entry with no forwarding value. Before these fixes, all
+of those packets flowed through the ordinary session-miss install after policy
+evaluation.
 
 The fix is a **strict-syn-check-style guard** at the session-MISS choke point
 in `afxdp/poll_descriptor` (`strict_syn_check_drops_new_flow`), applied right
 after `finalize_new_flow_ha_resolution` and BEFORE both transit install sites
 (the `ForwardCandidate` forward install and the `MissingNeighbor` seed
-install). A bare RST/FIN (`is_closing(flags) && !has_syn(flags)`) on a
-`ForwardCandidate` / `MissingNeighbor` miss is DROPPED — the frame is
-recycled, no session is installed, and the aggregate `screen_drops`
-flow-statistics counter is bumped (no per-reason ordinal — that array mirrors
-the Junos SCREEN checks, and strict-syn-check is a flow `tcp-session` control;
-it joins the syn-cookie / icmp-fragment aggregate-only class). No per-packet
-event is emitted: a RST/FIN flood must never become a log storm.
+install). Any non-SYN TCP packet on a `ForwardCandidate` /
+`MissingNeighbor` miss is DROPPED — the frame is recycled, no session is
+installed, and the aggregate `screen_drops` flow-statistics counter is bumped
+(no per-reason ordinal — that array mirrors the Junos SCREEN checks, and this
+is a flow `tcp-session` control; it joins the syn-cookie / icmp-fragment
+aggregate-only class). No per-packet event is emitted: a non-SYN session-miss
+flood must never become a log storm.
 
 Scope and deliberate exemptions:
 
 - **Applied unconditionally (no config knob).** Junos exposes
   `security flow tcp-session strict-syn-check` as an opt-in that requires the
-  first packet of EVERY TCP flow to be a SYN (dropping a non-SYN first packet
-  outright). xpf keeps the looser Junos *default* (no-syn-check): a SYN-ACK /
-  bare ACK / data first packet may still open an ESTABLISHED session (#3152),
-  preserving asymmetric-routing mid-stream pickup. Only the pathological
-  bare-RST/FIN-on-miss case is dropped, and it is dropped ALWAYS — a stray
-  RST/FIN opening a closing session is never useful regardless of the
-  operator's strict-syn-check setting, so this is the safe stateful-firewall
-  default and needs no configuration surface.
+  first packet of EVERY TCP flow to be a SYN. xpf still permits SYN-ACK first
+  packets for asymmetric-routing pickup (#3152), but a session-less bare
+  ACK/PSH/data packet is never admitted. A legitimate midstream packet is
+  unaffected when the established or HA-synced session is already present:
+  those packets are session HITS and resolve before this miss guard.
 - **SYN-bearing segments are untouched.** A bare SYN still installs; a SYN-ACK
-  on miss still installs per existing policy (asymmetric routing); the
+  on miss still installs per existing asymmetric-routing behavior; the
   malformed SYN-FIN stays owned by the `tcp-syn-fin` screen check (the guard's
   `!has_syn` clause excludes it).
 - **LocalDelivery (host-inbound to the RE) is exempt.** The guard gates only
-  the two TRANSIT dispositions. A peer RST tearing down a firewall-originated
+  the two TRANSIT dispositions. A peer control packet for a firewall-originated
   TCP session (BGP, IKE, management SSH) is host-inbound and MUST reach the
   local kernel stack, so it is never dropped here.
 - **No fabric exemption needed.** Since #6478 removed the
-  `cluster_peer_return_fast_path`, a fabric-ingress bare RST/FIN takes the
-  normal miss block and IS dropped by this guard — a legitimate
-  cross-chassis teardown arrives as a session HIT (the synced session is
-  present), never as a session-less fabric packet, so no exemption is
-  needed. Any bare RST/FIN reaching the guard is a genuine new-flow
-  attempt and is dropped whether it ingressed locally or crossed the
-  fabric.
+  `cluster_peer_return_fast_path`, a fabric-ingress non-SYN TCP packet takes
+  the normal miss block and is dropped by this guard — a legitimate
+  cross-chassis flow arrives as a session HIT (the synced session is present),
+  never as a session-less fabric packet. Any non-SYN TCP reaching the guard is
+  a genuine new-flow attempt and is dropped whether it ingressed locally or
+  crossed the fabric.
 
 ## Why a slab + integer handles
 
