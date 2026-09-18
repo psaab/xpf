@@ -639,6 +639,33 @@ func validateSourceNATPoolStrict(cfg *Config) error {
 	return nil
 }
 
+// validateSourceNATPoolUnknownLeavesStrict (#10291) hard-rejects a source-NAT
+// pool child that the compiler does not model. Without this gate, a valid
+// Junos knob or a misspelling commits cleanly and has no effect at runtime.
+// Pool names are sorted so the first reported offender is deterministic.
+func validateSourceNATPoolUnknownLeavesStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	pools := cfg.Security.NAT.SourcePools
+	names := make([]string, 0, len(pools))
+	for name := range pools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pool := pools[name]
+		if pool == nil || len(pool.UnknownLeaves) == 0 {
+			continue
+		}
+		return fmt.Errorf(
+			"source-nat pool %q: unsupported pool leaf %q is not implemented "+
+				"and would be silently dropped (#10291)",
+			name, pool.UnknownLeaves[0])
+	}
+	return nil
+}
+
 // #6041: validateSourceNATPersistentNoTranslationStrict (the #5819 fail-closed
 // reject of `persistent-nat` + `port no-translation`) was REMOVED here. The
 // userspace dataplane now implements an address-only persistent lease

@@ -796,6 +796,11 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				if v := nodeVal(prop); v != "" {
 					pool.RoutingInstance = v
 				}
+			default:
+				// #10291: source-NAT pool leaves outside the modeled switch
+				// used to be silently dropped. Preserve the authored keyword
+				// so the strict uniform gate can reject it by name.
+				pool.UnknownLeaves = append(pool.UnknownLeaves, prop.Name())
 			}
 		}
 		// #7173: do NOT invent a port range for a pool that does not translate

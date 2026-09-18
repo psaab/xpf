@@ -167,6 +167,23 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #10291 source-NAT pool closed-world gate. The source-pool compiler
+	// supports only its modeled leaves; every other child used to be ignored,
+	// so a valid-but-unimplemented Junos knob or a typo committed cleanly and
+	// had no effect at runtime. Strict on commit / commit-check (hard-reject);
+	// lenient on load / peer-sync (downgrade to a warning so a persisted config
+	// still boots). The compiler preserves the authored keyword in
+	// NATPool.UnknownLeaves for this gate. Shares lenientDestNATAddresses with
+	// the sibling source-pool gates.
+	if err := validateSourceNATPoolUnknownLeavesStrict(cfg); err != nil {
+		if opts.lenientDestNATAddresses {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("source-nat pool unsupported leaf (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3906 source-NAT pool port-range gate. The pool `port range <low> to
 	// <high>` was parsed with the wrong keyword shape and silently ignored (the
 	// pool defaulted to 1024-65535 PAT), so an operator narrowing the range got
