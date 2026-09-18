@@ -3354,10 +3354,11 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
   stored even for a valid zero-lease full set, distinct from never receiving a
   frame. The receiver validates generations, family/CIDR/RG metadata, reserved
   flags, and duplicate scopes before storing it. Pre-start memfile seeding and
-  post-start `lease{4,6}-add` use the same filter: only scopes present in the
-  receiver's unambiguous emission and served by its current RG state are
-  narrowed; omitted, mixed, moved, malformed, or unproven scopes retain the
-  conservative whole-union behavior.
+  post-start `lease{4,6}-add` use the same filter: only exact CIDR+RG
+  matched scopes in an unambiguous emission participate, and within those,
+  rows for scopes not currently served are excluded while served, unknown,
+  and unmatched rows are kept. Omitted, mixed, moved, malformed, or
+  unproven scopes retain the conservative whole-union behavior.
 - **Clock invariant** — each lease carries REMAINING LIFETIME, never an
   absolute wall-clock expiry (the channel only syncs a MONOTONIC offset). The
   promoting node re-anchors to its LOCAL clock at seed (`expire = now + remaining`),

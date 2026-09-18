@@ -102,7 +102,7 @@ parses a torn file, no fsync on the apply path.
   reconcile (#1835 F3): always regenerates configs for configured
   families but restarts only units that are currently active; clears
   unconfigured families like `Apply`. Fail-closed.
-- `ApplyWithLeaseAuthority` and `ApplyClusterCommitWithLeaseAuthority` — `dhcpserver.go`. Synchronous commit variants used by the daemon to bind each lease-authority generation to the exact family apply result. A family is marked `Applied` only after its config generation/reconcile branch succeeds; a failure publishes an unserved proof instead of leaving the prior generation authoritative.
+- `ApplyWithLeaseAuthority` and `ApplyClusterCommitWithLeaseAuthority` — `dhcpserver.go`. Synchronous commit variants used by the daemon to bind each lease-authority generation to the exact family apply result. A family is marked `Applied` only after its config generation/reconcile branch succeeds; a failure publishes an unapplied proof (Served preserved, Applied=false) instead of leaving the prior generation authoritative.
 - `Clear()` — `dhcpserver.go`. Stops both Kea units if systemd
   reports them active and removes config files. Void signature for
   the VRRP-transition callers (`pkg/daemon` HA path); stop failures
@@ -506,10 +506,12 @@ What increment 1 ships (the fully unit-testable, lab-free slice):
   the display `parseLeaseCSV` read the whole set through the shared
   `keaLFCLeaseFilePaths` (`lease_lfc.go`) and replay rows through the SAME
   append-only, last-row-wins dedup. A missing `.1`/`.2` (the common no-LFC
-  steady state) collapses the set to exactly the current file. The reader
-  snapshots the complete `{.completed,.2,.1,current}` identity universe before
-  source selection and after parsing; a rotation during selection or reading
-  fails closed.
+  steady state) collapses the set to exactly the current file.
+  For destructive `parseActiveLeases4/6`, the reader snapshots the complete
+  `{.completed,.2,.1,current}` identity universe before source selection and
+  after parsing; a rotation during selection or reading fails closed.
+  `parseLeaseCSV` shares the file paths and replay rules for display, but does
+  not apply this destructive-path rotation guard.
   The fail-safe posture is preserved and EXTENDED across the set: any EXISTING
   sibling that is headerless / mangled / ragged makes the WHOLE family
   untrusted (error → destructive diff skipped), and the trusted-empty result
