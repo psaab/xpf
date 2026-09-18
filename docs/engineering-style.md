@@ -1351,18 +1351,21 @@ Every hit must be an issue you intend to close. Also check every commit
 message body — GitHub scans those on the default branch too, so a clean PR
 body does not save you.
 
-**It is mechanical now (#9551).** `scripts/close_keyword_lint.py` implements
-GitHub's documented grammar plus the two measured shapes above. It refuses a
-close pair that follows a negation, or a scoping heading, within its own clause,
-and names the issue and the spellings that pass. Verdicts are per pair, so a
-`Closes #N` in the same body goes through. It runs automatically on the
-commit path and in the repository selftest; the PR-body workflow is preserved
-as a human step until the owner grants the required `workflow` OAuth scope:
+**It is mechanical now (#9551, partial).** `scripts/close_keyword_lint.py`
+implements GitHub's documented grammar plus the two measured shapes above. It
+refuses a close pair that follows a negation, or a scoping heading, within its
+own clause, and names the issue and the spellings that pass. Verdicts are per
+pair, so a `Closes #N` in the same body goes through. Nothing runs
+automatically: this repo has no CI, and nothing checks a PR BODY unless
+someone runs `make close-keyword-lint PR=<n>`. Master is not
+branch-protected either (verified 2026-09-18 via the API: 404), so even a red
+check would not block `gh pr merge`. The PR-body workflow is preserved as a
+human step until the owner grants the required `workflow` OAuth scope:
 
 - `make selftest` first runs `make close-keyword-lint`, which checks every
   commit message in this branch (`origin/master..HEAD`), then runs
-  `scripts/run-selftests.sh`. This is the merge-gate command for the current
-  tree.
+  `scripts/run-selftests.sh`. Invoke it before merge as an advisory pre-merge
+  check for the current tree (note: selftest is red at baseline today).
 - `scripts/close_keyword_lint_ci.sh` holds both pull-request legs (the PR body
   and every commit message in the range). The exact GitHub Actions job,
   including `opened`, `edited`, `synchronize`, and `reopened` triggers plus
