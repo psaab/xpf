@@ -119,11 +119,33 @@ func TestRendersAsOnePatternPassesUnicodeSpaces(t *testing.T) {
 	}
 }
 
-// TestRendersAsOnePatternPassesGlobsDeferredTo10089 pins the known-deferred
-// pass-through: glob metacharacters are exactly one pattern, so they PASS this
-// predicate. Render-side glob refusal is #10089; when it lands this test flips
-// to refusal. Leading-dash names likewise pass here — one pattern, and the argv
-// sink is #9885's belt, not this predicate's.
+// TestFirstGlobMetacharacterNamesTheFirstToken pins the render belt's
+// diagnostic primitive. The first token is reported so refusal errors explain
+// exactly which character made a name a shell-style glob (#10089).
+func TestFirstGlobMetacharacterNamesTheFirstToken(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+	}{
+		{"ge*", "*"},
+		{"ge?", "?"},
+		{"ge[0-9]", "["},
+		{"ge]0", "]"},
+		{"ge*?", "*"},
+	} {
+		if got := FirstGlobMetacharacter(tc.name); got != tc.want {
+			t.Errorf("FirstGlobMetacharacter(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	for _, name := range []string{"ge-0-0-0", "ge-0/0/0", "g\u00e90"} {
+		if got := FirstGlobMetacharacter(name); got != "" {
+			t.Errorf("FirstGlobMetacharacter(%q) = %q, want empty", name, got)
+		}
+	}
+}
+
+// TestRendersAsOnePatternPassesGlobsDeferredTo10089 pins the known scope
+// boundary: glob metacharacters are exactly one pattern, so they PASS this
+// whitespace predicate. Render-side glob refusal is the separate #10089 belt.
 func TestRendersAsOnePatternPassesGlobsDeferredTo10089(t *testing.T) {
 	for _, name := range []string{"ge*", "ge?", "ge[0-9]", "*", "--help", "-x"} {
 		if !RendersAsOnePattern(name) {

@@ -15,6 +15,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/netname"
+	"github.com/psaab/xpf/pkg/rendersafe"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -23,7 +24,15 @@ import (
 // OriginalName= (the kernel name) instead of MACAddress= for matching.
 // This ensures the .link works on reboot when the MAC reverts to physical.
 func fixRethLinkFile(ifName, kernelName string) {
-	path := fmt.Sprintf("/etc/systemd/network/10-xpf-%s.link", ifName)
+	if !rendersafe.SafeInterfaceName(kernelName) {
+		slog.Warn("refusing unsafe RETH OriginalName", "iface", ifName, "kernelName", kernelName)
+		return
+	}
+	if glob := rendersafe.FirstGlobMetacharacter(kernelName); glob != "" {
+		slog.Warn("refusing glob RETH OriginalName", "iface", ifName, "kernelName", kernelName, "glob", glob)
+		return
+	}
+	path := filepath.Join(linkDir, linkPrefix+ifName+".link")
 	content := fmt.Sprintf("# Managed by xpfd — do not edit\n[Match]\nOriginalName=%s\n\n[Link]\nName=%s\n", kernelName, ifName)
 	// AtomicGeneratedConfig: regenerated each apply/boot; a torn file is
 	// unacceptable (would mis-name a RETH member) but a power-cut loss

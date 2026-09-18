@@ -382,12 +382,14 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		// failing BOTH this predicate and confinedInterfaceName (slash plus
 		// space) is refused exactly ONCE, here, never reaching #9494.
 		//
-		// Both rendered slots are checked: Name= carries ifc.Name everywhere,
-		// and the .link carries ifc.OriginalName in [Match] OriginalName= —
-		// itself a whitespace-separated match list. First hazard wins, so a
-		// row is refused at most once. An empty OriginalName is unset, not a
-		// name, and skips the check. Glob metacharacters pass (they ARE one
-		// pattern) — render-side glob refusal is #10089.
+		// Both rendered slots are checked for #9886 whitespace/control
+		// hazards: Name= carries ifc.Name everywhere, and the .link carries
+		// ifc.OriginalName in [Match] OriginalName= — itself a
+		// whitespace-separated match list. First hazard wins, so a row is
+		// refused at most once. An empty OriginalName is unset, not a name,
+		// and skips the check. Glob metacharacters in either match-list value
+		// are checked separately below for #10089; the [Link] Name= target is
+		// literal, non-match syntax.
 		//
 		// Accepted exotic: a kernel device hand-named with control bytes
 		// (legal to dev_valid_name, never minted by udev/systemd) arrives as
@@ -398,8 +400,16 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: it is not exactly one [Match] Name= pattern or it carries control bytes — systemd would read it as a whitespace-separated list claiming other interfaces, and raw control bytes in a unit file are version-dependent and unanalyzed (#9886)", ifc.Name))
 			continue
 		}
+		if glob := rendersafe.FirstGlobMetacharacter(ifc.Name); glob != "" {
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: glob metacharacter %q in [Match] Name= would be interpreted as a shell-style glob and claim every matching interface (#10089)", ifc.Name, glob))
+			continue
+		}
 		if ifc.OriginalName != "" && !rendersafe.SafeInterfaceName(ifc.OriginalName) {
 			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: it is not exactly one [Match] OriginalName= pattern or it carries control bytes — systemd would read it as a whitespace-separated list claiming other interfaces (#9886)", ifc.OriginalName, ifc.Name))
+			continue
+		}
+		if glob := rendersafe.FirstGlobMetacharacter(ifc.OriginalName); ifc.OriginalName != "" && glob != "" {
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: glob metacharacter %q in [Match] OriginalName= would be interpreted as a shell-style glob and claim every matching interface (#10089)", ifc.OriginalName, ifc.Name, glob))
 			continue
 		}
 		filtered = append(filtered, ifc)

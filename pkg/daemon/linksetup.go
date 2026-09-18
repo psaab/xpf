@@ -554,6 +554,9 @@ func writeLinkFile(target, originalName string) (bool, error) {
 	// target into [Link] Name= (and the file name), originalName into
 	// [Match] OriginalName= — itself a whitespace-separated match list, so a
 	// multi-pattern original claims devices other than the intended NIC.
+	// #10089 adds the separate literal-pattern refusal for glob
+	// metacharacters in that [Match] OriginalName= slot; [Link] Name= is
+	// non-match syntax and remains literal.
 	// Callers surface the error on their existing fail-closed channels
 	// (#5842 positional errs, #4956 device-map renameErrs); the rename still
 	// proceeds without a .link rather than stranding the NIC mid-pass.
@@ -562,6 +565,9 @@ func writeLinkFile(target, originalName string) (bool, error) {
 	}
 	if !rendersafe.SafeInterfaceName(originalName) {
 		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: it is not exactly one [Match] OriginalName= pattern or it carries control bytes — no file written (#9886)", originalName, target)
+	}
+	if glob := rendersafe.FirstGlobMetacharacter(originalName); glob != "" {
+		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: glob metacharacter %q in [Match] OriginalName= would claim every matching interface — no file written (#10089)", originalName, target, glob)
 	}
 	path := filepath.Join(linkDir, linkPrefix+target+".link")
 	content := fmt.Sprintf(`# Managed by xpfd — do not edit
