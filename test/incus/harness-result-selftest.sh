@@ -226,6 +226,17 @@ else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi
 
+# #10122: the destructive DHCP gate and its post-run executable attestation
+# must share one outer lock cell. The gate script's cluster-cell is reentrant,
+# so this is the only way to keep the readback from racing a sibling deploy
+# after the script releases its inner cell.
+dhcp_recipe=$(sed -n '/^test-dhcp-lease-failover:/,/^[^[:space:]]/p' "$SCRIPT_DIR/../../Makefile")
+if [[ "$dhcp_recipe" == *"with-cluster.sh"* ]]; then
+	ok "#10122: DHCP gate wraps measurement and exe_check in one lock cell"
+else
+	bad "#10122: DHCP gate lets exe_check run outside the cluster lock"
+fi
+
 # 1d. The label prefix must NOT be part of the match. Same numeric tail, every
 #     real prefix, plus one nobody has written yet. Both adapters: the summary
 #     parse is shared, and the property belongs to it.
@@ -268,12 +279,21 @@ expect_field "ha-smoke FAIL with a figure keeps the throughput headline" ha-smok
 # The VOID that pays for itself: a smoke that died at `set -e` before its
 # summary is indistinguishable from a clean run to anything reading only the
 # tail.
-printf 'FATAL: cluster lock held by another agent\n' >"$LOG"
+printf 'FATAL: first cause (superseded)\nFATAL: DHCP_CLIENT failed: owner=lab-harness\n' >"$LOG"
 expect_field "ha-smoke with NO summary line -> VOID" ha-smoke 2 1 VOID
-if [[ "$(adapt_field ha-smoke 2 2)" == *"aborted before reaching its summary"* ]]; then
-	ok "ha-smoke VOID carries a reason naming the abort"
+if [[ "$(adapt_field ha-smoke 2 2)" == *"FATAL: DHCP_CLIENT failed: owner=lab-harness"* ]]; then
+	ok "ha-smoke VOID carries the last FATAL abort cause and owner"
 else
-	bad "ha-smoke VOID reason does not name the abort"
+	bad "ha-smoke VOID reason does not carry the last FATAL abort cause: $(adapt_field ha-smoke 2 2)"
+fi
+
+# A fatal line is evidence from the smoke, not a replacement for the summary.
+# Ensure a tab in the cause cannot corrupt the adapter's five-field envelope.
+printf 'FATAL: fixture\towner=lab-harness\n' >"$LOG"
+if [[ "$(adapt_field ha-smoke 2 2)" == *"FATAL: fixture owner=lab-harness"* ]]; then
+	ok "ha-smoke VOID flattens tabs in the abort cause"
+else
+	bad "ha-smoke VOID leaked a tab into its reason: $(adapt_field ha-smoke 2 2)"
 fi
 
 printf '  Results: 0 passed, 0 failed\n' >"$LOG"

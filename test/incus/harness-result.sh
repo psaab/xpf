@@ -159,7 +159,18 @@ _ha_smoke_summary() {
 	# read as the result.
 	line=$(grep -oE '[0-9]+ passed, [0-9]+ failed' "$log" | tail -1)
 	if [[ -z "$line" ]]; then
-		printf 'VOID\tno "<n> passed, <n> failed" summary line in the output (rc=%s) — the smoke aborted before reaching its summary\t\t\t\n' "$rc"
+		# #10122: the abort's own cause travels with the VOID. Every smoke
+		# dies through die() ("FATAL: ..."), and the run wrapper captures
+		# 2>&1, so the last FATAL line is why the summary never printed.
+		# Five #10122 rows said only "rc=2" and each cause had to be
+		# re-derived by hand. A tab would shift the TAB-separated fields,
+		# so it folds to a space; no FATAL line degrades to the bare
+		# reason, which is the previous behaviour exactly.
+		local fatal_line fatal_suffix=""
+		fatal_line=$(grep -E '^FATAL: ' "$log" | tail -1)
+		fatal_line=${fatal_line//$'\t'/ }
+		[[ -n "$fatal_line" ]] && fatal_suffix="; ${fatal_line:0:300}"
+		printf 'VOID\tno "<n> passed, <n> failed" summary line in the output (rc=%s) — the smoke aborted before reaching its summary%s\t\t\t\n' "$rc" "$fatal_suffix"
 		return 1
 	fi
 	p=${line%% passed,*}
