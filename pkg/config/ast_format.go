@@ -197,6 +197,17 @@ func (t *ConfigTree) FormatSet() string {
 	return b.String()
 }
 
+// FormatSetForLoadMerge renders hierarchical input as replayable flat `set`
+// commands for LoadMerge. It is deliberately separate from FormatSet:
+// operator-visible `display set` output must keep the #6668 zero-churn rule
+// that leaves never acquire bracket delimiters, while a merge replay must
+// preserve leaf bracket provenance for provenance-based validation (#10084).
+func (t *ConfigTree) FormatSetForLoadMerge() string {
+	var b strings.Builder
+	formatSetNodesMode(&b, t.Children, nil, nil, nil, true)
+	return b.String()
+}
+
 // nodeKeyBracketMask returns the per-key BRACKET mask for one node's
 // contribution to a flat `set` line (#6668): key i is emitted inside
 // `[ ... ]` when the operator AUTHORED it inside a bracket list and the node
@@ -270,11 +281,19 @@ func (t *ConfigTree) FormatPathSet(path []string) string {
 // inline token. Loading such output replays the `set` then the
 // `deactivate`, restoring the Inactive flag.
 func formatSetNodes(b *strings.Builder, nodes []*Node, prefix []string, prefixQuote, prefixGroup []bool) {
+	formatSetNodesMode(b, nodes, prefix, prefixQuote, prefixGroup, false)
+}
+
+func formatSetNodesMode(b *strings.Builder, nodes []*Node, prefix []string, prefixQuote, prefixGroup []bool, preserveLeafBrackets bool) {
 	for _, n := range canonicalOrder(nodes) {
-		path, pathQuote, pathGroup := appendNodeKeysGrouped(prefix, prefixQuote, prefixGroup, n)
+		path, pathQuote, pathGroup := appendNodeKeysGroupedMode(prefix, prefixQuote, prefixGroup, n, preserveLeafBrackets)
+		pathText := joinKeysProvGrouped(path, pathQuote, pathGroup)
+		if preserveLeafBrackets && n.IsLeaf {
+			pathText = joinKeysProvGroupedFrom(path, pathQuote, pathGroup, len(path)-len(n.Keys))
+		}
 		switch {
 		case n.IsLeaf:
-			fmt.Fprintf(b, "set %s\n", joinKeysProvGrouped(path, pathQuote, pathGroup))
+			fmt.Fprintf(b, "set %s\n", pathText)
 		case len(n.Children) == 0:
 			// #9126: AN EMPTY CONTAINER MUST STILL EMIT ITS OWN `set` LINE.
 			//
@@ -291,12 +310,17 @@ func formatSetNodes(b *strings.Builder, nodes []*Node, prefix []string, prefixQu
 			// deactivate replayable; there is no other line that could carry
 			// it, because a container with no children has no leaf to hang it
 			// off.
-			fmt.Fprintf(b, "set %s\n", joinKeysProvGrouped(path, pathQuote, pathGroup))
+			fmt.Fprintf(b, "set %s\n", pathText)
 		default:
-			formatSetNodes(b, n.Children, path, pathQuote, pathGroup)
+			formatSetNodesMode(b, n.Children, path, pathQuote, pathGroup, preserveLeafBrackets)
 		}
 		if n.Inactive {
-			fmt.Fprintf(b, "deactivate %s\n", joinKeysProvGrouped(path, pathQuote, pathGroup))
+			if preserveLeafBrackets && n.IsLeaf {
+				pathText = joinKeysProvGroupedFrom(path, pathQuote, pathGroup, len(path)-len(n.Keys))
+			} else {
+				pathText = joinKeysProvGrouped(path, pathQuote, pathGroup)
+			}
+			fmt.Fprintf(b, "deactivate %s\n", pathText)
 		}
 	}
 }
@@ -367,12 +391,19 @@ func appendNodeKeys(path []string, forceQuote []bool, n *Node) ([]string, []bool
 // appendNodeKeysGrouped is appendNodeKeys plus the parallel BRACKET-GROUP mask
 // (#6668), taken from the node's authored bracket provenance.
 func appendNodeKeysGrouped(path []string, forceQuote, group []bool, n *Node) ([]string, []bool, []bool) {
+	return appendNodeKeysGroupedMode(path, forceQuote, group, n, false)
+}
+
+func appendNodeKeysGroupedMode(path []string, forceQuote, group []bool, n *Node, preserveLeafBrackets bool) ([]string, []bool, []bool) {
 	outPath := append(append([]string(nil), path...), n.Keys...)
 	outQuote := make([]bool, len(path), len(outPath))
 	copy(outQuote, forceQuote)
 	outGroup := make([]bool, len(path), len(outPath))
 	copy(outGroup, group)
 	bracket := nodeKeyBracketMask(n)
+	if preserveLeafBrackets && n.IsLeaf && len(n.KeysBracketed) == len(n.Keys) {
+		bracket = n.KeysBracketed
+	}
 	for i := range n.Keys {
 		outQuote = append(outQuote, n.KeyQuoted(i))
 		outGroup = append(outGroup, i < len(bracket) && bracket[i])
@@ -386,6 +417,15 @@ func appendNodeKeysGrouped(path []string, forceQuote, group []bool, n *Node) ([]
 // key list ends. A one-key run is emitted bare — a single token needs no
 // delimiter and bracketing it would churn output for no information.
 func joinKeysProvGrouped(keys []string, forceQuote, group []bool) string {
+	return joinKeysProvGroupedFrom(keys, forceQuote, group, -1)
+}
+
+// joinKeysProvGroupedFrom is joinKeysProvGrouped with an optional starting
+// index whose single-key bracket runs should remain delimited. The public
+// FormatSet path passes -1 and therefore keeps the #6668 zero-churn rule.
+// LoadMerge's private replay renderer passes the leaf's start index so a
+// one-key leaf bracket is carried through ParseSetVerbGrouped (#10084).
+func joinKeysProvGroupedFrom(keys []string, forceQuote, group []bool, singleBracketFrom int) string {
 	if len(group) != len(keys) {
 		return joinQuotedKeysProv(keys, forceQuote)
 	}
@@ -400,19 +440,32 @@ func joinKeysProvGrouped(keys []string, forceQuote, group []bool) string {
 		for i+run < len(keys) && group[i+run] {
 			run++
 		}
-		if run < 2 {
+		if run < 2 && (singleBracketFrom < 0 || i < singleBracketFrom) {
 			parts = append(parts, quoteKeyProv(keys, forceQuote, i))
 			i++
 			continue
 		}
 		parts = append(parts, "[")
 		for j := i; j < i+run; j++ {
-			parts = append(parts, quoteKeyProv(keys, forceQuote, j))
+			preserveQuote := singleBracketFrom >= 0 && j >= singleBracketFrom
+			parts = append(parts, quoteKeyProvForLoadMerge(keys, forceQuote, j, preserveQuote))
 		}
 		parts = append(parts, "]")
 		i += run
 	}
 	return strings.Join(parts, " ")
+}
+
+// quoteKeyProvForLoadMerge preserves an authored quote on the final key when
+// that key is inside a replay-only bracket group. Public display-set output
+// intentionally suppresses final-key quote provenance (#6673); a bracketed
+// leaf needs it because #9881 distinguishes quoted bracket contents from an
+// unquoted bracket that was lexer list sugar.
+func quoteKeyProvForLoadMerge(keys []string, forceQuote []bool, i int, preserveFinalQuote bool) string {
+	if (i < len(keys)-1 || preserveFinalQuote) && i < len(forceQuote) && forceQuote[i] {
+		return `"` + keyEscaper.Replace(keys[i]) + `"`
+	}
+	return quoteKey(keys[i])
 }
 
 // quoteKeyProv renders keys[i] with the same authored-quote rule
