@@ -54,6 +54,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "dist"))
+from bridge_floor_10171 import bridge_floor_live_snippet  # noqa: E402  (#10171)
 import make_config_drive  # noqa: E402
 import sign  # noqa: E402  (#1924 signed-distribution helper)
 
@@ -1157,6 +1158,15 @@ class Harness:
             fail("linux-modules-extra (mlx5/i40e driver set) missing")
         if not guest_sh(a, '[ "$(ls /lib/modules | wc -l)" -eq 1 ]'):
             fail("more than one kernel in /lib/modules — stale cloudimg kernel not purged")
+        # #10171: mirror the bake-time bridge nf_tables floor against the
+        # kernel that actually booted. The bake check protects the artifact;
+        # this catches a foreign boot path or an image/kernel substitution
+        # before the scenario claims an appliance kernel is covered.
+        floor = guest(a, "sh", "-c", bridge_floor_live_snippet(),
+                      check=False, capture=True)
+        if floor.returncode != 0:
+            detail = (floor.stderr or floor.stdout).strip()
+            fail(f"bridge nf_tables kernel floor rejected: {detail}")
         if not guest_sh(a, 'grep -qw init_on_alloc=0 /proc/cmdline'):
             fail("init_on_alloc=0 missing from the booted kernel cmdline")
         self.assert_kernel_hold(a)

@@ -53,6 +53,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 # Signed-distribution helpers (#1924) live under scripts/dist.
 sys.path.insert(0, os.path.join(ROOT, "scripts", "dist"))
 import image_inventory  # noqa: E402  (#6500 inventory format)
+from bridge_floor_10171 import bridge_floor_offline_snippet  # noqa: E402  (#10171)
 import sign  # noqa: E402
 
 # Runtime dependency set installed explicitly into the image. This is the
@@ -478,6 +479,11 @@ def virt_customize(work_qcow, xpf_deb):
         "--run-command",
         'n=$(ls /lib/modules | wc -l); [ "$n" -eq 1 ] || '
         '{ echo "FATAL: $n kernels in /lib/modules after purge ($(ls /lib/modules | tr "\\n" " "))" >&2; exit 1; }',
+        # #10171: assert the target kernel's bridge nf_tables floor in the
+        # image itself. This runs inside virt-customize, so the helper discovers
+        # /lib/modules from the target root rather than inspecting the builder
+        # host's `uname -r`. It follows the single-kernel assert above.
+        "--run-command", bridge_floor_offline_snippet(),
         # #1930 INC-0: HOLD the kernel so an unattended `apt upgrade` cannot move
         # the running kernel out from under the verifier-gated shim .o (#1864).
         # The embedded AF_XDP shim is kernel-space-verifier-gated; a kernel the
