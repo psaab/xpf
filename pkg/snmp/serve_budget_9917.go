@@ -93,7 +93,8 @@ type snmpServeBudget struct {
 	lastExpirySweep time.Time
 	// pendingSources are sources that reached userspace while the global
 	// bucket was empty. Previously admitted sources yield future global
-	// credits to these onboarding contenders, preventing FIFO starvation.
+	// credits to these onboarding contenders only while tokens are scarce
+	// (globalTokens < pendingSources+1), preventing FIFO starvation.
 	pendingSources int
 	// Global backstop, refilled lazily (globalLast.IsZero means unstarted, so
 	// hand-built test budgets behave like constructed ones).
