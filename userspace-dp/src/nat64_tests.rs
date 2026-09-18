@@ -7745,7 +7745,9 @@ fn nat64_v6_to_v4_nonfirst_rejects_payload_above_65515_10191() {
         None => {}
         Some(n) => {
             let wire = u16::from_be_bytes([out[2], out[3]]);
-            panic!("non-first payload 65516 must fail closed; got Some({n}) with wire total {wire}");
+            panic!(
+                "non-first payload 65516 must fail closed; got Some({n}) with wire total {wire}"
+            );
         }
     }
 }
