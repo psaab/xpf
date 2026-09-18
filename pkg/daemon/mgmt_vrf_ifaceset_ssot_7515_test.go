@@ -66,3 +66,30 @@ func TestManagementVRFIfaceSetIsNilSafe7515(t *testing.T) {
 		t.Fatalf("a nil config must yield an empty management set, got %v", got)
 	}
 }
+
+// TestManagementVRFIfaceSetIgnoresZoneNames10308 proves the daemon's apply
+// path does not infer vrf-mgmt isolation from a security-zone label. A
+// data-NIC member of a zone named `mgmt`/`control` remains outside vrf-mgmt,
+// while the real interface-name lifelines stay isolated.
+func TestManagementVRFIfaceSetIgnoresZoneNames10308(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0"},
+		"fxp0":     {Name: "fxp0"},
+		"em0":      {Name: "em0"},
+		"fab0":     {Name: "fab0"},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"mgmt":    {Name: "mgmt", Interfaces: []string{"ge-0/0/0"}},
+		"control": {Name: "control", Interfaces: []string{"fxp0", "em0", "fab0"}},
+	}
+	got := managementVRFIfaceSet(cfg)
+	if got[config.LinuxIfName("ge-0/0/0")] {
+		t.Fatal("a data NIC must not enter vrf-mgmt merely because its zone is named mgmt")
+	}
+	for _, name := range []string{"fxp0", "em0", "fab0"} {
+		if !got[config.LinuxIfName(name)] {
+			t.Errorf("%s lifeline missing from vrf-mgmt set %v", name, got)
+		}
+	}
+}

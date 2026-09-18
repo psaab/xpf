@@ -170,32 +170,23 @@ func TestParentRedirectCannotReadmitTheExcludedXfrmi(t *testing.T) {
 	}
 }
 
-// TestParentRedirectKeepsAMgmtZonedParent is the NEGATIVE control for the
-// predicate split, and it is the reason the split exists rather than a blanket
-// "inherit every exclusion".
+// TestParentRedirectKeepsAMgmtNamedDataParent10308 is the #10308 regression
+// cell for a data NIC in a management-named zone. It also ensures the VLAN
+// parent redirect does not lose a real data path.
 //
-// buildInterfaceZoneMap keys a base off whichever zone entry sorts first, so
-// `security-zone mgmt interfaces ge-0/0/3.0` + `security-zone trust interfaces
-// ge-0/0/3.100` really does produce base=mgmt with a trust-zoned VLAN unit
+// `ge-0/0/3.100` really does produce base=mgmt with a trust-zoned VLAN unit
 // ("mgmt" < "trust"; the unit-ref arm sets the base and then `continue`s past
 // the fan-out that would have claimed the other units).
 //
-// The mgmt exclusion is a property of the ROW, not of the netdev: the trust
-// VLAN's tagged frames arrive on that same physical netdev's hardware queues,
-// so its ifindex MUST stay in the ingress set and its name in the allowlist.
-// Inheriting the parent's mgmt exclusion here would take the trust VLAN's
-// traffic off the dataplane — a forwarding regression wearing the fix's
-// clothes.
+// #10308 changes the old row-name exemption: the mgmt-named base is a data NIC
+// and stays on the adjudicated path. The trust VLAN's tagged frames arrive on
+// that same physical netdev's hardware queues, so both rows remain admitted.
 //
-// FAIL-ON-REVERT, measured rather than asserted: move the `mgmt`/`control` arm
-// into netdevExclusionClasses and this test reds on the PLACEMENT assertion
-// (`a mgmt ZONE is a property of the row, not of the netdev`) — which is a
-// t.Fatal, so the ingress and allowlist assertions below it never run. Round 9
-// claimed it "goes RED on both assertions"; a review round measured only one
-// firing, and it was right. The same mutation also reds
-// TestExclusionClassesAgreeAcrossParentAndChild's coverage assertion, since a
-// new production class with no case is exactly what that now detects.
-func TestParentRedirectKeepsAMgmtZonedParent(t *testing.T) {
+// FAIL-ON-REVERT: restore the `mgmt`/`control` arm to
+// userspaceSkipsIngressInterface and this test reds on the first placement
+// assertion (the base is incorrectly skipped); the ingress and allowlist
+// assertions then protect the end-to-end consumers.
+func TestParentRedirectKeepsAMgmtNamedDataParent10308(t *testing.T) {
 	const parentIfindex = 21
 	defer stubLinkSnapshot5619(t, map[string]int{"ge-0-0-3": parentIfindex})()
 	defer stubXfrmNetdevs(t)()
@@ -218,20 +209,21 @@ func TestParentRedirectKeepsAMgmtZonedParent(t *testing.T) {
 	if child.Zone != "trust" {
 		t.Fatalf("premise broken: VLAN unit zone is %q, want trust", child.Zone)
 	}
-	if !userspaceSkipsIngressInterface(base) {
-		t.Fatal("premise broken: the mgmt-zoned base row is not excluded")
+	if userspaceSkipsIngressInterface(base) {
+		t.Fatal("a data NIC in a mgmt-named zone must remain adjudicated (#10308)")
+	}
+	if userspaceSkipsIngressInterface(child) {
+		t.Fatal("the trust VLAN data row must remain adjudicated")
 	}
 	if userspaceUnbindableNetdev(base) {
-		t.Fatal("a mgmt ZONE is a property of the row, not of the netdev — putting it " +
-			"in userspaceUnbindableNetdev makes a data-zoned VLAN unit on the same NIC " +
-			"inherit it and lose its ingress adjudication")
+		t.Fatal("a mgmt zone is a label, not a netdev exclusion class")
 	}
 
 	ingress := buildUserspaceIngressIfindexes(&ConfigSnapshot{Interfaces: rows})
 	if !slices.Contains(ingress, uint32(parentIfindex)) {
 		t.Errorf("the physical parent (ifindex %d) is missing from the ingress set %v — "+
-			"the trust VLAN unit's tagged frames arrive on THAT netdev's queues, so "+
-			"dropping it carries no traffic for the unit", parentIfindex, ingress)
+			"the mgmt-named data NIC and trust VLAN must stay on the policy path",
+			parentIfindex, ingress)
 	}
 	if got := UserspaceBoundLinuxInterfaces(cfg); !slices.Contains(got, "ge-0-0-3") {
 		t.Errorf("RSS/AF_XDP allowlist = %v, want it to contain ge-0-0-3", got)
@@ -433,11 +425,11 @@ func TestExclusionClassesAgreeAcrossParentAndChild(t *testing.T) {
 				"drifted from netdevExclusionClasses", name)
 		}
 	}
-	// The remaining arm — `mgmt`/`control` — is deliberately NOT in
-	// netdevExclusionClasses: it lives in userspaceSkipsIngressInterface because
-	// it is a property of the ROW. TestParentRedirectKeepsAMgmtZonedParent
-	// asserts that placement on purpose. LocalFabric is the same, and is
-	// asserted inside the `fab name` case via wantLocal.
+	// Management/control zone names are deliberately NOT a production
+	// exclusion class after #10308: they are operator-controlled labels, not
+	// lifeline identity. TestParentRedirectKeepsAMgmtNamedDataParent10308
+	// proves that a data NIC in either label stays admitted. LocalFabric remains
+	// row-scoped and is asserted inside the `fab name` case via wantLocal.
 	//
 	// THE FABRIC LOOPS WERE A THIRD CONTRIBUTOR, and #6691 round 8 was wrong to
 	// bound the enumeration by "the predicate's callers". `add(fab.Parent-

@@ -455,11 +455,11 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 // (config.LinuxIfName). Extracted from the apply path so the class rule has a
 // callable, testable entry point rather than living inline in a long reconcile.
 //
-// #7515: the class comes from config.IsManagementIfName, the SSOT shared with
-// the networkd `VRF=` emitter and the ip-monitoring next-hop validator. Those
-// three answer the same question, and a divergence between them is always a bug:
-// the daemon would bind a VRF networkd strips, or the validator would refuse a
-// next-hop whose lease FRR actually owns.
+// #7515 / #10308: the class comes from config.IsManagementIfName, the SSOT
+// shared with the networkd `VRF=` emitter and the ip-monitoring next-hop
+// validator. Zone names are deliberately irrelevant: a data NIC in a zone
+// named `mgmt`/`control` is not vrf-mgmt-isolated, while fxp*/fab*/em*
+// lifelines remain isolated wherever they are zoned.
 func managementVRFIfaceSet(cfg *config.Config) map[string]bool {
 	out := make(map[string]bool)
 	if cfg == nil {

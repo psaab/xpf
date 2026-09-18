@@ -87,7 +87,9 @@ func TestRxMTUAdvisoryBoundaryAndUnitOverride9727(t *testing.T) {
 // TestRxMTUAdvisoryStaysSilentForInterfacesTheDataplaneDoesNotBind9727 is the
 // control that keeps the warning aimed: interfaces the userspace dataplane never
 // binds must not be told their jumbo MTU is a problem. Each exclusion gets its
-// own case, so dropping one of them is visible on its own.
+// own case, so dropping one of them is visible on its own. Management/control
+// zone names are intentionally absent from this table (#10308): a data NIC in
+// either named zone is now bound and must warn like any other data NIC.
 func TestRxMTUAdvisoryStaysSilentForInterfacesTheDataplaneDoesNotBind9727(t *testing.T) {
 	tunnel := iface9727("gr-0/0/0", 9000, map[int]int{0: 0})
 	tunnel.Tunnel = &TunnelConfig{}
@@ -104,8 +106,6 @@ func TestRxMTUAdvisoryStaysSilentForInterfacesTheDataplaneDoesNotBind9727(t *tes
 		{"lo0", "trust", "lo0.0", iface9727("lo0", 9000, map[int]int{0: 0})},
 		{"tunnel", "trust", "gr-0/0/0.0", tunnel},
 		{"local fabric member", "trust", "ge-0/0/5.0", fabMember},
-		{"mgmt zone", "mgmt", "ge-0/0/6.0", iface9727("ge-0/0/6", 9000, map[int]int{0: 0})},
-		{"control zone", "control", "ge-0/0/6.0", iface9727("ge-0/0/6", 9000, map[int]int{0: 0})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base, _, _ := strings.Cut(tc.ref, ".")
@@ -113,6 +113,16 @@ func TestRxMTUAdvisoryStaysSilentForInterfacesTheDataplaneDoesNotBind9727(t *tes
 			appendUserspaceRxMTUAdvisoryLocked(cfg, compileOpts{})
 			if w := rxMTUWarnings9727(cfg); len(w) != 0 {
 				t.Fatalf("%s is not bound by the userspace dataplane and must not warn: %v", tc.name, w)
+			}
+		})
+	}
+	for _, zone := range []string{"mgmt", "control"} {
+		t.Run(zone+" data NIC warns", func(t *testing.T) {
+			cfg := rxMTUCfg9727(map[string][]string{zone: {"ge-0/0/6.0"}},
+				map[string]*InterfaceConfig{"ge-0/0/6": iface9727("ge-0/0/6", 9000, map[int]int{0: 0})})
+			appendUserspaceRxMTUAdvisoryLocked(cfg, compileOpts{})
+			if w := rxMTUWarnings9727(cfg); len(w) != 1 {
+				t.Fatalf("%s-named data NIC is bound and must warn: %v", zone, w)
 			}
 		})
 	}

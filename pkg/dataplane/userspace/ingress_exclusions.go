@@ -24,9 +24,11 @@ import "strings"
 // #6691 round 8 SPLIT THE EXCLUSION IN TWO, and the split is the fix, not a
 // tidy-up. The classes below are properties of the DEVICE — "whatever row asks,
 // this netdev may not be bound" — so they are INHERITED by any row that
-// redirects its binding onto the device. The classes left in
-// userspaceSkipsIngressInterface (a mgmt/control ZONE, a local-fabric ROLE) are
-// properties of the ROW, and a sibling row must NOT inherit them.
+// redirects its binding onto this netdev. A local-fabric ROLE is a property of
+// the ROW and a sibling row must not inherit it. Management/control ZONE NAMES
+// are deliberately absent: a zone name is operator-controlled and says
+// nothing about whether its member is a real lifeline. A data NIC in a zone
+// named `mgmt` or `control` stays on the adjudicated path (#10308).
 //
 // The distinction is load-bearing in both directions:
 //
@@ -36,21 +38,15 @@ import "strings"
 //     (`stIndex<<16 | unit+1`), is correctly SecureTunnel=false, and carries
 //     ParentIfindex/ParentLinuxName pointing straight at the live xfrmi. Before
 //     this split the child re-admitted its own excluded parent: measured at
-//     head, the ingress set was [10 11] with 11 the xfrmi, the RSS allowlist
+//     head, the ingress set was [10 11] with 11 the live xfrmi, the RSS allowlist
 //     contained "st10", and the Rust planner re-keyed the orphan child onto
 //     "st10" and dropped the LAN from 4 planned queues to 1 — the #3091
 //     single-worker regression the exclusion exists to prevent, arriving
 //     through the child.
-//   - NOT INHERITED. A base row in the mgmt zone with a data-zoned VLAN unit
-//     (reachable: buildInterfaceZoneMap keys the base off whichever zone entry
-//     sorts first, so `security-zone mgmt interfaces ge-0/0/3.0` +
-//     `security-zone trust interfaces ge-0/0/3.100` gives base=mgmt,
-//     unit=trust) is the ORDINARY case the parent redirect exists for. The
-//     trust VLAN's tagged frames arrive on the parent's hardware queues, so
-//     the parent's ifindex MUST enter the ingress set or the unit carries no
-//     traffic. Inheriting the mgmt exclusion there would be a forwarding
-//     regression, not a fix. TestParentRedirectKeepsAMgmtZonedParent is the
-//     negative control.
+//
+//   - NOT INHERITED. A row-level class such as LocalFabric is not a property
+//     of the netdev: a sibling row may still carry the data traffic that
+//     arrives on the same physical parent's queues.
 //
 // Whether a class can actually DISAGREE between a base row and its unit row is
 // a separate question from where the class belongs, and it has to be asked in
@@ -70,8 +66,8 @@ import "strings"
 //     `set interfaces wgN unit 0 tunnel mode wireguard` is the canonical
 //     spelling — gives Tunnel=true on the unit and false on the base. That
 //     direction is the #6691 round 9 blocker; see userspaceRefusedNetdevs.
-//     LocalFabric really is one field copied to both rows, and the
-//     fxp/em/fab/lo0 arms really do test the BASE name a unit shares.
+//     LocalFabric really is one field copied to both rows, and the fxp/em/fab/lo0
+//     arms really do test the BASE name a unit shares.
 //
 // TestExclusionClassesAgreeAcrossParentAndChild pins both directions for every
 // class, so a new class cannot be added on the wrong side unnoticed and a
@@ -391,12 +387,10 @@ func userspaceSkipsIngressInterface(iface InterfaceSnapshot) bool {
 	if userspaceUnbindableNetdev(iface) {
 		return true
 	}
-	// The ROW half. Both classes below describe what THIS row is for, not what
-	// its netdev is, so a sibling row on the same netdev does not inherit them.
-	switch iface.Zone {
-	case "mgmt", "control":
-		return true
-	}
+	// The ROW half. Local-fabric membership describes what THIS row is for,
+	// not what its netdev is, so a sibling row on the same netdev does not
+	// inherit it. Zone names are deliberately not consulted: `mgmt` and
+	// `control` are operator-controlled labels, not lifeline identity (#10308).
 	if iface.LocalFabric != "" {
 		return true
 	}
@@ -539,8 +533,9 @@ func userspaceOwnsItsNetdev(iface InterfaceSnapshot) bool {
 //     (the name arms read the shared base name; the Tunnel flag ORs the
 //     parent's), so the child is dropped by userspaceSkipsIngressInterface
 //     before that loop consults the index.
-//   - LocalFabric, mgmt/control. Not device-level at all, so the parent never
-//     enters this index and there is nothing to ask.
+//   - LocalFabric. It is not device-level, so the parent never enters this
+//     index and there is nothing to ask. Zone names are not an exclusion class
+//     after #10308.
 //   - SecureTunnel. The child does NOT inherit — that is the F1 mechanism — but
 //     its own netdev is `st<N>.<vlan>`, which the xfrmi reconciler never creates
 //     and which the kernel cannot create as a VLAN on an ARPHRD_NONE parent. It

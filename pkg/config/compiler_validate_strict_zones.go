@@ -41,6 +41,12 @@ import (
 //
 //   - "junos-host"  — Junos reserved self-traffic zone (host-inbound / host-
 //     outbound policy context); it is never declared as a `security zone`.
+//
+// `mgmt` and `control` are intentionally NOT globally reserved here:
+// canonical lifeline configs use those zone names, and rejecting them would
+// brick valid vrf-mgmt deployments. Their userspace exemption is keyed on
+// interface identity (the same class used by the daemon's vrf-mgmt apply),
+// while a data member in either name receives the #10308 commit advisory.
 var reservedZoneNames = map[string]struct{}{
 	"junos-global": {},
 	"any":          {},

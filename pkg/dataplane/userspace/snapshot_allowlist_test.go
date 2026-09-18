@@ -48,9 +48,10 @@ func TestUserspaceBoundLinuxInterfaces_BasicFilter(t *testing.T) {
 	}
 }
 
-// Management / control zones are filtered even on non-fxp/em names
-// (matches userspaceSkipsIngressInterface semantics).
-func TestUserspaceBoundLinuxInterfaces_MgmtZoneFiltered(t *testing.T) {
+// Management/control zone names do not filter data interfaces (#10308). The
+// exclusion is keyed on interface identity, so only real lifeline names are
+// filtered by userspaceSkipsIngressInterface.
+func TestUserspaceBoundLinuxInterfaces_MgmtZoneDoesNotFilterData(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.System.DataplaneType = "userspace"
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -59,13 +60,13 @@ func TestUserspaceBoundLinuxInterfaces_MgmtZoneFiltered(t *testing.T) {
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"mgmt":    {Name: "mgmt", Interfaces: []string{"ge-0/0/0"}},
-		"untrust": {Name: "untrust", Interfaces: []string{"ge-0/0/1"}},
+		"control": {Name: "control", Interfaces: []string{"ge-0/0/1"}},
 	}
 
 	got := UserspaceBoundLinuxInterfaces(cfg)
-	want := []string{"ge-0-0-1"}
+	want := []string{"ge-0-0-0", "ge-0-0-1"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("want %v, got %v", want, got)
+		t.Fatalf("want %v, got %v — zone names must not remove data NICs (#10308)", want, got)
 	}
 }
 

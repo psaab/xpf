@@ -35,9 +35,12 @@ const (
 // netdevExclusionClasses in pkg/dataplane/userspace), which pkg/config cannot
 // import:
 //   - only interfaces referenced by a security zone;
-//   - not the mgmt or control zones;
-//   - not tunnels, fxp*, em*, fab* or lo0;
+//   - not tunnels, fxp*, em*, fab* or lo0 by interface identity;
 //   - not local fabric members.
+//
+// The zone name is deliberately absent. `mgmt` and `control` are
+// operator-controlled labels, not lifeline identity; a data NIC in one of
+// those zones is still AF_XDP-bound and policy-adjudicated (#10308).
 //
 // A WARNING, not an error. Commit cannot tell a copy-mode binding (drops
 // counted) from a zero-copy one (a refused bind), and a jumbo MTU remains
@@ -72,8 +75,8 @@ func userspaceRxMTUOverBudget(cfg *Config) map[string]int {
 	if cfg.Security.Zones == nil || cfg.Interfaces.Interfaces == nil {
 		return out
 	}
-	for zoneName, zone := range cfg.Security.Zones {
-		if zone == nil || zoneName == "mgmt" || zoneName == "control" {
+	for _, zone := range cfg.Security.Zones {
+		if zone == nil {
 			continue
 		}
 		for _, ref := range zone.Interfaces {

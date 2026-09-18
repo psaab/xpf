@@ -200,11 +200,11 @@ var adjudicated8901 = map[string]string{
 	// `logical_only` is Go-only, and the reason recorded here until #9009 was
 	// FALSE. It claimed "Rust excludes the row upstream via
 	// include_userspace_binding_interface" — but that function tests
-	// zone-empty, local_fabric_member, userspace_unbindable_netdev and
-	// mgmt/control, and nothing about logical-only. `logical_only` appears
-	// NOWHERE in userspace-dp (positive control: `parent_unbindable` hits
-	// main_tests.rs), and InterfaceSnapshot has no such field and no
-	// deny_unknown_fields, so the wire value is silently discarded.
+	// zone-empty, local_fabric_member, userspace_unbindable_netdev, and
+	// nothing about logical-only. `logical_only` appears NOWHERE in
+	// userspace-dp (positive control: `parent_unbindable` hits main_tests.rs),
+	// and InterfaceSnapshot has no such field and no deny_unknown_fields, so
+	// the wire value is silently discarded.
 	//
 	// The CONCLUSION survives, which is why the entry survives: a LogicalOnly
 	// flip also swaps the row between a real and a synthetic ifindex
