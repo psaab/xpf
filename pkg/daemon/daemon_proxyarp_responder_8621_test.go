@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -225,10 +226,11 @@ func TestAnAnsweredRequestReachesTheWireAddressedToTheAsker8621(t *testing.T) {
 	askerMAC := net.HardwareAddr{0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4}
 	poolIP := net.IP{172, 16, 80, 7}
 	askerIP := net.IP{172, 16, 80, 174}
+	r := &proxyARPResponder{mac: ourMAC, macSet: true}
 
 	frame := arpRequestFrame(askerMAC, askerIP, poolIP)
 	answerAll := func(_ string, _ net.IP) bool { return true }
-	if err := respondToARPFrame(7, 42, "ge-0-0-2.80", ourMAC, answerAll, frame); err != nil {
+	if err := respondToARPFrame(7, 42, "ge-0-0-2.80", r, answerAll, frame); err != nil {
 		t.Fatalf("respondToARPFrame: %v", err)
 	}
 	if sentPkt == nil {
@@ -254,12 +256,115 @@ func TestAnAnsweredRequestReachesTheWireAddressedToTheAsker8621(t *testing.T) {
 	// responder that transmits unconditionally satisfies every assertion above.
 	sentPkt, sentAddr = nil, nil
 	refuseAll := func(_ string, _ net.IP) bool { return false }
-	if err := respondToARPFrame(7, 42, "ge-0-0-2.80", ourMAC, refuseAll, frame); err != nil {
+	if err := respondToARPFrame(7, 42, "ge-0-0-2.80", r, refuseAll, frame); err != nil {
 		t.Fatalf("respondToARPFrame (refusing): %v", err)
 	}
 	if sentPkt != nil {
 		t.Fatal("a REFUSED request still put a frame on the wire")
 	}
+}
+
+// TestResponderReconcileRefreshesVirtualMAC_10316 proves the live-MAC fix at
+// the wire boundary. The socket remains open while reconcile swaps M1 -> M2;
+// the next ARP reply must carry M2, not the MAC captured when the responder
+// started. RED on the old code: syncProxyARPResponders only replaced addrs,
+// so the reply continued to use its stale start-time MAC.
+func TestResponderReconcileRefreshesVirtualMAC_10316(t *testing.T) {
+	mac1 := net.HardwareAddr{0x02, 0xbf, 0x72, 0x16, 0x01, 0x00}
+	mac2 := net.HardwareAddr{0x02, 0xbf, 0x72, 0x16, 0x02, 0x00}
+	current := mac2
+	originalLookup := proxyARPInterfaceByName
+	proxyARPInterfaceByName = func(_ string) (*net.Interface, error) {
+		return &net.Interface{HardwareAddr: append(net.HardwareAddr(nil), current...)}, nil
+	}
+	t.Cleanup(func() { proxyARPInterfaceByName = originalLookup })
+
+	d := &Daemon{arpResponders: newProxyARPResponders()}
+	r := &proxyARPResponder{
+		junosRef: "reth0.80",
+		addrs:    map[string]struct{}{"172.16.80.7": {}},
+		mac:      mac1,
+		macSet:  true,
+	}
+	d.arpResponders.running["ge-0-0-2"] = r
+	cfg := proxyARPCfg("reth0.80", "172.16.80.7/32")
+
+	// Reconcile is the live-set notification path: no responder restart and
+	// no socket reopen occurs here.
+	d.syncProxyARPResponders(cfg, map[string]string{"ge-0-0-2": "reth0.80"})
+	if got := r.currentMAC(); got.String() != mac2.String() {
+		t.Fatalf("reconcile left responder MAC at %s, want live MAC %s", got, mac2)
+	}
+
+	var sent []byte
+	originalSend := arpReplySend
+	arpReplySend = func(_ int, pkt []byte, _ unix.Sockaddr) error {
+		sent = append([]byte(nil), pkt...)
+		return nil
+	}
+	t.Cleanup(func() { arpReplySend = originalSend })
+	frame := arpRequestFrame(
+		net.HardwareAddr{0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4},
+		net.IP{172, 16, 80, 174}, net.IP{172, 16, 80, 7})
+	if err := respondToARPFrame(7, 42, "ge-0-0-2", r,
+		func(_ string, _ net.IP) bool { return true }, frame); err != nil {
+		t.Fatalf("respondToARPFrame: %v", err)
+	}
+	if len(sent) < 28 {
+		t.Fatalf("no complete ARP reply captured: %d bytes", len(sent))
+	}
+	if got := net.HardwareAddr(sent[22:28]); got.String() != mac2.String() {
+		t.Fatalf("ARP reply used stale MAC %s after reconcile; want %s", got, mac2)
+	}
+}
+
+// TestResponderReconcileAndRepliesAreRaceFree_10316 is intended for -race.
+// Reconcile writes the complete snapshot while a receive path reads it for
+// policy and reply construction. The old code wrote rgID/junosRef outside
+// addrsMu while the policy closure read rgID, producing a race under live
+// reconcile plus inbound ARP.
+func TestResponderReconcileAndRepliesAreRaceFree_10316(t *testing.T) {
+	originalLookup := proxyARPInterfaceByName
+	proxyARPInterfaceByName = func(_ string) (*net.Interface, error) {
+		return &net.Interface{HardwareAddr: net.HardwareAddr{0x02, 0xbf, 0x72, 0x16, 0x02, 0x00}}, nil
+	}
+	t.Cleanup(func() { proxyARPInterfaceByName = originalLookup })
+
+	d := &Daemon{arpResponders: newProxyARPResponders()}
+	r := &proxyARPResponder{
+		junosRef: "reth0.80",
+		rgID:     2,
+		addrs:    map[string]struct{}{"172.16.80.7": {}},
+		mac:      net.HardwareAddr{0x02, 0xbf, 0x72, 0x16, 0x01, 0x00},
+		macSet:  true,
+	}
+	d.arpResponders.running["ge-0-0-2"] = r
+	cfg := proxyARPCfg("reth0.80", "172.16.80.7/32")
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"reth0": {Name: "reth0", RedundancyGroup: 2},
+	}
+	policy := d.answerPolicyFor(r)
+	frame := arpRequestFrame(
+		net.HardwareAddr{0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4},
+		net.IP{172, 16, 80, 174}, net.IP{172, 16, 80, 7})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			d.syncProxyARPResponders(cfg, map[string]string{"ge-0-0-2": "reth0.80"})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			// fd=-1 deliberately avoids a raw socket; the decision and MAC
+			// snapshot still run, and the expected send error is irrelevant.
+			_ = respondToARPFrame(-1, 42, "ge-0-0-2", r, policy, frame)
+		}
+	}()
+	wg.Wait()
 }
 
 // arpRequestFrame builds a well-formed ARP request. Deliberately a local
