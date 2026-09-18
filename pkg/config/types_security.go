@@ -1122,10 +1122,17 @@ const (
 
 // NATPool is a pool of addresses for NAT.
 type NATPool struct {
-	Name      string
-	Address   string   // single address (DNAT compat)
-	Addresses []string // multiple addresses (source NAT pools)
-	Port      int      // optional port mapping (DNAT)
+	Name    string
+	Address string // single address (DNAT compat)
+	// AddressInvalidSpec preserves a multi-token destination-NAT address
+	// (`address A to B`, a bracket list, or another extra-token form). The
+	// dataplane wire field accepts one host only, so the strict commit gate
+	// rejects this compile-time artifact and the tolerant snapshot path skips
+	// the rule. `json:"-"`: it is recomputed from the ConfigTree and never
+	// crosses the config wire.
+	AddressInvalidSpec string   `json:"-"`
+	Addresses          []string // multiple addresses (source NAT pools)
+	Port               int      // optional port mapping (DNAT)
 	// PortRaw is the raw DNAT pool `port` token exactly as configured
 	// (empty when no `port` leaf was set). It lets the strict commit gate
 	// (validateDNATPoolStrict) and the snapshot builder distinguish a
