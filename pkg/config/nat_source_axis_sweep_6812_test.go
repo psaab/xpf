@@ -1063,10 +1063,15 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 			"compatibility scalars, PortRangeInvalidSpec is the #5457 rejected-range "+
 			"marker (every range here is valid), and no pool is routing-instance-scoped, "+
 			"port-overloaded, no-translation, persistent-NAT or deterministic-CGNAT. A "+
-			"tiebreak keyed on any of them would reorder a config that sets it.",
+			"tiebreak keyed on any of them would reorder a config that sets it. Unknown "+
+			"pool children are likewise absent from this valid fixture; malformed "+
+			"production input records them for the strict/tolerant gate, but nothing "+
+			"sorts or compares on that diagnostic state.",
 		"Pool.PortRangeInvalidSpec", "Pool.Addresses.nil",
 		"Pool.PortNoTranslation", "Pool.PortOverloadingFactor", "Pool.RoutingInstance",
 		"Pool.PersistentNAT.nil", "Pool.Deterministic.nil",
+		"Pool.UnknownLeaves.nil", "Pool.UnknownLeaves.len",
+		"Pool.UnknownLeaves.all", "Pool.UnknownLeaves[0]",
 	),
 )
 

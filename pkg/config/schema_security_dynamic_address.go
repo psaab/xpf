@@ -4,10 +4,11 @@ package config
 // schemaSecurity: feed servers, their feeds, and the address names bound to
 // them. It lives in its own file because #9689's fail-mode leaf took
 // schema_security.go past the 1500 LOC refactoraudit floor; the subtree is
-// unchanged apart from that leaf and the profile node's packedStatements.
+// unchanged apart from #10337's feed-server packedFlatRun boundary, that leaf,
+// and the profile node's packedStatements.
 func dynamicAddressSchema() *schemaNode {
 	return &schemaNode{desc: "Dynamic address feeds", children: map[string]*schemaNode{
-		"feed-server": {desc: "Feed server name", args: 1, placeholder: "<server-name>", children: map[string]*schemaNode{
+		"feed-server": {desc: "Feed server name", args: 1, placeholder: "<server-name>", packedFlatRun: true, children: map[string]*schemaNode{
 			"url":             {desc: "Feed URL (takes precedence over hostname)", args: 1, placeholder: "<url>", children: nil},
 			"hostname":        {desc: "Server hostname for building per-feed URLs", args: 1, scalar: true, placeholder: "<hostname>", children: nil},
 			"update-interval": {desc: "Feed refresh interval in seconds (default 3600)", args: 1, valueType: ValueInteger, valueDesc: "Seconds (> 0)", valueExamples: []string{"3600", "300"}, validator: ValidateInteger(1, MaxDurationSeconds), placeholder: "<seconds>", children: nil},

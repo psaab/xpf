@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestFlatRunResidueSchemasResolve9792 pins every #9792 resolver non-nil and
 // carrying the leaves its register row names. A resolver that returned nil
@@ -47,6 +50,56 @@ func TestFlatRunResidueSchemasResolve9792(t *testing.T) {
 				if tc.got.children[w] == nil {
 					t.Errorf("#9792: %s schema does not declare %q", tc.name, w)
 				}
+			}
+		})
+	}
+}
+
+// TestDynamicAddressFeedServerPackedFlatRunStrict10337 pins the compiler-read
+// shape that #10337 exposed under the #10078 security closed-world arm.
+// SetPath nests a same-line `feed-name` beneath the preceding `url` leaf;
+// feed-server opts into the measured flat-run expansion so strict validation
+// sees the two declared siblings the compiler reads. The negative control
+// keeps the arm's true reject: a misspelled child remains a strict error.
+func TestDynamicAddressFeedServerPackedFlatRunStrict10337(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		line   string
+		wantOK bool
+	}{
+		{
+			name:   "declared feed-name after url",
+			line:   "set security dynamic-address feed-server office url http://example.com/feed feed-name blocklist",
+			wantOK: true,
+		},
+		{
+			name:   "unknown feed child remains rejected",
+			line:   "set security dynamic-address feed-server office url http://example.com/feed feed-nam blocklist",
+			wantOK: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, err := ParseSetCommand(tc.line)
+			if err != nil {
+				t.Fatalf("ParseSetCommand(%q): %v", tc.line, err)
+			}
+			tree := &ConfigTree{}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", tc.line, err)
+			}
+			err = SchemaValidate(tree, nil)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("declared feed-server flat run was rejected: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("unknown feed-server child committed clean; the closed-world " +
+					"arm must still reject the typo")
+			}
+			if !strings.Contains(err.Error(), "feed-nam") {
+				t.Fatalf("rejection did not name the unknown child: %v", err)
 			}
 		})
 	}
