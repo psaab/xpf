@@ -7687,3 +7687,79 @@ fn nat64_poll_path_passes_the_flow_routing_domain_9680() {
     );
 }
 
+// #10191: IPv6 payloads 65516..=65535 are valid ordinary 16-bit payloads — not
+// IPv6 jumbograms — and a large-MTU or GRO-delivered ingress buffer can carry
+// one whole. `20 + L4` must fit the IPv4 16-bit Total Length: without a guard
+// the wire header wrapped below 20 while the translator returned the unwrapped
+// `usize` (an incoherent datagram). Both v6→v4 translators fail closed (`None`;
+// the caller selects the RFC 7915 §5.1 packet-too-big/drop policy). Saturating
+// the field would emit a different invalid datagram and is not a fix.
+#[test]
+fn nat64_v6_to_v4_rejects_l4_above_65515_10191() {
+    let (src_v6, dst_v6, snat_v4, dst_v4) = nat64_test_addrs();
+    // Every oversized value in the valid IPv6 16-bit payload range must be
+    // rejected (20 + 65516 wraps to 0; 20 + 65535 wraps to 19).
+    for l4_len in 65516usize..=65535 {
+        let payload = vec![0xABu8; l4_len - 20];
+        let pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, &payload);
+        assert_eq!(pkt.len(), 40 + l4_len);
+        let mut out = vec![0xAAu8; pkt.len()];
+        match write_v6_to_v4_into(&mut out, &pkt, snat_v4, dst_v4, false) {
+            None => {}
+            Some(n) => {
+                let wire = u16::from_be_bytes([out[2], out[3]]);
+                panic!("L4 len {l4_len} must fail closed; got Some({n}) with wire total {wire}");
+            }
+        }
+    }
+}
+
+#[test]
+fn nat64_v6_to_v4_accepts_l4_at_65515_boundary_10191() {
+    let (src_v6, dst_v6, snat_v4, dst_v4) = nat64_test_addrs();
+    // 20 + 65515 = 65535 exactly fills the IPv4 Total Length: must translate.
+    let payload = vec![0xABu8; 65515 - 20];
+    let pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, &payload);
+    let mut out = vec![0u8; pkt.len()];
+    let n = write_v6_to_v4_into(&mut out, &pkt, snat_v4, dst_v4, false)
+        .expect("L4 len 65515 must translate (20 + 65515 = 65535)");
+    assert_eq!(n, 65535);
+    assert_eq!(u16::from_be_bytes([out[2], out[3]]), 65535);
+    // Normal sizes unaffected.
+    let small = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, b"ok");
+    let mut small_out = vec![0u8; small.len()];
+    let ns = write_v6_to_v4_into(&mut small_out, &small, snat_v4, dst_v4, false)
+        .expect("normal-size packet must translate");
+    assert_eq!(ns, 20 + 20 + b"ok".len());
+}
+
+#[test]
+fn nat64_v6_to_v4_nonfirst_rejects_payload_above_65515_10191() {
+    let (src_v6, dst_v6, snat_v4, dst_v4) = nat64_test_addrs();
+    // Opaque frag payload (bytes after the Fragment Header) of 65516: UDP
+    // header (8) + data. 20 + 65516 wraps to 0 on the wire. Must fail closed.
+    let data = vec![0xABu8; 65516 - 8];
+    let pkt = make_ipv6_frag_udp(src_v6, dst_v6, 12345, 80, &data, 1, false, 0x12345678);
+    let mut out = vec![0xAAu8; pkt.len()];
+    match write_v6_to_v4_nonfirst_into(&mut out, &pkt, snat_v4, dst_v4) {
+        None => {}
+        Some(n) => {
+            let wire = u16::from_be_bytes([out[2], out[3]]);
+            panic!("non-first payload 65516 must fail closed; got Some({n}) with wire total {wire}");
+        }
+    }
+}
+
+#[test]
+fn nat64_v6_to_v4_nonfirst_accepts_payload_at_65515_boundary_10191() {
+    let (src_v6, dst_v6, snat_v4, dst_v4) = nat64_test_addrs();
+    // 20 + 65515 = 65535 exactly fills the IPv4 Total Length: must translate.
+    let data = vec![0xABu8; 65515 - 8];
+    let pkt = make_ipv6_frag_udp(src_v6, dst_v6, 12345, 80, &data, 1, true, 0x12345678);
+    let mut out = vec![0u8; pkt.len()];
+    let n = write_v6_to_v4_nonfirst_into(&mut out, &pkt, snat_v4, dst_v4)
+        .expect("non-first payload 65515 must translate");
+    assert_eq!(n, 65535);
+    assert_eq!(u16::from_be_bytes([out[2], out[3]]), 65535);
+}
+

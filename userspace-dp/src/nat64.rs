@@ -2514,7 +2514,12 @@ fn write_v6_to_v4_translate(
         l4_payload.len()
     };
 
-    let ipv4_total_len = 20 + l4_len;
+    let ipv4_total_len = 20usize.checked_add(l4_len)?;
+    // #10191: IPv4 Total Length is a 16-bit field. Fail closed rather than
+    // narrowing 20 + l4_len above 65535 and emitting a wrapped datagram.
+    if ipv4_total_len > u16::MAX as usize {
+        return None;
+    }
     out[2..4].copy_from_slice(&(ipv4_total_len as u16).to_be_bytes());
 
     // L4 checksum after the IPv6→IPv4 pseudo-header change. The L4 payload is
@@ -3853,6 +3858,11 @@ pub(crate) fn write_v6_to_v4_nonfirst_into(
     }
     let payload = packet.get(payload_off..l4_end)?;
     let total_len = 20usize.checked_add(payload.len())?;
+    // #10191: IPv4 Total Length is a 16-bit field. Fail closed rather than
+    // narrowing 20 + payload.len() above 65535 and emitting a wrapped datagram.
+    if total_len > u16::MAX as usize {
+        return None;
+    }
     let out = dst.get_mut(..total_len)?;
     out[0] = 0x45; // version=4, IHL=5
     out[1] = traffic_class;
