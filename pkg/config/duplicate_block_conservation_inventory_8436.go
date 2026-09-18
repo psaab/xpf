@@ -219,7 +219,6 @@ var dupConservationSkipped8436 = []string{
 	"security address-book global address-set",
 	"security dynamic-address address-name",
 	"security dynamic-address feed-server xpfname feed-name",
-	"security nat destination pool",
 	"security nat destination rule-set",
 	"security nat destination rule-set xpfname rule",
 	"security nat proxy-arp interface",

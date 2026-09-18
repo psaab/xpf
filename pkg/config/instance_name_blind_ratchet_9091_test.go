@@ -224,26 +224,9 @@ var instanceNameBlindBaseline9091 = []string{
 	"/routing-options/static/route/next-hop",
 	"/routing-options/static/route/qualified-next-hop",
 	"/schedulers/scheduler",
-	"/security/dynamic-address/address-name",
-	"/security/dynamic-address/feed-server",
-	"/security/dynamic-address/feed-server/feed-name",
-	"/security/flow/traceoptions/packet-filter",
-	"/security/ike/gateway",
-	"/security/ike/policy",
-	"/security/ipsec/gateway",
-	"/security/ipsec/policy",
-	"/security/ipsec/vpn",
-	"/security/log/profile",
-	"/security/log/stream",
-	"/security/nat/destination/pool",
-	"/security/nat/destination/rule-set",
-	"/security/nat/destination/rule-set/rule",
-	"/security/nat/source/pool",
-	"/security/nat/source/rule-set",
-	"/security/nat/source/rule-set/rule",
-	"/security/nat/static/rule-set",
-	"/security/nat/static/rule-set/rule",
-	"/security/screen/ids-option",
+	// #10078 removes the security-level blind rows above: the security arm
+	// deliberately closes these instance-name containers (and their children)
+	// rather than preserving an open-world exception.
 	"/services/flow-monitoring/version-ipfix/template",
 	"/services/flow-monitoring/version9/template",
 	"/services/ip-monitoring/policy",
@@ -273,9 +256,6 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // instanceNameArmedFloor9091 is the count of instance-name containers already
 // covered by a closed-world subtree. Asserted so the instrument cannot report
 // "nothing is blind" by having stopped finding anything.
-// instanceNameArmedFloor9091 is the count of instance-name containers already
-// covered by a closed-world subtree, with the SET beside it for the same reason
-// as above.
 //
 // #9351 moved it 7 -> 8: making `routing-instances <n> protocols` the GLOBAL
 // protocols node brought `rip group` — which carries closedWorld — into the
@@ -284,6 +264,11 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // #9878 moved it 23 -> 27: arming `security zones` + `security policies`
 // brings four instance-name containers inside a closed world
 // (from-zone, from-zone/policy, global/policy, zones/security-zone).
+// #10078 moved it 27 -> 47: arming the security root closes the modeled
+// dynamic-address, flow, IKE/IPsec, log, NAT, and screen instance containers.
+// Their compiler-owned opaque boundaries are explicit exceptions, not blind
+// admission: the parent keyword itself remains closed and unknown siblings
+// still fail where the grammar is modeled.
 // #9416 moved it 8 -> 9: `snmp community <c> routing-instance <ri>` is a new
 // instance-name container, and every keyword it can absorb is a SOURCE
 // RESTRICTION (`clients`, `client-list-name`). An unmodelled keyword there
@@ -318,6 +303,26 @@ var instanceNameArmedBaseline9091 = []string{
 	"/system/login/class",
 	"/system/services/dhcp-local-server/group/pool/static-binding",
 	"/system/services/dhcpv6-local-server/group/pool/static-binding",
+	"/security/dynamic-address/address-name",
+	"/security/dynamic-address/feed-server",
+	"/security/dynamic-address/feed-server/feed-name",
+	"/security/flow/traceoptions/packet-filter",
+	"/security/ike/gateway",
+	"/security/ike/policy",
+	"/security/ipsec/gateway",
+	"/security/ipsec/policy",
+	"/security/ipsec/vpn",
+	"/security/log/profile",
+	"/security/log/stream",
+	"/security/nat/destination/pool",
+	"/security/nat/destination/rule-set",
+	"/security/nat/destination/rule-set/rule",
+	"/security/nat/source/pool",
+	"/security/nat/source/rule-set",
+	"/security/nat/source/rule-set/rule",
+	"/security/nat/static/rule-set",
+	"/security/nat/static/rule-set/rule",
+	"/security/screen/ids-option",
 }
 
 var instanceNameArmedFloor9091 = len(instanceNameArmedBaseline9091)
@@ -391,20 +396,16 @@ func TestInstanceNameBlindInstrumentStillDiscriminates9091(t *testing.T) {
 		return m
 	}
 	blindSet, armedSet := set(blind), set(armed)
-
 	// Direction 1 — known BLIND. #9091 measured each of these accepting a bogus
-	// keyword at CheckText.
-	// #9265 re-anchored this list rather than shortening it. `/system/login/class`
-	// was here as a third known-BLIND witness and is now ARMED, so it moves to
-	// direction 2 below — the move this cell's own failure message prescribes
-	// ("Either it was armed (then lower the ceiling and say so) or the instrument
-	// stopped detecting blindness"). Both witnesses that remain are DEEP
-	// containers, and `closedWorld` INHERITS, so arming either would close its
-	// whole subtree (the measured #9017 lesson). That is why they are still blind,
-	// and it makes them durable anchors rather than the next ones to go.
+	// keyword at CheckText. #10078 intentionally moved the former security
+	// witnesses into the armed set, so these unchanged non-security anchors
+	// keep the blind side independently live.
+	// Direct CheckText probes measured both as accepted with `xpfbogus 5`:
+	// `services rpm probe p1 { ... }` and
+	// `system services dhcp-local-server group g1 { ... }`.
 	for _, p := range []string{
-		"/security/ike/gateway", // security ike gateway g1 { bogus-token 5; } -> ACCEPTED
-		"/security/ipsec/vpn",   // security ipsec vpn v1   { bogus-token 5; } -> ACCEPTED
+		"/services/rpm/probe",                      // CheckText accepted xpfbogus 5
+		"/system/services/dhcp-local-server/group", // CheckText accepted xpfbogus 5
 	} {
 		if !blindSet[p] {
 			t.Errorf("#9091: %s is no longer classified blind. Either it was armed "+

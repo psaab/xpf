@@ -95,6 +95,10 @@ type schemaNode struct {
 	// spellings compile identically once split, one container at a time. That
 	// is the same discipline the #8690 scope list arrived at.
 	packedStatements bool
+	// packedValueSibling names a sibling keyword that belongs to the preceding
+	// token-packed multi leaf rather than a separate statement. It is used only
+	// where Junos renders both the packed and standalone spellings.
+	packedValueSibling string
 
 	// blockValue opts a single-value typed leaf into the HIERARCHICAL BLOCK
 	// spelling `keyword { value; }`, in addition to the ordinary
@@ -190,24 +194,24 @@ type schemaNode struct {
 	// strict commit instead of silently dropped (opt-in per subtree,
 	// #4313). The default (false) preserves the legacy opt-in behaviour —
 	// SchemaValidate leaves unmodeled keywords to the compiler and never
-	// rejects them, so a leaf the schema does not model commits clean and
-	// is silently discarded. Flipping this on a subtree is only safe once
+	// rejects them, so a leaf the schema does not model commits clean and is
+	// silently discarded. Flipping this on a subtree is only safe once
 	// that subtree is LEAF-COMPLETE (every valid Junos keyword under it is
 	// modeled), otherwise it false-rejects a valid-but-not-yet-modeled
 	// config. The flag is threaded down the walker (walkSchemaNode's
 	// `closed` param): once a subtree sets it, every descendant level
 	// inherits closed-world enforcement.
 	//
-	// Production subtrees DO set this — it is not an inert mechanism, and
-	// this comment used to say otherwise. Do not deduce the armed set from
-	// prose that rots; find it with
+	// Production subtrees DO set this — it is not an inert mechanism, and this
+	// comment used to say otherwise. Do not deduce the armed set from prose
+	// that rots; find it with
 	//
 	//	git grep -n 'closedWorld: true' -- 'pkg/config/schema_*.go'
 	//
 	// The `schema_*.go` glob is deliberate: it excludes THIS file, so the
-	// command does not match the line you are reading. Dropping it returns
-	// one extra hit — this comment — and a reader counting results would be
-	// off by one against any number stated elsewhere.
+	// command does not match the line you are reading. Dropping it returns one
+	// extra hit — this comment — and a reader counting results would be off by
+	// one against any number stated elsewhere.
 	//
 	// The armed set is deliberately NOT enumerated here for the same reason
 	// walkSchemaNode declines to state a count: a list in a comment drifts
@@ -217,6 +221,24 @@ type schemaNode struct {
 	// blanket change — a blanket flip would break the deliberate
 	// accept-with-advisory knobs (#2078/#4231).
 	closedWorld bool
+
+	// closedWorldOpaque deliberately ends inherited closed-world enforcement
+	// at this node's children while preserving the node itself as a declared
+	// keyword. This is only for a measured compiler-owned value grammar whose
+	// valid child tokens cannot be represented by schemaNode children. The
+	// security flow tcp-mss subtree uses it for #1979: its kind/value tail
+	// accepts both `all-tcp 1396` and `all-tcp { mss 1396; }`, and the
+	// compiler's selectMSSToken is the single source of truth. It MUST remain
+	// paired with a focused acceptance/rejection pin; this is not a general
+	// escape from a security-level closed-world arm.
+	closedWorldOpaque bool
+	// packedFlatRun opts a named container into validation-time expansion of
+	// SetPath's nested packed run (for example `stream s1 port 5514 category
+	// policy`). It is deliberately separate from packedTail: packedTail covers
+	// tokens authored on the container's own line, while this flag mirrors the
+	// compiler's expandFlatRun over child chains. Keep it per-container so a
+	// compiler reader and the schema gate cannot silently diverge.
+	packedFlatRun bool
 
 	// Typed-leaf metadata (#1319). The zero value (valueType==ValueAny,
 	// validator==nil) is the legacy behaviour: any string accepted, no

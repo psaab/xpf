@@ -64,7 +64,7 @@ func TestUnknownTopLevelStanzaIsRejected8882(t *testing.T) {
 // carry.
 func TestTopLevelGateDoesNotInherit8882(t *testing.T) {
 	for _, c := range []struct{ name, text string }{
-		{"unmodeled child of a real stanza", `security { zonez { security-zone z1 { } } }`},
+		{"unmodeled child of a real stanza", `interfaces { intfce { unit 0 { family inet { address 192.0.2.1/32; } } } }`},
 		{"the shape shipped configs carry", `chassis { cluster { redundancy-group 1 { interface-monitor ge-0/0/0 weight 255; } } }`},
 	} {
 		if err := schemaCheck8882(t, c.text); err != nil {

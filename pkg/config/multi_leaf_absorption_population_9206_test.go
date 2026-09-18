@@ -249,8 +249,38 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 	// `security policies` brings thirteen more multi leaves inside a closed
 	// world (no `groups` rehosts for the zone-pair three: their 11-token
 	// rehost paths exceed this census's depth cap, so +13 structural for
-	// +13 distinct):
+	// +13 distinct).
 	//
+	// #10078: the security-level arm closes the remaining modeled security
+	// containers, so the measured population is now 98 absorbing / 58
+	// distinct (from 60 / 39). The +38 structural / +19 distinct rows are
+	// the newly closed `address-book`, `flow traceoptions`, IKE/IPsec policy
+	// proposal, and NAT pool/rule-set scope leaves; they were previously
+	// outside this census's closed-world definition. The source-NAT
+	// rule-level action remains an explicit opaque boundary, so its
+	// persistent-nat contract is not included in this increase.
+	//
+	// The #10078 rows were then hand-probed with a valid baseline and one
+	// garbage value. The arm only closes keyword admission; it does not claim
+	// to validate every `multi` value tail. Measured reach is mixed:
+	//
+	//	STRICT REJECT: address-book global address (trailing token),
+	//	  flow traceoptions flag, ipsec policy proposals, destination-pool
+	//	  address, and source-pool port range.
+	//	COMPILE WITH GARBAGE STILL ACCEPTED: IKE policy proposals, source-pool
+	//	  address, destination-NAT from zone, source-NAT from/to zone, and
+	//	  static-NAT from zone. These are existing compiler value/reference
+	//	  contracts, not evidence that the security keyword arm is too broad.
+	//	NOT MEASURED by this quick probe: interface/routing-instance scope
+	//	  variants, whose two-kind fixtures are rejected before the altered
+	//	  value is reached. They remain in the population count, not silently
+	//	  treated as safe.
+	//
+	// This explicit mixed verdict is why the count update is limited to the
+	// population change. It does not weaken a value validator or convert a
+	// compiler-accepted garbage value into a ratchet pass.
+	//
+	// The earlier #9878 rows:
 	//	security policies global policy <p> match multi=application
 	//	security policies global policy <p> match multi=destination-address
 	//	security policies global policy <p> match multi=from-zone
@@ -272,35 +302,22 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 	// the sites dropped silently. The walk now carries every arg slot with
 	// the fixed midKeyword at its own slot.)
 	//
-	// (The zone address-book address-SET rows were already counted — that
-	// node carries its own closedWorld flag.)
+	// The zone address-book address-SET rows were already counted — that node
+	// carries its own closedWorld flag. The #10078 destination-pool address
+	// leaf is now counted too: it is modeled under the armed pool grammar and
+	// reaches the compiler's packed-address reader in both spellings.
 	//
-	// The GREW note below says to check whether the new absorption reaches the
-	// compiler too. MEASURED, garbage value per site, strict CompileConfig:
-	//
-	//	global match source-address xpfbogus9206      STRICT REJECT (undefined address)
-	//	global match destination-address xpfbogus9206 STRICT REJECT (undefined address)
-	//	global match application xpfbogus9206         STRICT REJECT (#3144 undefined app)
-	//	global match from-zone xpfbogus9206           STRICT REJECT (undefined zone; #3402)
-	//	global match to-zone xpfbogus9206             STRICT REJECT (undefined zone; #3402)
-	//	zone-pair match source-address xpfbogus9206   STRICT REJECT (same undefined-address
-	//	  validator; dst/app share the global-measured validators)
-	//	zone address-book address xpfbogus9206        DEFINITION, not reference: `address
-	//	  <name> <prefix>` DEFINES the entry, so a garbage name with a valid
-	//	  prefix commits the same way any new address does — there is nothing
-	//	  to reject, and the earlier 9/1 framing was over 10 sites, not 13.
-	//	  The correct reach probe is trailing-after-prefix (TrailingTokens
-	//	  #3332): `address a1 10.0.0.0/8 xpfbogus9206` is STRICT REJECTED.
-	//	  0 reach.
-	//	zone + per-interface host-inbound-traffic     STRICT REJECT
-	//	  (validateHostInboundTokensStrict; per-interface measured with a defined
-	//	  interface, same token grammar per schema_security.go)
-	//
-	// So all thirteen are refused-or-definitional before enforcement: 0
-	// reach. Arming stays a strict improvement: keyword typos in these
-	// containers are now rejected, which the multi-leaf value route was
-	// never going to catch.
-	const wantAbsorbing, wantDistinct = 60, 39
+	// The #9878 GREW note's hand probe is retained separately from the new
+	// #10078 mixed reach above. For the original thirteen rows, the measured
+	// values were:
+	//	global match source/destination-address/application and zone-pair
+	//	  from-zone/to-zone: STRICT REJECT (undefined references).
+	//	zone address-book address: definition-only; trailing-after-prefix is
+	//	  STRICT REJECT.
+	//	per-interface host-inbound-traffic: STRICT REJECT by its token gate.
+	// So those thirteen were refused-or-definitional before enforcement: 0
+	// reach. Arming remains a strict improvement for their keyword typos.
+	const wantAbsorbing, wantDistinct = 98, 58
 	if absorbing != wantAbsorbing || distinct != wantDistinct {
 		t.Errorf("#9206: %d sites absorb at the schema walk (%d excluding `groups` "+
 			"rehosts), want %d (%d).\n  %s\n\n"+

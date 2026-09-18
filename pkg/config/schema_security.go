@@ -163,7 +163,7 @@ func policyThenSchemaChildren() map[string]*schemaNode {
 	}
 }
 
-var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[string]*schemaNode{
+var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: true, children: map[string]*schemaNode{
 	// #9878: closed-world arm. Leaf-completeness audit (the schema.go
 	// contract: only flip a LEAF-COMPLETE subtree). zones children =
 	// {security-zone}: the zone compiler (compiler_security_zones.go)
@@ -338,7 +338,13 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 	}},
 	"screen": {desc: "Screen options", children: map[string]*schemaNode{
 		"ids-option": {desc: "Screen profile name", args: 1, valueHint: ValueHintScreenProfile, placeholder: "<screen-name>", children: map[string]*schemaNode{
-			"icmp": {desc: "ICMP screening", children: map[string]*schemaNode{
+			// #10078: the four family bodies are compiler-owned packed
+			// grammars. The screen pre-walk expands both flat and braced
+			// spellings, records unsupported tails in UnknownLeaves, and the
+			// strict screen gate rejects those tails. Keep the family node
+			// itself declared so profile/family typos still fail closed, but
+			// end inherited schema closure at this exact value boundary.
+			"icmp": {desc: "ICMP screening", closedWorldOpaque: true, children: map[string]*schemaNode{
 				// #3316: exposes `fragment` for tab-completion and routes
 				// `icmp fragment` to ICMPScreen.Fragment. This is NOT typo
 				// rejection — `fragment` is a childless ValueAny node, and
@@ -362,7 +368,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 					"threshold": {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
 				}},
 			}},
-			"tcp": {desc: "TCP screening", children: map[string]*schemaNode{
+			"tcp": {desc: "TCP screening", closedWorldOpaque: true, children: map[string]*schemaNode{
 				"syn-flood": {desc: "SYN flood protection", children: map[string]*schemaNode{
 					"alarm-threshold":       {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
 					"attack-threshold":      {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
@@ -380,14 +386,14 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 				"no-flag":    {desc: "Drop TCP with no flags set", children: nil},
 				"fin-no-ack": {desc: "Drop FIN without ACK", children: nil},
 			}},
-			"ip": {desc: "IP screening", children: map[string]*schemaNode{
+			"ip": {desc: "IP screening", closedWorldOpaque: true, children: map[string]*schemaNode{
 				"ip-sweep": {desc: "IP sweep protection", children: map[string]*schemaNode{
 					"threshold": {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
 				}},
 				"source-route-option": {desc: "Drop IP source-route option", children: nil},
 				"tear-drop":           {desc: "Drop teardrop (overlapping fragments)", children: nil},
 			}},
-			"udp": {desc: "UDP screening", children: map[string]*schemaNode{
+			"udp": {desc: "UDP screening", closedWorldOpaque: true, children: map[string]*schemaNode{
 				"flood": {desc: "UDP flood protection", children: map[string]*schemaNode{
 					"threshold": {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
 				}},
@@ -406,12 +412,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 		"source": {desc: "Source NAT configuration", children: map[string]*schemaNode{
 			// #2823: the pool body is a container. The persistent-nat and
 			// port (#3864) subtrees are modeled here (commit-check +
-			// completion + flat-set grouping); the remaining pool leaves
-			// (address, host) are unmodeled and left to the compiler per the
-			// opt-in-gate contract (schema_walk.go: unknown keywords return
-			// nil). The container also keeps SetPath grouping intact —
-			// trailing tokens always descend, and a bare `pool <name>` still
-			// emits a leaf.
+			// completion + flat-set grouping); `address` is modeled below
+			// because compileNATSource reads its packed range. The remaining
+			// `host` leaf stays compiler-owned per the opt-in-gate contract
+			// (schema_walk.go: unknown keywords return nil). The container also
+			// keeps SetPath grouping intact — trailing tokens always descend,
+			// and a bare `pool <name>` still emits a leaf.
 			//
 			// #3864: `port deterministic { block-size N; host address X }`
 			// (CGNAT) is modeled so the documented flat-set quick-start
@@ -549,19 +555,23 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 						"destination-port":         {desc: "Destination port to match", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
 						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil},
 					}},
-					// #4313: NOT closed-world (unlike the destination-NAT then
-					// below). Junos permits `then source-nat pool <name>
-					// persistent-nat { ... }` at the rule level, which xpf models
-					// per-pool (`security nat source pool <name> persistent-nat`,
-					// ~line 360) rather than under the rule-then pool. Flipping
-					// closedWorld here would inherit down to the `pool` leaf and
-					// false-reject that valid Junos config (#4191 class). Deferred
-					// until the rule-level persistent-nat leaves are modeled.
+					// #4313: this action is otherwise modeled completely, but
+					// Junos permits `then source-nat pool <name>
+					// persistent-nat { ... }` at rule level. The compiler
+					// consumes that tail as a pool-action extension, while xpf
+					// models the persistent-nat body on the pool definition.
+					// #10078: source-NAT's rule-level pool action remains
+					// explicitly open-world. Junos permits the compiler-owned
+					// `persistent-nat` tail after `pool <name>`; the existing
+					// #4313 contract also keeps unknown action tails accepted
+					// until that grammar is modeled. End inherited security
+					// closure at this action, rather than rejecting a valid
+					// persistent-nat body or changing the deferred contract.
 					"then": {desc: "Source NAT action", children: map[string]*schemaNode{
-						"source-nat": {desc: "Source NAT translation", children: map[string]*schemaNode{
+						"source-nat": {desc: "Source NAT translation", closedWorldOpaque: true, children: map[string]*schemaNode{
 							"interface": {desc: "Translate to the egress interface address", children: nil},
 							"off":       {desc: "Disable source NAT for matching traffic", children: nil},
-							"pool":      {desc: "Translate using a source NAT pool", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: nil},
+							"pool":      {desc: "Translate using a source NAT pool", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", closedWorldOpaque: true, children: nil},
 						}},
 					}},
 				}},
@@ -582,8 +592,23 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			// corrupt it -- measured, inheriting `address 10.0.0.2/32 port 8080;`
 			// over an inline `address 10.0.0.1/32 port 80;` compiled the ADDRESS
 			// as "8080".
-			"pool": {desc: "Destination NAT pool name", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: map[string]*schemaNode{
-				"address": {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, multi: true, groupReplace: true, placeholder: "<address>", children: nil},
+			// #10078: compileNATDestination reads these legacy Junos pool
+			// siblings in addition to the address leaf. Keep them modeled
+			// before arming the security umbrella: otherwise a valid
+			// `pool p port 80` / `pool p routing-instance vr-red` is rejected
+			// before the compiler's existing strict pool gate can run.
+			"pool": {desc: "Destination NAT pool name", args: 1, packedFlatRun: true, packedValueSibling: "port", valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: map[string]*schemaNode{
+				// `port` is deliberately NOT a child of `address`, although Junos
+				// renders `address <ip> port <n>` as one packed statement. A child
+				// makes `address` a container: apply-groups then CHILD-MERGES
+				// instead of groupReplace-ing (inline loses to inherited, #8800),
+				// and the nested site drops across spellings (#2419). The compiler
+				// token-scans the packed form (parseDNATPoolAddress), and pool-level
+				// expansion hoists a flat-run `port` to the sibling the compiler's
+				// `port` case reads — the same sibling shape the source pool uses.
+				"address":          {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, multi: true, groupReplace: true, placeholder: "<address>", children: nil},
+				"port":             {desc: "Translated destination port (1..65535)", args: 1, valueType: ValueInteger, valueDesc: "Destination port", valueExamples: []string{"80", "443"}, validator: ValidateInteger(1, 65535), placeholder: "<port>", children: nil},
+				"routing-instance": {desc: "Translation-target routing instance (accepted, not enforced)", args: 1, placeholder: "<routing-instance>", children: nil},
 			}},
 			"rule-set": {desc: "Destination NAT rule-set name", args: 1, placeholder: "<rule-set-name>", children: map[string]*schemaNode{
 				// #3096: `from` scope by zone | interface | routing-instance.
@@ -632,14 +657,13 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 					// warning (#1960, configstore compileTreeLenient), so a
 					// stored or peer-synced config is not bricked.
 					//
-					// NOT flipped (yet): the SOURCE-NAT rule then-action above is
-					// deliberately left open-world because Junos permits
-					// `then source-nat pool <name> persistent-nat { ... }` at the
-					// rule level, which xpf instead models per-pool (`security nat
-					// source pool <name> persistent-nat`, ~line 360). Closing the
-					// source-NAT then would false-reject that valid Junos config;
-					// it is a follow-up once the rule-level persistent-nat leaves
-					// are modeled (or an accept-with-advisory decision is made).
+					// EXPLICIT OPAQUE BOUNDARY: the SOURCE-NAT rule then-action
+					// remains open-world because Junos permits
+					// `then source-nat pool <name> persistent-nat { ... }` at
+					// rule level, which xpf instead models per-pool (`security
+					// nat source pool <name> persistent-nat`, ~line 360).
+					// `source-nat` sets closedWorldOpaque above so the umbrella
+					// does not false-reject that valid compiler-owned tail.
 					"then": {desc: "Destination NAT action", closedWorld: true, children: map[string]*schemaNode{
 						"destination-nat": {desc: "Destination NAT translation", children: map[string]*schemaNode{
 							"off":  {desc: "Disable destination NAT for matching traffic (no-translate exemption)", children: nil},
@@ -693,7 +717,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 					// nil is the replace-vs-container signal). The mapped-port
 					// range is validated in the compiler (compileNATStatic).
 					"then": {desc: "Static NAT action", children: map[string]*schemaNode{
-						"static-nat": {desc: "Static NAT translation (prefix [mapped-port <port>]|prefix-name <name>|nptv6-prefix|inet [routing-instance <ri>])", children: nil},
+						// #10078: static-nat is a compiler-owned heterogeneous
+						// value grammar (prefix, prefix-name, nptv6-prefix, inet,
+						// and optional routing-instance). The schema keeps it as
+						// one opaque leaf so all shipped spellings survive the
+						// security-level arm; compileNATStatic remains its SSOT.
+						"static-nat": {desc: "Static NAT translation (prefix [mapped-port <port>]|prefix-name <name>|nptv6-prefix|inet [routing-instance <ri>])", closedWorldOpaque: true, children: nil},
 					}},
 				}},
 			}},
@@ -791,10 +820,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 		// `stream <s>` is ARG-NAMED, so production calls the scope predicate
 		// with the operator's actual stream name -- ("s1", "category"), never
 		// ("stream", "category"). Every pair up this chain is already admitted
-		// and every one of them inert. See docs/config-schema.md on why a
-		// pair-keyed admission is structurally unreachable for an arg-named
-		// container.
-		"stream": {desc: "Syslog stream name", args: 1, packedStatements: true, valueHint: ValueHintStreamName, placeholder: "<stream-name>", children: map[string]*schemaNode{
+		"stream": {desc: "Syslog stream name", args: 1, packedStatements: true, packedTail: true, packedFlatRun: true, valueHint: ValueHintStreamName, placeholder: "<stream-name>", children: map[string]*schemaNode{
 			// #9326: TYPED. This was `args: 1` with no valueType and no
 			// validator, so any string reached the dialer's resolver on the
 			// commit path.
@@ -806,6 +832,10 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			// validateSecurityLogStreamPortsAST compiler pass (#3349): the
 			// value has two AST locations the declarative schema walker cannot
 			// express, the same dual-location rationale as tcp-mss.
+			// #10078: packed stream runs are expanded by the schema walker
+			// through this container's packedTail opt-in, using the same
+			// expandFlatRun implementation as compileLog. Keep `port` a normal
+			// typed leaf so a misspelled packed sibling still fails closed.
 			"port": {desc: "Syslog server port (default 514)", args: 1, placeholder: "<port>", children: nil},
 			"severity": {desc: "Severity filter (any|emergency|alert|critical|error|warning|notice|info|debug|none)", args: 1, placeholder: "<severity>",
 				valueType: ValueEnumOf, valueDesc: "syslog severity floor",
@@ -964,13 +994,19 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 				valueType: ValueInteger, valueDesc: "ICMP session timeout in seconds (0..9223372036)",
 				valueExamples: []string{"60"}, validator: ValidateInteger(0, MaxDurationSeconds), children: nil},
 		}},
-		// #1979 Layer B (Tier 3): tcp-mss stays OPAQUE here by design. Its
-		// MSS value can live in EITHER position (flat `gre-in 1400` OR
-		// hierarchical `gre-in { mss 1360; }`), which the declarative schema
-		// walker cannot express. Validation runs in the compiler AST pre-walk
-		// validateTCPMSSRanges (compiler.go), modeled on
-		// validateVRRPTrackInterfaceAST. See compiler_security.go.
-		"tcp-mss":                      {desc: "TCP MSS clamping (ipsec-vpn|gre-in|gre-out|all-tcp)", children: nil},
+		// #1979 Layer B (Tier 3): tcp-mss owns a compiler-defined value tail.
+		// The four kind keywords are modeled so the security-level arm rejects
+		// a misspelled kind, while each kind's heterogeneous value spelling
+		// remains opaque (`all-tcp 1396` or `all-tcp { mss 1396; }`).
+		// validateTCPMSSRanges + selectMSSToken remain the SSOT for that tail.
+		// #10078 pins both halves: typo kinds reject; every shipped MSS shape
+		// still compiles, including the #1979 all-tcp grammar.
+		"tcp-mss": {desc: "TCP MSS clamping (ipsec-vpn|gre-in|gre-out|all-tcp)", children: map[string]*schemaNode{
+			"ipsec-vpn": {desc: "IPsec VPN MSS clamp (unsupported by userspace forwarding)", closedWorldOpaque: true, children: nil},
+			"gre-in":    {desc: "Inbound GRE MSS clamp", closedWorldOpaque: true, children: nil},
+			"gre-out":   {desc: "Outbound GRE MSS clamp", closedWorldOpaque: true, children: nil},
+			"all-tcp":   {desc: "All forwarded TCP MSS clamp", closedWorldOpaque: true, children: nil},
+		}},
 		"allow-dns-reply":              {desc: "Allow unsolicited DNS reply packets", children: nil},
 		"allow-embedded-icmp":          {desc: "Allow ICMP error packets for existing sessions", children: nil},
 		"gre-performance-acceleration": {desc: "Enable GRE performance acceleration", children: nil},
@@ -1008,12 +1044,21 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			}},
 		}},
 	}},
+	// #10078: the four wired ALG classes expose the compiler's `disable`
+	// child in both braced and flat spellings. Unsupported Junos ALG classes
+	// remain an explicit opaque wildcard: compileALG records their names for
+	// the #4232 accepted-but-inert warning, while their vendor-specific body
+	// is intentionally outside xpf's modeled grammar. The wildcard is not a
+	// blanket security escape — only this compiler-owned ALG value/body slot
+	// ends inherited closed-world enforcement.
 	"alg": {desc: "ALG (application layer gateway) control", children: map[string]*schemaNode{
-		"dns":  {desc: "DNS ALG (disable)", children: nil},
-		"ftp":  {desc: "FTP ALG (disable)", children: nil},
-		"sip":  {desc: "SIP ALG (disable)", children: nil},
-		"tftp": {desc: "TFTP ALG (disable)", children: nil},
-	}},
+		"dns":  {desc: "DNS ALG", children: map[string]*schemaNode{"disable": {desc: "Disable DNS ALG", children: nil}}},
+		"ftp":  {desc: "FTP ALG", children: map[string]*schemaNode{"disable": {desc: "Disable FTP ALG", children: nil}}},
+		"sip":  {desc: "SIP ALG", children: map[string]*schemaNode{"disable": {desc: "Disable SIP ALG", children: nil}}},
+		"tftp": {desc: "TFTP ALG", children: map[string]*schemaNode{"disable": {desc: "Disable TFTP ALG", children: nil}}},
+	}, wildcard: &schemaNode{desc: "Unsupported ALG class (accepted-only; compiler warning)", closedWorldOpaque: true, children: map[string]*schemaNode{
+		"disable": {desc: "Disable this ALG class", children: nil},
+	}}},
 	"ike": {desc: "IKE (Phase 1) configuration", children: map[string]*schemaNode{
 		// M2 (#2008): the IKE (Phase 1) proposal body is fully compiled
 		// (compiler_ipsec.go compileIKE proposal loop) and rendered to
@@ -1438,8 +1483,13 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 	// Built in schema_security_dynamic_address.go (#9689 split this subtree out
 	// when fail-mode took the file past the 1500 LOC refactoraudit floor).
 	"dynamic-address": dynamicAddressSchema(),
+	// #10078: host-key algorithms are compiler-owned key-type/value pairs
+	// (`rsa-key`, `ecdsa-key`, `ed25519-key`, and vendor extensions). The
+	// compiler iterates every child and writes its name/value, so modeling a
+	// finite list would reject valid OpenSSH key types. Keep this exact host
+	// body opaque while the `ssh-known-hosts` root remains closed.
 	"ssh-known-hosts": {desc: "SSH known hosts (written to /etc/ssh/ssh_known_hosts)", children: map[string]*schemaNode{
-		"host": {desc: "Known host name or address", args: 1, placeholder: "<hostname>", children: nil},
+		"host": {desc: "Known host name or address", args: 1, placeholder: "<hostname>", closedWorldOpaque: true, children: nil},
 	}},
 	"policy-stats": {desc: "Security policy statistics", children: map[string]*schemaNode{
 		"system-wide": {desc: "System-wide policy statistics (enable|disable)", args: 1, placeholder: "<enable|disable>", children: nil},

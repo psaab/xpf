@@ -31,7 +31,7 @@ func validSyslogPort(n int) bool { return n >= 1 && n <= 65535 }
 // leaves can be expanded before the reader walks it.
 //
 // #9391: `port` declares no valueType and no validator, so it is an ADMISSION
-// HEAD. `set security log stream s1 port 5514 category rt-flow` COMMITS CLEAN
+// HEAD. `set security log stream s1 port 5514 category policy` COMMITS CLEAN
 // with the category dropped, and Categories == 0 means ALL
 // (pkg/logging/syslog.go), so the operator's narrowing is silently inverted
 // into "export everything" — a collector scoped for one category receives every
@@ -114,7 +114,7 @@ func compileLog(node *Node, sec *SecurityConfig) error {
 			Port: 514, // default
 		}
 		// #9391: expand the flat-set run before reading it — `port` is an
-		// untyped ADMISSION HEAD, so `port 5514 category rt-flow` arrived as a
+		// untyped ADMISSION HEAD, so `port 5514 category policy` arrived as a
 		// nested chain and this loop kept only the head.
 		for _, prop := range expandFlatRun(inst.node.Children, securityLogStreamSchema9391()) {
 			switch prop.Name() {

@@ -704,6 +704,13 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 		if childSchema.multi && (childSchema.children == nil || childSchema.valueList) && i < len(path) {
 			nextToken := path[i]
 			_, nextIsSibling := schema.children[nextToken]
+			if nextIsSibling && schema.packedValueSibling == nextToken && childSchema.groupReplace {
+				// The destination NAT pool renders `address <ip> port <n>`
+				// as one packed statement even though `port` is also a
+				// standalone pool sibling. Keep flat replay in that
+				// canonical shape; the pool compiler expands the packed run.
+				nextIsSibling = false
+			}
 			// #9685: after an apply statement the remaining tokens are group
 			// names, never an instance under this node's wildcard slot.
 			if !nextIsSibling && schema.wildcard != nil && childSchema != applyStatementSchema {
@@ -725,6 +732,22 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 					// nextIsSibling=true otherwise.)
 					nodeKeys = append([]string(nil), nodeKeys...)
 					for i < len(path) {
+						if schema.packedValueSibling == path[i] && childSchema.groupReplace {
+							// Absorb the packed sibling and exactly its
+							// declared value arity. Anything after that
+							// belongs to the next schema walk step and must
+							// remain visible to closed-world validation.
+							packed := schema.children[path[i]]
+							nodeKeys = append(nodeKeys, path[i])
+							i++
+							if packed != nil {
+								for arg := 0; arg < packed.args && i < len(path); arg++ {
+									nodeKeys = append(nodeKeys, path[i])
+									i++
+								}
+							}
+							break
+						}
 						if _, sib := schema.children[path[i]]; sib {
 							break
 						}

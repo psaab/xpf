@@ -513,9 +513,9 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	if err != nil {
 		t.Fatalf("control: packed tunnel did not compile: %v", err)
 	}
-	if u := flatSetFirstUnitTunnel(tunPacked, "gr-0/0/0"); u == nil || u.Source != "10.0.0.1" || u.Destination != "" {
-		t.Logf("NOTE: the #8939 tunnel witness changed shape (%+v). If `destination` is now "+
-			"populated, that row was FIXED -- drop it from the fixture and say so.", u)
+	u := flatSetFirstUnitTunnel(tunPacked, "gr-0/0/0")
+	if u == nil || u.Source != "10.0.0.1" || u.Destination != "10.0.0.2" {
+		t.Fatalf("CONTROL FIXED: packed tunnel must retain both source and destination; got %+v", u)
 	}
 
 	// ---- the census -------------------------------------------------------
@@ -601,12 +601,16 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	}
 	sort.Strings(losers)
 
+	// #10078's security-level schema completion adds seven eligible containers
+	// and one collector route, moving the measured census from
+	// `walked=111,vacuous=38,unmeasured=88` to
+	// `walked=111,vacuous=36,unmeasured=91`; the three loser rows are
+	// byte-for-byte unchanged, so no loss signal was cleared. This is a
+	// population-count ratchet update, not a loser-set relaxation.
+	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
 	// vacuity control above passes: removing it moves rows between `vacuous`
-	// and `walked` and never touches the loser list, so the control could be
-	// dropped in silence. Recording all four counts is what makes it a
-	// control rather than a comment.
 	got := fmt.Sprintf("# counts: losers=%d walked=%d vacuous=%d unmeasured=%d\n"+
 		"# collector reach: %d containers walked, %d reached the census "+
 		"(%d dropped: no eligible leaf, %d dropped: only one)\n",

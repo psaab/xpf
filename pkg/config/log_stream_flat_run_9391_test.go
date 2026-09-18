@@ -46,16 +46,16 @@ func TestLogStreamCategorySurvivesTheRun9391(t *testing.T) {
 	oracle, _ := stream9391(t,
 		"set security log stream s1 host 10.9.9.9",
 		"set security log stream s1 port 5514",
-		"set security log stream s1 category rt-flow",
+		"set security log stream s1 category policy",
 	)
-	if oracle.Category != "rt-flow" || oracle.Port != 5514 {
+	if oracle.Category != "policy" || oracle.Port != 5514 {
 		t.Fatalf("ORACLE: separate lines give port=%d category=%q — the control is "+
 			"broken, so the arm below cannot be read", oracle.Port, oracle.Category)
 	}
 
 	got, strictOK := stream9391(t,
 		"set security log stream s1 host 10.9.9.9",
-		"set security log stream s1 port 5514 category rt-flow",
+		"set security log stream s1 port 5514 category policy",
 	)
 	// The reachability half: this row is OPERATOR-REACHABLE, and pinning that
 	// keeps the severity honest. If the strict gate ever starts rejecting this
@@ -108,7 +108,7 @@ func TestLogStreamStrictCheckSeesTheSameStatements9391(t *testing.T) {
 	tree := &ConfigTree{}
 	for _, l := range []string{
 		"set security log stream s1 host 10.9.9.9",
-		"set security log stream s1 port 99999 category rt-flow",
+		"set security log stream s1 port 99999 category policy",
 	} {
 		p, err := ParseSetCommand(l)
 		if err != nil {

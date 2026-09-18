@@ -6,19 +6,19 @@ import (
 	"testing"
 )
 
-// #8807 / #8787: the 16 predicate-B keywords that were recorded as UNDECLARED
-// and never measured for consequence.
+// #8807 / #8787: the fourteen predicate-B keywords that were recorded as
+// UNDECLARED and never measured for consequence.
 //
 // #8787 established existence -- "the compiler names it and the schema never
 // declares it" -- and stopped there. Existence is not a verdict: an undeclared
 // keyword may be read anyway, refused on purpose, or silently dropped, and only
-// the third is a defect. All 16 are still undeclared today (checked by walking
+// the third is a defect. All 14 are still undeclared today (checked by walking
 // the live schema), so the recorded fact holds; what follows is what it COSTS.
 //
 // Measured, every one of them:
 //
-//	READ                11  compiled result changes; the value reaches a field
-//	STRICT-REJECT        1  refused on purpose, with a specific message
+//	READ                10  compiled result changes; the value reaches a field
+//	STRICT-REJECT        0  refused on purpose, with a specific message
 //	ACCEPTED + ADVISORY  4  accepted, warned as unenforced, value not compiled
 //	SILENTLY DROPPED     0
 //
@@ -77,7 +77,7 @@ func signature8807(t *testing.T, text string) (js string, warnings int, strictOK
 	return string(b), warnings, serr == nil
 }
 
-func TestTheSixteenUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
+func TestTheFourteenUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
 	for _, c := range undeclCases8807() {
 		c := c
 		t.Run(c.kw, func(t *testing.T) {
@@ -118,7 +118,7 @@ func TestTheSixteenUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
 // undeclared. If one gains a schema declaration its consequence changes -- it
 // becomes completable, validated, and visible to the census machinery -- and the
 // row above stops describing it.
-func TestTheSixteenAreStillUndeclared8807(t *testing.T) {
+func TestTheFourteenAreStillUndeclared8807(t *testing.T) {
 	declared := map[string]bool{}
 	seen := map[*schemaNode]bool{}
 	var walk func(n *schemaNode, d int)
@@ -144,7 +144,7 @@ func TestTheSixteenAreStillUndeclared8807(t *testing.T) {
 	for _, c := range undeclCases8807() {
 		if declared[c.kw] {
 			t.Errorf("#8807: %q is now DECLARED somewhere in the schema. That is progress, not a "+
-				"regression -- but its row in TestTheSixteenUndeclaredKeywordsHaveNoSilentDrop8807 "+
+				"regression -- but its row in TestTheFourteenUndeclaredKeywordsHaveNoSilentDrop8807 "+
 				"describes an undeclared keyword and no longer applies. Re-measure it and move it "+
 				"out of this list.", c.kw)
 		}
@@ -165,9 +165,6 @@ func undeclCases8807() []undeclCase8807 {
 	fw := func(then string) string {
 		return "firewall {\n family inet {\n  filter f1 {\n   term t1 {\n    from { protocol tcp; }\n" + then + "\n   }\n  }\n }\n}\n"
 	}
-	mss := func(k string) string {
-		return "security {\n flow {\n  tcp-mss {\n" + k + "\n  }\n }\n}\n"
-	}
 	return []undeclCase8807{
 		// system services dhcp-local-server group <g> pool <p> — the pool
 		// container is itself undeclared, so these three sit under an
@@ -183,13 +180,6 @@ func undeclCases8807() []undeclCase8807 {
 			alarm("   pool-utilization-alarm { raise-threshold 80; }"),
 			alarm("   pool-utilization-alarm { raise-threshold 80; clear-threshold 55; }"), kwRead},
 		{"commit", "system {\n host-name h1;\n}\n", "system {\n host-name h1;\n commit persist-groups-inheritance;\n}\n", kwRead},
-		// tcp-mss kinds. gre-out is read in the BRACED spelling; the flat `set`
-		// spelling of the same statement is rejected because these sub-blocks
-		// are undeclared and SetPath cannot group them (#8824).
-		{"gre-out", mss(""), mss("   gre-out { mss 1350; }"), kwRead},
-		// Refused on purpose, with its own message: "not supported in the
-		// userspace forwarding path". A rejection is not a defect.
-		{"ipsec-vpn", mss(""), mss("   ipsec-vpn { mss 1350; }"), kwRejected},
 		// interfaces interface-range — `member` being read is visible as the
 		// "no members" advisory disappearing, not as a new field.
 		{"member", ir(""), ir("  member ge-0-0-1;"), kwRead},
