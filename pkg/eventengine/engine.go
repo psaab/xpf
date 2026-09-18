@@ -923,7 +923,7 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		// Standalone (tests): just commit; no apply. Still record the
 		// description so the journal/history attribution is identical to the
 		// daemon path.
-		if _, err := e.store.CommitWithDescription(desc); err != nil {
+		if _, err := e.store.CommitWithDescriptionAs("system:event-engine", desc); err != nil {
 			e.store.ExitConfigure()
 			return errBatch("commit: %v", err)
 		}

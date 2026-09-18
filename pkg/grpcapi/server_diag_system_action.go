@@ -48,11 +48,12 @@ func (s *Server) proxyPeerSystemAction(ctx context.Context, req *pb.SystemAction
 // interrupted wipe still leaves it) plus any remote syslog collector.
 // Best-effort: a journal write failure never blocks a confirmed power/wipe
 // action (the store layer warns rather than failing).
-func (s *Server) logSystemAction(action string) {
+func (s *Server) logSystemAction(action string, ctx context.Context) {
 	if s.store == nil {
 		return
 	}
-	s.store.LogSystemAction(action)
+	sessionID := connSessionID(ctx)
+	s.store.LogSystemActionAs(action, journalPrincipalForContext(s, ctx, sessionID))
 }
 
 // schedulePowerAction runs `systemctl <arg>` after a 1s grace so the RPC
@@ -173,19 +174,19 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		slog.Warn("system reboot requested via gRPC")
 		// Journal BEFORE the box goes down: the fsynced record survives the
 		// reboot even though the slog.Warn journald line may not (#4108 F8).
-		s.logSystemAction("reboot")
+		s.logSystemAction("reboot", ctx)
 		schedulePowerAction("reboot")
 		return &pb.SystemActionResponse{Message: "System going down for reboot NOW!"}, nil
 
 	case "halt":
 		slog.Warn("system halt requested via gRPC")
-		s.logSystemAction("halt")
+		s.logSystemAction("halt", ctx)
 		schedulePowerAction("halt")
 		return &pb.SystemActionResponse{Message: "System halting NOW!"}, nil
 
 	case "power-off":
 		slog.Warn("system power-off requested via gRPC")
-		s.logSystemAction("power-off")
+		s.logSystemAction("power-off", ctx)
 		schedulePowerAction("poweroff")
 		return &pb.SystemActionResponse{Message: "System powering off NOW!"}, nil
 
@@ -198,7 +199,7 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		// .config.journal (a completed factory reset must not hand its audit
 		// log to the next tenant — #4576), superseding the earlier
 		// journal-survives-zeroize belt-and-braces.
-		s.logSystemAction("zeroize")
+		s.logSystemAction("zeroize", ctx)
 		// Run the wipe through the daemon apply gate (#5281): ZeroizeFn takes the
 		// same apply semaphore commit/sync serialize on and enters a terminal
 		// reset generation BEFORE erasing, so a concurrent in-flight apply is

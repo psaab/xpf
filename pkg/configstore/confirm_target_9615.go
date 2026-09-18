@@ -70,6 +70,7 @@ func (s *Store) NoteConfirmTargetAlarm(detail string) {
 		Action:     "confirm_rollback_target_refused",
 		Detail:     detail,
 		ConfigHash: journalConfigHash(s.active),
+		Principal:  "system:configstore",
 	})
 }
 

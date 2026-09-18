@@ -53,7 +53,8 @@ func (d *Daemon) bootstrapFromFile() error {
 			return fmt.Errorf("bootstrap device-map preflight: %w", perr)
 		}
 	}
-	if _, err := d.store.CommitWithDescriptionGen("", gen); err != nil {
+	if _, err := d.store.CommitWithDescriptionGenAs(
+		configstore.InternalCommitterAs("system:bootstrap"), "", gen); err != nil {
 		d.store.ExitConfigure()
 		return fmt.Errorf("commit: %w", err)
 	}

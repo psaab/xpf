@@ -243,8 +243,9 @@ func (s *Store) recoverPendingConfirmLocked() error {
 			"err", err, "issue", "#8566")
 		s.confirmRecoveryReadFailed = true
 		s.journalLog(&JournalEntry{
-			Action: "confirm_recovery_read_error",
-			Detail: fmt.Sprintf("pending commit-confirmed record unreadable on boot; auto-rollback window lost: %v", err),
+			Action:    "confirm_recovery_read_error",
+			Detail:    fmt.Sprintf("pending commit-confirmed record unreadable on boot; auto-rollback window lost: %v", err),
+			Principal: "system:configstore",
 		})
 		return nil
 	}
@@ -374,6 +375,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 			Action:     "auto_rollback",
 			Detail:     "commit-confirmed window expired during daemon downtime; reverted on boot (#4577)",
 			ConfigHash: journalConfigHash(s.active),
+			Principal:  "system:commit-confirmed-timeout",
 		})
 		slog.Warn("commit-confirmed window expired while the daemon was down; configuration "+
 			"rolled back to the pre-confirm state on boot", "issue", "#4577")
@@ -617,8 +619,9 @@ func (s *Store) noteActivePersistFailureLocked(action string, err error) {
 	// set s.persistMarkerCommitted=false BEFORE invoking this; all other
 	// paths leave it at the default true.
 	s.journalLog(&JournalEntry{
-		Action: "persist_error",
-		Detail: fmt.Sprintf("%s: write active config failed: %v", action, err),
+		Action:    "persist_error",
+		Detail:    fmt.Sprintf("%s: write active config failed: %v", action, err),
+		Principal: "system:configstore",
 	})
 	s.ensurePersistRetryLoopLocked()
 }
@@ -663,8 +666,9 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 				s.confirmArmDegraded = false
 				s.confirmArmRec = nil
 				s.journalLog(&JournalEntry{
-					Action: "confirm_arm_superseded",
-					Detail: "pending commit-confirmed arm-write debt cleared: the window it was owed for was resolved or replaced",
+					Action:    "confirm_arm_superseded",
+					Detail:    "pending commit-confirmed arm-write debt cleared: the window it was owed for was resolved or replaced",
+					Principal: "system:configstore",
 				})
 				slog.Info("pending commit-confirmed arm-write debt cleared: the window it was "+
 					"owed for is no longer pending", "issue", "#9014")
@@ -681,8 +685,9 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 					// clears it on a first-try success.
 					s.confirmRecoveryReadFailed = false
 					s.journalLog(&JournalEntry{
-						Action: "confirm_arm_recovered",
-						Detail: "commit-confirmed record persisted after an earlier arm-write failure",
+						Action:    "confirm_arm_recovered",
+						Detail:    "commit-confirmed record persisted after an earlier arm-write failure",
+						Principal: "system:configstore",
 					})
 					slog.Info("commit-confirmed record persisted after an earlier arm-write "+
 						"failure; the auto-rollback would now survive a crash", "issue", "#9014")
@@ -718,8 +723,9 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 				// removal was deferred.
 				s.clearConfirmResolutionPendingLocked()
 				s.journalLog(&JournalEntry{
-					Action: "persist_recovered",
-					Detail: "active config persisted after earlier write failure",
+					Action:    "persist_recovered",
+					Detail:    "active config persisted after earlier write failure",
+					Principal: "system:configstore",
 				})
 				slog.Info("active config persisted after earlier write failure", "issue", "#1799")
 			} else if errors.Is(err, ErrPersistExceedsReadCeiling) {
@@ -749,8 +755,9 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			s.confirmRemoveDegraded = false
 			s.confirmRemoveDebtID = ""
 			s.journalLog(&JournalEntry{
-				Action: "confirm_remove_superseded",
-				Detail: "pending commit-confirmed removal debt cleared: a newer armed window durably replaced the record",
+				Action:    "confirm_remove_superseded",
+				Detail:    "pending commit-confirmed removal debt cleared: a newer armed window durably replaced the record",
+				Principal: "system:configstore",
 			})
 			slog.Info("pending commit-confirmed removal debt cleared: a newer armed window "+
 				"durably replaced the record it was owed for", "issue", "#7675")
@@ -783,8 +790,9 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 				// the flag latched and /health stuck at 503.
 				s.confirmRecoveryReadFailed = false
 				s.journalLog(&JournalEntry{
-					Action: "confirm_remove_recovered",
-					Detail: "stale pending commit-confirmed record removed after earlier failure",
+					Action:    "confirm_remove_recovered",
+					Detail:    "stale pending commit-confirmed record removed after earlier failure",
+					Principal: "system:configstore",
 				})
 				slog.Info("stale pending commit-confirmed record removed after earlier failure", "issue", "#5835")
 			} else {

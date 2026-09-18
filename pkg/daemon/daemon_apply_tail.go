@@ -701,7 +701,7 @@ func (d *Daemon) initEventEngine() {
 		// #6808: the event engine is an autonomous system committer with no
 		// config-lock session, so it states that explicitly. It must never be
 		// the zero authority, which is rejected.
-		return d.commitAndApply(ctx, configstore.InternalCommitter(), comment, peerSyncNever)
+		return d.commitAndApply(ctx, configstore.InternalCommitterAs("system:event-engine"), comment, peerSyncNever)
 	})
 	if d.rpm != nil {
 		d.rpm.SetEventCallback(d.eventEngine.HandleEvent)

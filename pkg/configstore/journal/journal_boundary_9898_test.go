@@ -56,11 +56,11 @@ func TestLogRefusesOversizedEntry_9898(t *testing.T) {
 		// A fixed timestamp keeps the framing byte-exact (time.Time
 		// marshals with variable fractional digits).
 		fixed := time.Date(2026, 9, 15, 10, 0, 0, 123456789, time.UTC)
-		frame, err := json.Marshal(&Entry{Timestamp: fixed, Schema: SchemaV2, Action: "commit"})
+		frame, err := json.Marshal(&Entry{Timestamp: fixed, Schema: SchemaV2, Action: "commit", Principal: UnknownPrincipal})
 		if err != nil {
 			t.Fatal(err)
 		}
-		probe, err := json.Marshal(&Entry{Timestamp: fixed, Schema: SchemaV2, Action: "commit", Detail: "a"})
+		probe, err := json.Marshal(&Entry{Timestamp: fixed, Schema: SchemaV2, Action: "commit", Principal: UnknownPrincipal, Detail: "a"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,10 +70,10 @@ func TestLogRefusesOversizedEntry_9898(t *testing.T) {
 		overhead := len(probe) - 1 - len(frame)
 		n := maxJournalEntryBytes - len(frame) - overhead
 		j := testJournal(t)
-		if err := j.Log(&Entry{Timestamp: fixed, Action: "commit", Detail: strings.Repeat("a", n)}); err != nil {
+		if err := j.Log(&Entry{Timestamp: fixed, Action: "commit", Principal: UnknownPrincipal, Detail: strings.Repeat("a", n)}); err != nil {
 			t.Fatalf("Log(exactly %d marshaled bytes) errored: %v; the bound refuses past-cap, not at-cap", maxJournalEntryBytes, err)
 		}
-		if err := j.Log(&Entry{Timestamp: fixed, Action: "commit", Detail: strings.Repeat("a", n+1)}); err == nil {
+		if err := j.Log(&Entry{Timestamp: fixed, Action: "commit", Principal: UnknownPrincipal, Detail: strings.Repeat("a", n+1)}); err == nil {
 			t.Fatalf("Log(%d marshaled bytes) = nil error; want refusal one past the bound", maxJournalEntryBytes+1)
 		}
 		got, err := j.Tail(0)

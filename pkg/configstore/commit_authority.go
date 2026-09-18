@@ -3,6 +3,7 @@ package configstore
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrCommitAuthorityMissing is returned by the authority-bound commit entry
@@ -76,22 +77,30 @@ const (
 type CommitAuthority struct {
 	kind      commitAuthorityKind
 	sessionID string
+	// journalPrincipal is a redacted, transport-derived actor label. It is
+	// deliberately separate from sessionID: the latter is a bearer-like
+	// lock token and must never be written to the audit journal verbatim.
+	journalPrincipal string
 	// epoch is the holder epoch observed when this authority was minted. It
 	// distinguishes "the same session still holds the lock" from "the lock was
 	// released and re-acquired", which the session id alone cannot: the same
-	// session can legitimately re-enter, and a wall-clock stamp cannot tell a
-	// held lock from a re-taken one.
+	// session can legitimately re-enter, and a wall-clock stamp cannot tell
+	// a held lock from a re-taken one.
 	epoch uint64
 }
 
-// InternalCommitter returns the authority for a system/daemon commit that
-// legitimately carries no config-lock session — the HA config-sync apply, the
-// event engine, the in-process shell CLI, and tests. It mirrors the long
-// standing sessionID == "" bypass in ensureHolderLocked, but as a WRITTEN
-// STATEMENT rather than the absence of one, so "this caller has no holder" and
-// "somebody forgot to say" are different values (#6808).
+// InternalCommitter returns an explicitly unattributed authority for a
+// system/daemon commit that legitimately carries no config-lock session. The
+// action-specific autonomous paths use InternalCommitterAs so they can name
+// their known system source; direct/legacy callers remain "unknown".
 func InternalCommitter() CommitAuthority {
-	return CommitAuthority{kind: authorityInternal}
+	return InternalCommitterAs(UnknownPrincipal)
+}
+
+// InternalCommitterAs returns an internal authority with an explicit,
+// non-secret journal actor/source label.
+func InternalCommitterAs(principal string) CommitAuthority {
+	return CommitAuthority{kind: authorityInternal, journalPrincipal: principal}
 }
 
 // IsInternal reports whether a is the system/daemon authority. Exported for the
@@ -101,6 +110,15 @@ func (a CommitAuthority) IsInternal() bool { return a.kind == authorityInternal 
 // SessionID returns the config session this authority is bound to, or "" for an
 // internal or unset authority.
 func (a CommitAuthority) SessionID() string { return a.sessionID }
+
+// JournalPrincipal returns the redacted principal to stamp on journal entries
+// produced by this commit. Missing values stay explicitly unknown.
+func (a CommitAuthority) JournalPrincipal() string {
+	if strings.TrimSpace(a.journalPrincipal) == "" {
+		return UnknownPrincipal
+	}
+	return a.journalPrincipal
+}
 
 // verifyCommitAuthorityLocked re-checks at promotion time that the authority a
 // commit was granted still holds. Caller holds s.mu — the check and the
@@ -134,13 +152,21 @@ func (s *Store) verifyCommitAuthorityLocked(a CommitAuthority) error {
 // commit-family paths. sessionID == "" yields InternalCommitter(), matching the
 // documented internal/system bypass in ensureHolderLocked.
 func (s *Store) AuthorizeCommit(sessionID string) (CommitAuthority, error) {
+	return s.AuthorizeCommitAs(sessionID, UnknownPrincipal)
+}
+
+// AuthorizeCommitAs is AuthorizeCommit with the already-authorized transport
+// principal attached for audit attribution. The principal is supplied by the
+// REST/gRPC handler that already resolved it; this method never trusts a
+// caller-controlled identity for authorization.
+func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureHolderLocked(sessionID); err != nil {
 		return CommitAuthority{}, err
 	}
 	if sessionID == "" {
-		return InternalCommitter(), nil
+		return InternalCommitterAs(principal), nil
 	}
 	// A session that passed ensureHolderLocked while NOT in config mode, or
 	// against an unowned lock, holds nothing an epoch could bind — both are
@@ -148,12 +174,13 @@ func (s *Store) AuthorizeCommit(sessionID string) (CommitAuthority, error) {
 	// internal so behaviour is unchanged for those paths; the turnover this
 	// closes requires a real recorded holder.
 	if !s.configDir || s.effectiveHolderLocked() == "" {
-		return InternalCommitter(), nil
+		return InternalCommitterAs(principal), nil
 	}
 	return CommitAuthority{
-		kind:      authorityHolder,
-		sessionID: sessionID,
-		epoch:     s.holderEpoch,
+		kind:             authorityHolder,
+		sessionID:        sessionID,
+		journalPrincipal: principal,
+		epoch:            s.holderEpoch,
 	}, nil
 }
 
