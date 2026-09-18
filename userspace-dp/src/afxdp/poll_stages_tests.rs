@@ -4715,6 +4715,114 @@ fn ndp_na_bad_source_transits_but_learns_nothing_9893() {
 }
 
 #[test]
+fn ndp_na_refusals_leave_dynamic_neighbor_cap_drops_unchanged_10097() {
+    // #10097 round-2: poll_stages-level cap-isolation pin for BOTH #9893
+    // refusal classes. The parser-level sibling
+    // (`parse_ndp_na_9893_refusal_leaves_dynamic_neighbor_cap_drops_unchanged`)
+    // proves the parser cannot touch the map by signature; this proves the
+    // property that could actually regress — a future stage/caller edit
+    // accounting refused NAs against the #5673 cap (the exact conflation
+    // docs/feature-coverage.md forbids) would bump `learn_cap_drops()` here.
+    // Both refusal paths bump process-wide parser counters via classify, so
+    // hold the counter lock like the #9893 siblings above.
+    let _counter_guard = parser::ndp_na_refusal_counter_test_lock();
+    let forwarding: &'static ForwardingState = Box::leak(Box::new(build_forwarding_state(
+        &super::super::test_fixtures::nat_snapshot(),
+    )));
+    let (ctx, neighbors) = neighbor_learn_ctx(forwarding);
+    let meta = link_layer_meta(24, 0);
+    let (frag_frame, frag_target, _) = ndp_na_fragmented_frame_9893();
+    // Bad-source leg: same builder/target as `ndp_na_frame`, unspecified
+    // source (loopback/multicast pinned at the parser) — mirrors the
+    // `ndp_na_bad_source_transits_but_learns_nothing_9893` sibling.
+    let (mut src_frame, src_target, _) = ndp_na_frame();
+    src_frame[14 + 8..14 + 24].copy_from_slice(&[0u8; 16]);
+    super::super::test_fixtures::stamp_icmpv6_checksum(&mut src_frame, 14, 54, 86);
+    assert_eq!(
+        frag_target, src_target,
+        "both refusal legs must share one target so one seeded shard covers both"
+    );
+    assert!(!forwarding.owns_configured_ip(frag_target));
+    // Seed the target's shard full on the SAME shared map the ctx learns
+    // into, then create one genuine cap refusal so this is not a vacuous
+    // "0 stayed 0" assertion. Seeding the NA's own shard (not an arbitrary
+    // one) keeps the pin strong: a future bug routing refusals through the
+    // insert path would land in a full shard and bump the counter.
+    let target_shard = ShardedNeighborMap::shard_index(&(24, frag_target));
+    let cap = crate::afxdp::sharded_neighbor::MAX_DYNAMIC_NEIGHBORS_PER_SHARD;
+    let mut candidate = 0u32;
+    let mut seeded = 0usize;
+    while seeded < cap {
+        let key = (
+            24,
+            IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32.wrapping_add(candidate))),
+        );
+        candidate = candidate
+            .checked_add(1)
+            .expect("exhausted the v4 space seeding one neighbor shard");
+        if ShardedNeighborMap::shard_index(&key) != target_shard {
+            continue;
+        }
+        assert!(
+            neighbors.insert_if_changed(key, NeighborEntry { mac: [0x11; 6] }),
+            "each seed key must be admitted below the shard cap"
+        );
+        seeded += 1;
+    }
+    let drop_key = loop {
+        let key = (
+            24,
+            IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32.wrapping_add(candidate))),
+        );
+        candidate = candidate
+            .checked_add(1)
+            .expect("exhausted the v4 space finding a cap-refused key");
+        if ShardedNeighborMap::shard_index(&key) == target_shard {
+            break key;
+        }
+    };
+    assert!(
+        !neighbors.insert_if_changed(drop_key, NeighborEntry { mac: [0x22; 6] }),
+        "a new key in a full shard must be refused"
+    );
+    let drops_before_refusal = neighbors.learn_cap_drops();
+    assert!(
+        drops_before_refusal > 0,
+        "the seeded map must expose the genuine cap refusal before the NDP probes"
+    );
+    // Leg 1: fragment-refused NA through classify().
+    let outcome = classify(&frag_frame, meta, ctx);
+    assert!(
+        matches!(outcome, StageOutcome::Continue(())),
+        "a fragmented NA must still transit (refusal is learn-only)"
+    );
+    assert_eq!(
+        neighbors.learn_cap_drops(),
+        drops_before_refusal,
+        "a fragment-refused NA must not increment the dynamic-neighbor cap series"
+    );
+    assert!(
+        neighbors.get(&(24, frag_target)).is_none(),
+        "a fragmented NA must NOT install a neighbor entry (RFC 6980)"
+    );
+    // Leg 2: bad-source-refused NA through classify().
+    let outcome = classify(&src_frame, meta, ctx);
+    assert!(
+        matches!(outcome, StageOutcome::Continue(())),
+        "a bad-source NA must still transit (refusal is learn-only)"
+    );
+    assert_eq!(
+        neighbors.learn_cap_drops(),
+        drops_before_refusal,
+        "a bad-source-refused NA must not increment the dynamic-neighbor cap series"
+    );
+    assert!(
+        neighbors.get(&(24, src_target)).is_none(),
+        "an NA with unspecified source must NOT install a neighbor entry"
+    );
+}
+
+#[test]
 fn ndp_na_override0_cas_preserves_live_entry_end_to_end_9893() {
     // #9893 SEQUENTIAL end-to-end preservation pin through the CAS path:
     // pre-seed a live differing LLA, drive an Override=0 NA, assert preserved
