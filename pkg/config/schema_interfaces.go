@@ -177,8 +177,8 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 				"unnumbered-address": {desc: "Borrow another interface's address (accepted-only, not yet enforced — #4308)", args: 1, placeholder: "<interface>",
 					valueHint: ValueHintInterfaceName, children: nil},
 				"targeted-broadcast": {desc: "Forward directed broadcasts to the subnet (accepted-only, not yet enforced — #4308)", children: nil},
-				// Compiled verbatim (compiler_interfaces.go:539); same
-				// pass-through contract as the interface-level mtu.
+				// Min-folded with the inet6 family mtu into unit.MTU
+				// (order-independent minimum wins, #10050); not verbatim.
 				"mtu": {
 					desc:          "Maximum transmit packet size",
 					args:          1,
