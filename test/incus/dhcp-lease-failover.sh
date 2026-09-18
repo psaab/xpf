@@ -56,7 +56,13 @@ set -euo pipefail
 _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=cluster-cell.sh
 source "${_CELL_DIR}/cluster-cell.sh"
-if [[ "${DHCP_LEASE_FAILOVER_SELFTEST:-0}" != "1" ]]; then
+# Sourced (selftests) vs executed (live runs) is the ONLY mode switch, and it
+# is structural: there is deliberately no environment bypass. No exported
+# variable can flip a live run into selftest mode (#10122). BASH_SOURCE[0] is
+# this file; $0 is this file only when executed (directly or via `bash
+# file`), and the caller otherwise (an interactive shell, `bash -c`, or
+# another script when sourced).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	xpf_enter_destructive_cluster_cell "dhcp-lease-failover $*" "$0" "$@"
 fi
 
@@ -77,6 +83,10 @@ DHCP_CLIENT_IFACE="${DHCP_CLIENT_IFACE:-eth0}"
 KEA_MEMFILE4="${KEA_MEMFILE4:-/var/lib/kea/kea-leases4.csv}"
 KEA_MEMFILE6="${KEA_MEMFILE6:-/var/lib/kea/kea-leases6.csv}"
 REBOOT_WAIT="${REBOOT_WAIT:-60}"
+# Cleanup polling is immediate-success and deadline-bounded. The defaults leave
+# the happy path unchanged while allowing a slow commit to settle in the lab.
+DHCP_RESTORE_WAIT="${DHCP_RESTORE_WAIT:-30}"
+DHCP_RESTORE_POLL="${DHCP_RESTORE_POLL:-2}"
 # How long to wait for the lease-sync push to pre-seed the standby. The push is
 # change-polled every 2s and fully re-sent every 30s (pkg/daemon
 # daemon_dhcp_lease_sync.go), so 30s covers a missed change poll.
@@ -111,7 +121,43 @@ ERRORS=()
 info() { echo "==> $*"; }
 pass() { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
-die()  { echo "FATAL: owner=test-dhcp-lease-failover: $*" >&2; exit 2; }
+
+# Structured early-abort cause (#10122). The FIRST abort wins: the run wrapper
+# captures 2>&1, and the ha-smoke/smoke-cells adapters attach the first
+# `ABORT_CAUSE=<value>` marker to a summary-less or rc-disagreeing VOID, so the
+# ledger row names the ORIGINAL failure instead of a downstream cleanup
+# complaint. A last-`FATAL:` fallback stays in the adapter for output that
+# predates markers.
+ABORT_CAUSE=""
+note_abort_cause() { # <cause>: record once, print the marker once.
+	if [[ -n "$ABORT_CAUSE" ]]; then
+		return 0
+	fi
+	local cause="$1"
+	cause=${cause//$'\t'/ }
+	cause=${cause//$'\n'/ }
+	ABORT_CAUSE="$cause"
+	printf 'ABORT_CAUSE=%s\n' "$ABORT_CAUSE" >&2 || true
+	return 0
+}
+
+# A `set -e` death outside die() still names its command. Installed by main();
+# cleanup disables it (cleanup FATALs record explicit causes instead). ERR is
+# inherited into command substitutions by `set -E`, but only the main shell may
+# publish the marker; otherwise `x=$(false)` emits once in the child and once
+# for the failed assignment in the parent.
+_ABORT_MAIN_BASHPID=""
+on_gate_err() { # <command> <rc>, from the ERR trap.
+	[[ "$BASHPID" == "$_ABORT_MAIN_BASHPID" ]] || return 0
+	note_abort_cause "ERR: ${1:-unknown} (rc=${2:-?})" || true
+}
+install_abort_trap() {
+	_ABORT_MAIN_BASHPID="$BASHPID"
+	set -E
+	trap 'on_gate_err "$BASH_COMMAND" "$?"' ERR
+}
+
+die()  { note_abort_cause "gate: $*"; echo "FATAL: owner=test-dhcp-lease-failover: $*" >&2; exit 2; }
 
 ssh_fw() { incus exec "$1" -- bash -lc "$2"; }
 
@@ -184,10 +230,10 @@ record_dhcp_config_state() {
 	local i node
 	for i in 0 1; do
 		if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
-		if ! ORIGINAL_DHCP_CHASSIS[$i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null')"; then
+		if ! ORIGINAL_DHCP_CHASSIS[i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null')"; then
 			die "cannot snapshot chassis configuration on $node before the destructive run"
 		fi
-		if ! ORIGINAL_DHCP_LOCAL[$i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null')"; then
+		if ! ORIGINAL_DHCP_LOCAL[i]="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null')"; then
 			die "cannot snapshot dhcp-local-server configuration on $node before the destructive run"
 		fi
 	done
@@ -197,29 +243,49 @@ record_dhcp_config_state() {
 
 verify_dhcp_config() {
 	[[ "$CONFIG_STATE_RECORDED" == "1" ]] || return 0
-	local i node chassis local_config
-	for i in 0 1; do
-		if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
-		chassis="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null' || true)"
-		local_config="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null' || true)"
-		if [[ "$chassis" != "${ORIGINAL_DHCP_CHASSIS[$i]}" ||
-			"$local_config" != "${ORIGINAL_DHCP_LOCAL[$i]}" ]]; then
-			echo "FATAL: cleanup did not restore DHCP configuration on $node; owner=test-dhcp-lease-failover" >&2
-			echo "  chassis before: ${ORIGINAL_DHCP_CHASSIS[$i]}" >&2
-			echo "  chassis after:  $chassis" >&2
-			echo "  local before:   ${ORIGINAL_DHCP_LOCAL[$i]}" >&2
-			echo "  local after:    $local_config" >&2
+	local deadline=$((SECONDS + DHCP_RESTORE_WAIT))
+	local i node chassis local_config mismatch attempt=1
+	local -a last_chassis=() last_local=()
+	while :; do
+		mismatch=0
+		for i in 0 1; do
+			if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
+			chassis="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration chassis cluster | display set" 2>/dev/null' || true)"
+			local_config="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null' || true)"
+			last_chassis[i]="$chassis"
+			last_local[i]="$local_config"
+			if [[ "$chassis" != "${ORIGINAL_DHCP_CHASSIS[$i]}" ||
+				"$local_config" != "${ORIGINAL_DHCP_LOCAL[$i]}" ]]; then
+				mismatch=1
+			fi
+		done
+		if ((mismatch == 0)); then
+			info "cleanup verified DHCP fixture configuration matches the pre-run snapshots"
+			return 0
+		fi
+		if ((SECONDS >= deadline)); then
+			note_abort_cause "cleanup:config-restore-timeout"
+			echo "FATAL: cleanup did not restore DHCP configuration before the ${DHCP_RESTORE_WAIT}s deadline; owner=test-dhcp-lease-failover" >&2
+			for i in 0 1; do
+				if [[ "$i" == "0" ]]; then node="$FW0"; else node="$FW1"; fi
+				echo "  $node chassis before: ${ORIGINAL_DHCP_CHASSIS[$i]}" >&2
+				echo "  $node chassis after:  ${last_chassis[$i]}" >&2
+				echo "  $node local before:   ${ORIGINAL_DHCP_LOCAL[$i]}" >&2
+				echo "  $node local after:    ${last_local[$i]}" >&2
+			done
 			return 1
 		fi
+		info "cleanup waiting for DHCP configuration restore (attempt $attempt)"
+		sleep "$DHCP_RESTORE_POLL"
+		attempt=$((attempt + 1))
 	done
-	info "cleanup verified DHCP fixture configuration matches the pre-run snapshots"
-	return 0
 }
 
 verify_client_namespaces() {
 	local ns
 	for ns in "$NS_A" "$NS_B"; do
 		if ! ssh_fw "$DHCP_CLIENT" "test ! -e /run/netns/'$ns'"; then
+			note_abort_cause "cleanup:client-namespace-left"
 			echo "FATAL: cleanup left DHCP client namespace $ns behind on $DHCP_CLIENT; owner=test-dhcp-lease-failover" >&2
 			return 1
 		fi
@@ -249,7 +315,7 @@ restore_cluster_state() {
 		case "$current_node" in
 		node0) current_instance="$FW0" ;;
 		node1) current_instance="$FW1" ;;
-		*) echo "FATAL: cleanup cannot identify the current RG${rg} primary; owner=test-dhcp-lease-failover" >&2; return 1 ;;
+		*) note_abort_cause "cleanup:current-rg-owner-unreadable"; echo "FATAL: cleanup cannot identify the current RG${rg} primary; owner=test-dhcp-lease-failover" >&2; return 1 ;;
 		esac
 		incus exec "$current_instance" -- /usr/local/sbin/cli -c \
 			"request chassis cluster failover redundancy-group $rg" \
@@ -271,6 +337,7 @@ restore_cluster_state() {
 		sleep 2
 	done
 	if (( ! all_ok )); then
+		note_abort_cause "cleanup:rg-owner-restore-timeout"
 		echo "FATAL: cleanup could not restore the recorded cluster owners before pin cleanup; owner=test-dhcp-lease-failover" >&2
 		printf '%s\n' "$status" >&2
 		return 1
@@ -285,7 +352,7 @@ restore_cluster_state() {
 			case "$target_node" in
 			node0) target_instance="$FW0" ;;
 			node1) target_instance="$FW1" ;;
-			*) echo "FATAL: cleanup has an invalid recorded RG${rg} owner '$target_node'; owner=test-dhcp-lease-failover" >&2; return 1 ;;
+			*) note_abort_cause "cleanup:recorded-rg-owner-invalid"; echo "FATAL: cleanup has an invalid recorded RG${rg} owner '$target_node'; owner=test-dhcp-lease-failover" >&2; return 1 ;;
 			esac
 			incus exec "$target_instance" -- /usr/local/sbin/cli -c \
 				"request chassis cluster failover redundancy-group $rg node ${target_node#node}" \
@@ -321,6 +388,7 @@ restore_cluster_state() {
 		fi
 		sleep 2
 	done
+	note_abort_cause "cleanup:cluster-state-restore-timeout"
 	echo "FATAL: cleanup could not restore the recorded cluster ownership/manual-pin state; owner=test-dhcp-lease-failover" >&2
 	printf '%s\n' "$status" >&2
 	return 1
@@ -442,11 +510,12 @@ restore_dhcp() {
 
 cleanup_on_exit() {
 	local run_rc="$?"
-	trap - EXIT
+	trap - EXIT ERR
 	set +e
 	restore_dhcp
 	local cleanup_rc="$?"
 	if ((cleanup_rc != 0)); then
+		note_abort_cause "cleanup:restore-failed"
 		echo "DHCP failover cleanup failed after the detailed cause; owner=test-dhcp-lease-failover" >&2
 		exit 2
 	fi
@@ -535,6 +604,7 @@ assert_memfile_header() {
 }
 
 main() {
+	install_abort_trap
 	trap cleanup_on_exit EXIT
 	record_cluster_state
 	record_dhcp_config_state
@@ -710,6 +780,8 @@ main() {
 	fi
 }
 
-if [[ "${DHCP_LEASE_FAILOVER_SELFTEST:-0}" != "1" ]]; then
+# Executed only (see the sourced-vs-executed guard above): sourcing defines
+# the functions and returns without taking the lock or running the gate.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	main "$@"
 fi

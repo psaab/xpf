@@ -154,6 +154,14 @@ harness_adapt() {
 # reason, which is the one thing it must never be confused with.
 
 _ha_smoke_abort_suffix() {
+	local abort_line
+	abort_line=$(grep -E '^ABORT_CAUSE=' "$1" | tail -1)
+	abort_line=${abort_line//$'\t'/ }
+	abort_line=${abort_line//$'\n'/ }
+	if [[ -n "$abort_line" ]]; then
+		printf '; %s' "${abort_line:0:300}"
+		return 0
+	fi
 	local fatal_line
 	fatal_line=$(grep -E '^FATAL: ' "$1" | tail -1)
 	fatal_line=${fatal_line//$'\t'/ }
