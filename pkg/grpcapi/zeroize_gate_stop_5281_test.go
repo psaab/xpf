@@ -25,10 +25,10 @@ import (
 // (the gate is bypassed) AND stopped stay false (no stop scheduled), so this
 // test fails.
 func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := performZeroizeWipe
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		performZeroizeWipe = origWipe
 		scheduleStopDaemon = origStop
 	})
 
@@ -36,10 +36,7 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 	// sequence is gate → wipe → stop (never stop-before-wipe, never a bypassed
 	// gate).
 	var seq []string
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
-		seq = append(seq, "wipe")
-		return nil
-	}
+	performZeroizeWipe = func(_, _, _ string) error { seq = append(seq, "wipe"); return nil }
 	scheduleStopDaemon = func() { seq = append(seq, "stop") }
 
 	var gateWipeArg func() error
@@ -86,17 +83,15 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 // NOT stop xpfd (stopping a half-wiped box would strand prior-tenant secrets on
 // disk while the daemon is down).
 func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := performZeroizeWipe
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		performZeroizeWipe = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	wantErr := errors.New("configdb not fully erased")
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
-		return wantErr
-	}
+	performZeroizeWipe = func(_, _, _ string) error { return wantErr }
 	var stopped bool
 	scheduleStopDaemon = func() { stopped = true }
 
@@ -128,18 +123,15 @@ func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
 // directly) and still stops the daemon — the pre-#5281 behavior, preserved for a
 // build with no running reconcile loop to race.
 func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := performZeroizeWipe
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		performZeroizeWipe = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
-		wiped = true
-		return nil
-	}
+	performZeroizeWipe = func(_, _, _ string) error { wiped = true; return nil }
 	scheduleStopDaemon = func() { stopped = true }
 
 	dir := t.TempDir()

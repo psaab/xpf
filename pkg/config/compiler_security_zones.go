@@ -12,22 +12,163 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 		return nil
 	}
 	hib := &HostInboundTraffic{}
+	var services, protocols []string
+	var servicesExcept, protocolsExcept []string
 	for _, hit := range n.Children {
 		switch hit.Name() {
 		case "system-services":
 			// #3703: system-services is a multi-value value-tail leaf. A
 			// bracket / single-line / repeated list carries values as the
 			// leaf's Keys[1:] AND/OR one-per-child; read BOTH via the
-			// firewallMatchValues SSOT so every token reaches the compiled
-			// slice (reading only child.Name()/Keys[0] dropped all but the
-			// first list value — the #2419 collapse bug). The compiled slice
-			// is then token-validated by validateHostInboundTokensStrict.
-			hib.SystemServices = append(hib.SystemServices, firewallMatchValues(hit)...)
+			// recursive except-aware walker so every token reaches the
+			// compiled slice (the #2419 collapse bug).
+			values, excluded := hostInboundExceptParts(hit)
+			services = append(services, values...)
+			servicesExcept = append(servicesExcept, excluded...)
 		case "protocols":
-			hib.Protocols = append(hib.Protocols, firewallMatchValues(hit)...)
+			values, excluded := hostInboundExceptParts(hit)
+			protocols = append(protocols, values...)
+			protocolsExcept = append(protocolsExcept, excluded...)
 		}
 	}
+	hib.SystemServices = hostInboundFilterExcept(services, servicesExcept, false)
+	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
+	hib.systemServicesExcept = servicesExcept
+	hib.protocolsExcept = protocolsExcept
 	return hib
+}
+
+// hostInboundExceptParts reads one system-services / protocols subtree into
+// positive values and exclusions. The parser's AST has two relevant shapes:
+//
+//   - `X except` (the modifier is in the value node's Keys tail), and
+//   - `X { except; }` (the modifier is a child node below X).
+//
+// Each value node is processed with its own key sequence. A bare `except`
+// sibling is not paired with a previous sibling: it remains in values for the
+// existing strict token gate to reject.
+func hostInboundExceptParts(n *Node) (values, excluded []string) {
+	if n == nil || len(n.Keys) == 0 {
+		return nil, nil
+	}
+
+	// appendKeys preserves the boundary of one AST value node while recognizing
+	// an inline modifier in that node's own key tail.
+	appendKeys := func(node *Node, start int) string {
+		self := node.Keys[0]
+		previous := ""
+		previousExcept := false
+		last := ""
+		for i := start; i < len(node.Keys); i++ {
+			token := node.Keys[i]
+			if token == self && i > 0 && !node.KeyQuoted(i) {
+				continue
+			}
+			if token == "" {
+				continue
+			}
+			if token == "except" && !node.KeyQuoted(i) && previous != "" && !previousExcept {
+				excluded = append(excluded, previous)
+				previousExcept = true
+				continue
+			}
+			values = append(values, token)
+			previous = token
+			previousExcept = token == "except" && !node.KeyQuoted(i)
+			last = token
+		}
+		return last
+	}
+
+	var walkValue func(*Node)
+	walkValue = func(node *Node) {
+		if node == nil || len(node.Keys) == 0 {
+			return
+		}
+		parent := appendKeys(node, 0)
+		for _, child := range node.Children {
+			if len(child.Keys) == 0 {
+				continue
+			}
+			if child.Keys[0] == "except" && !child.KeyQuoted(0) {
+				if len(child.Keys) == 1 && len(child.Children) == 0 &&
+					parent != "" && len(node.Children) == 1 {
+					excluded = append(excluded, parent)
+					continue
+				}
+				// Preserve malformed except syntax for strict validation,
+				// but never descend into its nested payload.
+				appendKeys(child, 0)
+				continue
+			}
+			// Non-except children are not host-inbound values. The old
+			// immediate-child parser ignored them; retaining that boundary
+			// avoids admitting malformed nested tokens.
+		}
+	}
+
+	// The root keyword's first key is the container name; its remaining keys
+	// are one inline value sequence. Child nodes each retain their own boundary.
+	appendKeys(n, 1)
+	for _, child := range n.Children {
+		walkValue(child)
+	}
+	return values, excluded
+}
+
+// hostInboundFilterExcept applies exclusions to one complete leaf stanza.
+// Filtering after all same-key children are aggregated is required for flat
+// SetPath trees, where `all` and `X except` are sibling nodes.
+//
+// `all` is materialized only when an exclusion is present. This preserves the
+// existing representation for ordinary stanzas while making `all except X`
+// a real subtraction rather than a modifier that is silently ignored.
+func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string {
+	if len(excluded) == 0 {
+		return tokens
+	}
+	excludedSet := make(map[string]bool, len(excluded))
+	for _, token := range excluded {
+		known := KnownHostInboundProtocols[token]
+		if !protocols {
+			known = KnownHostInboundSystemServices[token]
+		}
+		if known {
+			excludedSet[token] = true
+		}
+	}
+	var expansion []string
+	if protocols {
+		expansion = HostInboundAllExpansionProtocols()
+	} else {
+		expansion = HostInboundAllExpansionServices()
+	}
+	out := make([]string, 0, len(tokens)+len(expansion))
+	invalidExcept := false
+	for _, token := range tokens {
+		if token == "except" {
+			invalidExcept = true
+			continue
+		}
+		if excludedSet[token] {
+			continue
+		}
+		if token == "all" {
+			for _, expanded := range expansion {
+				if !excludedSet[expanded] {
+					out = append(out, expanded)
+				}
+			}
+			continue
+		}
+		out = append(out, token)
+	}
+	if invalidExcept {
+		// A malformed/consecutive modifier must stay visible to the existing
+		// strict token gate; never silently accept it as an empty exclusion.
+		out = append(out, "except")
+	}
+	return out
 }
 
 // mergeHostInbound unions the SystemServices and Protocols of src into dst,
@@ -46,7 +187,9 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 // SINGLE block stays byte-identical to the pre-#4544 behaviour (no dedup, no
 // copy — a single block preserves its exact token multiset). Only when a second
 // block is actually merged are the unioned slices deduplicated (first-seen
-// order preserved). src nil (no stanza) is a no-op.
+// order preserved). src nil (no stanza) is a no-op. Compiler-local exclusion
+// provenance is merged with the positive lists so a restrictive sibling block
+// cannot be erased by the positive-list union.
 func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	if src == nil {
 		return dst
@@ -56,12 +199,17 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	}
 	dst.SystemServices = dedupHostInboundTokens(append(dst.SystemServices, src.SystemServices...))
 	dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
+	dst.systemServicesExcept = append(dst.systemServicesExcept, src.systemServicesExcept...)
+	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
+	dst.SystemServices = hostInboundFilterExcept(dst.SystemServices, dst.systemServicesExcept, false)
+	dst.Protocols = hostInboundFilterExcept(dst.Protocols, dst.protocolsExcept, true)
 	return dst
 }
 
 // cloneHostInbound returns a deep copy of src (fresh backing arrays for both
-// admission dimensions), preserving the exact token multiset and order — a copy
-// is value-identical, it only breaks POINTER identity.
+// admission dimensions and compiler-only exclusion provenance), preserving the
+// exact token multiset and order — a copy is value-identical, it only breaks
+// POINTER identity.
 //
 // Required by the #6391 multi-member fan. mergeHostInbound returns src UNCHANGED
 // when dst is nil (the deliberate #4544 no-copy fast path), so fanning one parsed
@@ -83,8 +231,10 @@ func cloneHostInbound(src *HostInboundTraffic) *HostInboundTraffic {
 		return nil
 	}
 	return &HostInboundTraffic{
-		SystemServices: append([]string(nil), src.SystemServices...),
-		Protocols:      append([]string(nil), src.Protocols...),
+		SystemServices:       append([]string(nil), src.SystemServices...),
+		Protocols:            append([]string(nil), src.Protocols...),
+		systemServicesExcept: append([]string(nil), src.systemServicesExcept...),
+		protocolsExcept:      append([]string(nil), src.protocolsExcept...),
 	}
 }
 

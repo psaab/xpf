@@ -144,21 +144,20 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
-	// #3450/#10289 destination-NAT pool port/address gate. The DNAT pool
-	// `port` parser used a bare strconv.Atoi with no bound check and the snapshot
-	// builder cast straight to uint16, so `port 70000` wrapped to 4464 / `-1`
-	// to 65535 (wrong backend port) and `port 0`/`port httpp` collapsed to 0 =
-	// preserve-dest-port (silent no-op of the rewrite). The pool `address`
-	// previously collapsed any extra token to the final one; non-host CIDRs
-	// (10.0.0.0/24) were also coerced to the network base and address-book names
-	// (web-server) were dropped by the Rust parser, leaving the VIP untranslated.
-	// Strict on commit / commit-check (hard-reject); lenient on load / peer-sync
-	// (downgrade to a warning so a config persisted before this gate existed
-	// still boots — #1960 no-brick; the snapshot builder independently fails
-	// CLOSED, skipping the rule rather than wrapping the port, collapsing an
-	// address range, or coercing the address). Shares the lenientDestNATAddresses
-	// flag (same NAT silent-drop / wrong-translate doctrine). Runs after the
-	// destination-port gate.
+	// #3450 destination-NAT pool port/address gate. The DNAT pool `port` parser
+	// used a bare strconv.Atoi with no bound check and the snapshot builder cast
+	// straight to uint16, so `port 70000` wrapped to 4464 / `-1` to 65535 (wrong
+	// backend port) and `port 0`/`port httpp` collapsed to 0 = preserve-dest-port
+	// (silent no-op of the rewrite). The pool `address` was stored verbatim: a
+	// non-host CIDR (10.0.0.0/24) was coerced to the network base and an
+	// address-book name (web-server) was dropped by the Rust parser, leaving the
+	// VIP untranslated. Strict on commit / commit-check (hard-reject); lenient on
+	// load / peer-sync (downgrade to a warning so a config persisted before this
+	// gate existed still boots — #1960 no-brick; the snapshot builder
+	// independently fails CLOSED, skipping the rule rather than wrapping the port
+	// or coercing the address). Shares the lenientDestNATAddresses flag (same NAT
+	// silent-drop / wrong-translate doctrine). Runs after the destination-port
+	// gate.
 	if err := validateDNATPoolStrict(cfg); err != nil {
 		if opts.lenientDestNATAddresses {
 			cfg.Warnings = append(cfg.Warnings,

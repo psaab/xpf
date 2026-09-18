@@ -36,7 +36,7 @@ func TestConsoleZeroizeDelegatesToFullWipe_5890(t *testing.T) {
 	var wiped, stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { wiped = true; return nil }
+	zeroizeFullWipe = func(string, string, string) error { wiped = true; return nil }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	if err := c.performConsoleZeroize(); err != nil {
@@ -60,7 +60,7 @@ func TestConsoleZeroizeFailClosedOnWipeError_5890(t *testing.T) {
 	var stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { return wipeErr }
+	zeroizeFullWipe = func(string, string, string) error { return wipeErr }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	err := c.performConsoleZeroize()
@@ -80,7 +80,7 @@ func TestConsoleZeroizeFailClosedWithoutConfigRoot_5890(t *testing.T) {
 	var wiped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { wiped = true; return nil }
+	zeroizeFullWipe = func(string, string, string) error { wiped = true; return nil }
 	zeroizeStopDaemon = func() error { return nil }
 
 	if err := c.performConsoleZeroize(); err == nil {

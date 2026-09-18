@@ -480,12 +480,6 @@ func validateNATMatchDestinationPortStrict(cfg *Config) error {
 //     (isHostMaskAddress — the same predicate static NAT uses). An empty pool
 //     address is also rejected: the builder skips it, so the rule is inert.
 //
-//   - #10289 multi-token address: `address A to B`, bracket lists, and other
-//     extra-token forms used to collapse to the final token, making a range
-//     look like a valid single host. AddressInvalidSpec preserves the full
-//     sequence and rejects it because the destination-NAT wire field has no
-//     range representation.
-//
 // Strict on commit / commit-check (hard reject so the bad value is operator-
 // visible); the compiler downgrades this to a warning on the tolerant load /
 // peer-sync path (#1960 no-brick) — the snapshot builder independently fails
@@ -531,16 +525,6 @@ func validateDNATPoolStrict(cfg *Config) error {
 			}
 		}
 		// Address: the dataplane needs a single host (bare IP, /32, or /128).
-		// A multi-token address was previously collapsed by the parser to its
-		// final token, so reject the retained raw spec before host validation.
-		if pool.AddressInvalidSpec != "" {
-			kind := dnatPoolInvalidAddressKind(pool.AddressInvalidSpec)
-			return fmt.Errorf(
-				"destination-nat pool %q: %s %q is unsupported "+
-					"(destination-NAT pools require a single host address; configure one "+
-					"bare IP, /32, or /128)",
-				name, kind, pool.AddressInvalidSpec)
-		}
 		if pool.Address == "" {
 			return fmt.Errorf(
 				"destination-nat pool %q: no translated address configured; the rule "+

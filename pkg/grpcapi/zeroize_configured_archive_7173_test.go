@@ -30,16 +30,16 @@ import (
 // GREEN, 1340 collected, 0 failed. Binding the callee is not binding the
 // wiring, and the wiring is where the production defect lived.
 func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := performZeroizeWipe
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		performZeroizeWipe = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotArchive string
 	var called bool
-	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory) error {
+	performZeroizeWipe = func(_, _, archiveDir string) error {
 		called = true
 		gotArchive = archiveDir
 		return nil
@@ -73,15 +73,15 @@ func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
 // non-empty directory would satisfy the cell above while erasing a path the
 // operator never configured.
 func TestZeroizePassesEmptyWhenArchivalDisabled7173(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := performZeroizeWipe
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		performZeroizeWipe = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotArchive string
-	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory) error {
+	performZeroizeWipe = func(_, _, archiveDir string) error {
 		gotArchive = archiveDir
 		return nil
 	}
