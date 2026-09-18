@@ -29,16 +29,16 @@ import (
 // defaultConfigDir instead of the store's temp root — so the gotDir/gotBase
 // assertions (and the explicit defaultConfigDir guard) fail.
 func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
-	origWipe := performZeroizeWipe
+	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipe = origWipe
+		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotDir, gotBase string
 	var called bool
-	performZeroizeWipe = func(configDir, configBase, _ string) error {
+	performZeroizeWipeWithLogInventory = func(configDir, configBase, _ string, _ ZeroizeLogInventory) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil
@@ -78,15 +78,18 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 // A bare Server with a nil store cannot resolve ConfigPath, so runZeroize must
 // return an error BEFORE ever invoking performZeroizeWipe or scheduling a stop.
 func TestZeroizeFailsClosedWithoutConfigRoot(t *testing.T) {
-	origWipe := performZeroizeWipe
+	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipe = origWipe
+		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipe = func(_, _, _ string) error { wiped = true; return nil }
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+		wiped = true
+		return nil
+	}
 	scheduleStopDaemon = func() { stopped = true }
 
 	s := &Server{} // no store => config root undeterminable

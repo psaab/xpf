@@ -82,7 +82,7 @@ func (c *CLI) handleRequestSystem(args []string) error {
 			return err
 		}
 
-		fmt.Println("System zeroized. Configuration erased.")
+		fmt.Println("System zeroized. Configuration and firewall logs covered by the active configuration were erased; remote collectors and journald are outside this wipe.")
 		fmt.Println("Reboot to complete factory reset.")
 		return nil
 
@@ -141,8 +141,12 @@ func (c *CLI) zeroizeConfigRoot() (configDir, configBase string, err error) {
 
 // zeroizeFullWipe is the shared factory-reset primitive the console delegates to
 // (#5890) — a package var so a test can spy the delegation without wiping real
-// system paths. It defaults to grpcapi.PerformZeroizeWipe, the SAME primitive the
-// gRPC zeroize path runs.
+// system paths. It defaults to the log-aware gRPC primitive, with the
+// pre-wipe configured log inventory supplied by performConsoleZeroize (#10300).
+type zeroizeLogInventory = grpcapi.ZeroizeLogInventory
+
+var zeroizeFullWipe = grpcapi.PerformZeroizeWipeWithLogInventory
+
 // cliZeroizeArchiveDir returns the archive directory the CONSOLE zeroize path
 // erases (#7173).
 //
@@ -161,8 +165,6 @@ func (c *CLI) zeroizeConfigRoot() (configDir, configBase string, err error) {
 func cliZeroizeArchiveDir() string {
 	return configstore.DefaultArchiveDir
 }
-
-var zeroizeFullWipe = grpcapi.PerformZeroizeWipe
 
 // zeroizeStopDaemon stops xpfd so it releases interface/dataplane state; a
 // package var so a test can neutralize the real systemctl call. Best-effort: the
@@ -202,8 +204,14 @@ func (c *CLI) performConsoleZeroize() error {
 	}
 	// The shared full factory-reset wipe primitive (config state + tls/ +
 	// rendered service configs [frr/swanctl/kea] + provisioned login accounts +
-	// config archive + BPF pins + networkd), #5890.
-	wipe := func() error { return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir()) }
+	// config archive + BPF pins + networkd + firewall logs), #5890/#10300.
+	wipe := func() error {
+		// Capture names immediately before the wipe. When factoryResetFn is
+		// wired, this closure runs inside its apply gate, so a waiting commit
+		// cannot add a destination after the inventory snapshot.
+		logInventory := grpcapi.ZeroizeLogInventoryFromConfig(c.store.ActiveConfig())
+		return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir(), logInventory)
+	}
 
 	// Route through the daemon's coordinated transaction when wired. When it is
 	// nil the CLI is spawned OUTSIDE the daemon (offline recovery / unit test) —

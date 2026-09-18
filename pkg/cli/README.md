@@ -49,12 +49,14 @@ sibling files (same package, so unexported helpers stay reachable):
     (#5890).** `performConsoleZeroize` resolves+validates the configured
     config root (`zeroizeConfigRoot`, #5554/#5684 — fail-CLOSED on an
     undeterminable store/path so it never wipes the wrong directory) and then
-    DELEGATES to the exported `grpcapi.PerformZeroizeWipe(configDir,
-    configBase)` — the SAME primitive the gRPC `runZeroize` runs — before
-    stopping xpfd. Both paths therefore erase an IDENTICAL owned-artifact set
-    (config state + `tls/` + rendered service configs [frr/swanctl/kea] +
-    provisioned login accounts [shadow/authorized_keys/`sudoers.d/xpf-*`] +
-    config archive + BPF pins + networkd) and cannot diverge. Before #5890 the
+    DELEGATES to the exported log-aware `grpcapi.PerformZeroizeWipeWithLogInventory`
+    (the configured log inventory is snapshotted inside the transaction) — the
+    SAME primitive the gRPC `runZeroize` runs — before stopping xpfd. Both paths
+    therefore erase an IDENTICAL owned-artifact set (config state + `tls/` +
+    rendered service configs [frr/swanctl/kea] + provisioned login accounts
+    [`shadow`/`authorized_keys`/`sudoers.d/xpf-*`] + config archive + BPF pins +
+    networkd + xpf firewall logs). Journald copies and remote collectors are
+    outside this local wipe and are named in the success receipt.
     console called only `zeroizeConfigState` (config DB + archive), which LEFT
     `tls/`, the rendered secrets, and the login accounts on disk — secret
     residue a re-tenanted device could recover. It is fail-CLOSED: a wipe that
