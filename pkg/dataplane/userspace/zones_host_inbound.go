@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -46,6 +47,120 @@ type ZoneHostInboundView struct {
 	// destination address only, as before #9637.
 	IngressNetdevs []string
 }
+// stableRethLinkLocalTarget identifies one logical interface on which the
+// daemon may install the deterministic RETH router link-local. The value is
+// deliberately derived from config, not a live interface snapshot: the
+// address is present only on the MASTER, while host-inbound daddr scope must be
+// identical on MASTER, BACKUP, and during the cold-boot fence.
+type stableRethLinkLocalTarget struct {
+	iface string
+	addr  string
+}
+
+// stableRethLinkLocalTargets mirrors daemon.addStableRethLinkLocal. That
+// routine installs fe80::bf72:<cluster>:<rg> on the RETH base device and on
+// IPv6-bearing non-zero units. Unit 0 with no VLAN collapses onto the base
+// device, so the unit-qualified name is the host-inbound zone identity for
+// that address; a VLAN unit 0 is a distinct device and the stable address
+// remains on the base identity. An explicit unit-0 link-local suppresses the
+// daemon-managed address for the whole RETH interface.
+//
+// This helper is intentionally local to pkg/dataplane/userspace: importing
+// pkg/cluster here would create the existing cluster → dataplane dependency
+// cycle. Keep the byte construction in parity with cluster.StableRethLinkLocal
+// (pkg/cluster/reth.go).
+func stableRethLinkLocalTargets(cfg *config.Config) []stableRethLinkLocalTarget {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return nil
+	}
+	owners := cfg.RethRGOwners()
+	if len(owners) == 0 {
+		return nil
+	}
+	clusterID := cfg.Chassis.Cluster.ClusterID
+	ifNames := make([]string, 0, len(owners))
+	for ifName := range owners {
+		ifNames = append(ifNames, ifName)
+	}
+	sort.Strings(ifNames)
+
+	var out []stableRethLinkLocalTarget
+	for _, ifName := range ifNames {
+		rgID := owners[ifName]
+		if rgID <= 0 {
+			// RG 0 is the cluster control group, not a RETH service group.
+			continue
+		}
+		ifc := cfg.Interfaces.Interfaces[ifName]
+		if ifc == nil || stableRethUnitHasConfiguredLinkLocal(ifc, 0) {
+			continue
+		}
+		addr := stableRethLinkLocalString(clusterID, rgID)
+
+		// addStableRethLinkLocal always puts the address on the base netdev.
+		// A native unit-0 row is the same host-inbound identity; a VLAN unit
+		// 0 is distinct, so retain the bare interface identity there.
+		baseRef := ifName
+		if unit0 := ifc.Units[0]; unit0 != nil && unit0.VlanID == 0 {
+			baseRef = fmt.Sprintf("%s.0", ifName)
+		}
+		out = append(out, stableRethLinkLocalTarget{iface: baseRef, addr: addr})
+
+		unitNums := make([]int, 0, len(ifc.Units))
+		for unitNum := range ifc.Units {
+			if unitNum > 0 {
+				unitNums = append(unitNums, unitNum)
+			}
+		}
+		sort.Ints(unitNums)
+		for _, unitNum := range unitNums {
+			unit := ifc.Units[unitNum]
+			if !stableRethUnitHasIPv6(unit) {
+				continue
+			}
+			out = append(out, stableRethLinkLocalTarget{
+				iface: fmt.Sprintf("%s.%d", ifName, unitNum),
+				addr:  addr,
+			})
+		}
+	}
+	return out
+}
+
+func stableRethLinkLocalString(clusterID, rgID int) string {
+	return net.IP{0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+		0, 0, 0xbf, 0x72, 0, byte(clusterID), 0, byte(rgID)}.String()
+}
+
+func stableRethUnitHasConfiguredLinkLocal(ifc *config.InterfaceConfig, unitNum int) bool {
+	if ifc == nil {
+		return false
+	}
+	unit := ifc.Units[unitNum]
+	if unit == nil {
+		return false
+	}
+	for _, raw := range unit.Addresses {
+		ip, _, err := net.ParseCIDR(raw)
+		if err == nil && ip.To4() == nil && ip.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
+}
+
+func stableRethUnitHasIPv6(unit *config.InterfaceUnit) bool {
+	if unit == nil {
+		return false
+	}
+	for _, raw := range unit.Addresses {
+		if strings.Contains(raw, ":") {
+			return true
+		}
+	}
+	return unit.DHCPv6
+}
+
 
 // BuildZoneHostInboundViews returns one ZoneHostInboundView per configured
 // security zone (#3070; #3405 default-deny parity — every zone enforces, see
@@ -53,7 +168,8 @@ type ZoneHostInboundView struct {
 // host addresses via the canonical interface-snapshot builder (the same
 // resolution that populates the dataplane) PLUS each zone's RETH VRRP virtual
 // addresses (#3172, resolved from config so they scope the deny on the backup
-// node too, where the VIP is not yet live on the kernel interface), with
+// node too, where the VIP is not yet live on the kernel interface), and the
+// deterministic stable RETH router link-local (#10303), with
 // management/cluster-control lifeline interfaces (fxp0 / em0 / fab*) excluded
 // from the address set.
 //
@@ -364,6 +480,29 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 			}
 		}
 	}
+	// Stable RETH router link-locals (#10303): unlike an ordinary interface
+	// address, fe80::bf72:<cluster>:<rg> exists only while the RG is MASTER.
+	// Its host-inbound destination scope must nevertheless be present on both
+	// nodes and before the first successful commit, so derive it from the
+	// deterministic RETH/cluster config rather than ifaceSnaps' live addresses.
+	// The target walk mirrors addStableRethLinkLocal and adds the address to the
+	// target unit's effective token group, just like the VIP walk above.
+	for _, target := range stableRethLinkLocalTargets(cfg) {
+		if hostInboundLifelineInterface(target.iface, lifelines) {
+			continue
+		}
+		zoneName := zoneByIface[target.iface]
+		if zoneName == "" {
+			continue
+		}
+		zone := cfg.Security.Zones[zoneName]
+		if !configured(zone) {
+			continue
+		}
+		svc, proto := effectiveHostInboundTokens(zone, target.iface, overrideByIface[target.iface])
+		addAddr(getGroup(zoneName, svc, proto, target.iface), target.addr)
+	}
+
 
 	// Emit groups deterministically: the signature begins with the zone name,
 	// so sorting by signature orders views by zone then by token set. Addresses
@@ -574,6 +713,24 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 			}
 		}
 	}
+	// Stable RETH link-locals are config-derived too. A RETH unit with no
+	// security-zone binding is not represented by the zone views, so carry its
+	// deterministic IPv6 address into the unzoned catch-all. Zoned targets were
+	// already added above and are excluded through zoned[addr].
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	for _, target := range stableRethLinkLocalTargets(cfg) {
+		if hostInboundLifelineInterface(target.iface, lifelines) ||
+			zoneByIface[target.iface] != "" ||
+			zoned[target.addr] ||
+			lifelineShared[target.addr] {
+			continue
+		}
+		if !seen6[target.addr] {
+			seen6[target.addr] = true
+			v6 = append(v6, target.addr)
+		}
+	}
+
 	sort.Strings(v4)
 	sort.Strings(v6)
 	return v4, v6
@@ -581,7 +738,8 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 
 // forEachFirewallLocalAddr visits every (interface ref, address) pair that makes
 // an address firewall-local: the live/configured interface addresses from the
-// canonical snapshot builder, plus configured VRRP virtual addresses.
+// canonical snapshot builder, configured VRRP virtual addresses, and the
+// deterministic stable RETH link-locals used by HA.
 //
 // Extracted so the fence and the real table derive "which addresses live on a
 // lifeline" from ONE walk (#7284). They previously did not, and that divergence
@@ -645,6 +803,14 @@ func forEachFirewallLocalAddr(cfg *config.Config, visit func(ifName, cidr string
 			}
 		}
 	}
+	// The stable RETH address is installed only on the MASTER, but it remains
+	// firewall-local for host-inbound scope on the BACKUP and before the first
+	// commit. Include it in the same deterministic walk used by the cold-boot
+	// fence, so zoned and zone-less configurations share one source of truth.
+	for _, target := range stableRethLinkLocalTargets(cfg) {
+		visit(target.iface, target.addr)
+	}
+
 }
 
 // hostInboundLifelineSharedAddrs returns the bare host address VALUES that live
