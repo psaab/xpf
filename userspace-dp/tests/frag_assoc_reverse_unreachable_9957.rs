@@ -1,16 +1,19 @@
-//! #9957: pin the production fragment-association reverse-info boundary.
+//! #9957/#10132: pin the production fragment-association reverse-info boundary.
 //!
-//! The AF_INET non-first NAT64 builder requires `Nat64ReverseInfo`, but the
-//! production fragment-association installs currently pass `None` and both
-//! lookup sites discard the cache's optional reverse value. The end-to-end
-//! regression in `tests_nat64_tunnel.rs` proves today's packet disposition;
-//! this source guard makes the producer/consumer wiring itself load-bearing.
+//! The AF_INET non-first NAT64 builder requires `Nat64ReverseInfo`. #10132 now
+//! wires that payload through the AF_INET association installed on an admitted
+//! reverse first-fragment session hit, while ordinary same-family association
+//! installs continue to pass `None`. The NAT64 lookup returns the optional
+//! reverse payload; the ordinary same-family lookup still discards it.
+//!
+//! The end-to-end regression in `tests_nat64_tunnel.rs` proves the packet
+//! disposition; this source guard makes the producer/consumer wiring itself
+//! load-bearing.
 //!
 //! FAIL-ON-REVERT: adding a production `.frag_assoc.install(...)` or
 //! `.frag_assoc.lookup(...)` caller anywhere in the tree, moving either
-//! audited callsite out of `afxdp/poll_descriptor/frag_assoc.rs`, changing
-//! either install's third positional argument away from `None`, or binding
-//! either production lookup's reverse result instead of `_reverse` reds this
+//! audited callsite out of `afxdp/poll_descriptor/frag_assoc.rs`, removing the
+//! ordinary `None` install, or dropping the NAT64 reverse binding reds this
 //! test. Test-only low-level fixtures are excluded by filename.
 
 use std::fs;
@@ -333,47 +336,69 @@ fn lookup_discards_reverse(source: &str, offset: usize) -> bool {
 }
 
 #[test]
-fn production_fragment_association_installs_keep_reverse_none_9957() {
+fn production_fragment_association_installs_keep_family_specific_reverse_info_9957() {
     let sites = production_method_sites("install");
     let listing = listed(&sites);
     assert_eq!(
         sites.len(),
         2,
-        "#9957 production FragAssoc::install caller set changed: {listing:?}; update the census and expiry rationale"
+        "#9957/#10132 production FragAssoc::install caller set changed: {listing:?}"
     );
     assert!(
         sites
             .iter()
             .all(|site| rel(&site.file) == "afxdp/poll_descriptor/frag_assoc.rs"),
-        "#9957 production association installs moved outside the two audited poll-descriptor sites: {listing:?}"
+        "#9957/#10132 production association installs moved outside the two audited \
+         poll-descriptor sites: {listing:?}"
     );
     assert!(
-        sites.iter().all(|site| site.third_arg.as_deref() == Some("None")),
-        "#9957 every production FragAssoc::install third positional argument must remain None: {listing:?}"
+        sites.iter().any(|site| site.third_arg.as_deref() == Some("None")),
+        "#9957 ordinary same-family association must retain reverse=None: {listing:?}"
+    );
+    assert!(
+        sites
+            .iter()
+            .any(|site| site.third_arg.as_deref().is_some_and(|arg| arg.contains("nat64_reverse"))),
+        "#10132 NAT64 association must carry Nat64ReverseInfo on AF_INET: {listing:?}"
     );
 }
 
 #[test]
-fn production_fragment_association_lookups_discard_reverse_9957() {
+fn production_fragment_association_lookups_preserve_nat64_reverse_9957() {
     let sites = production_method_sites("lookup");
     let listing = listed(&sites);
     assert_eq!(
         sites.len(),
         2,
-        "#9957 production fragment-association lookup caller set changed: {listing:?}; update the census and expiry rationale"
+        "#9957/#10132 production fragment-association lookup caller set changed: {listing:?}"
     );
     assert!(
         sites
             .iter()
             .all(|site| rel(&site.file) == "afxdp/poll_descriptor/frag_assoc.rs"),
-        "#9957 production association lookups moved outside the two audited poll-descriptor sites: {listing:?}"
+        "#9957/#10132 production association lookups moved outside the two audited \
+         poll-descriptor sites: {listing:?}"
+    );
+    let bindings = sites
+        .iter()
+        .map(|site| {
+            let source = code_source_for(&site.file);
+            let statement_start = source[..site.offset].rfind(';').map_or(0, |idx| idx + 1);
+            source[statement_start..site.offset]
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        bindings.iter().any(|binding| binding.contains("let(decision,reverse)=")),
+        "#10132 NAT64 lookup must preserve reverse info: {listing:?}"
     );
     assert!(
-        sites.iter().all(|site| {
-            let source = code_source_for(&site.file);
-            lookup_discards_reverse(&source, site.offset)
-        }),
-        "#9957 every production lookup must bind its own result as `_reverse`: {listing:?}"
+        bindings
+            .iter()
+            .any(|binding| binding.contains("let(decision,_reverse)=")),
+        "#9957 ordinary lookup must continue discarding reverse info: {listing:?}"
     );
 }
 

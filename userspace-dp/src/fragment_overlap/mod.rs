@@ -201,11 +201,12 @@ pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
 }
 
 #[inline]
-fn overlap_entry_live(e: &OverlapEntry, now_ns: u64) -> bool {
+fn overlap_entry_live(e: &OverlapEntry, now_ns: u64, lifetime_evictions: &mut u64) -> bool {
     let idle_live = e.deadline_ns > now_ns;
     let absolutely_live = now_ns.saturating_sub(e.created_ns) < OVERLAP_MAX_LIFETIME_NS;
     if idle_live && !absolutely_live {
         FRAG_OVERLAP_MAX_LIFETIME_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+        *lifetime_evictions += 1;
     }
     idle_live && absolutely_live
 }
@@ -255,6 +256,23 @@ fn merge_ranges(
     Ok((out, (out_len + 1) as u8))
 }
 
+/// Classification returned by the detailed overlap APIs. The global atomics
+/// remain the alerting path; callers use this reason to batch the same event
+/// onto their binding-local telemetry without an atomic operation per packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverlapDropReason {
+    Overlap,
+    Overflow,
+    ShardFull,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OverlapCheckResult {
+    pub(crate) dropped: bool,
+    pub(crate) reason: Option<OverlapDropReason>,
+    pub(crate) lifetime_evictions: u64,
+}
+
 impl OverlapTracker {
     pub(crate) fn new() -> Self {
         let mut shards = Vec::with_capacity(OVERLAP_SHARDS);
@@ -280,30 +298,61 @@ impl OverlapTracker {
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> bool {
+        self.check_overlap_detailed(key, start, end, now_ns, drop_counter)
+            .dropped
+    }
+
+    pub(crate) fn check_overlap_detailed(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> OverlapCheckResult {
         if start >= end {
             drop_counter.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return OverlapCheckResult {
+                dropped: true,
+                reason: Some(OverlapDropReason::Overlap),
+                ..OverlapCheckResult::default()
+            };
         }
         let idx = overlap_shard_index(&key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        shard.retain(|e| overlap_entry_live(e, now_ns));
+        let mut lifetime_evictions = 0;
+        shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
         let Some(pos) = shard.iter().position(|e| e.key == key) else {
-            return false;
+            return OverlapCheckResult {
+                lifetime_evictions,
+                ..OverlapCheckResult::default()
+            };
         };
         for i in 0..(shard[pos].len as usize) {
             let (rs, re) = shard[pos].ranges[i];
             if start.max(rs) < end.min(re) {
                 drop_counter.fetch_add(1, Ordering::Relaxed);
-                return true;
+                return OverlapCheckResult {
+                    dropped: true,
+                    reason: Some(OverlapDropReason::Overlap),
+                    lifetime_evictions,
+                };
             }
         }
         if merge_ranges(&shard[pos].ranges, shard[pos].len as usize, (start, end)).is_err() {
             FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return OverlapCheckResult {
+                dropped: true,
+                reason: Some(OverlapDropReason::Overflow),
+                lifetime_evictions,
+            };
         }
-        false
+        OverlapCheckResult {
+            lifetime_evictions,
+            ..OverlapCheckResult::default()
+        }
     }
 
     /// Late (post-commit) check AND record: re-checks `(start, end)` under the shard lock
@@ -322,21 +371,42 @@ impl OverlapTracker {
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> bool {
+        self.check_and_record_detailed(key, start, end, now_ns, drop_counter)
+            .dropped
+    }
+
+    pub(crate) fn check_and_record_detailed(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> OverlapCheckResult {
         if start >= end {
             drop_counter.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return OverlapCheckResult {
+                dropped: true,
+                reason: Some(OverlapDropReason::Overlap),
+                ..OverlapCheckResult::default()
+            };
         }
         let idx = overlap_shard_index(&key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        shard.retain(|e| overlap_entry_live(e, now_ns));
+        let mut lifetime_evictions = 0;
+        shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
         if let Some(pos) = shard.iter().position(|e| e.key == key) {
             for i in 0..(shard[pos].len as usize) {
                 let (rs, re) = shard[pos].ranges[i];
                 if start.max(rs) < end.min(re) {
                     drop_counter.fetch_add(1, Ordering::Relaxed);
-                    return true;
+                    return OverlapCheckResult {
+                        dropped: true,
+                        reason: Some(OverlapDropReason::Overlap),
+                        lifetime_evictions,
+                    };
                 }
             }
             // No overlap: merge via the shared dry-run, then commit. The overflow drop
@@ -344,7 +414,11 @@ impl OverlapTracker {
             match merge_ranges(&shard[pos].ranges, shard[pos].len as usize, (start, end)) {
                 Err(()) => {
                     FRAG_OVERLAP_OVERFLOW_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return true;
+                    return OverlapCheckResult {
+                        dropped: true,
+                        reason: Some(OverlapDropReason::Overflow),
+                        lifetime_evictions,
+                    };
                 }
                 Ok((ranges, len)) => {
                     let mut e = shard.remove(pos);
@@ -353,15 +427,22 @@ impl OverlapTracker {
                     e.deadline_ns = now_ns.saturating_add(OVERLAP_TTL_NS);
                     // created_ns NEVER refreshed (absolute bound from first sighting).
                     shard.push(e);
-                    return false;
+                    return OverlapCheckResult {
+                        lifetime_evictions,
+                        ..OverlapCheckResult::default()
+                    };
                 }
             }
         }
         if shard.len() >= OVERLAP_CAP_PER_SHARD {
-            // Fail CLOSED: evicting a live entry would let a flood erase the anchor
-            // ranges and forward an overlap the screens never saw together.
+            // Fail CLOSED: evicting a live entry would let a flood erase the
+            // anchor ranges and forward an overlap the screens never saw together.
             FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return OverlapCheckResult {
+                dropped: true,
+                reason: Some(OverlapDropReason::ShardFull),
+                lifetime_evictions,
+            };
         }
         let mut ranges = [(0u32, 0u32); OVERLAP_MAX_RANGES];
         ranges[0] = (start, end);
@@ -372,7 +453,10 @@ impl OverlapTracker {
             deadline_ns: now_ns.saturating_add(OVERLAP_TTL_NS),
             created_ns: now_ns,
         });
-        false
+        OverlapCheckResult {
+            lifetime_evictions,
+            ..OverlapCheckResult::default()
+        }
     }
 
     #[cfg(test)]

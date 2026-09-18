@@ -76,6 +76,11 @@ Userspace dataplane helper:
   NAT64 tunnel encap unsupported drops:13
   NAT64 ineligible-protocol drops:11
   NAT frag untranslated drops:9
+  Fragment overlap drops:    14
+  Fragment overlap overflow drops:15
+  Fragment overlap shard-full drops:16
+  Fragment overlap post-NAT drops:17
+  Fragment overlap max-lifetime evictions:18
 Source NAT pools:
   Pool                 Rule                 Persist Permit           LiveFlows   MaxFlows    UsedPorts  Leases     Alloc      Reuse      Exhaust   
   pool-a               rule-a               true   target-host      3           64          30         2          10         4          1         

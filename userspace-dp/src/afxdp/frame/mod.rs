@@ -414,36 +414,11 @@ fn build_nat64_inner_frame(
         libc::AF_INET => {
             // Reverse direction: IPv4 → IPv6 (reply from server).
             let info = nat64_reverse?;
-            // #2562: a NON-first reply fragment has no L4 header — this arm
-            // would translate L3-only (payload verbatim, no L4/port rewrite)
-            // using the original v6 endpoints a future flowless reverse request
-            // would need to carry. Production currently never supplies that
-            // request metadata on this path; the #9957 rationale below records
-            // why.
-            // #9957: PRODUCTION-UNREACHABLE per the census — the sentence this
-            // replaces ("reached only when the reverse fragment-association
-            // consult supplies `nat64_reverse`") named a mechanism that was
-            // never built. Census: both PRODUCTION `FragAssoc::install`
-            // callers pass `reverse: None` (poll_descriptor/frag_assoc.rs),
-            // both consults bind `_reverse` and discard it. The live-packet
-            // `nat64_reverse: Some` producer is the flow-backed session path
-            // (poll_descriptor/mod.rs); HA session-sync can also reconstruct
-            // the same field for a promoted session, but that is likewise
-            // session metadata. A non-first fragment, flowless by the #2344
-            // chokepoint, enters neither producer path. So
-            // `nat64_reverse` is always `None` for a non-first reply
-            // fragment here and the `?` above exits first. The flowless
-            // reverse-fragment path therefore never builds a request carrying
-            // this info.
-            // EXPIRY: the first production NAT64 install caller that passes
-            // `reverse: Some(..)` to `FragAssoc::install`, together with
-            // enabling the currently AF_INET-disabled reverse consult (or
-            // equivalent reverse-info threading onto a flowless request),
-            // makes this arm live for the first time, unexercised. That
-            // change MUST update this comment and replace
-            // `nat64_reverse_nonfirst_reply_fragment_is_not_translated_9957`
-            // with coverage for the now-live builder; the pin below catches
-            // the NAT64 producer prerequisite immediately.
+            // #2562/#10132: a non-first reply fragment has no L4 header, so
+            // the flowless request carries the reverse session's original v6
+            // endpoints from the AF_INET fragment association. The v4-side
+            // association is installed only after an admitted reverse first
+            // fragment reaches the session-hit record site.
             if let Some(l3) = frame_l3_offset(frame)
                 && is_non_first_fragment(frame.get(l3..)?, libc::AF_INET as u8)
             {

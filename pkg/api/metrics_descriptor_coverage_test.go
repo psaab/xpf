@@ -577,7 +577,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_ndp_na_bad_source_refused_total",                    // #10097 NDP NA bad-source refusal
 		"xpf_userspace_dynamic_neighbor_present",                           // #1782 cold-start H2 dump
 		"xpf_userspace_session_publish_errors_total",                       // #1789 publish failures
-		"xpf_userspace_policy_revoked_sessions_total",                       // #10021 policy-revoked sessions
+		"xpf_userspace_policy_revoked_sessions_total",                      // #10021 policy-revoked sessions
 		"xpf_userspace_dnat_publish_errors_total",                          // #2244 dnat_table reverse-NAT publish failures
 		"xpf_userspace_session_nat_reverse_key_shared_displacements_total", // #1760 W3' shared displacements
 		"xpf_userspace_worker_command_queue_poison_recoveries_total",       // #1807 poison recoveries
@@ -609,6 +609,12 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		// #1831: per-binding V_min fairness-throttle counters (#941/#943)
 		"xpf_userspace_binding_v_min_throttles_total",
 		"xpf_userspace_binding_v_min_throttle_hard_cap_overrides_total",
+		// #10131: per-binding fragment-overlap attribution counters.
+		"xpf_userspace_binding_frag_overlap_drops_total",
+		"xpf_userspace_binding_frag_overlap_overflow_drops_total",
+		"xpf_userspace_binding_frag_overlap_shard_full_drops_total",
+		"xpf_userspace_binding_frag_overlap_post_nat_drops_total",
+		"xpf_userspace_binding_frag_overlap_max_lifetime_evictions_total",
 		// #1829 Phase 1: dequeue-time sojourn gauges
 		"xpf_userspace_cos_sojourn_ewma_ns",
 		"xpf_userspace_cos_sojourn_peak_ns",

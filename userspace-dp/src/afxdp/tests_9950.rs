@@ -347,6 +347,45 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         m.l4_offset = 34;
         m
     };
+    // #10130: exercise the miss path with the reply tail arriving before the
+    // first fragment. The live forward DNAT session must gate this tail
+    // instead of forwarding it with the untranslated internal source.
+    let reordered_tail_payload = [0xAAu8; 16];
+    let reordered_tail = ipv4_frag_frame_9950(
+        internal,
+        client,
+        PROTO_TCP,
+        reply_id,
+        0x0003,
+        &reordered_tail_payload,
+    );
+    let mut meta_reordered = frag_meta_9950(
+        24,
+        PROTO_TCP,
+        0,
+        internal,
+        client,
+        reordered_tail.len() as u16,
+    );
+    meta_reordered.flow_src_port = internal_port;
+    meta_reordered.flow_dst_port = client_port;
+    let (batch_reordered, dbg_reordered) = txn_run_descriptor(
+        &mut binding_lan,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &reordered_tail,
+        meta_reordered,
+    );
+    assert_eq!(
+        dbg_reordered.forward, 0,
+        "#10130: reordered DNAT reply tail must not forward untranslated"
+    );
+    assert_eq!(
+        batch_reordered.nat_frag_untranslated_dropped, 1,
+        "#10130: session-gated reply-tail drop is observable"
+    );
+
     let (_b1, dbg1) = txn_run_descriptor(
         &mut binding_lan,
         &mut sessions,
@@ -423,6 +462,50 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     assert_eq!(
         wire_src, public,
         "F-036 RED: reply non-first wire src must be the translated public address, not the internal server"
+    );
+
+    // #10130: a plain outbound fragment from the same internal address must
+    // remain eligible for forwarding; the session gate is not a source-address
+    // blanket drop.
+    let plain_tail = ipv4_frag_frame_9950(
+        internal,
+        Ipv4Addr::new(203, 0, 113, 9),
+        PROTO_TCP,
+        0xC002,
+        0x0003,
+        &[0xDDu8; 16],
+    );
+    let mut meta_plain = frag_meta_9950(
+        24,
+        PROTO_TCP,
+        0,
+        internal,
+        Ipv4Addr::new(203, 0, 113, 9),
+        plain_tail.len() as u16,
+    );
+    meta_plain.flow_src_port = internal_port;
+    meta_plain.flow_dst_port = 443;
+    binding_lan.scratch.scratch_forwards.clear();
+    let (batch_plain, dbg_plain) = txn_run_descriptor(
+        &mut binding_lan,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &plain_tail,
+        meta_plain,
+    );
+    assert_eq!(
+        dbg_plain.forward, 1,
+        "#10130: unrelated plain outbound fragment must still forward"
+    );
+    assert_eq!(
+        batch_plain.nat_frag_untranslated_dropped, 0,
+        "#10130: plain outbound forwarding is not a NAT-fragment drop"
+    );
+    assert_eq!(
+        binding_lan.scratch.scratch_forwards.len(),
+        1,
+        "#10130: plain fragment has one forwarding request"
     );
 }
 

@@ -459,6 +459,29 @@ fn udp_frag_meta_5689() -> UserspaceDpMeta {
     }
 }
 
+/// #10130: reply-side interface-SNAT fragment with no L4 header. The
+/// destination is the public address assigned to the WAN interface, so the
+/// flowless resolver selects LocalDelivery rather than ForwardCandidate.
+fn udp_reply_frag_frame_10130(frag_off: u16, id: u16) -> Vec<u8> {
+    let mut f = vec![
+        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
+    ];
+    let udp_or_payload = [0x01, 0xbb, 0x82, 0x35, 0x00, 0x08, 0x00, 0x00];
+    let mut ip = vec![0u8; 20];
+    ip[0] = 0x45;
+    let total = (20 + udp_or_payload.len()) as u16;
+    ip[2..4].copy_from_slice(&total.to_be_bytes());
+    ip[4..6].copy_from_slice(&id.to_be_bytes());
+    ip[6..8].copy_from_slice(&frag_off.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = PROTO_UDP;
+    ip[12..16].copy_from_slice(&[172, 16, 80, 200]);
+    ip[16..20].copy_from_slice(&[172, 16, 80, 8]);
+    f.extend_from_slice(&ip);
+    f.extend_from_slice(&udp_or_payload);
+    f
+}
+
 
 #[test]
 fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
@@ -540,6 +563,73 @@ fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
     assert_eq!(
         dbg2.nat_applied_none, 0,
         "#5689: the non-first fragment must NOT be forwarded untranslated"
+    );
+}
+
+/// #10130: a reordered interface-SNAT reply tail must be rejected even when
+/// its destination resolves to LocalDelivery. Without the session-gated L3
+/// reverse discriminator this packet reaches host-inbound handling as a plain
+/// fragment and can escape untranslated.
+#[test]
+fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding_lan = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding_lan.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    // Establish the live forward interface-SNAT session.
+    let first = udp_frag_frame_5689(0x2000, 0xbeef);
+    let (_batch_first, dbg_first) = txn_run_descriptor(
+        &mut binding_lan,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        udp_frag_meta_5689(),
+    );
+    assert_eq!(dbg_first.nat_applied_snat, 1);
+
+    // The reply tail uses a fresh identification, so no reverse fragment
+    // association exists. Its destination is the local public interface IP.
+    let mut binding_wan = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding_wan.interface = Arc::<str>::from("reth0.80");
+    let reply_tail = udp_reply_frag_frame_10130(0x0001, 0xcafe);
+    let reply_meta = UserspaceDpMeta {
+        ingress_ifindex: 12,
+        flow_src_port: 443,
+        flow_dst_port: 33333,
+        flow_src_addr: [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..udp_frag_meta_5689()
+    };
+    let (batch_reply, dbg_reply) = txn_run_descriptor(
+        &mut binding_wan,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &reply_tail,
+        reply_meta,
+    );
+    assert_eq!(
+        dbg_reply.forward, 0,
+        "#10130: reordered interface-SNAT reply tail must not forward"
+    );
+    assert_eq!(
+        batch_reply.nat_frag_untranslated_dropped, 1,
+        "#10130: LocalDelivery reply-tail rejection is observable"
     );
 }
 

@@ -55,6 +55,34 @@ func (c *xpfCollector) initBindingDescriptors() {
 			"xpf_userspace_binding_v_min_throttles_total.",
 		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 	)
+	// #10131: per-binding fragment-overlap attribution, split by the
+	// reason that caused the drop. Emit zeros too, so a binding's absence of
+	// overlap is distinguishable from an unavailable status snapshot.
+	c.bindingFragOverlapDropped = prometheus.NewDesc(
+		"xpf_userspace_binding_frag_overlap_drops_total",
+		"Fragment-overlap drops observed by this userspace binding (#10131).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
+	c.bindingFragOverlapOverflowDropped = prometheus.NewDesc(
+		"xpf_userspace_binding_frag_overlap_overflow_drops_total",
+		"Fragment-overlap drops caused by fragment-range overflow on this binding (#10131).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
+	c.bindingFragOverlapShardFullDropped = prometheus.NewDesc(
+		"xpf_userspace_binding_frag_overlap_shard_full_drops_total",
+		"Fragment-overlap drops caused by a full overlap shard on this binding (#10131).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
+	c.bindingFragOverlapPostNATDropped = prometheus.NewDesc(
+		"xpf_userspace_binding_frag_overlap_post_nat_drops_total",
+		"Post-NAT fragment-overlap drops observed by this userspace binding (#10131).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
+	c.bindingFragOverlapMaxLifetimeEvictions = prometheus.NewDesc(
+		"xpf_userspace_binding_frag_overlap_max_lifetime_evictions_total",
+		"Fragment-overlap entries evicted at maximum lifetime on this binding (#10131).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
 	// #7409: per-binding slow-path reinject counters, split by disposition.
 	// The frames counted here left the userspace dataplane WITHOUT being
 	// adjudicated and were forwarded by the kernel FIB — there is no

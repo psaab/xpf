@@ -421,6 +421,63 @@ pub(crate) fn reverse_session_key(key: &SessionKey, nat: NatDecision) -> Session
         routing_domain: key.routing_domain,
     }
 }
+/// #10130: L3-only reverse identity for the session-gated reply-fragment discriminator.
+///
+/// A non-first fragment carries no L4 ports, so the full 5-tuple `nat_reverse_index`
+/// (keyed by `reverse_wire_key` with ports) cannot resolve it. This key is the
+/// L3 projection of that reverse wire tuple: `(family, proto, wire_src, wire_dst)`
+/// where `wire_src = rewrite_dst.unwrap_or(forward.dst)` and
+/// `wire_dst = rewrite_src.unwrap_or(forward.src)`. Domain-agnostic by design
+/// (mirrors `reverse_wire_key` zeroing `routing_domain`): a reply may legitimately
+/// arrive in a different routing domain than the forward resolved, and a
+/// cross-tenant L3 collision here fails CLOSED (drop) rather than leaking.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct L3ReverseKey {
+    pub addr_family: u8,
+    pub protocol: u8,
+    pub src: IpAddr,
+    pub dst: IpAddr,
+}
+
+/// #10130: compute the L3 reverse key for a FORWARD session. Plain forwarding
+/// has no translated reply identity and returns `None`, while same-family
+/// address NAT and cross-family NAT64 project the full reverse wire key
+/// (including family/protocol mapping) down to the `(family, proto, src, dst)`
+/// identity used by flowless reply fragments.
+pub(crate) fn l3_reverse_key_for_forward(
+    forward_key: &SessionKey,
+    nat: NatDecision,
+) -> Option<L3ReverseKey> {
+    let reverse = if nat.nat64 {
+        reverse_session_key(forward_key, nat)
+    } else {
+        if nat.rewrite_src.is_none() && nat.rewrite_dst.is_none() {
+            return None;
+        }
+        reverse_session_key(forward_key, nat)
+    };
+    Some(L3ReverseKey {
+        addr_family: reverse.addr_family,
+        protocol: reverse.protocol,
+        src: reverse.src_ip,
+        dst: reverse.dst_ip,
+    })
+}
+
+/// #10130: probe key for a flowless reply fragment's L3 identity.
+pub(crate) fn l3_reverse_probe(
+    reply_src: IpAddr,
+    reply_dst: IpAddr,
+    protocol: u8,
+    addr_family: u8,
+) -> L3ReverseKey {
+    L3ReverseKey {
+        addr_family,
+        protocol,
+        src: reply_src,
+        dst: reply_dst,
+    }
+}
 
 #[cfg(test)]
 mod discriminator_carry_tests_8103 {

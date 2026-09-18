@@ -43,6 +43,8 @@ type NatIndexBucket = SmallVec<[u32; 2]>;
 type SeededReverseIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
+/// #10130: address/protocol-only index for session-gated reply fragments.
+type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>;
 
 // #1047 P2: SessionKey and the key-transform helpers (forward_wire_key,
 // translated_session_key, reverse_canonical_key, reverse_wire_key,
@@ -1100,10 +1102,12 @@ pub(crate) struct SessionTable {
     /// (`SeededReverseTranslatedIndex`) — a bucket of reverse handles per
     /// translated (alias) key — so a translated-key collision keeps BOTH
     /// colliding reverse sessions resolvable instead of displacing the earlier
-    /// one. The alias branch of `lookup_with_origin` resolves the bucket via
-    /// `resolve_reverse_translated_handle`, validating each candidate against
-    /// the full translated tuple.
+    /// one.
     reverse_translated_index: SeededReverseTranslatedIndex,
+    /// #10130: forward-session handles indexed by the L3 tuple a reply
+    /// fragment carries before reverse NAT. Ports are intentionally absent
+    /// because non-first fragments have no L4 header.
+    l3_reverse_index: SeededL3ReverseIndex,
     /// #964 Step 1: owner-RG sets keyed by handle (was Key).
     owner_rg_sessions: FxHashMap<i32, FxHashSet<u32>>,
     deltas: VecDeque<SessionDelta>,
@@ -1411,6 +1415,7 @@ impl SessionTable {
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),
+            l3_reverse_index: HashMap::with_hasher(state.clone()),
             leak_incarnations: HashMap::with_hasher(state.clone()),
             // owner_rg_sessions is keyed by i32 RG/ifindex (not an
             // attacker-chosen 5-tuple) with inner sets of internally
@@ -3358,6 +3363,18 @@ impl SessionTable {
                 );
             }
         }
+        if !is_reverse
+            && let Some(l3_key) = l3_reverse_key_for_forward(key, nat)
+        {
+            // #10130: this index is a gate, not a reverse session lookup. It
+            // intentionally carries no L4 identity and no collision telemetry;
+            // the packet itself has no ports, and the caller re-validates the
+            // live entry plus routing-domain compatibility before dropping.
+            let bucket = self.l3_reverse_index.entry(l3_key).or_default();
+            if !bucket.contains(&handle) {
+                bucket.push(handle);
+            }
+        }
         if owner_rg_id > 0 {
             self.owner_rg_sessions
                 .entry(owner_rg_id)
@@ -3422,6 +3439,9 @@ impl SessionTable {
             &forward_wire_key(key, nat),
             handle,
         );
+        if let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
+            l3_reverse_bucket_remove(&mut self.l3_reverse_index, &l3_key, handle);
+        }
     }
 
     /// #964 Step 1 mandatory debug assertion: scan every
@@ -3445,6 +3465,10 @@ impl SessionTable {
                 .any(|bucket| bucket.contains(&handle))
             && !self
                 .reverse_translated_index
+                .values()
+                .any(|bucket| bucket.contains(&handle))
+            && !self
+                .l3_reverse_index
                 .values()
                 .any(|bucket| bucket.contains(&handle))
             && !self
@@ -3533,7 +3557,6 @@ fn nat_index_bucket_push(
         }
     }
 }
-
 /// #4399/#4438: remove ONLY `handle` from the 1:N bucket for `key` in one of
 /// the NAT session lookup indexes, dropping the key entirely once its bucket
 /// empties. Value-guarded per handle: a colliding sibling in the same bucket is
@@ -3543,6 +3566,19 @@ fn nat_index_bucket_push(
 fn nat_index_bucket_remove(
     map: &mut HashMap<SessionKey, NatIndexBucket, FxSeededState>,
     key: &SessionKey,
+    handle: u32,
+) {
+    if let Some(bucket) = map.get_mut(key) {
+        bucket.retain(|h| *h != handle);
+        if bucket.is_empty() {
+            map.remove(key);
+        }
+    }
+}
+
+fn l3_reverse_bucket_remove(
+    map: &mut SeededL3ReverseIndex,
+    key: &L3ReverseKey,
     handle: u32,
 ) {
     if let Some(bucket) = map.get_mut(key) {

@@ -296,13 +296,22 @@ type BindingStatus struct {
 	// no rule and is NOT counted here, so ordinary fragmented forwarding is
 	// preserved. omitempty + the Rust serde `default` keep cross-version wire
 	// safety (an older helper omits it → 0).
-	NatFragUntranslatedDropped     uint64 `json:"nat_frag_untranslated_dropped,omitempty"`
-	SlowPathPackets                uint64 `json:"slow_path_packets,omitempty"`
-	SlowPathBytes                  uint64 `json:"slow_path_bytes,omitempty"`
-	SlowPathLocalDeliveryPackets   uint64 `json:"slow_path_local_delivery_packets,omitempty"`
-	SlowPathMissingNeighborPackets uint64 `json:"slow_path_missing_neighbor_packets,omitempty"`
-	SlowPathNoRoutePackets         uint64 `json:"slow_path_no_route_packets,omitempty"`
-	SlowPathNextTablePackets       uint64 `json:"slow_path_next_table_packets,omitempty"`
+	NatFragUntranslatedDropped uint64 `json:"nat_frag_untranslated_dropped,omitempty"`
+	// #10131: fragment-overlap attribution from the binding-local batch
+	// counters. Global alert atomics remain process-wide; these fields identify
+	// the worker/binding that observed each reason. omitempty keeps old-helper
+	// compatibility.
+	FragOverlapDropped              uint64 `json:"frag_overlap_dropped,omitempty"`
+	FragOverlapOverflowDropped      uint64 `json:"frag_overlap_overflow_dropped,omitempty"`
+	FragOverlapShardFullDropped     uint64 `json:"frag_overlap_shard_full_dropped,omitempty"`
+	FragOverlapPostNATDropped       uint64 `json:"frag_overlap_post_nat_dropped,omitempty"`
+	FragOverlapMaxLifetimeEvictions uint64 `json:"frag_overlap_max_lifetime_evictions,omitempty"`
+	SlowPathPackets                 uint64 `json:"slow_path_packets,omitempty"`
+	SlowPathBytes                   uint64 `json:"slow_path_bytes,omitempty"`
+	SlowPathLocalDeliveryPackets    uint64 `json:"slow_path_local_delivery_packets,omitempty"`
+	SlowPathMissingNeighborPackets  uint64 `json:"slow_path_missing_neighbor_packets,omitempty"`
+	SlowPathNoRoutePackets          uint64 `json:"slow_path_no_route_packets,omitempty"`
+	SlowPathNextTablePackets        uint64 `json:"slow_path_next_table_packets,omitempty"`
 	// NextTableUnsupportedDrops counts NextTableUnsupported frames dropped
 	// fail-closed by the slow-path allow-list (#6664). Since #6664 this is
 	// where the signal lives; SlowPathNextTablePackets above stays on the wire

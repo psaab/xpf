@@ -2873,6 +2873,67 @@ fn find_forward_nat_match_uses_reverse_index() {
     assert!(table.find_forward_nat_match(&reply).is_none());
 }
 
+/// #10130: a reply fragment has no ports, so the discriminator must consult
+/// live forward-session NAT state through the L3 reverse index. A plain packet
+/// from the same internal address to an unrelated destination is not gated.
+#[test]
+fn reverse_fragment_gate_requires_live_forward_nat_10130() {
+    let mut table = SessionTable::new();
+    let forward = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: "198.51.100.10".parse().unwrap(),
+        dst_ip: "172.16.80.8".parse().unwrap(),
+        src_port: 54321,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 7,
+    };
+    let nat = NatDecision {
+        rewrite_dst: Some("10.0.61.102".parse().unwrap()),
+        rewrite_dst_port: Some(8443),
+        ..NatDecision::default()
+    };
+    let decision = SessionDecision {
+        resolution: resolution(),
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    assert!(table.install_with_protocol(
+        forward,
+        decision,
+        metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let reply = l3_reverse_probe(
+        "10.0.61.102".parse().unwrap(),
+        "198.51.100.10".parse().unwrap(),
+        PROTO_TCP,
+        libc::AF_INET as u8,
+    );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(&reply, 0, 2_000_000_000),
+        "a live DNAT forward session must gate its reordered reply tail"
+    );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000),
+        "a live candidate in another non-default domain must fail closed"
+    );
+    let plain_outbound = l3_reverse_probe(
+        "10.0.61.102".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+        PROTO_TCP,
+        libc::AF_INET as u8,
+    );
+    assert!(
+        !table.reverse_nat_fragment_requires_translation(&plain_outbound, 0, 2_000_000_000),
+        "an unrelated plain outbound fragment must not be over-dropped"
+    );
+}
+
 #[test]
 fn find_forward_nat_match_uses_canonical_reverse_index() {
     let mut table = SessionTable::new();

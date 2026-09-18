@@ -416,6 +416,13 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// matches no rule and is NOT counted here — ordinary fragmented forwarding
     /// is preserved.
     pub(super) nat_frag_untranslated_dropped: AtomicU64,
+    /// #10131: binding-local fragment-overlap attribution, batched from each
+    /// worker while the matching global atomics remain the alert path.
+    pub(super) frag_overlap_dropped: AtomicU64,
+    pub(super) frag_overlap_overflow_dropped: AtomicU64,
+    pub(super) frag_overlap_shard_full_dropped: AtomicU64,
+    pub(super) frag_overlap_post_nat_dropped: AtomicU64,
+    pub(super) frag_overlap_max_lifetime_evictions: AtomicU64,
     pub(super) slow_path_packets: AtomicU64,
     pub(super) slow_path_bytes: AtomicU64,
     pub(super) slow_path_local_delivery_packets: AtomicU64,
@@ -975,13 +982,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #6664: both builds shift identically and one triple of literals makes both
 // green — verified by building BOTH the production (`cargo check`) and test
 // (`--all-targets`) configurations.
-// #10021 adds `policy_revoked_sessions` as an unconditional release-visible
-// atomic. The 2432-byte alignment unit still has room, so size is unchanged;
-// both pinned offsets move by 8 bytes (2240 -> 2248 and 2368 -> 2376) in
-// production and test configurations.
+// #10131 adds five unconditional u64 overlap-attribution counters ahead of
+// both sentinels. The 2432-byte alignment unit still has room, so size stays
+// unchanged; both pinned offsets move 2248 -> 2288 and 2376 -> 2416.
 const _: [(); 2432] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2248] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2376] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2288] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2416] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1071,6 +1077,11 @@ impl BindingLiveState {
             nat64_frag_assoc_evicted: AtomicU64::new(0),
             nat64_ineligible_source: AtomicU64::new(0),
             nat64_ineligible_dest: AtomicU64::new(0),
+            frag_overlap_dropped: AtomicU64::new(0),
+            frag_overlap_overflow_dropped: AtomicU64::new(0),
+            frag_overlap_shard_full_dropped: AtomicU64::new(0),
+            frag_overlap_post_nat_dropped: AtomicU64::new(0),
+            frag_overlap_max_lifetime_evictions: AtomicU64::new(0),
             nat64_exthdr_ineligible: AtomicU64::new(0),
             nat64_tunnel_encap_unsupported: AtomicU64::new(0),
             nat64_ineligible_protocol: AtomicU64::new(0),

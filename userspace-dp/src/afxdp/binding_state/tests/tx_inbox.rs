@@ -203,20 +203,20 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
         64,
         "#6304: ...nor its ALIGNMENT"
     );
-    // #10021: `policy_revoked_sessions` is an unconditional release-visible
-    // atomic inserted before these sentinels. It shifts both pinned offsets
-    // by +8 in BOTH builds (2240/2368 -> 2248/2376), while the 2432-byte
-    // size and 64-byte alignment remain unchanged.
+    // #10021/#10131: unconditional release-visible atomics inserted before
+    // these sentinels shift both pinned offsets by +48 in BOTH builds
+    // (2240/2368 -> 2288/2416), while the 2432-byte size and 64-byte
+    // alignment remain unchanged.
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2248,
-        "#6304/#10021: ...nor the OFFSET of the admission counter whose \
+        2288,
+        "#6304/#10021/#10131: ...nor the OFFSET of the admission counter whose \
          cacheline this is all about"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2376,
-        "#6304/#10021: ...nor the offset of the last-declared field, which is \
+        2416,
+        "#6304/#10021/#10131: ...nor the offset of the last-declared field, which is \
          the sentinel for a cfg(test) member appended at the END of the struct"
     );
 }

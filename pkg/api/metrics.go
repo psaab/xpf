@@ -694,6 +694,14 @@ type xpfCollector struct {
 	// LAG_THRESHOLD diagnostic.
 	bindingVMinThrottles                *prometheus.Desc
 	bindingVMinThrottleHardCapOverrides *prometheus.Desc
+	// #10131: per-binding fragment-overlap attribution. The global overlap
+	// atomics remain process-wide alert sources; these series preserve the
+	// binding/worker that observed each reason.
+	bindingFragOverlapDropped              *prometheus.Desc
+	bindingFragOverlapOverflowDropped      *prometheus.Desc
+	bindingFragOverlapShardFullDropped     *prometheus.Desc
+	bindingFragOverlapPostNATDropped       *prometheus.Desc
+	bindingFragOverlapMaxLifetimeEvictions *prometheus.Desc
 	// #7409: per-binding slow-path reinject counters, split by the
 	// disposition that sent the frame to the kernel. Already on the
 	// BindingStatus wire since the counters were added; unexported until
@@ -1168,6 +1176,11 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.bindingTXCompletionRingAvailableMax
 	ch <- c.bindingVMinThrottles
 	ch <- c.bindingVMinThrottleHardCapOverrides
+	ch <- c.bindingFragOverlapDropped
+	ch <- c.bindingFragOverlapOverflowDropped
+	ch <- c.bindingFragOverlapShardFullDropped
+	ch <- c.bindingFragOverlapPostNATDropped
+	ch <- c.bindingFragOverlapMaxLifetimeEvictions
 	ch <- c.bindingSlowPathNoRoutePackets
 	ch <- c.bindingSlowPathNextTablePackets
 	ch <- c.bindingNextTableUnsupportedDrops

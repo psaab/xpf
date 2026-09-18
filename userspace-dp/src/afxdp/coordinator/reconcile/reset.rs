@@ -65,6 +65,11 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.nat64_ineligible_protocol = 0;
         binding.nat_alloc_fail = 0;
         binding.nat_frag_untranslated_dropped = 0;
+        binding.frag_overlap_dropped = 0;
+        binding.frag_overlap_overflow_dropped = 0;
+        binding.frag_overlap_shard_full_dropped = 0;
+        binding.frag_overlap_post_nat_dropped = 0;
+        binding.frag_overlap_max_lifetime_evictions = 0;
         binding.slow_path_packets = 0;
         binding.slow_path_bytes = 0;
         binding.slow_path_local_delivery_packets = 0;

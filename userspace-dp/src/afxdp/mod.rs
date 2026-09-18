@@ -906,6 +906,14 @@ pub(in crate::afxdp) struct BatchCounters {
     // Bumped at the flowless miss path (`record_nat_frag_untranslated_dropped`)
     // and flushed to BindingLiveState.nat_frag_untranslated_dropped.
     nat_frag_untranslated_dropped: u64,
+    // #10131: fragment-overlap drops, split by the same reasons as the global
+    // alerting atomics. These are owner-local batch slots; the global atomics
+    // remain authoritative for process-wide alerts.
+    frag_overlap_dropped: u64,
+    frag_overlap_overflow_dropped: u64,
+    frag_overlap_shard_full_dropped: u64,
+    frag_overlap_post_nat_dropped: u64,
+    frag_overlap_max_lifetime_evictions: u64,
     // #1187: 8 disposition-path counters added to eliminate per-packet
     // MESI thrash on BindingLiveState atomics during DDoS / config-
     // reload windows. See docs/pr/1187-telemetry-double-buffer/plan.md
@@ -1083,6 +1091,35 @@ impl BatchCounters {
     pub(in crate::afxdp) fn record_nat_frag_untranslated_dropped(&mut self) {
         self.touched = true;
         self.nat_frag_untranslated_dropped += 1;
+    }
+
+    /// #10131: batch one fragment-overlap result while preserving the global
+    /// atomic alert path maintained by `OverlapTracker`.
+    #[inline]
+    pub(in crate::afxdp) fn record_frag_overlap_result(
+        &mut self,
+        result: crate::fragment_overlap::OverlapCheckResult,
+        post_nat: bool,
+    ) {
+        self.touched |= result.dropped || result.lifetime_evictions != 0;
+        if let Some(reason) = result.reason {
+            match reason {
+                crate::fragment_overlap::OverlapDropReason::Overlap => {
+                    if post_nat {
+                        self.frag_overlap_post_nat_dropped += 1;
+                    } else {
+                        self.frag_overlap_dropped += 1;
+                    }
+                }
+                crate::fragment_overlap::OverlapDropReason::Overflow => {
+                    self.frag_overlap_overflow_dropped += 1;
+                }
+                crate::fragment_overlap::OverlapDropReason::ShardFull => {
+                    self.frag_overlap_shard_full_dropped += 1;
+                }
+            }
+        }
+        self.frag_overlap_max_lifetime_evictions += result.lifetime_evictions;
     }
 
     /// #5623: record a fail-closed NAT64 SOURCE-ineligibility drop — an incoming
@@ -1291,6 +1328,31 @@ impl BatchCounters {
             live.nat64_ineligible_protocol
                 .fetch_add(self.nat64_ineligible_protocol, Ordering::Relaxed);
             self.nat64_ineligible_protocol = 0;
+        }
+        if self.frag_overlap_dropped != 0 {
+            live.frag_overlap_dropped
+                .fetch_add(self.frag_overlap_dropped, Ordering::Relaxed);
+            self.frag_overlap_dropped = 0;
+        }
+        if self.frag_overlap_overflow_dropped != 0 {
+            live.frag_overlap_overflow_dropped
+                .fetch_add(self.frag_overlap_overflow_dropped, Ordering::Relaxed);
+            self.frag_overlap_overflow_dropped = 0;
+        }
+        if self.frag_overlap_shard_full_dropped != 0 {
+            live.frag_overlap_shard_full_dropped
+                .fetch_add(self.frag_overlap_shard_full_dropped, Ordering::Relaxed);
+            self.frag_overlap_shard_full_dropped = 0;
+        }
+        if self.frag_overlap_post_nat_dropped != 0 {
+            live.frag_overlap_post_nat_dropped
+                .fetch_add(self.frag_overlap_post_nat_dropped, Ordering::Relaxed);
+            self.frag_overlap_post_nat_dropped = 0;
+        }
+        if self.frag_overlap_max_lifetime_evictions != 0 {
+            live.frag_overlap_max_lifetime_evictions
+                .fetch_add(self.frag_overlap_max_lifetime_evictions, Ordering::Relaxed);
+            self.frag_overlap_max_lifetime_evictions = 0;
         }
         // #4477: source-NAT allocation-failure tally.
         if self.nat_alloc_fail != 0 {

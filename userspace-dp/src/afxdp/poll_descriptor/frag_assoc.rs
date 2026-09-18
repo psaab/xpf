@@ -10,6 +10,7 @@ use super::*;
 use super::nat_exception::source_nat_would_translate_fragment;
 use super::prerouting_scope::prerouting_ingress_scope;
 
+use crate::nat64::Nat64ReverseInfo;
 /// #5798: resolve the INGRESS SECURITY AUTHORITY for a fragment, i.e. the
 /// domain whose enforcement a cached association is allowed to speak for.
 ///
@@ -91,8 +92,9 @@ pub(in crate::afxdp) fn frag_ingress_authority(
 /// anchor fragment actually authorized. Self-gated on `decision.nat.nat64` so it is
 /// safe to call unconditionally at the shared sites next to
 /// `nat_install_forward_fragment_assoc`; the two are mutually exclusive (NAT64 vs
-/// ordinary same-family), so exactly one fires. #9950: the hit tail gates NAT64 on
-/// AF_INET6 (v4 installs are never consulted — pure shard churn).
+/// ordinary same-family), so exactly one fires. #9950/#10132: the hit tail gates
+/// v6-side installs on AF_INET6 and carries `Nat64ReverseInfo` for AF_INET reply
+/// associations, which the flowless reverse consult returns to the NAT64 builder.
 #[inline]
 pub(super) fn nat64_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
@@ -101,8 +103,8 @@ pub(super) fn nat64_install_forward_fragment_assoc(
     authority: crate::fragment_assoc::FragAuthority,
     decision: &SessionDecision,
     now_ns: u64,
+    nat64_reverse: Option<Nat64ReverseInfo>,
 ) -> bool {
-    // #5146: only a genuine NAT64 (cross-family) decision installs here. The
     // ordinary same-family NAT / NPTv6 association is installed by
     // `nat_install_forward_fragment_assoc` (which self-gates the other way), so
     // both can be called at one commit site and exactly one populates the table.
@@ -122,7 +124,7 @@ pub(super) fn nat64_install_forward_fragment_assoc(
         return forwarding.nat64.frag_assoc.install(
             key,
             *decision,
-            None,
+            (addr_family == libc::AF_INET).then_some(nat64_reverse).flatten(),
             now_ns,
             forwarding.nat64.build_generation,
             // #6857: stamp the runtime entitlement this admission rested on, so
@@ -135,15 +137,14 @@ pub(super) fn nat64_install_forward_fragment_assoc(
     false
 }
 
-/// #2562: consult the fragment association for a NON-first NAT64 forward
-/// fragment (v6->v4). On a hit whose cached decision is a NAT64 translation,
-/// return that decision (resolution + `decision.nat` carrying snat_v4/dst_v4) so
-/// the flowless arm inherits the first fragment's permitted verdict + egress and
-/// the TX path L3-translates the fragment. A miss returns `None` and the caller
-/// falls through to the ordinary flowless drop (fail-closed, #4617). #9950: the
-/// v6-side forward-hit install now exists (session-hit tail); the v4->v6 reverse
-/// remains the deferred increment (see the #2562 PR notes) — v4 installs are gated
-/// off as dead (never consulted).
+/// #2562: consult the fragment association for a NON-first NAT64 fragment.
+/// On a hit whose cached decision is a NAT64 translation, return the decision
+/// plus the optional reverse-info payload needed by an AF_INET reply tail so
+/// the flowless request can rebuild IPv6 L3 headers. A miss returns `None` and
+/// the caller falls through to the ordinary flowless drop (fail-closed, #4617).
+/// #10132 enables both v6 forward and v4 reply association paths; the v4
+/// install remains populated only when the session-hit record site supplied
+/// `Nat64ReverseInfo`.
 #[inline]
 pub(super) fn nat64_consult_forward_fragment_assoc(
     forwarding: &ForwardingState,
@@ -155,17 +156,14 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     // stamped owner RG is STILL forwarding-active locally.
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
     now_secs: u64,
-) -> Option<SessionDecision> {
-    if addr_family != libc::AF_INET6 {
-        return None;
-    }
+) -> Option<(SessionDecision, Option<Nat64ReverseInfo>)> {
     let key = crate::fragment_assoc::nonfirst_fragment_key(l3_packet, addr_family, authority)?;
     // #5624: consult under the CURRENT forwarding state's generation. An
     // association installed under a prior generation (before a config commit
     // changed deny/NAT64 rules) is treated as a miss + evicted here, so the
     // non-first fragment falls through to the #4617 fail-closed drop instead of
     // inheriting a stale verdict.
-    let (decision, _reverse) = forwarding.nat64.frag_assoc.lookup(
+    let (decision, reverse) = forwarding.nat64.frag_assoc.lookup(
         &key,
         now_ns,
         forwarding.nat64.build_generation,
@@ -175,12 +173,11 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
                 .is_some_and(|group| group.is_forwarding_active(now_secs))
         },
     )?;
-    // Only a genuine NAT64 forward decision (nat64=true, rewrite_src/dst set)
-    // routes to the NAT64 frame builder.
+    // Only a genuine NAT64 decision routes to the NAT64 frame builder.
     if !decision.nat.nat64 {
         return None;
     }
-    Some(decision)
+    Some((decision, reverse))
 }
 
 /// #5689: on a FIRST fragment of an ORDINARY same-family NAT / NPTv6 flow that
@@ -218,17 +215,10 @@ pub(super) fn nat_install_forward_fragment_assoc(
     // Cross-family NAT64 has its own install; here we cache only an ordinary
     // same-family address rewrite.
     //
-    // #7899: this used to read "(which also stamps the reverse info)". It does
-    // not, and has not: BOTH production installs pass `reverse: None`; the
-    // only `Some(..)` install arguments in the tree are test-only low-level
-    // fixtures, and both consults bind `_reverse` and discard it. #9950:
-    // `reverse: None` stays None BY DESIGN for same-family — a reply's reverse
-    // translation lives in the reply entry's own `decision` (via
-    // `NatDecision::reverse` at the hit tail), not in `Nat64ReverseInfo`
-    // (which is NAT64-only: original v6 addrs for v4->v6 rebuild). The
-    // #7899 sentence was the stated reason the cache's entry type was "already
-    // shared enough to move", so it was load-bearing for a design argument
-    // while being false.
+    // #7899: same-family entries deliberately pass `reverse: None`. NAT64
+    // uses the sibling helper above; #10132 supplies `Nat64ReverseInfo` only
+    // for its AF_INET reply association, because the v4->v6 builder needs the
+    // original v6 endpoints while same-family replies use their own decision.
     if decision.nat.nat64
         || (decision.nat.rewrite_src.is_none() && decision.nat.rewrite_dst.is_none())
     {
@@ -470,4 +460,30 @@ pub(super) fn flowless_fragment_requires_nat_translation(
         return true;
     }
     false
+}
+
+/// #10130: session-gated reverse discriminator for a same-family reply tail
+/// that missed its fragment association. Unlike a rules-only reverse arm, this
+/// asks the worker's live session table whether a forward NAT session exists
+/// whose reverse L3 identity is exactly this fragment's `(src,dst,protocol)`.
+/// Plain outbound traffic from a translated target therefore has no matching
+/// session and remains forwardable.
+#[inline]
+pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
+    sessions: &crate::session::SessionTable,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    now_ns: u64,
+) -> bool {
+    let reply_key = crate::session::l3_reverse_probe(
+        l3_flow.src_ip,
+        l3_flow.dst_ip,
+        meta.protocol,
+        meta.addr_family,
+    );
+    sessions.reverse_nat_fragment_requires_translation(
+        &reply_key,
+        l3_flow.forward_key.routing_domain,
+        now_ns,
+    )
 }

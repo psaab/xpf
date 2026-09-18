@@ -85,3 +85,44 @@ func (c *xpfCollector) emitBindingVMinThrottleCounters(ch chan<- prometheus.Metr
 		)
 	}
 }
+
+// #10131: emit binding-local fragment-overlap attribution counters. These are
+// emitted unconditionally so zero means the binding observed no such event.
+func (c *xpfCollector) emitBindingFragmentOverlapCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, b := range status.Bindings {
+		slot := strconv.FormatUint(uint64(b.Slot), 10)
+		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
+		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
+		labels := []string{slot, queueID, workerID, b.Interface}
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingFragOverlapDropped,
+			prometheus.CounterValue,
+			float64(b.FragOverlapDropped),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingFragOverlapOverflowDropped,
+			prometheus.CounterValue,
+			float64(b.FragOverlapOverflowDropped),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingFragOverlapShardFullDropped,
+			prometheus.CounterValue,
+			float64(b.FragOverlapShardFullDropped),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingFragOverlapPostNATDropped,
+			prometheus.CounterValue,
+			float64(b.FragOverlapPostNATDropped),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.bindingFragOverlapMaxLifetimeEvictions,
+			prometheus.CounterValue,
+			float64(b.FragOverlapMaxLifetimeEvictions),
+			labels...,
+		)
+	}
+}

@@ -165,6 +165,19 @@ impl BindingLiveState {
             nat_frag_untranslated_dropped: self
                 .nat_frag_untranslated_dropped
                 .load(Ordering::Relaxed),
+            frag_overlap_dropped: self.frag_overlap_dropped.load(Ordering::Relaxed),
+            frag_overlap_overflow_dropped: self
+                .frag_overlap_overflow_dropped
+                .load(Ordering::Relaxed),
+            frag_overlap_shard_full_dropped: self
+                .frag_overlap_shard_full_dropped
+                .load(Ordering::Relaxed),
+            frag_overlap_post_nat_dropped: self
+                .frag_overlap_post_nat_dropped
+                .load(Ordering::Relaxed),
+            frag_overlap_max_lifetime_evictions: self
+                .frag_overlap_max_lifetime_evictions
+                .load(Ordering::Relaxed),
             slow_path_packets: self.slow_path_packets.load(Ordering::Relaxed),
             slow_path_bytes: self.slow_path_bytes.load(Ordering::Relaxed),
             slow_path_local_delivery_packets: self
