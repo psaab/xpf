@@ -73,9 +73,10 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
     ((next_deadline_ns.saturating_sub(now_ns) / 1_000_000).min(WG_POLL_CAP_MS as u64)) as i32
 }
 
-/// Bind the WG listen socket./// Bind the WG listen socket. Prefer a v6 dual-stack bind so a single
-/// socket serves both v4-mapped and v6 peers; fall back to a v4 bind if
-/// the v6 bind fails.
+/// Bind the WG listen socket. Prefer a v6 dual-stack bind so a single
+/// socket serves both v4-mapped and v6 peers; fall back to a v4 bind
+/// only when the v6 family/socket or its v6-only capability is
+/// unavailable (`v6_bind_can_fallback`).
 ///
 /// Codex MAJOR: a bare `[::]` bind is v6-ONLY on hosts where
 /// `net.ipv6.bindv6only=1`, silently black-holing v4 peers. We clear
@@ -92,8 +93,10 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
 ///
 /// IPV6_V6ONLY must be cleared BEFORE bind (Linux rejects it post-bind
 /// with EINVAL — Codex r3 MAJOR), so the v6 socket is created with raw
-/// libc, the option is set, then bind() is called. On any v6 failure we
-/// fall back to a plain v4 bind so v4 peers (the common case) work.
+/// libc, the option is set, then bind() is called. Only a v6 capability
+/// failure falls back to a plain v4 bind (carrying the requested device,
+/// so VRF scope survives); any other error — including a
+/// `SO_BINDTODEVICE` failure — is returned fail-closed.
 /// Returns the socket plus whether it is the AF_INET6 dual-stack one
 /// (v4 send targets must then be v4-mapped — see `wg_send_to`).
 pub(super) fn bind_wg_socket(port: u16) -> io::Result<(UdpSocket, bool)> {
@@ -110,7 +113,7 @@ pub(super) fn bind_wg_socket_with_device(
 ) -> io::Result<(UdpSocket, bool)> {
     match bind_dual_stack_v6(port, bind_device) {
         Ok(sock) => Ok((sock, true)),
-        Err(err) if !v6_bind_can_fallback_with_device(&err, bind_device) => Err(err),
+        Err(err) if !v6_bind_can_fallback(&err) => Err(err),
         // A v4 fallback is allowed only when the v6 family/socket or its
         // v6-only capability is unavailable. The requested device is carried
         // into bind_v4, so a capability fallback cannot lose VRF scope.
@@ -118,9 +121,6 @@ pub(super) fn bind_wg_socket_with_device(
     }
 }
 
-pub(super) fn v6_bind_can_fallback_with_device(err: &io::Error, _bind_device: Option<&str>) -> bool {
-    v6_bind_can_fallback(err)
-}
 
 /// The default transport tables have no VRF master. Named tables are rendered
 /// as `<instance>.inet.0` / `<instance>.inet6.0` by the Go snapshot builder.
@@ -135,7 +135,7 @@ pub(crate) fn wg_outer_bind_device_for_transport_table(table: &str) -> Option<St
     Some(format!("vrf-{instance}"))
 }
 
-fn v6_bind_can_fallback(err: &io::Error) -> bool {
+pub(super) fn v6_bind_can_fallback(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),
         Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT | libc::EINVAL)

@@ -95,8 +95,7 @@ use attempt::{
 use dispatch::{EncapOutcome, InboundOutcome, dispatch_inbound, encap_and_send};
 use sock::{
     PollWait, WgRecv, bind_wg_socket, bind_wg_socket_with_device, canonicalize_endpoint,
-    poll_timeout_ms, set_recv_tos_options, v6_bind_can_fallback_with_device, wg_poll_wait,
-    wg_recvmsg,
+    poll_timeout_ms, set_recv_tos_options, v6_bind_can_fallback, wg_poll_wait, wg_recvmsg,
 };
 pub(super) use sock::wg_outer_bind_device_for_transport_table;
 
@@ -149,8 +148,12 @@ pub(super) fn wg_control_loop(
     // #7158: peers whose endpoint was authored as a DNS hostname, as
     // (pubkey, authored `host:port`). Empty for a tunnel of IP literals,
     // which starts no resolver thread at all.
+    // #10196 limitation: authored DNS names resolve through the process-wide
+    // `ToSocketAddrs` path, which has no per-VRF resolver context. A name
+    // private to `vrf-<instance>` can therefore fail to resolve and leave the
+    // resolver's last-good endpoint in place; the UDP socket itself remains
+    // correctly bound. A VRF-aware resolver is a separate follow-up.
     endpoint_hosts: Vec<([u8; 32], String)>,
-    // #7936: coordinator-owned resolver telemetry. Passed in rather than
     // created here for the same reason `recent_exceptions` is: this thread
     // writes it and the 1 Hz status path reads it, and the reader must not
     // depend on the writer still being alive.
