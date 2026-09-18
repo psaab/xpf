@@ -49,6 +49,11 @@ if [[ "$MODE" == selftest ]]; then
             echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
         fi
     }
+    if wire_gate_finalizer_selftest; then
+        echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
+    else
+        echo "  FAIL  cleanup finalizer shields restore"; fail=$((fail + 1))
+    fi
     GOOD=(1000 0 0 1000 0 0)
     check "denied SSH/HTTPS with TCP netconf control passes" PASS 0 0 1500 1500 0 2 "${GOOD[@]}"
     BAD=(1000 1 0 1000 0 0)
@@ -121,7 +126,11 @@ CAP_PID=""; CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
 
 run_cli() { $SG "incus exec ${NODE} -- bash -lc 'cli'"; }
 cli_show() { printf '%s\nexit\n' "$1" | run_cli; }
-fail_void() { printf 'WIRE_GATE wire_hostinbound_deny VOID reason=%s cells_measured=0 syn_offered=0 handshake_completed=0 refused_total=0 exposed_total=0 reply_frames=0 ctrl_offered=0 ctrl_observed=0 cksum_bad=0\n' "$1"; exit 3; }
+fail_void() {
+    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_hostinbound_deny VOID reason=$1 cells_measured=0 syn_offered=0 handshake_completed=0 refused_total=0 exposed_total=0 reply_frames=0 ctrl_offered=0 ctrl_observed=0 cksum_bad=0"
+    WIRE_GATE_FINAL_RC=3
+    exit 3
+}
 
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
@@ -143,9 +152,12 @@ cleanup() {
     restore_config
     [[ -n "$CAPLOG" ]] && rm -f "$CAPLOG"
 }
-trap cleanup EXIT
-trap 'trap - INT TERM; cleanup; exit 130' INT
-trap 'trap - INT TERM; cleanup; exit 143' TERM
+WIRE_GATE_CLEANUP_FN=cleanup
+WIRE_GATE_RESTORE_OK_REF=RESTORE_OK
+WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_hostinbound_deny VOID reason=harness-void cells_measured=0 syn_offered=0 handshake_completed=0 refused_total=0 exposed_total=0 reply_frames=0 ctrl_offered=0 ctrl_observed=0 cksum_bad=0'
+wire_gate_signal_abort() { trap '' INT TERM; fail_void harness-void; }
+trap wire_gate_finalize EXIT
+trap wire_gate_signal_abort INT TERM
 
 BASE_ZONES="$(cli_show 'show configuration security zones | display set' 2>&1)"
 [[ "$BASE_ZONES" == *"security-zone wan host-inbound-traffic system-services ping"* ]] || fail_void env-void
@@ -203,14 +215,6 @@ for v in COMP_A REF_A COMP_B REF_B CTRL_COMP CTRL_REF; do [[ "${!v}" =~ ^[0-9]+$
 REPLIES=$((COMP_A + REF_A + COMP_B + REF_B))
 CONTROL_OBS=$((CTRL_COMP + CTRL_REF))
 CK="$(grep -ciE 'bad (tcp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"; [[ "$CK" =~ ^[0-9]+$ ]] || CK=0
-FINAL_OUT="$(wire_hostinbound_verdict "$REPLIES" "$CONTROL_OFFERED" "$CONTROL_OBS" "$CK" 2 "$OFFER_A" "$COMP_A" "$REF_A" "$OFFER_B" "$COMP_B" "$REF_B")"
-FINAL_RC=$?
-trap '' INT TERM
-cleanup
-trap - INT TERM
-if ((RESTORE_OK == 0)); then
-    printf 'WIRE_GATE wire_hostinbound_deny VOID reason=harness-void cells_measured=0 syn_offered=0 handshake_completed=0 refused_total=0 exposed_total=0 reply_frames=0 ctrl_offered=0 ctrl_observed=0 cksum_bad=0\n'
-    exit 2
-fi
-printf '%s\n' "$FINAL_OUT"
-exit "$FINAL_RC"
+WIRE_GATE_FINAL_OUT="$(wire_hostinbound_verdict "$REPLIES" "$CONTROL_OFFERED" "$CONTROL_OBS" "$CK" 2 "$OFFER_A" "$COMP_A" "$REF_A" "$OFFER_B" "$COMP_B" "$REF_B")"
+WIRE_GATE_FINAL_RC=$?
+exit "$WIRE_GATE_FINAL_RC"

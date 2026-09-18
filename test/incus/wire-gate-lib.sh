@@ -508,3 +508,77 @@ wire_conntrack_verdict() {
 	printf 'WIRE_GATE wire_conntrack_lifecycle PASS reason=-- %s\n' "$metrics"
 	return 0
 }
+
+# Finalization is deliberately shared by the live gates.  The cleanup callback
+# remains installed as EXIT while INT/TERM are ignored, so a cancellation
+# cannot interrupt a multi-commit restore or print a verdict before restoration
+# has been verified.
+wire_gate_finalize() {
+	local rc=$? restore_ok=0
+	trap '' EXIT INT TERM
+	if [[ -n "${WIRE_GATE_CLEANUP_FN:-}" ]]; then
+		"${WIRE_GATE_CLEANUP_FN}" || true
+	fi
+	if [[ -n "${WIRE_GATE_RESTORE_OK_REF:-}" ]]; then
+		local -n restore_ref="$WIRE_GATE_RESTORE_OK_REF"
+		restore_ok="$restore_ref"
+	fi
+	trap - INT TERM
+	if ((restore_ok == 0)); then
+		printf '%s\n' "${WIRE_GATE_RESTORE_VOID:-WIRE_GATE harness VOID reason=harness-void}"
+		exit 2
+	fi
+	if [[ -n "${WIRE_GATE_FINAL_OUT:-}" ]]; then
+		printf '%s\n' "$WIRE_GATE_FINAL_OUT"
+		exit "${WIRE_GATE_FINAL_RC:-$rc}"
+	fi
+	exit "$rc"
+}
+
+# Hermetic proof for the finalizer contract: cleanup runs with TERM ignored,
+# a successful restore prints the pending verdict/rc, and a failed restore
+# demotes it to the gate-specific harness VOID/rc=2.
+wire_gate_finalizer_selftest() {
+	local tmp mode out rc expected_rc expected_out
+	tmp="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-finalizer.XXXXXX")" || return 1
+	export WIRE_GATE_FINALIZER_TEST_FILE="$tmp"
+	export -f wire_gate_finalize
+	for mode in green restore-fail; do
+		out="$(
+			WIRE_GATE_FINALIZER_TEST_MODE="$mode" bash -c '
+				cleanup() {
+					kill -TERM "$$"
+					printf cleanup >>"$WIRE_GATE_FINALIZER_TEST_FILE"
+				}
+				RESTORE_OK=1
+				[[ "$WIRE_GATE_FINALIZER_TEST_MODE" == restore-fail ]] && RESTORE_OK=0
+				WIRE_GATE_CLEANUP_FN=cleanup
+				WIRE_GATE_RESTORE_OK_REF=RESTORE_OK
+				WIRE_GATE_RESTORE_VOID="finalizer-restore-void"
+				WIRE_GATE_FINAL_OUT="finalizer-pass"
+				WIRE_GATE_FINAL_RC=1
+				false
+				wire_gate_finalize
+			' 2>/dev/null
+		)"
+		rc=$?
+		if [[ "$mode" == green ]]; then
+			expected_rc=1; expected_out=finalizer-pass
+		else
+			expected_rc=2; expected_out=finalizer-restore-void
+		fi
+		if [[ "$rc" != "$expected_rc" || "$out" != "$expected_out" ]]; then
+			rm -f "$tmp"
+			unset WIRE_GATE_FINALIZER_TEST_FILE
+			return 1
+		fi
+	done
+	if [[ "$(<"$tmp")" != cleanupcleanup ]]; then
+		rm -f "$tmp"
+		unset WIRE_GATE_FINALIZER_TEST_FILE
+		return 1
+	fi
+	rm -f "$tmp"
+	unset WIRE_GATE_FINALIZER_TEST_FILE
+	return 0
+}

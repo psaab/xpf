@@ -70,6 +70,11 @@ if [[ "$MODE" == selftest ]]; then
             echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
         fi
     }
+    if wire_gate_finalizer_selftest; then
+        echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
+    else
+        echo "  FAIL  cleanup finalizer shields restore"; fail=$((fail + 1))
+    fi
     matrix_make_good
     check "complete 12-cell matrix passes" PASS 0 0 12 "${MATRIX[@]}"
     BAD=("${MATRIX[@]}"); BAD[2]=1
@@ -257,12 +262,19 @@ cleanup() {
     restore_routes
     [[ -n "$CAPLOG" ]] && rm -f "$CAPLOG"
 }
-trap cleanup EXIT
-trap 'trap - INT TERM; cleanup; exit 130' INT
-trap 'trap - INT TERM; cleanup; exit 143' TERM
+WIRE_GATE_CLEANUP_FN=cleanup
+WIRE_GATE_RESTORE_OK_REF=RESTORE_OK
+WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_zone_matrix VOID reason=harness-void cells_measured=0 cells_failed=0 deny_cells=0 permit_cells=0 permit64_offered=0 permit64_observed=0 permit1400_offered=0 permit1400_observed=0 deny_leaked=0 permit_missing=0 control_missing=0 duplicate_frames=0 cksum_bad=0'
+fail_void() {
+    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_zone_matrix VOID reason=$1 cells_measured=0 cells_failed=0 deny_cells=0 permit_cells=0 permit64_offered=0 permit64_observed=0 permit1400_offered=0 permit1400_observed=0 deny_leaked=0 permit_missing=0 control_missing=0 duplicate_frames=0 cksum_bad=0"
+    WIRE_GATE_FINAL_RC=3
+    exit 3
+}
 run_cli() { $SG "incus exec ${NODE} -- bash -lc 'cli'"; }
 cli_show() { printf '%s\nexit\n' "$1" | run_cli; }
-fail_void() { printf 'WIRE_GATE wire_zone_matrix VOID reason=%s cells_measured=0 cells_failed=0 deny_cells=0 permit_cells=0 permit64_offered=0 permit64_observed=0 permit1400_offered=0 permit1400_observed=0 deny_leaked=0 permit_missing=0 control_missing=0 duplicate_frames=0 cksum_bad=0\n' "$1"; exit 3; }
+wire_gate_signal_abort() { trap '' INT TERM; fail_void harness-void; }
+trap wire_gate_finalize EXIT
+trap wire_gate_signal_abort INT TERM
 snapshot() { cli_show "$1" 2>&1 | sed -n '/^set /p'; }
 
 POLICY_SNAP="$(snapshot 'show configuration security policies | display set')"
@@ -432,18 +444,8 @@ for ((i = 0; i < 6; i++)); do
     MATRIX+=("$key" "$CELL_P64O" "$CELL_P64B" "$CELL_P1400O" "$CELL_P1400B" "$CELL_C64O" "$CELL_C64B" "$CELL_C1400O" "$CELL_C1400B")
 done
 
-# Keep the EXIT trap active while the multi-commit restore runs.  Ignore
-# interrupts until exact snapshot verification completes; a cancellation here
-# must not release the cluster lock with a half-restored fixture.  The EXIT
-# trap's second cleanup is harmless because RESTORE_NEEDED becomes zero.
-FINAL_OUT="$(wire_matrix_verdict "$CKSUM_BAD" 12 "${MATRIX[@]}")"
-FINAL_RC=$?
-trap '' INT TERM
-cleanup
-trap - INT TERM
-if ((RESTORE_OK == 0)); then
-    printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void cells_measured=0 cells_failed=0 deny_cells=0 permit_cells=0 permit64_offered=0 permit64_observed=0 permit1400_offered=0 permit1400_observed=0 deny_leaked=0 permit_missing=0 control_missing=0 duplicate_frames=0 cksum_bad=0\n'
-    exit 2
-fi
-printf '%s\n' "$FINAL_OUT"
-exit "$FINAL_RC"
+# The shared EXIT finalizer masks cancellation during cleanup and emits the
+# verdict only after the exact restoration snapshot has been checked.
+WIRE_GATE_FINAL_OUT="$(wire_matrix_verdict "$CKSUM_BAD" 12 "${MATRIX[@]}")"
+WIRE_GATE_FINAL_RC=$?
+exit "$WIRE_GATE_FINAL_RC"

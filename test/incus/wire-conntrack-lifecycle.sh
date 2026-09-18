@@ -38,6 +38,11 @@ if [[ "$MODE" == selftest ]]; then
             echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
         fi
     }
+    if wire_gate_finalizer_selftest; then
+        echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
+    else
+        echo "  FAIL  cleanup finalizer shields restore"; fail=$((fail + 1))
+    fi
     check "create witness expire and drops pass" PASS 0 1 1 0 1000 0 1000 0 1500 1500 1 0
     check "stale session fails" FAIL 1 1 1 1 1000 0 1000 0 1500 1500 1 0
     check "expired subject leak fails" FAIL 1 1 1 0 1000 1 1000 0 1500 1500 1 0
@@ -113,7 +118,11 @@ CAP_PID=""; CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
 run_cli() { $SG "incus exec ${NODE} -- bash -lc 'cli'"; }
 run_cli_t() { timeout 90 $SG "incus exec ${NODE} -- bash -lc 'cli'" 2>&1; }
 cli_show() { printf '%s\nexit\n' "$1" | run_cli; }
-fail_void() { printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=%s created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0\n' "$1"; exit 3; }
+fail_void() {
+    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_conntrack_lifecycle VOID reason=$1 created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0"
+    WIRE_GATE_FINAL_RC=3
+    exit 3
+}
 
 session_list() { printf 'show security flow session destination-prefix %s destination-port %s limit 10000\nexit\n' "$SINK_ADDR" "$1" | run_cli_t; }
 session_count() {
@@ -149,9 +158,12 @@ cleanup() {
     restore_config
     [[ -n "$CAPLOG" ]] && rm -f "$CAPLOG"
 }
-trap cleanup EXIT
-trap 'trap - INT TERM; cleanup; exit 130' INT
-trap 'trap - INT TERM; cleanup; exit 143' TERM
+WIRE_GATE_CLEANUP_FN=cleanup
+WIRE_GATE_RESTORE_OK_REF=RESTORE_OK
+WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0'
+wire_gate_signal_abort() { trap '' INT TERM; fail_void harness-void; }
+trap wire_gate_finalize EXIT
+trap wire_gate_signal_abort INT TERM
 
 BASE="$(cli_show 'show configuration security policies | display set' 2>&1)"
 [[ "$BASE" == *"set security policies default-policy deny-all"* ]] || fail_void env-void
@@ -241,11 +253,6 @@ CTRL_SESS=0
 if n="$(session_count "$LIFECYCLE_PORT")"; then CTRL_SESS="$n"; else QUERY_BAD=1; fi
 CK="$(grep -ciE 'bad (tcp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"; [[ "$CK" =~ ^[0-9]+$ ]] || CK=0
 if ((QUERY_BAD)); then WITNESSED=0; CTRL_SESS=0; fi
-FINAL_OUT="$(wire_conntrack_verdict "$CREATED" "$WITNESSED" "$STALE" "$EXP_OFFER" "$EXP_LEAK" "$FRESH_OFFER" "$FRESH_LEAK" "$SYN_OFFER" "$SYN_OBS" "$CTRL_SESS" "$CK")"; FINAL_RC=$?
-trap '' INT TERM
-cleanup
-trap - INT TERM
-if ((RESTORE_OK == 0)); then
-    printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0\n'; exit 2
-fi
-printf '%s\n' "$FINAL_OUT"; exit "$FINAL_RC"
+WIRE_GATE_FINAL_OUT="$(wire_conntrack_verdict "$CREATED" "$WITNESSED" "$STALE" "$EXP_OFFER" "$EXP_LEAK" "$FRESH_OFFER" "$FRESH_LEAK" "$SYN_OFFER" "$SYN_OBS" "$CTRL_SESS" "$CK")"
+WIRE_GATE_FINAL_RC=$?
+exit "$WIRE_GATE_FINAL_RC"
