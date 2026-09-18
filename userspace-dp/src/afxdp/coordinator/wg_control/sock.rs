@@ -259,7 +259,7 @@ fn bind_dual_stack_v6(port: u16, bind_device: Option<&str>) -> Result<UdpSocket,
         ));
     }
     if let Err(err) = set_socket_bind_device(fd, bind_device) {
-        return Err(V6BindError::Fatal(err));
+        return Err(classify_v6_bind_error(V6BindStage::BindDevice, err));
     }
     // #9594: ask for the receiving interface BEFORE bind.
     set_recv_pktinfo_options(fd, true);
@@ -279,7 +279,10 @@ fn bind_dual_stack_v6(port: u16, bind_device: Option<&str>) -> Result<UdpSocket,
         )
     };
     if rc != 0 {
-        return Err(V6BindError::Fatal(io::Error::last_os_error()));
+        return Err(classify_v6_bind_error(
+            V6BindStage::AddressBind,
+            io::Error::last_os_error(),
+        ));
     }
     Ok(sock)
 }
