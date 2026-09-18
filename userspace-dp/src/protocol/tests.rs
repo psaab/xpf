@@ -359,8 +359,12 @@ fn process_status_ndp_na_refusal_counters_roundtrip() {
     let object = legacy_value
         .as_object_mut()
         .expect("ProcessStatus serializes to an object");
-    object.remove("ndp_na_frag_refused_total");
-    object.remove("ndp_na_bad_source_refused_total");
+    object
+        .remove("ndp_na_frag_refused_total")
+        .expect("new key present before strip");
+    object
+        .remove("ndp_na_bad_source_refused_total")
+        .expect("new key present before strip");
     let legacy: ProcessStatus =
         serde_json::from_value(legacy_value).expect("pre-#10097 payload decodes");
     assert_eq!(legacy.ndp_na_frag_refused_total, 0);

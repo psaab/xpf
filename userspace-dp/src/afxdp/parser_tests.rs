@@ -874,6 +874,78 @@ fn parse_ndp_na_9893_non_first_fragment_refused_and_counted() {
 }
 
 #[test]
+fn parse_ndp_na_9893_refusal_leaves_dynamic_neighbor_cap_drops_unchanged() {
+    // #10097: exercise the refusal path while reading the cap counter through
+    // one Coordinator. Seed that coordinator's map to a full shard, then
+    // create one genuine cap refusal so this is not a vacuous "0 stayed 0"
+    // assertion. A refused NDP NA must not touch the unrelated cap series.
+    let _g = ndp_na_refusal_counter_test_lock();
+    let coordinator = crate::afxdp::coordinator::Coordinator::new();
+    let map = &coordinator.neighbors.dynamic;
+    let target_shard = 0;
+    let cap = crate::afxdp::sharded_neighbor::MAX_DYNAMIC_NEIGHBORS_PER_SHARD;
+    let mut candidate = 0u32;
+    let mut seeded = 0usize;
+    while seeded < cap {
+        let key = (
+            7,
+            IpAddr::V4(Ipv4Addr::from(
+                0x0A00_0000u32.wrapping_add(candidate),
+            )),
+        );
+        candidate = candidate
+            .checked_add(1)
+            .expect("exhausted the v4 space seeding one neighbor shard");
+        if crate::afxdp::sharded_neighbor::ShardedNeighborMap::shard_index(&key)
+            != target_shard
+        {
+            continue;
+        }
+        assert!(
+            map.insert_if_changed(key, crate::afxdp::NeighborEntry { mac: [0x11; 6] }),
+            "each seed key must be admitted below the shard cap"
+        );
+        seeded += 1;
+    }
+    let drop_key = loop {
+        let key = (
+            7,
+            IpAddr::V4(Ipv4Addr::from(
+                0x0A00_0000u32.wrapping_add(candidate),
+            )),
+        );
+        candidate = candidate
+            .checked_add(1)
+            .expect("exhausted the v4 space finding a cap-refused key");
+        if crate::afxdp::sharded_neighbor::ShardedNeighborMap::shard_index(&key)
+            == target_shard
+        {
+            break key;
+        }
+    };
+    assert!(
+        !map.insert_if_changed(drop_key, crate::afxdp::NeighborEntry { mac: [0x22; 6] }),
+        "a new key in a full shard must be refused"
+    );
+    let drops_before_refusal = coordinator.dynamic_neighbor_learn_cap_drops_total();
+    assert!(
+        drops_before_refusal > 0,
+        "the seeded coordinator must expose the cap refusal before the NDP probe"
+    );
+
+    let f = build_eth_ndp_na_behind_fragment(0x0008);
+    assert!(
+        parse_ndp_neighbor_advert(&f).is_none(),
+        "the fragmented NA must be refused before any learn side effect"
+    );
+    assert_eq!(
+        coordinator.dynamic_neighbor_learn_cap_drops_total(),
+        drops_before_refusal,
+        "an NDP learn refusal must not increment the dynamic-neighbor cap series"
+    );
+}
+
+#[test]
 fn parse_ndp_na_9893_first_and_atomic_fragments_refused() {
     // RFC 6980 refuses ANY Fragment header — first (offset 0, M=1) and atomic
     // (offset 0, M=0) alike, not just non-first. Both carry a fully valid
