@@ -93,16 +93,18 @@ SINK_REF="${INCUS_REMOTE}:${SINK_HOST}"
 LAN_ADDR="${LAN_ADDR:-${LAN_HOST_IP:-10.0.61.102}}"; LAN_ADDR="${LAN_ADDR%%/*}"
 SINK_ADDR="${SINK_ADDR:-172.16.80.201}"
 LIFECYCLE_PORT="${LIFECYCLE_PORT:-54921}"
-LIFECYCLE_SRC_PORT="${LIFECYCLE_SRC_PORT:-$((40000 + RANDOM % 20000))}"
-CONTROL_SOURCE_PORT="${CONTROL_SOURCE_PORT:-$((40000 + RANDOM % 20000))}"
-FRESH_SOURCE_PORT="${FRESH_SOURCE_PORT:-$((40000 + RANDOM % 20000))}"
-while [[ "$CONTROL_SOURCE_PORT" == "$LIFECYCLE_SRC_PORT" || "$CONTROL_SOURCE_PORT" == "$FRESH_SOURCE_PORT" ]]; do CONTROL_SOURCE_PORT="$((40000 + RANDOM % 20000))"; done
-while [[ "$FRESH_SOURCE_PORT" == "$LIFECYCLE_SRC_PORT" ]]; do FRESH_SOURCE_PORT="$((40000 + RANDOM % 20000))"; done
+PORT_BASE="${WIRE_PORT_BASE:-$((20000 + RANDOM % 10000))}"
+LIFECYCLE_SRC_PORT="${LIFECYCLE_SRC_PORT:-$PORT_BASE}"
+FRESH_SOURCE_PORT="${FRESH_SOURCE_PORT:-$((LIFECYCLE_SRC_PORT + 1))}"
+while [[ "$FRESH_SOURCE_PORT" == "$LIFECYCLE_SRC_PORT" ]]; do FRESH_SOURCE_PORT="$((20000 + RANDOM % 10000))"; done
+CONTROL_SOURCE_PORT="${CONTROL_SOURCE_PORT:-$((FRESH_SOURCE_PORT + 1))}"
+while [[ "$CONTROL_SOURCE_PORT" == "$LIFECYCLE_SRC_PORT" || "$CONTROL_SOURCE_PORT" == "$FRESH_SOURCE_PORT" ]]; do CONTROL_SOURCE_PORT="$((20000 + RANDOM % 10000))"; done
 CONTROL_BURST="${CONTROL_BURST:-1500}"
 EXPIRED_BURST="${EXPIRED_BURST:-1000}"
 FRESH_BURST="${FRESH_BURST:-1000}"
 IDLE_WAIT="${IDLE_WAIT:-15}"
 APP_TIMEOUT="${APP_TIMEOUT:-10}"
+SUBJECT_DURATION="${SUBJECT_DURATION:-90}"
 STEP_TIMEOUT="${STEP_TIMEOUT:-90}"
 APP_SET="wire-10030-lifecycle-set"
 APP_LIFECYCLE="wire-10030-lifecycle"
@@ -114,10 +116,15 @@ REMOTE_PROBE="/tmp/xpf-wire_probe_burst.py"
 REMOTE_RAW="/tmp/xpf-wire_raw_tcp_burst.py"
 SG="sg incus-admin -c"
 CAP_PID=""; CAPLOG=""; RESTORE_NEEDED=0; RESTORE_OK=1
+CREATE_LOG="/tmp/xpf-wire-create.log"
+CREATE_PID_FILE="/tmp/xpf-wire-create.pid"
+RESERVE_LOG="/tmp/xpf-wire-reserve.log"
+RESERVE_PID_FILE="/tmp/xpf-wire-reserve.pid"
 
 run_cli() { $SG "incus exec ${NODE} -- bash -lc 'cli'"; }
 run_cli_t() { timeout 90 $SG "incus exec ${NODE} -- bash -lc 'cli'" 2>&1; }
 cli_show() { printf '%s\nexit\n' "$1" | run_cli; }
+snapshot() { cli_show "$1" 2>&1 | sed -n '/^set /p'; }
 fail_void() {
     WIRE_GATE_FINAL_OUT="WIRE_GATE wire_conntrack_lifecycle VOID reason=$1 created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0"
     WIRE_GATE_FINAL_RC=3
@@ -137,15 +144,21 @@ session_count() {
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
     local log=/tmp/xpf-wire-conntrack-restore.log
-    local cmds
-    cmds="configure\ndelete security policies from-zone lan to-zone wan policy allow-all match application\nset security policies from-zone lan to-zone wan policy allow-all match application any\ndelete applications application-set ${APP_SET}\ndelete applications application ${APP_LIFECYCLE}\ncommit\nexit\n"
+    local cmds line
+    cmds="configure\ndelete security policies from-zone lan to-zone wan policy allow-all match application\ndelete applications application-set ${APP_SET}\ndelete applications application ${APP_LIFECYCLE}\n"
+    while IFS= read -r line; do
+        case "$line" in
+        set\ security\ policies\ from-zone\ lan\ to-zone\ wan\ policy\ allow-all\ match\ application\ *)
+            cmds+="${line}"$'\n' ;;
+        esac
+    done <<<"$POLICY_SNAP"
+    cmds+="commit\nexit\n"
     if ! printf '%b' "$cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$log" 2>&1; then RESTORE_OK=0; fi
     grep -qE 'commit (complete|succeeded)' "$log" 2>/dev/null || RESTORE_OK=0
-    local p; p="$(cli_show 'show configuration security policies from-zone lan to-zone wan | display set' 2>&1)"
-    [[ "$p" == *"policy allow-all match application any"* ]] || RESTORE_OK=0
-    [[ "$p" != *"wire-10030"* ]] || RESTORE_OK=0
-    local a; a="$(cli_show 'show configuration applications | display set' 2>&1)"
-    [[ "$a" != *"wire-10030"* ]] || RESTORE_OK=0
+    local p; p="$(snapshot 'show configuration security policies | display set')"
+    [[ "$p" == "$POLICY_SNAP" ]] || RESTORE_OK=0
+    local a; a="$(snapshot 'show configuration applications | display set')"
+    [[ "$a" == "$APP_SNAP" ]] || RESTORE_OK=0
     RESTORE_NEEDED=0
 }
 cleanup() {
@@ -165,10 +178,14 @@ wire_gate_signal_abort() { trap '' INT TERM; fail_void harness-void; }
 trap wire_gate_finalize EXIT
 trap wire_gate_signal_abort INT TERM
 
-BASE="$(cli_show 'show configuration security policies | display set' 2>&1)"
-[[ "$BASE" == *"set security policies default-policy deny-all"* ]] || fail_void env-void
-[[ "$BASE" == *"from-zone lan to-zone wan policy allow-all match application any"* ]] || fail_void env-void
-[[ "$BASE" != *"wire-10030"* ]] || fail_void env-void
+for port in "$LIFECYCLE_SRC_PORT" "$FRESH_SOURCE_PORT" "$CONTROL_SOURCE_PORT"; do
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$port <= 65535)) || fail_void harness-void
+done
+POLICY_SNAP="$(snapshot 'show configuration security policies | display set')"
+APP_SNAP="$(snapshot 'show configuration applications | display set')"
+[[ "$POLICY_SNAP" == *"set security policies default-policy deny-all"* ]] || fail_void env-void
+[[ "$POLICY_SNAP" == *"from-zone lan to-zone wan policy allow-all match application any"* ]] || fail_void env-void
+[[ "$POLICY_SNAP" != *"wire-10030"* ]] || fail_void env-void
 [[ -f "$HOLD_SRC" && -f "$PROBER_SRC" && -f "$RAW_SRC" ]] || fail_void harness-void
 $SG "incus exec ${SINK_REF} -- sh -c 'command -v tcpdump && command -v python3'" >/dev/null 2>&1 || fail_void no-prober
 $SG "incus exec ${LAN_REF} -- sh -c 'command -v python3 && python3 -c \"import socket; s=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.IPPROTO_RAW); s.close()\"'" >/dev/null 2>&1 || fail_void no-prober
@@ -198,8 +215,8 @@ for p in "$LIFECYCLE_PORT"; do
     $SG "incus exec ${SINK_REF} -- grep -q 'LISTEN port=${p}' /tmp/xpf-wire-hold-${p}.log" >/dev/null 2>&1 || fail_void harness-void
 done
 
-$SG "incus exec ${LAN_REF} -- rm -f /tmp/xpf-wire-create.log" >/dev/null 2>&1 || fail_void harness-void
-$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --client ${SINK_ADDR} ${LIFECYCLE_PORT} --duration 45 --heartbeat 1 --silent-after 3 --source-port ${LIFECYCLE_SRC_PORT} >/tmp/xpf-wire-create.log 2>&1 &'" >/dev/null 2>&1 || fail_void harness-void
+$SG "incus exec ${LAN_REF} -- rm -f ${CREATE_LOG} ${CREATE_PID_FILE}" >/dev/null 2>&1 || fail_void harness-void
+$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --client ${SINK_ADDR} ${LIFECYCLE_PORT} --duration ${SUBJECT_DURATION} --heartbeat 1 --silent-after 3 --source-port ${LIFECYCLE_SRC_PORT} >${CREATE_LOG} 2>&1 & echo \$! >${CREATE_PID_FILE}'" >/dev/null 2>&1 || fail_void harness-void
 CREATED=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if $SG "incus exec ${LAN_REF} -- grep -q CONNECTED /tmp/xpf-wire-create.log" >/dev/null 2>&1; then CREATED=1; break; fi
@@ -215,6 +232,9 @@ if ((CREATED)); then
     done
 fi
 sleep "$IDLE_WAIT"
+if ! $SG "incus exec ${LAN_REF} -- sh -c 'pid=\$(cat ${CREATE_PID_FILE} 2>/dev/null) && kill -0 \"\$pid\" 2>/dev/null && grep -q CONNECTED ${CREATE_LOG} && ! grep -q Traceback ${CREATE_LOG}'" >/dev/null 2>&1; then
+    fail_void harness-void
+fi
 STALE=0
 if n="$(session_count "$LIFECYCLE_PORT")"; then ((n > 0)) && STALE=1; else QUERY_BAD=1; fi
 # Keep the lifecycle application permitted for the post-expiry probes.  The
@@ -223,13 +243,21 @@ if n="$(session_count "$LIFECYCLE_PORT")"; then ((n > 0)) && STALE=1; else QUERY
 # policy deny, rather than lifecycle state, explain every drop.
 CONTROL_LOG="/tmp/xpf-wire-control.log"
 $SG "incus exec ${LAN_REF} -- rm -f ${CONTROL_LOG}" >/dev/null 2>&1 || fail_void harness-void
-$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --client ${SINK_ADDR} ${LIFECYCLE_PORT} --duration 45 --heartbeat 1 --source-port ${CONTROL_SOURCE_PORT} >${CONTROL_LOG} 2>&1 &'" >/dev/null 2>&1 || fail_void harness-void
+$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --client ${SINK_ADDR} ${LIFECYCLE_PORT} --duration ${SUBJECT_DURATION} --heartbeat 1 --source-port ${CONTROL_SOURCE_PORT} >${CONTROL_LOG} 2>&1 &'" >/dev/null 2>&1 || fail_void harness-void
 CONTROL_READY=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     $SG "incus exec ${LAN_REF} -- grep -q CONNECTED ${CONTROL_LOG}" >/dev/null 2>&1 && { CONTROL_READY=1; break; }
     sleep 1
 done
 ((CONTROL_READY)) || fail_void harness-void
+$SG "incus exec ${LAN_REF} -- rm -f ${RESERVE_LOG} ${RESERVE_PID_FILE}" >/dev/null 2>&1 || fail_void harness-void
+$SG "incus exec ${LAN_REF} -- sh -c 'nohup python3 -u ${REMOTE_HOLD} --reserve ${LAN_ADDR} ${FRESH_SOURCE_PORT} --duration ${STEP_TIMEOUT} >${RESERVE_LOG} 2>&1 & echo \$! >${RESERVE_PID_FILE}'" >/dev/null 2>&1 || fail_void harness-void
+RESERVED=0
+for _ in 1 2 3 4 5; do
+    $SG "incus exec ${LAN_REF} -- grep -q RESERVED ${RESERVE_LOG}" >/dev/null 2>&1 && { RESERVED=1; break; }
+    sleep 1
+done
+((RESERVED)) || fail_void harness-void
 
 CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-conntrack-cap.XXXXXX")"
 $SG "incus exec ${SINK_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 'tcp and dst host ${SINK_ADDR} and dst port ${LIFECYCLE_PORT}'" >"$CAPLOG" 2>&1 &

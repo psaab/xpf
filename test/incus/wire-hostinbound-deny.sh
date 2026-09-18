@@ -58,10 +58,12 @@ if [[ "$MODE" == selftest ]]; then
     check "denied SSH/HTTPS with TCP netconf control passes" PASS 0 0 1500 1500 0 2 "${GOOD[@]}"
     BAD=(1000 1 0 1000 0 0)
     check "SYN-ACK exposure fails" FAIL 1 0 1500 1500 0 2 "${BAD[@]}"
+    REFUSED=(1000 0 1 1000 0 0)
+    check "RST refusal counts as exposure" FAIL 1 0 1500 1500 0 2 "${REFUSED[@]}"
     check "under-sampled cell is VOID" VOID 2 0 1500 1500 0 2 999 0 0 1000 0 0
     check "missing TCP netconf control is capture-blind" VOID 2 0 1500 0 0 2 "${GOOD[@]}"
     check "duplicate control reply fails" FAIL 1 0 1500 1501 0 2 "${GOOD[@]}"
-    check "bad checksum fails" FAIL 1 3 1500 1500 1 2 "${GOOD[@]}"
+    check "bad checksum fails" FAIL 1 0 1500 1500 1 2 "${GOOD[@]}"
     check "malformed input is harness VOID" VOID 2 0 1500 1500 0 2 1000 x 0 1000 0 0
     echo "  wire-hostinbound-deny selftest: $pass passed, $fail failed"
     [[ "$fail" -eq 0 && "$pass" -gt 0 ]] || exit 1
