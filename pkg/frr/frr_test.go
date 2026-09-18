@@ -3443,11 +3443,15 @@ func TestGenerateProtocols_OSPFv3(t *testing.T) {
 	if !strings.Contains(got, "ospf6 router-id 10.0.0.1\n") {
 		t.Errorf("missing router-id in:\n%s", got)
 	}
-	if !strings.Contains(got, "interface trust0 area 0.0.0.0\n") {
-		t.Errorf("missing interface trust0 area in:\n%s", got)
+	if !strings.Contains(got, "interface trust0\n ipv6 ospf6 area 0.0.0.0\n ipv6 ospf6 passive\n ipv6 ospf6 cost 10\nexit\n") {
+		t.Errorf("missing FRR 10.6 interface-node area activation for trust0 in:\n%s", got)
 	}
-	if !strings.Contains(got, "interface dmz0 area 0.0.0.0\n") {
-		t.Errorf("missing interface dmz0 area in:\n%s", got)
+	if !strings.Contains(got, "interface dmz0\n ipv6 ospf6 area 0.0.0.0\nexit\n") {
+		t.Errorf("missing FRR 10.6 interface-node area activation for dmz0 in:\n%s", got)
+	}
+	if strings.Contains(got, " interface trust0 area 0.0.0.0") ||
+		strings.Contains(got, " interface dmz0 area 0.0.0.0") {
+		t.Errorf("must not emit removed router-level interface-area form in:\n%s", got)
 	}
 	if !strings.Contains(got, "ipv6 ospf6 passive\n") {
 		t.Errorf("missing passive in:\n%s", got)

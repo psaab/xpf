@@ -105,8 +105,7 @@ func TestProtocolInterfaceOperandsResolveToKernelNames9405(t *testing.T) {
 				}}}
 			},
 			want: []string{
-				" interface ge-0-0-1 area 0.0.0.0\n",
-				"interface ge-0-0-1\n ipv6 ospf6 cost 10\n",
+				"interface ge-0-0-1\n ipv6 ospf6 area 0.0.0.0\n ipv6 ospf6 cost 10\n",
 			},
 			notWant: []string{"ge-0/0/1"},
 		},

@@ -9,13 +9,14 @@ import (
 
 // #9820 (Path D): the area render belt omits the area stanza line, the
 // per-interface `ip ospf area` line (keeping the block's other settings),
-// and the OSPFv3 interface-area line for area IDs the commit gate refuses
-// (mapped, padded, malformed). Well-formed IDs render byte-identical.
+// and the OSPFv3 per-interface `ipv6 ospf6 area` line for area IDs the commit
+// gate refuses (mapped, padded, malformed). Well-formed IDs render through
+// their current FRR grammar.
 //
 // NOTE on belt attribution: post-tightening, every value FRRSingleToken
 // rejects is also rejected by ValidateOSPFArea, so the token arm is
-// defense-in-depth with no standalone behavioral cell — the combined belt
-// is what these cells prove.
+// defense-in-depth with no standalone behavioral cell — the combined belt is
+// what these cells prove.
 //
 // FAIL-ON-REVERT: drop validFRROSPFArea from any of the three sites and
 // the corresponding omission cell renders the raw ID again.
@@ -101,9 +102,9 @@ func ospfWellFormed9820() *config.OSPFConfig {
 
 func TestOSPFv3AreaBelt_9820(t *testing.T) {
 	m := &Manager{}
-	// Bad IDs omitted (controls assert byte-identical emission, NOT
-	// "valid FRR" — the `interface area` command is absent on 10.6,
-	// pre-existing defect filed separately).
+	// Bad IDs are omitted by the belt. Unlike OSPFv2's area line above,
+	// OSPFv3 activation is now the FRR 10.6 interface-node command
+	// `ipv6 ospf6 area`, not the removed router-level `interface ... area`.
 	bad := &config.OSPFv3Config{
 		RouterID: "1.1.1.1",
 		Areas: []*config.OSPFv3Area{{
@@ -121,8 +122,8 @@ func TestOSPFv3AreaBelt_9820(t *testing.T) {
 			Interfaces: []*config.OSPFv3Interface{{Name: "trust0"}},
 		}},
 	}
-	if got := m.generateProtocols(nil, good, nil, nil, nil, "", 0, nil, nil); !strings.Contains(got, " interface trust0 area 0.0.0.0\n") {
-		t.Fatalf("well-formed ospf3 line changed:\n%s", got)
+	if got := m.generateProtocols(nil, good, nil, nil, nil, "", 0, nil, nil); !strings.Contains(got, "interface trust0\n ipv6 ospf6 area 0.0.0.0\nexit\n") {
+		t.Fatalf("well-formed ospf3 interface-node area line changed:\n%s", got)
 	}
 }
 
