@@ -299,6 +299,12 @@ MUTATIONS = {
         '\tfatal_line=""',
         "the #10122 abort cause and owner attached to a summary-less VOID",
     ),
+    "abort-marker-primary-dropped": (
+        SH_FILE, "sh",
+        '\tabort_line=$(grep -E \'^ABORT_CAUSE=\' "$1" | tail -1)',
+        '\tabort_line=""',
+        "the #10122 structured ABORT_CAUSE marker must be the primary VOID cause",
+    ),
     "void-without-a-reason-accepted": (
         SH_FILE, "sh",
         '\tif [[ "$verdict" == "VOID" && -z "$void_reason" ]]; then',
