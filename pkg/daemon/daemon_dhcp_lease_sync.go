@@ -625,11 +625,5 @@ func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig
 		fullCfg = nil
 	}
 	authority := d.nextDHCPLeaseApplyAuthority(fullCfg, masters)
-	if applier, ok := d.dhcpServer.(interface {
-		ApplyAsyncWithLeaseAuthority(*config.DHCPServerConfig, string, dhcpserver.LeaseApplyAuthority)
-	}); ok {
-		applier.ApplyAsyncWithLeaseAuthority(cfg, reason, authority)
-		return
-	}
-	d.dhcpServer.ApplyAsync(cfg, reason)
+	d.dhcpServer.ApplyAsyncWithLeaseAuthority(cfg, reason, authority)
 }

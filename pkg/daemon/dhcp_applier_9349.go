@@ -36,8 +36,11 @@ import (
 // is what made this untestable in the first place.
 type dhcpApplier interface {
 	Apply(cfg *config.DHCPServerConfig) error
+	ApplyWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error
 	ApplyClusterCommit(cfg *config.DHCPServerConfig) error
+	ApplyClusterCommitWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error
 	ApplyAsync(cfg *config.DHCPServerConfig, reason string)
+	ApplyAsyncWithLeaseAuthority(cfg *config.DHCPServerConfig, reason string, authority dhcpserver.LeaseApplyAuthority)
 	ClaimApplyRetry(now time.Time) bool
 	SetLeaseSyncEnabled(enabled bool)
 	Shutdown() error

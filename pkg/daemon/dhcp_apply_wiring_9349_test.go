@@ -40,6 +40,10 @@ type recordingDHCPApplier9349 struct {
 	applied                []config.DHCPServerConfig
 	clusterApply           []config.DHCPServerConfig
 	clusterNil             int
+	authorityApply         []dhcpserver.LeaseApplyAuthority
+	authorityClusterApply  []dhcpserver.LeaseApplyAuthority
+	authorityAsync         []dhcpserver.LeaseApplyAuthority
+	authorityAsyncCfg      []*config.DHCPServerConfig
 	preSeed4StillMastering []bool
 	preSeed6StillMastering []bool
 }
@@ -50,6 +54,15 @@ func (r *recordingDHCPApplier9349) Apply(cfg *config.DHCPServerConfig) error {
 	if cfg != nil {
 		r.applied = append(r.applied, *cfg)
 	}
+	return nil
+}
+func (r *recordingDHCPApplier9349) ApplyWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cfg != nil {
+		r.applied = append(r.applied, *cfg)
+	}
+	r.authorityApply = append(r.authorityApply, authority)
 	return nil
 }
 
@@ -63,13 +76,30 @@ func (r *recordingDHCPApplier9349) ApplyClusterCommit(cfg *config.DHCPServerConf
 	r.clusterApply = append(r.clusterApply, *cfg)
 	return nil
 }
+func (r *recordingDHCPApplier9349) ApplyClusterCommitWithLeaseAuthority(cfg *config.DHCPServerConfig, authority dhcpserver.LeaseApplyAuthority) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cfg == nil {
+		r.clusterNil++
+	} else {
+		r.clusterApply = append(r.clusterApply, *cfg)
+	}
+	r.authorityClusterApply = append(r.authorityClusterApply, authority)
+	return nil
+}
 
 func (r *recordingDHCPApplier9349) ApplyAsync(*config.DHCPServerConfig, string) {}
-func (r *recordingDHCPApplier9349) ClaimApplyRetry(time.Time) bool              { return false }
-func (r *recordingDHCPApplier9349) SetLeaseSyncEnabled(bool)                    {}
-func (r *recordingDHCPApplier9349) Shutdown() error                             { return nil }
-func (r *recordingDHCPApplier9349) IsRunning() bool                             { return false }
-func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool                 { return false }
+func (r *recordingDHCPApplier9349) ApplyAsyncWithLeaseAuthority(cfg *config.DHCPServerConfig, _ string, authority dhcpserver.LeaseApplyAuthority) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.authorityAsyncCfg = append(r.authorityAsyncCfg, cfg)
+	r.authorityAsync = append(r.authorityAsync, authority)
+}
+func (r *recordingDHCPApplier9349) ClaimApplyRetry(time.Time) bool { return false }
+func (r *recordingDHCPApplier9349) SetLeaseSyncEnabled(bool)       {}
+func (r *recordingDHCPApplier9349) Shutdown() error                { return nil }
+func (r *recordingDHCPApplier9349) IsRunning() bool                { return false }
+func (r *recordingDHCPApplier9349) ApplyFailedForTesting() bool    { return false }
 func (r *recordingDHCPApplier9349) GetLeasesWithSource4() ([]dhcpserver.Lease, dhcpserver.LeaseSource) {
 	return nil, dhcpserver.LeaseSource{}
 }
@@ -155,6 +185,12 @@ func TestMasterEdgePassesStillMasteringToPreSeed9853(t *testing.T) {
 	if len(rec.preSeed6StillMastering) != 1 || !rec.preSeed6StillMastering[0] {
 		t.Fatalf("v6 pre-seed did not receive stillMastering=true: %v", rec.preSeed6StillMastering)
 	}
+	if len(rec.authorityAsync) != 1 || rec.authorityAsync[0].Generation == 0 {
+		t.Fatalf("transition did not pass lease authority to ApplyAsyncWithLeaseAuthority: %+v", rec.authorityAsync)
+	}
+	if len(rec.authorityAsyncCfg) != 1 || rec.authorityAsyncCfg[0] == nil {
+		t.Fatalf("transition did not pass the desired config to ApplyAsyncWithLeaseAuthority")
+	}
 }
 
 // TestFirstMasterEdgePassesPureBackupToPreSeed9853 covers the complementary
@@ -197,6 +233,9 @@ func TestStandaloneApplyReceivesTheResolvedConfig9349(t *testing.T) {
 		t.Fatal("dhcpserver.Apply was never called — the standalone DHCP branch did not run, so " +
 			"nothing below is measured")
 	}
+	if len(rec.authorityApply) != 1 || rec.authorityApply[0].Generation == 0 {
+		t.Fatalf("standalone apply did not pass lease authority to ApplyWithLeaseAuthority: %+v", rec.authorityApply)
+	}
 	got := rec.applied[len(rec.applied)-1]
 	if got.DHCPLocalServer == nil {
 		t.Fatal("Apply received no v4 family")
@@ -235,6 +274,9 @@ func TestClusterApplyReceivesTheFilteredConfig9349(t *testing.T) {
 	}
 	if rec.clusterNil == 0 && len(rec.clusterApply) == 0 {
 		t.Fatal("ApplyClusterCommit was never called — the cluster DHCP branch did not run")
+	}
+	if len(rec.authorityClusterApply) != 1 || rec.authorityClusterApply[0].Generation == 0 {
+		t.Fatalf("cluster apply did not pass lease authority to ApplyClusterCommitWithLeaseAuthority: %+v", rec.authorityClusterApply)
 	}
 	for _, got := range rec.clusterApply {
 		if got.DHCPLocalServer == nil {
