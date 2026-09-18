@@ -216,7 +216,11 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 
 // ForceSecondary sets weight to 0 for all redundancy groups, forcing this node
 // to become secondary. Used by ISSU to drain traffic to the peer before upgrade.
-// Returns an error if the peer is not alive (no peer to take over).
+// Returns an error if the peer is not alive (no peer to take over), or if the
+// pre-manual-failover hook cannot prove that the peer has received the current
+// session state. The hook is the userspace session-sync demotion barrier; it
+// MUST run before any RG is demoted so a failed barrier leaves the node fully
+// forwarding (#10261).
 func (m *Manager) ForceSecondary() error {
 	// #9569: forcing every RG secondary promotes the peer for all of them (the
 	// ISSU drain). Refuse when it did not apply the newest config this node
@@ -228,20 +232,113 @@ func (m *Manager) ForceSecondary() error {
 		return err
 	}
 
+	// Snapshot the hook and the active RG ids before releasing m.mu. Reserve
+	// every member for the full barrier window, matching
+	// ManualFailoverBatch: a concurrent failover cannot interleave, and a
+	// ResetFailover is detected by the generation check at commit.
+	m.mu.Lock()
+	if !m.peerAlive {
+		m.mu.Unlock()
+		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
+	}
+	preHook := m.preManualFailoverFn
+	retryTimeout := m.preManualFailoverRetryTimeout
+	retryInterval := m.preManualFailoverRetryInterval
+	ids := make([]int, 0, len(m.groups))
+	groupSnapshot := make(map[int]*RedundancyGroupState, len(m.groups))
+	activeSnapshot := make(map[int]bool, len(m.groups))
+	for rgID, rg := range m.groups {
+		groupSnapshot[rgID] = rg
+		active := rg.State != StateDisabled
+		activeSnapshot[rgID] = active
+		if active {
+			ids = append(ids, rgID)
+		}
+	}
+	sort.Ints(ids)
+	owners := make(map[int]uint64, len(ids))
+	gens := make(map[int]uint64, len(ids))
+	for _, rgID := range ids {
+		// ISSU is the newer, explicit operator intent. It supersedes a
+		// peer-transfer request that is in its unlocked post-ACK hook instead
+		// of being rejected behind that request; bumping the generation makes
+		// the older abort path unable to restore its stale hold over this
+		// force-secondary commit (#10004).
+		if m.failoverInProgress[rgID] != 0 {
+			m.failoverGen[rgID]++
+		}
+		owners[rgID] = m.nextFailoverOwnerLocked()
+		m.failoverInProgress[rgID] = owners[rgID]
+		gens[rgID] = m.failoverGen[rgID]
+	}
+	defer func() {
+		m.mu.Lock()
+		for rgID, owner := range owners {
+			m.releaseFailoverLocked(rgID, owner)
+		}
+		m.mu.Unlock()
+	}()
+	m.mu.Unlock()
+
+	// Run the hook once per configured RG, matching ManualFailoverBatch: it is
+	// intentionally outside the manager lock because the userspace barrier
+	// waits for a peer round-trip and the hook may call back into cluster state.
+	if preHook != nil {
+		for _, rgID := range ids {
+			deadline := time.Now().Add(retryTimeout)
+			for {
+				if err := preHook(rgID); err == nil {
+					break
+				} else if !IsRetryablePreFailoverError(err) {
+					return fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
+				} else if remaining := time.Until(deadline); remaining <= 0 {
+					return fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
+				} else {
+					sleep := retryInterval
+					if sleep <= 0 {
+						sleep = DefaultPreManualFailoverRetryInterval
+					}
+					if sleep > remaining {
+						sleep = remaining
+					}
+					time.Sleep(sleep)
+				}
+			}
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Re-check peer liveness after the unlocked barrier waits: handing off to a
+	// peer that disappeared while the barrier was running would strand VIPs.
 	if !m.peerAlive {
 		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
 	}
-
-	for _, rg := range m.groups {
-		if rg.State == StateDisabled {
-			continue
+	// Commit only the exact RG incarnation and active/disabled membership that
+	// were fenced. A config remove + re-add gets a fresh pointer even if its
+	// numeric id and generation both happen to return to their old values; an
+	// RG added or re-enabled during the barrier aborts rather than being
+	// demoted without a barrier.
+	if len(m.groups) != len(groupSnapshot) {
+		return fmt.Errorf("redundancy-group membership changed while preparing force-secondary; aborting without demotion")
+	}
+	for rgID, snap := range groupSnapshot {
+		rg, ok := m.groups[rgID]
+		if !ok || rg != snap || (rg.State != StateDisabled) != activeSnapshot[rgID] {
+			return fmt.Errorf("redundancy-group membership changed while preparing force-secondary; aborting without demotion")
 		}
-		oldState := rg.State
+	}
+	for _, rgID := range ids {
+		if m.failoverGen[rgID] != gens[rgID] {
+			return fmt.Errorf("redundancy-group %d changed while preparing force-secondary; aborting without demotion", rgID)
+		}
+	}
+	for _, rgID := range ids {
+		rg := m.groups[rgID]
 		// ISSU force-secondary is a deliberate drain; drop any remote
 		// transfer-out lease so it is never auto-restored (#5079).
+		oldState := rg.State
 		m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 		rg.Weight = 0
 		rg.ManualFailover = true

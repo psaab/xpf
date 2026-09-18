@@ -151,40 +151,77 @@ func sleepBounded(dl time.Time, interval time.Duration) {
 	time.Sleep(interval)
 }
 
-// RejoinAndConfirm clears manual failover on the local node and confirms it is
-// back as an eligible cluster member with sync re-established within deadline.
-// The orchestrator calls this AFTER a node has booted+promoted the candidate,
-// and must see it succeed BEFORE it touches the peer (the "never both down"
-// gate): a node that cannot rejoin/sync leaves the roll stopped with the peer
-// still primary.
+// RejoinAndConfirm confirms inbound bulk state before clearing the local
+// ForceSecondary hold, then confirms election eligibility after the reset.
+// The node must remain held secondary while the restarted daemon's session
+// table is incomplete: resetting first would let election promote it before
+// #10261's late bulk flow arrives.
 func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
-	if err := cl.ResetFailover(); err != nil {
-		return fmt.Errorf("reset failover: %w", err)
-	}
-	// Confirm the peer is still a healthy member, sync is re-established, AND
-	// this node has actually resumed eligibility for EVERY configured RG —
-	// i.e. the cluster is whole again — before declaring the rejoin done.
-	// PeerAlive + SyncEstablished are GLOBAL predicates: they hold even if some
-	// configured RG (e.g. RG>=3 the pre-#5044 {0,1,2} guess dropped) is still
-	// held in the ForceSecondary drain. Without the per-RG gate the orchestrator
-	// would confirm rejoin and advance to drain the PEER while that RG has no
-	// primary on either node — a per-RG blackhole (#5138). LocalRejoinComplete
-	// fails closed on an enumeration error or a still-demoted RG, so the roll
-	// stops here instead.
 	dl := time.Now().Add(deadline)
-	// Retain the last non-nil transport/gRPC error from each predicate so a
-	// deadline miss reports WHY the rejoin never confirmed, not just the
-	// alive/synced booleans (gemini-review-041 Low-2, #4717). Without this an
-	// operator sees only "peer-alive=false sync-established=false" and must dig
-	// through syslog to learn it was e.g. a refused gRPC dial while xpfd was
-	// still restarting. Mirrors DrainAndConfirm's timeout, which already wraps
-	// the last DrainComplete error.
-	var lastAErr, lastSErr, lastRErr error
+	var lastAErr, lastSErr, lastBErr, lastRErr error
+	timeout := func(alive, synced, bulkPrimed, rejoined bool) error {
+		base := fmt.Errorf("rejoin not confirmed within %s "+
+			"(peer-alive=%v sync-established=%v bulk-primed=%v local-rejoined=%v)",
+			deadline, alive, synced, bulkPrimed, rejoined)
+		var details []string
+		if lastAErr != nil {
+			details = append(details, fmt.Sprintf("last peer-alive error: %v", lastAErr))
+		}
+		if lastSErr != nil {
+			details = append(details, fmt.Sprintf("last sync-established error: %v", lastSErr))
+		}
+		if lastBErr != nil {
+			details = append(details, fmt.Sprintf("last session-sync bulk-prime error: %v", lastBErr))
+		}
+		if lastRErr != nil {
+			details = append(details, fmt.Sprintf("last local-rejoin error: %v", lastRErr))
+		}
+		if len(details) > 0 {
+			return fmt.Errorf("%w; %s", base, strings.Join(details, "; "))
+		}
+		return base
+	}
+
+	// Phase 1: the node is still held secondary. Wait for the peer, sync
+	// transport, and the actual inbound BulkEnd before allowing election to
+	// resume. LocalRejoinComplete is intentionally not queried yet: reset has
+	// not been requested and false is expected.
 	for {
 		alive, aerr := cl.PeerAlive()
 		synced, serr := cl.SyncEstablished()
+		bulkPrimed, berr := cl.SessionSyncBulkPrimed()
+		if aerr == nil && serr == nil && berr == nil && alive && synced && bulkPrimed {
+			break
+		}
+		if aerr != nil {
+			lastAErr = aerr
+		}
+		if serr != nil {
+			lastSErr = serr
+		}
+		if berr != nil {
+			lastBErr = berr
+		} else if !bulkPrimed {
+			lastBErr = fmt.Errorf("session-sync inbound bulk prime not complete")
+		}
+		if time.Now().After(dl) {
+			return timeout(alive, synced, bulkPrimed, false)
+		}
+		sleepBounded(dl, drainPollInterval)
+	}
+
+	// Phase 2: only now clear the hold, then confirm every configured RG has
+	// actually resumed election eligibility before the caller advances.
+	if err := cl.ResetFailover(); err != nil {
+		return fmt.Errorf("reset failover: %w", err)
+	}
+	for {
+		alive, aerr := cl.PeerAlive()
+		synced, serr := cl.SyncEstablished()
+		bulkPrimed, berr := cl.SessionSyncBulkPrimed()
 		rejoined, rerr := cl.LocalRejoinComplete()
-		if aerr == nil && serr == nil && rerr == nil && alive && synced && rejoined {
+		if aerr == nil && serr == nil && berr == nil && rerr == nil &&
+			alive && synced && bulkPrimed && rejoined {
 			return nil
 		}
 		if aerr != nil {
@@ -193,26 +230,16 @@ func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
 		if serr != nil {
 			lastSErr = serr
 		}
+		if berr != nil {
+			lastBErr = berr
+		} else if !bulkPrimed {
+			lastBErr = fmt.Errorf("session-sync inbound bulk prime not complete")
+		}
 		if rerr != nil {
 			lastRErr = rerr
 		}
 		if time.Now().After(dl) {
-			base := fmt.Errorf("rejoin not confirmed within %s "+
-				"(peer-alive=%v sync-established=%v local-rejoined=%v)", deadline, alive, synced, rejoined)
-			var details []string
-			if lastAErr != nil {
-				details = append(details, fmt.Sprintf("last peer-alive error: %v", lastAErr))
-			}
-			if lastSErr != nil {
-				details = append(details, fmt.Sprintf("last sync-established error: %v", lastSErr))
-			}
-			if lastRErr != nil {
-				details = append(details, fmt.Sprintf("last local-rejoin error: %v", lastRErr))
-			}
-			if len(details) > 0 {
-				return fmt.Errorf("%w; %s", base, strings.Join(details, "; "))
-			}
-			return base
+			return timeout(alive, synced, bulkPrimed, rejoined)
 		}
 		sleepBounded(dl, drainPollInterval)
 	}

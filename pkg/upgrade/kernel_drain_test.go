@@ -77,26 +77,26 @@ func TestDrainAndConfirmTimesOutAndFailsBack(t *testing.T) {
 	}
 }
 
-// RejoinAndConfirm: ResetFailover then peer-alive + sync -> nil.
+// RejoinAndConfirm: inbound bulk prime, then ResetFailover + peer-alive + sync -> nil.
 func TestRejoinAndConfirmHappy(t *testing.T) {
 	f := &fakeCluster{peerAlive: true, synced: true}
 	if err := RejoinAndConfirm(f, 5*time.Second); err != nil {
 		t.Fatalf("RejoinAndConfirm: %v", err)
 	}
 	if !f.resetCalled {
-		t.Fatal("expected ResetFailover to be called")
+		t.Fatal("expected ResetFailover to be called after bulk prime")
 	}
 }
 
-// Rejoin that cannot re-establish sync within the deadline -> error (so the
-// orchestrator does not advance to the peer — the "never both down" gate).
+// Rejoin that cannot re-establish sync within the deadline must fail while the
+// local ForceSecondary hold is still in place.
 func TestRejoinAndConfirmTimesOutOnNoSync(t *testing.T) {
 	f := &fakeCluster{peerAlive: true, synced: false}
 	if err := RejoinAndConfirm(f, 50*time.Millisecond); err == nil {
 		t.Fatal("expected timeout when sync never re-establishes")
 	}
-	if !f.resetCalled {
-		t.Fatal("ResetFailover should still have been attempted")
+	if f.resetCalled {
+		t.Fatal("ResetFailover must not run before sync and inbound bulk are ready")
 	}
 }
 
@@ -118,8 +118,8 @@ func TestRejoinAndConfirmSurfacesSyncError(t *testing.T) {
 	if !strings.Contains(err.Error(), wantCause.Error()) {
 		t.Fatalf("timeout error must surface the underlying SyncEstablished cause; got: %v", err)
 	}
-	if !f.resetCalled {
-		t.Fatal("ResetFailover should still have been attempted")
+	if f.resetCalled {
+		t.Fatal("ResetFailover must not run while SyncEstablished is failing")
 	}
 }
 
@@ -138,6 +138,10 @@ func TestRejoinAndConfirmSurfacesPeerAliveError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), wantCause.Error()) {
 		t.Fatalf("timeout error must surface the underlying PeerAlive cause; got: %v", err)
+	}
+
+	if f.resetCalled {
+		t.Fatal("ResetFailover must not run while PeerAlive is failing")
 	}
 }
 

@@ -66,10 +66,12 @@ func (d *Daemon) onSessionSyncPeerConnected() {
 	// already synced; preserve the primed state and sync readiness (#466).
 	ss := d.getSessionSync()
 	coldStart := ss == nil || !ss.BulkEverCompleted()
-
 	if coldStart {
 		d.syncBulkPrimed.Store(false)
 		d.syncPeerBulkPrimed.Store(false)
+		if d.cluster != nil {
+			d.cluster.SetSyncBulkPrimed(false)
+		}
 	}
 
 	gen := d.syncPrimeRetryGen.Add(1)
@@ -91,6 +93,9 @@ func (d *Daemon) onSessionSyncPeerConnected() {
 
 func (d *Daemon) onSessionSyncBulkReceived() {
 	d.syncBulkPrimed.Store(true)
+	if d.cluster != nil {
+		d.cluster.SetSyncBulkPrimed(true)
+	}
 	slog.Info("cluster: session sync bulk received",
 		"retry_gen", d.syncPrimeRetryGen.Load())
 	d.stopSyncReadyTimer()
@@ -134,6 +139,9 @@ func (d *Daemon) onSessionSyncPeerDisconnected() {
 	if !wasEverPrimed {
 		d.syncBulkPrimed.Store(false)
 		d.syncPeerBulkPrimed.Store(false)
+		if d.cluster != nil {
+			d.cluster.SetSyncBulkPrimed(false)
+		}
 	}
 
 	slog.Info("cluster: session sync peer disconnected",
