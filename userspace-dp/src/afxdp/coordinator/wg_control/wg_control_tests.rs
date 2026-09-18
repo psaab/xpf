@@ -2155,3 +2155,86 @@ fn wg_tun_burst_response_shaped_skips_create_10038() {
     stop.store(true, Ordering::Relaxed);
     handle.join().expect("join");
 }
+
+fn socket_bound_device_10196(socket: &std::net::UdpSocket) -> String {
+    let mut buf = [0u8; 16];
+    let mut len = buf.len() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    assert_eq!(rc, 0, "getsockopt(SO_BINDTODEVICE) must succeed");
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// #10196: the normal/default-table WireGuard socket remains unbound. The
+/// positive VRF path must not change main-table WireGuard behavior.
+#[test]
+fn wg_socket_default_table_remains_unbound_10196() {
+    let (socket, _is_v6) = bind_wg_socket(0).expect("bind ephemeral WG socket");
+    assert!(
+        socket_bound_device_10196(&socket).is_empty(),
+        "main-table WireGuard socket must remain unbound"
+    );
+}
+
+/// #10196: a named transport table resolves to the corresponding VRF master,
+/// and the raw UDP socket applies SO_BINDTODEVICE before wildcard bind.
+#[test]
+fn wg_socket_named_transport_binds_vrf_device_10196() {
+    assert_eq!(
+        wg_outer_bind_device_for_transport_table("inet.0"),
+        None,
+        "default IPv4 table must not select a VRF device"
+    );
+    assert_eq!(
+        wg_outer_bind_device_for_transport_table("inet6.0"),
+        None,
+        "default IPv6 table must not select a VRF device"
+    );
+    assert_eq!(
+        wg_outer_bind_device_for_transport_table("blue.inet.0").as_deref(),
+        Some("vrf-blue")
+    );
+    assert_eq!(
+        wg_outer_bind_device_for_transport_table("blue.inet6.0").as_deref(),
+        Some("vrf-blue")
+    );
+
+    // `lo` is an always-present device in the unit-test environment and
+    // exercises the same SO_BINDTODEVICE syscall as a kernel VRF master.
+    let (socket, _is_v6) =
+        bind_wg_socket_with_device(0, Some("lo")).expect("bind socket to loopback device");
+    assert_eq!(socket_bound_device_10196(&socket), "lo");
+}
+
+/// #10196: a failed VRF bind must not fall back to an unbound v4 socket.
+#[test]
+fn wg_socket_vrf_bind_failure_is_not_swallowed_10196() {
+    let err = bind_wg_socket_with_device(0, Some("vrf-10196-does-not-exist"))
+        .expect_err("missing VRF device must fail the requested scoped bind");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENODEV),
+        "missing SO_BINDTODEVICE target must surface ENODEV, got {err}"
+    );
+}
+
+/// #10196: an IPv6 capability failure may fall back to AF_INET even when a
+/// scoped device was requested, but a real bind-device failure may not.
+#[test]
+fn wg_socket_v6_capability_fallback_preserves_requested_device_10196() {
+    let capability = io::Error::from_raw_os_error(libc::EAFNOSUPPORT);
+    assert!(v6_bind_can_fallback_with_device(&capability, Some("lo")));
+    let missing_device = io::Error::from_raw_os_error(libc::ENODEV);
+    assert!(!v6_bind_can_fallback_with_device(
+        &missing_device,
+        Some("vrf-10196-does-not-exist")
+    ));
+}

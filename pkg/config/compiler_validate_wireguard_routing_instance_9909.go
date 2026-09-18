@@ -8,11 +8,12 @@ import (
 
 // validateWireguardRoutingInstance9909 closes the commit-time hole between
 // the persistent wgN device and the userspace control socket (#9909). The
-// routing manager can put wgN in a routing-instance, but the Rust control
-// thread's outer UDP socket still binds the default table until the VRF-fd
-// mechanism owned by #1434 S6 lands. A tolerant load warns and removes that
-// tunnel and its matching RI membership from the compiled config before
-// routing or snapshot consumers can act on it.
+// routing manager can put wgN in a routing-instance, and the userspace WG
+// control thread now binds its outer UDP socket to the corresponding
+// `vrf-<instance>` device (#10196). Forwarding instances have no VRF device,
+// so that unsupported scope remains refused. A tolerant load warns and
+// removes an unsupported tunnel and its matching RI membership from the
+// compiled config before routing or snapshot consumers can act on it.
 //
 // Both scope paths are deliberate:
 //   - TunnelConfig.RoutingInstance comes from `tunnel routing-instance`.
@@ -43,14 +44,45 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 		}
 		return tunMap
 	}
-	scopeFor := func(tc *TunnelConfig) string {
+	scopesFor := func(tc *TunnelConfig) []string {
 		if tc == nil {
-			return ""
+			return nil
 		}
 		if tc.RoutingInstance != "" || tc.RIListMember != "" || len(cfg.RoutingInstances) == 0 {
-			return wireguardRoutingInstance9909(cfg, nil, tc)
+			return wireguardRoutingInstances9909(cfg, nil, tc)
 		}
-		return wireguardRoutingInstance9909(cfg, getTunMap(), tc)
+		return wireguardRoutingInstances9909(cfg, getTunMap(), tc)
+	}
+
+	type deviceScopeClaim struct {
+		ifName  string
+		unitNum int
+		tc      *TunnelConfig
+		scopes  map[string]struct{}
+	}
+	deviceClaims := make(map[string]*deviceScopeClaim)
+	recordDeviceScopes := func(ifName string, unitNum int, parent, tc *TunnelConfig, scopes []string) {
+		if tc == nil || len(scopes) == 0 {
+			return
+		}
+		device := tc.Name
+		if parent != nil && parent.Mode == "wireguard" && parent.Name != "" {
+			device = parent.Name
+		}
+		if device == "" {
+			return
+		}
+		claim := deviceClaims[device]
+		if claim == nil {
+			claim = &deviceScopeClaim{
+				ifName: ifName, unitNum: unitNum, tc: tc,
+				scopes: make(map[string]struct{}, len(scopes)),
+			}
+			deviceClaims[device] = claim
+		}
+		for _, scope := range scopes {
+			claim.scopes[scope] = struct{}{}
+		}
 	}
 
 	violations := make([]wireguardRoutingInstanceViolation9909, 0)
@@ -61,9 +93,11 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 		}
 
 		if tc := ifc.Tunnel; tc != nil && tc.Mode == "wireguard" {
-			if ri := scopeFor(tc); ri != "" {
+			scopes := scopesFor(tc)
+			recordDeviceScopes(ifName, -1, nil, tc, scopes)
+			if len(scopes) == 1 && !wireguardOuterVRFSupported9909(cfg, scopes[0]) {
 				violations = append(violations, wireguardRoutingInstanceViolation9909{
-					ifName: ifName, unitNum: -1, tc: tc, ri: ri,
+					ifName: ifName, unitNum: -1, tc: tc, ri: scopes[0],
 				})
 			}
 		}
@@ -78,35 +112,61 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 			if unit == nil || unit.Tunnel == nil || unit.Tunnel.Mode != "wireguard" {
 				continue
 			}
-			if ri := scopeFor(unit.Tunnel); ri != "" {
+			scopes := scopesFor(unit.Tunnel)
+			recordDeviceScopes(ifName, n, ifc.Tunnel, unit.Tunnel, scopes)
+			if len(scopes) == 1 && !wireguardOuterVRFSupported9909(cfg, scopes[0]) {
 				violations = append(violations, wireguardRoutingInstanceViolation9909{
-					ifName: ifName, unitNum: n, tc: unit.Tunnel, ri: ri,
+					ifName: ifName, unitNum: n, tc: unit.Tunnel, ri: scopes[0],
 				})
 			}
 		}
 	}
 
+	devices := make([]string, 0, len(deviceClaims))
+	for device := range deviceClaims {
+		devices = append(devices, device)
+	}
+	sort.Strings(devices)
+	for _, device := range devices {
+		claim := deviceClaims[device]
+		if len(claim.scopes) < 2 {
+			continue
+		}
+		scopes := make([]string, 0, len(claim.scopes))
+		for scope := range claim.scopes {
+			scopes = append(scopes, scope)
+		}
+		sort.Strings(scopes)
+		violations = append(violations, wireguardRoutingInstanceViolation9909{
+			ifName: claim.ifName, unitNum: claim.unitNum, tc: claim.tc,
+			ri: strings.Join(scopes, ","), conflict: true,
+		})
+	}
 	if len(violations) == 0 {
 		return nil, nil
 	}
 	if !lenient {
 		v := violations[0]
+		if v.conflict {
+			return nil, fmt.Errorf(
+				"wireguard tunnel %q has conflicting routing-instance claims %q for one outer device; commit refused (#9909, #10196)",
+				tunnelLabel(v.ifName, v.unitNum, v.tc), v.ri)
+		}
 		return nil, fmt.Errorf(
-			"wireguard tunnel %q is scoped to routing-instance %q, but its outer UDP socket is not VRF-bound; commit refused until #1434 S6 provides VRF-fd binding (#9909)",
+			"wireguard tunnel %q is scoped to routing-instance %q, but that scope has no supported VRF device for outer UDP binding; commit refused (#9909, #10196)",
 			tunnelLabel(v.ifName, v.unitNum, v.tc), v.ri)
 	}
-
 	// Remove RI memberships while all tunnel records still exist. This is
 	// important when an interface-level WG and a scope-only unit override
 	// share one device: removing just the violating unit would leave the
-	// interface-level endpoint alive on the main-table socket.
+	// interface-level endpoint alive on an unsupported outer socket.
+
 	quarantineMap := tunMap
 	if len(cfg.RoutingInstances) > 0 && !tunMapReady {
 		quarantineMap = getTunMap()
 	}
 	quarantineWireguardRoutingInstanceMembers9909(cfg, quarantineMap, violations)
 	quarantineWireguardRoutingInstanceRecords9909(cfg, violations)
-
 	var warnings []string
 	warned := make(map[string]struct{}, len(violations))
 	for _, v := range violations {
@@ -115,18 +175,25 @@ func validateWireguardRoutingInstance9909(cfg *Config, lenient bool) ([]string, 
 			continue
 		}
 		warned[key] = struct{}{}
+		if v.conflict {
+			warnings = append(warnings, fmt.Sprintf(
+				"wireguard tunnel %q is skipped on tolerant load: conflicting routing-instance claims %q target one outer device (#9909, #10196)",
+				tunnelLabel(v.ifName, v.unitNum, v.tc), v.ri))
+			continue
+		}
 		warnings = append(warnings, fmt.Sprintf(
-			"wireguard tunnel %q in routing-instance %q is skipped on tolerant load: its outer UDP socket cannot be VRF-bound until #1434 S6 lands (#9909)",
+			"wireguard tunnel %q in routing-instance %q is skipped on tolerant load: that scope has no supported VRF device for outer UDP binding (#9909, #10196)",
 			tunnelLabel(v.ifName, v.unitNum, v.tc), v.ri))
 	}
 	return warnings, nil
 }
 
 type wireguardRoutingInstanceViolation9909 struct {
-	ifName  string
-	unitNum int
-	tc      *TunnelConfig
-	ri      string
+	ifName   string
+	unitNum  int
+	tc       *TunnelConfig
+	ri       string
+	conflict bool
 }
 
 // wireguardRoutingInstanceMemberRef9909 pairs one authored RI member spelling
@@ -137,19 +204,30 @@ type wireguardRoutingInstanceMemberRef9909 struct {
 }
 
 // wireguardRoutingInstance9909 returns the first deterministic routing-instance
-// scope for one WG tunnel. Explicit tunnel scope is preferred over list
-// membership, as it is the scope that reconcileVRFClaimLocked applies first.
-// Every declared instance type is gated: the outer socket has no binding
-// mechanism for any routing-instance scope until #1434 S6 lands.
+// scope for one WG tunnel. Callers that enforce the one-device invariant use
+// wireguardRoutingInstances9909 so conflicting claims are not hidden.
 func wireguardRoutingInstance9909(cfg *Config, tunMap map[string]string, tc *TunnelConfig) string {
-	if tc == nil {
+	scopes := wireguardRoutingInstances9909(cfg, tunMap, tc)
+	if len(scopes) == 0 {
 		return ""
 	}
+	return scopes[0]
+}
+
+// wireguardRoutingInstances9909 returns every distinct routing-instance scope
+// claiming one WG tunnel, in deterministic order. Explicit tunnel scope wins
+// over list membership, matching reconcileVRFClaimLocked; otherwise all
+// matching RI members are retained so two supported VRFs cannot silently
+// collapse onto one shared outer UDP socket.
+func wireguardRoutingInstances9909(cfg *Config, tunMap map[string]string, tc *TunnelConfig) []string {
+	if cfg == nil || tc == nil {
+		return nil
+	}
 	if tc.RoutingInstance != "" {
-		return tc.RoutingInstance
+		return []string{tc.RoutingInstance}
 	}
 	if tc.RIListMember != "" {
-		return tc.RIListMember
+		return []string{tc.RIListMember}
 	}
 
 	ris := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
@@ -159,14 +237,38 @@ func wireguardRoutingInstance9909(cfg *Config, tunMap map[string]string, tc *Tun
 		}
 	}
 	sort.SliceStable(ris, func(i, j int) bool { return ris[i].Name < ris[j].Name })
+	scopes := make([]string, 0, len(ris))
+	seen := make(map[string]struct{}, len(ris))
 	for _, ri := range ris {
 		for _, member := range ri.Interfaces {
-			if wireguardMemberMatches9909(cfg, tunMap, tc, member) {
-				return ri.Name
+			if !wireguardMemberMatches9909(cfg, tunMap, tc, member) {
+				continue
 			}
+			if _, duplicate := seen[ri.Name]; duplicate {
+				break
+			}
+			seen[ri.Name] = struct{}{}
+			scopes = append(scopes, ri.Name)
+			break
 		}
 	}
-	return ""
+	return scopes
+}
+
+// wireguardOuterVRFSupported9909 reports whether a named routing-instance has
+// a kernel VRF device that the userspace WG socket can bind. Every supported
+// non-forwarding instance type ("virtual-router", "vrf", or omitted) creates
+// a VRF; forwarding instances intentionally do not.
+func wireguardOuterVRFSupported9909(cfg *Config, instance string) bool {
+	if cfg == nil || instance == "" {
+		return false
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil && ri.Name == instance {
+			return ri.InstanceType != "forwarding"
+		}
+	}
+	return false
 }
 
 // quarantineWireguardRoutingInstanceMembers9909 removes affected WG devices

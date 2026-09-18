@@ -94,9 +94,11 @@ use attempt::{
 };
 use dispatch::{EncapOutcome, InboundOutcome, dispatch_inbound, encap_and_send};
 use sock::{
-    PollWait, WgRecv, bind_wg_socket, canonicalize_endpoint, poll_timeout_ms, set_recv_tos_options,
-    wg_poll_wait, wg_recvmsg,
+    PollWait, WgRecv, bind_wg_socket, bind_wg_socket_with_device, canonicalize_endpoint,
+    poll_timeout_ms, set_recv_tos_options, v6_bind_can_fallback_with_device, wg_poll_wait,
+    wg_recvmsg,
 };
+pub(super) use sock::wg_outer_bind_device_for_transport_table;
 
 // tunnel_supervision.rs names the last-resort outer-MTU fallback at
 // `wg_control::WG_DEFAULT_OUTER_MTU` — re-export at the historical path
@@ -135,6 +137,7 @@ pub(super) fn wg_control_loop(
     tunnel_endpoint_id: u16,
     engine: Arc<crate::afxdp::wg::WgEngine>,
     listen_port: u16,
+    outer_bind_device: Option<String>,
     // #9521: may a transport record's plaintext received on this socket be
     // written to the TUN? Decided by the coordinator at spawn.
     kernel_transport: crate::afxdp::types::WgKernelTransport,
@@ -165,19 +168,25 @@ pub(super) fn wg_control_loop(
     shared_owner_rg_indexes: SharedSessionOwnerRgIndexes,
 ) {
     // Bind the UDP socket. v6 dual-stack ([::]:port) accepts both v4 and
-    // v6 peers where the kernel allows it; fall back to v4 if the v6
-    // bind fails. EADDRINUSE here means a host kernel wgX claims the port
-    // (mutually exclusive with userspace-WG — surface a clear error).
-    let (socket, socket_is_v6) = match bind_wg_socket(listen_port) {
+    // v6 peers where the kernel allows it; fall back to v4 only for a
+    // v6-family/socket capability failure. A requested VRF bind is
+    // fail-closed and is never swallowed by that fallback.
+    let (socket, socket_is_v6) = match bind_wg_socket_with_device(
+        listen_port,
+        outer_bind_device.as_deref(),
+    ) {
         Ok(pair) => pair,
         Err(err) => {
             record_local_tunnel_exception(
                 &recent_exceptions,
                 &tunnel_name,
-                format!("wg_bind_listen_port:{listen_port}:{err}"),
+                format!(
+                    "wg_bind_listen_port:{listen_port}:device={:?}:{err}",
+                    outer_bind_device
+                ),
             );
             eprintln!(
-                "xpf-userspace-dp: WG control thread exiting tun={tunnel_name}: bind :{listen_port} failed: {err}"
+                "xpf-userspace-dp: WG control thread exiting tun={tunnel_name}: bind :{listen_port} device={outer_bind_device:?} failed: {err}"
             );
             return;
         }

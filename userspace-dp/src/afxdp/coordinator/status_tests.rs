@@ -533,6 +533,7 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
             spawned_ifindex: 41,
             spawned_tunnel_name: "wg0".into(),
             spawned_outer_mtu: 1420,
+            spawned_outer_bind_device: None,
             spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
             last_spawn_attempt_ns: 0,
             spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,

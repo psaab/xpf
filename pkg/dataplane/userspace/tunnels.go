@@ -15,14 +15,17 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 		return nil
 	}
 	ifaceByName := make(map[string]InterfaceSnapshot, len(interfaces))
+	ifaceByLinuxName := make(map[string]InterfaceSnapshot, len(interfaces))
 	rgByAddress := make(map[string]int)
 	for _, iface := range interfaces {
 		if iface.Name == "" || iface.Ifindex <= 0 {
 			continue
 		}
 		ifaceByName[iface.Name] = iface
-		if iface.RedundancyGroup <= 0 {
-			continue
+		if iface.LinuxName != "" {
+			if _, exists := ifaceByLinuxName[iface.LinuxName]; !exists {
+				ifaceByLinuxName[iface.LinuxName] = iface
+			}
 		}
 		for _, addr := range iface.Addresses {
 			ip, _, err := net.ParseCIDR(addr.Address)
@@ -34,6 +37,29 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 	}
 	if len(ifaceByName) == 0 {
 		return nil
+	}
+	interfaceRoutingInstances := buildInterfaceRoutingInstances(cfg)
+	riByLinuxName := make(map[string]string, len(interfaceRoutingInstances))
+	ambiguousLinuxNames := make(map[string]struct{})
+	riRefs := make([]string, 0, len(interfaceRoutingInstances))
+	for ref := range interfaceRoutingInstances {
+		riRefs = append(riRefs, ref)
+	}
+	sort.Strings(riRefs)
+	for _, ref := range riRefs {
+		linuxName := cfg.ResolveKernelIfName(ref)
+		if linuxName == "" {
+			continue
+		}
+		riName := interfaceRoutingInstances[ref]
+		if previous, exists := riByLinuxName[linuxName]; exists && previous != riName {
+			delete(riByLinuxName, linuxName)
+			ambiguousLinuxNames[linuxName] = struct{}{}
+			continue
+		}
+		if _, ambiguous := ambiguousLinuxNames[linuxName]; !ambiguous {
+			riByLinuxName[linuxName] = riName
+		}
 	}
 	out := make([]TunnelEndpointSnapshot, 0)
 	// #1873: ids are content-derived (config.StableTunnelEndpointID of
@@ -75,11 +101,42 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 			outerFamily = "inet6"
 			transportTable = "inet6.0"
 		}
-		if tunnel.RoutingInstance != "" {
+		// WireGuard has no tunnel source/destination; resolve its peer
+		// family before composing a scoped transport table.
+		if isWireguard && tunnel.WgOuterFamilyV6() {
+			outerFamily = "inet6"
+			transportTable = "inet6.0"
+		}
+		// WireGuard has no tunnel source/destination; its peer endpoint
+		// supplies the underlay family, while the effective routing-instance
+		// comes from the explicit tunnel stanza first and the resolved
+		// InterfaceSnapshot row for list-only membership. If that row's
+		// authored name differs from the RI member spelling, recover the RI
+		// through the same kernel identity rather than row-name lookup alone
+		// (#10196).
+		transportRI := tunnel.RoutingInstance
+		if isWireguard && transportRI == "" {
+			transportRI = iface.RoutingInstance
+			if transportRI == "" {
+				linuxName := iface.LinuxName
+				if linuxName == "" {
+					linuxName = cfg.ResolveKernelIfName(ifName)
+				}
+				if _, ambiguous := ambiguousLinuxNames[linuxName]; ambiguous {
+					// The commit gate quarantines this shape; keep the
+					// snapshot builder fail-closed if it is reached through
+					// a tolerant or hand-built config instead of emitting a
+					// main-table outer socket (#10196).
+					return
+				}
+				transportRI = riByLinuxName[linuxName]
+			}
+		}
+		if transportRI != "" {
 			if outerFamily == "inet6" {
-				transportTable = tunnel.RoutingInstance + ".inet6.0"
+				transportTable = transportRI + ".inet6.0"
 			} else {
-				transportTable = tunnel.RoutingInstance + ".inet.0"
+				transportTable = transportRI + ".inet.0"
 			}
 		}
 		// #2703: an omitted tunnel TTL is stored as the default-64 sentinel 0
@@ -100,15 +157,6 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 			if src := net.ParseIP(tunnel.Source); src != nil {
 				redundancyGroup = rgByAddress[src.String()]
 			}
-		}
-		// For WG the outer family follows the peer endpoint address
-		// (the Source/Destination heuristic above sees empty strings).
-		// With multi-peer (#1434) the family is a tunnel-level property
-		// (one UDP socket); WgOuterFamilyV6 resolves it from the
-		// endpoint-bearing peer(s) (validateWireguardPeers rejects
-		// mixed-family at commit).
-		if isWireguard && tunnel.WgOuterFamilyV6() {
-			outerFamily = "inet6"
 		}
 		id := config.StableTunnelEndpointID(ifName)
 		if owner, taken := usedIDs[id]; taken {
