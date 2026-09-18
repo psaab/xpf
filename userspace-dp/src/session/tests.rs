@@ -6370,6 +6370,71 @@ fn session_limit_ha_import_promote_demote_count() {
     assert_eq!(table.session_limit_src_map_len(), 0);
 }
 
+/// #10310: a WorkerLocalImport replica must not consume a second
+/// `limit-session` slot, while a later local promotion must back-count it
+/// exactly once. True `SyncImport` counting remains pinned by the neighboring
+/// #3122 failover cells.
+#[test]
+fn session_limit_worker_replica_excluded_then_promote_backcounts_10310() {
+    let mut table = SessionTable::new();
+    table.set_session_limit_active(true);
+    let now = 1_000_000_000u64;
+    let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 37));
+    let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+    let key = SessionKey {
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 45000,
+        ..limit_key(37, 9, 0)
+    };
+    let mut meta = metadata();
+    meta.owner_rg_id = 1;
+
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: key.clone(),
+            decision: decision(),
+            metadata: meta.clone(),
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+        false,
+    ));
+    assert_eq!(
+        table.session_limit_src_count(src),
+        0,
+        "a local worker replica must not charge a second logical session"
+    );
+
+    // Real traffic promotes the replica to a local owner. The transition
+    // changes the counted class, so it must add exactly one slot.
+    assert!(table.promote_synced_with_origin(SessionUpdate {
+        key: &key,
+        decision: decision(),
+        metadata: meta,
+        origin: SessionOrigin::SharedPromote,
+        now_ns: now + 1_000_000,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+    }));
+    assert_eq!(
+        table.session_limit_src_count(src),
+        1,
+        "promoting a replica to local ownership must back-count once"
+    );
+
+    // Demoting the still-present logical session remains count-neutral, and
+    // the sole removal sink releases the one charged slot.
+    assert_eq!(table.demote_owner_rg(1).len(), 1);
+    assert_eq!(table.session_limit_src_count(src), 1);
+    table.delete(&key);
+    assert_eq!(table.session_limit_src_count(src), 0);
+}
+
 /// §5.6b (#3122) the FAILOVER LIMIT-BYPASS scenario, end to end: a client
 /// drives N synced sessions onto the standby, then the standby becomes
 /// active. Its per-IP count must already reflect the N synced sessions so
@@ -6692,9 +6757,10 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
         let mut src_live: std::collections::HashMap<IpAddr, u32> = std::collections::HashMap::new();
         let mut dst_live: std::collections::HashMap<IpAddr, u32> = std::collections::HashMap::new();
         table.iter_with_origin(|key, _decision, md, origin| {
-            // #3122: counted-class is origin-agnostic (presence-based) —
-            // peer-synced entries count, only reverse + seed are excluded.
-            if !md.is_reverse && !origin.is_transient_local_seed() {
+            // #3122/#10310: use the production counted-class predicate:
+            // peer-synced imports count, WorkerLocalImport replicas do not,
+            // and reverse/transient-seed entries are excluded.
+            if !md.is_reverse && super::install::session_limit_origin_counted(origin) {
                 *src_live.entry(key.src_ip).or_insert(0) += 1;
                 *dst_live.entry(key.dst_ip).or_insert(0) += 1;
             }
@@ -6946,7 +7012,10 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
     // number of live counted entries for that IP — never below it.
     let mut live_src = 0u32;
     table.iter_with_origin(|k, _d, md, origin| {
-        if k.src_ip == src && !md.is_reverse && !origin.is_transient_local_seed() {
+        if k.src_ip == src
+            && !md.is_reverse
+            && super::install::session_limit_origin_counted(origin)
+        {
             live_src += 1;
         }
     });

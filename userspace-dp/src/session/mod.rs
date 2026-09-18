@@ -1311,19 +1311,17 @@ pub(crate) struct SessionTable {
     /// Set by `set_session_limit_active`, driven from the worker's
     /// forwarding/screen-profile snapshot apply.
     session_limit_active: bool,
-    /// #2134/#3122: per-source-IP count of PRESENT forward-direction
-    /// sessions (the counted-class predicate: `!is_reverse &&
-    /// !origin.is_transient_local_seed()`). As of #3122 this is
-    /// ORIGIN-AGNOSTIC — locally-admitted AND HA-peer-synced sessions both
-    /// count, because a synced session occupies a real slot and must
-    /// remain enforced after a failover (a peer-synced exclusion let a
-    /// client exceed its cap on the standby-turned-active). Incremented at
-    /// the two create sinks (fresh install + synced import), decremented at
-    /// the sole removal sink (`remove_entry`); the in-place HA promote and
-    /// demote are count-NEUTRAL (the session stays present, only its origin
-    /// flips). Evicted the moment a count hits 0 so the map is bounded by
-    /// distinct IPs with >=1 live session (#2128 — no phantom-zero
-    /// entries). Read non-mutating at the new-flow check.
+    /// #2134/#3122/#10310: per-source-IP count of PRESENT forward-direction
+    /// logical sessions. The shared counted-class predicate is
+    /// `!is_reverse && install::session_limit_origin_counted(origin)`: true
+    /// HA-peer-synced sessions count for failover enforcement, while a
+    /// WorkerLocalImport replica does not consume a second logical slot.
+    /// Incremented at the two create sinks (fresh install + synced import),
+    /// decremented at the sole removal sink (`remove_entry`); in-place HA
+    /// transitions are balanced, with only an uncounted-replica→local
+    /// promotion adding a slot. Evicted the moment a count hits 0 so the map
+    /// is bounded by distinct IPs with >=1 live logical session (#2128 — no
+    /// phantom-zero entries). Read non-mutating at the new-flow check.
     session_limit_src_counts: SeededIpMap<u32>,
     /// #2134: per-destination-IP mirror of `session_limit_src_counts`.
     session_limit_dst_counts: SeededIpMap<u32>,
@@ -1873,12 +1871,11 @@ impl SessionTable {
     /// `saturating_sub` + evict-at-0 hide the underflow, so X's count can
     /// reach 0 while sessions are live and X is handed a fresh full
     /// allotment (cap bypass). Rebuilding on enable makes every decrement
-    /// balance an increment. The walk uses the same origin-agnostic
-    /// counted-class predicate as the install/decrement sinks
-    /// (`!is_reverse && !origin.is_transient_local_seed()` — #3122:
-    /// peer-SYNCED sessions ARE counted, only reverse + transient-local
-    /// seed are excluded), so back-counting includes imported sessions
-    /// exactly as their later teardown will decrement them. O(N) once per
+    /// balance an increment. The walk uses the same shared counted-class
+    /// predicate as the install/decrement sinks (`!is_reverse &&
+    /// install::session_limit_origin_counted(origin)`): true peer-SYNCED
+    /// sessions are counted, while WorkerLocalImport replicas are excluded
+    /// and only the two transient-local seeds remain uncounted. O(N) once per
     /// rare enable, no per-entry memory cost.
     pub fn set_session_limit_active(&mut self, active: bool) {
         if !active {
@@ -1896,7 +1893,7 @@ impl SessionTable {
             for (key, handle) in &self.key_to_handle {
                 if let Some(record) = self.entries.get(*handle as usize) {
                     if !record.entry.metadata.is_reverse
-                        && !record.entry.origin.is_transient_local_seed()
+                        && install::session_limit_origin_counted(record.entry.origin)
                     {
                         let c = self.session_limit_src_counts.entry(key.src_ip).or_insert(0);
                         *c = c.saturating_add(1);
@@ -1926,11 +1923,11 @@ impl SessionTable {
         self.session_limit_dst_counts.get(&ip).copied().unwrap_or(0)
     }
 
-    /// #2134/#3122: increment the per-IP counts for a freshly-counted
-    /// session. Caller MUST have already evaluated the counted-class
-    /// predicate (`!is_reverse && !origin.is_transient_local_seed()` —
-    /// origin-agnostic since #3122) — this helper only adds the OFF-gate
-    /// guard so an unconfigured deployment pays a single branch.
+    /// #2134/#3122/#10310: increment the per-IP counts for a freshly-counted
+    /// session. Caller MUST have already evaluated the shared counted-class
+    /// predicate (`!is_reverse &&
+    /// install::session_limit_origin_counted(origin)`) — this helper only
+    /// adds the OFF-gate guard so an unconfigured deployment pays one branch.
     /// `saturating_add` never wraps (#1357 / overflow policy); the count
     /// is bounded by `max_sessions`.
     #[inline]
@@ -2646,7 +2643,10 @@ impl SessionTable {
         let old_nat = record.entry.decision.nat;
         let old_is_reverse = record.entry.metadata.is_reverse;
         let old_owner_rg = record.entry.metadata.owner_rg_id;
-
+        // #10310: a WorkerLocalImport replica is not counted, but a promote
+        // to a local origin becomes one logical limit-session unit.
+        let old_counted =
+            !old_is_reverse && install::session_limit_origin_counted(old_origin);
         if !ha_activation {
             let new_peer = origin.is_peer_synced();
             // Reject: both peer-synced (refresh_local on a synced entry) OR peer
@@ -2765,6 +2765,15 @@ impl SessionTable {
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
         }
+        // #10310: keep count maintenance balanced across in-place origin
+        // transitions (notably WorkerLocalImport -> local promotion).
+        let new_counted =
+            !metadata.is_reverse && install::session_limit_origin_counted(origin);
+        if new_counted && !old_counted {
+            self.session_limit_inc(key.src_ip, key.dst_ip);
+        } else if old_counted && !new_counted {
+            self.session_limit_dec(key.src_ip, key.dst_ip);
+        }
         // Always re-assert the secondary ADDS — byte-identical to restore_entry's
         // unconditional index_forward_nat_key. For the no-reindex case this
         // re-inserts the same keys→handle (idempotent when unique, re-wins on a
@@ -2783,15 +2792,12 @@ impl SessionTable {
         self.push_to_wheel(key, now_ns);
         // Emit open delta when promoting a peer-synced entry to local
         if was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse {
-            // #3122: an in-place promote synced→local is COUNT-NEUTRAL.
-            // The session was already counted toward the per-IP limit when
-            // it was IMPORTED (`upsert_synced_with_origin`), and a promote
-            // mutates the entry IN PLACE (no remove+reinstall), so the slot
-            // is already charged — re-incrementing here would double-count
-            // the same session across import -> promote (the #3122 failover
-            // double-count hazard). The count is left untouched; only the
-            // Open delta is emitted, to announce the new local ownership to
-            // this node's peers.
+            // #3122/#10310: a counted peer import -> local promote is
+            // COUNT-NEUTRAL because the slot was charged at import. A
+            // WorkerLocalImport -> local promote was uncounted and the
+            // transition bookkeeping above adds its one slot. In both cases
+            // this Open-delta branch must not increment again: it only
+            // announces the new local ownership to this node's peers.
             // #2465: a promote keeps the original entry's write-once
             // created_ns (the update block above does not touch it); pair it
             // with the refresh instant as last_seen. Informational on an Open
@@ -3166,17 +3172,13 @@ impl SessionTable {
         );
         // Only AFTER all indices are clean, return slot to slab.
         let record = self.entries.remove(handle as usize);
-        // #2134/#3122: decrement the per-IP count for a removed counted
-        // session (success path ONLY — the two early `None` guards above
-        // RESTORE the mapping and do not remove, so they must not
-        // decrement). The counted-class is now PRESENCE-based and
-        // ORIGIN-AGNOSTIC (#3122): a forward, non-seed session is charged
-        // whether it was locally admitted OR imported from the HA peer, so
-        // the decrement must fire for peer-synced removals too (previously
-        // gated on `!is_peer_synced()`, which leaked the import count when
-        // a synced session expired). This is the sole removal sink, so the
-        // decrement balances every increment (install + synced import).
-        if !removed_is_reverse && !removed_origin.is_transient_local_seed() {
+        // #2134/#3122/#10310: decrement the per-IP count for a removed
+        // counted session (success path ONLY — the two early `None` guards
+        // above RESTORE the mapping and do not decrement). The shared
+        // counted-class predicate charges true HA peer imports, but not a
+        // WorkerLocalImport replica, so removal balances the matching create
+        // or promotion transition exactly.
+        if !removed_is_reverse && install::session_limit_origin_counted(removed_origin) {
             self.session_limit_dec(key.src_ip, key.dst_ip);
         }
         // #9856: harvest an export tombstone for genuine terminal

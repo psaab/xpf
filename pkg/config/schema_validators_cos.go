@@ -51,10 +51,12 @@ func ValidateByteSize(raw string, _ *Config) error {
 // (it is unambiguous bytes for a policer bucket and was a valid,
 // compiling input before this gate). What IS rejected is the fail-closed
 // input the pre-#5299 parseBurstSizeLimit silently coerced to 0 (or, on
-// overflow, wrapped to a small nonzero): empty, zero, negative,
-// malformed (15kk), and any value whose scaled product overflows uint64.
-// A 0-byte bucket fail-closes the policer to a drop-all meter for the
-// default `then discard`, so a typo must not commit clean.
+// overflow, wrapped to a small nonzero), plus a bucket smaller than one
+// maximum-sized packet. A sub-packet bucket cannot admit an ordinary MTU
+// frame and otherwise commits a configuration that drops/marks every such
+// packet.
+const minPolicerBurstBytes uint64 = 1500
+
 func ValidatePolicerBurstSize(raw string, _ *Config) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -64,8 +66,12 @@ func ValidatePolicerBurstSize(raw string, _ *Config) error {
 	if err != nil {
 		return fmt.Errorf("not a valid burst-size-limit (expected bytes, optionally with a k/m/g suffix, e.g. 15k): %w", err)
 	}
-	if n == 0 {
-		return fmt.Errorf("burst-size-limit must be greater than zero (0 compiles the same as unset and fail-closes the policer to a drop-all meter)")
+	if n < minPolicerBurstBytes {
+		return fmt.Errorf(
+			"burst-size-limit must be at least one 1500-byte packet (%d bytes), got %d",
+			minPolicerBurstBytes,
+			n,
+		)
 	}
 	return nil
 }

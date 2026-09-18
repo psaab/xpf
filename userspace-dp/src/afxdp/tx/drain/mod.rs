@@ -517,13 +517,15 @@ pub(super) fn ingest_cos_pending_tx_with_provenance(
             Some(Step1Action::Command(owner_worker_id)) => {
                 if let Some(commands) = worker_commands_by_id.get(owner_worker_id) {
                     // #1807: a poisoned mutex is RECOVERED (committed-
-                    // prefix + clear_poison policy, worker_queue.rs), so
-                    // the request always lands on the owner's queue —
-                    // poison used to fall through to Step 2/3 and could
-                    // lose the cross-worker shaped-TX request.
+                    // prefix + clear_poison policy, worker_queue.rs).
                     let mut pending = crate::afxdp::worker_queue::lock_recover(commands);
-                    worker_queue::push_bounded(&mut pending, WorkerCommand::EnqueueShapedLocal(req));
-                    return Ok(());
+                    match worker_queue::push_shaped_local_bounded(
+                        &mut pending,
+                        req,
+                    ) {
+                        Ok(()) => return Ok(()),
+                        Err(req) => req,
+                    }
                 } else {
                     req
                 }
