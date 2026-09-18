@@ -33,19 +33,15 @@ func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) 
 	// Ensure parent is UP — IPVLAN inherits carrier from parent.
 	netlink.LinkSetUp(parentLink)
 
-	// Set the configured fabric MTU on the parent before creating/reconciling
-	// the overlay. The overlay cannot exceed its parent.
 	wantMTU := fabricMTU10216(configuredMTU)
-	if err := reconcileFabricMTU10216(parent, parentLink, wantMTU); err != nil {
-		return fmt.Errorf("fabric parent %s MTU reconciliation: %w", parent, err)
-	}
 
-	// Check if IPVLAN already exists on correct parent.
+	// Check if IPVLAN already exists on the correct parent. A decrease must
+	// lower the overlay first; Linux rejects a parent decrease while an upper
+	// IPVLAN still advertises the larger MTU.
 	if existing, err := netlink.LinkByName(name); err == nil {
 		if existing.Attrs().ParentIndex == parentLink.Attrs().Index {
-			// Already correct — reconcile addresses, MTU, and ensure UP (#127).
-			if err := reconcileFabricMTU10216(name, existing, wantMTU); err != nil {
-				return fmt.Errorf("fabric IPVLAN %s MTU reconciliation: %w", name, err)
+			if err := reconcileFabricMTUPair10216(parent, parentLink, name, existing, wantMTU); err != nil {
+				return err
 			}
 			reconcileIPVLANAddrs(existing, name, addrs)
 			netlink.LinkSetUp(existing)
@@ -55,6 +51,11 @@ func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) 
 		netlink.LinkDel(existing)
 	}
 
+	// New overlays have no upper-device ordering constraint, so reconcile the
+	// parent before creation. The overlay is reconciled again after LinkAdd.
+	if err := reconcileFabricMTU10216(parent, parentLink, wantMTU); err != nil {
+		return fmt.Errorf("fabric parent %s MTU reconciliation: %w", parent, err)
+	}
 	ipvlan := &netlink.IPVlan{
 		LinkAttrs: netlink.LinkAttrs{
 			Name:        name,

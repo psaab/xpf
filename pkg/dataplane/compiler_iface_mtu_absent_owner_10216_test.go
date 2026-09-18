@@ -235,3 +235,16 @@ func TestFabricOwnedAbsentMemberStaysSilent_10216(t *testing.T) {
 			"or this control passes vacuously", len(result.unarmedSurfaces))
 	}
 }
+func TestInterfaceMTULookupFailureKeepsPresenceUnknown_10216(t *testing.T) {
+	result := &CompileResult{}
+	recordAbsentInterfaceMTU10216(result, &physDesired{mtu: 1400, mtuExplicit: true},
+		"ge-9-0-9", "ge-9-0-9", false)
+	recs := result.sortedMTUUnconverged()
+	if len(recs) != 1 {
+		t.Fatalf("MTU records = %+v, want one lookup-failed diagnostic", recs)
+	}
+	if !strings.Contains(recs[0].Detail, "lookup failed") ||
+		strings.Contains(recs[0].Detail, "is absent") {
+		t.Fatalf("detail = %q, want unknown presence without an absence claim", recs[0].Detail)
+	}
+}

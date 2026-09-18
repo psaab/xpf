@@ -43,3 +43,25 @@ func reconcileFabricMTU10216(name string, link netlink.Link, want int) error {
 	}
 	return nil
 }
+
+// reconcileFabricMTUPair10216 orders a parent/overlay transition so a jumbo
+// overlay is lowered before its parent. Linux rejects lowering a parent below
+// an attached upper device's MTU; increases remain parent-first because an
+// IPVLAN cannot exceed its parent.
+func reconcileFabricMTUPair10216(parentName string, parent netlink.Link, overlayName string, overlay netlink.Link, want int) error {
+	lowerOverlayFirst := overlay != nil && overlay.Attrs() != nil && overlay.Attrs().MTU > want
+	if lowerOverlayFirst {
+		if err := reconcileFabricMTU10216(overlayName, overlay, want); err != nil {
+			return fmt.Errorf("fabric IPVLAN %s MTU reconciliation: %w", overlayName, err)
+		}
+	}
+	if err := reconcileFabricMTU10216(parentName, parent, want); err != nil {
+		return fmt.Errorf("fabric parent %s MTU reconciliation: %w", parentName, err)
+	}
+	if overlay != nil && !lowerOverlayFirst {
+		if err := reconcileFabricMTU10216(overlayName, overlay, want); err != nil {
+			return fmt.Errorf("fabric IPVLAN %s MTU reconciliation: %w", overlayName, err)
+		}
+	}
+	return nil
+}
