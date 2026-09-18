@@ -139,8 +139,9 @@ const (
 // downgrade-guard signal. Its only consumer was syncPeerAuthSeen, which the
 // unconditional keyed-node rejection made unreachable, so the requirement went
 // with it. Manager still EXPORTS HeartbeatPeerAuthSeen — the gRPC fabric
-// listener (pkg/grpcapi) and the control-link auth status string both consume
-// it — it is simply no longer part of this interface's contract.
+// listener consumes it — it is simply no longer part of this interface's
+// contract, and the control-link auth status string renders from local key
+// state instead (#10315).
 type SyncAuthProvider interface {
 	ControlLinkAuthKey() []byte
 }

@@ -372,8 +372,9 @@ func TestHeartbeatReplayGatesLivenessRefresh(t *testing.T) {
 }
 
 // TestHeartbeatAuthDecision is the RED-on-revert core: it pins the accept/reject
-// truth table of the dual-accept policy. Reverting the enforcement (e.g. always
-// returning accept, or dropping the macOK/peerAuthSeen checks) turns one of
+// truth table of the keyed-reject policy (#10315: no first-contact grace).
+// Reverting the enforcement (e.g. always returning accept, or dropping the
+// macOK/nonceFresh checks) turns one of
 // these REJECT cases GREEN — i.e. a forged/unauthenticated heartbeat would
 // drive election.
 func TestHeartbeatAuthDecision(t *testing.T) {

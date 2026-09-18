@@ -1,9 +1,9 @@
 // controllink_auth_status_4484_test.go — #4484 L-9: the control-plane
 // statistics surface must reveal whether the #4107 control-link authentication
 // is ENGAGED (enforced) or silently degraded to DUAL-ACCEPT. The status string
-// is derived from the same two facts the auth-decision gates use
-// (ControlLinkAuthKey + HeartbeatPeerAuthSeen), so it tracks the real
-// enforcement posture.
+// renders from the local key fact (ControlLinkAuthKey configured), so it
+// tracks the real enforcement posture (#10315: no longer gated on
+// HeartbeatPeerAuthSeen).
 package cluster
 
 import (
