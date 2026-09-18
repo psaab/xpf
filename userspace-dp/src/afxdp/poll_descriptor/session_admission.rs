@@ -1,9 +1,9 @@
 // #6386 leaf extraction: the new-flow session-admission predicates
-// (#2134 per-IP session-limit, #4400 strict-syn-check bare-RST/FIN drop),
-// lifted verbatim out of poll_descriptor/mod.rs. Each moved bare fn
-// becomes pub(super); both keep their existing #[inline]. Attr-verbatim,
-// no other non-motion change. Bodies byte-identical to their prior
-// location.
+// (#2134 per-IP session-limit, #4400/#10270 non-SYN TCP session-MISS drop),
+// originally lifted verbatim out of poll_descriptor/mod.rs. Each moved bare fn
+// becomes pub(super); both keep their existing #[inline] attributes. The
+// extraction keeps the poll call site small; behavior-specific changes remain
+// in this leaf and are covered by its tests.
 
 use super::*;
 
@@ -50,40 +50,25 @@ pub(super) fn new_flow_session_limit_drop(
     None
 }
 
-/// #4400: strict-syn-check-style guard for the TCP session-MISS install
-/// path.
+/// #4400/#10270: strict-syn-check-style guard for the TCP session-MISS
+/// install path.
 ///
-/// Junos `security flow tcp-session strict-syn-check` requires the FIRST
-/// packet of a TCP flow to be a SYN and drops a non-SYN first packet. xpf
-/// deliberately keeps the looser Junos default (no-syn-check) so a SYN-ACK /
-/// bare ACK / data first packet may still open an ESTABLISHED session
-/// (#3152), preserving asymmetric-routing mid-stream pickup. A bare RST/FIN,
-/// however — a connection-CLOSING control bit (FIN or RST) with NO SYN — can
-/// never legitimately OPEN a connection: a real flow starts with a SYN, and
-/// a RST/FIN for a flow this node does not track is either a late segment for
-/// an already-GC'd session or an attack. Installing a session for it (which
-/// the ForwardCandidate / MissingNeighbor session-miss install sites would
-/// otherwise do, seeding an immediately-`closing`/`reset` entry — see
-/// `session/install.rs` lines that set `closing` / `reset` from `tcp_flags`)
-/// provides no forwarding value and lets a RST/FIN flood churn the per-worker
-/// session table (a real DoS surface, #4400, confirmed 4x).
+/// A TCP packet that misses the session table can only create a new transit
+/// session when it is a SYN. A non-SYN ACK/PSH/data packet with no matching
+/// session is either a late segment for an expired flow or a midstream tuple
+/// the firewall never observed; admitting it would let a policy-permitted
+/// destination carry traffic without conntrack state (#10270). The same
+/// fail-closed rule covers bare RST/FIN (#4400), which can never legitimately
+/// open a connection and would otherwise churn closing entries.
 ///
-/// This predicate returns true for exactly that pathological case (TCP, FIN
-/// or RST set, SYN clear); the session-MISS cold path drops such a packet
-/// before it reaches an install site. Non-TCP traffic and any SYN-bearing
-/// segment (bare SYN, SYN-ACK, the malformed SYN-FIN the `tcp-syn-fin` screen
-/// check owns) return false — unchanged behavior. Applied unconditionally
-/// (no config knob): a stray RST/FIN opening a closing session is never
-/// useful regardless of the operator's strict-syn-check setting, so this is
-/// the safe stateful-firewall default. Host-inbound (LocalDelivery) traffic
-/// is exempt at the call site so a peer RST tearing down a firewall-
-/// originated TCP session (BGP, IKE, management) still reaches the local
-/// stack.
+/// Established and HA-synced flows are session HITS and never reach this
+/// session-MISS predicate. SYN-bearing packets (including SYN-ACK on an
+/// asymmetric path) remain eligible for the existing no-syn-check behavior.
+/// LocalDelivery is exempt at the poll call site so a peer control packet for
+/// a firewall-originated connection still reaches the local stack.
 #[inline]
 pub(super) fn strict_syn_check_drops_new_flow(protocol: u8, tcp_flags: u8) -> bool {
-    matches!(protocol, crate::ip_proto::PROTO_TCP)
-        && crate::tcp_flags::is_closing(tcp_flags)
-        && !crate::tcp_flags::has_syn(tcp_flags)
+    matches!(protocol, crate::ip_proto::PROTO_TCP) && !crate::tcp_flags::has_syn(tcp_flags)
 }
 
 #[cfg(test)]

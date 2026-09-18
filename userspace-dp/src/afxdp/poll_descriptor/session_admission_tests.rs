@@ -170,20 +170,21 @@ mod new_flow_session_limit_tests {
     }
 }
 
-/// #4400: strict-syn-check drop on the TCP session-MISS install path. A bare
-/// RST/FIN (a closing control bit with no SYN) can never open a connection, so
-/// the session-miss cold path drops it before it seeds an immediately-`closing`
-/// session (P6, confirmed 4x). These drive the extracted decision predicate
-/// `strict_syn_check_drops_new_flow` and model the guarded install directly
-/// against a real `SessionTable` (the poll loop body is un-callable). RED on
-/// revert: without the guard a bare RST/FIN installs a closing session, so the
-/// `table.len() == 0` assertions fail.
+/// #4400/#10270: strict-syn-check drop on the TCP session-MISS install path.
+/// A TCP packet that misses the session table can only create a new transit
+/// session when it carries SYN. Non-SYN ACK/PSH/data, including the original
+/// bare RST/FIN subset, is either a late segment for an already-GC'd session
+/// or a midstream tuple this firewall never observed. These drive the
+/// extracted decision predicate and model the guarded install directly
+/// against a real `SessionTable` (the poll loop body is un-callable).
+/// RED on revert: without the guard a non-SYN miss installs a session, so the
+/// expired/fresh burst tests observe transit/session creation.
 #[cfg(test)]
 mod strict_syn_check_tests {
     use super::*;
     use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
     use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
-    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn tcp_key(src_port: u16) -> SessionKey {
@@ -233,10 +234,10 @@ mod strict_syn_check_tests {
     }
 
     /// Model the poll_descriptor session-MISS guard for a ForwardCandidate
-    /// transit new flow: a bare RST/FIN first packet is DROPPED (no install);
-    /// any other first packet installs. Returns true iff a session was
-    /// installed. Byte-for-byte the same predicate gate the production path
-    /// applies before `install_with_protocol_with_origin`.
+    /// transit new flow: only SYN-bearing TCP packets are installed. Returns
+    /// true iff a session was installed. Byte-for-byte the same predicate
+    /// gate the production path applies before
+    /// `install_with_protocol_with_origin`.
     fn install_on_miss(table: &mut SessionTable, key: SessionKey, flags: u8) -> bool {
         if strict_syn_check_drops_new_flow(PROTO_TCP, flags) {
             return false;
@@ -253,22 +254,29 @@ mod strict_syn_check_tests {
     }
 
     #[test]
-    fn predicate_drops_only_bare_rst_fin() {
-        // A closing control bit (FIN or RST) with NO SYN -> DROP.
-        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_RST));
-        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_FIN));
-        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_FIN | TCP_ACK));
-        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_RST | TCP_ACK));
-        // SYN-bearing (bare SYN, SYN-ACK, malformed SYN-FIN owned by the
-        // tcp-syn-fin screen check) and bare ACK / data -> NOT dropped, so
-        // legitimate opens and #3152 asymmetric-routing mid-stream pickup are
-        // preserved.
+    fn predicate_drops_every_non_syn_tcp_miss() {
+        // The complete non-SYN family is fail-closed on a session miss,
+        // including ACK/PSH bursts and the original bare RST/FIN subset.
+        for flags in [
+            TCP_ACK,
+            TCP_ACK | TCP_PSH,
+            0,
+            TCP_FIN,
+            TCP_RST,
+            TCP_FIN | TCP_ACK,
+            TCP_RST | TCP_ACK,
+        ] {
+            assert!(
+                strict_syn_check_drops_new_flow(PROTO_TCP, flags),
+                "non-SYN TCP flags 0x{flags:02x} must drop on a miss"
+            );
+        }
+        // SYN-bearing packets remain eligible for a new session, including
+        // asymmetric-path SYN-ACK and the existing tcp-syn-fin screen case.
         assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN));
         assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN | TCP_ACK));
         assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN | TCP_FIN));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_ACK));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, 0));
-        // Non-TCP is never gated.
+        // Non-TCP traffic is never gated by this TCP-only predicate.
         assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_RST));
         assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_FIN));
     }
@@ -290,15 +298,106 @@ mod strict_syn_check_tests {
     }
 
     #[test]
-    fn syn_and_midstream_first_packet_still_install() {
+    fn syn_only_first_packet_installs_on_miss() {
         let mut table = SessionTable::new();
         // A legitimate connection open (bare SYN) still installs.
         assert!(install_on_miss(&mut table, tcp_key(40100), TCP_SYN));
-        // Asymmetric routing: a SYN-ACK on miss installs per existing policy.
+        // Asymmetric routing: a SYN-ACK on miss remains eligible.
         assert!(install_on_miss(&mut table, tcp_key(40101), TCP_SYN | TCP_ACK));
-        // Mid-stream pickup: a bare ACK / data first packet still installs.
-        assert!(install_on_miss(&mut table, tcp_key(40102), TCP_ACK));
-        assert_eq!(table.len(), 3);
+        // A bare ACK / ACK+PSH first packet is a session-less midstream
+        // attempt and is dropped rather than opening a new transit session.
+        assert!(!install_on_miss(
+            &mut table,
+            tcp_key(40102),
+            TCP_ACK | TCP_PSH
+        ));
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn expired_and_fresh_non_syn_bursts_drop_10270() {
+        let mut table = SessionTable::new();
+        let expired = tcp_key(40300);
+        let now = 1_000_000_000u64;
+        // Seed an established tuple directly (the equivalent of a confirmed
+        // existing session), then advance beyond the default 300 s idle window.
+        assert!(table.install_with_protocol_with_origin(
+            expired.clone(),
+            fwd_decision(),
+            fwd_meta(),
+            SessionOrigin::ForwardFlow,
+            now,
+            PROTO_TCP,
+            TCP_ACK,
+        ));
+        let _ = table.expire_stale_entries(now + 301_000_000_000);
+        assert!(
+            table.probe_with_origin_at(&expired, now + 301_000_000_000).is_none(),
+            "expired tuple must be a session miss before the ACK/PSH burst"
+        );
+        let fresh = tcp_key(40301);
+        let mut expired_transit = 0usize;
+        let mut fresh_transit = 0usize;
+        // Match the wire gate's 1000-frame probe floor. A reverted predicate
+        // installs/replaces the tuple on every first miss and makes these counts
+        // nonzero; the fixed path drops all 2000 frames.
+        for _ in 0..1000 {
+            expired_transit += usize::from(install_on_miss(
+                &mut table,
+                expired.clone(),
+                TCP_ACK | TCP_PSH,
+            ));
+            fresh_transit += usize::from(install_on_miss(
+                &mut table,
+                fresh.clone(),
+                TCP_ACK | TCP_PSH,
+            ));
+        }
+        assert_eq!(expired_transit, 0, "expired ACK/PSH burst must not transit");
+        assert_eq!(fresh_transit, 0, "fresh ACK/PSH burst must not transit");
+        assert!(
+            table.probe_with_origin_at(&expired, now + 301_000_000_000).is_none()
+        );
+        assert!(table.probe_with_origin_at(&fresh, now + 301_000_000_000).is_none());
+    }
+
+    #[test]
+    fn established_and_ha_synced_non_syn_hits_are_unaffected_10270() {
+        let mut table = SessionTable::new();
+        let now = 1_000_000_000u64;
+        let established = tcp_key(40302);
+        assert!(table.install_with_protocol_with_origin(
+            established.clone(),
+            fwd_decision(),
+            fwd_meta(),
+            SessionOrigin::ForwardFlow,
+            now,
+            PROTO_TCP,
+            TCP_ACK,
+        ));
+        assert!(
+            table
+                .lookup(&established, now + 1_000_000, TCP_ACK | TCP_PSH)
+                .is_some(),
+            "a confirmed existing session remains a normal hit"
+        );
+
+        let synced = tcp_key(40303);
+        table.upsert_synced(
+            synced.clone(),
+            fwd_decision(),
+            fwd_meta(),
+            now,
+            PROTO_TCP,
+            TCP_ACK,
+            false,
+        );
+        assert!(
+            table
+                .lookup(&synced, now + 2_000_000, TCP_ACK | TCP_PSH)
+                .is_some(),
+            "an HA-synced session remains a normal hit"
+        );
     }
 
     #[test]

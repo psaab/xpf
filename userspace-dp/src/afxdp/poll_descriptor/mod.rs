@@ -2292,41 +2292,35 @@ pub(super) fn poll_binding_process_descriptor(
                             from_zone_id,
                             ha_startup_grace_until_secs,
                         );
-                        // #4400: strict-syn-check drop. A bare TCP RST/FIN (a
-                        // connection-closing control bit with no SYN) that
-                        // MISSES the session table can never legitimately open
-                        // a connection — a real flow starts with a SYN, and a
-                        // RST/FIN for a flow this node does not track is a late
-                        // segment for an already-GC'd session or an attack.
-                        // Dropping it here, before the ForwardCandidate /
-                        // MissingNeighbor install sites below, keeps a RST/FIN
-                        // flood from churning the per-worker session table with
-                        // immediately-`closing` seed entries (P6, confirmed 4x).
-                        // A SYN-ACK / bare ACK / data first packet is NOT
-                        // dropped, preserving the Junos no-syn-check default and
-                        // #3152 asymmetric-routing mid-stream pickup. Only the
-                        // two TRANSIT dispositions that seed a new local session
-                        // from this packet's flags are gated: LocalDelivery
+                        // #4400/#10270: fail closed on any non-SYN TCP
+                        // session-MISS packet. A bare ACK/PSH/data tuple with
+                        // no matching session is either a late segment for an
+                        // already-expired flow or a midstream flow this
+                        // firewall never observed; forwarding it would admit
+                        // traffic without conntrack state. Bare RST/FIN is the
+                        // original #4400 subset and would otherwise churn
+                        // immediately-closing entries.
+                        // Dropping here, before the ForwardCandidate /
+                        // MissingNeighbor install sites below, makes the
+                        // session-MISS path fail closed. Only the two TRANSIT
+                        // dispositions that seed a new local session from
+                        // this packet's flags are gated: LocalDelivery
                         // (host-inbound to the RE) is deliberately exempt so a
-                        // peer RST tearing down a firewall-originated TCP session
+                        // peer control packet for a firewall-originated session
                         // (BGP, IKE, management) still reaches the local stack,
-                        // and NoRoute / FabricRedirect / HAInactive never seed a
-                        // local session from this packet. Legitimate teardowns
-                        // for a SYNCED peer-owned session are session HITs served
-                        // by `resolve_flow_session_decision` before the fast path;
-                        // a session-MISS fabric-ingress bare RST/FIN is dropped
-                        // RIGHT HERE by this strict-syn-check (#6478 removed the
-                        // cluster-peer return fast path — session-less
-                        // fabric-ingress packets take this normal miss path), so
-                        // the local and fabric-ingress paths handle a bare
-                        // RST/FIN identically.
+                        // and NoRoute / FabricRedirect / HAInactive never seed
+                        // a local session from this packet. Established and
+                        // HA-synced sessions are session HITS served by
+                        // `resolve_flow_session_decision` before this miss path.
+                        // A SYN or SYN-ACK remains eligible for the existing
+                        // asymmetric-routing no-syn-check behavior.
                         // Counted in the aggregate `screen_drops` flow-statistics
                         // tally (no per-reason ordinal — that array mirrors the
-                        // Junos SCREEN checks, and strict-syn-check is a flow
-                        // tcp-session control, not a screen check; joins the
-                        // syn-cookie / icmp-fragment aggregate-only class). No
-                        // per-packet event is emitted: a RST/FIN flood must not
-                        // become a log storm.
+                        // Junos SCREEN checks, and this is a flow tcp-session
+                        // control; it joins the syn-cookie / icmp-fragment
+                        // aggregate-only class). No per-packet event is emitted:
+                        // a non-SYN session-miss flood must not become a log
+                        // storm.
                         if matches!(
                             decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
