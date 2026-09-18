@@ -42,6 +42,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     let cos_bound = |payload: u8| TxRequest {
@@ -54,6 +55,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     let mut pending: VecDeque<TxRequest> = VecDeque::from([
@@ -94,6 +96,7 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     let cos_bound = TxRequest {
@@ -106,6 +109,7 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     let mut pending: VecDeque<TxRequest> = VecDeque::from([non_cos, cos_bound]);
@@ -136,6 +140,7 @@ fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
             cos_queue_id: None,
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
         TxRequest {
@@ -148,6 +153,7 @@ fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
             cos_queue_id: None,
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
     ]);
@@ -249,6 +255,7 @@ fn park_drained_deques_keeps_both_allocations_7204() {
         cos_queue_id: None,
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     });
     let restored2 = pipeline2.park_drained_deques(pending2, retry2);

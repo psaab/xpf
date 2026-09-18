@@ -129,6 +129,18 @@ struct OverlapEntry {
     key: OverlapKey,
     ranges: [(u32, u32); OVERLAP_MAX_RANGES],
     len: u8,
+    terminal_end: Option<u32>,
+    /// Revision of the current range set. Completion snapshots use this to
+    /// reject stale releases after a concurrent mutation.
+    revision: u64,
+    /// Incarnation of this key's entry. Admission tokens use this stable value
+    /// while several queued fragments commit out of order.
+    incarnation: u64,
+    /// Number of recorded fragments whose final admission outcome is pending.
+    pending: u32,
+    /// A failed admission makes this datagram permanently ineligible for
+    /// completion reclaim. Its ranges remain as overlap protection until TTL.
+    failed: bool,
     deadline_ns: u64,
     created_ns: u64,
 }
@@ -140,7 +152,7 @@ struct OverlapEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlapParse {
     NonFragment,
-    Fragment(OverlapKey, u32, u32),
+    Fragment(OverlapKey, u32, u32, bool),
     Unreadable,
 }
 
@@ -148,6 +160,7 @@ pub(crate) enum OverlapParse {
 #[derive(Clone)]
 pub(crate) struct OverlapTracker {
     shards: Arc<Vec<Mutex<Vec<OverlapEntry>>>>,
+    next_revision: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for OverlapTracker {
@@ -211,6 +224,31 @@ fn overlap_entry_live(e: &OverlapEntry, now_ns: u64, lifetime_evictions: &mut u6
     idle_live && absolutely_live
 }
 
+#[inline]
+fn ranges_cover_terminal(e: &OverlapEntry, terminal_end: u32) -> bool {
+    if e.len == 0 || e.ranges[0].0 != 0 {
+        return false;
+    }
+    let mut covered_end = 0u32;
+    for &(start, end) in e.ranges.iter().take(e.len as usize) {
+        if start > covered_end {
+            return false;
+        }
+        covered_end = covered_end.max(end);
+    }
+    covered_end == terminal_end
+}
+
+#[inline]
+fn completion_token(e: &OverlapEntry) -> Option<OverlapCompletionToken> {
+    let terminal_end = e.terminal_end?;
+    ranges_cover_terminal(e, terminal_end).then_some(OverlapCompletionToken {
+        key: e.key,
+        terminal_end,
+        revision: e.revision,
+    })
+}
+
 /// Dry-run merge of `new` into `len` ranges: sort by start, coalesce adjacency
 /// (`nxt.0 <= cur.1`), return the merged set — or `Err(())` on would-overflow.
 /// Shared by [`OverlapTracker::check_overlap`] (discards) and
@@ -266,11 +304,123 @@ pub(crate) enum OverlapDropReason {
     ShardFull,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A reservation for one fragment that was recorded but has not yet reached
+/// its final forwarding outcome. The entry incarnation remains stable while
+/// queued fragments commit out of order. The token is intentionally non-Copy:
+/// settlement transfers ownership so a caller cannot settle the same
+/// reservation twice.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct OverlapAdmissionToken {
+    key: OverlapKey,
+    incarnation: u64,
+}
+
+/// A pair of reservations for the arrival and translated reassembly identities.
+/// The pair owns the tracker handle so every queue/drop path has RAII failure
+/// semantics; only an explicit commit disarms the tokens.
+pub(crate) struct OverlapAdmissionTokens {
+    tracker: OverlapTracker,
+    pub(crate) pre: Option<OverlapAdmissionToken>,
+    pub(crate) post: Option<OverlapAdmissionToken>,
+}
+
+impl std::fmt::Debug for OverlapAdmissionTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OverlapAdmissionTokens")
+            .field("pre", &self.pre)
+            .field("post", &self.post)
+            .finish()
+    }
+}
+
+impl OverlapAdmissionTokens {
+    pub(crate) fn new(
+        tracker: OverlapTracker,
+        pre: Option<OverlapAdmissionToken>,
+        post: Option<OverlapAdmissionToken>,
+    ) -> Self {
+        Self { tracker, pre, post }
+    }
+
+    /// Final TX submission accepted both identities. This consumes the
+    /// reservations without invoking their failure-on-drop guard.
+    pub(crate) fn commit(&mut self) {
+        if let Some(token) = self.pre.take() {
+            self.tracker.commit_admission(token);
+        }
+        if let Some(token) = self.post.take() {
+            self.tracker.commit_admission(token);
+        }
+    }
+}
+
+impl Drop for OverlapAdmissionTokens {
+    fn drop(&mut self) {
+        if let Some(token) = self.pre.take() {
+            self.tracker.fail_admission(token);
+        }
+        if let Some(token) = self.post.take() {
+            self.tracker.fail_admission(token);
+        }
+    }
+}
+
+/// A completion snapshot held until every recorded fragment has settled.
+/// Reclaim validates the entry's incarnation under the shard lock, so a
+/// concurrent worker cannot cause a stale completion to delete newer ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverlapCompletionToken {
+    key: OverlapKey,
+    terminal_end: u32,
+    revision: u64,
+}
+
+#[derive(Debug)]
 pub(crate) struct OverlapCheckResult {
     pub(crate) dropped: bool,
     pub(crate) reason: Option<OverlapDropReason>,
     pub(crate) lifetime_evictions: u64,
+    /// Snapshot for diagnostics/tests; production settlement uses `admission`
+    /// because completion can be observed before other fragments settle.
+    pub(crate) completion: Option<OverlapCompletionToken>,
+    /// Reservation ownership that must be committed or failed exactly once.
+    pub(crate) admission: Option<OverlapAdmissionToken>,
+    /// Tracker used by the drop guard when a caller discards an admission
+    /// without transferring it to a final forwarding owner.
+    pub(crate) tracker: Option<OverlapTracker>,
+}
+
+impl Default for OverlapCheckResult {
+    fn default() -> Self {
+        Self {
+            dropped: false,
+            reason: None,
+            lifetime_evictions: 0,
+            completion: None,
+            admission: None,
+            tracker: None,
+        }
+    }
+}
+
+impl PartialEq for OverlapCheckResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.dropped == other.dropped
+            && self.reason == other.reason
+            && self.lifetime_evictions == other.lifetime_evictions
+            && self.completion == other.completion
+            && self.admission == other.admission
+    }
+}
+
+impl Eq for OverlapCheckResult {}
+
+impl Drop for OverlapCheckResult {
+    fn drop(&mut self) {
+        if let (Some(tracker), Some(token)) = (self.tracker.as_ref(), self.admission.take()) {
+            tracker.fail_admission(token);
+        }
+    }
 }
 
 impl OverlapTracker {
@@ -281,6 +431,7 @@ impl OverlapTracker {
         }
         Self {
             shards: Arc::new(shards),
+            next_revision: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -298,8 +449,23 @@ impl OverlapTracker {
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> bool {
-        self.check_overlap_detailed(key, start, end, now_ns, drop_counter)
-            .dropped
+        let result =
+            self.check_overlap_fragment_detailed(key, start, end, false, now_ns, drop_counter);
+        result.dropped
+    }
+
+    pub(crate) fn check_overlap_fragment(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        is_last: bool,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> bool {
+        let result =
+            self.check_overlap_fragment_detailed(key, start, end, is_last, now_ns, drop_counter);
+        result.dropped
     }
 
     pub(crate) fn check_overlap_detailed(
@@ -310,12 +476,27 @@ impl OverlapTracker {
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> OverlapCheckResult {
+        self.check_overlap_fragment_detailed(key, start, end, false, now_ns, drop_counter)
+    }
+
+    pub(crate) fn check_overlap_fragment_detailed(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        _is_last: bool,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> OverlapCheckResult {
         if start >= end {
             drop_counter.fetch_add(1, Ordering::Relaxed);
             return OverlapCheckResult {
                 dropped: true,
                 reason: Some(OverlapDropReason::Overlap),
-                ..OverlapCheckResult::default()
+                lifetime_evictions: 0,
+                completion: None,
+                admission: None,
+                tracker: None,
             };
         }
         let idx = overlap_shard_index(&key);
@@ -326,8 +507,12 @@ impl OverlapTracker {
         shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
         let Some(pos) = shard.iter().position(|e| e.key == key) else {
             return OverlapCheckResult {
+                dropped: false,
+                reason: None,
                 lifetime_evictions,
-                ..OverlapCheckResult::default()
+                completion: None,
+                admission: None,
+                tracker: None,
             };
         };
         for i in 0..(shard[pos].len as usize) {
@@ -338,6 +523,9 @@ impl OverlapTracker {
                     dropped: true,
                     reason: Some(OverlapDropReason::Overlap),
                     lifetime_evictions,
+                    completion: None,
+                    admission: None,
+                    tracker: None,
                 };
             }
         }
@@ -347,11 +535,18 @@ impl OverlapTracker {
                 dropped: true,
                 reason: Some(OverlapDropReason::Overflow),
                 lifetime_evictions,
+                completion: None,
+                admission: None,
+                tracker: None,
             };
         }
         OverlapCheckResult {
+            dropped: false,
+            reason: None,
             lifetime_evictions,
-            ..OverlapCheckResult::default()
+            completion: None,
+            admission: None,
+            tracker: None,
         }
     }
 
@@ -371,8 +566,31 @@ impl OverlapTracker {
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> bool {
-        self.check_and_record_detailed(key, start, end, now_ns, drop_counter)
-            .dropped
+        let mut result =
+            self.check_and_record_fragment_detailed(key, start, end, false, now_ns, drop_counter);
+        let dropped = result.dropped;
+        if let Some(admission) = result.admission.take() {
+            self.commit_admission(admission);
+        }
+        dropped
+    }
+
+    pub(crate) fn check_and_record_fragment(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        is_last: bool,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> bool {
+        let mut result =
+            self.check_and_record_fragment_detailed(key, start, end, is_last, now_ns, drop_counter);
+        let dropped = result.dropped;
+        if let Some(admission) = result.admission.take() {
+            self.commit_admission(admission);
+        }
+        dropped
     }
 
     pub(crate) fn check_and_record_detailed(
@@ -383,12 +601,27 @@ impl OverlapTracker {
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> OverlapCheckResult {
+        self.check_and_record_fragment_detailed(key, start, end, false, now_ns, drop_counter)
+    }
+
+    pub(crate) fn check_and_record_fragment_detailed(
+        &self,
+        key: OverlapKey,
+        start: u32,
+        end: u32,
+        is_last: bool,
+        now_ns: u64,
+        drop_counter: &AtomicU64,
+    ) -> OverlapCheckResult {
         if start >= end {
             drop_counter.fetch_add(1, Ordering::Relaxed);
             return OverlapCheckResult {
                 dropped: true,
                 reason: Some(OverlapDropReason::Overlap),
-                ..OverlapCheckResult::default()
+                lifetime_evictions: 0,
+                completion: None,
+                admission: None,
+                tracker: None,
             };
         }
         let idx = overlap_shard_index(&key);
@@ -406,6 +639,9 @@ impl OverlapTracker {
                         dropped: true,
                         reason: Some(OverlapDropReason::Overlap),
                         lifetime_evictions,
+                        completion: None,
+                        admission: None,
+                        tracker: None,
                     };
                 }
             }
@@ -418,18 +654,35 @@ impl OverlapTracker {
                         dropped: true,
                         reason: Some(OverlapDropReason::Overflow),
                         lifetime_evictions,
+                        completion: None,
+                        admission: None,
+                        tracker: None,
                     };
                 }
                 Ok((ranges, len)) => {
                     let mut e = shard.remove(pos);
                     e.ranges = ranges;
                     e.len = len;
+                    if is_last && e.terminal_end.is_none() {
+                        e.terminal_end = Some(end);
+                    }
+                    e.revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+                    e.pending = e.pending.saturating_add(1);
                     e.deadline_ns = now_ns.saturating_add(OVERLAP_TTL_NS);
                     // created_ns NEVER refreshed (absolute bound from first sighting).
+                    let completion = completion_token(&e);
+                    let admission = Some(OverlapAdmissionToken {
+                        key: e.key,
+                        incarnation: e.incarnation,
+                    });
                     shard.push(e);
                     return OverlapCheckResult {
+                        dropped: false,
+                        reason: None,
                         lifetime_evictions,
-                        ..OverlapCheckResult::default()
+                        completion,
+                        admission,
+                        tracker: Some(self.clone()),
                     };
                 }
             }
@@ -442,23 +695,109 @@ impl OverlapTracker {
                 dropped: true,
                 reason: Some(OverlapDropReason::ShardFull),
                 lifetime_evictions,
+                completion: None,
+                admission: None,
+                tracker: None,
             };
         }
         let mut ranges = [(0u32, 0u32); OVERLAP_MAX_RANGES];
         ranges[0] = (start, end);
-        shard.push(OverlapEntry {
+        let incarnation = self.next_revision.fetch_add(1, Ordering::Relaxed);
+        let entry = OverlapEntry {
             key,
             ranges,
             len: 1,
+            terminal_end: is_last.then_some(end),
+            revision: incarnation,
+            incarnation,
+            pending: 1,
+            failed: false,
             deadline_ns: now_ns.saturating_add(OVERLAP_TTL_NS),
             created_ns: now_ns,
-        });
+        };
+        let completion = completion_token(&entry);
+        let admission = Some(OverlapAdmissionToken { key, incarnation });
+        shard.push(entry);
         OverlapCheckResult {
+            dropped: false,
+            reason: None,
             lifetime_evictions,
-            ..OverlapCheckResult::default()
+            completion,
+            admission,
+            tracker: Some(self.clone()),
         }
     }
 
+    /// Settle a recorded fragment after its final TX admission succeeds.
+    /// Reclaim happens only when every recorded fragment has settled, the
+    /// datagram has a terminal range, and no admission failed.
+    pub(crate) fn commit_admission(&self, token: OverlapAdmissionToken) -> bool {
+        let idx = overlap_shard_index(&token.key);
+        let mut shard = self.shards[idx]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pos) = shard.iter().position(|e| e.key == token.key) else {
+            return false;
+        };
+        let e = &mut shard[pos];
+        if e.incarnation != token.incarnation || e.pending == 0 {
+            return false;
+        }
+        e.pending -= 1;
+        if e.pending == 0 && !e.failed {
+            if let Some(terminal_end) = e.terminal_end {
+                if ranges_cover_terminal(e, terminal_end) {
+                    shard.remove(pos);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Settle a recorded fragment after a final admission/drop failure.
+    /// Failed datagrams retain their ranges as overlap protection but can
+    /// never be reclaimed by later completion coverage.
+    pub(crate) fn fail_admission(&self, token: OverlapAdmissionToken) -> bool {
+        let idx = overlap_shard_index(&token.key);
+        let mut shard = self.shards[idx]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pos) = shard.iter().position(|e| e.key == token.key) else {
+            return false;
+        };
+        let e = &mut shard[pos];
+        if e.incarnation != token.incarnation || e.pending == 0 {
+            return false;
+        }
+        e.pending -= 1;
+        e.failed = true;
+        true
+    }
+
+    /// Test-only compatibility for the snapshot API. Production settlement
+    /// uses [`Self::commit_admission`] so queued fragments cannot reclaim early.
+    #[cfg(test)]
+    pub(crate) fn release_completed(&self, token: OverlapCompletionToken) -> bool {
+        let idx = overlap_shard_index(&token.key);
+        let mut shard = self.shards[idx]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pos) = shard.iter().position(|e| e.key == token.key) else {
+            return false;
+        };
+        let e = &shard[pos];
+        if e.revision != token.revision
+            || e.terminal_end != Some(token.terminal_end)
+            || !ranges_cover_terminal(e, token.terminal_end)
+            || e.pending != 0
+            || e.failed
+        {
+            return false;
+        }
+        shard.remove(pos);
+        true
+    }
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shards
@@ -511,6 +850,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                 },
                 start,
                 end,
+                (frag_off & 0x2000) == 0 && wire >= declared,
             )
         }
         libc::AF_INET6 => {
@@ -554,6 +894,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                 },
                 start,
                 end,
+                (frag_off & 1) == 0 && wire >= declared,
             )
         }
         _ => OverlapParse::NonFragment,
@@ -802,12 +1143,21 @@ mod tests {
         let mut pkt = first;
         pkt.extend_from_slice(&[0u8; 8]);
         match overlap_parse(&pkt, libc::AF_INET) {
-            OverlapParse::Fragment(k, s, e) => {
+            OverlapParse::Fragment(k, s, e, is_last) => {
                 assert_eq!((s, e), (0, 8));
+                assert!(!is_last);
                 assert_eq!(k.ident, 0xBEEF);
                 assert_eq!(k.protocol, 6);
             }
             other => panic!("expected Fragment, got {other:?}"),
+        }
+        let mut truncated_last = pkt.clone();
+        truncated_last[6..8].copy_from_slice(&0x0001u16.to_be_bytes());
+        match overlap_parse(&truncated_last, libc::AF_INET) {
+            OverlapParse::Fragment(_, _, _, is_last) => {
+                assert!(!is_last, "truncated IPv4 last fragment cannot complete");
+            }
+            other => panic!("expected truncated IPv4 Fragment, got {other:?}"),
         }
         // Truncated (<20B) and version-mismatched slices are Unreadable, never keys.
         assert_eq!(overlap_parse(&pkt[..10], libc::AF_INET), OverlapParse::Unreadable);
@@ -829,11 +1179,12 @@ mod tests {
         pkt[40] = 6;
         pkt[42..44].copy_from_slice(&0x0001u16.to_be_bytes());
         pkt[44..48].copy_from_slice(&0x01020304u32.to_be_bytes());
-        let (k, s, e) = match overlap_parse(&pkt, libc::AF_INET6) {
-            OverlapParse::Fragment(k, s, e) => (k, s, e),
+        let (k, s, e, is_last) = match overlap_parse(&pkt, libc::AF_INET6) {
+            OverlapParse::Fragment(k, s, e, is_last) => (k, s, e, is_last),
             other => panic!("expected Fragment, got {other:?}"),
         };
         assert_eq!((s, e), (0, 16));
+        assert!(!is_last);
         assert_eq!(k.protocol, 0);
         assert_eq!(k.ident, 0x01020304);
         // Same datagram, different Next Header (UDP=17): SAME key (proto dropped).
@@ -841,12 +1192,22 @@ mod tests {
         let mut pkt2 = pkt.clone();
         pkt2[40] = 17;
         pkt2[42..44].copy_from_slice(&0x0009u16.to_be_bytes());
-        let (k2, s2, e2) = match overlap_parse(&pkt2, libc::AF_INET6) {
-            OverlapParse::Fragment(k, s, e) => (k, s, e),
+        let (k2, s2, e2, is_last2) = match overlap_parse(&pkt2, libc::AF_INET6) {
+            OverlapParse::Fragment(k, s, e, is_last) => (k, s, e, is_last),
             other => panic!("expected Fragment, got {other:?}"),
         };
         assert_eq!(k2, k);
+        assert!(!is_last2);
         assert_eq!((s2, e2), (8, 24));
+        let mut truncated_last = pkt.clone();
+        truncated_last[42..44].copy_from_slice(&0x0008u16.to_be_bytes());
+        truncated_last.truncate(60);
+        match overlap_parse(&truncated_last, libc::AF_INET6) {
+            OverlapParse::Fragment(_, _, _, is_last) => {
+                assert!(!is_last, "truncated IPv6 last fragment cannot complete");
+            }
+            other => panic!("expected truncated IPv6 Fragment, got {other:?}"),
+        }
         let t = OverlapTracker::new();
         assert!(!t.check_and_record(k, s, e, 1_000, &FRAG_OVERLAP_DROPPED));
         assert!(t.check_and_record(k2, s2, e2, 2_000, &FRAG_OVERLAP_DROPPED));
@@ -982,6 +1343,287 @@ mod tests {
             assert!(t.check_overlap(v4_key(), 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
         });
         assert_eq!(d, 1);
+    }
+
+    #[test]
+    fn completed_datagram_reclaims_only_after_all_admissions_10285() {
+        let t = OverlapTracker::new();
+        let mut first = t.check_and_record_fragment_detailed(
+            v4_key(),
+            0,
+            8,
+            false,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(!first.dropped);
+        let mut last = t.check_and_record_fragment_detailed(
+            v4_key(),
+            8,
+            16,
+            true,
+            2_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(!last.dropped);
+        let first_admission = first.admission.take().expect("head admission");
+        let last_admission = last.admission.take().expect("tail admission");
+        assert_eq!(t.len(), 1, "release is deferred until all gates pass");
+        assert!(!t.commit_admission(last_admission));
+        assert_eq!(t.len(), 1, "tail may settle before the head");
+        assert!(t.commit_admission(first_admission));
+        assert_eq!(t.len(), 0, "completed datagram is reclaimed immediately");
+    }
+
+    #[test]
+    fn completion_waits_for_tail_first_gaps_10285() {
+        let t = OverlapTracker::new();
+        let key = v4_key();
+        let mut tail = t.check_and_record_fragment_detailed(
+            key,
+            16,
+            24,
+            true,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(tail.completion.is_none(), "tail-first datagram still has a gap");
+        let mut first = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            false,
+            2_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(
+            first.completion.is_none(),
+            "endpoint coverage must not hide the middle gap"
+        );
+        let mut middle = t.check_and_record_fragment_detailed(
+            key,
+            8,
+            16,
+            false,
+            3_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let tail_admission = tail.admission.take().expect("tail admission");
+        let first_admission = first.admission.take().expect("head admission");
+        let middle_admission = middle.admission.take().expect("middle admission");
+        assert!(!t.commit_admission(tail_admission));
+        assert_eq!(t.len(), 1, "head and middle remain unsettled");
+        assert!(!t.commit_admission(first_admission));
+        assert!(t.commit_admission(middle_admission));
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn admission_token_does_not_delete_reinserted_state_10285() {
+        let t = OverlapTracker::new();
+        let key = v4_key();
+        let mut first = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            false,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let first_admission = first.admission.take().expect("head admission");
+        let stale_incarnation = first_admission.incarnation;
+        let mut done = t.check_and_record_fragment_detailed(
+            key,
+            8,
+            16,
+            true,
+            2_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let done_admission = done.admission.take().expect("tail admission");
+        assert!(!t.commit_admission(done_admission));
+        assert!(t.commit_admission(first_admission));
+        assert_eq!(t.len(), 0);
+
+        let mut second = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            true,
+            3_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let current = second.admission.take().expect("reinserted admission");
+        assert!(
+            !t.commit_admission(OverlapAdmissionToken {
+                key,
+                incarnation: stale_incarnation,
+            }),
+            "incarnation IDs prevent ABA deletion"
+        );
+        assert_eq!(t.len(), 1);
+        assert!(t.commit_admission(current));
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn failed_admission_keeps_overlap_protection_10285() {
+        let t = OverlapTracker::new();
+        let key = v4_key();
+        let mut head = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            false,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let mut tail = t.check_and_record_fragment_detailed(
+            key,
+            8,
+            16,
+            true,
+            1_001,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(t.fail_admission(head.admission.take().expect("head admission")));
+        assert!(!t.commit_admission(tail.admission.take().expect("tail admission")));
+        assert_eq!(t.len(), 1, "failed datagrams are not reclaimable");
+        assert!(t.check_overlap(key, 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
+    }
+
+    #[test]
+    fn completed_entries_free_shard_capacity_without_eviction_10285() {
+        let t = OverlapTracker::new();
+        let target = overlap_shard_index(&v4_key());
+        let mut keys = Vec::new();
+        for ident in 0u32.. {
+            let mut key = v4_key();
+            key.ident = ident;
+            if overlap_shard_index(&key) == target {
+                keys.push(key);
+                if keys.len() == OVERLAP_CAP_PER_SHARD + 1 {
+                    break;
+                }
+            }
+        }
+        let mut tokens = Vec::new();
+        for key in keys.iter().take(OVERLAP_CAP_PER_SHARD) {
+            let mut result = t.check_and_record_fragment_detailed(
+                *key,
+                0,
+                8,
+                true,
+                1_000,
+                &FRAG_OVERLAP_DROPPED,
+            );
+            tokens.push(result.admission.take().expect("single-fragment admission"));
+        }
+        let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
+        let refused = t.check_and_record_fragment_detailed(
+            keys[OVERLAP_CAP_PER_SHARD],
+            0,
+            8,
+            true,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(refused.dropped);
+        assert_eq!(
+            FRAG_OVERLAP_SHARD_FULL_DROPPED
+                .load(Ordering::Relaxed)
+                .wrapping_sub(full0),
+            1
+        );
+        for token in tokens {
+            assert!(t.commit_admission(token));
+        }
+        let mut admitted = t.check_and_record_fragment_detailed(
+            keys[OVERLAP_CAP_PER_SHARD],
+            0,
+            8,
+            true,
+            2_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(!admitted.dropped);
+        assert!(t.commit_admission(admitted.admission.take().expect("admitted token")));
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn completion_rejects_bytes_beyond_terminal_end_10285() {
+        let t = OverlapTracker::new();
+        let key = v4_key();
+        assert!(!t
+            .check_and_record_fragment_detailed(
+                key,
+                16,
+                24,
+                false,
+                1_000,
+                &FRAG_OVERLAP_DROPPED,
+            )
+            .dropped);
+        assert!(!t
+            .check_and_record_fragment_detailed(
+                key,
+                0,
+                8,
+                false,
+                2_000,
+                &FRAG_OVERLAP_DROPPED,
+            )
+            .dropped);
+        let last = t.check_and_record_fragment_detailed(
+            key,
+            8,
+            16,
+            true,
+            3_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(
+            last.completion.is_none(),
+            "ranges extending past the terminal fragment are not completion"
+        );
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn stale_token_cannot_delete_reinserted_identical_state_10285() {
+        let t = OverlapTracker::new();
+        let key = v4_key();
+        let mut first = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            true,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let stale = first.admission.take().expect("first admission");
+        let stale_incarnation = stale.incarnation;
+        assert!(t.commit_admission(stale));
+        let mut second = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            true,
+            2_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        let current = second.admission.take().expect("reinserted admission");
+        assert!(
+            !t.commit_admission(OverlapAdmissionToken {
+                key,
+                incarnation: stale_incarnation,
+            }),
+            "incarnation IDs prevent ABA deletion"
+        );
+        assert_eq!(t.len(), 1);
+        assert!(t.commit_admission(current));
+        assert_eq!(t.len(), 0);
     }
 
 }

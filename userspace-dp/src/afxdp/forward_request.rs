@@ -380,6 +380,7 @@ pub(super) fn build_live_forward_request_from_frame(
         // every non-NAT64 flow (the common IPv4/IPv6 same-family path is
         // byte-identical to before).
         nat64_reverse,
+        overlap_admissions: None,
         cos_queue_id: cos.queue_id,
         dscp_rewrite: cos.dscp_rewrite,
         cos_tx_selection_resolved: true,

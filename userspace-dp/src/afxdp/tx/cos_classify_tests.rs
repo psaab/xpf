@@ -194,7 +194,7 @@ fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
     area.slice_mut(128, payload.len())
         .expect("slice")
         .copy_from_slice(&payload);
-    let req = PreparedTxRequest {
+    let mut req = PreparedTxRequest {
         offset: 128,
         len: payload.len() as u32,
         recycle: PreparedTxRecycle::FreeTxFrame,
@@ -215,10 +215,11 @@ fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
         cos_queue_id: Some(4),
         dscp_rewrite: Some(46),
         mirror_clone: true,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
 
-    let local = clone_prepared_request_for_cos(&area, &req).expect("local copy");
+    let local = clone_prepared_request_for_cos(&area, &mut req).expect("local copy");
 
     assert_eq!(local.bytes, payload);
     assert_eq!(local.expected_ports, Some((1111, 2222)));
@@ -240,7 +241,7 @@ fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
 #[test]
 fn clone_prepared_request_for_cos_rejects_out_of_range_offset() {
     let area = MmapArea::new(256).expect("mmap");
-    let req = PreparedTxRequest {
+    let mut req = PreparedTxRequest {
         offset: 1024,
         len: 64,
         recycle: PreparedTxRecycle::FreeTxFrame,
@@ -252,10 +253,11 @@ fn clone_prepared_request_for_cos_rejects_out_of_range_offset() {
         cos_queue_id: Some(4),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
 
-    assert!(clone_prepared_request_for_cos(&area, &req).is_none());
+    assert!(clone_prepared_request_for_cos(&area, &mut req).is_none());
 }
 
 #[test]
@@ -275,6 +277,7 @@ fn prepare_local_request_for_cos_preserves_mirror_tx_frame_reserve() {
         cos_queue_id: Some(5),
         dscp_rewrite: None,
         mirror_clone: true,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
 
@@ -310,6 +313,7 @@ fn prepare_local_request_for_cos_materializes_prepared_frame() {
         cos_queue_id: Some(5),
         dscp_rewrite: Some(46),
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
 
@@ -341,6 +345,7 @@ fn prepare_local_request_for_cos_falls_back_when_no_free_tx_frame_exists() {
         cos_queue_id: Some(5),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
 
@@ -388,6 +393,7 @@ fn cos_queue_accepts_prepared_when_queue_is_prepared_only() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 
@@ -437,6 +443,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
     root.queues[0]
@@ -454,6 +461,7 @@ fn demote_prepared_cos_queue_to_local_recycles_frames_and_blocks_prepared_append
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 
@@ -552,6 +560,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
             cos_queue_id: Some(4),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }),
     );
@@ -569,6 +578,7 @@ fn demote_prepared_cos_queue_to_local_preserves_mqfq_frontier() {
             cos_queue_id: Some(4),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }),
     );
@@ -722,6 +732,7 @@ fn demote_failure_preserves_mqfq_frontier_across_buckets_9066() {
                 cos_queue_id: Some(4),
                 dscp_rewrite: None,
                 mirror_clone: false,
+                overlap_admissions: None,
                 enqueue_ns: 0,
             }),
         );
@@ -743,6 +754,7 @@ fn demote_failure_preserves_mqfq_frontier_across_buckets_9066() {
             cos_queue_id: Some(4),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }),
     );
@@ -848,6 +860,7 @@ fn demote_prepared_cos_queue_to_local_skips_non_exact_queue() {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         }));
 
@@ -6491,7 +6504,7 @@ fn cached_cos_tx_selection_carries_the_reject_message_type_6854() {
 #[test]
 fn clone_prepared_request_for_cos_refuses_an_out_of_bounds_descriptor_8597_k41() {
     let area = MmapArea::new(4096).expect("mmap");
-    let req = PreparedTxRequest {
+    let mut req = PreparedTxRequest {
         // Past the end of a 4096-byte area: `area.slice` must refuse.
         offset: 8192,
         len: 64,
@@ -6504,10 +6517,11 @@ fn clone_prepared_request_for_cos_refuses_an_out_of_bounds_descriptor_8597_k41()
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     assert!(
-        clone_prepared_request_for_cos(&area, &req).is_none(),
+        clone_prepared_request_for_cos(&area, &mut req).is_none(),
         "a descriptor outside the UMEM must make the clone refuse — the caller \
          turns that refusal into a counted drop instead of the worker panic it \
          used to be (#8597 K41)"

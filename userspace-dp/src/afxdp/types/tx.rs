@@ -7,8 +7,7 @@
 // tx::*;` so external call sites resolve unchanged.
 
 use super::*;
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(in crate::afxdp) struct TxRequest {
     pub(in crate::afxdp) bytes: Vec<u8>,
     #[allow(dead_code)]
@@ -22,6 +21,10 @@ pub(in crate::afxdp) struct TxRequest {
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
     pub(in crate::afxdp) mirror_clone: bool,
+    /// Fragment-overlap admission ownership. This is moved through every
+    /// local/CoS/prepared queue until the TX ring accepts or drops it.
+    pub(in crate::afxdp) overlap_admissions:
+        Option<crate::fragment_overlap::OverlapAdmissionTokens>,
     /// #1829 Phase 1: CoS enqueue timestamp (pass-level `now_ns`),
     /// stamped ONCE at the single CoS admission choke point
     /// (`enqueue_cos_item`). 0 means "never CoS-enqueued" (direct TX
@@ -33,7 +36,27 @@ pub(in crate::afxdp) struct TxRequest {
     /// ORIGINAL enqueue time (correct for sojourn measurement).
     pub(in crate::afxdp) enqueue_ns: u64,
 }
-
+impl Clone for TxRequest {
+    fn clone(&self) -> Self {
+        assert!(
+            self.overlap_admissions.is_none(),
+            "admission-bearing TX requests must move, not clone"
+        );
+        Self {
+            bytes: self.bytes.clone(),
+            expected_ports: self.expected_ports,
+            expected_addr_family: self.expected_addr_family,
+            expected_protocol: self.expected_protocol,
+            flow_key: self.flow_key.clone(),
+            egress_ifindex: self.egress_ifindex,
+            cos_queue_id: self.cos_queue_id,
+            dscp_rewrite: self.dscp_rewrite,
+            mirror_clone: self.mirror_clone,
+            overlap_admissions: None,
+            enqueue_ns: self.enqueue_ns,
+        }
+    }
+}
 impl TxRequest {
     #[inline]
     pub(in crate::afxdp) fn into_prepared_request(
@@ -53,6 +76,7 @@ impl TxRequest {
             cos_queue_id: self.cos_queue_id,
             dscp_rewrite: self.dscp_rewrite,
             mirror_clone: self.mirror_clone,
+            overlap_admissions: self.overlap_admissions,
             enqueue_ns: self.enqueue_ns,
         }
     }
@@ -91,6 +115,9 @@ pub(in crate::afxdp) struct PendingForwardRequest {
     /// / generated-time-exceeded) whose non-NAT64 decision routes them past the
     /// frame builder entirely.
     pub(in crate::afxdp) nat64_reverse: Option<Nat64ReverseInfo>,
+    /// Fragment-overlap admission ownership transferred to TX queues.
+    pub(in crate::afxdp) overlap_admissions:
+        Option<crate::fragment_overlap::OverlapAdmissionTokens>,
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
     pub(in crate::afxdp) cos_tx_selection_resolved: bool,
@@ -116,6 +143,9 @@ pub(in crate::afxdp) struct PreparedTxRequest {
     #[allow(dead_code)]
     pub(in crate::afxdp) expected_protocol: u8,
     pub(in crate::afxdp) flow_key: Option<SessionKey>,
+    /// Fragment-overlap admission ownership transferred to TX queues.
+    pub(in crate::afxdp) overlap_admissions:
+        Option<crate::fragment_overlap::OverlapAdmissionTokens>,
     pub(in crate::afxdp) egress_ifindex: i32,
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
@@ -128,7 +158,7 @@ pub(in crate::afxdp) struct PreparedTxRequest {
 
 impl PreparedTxRequest {
     #[inline]
-    pub(in crate::afxdp) fn to_local_request(&self, bytes: Vec<u8>) -> TxRequest {
+    pub(in crate::afxdp) fn into_local_request(&mut self, bytes: Vec<u8>) -> TxRequest {
         TxRequest {
             bytes,
             expected_ports: self.expected_ports,
@@ -139,6 +169,7 @@ impl PreparedTxRequest {
             cos_queue_id: self.cos_queue_id,
             dscp_rewrite: self.dscp_rewrite,
             mirror_clone: self.mirror_clone,
+            overlap_admissions: self.overlap_admissions.take(),
             enqueue_ns: self.enqueue_ns,
         }
     }

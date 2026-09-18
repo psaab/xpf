@@ -31,6 +31,50 @@ use crate::afxdp::types::{
 
 const TEST_EPOCH_DURATION_NS: u64 = 200_000;
 
+fn test_overlap_admissions_10285(
+    tracker: &crate::fragment_overlap::OverlapTracker,
+    ident: u32,
+) -> crate::fragment_overlap::OverlapAdmissionTokens {
+    let key = crate::fragment_overlap::OverlapKey {
+        addr_family: libc::AF_INET as u8,
+        src: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 100)),
+        dst: std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 200)),
+        ident,
+        protocol: PROTO_TCP,
+        routing_domain: 0,
+    };
+    let mut result = tracker.check_and_record_fragment_detailed(
+        key,
+        0,
+        8,
+        true,
+        1_000 + ident as u64,
+        &crate::fragment_overlap::FRAG_OVERLAP_DROPPED,
+    );
+    let admission = result.admission.take().expect("test overlap admission");
+    crate::fragment_overlap::OverlapAdmissionTokens::new(
+        tracker.clone(),
+        Some(admission),
+        None,
+    )
+}
+
+fn attach_test_overlap_admission_10285(
+    item: &mut crate::afxdp::types::CoSPendingTxItem,
+    tracker: &crate::fragment_overlap::OverlapTracker,
+    ident: u32,
+) {
+    let admissions = test_overlap_admissions_10285(tracker, ident);
+    match item {
+        crate::afxdp::types::CoSPendingTxItem::Local(req) => {
+            req.overlap_admissions = Some(admissions);
+        }
+        crate::afxdp::types::CoSPendingTxItem::Prepared(req) => {
+            req.overlap_admissions = Some(admissions);
+        }
+    }
+}
+
 /// Build a GuaranteeRate root with the ascending-by-rate vec populated
 /// and every exact queue given abundant per-queue tokens so the only
 /// gate is the Phase-1 byte budget.

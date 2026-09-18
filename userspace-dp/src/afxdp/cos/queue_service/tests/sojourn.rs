@@ -93,14 +93,13 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
     // replay-equality assert below would diverge on the EWMA.
     let enq_a = now_ns - 7_000_000;
     let enq_b = now_ns - 3_000_000;
-    cos_queue_push_back(
-        &mut root.queues[0],
-        stamp_cos_item(test_flow_cos_item(5201, 512), enq_a),
-    );
-    cos_queue_push_back(
-        &mut root.queues[0],
-        stamp_cos_item(test_flow_cos_item(5201, 512), enq_b),
-    );
+    let tracker = crate::fragment_overlap::OverlapTracker::new();
+    let mut item_a = stamp_cos_item(test_flow_cos_item(5201, 512), enq_a);
+    attach_test_overlap_admission_10285(&mut item_a, &tracker, 21);
+    cos_queue_push_back(&mut root.queues[0], item_a);
+    let mut item_b = stamp_cos_item(test_flow_cos_item(5201, 512), enq_b);
+    attach_test_overlap_admission_10285(&mut item_b, &tracker, 22);
+    cos_queue_push_back(&mut root.queues[0], item_b);
     root.queues[0].hot.queued_bytes = 1024;
 
     // Attempt 1: drain both to scratch, TX ring accepts ONE (partial
@@ -134,6 +133,11 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
         now_ns,
     );
     assert_eq!(sent_packets, 1);
+    assert_eq!(
+        tracker.len(),
+        1,
+        "accepted flow-fair local prefix commits; retry suffix stays held"
+    );
     let mut expected = CoSQueueSojourn::default();
     expected.record(enq_a, now_ns);
     assert_eq!(
@@ -166,6 +170,11 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
         now_ns,
     );
     assert_eq!(sent_packets, 1);
+    assert_eq!(
+        tracker.len(),
+        0,
+        "flow-fair local retry commits its remaining admission"
+    );
     expected.record(enq_b, now_ns);
     assert_eq!(
         root.queues[0].telemetry.sojourn, expected,
@@ -173,7 +182,6 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
          attempt that ships it (replay equality incl. EWMA)",
     );
 }
-
 #[test]
 fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     use crate::afxdp::types::{COS_SOJOURN_WINDOW_NS, CoSQueueSojourn};
@@ -182,14 +190,13 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     let mut root = sojourn_test_exact_root();
     let enq_a = now_ns - 6_000_000;
     let enq_b = now_ns - 2_000_000;
-    cos_queue_push_back(
-        &mut root.queues[0],
-        stamp_cos_item(test_flow_prepared_cos_item(5201, 512, 4096), enq_a),
-    );
-    cos_queue_push_back(
-        &mut root.queues[0],
-        stamp_cos_item(test_flow_prepared_cos_item(5201, 512, 8192), enq_b),
-    );
+    let tracker = crate::fragment_overlap::OverlapTracker::new();
+    let mut item_a = stamp_cos_item(test_flow_prepared_cos_item(5201, 512, 4096), enq_a);
+    attach_test_overlap_admission_10285(&mut item_a, &tracker, 31);
+    cos_queue_push_back(&mut root.queues[0], item_a);
+    let mut item_b = stamp_cos_item(test_flow_prepared_cos_item(5201, 512, 8192), enq_b);
+    attach_test_overlap_admission_10285(&mut item_b, &tracker, 32);
+    cos_queue_push_back(&mut root.queues[0], item_b);
     root.queues[0].hot.queued_bytes = 1024;
 
     let mut free_tx_frames = VecDeque::new();
@@ -226,6 +233,11 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
         now_ns,
     );
     assert_eq!(sent_packets, 1);
+    assert_eq!(
+        tracker.len(),
+        1,
+        "accepted flow-fair prepared prefix commits; retry suffix stays held"
+    );
     let mut expected = CoSQueueSojourn::default();
     expected.record(enq_a, now_ns);
     assert_eq!(root.queues[0].telemetry.sojourn, expected);
@@ -255,13 +267,17 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
         now_ns,
     );
     assert_eq!(sent_packets, 1);
+    assert_eq!(
+        tracker.len(),
+        0,
+        "flow-fair prepared retry commits its remaining admission"
+    );
     expected.record(enq_b, now_ns);
     assert_eq!(
         root.queues[0].telemetry.sojourn, expected,
         "rolled-back prepared item sampled exactly ONCE on commit",
     );
 }
-
 #[test]
 fn sojourn_recorded_end_to_end_via_submit_local() {
     use crate::afxdp::types::{COS_SOJOURN_WINDOW_NS, CoSQueueSojourn};
@@ -381,6 +397,7 @@ fn submit_local_publishes_committed_vtime_on_settle() {
         cos_queue_id: Some(0),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: now_ns,
     }]);
     let mut shared_recycles = Vec::new();

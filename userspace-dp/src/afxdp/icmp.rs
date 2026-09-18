@@ -346,6 +346,7 @@ pub(super) fn build_local_time_exceeded_request(
         expected_ports: None,
         flow_key: Some(flow.forward_key.clone()),
         nat64_reverse: None,
+        overlap_admissions: None,
         cos_queue_id: verdict.cos_queue_id,
         dscp_rewrite: verdict.dscp_rewrite,
         cos_tx_selection_resolved: true,

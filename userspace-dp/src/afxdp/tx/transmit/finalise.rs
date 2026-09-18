@@ -44,9 +44,12 @@ pub(super) fn finalise_prepared(
     // the ORIGINAL front-to-back FIFO at the head of `pending` —
     // identical ordering to the prior `retry_tail` + `.rev()`, now
     // allocation-free.
-    while let Some(req) = binding.scratch.scratch_prepared_tx.pop() {
+    while let Some(mut req) = binding.scratch.scratch_prepared_tx.pop() {
         let idx = binding.scratch.scratch_prepared_tx.len();
         if idx < inserted as usize {
+            if let Some(mut admissions) = req.overlap_admissions.take() {
+                admissions.commit();
+            }
             remember_prepared_recycle(
                 &mut binding.tx_pipeline.in_flight_prepared_recycles,
                 &mut binding.tx_pipeline.in_flight_untracked_tx,

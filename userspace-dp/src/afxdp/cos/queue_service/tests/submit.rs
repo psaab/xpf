@@ -21,6 +21,7 @@ fn t7_local_scratch_entry(offset: u64, len: usize) -> (u64, TxRequest) {
             cos_queue_id: Some(5),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
     )
@@ -141,6 +142,7 @@ fn submit_local_bumps_owner_tx_packets_and_bytes() {
             cos_queue_id: Some(0),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: now_ns,
         })
         .collect();
@@ -255,6 +257,7 @@ fn submit_prepared_bumps_owner_tx_packets_and_bytes() {
             cos_queue_id: Some(0),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: now_ns,
         })
         .collect();
@@ -420,6 +423,7 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
             cos_queue_id: Some(0),
             dscp_rewrite: None,
             mirror_clone: true,
+            overlap_admissions: None,
             enqueue_ns: now_ns,
         },
         TxRequest {
@@ -432,6 +436,7 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
             cos_queue_id: Some(0),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: now_ns,
         },
         TxRequest {
@@ -444,6 +449,7 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
             cos_queue_id: Some(0),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: now_ns,
         },
     ]);

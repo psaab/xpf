@@ -175,6 +175,7 @@ fn enqueue_mirror_clone_to_binding(
             cos_queue_id,
             dscp_rewrite: None,
             mirror_clone: true,
+            overlap_admissions: None,
             enqueue_ns: 0,
         });
     MirrorCloneResult::Enqueued
@@ -231,6 +232,7 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
         cos_queue_id,
         dscp_rewrite: None,
         mirror_clone: true,
+        overlap_admissions: None,
         enqueue_ns: 0,
     };
     admission

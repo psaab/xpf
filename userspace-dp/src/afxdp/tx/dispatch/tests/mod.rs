@@ -81,6 +81,7 @@ fn test_live_forward_request_for_frame(
         expected_ports: None,
         flow_key: Some(test_session_key(12345, 443)),
         nat64_reverse: None,
+        overlap_admissions: None,
         cos_queue_id: None,
         dscp_rewrite: None,
         cos_tx_selection_resolved: true,

@@ -1282,7 +1282,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
                     shared_recycles.as_deref_mut(),
                 ) {
                     Ok(()) => return Ok(()),
-                    Err(CoSPendingTxItem::Prepared(prepared_req)) => {
+                    Err(CoSPendingTxItem::Prepared(mut prepared_req)) => {
                         // #8597 K41: NEVER panic on the TX path.
                         //
                         // `clone_prepared_request_for_cos` returns None only
@@ -1305,7 +1305,7 @@ pub(in crate::afxdp) fn enqueue_local_into_cos(
                         // `dbg_cos_queue_overflow`). An out-of-bounds descriptor
                         // is a fault.
                         let Some(req) =
-                            clone_prepared_request_for_cos(binding.umem.area(), &prepared_req)
+                            clone_prepared_request_for_cos(binding.umem.area(), &mut prepared_req)
                         else {
                             binding
                                 .live
@@ -1423,7 +1423,7 @@ pub(super) fn prepare_local_request_for_cos(
 pub(super) fn enqueue_prepared_into_cos(
     binding: &mut BindingWorker,
     forwarding: &ForwardingState,
-    req: PreparedTxRequest,
+    mut req: PreparedTxRequest,
     now_ns: u64,
     mut shared_recycles: Option<&mut Vec<(u32, u64)>>,
 ) -> Result<(), PreparedTxRequest> {
@@ -1453,7 +1453,7 @@ pub(super) fn enqueue_prepared_into_cos(
         }
     }
 
-    let Some(local_req) = clone_prepared_request_for_cos(binding.umem.area(), &req) else {
+    let Some(local_req) = clone_prepared_request_for_cos(binding.umem.area(), &mut req) else {
         return Err(req);
     };
     // Keep prepared/direct frames in CoS while a queue stays prepared-only.
@@ -1475,7 +1475,10 @@ pub(super) fn enqueue_prepared_into_cos(
             recycle_prepared_immediately_with_shared(binding, &req, shared_recycles.as_deref_mut());
             Ok(())
         }
-        Err(CoSPendingTxItem::Local(_)) => Err(req),
+        Err(CoSPendingTxItem::Local(mut local_req)) => {
+            req.overlap_admissions = local_req.overlap_admissions.take();
+            Err(req)
+        }
         Err(CoSPendingTxItem::Prepared(_)) => {
             unreachable!("prepared queueing converted to local request")
         }
@@ -1484,10 +1487,10 @@ pub(super) fn enqueue_prepared_into_cos(
 
 pub(super) fn clone_prepared_request_for_cos(
     area: &MmapArea,
-    req: &PreparedTxRequest,
+    req: &mut PreparedTxRequest,
 ) -> Option<TxRequest> {
     let frame = area.slice(req.offset as usize, req.len as usize)?.to_vec();
-    Some(req.to_local_request(frame))
+    Some(req.into_local_request(frame))
 }
 
 pub(super) fn resolve_cos_queue_idx(
@@ -1623,11 +1626,10 @@ pub(in crate::afxdp) fn demote_prepared_cos_queue_to_local(
             ff.flow_bucket_tail_finish_bytes,
         )
     });
-
-    let drained = cos_queue_drain_all(queue);
+    let mut drained = cos_queue_drain_all(queue);
     let mut local_items = VecDeque::with_capacity(drained.len());
     let mut recycles = Vec::with_capacity(drained.len());
-    for item in &drained {
+    for item in &mut drained {
         let CoSPendingTxItem::Prepared(req) = item else {
             cos_queue_restore_front(queue, drained);
             // #9066: the frontier restore runs here too. cos_queue_restore_front

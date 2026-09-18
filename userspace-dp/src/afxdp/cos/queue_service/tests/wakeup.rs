@@ -16,6 +16,7 @@ fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
             cos_queue_id: Some(0),
             dscp_rewrite: None,
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
         TxRequest {
@@ -28,6 +29,7 @@ fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
             cos_queue_id: Some(0),
             dscp_rewrite: Some(0),
             mirror_clone: false,
+            overlap_admissions: None,
             enqueue_ns: 0,
         },
     ]);
@@ -140,6 +142,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
         cos_queue_id: Some(5),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }]);
 
@@ -215,6 +218,7 @@ fn restore_cos_prepared_items_marks_queue_runnable_after_retry() {
         cos_queue_id: Some(5),
         dscp_rewrite: None,
         mirror_clone: false,
+        overlap_admissions: None,
         enqueue_ns: 0,
     }]);
 
