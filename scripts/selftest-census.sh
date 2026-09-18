@@ -12,8 +12,8 @@
 #      runner with comments stripped (a bare filename mention would be
 #      satisfied by a comment naming the script — the shape where a
 #      source-scanning gate passes on its own documentation).
-#   2. The §4 odd-name set is EXACTLY the four declared below. These are
-#      registered self-tests outside every discovery glob; a fifth odd name
+#   2. The §4 odd-name set is EXACTLY the seven declared below. These are
+#      registered self-tests outside every discovery glob; an eighth odd name
 #      must extend the glob or the declaration, never slip past both.
 #   3. Every §3 python self-test (scripts/image, scripts/dist,
 #      scripts/deploy, scripts root, test_*.py) defines a `__main__` guard.
@@ -47,10 +47,12 @@
 #
 #   scripts/dist/selftest.sh and scripts/image/test-grow-root.sh predate the
 #   *-selftest.sh convention and stay explicitly registered. So do
-#   test/incus/wire-policy-deny.sh and test/incus/wire-appmatch-twins.sh,
-#   which are verdict cores driven with a --selftest flag rather than
-#   standalone self-test files. Renaming any of the four into a glob (or out
-#   of §4) means updating the set below — loudly, in review.
+#   test/incus/wire-policy-deny.sh, test/incus/wire-appmatch-twins.sh,
+#   test/incus/wire-zone-matrix.sh, test/incus/wire-hostinbound-deny.sh, and
+#   test/incus/wire-conntrack-lifecycle.sh, which are verdict cores driven
+#   with a --selftest flag rather than standalone self-test files. Renaming
+#   any of the seven into a glob (or out of §4) means updating the set below —
+#   loudly, in review.
 #
 # USAGE
 #   sh scripts/selftest-census.sh
@@ -73,7 +75,7 @@ note_pass() { echo "  PASS: $*"; }
 
 SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh"
 PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py"
-ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh"
+ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh test/incus/wire-zone-matrix.sh test/incus/wire-hostinbound-deny.sh test/incus/wire-conntrack-lifecycle.sh"
 POSITIVE_CONTROL="test/incus/harness-result-selftest.sh"
 
 runner_code=$(sed 's/#.*//' "$RUNNER")
@@ -159,7 +161,7 @@ else
 		note_fail "odd-set members no longer registered in §4 (remove the declaration):$odd_stale"
 	fi
 	if [ -z "$odd_extra" ] && [ -z "$odd_stale" ]; then
-		note_pass "§4 odd-name set is exactly the 4 declared"
+		note_pass "§4 odd-name set is exactly the 7 declared"
 	fi
 fi
 

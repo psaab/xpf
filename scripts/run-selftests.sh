@@ -366,6 +366,9 @@ run_bash test/incus/with-cluster-selftest.sh
 # separately by the pass-on-good/fail-on-bad ledger pairs.
 run_bash test/incus/wire-policy-deny.sh --selftest
 run_bash test/incus/wire-appmatch-twins.sh --selftest
+run_bash test/incus/wire-zone-matrix.sh --selftest
+run_bash test/incus/wire-hostinbound-deny.sh --selftest
+run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
 # #7159: the mouse-latency elephant generator's remote lifecycle. Hermetic --
 # a fake iperf3 plus an unprivileged PID namespace; no incus, no cluster. The
 # defect it guards produced a CORRUPT MEASUREMENT, not an error: killing the

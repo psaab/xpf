@@ -684,7 +684,7 @@ clean:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
 
 test-env-init:
 	./test/incus/setup.sh init
@@ -940,6 +940,30 @@ test-wire-appmatch-twins:
 
 test-wire-appmatch-twins-lib:
 	./test/incus/wire-appmatch-twins.sh --selftest
+
+test-wire-zone-matrix:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_zone_matrix --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wire-zone-matrix.sh
+
+test-wire-zone-matrix-lib:
+	./test/incus/wire-zone-matrix.sh --selftest
+
+test-wire-hostinbound-deny:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_hostinbound_deny --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wire-hostinbound-deny.sh
+
+test-wire-hostinbound-deny-lib:
+	./test/incus/wire-hostinbound-deny.sh --selftest
+
+test-wire-conntrack-lifecycle:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_conntrack_lifecycle --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wire-conntrack-lifecycle.sh
+
+test-wire-conntrack-lifecycle-lib:
+	./test/incus/wire-conntrack-lifecycle.sh --selftest
 
 # #1922 rollback functional gate, both arms (#9531 adds Arm B). Two wrapper
 # invocations in one recipe — Arm B runs even if Arm A fails (rc captured,

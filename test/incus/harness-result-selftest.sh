@@ -925,6 +925,19 @@ wire_field_is "arm-b VOID keeps row-timeout" 0 2 "row-timeout"
 wire_log 'some noise, no verdict line\n'
 wire_field_is "absent line is VOID, never a pass" 0 1 "VOID"
 wire_field_has "absent line names the missing line" 0 2 "no \"WIRE_GATE"
+ZONE_OK='WIRE_GATE wire_zone_matrix PASS reason=-- cells_measured=12 cells_failed=0 deny_cells=6 permit_cells=6 deny_leaked=0 permit_missing=0 control_missing=0 duplicate_frames=0 permit64_offered=60000 permit64_observed=60000 permit1400_offered=60000 permit1400_observed=60000 cksum_bad=0\n'
+wire_log "$ZONE_OK"
+wire_field_is "zone matrix PASS transcribes" 0 1 "PASS"
+wire_field_is "zone matrix headline is cells_failed" 0 3 "cells_failed"
+wire_field_has "zone matrix keeps duplicate metric" 0 5 "duplicate_frames=0"
+wire_log 'WIRE_GATE wire_hostinbound_deny FAIL reason=-- cells_measured=2 syn_offered=2000 handshake_completed=1 refused_total=0 exposed_total=1 reply_frames=1 ctrl_offered=1500 ctrl_observed=1500 cksum_bad=0\n'
+wire_field_is "host-inbound exposure FAIL transcribes" 0 1 "FAIL"
+wire_field_is "host-inbound headline is exposed_total" 0 3 "exposed_total"
+wire_field_has "host-inbound keeps reply frames" 0 5 "reply_frames=1"
+wire_log 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled created=1 witnessed=1 evicted=1 stale_present=0 exp_offered=999 exp_leaked=0 fresh_offered=1000 fresh_leaked=0 syn_offered=1500 syn_observed=1500 ctrl_sess=1 lifecycle_bad=0 cksum_bad=0\n'
+wire_field_is "conntrack under-sample VOID transcribes" 0 1 "VOID"
+wire_field_is "conntrack VOID keeps under-sampled" 0 2 "under-sampled"
+wire_field_has "conntrack keeps lifecycle metric" 0 5 "lifecycle_bad=0"
 wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\nWIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=1\n'
 wire_field_is "two gate IDs in one log is VOID" 0 1 "VOID"
 wire_field_has "two gate IDs says why" 0 2 "distinct WIRE_GATE gate IDs"

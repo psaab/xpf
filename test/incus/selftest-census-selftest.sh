@@ -26,7 +26,7 @@ n=0
 
 # stamp_clean <dir> — a fixture tree satisfying every census check: one file
 # per discovery glob, the positive control, one guarded file per python
-# glob, and a runner registering all of them plus exactly the 4 odd names.
+# glob, and a runner registering all of them plus exactly the 7 odd names.
 stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
@@ -56,6 +56,9 @@ run_shell scripts/dist/selftest.sh
 run_shell scripts/image/test-grow-root.sh
 run_bash test/incus/wire-policy-deny.sh --selftest
 run_bash test/incus/wire-appmatch-twins.sh --selftest
+run_bash test/incus/wire-zone-matrix.sh --selftest
+run_bash test/incus/wire-hostinbound-deny.sh --selftest
+run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
 # -- harness reachability census (#8302) --
 RUNNER
 }
