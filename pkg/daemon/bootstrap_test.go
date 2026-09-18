@@ -26,9 +26,6 @@ func TestClassifyLoadError(t *testing.T) {
 		// A plain wrapped compile error (the Load wrap chains both sentinels in
 		// other paths; ensure the compile tag is still detected through %w).
 		{"compile-failed-wrapped", fmt.Errorf("outer: %w", fmt.Errorf("compile config: %w: x", configstore.ErrConfigCompile)), loadCompileFailed},
-		// #10297: active.json absent but rollback markers survive => fail
-		// closed bootstrap, not a fresh text-config import.
-		{"absent-active-with-history", fmt.Errorf("load config: %w", configstore.ErrConfigAbsentWithHistory), loadAbsentWithHistory},
 		{"other", fmt.Errorf("some unrelated failure"), loadOtherError},
 	}
 	for _, tt := range tests {
@@ -65,23 +62,6 @@ func TestCompileFailureForcesBootstrapNotClaimAll(t *testing.T) {
 					"want bootClassBootstrap (no positional claim-all)", nodeID, got)
 			}
 		})
-	}
-}
-
-// TestAbsentActiveHistoryForcesBootstrapNotClaimAll_10297 pins the second
-// fail-closed half of #10297: the Store error is distinct from a corrupt
-// present DB, but an absent active config with surviving history still forces
-// lifeline bootstrap and skips stale text-config import.
-func TestAbsentActiveHistoryForcesBootstrapNotClaimAll_10297(t *testing.T) {
-	err := fmt.Errorf("load config: %w", configstore.ErrConfigAbsentWithHistory)
-	if got := classifyLoadError(err); got != loadAbsentWithHistory {
-		t.Fatalf("classifyLoadError(%v) = %v; want loadAbsentWithHistory", err, got)
-	}
-	if got := computeBootClass(false, true, false, true); got != bootClassBootstrap {
-		t.Fatalf("absent active with history classified %v; want bootClassBootstrap", got)
-	}
-	if shouldBootstrapFromFile(false, true) {
-		t.Fatal("absent active with history must not import stale xpf.conf")
 	}
 }
 

@@ -3,27 +3,23 @@ package config
 import (
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // parseDNATPoolAddress walks a destination-NAT pool `address` statement and
 // captures the translated address and (optionally nested) `port <N>` token.
 // Junos expresses the DNAT pool port as `address port <N>` (a child of the
 // address leaf), not a top-level `port`. The token stream after "address" may
-// be the bare IP, a `port <N>` pair, both interleaved, or — in the
-// hierarchical shape — split across Children (`address { <ip>; port <N>; }`).
-// A port token records PortRaw (and the parsed int) so
-// validateDNATPoolStrict and the snapshot builder can fail closed on an
-// invalid value. A destination pool is a single-host wire field: when more
-// than one non-port address token is present, retain the full token sequence
-// in Address and AddressInvalidSpec so strict validation rejects it instead
-// of silently keeping only the final token.
+// be the bare IP, a `port <N>` pair, both interleaved, or — in the hierarchical
+// shape — split across Children (`address { <ip>; port <N>; }`). A `port` token
+// records PortRaw (and the parsed int) so validateDNATPoolStrict and the
+// snapshot builder can fail closed on an invalid value; everything else is the
+// translated address. PortRaw lets the gate tell a configured port (which must
+// be 1..65535) from no port leaf at all (Port==0 = preserve destination port).
 func parseDNATPoolAddress(pool *NATPool, prop *Node) {
 	toks := append([]string(nil), prop.Keys[1:]...)
 	for _, c := range prop.Children {
 		toks = append(toks, c.Keys...)
 	}
-	var addresses []string
 	for i := 0; i < len(toks); i++ {
 		if toks[i] == "port" {
 			if i+1 < len(toks) {
@@ -35,28 +31,8 @@ func parseDNATPoolAddress(pool *NATPool, prop *Node) {
 			}
 			continue
 		}
-		addresses = append(addresses, toks[i])
+		pool.Address = toks[i]
 	}
-	switch len(addresses) {
-	case 0:
-		return
-	case 1:
-		pool.Address = addresses[0]
-		pool.AddressInvalidSpec = ""
-	default:
-		pool.Address = strings.Join(addresses, " ")
-		pool.AddressInvalidSpec = pool.Address
-	}
-}
-
-func dnatPoolInvalidAddressKind(spec string) string {
-	fields := strings.Fields(spec)
-	for i := 1; i+1 < len(fields); i++ {
-		if fields[i] == "to" {
-			return "address range"
-		}
-	}
-	return "multi-address value"
 }
 
 func compileNATDestination(node *Node, sec *SecurityConfig) error {
@@ -112,10 +88,9 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// as its flat-set counterpart. Merge fields instead of replacing
 			// the prior object, otherwise a block carrying only `port` or
 			// `routing-instance` silently discards the address from the first
-			// (and vice versa).
+			// block (and vice versa).
 			if pool.Address != "" {
 				existing.Address = pool.Address
-				existing.AddressInvalidSpec = pool.AddressInvalidSpec
 			}
 			if pool.PortRaw != "" {
 				existing.PortRaw = pool.PortRaw

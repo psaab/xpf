@@ -36,26 +36,6 @@ var ErrConfigDBUnreadable = errors.New("config DB present but unreadable")
 // avoid. See pkg/daemon/daemon_run.go.
 var ErrConfigCompile = errors.New("config DB present but does not compile")
 
-// ErrConfigAbsentWithHistory tags a Store.Load failure where active.json is
-// ABSENT but rollback/.configdb markers survive — numbered text rollback
-// slots, DB rollback slots, or a pending commit-confirmed record (#10297).
-// Every commit pushes the pre-commit tree into the rollback history, so such
-// markers prove the box previously committed: this is a deleted/lost DB, not
-// a never-booted store. It is distinct from an absent DB with no markers
-// (start-fresh, no error), from ErrConfigDBUnreadable (present but unreadable
-// bytes), and from ErrConfigCompile (present bytes that no longer compile).
-//
-// This is the #10297 fail-closed signal: silently re-importing the
-// never-rewritten day-0 xpf.conf here would commit over the surviving history
-// and delete it. The daemon distinguishes this case with errors.Is so it can
-// refuse the import and the interface takeover, enter the #1922
-// bootstrap/lifeline safe state with the loaded history available for
-// explicit recovery (`rollback N` or a re-import followed by
-// `commit confirmed`), instead of treating the store as fresh. A daemon
-// hard-exit is the wrong remedy for the same reason as ErrConfigCompile: it
-// would strand management, which this sentinel exists to avoid.
-var ErrConfigAbsentWithHistory = errors.New("config DB absent but rollback history survives")
-
 // ErrConfigLocked tags an EnterConfigure/EnterConfigureSession failure caused
 // by the candidate already being held by another session (an interactive
 // `configure`, a REST/gRPC config session, or another non-interactive

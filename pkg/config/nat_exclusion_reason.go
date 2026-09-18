@@ -174,15 +174,10 @@ func DestinationNATRuleExcludedReason(dnat *DestinationNATConfig, rule *NATRule)
 		}
 		return "references undefined or address-less pool " + quoteName(rule.Then.PoolName)
 	}
-	// #3450/#10289: a non-host or multi-token pool address would be coerced to
-	// its network base, collapsed to one endpoint, or dropped. A configured-but-
-	// invalid port would wrap on the uint16 cast or collapse to preserve-
-	// destination-port. All publish NO entry so the rule matches nothing rather
-	// than translating to the wrong place.
-	if pool.AddressInvalidSpec != "" {
-		return "pool " + quoteName(rule.Then.PoolName) + " " +
-			dnatPoolInvalidAddressKind(pool.AddressInvalidSpec) + " is unsupported"
-	}
+	// #3450: a non-host pool address would be coerced to its network base, and
+	// a configured-but-invalid port would wrap on the uint16 cast or collapse
+	// to preserve-destination-port. Both publish NO entry so the rule matches
+	// nothing rather than translating to the wrong place.
 	if _, hostOK := DNATPoolHostIP(pool.Address); !hostOK {
 		return "pool " + quoteName(rule.Then.PoolName) + " address is not a single host address"
 	}

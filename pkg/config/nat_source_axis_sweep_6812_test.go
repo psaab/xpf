@@ -925,11 +925,11 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 		"the DNAT-compat scalars cannot be set on a SOURCE pool. compileNATSource "+
 			"constructs its pools fresh (`pool := &NATPool{Name: inst.name}`, "+
 			"compiler_nat_source.go:471) and is the sole writer of SourcePools (:686); "+
-			"the only non-test writers of Address / AddressInvalidSpec / Port / PortRaw "+
-			"are in compiler_nat_destination.go, on DNAT pool objects this map never "+
-			"aliases. Round 10 recorded these as fixture blind spots too.",
+			"the only non-test writers of Address / Port / PortRaw are in "+
+			"compiler_nat_destination.go, on DNAT pool objects this map never aliases. "+
+			"Round 10 recorded these as fixture blind spots too.",
 		walkWitness6812(),
-		"Pool.Address", "Pool.AddressInvalidSpec", "Pool.Port", "Pool.PortRaw",
+		"Pool.Address", "Pool.Port", "Pool.PortRaw",
 	),
 	fixtureConstantAxes6812(
 		"the fixture gives each rule ONE literal source prefix and no address-book "+

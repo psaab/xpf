@@ -157,11 +157,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// down cleanly) — then Run returns the non-nil abort error rather than
 	// proceeding into steady state. A PLAIN phase error keeps the historical
 	// path: return the error and let the deferred loop stops (#5308) run.
-	var configFailClosed bool
+	var configCompileFailed bool
 	phases := []startupPhase{
 		{"config-load-bootstrap", func(context.Context) error {
 			var e error
-			configFailClosed, e = d.loadAndBootstrapConfig()
+			configCompileFailed, e = d.loadAndBootstrapConfig()
 			return e
 		}},
 		{"interface-naming", func(context.Context) error {
@@ -169,7 +169,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		}},
 		{"manager-init", func(context.Context) error {
-			return d.initManagers(configFailClosed)
+			return d.initManagers(configCompileFailed)
 		}},
 		// #9615: after manager-init so the feed manager exists; an alarm only,
 		// never a refusal to keep the recovered window armed.

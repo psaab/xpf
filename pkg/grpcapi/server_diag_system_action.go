@@ -153,14 +153,7 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	if s.store != nil {
 		archiveDir = s.store.ArchiveDir()
 	}
-	// Snapshot configured firewall-log names immediately before the shared wipe
-	// runs. This closure executes inside ZeroizeFn's apply gate, so a commit
-	// that was waiting for the gate cannot add a destination after the
-	// inventory snapshot and escape erasure (#10300).
-	wipe := func() error {
-		logInventory := ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
-		return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, logInventory)
-	}
+	wipe := func() error { return performZeroizeWipe(configDir, configBase, archiveDir) }
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)
 	}
@@ -213,18 +206,18 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 			// wipe did not finish, so stopping would strand a half-reset box (the
 			// daemon has already left the reset generation, so it keeps running
 			// normally until a retried zeroize succeeds).
-			slog.Error("system zeroize did not fully erase config or firewall log state", "err", err)
+			slog.Error("system zeroize did not fully erase config state", "err", err)
 			return nil, status.Errorf(codes.Internal,
-				"zeroize incomplete: configuration or firewall log state may remain on disk: %v", err)
+				"zeroize incomplete: config state may remain on disk: %v", err)
 		}
 		// The wipe fully completed. Stop xpfd so the daemon does not keep running
-		// with the pre-wipe in-memory ActiveConfig and re-render the wiped
+		// with the pre-wipe in-memory ActiveConfig and re-render the erased
 		// secrets on the next reconcile (#5281). Scheduled after a 1s grace so
 		// this response reaches the client; the daemon is already in the terminal
 		// reset generation, so nothing re-renders in the interim. The reboot
 		// completes the factory reset.
 		scheduleStopDaemon()
-		return &pb.SystemActionResponse{Message: "System zeroized. Configuration and firewall logs covered by the active configuration were erased; remote collectors and journald are outside this wipe. Reboot to complete factory reset."}, nil
+		return &pb.SystemActionResponse{Message: "System zeroized. Configuration erased. Reboot to complete factory reset."}, nil
 
 	case "rescue-save", "rescue-delete":
 		// #8597 K47: `request system configuration rescue save|delete`, which

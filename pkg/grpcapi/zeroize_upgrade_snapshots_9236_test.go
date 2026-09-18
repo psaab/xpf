@@ -45,7 +45,6 @@ func newZeroize9236Env(t *testing.T) *zeroize9236Env {
 		configBase:  "xpf.conf",
 		versionsDir: filepath.Join(root, "versions"),
 	}
-	seamZeroizeFirewallLogPaths(t, root)
 	mustWriteFile(t, filepath.Join(e.configDir, ".configdb", "master.key"), []byte(snap9236Key))
 	mustWriteFile(t, filepath.Join(e.configDir, ".configdb", "active.json"), []byte(snap9236Body))
 	mustWriteFile(t, filepath.Join(e.configDir, e.configBase), []byte("system { host-name fw; }\n"))

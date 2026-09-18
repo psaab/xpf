@@ -509,9 +509,19 @@ type ZoneConfig struct {
 }
 
 // HostInboundTraffic defines what services are permitted to the firewall itself.
+// The compiler normalizes Junos `except` modifiers into the positive token
+// slices, so all downstream consumers continue to share the existing
+// host-inbound admission representation.
 type HostInboundTraffic struct {
 	SystemServices []string // ssh, ping, dns, etc.
 	Protocols      []string // ospf, bgp, etc.
+
+	// Compiler-only provenance for Junos `except` modifiers. The parser
+	// materializes filtered positives immediately; retaining the exclusions
+	// privately lets repeated same-key blocks merge without re-introducing a
+	// token that a later block explicitly excluded.
+	systemServicesExcept []string
+	protocolsExcept      []string
 }
 
 // SortedInterfaceHostInboundRefs returns the interface refs that declare a
@@ -1122,17 +1132,10 @@ const (
 
 // NATPool is a pool of addresses for NAT.
 type NATPool struct {
-	Name    string
-	Address string // single address (DNAT compat)
-	// AddressInvalidSpec preserves a multi-token destination-NAT address
-	// (`address A to B`, a bracket list, or another extra-token form). The
-	// dataplane wire field accepts one host only, so the strict commit gate
-	// rejects this compile-time artifact and the tolerant snapshot path skips
-	// the rule. `json:"-"`: it is recomputed from the ConfigTree and never
-	// crosses the config wire.
-	AddressInvalidSpec string   `json:"-"`
-	Addresses          []string // multiple addresses (source NAT pools)
-	Port               int      // optional port mapping (DNAT)
+	Name      string
+	Address   string   // single address (DNAT compat)
+	Addresses []string // multiple addresses (source NAT pools)
+	Port      int      // optional port mapping (DNAT)
 	// PortRaw is the raw DNAT pool `port` token exactly as configured
 	// (empty when no `port` leaf was set). It lets the strict commit gate
 	// (validateDNATPoolStrict) and the snapshot builder distinguish a
