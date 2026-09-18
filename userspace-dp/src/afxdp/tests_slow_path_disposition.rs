@@ -1426,3 +1426,341 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
         }
     }
 }
+
+// #10311: neighbor MISS with a pending source translation parks the frame
+// AND (pre-fix) hands a copy to the kernel slow path. The parked entry
+// carries `pending_decision` (SNAT/NPTv6 merged in the MISS arm), but the
+// trailing chokepoint reinjects with the ORIGINAL `decision`, whose
+// `decision.nat` omits the pending translation — so the first packet(s) of
+// an SNAT'd flow egress the kernel with the ORIGINAL source (SNAT bypass +
+// internal-address disclosure) plus double delivery (kernel copy + later
+// translated replay).
+//
+// The coherent disposition: a buffered frame is held for translated replay
+// and must NOT also be slow-path-copied. These cells drive one SYN of an
+// SNAT'd flow with an unresolved next-hop through the REAL
+// `poll_binding_process_descriptor` and pin: parked exactly once,
+// translated (case's source NAT), session seeded translated, no immediate
+// forward, and NO slow-path copy (the txn harness wires `slow_path: None`,
+// so any reinject attempt lands on `slow_path_drops` as
+// `slow_path_unavailable` — pre-fix the drops assert below is 1, RED).
+//
+// Fail-on-revert: restore the fall-through reinject for buffered frames
+// and `slow_path_drops` goes 0 -> 1 while `pending_neigh` still holds the
+// sole translated replay representative; this cell goes RED.
+#[derive(Clone, Copy, Debug)]
+enum NeighMissNat10311 {
+    /// Interface-mode SNAT (the `nat_snapshot` default rule):
+    /// 10.0.61.102 -> 172.16.80.8 (egress reth0.80 address).
+    InterfaceSnat,
+    /// Static-NAT reverse SNAT: 10.0.61.102 -> 203.0.113.10.
+    StaticSnat,
+    /// NPTv6 outbound: 2001:559:8585:ef00::102 -> 2001:559:8585:80::/64.
+    Nptv6,
+}
+
+fn drive_neigh_miss_10311(case: NeighMissNat10311) {
+    let case_name = match case {
+        NeighMissNat10311::InterfaceSnat => "iface-snat",
+        NeighMissNat10311::StaticSnat => "static-snat",
+        NeighMissNat10311::Nptv6 => "nptv6",
+    };
+    let mut snapshot = nat_snapshot();
+    // Unresolved next-hop: the default routes exist but no neighbor does,
+    // so resolution yields MissingNeighbor (the MISS seed path).
+    snapshot.neighbors.clear();
+    let v6 = matches!(case, NeighMissNat10311::Nptv6);
+    match case {
+        NeighMissNat10311::InterfaceSnat => {}
+        NeighMissNat10311::StaticSnat => {
+            // Static SNAT is the ONLY source translation: drop the
+            // interface/pool rules so the parked rewrite can only come
+            // from the static reverse match below.
+            snapshot.source_nat_rules.clear();
+            snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+                name: "static-10311".to_string(),
+                from_zone: "wan".to_string(),
+                external_ip: "203.0.113.10".to_string(),
+                internal_ip: "10.0.61.102".to_string(),
+                ..Default::default()
+            }];
+        }
+        NeighMissNat10311::Nptv6 => {
+            snapshot.nptv6_rules = vec![crate::Nptv6RuleSnapshot {
+                name: "nptv6-10311".to_string(),
+                from_zone: String::new(),
+                internal_prefix: "2001:559:8585:ef00::/64".to_string(),
+                external_prefix: "2001:559:8585:80::/64".to_string(),
+            }];
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    let (frame, meta) = if v6 {
+        let client: std::net::Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
+        let server: std::net::Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
+        let frame = build_txn_tcp_syn_frame_v6(client, server, 12345, 80);
+        let meta = txn_meta_v6(24, frame.len());
+        (frame, meta)
+    } else {
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(8, 8, 8, 8),
+            12345,
+            443,
+            TCP_FLAG_SYN,
+        );
+        let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+        (frame, meta)
+    };
+    let (_batch, dbg, published) = txn_run_descriptor_capturing_shared(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+
+    // ── Fixture: the MISS arm fired, seeded, and parked. ──
+    assert!(
+        dbg.missing_neigh >= 1,
+        "{case_name}: FIXTURE must take the MissingNeighbor arm"
+    );
+    assert_eq!(sessions.len(), 1, "{case_name}: permitted MISS flow seeds one session");
+    assert_eq!(
+        binding.pending_neigh.len(),
+        1,
+        "{case_name}: the MISS frame parks exactly once"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "{case_name}: a parked frame queues no immediate forward"
+    );
+    assert!(
+        binding.scratch.scratch_recycle.is_empty(),
+        "{case_name}: a parked frame is held for replay, not recycled"
+    );
+    // ── THE #10311 pin: no slow-path copy while parked. ──
+    assert_eq!(
+        binding.live.slow_path_packets.load(Ordering::Relaxed),
+        0,
+        "{case_name}: no slow-path accept while parked (#10311 double delivery)"
+    );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        0,
+        "{case_name}: no slow-path copy while parked (#10311 untranslated egress)"
+    );
+    // ── The parked copy and the seed carry the pending translation. ──
+    let parked = binding
+        .pending_neigh
+        .values()
+        .next()
+        .expect("parked entry");
+    let nat = &parked.decision.nat;
+    assert_eq!(nat.rewrite_dst, None, "{case_name}: no DNAT in this flow");
+    match case {
+        NeighMissNat10311::InterfaceSnat => {
+            assert_eq!(
+                nat.rewrite_src,
+                Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                "{case_name}: parked decision carries the interface-SNAT source"
+            );
+        }
+        NeighMissNat10311::StaticSnat => {
+            assert_eq!(
+                nat.rewrite_src,
+                Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+                "{case_name}: parked decision carries the static-SNAT source"
+            );
+        }
+        NeighMissNat10311::Nptv6 => {
+            assert!(nat.nptv6, "{case_name}: parked decision is NPTv6-marked");
+            match nat.rewrite_src {
+                Some(IpAddr::V6(translated)) => {
+                    // RFC 6296 adjusts the IID, so only the /64 prefix
+                    // swap is pinned, not the full address.
+                    assert_eq!(
+                        translated.segments()[..4],
+                        [0x2001, 0x0559, 0x8585, 0x0080],
+                        "{case_name}: parked source is in the NPTv6 external /64"
+                    );
+                    assert_ne!(
+                        translated,
+                        "2001:559:8585:ef00::102".parse::<std::net::Ipv6Addr>().unwrap(),
+                        "{case_name}: parked source differs from the original"
+                    );
+                }
+                other => panic!("{case_name}: expected an NPTv6 v6 rewrite, got {other:?}"),
+            }
+        }
+    }
+    let seeds: Vec<_> = published
+        .iter()
+        .filter(|e| e.origin == SessionOrigin::MissingNeighborSeed)
+        .collect();
+    assert_eq!(seeds.len(), 1, "{case_name}: exactly one MissingNeighborSeed publish");
+    assert_eq!(
+        seeds[0].decision.nat, parked.decision.nat,
+        "{case_name}: the seed carries the same pending translation"
+    );
+    let pending_key = *binding.pending_neigh.keys().next().expect("pending key");
+    assert_eq!(
+        pending_key.1,
+        if v6 {
+            IpAddr::V6(
+                "2001:559:8585:80::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap(),
+            )
+        } else {
+            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))
+        },
+        "{case_name}: parked key uses the configured gateway"
+    );
+    // ── Resolve the hop and replay the parked frame through the real
+    // `retry_pending_neigh` path. The egress binding deliberately owns a
+    // different UMEM, so production's cross-UMEM pending_tx_local copy path
+    // is exercised rather than a prepared offset alias.
+    let next_hop = if v6 {
+        IpAddr::V6(
+            "2001:559:8585:80::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap(),
+        )
+    } else {
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))
+    };
+    assert_eq!(
+        pending_key.0,
+        12,
+        "{case_name}: pending key uses the route's egress ifindex"
+    );
+    let mut bindings = vec![
+        binding,
+        BindingWorker::new_for_mirror_test(1, 0, 11, 0),
+    ];
+    bindings[1].interface = Arc::<str>::from("ge-0-0-0.80");
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &dynamic_neighbors,
+        12,
+        80,
+        next_hop,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut shared_recycles = Vec::new();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    assert!(
+        dynamic_neighbors.get(&pending_key).is_some(),
+        "{case_name}: resolved neighbor must be visible under the pending key"
+    );
+    retry_pending_neigh(
+        ingress,
+        left,
+        0,
+        right,
+        &binding_lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        123_000_000_100,
+        // SAFETY: `area` points into bindings[0]'s UMEM, which outlives this
+        // single-threaded retry call; the split borrows cover disjoint worker
+        // state while the UMEM allocation itself is reference-counted.
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut BatchCounters::default(),
+    );
+    assert!(
+        bindings[0].pending_neigh.is_empty(),
+        "{case_name}: neighbor resolution drains the parked representative"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        0,
+        "{case_name}: separate UMEMs must not receive a prepared offset"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len(),
+        1,
+        "{case_name}: exactly one translated replay reaches the egress queue \
+         (prepared={}, fill={}, table_unavailable={}, tx_submit_errors={}, cross_umem={})",
+        bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        bindings[1].live.debug_pending_fill_frames.load(Ordering::Relaxed),
+        bindings[1].live.table_unavailable_packets.load(Ordering::Relaxed),
+        bindings[1].live.tx_submit_error_drops.load(Ordering::Relaxed),
+        bindings[1].tx_counters.neighbor_retry_cross_umem_copies
+    );
+    assert_eq!(
+        bindings[1].tx_counters.neighbor_retry_cross_umem_copies,
+        1,
+        "{case_name}: replay uses exactly one cross-UMEM copy"
+    );
+    let replay = bindings[1]
+        .tx_pipeline
+        .pending_tx_local
+        .front()
+        .expect("translated replay request");
+    assert_eq!(
+        replay.bytes.len(),
+        frame.len() + 4,
+        "{case_name}: replay preserves the egress VLAN tag and frame payload"
+    );
+    if v6 {
+        let expected_prefix = [0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0x00, 0x80];
+        assert_eq!(
+            &replay.bytes[26..34],
+            &expected_prefix,
+            "{case_name}: replay source carries the NPTv6 external /64"
+        );
+        assert_ne!(
+            &replay.bytes[26..34],
+            &[0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0xef, 0x00],
+            "{case_name}: replay does not carry the original NPTv6 source prefix"
+        );
+    } else {
+        let expected_source = match case {
+            NeighMissNat10311::InterfaceSnat => [172, 16, 80, 8],
+            NeighMissNat10311::StaticSnat => [203, 0, 113, 10],
+            NeighMissNat10311::Nptv6 => unreachable!(),
+        };
+        assert_eq!(
+            &replay.bytes[30..34],
+            &expected_source,
+            "{case_name}: replay source is translated, never the original LAN address"
+        );
+        assert_ne!(
+            &replay.bytes[30..34],
+            &[10, 0, 61, 102],
+            "{case_name}: replay cannot egress with the original source"
+        );
+    }
+}
+
+#[test]
+fn neigh_miss_iface_snat_suppresses_slow_path_copy_while_parked_10311() {
+    drive_neigh_miss_10311(NeighMissNat10311::InterfaceSnat);
+}
+
+#[test]
+fn neigh_miss_static_snat_suppresses_slow_path_copy_while_parked_10311() {
+    drive_neigh_miss_10311(NeighMissNat10311::StaticSnat);
+}
+
+#[test]
+fn neigh_miss_nptv6_suppresses_slow_path_copy_while_parked_10311() {
+    drive_neigh_miss_10311(NeighMissNat10311::Nptv6);
+}
