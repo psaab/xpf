@@ -139,7 +139,8 @@ restore_config() {
     local log=/tmp/xpf-wire-hostinbound-restore.log
     if ! printf 'configure\ndelete security zones security-zone wan host-inbound-traffic system-services netconf\ndelete security zones security-zone wan host-inbound-traffic system-services ssh\ndelete security zones security-zone wan host-inbound-traffic system-services https\ncommit\nexit\n' | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$log" 2>&1; then RESTORE_OK=0; fi
     grep -qE 'commit (complete|succeeded)' "$log" 2>/dev/null || RESTORE_OK=0
-    local z; z="$(cli_show 'show configuration security zones | display set' 2>&1)"
+    local z; z="$(cli_show 'show configuration security zones | display set' 2>&1)" || RESTORE_OK=0
+    [[ -n "$z" && "$z" == *"security-zone wan host-inbound-traffic system-services ping"* ]] || RESTORE_OK=0
     [[ "$z" != *"security-zone wan host-inbound-traffic system-services netconf"* ]] || RESTORE_OK=0
     [[ "$z" != *"security-zone wan host-inbound-traffic system-services ssh"* ]] || RESTORE_OK=0
     [[ "$z" != *"security-zone wan host-inbound-traffic system-services https"* ]] || RESTORE_OK=0
