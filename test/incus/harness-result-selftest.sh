@@ -1223,6 +1223,10 @@ wire_log 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled created=1
 wire_field_is "conntrack under-sample VOID transcribes" 0 1 "VOID"
 wire_field_is "conntrack VOID keeps under-sampled" 0 2 "under-sampled"
 wire_field_has "conntrack keeps lifecycle metric" 0 5 "lifecycle_bad=0"
+wire_log 'WIRE_GATE wire_routing_separation PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0\n'
+wire_field_is "routing separation PASS transcribes" 0 1 "PASS"
+wire_field_is "routing separation headline is probe_leaked" 0 3 "probe_leaked"
+wire_field_has "routing separation keeps control offered" 0 5 "control_offered=1500"
 wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\nWIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=1\n'
 wire_field_is "two gate IDs in one log is VOID" 0 1 "VOID"
 wire_field_has "two gate IDs says why" 0 2 "distinct WIRE_GATE gate IDs"

@@ -3,7 +3,8 @@
 #
 # Shared verdict core for the wire-deny gates: wire-policy-deny.sh and
 # wire-appmatch-twins.sh (#9531), wire-zone-matrix.sh (#10028),
-# wire-hostinbound-deny.sh (#10029), wire-conntrack-lifecycle.sh (#10030).
+# wire-hostinbound-deny.sh (#10029), wire-conntrack-lifecycle.sh (#10030),
+# and wire-routing-separation.sh (#10136).
 # Pure bash, no cluster, no incus, no network — every
 #
 # WHY THIS EXISTS
@@ -14,7 +15,7 @@
 # PASS. If each script grew its own copy, a floor fix in one and not the other
 # would be a silent divergence in what "conformant" means — the exact class of
 # drift the §2 oracle exists to prevent. One total verdict function per gate,
-# five callers, hermetic matrices on all.
+# six callers, hermetic matrices on all.
 #
 # lekko vocabulary (mirrors the WIRE_GATE adapter contract in
 # harness-result.sh `harness_adapt_wire_gate`):
@@ -64,8 +65,8 @@ wire_num() {
 #      frames than §2 allows is VOID before any other question is asked;
 #   2. leak — emerged probe frames are a positive observation of breakage
 #      and survive a missing control (the capture evidently saw *something*);
-#   3. capture-blind — no leak but no control either proves only that the
-#      capture saw nothing, never that the policy held;
+#   3. capture-blind — no leak but no control either proves only that
+#      the capture saw nothing, never that the policy held;
 #   4. checksum — a rewrite with a broken checksum is FAIL (§2.4), not a pass
 #      with loss;
 #   5. PASS.
@@ -94,6 +95,19 @@ wire_deny_verdict() {
 	fi
 	printf 'WIRE_GATE wire_policy_deny PASS reason=-- %s\n' "$metrics"
 	return 0
+}
+# wire_routing_separation_verdict <probe_offered> <probe_leaked>
+#   <control_offered> <control_observed> <cksum_bad>
+#
+# #10136 uses the same deny oracle and floors as wire_policy_deny, but the
+# adapter/ledger identity is a distinct §3 row. Keep the policy core as the
+# single source of scoring truth and rewrite only its gate token.
+wire_routing_separation_verdict() {
+	local out rc
+	out="$(wire_deny_verdict "$@")"
+	rc=$?
+	printf '%s\n' "${out/wire_policy_deny/wire_routing_separation}"
+	return "$rc"
 }
 #
 # The appmatch-twins verdict. LIVE-FINDING DEMOTION (see plan §16): the lab
