@@ -717,11 +717,11 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// expands via packedBody rather than relying on the
 					// compact normalizer's scope admitting the pair) and the
 					// recorded set can never drift from the strict-reject set.
-					// In particular a term-level packed valueless leaf (`term T
-					// from protocol;`, #10072) — like a term-level packed
-					// unknown leaf (#10071) — escapes BOTH the gate and this
-					// recording identically (strict-path packing defects with
-					// their own filings — NOT a marker/gate divergence). The
+					// Before #10071/#10072, term-level packed valueless and
+					// unknown leaves escaped BOTH the gate and this recording
+					// identically (strict-path packing defects, not a
+					// marker/gate divergence). Their fixes now surface the
+					// packed leaves to the strict gate and marker view. The
 					// snapshot builder, the lo0 mirror and the PBR classifier
 					// fail the term closed on this field; the strict path
 					// rejects it in pre-walk before compilation, so a committed
