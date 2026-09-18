@@ -658,12 +658,13 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// term node's Keys, leaving Children empty — the term compiled
 					// with an EMPTY Action, so a discard did not discard while the
 					// term still existed and still matched.
-					termBody := packedBody(termInst.node,
-						schemaForPath("firewall", "family", af, "filter", "term"))
+					termSchema := schemaForPath("firewall", "family", af, "filter", "term")
+					termBody := packedBody(termInst.node, termSchema)
 
 					fromSchema := schemaForPath("firewall", "family", af, "filter", "term", "from")
 					var rangeNames map[string]bool
-					for _, fromNode := range termBody.FindChildren("from") {
+					fromNodes, _ := firewallTermFromNodes(termInst.node, termSchema)
+					for _, fromNode := range fromNodes {
 						// A `from` written as a one-line STATEMENT inside the term
 						// block — `term t1 { from protocol tcp; }` — packs the
 						// condition onto the from node's own Keys, exactly as the
@@ -673,19 +674,6 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 						// for #6685, where this is the NESTED side.
 						rangeNames = compileFilterFrom(packedBody(fromNode, fromSchema),
 							term, af, rangeNames)
-					}
-					// #10071: when a schema-unknown `from` leaf is packed onto
-					// the term itself, packedBody deliberately leaves the original
-					// node unchanged rather than guessing how many operands the
-					// unknown leaf owns. Preserve the filter compiler's existing
-					// unknown-leaf contract by giving compileFilterFrom the
-					// synthetic `from` statement so it can record the leaf.
-					if termBody == termInst.node {
-						for _, packedFrom := range firewallPackedTermFromNodes(termInst.node,
-							schemaForPath("firewall", "family", af, "filter", "term")) {
-							rangeNames = compileFilterFrom(packedBody(packedFrom, fromSchema),
-								term, af, rangeNames)
-						}
 					}
 					// Finalize only after all same-name range fragments have
 					// merged, including fragments in later `from` blocks (#9899).
@@ -1508,6 +1496,29 @@ func firewallPackedTermFromNodes(termNode *Node, termSchema *schemaNode) []*Node
 		out = append(out, from)
 	}
 	return out
+}
+
+// firewallTermFromNodes lowers every `from` statement carried by a term. A
+// leaf term can have several packed segments; packedBody may absorb a later
+// `from` marker as the preceding leaf's operand, so the raw segment view must
+// replace that normalized body rather than be appended to it.
+func firewallTermFromNodes(termNode *Node, termSchema *schemaNode) (fromNodes, packedFroms []*Node) {
+	if termNode == nil || termSchema == nil {
+		return nil, nil
+	}
+	termBody := packedBody(termNode, termSchema)
+	fromNodes = termBody.FindChildren("from")
+	packedFroms = firewallPackedTermFromNodes(termNode, termSchema)
+	if len(packedFroms) == 0 {
+		return fromNodes, nil
+	}
+	if termNode.IsLeaf && len(termNode.Children) == 0 {
+		return packedFroms, packedFroms
+	}
+	if termBody == termNode {
+		fromNodes = append(fromNodes, packedFroms...)
+	}
+	return fromNodes, packedFroms
 }
 
 // compileFilterFrom compiles a firewall-filter term's `from` match block. The

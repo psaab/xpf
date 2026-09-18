@@ -66,44 +66,45 @@ func TestFilterPackedUnknownFromStrict10071(t *testing.T) {
 		t.Fatalf("mixed packed UnknownFrom = %v, want [ttl]", mixedTerm.UnknownFrom)
 	}
 
-	// P1: every packed `from` segment must reach the gate, not just the first.
-	twoSeg, perrs := NewParser(`firewall { family inet { filter F { term T from protocol tcp from ttl 64; } } }`).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("two-segment packed from fixture did not parse: %v", perrs)
-	}
-	if _, err := CompileConfig(twoSeg); err == nil || !strings.Contains(err.Error(), "ttl") {
-		t.Fatalf("two-segment packed from must reject naming ttl, got %v", err)
-	} else if strings.Contains(err.Error(), "from range") {
-		t.Fatalf("two-segment packed from misidentified a nested leaf: %v", err)
-	}
-	twoSegLenient, err := CompileConfigLenient(twoSeg)
-	if err != nil {
-		t.Fatalf("two-segment packed from must warn, not fail: %v", err)
-	}
-	twoSegTerm := firstInetTerm(t, twoSegLenient, "F")
-	if len(twoSegTerm.UnknownFrom) != 1 || twoSegTerm.UnknownFrom[0] != "ttl" {
-		t.Fatalf("two-segment packed UnknownFrom = %v, want [ttl]", twoSegTerm.UnknownFrom)
-	}
+	t.Run("two packed from segments", func(t *testing.T) {
+		twoSeg, perrs := NewParser(`firewall { family inet { filter F { term T from protocol tcp from ttl 64; } } }`).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("two-segment packed from fixture did not parse: %v", perrs)
+		}
+		if _, err := CompileConfig(twoSeg); err == nil || !strings.Contains(err.Error(), "ttl") {
+			t.Fatalf("two-segment packed from must reject naming ttl, got %v", err)
+		} else if strings.Contains(err.Error(), "from range") {
+			t.Fatalf("two-segment packed from misidentified a nested leaf: %v", err)
+		}
+		twoSegLenient, err := CompileConfigLenient(twoSeg)
+		if err != nil {
+			t.Fatalf("two-segment packed from must warn, not fail: %v", err)
+		}
+		twoSegTerm := firstInetTerm(t, twoSegLenient, "F")
+		if len(twoSegTerm.UnknownFrom) != 1 || twoSegTerm.UnknownFrom[0] != "ttl" {
+			t.Fatalf("two-segment packed UnknownFrom = %v, want [ttl]", twoSegTerm.UnknownFrom)
+		}
+	})
 
-	// P2: bracket provenance must survive segment recovery, or the bracketed
-	// values mis-scan as the unknown leaf and swallow the real one.
-	bracket, perrs := NewParser(`firewall { family inet { filter F { term T from source-address [ 10.0.0.0/8 20.0.0.0/8 ] ttl 64; } } }`).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("bracketed packed from fixture did not parse: %v", perrs)
-	}
-	if _, err := CompileConfig(bracket); err == nil || !strings.Contains(err.Error(), "ttl") {
-		t.Fatalf("bracketed packed from must reject naming ttl, got %v", err)
-	} else if strings.Contains(err.Error(), "from range") {
-		t.Fatalf("bracketed packed from misidentified a nested leaf: %v", err)
-	}
-	bracketLenient, err := CompileConfigLenient(bracket)
-	if err != nil {
-		t.Fatalf("bracketed packed from must warn, not fail: %v", err)
-	}
-	bracketTerm := firstInetTerm(t, bracketLenient, "F")
-	if len(bracketTerm.UnknownFrom) != 1 || bracketTerm.UnknownFrom[0] != "ttl" {
-		t.Fatalf("bracketed packed UnknownFrom = %v, want [ttl]", bracketTerm.UnknownFrom)
-	}
+	t.Run("bracketed packed from tail", func(t *testing.T) {
+		bracket, perrs := NewParser(`firewall { family inet { filter F { term T from source-address [ 10.0.0.0/8 20.0.0.0/8 ] ttl 64; } } }`).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("bracketed packed from fixture did not parse: %v", perrs)
+		}
+		if _, err := CompileConfig(bracket); err == nil || !strings.Contains(err.Error(), "ttl") {
+			t.Fatalf("bracketed packed from must reject naming ttl, got %v", err)
+		} else if strings.Contains(err.Error(), "from range") {
+			t.Fatalf("bracketed packed from misidentified a nested leaf: %v", err)
+		}
+		bracketLenient, err := CompileConfigLenient(bracket)
+		if err != nil {
+			t.Fatalf("bracketed packed from must warn, not fail: %v", err)
+		}
+		bracketTerm := firstInetTerm(t, bracketLenient, "F")
+		if len(bracketTerm.UnknownFrom) != 1 || bracketTerm.UnknownFrom[0] != "ttl" {
+			t.Fatalf("bracketed packed UnknownFrom = %v, want [ttl]", bracketTerm.UnknownFrom)
+		}
+	})
 
 	// #6818 is the adjacent packed-tail control: a known nested firewall
 	// chain must not be mistaken for an opaque unknown `from` leaf.
