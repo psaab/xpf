@@ -221,7 +221,7 @@ func findCleanupCallers(t *testing.T, root string) []cleanupCaller {
 			// repo, and the walk counted each copy's `cmd/xpfd/main.go` as a
 			// production Cleanup() caller — a red test with zero production
 			// change. Skipping them keeps the walk to this checkout's source.
-			if strings.HasPrefix(info.Name(), ".") || strings.HasPrefix(info.Name(), "_") {
+			if path != root && (strings.HasPrefix(info.Name(), ".") || strings.HasPrefix(info.Name(), "_")) {
 				return filepath.SkipDir
 			}
 			switch info.Name() {
