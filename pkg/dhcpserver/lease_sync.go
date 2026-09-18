@@ -998,6 +998,12 @@ func peerLeasesForScopes(peer LeaseSyncSnapshot, family int, known, eligible []L
 // generation mismatches, unapplied sender state, and ambiguous groups retain
 // the old whole-union behavior. Explicit authority proof narrows both local
 // stale rows and peer rows during staggered multi-RG takeover.
+//
+// Contract ruling (see docs/log/10170.md): NO ordinal stale<current comparison.
+// Generation values are independent per-node counters, so cross-node age
+// ordering is meaningless; narrowing stays proof-gated (successful
+// current-generation peer proof + exact CIDR+RG match). Do not reintroduce
+// age ordering here.
 func mergeLeasesByAuthority(local []SyncLease, peer LeaseSyncSnapshot, family int, authority LeaseSyncAuthority, _ bool) []SyncLease {
 	if !peer.Received || peer.Generation == 0 {
 		return mergeLeasesByIdentity(local, peer.Leases, family)
