@@ -163,9 +163,18 @@ xpf_cluster_epoch_bump() {
 		fi
 	fi
 	# Only the shared production directory is normalized; never weaken
-	# a caller's private temp-tree permissions.
+	# a caller's private temp-tree permissions. Both the chmod and the
+	# resulting mode are required: silently retaining a sticky/private
+	# mode would make the published epoch unavailable to another user.
 	if [[ "$epoch_dir" == "/tmp/xpf-cluster-state" ]]; then
-		chmod 0777 "$epoch_dir" 2>/dev/null || true
+		if ! chmod 0777 "$epoch_dir" 2>/dev/null; then
+			echo "warning: xpf_cluster_epoch_bump: cannot make production state directory ${epoch_dir} non-sticky and cross-user writable — refusing lock cell (#10126)" >&2
+			return 1
+		fi
+		if [[ "$(stat -c %a "$epoch_dir" 2>/dev/null || true)" != 777 ]]; then
+			echo "warning: xpf_cluster_epoch_bump: production state directory ${epoch_dir} is not mode 0777 — refusing lock cell (#10126)" >&2
+			return 1
+		fi
 	fi
 	if [[ ! -w "$epoch_dir" ]]; then
 		echo "warning: xpf_cluster_epoch_bump: state directory ${epoch_dir} is not writable — refusing lock cell (#10126)" >&2
