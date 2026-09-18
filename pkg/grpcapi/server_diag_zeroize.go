@@ -1331,10 +1331,14 @@ var (
 // DELEGATES to the SAME primitive the gRPC path uses (#5890). Both paths then
 // erase an IDENTICAL, single-source-of-truth OWNED-artifact set — config state
 // + tls/ + rendered service configs (frr/swanctl/kea) + provisioned login
-// accounts + config archive + BPF pins + networkd — so they cannot diverge and
-// leave secret residue on a re-tenanted device. configDir/configBase are the
-// CONFIGURED config root (see performZeroizeWipe); the caller resolves+validates
-// them (cli.zeroizeConfigRoot / grpcapi.zeroizeConfigRoot) before delegating.
+// accounts + config archive + BPF pins + networkd + firewall logs — so they
+// cannot diverge and leave secret residue on a re-tenanted device. Callers
+// without a config store use the zero inventory for dynamic names; static
+// xpf-owned log surfaces are still erased. Production gRPC/console callers use
+// PerformZeroizeWipeWithLogInventory after snapshotting configured names.
+// configDir/configBase are the CONFIGURED config root (see performZeroizeWipe);
+// the caller resolves+validates them (cli.zeroizeConfigRoot /
+// grpcapi.zeroizeConfigRoot) before delegating.
 // #7173: archiveDir is the CONFIGURED archive directory, not the compiled-in
 // default. Passing the default unconditionally meant the ownership guard inside
 // FactoryResetArchiveDir could never fire — the caller handed it exactly the
@@ -1344,7 +1348,7 @@ var (
 // communities, was never examined and the reset reported clean. Pass "" to mean
 // "archival disabled, nothing to erase".
 func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
-	return performZeroizeWipe(configDir, configBase, archiveDir)
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{})
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {

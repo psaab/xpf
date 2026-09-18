@@ -78,7 +78,7 @@ func TestCLIZeroizeWipesConfiguredRootNotHardcoded(t *testing.T) {
 	var called bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(configDir, configBase, _ string) error {
+	zeroizeFullWipe = func(configDir, configBase, _ string, _ zeroizeLogInventory) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil

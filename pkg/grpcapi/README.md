@@ -519,9 +519,11 @@ contract.
   which LEFT `tls/`, the rendered service configs (frr/swanctl/kea), and
   the provisioned login accounts (shadow/authorized_keys/`sudoers.d/xpf-*`)
   on disk — secret residue on a re-tenanted device. The console now
-  DELEGATES to the exported `PerformZeroizeWipe(configDir, configBase)` —
+  DELEGATES to the exported log-aware `PerformZeroizeWipeWithLogInventory` —
   the SAME primitive `runZeroize` runs — so both paths erase an IDENTICAL
-  single-source-of-truth OWNED-artifact set and cannot diverge again. The
+  single-source-of-truth OWNED-artifact set (including xpf firewall logs) and
+  cannot diverge again. Journald copies and remote collectors remain outside
+  this local wipe and are named in the success receipt. The
   console keeps its own root resolution (`cli.zeroizeConfigRoot`, #5554/
   #5684) and daemon stop. **The console also runs the wipe THROUGH the
   daemon's coordinated factory-reset transaction (#5871).** It does not dial

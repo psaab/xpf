@@ -403,6 +403,7 @@ func hermeticWipe10100(t *testing.T, root string) (versionsDir string) {
 		filepath.Join(login, "sudoers.d"), filepath.Join(login, "home"),
 		filepath.Join(login, "passwd"))
 	setZeroizeRootPaths(t, filepath.Join(login, "root-ssh"), nil)
+	seamZeroizeFirewallLogPaths(t, root)
 	return versionsDir
 }
 

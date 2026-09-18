@@ -32,7 +32,7 @@ func TestConsoleZeroizeRoutesThroughDaemonTransaction_5871(t *testing.T) {
 	var enteredTransaction, wipedAtAll, wipedInsideTransaction, stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string) error {
+	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error {
 		wipedAtAll = true
 		// Records that the wipe ran only AFTER the transaction was entered —
 		// proving fencing (apply-gate + reset generation) precedes erasure.
@@ -70,6 +70,52 @@ func TestConsoleZeroizeRoutesThroughDaemonTransaction_5871(t *testing.T) {
 	}
 }
 
+// TestConsoleZeroizeSnapshotsFirewallInventoryInsideGate10300 prevents the
+// same inventory race on the console path: the gate may commit a new syslog
+// destination before invoking the wipe closure.
+func TestConsoleZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "site.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if _, err := store.LoadSet("set system syslog file messages any any"); err != nil {
+		t.Fatalf("LoadSet initial config: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit initial config: %v", err)
+	}
+	store.ExitConfigure()
+	c := &CLI{store: store}
+
+	var got zeroizeLogInventory
+	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
+	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
+	zeroizeFullWipe = func(_, _, _ string, inv zeroizeLogInventory) error {
+		got = inv
+		return nil
+	}
+	zeroizeStopDaemon = func() error { return nil }
+	c.factoryResetFn = func(_ context.Context, wipe func() error) error {
+		if err := store.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure gated commit: %v", err)
+		}
+		if _, err := store.LoadSet("set system syslog file committed-during-gate any notice"); err != nil {
+			t.Fatalf("LoadSet gated config: %v", err)
+		}
+		if _, err := store.Commit(); err != nil {
+			t.Fatalf("Commit gated config: %v", err)
+		}
+		return wipe()
+	}
+
+	if err := c.performConsoleZeroize(); err != nil {
+		t.Fatalf("performConsoleZeroize: %v", err)
+	}
+	if len(got.SyslogFiles) != 2 || got.SyslogFiles[0] != "messages" || got.SyslogFiles[1] != "committed-during-gate" {
+		t.Fatalf("console zeroize inventory missed gated destination: %+v", got)
+	}
+}
+
 // TestConsoleZeroizeSurfacesTransactionFailure_5871 pins fail-CLOSED behavior
 // through the transaction path: a factory-reset transaction FAILURE (e.g. the
 // apply semaphore could not be acquired, or a rendered-config removal inside the
@@ -85,7 +131,7 @@ func TestConsoleZeroizeSurfacesTransactionFailure_5871(t *testing.T) {
 	var enteredTransaction, stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string) error { return removalErr }
+	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { return removalErr }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	c.factoryResetFn = func(_ context.Context, wipe func() error) error {
@@ -120,7 +166,7 @@ func TestConsoleZeroizeSurfacesGateAcquireFailure_5871(t *testing.T) {
 	var wiped, stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string) error { wiped = true; return nil }
+	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { wiped = true; return nil }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	// The transaction fails to enter the gate and never invokes the wipe closure.
@@ -152,7 +198,7 @@ func TestConsoleZeroizeOfflineFallbackUngatedWipe_5871(t *testing.T) {
 	var wiped, stopped bool
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string) error { wiped = true; return nil }
+	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { wiped = true; return nil }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	if err := c.performConsoleZeroize(); err != nil {

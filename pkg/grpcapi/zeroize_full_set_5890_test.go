@@ -70,6 +70,7 @@ func TestPerformZeroizeWipeErasesFullSecretSet_5890(t *testing.T) {
 	// Non-secret best-effort legs onto a throwaway tree so nothing real is touched.
 	zeroizeBPFPinDir = filepath.Join(root, "bpf-pins")
 	zeroizeNetworkdDir = filepath.Join(root, "networkd")
+	seamZeroizeFirewallLogPaths(t, root)
 	mustWriteFile(t, filepath.Join(zeroizeNetworkdDir, "10-xpf-ge-0-0-0.link"), []byte("x"))
 	operatorND := filepath.Join(zeroizeNetworkdDir, "20-operator.network")
 	mustWriteFile(t, operatorND, []byte("operator"))

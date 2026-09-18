@@ -92,6 +92,7 @@ func TestZeroizeRefusesSymlinkedTargets9013(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			seamZeroizeFirewallLogPaths(t, root)
 			tc.setup(t, configDir, real)
 
 			err := PerformZeroizeWipe(configDir, "xpf.conf", "")
