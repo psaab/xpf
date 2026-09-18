@@ -22,7 +22,6 @@ import (
 //
 // Each rejection cell is RED with the relevant arm reverted (open-world
 // silent-accept) and GREEN with the arm present.
-//
 func cwSecurity9878Set(bodyLines ...string) []string {
 	out := []string{}
 	for _, l := range bodyLines {
@@ -308,6 +307,7 @@ func TestClosedWorldSecurity10078_PackedLogRunExpansion(t *testing.T) {
 		t.Fatalf("packed stream rejection must name categroy and closed-world, got: %v", err)
 	}
 }
+
 // TestClosedWorldSecurity10078_PackedDestinationPortArity ensures the
 // address-plus-port Junos suffix consumes exactly the declared port value.
 // A trailing token must return to the pool-level schema walk and be rejected,
@@ -330,6 +330,100 @@ func TestClosedWorldSecurity10078_PackedDestinationPortArity(t *testing.T) {
 	}
 }
 
+// TestClosedWorldSecurity10078_PoolUtilizationAlarmGrammar pins the #2079
+// compiler-read source-NAT alarm under the inherited security boundary. The
+// distinct 80/55 pair proves the clear value is preserved rather than replaced
+// by the raise-only default, and a misspelled leaf must fail closed.
+func TestClosedWorldSecurity10078_PoolUtilizationAlarmGrammar(t *testing.T) {
+	valid := buildTree(t, []string{
+		"set security nat source pool-utilization-alarm raise-threshold 80 clear-threshold 55",
+	})
+	if err := SchemaValidate(valid, nil); err != nil {
+		t.Fatalf("valid pool-utilization-alarm must survive the security arm: %v", err)
+	}
+	cfg, err := CompileConfig(valid)
+	if err != nil {
+		t.Fatalf("valid pool-utilization-alarm must compile: %v", err)
+	}
+	a := cfg.Security.NAT.PoolUtilizationAlarm
+	if a == nil || a.RaiseThreshold != 80 || a.ClearThreshold != 55 {
+		t.Fatalf("alarm thresholds were not preserved: %+v", a)
+	}
+	bad := buildTree(t, []string{
+		"set security nat source pool-utilization-alarm raise-threshold 80 clear-threshhold 55",
+	})
+	if err := SchemaValidate(bad, nil); err == nil {
+		t.Fatal("misspelled pool-utilization-alarm leaf must be rejected")
+	} else if !strings.Contains(err.Error(), "clear-threshhold") {
+		t.Fatalf("alarm typo rejection must name the token, got: %v", err)
+	}
+}
+
+// TestClosedWorldSecurity10078_DirectIPsecVPNLeaves pins the direct VPN
+// spelling alongside the existing nested `ike` form. Both leaves are read by
+// compileIPsec, so the direct shape must commit and a typo must fail closed.
+func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
+	valid := buildTree(t, []string{
+		"set security ike policy ike-pol proposal-set standard",
+		"set security ike policy ike-pol pre-shared-key ascii-text secret123",
+		"set security ike gateway gw1 address 172.16.0.1",
+		"set security ike gateway gw1 ike-policy ike-pol",
+		"set security ipsec policy esp-pol proposal-set standard",
+		"set security ipsec vpn tun1 gateway gw1 ipsec-policy esp-pol",
+	})
+	if err := SchemaValidate(valid, nil); err != nil {
+		t.Fatalf("direct gateway/ipsec-policy leaves must survive the security arm: %v", err)
+	}
+	cfg, err := CompileConfig(valid)
+	if err != nil {
+		t.Fatalf("direct gateway/ipsec-policy leaves must compile strictly: %v", err)
+	}
+	vpn := cfg.Security.IPsec.VPNs["tun1"]
+	if vpn == nil || vpn.Gateway != "gw1" || vpn.IPsecPolicy != "esp-pol" {
+		t.Fatalf("direct VPN leaves were not preserved: %+v", vpn)
+	}
+
+	hier, perrs := NewParser(`security {
+    ike { gateway gw1 { address 192.0.2.1; } }
+    ipsec {
+        proposal esp-p1 {
+            protocol esp;
+            encryption-algorithm aes-256-cbc;
+            authentication-algorithm hmac-sha-256-128;
+        }
+        policy esp-pol { proposals esp-p1; }
+        vpn tun1 gateway gw1 ipsec-policy esp-pol;
+    }
+}`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("hierarchical direct VPN fixture does not parse: %v", perrs)
+	}
+	if err := SchemaValidate(hier, nil); err != nil {
+		t.Fatalf("hierarchical direct VPN leaves must survive the security arm: %v", err)
+	}
+	hcfg, err := CompileConfig(hier)
+	if err != nil {
+		t.Fatalf("hierarchical direct gateway/ipsec-policy leaves must compile strictly: %v", err)
+	}
+	hvpn := hcfg.Security.IPsec.VPNs["tun1"]
+	if hvpn == nil || hvpn.Gateway != "gw1" || hvpn.IPsecPolicy != "esp-pol" {
+		t.Fatalf("hierarchical direct VPN leaves were not preserved: %+v", hvpn)
+	}
+
+	bad := buildTree(t, []string{
+		"set security ike policy ike-pol proposal-set standard",
+		"set security ike policy ike-pol pre-shared-key ascii-text secret123",
+		"set security ike gateway gw1 address 172.16.0.1",
+		"set security ike gateway gw1 ike-policy ike-pol",
+		"set security ipsec policy esp-pol proposal-set standard",
+		"set security ipsec vpn tun1 gateway gw1 ipsec-policie esp-pol",
+	})
+	if err := SchemaValidate(bad, nil); err == nil {
+		t.Fatal("misspelled direct ipsec-policy leaf must be rejected")
+	} else if !strings.Contains(err.Error(), "ipsec-policie") || !strings.Contains(err.Error(), "closed-world") {
+		t.Fatalf("direct VPN typo rejection must name the token and closed-world boundary, got: %v", err)
+	}
+}
 
 // TestClosedWorldSecurity10078_CompletionPinsSubtrees verifies the same
 // modeled keywords drive config-mode completion. This keeps the closed-world

@@ -80,23 +80,24 @@ func TestIPsecFlatRunKeepsEveryLeaf8939(t *testing.T) {
 	})
 
 	t.Run("vpn top level", func(t *testing.T) {
-		// The VPN's own leaf set. Note what is NOT asserted here: `gateway`
-		// and `ipsec-policy` are read by the compiler at this level too but
-		// are ABSENT from setSchema, so expandFlatRun cannot tell them from
-		// value tokens and the flat run through them is still truncated.
-		// That is a schema/compiler skew, it is the one operator-reachable
-		// hole left in this family, and closing it changes ADMISSION -- it is
-		// deliberately not smuggled into a compiler-only change.
+		// The VPN's own leaf set includes the direct `gateway` and
+		// `ipsec-policy` references. #10327 declares those compiler-read leaves
+		// so packed SetPath runs and the nested block form retain the same
+		// values; the split-arm comparison below pins every reader shape.
 		b := "set security ipsec vpn v1 "
 		ref := vpnOf(t, build(t, b+"bind-interface st0.1", b+"df-bit clear",
-			b+"establish-tunnels immediately", b+"local-address 10.0.0.1"))
-		if ref.BindInterface == "" || ref.DFBit == "" || ref.EstablishTunnels == "" || ref.LocalAddr == "" {
+			b+"establish-tunnels immediately", b+"local-address 10.0.0.1",
+			b+"gateway G", b+"ipsec-policy P"))
+		if ref.BindInterface == "" || ref.DFBit == "" || ref.EstablishTunnels == "" ||
+			ref.LocalAddr == "" || ref.Gateway == "" || ref.IPsecPolicy == "" {
 			t.Fatalf("the split reference arm is incomplete (%+v) (#8939)", ref)
 		}
 		got := vpnOf(t, build(t, b+"bind-interface st0.1 df-bit clear "+
-			"establish-tunnels immediately local-address 10.0.0.1"))
+			"establish-tunnels immediately local-address 10.0.0.1 "+
+			"gateway G ipsec-policy P"))
 		if got.BindInterface != ref.BindInterface || got.DFBit != ref.DFBit ||
-			got.EstablishTunnels != ref.EstablishTunnels || got.LocalAddr != ref.LocalAddr {
+			got.EstablishTunnels != ref.EstablishTunnels || got.LocalAddr != ref.LocalAddr ||
+			got.Gateway != ref.Gateway || got.IPsecPolicy != ref.IPsecPolicy {
 			t.Errorf("packed vpn = %+v, want the split arm's %+v (#8939)", got, ref)
 		}
 	})

@@ -410,14 +410,15 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 	}},
 	"nat": {desc: "Network Address Translation", children: map[string]*schemaNode{
 		"source": {desc: "Source NAT configuration", children: map[string]*schemaNode{
-			// #2823: the pool body is a container. The persistent-nat and
-			// port (#3864) subtrees are modeled here (commit-check +
-			// completion + flat-set grouping); `address` is modeled below
-			// because compileNATSource reads its packed range. The remaining
-			// `host` leaf stays compiler-owned per the opt-in-gate contract
-			// (schema_walk.go: unknown keywords return nil). The container also
-			// keeps SetPath grouping intact — trailing tokens always descend,
-			// and a bare `pool <name>` still emits a leaf.
+			// #2823: the pool body is a container. The compiler-read
+			// persistent-nat, port, address, deterministic, and
+			// routing-instance subtrees are modeled below (commit-check +
+			// completion + flat-set grouping). The nested deterministic
+			// `host` leaf is modeled under `port`; unknown pool-level
+			// keywords are rejected by the inherited closed-world boundary.
+			// The container also keeps SetPath grouping intact — trailing
+			// tokens always descend, and a bare `pool <name>` still emits a
+			// leaf.
 			//
 			// #3864: `port deterministic { block-size N; host address X }`
 			// (CGNAT) is modeled so the documented flat-set quick-start
@@ -514,6 +515,15 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				// ValidateConfig) — the dataplane does not route the post-
 				// translation packet against a non-ingress table.
 				"routing-instance": {desc: "Translation-target routing instance (accepted, not enforced)", args: 1, placeholder: "<routing-instance>", children: nil},
+			}},
+			// #2079: compileNATSource reads both alarm thresholds and the
+			// strict compiler gate bounds raise to 1..100 and clear to
+			// 1..100, with the cross-field rule clear < raise enforced
+			// there. Keep the leaves typed here so valid alarms survive the
+			// security closed-world boundary and misspellings fail closed.
+			"pool-utilization-alarm": {desc: "Source NAT pool utilization alarm", packedFlatRun: true, children: map[string]*schemaNode{
+				"raise-threshold": {desc: "Utilization percentage that raises the alarm (1..100)", args: 1, valueType: ValueInteger, valueDesc: "Raise percentage", valueExamples: []string{"80", "90"}, validator: ValidateInteger(1, 100), placeholder: "<percent>", children: nil},
+				"clear-threshold": {desc: "Utilization percentage that clears the alarm (1..100; below raise-threshold)", args: 1, valueType: ValueInteger, valueDesc: "Clear percentage", valueExamples: []string{"70", "80"}, validator: ValidateInteger(1, 100), placeholder: "<percent>", children: nil},
 			}},
 			// #4291: `nat source interface port-overloading off` disables
 			// source-port reuse across destinations. Typed so it completes and
@@ -1378,7 +1388,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"hostname": {desc: "Dynamic peer FQDN (DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
 			}},
 		}},
-		"vpn": {desc: "IPsec VPN tunnel name", args: 1, placeholder: "<vpn-name>", children: map[string]*schemaNode{
+		"vpn": {desc: "IPsec VPN tunnel name", args: 1, packedFlatRun: true, placeholder: "<vpn-name>", children: map[string]*schemaNode{
 			// #5297: type the leaf so a non-canonical bind-interface (anything
 			// but st<N> / st<N>.<unit>) fails closed at commit-check instead of
 			// committing and then creating no XFRM device at reconciliation
@@ -1448,6 +1458,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"destination-ip":   {desc: "Probe destination IP", args: 1, placeholder: "<address>", children: nil},
 				"optimized":        {desc: "Send probes only when there is no outbound traffic", children: nil},
 			}},
+			// #10327: compileIPsec reads these direct VPN leaves as well as
+			// the nested `ike { ... }` spelling. Model both forms so direct
+			// configurations commit and a misspelled direct leaf is rejected
+			// by the inherited closed-world boundary.
+			"gateway":         {desc: "IKE gateway reference", args: 1, placeholder: "<gateway-name>", children: nil},
+			"ipsec-policy":    {desc: "IPsec policy reference", args: 1, placeholder: "<policy-name>", children: nil},
 			"local-identity":  {desc: "Local identity (default local traffic selector)", args: 1, placeholder: "<identity>", children: nil},
 			"remote-identity": {desc: "Remote identity (default remote traffic selector)", args: 1, placeholder: "<identity>", children: nil},
 			"pre-shared-key":  {desc: "Pre-shared key for this VPN", args: 1, placeholder: "<key>", children: nil},
@@ -1474,6 +1490,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"local-ip":  {desc: "Local traffic selector prefix", args: 1, placeholder: "<prefix>", children: nil},
 				"remote-ip": {desc: "Remote traffic selector prefix", args: 1, placeholder: "<prefix>", children: nil},
 			}},
+			// #10327 keeps the direct leaves above and the existing nested
+			// `ike` references below equivalent at the schema boundary.
 			"ike": {desc: "IKE bindings for this VPN", children: map[string]*schemaNode{
 				"gateway":      {desc: "IKE gateway reference", args: 1, placeholder: "<gateway-name>", children: nil},
 				"ipsec-policy": {desc: "IPsec policy reference", args: 1, placeholder: "<policy-name>", children: nil},

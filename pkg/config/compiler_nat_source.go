@@ -824,6 +824,15 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 
 	// Parse pool-utilization-alarm
 	if alarmNode := node.FindChild("pool-utilization-alarm"); alarmNode != nil {
+		// #10327: the alarm body is now modeled so the security closed-world
+		// walker can admit its leaves. Mirror the schema walk's packed-run
+		// expansion before reading children; otherwise SetPath's
+		// `raise-threshold 80 clear-threshold 55` chain leaves clear nested under
+		// raise and the compiler silently falls back to its raise-only default.
+		alarmChildren := alarmNode.Children
+		if alarmSchema := schemaForPath("security", "nat", "source", "pool-utilization-alarm"); alarmSchema != nil {
+			alarmChildren = expandFlatRun(alarmChildren, alarmSchema)
+		}
 		alarm := &PoolUtilizationAlarmConfig{}
 		// clearSet records whether the operator explicitly provided a
 		// clear-threshold token. Junos makes clear-threshold OPTIONAL: a
@@ -834,7 +843,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 		// even an invalid one like 0 or >= raise — is preserved verbatim so the
 		// commit gate still rejects it.
 		clearSet := false
-		for _, ap := range alarmNode.Children {
+		for _, ap := range alarmChildren {
 			switch ap.Name() {
 			case "raise-threshold":
 				if v := nodeVal(ap); v != "" {

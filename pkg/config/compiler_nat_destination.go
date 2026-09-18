@@ -92,9 +92,6 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			if pool.Address != "" {
 				existing.Address = pool.Address
 			}
-			if len(pool.Addresses) > 0 {
-				existing.Addresses = append(existing.Addresses, pool.Addresses...)
-			}
 			if pool.PortRaw != "" {
 				existing.PortRaw = pool.PortRaw
 				existing.Port = pool.Port

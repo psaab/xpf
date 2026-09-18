@@ -601,12 +601,12 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	}
 	sort.Strings(losers)
 
-	// #10078's security-level schema completion changes the combined-tree
-	// population from the current-master baseline
-	// `walked=111,vacuous=38,unmeasured=80` to
-	// `walked=111,vacuous=36,unmeasured=83`; the three loser rows are
+	// #10327's four newly modeled compiler-read leaves add one reachable
+	// container to the combined-tree population: the #10078 baseline
+	// `walked=111,vacuous=36,unmeasured=83` becomes
+	// `walked=112,vacuous=36,unmeasured=83`. The three loser rows are
 	// byte-for-byte unchanged, so no loss signal was cleared. Collector reach
-	// moves from 379/139 to 385/140 as the schema population is admitted.
+	// moves from 385/140 to 386/141 as the schema population is admitted.
 	// This is a measured population-count ratchet update, not a loser-set
 	// relaxation.
 	//

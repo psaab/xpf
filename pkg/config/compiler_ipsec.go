@@ -552,13 +552,13 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			vpn = &IPsecVPN{Name: inst.name}
 		}
 		vpnSchema := ipsecVPNLeafSchema8939()
-		// #9088: segment the run against a schema that also knows the two leaves
-		// the COMPILER reads here and setSchema does not declare -- `gateway`
-		// and `ipsec-policy`. Without them expandFlatRun has no cut point at the
-		// head of `gateway G ipsec-policy P bind-interface st0.1` and passes the
-		// whole run through, so the compiler takes the first value and drops the
-		// crypto policy and the XFRM binding. Both losses commit clean.
-		for _, p := range expandFlatRun(inst.node.Children, ipsecVPNRunSchema9088()) {
+		// #9088: segment the run against the same VPN schema used by the
+		// closed-world walker and the bind-interface gate. #10327 declares
+		// the compiler-read direct `gateway` and `ipsec-policy` leaves in
+		// setSchema, so they are now real cut points rather than synthetic
+		// compiler-only additions; a packed `gateway G ipsec-policy P
+		// bind-interface st0.1` run keeps all three values.
+		for _, p := range expandIPsecVPNRun9088(inst.node) {
 			v := nodeVal(p)
 			switch p.Name() {
 			case "bind-interface":

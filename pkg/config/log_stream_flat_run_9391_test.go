@@ -16,6 +16,11 @@ import "testing"
 // This row exists at all only because the flat-set axis was restored: the
 // braced-only gate found 26 differing containers of which ZERO were
 // operator-reachable, and missed the one that was.
+// The fixture deliberately uses valid category `policy`, not the historical
+// `rt-flow`: `rt-flow` is absent from syslogCategories and only committed
+// before the strict arm exposed the run, so keeping it would test enum
+// validation rather than the #9391 reader loss (invalid-value coverage is
+// owned by #3349).
 
 func stream9391(t *testing.T, lines ...string) (*SyslogStream, bool) {
 	t.Helper()

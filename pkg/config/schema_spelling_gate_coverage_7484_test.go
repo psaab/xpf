@@ -388,9 +388,12 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // #9984 adds the value-bearing event-options plant-class leaf; the spelling
 // census moved one leaf into COMPARED, so tighten the floor 764 -> 765.
 // #10078 models security tcp-mss kinds and destination-pool fields. Six
-// additional spellings become comparable (the remaining ALG kinds are
-// value-less flags), so the measured floor tightens 765 -> 771.
-const gateCoverageFloor = 771
+// additional spellings become comparable (the remaining ALG kinds are value-
+// less flags), so the measured floor tightens 765 -> 771.
+// #10327 models the compiler-read direct IPsec VPN references and source-NAT
+// pool alarm thresholds. Their four value leaves become comparable, so the
+// measured floor tightens 771 -> 775.
+const gateCoverageFloor = 775
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

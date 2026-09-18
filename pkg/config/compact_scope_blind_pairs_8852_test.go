@@ -202,6 +202,7 @@ var knownBlindScopePairs8852 = map[string]string{
 	"policy then":              "plain-container",
 	"routing-options static":   "plain-container",
 	"security flow":            "plain-container",
+	"security nat":             "plain-container",
 	// #8850 admitted ("firewall","family") so an elided `firewall family inet
 	// { filter ... }` compiles its filters instead of silently producing zero.
 	// `family` is args:0 with children and no wildcard, so blindShape8852
@@ -261,13 +262,13 @@ var knownBlindScopePairs8852 = map[string]string{
 	// measure it.
 	"system master-password":     "plain-container",
 	"system root-authentication": "plain-container",
-	// issue 8875. Their folds ARE measured -- by
-	// TestSecurityTopLevelElisionKeepsContents8875, across all three depths and
-	// on compiled CONTENTS -- but not by arm 2, and a pair leaves this list
-	// only when arm 2 generates a site for it. Registration records that this
-	// arm does not measure them; it is not a claim that they are unfixed.
+	// issue 8875. The folds for security policies, screen, and zones ARE
+	// measured -- by TestSecurityTopLevelElisionKeepsContents8875, across
+	// all three depths and on compiled CONTENTS -- but not by arm 2, and a
+	// pair leaves this list only when arm 2 generates a site for it.
+	// Registration records that this arm does not measure them; it is not a
+	// claim that they are unfixed.
 	"security policies":                  "plain-container",
-	"security nat":                       "plain-container",
 	"security screen":                    "plain-container",
 	"security zones":                     "plain-container",
 	"security-zone address-book":         "plain-container",

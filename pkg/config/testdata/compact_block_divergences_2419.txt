@@ -229,12 +229,12 @@
 # compiler intentionally does not consume; keep this measured divergence in
 # the inventory rather than widening the unrelated compact-policy reader.
 #
-# checked: 1161
+# checked: 1172
 #
 # skipped (leaf value not observable in the typed config): 227
 # skipped (a spelling did not parse or compile): 31
 # skipped (no two distinct synthesizable values): 7
-# skipped (under groups (schema re-host, duplicate coverage)): 1121
+# skipped (under groups (schema re-host, duplicate coverage)): 1132
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial

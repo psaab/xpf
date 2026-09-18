@@ -226,6 +226,17 @@ func baseChildrenIdent8807(x ast.Expr) string {
 			}
 		}
 	case *ast.CallExpr:
+		// expandIPsecVPNRun9088 accepts the named-instance wrapper itself
+		// rather than its Children slice, so recover the wrapper variable from
+		// `expandIPsecVPNRun9088(inst.node)` explicitly.
+		if fn, ok := e.Fun.(*ast.Ident); ok && fn.Name == "expandIPsecVPNRun9088" &&
+			len(e.Args) == 1 {
+			if sel, ok := e.Args[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "node" {
+				if id, ok := sel.X.(*ast.Ident); ok {
+					return id.Name
+				}
+			}
+		}
 		// The node list is an ARGUMENT of the wrapper, not its result.
 		for _, a := range e.Args {
 			if v := baseChildrenIdent8807(a); v != "" {
@@ -335,11 +346,10 @@ var posAdjudicated8807 = map[string]posVerdict8807{
 		"compileApplications accepts `description` deliberately without recording it, and ApplicationSet has no " +
 		"Description field -- the value lands nowhere by design, so no spelling can lose it."},
 
-	"vpn / gateway": {"benign", "MEASURED: `security ipsec vpn <v> { gateway g; }` and the `ike { gateway g; }` " +
-		"nesting compile IDENTICALLY (gateway=\"gw1\" both ways, strict accepts both). The compiler accepts the head " +
-		"at vpn level as well as under `ike`, and the schema declares only the nested form. Nothing is lost, so this " +
-		"is a declaration gap with no behavioural consequence."},
-	"vpn / ipsec-policy": {"benign", "MEASURED alongside `vpn / gateway`, identical in both spellings."},
+	// `vpn / gateway` and `vpn / ipsec-policy` were benign declaration-gap
+	// rows. #10327 models both direct VPN leaves alongside the nested `ike`
+	// form, so the positional predicate no longer reports them and the rows
+	// are retired from this live-hit adjudication map.
 }
 
 // posDefectFloor8807 is a RATCHET. It fails in BOTH directions: a rise means an

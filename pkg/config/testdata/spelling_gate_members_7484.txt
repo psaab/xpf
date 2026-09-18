@@ -847,8 +847,10 @@ COMPARED	security ipsec proposal <*> protocol
 COMPARED	security ipsec vpn <*> bind-interface
 COMPARED	security ipsec vpn <*> df-bit
 COMPARED	security ipsec vpn <*> establish-tunnels
+COMPARED	security ipsec vpn <*> gateway
 COMPARED	security ipsec vpn <*> ike gateway
 COMPARED	security ipsec vpn <*> ike ipsec-policy
+COMPARED	security ipsec vpn <*> ipsec-policy
 COMPARED	security ipsec vpn <*> local-address
 COMPARED	security ipsec vpn <*> local-identity
 unreachable (leaf changed nothing)	security ipsec vpn <*> manual authentication
@@ -909,6 +911,8 @@ err (parent stanza does not compile)	security nat source pool <*> port determini
 flag (read, but value-less)	security nat source pool <*> port no-translation
 COMPARED	security nat source pool <*> port-overloading-factor
 COMPARED	security nat source pool <*> routing-instance
+COMPARED	security nat source pool-utilization-alarm clear-threshold
+COMPARED	security nat source pool-utilization-alarm raise-threshold
 COMPARED	security nat source rule-set <*> from interface
 COMPARED	security nat source rule-set <*> from routing-instance
 COMPARED	security nat source rule-set <*> from zone
