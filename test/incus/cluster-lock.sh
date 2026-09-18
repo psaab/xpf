@@ -31,14 +31,15 @@
 #     Per-command raw-flock holders publish no metadata and never bump:
 #     edge overlap with them is still caught by the flock probe, while
 #     a raw cycle that falls entirely mid-window remains polling-invisible.
-#   - NEVER `rm` the lock or owner files: flock binds the inode, so
-#     deleting the path silently splits the mutex. Recovery from a
-#     stuck holder is `kill <holder-pid>` (the kernel releases the
-#     lock when its fd closes), never `rm`.
+#   - NEVER `rm` the lock, owner, or epoch files/state directory: flock
+#     binds the lock inode, so deleting any persistence path can split
+#     the mutex or erase the owner-epoch witness. Recovery from a stuck
+#     holder is `kill <holder-pid>` (the kernel releases the lock when
+#     its fd closes), never `rm`.
 #
 # Everything here must be safe under `set -euo pipefail` in consumers:
 # no unguarded reads, no unguarded kill -0, no traps, no global state
-# beyond the three XPF_CLUSTER_* path variables.
+# beyond the four XPF_CLUSTER_* path variables.
 
 XPF_CLUSTER_LOCK="${XPF_CLUSTER_LOCK:-/tmp/xpf-cluster.lock}"
 XPF_CLUSTER_OWNER="${XPF_CLUSTER_OWNER:-/tmp/xpf-cluster.owner}"
@@ -48,7 +49,8 @@ XPF_CLUSTER_OWNER="${XPF_CLUSTER_OWNER:-/tmp/xpf-cluster.owner}"
 # cooperatively writable, NON-STICKY state directory so a different
 # user can atomically replace the 0666 epoch file; private hermetic
 # callers override XPF_CLUSTER_EPOCH to a path under their temp tree.
-XPF_CLUSTER_EPOCH="${XPF_CLUSTER_EPOCH:-/tmp/xpf-cluster-state/epoch}"
+XPF_CLUSTER_EPOCH_STATE_DIR="${XPF_CLUSTER_EPOCH_STATE_DIR:-/tmp/xpf-cluster-state}"
+XPF_CLUSTER_EPOCH="${XPF_CLUSTER_EPOCH:-${XPF_CLUSTER_EPOCH_STATE_DIR}/epoch}"
 
 # True (0) iff XPF_CLUSTER_LOCK_HELD names THIS lock path and a holder
 # pid that is alive AND an ancestor of the current process. Any parse
@@ -151,7 +153,7 @@ xpf_cluster_owner_identity() {
 # fatal to acquisition: the destructive command must not run without
 # a witness, or the #10126 hole returns.
 xpf_cluster_epoch_bump() {
-	local epoch_dir tmp token
+	local epoch_dir epoch_dir_mode tmp token
 	if [[ "$XPF_CLUSTER_EPOCH" == "$XPF_CLUSTER_LOCK" ]]; then
 		echo "warning: xpf_cluster_epoch_bump: epoch sidecar must not replace the lock inode — refusing lock cell (#10126)" >&2
 		return 1
@@ -165,13 +167,16 @@ xpf_cluster_epoch_bump() {
 		fi
 	fi
 	# Only the shared production directory is normalized; never weaken
-	# a caller's private temp-tree permissions. Both the chmod and the
-	# resulting mode are required: silently retaining a sticky/private
-	# mode would make the published epoch unavailable to another user.
-	if [[ "$epoch_dir" == "/tmp/xpf-cluster-state" ]]; then
-		if ! chmod 0777 "$epoch_dir" 2>/dev/null; then
-			echo "warning: xpf_cluster_epoch_bump: cannot make production state directory ${epoch_dir} non-sticky and cross-user writable — refusing lock cell (#10126)" >&2
-			return 1
+	# a caller's private temp-tree permissions. A cooperating user that
+	# already finds mode 0777 must not chmod a directory it does not own:
+	# stat first, chmod only when the mode differs, then verify 0777.
+	if [[ "$epoch_dir" == "$XPF_CLUSTER_EPOCH_STATE_DIR" ]]; then
+		epoch_dir_mode="$(stat -c %a "$epoch_dir" 2>/dev/null || true)"
+		if [[ "$epoch_dir_mode" != 777 ]]; then
+			if ! chmod 0777 "$epoch_dir" 2>/dev/null; then
+				echo "warning: xpf_cluster_epoch_bump: cannot make production state directory ${epoch_dir} non-sticky and cross-user writable — refusing lock cell (#10126)" >&2
+				return 1
+			fi
 		fi
 		if [[ "$(stat -c %a "$epoch_dir" 2>/dev/null || true)" != 777 ]]; then
 			echo "warning: xpf_cluster_epoch_bump: production state directory ${epoch_dir} is not mode 0777 — refusing lock cell (#10126)" >&2
@@ -180,6 +185,10 @@ xpf_cluster_epoch_bump() {
 	fi
 	if [[ ! -w "$epoch_dir" ]]; then
 		echo "warning: xpf_cluster_epoch_bump: state directory ${epoch_dir} is not writable — refusing lock cell (#10126)" >&2
+		return 1
+	fi
+	if [[ -d "$XPF_CLUSTER_EPOCH" ]]; then
+		echo "warning: xpf_cluster_epoch_bump: epoch sidecar path ${XPF_CLUSTER_EPOCH} is a directory — refusing lock cell (#10126)" >&2
 		return 1
 	fi
 	token="$(date +%s%N 2>/dev/null || date +%s)-$$-${RANDOM:-0}"
@@ -202,7 +211,7 @@ xpf_cluster_epoch_bump() {
 		rm -f "$tmp" 2>/dev/null || true
 		return 1
 	fi
-	if ! mv -f "$tmp" "$XPF_CLUSTER_EPOCH" 2>/dev/null; then
+	if ! mv -fT "$tmp" "$XPF_CLUSTER_EPOCH" 2>/dev/null; then
 		echo "warning: xpf_cluster_epoch_bump: cannot publish ${XPF_CLUSTER_EPOCH} — refusing lock cell (#10126)" >&2
 		rm -f "$tmp" 2>/dev/null || true
 		return 1

@@ -475,6 +475,38 @@ _F158_EPOCH_AFTER=$(cat "$XPF_CLUSTER_EPOCH" 2>/dev/null || true)
 	|| fail "F-158 (i) writable epoch did not publish a new acquisition token"
 ok "F-158 (i) existing mode-0666 epoch atomically replaces acquisition token"
 
+# F-158 (i2): a second cooperating publisher must not chmod an already
+# mode-0777 shared state directory it does not own. A selective chmod
+# shim fails only for that directory; the bump must skip chmod and run.
+mkdir "$T/epoch-shared"
+chmod 0777 "$T/epoch-shared"
+mkdir "$T/dir-chmod-bin"
+cat >"$T/dir-chmod-bin/chmod" <<'EOF'
+#!/bin/sh
+if [ "${2:-}" = "$XPF_CLUSTER_EPOCH_STATE_DIR" ]; then
+	exit 1
+fi
+exec /bin/chmod "$@"
+EOF
+chmod 755 "$T/dir-chmod-bin/chmod"
+set +e
+PATH="$T/dir-chmod-bin:$PATH" \
+	XPF_CLUSTER_EPOCH_STATE_DIR="$T/epoch-shared" \
+	XPF_CLUSTER_EPOCH="$T/epoch-shared/epoch" \
+	FIX_START="$T/f158-shared.start" FIX_SLEEP=0 \
+	"$FIX" >"$T/f158-shared.out" 2>&1
+_F158_SHARED_RC=$?
+set -e
+[[ $_F158_SHARED_RC -eq 0 ]] \
+	|| fail "F-158 (i2) pre-0777 shared state expected success, got $_F158_SHARED_RC"
+[[ "$(stat -c %a "$T/epoch-shared")" == 777 ]] \
+	|| fail "F-158 (i2) shared state mode changed"
+[[ "$(stat -c %a "$T/epoch-shared/epoch")" == 666 ]] \
+	|| fail "F-158 (i2) shared epoch was not published mode 0666"
+[[ -e "$T/f158-shared.start" ]] \
+	|| fail "F-158 (i2) shared-state fixture body did not run"
+ok "F-158 (i2) pre-0777 shared state skips foreign chmod and publishes"
+
 # F-158 (j): an invalid sidecar parent is fail-closed — with-cluster
 # refuses to run the destructive body rather than reopening the
 # whole-window hole. A regular file in the parent position makes
@@ -513,9 +545,25 @@ set -e
 grep -q "cannot make temporary epoch cross-user readable" "$T/f158-chmod-deny.out" \
 	|| fail "F-158 (j2) chmod failure diagnostic missing"
 ok "F-158 (j2) chmod failure refuses cell before body"
+# F-158 (j3): an epoch path that is itself a directory is fail-closed;
+# mv must never place the temporary token inside that directory.
+mkdir "$T/epoch-path-dir"
+set +e
+XPF_CLUSTER_EPOCH="$T/epoch-path-dir" FIX_START="$T/f158-dir.start" \
+	FIX_SLEEP=0 "$FIX" >"$T/f158-dir.out" 2>&1
+_F158_DIR_RC=$?
+set -e
+[[ $_F158_DIR_RC -eq 73 ]] \
+	|| fail "F-158 (j3) directory epoch path expected refusal 73, got $_F158_DIR_RC"
+[[ ! -e "$T/f158-dir.start" ]] \
+	|| fail "F-158 (j3) directory epoch path let destructive fixture body run"
+grep -q "epoch sidecar path .* is a directory" "$T/f158-dir.out" \
+	|| fail "F-158 (j3) directory epoch refusal diagnostic missing"
+ok "F-158 (j3) directory epoch path refuses cell before body"
 # F-158 (c): held lock + bare FW0 → rc 0 (dedicated local instance no
 # other lane touches — the probe must not fire).
 unset XPF_CLUSTER_LOCK_HELD || true
+
 flock "$XPF_CLUSTER_LOCK" sleep 30 </dev/null >/dev/null 2>&1 &
 _F158_HOLDER=$!
 waitfor 5 "F-158 (c) background holder holds the lock" _xpf_lock_held_now
