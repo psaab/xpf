@@ -204,6 +204,8 @@ restore_routes() {
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
     local restore_log=/tmp/xpf-wire-zone-matrix-restore.log
+    local policy_log="${restore_log}.policy" context_log="${restore_log}.context" zone_log="${restore_log}.zone"
+    : >"$restore_log"; : >"$policy_log"; : >"$context_log"; : >"$zone_log"
     local cmds='configure\n' context_cmds='configure\n' slug context_needed=0 i
     for ((i = 0; i < ${#PAIR_NAMES[@]}; i++)); do
         slug="${PAIR_NAMES[$i]}"
@@ -228,22 +230,25 @@ restore_config() {
     cmds+="delete applications application-set ${CONTROL_SET}\n"
     cmds+="delete applications application ${APP_NAME}\n"
     cmds+="commit\nexit\n"
-    if ! printf '%b' "$cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$restore_log" 2>&1; then
+    if ! printf '%b' "$cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$policy_log" 2>&1; then
         RESTORE_OK=0
     fi
-    if ! grep -qE 'commit (complete|succeeded)' "$restore_log" 2>/dev/null; then RESTORE_OK=0; fi
+    cat "$policy_log" >>"$restore_log"
+    grep -qE 'commit (complete|succeeded)' "$policy_log" 2>/dev/null || RESTORE_OK=0
     if ((context_needed)); then
         context_cmds+="commit\nexit\n"
-        if ! printf '%b' "$context_cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$restore_log" 2>&1; then
+        if ! printf '%b' "$context_cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$context_log" 2>&1; then
             RESTORE_OK=0
         fi
-        if ! grep -qE 'commit (complete|succeeded)' "$restore_log" 2>/dev/null; then RESTORE_OK=0; fi
+        cat "$context_log" >>"$restore_log"
+        grep -qE 'commit (complete|succeeded)' "$context_log" 2>/dev/null || RESTORE_OK=0
     fi
-    if ! printf '%b' 'configure\ndelete security zones security-zone dmz\nset security zones security-zone wan interfaces reth0.50\nset security policies default-policy deny-all\ncommit\nexit\n' |
-        $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$restore_log" 2>&1; then
+    if ! printf '%b' 'configure\ndelete security zones security-zone dmz\ndelete security zones security-zone wan interfaces reth0.50\ndelete security zones security-zone wan interfaces reth0.80\nset security zones security-zone wan interfaces reth0.50\nset security zones security-zone wan interfaces reth0.80\nset security policies default-policy deny-all\ncommit\nexit\n' |
+        $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$zone_log" 2>&1; then
         RESTORE_OK=0
     fi
-    if ! grep -qE 'commit (complete|succeeded)' "$restore_log" 2>/dev/null; then RESTORE_OK=0; fi
+    cat "$zone_log" >>"$restore_log"
+    grep -qE 'commit (complete|succeeded)' "$zone_log" 2>/dev/null || RESTORE_OK=0
     local restored_policy restored_zone restored_apps
     restored_policy="$(snapshot 'show configuration security policies | display set')"
     restored_zone="$(snapshot 'show configuration security zones | display set')"
