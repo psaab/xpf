@@ -755,7 +755,24 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 			// so the possibly-landed retry generation is still consumed.
 			debtGen := publishSnap.Generation
 			if m.lastSnapshot == nil || publishSnap.Generation != m.lastSnapshot.Generation {
+				// #10066: retain the process identity baseline before replacing
+				// m.lastSnapshot. ensureProcessLocked writes m.cfg when it
+				// spawns a new helper, so a later publish failure can leave the
+				// live spawn record NEW while retained.Userspace is OLD.
+				retained := m.lastSnapshot
 				adopted := *publishSnap
+				// A conflict retry changes only Generation from the tick's
+				// retained copy. If that copy still carries retained.Userspace
+				// while m.cfg no longer matches it, m.cfg describes the newer
+				// spawned process and MUST NOT regress to the retained identity.
+				// A Compile-differ carries a different Userspace identity and
+				// still updates m.cfg. Compare with configEqual because this
+				// invariant is about the helper spawn identity, not incidental
+				// UserspaceConfig bookkeeping fields.
+				adoptedRetainedIdentity := retained != nil &&
+					configEqual(adopted.Userspace, retained.Userspace)
+				spawnedIdentityDiverged := retained != nil &&
+					!configEqual(m.cfg, retained.Userspace)
 				if adopted.Generation <= m.publishedSnapshot {
 					// A partial writeback overtook Compile's reserved generation
 					// after the build (reserved pre-mu). Re-stamp ahead: content
@@ -766,7 +783,9 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 				}
 				m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
 				m.lastSnapshot = &adopted
-				m.cfg = adopted.Userspace
+				if !adoptedRetainedIdentity || !spawnedIdentityDiverged {
+					m.cfg = adopted.Userspace
+				}
 				m.publishHAWatchdogSnapshotLocked()
 				debtGen = adopted.Generation
 			}
