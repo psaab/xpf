@@ -1200,7 +1200,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 	run) harness_result_run "$@" ;;
 	emit) harness_result_emit "$@" ;;
 	adapt) harness_adapt "$@" ;;
-	adapters) printf '%s\n' $HARNESS_ADAPTERS ;;
+	adapters) IFS=' ' read -r -a adapters <<<"$HARNESS_ADAPTERS"; printf '%s\n' "${adapters[@]}" ;;
 	*)
 		cat >&2 <<USAGE
 usage: harness-result.sh <run|emit|adapt|adapters> ...
