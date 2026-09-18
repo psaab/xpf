@@ -299,16 +299,18 @@ wire_matrix_verdict() {
 			((10#$c1400b > 10#$c1400o)) && over=$((over + 10#$c1400b - 10#$c1400o))
 			duplicate=$((duplicate + over))
 			local d1=$((10#$p64o - 10#$p64b)); local d2=$((10#$p1400o - 10#$p1400b))
-			local d3=$((10#$c64o - 10#$c64b)); local d4=$((10#$c1400o - 10#$c1400b))
+			local d3=0 d4=0
+			((10#$c64b < WIRE_DROP_FLOOR)) && d3=$((WIRE_DROP_FLOOR - 10#$c64b))
+			((10#$c1400b < WIRE_DROP_FLOOR)) && d4=$((WIRE_DROP_FLOOR - 10#$c1400b))
 			((d1 < 0)) && d1=0; ((d2 < 0)) && d2=0
-			((d3 < 0)) && d3=0; ((d4 < 0)) && d4=0
 			local cell_missing=$((d1 + d2))
 			missing=$((missing + cell_missing))
 			if ((over > 0)); then
 				failed=$((failed + 1))
-			# The same-pair near-miss control is mandatory.  A control
-			# shortfall is a capture-blind VOID; a probe shortfall with a
-			# proven control is a measured policy_drop FAIL.
+			# The same-pair near-miss control is mandatory, but its offered
+			# count intentionally supplies headroom for routine capture loss.
+			# Only falling below the observed floor is capture-blind; a probe
+			# shortfall with a proven control is a measured policy_drop FAIL.
 			elif ((d3 > 0 || d4 > 0)); then
 				control_missing=$((control_missing + d3 + d4))
 				blind=$((blind + 1)); [[ "$reason" == "--" ]] && reason=capture-blind

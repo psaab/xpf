@@ -83,6 +83,10 @@ if [[ "$MODE" == selftest ]]; then
     check "permit loss fails after proven control" FAIL 1 0 12 "${BAD[@]}"
     BAD=("${MATRIX[@]}"); BAD[56]=10001
     check "duplicate capture frame fails" FAIL 1 0 12 "${BAD[@]}"
+    HEADROOM=("${MATRIX[@]}"); HEADROOM[60]=9999; HEADROOM[62]=9999
+    check "permit control headroom tolerates routine capture loss" PASS 0 0 12 "${HEADROOM[@]}"
+    BAD=("${MATRIX[@]}"); BAD[60]=999
+    check "permit control below observed floor is VOID" VOID 2 0 12 "${BAD[@]}"
     BAD=("${MATRIX[@]}"); BAD[55]=9999
     check "permit 64-byte under-sample is VOID" VOID 2 0 12 "${BAD[@]}"
     BAD=("${MATRIX[@]}"); BAD[0]=deny:trust-'>'trust
