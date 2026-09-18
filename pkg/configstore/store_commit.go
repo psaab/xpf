@@ -1479,8 +1479,11 @@ func (s *Store) saveRollbackFiles() {
 	}
 
 	entries := s.history.List() // most-recent-first
+	metadata := make([]rollbackSlotMetadataEntry, len(entries))
 	degraded := false
 	for i, entry := range entries {
+		path := s.rollbackPath(i + 1)
+		var data []byte
 		if entry.Config == nil {
 			// #4810: a tombstoned slot (unreadable/corrupt at load, see
 			// loadRollbackHistory) has no config text to persist, and removing
@@ -1499,31 +1502,50 @@ func (s *Store) saveRollbackFiles() {
 			//
 			// Writing the marker preserves #4810's file-must-exist requirement
 			// while guaranteeing the slot cannot masquerade as healthy config.
-			path := s.rollbackPath(i + 1)
-			if err := rbWriteFileDurable(path, []byte(rollbackTombstoneMarker), 0600); err != nil {
-				slog.Warn("failed to write rollback tombstone marker", "path", path, "err", err)
-				degraded = true
-			}
-			continue
+			data = []byte(rollbackTombstoneMarker)
+		} else {
+			data = []byte(entry.Config.Format())
 		}
-		path := s.rollbackPath(i + 1)
-		data := entry.Config.Format()
-		var err error
 		// Owner-only 0600 (#4056): the rollback slots (xpf.conf.N) hold the
 		// full committed config TEXT, which always includes cleartext secret
 		// leaves (IKE PSK, auth keys, SNMP community) — Format() does not
 		// redact or encrypt. World-readable 0644 exposed every firewall
 		// secret to any local user; 0600 keeps them owner-only. The daemon
 		// owns the files, so loadRollbackHistory still reads them back.
-		// Every slot uses the durable writer: slot positions 2..N are just
-		// as authoritative rollback targets after a restart as slot 1.
-		err = rbWriteFileDurable(path, []byte(data), 0600)
-		if err != nil {
-			slog.Warn("failed to write rollback file", "path", path, "err", err)
+		writeErr := rbWriteFileDurable(path, data, 0600)
+		identity := rollbackSlotIdentity{}
+		identityOK := false
+		if writeErr != nil {
+			slog.Warn("failed to write rollback file", "path", path, "err", writeErr)
 			degraded = true
+			// A post-rename fsync failure leaves the new inode visible.
+			// Capture it so the metadata can still be used after restart;
+			// pre-rename failures deliberately retain an invalid identity,
+			// never the old inode's identity.
+			if isPostRenameDurabilityFailure(writeErr) {
+				identity, identityOK = rollbackSlotIdentityForPath(path)
+			}
+		} else {
+			identity, identityOK = rollbackSlotIdentityForPath(path)
+		}
+		if !identityOK {
+			slog.Warn("failed to stat rollback file for metadata", "path", path)
+			degraded = true
+		}
+		metadata[i] = rollbackSlotMetadataEntry{
+			Hash:      rollbackSlotHash(data),
+			Device:    identity.Device,
+			Inode:     identity.Inode,
+			ModTime:   identity.ModTime,
+			Timestamp: entry.Timestamp,
+			Comment:   entry.Comment,
 		}
 	}
 	s.cleanupRollbackFiles(len(entries) + 1)
+	if err := s.writeRollbackMetadata(metadata); err != nil {
+		slog.Warn("failed to write rollback metadata", "path", s.rollbackMetadataPath(), "err", err)
+		degraded = true
+	}
 	if len(entries) > 0 {
 		if err := rbSyncDir(filepath.Dir(s.filePath)); err != nil {
 			slog.Warn("failed to sync rollback directory", "err", err)
@@ -1576,6 +1598,7 @@ func (s *Store) loadRollbackHistory() {
 	}
 
 	var entries []*HistoryEntry
+	metadata := s.readRollbackMetadata()
 	for i := 1; i <= s.history.MaxSize(); i++ {
 		path := s.rollbackPath(i)
 		// #8597 (muse-004 K70): bounded, like every other authoritative read in
@@ -1602,6 +1625,13 @@ func (s *Store) loadRollbackHistory() {
 			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
 			continue
 		}
+		slotTimestamp := time.Now()
+		slotComment := ""
+		identity, identityOK := rollbackSlotIdentityForPath(path)
+		if ts, comment, ok := rollbackMetadataForSlot(metadata, i-1, data, identity, identityOK); ok {
+			slotTimestamp = ts
+			slotComment = comment
+		}
 		// #5557: bound a rollback slot the same way every other parse
 		// entry point is bounded (LoadOverride/LoadMerge/LoadSet/SyncApply
 		// via checkConfigSize). loadRollbackHistory reads straight off disk
@@ -1613,7 +1643,7 @@ func (s *Store) loadRollbackHistory() {
 		if len(data) > MaxConfigSize {
 			slog.Warn("rollback file exceeds max config size, skipping",
 				"path", path, "bytes", len(data), "max", MaxConfigSize)
-			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 		// #10296: a power cut can leave a rollback slot zero-length, and
@@ -1622,7 +1652,7 @@ func (s *Store) loadRollbackHistory() {
 		// must never be offered as a healthy config that can wipe active state.
 		if len(bytes.TrimSpace(data)) == 0 {
 			slog.Warn("skipping empty rollback file", "path", path)
-			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 
@@ -1646,7 +1676,7 @@ func (s *Store) loadRollbackHistory() {
 		// cell to keep if this check is ever removed.
 		if bytes.HasPrefix(data, []byte(rollbackTombstoneMarkerPrefix)) {
 			slog.Info("rollback slot is a recorded tombstone", "path", path)
-			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 		parser := config.NewParser(string(data))
@@ -1664,7 +1694,7 @@ func (s *Store) loadRollbackHistory() {
 			// rather than shifting later slots' indices.
 			slog.Warn("skipping corrupt rollback file",
 				"path", path, "line", errs[0].Line, "column", errs[0].Column)
-			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 		// #10296: comment-only files also parse successfully into an empty
@@ -1672,19 +1702,20 @@ func (s *Store) loadRollbackHistory() {
 		// rollback target, so `rollback N` cannot replace active with nothing.
 		if tree == nil || len(tree.Children) == 0 {
 			slog.Warn("skipping empty rollback configuration", "path", path)
-			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 
-		// Use file modification time as timestamp
-		info, _ := os.Stat(path)
-		ts := time.Now()
-		if info != nil {
-			ts = info.ModTime()
+		if ts, comment, ok := rollbackMetadataForSlot(metadata, i-1, data, identity, identityOK); ok {
+			slotTimestamp = ts
+			slotComment = comment
+		} else if identityOK {
+			slotTimestamp = identity.ModTime
 		}
 		entries = append(entries, &HistoryEntry{
 			Config:    tree,
-			Timestamp: ts,
+			Timestamp: slotTimestamp,
+			Comment:   slotComment,
 		})
 	}
 
