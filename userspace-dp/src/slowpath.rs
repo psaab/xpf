@@ -677,9 +677,10 @@ impl SlowPathReinjector {
     }
 
     /// #10069: admit one delegated retry in a rolling logical-tick window.
-    /// The degraded transition re-arms the counter, while old attempt ticks
-    /// age out. This permits eventual recovery after a persistent failure
-    /// without allowing one reconcile tick to issue an unbounded ioctl stream.
+    /// A degraded transition re-arms the next retry without discarding
+    /// attempt history, while old attempt ticks age out. This permits eventual
+    /// recovery after a persistent failure without allowing one reconcile tick
+    /// to issue an unbounded ioctl stream.
     pub(crate) fn delegated_mtu_retry_permitted(
         &self,
         desired_mtu: i32,
