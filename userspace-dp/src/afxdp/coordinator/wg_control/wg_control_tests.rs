@@ -2183,6 +2183,84 @@ fn wg_socket_default_table_remains_unbound_10196() {
         "main-table WireGuard socket must remain unbound"
     );
 }
+/// #10196: an IPv6-only occupant must not strand an unscoped main-table WG
+/// socket; the v6 bind conflict falls back to an AF_INET socket.
+#[test]
+fn wg_socket_default_table_falls_back_on_v6_only_conflict_10196() {
+    use std::os::fd::FromRawFd;
+
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET6,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        if matches!(
+            err.raw_os_error(),
+            Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT)
+        ) {
+            return;
+        }
+        panic!("create IPv6-only squatter socket: {err}");
+    }
+    let squatter = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+    let on: libc::c_int = 1;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_V6ONLY,
+            &on as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        if matches!(
+            err.raw_os_error(),
+            Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT)
+        ) {
+            return;
+        }
+        panic!("set IPV6_V6ONLY on squatter socket: {err}");
+    }
+    let addr = libc::sockaddr_in6 {
+        sin6_family: libc::AF_INET6 as libc::sa_family_t,
+        sin6_port: 0,
+        sin6_flowinfo: 0,
+        sin6_addr: libc::in6_addr { s6_addr: [0; 16] },
+        sin6_scope_id: 0,
+    };
+    let rc = unsafe {
+        libc::bind(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        if matches!(
+            err.raw_os_error(),
+            Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT)
+        ) {
+            return;
+        }
+        panic!("bind IPv6-only squatter socket: {err}");
+    }
+    let port = squatter
+        .local_addr()
+        .expect("read IPv6-only squatter port")
+        .port();
+    let (socket, is_v6) =
+        bind_wg_socket(port).expect("main-table WG socket must fall back to v4");
+    assert!(!is_v6, "IPv6-only conflict must select the AF_INET fallback");
+    drop(socket);
+}
+
 
 /// #10196: a named transport table resolves to the corresponding VRF master,
 /// and the raw UDP socket applies SO_BINDTODEVICE before wildcard bind.
@@ -2227,11 +2305,18 @@ fn wg_socket_vrf_bind_failure_is_not_swallowed_10196() {
 }
 
 /// #10196: only IPv6 capability failures are eligible for the v4 fallback;
-/// a real bind-device failure remains fail-closed.
+/// EINVAL from device pinning or final bind remains fatal.
 #[test]
-fn wg_socket_v6_capability_fallback_predicate_10196() {
+fn wg_socket_v6_capability_fallback_predicate_is_stage_aware_10196() {
     let capability = io::Error::from_raw_os_error(libc::EAFNOSUPPORT);
-    assert!(v6_bind_can_fallback(&capability));
+    assert!(v6_bind_can_fallback(V6BindStage::Socket, &capability));
+    let einval = io::Error::from_raw_os_error(libc::EINVAL);
+    assert!(v6_bind_can_fallback(V6BindStage::V6Only, &einval));
+    assert!(!v6_bind_can_fallback(V6BindStage::BindDevice, &einval));
+    assert!(!v6_bind_can_fallback(V6BindStage::AddressBind, &einval));
     let missing_device = io::Error::from_raw_os_error(libc::ENODEV);
-    assert!(!v6_bind_can_fallback(&missing_device));
+    assert!(!v6_bind_can_fallback(
+        V6BindStage::BindDevice,
+        &missing_device
+    ));
 }

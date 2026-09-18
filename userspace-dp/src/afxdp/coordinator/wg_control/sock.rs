@@ -74,9 +74,10 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
 }
 
 /// Bind the WG listen socket. Prefer a v6 dual-stack bind so a single
-/// socket serves both v4-mapped and v6 peers; fall back to a v4 bind
-/// only when the v6 family/socket or its v6-only capability is
-/// unavailable (`v6_bind_can_fallback`).
+/// socket serves both v4-mapped and v6 peers. A main-table socket (no
+/// requested device) falls back to v4 for any v6 bind failure, including
+/// an IPv6-only socket already holding the port; a scoped socket falls back
+/// only for v6 capability failures (`v6_bind_can_fallback`).
 ///
 /// Codex MAJOR: a bare `[::]` bind is v6-ONLY on hosts where
 /// `net.ipv6.bindv6only=1`, silently black-holing v4 peers. We clear
@@ -93,10 +94,9 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
 ///
 /// IPV6_V6ONLY must be cleared BEFORE bind (Linux rejects it post-bind
 /// with EINVAL — Codex r3 MAJOR), so the v6 socket is created with raw
-/// libc, the option is set, then bind() is called. Only a v6 capability
-/// failure falls back to a plain v4 bind (carrying the requested device,
-/// so VRF scope survives); any other error — including a
-/// `SO_BINDTODEVICE` failure — is returned fail-closed.
+/// libc, the option is set, then bind() is called. Only socket creation and
+/// v6-only setup errors are capability-fallback candidates; device-pin and
+/// final address-bind errors stay fatal for scoped sockets regardless of errno.
 /// Returns the socket plus whether it is the AF_INET6 dual-stack one
 /// (v4 send targets must then be v4-mapped — see `wg_send_to`).
 pub(super) fn bind_wg_socket(port: u16) -> io::Result<(UdpSocket, bool)> {
@@ -113,14 +113,50 @@ pub(super) fn bind_wg_socket_with_device(
 ) -> io::Result<(UdpSocket, bool)> {
     match bind_dual_stack_v6(port, bind_device) {
         Ok(sock) => Ok((sock, true)),
-        Err(err) if !v6_bind_can_fallback(&err) => Err(err),
-        // A v4 fallback is allowed only when the v6 family/socket or its
-        // v6-only capability is unavailable. The requested device is carried
-        // into bind_v4, so a capability fallback cannot lose VRF scope.
-        Err(_) => bind_v4(port, bind_device).map(|sock| (sock, false)),
+        Err(V6BindError::Fallback(_)) => bind_v4(port, bind_device).map(|sock| (sock, false)),
+        Err(V6BindError::Fatal(_err)) if bind_device.is_none() => {
+            bind_v4(port, bind_device).map(|sock| (sock, false))
+        }
+        Err(err) => Err(err.into_io_error()),
     }
 }
 
+enum V6BindError {
+    Fallback(io::Error),
+    Fatal(io::Error),
+}
+
+impl V6BindError {
+    fn into_io_error(self) -> io::Error {
+        match self {
+            Self::Fallback(err) | Self::Fatal(err) => err,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum V6BindStage {
+    Socket,
+    V6Only,
+    BindDevice,
+    AddressBind,
+}
+
+pub(super) fn v6_bind_can_fallback(stage: V6BindStage, err: &io::Error) -> bool {
+    matches!(stage, V6BindStage::Socket | V6BindStage::V6Only)
+        && matches!(
+            err.raw_os_error(),
+            Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT | libc::EINVAL)
+        )
+}
+
+fn classify_v6_bind_error(stage: V6BindStage, err: io::Error) -> V6BindError {
+    if v6_bind_can_fallback(stage, &err) {
+        V6BindError::Fallback(err)
+    } else {
+        V6BindError::Fatal(err)
+    }
+}
 
 /// The default transport tables have no VRF master. Named tables are rendered
 /// as `<instance>.inet.0` / `<instance>.inet6.0` by the Go snapshot builder.
@@ -133,13 +169,6 @@ pub(crate) fn wg_outer_bind_device_for_transport_table(table: &str) -> Option<St
         .or_else(|| table.strip_suffix(".inet6.0"))
         .filter(|instance| !instance.is_empty())?;
     Some(format!("vrf-{instance}"))
-}
-
-pub(super) fn v6_bind_can_fallback(err: &io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT | libc::ENOPROTOOPT | libc::EINVAL)
-    )
 }
 
 fn set_socket_bind_device(fd: i32, bind_device: Option<&str>) -> io::Result<()> {
@@ -200,11 +229,11 @@ fn bind_v4(port: u16, bind_device: Option<&str>) -> io::Result<UdpSocket> {
     Ok(sock)
 }
 
-/// Create a `[::]:port` UDP socket with IPV6_V6ONLY cleared before bind.
+/// Create a `[::]:port` UDP socket with `IPV6_V6ONLY` cleared before bind.
 fn bind_dual_stack_v6(
     port: u16,
     bind_device: Option<&str>,
-) -> io::Result<UdpSocket> {
+) -> Result<UdpSocket, V6BindError> {
     // socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0)
     let fd = unsafe {
         libc::socket(
@@ -214,7 +243,10 @@ fn bind_dual_stack_v6(
         )
     };
     if fd < 0 {
-        return Err(io::Error::last_os_error());
+        return Err(classify_v6_bind_error(
+            V6BindStage::Socket,
+            io::Error::last_os_error(),
+        ));
     }
     // Own the fd immediately so any early return closes it.
     let sock = unsafe { UdpSocket::from_raw_fd(fd) };
@@ -230,11 +262,14 @@ fn bind_dual_stack_v6(
         )
     };
     if rc != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(classify_v6_bind_error(
+            V6BindStage::V6Only,
+            io::Error::last_os_error(),
+        ));
     }
-    // The device pin MUST precede bind: it scopes both wildcard receive and
-    // every later sendto(2) on this socket.
-    set_socket_bind_device(fd, bind_device)?;
+    if let Err(err) = set_socket_bind_device(fd, bind_device) {
+        return Err(V6BindError::Fatal(err));
+    }
     // #9594: ask for the receiving interface BEFORE bind.
     set_recv_pktinfo_options(fd, true);
     // bind([::]:port)
@@ -253,7 +288,7 @@ fn bind_dual_stack_v6(
         )
     };
     if rc != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(V6BindError::Fatal(io::Error::last_os_error()));
     }
     Ok(sock)
 }
