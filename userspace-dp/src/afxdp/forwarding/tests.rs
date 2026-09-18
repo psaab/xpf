@@ -1286,6 +1286,7 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         50,
         true,
         decision,
+        None,
     );
 
     assert_eq!(metadata.ingress_zone, 1);
