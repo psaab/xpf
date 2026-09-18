@@ -5595,6 +5595,8 @@ pub(super) fn poll_binding_process_descriptor(
                     }
                 } else {
                     // Debug: count non-forward dispositions
+                    let mut suppress_slow_path_reinject = false;
+                    let mut missing_neighbor_slow_path_decision: Option<SessionDecision> = None;
                     match decision.resolution.disposition {
                         ForwardingDisposition::LocalDelivery => {
                             telemetry.dbg.local += 1;
@@ -5813,6 +5815,11 @@ pub(super) fn poll_binding_process_descriptor(
                             // `recycle_now` still owned by the caller (the
                             // pending_neigh buffer branch sets it false when it
                             // takes the frame).
+                            // #10311: a buffered MissingNeighbor frame is owned
+                            // by `pending_neigh` for translated replay. Keep
+                            // that ownership disposition distinct from the
+                            // decap/tunnel cases that still fall through to the
+                            // shared slow-path gate below.
                             let missing_neighbor_outcome: StageOutcome<()> = 'missing_neighbor: {
                                 telemetry.dbg.missing_neigh += 1;
                                 // #919/#922: zero-allocation ID-native zone
@@ -6849,6 +6856,17 @@ pub(super) fn poll_binding_process_descriptor(
                                 // neighbor resolves. Counted per binding so
                                 // the live gate is observable
                                 // (xpf_userspace_pending_neigh_decap_drops_total).
+                                // #10311: all non-buffered MISS fallthroughs
+                                // must use the arm's composed decision. A
+                                // refused seed has rolled back its source-NAT
+                                // allocation, so it is recycled without any
+                                // slow-path copy.
+                                if seed_install_refused {
+                                    suppress_slow_path_reinject = true;
+                                } else {
+                                    missing_neighbor_slow_path_decision =
+                                        Some(pending_decision);
+                                }
                                 if !seed_install_refused
                                     && pending_decision.resolution.tunnel_endpoint_id == 0
                                     && pending_decision.resolution.next_hop.is_some()
@@ -6892,7 +6910,13 @@ pub(super) fn poll_binding_process_descriptor(
                                     // below.
                                     record_pending_neigh_admission_drop(&binding.live, admission);
                                     match admission {
-                                        PendingNeighAdmission::DuplicateDrop => {}
+                                        PendingNeighAdmission::DuplicateDrop => {
+                                            // #10311: this sibling is dropped
+                                            // and recycled; it is not parked,
+                                            // so do not send an untranslated
+                                            // copy through the kernel either.
+                                            suppress_slow_path_reinject = true;
+                                        }
                                         PendingNeighAdmission::Buffer => {
                                             // #2357: when this buffered packet is
                                             // later flushed by retry_pending_neigh,
@@ -6966,6 +6990,14 @@ pub(super) fn poll_binding_process_descriptor(
                                                 ),
                                             );
                                             recycle_now = false;
+                                            // #10311: the pending entry is the
+                                            // sole delivery for this frame.
+                                            // Suppress the trailing slow-path
+                                            // copy so it cannot leave with the
+                                            // original, untranslated decision
+                                            // while the translated entry waits
+                                            // for neighbor resolution.
+                                            suppress_slow_path_reinject = true;
                                         }
                                         PendingNeighAdmission::CapacityDrop => {
                                             // #2375: a NEW distinct hop refused
@@ -6977,6 +7009,10 @@ pub(super) fn poll_binding_process_descriptor(
                                             // call above; the frame is recycled
                                             // exactly like the duplicate branch
                                             // (recycle_now stays true).
+                                            // #10311: a capacity-refused frame is
+                                            // recycled, not handed to the kernel
+                                            // with the original source.
+                                            suppress_slow_path_reinject = true;
                                         }
                                     }
                                 }
@@ -6985,7 +7021,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         if let Some(flow) = flow.as_ref() {
                                             eprintln!(
                                                 "DBG MISS_NEIGH→{}: {}:{} -> {}:{} proto={} egress_if={} next_hop={:?}",
-                                                "SOLICIT+SLOW",
+                                                "SOLICIT+DEFER",
                                                 flow.src_ip,
                                                 flow.forward_key.src_port,
                                                 flow.dst_ip,
@@ -7032,29 +7068,33 @@ pub(super) fn poll_binding_process_descriptor(
                     // already counted by record_forwarding_disposition
                     // above and recycled by the recycle_now epilogue
                     // below — no leak, no double-count.
-                    if slow_path_admit(&binding.live, decision.resolution.disposition) {
-                        maybe_reinject_slow_path_from_frame(
-                            &worker_ctx.ident,
-                            &binding.live,
-                            worker_ctx.slow_path,
-                            worker_ctx.local_tunnel_deliveries,
-                            packet_frame,
-                            meta,
-                            decision,
-                            // #9637 operator narrowing: the ONLY trusted path
-                            // through this filtered chokepoint is a
-                            // LocalDelivery disposition — every such frame
-                            // passed the session-hit / session-miss /
-                            // flowless host-inbound gates upstream (each deny
-                            // `continue`s before reinject). NoRoute (incl.
-                            // capped), transit-adjudicated MissingNeighbor
-                            // and any other disposition take the delegated
-                            // outlet (destination-judged as pre-#9637).
-                            reinject_host_authorized(decision.resolution.disposition),
-                            worker_ctx.recent_exceptions,
-                            "slow_path",
-                            worker_ctx.forwarding,
-                        );
+                    let slow_path_decision =
+                        missing_neighbor_slow_path_decision.unwrap_or(decision);
+                    if !suppress_slow_path_reinject {
+                        if slow_path_admit(&binding.live, decision.resolution.disposition) {
+                            maybe_reinject_slow_path_from_frame(
+                                &worker_ctx.ident,
+                                &binding.live,
+                                worker_ctx.slow_path,
+                                worker_ctx.local_tunnel_deliveries,
+                                packet_frame,
+                                meta,
+                                slow_path_decision,
+                                // #9637 operator narrowing: the ONLY trusted path
+                                // through this filtered chokepoint is a
+                                // LocalDelivery disposition — every such frame
+                                // passed the session-hit / session-miss /
+                                // flowless host-inbound gates upstream (each deny
+                                // `continue`s before reinject). NoRoute (incl.
+                                // capped), transit-adjudicated MissingNeighbor
+                                // and any other disposition take the delegated
+                                // outlet (destination-judged as pre-#9637).
+                                reinject_host_authorized(decision.resolution.disposition),
+                                worker_ctx.recent_exceptions,
+                                "slow_path",
+                                worker_ctx.forwarding,
+                            );
+                        }
                     }
                 }
             } else {

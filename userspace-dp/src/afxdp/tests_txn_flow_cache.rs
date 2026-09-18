@@ -1505,6 +1505,12 @@ fn missing_neighbor_recycle_exactly_once_pin() {
         1,
         "duplicate-hop frame recycled exactly once (no leak, no double-push)"
     );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        0,
+        "duplicate-hop frame must not be copied to slow path with an \
+         untranslated source"
+    );
 
     // ── Phase 3: policy-DENY inside the arm → the RecycleAndContinue
     // outcome; the frame is recycled EXACTLY ONCE by the single consumer,
