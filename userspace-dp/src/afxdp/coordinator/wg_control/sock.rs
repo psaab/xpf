@@ -230,18 +230,9 @@ fn bind_v4(port: u16, bind_device: Option<&str>) -> io::Result<UdpSocket> {
 }
 
 /// Create a `[::]:port` UDP socket with `IPV6_V6ONLY` cleared before bind.
-fn bind_dual_stack_v6(
-    port: u16,
-    bind_device: Option<&str>,
-) -> Result<UdpSocket, V6BindError> {
+fn bind_dual_stack_v6(port: u16, bind_device: Option<&str>) -> Result<UdpSocket, V6BindError> {
     // socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0)
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_INET6,
-            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
+    let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(classify_v6_bind_error(
             V6BindStage::Socket,

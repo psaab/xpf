@@ -2189,13 +2189,7 @@ fn wg_socket_default_table_remains_unbound_10196() {
 fn wg_socket_default_table_falls_back_on_v6_only_conflict_10196() {
     use std::os::fd::FromRawFd;
 
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_INET6,
-            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
+    let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         let err = io::Error::last_os_error();
         if matches!(
@@ -2255,12 +2249,13 @@ fn wg_socket_default_table_falls_back_on_v6_only_conflict_10196() {
         .local_addr()
         .expect("read IPv6-only squatter port")
         .port();
-    let (socket, is_v6) =
-        bind_wg_socket(port).expect("main-table WG socket must fall back to v4");
-    assert!(!is_v6, "IPv6-only conflict must select the AF_INET fallback");
+    let (socket, is_v6) = bind_wg_socket(port).expect("main-table WG socket must fall back to v4");
+    assert!(
+        !is_v6,
+        "IPv6-only conflict must select the AF_INET fallback"
+    );
     drop(socket);
 }
-
 
 /// #10196: a named transport table resolves to the corresponding VRF master,
 /// and the raw UDP socket applies SO_BINDTODEVICE before wildcard bind.
