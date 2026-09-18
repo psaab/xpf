@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib
 
 all: generate build build-ctl
 
@@ -964,6 +964,18 @@ test-wire-conntrack-lifecycle:
 
 test-wire-conntrack-lifecycle-lib:
 	./test/incus/wire-conntrack-lifecycle.sh --selftest
+
+# #10136: Routing-Instance Separation deny gate. The entire wrapper invocation
+# stays inside the #1875 lock cell: target prechecks, the live script, and
+# post-run exe_check all read the same locked cluster state.
+test-wire-routing-separation:
+	./test/incus/with-cluster.sh "wire-routing-separation #10136" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_routing_separation --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wire-routing-separation.sh
+
+test-wire-routing-separation-lib:
+	./test/incus/wire-routing-separation.sh --selftest
 
 .PHONY: test-wg-interop
 # #10118 / #1736: independent kernel-WireGuard interop gate. The harness

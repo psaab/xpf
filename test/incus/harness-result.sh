@@ -449,9 +449,9 @@ harness_adapt_iperf_throughput() {
 # ── wire-gate ────────────────────────────────────────────────────────
 #
 # #9531 frame-count wire gates (wire_policy_deny, wire_appmatch_twins,
-# test-host-inbound matrix + failover, cc-rollback arms). Each harness prints
-# exactly one final line per wrapper invocation:
-#
+# test-host-inbound matrix + failover, cc-rollback arms, and
+# wire_routing_separation #10136). Each harness prints exactly one final line
+# per wrapper invocation:
 #   WIRE_GATE <gate-id> <PASS|FAIL|VOID> reason=<slug> <k=v numeric...>
 #
 # `reason` is `--` on PASS/FAIL and a design-doc-§8 closed slug on VOID
@@ -573,6 +573,11 @@ harness_adapt_wire_gate() {
 	wire_conntrack_lifecycle)
 		required="created witnessed evicted stale_present exp_offered exp_leaked fresh_offered fresh_leaked syn_offered syn_observed ctrl_sess lifecycle_bad"
 		headline="lifecycle_bad"
+		direction="lower-better"
+		;;
+	wire_routing_separation)
+		required="probe_offered probe_leaked control_offered control_observed"
+		headline="probe_leaked"
 		direction="lower-better"
 		;;
 	test-host-inbound | test-host-inbound-failover)

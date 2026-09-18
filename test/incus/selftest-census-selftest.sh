@@ -26,7 +26,7 @@ n=0
 
 # stamp_clean <dir> — a fixture tree satisfying every census check: one file
 # per discovery glob, the positive control, one guarded file per python
-# glob, and a runner registering all of them plus exactly the 7 odd names.
+# glob, and a runner registering all of them plus exactly the 8 odd names.
 stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
@@ -59,6 +59,7 @@ run_bash test/incus/wire-appmatch-twins.sh --selftest
 run_bash test/incus/wire-zone-matrix.sh --selftest
 run_bash test/incus/wire-hostinbound-deny.sh --selftest
 run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
+run_bash test/incus/wire-routing-separation.sh --selftest
 # -- harness reachability census (#8302) --
 RUNNER
 }
@@ -168,7 +169,7 @@ else
 	esac
 fi
 
-# ── 5. a fifth odd name fails (exact-set, extra direction) ──
+# ── 5. a ninth odd name fails (exact-set, extra direction) ──
 n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
 printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
 # The append lands after the §4 end marker; move it inside (a registration
@@ -176,7 +177,7 @@ printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
 sed -i '/odd-new-thing/d' "$fix/runner.sh"
 sed -i 's|# -- harness reachability census|run_bash scripts/odd-new-thing.sh\n# -- harness reachability census|' "$fix/runner.sh"
 if out=$(run_census "$fix"); then
-	bad "undeclared fifth odd name passed the census"
+	bad "undeclared ninth odd name passed the census"
 else
 	case "$out" in
 	*"scripts/odd-new-thing.sh"*) ok "undeclared odd name fails, naming the file" ;;
