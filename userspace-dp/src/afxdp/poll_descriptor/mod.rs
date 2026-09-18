@@ -623,9 +623,11 @@ pub(super) fn poll_binding_process_descriptor(
                 // loads, on this cold cache-miss/resolve path only.
                 let neighbor_epoch_snapshot = worker_ctx.dynamic_neighbors.snapshot_shard_epochs();
                 let mut decision = if let Some(flow) = flow.as_ref() {
-                    if let Some(resolved) = resolve_flow_session_decision(
+                    if let Some(resolved) = resolve_flow_session_decision_with_conntrack(
                         sessions,
                         binding.bpf_maps.session_map.handle(),
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
                         worker_ctx.shared_sessions,
                         worker_ctx.shared_nat_sessions,
                         worker_ctx.shared_forward_wire_sessions,
@@ -799,6 +801,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 app_id,
                                 session_id,
                                 timeout_secs,
+                                resolved.origin,
                             );
                         }
                         // Log first N session hits from WAN (return path)
@@ -2716,6 +2719,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     app_id,
                                     session_id,
                                     timeout_secs,
+                                    SessionOrigin::LocalMiss,
                                 );
                             }
                         }
@@ -3466,6 +3470,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             ct_app_id,
                                             ct_session_id,
                                             ct_timeout_secs,
+                                            SessionOrigin::ForwardFlow,
                                         );
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
@@ -6661,6 +6666,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             app_id,
                                             session_id,
                                             timeout_secs,
+                                            SessionOrigin::MissingNeighborSeed,
                                         );
                                         // #2244: count failed reverse-NAT publishes so
                                         // map-pressure loss is operator-visible.

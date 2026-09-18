@@ -131,7 +131,7 @@ func TestRecvMemoRestoresOverLossyMirror9752(t *testing.T) {
 	// vacuous (a resend to a garbage key proves nothing).
 	wire := encodeSessionV4(fwd, dataplane.SessionValue{SessionID: 77, RTFlowSessionID: 77, Generation: 11})
 	payload := wire[syncHeaderSize:]
-	truncated := payload[:len(payload)-8] // strip the (0,0) tail: pre-9752 shape
+	truncated := payload[:len(payload)-9] // strip table + high-flags tails: pre-10227 shape
 	key, val, ok := decodeSessionV4Payload(truncated)
 	if !ok {
 		t.Fatal("FIXTURE: truncated resend did not decode")
@@ -141,6 +141,9 @@ func TestRecvMemoRestoresOverLossyMirror9752(t *testing.T) {
 	}
 	if val.SessionID != 77 || val.Generation != 11 {
 		t.Fatalf("FIXTURE: decoded resend lost identity (sid=%d gen=%d)", val.SessionID, val.Generation)
+	}
+	if val.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("FIXTURE: decoded legacy v4 origin flags=%#x, want clear", val.Flags)
 	}
 	ss.installClusterSyncedV4(key, val)
 	got := lastSet9752(t, dp)
@@ -267,7 +270,7 @@ func TestRecvMemoRestoresOverLossyMirrorV610068(t *testing.T) {
 		SessionID: 77, RTFlowSessionID: 77, Generation: 11,
 	})
 	payload := wire[syncHeaderSize:]
-	truncated := payload[:len(payload)-8]
+	truncated := payload[:len(payload)-9] // strip table + high-flags tails: pre-10227 shape
 	key, val, ok := decodeSessionV6Payload(truncated)
 	if !ok {
 		t.Fatal("FIXTURE: truncated v6 resend did not decode")
@@ -278,6 +281,9 @@ func TestRecvMemoRestoresOverLossyMirrorV610068(t *testing.T) {
 	if val.SessionID != 77 || val.Generation != 11 {
 		t.Fatalf("FIXTURE: decoded v6 resend lost identity (sid=%d gen=%d)",
 			val.SessionID, val.Generation)
+	}
+	if val.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("FIXTURE: decoded legacy v6 origin flags=%#x, want clear", val.Flags)
 	}
 	ss.installClusterSyncedV6(key, val)
 	got := lastSetV610068(t, dp)

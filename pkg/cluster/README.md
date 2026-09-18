@@ -4383,12 +4383,14 @@ outside the monitor loop:
     the old answers could delete a session in a zone that has since moved to this
     node. An identical map re-set by a config apply is not a change, so a commit
     during a bulk does not cost it its reconcile.
-  - A snapshot that names no zone judges nothing, and both shapes take none: a
-    map never installed (ownership is not wired yet) and a map installed naming
-    no zone. The bulk deletes nothing and the next one tries again
-    (`TestReconcileSkipsNonEmptyBulkWithoutZoneSnapshot` keeps the first guard).
-  - A zone the map does not name is KEPT WHOLE. That is the conservative answer
-    and it is deliberate.
+  - A nil zone map has no ownership answers and takes no snapshot, so the
+    bulk deletes nothing and the next one tries again. An installed empty map
+    is an authoritative all-unmapped snapshot: #10227's per-session origin
+    bit deletes only peer-synced rows there, preserving rows promoted to local
+    ownership during failover. A non-empty snapshot still judges only zones
+    it names (`TestAZoneMapNamingNoZoneSkipsTheReconcile_9655`).
+  - A zone the map does not name is filtered by origin: peer-synced rows are
+    deleted, while node-local/promoted rows are kept.
 
   **Why an RG-unmapped zone is not answered with RG 0.** The live sweep answers
   such a zone with RG 0 ownership (`IsPrimaryFn`), and the first attempt at this

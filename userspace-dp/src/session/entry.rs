@@ -472,6 +472,14 @@ impl SessionOrigin {
         )
     }
 
+    /// Returns true only for origins whose authoritative row arrived from the
+    /// HA peer. `WorkerLocalImport` is a local worker replica of a locally
+    /// authored session; it participates in peer-synced control gates but must
+    /// not be stamped as peer-originated in the BPF row.
+    pub(crate) fn is_cluster_synced_origin(self) -> bool {
+        matches!(self, Self::SyncImport | Self::SharedMaterialize)
+    }
+
     pub(crate) fn is_promotable_synced(self) -> bool {
         matches!(self, Self::SyncImport | Self::SharedMaterialize)
     }

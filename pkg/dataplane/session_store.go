@@ -80,7 +80,12 @@ type ClusterBulkReconcileInput struct {
 	ReceivedV4     map[SessionKey]struct{}
 	ReceivedV6     map[SessionKeyV6]struct{}
 	ShouldSyncZone func(uint16) bool
-	DeleteReason   DeleteReason
+	// IsZoneMapped distinguishes a zone named by the RG ownership snapshot
+	// from an unmapped (node-local or otherwise unowned) zone. When provided,
+	// stale rows in an unmapped zone are deletable only if their map value
+	// carries SessFlagClusterSynced (#10227/#9655 second half).
+	IsZoneMapped func(uint16) bool
+	DeleteReason DeleteReason
 }
 
 type ClusterBulkReconcileResult struct {
@@ -356,6 +361,11 @@ func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionVal
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
+	// Every row arriving through the peer-install API is peer-owned on this
+	// node, regardless of whether the sender's copy was originally local or
+	// itself imported after failover. Stamp the local map origin so an unmapped
+	// bulk reconcile can delete only this synced copy (#10227/#9655).
+	val.Flags |= SessFlagClusterSynced
 	forwardSnap, err := s.snapshotV4(key)
 	if err != nil {
 		return err
@@ -429,6 +439,9 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
+	// See the v4 path: all receiver-side peer installs are marked synced,
+	// including imports whose sender copy was itself imported after failover.
+	val.Flags |= SessFlagClusterSynced
 	forwardSnap, err := s.snapshotV6(key)
 	if err != nil {
 		return err
@@ -1003,17 +1016,22 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	// beside a complete-looking stale_v4/stale_v6 pair and cannot tell which
 	// number to distrust.
 	var errs []error
-
+	// An unmapped zone can be node-local and therefore must not be judged by
+	// the RG ownership answer. Once the caller supplies the snapshot's
+	// membership predicate, only rows explicitly marked as peer-synced are
+	// eligible for stale deletion there. A nil predicate preserves the
+	// historical mapped-zone behavior for standalone callers.
 	var staleV4 []SessionEntryV4
 	if err := s.ForEachV4(func(key SessionKey, val SessionValue) bool {
-		if val.IsReverse != 0 {
+		mapped := input.IsZoneMapped == nil || input.IsZoneMapped(val.IngressZone)
+		if (mapped && input.ShouldSyncZone(val.IngressZone)) ||
+			(!mapped && val.Flags&SessFlagClusterSynced == 0) {
 			return true
 		}
-		if input.ShouldSyncZone(val.IngressZone) {
-			return true
-		}
-		if _, ok := input.ReceivedV4[key]; !ok {
-			staleV4 = append(staleV4, SessionEntryV4{Key: key, Value: val})
+		if val.IsReverse == 0 {
+			if _, ok := input.ReceivedV4[key]; !ok {
+				staleV4 = append(staleV4, SessionEntryV4{Key: key, Value: val})
+			}
 		}
 		return true
 	}); err != nil {
@@ -1029,14 +1047,15 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 
 	var staleV6 []SessionEntryV6
 	if err := s.ForEachV6(func(key SessionKeyV6, val SessionValueV6) bool {
-		if val.IsReverse != 0 {
+		mapped := input.IsZoneMapped == nil || input.IsZoneMapped(val.IngressZone)
+		if (mapped && input.ShouldSyncZone(val.IngressZone)) ||
+			(!mapped && val.Flags&SessFlagClusterSynced == 0) {
 			return true
 		}
-		if input.ShouldSyncZone(val.IngressZone) {
-			return true
-		}
-		if _, ok := input.ReceivedV6[key]; !ok {
-			staleV6 = append(staleV6, SessionEntryV6{Key: key, Value: val})
+		if val.IsReverse == 0 {
+			if _, ok := input.ReceivedV6[key]; !ok {
+				staleV6 = append(staleV6, SessionEntryV6{Key: key, Value: val})
+			}
 		}
 		return true
 	}); err != nil {

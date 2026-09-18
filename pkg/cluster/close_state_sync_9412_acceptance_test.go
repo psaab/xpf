@@ -47,8 +47,9 @@ func TestTheCloseClassCrossesTheClusterWire9412(t *testing.T) {
 	if got.RoutingDomain != 100007 {
 		t.Fatalf("RoutingDomain corrupted: %d", got.RoutingDomain)
 	}
-	// A peer from before the field stops one byte earlier.
-	_, legacy, ok := decodeSessionV4Payload(payload[:len(payload)-9])
+	// A peer from before the field stops before the close-class, table-identity,
+	// and #10227 high-flags trailers.
+	_, legacy, ok := decodeSessionV4Payload(payload[:len(payload)-10])
 	if !ok {
 		t.Fatal("legacy (truncated) v4 decode failed")
 	}

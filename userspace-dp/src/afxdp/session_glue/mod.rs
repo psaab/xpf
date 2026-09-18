@@ -9,7 +9,9 @@ pub(in crate::afxdp) use delete_drop_sweep::{DeleteDropSweep, DELETE_DROP_SWEEP_
 pub(in crate::afxdp) use install_table_purge::{
     InstallTablePurge, INSTALL_TABLE_PURGE_BUDGET, install_table_purge_predicate,
 };
-pub(in crate::afxdp) use promote::{SharedSessionRefs, maybe_promote_synced_session};
+pub(in crate::afxdp) use promote::{
+    SharedSessionRefs, maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
+};
 use promote::{purge_translated_synced_hit, should_keep_synced_hit_transient};
 
 pub(super) fn resolution_target_for_session(
@@ -1045,8 +1047,8 @@ pub(super) fn apply_worker_commands(
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    _conntrack_v4_fd: c_int,
-    _conntrack_v6_fd: c_int,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -1138,6 +1140,8 @@ pub(super) fn apply_worker_commands(
                 if commands::handle_demote_owner_rgs(
                     sessions,
                     session_map,
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
                     forwarding,
                     ha_state,
                     dynamic_neighbors,
@@ -1357,6 +1361,8 @@ pub(super) fn apply_worker_commands(
             dispatch_transition_debt_op(
                 sessions,
                 session_map,
+                conntrack_v4_fd,
+                conntrack_v6_fd,
                 forwarding,
                 ha_state,
                 dynamic_neighbors,
@@ -1404,13 +1410,12 @@ pub(super) fn apply_worker_commands(
 /// COMMUTE with publish — the countdown is what keeps it positioned like
 /// in-band rather than trailing the drain).
 ///
-/// Refresh-subset advisory (parent O5): the handler wide-scans beyond the
-/// surviving list, so the filter is a call/don't-call gate for Refresh and
-/// a precise per-RG subset for Demote.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_transition_debt_op(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -1437,6 +1442,8 @@ fn dispatch_transition_debt_op(
                 commands::handle_demote_owner_rgs(
                     sessions,
                     session_map,
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
                     forwarding,
                     ha_state,
                     dynamic_neighbors,
@@ -2227,9 +2234,62 @@ fn materialize_shared_session_hit(
     resolved.lookup.clone()
 }
 
+// Test and non-worker callers retain the no-conntrack transition behavior.
+// The production poll path uses the `_with_conntrack` variant so helper
+// promote/demote transitions can invalidate only the origin bit in the mirror.
 pub(super) fn resolve_flow_session_decision(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    now_ns: u64,
+    now_secs: u64,
+    protocol: u8,
+    tcp_flags: u8,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress: bool,
+    ha_startup_grace_until_secs: u64,
+    worker_id: u32,
+) -> Option<ResolvedFlowSessionDecision> {
+    resolve_flow_session_decision_with_conntrack(
+        sessions,
+        session_map,
+        -1,
+        -1,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        peer_worker_commands,
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        flow,
+        now_ns,
+        now_secs,
+        protocol,
+        tcp_flags,
+        ingress_ifindex,
+        ingress_vlan_id,
+        fabric_ingress,
+        ha_startup_grace_until_secs,
+        worker_id,
+    )
+}
+
+pub(super) fn resolve_flow_session_decision_with_conntrack(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -2386,9 +2446,11 @@ pub(super) fn resolve_flow_session_decision(
         let metadata = if keep_transient {
             resolved.metadata
         } else {
-            maybe_promote_synced_session(
+            maybe_promote_synced_session_with_conntrack(
                 sessions,
                 session_map,
+                conntrack_v4_fd,
+                conntrack_v6_fd,
                 shared,
                 peer_worker_commands,
                 forwarding,
@@ -2523,10 +2585,11 @@ pub(super) fn resolve_flow_session_decision(
         flag_install_table_purge(worker_id);
     }
     // Reverse sessions created from forward NAT matches are locally
-    // created (ReverseFlow), not peer-synced, so they won't be promoted.
-    let metadata = maybe_promote_synced_session(
+    let metadata = maybe_promote_synced_session_with_conntrack(
         sessions,
         session_map,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
         shared,
         peer_worker_commands,
         forwarding,

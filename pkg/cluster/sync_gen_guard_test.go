@@ -330,6 +330,7 @@ func TestSessionWireRoundTripGenerationV6(t *testing.T) {
 func TestSessionWireRoundTripPolicyFields3301V4(t *testing.T) {
 	key := gen2170KeyV4()
 	val := dataplane.SessionValue{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            dataplane.SessStateEstablished,
 		IngressZone:      1,
 		EgressZone:       2,
@@ -361,7 +362,7 @@ func TestSessionWireRoundTripPolicyFields3301V4(t *testing.T) {
 	// IngressIfaceFold (4 bytes) AND the #7188 TunnelDiscriminator (8 bytes) so
 	// the frame ends after Generation (an old peer that stops there). Decode
 	// must still succeed with the new fields at 0 and Generation preserved.
-	legacy := payload[:len(payload)-48]
+	legacy := payload[:len(payload)-50]
 	_, lVal, ok := decodeSessionV4Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
@@ -372,11 +373,15 @@ func TestSessionWireRoundTripPolicyFields3301V4(t *testing.T) {
 	if lVal.Generation != val.Generation {
 		t.Fatalf("legacy Generation = %#x, want %#x preserved", lVal.Generation, val.Generation)
 	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v4 frame origin flags=%#x, want clear", lVal.Flags)
+	}
 }
 
 func TestSessionWireRoundTripPolicyFields3301V6(t *testing.T) {
 	key := gen2170KeyV6()
 	val := dataplane.SessionValueV6{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            dataplane.SessStateEstablished,
 		IngressZone:      1,
 		EgressZone:       2,
@@ -406,15 +411,18 @@ func TestSessionWireRoundTripPolicyFields3301V6(t *testing.T) {
 	// Drop the #3301 AppTimeout+PolicyCounterIdx (8 bytes), the #4565 trailing
 	// Nat64SnatV4 (4 bytes), the #5274 ConfigEpoch (8 bytes), the #5212
 	// RTFlowSessionID (8 bytes), the #7095 IngressIfaceFold (4 bytes) AND the
-	// #7188 TunnelDiscriminator (8 bytes) to simulate a pre-#3301 peer that
-	// omits all of the additive trailing fields.
-	legacy := payload[:len(payload)-52]
+	// #7188 TunnelDiscriminator (8 bytes) plus the #10227 high-flags byte to
+	// simulate a pre-#3301 peer that omits all additive trailing fields.
+	legacy := payload[:len(payload)-54]
 	_, lVal, ok := decodeSessionV6Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
 	}
 	if lVal.AppTimeout != 0 || lVal.PolicyCounterIdx != 0 {
 		t.Fatalf("legacy frame: appto=%d counter=%d, want 0/0", lVal.AppTimeout, lVal.PolicyCounterIdx)
+	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy v6 frame origin flags=%#x, want clear", lVal.Flags)
 	}
 }
 
@@ -426,6 +434,7 @@ func TestSessionWireRoundTripPolicyFields3301V6(t *testing.T) {
 func TestSessionWireRoundTripNat64SnatV4_4565(t *testing.T) {
 	key := gen2170KeyV6()
 	val := dataplane.SessionValueV6{
+		Flags:       dataplane.SessFlagClusterSynced,
 		State:       dataplane.SessStateEstablished,
 		IngressZone: 1,
 		EgressZone:  2,
@@ -445,13 +454,16 @@ func TestSessionWireRoundTripNat64SnatV4_4565(t *testing.T) {
 	// (8 bytes), the #7095 IngressIfaceFold (4 bytes) and the #7188
 	// TunnelDiscriminator (8 bytes) too — so truncate all of them to reach an
 	// after-#3301 frame -> Nat64SnatV4 all-zero (not NAT64).
-	legacy := payload[:len(payload)-44]
+	legacy := payload[:len(payload)-46]
 	_, lVal, ok := decodeSessionV6Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
 	}
 	if lVal.Nat64SnatV4 != ([4]byte{}) {
 		t.Fatalf("legacy frame Nat64SnatV4 = %v, want all-zero", lVal.Nat64SnatV4)
+	}
+	if lVal.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("legacy NAT64 frame origin flags=%#x, want clear", lVal.Flags)
 	}
 }
 
@@ -499,7 +511,7 @@ func TestCrossVersionShortPayloadDecode(t *testing.T) {
 	// #5274 ConfigEpoch u64 + the #5212 RTFlowSessionID u64 + the #7095
 	// IngressIfaceFold u32 + the #7188 TunnelDiscriminator u64) so the payload
 	// ends at FibGen.
-	short := full[:len(full)-56]
+	short := full[:len(full)-58]
 	_, dVal, ok := decodeSessionV4Payload(short)
 	if !ok {
 		t.Fatal("short (legacy) payload should still decode")

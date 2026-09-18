@@ -106,7 +106,7 @@ func TestTwoKeyedTunnelsSharingAKeyStayDistinctOnTheWire_7188(t *testing.T) {
 func TestLegacyPeerPayloadDecodesDiscriminatorAsNotCarried_7188(t *testing.T) {
 	key := greSessionKey7188()
 	full := encodeSessionV4Payload(key, sessionValue7188(uint64(1)<<32|100))
-	legacy := full[:len(full)-20]
+	legacy := full[:len(full)-22]
 
 	gotKey, got, ok := decodeSessionV4Payload(legacy)
 	if !ok {
@@ -136,6 +136,7 @@ func TestTunnelDiscriminatorRoundTripsV6_7188(t *testing.T) {
 	key.Protocol = 47
 	const discriminator = uint64(1)<<32 | 0x0BADF00D
 	val := dataplane.SessionValueV6{
+		Flags:               dataplane.SessFlagClusterSynced,
 		State:               2,
 		SessionID:           7,
 		RTFlowSessionID:     88,
@@ -152,10 +153,13 @@ func TestTunnelDiscriminatorRoundTripsV6_7188(t *testing.T) {
 		t.Fatalf("v6 discriminator round-tripped as %#x, want %#x",
 			got.TunnelDiscriminator, uint64(discriminator))
 	}
-	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-20])
+	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-22])
 	if !ok || shortGot.TunnelDiscriminator != 0 {
 		t.Fatalf("v6 legacy truncation: ok=%v discriminator=%#x, want ok=true 0",
 			ok, shortGot.TunnelDiscriminator)
+	}
+	if shortGot.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("v6 legacy truncation origin flags=%#x, want clear", shortGot.Flags)
 	}
 	if shortGot.IngressIfaceFold != 0x0BADF00D || shortGot.RTFlowSessionID != 88 {
 		t.Fatalf("v6 truncation disturbed earlier fields: IngressIfaceFold=%#x "+

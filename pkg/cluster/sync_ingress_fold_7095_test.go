@@ -80,7 +80,7 @@ func TestLegacyPeerPayloadDecodesFoldAsUnknown_7095(t *testing.T) {
 	// The running total: #7188's 8-byte TunnelDiscriminator, then #7239's
 	// 4-byte RoutingDomain, plus the 4-byte fold itself = 16.
 	full := encodeSessionV4Payload(key, sessionValue7095(0xABCD1234))
-	legacy := full[:len(full)-24]
+	legacy := full[:len(full)-26]
 
 	gotKey, got, ok := decodeSessionV4Payload(legacy)
 	if !ok {
@@ -110,6 +110,7 @@ func TestIngressFoldRoundTripsV6_7095(t *testing.T) {
 	key.DstPort = 443
 	key.Protocol = 6
 	val := dataplane.SessionValueV6{
+		Flags:            dataplane.SessFlagClusterSynced,
 		State:            2,
 		SessionID:        7,
 		RTFlowSessionID:  88,
@@ -125,11 +126,15 @@ func TestIngressFoldRoundTripsV6_7095(t *testing.T) {
 		t.Fatalf("v6 fold round-tripped as %#x, want %#x", got.IngressIfaceFold, uint32(0x0BADF00D))
 	}
 	// Cut every field appended behind the fold — see the v4 cell above for the
-	// running total (#7188 discriminator 8 + #7239 routing domain 4 + fold 4).
-	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-24])
+	// running total (#7188 discriminator 8 + #7239 routing domain 4 + fold 4
+	// + #10227 high-flags trailer 1).
+	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-26])
 	if !ok || shortGot.IngressIfaceFold != 0 {
 		t.Fatalf("v6 legacy truncation: ok=%v fold=%#x, want ok=true fold=0",
 			ok, shortGot.IngressIfaceFold)
+	}
+	if shortGot.Flags&dataplane.SessFlagClusterSynced != 0 {
+		t.Fatalf("v6 legacy truncation origin flags=%#x, want clear", shortGot.Flags)
 	}
 	if shortGot.RTFlowSessionID != 88 || shortGot.ConfigEpoch != 77 {
 		t.Fatalf("v6 truncation disturbed earlier fields: ConfigEpoch=%d RTFlowSessionID=%d",
