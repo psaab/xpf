@@ -459,6 +459,9 @@ wire_conntrack_verdict() {
 	local evicted=0
 	if ((10#$st == 0)); then evicted=1; fi
 	local bad=$((10#$el + 10#$fl + 10#$st))
+	((10#$cr == 0)) && bad=$((bad + 1))
+	((10#$w == 0)) && bad=$((bad + 1))
+	((10#$cs == 0)) && bad=$((bad + 1))
 	local metrics="created=$cr witnessed=$w evicted=$evicted stale_present=$st exp_offered=$eo exp_leaked=$el fresh_offered=$fo fresh_leaked=$fl syn_offered=$so syn_observed=$sob ctrl_sess=$cs lifecycle_bad=$bad cksum_bad=$ck"
 	if ((10#$eo < WIRE_DROP_FLOOR)) || ((10#$fo < WIRE_DROP_FLOOR)) || ((10#$so < WIRE_LIVENESS_OFFERED)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled %s\n' "$metrics"

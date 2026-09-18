@@ -47,6 +47,12 @@ if [[ "$MODE" == selftest ]]; then
     check "under-sampled post legs are void" VOID 2 1 1 0 999 0 1000 0 1500 1500 1 0
     check "checksum corruption fails" FAIL 1 1 1 0 1000 0 1000 0 1500 1500 1 1
     check "malformed field is harness void" VOID 2 1 1 0 1000 x 1000 0 1500 1500 1 0
+    out="$(wire_conntrack_verdict 0 0 0 1000 0 1000 0 1500 1500 1 0)"; rc=$?
+    if [[ "$rc" == 1 && "$out" == *"lifecycle_bad=2"* ]]; then
+        echo "  PASS  missing create and witness headline records lifecycle failures"; pass=$((pass + 1))
+    else
+        echo "  FAIL  missing create and witness headline records lifecycle failures (got '$out' rc=$rc)"; fail=$((fail + 1))
+    fi
     echo "  wire-conntrack-lifecycle selftest: $pass passed, $fail failed"
     [[ "$fail" -eq 0 && "$pass" -gt 0 ]] || exit 1
     exit 0
