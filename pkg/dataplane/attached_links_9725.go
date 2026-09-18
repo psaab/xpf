@@ -1,6 +1,10 @@
 package dataplane
 
-import "github.com/cilium/ebpf/link"
+import (
+	"sort"
+
+	"github.com/cilium/ebpf/link"
+)
 
 // AttachedXDPLinkCount returns the number of XDP links this Manager records
 // whose bpf_link still reports a non-zero attached-device ifindex from the
@@ -10,21 +14,76 @@ import "github.com/cilium/ebpf/link"
 //
 // This is deliberately a snapshot, not a writer-maintained counter. A future
 // detach path, device unregister, driver reset, process exit, or privileged
-// cleanup can change kernel truth without running one of our writers. The
-// daemon periodically calls this method; link-change notifications only wake
-// an earlier read as a latency optimisation.
+// cleanup can change kernel truth without running one of our writers. The daemon
+// periodically calls this method; link-change notifications only wake an
+// earlier read as a latency optimisation.
 func (m *Manager) AttachedXDPLinkCount() int {
 	if m == nil {
 		return 0
 	}
-	links := m.XDPLinks()
 	count := 0
-	for _, l := range links {
+	for _, l := range m.XDPLinks() {
 		if xdpLinkAttachedFn(l) {
 			count++
 		}
 	}
 	return count
+}
+
+// AttachedXDPIfindexes returns the tracked xpf XDP attachment ifindexes that
+// the kernel still proves attached. It is the provenance-bearing companion to
+// AttachedXDPLinkCount: callers may use the returned set to scope a kernel
+// pinhole, but must not infer ownership from a global netlink XDP flag.
+//
+// The tracked map is only a candidate set. Both the bpf_link's reported
+// ifindex and the tracked map key must agree before an ifindex is returned;
+// disagreement or an Info failure is the conservative, no-pinhole result.
+func (m *Manager) AttachedXDPIfindexes() []int {
+	if m == nil {
+		return nil
+	}
+	links := m.XDPLinks()
+	if len(links) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(links))
+	for ifindex, l := range links {
+		reported, ok := xdpLinkIfindexFn(l)
+		if ok && reported == ifindex && ifindex > 0 {
+			out = append(out, ifindex)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// WithAttachedXDPFence runs fn while the Manager's XDP ownership read lease is
+// held. The callback receives a kernel-truth ifindex snapshot and must complete
+// the corresponding forward-fence installation and transit-open actuation
+// before returning. XDP attach/detach writers hold the write lease across their
+// kernel transition, so a detach cannot race from the snapshot through the
+// fence/sysctl transition.
+func WithAttachedXDPFence(m *Manager, fn func([]int) error) error {
+	if m == nil || fn == nil {
+		return nil
+	}
+	return m.withAttachedXDPFence(fn)
+}
+
+func (m *Manager) withAttachedXDPFence(fn func([]int) error) error {
+	m.xdpOwnershipMu.RLock()
+	defer m.xdpOwnershipMu.RUnlock()
+	m.mu.Lock()
+	out := make([]int, 0, len(m.xdpLinks))
+	for ifindex, l := range m.xdpLinks {
+		reported, ok := xdpLinkIfindexFn(l)
+		if ok && reported == ifindex && ifindex > 0 {
+			out = append(out, ifindex)
+		}
+	}
+	m.mu.Unlock()
+	sort.Ints(out)
+	return fn(out)
 }
 
 // SetAttachedLinksObserver installs a non-authoritative wake callback. The
@@ -52,22 +111,34 @@ func (m *Manager) notifyAttachedLinksChanged() {
 	}
 }
 
-// linkInfoAttached is kept as a small testable production predicate: an Info
+// linkInfoIfindex is kept as a small testable production predicate: an Info
 // failure, absent XDP metadata, and ifindex zero all mean the kernel cannot
 // prove an attached program.
-func linkInfoAttached(l link.Link) bool {
+func linkInfoIfindex(l link.Link) (int, bool) {
 	if l == nil {
-		return false
+		return 0, false
 	}
 	info, err := l.Info()
 	if err != nil || info == nil {
-		return false
+		return 0, false
 	}
 	xdp := info.XDP()
-	return xdp != nil && xdp.Ifindex != 0
+	if xdp == nil || xdp.Ifindex == 0 {
+		return 0, false
+	}
+	return int(xdp.Ifindex), true
+}
+
+func linkInfoAttached(l link.Link) bool {
+	_, ok := linkInfoIfindex(l)
+	return ok
 }
 
 // xdpLinkAttachedFn is a narrow test seam around the kernel Info read. Tests
 // can model attached, detached, and uncertain links without CAP_BPF; production
 // uses linkInfoAttached unchanged.
 var xdpLinkAttachedFn = linkInfoAttached
+
+// xdpLinkIfindexFn is the matching provenance seam for callers that need the
+// actual kernel-reported ifindex rather than only a boolean count.
+var xdpLinkIfindexFn = linkInfoIfindex

@@ -9,13 +9,22 @@ import (
 )
 
 // TransitBarrierTableName is the table installed on BOTH the inet and bridge
-// families while the dataplane is UNARMED (#7191).
+// families while the dataplane is unarmed or armed (#7191/#10302).
 const TransitBarrierTableName = "xpf_transit_barrier"
 
+// ForwardFenceSpec is the provenance-scoped allowlist for the armed forward
+// fence. Every other packet reaches the base chain's DROP policy. Names must be
+// resolved from runtime-owned XDP links (plus the daemon's owned reinjection
+// TUN); callers must never populate this from a global "any XDP on the host"
+// scan.
+type ForwardFenceSpec struct {
+	AllowedIfnames []string
+}
+
 // ErrTransitBarrierBridgeUnsupported marks a kernel that does not provide the
-// bridge nf_tables family. The inet barrier remains useful on that kernel, so
+// bridge nf_tables family. The inet fence remains useful on that kernel, so
 // callers may treat this sentinel as a documented degraded-success condition
-// only when it is the sole InstallTransitBarrier error.
+// only when it is the sole error from either forward-fence installer.
 var ErrTransitBarrierBridgeUnsupported = errors.New("bridge nftables family unsupported")
 
 type transitBarrierBridgeUnsupportedError struct {
@@ -35,8 +44,8 @@ func (e *transitBarrierBridgeUnsupportedError) Is(target error) bool {
 }
 
 // IsTransitBarrierBridgeUnsupportedOnly reports whether err is exactly the
-// bridge-family unsupported degradation from InstallTransitBarrier, with no
-// inet or other family failure joined alongside it.
+// bridge-family unsupported degradation from a forward-fence installer, with
+// no inet or other family failure joined alongside it.
 func IsTransitBarrierBridgeUnsupportedOnly(err error) bool {
 	if err == nil {
 		return false
@@ -73,48 +82,33 @@ func transitBarrierFamilyUnsupported(err error) bool {
 		errors.Is(err, unix.EAFNOSUPPORT)
 }
 
-// #7191: the nftables half of the unarmed transit barrier.
+// #7191/#10302: nftables is the forward-hook half of the transit fence.
 //
-// WHY IT EXISTS. PR #7189 shipped the `ip_forward=0` leg of the barrier
-// specified in docs/research/5275-arm-failclosed/plan.md §6. That leaves a
-// single sysctl as the only thing between an unarmed box and kernel routing —
-// and a sysctl can be raised by a `sysctl.d` drop-in, a systemd unit, an
-// operator, or any future code path, none of which this daemon controls. Before
-// this change the repo had ZERO `hook forward` chains, verified on a live node:
-// `nft list ruleset | grep -c "hook forward"` returned 0.
-//
-// WHY IT IS SCOPED STRICTLY TO THE UNARMED WINDOW. This is the constraint that
-// makes the barrier safe, and getting it wrong is the difference between
-// defence-in-depth and a black hole. Several ARMED paths deliberately rely on
-// the kernel forward path being OPEN and UNFILTERED, and daemon_transit_gate.go
-// names them: route-based-VPN plaintext leaving an xfrm interface (which is
-// excluded from AF_XDP binding, so nothing adjudicates it in userspace), SNAT'd
-// frames passed up for kernel routing (the reason `accept_local` is set), and
-// the #7409 slow-path reinject. A forward drop that is live while ARMED breaks
-// all three.
-//
-// Because the barrier is installed only while unarmed — exactly the window in
-// which `ip_forward` is already 0 — it CLOSES NOTHING THAT WAS OPEN. It is belt
-// to the sysctl's braces over the same interval, not a new reject surface. That
-// bounds the blast radius: the worst case of a bug here is that the barrier
-// fails to install (no worse than today), not that armed transit is dropped.
+// The same table is rendered in both the inet and bridge families. While the
+// daemon is unarmed, the base chain has an unconditional DROP policy. While it
+// is armed, InstallArmedTransitFence adds only the provenance-scoped iifname
+// ACCEPT rule(s) supplied by the daemon, then retains that DROP policy. This
+// keeps configured-but-unzoned and leave-alone interfaces out of the kernel
+// router while preserving only explicitly owned runtime XDP paths and the
+// daemon-owned xpf-usp1 delegated TUN residual. xpf-usp0 is LocalDelivery/
+// gated-only and is not a FORWARD pinhole; direct route-based IPsec plaintext
+// arrives on xfrmi and remains dropped.
 //
 // WHY BOTH FAMILIES. `ip_forward` does not govern bridged frames at all, and
 // this repo creates Linux bridge domains (compiler_iface.go), so an inet
-// forward-hook drop alone leaves a bridged topology uncovered. The two families
-// are installed and removed independently so a kernel without bridge netfilter
-// still gets the inet leg.
+// forward-hook drop alone leaves a bridged topology uncovered. The two
+// families are installed and removed independently so a kernel without bridge
+// netfilter still gets the inet leg.
 //
 // FLOWTABLE: plan §6 also calls for a flowtable disable. That leg is a NO-OP
 // today and no code is written for it deliberately: xpf creates no flowtable
 // anywhere (zero hits for `flowtable` outside prose), so there is nothing to
-// flush. Building machinery to disable a flowtable that is never created would
-// be inert code that reads as coverage. TestNoFlowtableIsEverCreated7191 pins
-// the assumption so this comment cannot rot into a false claim.
+// flush. TestNoFlowtableIsEverCreated7191 pins that assumption so this
+// sentence cannot rot into a false claim.
 
-// transitBarrierFamilies is the family set the barrier covers. inet carries
-// routed transit; bridge carries frames that never traverse the inet forward
-// hook at all.
+// transitBarrierFamilies is the family set the forward fence covers. inet
+// carries routed transit; bridge carries frames that never traverse the inet
+// forward hook at all.
 func transitBarrierFamilies() []nftables.TableFamily {
 	return []nftables.TableFamily{nftables.TableFamilyINet, nftables.TableFamilyBridge}
 }
@@ -128,9 +122,21 @@ func transitBarrierFamilies() []nftables.TableFamily {
 // family-unsupported error carries ErrTransitBarrierBridgeUnsupported so a
 // caller can report that documented degradation without hiding other failures.
 func (in *netlinkInstaller) InstallTransitBarrier() error {
+	return in.installForwardFence(ForwardFenceSpec{})
+}
+
+// InstallArmedTransitFence installs the armed-state forward fence. The base
+// chain remains policy DROP; only the supplied provenance-scoped ingress names
+// receive an explicit ACCEPT before that policy. An empty or failed allowlist
+// therefore remains fail-closed rather than turning into an accept-all chain.
+func (in *netlinkInstaller) InstallArmedTransitFence(spec ForwardFenceSpec) error {
+	return in.installForwardFence(spec)
+}
+
+func (in *netlinkInstaller) installForwardFence(spec ForwardFenceSpec) error {
 	var errs []error
 	for _, family := range transitBarrierFamilies() {
-		if err := in.installBarrierFamily(family); err != nil {
+		if err := in.installBarrierFamily(family, spec); err != nil {
 			if family == nftables.TableFamilyBridge && transitBarrierFamilyUnsupported(err) {
 				err = &transitBarrierBridgeUnsupportedError{err: err}
 			}
@@ -140,7 +146,27 @@ func (in *netlinkInstaller) InstallTransitBarrier() error {
 	return errors.Join(errs...)
 }
 
-func (in *netlinkInstaller) installBarrierFamily(family nftables.TableFamily) error {
+func transitBarrierChain(tbl *nftables.Table) *nftables.Chain {
+	prio := *nftables.ChainPriorityFilter
+	policy := nftables.ChainPolicyDrop
+	return &nftables.Chain{
+		Name:     "forward",
+		Table:    tbl,
+		Type:     nftables.ChainTypeFilter,
+		Hooknum:  nftables.ChainHookForward,
+		Priority: &prio,
+		Policy:   &policy,
+	}
+}
+
+func emitTransitFencePinhole(p *nlPlan, spec ForwardFenceSpec) {
+	if len(spec.AllowedIfnames) == 0 {
+		return
+	}
+	p.rule().iifname(spec.AllowedIfnames).emit(verdictAccept()...)
+}
+
+func (in *netlinkInstaller) installBarrierFamily(family nftables.TableFamily, spec ForwardFenceSpec) error {
 	c, err := in.newConn()
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)
@@ -154,20 +180,16 @@ func (in *netlinkInstaller) installBarrierFamily(family nftables.TableFamily) er
 		c.DelTable(tbl)
 	}
 	tbl = c.AddTable(tbl)
-	prio := *nftables.ChainPriorityFilter
-	// Policy DROP with no rules: every forwarded packet falls through the empty
-	// chain to the policy. There is deliberately no management exemption —
-	// management is INPUT, not FORWARD (plan §6), so nothing reachable by an
-	// operator traverses this chain.
-	policy := nftables.ChainPolicyDrop
-	c.AddChain(&nftables.Chain{
-		Name:     "forward",
-		Table:    tbl,
-		Type:     nftables.ChainTypeFilter,
-		Hooknum:  nftables.ChainHookForward,
-		Priority: &prio,
-		Policy:   &policy,
-	})
+	chain := c.AddChain(transitBarrierChain(tbl))
+
+	// An armed fence admits only the supplied XDP_PASS ownership proof. The
+	// unarmed spec intentionally has no rules and is the old unconditional
+	// policy DROP shape.
+	p := &nlPlan{c: c, table: tbl, chain: chain}
+	emitTransitFencePinhole(p, spec)
+	if p.err != nil {
+		return p.err
+	}
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("nftables flush %s: %w", TransitBarrierTableName, err)
 	}

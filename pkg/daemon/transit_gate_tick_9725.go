@@ -56,19 +56,36 @@ func (d *Daemon) transitOpen() bool {
 // writeTransitGateLocked drives both transit legs from the single ready
 // predicate computed by the caller. The caller holds transitGateMu and must
 // derive open from dataplaneArmed && AttachedXDPLinkCount > 0. Closing
-// installs the barrier before writing zero; opening writes the knobs before
-// removing the barrier, so either leg by itself remains fail-closed during a
-// transition.
-func (d *Daemon) writeTransitGateLocked(stage string, open bool) {
+// installs the appropriate forward fence before writing zero; opening installs
+// the armed fence before raising the knobs. The production dataplane lease
+// holds its XDP ownership lock across both operations, so a detach cannot
+// invalidate the allowlist between them.
+func (d *Daemon) writeTransitGateLocked(stage string, open bool) bool {
 	if open {
-		writeTransitForwardSysctls(true)
-		d.applyTransitBarrier(true)
+		if err := d.openTransitGateLocked(); err != nil {
+			// An armed fence may already be live from a previous reassert.
+			// Restore the unconditional barrier before dropping the sysctls,
+			// otherwise bridge forwarding could continue through stale rules.
+			if barrierErr := d.applyTransitBarrier(false); barrierErr != nil {
+				slog.Error("armed transit fence failed and unconditional barrier "+
+					"restore also failed; keeping kernel transit forwarding disabled",
+					"stage", stage, "err", err, "barrier_err", barrierErr)
+			}
+			writeTransitForwardSysctls(false)
+			slog.Error("armed transit fence install failed; keeping kernel transit forwarding disabled",
+				"stage", stage, "err", err)
+			return false
+		}
 		slog.Debug("transit gate re-evaluated open", "stage", stage)
-		return
+		return true
 	}
-	d.applyTransitBarrier(false)
+	// Always install the unconditional barrier while the gate is closed.
+	// ip_forward=0 does not govern bridge forwarding, and an armed XDP-link
+	// count can change independently of the fence's name snapshot.
+	_ = d.applyTransitBarrier(false)
 	writeTransitForwardSysctls(false)
 	slog.Debug("transit gate re-evaluated closed", "stage", stage)
+	return false
 }
 
 // reassertTransitGate is the one authoritative actuation path for both the
@@ -82,8 +99,8 @@ func (d *Daemon) reassertTransitGate(stage string) {
 	d.transitGateMu.Lock()
 	defer d.transitGateMu.Unlock()
 	ready := d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
-	d.writeTransitGateLocked(stage, ready)
-	d.applyDataplaneReadyTrack(ready)
+	opened := d.writeTransitGateLocked(stage, ready)
+	d.applyDataplaneReadyTrack(opened)
 }
 
 // closeTransitUntilAttached establishes the boot fence without changing the
@@ -95,7 +112,7 @@ func (d *Daemon) closeTransitUntilAttached(stage string) {
 	}
 	d.transitGateMu.Lock()
 	defer d.transitGateMu.Unlock()
-	d.applyTransitBarrier(false)
+	_ = d.applyTransitBarrier(false)
 	writeTransitForwardSysctls(false)
 	slog.Info("transit gate closed until a live XDP link is proven", "stage", stage)
 }

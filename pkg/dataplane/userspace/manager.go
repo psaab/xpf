@@ -18,6 +18,10 @@ import (
 
 var _ dataplane.ConfigSink = (*Manager)(nil)
 var _ dataplane.RuntimeDataPlane = (*Manager)(nil)
+var _ interface {
+	AttachedXDPIfindexes() []int
+	WithAttachedXDPFence(func([]int) error) error
+} = (*Manager)(nil)
 
 // DataplaneMode describes which packet-processing pipeline is active.
 type DataplaneMode int
@@ -740,6 +744,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	EnableLearnedRouteImport()
 	return m.Load()
 }
+
 // AttachedXDPLinkCount forwards the daemon's kernel-truth XDP link census to
 // the retained shim Manager. The count is a snapshot; callers must not treat
 // it as a writer-maintained counter.
@@ -748,6 +753,27 @@ func (m *Manager) AttachedXDPLinkCount() int {
 		return 0
 	}
 	return m.bpfShim.AttachedXDPLinkCount()
+}
+
+// AttachedXDPIfindexes forwards the provenance-bearing kernel-truth XDP
+// census to the retained shim Manager.
+func (m *Manager) AttachedXDPIfindexes() []int {
+	if m == nil || m.bpfShim == nil {
+		return nil
+	}
+	return m.bpfShim.AttachedXDPIfindexes()
+}
+
+// WithAttachedXDPFence serializes armed-fence installation with XDP ownership
+// changes in the retained shim Manager.
+func (m *Manager) WithAttachedXDPFence(fn func([]int) error) error {
+	if fn == nil {
+		return nil
+	}
+	if m == nil || m.bpfShim == nil {
+		return fn(nil)
+	}
+	return dataplane.WithAttachedXDPFence(m.bpfShim, fn)
 }
 
 // SetAttachedLinksObserver installs a wake-only callback on the retained shim.

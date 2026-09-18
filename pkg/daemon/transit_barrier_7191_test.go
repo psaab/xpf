@@ -2,19 +2,21 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
-// #7191. Two halves: the nftables barrier depth, and the arm-coverage gate.
+// #7191 plus #10302. Two halves: the nftables barrier depth, and the
+// arm-coverage gate.
 //
-// The OVER-REJECTION controls are the load-bearing cells here, not the defect
-// cells. A forward-hook DROP is a reject-direction change whose worst case is a
-// silent black hole rather than a loud error, so "the armed case still
-// forwards" matters more than "the unarmed case drops".
-
+// The OVER-REJECTION controls remain load-bearing. The armed path now keeps a
+// default-drop forward fence with only explicit provenance pinholes; an
+// install failure must not open kernel forwarding.
 func withBarrierRecorder(t *testing.T) *fakeNftInstaller {
 	t.Helper()
 	f := &fakeNftInstaller{}
@@ -30,48 +32,53 @@ func lastBarrierCall(f *fakeNftInstaller) string {
 	}
 	return f.barrierCalls[len(f.barrierCalls)-1]
 }
+func lastFenceCall10302(f *fakeNftInstaller) string {
+	if len(f.fenceCalls10302) == 0 {
+		return ""
+	}
+	return f.fenceCalls10302[len(f.fenceCalls10302)-1]
+}
 
-// OVER-REJECTION CONTROL. An armed daemon must end with the barrier REMOVED.
-// If this ever fails, armed transit is being dropped — route-based IPsec
-// plaintext off an xfrm interface, SNAT'd frames passed up for kernel routing,
-// and the #7409 slow-path reinject all rely on an OPEN kernel forward hook, and
-// daemon_transit_gate.go names them as the reason the gate never lowers the
-// knob while armed.
-func TestArmedStateRemovesTheBarrier7191(t *testing.T) {
+// OVER-REJECTION CONTROL. An armed daemon must install the explicit armed
+// forward fence rather than remove the forward hook entirely. Unlisted ingress
+// remains policy-DROP; the XDP_PASS pinholes are tested in
+// transit_fence_10302_test.go.
+func TestArmedStateInstallsTheForwardFence7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
 	d := &Daemon{}
 	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
 
-	if got := lastBarrierCall(f); got != "remove" {
-		t.Fatalf("arming must REMOVE the barrier, last call = %q (calls: %v). "+
-			"A barrier that survives arming black-holes IPsec plaintext and SNAT'd "+
-			"frames, which is worse than the hole this change closes", got, f.barrierCalls)
+	if got := lastFenceCall10302(f); got != "install" {
+		t.Fatalf("arming must INSTALL the armed forward fence, last call = %q (fence calls: %v barrier calls: %v)",
+			got, f.fenceCalls10302, f.barrierCalls)
+	}
+	if len(f.barrierCalls) != 0 {
+		t.Fatalf("arming must not remove or install the unconditional barrier directly: %v", f.barrierCalls)
 	}
 }
 
 // The same control on the repeating path. The apply tail runs on EVERY commit,
-// so a barrier re-asserted there against an armed daemon would black-hole the
-// box on the next unrelated config change rather than at arm time.
-func TestApplyTailKeepsTheBarrierOffWhileArmed7191(t *testing.T) {
+// so an armed daemon must re-assert the explicit fence rather than remove the
+// forward hook and reopen unlisted kernel transit.
+func TestApplyTailKeepsTheArmedForwardFence7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
 	d := &Daemon{}
 	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
-	f.barrierCalls = nil // isolate the tail's own decision
+	f.barrierCalls = nil
+	f.fenceCalls10302 = nil
 
 	d.applyKernelTuning(&config.Config{})
 
-	if got := lastBarrierCall(f); got != "remove" {
-		t.Errorf("the apply tail on an ARMED daemon must keep the barrier off, last call = %q (calls: %v)",
-			got, f.barrierCalls)
+	if got := lastFenceCall10302(f); got != "install" {
+		t.Errorf("the apply tail on an ARMED daemon must keep the armed fence installed, last call = %q (calls: %v)",
+			got, f.fenceCalls10302)
 	}
-	for _, c := range f.barrierCalls {
-		if c == "install" {
-			t.Errorf("the apply tail installed the barrier on an ARMED daemon: %v", f.barrierCalls)
-		}
+	if len(f.barrierCalls) != 0 {
+		t.Errorf("the apply tail installed/removed the unconditional barrier on an ARMED daemon: %v", f.barrierCalls)
 	}
 }
 
@@ -101,20 +108,29 @@ func TestArmFailureInstallsTheBarrier7191(t *testing.T) {
 	}
 }
 
-// A barrier that cannot be REMOVED must not take the arm state down with it:
-// the daemon stays armed and the failure is loud. Disarming here would convert
-// an nftables fault into a forwarding outage.
-func TestBarrierRemoveFailureDoesNotDisarm7191(t *testing.T) {
+// An armed-fence install failure must keep the dataplane arm bit intact for
+// observability, but the ordered gate writer must leave both transit sysctls
+// closed rather than exposing an unfiltered forward path.
+func TestArmedFenceInstallFailureKeepsTransitClosed7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
-	f.barrierRemove = func() error { return errors.New("kernel says no") }
+	f.fenceInstall10302 = func(xnft.ForwardFenceSpec) error { return errors.New("kernel says no") }
 
 	d := &Daemon{}
 	d.setDataplane(&armedRecorderDP{})
 	d.markDataplaneArmed("test")
 
 	if !d.DataplaneArmed() {
-		t.Error("a barrier REMOVE failure must not disarm the dataplane")
+		t.Error("an armed-fence install failure must not disarm the dataplane")
+	}
+	for _, path := range transitForwardSysctlPaths() {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read transit knob %s: %v", path, err)
+		}
+		if strings.TrimSpace(string(b)) != "0" {
+			t.Errorf("armed-fence install failure opened %s to %q", path, strings.TrimSpace(string(b)))
+		}
 	}
 }
 

@@ -26,15 +26,15 @@ func (r *gateLinkRuntime9848) AttachedXDPLinkCount() int {
 	n := r.reads.Add(1)
 	firstReadAt := r.readCompleteAt
 	if firstReadAt == 0 {
-		firstReadAt = 3
+		firstReadAt = 2
 	}
 	if r.readComplete != nil && n == int64(firstReadAt) {
 		close(r.readComplete) // first watcher/gate-loop census
 	}
-	if r.secondReadComplete != nil && n == 4 {
+	if r.secondReadComplete != nil && n == 3 {
 		close(r.secondReadComplete) // second census (subscribe re-sync)
 	}
-	if r.eventReadComplete != nil && n == 5 {
+	if r.eventReadComplete != nil && n == 4 {
 		close(r.eventReadComplete) // census after a DELLINK wake
 	}
 	return int(r.count.Load())

@@ -36,9 +36,12 @@ func (noopNftInstaller) InstallColdBootFence(xnft.FenceSpec) error     { return 
 func (noopNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error  { return nil }
 func (noopNftInstaller) InstallGapFence(xnft.GapFenceSpec) error       { return nil }
 func (noopNftInstaller) InstallTransitBarrier() error                  { return nil }
-func (noopNftInstaller) RemoveTransitBarrier() error                   { return nil }
-func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)  { return fakeLo0Rules(s), nil }
-func (noopNftInstaller) DeleteTable(string) error                      { return nil }
+func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
+	return nil
+}
+func (noopNftInstaller) RemoveTransitBarrier() error                  { return nil }
+func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) { return fakeLo0Rules(s), nil }
+func (noopNftInstaller) DeleteTable(string) error                     { return nil }
 
 // fakeNftInstaller is the per-test failure-injection seam. A nil hook succeeds
 // (returns nil); a set hook decides the result and can capture the spec/name for
@@ -61,6 +64,11 @@ type fakeNftInstaller struct {
 	barrierCalls   []string
 	barrierInstall func() error
 	barrierRemove  func() error
+	// #10302: records armed-fence installs so fence cells can assert the armed
+	// action is a fence install, not a bare barrier removal.
+	fenceCalls10302   []string
+	fenceSpecs10302   []xnft.ForwardFenceSpec
+	fenceInstall10302 func(xnft.ForwardFenceSpec) error
 }
 
 func (f *fakeNftInstaller) InstallHostInbound(s xnft.HostInboundSpec) error {
@@ -228,7 +236,18 @@ func (f *fakeNftInstaller) RemoveTransitBarrier() error {
 	}
 	return nil
 }
+func (f *fakeNftInstaller) InstallArmedTransitFence(spec xnft.ForwardFenceSpec) error {
+	f.fenceCalls10302 = append(f.fenceCalls10302, "install")
+	f.fenceSpecs10302 = append(f.fenceSpecs10302, spec)
+	if f.fenceInstall10302 != nil {
+		return f.fenceInstall10302(spec)
+	}
+	return nil
+}
 
 // #7191: barrier no-ops; this fake counts host-inbound installs only.
 func (c *countingNftInstaller) InstallTransitBarrier() error { return nil }
-func (c *countingNftInstaller) RemoveTransitBarrier() error  { return nil }
+func (c *countingNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
+	return nil
+}
+func (c *countingNftInstaller) RemoveTransitBarrier() error { return nil }

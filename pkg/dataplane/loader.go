@@ -56,15 +56,15 @@ type Manager struct {
 	// SNAPSHOT rather than the live map: handing out the map by reference put
 	// the range loop outside any lock the accessor could take, which is how the
 	// race survived the #2114 A3 registry rule.
-	xdpLinks        map[int]link.Link
+	xdpLinks map[int]link.Link
 	// attachedLinksObserver is a wake-only callback. It never carries a count:
 	// callers must re-read kernel link truth through AttachedXDPLinkCount.
 	// Access is serialized by m.mu and callbacks run after m.mu is released.
 	attachedLinksObserver func()
-	tcLinks         map[int]link.Link
-	lastCompile     *CompileResult
-	applyMu         sync.Mutex
-	applyGeneration uint64
+	tcLinks               map[int]link.Link
+	lastCompile           *CompileResult
+	applyMu               sync.Mutex
+	applyGeneration       uint64
 	// registryGeneration counts REGISTRY publications (#6741). It is bumped
 	// inside publishShimRegistryLocked's m.mu hold, so it and the m.maps /
 	// m.programs contents always move together.
@@ -89,9 +89,12 @@ type Manager struct {
 	PersistentNAT            *PersistentNATTable
 	EnableCPUMap             bool // Enable cpumap multi-CPU distribution (adds startup overhead)
 	xdpEntryProg             string
-	vlanSubInterfaces        map[int]bool      // VLAN sub-interface ifindexes (skip XDP swap for these); guarded by m.mu (#6740)
-	mu                       sync.Mutex        // protects userspaceCounterOffsets + natRuleCounterOffsets + zone/flood offsets; #2114 A3: also the uniform m.maps/m.programs registry rule (every access goes through the lookupMapLocked/lookupProgramLocked scoped helpers, classification + handle selection atomic inside) and the xdpEntryProg field
-	userspaceCounterOffsets  map[uint32]uint64 // userspace counter deltas merged in ReadGlobalCounter
+	vlanSubInterfaces        map[int]bool // VLAN sub-interface ifindexes (skip XDP swap for these); guarded by m.mu (#6740)
+	// xdpOwnershipMu is the read/write lease that serializes XDP attach/detach
+	// kernel transitions with the daemon's armed forward-fence actuation.
+	xdpOwnershipMu          sync.RWMutex
+	mu                      sync.Mutex        // protects userspaceCounterOffsets + natRuleCounterOffsets + zone/flood offsets; #2114 A3: also the uniform m.maps/m.programs registry rule (every access goes through the lookupMapLocked/lookupProgramLocked scoped helpers, classification + handle selection atomic inside) and the xdpEntryProg field
+	userspaceCounterOffsets map[uint32]uint64 // userspace counter deltas merged in ReadGlobalCounter
 	// natRuleCounterOffsets holds per-rule NAT translation hit totals reported
 	// by the Rust userspace dataplane (keyed by compiler-assigned counter ID),
 	// merged into ReadNATRuleCounter. The Rust forwarder never writes the
@@ -508,6 +511,8 @@ func xdpAttachModeMatches(ifindex int, wantGeneric bool) bool {
 // When forceGeneric is false, tries native driver mode only (no automatic fallback).
 // On restart, reuses a previously pinned link and atomically replaces the program.
 func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
+	m.xdpOwnershipMu.Lock()
+	defer m.xdpOwnershipMu.Unlock()
 	// #2114 A3 carve-out: the attach family keeps its own pre-registry
 	// loaded rejection on BOTH unarmed states; the typed ErrDataplaneNotArmed
 	// never fires here.
@@ -688,6 +693,8 @@ func (m *Manager) swapXDPEntryProg(name string) error {
 // DetachXDP detaches the XDP program from the given interface and
 // removes its pin file.
 func (m *Manager) DetachXDP(ifindex int) error {
+	m.xdpOwnershipMu.Lock()
+	defer m.xdpOwnershipMu.Unlock()
 	l, exists := m.xdpLinkFor(ifindex)
 	if !exists {
 		return nil

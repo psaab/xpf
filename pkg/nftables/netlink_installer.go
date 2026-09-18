@@ -64,12 +64,16 @@ type Installer interface {
 	// contract #5790).
 	DeleteTable(name string) error
 	// InstallTransitBarrier installs the #7191 unarmed forward-hook DROP in the
-	// inet and bridge families. Idempotent. Installed ONLY while the dataplane
-	// is unarmed -- see the scoping argument in transit_barrier.go.
+	// inet and bridge families. Idempotent.
 	InstallTransitBarrier() error
-	// RemoveTransitBarrier removes it from both families. Idempotent; a genuine
-	// failure is returned because a barrier that survives arming would drop
-	// armed transit (IPsec plaintext, SNAT'd frames, #7409 reinject).
+	// InstallArmedTransitFence replaces the forward-hook DROP with the armed
+	// default-drop fence and its provenance-scoped XDP_PASS pinholes. The same
+	// table is used in both armed and unarmed states so a stale generation
+	// cannot leave two competing forward hooks behind.
+	InstallArmedTransitFence(spec ForwardFenceSpec) error
+	// RemoveTransitBarrier removes the transit table from both families.
+	// Idempotent; a genuine failure is returned because a table that survives
+	// teardown leaves the kernel transit posture uncertain.
 	RemoveTransitBarrier() error
 }
 
