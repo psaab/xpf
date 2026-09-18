@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // DefaultArchiveDir is the xpf-owned DEFAULT local config-archive directory —
@@ -111,6 +112,49 @@ func (e *FactoryResetSymlinkError) Error() string {
 	return b.String()
 }
 
+// HardlinkedPath names a managed regular file that has another directory entry
+// for the same inode. The other names are intentionally not guessed: a
+// pathname does not contain enough information to enumerate hardlink siblings.
+// Dev and Ino are captured before the managed name is removed so remediation
+// remains possible after the wipe.
+type HardlinkedPath struct {
+	Path  string
+	Nlink uint64
+	Dev   uint64
+	Ino   uint64
+}
+
+// FactoryResetHardlinkError reports managed files whose contents can survive
+// the wipe through another hardlink name. The managed name is still removed
+// along with the other safe artifacts, but the reset is incomplete and must
+// not be reported as successful.
+//
+// The operator must locate and remove every hardlink name by scanning the
+// filesystem containing each captured device/inode pair (for example with
+// `find <filesystem-root> -xdev -inum <inode>`), then rerun zeroize. Sibling
+// names are not enumerable from the managed path alone, so this error names
+// only attested paths and the metadata needed for that scan.
+type FactoryResetHardlinkError struct {
+	Paths []HardlinkedPath
+}
+
+func (e *FactoryResetHardlinkError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "factory reset incomplete: %d managed path", len(e.Paths))
+	if len(e.Paths) != 1 {
+		b.WriteString("s")
+	}
+	b.WriteString(" still has multiple hard-link names (the sibling names cannot be enumerated from the managed path): ")
+	for i, p := range e.Paths {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "%s (dev=%d ino=%d nlink=%d; scan with `find <filesystem-root> -xdev -inum %d`)", p.Path, p.Dev, p.Ino, p.Nlink, p.Ino)
+	}
+	b.WriteString(". Remove every hard-link name found by those inode scans, then rerun zeroize")
+	return b.String()
+}
+
 // SymlinkTarget reports whether path's FINAL component is a symlink, and where
 // it points. Only the final component matters: when an INTERMEDIATE component
 // is a link, os.RemoveAll resolves through it and does erase the real directory
@@ -172,13 +216,12 @@ func SymlinkTarget(path string) (SymlinkedTarget, bool) {
 // The recorded Target is Readlink as-is (possibly relative); resolve it
 // against Dir(Path) (a known string even after unlink) like #9013.
 //
-// NARROWED contract (#10100 GPT-4): this census covers SYMLINKS only. A
-// same-filesystem HARDLINK (nlink>1) to interior content survives RemoveAll
-// via its other name and is NOT reported — presence is detectable but the
-// other names are not enumerable, so there is nothing actionable to hand the
-// operator. The wipe therefore certifies MANAGED-NAME removal only;
-// pre-existing extra hardlinks are out of scope. Link-count attestation is
-// follow-up #10135, not this change.
+// The census covers SYMLINKS and regular-file HARDLINKS. A same-filesystem
+// hardlink (nlink>1) to interior content survives RemoveAll via its other name;
+// CollectHardlinkedFiles attests that condition before removal and reports the
+// managed path and count. The other names are not enumerable from that path,
+// so the dedicated FactoryResetHardlinkError tells the operator to locate and
+// remove every name before rerunning zeroize.
 //
 // Accepted residual: the validated census is a pathname walk, not a pinned
 // handle — a concurrent plant DURING the wipe (dbDir/tls write while the
@@ -228,6 +271,86 @@ func CollectInteriorSymlinks(root, exclude string) ([]SymlinkedTarget, error) {
 	})
 	if walkErr != nil {
 		return out, fmt.Errorf("census interior symlinks under %s incomplete: %w", root, walkErr)
+	}
+	return out, nil
+}
+
+// CollectHardlinkedFiles attests the regular files under root before a wipe.
+// It uses Lstat for every candidate so a symlink is never followed. A regular
+// file with nlink>1 is returned as an attested managed path; sibling names are
+// not inferable from that path and are intentionally not fabricated.
+//
+// Like CollectInteriorSymlinks, an absent root is a clean no-op and a walk
+// failure returns the partial census plus an error. Callers continue their
+// best-effort erase while surfacing that error.
+func CollectHardlinkedFiles(root, exclude string) ([]HardlinkedPath, error) {
+	cleanExclude := ""
+	if exclude != "" {
+		cleanExclude = filepath.Clean(exclude)
+	}
+	var out []HardlinkedPath
+	inspect := func(path string) error {
+		if cleanExclude != "" && filepath.Clean(path) == cleanExclude {
+			return nil
+		}
+		fi, err := os.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+			return nil
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("cannot attest hardlink count for %s: unsupported file metadata", path)
+		}
+		if st.Nlink > 1 {
+			out = append(out, HardlinkedPath{
+				Path:  path,
+				Nlink: uint64(st.Nlink),
+				Dev:   uint64(st.Dev),
+				Ino:   uint64(st.Ino),
+			})
+		}
+		return nil
+	}
+
+	fi, err := os.Lstat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if cleanExclude != "" && filepath.Clean(root) == cleanExclude {
+		return nil, nil
+	}
+	if !fi.IsDir() {
+		if err := inspect(root); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if cleanExclude != "" && filepath.Clean(path) == cleanExclude {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		return inspect(path)
+	})
+	if walkErr != nil {
+		return out, fmt.Errorf("census hardlinked files under %s incomplete: %w", root, walkErr)
 	}
 	return out, nil
 }
@@ -319,6 +442,7 @@ func FactoryResetArchiveDir(archiveDir string) error {
 	// archive has no master.key shape), still RemoveAll regulars. A root-link
 	// result here is a TOCTOU swap after the check above: refuse whole.
 	var skipped []SymlinkedTarget
+	var hardlinks []HardlinkedPath
 	if interior, cerr := CollectInteriorSymlinks(archiveDir, ""); len(interior) == 1 && interior[0].Path == archiveDir {
 		slog.Warn("zeroize: config archive directory is a symlink; NOT erasing it — "+
 			"removing it would unlink the link and leave the archived config text",
@@ -335,6 +459,9 @@ func FactoryResetArchiveDir(archiveDir string) error {
 			fail(cerr)
 		}
 	}
+	found, herr := CollectHardlinkedFiles(archiveDir, "")
+	hardlinks = append(hardlinks, found...)
+	fail(herr)
 	// Erase the whole archive tree — every config-<ts>.<seq>.conf snapshot of
 	// the prior tenant's config text. RemoveAll is nil on an absent dir.
 	fail(os.RemoveAll(archiveDir))
@@ -345,17 +472,24 @@ func FactoryResetArchiveDir(archiveDir string) error {
 	// reported as a clean zeroize. ErrNotExist (parent absent → nothing was
 	// removed) is excluded by fail().
 	fail(rbSyncDir(filepath.Dir(archiveDir)))
-	// A SKIPPED erase outranks a FAILED one (the #7173/#9013 doctrine: an
-	// erasure that did not happen AT ALL is strictly worse than one that
-	// failed). Joined so a real I/O failure is not swallowed.
+	var result []error
 	if len(skipped) > 0 {
-		symErr := &FactoryResetSymlinkError{Skipped: skipped}
-		if firstErr != nil {
-			return errors.Join(symErr, firstErr)
-		}
-		return symErr
+		result = append(result, &FactoryResetSymlinkError{Skipped: skipped})
 	}
-	return firstErr
+	if len(hardlinks) > 0 {
+		result = append(result, &FactoryResetHardlinkError{Paths: hardlinks})
+	}
+	if firstErr != nil {
+		result = append(result, firstErr)
+	}
+	switch len(result) {
+	case 0:
+		return nil
+	case 1:
+		return result[0]
+	default:
+		return errors.Join(result...)
+	}
 }
 
 // FactoryResetForbiddenRoots are directories a factory-reset config-state wipe
@@ -640,6 +774,7 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 	// abandon the rest of the wipe, and the operator needs EVERY surviving path,
 	// not just the first found.
 	var skipped []SymlinkedTarget
+	var hardlinks []HardlinkedPath
 
 	dbDir := filepath.Join(configDir, ".configdb")
 	// #9013: this check precedes EVERY removal in the DB block, and the ordering
@@ -654,6 +789,9 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 			"dir", sk.Path, "target", sk.Target)
 		skipped = append(skipped, sk)
 	} else {
+		found, herr := CollectHardlinkedFiles(dbDir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
 		skipped = append(skipped, eraseConfigDB(dbDir, fail)...)
 	}
 
@@ -688,6 +826,9 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 			// leaving the real file — the live config, the rescue config, the
 			// audit journal and the numbered rollback slots each carry the full
 			// config text with cleartext secret leaves. Record and skip.
+			found, herr := CollectHardlinkedFiles(full, "")
+			hardlinks = append(hardlinks, found...)
+			fail(herr)
 			if sk, isLink := SymlinkTarget(full); isLink {
 				slog.Warn("zeroize: config artifact is a symlink; NOT erasing it — "+
 					"removing it would unlink the link and leave the config text",
@@ -706,19 +847,24 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 	// so it must not be reported as a clean zeroize. ErrNotExist (configDir
 	// itself absent → nothing to wipe) is excluded by fail().
 	fail(rbSyncDir(configDir))
-	// #9013: a SKIPPED erase outranks a FAILED one. FactoryResetArchiveDir's
-	// #7173 comment states the doctrine — an erasure that did not happen AT ALL
-	// is strictly worse than one that failed, because only the latter announces
-	// itself. Joined rather than replacing firstErr so a real I/O failure is not
-	// swallowed; errors.As finds either.
+	var result []error
 	if len(skipped) > 0 {
-		symErr := &FactoryResetSymlinkError{Skipped: skipped}
-		if firstErr != nil {
-			return errors.Join(symErr, firstErr)
-		}
-		return symErr
+		result = append(result, &FactoryResetSymlinkError{Skipped: skipped})
 	}
-	return firstErr
+	if len(hardlinks) > 0 {
+		result = append(result, &FactoryResetHardlinkError{Paths: hardlinks})
+	}
+	if firstErr != nil {
+		result = append(result, firstErr)
+	}
+	switch len(result) {
+	case 0:
+		return nil
+	case 1:
+		return result[0]
+	default:
+		return errors.Join(result...)
+	}
 }
 
 // eraseConfigDB erases the .configdb SSOT key-first. Split out of
