@@ -824,7 +824,7 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         routing_domain: forward_key.routing_domain,
     };
     assert!(
-        lookup_session_across_scopes(
+        lookup_session_across_scopes_for_test(
             &mut sessions,
             &shared_sessions,
             &shared_forward_wire_sessions,
@@ -917,7 +917,7 @@ fn lookup_session_across_scopes_returns_shared_entry() {
         .expect("shared lock")
         .insert(key.clone(), entry.clone());
 
-    let resolved = lookup_session_across_scopes(
+    let resolved = lookup_session_across_scopes_for_test(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,
@@ -949,7 +949,7 @@ fn lookup_session_across_scopes_preserves_local_synced_origin() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let resolved = lookup_session_across_scopes(
+    let resolved = lookup_session_across_scopes_for_test(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,
@@ -961,6 +961,381 @@ fn lookup_session_across_scopes_preserves_local_synced_origin() {
     assert!(resolved.shared_entry.is_none());
     assert_eq!(resolved.key.as_ref(&key), &key);
     assert_eq!(resolved.origin, SessionOrigin::SyncImport);
+}
+
+/// #10287: a bare SYN reusing a closing TCP 5-tuple is a NEW connection, not
+/// traffic for the dead incarnation. The cross-scope lookup must evict both
+/// local halves and MISS so the miss path admits it as a new flow with fresh
+/// OPENING state — never inherit the 30s FIN / 2s RST close window and reap
+/// while both endpoints consider the new connection established.
+///
+/// RED pre-fix: the SYN hits the closing entry (`Some`) and re-arms its close
+/// window. GREEN: `None`, both halves gone, and no synthetic replacement
+/// `Close` (the prior FIN state update was drained before the SYN).
+#[test]
+fn syn_on_closing_tuple_evicts_both_halves_and_misses_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    let now = 1_000_000_000u64;
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+    let mut rev_meta = test_metadata();
+    rev_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol(
+        reverse.clone(),
+        test_decision(),
+        rev_meta,
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    // A FIN closes both halves (#4109 F17); drain the Open + Update deltas.
+    // Same-key replacement intentionally emits no Close: the prior FIN Update
+    // already announced the old state, and a synthetic Close could race the
+    // replacement Open in downstream consumers.
+    assert!(sessions.lookup(&forward, now + 1_000, TCP_FIN).is_some());
+    let _ = sessions.drain_deltas(8);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward,
+            now + 2_000,
+            TCP_SYN,
+        )
+        .is_none(),
+        "a bare SYN on a closing tuple must MISS (evict-to-miss), not hit the dead entry"
+    );
+    assert!(
+        sessions.probe_with_origin(&forward).is_none(),
+        "eviction must remove the matched closing half"
+    );
+    assert!(
+        sessions.probe_with_origin(&reverse).is_none(),
+        "eviction must remove the companion closing half too, or the new flow reaps half-dead"
+    );
+    assert!(
+        sessions.drain_deltas(8).is_empty(),
+        "same-key replacement must not emit a synthetic Close"
+    );
+}
+
+/// #10287: after a local SYN-evict, the cross-scope lookup must NOT fall
+/// through to the shared maps — the old closing `SyncedSessionEntry` there is
+/// the same dead incarnation and rematerializing it would resurrect the close
+/// window the eviction just removed.
+#[test]
+fn syn_on_closing_tuple_does_not_rematerialize_shared_close_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    let now = 1_000_000_000u64;
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(sessions.lookup(&forward, now + 1_000, TCP_FIN).is_some());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    shared_sessions.lock().expect("shared lock").insert(
+        forward.clone(),
+        SyncedSessionEntry {
+            key: forward.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 1,
+        },
+    );
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward,
+            now + 2_000,
+            TCP_SYN,
+        )
+        .is_none(),
+        "eviction must gate the shared fallback: the dead shared copy must not resurface"
+    );
+
+    // The stale shared copy must stay gone on a retransmitted SYN too. This
+    // catches an implementation that only gates the first lookup while
+    // leaving the shared map populated.
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward,
+            now + 3_000,
+            TCP_SYN,
+        )
+        .is_none(),
+        "a retransmitted SYN must not rematerialize the retired shared close"
+    );
+    assert!(
+        sessions.probe_with_origin(&forward).is_none(),
+        "no local entry may be rematerialized from the dead shared copy"
+    );
+}
+
+/// #10287 production transition: the full `resolve_flow_session_decision` path
+/// (not only the bare table lookup) must MISS on a SYN reusing a closing
+/// tuple, handing the packet to the miss path for fresh admission.
+#[test]
+fn resolve_flow_syn_on_closing_tuple_misses_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+    let mut rev_meta = test_metadata();
+    rev_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol(
+        reverse.clone(),
+        test_decision(),
+        rev_meta,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(sessions.lookup(&forward, 2_000_000, TCP_FIN).is_some());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands = Vec::new();
+    let forwarding = test_forwarding_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let now_ns = 3_000_000u64;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(0))]);
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &SessionFlow {
+            src_ip: forward.src_ip,
+            dst_ip: forward.dst_ip,
+            forward_key: forward.clone(),
+        },
+        now_ns,
+        0,
+        PROTO_TCP,
+        TCP_SYN,
+        6,
+        0,
+        false,
+        0,
+        0,
+    );
+    assert!(
+        resolved.is_none(),
+        "resolve_flow must MISS on a SYN reusing a closing tuple (evict-to-miss)"
+    );
+    assert!(
+        sessions.probe_with_origin(&forward).is_none()
+            && sessions.probe_with_origin(&reverse).is_none(),
+        "the production transition must evict both closing halves"
+    );
+}
+
+/// #10287 control: eviction is SYN-only. A stray ACK on a closing tuple keeps
+/// close semantics (hit, no eviction).
+#[test]
+fn ack_on_closing_tuple_still_hits_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN};
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    let now = 1_000_000_000u64;
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(sessions.lookup(&forward, now + 1_000, TCP_FIN).is_some());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward,
+            now + 2_000,
+            TCP_ACK,
+        )
+        .is_some(),
+        "a non-SYN segment on a closing tuple must still hit (close semantics preserved)"
+    );
+    assert!(sessions.probe_with_origin(&forward).is_some());
+}
+
+/// #10287 control: a SYN on an OPEN tuple is a retransmit, not a reuse — it
+/// must hit, never evict.
+#[test]
+fn syn_on_open_tuple_still_hits_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_SYN};
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    let now = 1_000_000_000u64;
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &forward,
+            now + 1_000,
+            TCP_SYN,
+        )
+        .is_some(),
+        "a SYN on an open tuple must still hit (retransmit, not reuse)"
+    );
+    assert!(sessions.probe_with_origin(&forward).is_some());
+}
+
+/// #10287 control: a SYN-ACK on a closing tuple is a stale retransmit of the
+/// old incarnation, not a new connection — it must hit, never evict.
+#[test]
+fn synack_on_closing_tuple_still_hits_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN};
+    let mut sessions = SessionTable::new();
+    let forward = test_key();
+    let now = 1_000_000_000u64;
+    assert!(sessions.install_with_protocol(
+        forward.clone(),
+        test_decision(),
+        test_metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+    let mut rev_meta = test_metadata();
+    rev_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol(
+        reverse.clone(),
+        test_decision(),
+        rev_meta,
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(sessions.lookup(&forward, now + 1_000, TCP_FIN).is_some());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &reverse,
+            now + 2_000,
+            TCP_SYN | TCP_ACK,
+        )
+        .is_some(),
+        "a SYN-ACK on a closing tuple must still hit (stale retransmit, not reuse)"
+    );
+    assert!(sessions.probe_with_origin(&reverse).is_some());
+}
+
+/// #10287 control: SYN|FIN and SYN|RST are malformed close segments, not
+/// valid new-connection openers. They must not evict a closing/TIME-WAIT pair.
+#[test]
+fn syn_with_close_bit_does_not_evict_closing_tuple_10287() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+    for reuse_flags in [TCP_SYN | TCP_FIN, TCP_SYN | TCP_RST] {
+        let mut sessions = SessionTable::new();
+        let forward = test_key();
+        let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+        let now = 1_000_000_000u64;
+        assert!(sessions.install_with_protocol(
+            forward.clone(),
+            test_decision(),
+            test_metadata(),
+            now,
+            PROTO_TCP,
+            TCP_ACK,
+        ));
+        let mut reverse_metadata = test_metadata();
+        reverse_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol(
+            reverse.clone(),
+            test_decision(),
+            reverse_metadata,
+            now,
+            PROTO_TCP,
+            TCP_ACK,
+        ));
+        assert!(sessions.lookup(&forward, now + 1_000, TCP_FIN).is_some());
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        assert!(
+            lookup_session_across_scopes_for_test(
+                &mut sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &forward,
+                now + 2_000,
+                reuse_flags,
+            )
+            .is_some(),
+            "SYN|close must hit the old closing incarnation, flags={reuse_flags:#x}"
+        );
+        assert!(
+            sessions.probe_with_origin(&forward).is_some()
+                && sessions.probe_with_origin(&reverse).is_some(),
+            "SYN|close must not evict either half, flags={reuse_flags:#x}"
+        );
+    }
 }
 
 #[test]
@@ -993,7 +1368,7 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
         .expect("shared forward-wire lock")
         .insert(translated_key.clone(), entry.clone());
 
-    let resolved = lookup_session_across_scopes(
+    let resolved = lookup_session_across_scopes_for_test(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,
@@ -1031,7 +1406,7 @@ fn lookup_session_across_scopes_preserves_local_forward_wire_synced_origin() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let resolved = lookup_session_across_scopes(
+    let resolved = lookup_session_across_scopes_for_test(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,
@@ -1089,7 +1464,7 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
         .expect("shared forward-wire lock")
         .insert(translated_key.clone(), shared_entry.clone());
 
-    let resolved = lookup_session_across_scopes(
+    let resolved = lookup_session_across_scopes_for_test(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,

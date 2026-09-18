@@ -2329,10 +2329,12 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         forward_wire_sessions: shared_forward_wire_sessions,
         owner_rg_indexes: shared_owner_rg_indexes,
     };
-    if let Some(mut hit) = lookup_session_across_scopes(
+    if let Some(mut hit) = lookup_session_across_scopes_with_shared(
         sessions,
         shared_sessions,
+        shared_nat_sessions,
         shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
         &flow.forward_key,
         now_ns,
         tcp_flags,

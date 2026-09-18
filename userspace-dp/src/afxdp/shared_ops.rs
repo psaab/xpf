@@ -797,14 +797,85 @@ fn probe_local_wire_at(
     }
 }
 
-pub(super) fn lookup_session_across_scopes(
-    sessions: &mut SessionTable,
+fn retire_shared_tcp_pair_for_syn(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    forward_key: &SessionKey,
+    reverse_key: &SessionKey,
+) {
+    let _ = remove_shared_session_if(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        forward_key,
+        |entry| entry.tcp_close_class != 0,
+    );
+    if reverse_key != forward_key {
+        let _ = remove_shared_session_if(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            reverse_key,
+            |entry| entry.tcp_close_class != 0,
+        );
+    }
+}
+
+fn shared_closing_tcp_entry_for_syn(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    tcp_flags: u8,
+) -> Option<(SessionKey, SessionKey)> {
+    if !crate::tcp_flags::is_initial_syn(tcp_flags)
+        || crate::tcp_flags::is_closing(tcp_flags)
+    {
+        return None;
+    }
+    let entry = lookup_shared_session(shared_sessions, key)
+        .or_else(|| lookup_shared_forward_wire_match(shared_forward_wire_sessions, key))?;
+    if entry.tcp_close_class == 0 {
+        return None;
+    }
+    let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
+    if entry.metadata.is_reverse {
+        Some((reverse_key, entry.key))
+    } else {
+        Some((entry.key, reverse_key))
+    }
+}
+
+pub(super) fn lookup_session_across_scopes_with_shared(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
     now_ns: u64,
     tcp_flags: u8,
 ) -> Option<ResolvedSessionLookup> {
+    // #10287: a bare SYN on a live closing tuple is a new incarnation. Evict
+    // the old local pair and stop here: falling through to a shared-map copy
+    // would rematerialize the same dead close state before the miss path can
+    // install the fresh pair.
+    if let Some((forward_key, reverse_key)) =
+        sessions.evict_closing_tcp_pair_for_syn(key, tcp_flags)
+    {
+        retire_shared_tcp_pair_for_syn(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &forward_key,
+            &reverse_key,
+        );
+        return None;
+    }
     if let Some((lookup, origin)) = sessions.lookup_with_origin(key, now_ns, tcp_flags) {
         if is_fabric_wire_placeholder(
             lookup.metadata.fabric_ingress,
@@ -840,6 +911,25 @@ pub(super) fn lookup_session_across_scopes(
         LocalExpiryProbe::Stale => return None,
         LocalExpiryProbe::Absent => {}
     }
+    // A worker may have no local copy while the shared map still carries the
+    // old closing incarnation. Treat that copy the same way: remove it before
+    // the miss path can install a fresh local pair.
+    if let Some((forward_key, reverse_key)) = shared_closing_tcp_entry_for_syn(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        key,
+        tcp_flags,
+    ) {
+        retire_shared_tcp_pair_for_syn(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &forward_key,
+            &reverse_key,
+        );
+        return None;
+    }
     lookup_shared_session(shared_sessions, key)
         .map(ResolvedSessionLookup::shared)
         .or_else(|| {
@@ -848,7 +938,30 @@ pub(super) fn lookup_session_across_scopes(
         })
 }
 
-/// #9990: non-mutating counterpart to [`lookup_session_across_scopes`].
+#[cfg(test)]
+pub(super) fn lookup_session_across_scopes_for_test(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> Option<ResolvedSessionLookup> {
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    lookup_session_across_scopes_with_shared(
+        sessions,
+        shared_sessions,
+        &shared_nat_sessions,
+        shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        key,
+        now_ns,
+        tcp_flags,
+    )
+}
+
+/// #9990: non-mutating counterpart to [`lookup_session_across_scopes_with_shared`].
 ///
 /// Delete guards and embedded-error quote matching inspect an installed
 /// decision before deciding whether to remove, rewrite, or account for it.
