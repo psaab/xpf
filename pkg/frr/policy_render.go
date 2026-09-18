@@ -1064,10 +1064,21 @@ func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitNa
 //     default-ACCEPT applies (#2998). A composed chain only ever renders in a
 //     BGP `route-map in`/`out` context, so that fall-off default is permit.
 //
-// Sequence numbers run continuously across the chain; each policy's inline
-// prefix-lists are namespaced by composedName+"-"+policyName so a term name
-// reused across policies cannot fuse two prefix-lists.
+// renderComposedRouteMap renders a composed BGP policy-chain route-map with
+// the Junos BGP default-ACCEPT fall-off semantics (#2998). Narrowed-chain
+// aliases call renderComposedRouteMapWithDefault with a fail-closed fallback
+// instead, without changing this existing shared-map behavior.
 func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, composedName string, chain []string) string {
+	return m.renderComposedRouteMapWithDefault(po, composedName, chain, "permit")
+}
+
+// renderComposedRouteMapWithDefault is the common chain renderer. The
+// fallbackAction is emitted only when every member falls through; explicit
+// policy defaults still terminate exactly as authored. Keeping the fallback
+// as an argument lets a future narrowed-chain alias deny the surviving
+// subset without mutating the shared composed map or changing ordinary BGP
+// chains.
+func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConfig, composedName string, chain []string, fallbackAction string) string {
 	// #5732 render-side belt: this composed route-map numbers its members'
 	// sequences with ONE running counter, so a chain whose members each pass the
 	// per-policy #5701 bound can still SUM past the FRR ceiling and emit a
@@ -1123,9 +1134,11 @@ func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, compose
 		}
 	}
 	if !terminated {
-		// Fell off the end of every policy in the chain → Junos BGP
-		// default-ACCEPT (#2998): permit the (accumulated-modified) route.
-		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(composedName), seq)
+		// The ordinary composed BGP attachment falls off to Junos
+		// default-ACCEPT (#2998). A narrowed alias passes "deny" here so
+		// the dropped authored members cannot silently widen that attached
+		// map; explicit member defaults above remain authoritative.
+		fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), fallbackAction, seq)
 		b.WriteString("exit\n")
 	}
 	return b.String()

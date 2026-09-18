@@ -41,6 +41,15 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"on how often the safe shape occurs. Not an alert on its own.",
 		nil, nil,
 	)
+	c.frrPolicyChainsNarrowedShape = prometheus.NewDesc(
+		"xpf_frr_policy_chains_narrowed_shape",
+		"Number of narrowed BGP policy-chain attachments in the last rendered "+
+			"FRR managed section by survivor-body shape (#10129). Shapes are "+
+			"fall-through, empty, terminating-default, match-all, quarantined, "+
+			"or unknown; the existing xpf_frr_policy_chains_narrowed gauge "+
+			"remains the total population.",
+		[]string{"shape"}, nil,
+	)
 	c.frrRouteMapsQuarantined = prometheus.NewDesc(
 		"xpf_frr_route_maps_quarantined",
 		"Number of route-maps in the last rendered FRR managed section that "+

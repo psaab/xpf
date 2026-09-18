@@ -597,7 +597,11 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// references the composed route-map that preserves the ordered
 				// Junos policy chain (#5277) instead of dropping all but the
 				// last.
-				if rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions); rm != "" {
+				rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions)
+				if alias := m.narrowedAliasRef10129(n, bgp, globalExportChain, policyOptions, true); alias != "" {
+					rm = alias
+				}
+				if rm != "" {
 					fmt.Fprintf(&b, "  neighbor %s route-map %s out\n", n.Address, frrName(rm))
 				}
 				// Junos `then next-hop self` is lowered per-term INSIDE the
@@ -612,11 +616,11 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// "self"` branch in the route-map renderer.
 				//
 				// Inbound filter (#2490/#5277). Same chain composition as the
-				// outbound path: the effective import chain is defined-filtered
-				// (no dangling in-line), single-policy references the standalone
-				// route-map, and a chain of >= 2 references the composed
-				// route-map preserving the ordered inbound policy chain.
-				if rm := bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions); rm != "" {
+				rm = bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions)
+				if alias := m.narrowedAliasRef10129(n, bgp, globalImportChain, policyOptions, false); alias != "" {
+					rm = alias
+				}
+				if rm != "" {
 					fmt.Fprintf(&b, "  neighbor %s route-map %s in\n", n.Address, frrName(rm))
 				}
 			}
@@ -643,8 +647,11 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				if n.PrefixLimitInet6 > 0 {
 					fmt.Fprintf(&b, "  neighbor %s maximum-prefix %d\n", n.Address, n.PrefixLimitInet6)
 				}
-				// Outbound filter (#2539/#5277) — see the ipv4 block above.
-				if rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions); rm != "" {
+				rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions)
+				if alias := m.narrowedAliasRef10129(n, bgp, globalExportChain, policyOptions, true); alias != "" {
+					rm = alias
+				}
+				if rm != "" {
 					fmt.Fprintf(&b, "  neighbor %s route-map %s out\n", n.Address, frrName(rm))
 				}
 				// `then next-hop self` is lowered per-term in the export
@@ -652,7 +659,11 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// neighbor-wide `next-hop-self` knob (#5115) — see the ipv4
 				// block above.
 				// Inbound filter (#2490/#5277) — see the ipv4 block above.
-				if rm := bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions); rm != "" {
+				rm = bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions)
+				if alias := m.narrowedAliasRef10129(n, bgp, globalImportChain, policyOptions, false); alias != "" {
+					rm = alias
+				}
+				if rm != "" {
 					fmt.Fprintf(&b, "  neighbor %s route-map %s in\n", n.Address, frrName(rm))
 				}
 			}
