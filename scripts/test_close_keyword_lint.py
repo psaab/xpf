@@ -284,6 +284,18 @@ class CliTest(unittest.TestCase):
 CI = ROOT / "scripts" / "close_keyword_lint_ci.sh"
 HOOK = ROOT / "scripts" / "git-hooks" / "commit-msg"
 INSTALL = ROOT / "scripts" / "git-hooks" / "install.sh"
+MAKEFILE = ROOT / "Makefile"
+
+
+class SelftestWiringTest(unittest.TestCase):
+    """The repository selftest must run the branch commit-message lint."""
+
+    def test_make_selftest_runs_close_keyword_lint(self):
+        makefile = MAKEFILE.read_text()
+        self.assertRegex(
+            makefile,
+            r"(?m)^selftest: close-keyword-lint\n\tsh scripts/run-selftests\.sh$",
+        )
 
 
 def clean_env(**extra):

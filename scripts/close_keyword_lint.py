@@ -65,12 +65,12 @@ Verdicts are PER PAIR, never per body. In "Fixes #1 ... does not close #2",
 only #2 is refused and named, so a legitimate close in the same body goes
 through.
 
-Where it runs: scripts/close_keyword_lint_ci.sh holds both pull-request legs (the
-body and every commit message in a range), and `make close-keyword-lint` plus the
-selftest call it. The GitHub Actions job that would run it on every pull request
-is NOT in the tree: pushing a workflow file needs an OAuth token with `workflow`
-scope, which the token in use does not have (#9551). The commit-msg hook is installed by
-`make install-git-hooks`.
+Where it runs: `make selftest` reaches the lint's cells through
+`scripts/run-selftests.sh`, and `make test-close-keyword-lint-lib` runs them
+directly. `make close-keyword-lint` checks this branch's commit messages, while
+`scripts/close_keyword_lint_ci.sh` is the two-leg wrapper preserved for the
+human workflow step recorded in `docs/log/9551.md`. The commit-msg hook is
+installed by `make install-git-hooks`.
 
 Exit status: 0 nothing refused; 1 at least one refusal; 2 usage, read, git or
 gh failure. A lint that cannot read its input must not pass.
