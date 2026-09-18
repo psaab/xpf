@@ -72,11 +72,60 @@ impl DeleteDropSweep {
     /// Examine at most [`DELETE_DROP_SWEEP_BUDGET`] slab slots, deleting the
     /// peer-synced sessions the shared authority no longer holds. Returns the
     /// number swept THIS pass.
+    ///
+    /// This compatibility entry point is used by steering-only behavioural
+    /// cells. The worker loop uses [`Self::step_with_nat`] so a swept entry's
+    /// NAT holder is released before its table record disappears.
     pub(in crate::afxdp) fn step(
         &mut self,
         sessions: &mut SessionTable,
         shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
         session_map: SteeringMap<'_>,
+        evicted_keys: &mut Vec<SessionKey>,
+    ) -> usize {
+        self.step_inner(
+            sessions,
+            shared_sessions,
+            session_map,
+            None,
+            evicted_keys,
+        )
+    }
+
+    /// Sweep with the worker's forwarding state so NAT holders cannot be
+    /// stranded when an accepted `DeleteSynced` is still queued (#10288).
+    ///
+    /// The queued command may arrive after this sweep and find no table entry.
+    /// Releasing the worker's source-NAT and NAT64 holds here closes that
+    /// window; the later command remains safe because both release paths are
+    /// holder-aware and therefore idempotent (#6211). Steering release still
+    /// happens first, unchanged from #9560.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::afxdp) fn step_with_nat(
+        &mut self,
+        sessions: &mut SessionTable,
+        shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        session_map: SteeringMap<'_>,
+        forwarding: &ForwardingState,
+        now_ns: u64,
+        worker_id: u32,
+        evicted_keys: &mut Vec<SessionKey>,
+    ) -> usize {
+        self.step_inner(
+            sessions,
+            shared_sessions,
+            session_map,
+            Some((forwarding, now_ns, worker_id)),
+            evicted_keys,
+        )
+    }
+
+    fn step_inner(
+        &mut self,
+        sessions: &mut SessionTable,
+        shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        session_map: SteeringMap<'_>,
+        nat_context: Option<(&ForwardingState, u64, u32)>,
         evicted_keys: &mut Vec<SessionKey>,
     ) -> usize {
         if !self.running {
@@ -100,12 +149,40 @@ impl DeleteDropSweep {
             )
         };
         for key in &self.stale {
-            // #9560 round 3: give up this worker's steering claims BEFORE the table
-            // entry goes. The sweep deletes the entry directly, so nothing downstream
-            // can derive the rows it published; its holdings and the fixed-size BPF
-            // rows would survive with no entry left to reap them, and unique-key churn
-            // would grow both until publishes failed.
+            // #9560 round 3: give up this worker's steering claims BEFORE the
+            // table entry goes. The sweep deletes the entry directly, so
+            // nothing downstream can derive the rows it published; its
+            // holdings and the fixed-size BPF rows would survive with no entry
+            // left to reap them, and unique-key churn would grow both until
+            // publishes failed.
             release_all_session_rows(session_map, key);
+            if let Some((forwarding, now_ns, worker_id)) = nat_context {
+                // The candidate is still present here: release its exact
+                // decision before deleting the table record. If a queued
+                // DeleteSynced runs first, this lookup misses and these
+                // holder-aware release helpers are harmless no-ops.
+                if let Some((lookup, origin)) = sessions.probe_with_origin(key) {
+                    if origin.is_peer_synced() {
+                        crate::nat::release_source_nat_allocation_for_worker(
+                            &forwarding.iface_nat_allocators,
+                            &forwarding.source_nat_rules,
+                            key,
+                            lookup.decision.nat,
+                            lookup.metadata.is_reverse,
+                            now_ns,
+                            worker_id,
+                        );
+                        crate::nat64::release_nat64_allocation_for_worker(
+                            &forwarding.nat64,
+                            key,
+                            lookup.decision.nat,
+                            lookup.metadata.is_reverse,
+                            now_ns,
+                            worker_id,
+                        );
+                    }
+                }
+            }
             sessions.delete(key);
             evicted_keys.push(key.clone());
         }

@@ -193,11 +193,15 @@ the exclusions are the safety property:
   what the shared map does not have" sweep deletes them on its first
   pass; `is_peer_synced()` excludes them.
 
-The reconcile releases no NAT, removes no shared state and replicates no
-delete: the deleting worker already did all three (#8576), and repeating
-any of them would double-process a pair or recurse. It holds the
-shared-map lock across the membership FILTER only, never across the table
-walk — sibling workers take that lock on their packet path.
+The worker-loop sweep still removes no shared state and replicates no delete:
+the deleting worker already did both (#8576). Its production
+`step_with_nat` path releases the local source-NAT and NAT64 holder bits after
+the #9560 steering claims and before the table entry disappears (#10288).
+That release is holder-aware and idempotent: #8576 has already cleared the bit
+for a refused queue push, while an accepted-but-undelivered `DeleteSynced`
+needs the sweep to close the gap. The behavioural wrapper remains
+steering-only because its cells intentionally model the #8586 table/cache half
+without forwarding state.
 
 **Still not covered:** a refusal whose worker id could not be resolved
 bumps no epoch, because there is no worker to name. Those are the
