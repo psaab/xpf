@@ -25,8 +25,11 @@ import (
 // no live target left to gate for.
 //
 // FAIL-ON-REVERT: restoring the router-level ` interface <name> area` line
-// (or dropping the interface-level area line) turns every v3 cell RED; the v2
-// control cell is green on both sides of the change.
+// (or dropping the interface-level area line) turns the two valid-area
+// activation cells RED; re-gating interface blocks on optional settings also
+// turns the primary valid-area cell RED because area-only dmz0 disappears.
+// The invalid-ID and OSPFv2 cells are green-on-both-sides preservation pins
+// for the #9820 belt and unchanged OSPFv2 output.
 
 // ospf6Stanza10037 extracts the `router ospf6` stanza (up to its closing
 // "exit") so cells can assert the dead router-level form is gone without
