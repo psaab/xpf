@@ -68,20 +68,13 @@ var firewallValueBearingFromLeaf = func() map[string]bool {
 // compiler, which is the defect one layer up.
 //
 // Each `from` node is read through packedBody with the SAME from-schema
-// compileFilterFrom is lowered with (compiler_firewall.go) — not raw
-// Children. A from-packed leaf (`from protocol;`) lives on the from node's
-// Keys, not its Children, and a children-only read is blind to it while
-// compilation still lowers it (to an empty match set). The pre-fix helper
-// was exactly that blind: from-packed `protocol` was caught only because
-// the compact normalizer happens to admit (from,protocol) and expands it
-// before gates run — scope-accident, not structure. For a pair the
-// normalizer declines the leaf compiled-but-unmarked with the strict gate
-// missing it too. Reading packedBody makes gate and marker see packed
-// tails BY CONSTRUCTION, aligned with compilation regardless of
-// normalizer scope. Braced shapes are unaffected (packedBody returns the
-// original node when there is nothing to expand), and term-level packing
-// still escapes (there is no `from` child at all on a term-packed node —
-// the pinned #10072 escape, which the strict gate misses identically).
+// compileFilterFrom is lowered with (compiler_firewall.go), and the term itself
+// is first lowered through its term schema. A from-packed leaf (`from
+// protocol;`) lives on the from node's Keys, not its Children, while a
+// term-packed leaf (`term T from protocol;`) lives on the term Keys. Reading
+// both packed levels keeps the #8480 gate and #9875 marker aligned with the
+// compiler rather than relying on whichever compact-normalizer pair happens
+// to admit a spelling.
 //
 // A leaf written more than once is valueless only if EVERY occurrence is: Junos
 // merges duplicate blocks, so `from { protocol; }` beside `from { protocol tcp; }`
@@ -96,9 +89,14 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	if fromSchema == nil {
 		fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
 	}
+	if termNode == nil || fromSchema == nil {
+		return nil
+	}
 	seen := map[string]bool{}
 	valued := map[string]bool{}
-	for _, from := range termNode.Children {
+	termSchema := schemaForPath("firewall", "family", "inet", "filter", "term")
+	termBody := packedBody(termNode, termSchema)
+	for _, from := range termBody.Children {
 		if from.Name() != "from" {
 			continue
 		}
@@ -183,12 +181,6 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	return out
 }
 
-// validateFirewallFilterValuelessFromStrict walks the group-expanded `firewall`
-// subtree and rejects a term whose `from` writes a value-bearing leaf with no
-// operand (#8480).
-//
-// Strict (commit / commit-check): the FIRST offending term is a hard error
-// naming the family, filter, term and every valueless leaf, so the operator is
 // told exactly which line to fix rather than which file.
 //
 // Lenient (load / peer-sync): every offending term is returned as a warning and
