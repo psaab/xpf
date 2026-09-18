@@ -205,8 +205,9 @@ CONTROL_OBS=$((CTRL_COMP + CTRL_REF))
 CK="$(grep -ciE 'bad (tcp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"; [[ "$CK" =~ ^[0-9]+$ ]] || CK=0
 FINAL_OUT="$(wire_hostinbound_verdict "$REPLIES" "$CONTROL_OFFERED" "$CONTROL_OBS" "$CK" 2 "$OFFER_A" "$COMP_A" "$REF_A" "$OFFER_B" "$COMP_B" "$REF_B")"
 FINAL_RC=$?
-trap - EXIT INT TERM
+trap '' INT TERM
 cleanup
+trap - INT TERM
 if ((RESTORE_OK == 0)); then
     printf 'WIRE_GATE wire_hostinbound_deny VOID reason=harness-void cells_measured=0 syn_offered=0 handshake_completed=0 refused_total=0 exposed_total=0 reply_frames=0 ctrl_offered=0 ctrl_observed=0 cksum_bad=0\n'
     exit 2
