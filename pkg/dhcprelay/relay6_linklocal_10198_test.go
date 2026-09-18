@@ -1,9 +1,11 @@
 package dhcprelay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -141,7 +143,7 @@ func TestDHCPV6UpstreamBindAddrSelection10198(t *testing.T) {
 	}{
 		{"gua exact", net.ParseIP("2001:db8:1::1"), (&net.UDPAddr{IP: net.ParseIP("2001:db8:1::1"), Port: port}).String()},
 		{"ula exact", net.ParseIP("fd00::1"), (&net.UDPAddr{IP: net.ParseIP("fd00::1"), Port: port}).String()},
-		{"link-local scoped exact", net.ParseIP("fe80::1"), (&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: ifaceName, Port: port}).String()},
+		{"link-local route-selected fallback", net.ParseIP("fe80::1"), (&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String()},
 		{"nil fallback", nil, (&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String()},
 		{"unspecified fallback", net.IPv6unspecified, (&net.UDPAddr{IP: net.IPv6unspecified, Port: port}).String()},
 	}
@@ -256,130 +258,241 @@ func TestDHCPv6PerInterfaceServerBindDemux10198(t *testing.T) {
 	}
 }
 
-func TestDHCPv6PerLinkLocalServerBindDemux10198(t *testing.T) {
-	type candidate struct {
-		ip    net.IP
-		iface string
+func TestDHCPv6ReplyDispatcherRoutesByInterfaceID10198(t *testing.T) {
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(ctx context.Context) (net.PacketConn, error) {
+		listen := dhcpV6ListenConfig("")
+		return listen.ListenPacket(ctx, "udp6", "[::1]:0")
 	}
-	var candidates []candidate
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		t.Fatalf("list interfaces: %v", err)
-	}
-	for _, iface := range interfaces {
-		ifaceAddrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range ifaceAddrs {
-			var ip net.IP
-			switch value := addr.(type) {
-			case *net.IPNet:
-				ip = value.IP
-			case *net.IPAddr:
-				ip = value.IP
-			}
-			if ip == nil || ip.To16() == nil || ip.To4() != nil || !ip.IsLinkLocalUnicast() {
-				continue
-			}
-			duplicate := false
-			for _, existing := range candidates {
-				if existing.iface == iface.Name && existing.ip.Equal(ip) {
-					duplicate = true
-					break
-				}
-			}
-			if !duplicate {
-				candidates = append(candidates, candidate{
-					ip:    append(net.IP(nil), ip.To16()...),
-					iface: iface.Name,
-				})
-			}
-		}
-	}
-	var first, second candidate
-	for _, candidate := range candidates {
-		if first.ip == nil {
-			first = candidate
-			continue
-		}
-		if candidate.iface != first.iface {
-			second = candidate
-			break
-		}
-	}
-	if second.ip == nil {
-		t.Skipf("need link-local addresses on two interfaces for real-socket demux, found %d candidates", len(candidates))
-	}
-
-	firstConfig := dhcpV6ListenConfig(first.iface)
-	firstAddr := dhcpV6UpstreamBindAddr(first.ip, first.iface, 0)
-	firstRaw, err := firstConfig.ListenPacket(context.Background(), "udp6", firstAddr)
+	sender, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0})
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
-			t.Skipf("link-local socket bind requires network capability: %v", err)
+			t.Skipf("real UDP6 dispatcher socket requires network capability: %v", err)
 		}
-		t.Fatalf("listen first scoped link-local address %q: %v", firstAddr, err)
+		t.Fatalf("listen dispatcher sender: %v", err)
 	}
-	defer firstRaw.Close()
-	firstSocket, ok := firstRaw.(*net.UDPConn)
-	if !ok {
-		t.Fatalf("first link-local listener type = %T, want *net.UDPConn", firstRaw)
-	}
-	port := firstSocket.LocalAddr().(*net.UDPAddr).Port
-
-	secondConfig := dhcpV6ListenConfig(second.iface)
-	secondAddr := dhcpV6UpstreamBindAddr(second.ip, second.iface, port)
-	secondRaw, err := secondConfig.ListenPacket(context.Background(), "udp6", secondAddr)
+	defer sender.Close()
+	senderAddr := sender.LocalAddr().(*net.UDPAddr)
+	allowed := []*net.UDPAddr{{IP: net.ParseIP("::1"), Port: senderAddr.Port}}
+	clientA := newFakeConn()
+	clientB := newFakeConn()
+	relayA := &dhcpV6Relay{ifaceName: "ll-a", kernelName: "lo"}
+	relayB := &dhcpV6Relay{ifaceName: "ll-b", kernelName: "lo"}
+	server, releaseA, err := dispatcher.register(context.Background(), relayA, clientA, allowed, []byte("ll-a"))
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
-			t.Skipf("link-local socket bind requires network capability: %v", err)
+			t.Skipf("real UDP6 dispatcher socket requires network capability: %v", err)
 		}
-		t.Fatalf("listen second scoped link-local address %q: %v", secondAddr, err)
+		t.Fatalf("register first dispatcher target: %v", err)
 	}
-	defer secondRaw.Close()
-	secondSocket, ok := secondRaw.(*net.UDPConn)
-	if !ok {
-		t.Fatalf("second link-local listener type = %T, want *net.UDPConn", secondRaw)
+	defer releaseA()
+	_, releaseB, err := dispatcher.register(context.Background(), relayB, clientB, allowed, []byte("ll-b"))
+	if err != nil {
+		t.Fatalf("register second dispatcher target: %v", err)
 	}
+	defer releaseB()
+	serverAddr := server.LocalAddr().(*net.UDPAddr)
 
-	firstSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: first.ip, Port: port, Zone: first.iface})
-	if err != nil {
-		t.Fatalf("dial first link-local destination: %v", err)
+	innerA := newDHCPV6TestMessage(t)
+	replyA := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    net.ParseIP("2001:db8:1::1"),
+		PeerAddr:    net.ParseIP("::1"),
 	}
-	defer firstSender.Close()
-	secondSender, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: second.ip, Port: port, Zone: second.iface})
-	if err != nil {
-		t.Fatalf("dial second link-local destination: %v", err)
+	replyA.AddOption(dhcpv6.OptInterfaceID([]byte("ll-a")))
+	replyA.AddOption(dhcpv6.OptRelayMessage(innerA))
+	innerB := newDHCPV6TestMessage(t)
+	replyB := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    net.ParseIP("2001:db8:2::1"),
+		PeerAddr:    net.ParseIP("::1"),
 	}
-	defer secondSender.Close()
-	if _, err := firstSender.Write([]byte("link-local-one")); err != nil {
-		t.Fatalf("send first link-local reply: %v", err)
+	replyB.AddOption(dhcpv6.OptInterfaceID([]byte("ll-b")))
+	replyB.AddOption(dhcpv6.OptRelayMessage(innerB))
+	if _, err := sender.WriteToUDP(replyA.ToBytes(), serverAddr); err != nil {
+		t.Fatalf("send first Interface-ID reply: %v", err)
 	}
-	if _, err := secondSender.Write([]byte("link-local-two")); err != nil {
-		t.Fatalf("send second link-local reply: %v", err)
+	if _, err := sender.WriteToUDP(replyB.ToBytes(), serverAddr); err != nil {
+		t.Fatalf("send second Interface-ID reply: %v", err)
 	}
 	deadline := time.Now().Add(time.Second)
-	if err := firstSocket.SetReadDeadline(deadline); err != nil {
-		t.Fatalf("set first link-local read deadline: %v", err)
+	for (clientA.writeCount() == 0 || clientB.writeCount() == 0) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
-	if err := secondSocket.SetReadDeadline(deadline); err != nil {
-		t.Fatalf("set second link-local read deadline: %v", err)
+	if clientA.writeCount() != 1 || clientB.writeCount() != 1 {
+		t.Fatalf("dispatcher writes = %d/%d, want one reply per Interface-ID", clientA.writeCount(), clientB.writeCount())
 	}
-	firstData := make([]byte, 64)
-	n, _, err := firstSocket.ReadFromUDP(firstData)
+	if got := clientA.firstWrite(t); !bytes.Equal(got, innerA.ToBytes()) {
+		t.Fatalf("Interface-ID ll-a payload = %x, want %x", got, innerA.ToBytes())
+	}
+	if got := clientB.firstWrite(t); !bytes.Equal(got, innerB.ToBytes()) {
+		t.Fatalf("Interface-ID ll-b payload = %x, want %x", got, innerB.ToBytes())
+	}
+}
+
+func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.T) {
+	server := newFakeConn()
+	server.srcAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 68}
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(context.Context) (net.PacketConn, error) {
+		return server, nil
+	}
+	clientA := newFakeConn()
+	clientB := newFakeConn()
+	relayA := &dhcpV6Relay{
+		ifaceName:  "ll-shared-a",
+		kernelName: "lo",
+		linkAddr:   net.ParseIP("2001:db8:10::1"),
+	}
+	relayB := &dhcpV6Relay{
+		ifaceName:  "ll-shared-b",
+		kernelName: "lo",
+		linkAddr:   net.ParseIP("2001:db8:20::1"),
+	}
+	allowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
+	_, releaseA, err := dispatcher.register(context.Background(), relayA, clientA, allowed, []byte("shared"))
 	if err != nil {
-		t.Fatalf("read first link-local reply: %v", err)
+		t.Fatalf("register first duplicate-ID target: %v", err)
 	}
-	if string(firstData[:n]) != "link-local-one" {
-		t.Fatalf("first link-local socket received %q, want link-local-one", firstData[:n])
-	}
-	secondData := make([]byte, 64)
-	n, _, err = secondSocket.ReadFromUDP(secondData)
+	defer releaseA()
+	_, releaseB, err := dispatcher.register(context.Background(), relayB, clientB, allowed, []byte("shared"))
 	if err != nil {
-		t.Fatalf("read second link-local reply: %v", err)
+		t.Fatalf("register second duplicate-ID target: %v", err)
 	}
-	if string(secondData[:n]) != "link-local-two" {
-		t.Fatalf("second link-local socket received %q, want link-local-two", secondData[:n])
+	defer releaseB()
+
+	innerA := newDHCPV6TestMessage(t)
+	replyA := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    relayA.linkAddr,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	replyA.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
+	replyA.AddOption(dhcpv6.OptRelayMessage(innerA))
+	innerB := newDHCPV6TestMessage(t)
+	replyB := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    relayB.linkAddr,
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	replyB.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
+	replyB.AddOption(dhcpv6.OptRelayMessage(innerB))
+	server.push(replyA.ToBytes())
+	server.push(replyB.ToBytes())
+	deadline := time.Now().Add(time.Second)
+	for (clientA.writeCount() == 0 || clientB.writeCount() == 0) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if clientA.writeCount() != 1 || clientB.writeCount() != 1 {
+		t.Fatalf("duplicate Interface-ID dispatch writes = %d/%d, want one each", clientA.writeCount(), clientB.writeCount())
+	}
+	if got := clientA.firstWrite(t); !bytes.Equal(got, innerA.ToBytes()) {
+		t.Fatalf("duplicate Interface-ID link-address A payload = %x, want %x", got, innerA.ToBytes())
+	}
+	if got := clientB.firstWrite(t); !bytes.Equal(got, innerB.ToBytes()) {
+		t.Fatalf("duplicate Interface-ID link-address B payload = %x, want %x", got, innerB.ToBytes())
+	}
+}
+
+func TestDHCPv6ReplyDispatcherRestartsDeadServer10198(t *testing.T) {
+	dead := newFakeConn()
+	dead.readErr = errors.New("dead upstream socket")
+	replacement := newFakeConn()
+	var factoryCalls atomic.Int32
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(context.Context) (net.PacketConn, error) {
+		if factoryCalls.Add(1) == 1 {
+			return dead, nil
+		}
+		return replacement, nil
+	}
+
+	client := newFakeConn()
+	relay := &dhcpV6Relay{ifaceName: "ll-restart", kernelName: "lo"}
+	allowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
+	server, release, err := dispatcher.register(context.Background(), relay, client, allowed, []byte("ll-restart"))
+	if err != nil {
+		t.Fatalf("register dispatcher target: %v", err)
+	}
+	defer release()
+
+	deadline := time.Now().Add(time.Second)
+	for (factoryCalls.Load() < 2 || replacement.readCalls.Load() == 0) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if factoryCalls.Load() < 2 {
+		t.Fatalf("dispatcher did not reopen after dead server (factory calls=%d)", factoryCalls.Load())
+	}
+	if replacement.readCalls.Load() == 0 {
+		t.Fatal("dispatcher did not read from replacement server")
+	}
+	if _, err := server.WriteTo([]byte("probe"), allowed[0]); err != nil {
+		t.Fatalf("existing target write after server restart: %v", err)
+	}
+	if replacement.writeCount() != 1 {
+		t.Fatalf("replacement server writes=%d, want 1 after existing target restart", replacement.writeCount())
+	}
+
+	inner := newDHCPV6TestMessage(t)
+	reply := &dhcpv6.RelayMessage{
+		MessageType: dhcpv6.MessageTypeRelayReply,
+		HopCount:    1,
+		LinkAddr:    net.ParseIP("2001:db8:1::1"),
+		PeerAddr:    net.ParseIP("::1"),
+	}
+	reply.AddOption(dhcpv6.OptInterfaceID([]byte("ll-restart")))
+	reply.AddOption(dhcpv6.OptRelayMessage(inner))
+	replacement.srcAddr = allowed[0]
+	replacement.push(reply.ToBytes())
+	deadline = time.Now().Add(time.Second)
+	for client.writeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if client.writeCount() != 1 {
+		t.Fatalf("reply after server restart writes=%d, want 1", client.writeCount())
+	}
+	if got := client.firstWrite(t); !bytes.Equal(got, inner.ToBytes()) {
+		t.Fatalf("reply after server restart payload = %x, want %x", got, inner.ToBytes())
+	}
+}
+
+func TestDHCPv6ReplyDispatcherCancelsReopenOnRelease10198(t *testing.T) {
+	dead := newFakeConn()
+	dead.readErr = errors.New("dead upstream socket")
+	reopenStarted := make(chan struct{})
+	reopenCanceled := make(chan struct{})
+	var factoryCalls atomic.Int32
+	dispatcher := newDHCPV6ReplyDispatcher()
+	dispatcher.newServer = func(ctx context.Context) (net.PacketConn, error) {
+		if factoryCalls.Add(1) == 1 {
+			return dead, nil
+		}
+		close(reopenStarted)
+		<-ctx.Done()
+		close(reopenCanceled)
+		return nil, ctx.Err()
+	}
+
+	client := newFakeConn()
+	relay := &dhcpV6Relay{ifaceName: "ll-cancel", kernelName: "lo"}
+	allowed := []*net.UDPAddr{{IP: net.IPv4(10, 0, 0, 1), Port: 68}}
+	_, release, err := dispatcher.register(context.Background(), relay, client, allowed, []byte("ll-cancel"))
+	if err != nil {
+		t.Fatalf("register dispatcher target: %v", err)
+	}
+	select {
+	case <-reopenStarted:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not begin reopening after dead server")
+	}
+	release()
+	select {
+	case <-reopenCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher reopen did not observe final target release")
 	}
 }
