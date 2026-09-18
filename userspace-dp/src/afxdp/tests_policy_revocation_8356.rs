@@ -785,6 +785,7 @@ fn forwarding_with_icmp_type_split_9949() -> ForwardingState {
         state: "reachable".into(),
         router: false,
         link_local: false,
+        ..Default::default()
     });
     snapshot
         .policies

@@ -111,6 +111,7 @@ fn pool_9782_snapshot() -> ConfigSnapshot {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
+        ..Default::default()
     });
     snapshot
 }
@@ -357,6 +358,7 @@ fn interface_pat_collider_both_complete_9782() {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
+        ..Default::default()
     });
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
@@ -472,6 +474,7 @@ fn interface_preserve_control_unchanged_9782() {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
+        ..Default::default()
     });
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
