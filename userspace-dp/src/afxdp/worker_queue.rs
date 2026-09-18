@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
-use super::types::WorkerCommand;
+use super::types::{TxRequest, WorkerCommand};
 
 /// #1807: total worker-command-queue poison recoveries across every
 /// producer/consumer site (worker poll peek + apply, HA enqueues,
@@ -535,6 +535,26 @@ pub(in crate::afxdp) fn push_bounded(
     }
     pending.push_back(cmd);
     true
+}
+
+/// Enqueue a shaped-local request without losing ownership on capacity refusal.
+///
+/// `push_bounded` accepts a complete `WorkerCommand`, so its boolean refusal
+/// cannot recover the `TxRequest` nested inside the command. CoS redirect
+/// callers need the request for their Step 2/3 fallback; check the same bound
+/// while holding the queue lock, account the refusal, and only then move the
+/// request into the command.
+#[inline]
+pub(in crate::afxdp) fn push_shaped_local_bounded(
+    pending: &mut VecDeque<WorkerCommand>,
+    req: TxRequest,
+) -> Result<(), TxRequest> {
+    if pending.len() >= MAX_PENDING_WORKER_COMMANDS {
+        WORKER_COMMAND_QUEUE_DROPS.fetch_add(1, Ordering::Relaxed);
+        return Err(req);
+    }
+    pending.push_back(WorkerCommand::EnqueueShapedLocal(req));
+    Ok(())
 }
 
 /// #7201: the most commands one `apply_worker_commands` call may process before

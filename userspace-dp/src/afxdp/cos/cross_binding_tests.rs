@@ -876,3 +876,77 @@ fn cos_cross_worker_redirect_to_owner_is_allocation_free_6310() {
     assert_eq!(measured.egress_ifindex, 80);
     assert_eq!(measured.cos_queue_id, Some(4));
 }
+
+/// #10310 (F6): a cross-worker shaped-local redirect refused by a FULL owner
+/// queue must come back as `Err(req)` — never `Ok(())`.
+///
+/// RED on base: the redirect ignores `push_bounded`'s refusal and returns
+/// `Ok`, so the drain cascade treats the request as consumed and the shaped
+/// frame is discarded with only the aggregate drop counter as a trace.
+#[test]
+fn redirect_local_cos_request_to_owner_refused_at_capacity_returns_err_10310() {
+    use crate::afxdp::worker_queue::{
+        MAX_PENDING_WORKER_COMMANDS, WORKER_COMMAND_QUEUE_DROPS, push_bounded,
+    };
+    use std::sync::atomic::Ordering;
+
+    // Owner worker 7's command queue is exactly at capacity.
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut pending = commands.lock().unwrap();
+        for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+            assert!(
+                push_bounded(&mut pending, WorkerCommand::VacateAllSharedExactSlots),
+                "fill below the cap must be accepted"
+            );
+        }
+    }
+    assert_eq!(commands.lock().unwrap().len(), MAX_PENDING_WORKER_COMMANDS);
+    let worker_commands_by_id = BTreeMap::from([(7, commands.clone())]);
+    let cos_fast_interfaces = test_cos_fast_interfaces(
+        80,
+        12,
+        4,
+        vec![(4, test_queue_fast_path(false, 7, None, None))],
+        None,
+        None,
+    );
+    let req = TxRequest {
+        bytes: vec![9, 9, 9],
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 80,
+        cos_queue_id: Some(4),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    };
+
+    let drops_before = WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
+    let redirected =
+        redirect_local_cos_request_to_owner(&cos_fast_interfaces, req, 2, &worker_commands_by_id);
+
+    match redirected {
+        Err(req) => {
+            assert_eq!(req.egress_ifindex, 80);
+            assert_eq!(req.cos_queue_id, Some(4));
+            assert_eq!(req.bytes, vec![9, 9, 9]);
+        }
+        Ok(()) => panic!(
+            "refused redirect reported Ok — the shaped request is discarded \
+             without a caller-visible failure (#10310)"
+        ),
+    }
+    assert_eq!(
+        commands.lock().unwrap().len(),
+        MAX_PENDING_WORKER_COMMANDS,
+        "a refused push must not grow the queue past the cap"
+    );
+    assert!(
+        WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed) >= drops_before + 1,
+        "the refusal must still bump the aggregate drop counter"
+    );
+}

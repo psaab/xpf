@@ -6,6 +6,7 @@
 // inside `drain/`).
 
 use super::*;
+use crate::afxdp::tx::test_support::*;
 
 /// #784 Codex review regression pin: mixed-head deque scan.
 ///
@@ -268,5 +269,123 @@ fn park_drained_deques_keeps_both_allocations_7204() {
     assert!(
         pipeline2.backup_retry_scratch.capacity() >= 64,
         "...and the emptied pending deque becomes the next batch's scratch"
+    );
+}
+
+/// #10310 (F6): a Step 1 Command enqueue refused by a FULL owner queue must
+/// fall through to Step 2 — not report `Ok` and discard the request.
+///
+/// RED on base: the Step 1 arm ignores `push_bounded`'s refusal and returns
+/// `Ok`, so the request is consumed-into-void: neither queued on the owner
+/// nor attempted on Step 2/3.
+#[test]
+fn ingest_cos_pending_tx_step1_refusal_falls_through_to_step2_10310() {
+    use crate::afxdp::binding_state::BindingLiveState;
+    use crate::afxdp::worker_queue::{MAX_PENDING_WORKER_COMMANDS, push_bounded};
+
+    // Owner worker 7's command queue is exactly at capacity.
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut pending = commands.lock().unwrap();
+        for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+            assert!(
+                push_bounded(&mut pending, WorkerCommand::VacateAllSharedExactSlots),
+                "fill below the cap must be accepted"
+            );
+        }
+    }
+    let worker_commands_by_id = BTreeMap::from([(7, commands.clone())]);
+    // Step 2 target: a live state distinct from the test binding's own.
+    let step2_live = Arc::new(BindingLiveState::new());
+    let fast_path = test_cos_fast_interfaces(
+        80,
+        12,
+        4,
+        vec![(4, test_queue_fast_path(false, 7, None, None))],
+        Some(step2_live.clone()),
+        None,
+    )
+    .remove(&80)
+    .expect("fast path");
+    let root = test_cos_runtime_with_exact(false);
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 2, 80, root, fast_path);
+    binding.tx_pipeline.pending_tx_local.push_back(TxRequest {
+        bytes: vec![7, 7, 7],
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 80,
+        cos_queue_id: Some(4),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    });
+    let mut forwarding = ForwardingState::default();
+    forwarding.cos.interfaces.insert(
+        80,
+        crate::afxdp::types::CoSInterfaceConfig {
+            shaping_rate_bytes: 1_000_000,
+            burst_bytes: 64 * 1024,
+            default_queue: 0,
+            dscp_classifier: String::new(),
+            ieee8021_classifier: String::new(),
+            dscp_queue_by_dscp: [u8::MAX; 64],
+            ieee8021_queue_by_pcp: [u8::MAX; 8],
+            queue_by_forwarding_class: crate::afxdp::FastMap::default(),
+            queues: vec![crate::afxdp::types::CoSQueueConfig {
+                queue_id: 0,
+                forwarding_class: "best-effort".into(),
+                priority: 5,
+                transmit_rate_bytes: 1_000_000,
+                guarantee_enabled: true,
+                exact: false,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                equal_flow_target_policy:
+                    crate::afxdp::types::EqualFlowTargetPolicy::Slowest,
+                surplus_weight: 1,
+                buffer_bytes: 64 * 1024,
+                dscp_rewrite: None,
+                codel_target_ns: 0,
+            }],
+            oversubscription_policy:
+                crate::afxdp::types::CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
+        },
+    );
+    let mut shared_recycles = Vec::new();
+    ingest_cos_pending_tx_with_provenance(
+        &mut binding,
+        &forwarding,
+        1_000_000_000,
+        2,
+        &worker_commands_by_id,
+        false,
+        &mut shared_recycles,
+    );
+    // The request must be OBSERVABLE on Step 2 — not swallowed by a false Ok.
+    let mut step2_queued = VecDeque::new();
+    step2_live.take_pending_tx_into(&mut step2_queued);
+    assert_eq!(
+        step2_queued.len(),
+        1,
+        "a Step 1 refusal must fall through to Step 2 (#10310)"
+    );
+    let req = step2_queued.front().expect("step2 request");
+    assert_eq!(req.bytes, vec![7, 7, 7]);
+    assert_eq!(req.egress_ifindex, 80);
+    assert_eq!(
+        commands.lock().unwrap().len(),
+        MAX_PENDING_WORKER_COMMANDS,
+        "a refused push must not grow the queue past the cap"
+    );
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "a Step 2-accepted request must not linger in pending"
     );
 }

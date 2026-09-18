@@ -167,6 +167,33 @@ func TestPolicer5299_Reject_BurstSizeLimit(t *testing.T) {
 	}
 }
 
+// #10310: a policer burst smaller than one maximum-sized packet cannot admit
+// any ordinary MTU frame. The strict commit gate must reject it rather than
+// installing a bucket that silently marks every packet yellow/red.
+func TestPolicer10310_RejectsSubPacketBurst(t *testing.T) {
+	for _, value := range []string{"1", "100", "1499"} {
+		t.Run(value, func(t *testing.T) {
+			err := policer5299SchemaCheck(t,
+				"set firewall policer p-subpacket if-exceeding burst-size-limit "+value)
+			if err == nil {
+				t.Fatalf(
+					"burst-size-limit %q: expected rejection below one 1500-byte packet",
+					value,
+				)
+			}
+			if !strings.Contains(err.Error(), "burst-size-limit") {
+				t.Fatalf("burst-size-limit %q: error should name the leaf: %v", value, err)
+			}
+		})
+	}
+	if err := policer5299SchemaCheck(
+		t,
+		"set firewall policer p-one-packet if-exceeding burst-size-limit 1500",
+	); err != nil {
+		t.Fatalf("exactly one 1500-byte packet must remain valid: %v", err)
+	}
+}
+
 // --- tolerant-load path: WARN, not hard-fail ---
 //
 // The configstore tolerant ingress (Store.Load / SyncApply -> compileTreeLenient)
