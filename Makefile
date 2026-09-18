@@ -594,7 +594,7 @@ docs-check:
 # (scripts/image/validate.py) and the loss-cluster smokes are NOT included —
 # they need a hypervisor and have their own entry points.
 .PHONY: selftest
-selftest:
+selftest: close-keyword-lint
 	sh scripts/run-selftests.sh
 
 # Reachability census over the RUNNABLE HARNESSES, one layer above `make
@@ -769,10 +769,10 @@ test-target-services-lib:
 # #9551: refuse a NEGATED GitHub close keyword. GitHub's parser does not read
 # negation, so a sentence saying an issue stays open closes it at merge when a
 # close verb stands in front of the number. scripts/close_keyword_lint_ci.sh
-# holds both pull-request legs (the body and the commit range); the GitHub
-# Actions job that would call it on every PR is NOT in the tree yet, because
-# pushing a workflow file needs a token with `workflow` scope (#9551). These are
-# the local legs.
+# holds both pull-request legs (the body and the commit range). `make selftest`
+# reaches the lint's cells through scripts/run-selftests.sh's
+# `scripts/test_*.py` glob. The PR-body workflow draft and its required
+# `workflow` OAuth scope are recorded in docs/log/9551.md as a human step.
 #   close-keyword-lint           lint this branch's commit messages
 #                                (origin/master..HEAD); PR=<n> lints that PR's
 #                                body and commit messages instead (needs gh)
