@@ -6,8 +6,8 @@
 # Usage: ./test/incus/harness-result-selftest.sh   (rc 0 = all pass)
 #
 # The load-bearing cell is the ADAPTER CENSUS. It does not invent a summary
-# line; it EXTRACTS the real `echo` from each of the nine gates that carry the
-# shape, renders it, and feeds that to the adapter. Two consequences:
+# line; it EXTRACTS the real `echo` from each of the thirteen gates that carry the
+# shape. Two consequences:
 #
 #   * an adapter anchored on a label prefix ("Failover test:") covers six of
 #     eight and looks complete -- here it fails on the two that print a bare
@@ -15,13 +15,13 @@
 #   * an adapter anchored at end of line drops test-connectivity.sh, whose
 #     summary continues ", <n> skipped" after the pair;
 #
-# and if any of those nine gates changes its summary format, this reds instead
+# and if any of those thirteen gates changes its summary format, this reds instead
 # of the ledger quietly filling with VOIDs.
 #
 # Falsifiability of this file: if the adapter table is wrong, the cell naming
 # the affected source fails. If the census's own extraction breaks (a changed
 # echo, a renamed file) the census fails rather than sweeping an empty set --
-# it asserts the DISCOVERED set equals the declared set, so a ninth gate added
+# it asserts the DISCOVERED set equals the declared set, so another gate added
 # with the same shape and not declared is a red, and a declared gate that
 # disappeared is also a red. On an empty glob it fails outright.
 
@@ -67,11 +67,11 @@ expect_field() {
 	fi
 }
 
-# ── 1. The adapter census: 5 iperf smokes + 7 cells smokes ──────────
+# ── 1. The adapter census: 5 iperf smokes + 8 cells smokes ──────────
 #
 # #9922 F-155: ONE adapter can no longer cover both classes. The five smokes
 # that emit an iperf3 throughput cell keep ha-smoke (PASS headline FIXED to
-# throughput_gbps, figure required); the seven that emit cells only take
+# throughput_gbps, figure required); the eight smokes that emit cells only take
 # smoke-cells (PASS/FAIL headline FIXED to cells_passed). The declared sets
 # below are CLAIMs; the discovery in 1b and the Makefile cross-check in 1f
 # test them.
@@ -90,6 +90,7 @@ DECLARED_CELLS_SMOKES=(
 	test-wire-properties
 	persistent-nat-failover
 	dhcp-lease-failover
+	wg-interop
 )
 
 # 1a. Every declared gate exists, carries its summary echo(s), and its OWN
@@ -113,7 +114,7 @@ score_gate() {
 	# runtime reads the LAST summary, so the census renders the LAST echo;
 	# any other count anywhere is a shape change, not coverage.
 	local want_echoes=1
-	[[ "$g" == "dhcp-lease-failover" ]] && want_echoes=2
+	[[ "$g" == "dhcp-lease-failover" || "$g" == "wg-interop" ]] && want_echoes=2
 	local n
 	n=$(grep -cE 'echo "[^"]*passed, [^"]*failed[^"]*"' "$f")
 	if [[ "$n" != "$want_echoes" ]]; then
@@ -156,19 +157,17 @@ score_gate() {
 for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
 for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
 if ((census_covered == census_total)); then
-	ok "adapter census: own adapter covers all $census_total declared gates (5 ha-smoke + 7 smoke-cells)"
+	ok "adapter census: own adapter covers all $census_total declared gates (5 ha-smoke + 8 smoke-cells)"
 else
 	bad "adapter census: covered $census_covered of $census_total declared gates"
 fi
 
 # 1b. The declared set must EQUAL the discovered set. A per-member check plus a
 #     count is satisfied by a NEW gate nobody declared -- the extra member a
-#     lower bound cannot see. Two globs: test-*.sh plus *-failover.sh, because
-#     persistent-nat-failover.sh and dhcp-lease-failover.sh carry no test-
-#     prefix and a single-glob census cannot see them (they were wrapped but
-#     uncensused before #9922 F-155).
+#     lower bound cannot see. Three globs: test-*.sh, *-failover.sh, and the
+#     unprefixed wg-interop.sh gate.
 discovered=$(
-	for f in "$SCRIPT_DIR"/test-*.sh "$SCRIPT_DIR"/*-failover.sh; do
+	for f in "$SCRIPT_DIR"/test-*.sh "$SCRIPT_DIR"/*-failover.sh "$SCRIPT_DIR"/wg-interop.sh; do
 		[[ -f "$f" ]] || continue
 		b=$(basename "$f" .sh)
 		case "$b" in *-selftest | *-lib) continue ;; esac
@@ -205,10 +204,10 @@ fi
 #     iperf_throughput_verdict IFF it is wrapped with ha-smoke. A cells gate
 map_bad=""
 for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
-	# The two unprefixed scripts run under test- gates (Makefile wraps
-	# --gate test-persistent-nat-failover for persistent-nat-failover.sh).
+	# The unprefixed scripts run under test- gates (Makefile wraps
+	# each source as --gate test-<script-name>).
 	gate="$g"
-	case "$g" in persistent-nat-failover | dhcp-lease-failover) gate="test-$g" ;; esac
+	case "$g" in persistent-nat-failover | dhcp-lease-failover | wg-interop) gate="test-$g" ;; esac
 	mkline=$(grep -E -- "--gate $gate " "$SCRIPT_DIR/../../Makefile" | head -1)
 	case "$mkline" in
 	*"--adapter ha-smoke"*) mk_adapter="ha-smoke" ;;
@@ -222,7 +221,7 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	fi
 done
 if [[ -z "$map_bad" ]]; then
-	ok "adapter census: Makefile --adapter matches iperf emission for all 12 smoke gates"
+	ok "adapter census: Makefile --adapter matches iperf emission for all 13 smoke gates"
 else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi

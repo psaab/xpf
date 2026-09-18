@@ -62,6 +62,11 @@ mkdir -p "${EVID}" 2>/dev/null || { echo "[wg-interop] FATAL: cannot create evid
 SUMMARY="${EVID}/summary.txt"
 
 KEEP_PEER=0
+# Result counters are emitted in the canonical harness-result summary shape.
+# They make a live run a measured PASS/FAIL envelope instead of an
+# adapter-VOID when a phase fails before teardown.
+PASS=0
+FAIL=0
 # Recovery-restart taint counter (Codex PR-review finding 2): the
 # wedged-apply / leaked-port xpfd restarts keep a run going for
 # triage, but a restart-recovered run must NOT be presented as clean
@@ -69,13 +74,19 @@ KEEP_PEER=0
 # commit-apply path. Taints are surfaced at the end and `all` exits 2.
 TAINTS=0
 
+log()  { echo "[wg-interop $(date +%H:%M:%S)] $*" | tee -a "${SUMMARY}" || true; }
+pass() { PASS=$((PASS + 1)); log "PASS: $*"; }
+fail() {
+    FAIL=$((FAIL + 1))
+    log "FAIL: $*"
+    echo "  WireGuard interop: ${PASS} passed, ${FAIL} failed"
+    exit 1
+}
+summary() { echo "  WireGuard interop: ${PASS} passed, ${FAIL} failed"; }
+warn() { log "WARN: $*"; }
 # Diagnostics are non-fatal by design (GPT round-6): a failed evidence
 # write (missing/unwritable dir, full disk) must never flip control flow
 # or mask an exit status. Lost evidence is visible as missing files.
-log()  { echo "[wg-interop $(date +%H:%M:%S)] $*" | tee -a "${SUMMARY}" || true; }
-pass() { log "PASS: $*"; }
-fail() { log "FAIL: $*"; exit 1; }
-warn() { log "WARN: $*"; }
 
 # Evidence-safe transcript path (GPT round-6): echoes a writable path under
 # EVID, or /dev/null when evidence is unavailable (missing/unwritable dir,
@@ -1306,5 +1317,6 @@ case "${CMD}" in
         fi ;;
     *) usage ;;
 esac
+summary
 
 log "evidence: ${EVID}"
