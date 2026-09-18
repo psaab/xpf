@@ -95,15 +95,14 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	seen := map[string]bool{}
 	valued := map[string]bool{}
 	termSchema := schemaForPath("firewall", "family", "inet", "filter", "term")
-	termBody := packedBody(termNode, termSchema)
-	fromNodes := append([]*Node(nil), termBody.Children...)
+	fromNodes, packedFroms := firewallTermFromNodes(termNode, termSchema)
 	ambiguousFrom := map[*Node]bool{}
-	// #10073: preserve a raw packed `from` node when the operand has the
+	// #10073: preserve raw packed `from` nodes when the operand has the
 	// same spelling as its prefix-list leaf. The schema now declares one
 	// argument, so packedBody would otherwise reinterpret that operand as a
 	// child statement; the normalizer deliberately preserves this ambiguous
 	// raw spelling for the gate to resolve conservatively.
-	if packedFroms := firewallPackedTermFromNodes(termNode, termSchema); len(packedFroms) > 0 {
+	if len(packedFroms) > 0 {
 		ambiguous := false
 		for _, packedFrom := range packedFroms {
 			for i := 1; i < len(packedFrom.Keys); i++ {
@@ -125,7 +124,9 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 		}
 		for _, packedFrom := range packedFroms {
 			ambiguousFrom[packedFrom] = ambiguous
-			fromNodes = append(fromNodes, packedFrom)
+			if ambiguous {
+				fromNodes = append(fromNodes, packedFrom)
+			}
 		}
 	}
 	for _, from := range fromNodes {

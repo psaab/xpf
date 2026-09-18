@@ -34,6 +34,31 @@ func TestFilterTermPackedValuelessStrict10072(t *testing.T) {
 		t.Fatalf("from-level valueless protocol must remain rejected, got %v", err)
 	}
 
+	multi, perrs := NewParser(`firewall { family inet { filter F { term T from protocol from source-port; } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("multi-segment packed valueless fixture did not parse: %v", perrs)
+	}
+	if _, err := CompileConfig(multi); err == nil ||
+		!strings.Contains(err.Error(), "protocol") ||
+		!strings.Contains(err.Error(), "source-port") {
+		t.Fatalf("multi-segment packed valueless must reject both leaves, got %v", err)
+	}
+	multiLenient, err := CompileConfigLenient(multi)
+	if err != nil {
+		t.Fatalf("multi-segment packed valueless must warn, not fail: %v", err)
+	}
+	multiTerm := firstInetTerm(t, multiLenient, "F")
+	if len(multiTerm.Protocols) != 0 || len(multiTerm.SourcePorts) != 0 {
+		t.Fatalf("multi-segment valueless leaves must not compile values: protocols=%v source ports=%v",
+			multiTerm.Protocols, multiTerm.SourcePorts)
+	}
+	want := []string{"protocol", "source-port"}
+	if len(multiTerm.ValuelessFrom) != len(want) ||
+		multiTerm.ValuelessFrom[0] != want[0] ||
+		multiTerm.ValuelessFrom[1] != want[1] {
+		t.Fatalf("multi-segment ValuelessFrom = %v, want %v", multiTerm.ValuelessFrom, want)
+	}
+
 	clean, perrs := NewParser(`firewall { family inet { filter F { term T from protocol tcp; } } }`).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("clean control did not parse: %v", perrs)
