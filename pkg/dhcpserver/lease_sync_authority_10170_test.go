@@ -53,7 +53,7 @@ func TestMergeLeasesByAuthorityRejectsGenerationMismatch10170(t *testing.T) {
 			Family: 4, CIDR: "10.0.4.0/24", RGID: 2, Generation: 7, Served: true, Applied: true,
 		}},
 	}
-	authority := LeaseSyncAuthority{Scopes: []LeaseScopeAuthority{{Family: 4, CIDR: "10.0.4.0/24", RGID: 2, Served: true}}}
+	authority := LeaseSyncAuthority{Scopes: []LeaseScopeAuthority{{Family: 4, CIDR: "10.0.4.0/24", RGID: 2, Served: false}}}
 	if got := mergeLeasesByAuthority(local, peer, 4, authority, true); len(got) != 2 {
 		t.Fatalf("generation-mismatched proof must retain conservative union, got %#v", got)
 	}
