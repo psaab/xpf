@@ -611,7 +611,7 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		// line(s), so the hierarchical -> flat -> tree round trip must honor
 		// the deactivate verb (#2008 H1) to preserve Inactive — applying it as
 		// a plain set would silently re-activate the node.
-		setLines := strings.Split(tree.FormatSet(), "\n")
+		setLines := strings.Split(tree.FormatSetForLoadMerge(), "\n")
 		for _, line := range setLines {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" {
