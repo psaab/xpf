@@ -1872,11 +1872,13 @@ pub(super) fn replicate_session_delete_repairing(
 ///   pass. That is the worse-failure-mode #8586 declined to build against an
 ///   unestablished premise, and `is_peer_synced()` excludes them.
 ///
-/// What it deliberately does NOT do: release NAT, remove shared state, or
-/// replicate a delete. The deleting worker already removed shared authority and
-/// already ran #8576's NAT teardown for THIS worker's holder bit; repeating
-/// either here would double-process a pair, and re-replicating would recurse.
-/// Local table plus local caches is the whole remit.
+/// The worker-loop path uses [`DeleteDropSweep::step_with_nat`], which also
+/// drops this worker's source-NAT and NAT64 holder bits before deleting the
+/// local entry (#10288). That release is holder-aware and idempotent: for the
+/// refused-delete case #8576 already cleared the bit, while an accepted
+/// DeleteSynced still queued needs this sweep to close the window. This
+/// whole-table behavioural wrapper remains steering-only because its callers
+/// intentionally model the #8586 table/cache half without forwarding state.
 ///
 /// The shared-map lock is held only across the membership FILTER, not across
 /// the table walk: the walk clones candidate keys first. Sibling workers take

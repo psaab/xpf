@@ -1465,10 +1465,13 @@ pub(crate) fn worker_loop(
         // DELETE_DROP_SWEEP_BUDGET slab slots. A no-op with no sweep armed.
         {
             let mut evicted_keys: Vec<crate::session::SessionKey> = Vec::new();
-            let reconciled = delete_drop_sweep.step(
+            let reconciled = delete_drop_sweep.step_with_nat(
                 &mut sessions,
                 &shared_sessions,
                 session_map.handle(),
+                &forwarding,
+                loop_now_ns,
+                worker_id,
                 &mut evicted_keys,
             );
             if reconciled > 0 {

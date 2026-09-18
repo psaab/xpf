@@ -10294,8 +10294,19 @@ fn drop8114_forwarding() -> ForwardingState {
 /// Take the pool reservation for `drop8114_key()` with `worker_id` as the
 /// holder — exactly what that worker's own `UpsertSynced` would have left.
 fn drop8114_reserve(forwarding: &ForwardingState, worker_id: u32) -> crate::nat::NatDecision {
-    use crate::nat::NatHolder;
     let key = drop8114_key();
+    drop8114_reserve_for(forwarding, &key, worker_id)
+}
+
+/// Reserve the one-port fixture for an explicitly supplied flow key. The
+/// #10288 race uses this for a distinct post-delete flow to prove the freed
+/// allocation is reusable rather than merely idempotent for the old key.
+fn drop8114_reserve_for(
+    forwarding: &ForwardingState,
+    key: &SessionKey,
+    worker_id: u32,
+) -> crate::nat::NatDecision {
+    use crate::nat::NatHolder;
     let translated = crate::nat::TranslatedTuple {
         ip: "203.0.113.1".parse().unwrap(),
         port: 20000,
@@ -11254,6 +11265,162 @@ fn arming_restarts_an_in_flight_sweep_9327() {
         "#9327: an epoch bump must restart the sweep. The shared map changed, so \
          every slot already judged against the previous map has to be re-examined."
     );
+}
+
+// ---------------------------------------------------------------------------
+// #10288 — the delete-drop sweep vs a still-QUEUED DeleteSynced.
+// ---------------------------------------------------------------------------
+//
+// THE STRAND BEFORE #10288. The sweep removed a worker's peer-synced session
+// while that session's `DeleteSynced` was still QUEUED (accepted by
+// `push_bounded`, undelivered — so #8576's on-behalf release did NOT run; it
+// only repairs REFUSED pushes). The old sweep released steering only, and the
+// late `DeleteSynced` then found no entry and took the no-entry branch, which
+// released steering rows only too. Neither path dropped this worker's NAT
+// holder bit, so the pool port and the `live_by_flow` slot were stranded for
+// the life of the allocator.
+//
+// WHY THIS IS NOT THE #8586 CASE. #8586's reconcile is correct for the
+// worker whose delete was REFUSED: #8576 already released that worker's bit
+// on its behalf, so the sweep must touch only table + caches. This cell is
+// the worker whose delete was QUEUED: nobody released anything yet, and the
+// sweep — armed by a refused delete (or RG churn) for some OTHER key — runs
+// first and destroys the entry the queued command needs to find.
+//
+// Fail-on-revert: restore the steering-only sweep body and the port stays
+// occupied with a live allocator record holding worker 3's bit.
+#[test]
+fn delete_drop_sweep_releases_nat_before_a_still_queued_delete_synced_10288() {
+    const WORKER: u32 = 3;
+    let forwarding = drop8114_forwarding();
+    let nat = drop8114_reserve(&forwarding, WORKER);
+    let key = drop8114_key();
+
+    // The real worker queue accepts the DeleteSynced before the sweep runs.
+    // It is intentionally left undrained until after the table entry is
+    // evicted, which is the ordering that strands the old implementation.
+    let queued_commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut pending = queued_commands.lock().expect("worker queue");
+        assert!(
+            crate::afxdp::worker_queue::push_bounded(
+                &mut pending,
+                WorkerCommand::DeleteSynced(key.clone()),
+            ),
+            "fixture: DeleteSynced must be accepted by the real bounded queue"
+        );
+        assert!(
+            pending
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::DeleteSynced(k) if k == &key)),
+            "fixture: accepted DeleteSynced must remain queued until after the sweep"
+        );
+    }
+
+    // This worker's table holds the peer-synced session carrying the pool
+    // decision — exactly what its own `UpsertSynced` installed.
+    let mut sessions = SessionTable::new();
+    let mut decision = test_decision();
+    decision.nat = nat;
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            test_metadata(),
+            SessionOrigin::SyncImport,
+            1_000_000,
+            PROTO_TCP,
+            0x10,
+        ),
+        "fixture: the synced install must succeed, or the sweep below collects nothing"
+    );
+    // Shared authority has already dropped the session, so the sweep collects
+    // this key — while its DeleteSynced sits QUEUED, accepted but undelivered.
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        shared_sessions.lock().expect("shared").is_empty(),
+        "fixture: nothing in the shared map, so the entry is sweep-eligible"
+    );
+
+    let mut sweep = super::DeleteDropSweep::default();
+    sweep.arm();
+    let mut evicted = Vec::new();
+    let n = sweep.step_with_nat(
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        2_000_000,
+        WORKER,
+        &mut evicted,
+    );
+    assert_eq!(n, 1, "fixture: the sweep must collect the one stale key");
+    assert!(
+        sessions.entry_with_origin(&key).is_none(),
+        "fixture: the swept entry must be gone from the table"
+    );
+    assert_eq!(
+        evicted,
+        vec![key.clone()],
+        "the swept key must still reach flow-cache eviction (#6457 failure mode)"
+    );
+
+    // THE BUG, pre-fix: the sweep released steering only, so the reservation
+    // this worker holds is still live — and the late DeleteSynced below finds
+    // no entry and releases nothing either.
+    assert!(
+        !forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, 20000),
+        "#10288: the sweep stranded 203.0.113.1:20000 — it removed the entry \
+         the still-QUEUED DeleteSynced needed to find, and neither path \
+         dropped worker 3's holder bit"
+    );
+    assert_eq!(
+        forwarding.source_nat_rules[0].pool_allocator.live_flow_count(),
+        0,
+        "#10288: the live_by_flow slot must be reclaimed — it counts against \
+         max_tracked_flows until the allocator reports AllocatorExhausted"
+    );
+
+    // Drain the accepted command through the real worker dispatcher. It finds
+    // no table entry after the sweep, takes the no-entry branch, and still
+    // records the key for flow-cache invalidation (#6457).
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let results = apply_worker_commands(
+        &queued_commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        WORKER,
+        &mut scratch,
+    );
+    assert!(
+        queued_commands.lock().expect("worker queue").is_empty(),
+        "the accepted DeleteSynced must be drained after the sweep"
+    );
+    assert_eq!(
+        results.deleted_synced_keys,
+        vec![key.clone()],
+        "the late delete must still record its key for flow-cache invalidation"
+    );
+    assert!(
+        !forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, 20000),
+        "the late delete must leave the freed port freed — no double-free, no re-hold"
+    );
+
+    // PORT REUSE (issue acceptance): a distinct flow serves the freed port
+    // again, proving the allocation was actually unlinked.
+    let mut reuse_key = key.clone();
+    reuse_key.src_port += 1;
+    drop8114_reserve_for(&forwarding, &reuse_key, WORKER);
 }
 
 // ---------------------------------------------------------------------------
