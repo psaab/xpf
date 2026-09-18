@@ -509,9 +509,19 @@ type ZoneConfig struct {
 }
 
 // HostInboundTraffic defines what services are permitted to the firewall itself.
+// The compiler normalizes Junos `except` modifiers into the positive token
+// slices, so all downstream consumers continue to share the existing
+// host-inbound admission representation.
 type HostInboundTraffic struct {
 	SystemServices []string // ssh, ping, dns, etc.
 	Protocols      []string // ospf, bgp, etc.
+
+	// Compiler-only provenance for Junos `except` modifiers. The parser
+	// materializes filtered positives immediately; retaining the exclusions
+	// privately lets repeated same-key blocks merge without re-introducing a
+	// token that a later block explicitly excluded.
+	systemServicesExcept []string
+	protocolsExcept      []string
 }
 
 // SortedInterfaceHostInboundRefs returns the interface refs that declare a
