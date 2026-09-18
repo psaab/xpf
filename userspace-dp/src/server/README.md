@@ -233,16 +233,16 @@ pair. The binding-candidate decision is a single shared invariant
 (`UserspaceBoundLinuxInterfaces` /
 `userspaceSkipsIngressInterface`) all filter through the same exclusion
 contract — `include_userspace_binding_interface` (zoned, non-tunnel,
-non-local-fabric, excluding `fxp*`/`em*`/`fab*`/`lo0`, interfaces carrying
-the snapshot's `secure_tunnel` flag, and `mgmt`/`control`
-zones). That flag is shipped by the control plane as an OWNERSHIP **or
-KERNEL-DEVICE-KIND** verdict since #6691 round 8 — an earlier revision of this
-sentence said ownership alone, which stopped being true when the live-xfrmi half
-landed — not
+non-local-fabric, excluding `fxp*`/`em*`/`fab*`/`lo0` lifeline classes and
+interfaces carrying the snapshot's `secure_tunnel` flag; `mgmt`/`control`
+zone names do NOT exclude data NICs since #10308). That flag is shipped by
+the control plane as an OWNERSHIP **or KERNEL-DEVICE-KIND** verdict since
+#6691 round 8 — an earlier revision of this sentence said ownership alone,
+which stopped being true when the live-xfrmi half landed — not
 the name shape `st<N>` — an earlier revision of this line said `st<N>`, which
 the section 30 lines below already repudiates. The hash MUST cover exactly the interfaces the planner acts on, so
 a change to a non-candidate interface never spuriously bumps the plan key
-and a `ge-*`/`xe-*`/`et-*` netdev placed in a mgmt/control/tunnel/fabric
+and a `ge-*`/`xe-*`/`et-*` netdev placed in a tunnel/fabric
 context is never planned as an AF_XDP binding the rest of the system does
 not account for.
 
@@ -540,12 +540,14 @@ refusal is now **structurally unreachable** — such a row only reaches the chec
 after passing the row-level exclusion, so it is a bindable owner of its own
 bucket — which puts the Go rule in the same shape as this file's
 `binding_target_is_refused`, whose non-VLAN arm is the literal `false`. Second,
-the ANY rule diverged the planes in the dangerous direction: with a `mgmt`-zoned
+the ANY rule diverged the planes in the dangerous direction: with an excluded
 base plus a unit-0 tunnel row and a trust VLAN child, this planner produced NO
-binding for a netdev whose ifindex the Go ingress map still carried, and an
-ifindex in the ingress map with no READY binding is `drop_degraded_transit`
-(BINDING_MISSING). `a_netdev_with_a_bindable_owner_is_not_refused`
-(`main_tests.rs`) is the fail-on-revert guard for that shape.
+binding for a netdev whose ifindex the Go ingress map still carried (at the
+time the exclusion was a `mgmt` zone; zone names no longer exclude since
+#10308), and an ifindex in the ingress map with no READY binding is
+`drop_degraded_transit` (BINDING_MISSING).
+`a_netdev_with_a_bindable_owner_is_not_refused` (`main_tests.rs`), now on the
+unzoned-parent shape, is the fail-on-revert guard for that divergence.
 
 **The caller list is not an enumeration of the sets.** Round 8 bounded its own
 work with "a redirect can only launder within the sets the predicate gates, so
