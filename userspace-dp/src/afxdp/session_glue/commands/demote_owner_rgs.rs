@@ -11,13 +11,14 @@ use super::super::*;
 /// `WorkerCommandResults` accumulator after the loop (per #1346
 /// plan v2).
 ///
-/// #5155: the dedup uses a companion `cancelled_keys_seen`
-/// `FxHashSet` for an O(1) membership test rather than a linear
-/// `SessionTable::demote_owner_rg` retags eligible local origins as
-/// `SyncImport` but preserves node-local `TunOrigin` and transient local
-/// seeds; it does NOT remove the entry from `owner_rg_sessions[rg]` — so a
-/// repeated `Demote{[rg]}` in the same command stream re-discovers the same
-/// key and the dedup is load-bearing (see the dispatcher order-pin test).
+/// #5155: the dedup uses a companion
+/// `cancelled_keys_seen` `FxHashSet` for an O(1) membership test rather than
+/// a linear scan. `SessionTable::demote_owner_rg` retags every ordinary origin
+/// (including `WorkerLocalImport`) as `SyncImport` but preserves node-local
+/// `TunOrigin` and transient local seeds; it does NOT remove the entry from
+/// `owner_rg_sessions[rg]` — so a repeated `Demote{[rg]}` in the same command
+/// stream re-discovers the same key and the dedup is load-bearing (see the
+/// dispatcher order-pin test).
 /// The old scan was
 /// O(N^2) over the growing `cancelled_keys` Vec: `demote_owner_rg`
 /// yields unique keys per RG, so every `.any()` reached the tail. With

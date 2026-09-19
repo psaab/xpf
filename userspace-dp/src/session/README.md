@@ -2133,12 +2133,14 @@ through.
 **Counted-class predicate (#3122 / #10310).** A session counts iff it is
 forward-direction and real, and is not a worker-local replica:
 `!is_reverse && session_limit_origin_counted(origin)`. The predicate excludes
-the two transient local seeds and `WorkerLocalImport` (a replica of a session
-authored by this node's other RSS worker). Charging that replica again would
-make the effective cap depend on replica fanout rather than logical sessions.
-True HA peer origins (`SyncImport` / `SharedMaterialize`) remain counted so a
-standby cannot bypass the cap after failover — the #3122 limit-bypass fix is
-preserved.
+the two transient local seeds and `WorkerLocalImport` while that origin means
+"a replica of a session authored by this node's other RSS worker." Charging
+that replica again would make the effective cap depend on replica fanout rather
+than logical sessions. A demoted worker replica is deliberately re-tagged
+`SyncImport` by `demote_owner_rg`, after which it is a true HA peer origin and
+must count. True HA peer origins (`SyncImport` / `SharedMaterialize`) remain
+counted so a standby cannot bypass the cap after failover — the #3122
+limit-bypass fix is preserved.
 
 **Count vs. HA Open delta are now SEPARATE conditions (#3122).** The
 fresh-install path increments the count for any counted-class session but
@@ -2149,30 +2151,32 @@ condition; they diverged when the count became origin-agnostic.
 
 **Maintenance sites (all OFF-gated by `session_limit_active`).** The count is
 incremented at the two CREATE sinks and decremented at the sole REMOVE sink.
-The in-place HA origin transitions keep the count balanced: an ordinary
-counted import → local promote and local → `SyncImport` demote are
-count-neutral, while a `WorkerLocalImport` replica → local promote crosses
-from uncounted to counted and increments exactly once.
+The in-place HA origin transitions keep the count balanced for already-counted
+rows: an ordinary counted import → local promote and local → `SyncImport`
+demote are count-neutral. A `WorkerLocalImport` replica → local promote or
+`SyncImport` demote crosses from uncounted to counted and increments exactly
+once.
 
 | Transition | Site | Action |
 |---|---|---|
 | fresh install (local) | `install_with_protocol_with_origin` (next to the Open-delta push) | increment |
 | peer-synced import (#3122) | `upsert_synced_with_origin` (after the insert) | increment |
-| worker-local replica (#10310) | `upsert_synced_with_origin` (after the insert) | **none** |
+| worker-local replica (#10310) | `upsert_synced_with_origin` (after the insert) | **none** until a promote or demote transition |
 | any removal (expire / clear / RST / fabric-cancel / take_synced_local) | `remove_entry` success path (the sole removal sink) | decrement when counted |
 | in-place HA promote synced→local | `update_session` promote branch (`mod.rs`) | transition-only (WLI→local increments; counted import→local none) |
-| in-place HA demote local→synced | `demote_owner_rg` | **none** for a counted session (session stays present) |
+| in-place HA demote local→synced | `demote_owner_rg` | transition-only (WLI→SyncImport increments; counted local→SyncImport none) |
 
 Removals are structurally exhaustive through `remove_entry`, so a future
 delete site cannot forget the decrement; `remove_entry`'s decrement uses the
 same counted-class predicate as the import/installation paths and therefore
-balances peer-synced imports while excluding WorkerLocalImport replicas. The
-re-install promote path (`take_synced_local` + fresh install) decrements on
-the remove and increments on the re-install → still nets to one. The in-place
-promote (`update_session`) is transition-aware: a counted import→local promote
-is count-neutral, while WorkerLocalImport→local increments exactly once.
-Demote (`demote_owner_rg`) is count-neutral for the still-present session.
-There is no double-count at failover or failback.
+balances peer-synced imports while excluding `WorkerLocalImport` replicas
+until they transition. The re-install promote path (`take_synced_local` +
+fresh install) decrements on the remove and increments on the re-install →
+still nets to one. The in-place promote (`update_session`) is
+transition-aware, as is demotion: a counted import→local or local→synced
+transition is count-neutral, while a WorkerLocalImport→local or
+WorkerLocalImport→SyncImport transition increments exactly once. There is no
+double-count at failover or failback.
 Every decrement uses `saturating_sub` and **evicts the map entry the moment its
 count reaches 0** — so the maps are bounded by distinct IPs with ≥1 live
 counted session (this is the #2128 fix: the read path never inserts a
