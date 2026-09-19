@@ -1305,7 +1305,7 @@ wire_log 'WIRE_GATE wire_hostinbound_deny FAIL reason=-- cells_measured=2 syn_of
 wire_field_is "host-inbound exposure FAIL transcribes" 0 1 "FAIL"
 wire_field_is "host-inbound headline is exposed_total" 0 3 "exposed_total"
 wire_field_has "host-inbound keeps reply frames" 0 5 "reply_frames=1"
-wire_log 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled created=1 witnessed=1 evicted=1 stale_present=0 exp_offered=999 exp_leaked=0 fresh_offered=1000 fresh_leaked=0 syn_offered=1500 syn_observed=1500 ctrl_sess=1 lifecycle_bad=0 cksum_bad=0\n'
+wire_log 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled created=1 witnessed=1 evicted=1 subj_absent=1 stale_present=0 exp_offered=999 exp_leaked=0 fresh_offered=1000 fresh_leaked=0 syn_offered=1500 syn_observed=1500 ctrl_sess=1 lifecycle_bad=0 cksum_bad=0\n'
 wire_field_is "conntrack under-sample VOID transcribes" 0 1 "VOID"
 wire_field_is "conntrack VOID keeps under-sampled" 0 2 "under-sampled"
 wire_field_has "conntrack keeps lifecycle metric" 0 5 "lifecycle_bad=0"

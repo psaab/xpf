@@ -977,7 +977,8 @@ test-wire-hostinbound-deny-lib:
 	./test/incus/wire-hostinbound-deny.sh --selftest
 
 test-wire-conntrack-lifecycle:
-	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+	./test/incus/with-cluster.sh "wire-conntrack-lifecycle #10030" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_conntrack_lifecycle --adapter wire-gate --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/wire-conntrack-lifecycle.sh
 
