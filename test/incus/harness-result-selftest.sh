@@ -552,6 +552,92 @@ else
 		bad "wg-interop taint source pin: summary must precede exit 2"
 	fi
 fi
+# P5's oversized xpf->peer echo reply can be lost as an outer fragment. Pin
+# the real source oracle: the ping is deliberately non-fatal, while the peer
+# capture is mandatory before the phase can pass.
+if grep -Fq 'p5-fw0-oversize.txt" || true' "$WG_SOURCE"; then
+	ok "wg-interop P5 source pin: oversized fw0 ping is non-fatal"
+else
+	bad "wg-interop P5 source pin: oversized fw0 ping must be non-fatal"
+fi
+if grep -Fq 'fail "P5: xpf->peer inner-fragmentation case failed"' "$WG_SOURCE"; then
+	bad "wg-interop P5 source pin: stale round-trip failure oracle remains"
+else
+	ok "wg-interop P5 source pin: stale round-trip failure oracle is absent"
+fi
+if grep -Fq "'ip and src host \${WG_INNER4_XPF} and dst host \${WG_INNER4_PEER} and (ip[6:2] & 0x3fff != 0)'" "$WG_SOURCE"; then
+	ok "wg-interop P5 source pin: peer filter is inner-address and fragment specific"
+else
+	bad "wg-interop P5 source pin: peer filter must include inner addresses and fragment mask"
+fi
+if grep -Fq 'p5_complete_fragment_sets()' "$WG_SOURCE" &&
+	grep -Fq 'tcpdump -l -U -nn -vv -ni any' "$WG_SOURCE" &&
+	grep -Fq 'if (current_id != "" && current_offset == 0)' "$WG_SOURCE" &&
+	grep -Fq 'first_fragments[current_id] = 1' "$WG_SOURCE" &&
+	grep -Fq 'later_fragments[current_id] = 1' "$WG_SOURCE" &&
+	grep -Fq 'if (later_fragments[id]) complete++' "$WG_SOURCE" &&
+	grep -Fq 'complete_fragment_sets=$(p5_complete_fragment_sets "${EVID}/p5-xpf-peer.txt")' "$WG_SOURCE" &&
+	grep -Fq '"${complete_fragment_sets}" -lt 5' "$WG_SOURCE"; then
+	ok "wg-interop P5 source pin: complete fragment IDs are correlated with a floor"
+else
+	bad "wg-interop P5 source pin: correlated complete-fragment oracle is missing"
+fi
+P5_FRAGMENT_FIXTURE=$(mktemp)
+cat >"$P5_FRAGMENT_FIXTURE" <<'EOF'
+IP (id 100, offset 0, flags [MF], proto ICMP (1), length 1500)
+    10.78.0.1 > 10.78.0.2: ICMP echo request, id 1, seq 1, length 1480
+IP (id 100, offset 185, flags [none], proto ICMP (1), length 100)
+    10.78.0.1 > 10.78.0.2: ip-proto-1
+IP (id 101, offset 0, flags [MF], proto ICMP (1), length 1500)
+    10.78.0.1 > 10.78.0.2: ICMP echo request, id 2, seq 2, length 1480
+IP (id 101, offset 185, flags [none], proto ICMP (1), length 100)
+    10.78.0.1 > 10.78.0.2: ip-proto-1
+IP (id 102, offset 0, flags [MF], proto ICMP (1), length 1500)
+    10.78.0.1 > 10.78.0.2: ICMP echo request, id 3, seq 3, length 1480
+IP (id 102, offset 185, flags [none], proto ICMP (1), length 100)
+    10.78.0.1 > 10.78.0.2: ip-proto-1
+IP (id 103, offset 0, flags [MF], proto ICMP (1), length 1500)
+    10.78.0.1 > 10.78.0.2: ICMP echo request, id 4, seq 4, length 1480
+IP (id 103, offset 185, flags [none], proto ICMP (1), length 100)
+    10.78.0.1 > 10.78.0.2: ip-proto-1
+IP (id 104, offset 0, flags [MF], proto ICMP (1), length 1500)
+    10.78.0.1 > 10.78.0.2: ICMP echo request, id 5, seq 5, length 1480
+IP (id 104, offset 185, flags [none], proto ICMP (1), length 100)
+    10.78.0.1 > 10.78.0.2: ip-proto-1
+EOF
+if [[ "$("$WG_SOURCE" p5-parse "$P5_FRAGMENT_FIXTURE")" == "5" ]]; then
+	ok "wg-interop P5 parser fixture: five matching IDs are complete sets"
+else
+	bad "wg-interop P5 parser fixture: five matching IDs were not counted"
+fi
+cat >"$P5_FRAGMENT_FIXTURE" <<'EOF'
+IP id 200, offset 0, flags [none], proto ICMP: ICMP echo request
+IP id 201, offset 0, flags [none], proto ICMP: ICMP echo request
+IP id 202, offset 0, flags [none], proto ICMP: ICMP echo request
+IP id 203, offset 0, flags [none], proto ICMP: ICMP echo request
+IP id 204, offset 0, flags [none], proto ICMP: ICMP echo request
+IP id 300, offset 185, flags [none], proto ICMP: ip-proto-1
+IP id 301, offset 185, flags [none], proto ICMP: ip-proto-1
+IP id 302, offset 185, flags [none], proto ICMP: ip-proto-1
+IP id 303, offset 185, flags [none], proto ICMP: ip-proto-1
+IP id 304, offset 185, flags [none], proto ICMP: ip-proto-1
+EOF
+if [[ "$("$WG_SOURCE" p5-parse "$P5_FRAGMENT_FIXTURE")" == "0" ]]; then
+	ok "wg-interop P5 parser fixture: mismatched IDs cannot fake five sets"
+else
+	bad "wg-interop P5 parser fixture: mismatched IDs were counted as complete"
+fi
+rm -f "$P5_FRAGMENT_FIXTURE"
+WG_P5_REQUEST_LINE=$(grep -nF 'incomplete xpf->peer fragment sets at peer' "$WG_SOURCE" |
+	awk -F: 'NR == 1 { print $1 }')
+WG_P5_PASS_LINE=$(grep -nF 'pass "P5 >MTU bounded' "$WG_SOURCE" |
+	awk -F: 'NR == 1 { print $1 }')
+if [[ -n "$WG_P5_REQUEST_LINE" && -n "$WG_P5_PASS_LINE" &&
+	"$WG_P5_REQUEST_LINE" -lt "$WG_P5_PASS_LINE" ]]; then
+	ok "wg-interop P5 source pin: complete fragment assertion precedes PASS"
+else
+	bad "wg-interop P5 source pin: complete fragment assertion must precede PASS"
+fi
 
 
 printf '  Results: 21 passed, 0 failed\nFATAL: cleanup failed: owner=lab-harness\n' >"$LOG"

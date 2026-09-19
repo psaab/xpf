@@ -897,6 +897,14 @@ deploy_vm() {
 		# Clear configstore DB so daemon bootstraps from the new text file.
 		# Without this, the daemon loads the OLD config from active.json.
 		incus exec "$rinst" -- rm -rf /etc/xpf/.configdb
+		# #10297: also clear numbered rollback slots. A .configdb-absent state
+		# with surviving xpf.conf.N files is a deliberate fail-closed bootstrap
+		# refusal on current master, so leaving them behind strands the deploy
+		# at startup instead of importing the canonical text config. The
+		# regex matches only rollback slots whose suffix is all decimal digits
+		# (xpf.conf.1.backup is not a numbered slot); the post-check fails the
+		# deploy if any exact numeric slot survives.
+		incus exec "$rinst" -- bash -c 'find /etc/xpf -maxdepth 1 -type f -regextype posix-extended -regex ".*/xpf[.]conf[.][0-9]+" -delete; remaining=$(find /etc/xpf -maxdepth 1 -type f -regextype posix-extended -regex ".*/xpf[.]conf[.][0-9]+" -print -quit); if [ -n "$remaining" ]; then echo "refusing: rollback slot survived canonical reset: $remaining" >&2; exit 1; fi'
 	else
 		warn "Config file $CLUSTER_CONF not found"
 	fi

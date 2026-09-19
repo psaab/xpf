@@ -166,5 +166,21 @@ deploy_body | grep -q 'xpf_cluster_build_report' \
 	&& fail "control: cmd_deploy must NOT contain the boundary report -- if this \
 matches, the search above is matching something other than the call site"
 ok "the deploy path's re-baseline call site is wired (with a negative control)"
+deploy_vm_body() {
+	awk '/^deploy_vm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCRIPT_DIR/cluster-setup.sh"
+}
+[[ -n "$(deploy_vm_body)" ]] \
+	|| fail "control: could not extract deploy_vm from cluster-setup.sh"
+deploy_vm_body | grep -Fq 'find /etc/xpf -maxdepth 1 -type f -regextype posix-extended -regex ".*/xpf[.]conf[.][0-9]+" -delete' \
+	|| fail "cluster deploy canonical reset must delete only numbered xpf.conf rollback slots (#10297)"
+deploy_vm_body | grep -Fq 'remaining=$(find /etc/xpf -maxdepth 1 -type f -regextype posix-extended -regex ".*/xpf[.]conf[.][0-9]+" -print -quit)' \
+	|| fail "cluster deploy canonical reset must check for surviving numbered rollback slots"
+deploy_vm_body | grep -Fq 'if [ -n "$remaining" ]; then' \
+	|| fail "cluster deploy canonical reset must fail closed when a numbered slot survives"
+deploy_vm_body | grep -Fq 'echo "refusing: rollback slot survived canonical reset:' \
+	|| fail "cluster deploy canonical reset must identify a surviving rollback slot"
+deploy_vm_body | grep -Fq 'exit 1' \
+	|| fail "cluster deploy canonical reset survivor check must exit nonzero"
+ok "the canonical config reset purges and verifies exact numeric rollback slots"
 
 echo "ALL $PASS CASES PASS"

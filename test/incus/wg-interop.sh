@@ -17,6 +17,7 @@
 #   ./test/incus/wg-interop.sh test [phase]     # p2|p4a|p3|p4b|p5|p6|p7|p8 (default: all)
 #   ./test/incus/wg-interop.sh teardown [--keep]# remove config (+ peer unless --keep)
 #   ./test/incus/wg-interop.sh all [--keep]     # everything in plan order
+#   ./test/incus/wg-interop.sh p5-parse <tcpdump-file> # count complete P5 sets
 #
 # Phase order (plan §5.2 + #9587 P8): P0 P1 P2 P4a P3 P4b P5 P6 P7 P8 teardown.
 #
@@ -173,6 +174,43 @@ ping_gap_stats() { # ping_gap_stats <file> <expected_count>
             if (first > 1 && first - 1 > gap) gap = first - 1
             if (expect > last && expect - last > gap) gap = expect - last
             print gap + 0, rcvd + 0 }' "$1"
+}
+
+# Count complete inner IPv4 fragment sets in tcpdump -vv text. A set is
+# complete only when one IPv4 ID has both an offset-zero ICMP echo request and
+# at least one non-first fragment (offset > 0).
+p5_complete_fragment_sets() { # p5_complete_fragment_sets <tcpdump_text>
+    awk '
+        function field_number(token,    p, v) {
+            p = index($0, token)
+            if (!p) return ""
+            v = substr($0, p + length(token))
+            sub(/[^0-9].*/, "", v)
+            return v
+        }
+        {
+            id = field_number("id ")
+            offset = field_number("offset ")
+            if (id != "" && offset != "") {
+                current_id = id
+                current_offset = offset + 0
+                if (current_offset > 0)
+                    later_fragments[current_id] = 1
+            }
+            if ($0 ~ /ICMP echo request/) {
+                if (current_id != "" && current_offset == 0)
+                    first_fragments[current_id] = 1
+                current_id = ""
+                current_offset = -1
+            }
+        }
+        END {
+            complete = 0
+            for (id in first_fragments)
+                if (later_fragments[id]) complete++
+            print complete
+        }
+    ' "$1"
 }
 
 # Mbit/s from the iperf3 "[SUM] ... receiver" (or single-stream) line.
@@ -905,7 +943,7 @@ test_p4b() { rekey_run "p4b" "${WG_P4B_DURATION_S}" 3; }
 test_p5() {
     log "P5: >MTU full-tunnel (AllowedIPs 0/0) + fragmented outer"
     # tcpdump on both ends for the fragment proof.
-    ish "${PEER}" "nohup tcpdump -ni any 'udp port ${WG_LISTEN_PORT} or ip[6:2] & 0x3fff != 0' -c 200 \
+    ish "${PEER}" "nohup tcpdump -l -U -ni any 'udp port ${WG_LISTEN_PORT} or ip[6:2] & 0x3fff != 0' -c 200 \
         > /tmp/p5-tcpdump.log 2>&1 < /dev/null & sleep 1"
     # Full-tunnel cryptokey routing + raised MTU on the peer side only
     # (wg set does not install routes; mgmt path stays usable).
@@ -926,10 +964,26 @@ test_p5() {
     # Wedge check: normal-size traffic must pass immediately after.
     ish "${PEER}" "ping -c 5 -W 2 ${WG_INNER4_XPF}" > "${EVID}/p5-peer-normal-after.txt" \
         || fail "P5: WEDGE — normal inner ping dead after oversize attempt"
-    # xpf->peer oversize: inner fragmented at the wg0 TUN MTU (~1425).
-    ish "${FW0}" "ping -c 5 -s 1472 -M dont -W 3 ${WG_INNER4_PEER}" > "${EVID}/p5-fw0-oversize.txt" \
-        || fail "P5: xpf->peer inner-fragmentation case failed"
+    # xpf->peer oversize: the inner packet fragments at the wg0 TUN MTU
+    # (~1425). Do not use ping's round-trip status as the assertion: the
+    # peer's oversized echo reply can become an outer fragment, and outcome
+    # (ii) above explicitly permits that reply to be dropped. Capture the
+    # decrypted request at the peer instead.
+    ish "${PEER}" "nohup tcpdump -l -U -nn -vv -ni any \
+        'ip and src host ${WG_INNER4_XPF} and dst host ${WG_INNER4_PEER} and (ip[6:2] & 0x3fff != 0)' -c 20 \
+        > /tmp/p5-xpf-peer.log 2>&1 < /dev/null & sleep 1"
+    ish "${FW0}" "ping -c 5 -s 1472 -M dont -W 3 ${WG_INNER4_PEER}" > "${EVID}/p5-fw0-oversize.txt" || true
+    sleep 1
+    ish "${PEER}" 'cat /tmp/p5-xpf-peer.log 2>/dev/null' > "${EVID}/p5-xpf-peer.txt" || true
     ish "${PEER}" 'cat /tmp/p5-tcpdump.log 2>/dev/null' > "${EVID}/p5-tcpdump.txt" || true
+    ish "${FW0}" 'wg show wg0 2>/dev/null; ip -s link show wg0 2>/dev/null' > "${EVID}/p5-fw0-wg-stats.txt" || true
+    ish "${FW0}" 'journalctl -u xpfd --since "-2 min" --no-pager 2>/dev/null' > "${EVID}/p5-xpfd-log.txt" || true
+    local complete_fragment_sets
+    complete_fragment_sets=$(p5_complete_fragment_sets "${EVID}/p5-xpf-peer.txt")
+    if [ "${complete_fragment_sets}" -lt 5 ]; then
+        fail "P5: incomplete xpf->peer fragment sets at peer (complete=${complete_fragment_sets})"
+    fi
+    log "P5: xpf->peer complete fragmented request sets observed at peer (complete=${complete_fragment_sets}; reply may be outer-frag dropped)"
     ish "${FW0}" 'systemctl is-active xpfd' | grep -q active || fail "P5: xpfd unhealthy after fragment exercise"
     # Restore.
     ish "${PEER}" "set -eu
@@ -1279,6 +1333,10 @@ CMD="${1:-}"; shift || true
 for a in "$@"; do [ "$a" = "--keep" ] && KEEP_PEER=1; done
 
 case "${CMD}" in
+    p5-parse)
+        [ "$#" -eq 1 ] || usage
+        p5_complete_fragment_sets "$1"
+        exit 0 ;;
     preflight) preflight ;;
     provision) provision ;;
     configure) configure_p1 ;;
