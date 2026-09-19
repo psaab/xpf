@@ -22,6 +22,54 @@ use super::tests_support::*;
 use crate::session::TunnelDiscriminator;
 use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 
+use super::poll_descriptor::dns_reply_fastpath_admit;
+
+#[test]
+fn dns_query_from_port_53_requires_session_tracking_10321() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot());
+    forwarding.allow_dns_reply = true;
+    let flow = SessionFlow {
+        src_ip: "172.16.80.53".parse().expect("src"),
+        dst_ip: "10.0.61.102".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: "172.16.80.53".parse().expect("src"),
+            dst_ip: "10.0.61.102".parse().expect("dst"),
+            src_port: 53,
+            dst_port: 5353,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        ..UserspaceDpMeta::default()
+    };
+    let nat = NatDecision::default();
+    let mut query = vec![0u8; 54];
+    query[34 + 4..34 + 6].copy_from_slice(&20u16.to_be_bytes());
+    query[14 + 20 + 8 + 2] = 0;
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &query, meta),
+        "sport-53 DNS query must take the normal session-install path"
+    );
+    query[34 + 4..34 + 6].copy_from_slice(&8u16.to_be_bytes());
+    query[14 + 20 + 8 + 2] = 0x80;
+    assert!(
+        !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &query, meta),
+        "truncated DNS payload must fail closed into session tracking"
+    );
+    query[34 + 4..34 + 6].copy_from_slice(&20u16.to_be_bytes());
+    assert!(
+        dns_reply_fastpath_admit(&forwarding, &flow, &nat, &query, meta),
+        "DNS QR=1 replies retain the unsolicited-reply fast path"
+    );
+}
+
 #[test]
 fn no_match_embedded_icmp_returns_none() {
     // An ICMP error with no matching session should return None

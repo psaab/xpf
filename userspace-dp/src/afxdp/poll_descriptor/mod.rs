@@ -134,6 +134,57 @@ use filter::{
 // polling — so each shared reborrow is valid and cannot alias a
 // mutable reference. The raw pointer only decouples the immutable
 // UMEM-area borrow from the `&mut BindingWorker` borrow.
+#[inline]
+fn dns_reply_qr_set(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
+    if meta.protocol != PROTO_UDP {
+        return false;
+    }
+    let l4 = meta.l4_offset as usize;
+    let Some(udp_header) = packet_frame.get(l4..l4.checked_add(8).unwrap_or(usize::MAX)) else {
+        return false;
+    };
+    let udp_len = u16::from_be_bytes([udp_header[4], udp_header[5]]) as usize;
+    if udp_len < 8 + 12 {
+        return false;
+    }
+    let Some(udp_end) = l4.checked_add(udp_len) else {
+        return false;
+    };
+    let Some(dns_end) = l4.checked_add(8 + 12) else {
+        return false;
+    };
+    if dns_end > udp_end || udp_end > packet_frame.len() {
+        return false;
+    }
+    packet_frame
+        .get(l4 + 8 + 2)
+        .is_some_and(|flags_hi| (flags_hi & 0x80) != 0)
+}
+
+#[inline]
+fn dns_nat_free(nat: &NatDecision) -> bool {
+    nat.rewrite_src.is_none()
+        && nat.rewrite_dst.is_none()
+        && nat.rewrite_src_port.is_none()
+        && nat.rewrite_dst_port.is_none()
+        && !nat.nat64
+        && !nat.nptv6
+}
+
+
+#[inline]
+pub(super) fn dns_reply_fastpath_admit(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    nat: &NatDecision,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> bool {
+    allow_unsolicited_dns_reply(forwarding, flow)
+        && dns_nat_free(nat)
+        && dns_reply_qr_set(packet_frame, meta)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poll_binding_process_descriptor(
     binding: &mut BindingWorker,
@@ -3168,12 +3219,13 @@ pub(super) fn poll_binding_process_descriptor(
                                     // when no NAT is required.  If NAT is required, fall
                                     // through to normal session install so NAT state is
                                     // anchored for GC.
-                                    let dns_fastpath_admit =
-                                        allow_unsolicited_dns_reply(worker_ctx.forwarding, flow)
-                                            && decision.nat.rewrite_src.is_none()
-                                            && decision.nat.rewrite_dst.is_none()
-                                            && !decision.nat.nat64
-                                            && !decision.nat.nptv6;
+                                    let dns_fastpath_admit = dns_reply_fastpath_admit(
+                                        worker_ctx.forwarding,
+                                        flow,
+                                        &decision.nat,
+                                        packet_frame,
+                                        meta,
+                                    );
                                     let track_in_userspace = decision.resolution.disposition
                                         != ForwardingDisposition::LocalDelivery
                                         && !dns_fastpath_admit;
