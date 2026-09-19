@@ -198,6 +198,89 @@ func (m *Manager) drainAndClearSteeringRowsLocked(reason string) {
 	}
 }
 
+const startupNAPIBootstrapDelay = 3 * time.Second
+
+// scheduleStartupNAPIBootstrapLocked arms the delayed startup NAPI bootstrap
+// for the helper generation that was just spawned. The callback captures both
+// the process-generation fence and the helper identities while m.mu is held;
+// after the delay it re-checks them under the same lock before submitting any
+// probes. A callback from a stopped or crashed generation therefore becomes a
+// no-op even when a replacement helper is already running (#10436).
+func (m *Manager) scheduleStartupNAPIBootstrapLocked() {
+	m.scheduleStartupNAPIBootstrapAfterLocked(startupNAPIBootstrapDelay)
+}
+
+// scheduleStartupNAPIBootstrapAfterLocked is the same generation-fenced
+// callback with an injected delay for deterministic lifecycle tests.
+func (m *Manager) scheduleStartupNAPIBootstrapAfterLocked(delay time.Duration) <-chan struct{} {
+	procGen := m.procGen
+	proc := m.proc
+	procSup := m.procSup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(delay)
+		m.mu.Lock()
+		if !m.startupNAPIBootstrapGenerationCurrentLocked(procGen, proc, procSup) {
+			m.mu.Unlock()
+			return
+		}
+		innerDone := m.bootstrapNAPIQueuesAsyncForGenerationLocked("startup", procGen, proc, procSup)
+		m.mu.Unlock()
+		<-innerDone
+	}()
+	return done
+}
+
+func (m *Manager) startupNAPIBootstrapGenerationCurrentLocked(
+	procGen uint64,
+	proc *exec.Cmd,
+	procSup *helperGeneration,
+) bool {
+	return m.proc != nil &&
+		m.procGen == procGen &&
+		m.proc == proc &&
+		m.procSup == procSup
+}
+
+// bootstrapNAPIQueuesAsyncForGenerationLocked is the generation-fenced
+// startup variant of bootstrapNAPIQueuesAsyncLocked. The second callback
+// acquires m.mu independently, so it must repeat the same identity check:
+// generation G1 can stop after the delayed callback starts but before this
+// inner callback runs, at which point G2 may already own m.proc (#10436).
+func (m *Manager) bootstrapNAPIQueuesAsyncForGenerationLocked(
+	reason string,
+	procGen uint64,
+	proc *exec.Cmd,
+	procSup *helperGeneration,
+) <-chan struct{} {
+	done := make(chan struct{})
+	now := time.Now()
+	if !m.lastNAPIBootstrap.IsZero() && now.Sub(m.lastNAPIBootstrap) < 2*time.Second {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if !m.startupNAPIBootstrapGenerationCurrentLocked(procGen, proc, procSup) {
+			return
+		}
+		now := time.Now()
+		if !m.lastNAPIBootstrap.IsZero() && now.Sub(m.lastNAPIBootstrap) < 2*time.Second {
+			return
+		}
+		m.lastNAPIBootstrap = now
+		if m.lastSnapshot == nil || m.lastSnapshot.Config == nil {
+			return
+		}
+		slog.Info("userspace: bootstrapping NAPI queues", "reason", reason)
+		m.bootstrapNAPIQueuesLocked()
+	}()
+	return done
+}
+
 func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 	tuneSocketBuffers()
 	if m.proc != nil && m.proc.Process != nil && configEqual(m.cfg, cfg) {
@@ -313,15 +396,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 	// The broadcast pings generate hardware RX events on multiple queues,
 	// triggering NAPI which consumes fill ring entries and posts WQEs for
 	// zero-copy.
-	go func() {
-		time.Sleep(3 * time.Second)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.proc == nil {
-			return
-		}
-		m.bootstrapNAPIQueuesAsyncLocked("startup")
-	}()
+	m.scheduleStartupNAPIBootstrapLocked()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(cfg.ControlSocket); err == nil {
