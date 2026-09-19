@@ -2,7 +2,7 @@ package nftables
 
 // netlink_spec.go defines the self-contained input specs the #6387 PR-2 netlink
 // installer consumes. They MIRROR the daemon / dpuserspace types the exec-`nft`
-// oracle consumes (dpuserspace.ZoneHostInboundView, dpuserspace.JunosHostProgram,
+// oracle consumes (dpuserspace.ZoneHostInboundView, dpuserspace.JunosHostProgram
 // config.JunosHostDenyRule/L4, config.FirewallFilterTerm) but are declared here
 // so pkg/nftables does not import pkg/dataplane/userspace (which imports
 // pkg/nftables — an import cycle). The PR-3 daemon converter copies daemon
@@ -16,7 +16,16 @@ package nftables
 // so the only thing that differs between oracle and netlink is the
 // rendering-to-kernel step — which the T1 ruleset-parity test pins.
 
-import "github.com/psaab/xpf/pkg/config"
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+
+	"sort"
+
+	"github.com/psaab/xpf/pkg/config"
+)
 
 // PortRange mirrors config.PortRange: an inclusive [Lo,Hi] transport-port range
 // (Lo==Hi is a single port).
@@ -195,6 +204,68 @@ type Lo0FilterSpec struct {
 	V6Terms []Lo0FilterTerm
 }
 
+// HostInputFenceOverlay is the generation-tagged master-interface revocation
+// overlay. It is merged at the very head of the ordinary host-input chain so
+// established/related accepts cannot bypass a revoked master. The marker fields
+// are encoded into the named counter and are checked by readback before the
+// daemon publishes the generation.
+type HostInputFenceOverlay struct {
+	MasterSet       []string
+	Generation      uint64
+	PermitEpoch     uint64
+	CloseRequestSeq uint64
+	CloseRequestKey string
+	WatchGeneration uint64
+	State           string
+}
+
+// CanonicalHostInputFenceOverlay returns an immutable-value copy with the
+// master-interface set sorted and deduplicated. Every renderer and readback
+// path uses this form so duplicate logical members cannot diverge from the
+// content marker.
+func CanonicalHostInputFenceOverlay(o HostInputFenceOverlay) HostInputFenceOverlay {
+	o.MasterSet = append([]string(nil), o.MasterSet...)
+	sort.Strings(o.MasterSet)
+	uniq := o.MasterSet[:0]
+	for _, name := range o.MasterSet {
+		if len(uniq) == 0 || uniq[len(uniq)-1] != name {
+			uniq = append(uniq, name)
+		}
+	}
+	o.MasterSet = uniq
+	return o
+}
+
+// HostInputFenceOverlayCounterName is a stable content marker. It hashes the
+// canonical master set and every authority field, so marker presence is an
+// exact candidate readback rather than a table-presence probe.
+func HostInputFenceOverlayCounterName(o HostInputFenceOverlay) string {
+	o = CanonicalHostInputFenceOverlay(o)
+	var payload bytes.Buffer
+	writeU64 := func(v uint64) {
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], v)
+		payload.Write(b[:])
+	}
+	writeString := func(v string) {
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], uint32(len(v)))
+		payload.Write(b[:])
+		payload.WriteString(v)
+	}
+	writeU64(o.Generation)
+	writeU64(o.PermitEpoch)
+	writeU64(o.CloseRequestSeq)
+	writeU64(o.WatchGeneration)
+	writeString(o.CloseRequestKey)
+	writeString(o.State)
+	for _, name := range o.MasterSet {
+		writeString(name)
+	}
+	sum := sha256.Sum256(payload.Bytes())
+	return "xpf_hif_" + hex.EncodeToString(sum[:12])
+}
+
 // HostInboundSpec is the full host-inbound render request (plan §5.1). It is the
 // exact input set buildHostInboundFilterPayload consumes.
 type HostInboundSpec struct {
@@ -207,6 +278,7 @@ type HostInboundSpec struct {
 	// the userspace dataplane runs this generation's snapshot. When false the
 	// reinject accept is omitted (byte-identical to the pre-#9637 ruleset).
 	DataplaneFresh bool
+	Overlay        *HostInputFenceOverlay
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): the

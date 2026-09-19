@@ -38,6 +38,7 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/natpoolalarm"
 	"github.com/psaab/xpf/pkg/networkd"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/psaab/xpf/pkg/ra"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
@@ -132,6 +133,17 @@ type Daemon struct {
 	transitGateMu       sync.Mutex
 	transitGateWakeOnce sync.Once
 	transitGateWake     chan struct{}
+
+	// #9506 S4 permit/queue authority. The pointer is initialized before
+	// background loops start and retained until Run's joined shutdown.
+	ipsecS4                     *ipsecSupervisor
+	ipsecOverlay                atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayAcked           atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayRetryUntil      atomic.Int64
+	ipsecOverlayRetryGeneration atomic.Uint64
+	ipsecOverlayRetrySequence   atomic.Uint64
+	ipsecTopologyDirty          atomic.Bool
+	ipsecTopologySubscribed     atomic.Bool
 
 	// --- always-on transit-gate link watcher (#9848) ---
 	// The watcher has its own subscription seam so it remains independent of
@@ -1064,6 +1076,12 @@ type Daemon struct {
 	// the operator-visible signal the pre-#6802 code had none of; a rising value
 	// means now-denied host-inbound flows may still be authorized.
 	hostInboundConntrackFlushFailures atomic.Uint64
+	// hostInputFenceConntrackDebt is separate from the service-tightening
+	// reconcile above: an XFRM master overlay revokes every direct-host flow,
+	// including flows that ordinary host-inbound policy still permits.
+	hostInputFenceConntrackDebt     atomic.Pointer[hostInputFenceConntrackRequest]
+	hostInputFenceConntrackFailures atomic.Uint64
+	hostInputFenceConntrackActive   atomic.Pointer[hostInputFenceConntrackRequest]
 
 	// mgmtReassertNoticed is the #6803 owner's down-STREAK flag: set on the first
 	// tick of a management-listener outage, cleared when one is re-bound. It

@@ -112,12 +112,17 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 }
 
 func toNftHostInboundSpec(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, dataplaneFresh bool) xnft.HostInboundSpec {
+	return toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, dataplaneFresh, nil)
+}
+
+func toNftHostInboundSpecWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay) xnft.HostInboundSpec {
 	spec := xnft.HostInboundSpec{
 		Views:          toNftViews(views),
 		UnzonedV4:      unzonedV4,
 		UnzonedV6:      unzonedV6,
 		WGListenPorts:  wg,
 		DataplaneFresh: dataplaneFresh,
+		Overlay:        overlay,
 	}
 	for _, p := range programs {
 		spec.Programs = append(spec.Programs, toNftProgram(p))

@@ -556,8 +556,11 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 // a historical fallback gate, not proof of current table presence or current-
 // address coverage (#5789, #5790).
 func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
+	return d.applyHostInboundFilterWithOverlay(cfg, d.activeHostInputFenceOverlay())
+}
+
+func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *xnft.HostInputFenceOverlay) error {
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
-	// #4420 HI-2: firewall-local addresses on interfaces assigned to NO security
 	// zone. xpfd applies an interface's address regardless of zone membership,
 	// but the per-zone views above scope the default-deny to ZONED addresses
 	// only, so host-bound traffic to an addressed-but-unzoned interface would
@@ -606,7 +609,7 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 	// them). Only representable programs that resolve to >=1 non-lifeline netdev
 	// are returned; the un-representable remainder keeps the #4168 commit warning.
 	programs := dpuserspace.BuildJunosHostPrograms(cfg)
-	if !hostInboundHasEnforceableView(views) && len(unzonedV4) == 0 && len(unzonedV6) == 0 && len(programs) == 0 {
+	if overlay == nil && !hostInboundHasEnforceableView(views) && len(unzonedV4) == 0 && len(unzonedV6) == 0 && len(programs) == 0 {
 		// No host-inbound-configured zone with a resolvable address, no
 		// addressed-but-unzoned interface (#4420 HI-2), AND no junos-host DENY
 		// program (#4146) — nothing to enforce. Remove any stale table.
@@ -668,6 +671,31 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 	// catch-all DROP for. Compared on failure against the retained generation's
 	// covered set to detect addresses that appeared after that generation loaded.
 	desiredDrop := hostInboundDesiredDropAddrs(views, unzonedV4, unzonedV6)
+	var overlayConntrackReq *hostInputFenceConntrackRequest
+	overlayConntrackChanged := false
+	if overlay != nil {
+		destinations, addrErr := hostInputFenceConntrackDestinations(cfg, views, unzonedV4, unzonedV6)
+		if addrErr != nil {
+			d.noteHostInboundApplyFailed(time.Now())
+			return fmt.Errorf("capture host-input fence destinations: %w", addrErr)
+		}
+		req := hostInputFenceConntrackRequestForOverlay(*overlay, destinations)
+		oldReq := d.hostInputFenceConntrackActive.Load()
+		if oldReq == nil || !hostInputFenceConntrackRequestEqual(*oldReq, req) {
+			if oldReq != nil {
+				if oldErr := flushHostInputFenceConntrack(*oldReq); oldErr != nil {
+					d.noteHostInputFenceConntrack(*oldReq, oldErr)
+					d.noteHostInboundApplyFailed(time.Now())
+					return fmt.Errorf("revoke prior host-input fence conntrack: %w", oldErr)
+				}
+				d.noteHostInputFenceConntrack(*oldReq, nil)
+			}
+			overlayConntrackChanged = true
+		}
+		if len(overlay.MasterSet) > 0 && overlayConntrackChanged {
+			overlayConntrackReq = &req
+		}
+	}
 	// #6387 PR-3: install via netlink. toNftHostInboundSpec re-derives the SAME
 	// inputs buildHostInboundFilterPayload feeds the oracle; the netlink build is
 	// parity-proven equivalent (T1 CI). A failed install still fails the commit
@@ -683,7 +711,7 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 	// the previous table (pre-existing #5789 staleness, commit fails closed
 	// via H7); the flag is untouched and the next call-site outcome re-drives
 	// it — see hostInboundDataplaneFresh for the full transition table.
-	spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wgListenPorts, d.hostInboundDataplaneFresh.Load())
+	spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, d.hostInboundDataplaneFresh.Load(), overlay)
 	if err := nftInstaller.InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Warn("failed to apply host-inbound filter", "err", err)
@@ -750,6 +778,26 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 		// express.
 		d.noteHostInboundApplyFailed(time.Now())
 		return fmt.Errorf("apply host-inbound nftables filter: %w", err)
+	}
+	if overlay != nil {
+		if verifyErr := nftInstaller.VerifyHostInboundOverlay(*overlay); verifyErr != nil {
+			verifyErr = tagNftInstallErr(verifyErr)
+			d.noteHostInboundApplyFailed(time.Now())
+			return fmt.Errorf("verify host-input fence overlay: %w", verifyErr)
+		}
+	}
+	if overlayConntrackReq != nil {
+		ctReq := *overlayConntrackReq
+		if ctErr := flushHostInputFenceConntrack(ctReq); ctErr != nil {
+			// The verified head DROP is already fail-closed. Retain the exact
+			// candidate as active and let the 30s debt owner retry conntrack;
+			// only an old-set ACK failure blocks replacement.
+			d.noteHostInputFenceConntrack(ctReq, ctErr)
+			slog.Warn("host-input fence installed but conntrack revocation is owed; retaining exact retry debt", "err", ctErr)
+		} else {
+			d.noteHostInputFenceConntrack(ctReq, nil)
+		}
+		d.hostInputFenceConntrackActive.Store(&ctReq)
 	}
 	// A real host-inbound table is now installed. Record the historical success;
 	// a later failed install retains that exact generation and therefore skips the
@@ -1367,6 +1415,10 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     removes an installed accept on the next render. The F3 window is closed by
 //     construction, not by probe.
 func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool) string {
+	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, dataplaneFresh, nil)
+}
+
+func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay) string {
 	// Pre-pass: collect the named DROP counters the chain will reference, so they
 	// can be declared at the top of the table body BEFORE the chain. A counter is
 	// emitted exactly when emitHostInboundZone emits a catch-all drop
@@ -1393,6 +1445,9 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		}
 		seenCounter[name] = true
 		counters = append(counters, name)
+	}
+	if overlay != nil {
+		addCounter(xnft.HostInputFenceOverlayCounterName(*overlay))
 	}
 	// #4759: the GLOBAL ICMP-error / ND accept rules emitted below carry named
 	// nft counters so the host-inbound admit path is observable per type-class
@@ -1464,6 +1519,16 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 	rules = append(rules, "  chain input {")
 	// #3364: explicit distinct priority so host-inbound evaluates AFTER xpf_lo0.
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundPriority))
+	if overlay != nil {
+		canonical := xnft.CanonicalHostInputFenceOverlay(*overlay)
+		if len(canonical.MasterSet) > 0 {
+			quoted := make([]string, 0, len(canonical.MasterSet))
+			for _, master := range canonical.MasterSet {
+				quoted = append(quoted, strconv.Quote(master))
+			}
+			rules = append(rules, "    iifname { "+strings.Join(quoted, ", ")+" } counter name \""+xnft.HostInputFenceOverlayCounterName(canonical)+"\" drop")
+		}
+	}
 	// #4146: when a `to-zone junos-host` DENY program is enforced, the chain is
 	// restructured into Rust's coarse-then-fine order — the fine DROP must run
 	// AFTER the genuinely pre-fine-exempt accepts (ESP/AH + firewall-originated
