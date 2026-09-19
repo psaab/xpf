@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -84,6 +86,57 @@ func TestHostInboundIngressRulesShape9637(t *testing.T) {
 	}
 	if !strings.Contains(payload, "  counter "+xnft.HostInboundDenyCounterName("lan", "ip6")+" {") {
 		t.Error("lan's ip6 ingress drop references a counter the table must declare, though lan has no v6 address")
+	}
+}
+
+// TestHostInboundSharedParentOnlyDoesNotFallThrough10431 is the #10431
+// shared-parent-only cell. A netdev claimed by two zones gets a fail-closed
+// drop over every judged destination before destination-only rules.
+func TestHostInboundSharedParentOnlyDoesNotFallThrough10431(t *testing.T) {
+	views := []dpuserspace.ZoneHostInboundView{
+		{
+			Zone:               "trusted",
+			SystemServices:     []string{"ssh"},
+			V4Addrs:            []string{"10.0.1.1"},
+			IngressDenyNetdevs: []string{"shared"},
+		},
+		{
+			Zone:           "untrusted",
+			SystemServices: []string{"ping"},
+			V4Addrs:        []string{"10.0.2.1"},
+		},
+	}
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
+	deny := `    iifname "shared" ip daddr { 10.0.1.1, 10.0.2.1 } drop`
+	if !strings.Contains(payload, deny) {
+		t.Fatalf("shared-parent guard missing:\n%s", payload)
+	}
+	denyAt := strings.Index(payload, deny)
+	for _, accept := range []string{
+		"    ip daddr 10.0.1.1 tcp dport 22 accept",
+		"    ip daddr 10.0.2.1 icmp type echo-request accept",
+	} {
+		if acceptAt := strings.Index(payload, accept); acceptAt < 0 || denyAt > acceptAt {
+			t.Fatalf("shared-parent guard must precede destination-only accept %q:\n%s", accept, payload)
+		}
+	}
+}
+
+// TestHostInboundEstablishedReevaluatesIngressBeforeResidualAccept10431 closes
+// the established-flow half of the ingress residual. Original-direction
+// established packets must encounter ingress-zone accept/drop rules before the
+// chain's residual established accept; reply-direction traffic remains admitted
+// by the early split.
+func TestHostInboundEstablishedReevaluatesIngressBeforeResidualAccept10431(t *testing.T) {
+	payload := buildHostInboundFilterPayload(ingressViews9637(true), nil, nil, nil, nil, true)
+	ingressAt := strings.Index(payload, `iifname "fwlan"`)
+	residualAt := strings.Index(payload, "    ct state established,related accept")
+	replyAt := strings.Index(payload, "    ct state established,related ct direction reply accept")
+	if ingressAt < 0 || residualAt < 0 || replyAt < 0 {
+		t.Fatalf("missing established/ingress rules:\n%s", payload)
+	}
+	if replyAt > ingressAt || residualAt < ingressAt {
+		t.Fatalf("reply established must precede ingress, residual established must follow ingress (reply=%d ingress=%d residual=%d):\n%s", replyAt, ingressAt, residualAt, payload)
 	}
 }
 
@@ -195,7 +248,10 @@ func hostInboundIngressNetnsChild9637(t *testing.T) {
 			if err != nil {
 				return
 			}
-			c.Close()
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
 		}
 	}()
 
@@ -241,6 +297,37 @@ func hostInboundIngressNetnsChild9637(t *testing.T) {
 	})
 	if t.Failed() {
 		t.Fatal("the destination-only ruleset did not reproduce #9637, so the rows below would not measure the fix")
+	}
+	// Keep one WAN→LAN SSH flow established under destination-only policy, then
+	// replace the table while the flow remains open. The second byte must hit
+	// the WAN ingress drop instead of the residual established accept.
+	var establishedOut bytes.Buffer
+	established := exec.Command("nsenter", "-t", wan, "-n", "timeout", "4", "bash", "-c", `
+set -e
+exec 3<>/dev/tcp/10.0.61.1/22
+printf x >&3
+IFS= read -r -N 1 first <&3
+printf '%s' "$first"
+sleep 1
+printf y >&3
+if IFS= read -r -N 1 -t 1 second <&3; then
+	printf '%s' "$second"
+else
+	printf timeout
+fi
+`)
+	established.Stdout = &establishedOut
+	established.Stderr = &establishedOut
+	if err := established.Start(); err != nil {
+		t.Fatalf("start established cross-zone flow: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	load(ingressViews9637(true))
+	if err := established.Wait(); err != nil {
+		t.Fatalf("established cross-zone flow: %v (output %q)", err, establishedOut.String())
+	}
+	if got := establishedOut.String(); got != "xtimeout" {
+		t.Fatalf("established WAN→LAN flow bypassed ingress re-evaluation: output %q, want %q", got, "xtimeout")
 	}
 
 	load(ingressViews9637(true))

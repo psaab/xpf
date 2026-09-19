@@ -36,10 +36,11 @@ func hostInboundEmitsIngressDrop(v dpuserspace.ZoneHostInboundView, dests []stri
 	return len(v.IngressNetdevs) > 0 && hostInboundEmitsDrop(v, dests)
 }
 
-// emitHostInboundZoneIngress emits the #9637 ingress-zone rules for one view and
-// family. The rules use the view's own service and protocol matches, and its
-// per-zone deny counter. Each rule is scoped to the view's ingress netdevs and
-// to EVERY judged local address, not only the view's own.
+// emitHostInboundZoneIngress emits the #9637 ingress-zone rules for one view
+// and family. IngressDenyNetdevs is rendered first as an unconditional
+// destination-scoped drop for ambiguous effective netdevs (#10431). Normal
+// rules use the view's service and protocol matches, its per-zone deny counter,
+// and EVERY judged local address, not only the view's own.
 //
 // Junos admits host-inbound traffic by the zone of the interface it arrives on.
 // The destination-address rules alone judged a packet by the zone that owns the
@@ -47,6 +48,10 @@ func hostInboundEmitsIngressDrop(v dpuserspace.ZoneHostInboundView, dests []stri
 // on another zone's address, and a zone that admits ssh was refused on another
 // zone's address. #9637 measured the refusal on the loss cluster.
 func emitHostInboundZoneIngress(rules *[]string, v dpuserspace.ZoneHostInboundView, family string, dests []string) {
+	if len(v.IngressDenyNetdevs) > 0 && len(dests) > 0 {
+		scope := "iifname " + nftIifnameSet(v.IngressDenyNetdevs) + " " + family + " daddr " + nftAddrSet(dests)
+		*rules = append(*rules, "    "+scope+" drop")
+	}
 	if len(v.IngressNetdevs) == 0 || len(dests) == 0 {
 		return
 	}
