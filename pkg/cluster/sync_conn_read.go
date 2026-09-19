@@ -519,10 +519,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// survivor fabric independently of whether an inbound bulk (which also
 		// sets bulkEverCompleted at syncMsgBulkEnd) completed first.
 		s.outboundBulkAcked.Store(true)
-		s.dischargeBarrierFence(fenceCapture)
-		// #9626: the peer now holds the table this bulk carried, which is what
-		// discharges an owed cold prime, and only the one the bulk was sent for.
+		// #9626: discharge the cold-prime debt before publishing fence
+		// clearance. A barrier may sample both states in that handoff.
 		s.dischargeColdPrime(owed)
+		// #9508: only expose the re-prime's fence clearance after its matching
+		// cold-prime debt is discharged.
+		s.dischargeBarrierFence(fenceCapture)
 		if s.OnBulkSyncAckReceived != nil {
 			go s.OnBulkSyncAckReceived()
 		}

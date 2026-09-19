@@ -39,16 +39,28 @@ func (s *SessionSync) ResumeIncrementalSync(reason string) {
 // BulkStart's write, making the watermark an exact wire-order cut: frames
 // accepted before that write belong to the gap; later frames are post-marker.
 func (s *SessionSync) enqueueQueuedFrame(msg []byte) bool {
+	_, _, ok := s.enqueueQueuedFrameWithWatermark(msg)
+	return ok
+}
+
+func (s *SessionSync) enqueueQueuedFrameWithWatermark(msg []byte) (seq, failures uint64, ok bool) {
 	s.queuedFrameMu.Lock()
 	defer s.queuedFrameMu.Unlock()
 	select {
 	case s.sendCh <- msg:
 		s.queuedFrameSeq++
-		return true
+		return s.queuedFrameSeq, s.queuedFrameFailures, true
 	default:
-		return false
+		return 0, s.queuedFrameFailures, false
 	}
 }
+
+func (s *SessionSync) queuedFrameWriteStarted() {
+	s.queuedFrameMu.Lock()
+	s.queuedFrameStarted++
+	s.queuedFrameMu.Unlock()
+}
+
 func (s *SessionSync) queuedFrameDelivered() {
 	s.queuedFrameMu.Lock()
 	s.queuedFrameResolved++
@@ -636,6 +648,7 @@ func (s *SessionSync) sendCapabilities(conn net.Conn) {
 func (s *SessionSync) sendLoop(ctx context.Context) {
 	sendOne := func(msg []byte) {
 		delivered := false
+		writeStarted := false
 		defer func() {
 			if delivered {
 				s.queuedFrameDelivered()
@@ -684,6 +697,10 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 			// its delete).
 			s.writeMu.Lock()
 			moved := s.noteStreamConnLocked(conn) // #9508: before the write
+			if !writeStarted {
+				s.queuedFrameWriteStarted()
+				writeStarted = true
+			}
 			err := writeFull(conn, msg)
 			s.writeMu.Unlock()
 			s.bulkStartMu.Unlock()

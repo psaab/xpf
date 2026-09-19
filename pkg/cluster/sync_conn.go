@@ -1633,11 +1633,15 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 				if s.outboundBulkAcked.Load() && !s.needColdPrime.Load() {
 					return
 				}
-				// Reset the stranded pending-ack epoch so the re-run's fresh
-				// epoch supersedes it (a latched phantom pending epoch would
-				// block manual failover, #3912).
+				// Reset the stranded pending-ack epoch and keep the same
+				// bulk-send admission across the replacement. Otherwise a
+				// barrier can observe the old pending bulk, queue its marker,
+				// then let this clear+BulkStart run after it (#10387).
+				s.bulkSendMu.Lock()
 				s.clearPendingBulkAck()
-				if err := s.doBulkSync(); err != nil {
+				err := s.doBulkSyncWithBulkSend(true)
+				s.bulkSendMu.Unlock()
+				if err != nil {
 					slog.Warn("cluster sync: cold-start bulk re-drive failed", "err", err)
 				}
 				// #5718 fold r7 BLOCKER 2 required a discharge for this path, so a

@@ -39,6 +39,33 @@ func (s *SessionSync) SetConnectedForTesting(connected bool) {
 	s.stats.Connected.Store(connected)
 }
 
+// DischargeColdPrimeForTesting discharges the currently owed cold-prime debt,
+// if any, through the production BulkAck discharge path. It is a no-op with
+// nothing owed.
+//
+// #10387: it exists so daemon-level drain cells can reach the PRIMED state
+// without a wire round trip. The owed state is the natural post-connect
+// state, and only a matching BulkAck clears it.
+func (s *SessionSync) DischargeColdPrimeForTesting() {
+	s.dischargeColdPrime(s.coldPrimeOwedGen())
+}
+
+// SetPendingColdPrimeForTesting publishes a generation-matching pending bulk
+// acknowledgement without a wire round trip. The daemon-level #10387 cell
+// uses it to prove an owed debt with a qualifying bulk keeps the demotion
+// barrier path.
+func (s *SessionSync) SetPendingColdPrimeForTesting() bool {
+	owed := s.coldPrimeOwedGen()
+	if owed == 0 {
+		return false
+	}
+	epoch := s.bulkSendNext.Add(1)
+	s.pendingBulkOwed.Store(owed)
+	s.pendingBulkAckEpoch.Store(epoch)
+	s.pendingBulkAckSince.Store(time.Now().UnixNano())
+	return true
+}
+
 // FillSendQueueForTesting fills the send queue with placeholder messages and
 // returns how many it added.
 func (s *SessionSync) FillSendQueueForTesting() int {

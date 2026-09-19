@@ -228,6 +228,9 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 			"intervals", intervals)
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			if wait := intervals[attempt-1]; wait > 0 {
+				if hook := d.syncPrimeRetryBeforeSleepForTest; hook != nil {
+					hook()
+				}
 				time.Sleep(wait)
 			}
 			if d.syncPrimeRetryGen.Load() != gen {

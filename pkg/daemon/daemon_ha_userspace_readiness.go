@@ -169,10 +169,11 @@ func (d *Daemon) prepareUserspaceRGDemotionWithTimeoutStrict(rgID int, barrierTi
 		success = true
 		return nil
 	}
-	// Transfer readiness (bulk sync state) is NOT checked here.
-	// The barrier at the end of this function proves the peer has all
-	// sessions. Planned failover should not depend on bulk sync state —
-	// both nodes have full session state from continuous real-time sync.
+	// The demotion gate is intentionally checked before the ordered barrier:
+	// a source failure with no queued bulk leaves a vacuous marker. The gated
+	// barrier path repeats this predicate while holding its admission lock, so
+	// a replacement bulk cannot race between this readiness check and marker
+	// admission.
 
 	// Stop the bulk sync retry loop — it floods the sync TCP connection
 	// with session data, delaying the barrier write/ack by 30+ seconds.
@@ -201,8 +202,12 @@ func (d *Daemon) prepareUserspaceRGDemotionWithTimeoutStrict(rgID int, barrierTi
 	}()
 
 	// Single barrier — peer ack means it has processed all queued deltas.
-	// The actual demotion happens atomically in UpdateRGActive(false).
-	if err := ss.WaitForPeerBarrier(barrierTimeout); err != nil {
+	// The cold-prime-specific wrapper rechecks its gate atomically with marker
+	// admission; generic ordered barriers remain policy-neutral.
+	if ss.ColdPrimeOwedWithoutPendingBulk() {
+		return fmt.Errorf("demotion peer barrier failed: cold prime owed without pending outbound bulk")
+	}
+	if err := ss.WaitForPeerBarrierAfterColdPrimeGate(barrierTimeout); err != nil {
 		return fmt.Errorf("demotion peer barrier failed: %w", err)
 	}
 
