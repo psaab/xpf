@@ -433,31 +433,121 @@ wire_hostinbound_verdict() {
 	printf 'WIRE_GATE wire_hostinbound_deny PASS reason=-- %s\n' "$metrics"
 	return 0
 }
+# wire_conntrack_sids <listing> <dst_ip> <dst_port> — prints "sid timeout"
+# per entry whose In-line names the probe destination. The Arm B sess_sids
+# algorithm: one entry renders as a `Session ID:` line followed by `In:`/`Out:`
+# lines, so associate by adjacency — a bare Timeout grep would attribute
+# another session's lifetime to the probe.
+wire_conntrack_sids() {
+	awk -v dst="$2" -v port="$3" '
+		/Session ID: [0-9]+/ {
+			sid = ""
+			tmo = ""
+			if (match($0, /Session ID: [0-9]+/)) sid = substr($0, RSTART + 12, RLENGTH - 12)
+			if (match($0, /Timeout: [0-9]+/)) tmo = substr($0, RSTART + 9, RLENGTH - 9)
+		}
+		/^  In: / {
+			line = $0
+			sub(/^  In: /, "", line)
+			n = split(line, sides, " --> ")
+			if (n != 2) n = split(line, sides, " > ")
+			if (n == 2) {
+				split(sides[2], dest, /[;, ]/)
+				if (dest[1] == dst "/" port || dest[1] == dst ":" port) print sid, tmo
+			}
+		}' <<<"$1"
+}
+
+# wire_conntrack_pick_sid <listing> <dst_ip> <dst_port> [exclude_sid...] —
+# prints "sid timeout" for the max-Timeout entry naming the destination,
+# skipping excluded SIDs. The Arm B held-session selection: the listing may
+# carry leftover close-state entries with low timeouts, so the live entry is
+# the max-Timeout one. Prints nothing and returns 1 when none qualifies.
+wire_conntrack_pick_sid() {
+	local listing="$1" dst="$2" port="$3"
+	shift 3
+	local best_sid="" best_tmo="" sid="" tmo="" skip x
+	while read -r sid tmo; do
+		[[ "$sid" =~ ^[0-9]+$ && "$tmo" =~ ^[0-9]+$ ]] || continue
+		skip=0
+		for x in "$@"; do
+			[[ "$sid" == "$x" ]] && skip=1
+		done
+		((skip)) && continue
+		if [[ -z "$best_sid" ]] || ((10#$tmo > 10#$best_tmo)); then
+			best_sid="$sid"
+			best_tmo="$tmo"
+		fi
+	done < <(wire_conntrack_sids "$listing" "$dst" "$port")
+	[[ -n "$best_sid" ]] || return 1
+	printf '%s %s\n' "$best_sid" "$best_tmo"
+}
+
+# wire_conntrack_sid_present <listing> <sid> — rc 0 iff the listing names the
+# exact session ID. The Arm B post-check shape: `Session ID: <sid>` followed
+# by a comma or space, never a longer ID carrying this SID as a prefix. An
+# untied (empty/non-numeric) SID never reads present.
+wire_conntrack_sid_present() {
+	[[ "${2:-}" =~ ^[0-9]+$ ]] || return 1
+	grep -q "Session ID: $2[, ]" <<<"$1"
+}
+
+wire_conntrack_listing_complete() {
+	grep -q "Total sessions:" <<<"${1:-}"
+}
+
+# wire_conntrack_transition_flags <mid-listing> <control-listing>
+# <post-listing> <dst-ip> <dst-port> — prints
+# "subject_sid control_sid subject_absent control_present" after proving all
+# three listings are structurally complete. The subject is selected from the
+# pre-control witness; the control is selected from the next listing while
+# excluding that exact subject SID. Post state is then tied to those exact
+# IDs, not to any same-port entry.
+wire_conntrack_transition_flags() {
+	local mid="${1:-}" control="${2:-}" post="${3:-}" dst="${4:-}" port="${5:-}"
+	local subject_pair control_pair subject_sid control_sid
+	wire_conntrack_listing_complete "$mid" &&
+		wire_conntrack_listing_complete "$control" &&
+		wire_conntrack_listing_complete "$post" || return 2
+	subject_pair="$(wire_conntrack_pick_sid "$mid" "$dst" "$port")" || return 2
+	read -r subject_sid _ <<<"$subject_pair"
+	control_pair="$(wire_conntrack_pick_sid "$control" "$dst" "$port" "$subject_sid")" || return 2
+	read -r control_sid _ <<<"$control_pair"
+	local subject_absent=1 control_present=0
+	wire_conntrack_sid_present "$post" "$subject_sid" && subject_absent=0
+	wire_conntrack_sid_present "$post" "$control_sid" && control_present=1
+	printf '%s %s %s %s\n' "$subject_sid" "$control_sid" "$subject_absent" "$control_present"
+}
+
 #
-# wire_conntrack_verdict <created> <witnessed> <stale_present> <exp_offered> <exp_leaked> <fresh_offered> <fresh_leaked> <syn_offered> <syn_observed> <ctrl_sess> <cksum_bad>
+# wire_conntrack_verdict <created> <witnessed> <stale_present> <subj_absent> <exp_offered> <exp_leaked> <fresh_offered> <fresh_leaked> <syn_offered> <syn_observed> <ctrl_sess> <cksum_bad>
 #
 # The conntrack-lifecycle verdict (#10030): one TCP session is created and
-# witnessed present via the Arm B session_list contract, idles past its
-# per-application inactivity-timeout, and must read evicted; post-expiry
-# non-SYN bursts for the expired tuple AND a never-existed tuple must both
-# drop on the wire (the mid-stream pickup shape is the same dataplane path:
-# no session + no SYN), while a same-window permitted SYN burst (the
-# near-miss: SYN-ness is the keyed field) plus one full control connection
-# prove the window and the witness. evicted is DERIVED (stale==0), never an
-# input — a blind witness must not be able to report eviction by seeing
-# nothing. ctrl_sess is the session-table proof for the control connection:
-# it separates "the create-session specifically never installed" (FAIL —
-# the witness is proven alive) from "the witness sees nothing at all"
-# (VOID harness-void).
+# witnessed present via the Arm B session_list contract — tied to its exact
+# session ID, the max-Timeout entry — idles past its per-application
+# inactivity-timeout, and that exact SID must read absent in a structurally
+# complete post-probe listing while the tracked control SID still reads
+# present. subj_absent is the session-table eviction leg (1 iff the witnessed
+# subject SID is absent); evicted is DERIVED from it, never an input — a
+# blind witness must not report eviction by seeing nothing. ctrl_sess is 1
+# iff the tracked control SID is present in that same final listing: it
+# separates "the subject SID specifically evicted" (control alive, witness
+# proven) from "the witness sees nothing at all" (VOID harness-void).
+# stale_present stays independent wire evidence (expired-tuple leakage):
+# post-expiry non-SYN bursts for the expired tuple AND a never-existed tuple
+# must both drop on the wire (the mid-stream pickup shape is the same
+# dataplane path: no session + no SYN), while a same-window permitted SYN
+# burst (the near-miss: SYN-ness is the keyed field) plus the control
+# connection prove the window and the witness.
 # Prints exactly one `WIRE_GATE wire_conntrack_lifecycle ...` line; rc 0/1/2.
 # Order: validity; offered floors; uncreated subject (VOID); mid-stream
 # leaks (FAIL, surviving everything); unwitnessed (FAIL iff the witness is
-# proven alive, else VOID); stale survivor (FAIL); capture-blind; checksums;
-# PASS.
+# proven alive, else VOID); control-witness; eviction (FAIL); stale wire
+# (FAIL); capture-blind; checksums; PASS.
 wire_conntrack_verdict() {
-	local cr="${1:-}" w="${2:-}" st="${3:-}" eo="${4:-}" el="${5:-}" fo="${6:-}" fl="${7:-}" so="${8:-}" sob="${9:-}" cs="${10:-}" ck="${11:-}"
-	local zero="created=0 witnessed=0 evicted=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0"
-	if (($# != 11)); then
+	local cr="${1:-}" w="${2:-}" st="${3:-}" sa="${4:-}" eo="${5:-}" el="${6:-}" fo="${7:-}" fl="${8:-}" so="${9:-}" sob="${10:-}" cs="${11:-}" ck="${12:-}"
+	local zero="created=0 witnessed=0 evicted=0 subj_absent=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0"
+	if (($# != 12)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void %s\n' "$zero"
 		return 2
 	fi
@@ -468,17 +558,18 @@ wire_conntrack_verdict() {
 			return 2
 		fi
 	done
-	if ((10#$cr > 1)) || ((10#$w > 1)); then
+	if ((10#$cr > 1)) || ((10#$w > 1)) || ((10#$sa > 1)) || ((10#$cs > 1)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void %s\n' "$zero"
 		return 2
 	fi
 	local evicted=0
-	if ((10#$st == 0)); then evicted=1; fi
+	if ((10#$sa == 1)); then evicted=1; fi
 	local bad=$((10#$el + 10#$fl + 10#$st))
 	((10#$cr == 0)) && bad=$((bad + 1))
 	((10#$w == 0)) && bad=$((bad + 1))
 	((10#$cs == 0)) && bad=$((bad + 1))
-	local metrics="created=$cr witnessed=$w evicted=$evicted stale_present=$st exp_offered=$eo exp_leaked=$el fresh_offered=$fo fresh_leaked=$fl syn_offered=$so syn_observed=$sob ctrl_sess=$cs lifecycle_bad=$bad cksum_bad=$ck"
+	((10#$sa == 0)) && bad=$((bad + 1))
+	local metrics="created=$cr witnessed=$w evicted=$evicted subj_absent=$sa stale_present=$st exp_offered=$eo exp_leaked=$el fresh_offered=$fo fresh_leaked=$fl syn_offered=$so syn_observed=$sob ctrl_sess=$cs lifecycle_bad=$bad cksum_bad=$ck"
 	if ((10#$eo < WIRE_DROP_FLOOR)) || ((10#$fo < WIRE_DROP_FLOOR)) || ((10#$so < WIRE_LIVENESS_OFFERED)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled %s\n' "$metrics"
 		return 2
@@ -508,6 +599,13 @@ wire_conntrack_verdict() {
 	if ((10#$cs == 0)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void %s\n' "$metrics"
 		return 2
+	fi
+	# The witnessed subject SID must be absent from the final listing: a
+	# retained SID is a session table that never evicted, whatever the wire
+	# did.
+	if ((10#$sa == 0)); then
+		printf 'WIRE_GATE wire_conntrack_lifecycle FAIL reason=-- %s\n' "$metrics"
+		return 1
 	fi
 	if ((10#$st > 0)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle FAIL reason=-- %s\n' "$metrics"

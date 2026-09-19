@@ -571,7 +571,7 @@ harness_adapt_wire_gate() {
 		direction="lower-better"
 		;;
 	wire_conntrack_lifecycle)
-		required="created witnessed evicted stale_present exp_offered exp_leaked fresh_offered fresh_leaked syn_offered syn_observed ctrl_sess lifecycle_bad"
+		required="created witnessed evicted subj_absent stale_present exp_offered exp_leaked fresh_offered fresh_leaked syn_offered syn_observed ctrl_sess lifecycle_bad"
 		headline="lifecycle_bad"
 		direction="lower-better"
 		;;
