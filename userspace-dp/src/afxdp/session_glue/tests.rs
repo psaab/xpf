@@ -4370,6 +4370,213 @@ fn demote_shared_owner_rgs_preserves_transient_seed_aliases_10402() {
     assert_aliases(&control, SessionOrigin::SyncImport);
 }
 
+/// #10405: demote→reactivate keeps node-local TUN provenance in every
+/// shared-map alias.
+///
+/// `demote_shared_owner_rgs` must preserve `TunOrigin` (and transient
+/// seeds, same class) in the shared, NAT-alias, and forward-wire loops
+/// while still retagging ordinary origins to `SyncImport` — mirroring
+/// the `SessionTable::demote_owner_rg` guard. The reactivation leg
+/// matters, not just the demote: `prewarm_reverse_synced_sessions_for_owner_rgs`
+/// (the shared-map leg of `Coordinator::handle_activated_rgs`,
+/// `ha/state.rs`) only synthesizes a `SyncImport` reverse for
+/// peer-synced/promoted entries (`shared_ops.rs`), so a demote that
+/// destroyed TUN provenance would plant a peer-synced reverse for a
+/// node-local session on failback and let it cross HA.
+#[test]
+fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let forwarding = test_forwarding_state_with_fabric();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+
+    // Non-default NAT publishes into all three aliases (primary, NAT
+    // reverse-wire, forward wire). Distinct ports/rewrites keep the TUN
+    // and control aliases from colliding.
+    let mut tun_key = test_key();
+    tun_key.src_port = 44_101;
+    let mut tun_decision = test_decision();
+    tun_decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(44_101),
+        ..NatDecision::default()
+    };
+    let tun = SyncedSessionEntry {
+        key: tun_key.clone(),
+        decision: tun_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::TunOrigin,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let mut control_key = test_key();
+    control_key.src_port = 44_102;
+    let mut control_decision = test_decision();
+    control_decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 9))),
+        rewrite_src_port: Some(44_102),
+        ..NatDecision::default()
+    };
+    let control = SyncedSessionEntry {
+        key: control_key.clone(),
+        decision: control_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    for entry in [&tun, &control] {
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            entry,
+        );
+    }
+
+    // Failover: RG 1 demotes (standby).
+    demote_shared_owner_rgs(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &forwarding,
+        &dynamic_neighbors,
+        &[1],
+    );
+
+    // Failback: RG 1 reactivates through the production prewarm path
+    // (`Coordinator::handle_activated_rgs` shared-map leg). fd -1 skips
+    // the BPF publish; the shared maps and worker fan-out are real.
+    let worker_commands = vec![Arc::new(Mutex::new(VecDeque::new()))];
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    prewarm_reverse_synced_sessions_for_owner_rgs(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &worker_commands,
+        SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &[1],
+        1,
+    );
+
+    // Per-alias provenance after the full demote→reactivate cycle. Each
+    // alias names itself so a RED run identifies the regressed loop.
+    let origin_in =
+        |map: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>, key: &SessionKey| {
+            map.lock()
+                .expect("shared map")
+                .get(key)
+                .cloned()
+                .map(|entry| entry.origin)
+        };
+    let assert_aliases = |entry: &SyncedSessionEntry, expected: SessionOrigin, label: &str| {
+        // Primary alias.
+        assert_eq!(
+            origin_in(&shared_sessions, &entry.key),
+            Some(expected),
+            "{}: primary alias must stay {:?} across demote-reactivate",
+            label,
+            expected
+        );
+        // NAT reverse-wire alias.
+        let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
+        assert_eq!(
+            origin_in(&shared_nat_sessions, &reverse_wire),
+            Some(expected),
+            "{}: NAT alias must stay {:?} across demote-reactivate",
+            label,
+            expected
+        );
+        // Forward-wire alias.
+        let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
+        assert_ne!(
+            wire_key, entry.key,
+            "{}: fixture must exercise the forward-wire alias",
+            label
+        );
+        assert_eq!(
+            origin_in(&shared_forward_wire_sessions, &wire_key),
+            Some(expected),
+            "{}: forward-wire alias must stay {:?} across demote-reactivate",
+            label,
+            expected
+        );
+    };
+    assert_aliases(&tun, SessionOrigin::TunOrigin, "TUN");
+    assert_aliases(&control, SessionOrigin::SyncImport, "ordinary control");
+
+    // The reactivation discriminator: a demote that retagged TUN as
+    // peer-synced would let prewarm synthesize + publish a SyncImport
+    // reverse for the node-local session (see
+    // `synthesized_synced_reverse_entry`, which stamps SyncImport).
+    // No reverse may be planted for TUN ...
+    let tun_reverse_wire = reverse_session_key(&tun.key, tun.decision.nat);
+    assert!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&tun_reverse_wire)
+            .is_none(),
+        "reactivation must not plant a peer-synced reverse for a TUN-origin session"
+    );
+    // ... while the ordinary control (now genuinely peer-synced) DOES
+    // get its reverse prewarmed — proving the prewarm ran and told the
+    // two origins apart.
+    let control_reverse = shared_sessions
+        .lock()
+        .expect("shared sessions")
+        .get(&reverse_session_key(&control.key, control.decision.nat))
+        .cloned()
+        .expect("reactivation must prewarm the ordinary control reverse");
+    assert_eq!(control_reverse.origin, SessionOrigin::SyncImport);
+    assert!(control_reverse.metadata.is_reverse);
+
+    // Worker fan-out carries provenance across the boundary intact: the
+    // TUN forward arrives as TunOrigin (node-local), the control as
+    // SyncImport (peer-synced).
+    let pending = worker_commands[0].lock().expect("worker commands");
+    let upsert_origin = |key: &SessionKey| {
+        pending
+            .iter()
+            .filter_map(|cmd| match cmd {
+                WorkerCommand::UpsertSynced(entry)
+                    if entry.key == *key && !entry.metadata.is_reverse =>
+                {
+                    Some(entry.origin)
+                }
+                _ => None,
+            })
+            .next()
+    };
+    assert_eq!(
+        upsert_origin(&tun.key),
+        Some(SessionOrigin::TunOrigin),
+        "TUN forward UpsertSynced must preserve TunOrigin"
+    );
+    assert_eq!(
+        upsert_origin(&control.key),
+        Some(SessionOrigin::SyncImport),
+        "ordinary control forward UpsertSynced must be SyncImport"
+    );
+}
+
 #[test]
 fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
