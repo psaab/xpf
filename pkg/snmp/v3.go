@@ -1,6 +1,7 @@
 package snmp
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
@@ -23,10 +24,11 @@ const (
 	// USM security model (RFC 3414).
 	usmSecurityModel = 3
 
-	// SNMPv3 message flags.
-	msgFlagAuth   = 0x01
-	msgFlagPriv   = 0x02
-	msgFlagReport = 0x04
+	// SNMPv3 message flags. The reportable flag is request-only; response
+	// Reports clear it.
+	msgFlagAuth       = 0x01
+	msgFlagPriv       = 0x02
+	msgFlagReportable = 0x04
 
 	// Auth HMAC truncation lengths (RFC 3414, RFC 7860).
 	hmacMD5Len    = 12
@@ -207,7 +209,7 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 	}
 
 	// USM fields: engineID, engineBoots, engineTime, userName, authParams, privParams.
-	_, usmRest, err := berDecodeOctetString(usmBody) // reqEngineID
+	reqEngineID, usmRest, err := berDecodeOctetString(usmBody) // msgAuthoritativeEngineID
 	if err != nil {
 		slog.Debug("SNMPv3: failed to decode engineID")
 		return nil
@@ -240,8 +242,27 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 
 	userName := string(userNameBytes)
 
-	// Discovery: empty userName means engine ID discovery.
+	// Discovery: empty userName means engine ID discovery. This special case
+	// intentionally precedes the authoritative-engine gate: a reportable
+	// manager that does not yet know our engine ID must be able to discover it.
 	if userName == "" {
+		if msgFlags&msgFlagReportable == 0 {
+			return nil
+		}
+		return a.buildV3Discovery(msgID)
+	}
+
+	// A non-discovery request naming another authoritative engine must not be
+	// authenticated or served by this agent. RFC 3414/3412 only permits a
+	// Report when the incoming reportable flag is set; otherwise drop the
+	// message without reflecting a response.
+	if !bytes.Equal(reqEngineID, a.engineID) {
+		slog.Debug("SNMPv3: unknown authoritative engine", "engine_id", reqEngineID)
+		if msgFlags&msgFlagReportable == 0 {
+			return nil
+		}
+		// Return the RFC 3414 usmStatsUnknownEngineIDs Report carrying this
+		// agent's engine ID, boots, and time so the manager can resynchronize.
 		return a.buildV3Discovery(msgID)
 	}
 
@@ -293,12 +314,17 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 		// Without it an on-path attacker can replay a captured authenticated
 		// PDU. As the authoritative engine we check the request's boots/time
 		// against our own clock and reply with usmStatsNotInTimeWindows on a
-		// stale/future/wrong-boots request, which also lets a manager whose
-		// cached boots/time drifted (e.g. across our restart) resynchronize.
+		// stale/future/wrong-boots request when the request is reportable,
+		// which also lets a manager whose cached boots/time drifted (e.g.
+		// across our restart) resynchronize. RFC 3412 requires a silent drop
+		// when the incoming reportable flag is clear.
 		if !a.checkTimeliness(reqBoots, reqTime) {
 			slog.Debug("SNMPv3: not in time window",
 				"user", userName, "req_boots", reqBoots, "req_time", reqTime,
 				"our_boots", a.engineBoots, "our_time", a.engineTime())
+			if msgFlags&msgFlagReportable == 0 {
+				return nil
+			}
 			return a.buildV3TimelinessReport(msgID, msgFlags, user)
 		}
 	}
@@ -333,7 +359,7 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 	}
 
 	// Parse scopedPDU: contextEngineID, contextName, PDU.
-	_, scopedRest, err := berDecodeOctetString(scopedPDUBody) // contextEngineID
+	contextEngineID, scopedRest, err := berDecodeOctetString(scopedPDUBody)
 	if err != nil {
 		slog.Debug("SNMPv3: failed to decode contextEngineID")
 		return nil
@@ -345,17 +371,19 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 	}
 
 	// Context gating (RFC 3412 §4.1, RFC 3413 §3). This agent serves a single
-	// MIB view in the default context (empty contextName). It does NOT model
-	// per-VRF/routing-instance context views, so a request naming a non-default
-	// context must NOT be answered with default-context data — that would be an
-	// information-exposure / operator-confusion bug (#2611). Per RFC 3413, an
-	// unknown context yields no matching MIB objects: Get returns
-	// noSuchObject for unknown objects and noSuchInstance for missing
-	// instances; GetNext/GetBulk return endOfMibView for every varbind.
-	// The requested contextName is echoed back in the response so the manager
-	// sees which context it addressed. The empty (default) context continues to
-	// be served exactly as before.
-	defaultContext := len(contextName) == 0
+	// MIB view in the default context (empty contextName) only when the scoped
+	// PDU names this agent's context engine. A request naming a foreign context
+	// engine is handled as an unknown/empty context rather than receiving local
+	// default-view data. It does NOT model per-VRF/routing-instance context
+	// views, so a request naming a non-default context must NOT be answered with
+	// default-context data — that would be an information-exposure /
+	// operator-confusion bug (#2611). Per RFC 3413, an unknown context yields no
+	// matching MIB objects: Get returns noSuchObject for unknown objects and
+	// noSuchInstance for missing instances; GetNext/GetBulk return endOfMibView
+	// for every varbind. The requested contextName is echoed back in the
+	// response so the manager sees which context it addressed. The empty
+	// (default) context with the local contextEngineID continues to be served.
+	defaultContext := len(contextName) == 0 && bytes.Equal(contextEngineID, a.engineID)
 	echoContext := contextName
 
 	// Decode PDU.
@@ -960,10 +988,11 @@ func (a *Agent) buildV3Discovery(msgID int) []byte {
 	usmFields = append(usmFields, berEncodeTLV(tagOctetString, nil)...) // privParams
 	usmOctet := berEncodeTLV(tagOctetString, berEncodeTLV(tagSequence, usmFields))
 
-	// Header.
+	// Header. Report messages clear reportableFlag: that bit describes whether
+	// a received request may elicit a Report, not the Report response itself.
 	hdr := berEncodeIntegerTLV(msgID)
 	hdr = append(hdr, berEncodeIntegerTLV(maxPacketSize)...)
-	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagReport})...)
+	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{0})...)
 	hdr = append(hdr, berEncodeIntegerTLV(usmSecurityModel)...)
 	hdrSeq := berEncodeTLV(tagSequence, hdr)
 
@@ -1032,7 +1061,7 @@ func (a *Agent) buildV3TimelinessReport(msgID int, reqFlags byte, user *usmUser)
 
 	hdr := berEncodeIntegerTLV(msgID)
 	hdr = append(hdr, berEncodeIntegerTLV(maxPacketSize)...)
-	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{respFlags | msgFlagReport})...)
+	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{respFlags})...)
 	hdr = append(hdr, berEncodeIntegerTLV(usmSecurityModel)...)
 	hdrSeq := berEncodeTLV(tagSequence, hdr)
 

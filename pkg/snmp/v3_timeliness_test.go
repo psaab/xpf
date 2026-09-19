@@ -22,6 +22,10 @@ func nowMinus(secs int) time.Time {
 // the on-wire bytes. The PDU is an empty GetRequest (the agent serves it and
 // returns a GetResponse on acceptance, or a Report on a timeliness failure).
 func buildV3TimedRequest(t *testing.T, authProto, userName string, engineID, authKey []byte, boots, tm int) []byte {
+	return buildV3TimedRequestWithFlags(t, authProto, userName, engineID, authKey, msgFlagAuth|msgFlagReportable, boots, tm)
+}
+
+func buildV3TimedRequestWithFlags(t *testing.T, authProto, userName string, engineID, authKey []byte, msgFlags byte, boots, tm int) []byte {
 	t.Helper()
 	hashFn, _ := authHashFunc(authProto)
 	if hashFn == nil {
@@ -40,7 +44,7 @@ func buildV3TimedRequest(t *testing.T, authProto, userName string, engineID, aut
 
 	hdr := berEncodeIntegerTLV(7)
 	hdr = append(hdr, berEncodeIntegerTLV(maxPacketSize)...)
-	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagAuth})...)
+	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlags})...)
 	hdr = append(hdr, berEncodeIntegerTLV(usmSecurityModel)...)
 	hdrSeq := berEncodeTLV(tagSequence, hdr)
 
@@ -142,6 +146,21 @@ func TestTimeliness_StaleRejected(t *testing.T) {
 	if got := classifyV3Response(t, resp); got != "report" {
 		t.Fatalf("stale replay: got %q, want a usmStatsNotInTimeWindows report (replay must be rejected)", got)
 	}
+	assertV3ReportEncoding10434(t, resp)
+}
+
+// TestTimeliness_NonReportableDropped_10434 verifies that an authenticated
+// stale request with reportableFlag clear is dropped rather than reflected
+// with a Report response.
+func TestTimeliness_NonReportableDropped_10434(t *testing.T) {
+	a, engineID, authKey := newTimelinessAgent(t, 5, 1000)
+	pkt := buildV3TimedRequestWithFlags(t, "sha", "tuser", engineID, authKey,
+		msgFlagAuth, 5, 849)
+	a.lastPacket = pkt
+
+	if resp := driveV3(t, a, pkt); resp != nil {
+		t.Fatalf("non-reportable stale request: got %d-byte response, want drop", len(resp))
+	}
 }
 
 // TestTimeliness_FutureRejected covers a request whose engineTime is far in the
@@ -205,7 +224,7 @@ func TestTimeliness_DiscoveryStillWorks(t *testing.T) {
 
 	hdr := berEncodeIntegerTLV(1)
 	hdr = append(hdr, berEncodeIntegerTLV(maxPacketSize)...)
-	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagReport})...)
+	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagReportable})...)
 	hdr = append(hdr, berEncodeIntegerTLV(usmSecurityModel)...)
 	hdrSeq := berEncodeTLV(tagSequence, hdr)
 
