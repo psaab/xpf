@@ -18,6 +18,10 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v4(
     if packet.len() < 20 {
         return None;
     }
+    let ttl = packet[8];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 && ttl <= 1 {
+        return None;
+    }
     let ihl = ((packet[0] & 0x0f) as usize) * 4;
     if ihl < 20 || packet.len() < ihl + 8 {
         return None;
@@ -61,6 +65,9 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v4(
     out.get_mut(out_eth_len..)?.copy_from_slice(payload);
 
     let pkt = &mut out[out_eth_len..];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 {
+        pkt[8] = ttl - 1;
+    }
 
     pkt.get_mut(16..20)?
         .copy_from_slice(&original_client.octets());
@@ -189,6 +196,10 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v6(
     if packet.len() < 40 {
         return None;
     }
+    let hop_limit = packet[7];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 && hop_limit <= 1 {
+        return None;
+    }
 
     let original_client_bytes = match icmp_match.original_src {
         IpAddr::V6(v6) => v6.octets(),
@@ -227,6 +238,9 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v6(
     out.get_mut(out_eth_len..)?.copy_from_slice(payload);
 
     let pkt = &mut out[out_eth_len..];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 {
+        pkt[7] = hop_limit - 1;
+    }
 
     pkt.get_mut(24..40)?.copy_from_slice(&original_client_bytes);
 
@@ -362,6 +376,10 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
     if packet.len() < 20 {
         return None;
     }
+    let ttl = packet[8];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 && ttl <= 1 {
+        return None;
+    }
     let ihl = ((packet[0] & 0x0f) as usize) * 4;
     if ihl < 20 || packet.len() < ihl + 8 {
         return None;
@@ -393,6 +411,9 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
     out.get_mut(out_eth_len..)?.copy_from_slice(payload);
 
     let pkt = &mut out[out_eth_len..];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 {
+        pkt[8] = ttl - 1;
+    }
 
     // Outer source → the SNAT (external) address.
     pkt.get_mut(12..16)?.copy_from_slice(&snat_ip.octets());
@@ -476,6 +497,10 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
     if packet.len() < 40 {
         return None;
     }
+    let hop_limit = packet[7];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 && hop_limit <= 1 {
+        return None;
+    }
     let snat_bytes = match icmp_match.nat.rewrite_src {
         Some(IpAddr::V6(v6)) => v6.octets(),
         _ => return None,
@@ -504,6 +529,9 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
     out.get_mut(out_eth_len..)?.copy_from_slice(payload);
 
     let pkt = &mut out[out_eth_len..];
+    if (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0 {
+        pkt[7] = hop_limit - 1;
+    }
 
     // Outer source → the translated (external) source.
     pkt.get_mut(8..24)?.copy_from_slice(&snat_bytes);

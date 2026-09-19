@@ -25,7 +25,7 @@
 use super::*;
 
 /// Outcome of [`try_reverse_embedded_icmp_error`].
-pub(super) enum EmbeddedIcmpReversal {
+pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// A live session matched and the related error frame was queued as a
     /// prebuilt forward toward the quoted packet's original source. NAT'd
     /// matches are reverse-translated; untranslated matches preserve the wire
@@ -45,13 +45,14 @@ pub(super) enum EmbeddedIcmpReversal {
     NotHandled,
 }
 
+
 /// Attempt the generic embedded-ICMP NAT reversal for a non-query ICMP error
 /// on the flowless poll path. Returns [`EmbeddedIcmpReversal`] telling the
 /// caller how the descriptor was consumed. Only invoked when
 /// `allow_embedded_icmp` is set AND the packet is classified as an ICMP error
 /// (both checked by the caller).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn try_reverse_embedded_icmp_error(
+pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     desc: XdpDesc,
     // #8271: the frame this function PARSES. On a native-GRE-decapped packet
     // this is the owned inner frame, NOT the raw UMEM frame `desc` points at.
@@ -147,6 +148,9 @@ pub(super) fn try_reverse_embedded_icmp_error(
     // with the finalized (possibly zone-stamped FabricRedirect) decision before
     // building the prebuilt frame.
     icmp_match.resolution = icmp_resolution;
+    if matches!(packet_ttl_would_expire(packet_frame, meta), Some(true)) {
+        return EmbeddedIcmpReversal::Dropped;
+    }
     let rewritten = match meta.addr_family as i32 {
         // #6474: an OUTBOUND error through source NAT takes the re-NAT
         // builders (external outer source + associable quote), never the

@@ -20,6 +20,7 @@ use crate::{
 };
 use super::tests_support::*;
 use crate::session::TunnelDiscriminator;
+use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 
 #[test]
 fn no_match_embedded_icmp_returns_none() {
@@ -508,6 +509,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     ha_state: BTreeMap<i32, HAGroupRuntime>,
     expect_denied: bool,
     expect_fabric_redirect: bool,
+    outer_ttl: u8,
 ) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
@@ -517,7 +519,11 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     let client_port: u16 = 12345;
 
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let mut frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    frame[14 + 8] = outer_ttl;
+    frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
+    let outer_csum = checksum16(&frame[14..34]);
+    frame[14 + 10..14 + 12].copy_from_slice(&outer_csum.to_be_bytes());
 
     let mut snapshot = if expect_fabric_redirect {
         nat_snapshot_with_fabric()
@@ -710,6 +716,32 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         0x18,
     ));
     let sessions_before = sessions.len();
+    if outer_ttl <= 1 {
+        let outcome = try_reverse_embedded_icmp_error(
+            XdpDesc {
+                addr: frame_offset as u64,
+                len: frame.len() as u32,
+                options: 0,
+            },
+            &frame,
+            meta,
+            0,
+            &mut sessions,
+            &worker_ctx,
+            &mut binding.scratch.scratch_forwards,
+            123_000_000_000,
+            123,
+            None,
+        );
+        assert!(
+            matches!(outcome, EmbeddedIcmpReversal::Dropped),
+            "matched TTL<=1 reversal must return an explicit terminal drop"
+        );
+        assert!(binding.scratch.scratch_forwards.is_empty());
+        return;
+    }
+
+
 
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
@@ -741,6 +773,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         &worker_ctx,
         &mut telemetry,
     );
+
     if expect_fabric_redirect {
         assert_eq!(
             binding.scratch.scratch_forwards.len(),
@@ -891,6 +924,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
         txn_ha_state(),
         false,
         false,
+        64,
     );
 }
 
@@ -904,6 +938,7 @@ fn poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948() {
         txn_ha_state(),
         true,
         false,
+        64,
     );
 }
 
@@ -916,6 +951,7 @@ fn poll_descriptor_embedded_icmp_reversal_ha_inactive_denies_9948() {
         inactive_ha_state(),
         true,
         false,
+        64,
     );
 }
 
@@ -929,8 +965,20 @@ fn poll_descriptor_embedded_icmp_reversal_fabric_redirect_passthrough_9948() {
         fabric_redirect_local_ha_state(),
         false,
         true,
+        64,
     );
 }
+#[test]
+fn poll_descriptor_same_family_reversal_ttl_one_is_dropped_10320() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
+        true,
+        txn_ha_state(),
+        false,
+        false,
+        1,
+    );
+}
+
 
 // ---------------------------------------------------------------------------
 // #6472: NAT64 (cross-family) ICMP error translation on the flowless arm.
