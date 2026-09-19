@@ -211,9 +211,9 @@ During parallel filing, #087 was transiently opened as #10441; after contract re
 
 ### GEMINI-049-064 — REFUTED
 
-**Claim/mechanism:** A dequeue/error path allegedly copies all 4096 queued frames or an unbounded payload into a temporary buffer. Current and base queue code copies the bounded tail payload as it drains; the relevant `VecDeque` operation retains only the one tail item needed for continuation.
+**Claim/mechanism:** `flushPendingCallbackFrames` does `copy(queue, queue[1:])` and then reslices without clearing the trailing element. That stale-pointer mechanism is present at base and current in both dequeue sites.
 
-**Measurement/consequence split:** The claimed MB-scale allocation is not present in the production path. Queue length and payload buffers are bounded by configured frame/MTU limits, so no unbounded allocation consequence was established.
+**Measurement/consequence split:** For a backing array `[A,B,C,D]`, successive left-shifts leave `[D,D,D,D]` after the queue drains: the stale references retain only the final frame's object graph, not all 4,096 payloads. The queue is capped and each payload is bounded, so at most one bounded frame remains retained until overwrite/reallocation; the claimed megabytes/unbounded RSS growth is not established. Refuted as a material memory-leak finding, while recording the mechanical zeroing improvement.
 
 ### GEMINI-049-068 — FILED #10436
 
@@ -259,9 +259,9 @@ During parallel filing, #087 was transiently opened as #10441; after contract re
 
 ### GEMINI-049-085 — FILED #10438
 
-**Claim/mechanism:** `pkg/api/nat.go:169-198` and `pkg/grpcapi/server_nat.go:33-63` set source NAT `Type` only for interface/pool actions. They omit `then source-nat off` and actionless/none states, and the structured fields contain no source-match rendering even though `pkg/natshow.SourceRuleAction` and `RuleMatchSource` provide the complete canonical view.
+**Claim/mechanism:** `pkg/api/nat.go:169-198` and `pkg/grpcapi/server_nat.go:33-63` set source NAT `Type` only for interface/pool actions. They omit `then source-nat off` and actionless/none states. The structured `NATSourceInfo` schemas also have no source-match field, but this filing does not treat that additive schema question as an independently proven regression.
 
-**Consequence:** REST/gRPC inspection cannot distinguish a configured NAT exemption from an incomplete/actionless rule and cannot report source match scope, impairing automation and security audits. The finding concerns observability, not dataplane enforcement. Filed as #10438 with acceptance for shared action rendering and complete source match data in both transports.
+**Consequence:** REST/gRPC inspection cannot distinguish a configured NAT exemption from an incomplete/actionless rule, impairing automation and security audits. The concrete defect is the empty action/type; it concerns observability, not dataplane enforcement. Filed as #10438 with acceptance for shared `SourceRuleAction` rendering of `off`, `interface`, `pool`, and `none`; any source-match schema extension requires a separate contract decision.
 
 ### GEMINI-049-086 — FILED #10437
 
@@ -307,7 +307,7 @@ During parallel filing, #087 was transiently opened as #10441; after contract re
 
 ## Verification record
 
-- The targeted temporary parser probe for #037 passed all three forms and was removed; no product-code or test-file change remains.
+- The scoped parser proof `TMPDIR=/home/ps/git/pi-xpf/.tmp-med go test ./pkg/config -run 'TestTheTwelveUndeclaredKeywordsHaveNoSilentDrop8807|TestFilterAction_NextTerm_CommitsAndMarks' -count=1` ran real tests and passed (`ok github.com/psaab/xpf/pkg/config 0.145s`).
 - Issue filing responses and URLs are recorded above; all nine open issues carry the required labels.
 - The transient #10441 for #087 was closed as not planned before this log was finalized.
 - No formatter, linter, project-wide build, or project-wide test suite was run in this lane. The parent lane owns final repository-wide validation.
