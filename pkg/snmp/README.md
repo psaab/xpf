@@ -112,6 +112,10 @@ views. The scopedPDU `contextEngineID` and `contextName` are decoded and the
 
 - **Default context** (empty `contextName`): served exactly as before —
   Get / GetNext / GetBulk return the real MIB objects. No behavior change.
+- **Context engine binding:** an empty `contextName` is the default view only
+  when the scopedPDU `contextEngineID` equals this agent's engine ID. A foreign
+  context engine is treated as an unknown/empty context and receives the same
+  fail-closed exceptions rather than local MIB values.
 - **Non-default context** (any non-empty `contextName`): there is no MIB view
   for that context, so per RFC 3413 the request yields no matching objects.
   Rather than leaking default-context data (an information-exposure /
@@ -183,9 +187,16 @@ the RFC 3414 §3.2 timeliness window as the authoritative engine:
   boots equals ours, and the request's time is within ±150 seconds of ours.
 - A request outside the window gets an **authenticated** Report PDU carrying
   `usmStatsNotInTimeWindows` (`1.3.6.1.6.3.15.1.1.2.0`) plus the agent's current
-  boots/time, never a data response. A manager whose cached boots/time drifted
-  (the legitimate case, e.g. after our restart bumped boots) reads the report
-  and resynchronizes; a replay simply gets nothing useful.
+  boots/time when its incoming reportable flag is set, never a data response.
+  If that flag is clear, the stale request is dropped without a reflected
+  response. A manager whose cached authoritative boots/time drifted (the
+  legitimate case, e.g. after our restart) reads the report and resynchronizes;
+  a replay simply gets nothing useful.
+- **Authoritative engine binding:** every non-discovery request must carry this
+  agent's `msgAuthoritativeEngineID`. A foreign ID gets the
+  `usmStatsUnknownEngineIDs` Report only when the incoming reportable flag is
+  set; otherwise it is dropped without reflecting a response. Empty `userName`
+  discovery remains the exception so a manager can learn this engine ID.
 - The engineID discovery handshake (empty `userName` →
   `usmStatsUnknownEngineIDs`, `1.3.6.1.6.3.15.1.1.4.0`) is unaffected: a manager
   still learns our engineID and current boots/time before its first
