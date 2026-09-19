@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/nfqueue"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
 func wiringHandles9506() []ipsecQueueHandle {
@@ -93,5 +96,183 @@ func TestRestoreIpsecCaptureRuntimeInvalidatesAuthorityAnnouncement9506(t *testi
 	}
 	if d.ipsecCapture != runtime || d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
 		t.Fatalf("restored daemon state = active=%p staged=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
+	}
+}
+
+type fakeIpsecReinjectSubmitter9506 struct {
+	announces int
+}
+
+func (f *fakeIpsecReinjectSubmitter9506) SubmitAdjudicated([]nfqueue.AdjudicatedFrame) ([]nfqueue.ReinjectAdmission, error) {
+	return nil, nil
+}
+
+func (f *fakeIpsecReinjectSubmitter9506) DrainReinjectCompletions(uint32) ([]nfqueue.ReinjectCompletion, error) {
+	return nil, nil
+}
+
+func (f *fakeIpsecReinjectSubmitter9506) CancelReinject([]uint64, uint64, []nfqueue.ReinjectQueueScope) ([]uint64, error) {
+	return nil, nil
+}
+
+func (f *fakeIpsecReinjectSubmitter9506) AnnounceReinject(uint64, bool, []nfqueue.ReinjectQueueEpoch) error {
+	f.announces++
+	return nil
+}
+
+func (f *fakeIpsecReinjectSubmitter9506) Close() error {
+	return nil
+}
+
+func TestReconcileIpsecCaptureRejectsStaleSampleAfterRestore9506(t *testing.T) {
+	supervisor := newIpsecSupervisor()
+	supervisor.permit.Store(&permitRecord{state: ipsecPermitOpen, permitEpoch: 17})
+	submitter := new(fakeIpsecReinjectSubmitter9506)
+	runtime := &ipsecCaptureRuntime{
+		supervisor: supervisor,
+		handles:    wiringHandles9506(),
+		submitter:  submitter,
+		announced:  true,
+	}
+	d := new(Daemon)
+	d.ipsecCapture = runtime
+	d.ipsecCaptureAuthorityRevision.Store(1)
+	sampled := make(chan struct{})
+	resume := make(chan struct{})
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- d.reconcileIpsecCaptureAuthorityWithHook(func() {
+			close(sampled)
+			<-resume
+		})
+	}()
+	<-sampled
+	d.restoreIpsecCaptureRuntime(runtime)
+	close(resume)
+	if err := <-reconcileDone; err != nil {
+		t.Fatal(err)
+	}
+	runtime.authorityMu.Lock()
+	announced := runtime.announced
+	runtime.authorityMu.Unlock()
+	if announced {
+		t.Fatal("stale reconcile re-announced restored authority")
+	}
+	if submitter.announces != 0 {
+		t.Fatalf("stale reconcile sent %d authority announcements", submitter.announces)
+	}
+}
+
+func TestIpsecCapturePublicationSerializesOverlappingTransitions9506(t *testing.T) {
+	oldRuntime := &ipsecCaptureRuntime{}
+	newRuntime := &ipsecCaptureRuntime{}
+	d := &Daemon{ipsecCapture: oldRuntime}
+	done := make(chan struct{}, 2)
+	go func() {
+		for range 256 {
+			d.publishIpsecCaptureCommitted(newRuntime)
+			d.restoreIpsecCaptureRuntime(oldRuntime)
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for range 256 {
+			d.restoreIpsecCaptureRuntime(newRuntime)
+			d.publishIpsecCaptureCommitted(oldRuntime)
+		}
+		done <- struct{}{}
+	}()
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	for range 2 {
+		select {
+		case <-done:
+		case <-timeout.C:
+			t.Fatal("overlapping capture publications deadlocked")
+		}
+	}
+	d.ipsecCaptureMu.Lock()
+	current := d.ipsecCapture
+	revision := d.ipsecCaptureAuthorityRevision.Load()
+	d.ipsecCaptureMu.Unlock()
+	if current != oldRuntime && current != newRuntime {
+		t.Fatalf("final capture runtime=%p, want one of %p/%p", current, oldRuntime, newRuntime)
+	}
+	if revision < 512 {
+		t.Fatalf("publication revision=%d, want at least 512", revision)
+	}
+}
+
+func stagedIpsecCaptureRuntime9506(t *testing.T) *ipsecCaptureRuntime {
+	t.Helper()
+	actor, err := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{
+		Supervisor: newIpsecSupervisor(),
+		Registry:   new(nfqueue.OriginRegistry),
+		Pipeline:   nfqueue.CapturePipelineConfig{Phase: nfqueue.PipelineQuarantine},
+	})
+	if err != nil {
+		t.Fatalf("NewIpsecCapturePipeline: %v", err)
+	}
+	return &ipsecCaptureRuntime{actor: actor}
+}
+
+func TestCommitIpsecCaptureStageRemoveFailureUsesNftInstaller9506(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{
+		divertRemove: func() error { return errors.New("remove failed") },
+	}
+	nftInstaller = fake
+	old := &ipsecCaptureRuntime{}
+	d := &Daemon{ipsecCapture: old, ipsecCaptureStagePending: true}
+	if err := d.commitIpsecCaptureStage(old, nil); err == nil {
+		t.Fatal("remove failure was swallowed")
+	}
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "remove" {
+		t.Fatalf("divert calls=%v, want one remove", fake.divertCalls)
+	}
+	if d.ipsecCapture != old || d.ipsecCaptureStagePending {
+		t.Fatalf("daemon state after remove failure = active=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStagePending)
+	}
+}
+
+func TestCommitIpsecCaptureStageInstallFailureUsesNftInstaller9506(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{
+		divertInstall: func(xnft.IpsecDivertSpec) error { return errors.New("install failed") },
+	}
+	nftInstaller = fake
+	staged := stagedIpsecCaptureRuntime9506(t)
+	d := &Daemon{ipsecCaptureStaged: staged, ipsecCaptureStagePending: true}
+	if err := d.commitIpsecCaptureStage(nil, staged); err == nil {
+		t.Fatal("install failure was swallowed")
+	}
+	if len(fake.divertCalls) != 1 || fake.divertCalls[0] != "install" {
+		t.Fatalf("divert calls=%v, want one install", fake.divertCalls)
+	}
+	if d.ipsecCapture != nil || d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
+		t.Fatalf("daemon state after install failure = active=%p staged=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
+	}
+}
+
+func TestCommitIpsecCaptureStageActorStartFailureRestoresDivert9506(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := new(fakeNftInstaller)
+	nftInstaller = fake
+	staged := stagedIpsecCaptureRuntime9506(t)
+	if err := staged.actor.Start(); err != nil {
+		t.Fatalf("pre-start actor: %v", err)
+	}
+	d := &Daemon{ipsecCaptureStaged: staged, ipsecCaptureStagePending: true}
+	if err := d.commitIpsecCaptureStage(nil, staged); err == nil {
+		t.Fatal("actor start failure was swallowed")
+	}
+	if len(fake.divertCalls) != 2 || fake.divertCalls[0] != "install" || fake.divertCalls[1] != "remove" {
+		t.Fatalf("divert calls=%v, want install then remove", fake.divertCalls)
+	}
+	if d.ipsecCapture != nil || d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
+		t.Fatalf("daemon state after actor failure = active=%p staged=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
 	}
 }
