@@ -59,19 +59,24 @@
 //! never tracked, so it never trips) and a **Cold-Start Eviction Race** (a
 //! victim ramping 0→threshold is the coldest entry and gets evicted/reset
 //! before it can cross). The CMS has NO eviction and NO per-key slot: every key
-//! is ALWAYS counted in its `ROWS` cells, which only ever INCREASE within the
-//! sliding window (a colliding key ADDS to a cell, never resets it). So a
-//! victim's own flood drives all `ROWS` of its cells up monotonically and it
-//! ALWAYS trips, regardless of arrival order or colliding traffic.
+//! is ALWAYS mapped to its `ROWS` cells. `RateCounter` cells retain their
+//! count-all sliding-window semantics, so their event counts only increase
+//! during a window and a victim's own flood drives all rows over threshold.
+//! Flood `TokenBucket` cells are different: refill makes their state decrease,
+//! and the flood sketch therefore uses an all-row prepare/commit transaction.
+//! A flood event is admitted only when EVERY selected row has a token, then
+//! all rows consume one token atomically; a phase-staggered set of rows cannot
+//! multiply the configured sustained rate.
 //!
 //! ### Fail-CLOSED collision bias
 //!
 //! Collisions can only OVER-estimate a key's rate (another hot key sharing a
-//! cell inflates it), never under-estimate. The CMS therefore never produces a
-//! false-negative (it never lets a real flood through). Its only error is a
-//! false-POSITIVE: a legitimate key whose `ROWS` cells ALL collide with hot keys
-//! is throttled. That probability is `~(load)^ROWS`, driven below noise by
-//! `ROWS = 4`. For a security rate limiter, over-count is the correct bias.
+//! cell consumes capacity), never under-estimate it. Both cell types therefore
+//! fail closed: a real flood cannot evade its selected rows, while a
+//! legitimate key may be throttled when collisions exhaust every row. The
+//! flood sketch's atomic token transaction additionally bounds the sustained
+//! admitted rate to the configured threshold (apart from its configured burst
+//! capacity). For a security rate limiter, over-count is the correct bias.
 //!
 //! ### Per-source saturation under spoofing
 //!
@@ -126,11 +131,22 @@ use std::net::IpAddr;
 /// (`now_secs` for the SYN sketches, the batch-cached `loop_now_ns` for the
 /// flood sketches).
 pub(super) trait SketchCell: Clone + Default {
-    /// Charge one event against this cell; return `true` when the key is OVER
-    /// LIMIT (drop) and `false` when admitted — the `true == drop` polarity the
-    /// count-min AND-reduction expects. The event is charged in every row cell
-    /// (the count-min side effect) whatever the verdict.
+    /// Charge one event against this cell; return `true` when the key is
+    /// OVER LIMIT (drop) and `false` when admitted.
     fn charge(&mut self, now: u64, threshold: u32) -> bool;
+
+    /// Whether this cell participates in the two-phase all-row admission
+    /// transaction used by flood sketches (#10319).
+    const ATOMIC_ADMIT: bool = false;
+
+    /// Prepare one admission without consuming it. The default preserves the
+    /// existing single-cell semantics for count-all `RateCounter` sketches.
+    fn prepare_admit(&mut self, now: u64, threshold: u32) -> bool {
+        !self.charge(now, threshold)
+    }
+
+    /// Commit a prepared admission. Count-all cells have no second phase.
+    fn commit_admit(&mut self) {}
 }
 
 impl SketchCell for RateCounter {
@@ -143,11 +159,22 @@ impl SketchCell for RateCounter {
 impl SketchCell for TokenBucket {
     #[inline]
     fn charge(&mut self, now_ns: u64, threshold: u32) -> bool {
-        // The token bucket consumes a token only on ADMIT: a rejected packet
-        // OBSERVES capacity but does not charge it (the #5805 fix — a sustained
-        // at-threshold destination is never starved by its own rejected
-        // packets, unlike `RateCounter`'s count-all window).
+        // The single-cell API retains consume-on-admit semantics for the
+        // aggregate flood bucket and test seams. The sketch itself uses the
+        // all-row transaction below.
         self.admit_is_over(now_ns, threshold)
+    }
+
+    const ATOMIC_ADMIT: bool = true;
+
+    #[inline]
+    fn prepare_admit(&mut self, now_ns: u64, threshold: u32) -> bool {
+        TokenBucket::prepare_admit(self, now_ns, threshold)
+    }
+
+    #[inline]
+    fn commit_admit(&mut self) {
+        TokenBucket::commit_admit(self)
     }
 }
 
@@ -254,20 +281,38 @@ impl<C: SketchCell> SynRateSketch<C> {
     /// `now` is the cell's clock unit — `now_secs` for a `RateCounter` sketch,
     /// the batch-cached `loop_now_ns` for a `TokenBucket` sketch.
     ///
-    /// Every row cell is charged (the count-min side effect MUST happen in all
-    /// rows even when an earlier row is already under threshold), then the
-    /// per-row over-threshold results are AND-ed: the key trips ⟺ ALL rows
-    /// report over-threshold (= `min` over rows > threshold). `&=` here is the
-    /// non-short-circuiting bitwise-and assignment, so it never skips a row's
-    /// `charge`.
+    /// Count-all cells retain their historical non-short-circuiting AND
+    /// semantics. Flood cells use a two-phase transaction: every selected
+    /// row must have a token before any row consumes one (#10319).
     pub(super) fn increment(&mut self, ip: &IpAddr, now: u64, threshold: u32) -> bool {
-        let mut over_all = true;
-        for row in 0..ROWS {
-            let idx = self.cell_index(row, ip);
-            let over = self.rows[row][idx].charge(now, threshold);
-            over_all &= over;
+        let mut indices = [0usize; ROWS];
+        for (row, slot) in indices.iter_mut().enumerate() {
+            *slot = self.cell_index(row, ip);
         }
-        over_all
+        self.increment_indices(indices, now, threshold)
+    }
+
+    /// Apply one event to a set of row cells. `true` means drop.
+    fn increment_indices(&mut self, indices: [usize; ROWS], now: u64, threshold: u32) -> bool {
+        if C::ATOMIC_ADMIT {
+            let mut all_admit = true;
+            for (row, &idx) in indices.iter().enumerate() {
+                all_admit &= self.rows[row][idx].prepare_admit(now, threshold);
+            }
+            if all_admit {
+                for (row, &idx) in indices.iter().enumerate() {
+                    self.rows[row][idx].commit_admit();
+                }
+            }
+            !all_admit
+        } else {
+            let mut over_all = true;
+            for (row, &idx) in indices.iter().enumerate() {
+                let over = self.rows[row][idx].charge(now, threshold);
+                over_all &= over;
+            }
+            over_all
+        }
     }
 
     /// Cell index for `(ip, port)` in row `row`: the seeded per-row hash of the
@@ -289,9 +334,7 @@ impl<C: SketchCell> SynRateSketch<C> {
 
     /// Count one packet for `(ip, port)` and report whether it is over
     /// `threshold`. Mirrors `increment` but keys on the L4 destination port too
-    /// — the UDP per-destination-port flood cap (#4112 F18). Every row cell is
-    /// still charged (non-short-circuiting AND), so the count-min side effect
-    /// happens in all rows. `now` is the cell's clock unit (see `increment`).
+    /// — the UDP per-destination-port flood cap (#4112 F18).
     pub(super) fn increment_ip_port(
         &mut self,
         ip: &IpAddr,
@@ -299,13 +342,11 @@ impl<C: SketchCell> SynRateSketch<C> {
         now: u64,
         threshold: u32,
     ) -> bool {
-        let mut over_all = true;
-        for row in 0..ROWS {
-            let idx = self.cell_index_ip_port(row, ip, port);
-            let over = self.rows[row][idx].charge(now, threshold);
-            over_all &= over;
+        let mut indices = [0usize; ROWS];
+        for (row, slot) in indices.iter_mut().enumerate() {
+            *slot = self.cell_index_ip_port(row, ip, port);
         }
-        over_all
+        self.increment_indices(indices, now, threshold)
     }
 
     /// Total cell capacity (`ROWS * cols`). Test seam to assert no growth under a
@@ -323,6 +364,24 @@ impl<C: SketchCell> SynRateSketch<C> {
             *slot = self.cell_index(row, ip);
         }
         out
+    }
+
+    /// The `ROWS` cell indices `(ip, port)` maps to. Test seam for the
+    /// #10319 port-keyed desync cell (mirrors `cell_indices`).
+    #[cfg(test)]
+    pub(super) fn cell_indices_ip_port(&self, ip: &IpAddr, port: u16) -> [usize; ROWS] {
+        let mut out = [0usize; ROWS];
+        for (row, slot) in out.iter_mut().enumerate() {
+            *slot = self.cell_index_ip_port(row, ip, port);
+        }
+        out
+    }
+
+    /// Charge one selected cell at a caller-provided time. Test seam for
+    /// constructing phase-staggered token buckets without collider search.
+    #[cfg(test)]
+    pub(super) fn charge_cell(&mut self, row: usize, col: usize, now: u64, threshold: u32) {
+        self.rows[row][col].charge(now, threshold);
     }
 
     /// Directly drive a specific `(row, col)` cell over `threshold`, simulating
