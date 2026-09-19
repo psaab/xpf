@@ -429,9 +429,12 @@ func readSyncLeasesViaMemfile(path string, family int, now time.Time) ([]SyncLea
 				l.PrefixLen = a.PrefixLen
 			}
 		} else {
-			hw, cid := splitV4Identity(a.Identity)
-			l.HWAddress = hw
-			l.ClientID = cid
+			// The memfile parser retains client-id and hwaddr separately.
+			// Identity is the DDNS owner key and intentionally remains
+			// client-id-preferred, so it cannot be used as a lossless
+			// transport for the two v4 fields (#10428).
+			l.HWAddress = a.HWAddress
+			l.ClientID = a.ClientID
 		}
 		rem := a.Expire - now.Unix()
 		if a.Expire == 0 {
@@ -457,19 +460,6 @@ func readSyncLeasesViaMemfile(path string, family int, now time.Time) ([]SyncLea
 		out = append(out, l)
 	}
 	return out, nil
-}
-
-// splitV4Identity inverts identity4 ("cid:.."/"mac:..") back into the Kea
-// fields. The memfile parser collapsed client-id/hwaddr into one keyed string;
-// we recover whichever was present so lease4-add gets a usable identity.
-func splitV4Identity(identity string) (hwaddr, clientID string) {
-	switch {
-	case strings.HasPrefix(identity, "cid:"):
-		return "", strings.TrimPrefix(identity, "cid:")
-	case strings.HasPrefix(identity, "mac:"):
-		return strings.TrimPrefix(identity, "mac:"), ""
-	}
-	return "", ""
 }
 
 // keaLeaseTypeToString maps the numeric Kea memfile lease_type column to the
