@@ -353,7 +353,12 @@ const (
 	// v25 -> v26 STANDS (#10196): WireGuard changes the meaning of the existing
 	// transport_table value; the ConfigSnapshot field set and this shape golden
 	// remain unchanged, but old helpers must be fenced before they install it.
-	snapshotShapeVersion8892 = 26
+	// v26 -> v27 BUMPED (#9522): the ConfigSnapshot field set and this shape
+	// golden remain unchanged, but `learned_route_import_capped` changed
+	// disposition meaning. A v26 helper still delegates capped NoRoute frames;
+	// v27 adjudicates and denies them. The protocol version must move even
+	// without a snapshot-shape change so exact equality refuses that pairing.
+	snapshotShapeVersion8892 = 27
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

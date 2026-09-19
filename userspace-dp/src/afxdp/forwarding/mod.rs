@@ -156,31 +156,43 @@ pub(in crate::afxdp) fn noroute_policy_denial(
     }
 }
 
-/// #9054: `noroute_policy_denial` with the one precondition its soundness
-/// depends on made explicit.
+/// #9522: the `NoRoute` adjudication entry point.
 ///
 /// `noroute_policy_denial` answers "does the operator's policy deny this?" and
-/// #7480's arm acts on the answer by DROPPING. That is right only while
-/// `NoRoute` carries information — i.e. while the helper FIB is a
-/// near-complete mirror of the kernel's, so a destination missing from it is
-/// genuinely unroutable.
+/// the NoRoute arm acts on the answer by DROPPING. That is the only safe
+/// disposition now: #9054's capped-import exception restored kernel
+/// delegation above the learned-route cap, but that made every kernel-routable
+/// destination the helper did not import eligible for transit with no zone
+/// policy, session, NAT or screen. #9522 owns that tradeoff and removes the
+/// exception. A capped route miss and an uncapped route miss take this exact
+/// same policy path.
 ///
-/// The #8355 learned-route cap suspends that. Above ~65,000 kernel routes the
-/// daemon declines the ENTIRE learned-route import rather than a subset, so
-/// every dynamically learned destination resolves `NoRoute` for a reason that
-/// has nothing to do with the destination. Adjudicating there does not fail
-/// closed; it black-holes the whole dynamic FIB, and #8355's own operator log
-/// line asserted the opposite ("traffic still forwards through the kernel"),
-/// so the first diagnostic an operator reads points away from the cause.
+/// The `ForwardingState` argument remains explicit because the caller's
+/// runtime state carries the cap flag and the helper status reports it. The
+/// flag is diagnostic state only; it is NOT a disposition predicate. Keeping
+/// the entry point shared makes that contract visible and prevents a future
+/// capped-only delegation fork from bypassing #7480 again.
 ///
-/// So when the snapshot says the import was withheld, this returns `None` and
-/// the frame keeps the pre-#7480 slow-path delegation. Nothing else changes:
-/// an uncapped snapshot takes the identical path it took before.
+/// Returns `Some(result)` when the flow is DENIED and the caller must downgrade
+/// the disposition to `PolicyDenied`; `None` when it is permitted and the
+/// kernel delegation stands.
 ///
-/// The gate is a wrapper rather than an `if` in the caller because the caller
-/// (`poll_binding_process_descriptor`'s `NoRoute` arm) is not drivable from any
-/// in-crate test — `slow_path_admit_single_site_6664.rs` guards it by reading
-/// source. A function is testable; an inline branch there would not have been.
+/// `ports` carries the flow-backed vs flowless distinction in ONE place:
+///   * `Some((src, dst))` — a real flow. Evaluated with its ports and
+///     `l4_present = true`, so a port-bearing permit term still matches and a
+///     permitted flow is not over-gated into a false drop.
+///   * `None` — a flowless packet (non-first fragment / no L4). Evaluated with
+///     ports 0 and `l4_present = false`, so port-bearing terms fail CLOSED while
+///     address/protocol/`any` terms still match. Parity with the #3291 flowless
+///     ForwardCandidate gate and the #4024 MissingNeighbor arm.
+///
+/// Both `NoRoute` constructors in `fib.rs` set `egress_ifindex: 0`, so the
+/// caller normally resolves `to_zone_id = 0` — the #3110 unzoned sentinel.
+/// #3110 makes a flow with an unknown egress zone ineligible for BOTH
+/// zone-pair policies and `junos-global`, so every NoRoute evaluation falls
+/// through to the DEFAULT action. A default-deny box therefore drops a capped
+/// or uncapped NoRoute frame identically; an explicit permit rule for the
+/// ingress zone pair does NOT rescue it.
 pub(in crate::afxdp) fn noroute_policy_denial_gated(
     forwarding: &ForwardingState,
     from_zone_id: u16,
@@ -192,9 +204,9 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated(
     policy_icmp: Option<(u8, u8)>,
     packet_len: u64,
 ) -> Option<crate::policy::PolicyEvaluationResult> {
-    if forwarding.learned_route_import_capped {
-        return None;
-    }
+    // The cap is deliberately not consulted here. It remains in
+    // ForwardingState for the published diagnostic and metrics, while every
+    // NoRoute frame is adjudicated fail-closed by the same predicate.
     noroute_policy_denial(
         &forwarding.policy,
         from_zone_id,

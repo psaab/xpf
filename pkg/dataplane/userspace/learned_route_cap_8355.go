@@ -85,25 +85,16 @@ func LearnedRouteCapHits() uint64 { return learnedRouteCapHits.Load() }
 //
 // THE DECISION: DEGRADE TO NO IMPORT, never a bounded subset.
 //
-// #9054 CORRECTED THE PREMISE THIS ARGUMENT RESTED ON. What follows used to
-// open by asserting that neither option was an outage because the kernel kept
-// forwarding, and that had been false since #7480 landed: a NoRoute frame is
-// adjudicated against the
-// #3110 unzoned egress sentinel, no zone-pair or junos-global permit can match
-// it, and the DEFAULT action decides — deny on a Junos-default box. So the
-// degradation this function chose was not "slower", it was a silent total
-// blackhole of the dynamic FIB, with a log line telling the operator the
-// opposite.
+// #9522 owns the disposition above the cap. The old #9054 exception restored
+// kernel delegation for NoRoute while the flag was set, but that made every
+// kernel-routable destination the helper did not import eligible for transit
+// with no zone policy, session, NAT or screen — a permitted-by-absence path
+// that does not exist under an uncapped import. The helper now adjudicates
+// capped NoRoute frames exactly as uncapped ones and the NoRoute arm drops a
+// denied result as PolicyDenied.
 //
-// The cap itself is unchanged and the reasoning below still holds; what changed
-// is that the snapshot now CARRIES the fact (ConfigSnapshot.
-// LearnedRouteImportCapped), and the helper restores the slow-path delegation
-// for NoRoute while the flag is set. That makes "the kernel still forwards"
-// true again rather than merely asserted.
-//
-// Both options leave some destinations resolving `NoRoute` in the helper FIB
-// and taking the slow-path reinject. They differ in PREDICTABILITY, and that is
-// the whole argument:
+// The cap itself is unchanged and the reasoning for declining the ENTIRE
+// import still holds:
 //
 //   - NO IMPORT is uniform. Every learned destination behaves the same way,
 //     the box is in one describable state, and an operator can reason about it
@@ -117,14 +108,15 @@ func LearnedRouteCapHits() uint64 { return learnedRouteCapHits.Load() }
 //     can state, and it presents as intermittent performance rather than as a
 //     limit being hit.
 //
-// The second is the shape this project keeps being bitten by: a degraded state
-// that looks healthy from every surface. A partial FIB reports a plausible
-// route count, forwards traffic, and gives no signal at all that it is a
-// prefix of the intended table.
+// This deliberately accepts the availability cost of dropping capped NoRoute
+// frames on a deny-default box. Kernel-assisted adjudication and a chunked
+// route verb were considered in #9522 and plan-killed for lack of an ordering
+// and atomicity proof. Until one of those designs has a complete contract, a
+// silent kernel delegation is the security defect this cap must not recreate.
 //
-// LOUD, because the issue is right that silently importing a prefix of the
-// table is the failure that reads as healthy. The log names the count, the cap
-// and the consequence rather than saying "cap exceeded"; the counter makes it
+// LOUD, because silently importing a prefix of the table is the failure that
+// reads as healthy. The log names the count, cap, fail-closed consequence and
+// protocol pairing; the cap counter plus policy-denial counter make the state
 // readable without log scraping.
 func learnedRouteCapExceeded(count int) bool {
 	limit := maxLearnedRoutes()
@@ -137,11 +129,11 @@ func learnedRouteCapExceeded(count int) bool {
 		"cap", limit,
 		"publish_budget", learnedRoutePublishBudget.String(),
 		"bytes_per_route", learnedRouteBytesEach,
-		"consequence", "the helper FIB keeps its config-derived routes only; every LEARNED destination resolves NoRoute. The snapshot carries learned_route_import_capped, so while capped the helper DELEGATES those frames to the kernel instead of adjudicating them (#7480) — traffic forwards through the kernel, not on the AF_XDP fast path. On a helper older than snapshot protocol 10 the snapshot is REFUSED outright rather than applied, because such a helper would drop them (#9054)",
-		"security_note", "while capped, a NoRoute frame reaches the kernel FIB without zone-policy adjudication — the #6664 delegation #7480 narrowed. The kernel FIB is still the authority, so a destination with no kernel route is still dropped; but a permitted-by-absence path exists that does not exist under an uncapped import",
+		"consequence", "the helper FIB keeps its config-derived routes only; every LEARNED destination resolves NoRoute. Capped NoRoute frames are ADJUDICATED and DROPPED as policy denials on a deny-default box; xpf_policy_denies_total counts them and xpf_learned_route_import_capped reports the capped state. On a helper older than snapshot protocol 27 the snapshot is REFUSED outright rather than applied (#9522)",
+		"security_note", "the capped state no longer delegates NoRoute to the kernel: the #7480 policy adjudication applies above and below the cap, and only a PolicyAction::Permit result keeps the normal slow-path delegation. A kernel-routable destination cannot transit by absence of a userspace route",
 		"why_not_partial", "a bounded subset would be selected by emission sort order, making fast-path eligibility per-destination and unpredictable rather than a state an operator can describe",
 		"remedy", "reduce the imported table (filter what FRR installs into the kernel), or raise the publish budget if holding the control socket that long is acceptable",
-		"observability", "xpf_userspace_binding_slow_path_no_route_packets_total advances for the delegated frames; under the pre-#9054 behaviour it stayed flat while the frames were dropped as policy denials instead",
+		"observability", "xpf_learned_route_cap_hits_total counts the refused import; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for every capped NoRoute frame denied by policy",
 	)
 	return true
 }

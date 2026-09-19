@@ -119,13 +119,15 @@ const (
 	// WHEN THE OLD BEHAVIOUR IS THE DEFECT THE FIELD WAS ADDED TO FIX. For
 	// those, the version bump IS the mechanism that refuses the pairing, and
 	// skipping it removes the only signal.
-	// v10 (issue 9054): `learned_route_import_capped`. The #8355 cap declines
-	// the whole learned-route import above ~65k routes and its diagnostic said
-	// "traffic still forwards through the kernel"; #7480 had already made a
-	// NoRoute frame drop on a default-deny box, so the composition is a silent
-	// total blackhole of the dynamic FIB. The flag tells the helper the FIB it
-	// just received is deliberately incomplete so it delegates NoRoute to the
-	// kernel again while capped.
+	// v10 (issue 9054) introduced `learned_route_import_capped`. #8355's cap
+	// declines the whole learned-route import above ~65k routes. #7480 had
+	// already made a NoRoute frame drop on a default-deny box, so #9054 made
+	// the flag restore delegation to avoid a silent dynamic-FIB blackhole.
+	// #9522 re-owns that tradeoff in the fail-closed direction: the helper
+	// adjudicates capped NoRoute frames exactly as uncapped ones, and only a
+	// policy Permit result keeps the normal slow-path delegation. The field's
+	// meaning changed while its JSON bytes stayed the same, so v27 fences old
+	// helpers that would still delegate.
 	//
 	// BUMPED, per the rule the v9 note above records: an old helper that
 	// ignores the field keeps the pre-#9054 behaviour, and the pre-#9054
@@ -314,7 +316,12 @@ const (
 	// outer UDP socket is bound to `vrf-<instance>` via SO_BINDTODEVICE. An
 	// old Rust helper would accept the same snapshot but keep that socket in
 	// the main table, reopening #9909's containment escape.
-	ProtocolVersion = 26
+	// v26 -> v27 (#9522): `learned_route_import_capped` keeps the same JSON
+	// field, but its disposition changed. A v26 helper still restores kernel
+	// delegation for capped NoRoute frames; v27 adjudicates them and drops a
+	// policy denial. Exact equality must refuse the mixed pairing or an old
+	// helper preserves the #9054 security bypass.
+	ProtocolVersion = 27
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -580,33 +587,23 @@ type ConfigSnapshot struct {
 	// helper decodes a missing field as false and an old Go binary that does not
 	// emit it leaves the Rust flag false.
 	// LearnedRouteImportCapped says the #8355 learned-route cap DECLINED this
-	// build's kernel-route import (#9054). It is not telemetry — the helper
-	// changes its NoRoute disposition on it.
+	// build's kernel-route import (#9054). It is diagnostic state, not a
+	// disposition override: #9522 makes the NoRoute policy predicate identical
+	// above and below the cap. A denied result becomes PolicyDenied and is
+	// dropped/counts as a policy denial; only a policy Permit result keeps the
+	// ordinary slow-path delegation.
 	//
-	// WHY IT HAS TO BE ON THE WIRE. #7480 made a NoRoute frame get adjudicated
-	// against the #3110 unzoned egress sentinel, which no zone-pair or
-	// junos-global permit can match, so the verdict is the DEFAULT action —
-	// deny on a Junos-default box — and the frame is dropped instead of
-	// delegated to the kernel. That is sound while the helper FIB is a
-	// near-complete mirror of the kernel's, because NoRoute then really does
-	// mean "no route exists". When the #8355 cap declines the import WHOLESALE
-	// it stops meaning that and starts meaning "the daemon did not tell you",
-	// and dropping on a signal that carries no information is not fail-closed,
-	// it is just closed: every learned destination black-holes. #8355's own
-	// log line and acceptance text asserted the opposite ("traffic still
-	// forwards through the kernel"), which is the premise #7480 had already
-	// inverted.
+	// WHY IT STAYS ON THE WIRE. The helper status and Prometheus gauge need to
+	// report the published capped state, and the NoRoute diagnostics need to
+	// explain why the helper route set is incomplete. The flag is also the
+	// explicit input to the v26 -> v27 mixed-version fence: a v26 helper would
+	// still restore delegation while a v27 helper adjudicates, even though the
+	// JSON bytes are identical.
 	//
-	// The helper therefore restores the pre-#7480 slow-path delegation for
-	// NoRoute — and ONLY while this flag is set, and only for frames that
-	// resolve NoRoute. It returns to adjudication on the next publish whose
-	// table fits.
-	//
-	// NOT skew-tolerant, and that is deliberate: a helper that ignores this
-	// field keeps black-holing, which IS the defect the field was added to fix.
-	// ProtocolVersion is bumped to 10 alongside it so a mismatched pairing is
-	// REFUSED loudly rather than silently reverting to the blackhole — the rule
-	// recorded in the v9 note above.
+	// The snapshot is therefore NOT skew-tolerant. ProtocolVersion 27 refuses a
+	// mismatched pairing rather than silently preserving the #9054 kernel
+	// bypass. A v26 helper is not allowed to apply a snapshot whose capped
+	// NoRoute meaning it would interpret differently.
 	LearnedRouteImportCapped bool `json:"learned_route_import_capped,omitempty"`
 
 	DefaultLogSessionInit  bool                         `json:"default_log_session_init,omitempty"`

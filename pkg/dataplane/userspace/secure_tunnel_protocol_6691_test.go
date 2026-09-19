@@ -127,10 +127,12 @@ const preSecureTunnelProtocolVersion = 4
 // Issue #10018 moves it 24 -> 25 for the persistent-NAT control-socket
 // RoutingScope field. Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again.
-// Issue #10196 moves it 25 -> 26 for WireGuard's named transport-table
-// binding semantics. The snapshot field set and secure-tunnel golden remain
-// unchanged, but an old helper would place the outer socket in inet.0.
-const secureTunnelSnapshotProtocolVersion = 26
+// Issue #9522 moves it 26 -> 27 because the existing
+// `learned_route_import_capped` field changes the NoRoute disposition:
+// v26 delegates capped misses, while v27 adjudicates and denies them. Nothing
+// about secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) remains
+// untouched again.
+const secureTunnelSnapshotProtocolVersion = 27
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

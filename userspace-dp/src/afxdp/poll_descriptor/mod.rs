@@ -5769,25 +5769,20 @@ pub(super) fn poll_binding_process_descriptor(
                             // drops. That is the intended fix and it is
                             // availability-visible on upgrade.
                             //
-                            // #9054 BOUNDS THAT — in `noroute_policy_denial_gated`,
-                            // which returns None (delegate) whenever the snapshot
-                            // says the daemon WITHHELD the kernel route table.
+                            // #9522 supersedes #9054's capped-import exception:
+                            // `noroute_policy_denial_gated` no longer returns
+                            // None merely because the daemon WITHHELD the
+                            // kernel route table. The cap flag is diagnostic
+                            // state only; capped and uncapped NoRoute frames
+                            // take the same policy path.
                             //
-                            // This is not a softening of #7480. The paragraph above
-                            // justifies adjudicating rather than delegating on the
-                            // grounds that the divergence window is NARROW — a route
-                            // learned between two coalesced republishes. That
-                            // argument needs `NoRoute` to mean "there is no route",
-                            // which holds only while this FIB is a near-complete
-                            // mirror of the kernel's. The #8355 learned-route cap
-                            // breaks exactly that premise: above ~65k routes the
-                            // daemon declines the ENTIRE import, `NoRoute` starts
-                            // meaning "the daemon did not tell you", and dropping on
-                            // a signal that carries no information black-holes the
-                            // whole dynamic FIB — while #8355's own log line told
-                            // the operator traffic still forwarded through the
-                            // kernel. The delegation is restored for precisely that
-                            // state and closes on the first publish that fits.
+                            // Above the #8355 cap the daemon declines the
+                            // ENTIRE learned-route import, so `NoRoute` can
+                            // mean "the daemon did not tell you". #9522 owns
+                            // that availability tradeoff in the fail-closed
+                            // direction: a denied result is downgraded to
+                            // PolicyDenied and never reaches the kernel. Only
+                            // a policy Permit result keeps slow-path delegation.
                             //
                             // Flow-backed vs flowless mirrors #3291/#4024: a real flow
                             // is evaluated with its ports and `l4_present = true`, so a

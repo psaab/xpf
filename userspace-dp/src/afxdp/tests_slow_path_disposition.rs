@@ -1052,11 +1052,11 @@ fn syn_cookie_counters_hot_path_accumulate_in_batch() {
 
 
 // #6664: NextTableUnsupported is DROPPED by the filtered wrapper and counted,
-// and NoRoute still DELEGATES. Both halves are asserted in one test against
-// the same harness because the failure this guards against is not "the deny
-// does not work" -- it is "the deny was applied to the wrong disposition", and
-// only the pair can see that. A change that denied both would satisfy a
-// deny-only test.
+// while a NoRoute whose policy result is Permit still DELEGATES. Both halves
+// are asserted in one test against the same harness because the failure this
+// guards against is not "the deny does not work" -- it is "the deny was
+// applied to the wrong disposition", and only the pair can see that. A change
+// that denied both would satisfy a deny-only test.
 //
 // The two dispositions produce OPPOSITE counter signatures, which is what
 // makes the assertions mutation-sensitive:
@@ -1068,7 +1068,7 @@ fn syn_cookie_counters_hot_path_accumulate_in_batch() {
 // Restoring NextTableUnsupported to the allow-list flips it onto the second
 // signature and reds on an assertion rather than on a build error.
 #[test]
-fn next_table_unsupported_is_dropped_and_counted_no_route_still_delegates_6664() {
+fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates_6664() {
     struct Case {
         disposition: ForwardingDisposition,
         filtered: bool,
@@ -1172,10 +1172,11 @@ fn next_table_unsupported_is_dropped_and_counted_no_route_still_delegates_6664()
             );
             assert_eq!(
                 slow_path_drops, 1,
-                "{disposition:?} must still DELEGATE: it proceeds past the allow-list \
-                 and is only dropped here because this harness has no reinjector. If \
-                 this is 0 the packet was filtered out, i.e. NoRoute stopped being \
-                 slow-path eligible -- the #7409 black-hole regression.",
+                "{disposition:?} must still DELEGATE: it is a permit-result NoRoute \
+                 and proceeds past the allow-list, then is only dropped here because \
+                 this harness has no reinjector. If this is 0 the packet was filtered \
+                 out, i.e. an uncapped/permit NoRoute stopped being slow-path eligible \
+                 -- the #7409 black-hole regression.",
             );
             assert!(
                 exception_seen,
