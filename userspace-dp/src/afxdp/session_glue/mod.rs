@@ -977,7 +977,7 @@ const FORWARD_EXPORT_CANDIDATE_SLICE: usize = 2048;
 
 /// #2442: the filter half of `export_forward_sessions_for_owner_rgs`. Walks the
 /// table via the #9856 budgeted export cursor (epoch ≤ kick + owner-RG set)
-/// and returns the export candidates (forward, locally-owned,
+/// and returns the export candidates (forward, locally-held,
 /// forwarding-disposition sessions) WITHOUT pushing any delta. Both callers
 /// re-emit through the SAME `chunked_drain_as_you_export!` macro in
 /// `worker::loop_body` (#2653): the `ExportOwnerRGSessions` command path (now
@@ -1030,7 +1030,8 @@ pub(crate) fn forward_export_candidates_for_owner_rgs(
 // so a worker owning more sessions than the 4096-slot ring never overflows it
 // mid-export. The unbounded helper is retained only as a test fixture that
 // drives the candidate-selection walk directly (forward yes, reverse /
-// peer-synced / transient-seed / fabric-ingress no), hence `#[cfg(test)]`.
+// worker-local-replica / transient-seed / TUN-origin no; fabric-ingress is
+// authoritative and included), hence `#[cfg(test)]`.
 #[cfg(test)]
 pub(crate) fn export_forward_sessions_for_owner_rgs(
     sessions: &mut SessionTable,

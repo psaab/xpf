@@ -432,10 +432,11 @@ pub(crate) enum SessionOrigin {
     ///
     /// Node-local, never crosses HA: excluded from bulk export, live-Open,
     /// Close, and Update-announce (see `is_local_tun_origin` callers), so a
-    /// peer can never hold TUN-derived state. NOT peer-synced (local
-    /// provenance: demote flips it to `SyncImport`, fail-closed) and NOT
-    /// promotable (promotion would re-tag the marker away; a TUN forward
-    /// HIT keeps its origin). Materialize/replica preserve it.
+    /// peer can never hold TUN-derived state. NOT peer-synced: demotion
+    /// preserves this provenance while the demotion marker fences export, and
+    /// reactivation does not retag it. NOT promotable (promotion would re-tag
+    /// the marker away; a TUN forward HIT keeps its origin). Materialize/replica
+    /// preserve it.
     TunOrigin,
 }
 

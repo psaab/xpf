@@ -470,12 +470,13 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
 /// - policy_counter_idx == 0: self-originated runs no policy match (#6224).
 ///
 /// Lifecycle notes: TUN-origin never promotes (refused — promotion would
-/// re-tag the marker away) and a demote flips it to `SyncImport`
-/// (fail-closed: judged/gated thereafter). Every other origin —
-/// ForwardFlow/ReverseFlow (MISS installs, the spoof-plant shape),
-/// SyncImport/SharedMaterialize/WorkerLocalImport/SharedPromote (HA-synced
-/// family, incl. the legacy alias), LocalMiss/seeds (transient local) —
-/// fails closed.
+/// re-tag the marker away), and demotion preserves its node-local provenance.
+/// Transient local seeds likewise remain local through demotion and refresh;
+/// their origin predicates and demotion markers keep them out of HA export.
+/// Every other origin — ForwardFlow/ReverseFlow (MISS installs, the spoof-plant
+/// shape), SyncImport/SharedMaterialize/WorkerLocalImport/SharedPromote
+/// (HA-synced family, incl. the legacy alias), and LocalMiss — follows the
+/// normal policy revalidation gates.
 pub(super) fn tun_origin_forward(
     decision: &SessionDecision,
     metadata: &SessionMetadata,

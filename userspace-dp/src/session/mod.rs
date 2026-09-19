@@ -1110,6 +1110,10 @@ pub(crate) struct SessionTable {
     l3_reverse_index: SeededL3ReverseIndex,
     /// #964 Step 1: owner-RG sets keyed by handle (was Key).
     owner_rg_sessions: FxHashMap<i32, FxHashSet<u32>>,
+    /// RGs demoted during the current ownership epoch. The owner-RG index is
+    /// retained for transition scans, so the export walk needs this separate
+    /// authority bit to reject stale same-RG bulk requests until activation.
+    demoted_owner_rgs: FxHashSet<i32>,
     deltas: VecDeque<SessionDelta>,
     last_gc_ns: u64,
     max_sessions: usize,
@@ -1383,6 +1387,14 @@ impl SessionTable {
     pub(crate) fn pptp_mut(&mut self) -> &mut crate::session::pptp::PptpAssociations {
         &mut self.pptp
     }
+    /// Clear demotion markers when the requested owner RGs become active again.
+    pub(crate) fn activate_owner_rgs(&mut self, owner_rgs: &[i32]) {
+        for owner_rg_id in owner_rgs {
+            if *owner_rg_id > 0 {
+                self.demoted_owner_rgs.remove(owner_rg_id);
+            }
+        }
+    }
 
     pub fn new() -> Self {
         // #2364: the per-boot, per-process secret seed for the
@@ -1420,6 +1432,7 @@ impl SessionTable {
             // allocated u32 handles — neither is the hash-flood surface, so
             // it stays on the default FxHasher (#2364 scope note).
             owner_rg_sessions: FxHashMap::default(),
+            demoted_owner_rgs: FxHashSet::default(),
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
@@ -3194,9 +3207,10 @@ impl SessionTable {
         let entry = &record.entry;
         if kind == RemovalKind::Terminal {
             if !entry.metadata.is_reverse
-                && !entry.origin.is_peer_synced()
+                && !self.demoted_owner_rgs.contains(&entry.metadata.owner_rg_id)
+                && entry.origin != SessionOrigin::WorkerLocalImport
                 && !entry.origin.is_transient_local_seed()
-                && !entry.metadata.fabric_ingress
+                && !entry.origin.is_local_tun_origin()
                 && matches!(
                     entry.decision.resolution.disposition,
                     ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect

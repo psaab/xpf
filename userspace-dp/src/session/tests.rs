@@ -2697,6 +2697,209 @@ fn demote_owner_rg_marks_forward_and_reverse_entries_synced() {
 }
 
 #[test]
+fn demote_reactivate_tun_stays_local_10402() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let now = 1_000_000_000u64;
+    let mut metadata = metadata();
+    metadata.owner_rg_id = 1;
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        metadata,
+        SessionOrigin::TunOrigin,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+
+    let candidates = |table: &SessionTable| {
+        crate::afxdp::forward_export_candidates_for_owner_rgs(table, &[1], u64::MAX)
+    };
+    assert!(
+        candidates(&table).is_empty(),
+        "TUN-origin rows must be local before demotion"
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&key)
+            .expect("TUN row before demotion")
+            .2,
+        SessionOrigin::TunOrigin
+    );
+
+    assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
+    assert!(
+        candidates(&table).is_empty(),
+        "demotion must not make TUN-origin state exportable"
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&key)
+            .expect("TUN row after demotion")
+            .2,
+        SessionOrigin::TunOrigin
+    );
+
+    table.activate_owner_rgs(&[1]);
+    assert!(
+        candidates(&table).is_empty(),
+        "reactivation must not leak preserved TUN-origin state"
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&key)
+            .expect("TUN row after reactivation")
+            .2,
+        SessionOrigin::TunOrigin
+    );
+}
+
+#[test]
+fn demotion_marker_clears_on_owner_rg_activation_10317() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let now = 1_000_000_000u64;
+    let mut metadata = metadata();
+    metadata.owner_rg_id = 1;
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        metadata,
+        SessionOrigin::ForwardFlow,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+
+    let candidates = |table: &SessionTable| {
+        crate::afxdp::forward_export_candidates_for_owner_rgs(table, &[1], u64::MAX)
+    };
+    assert_eq!(
+        candidates(&table).len(),
+        1,
+        "active owner RG should export its local authoritative row"
+    );
+    assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
+    assert!(
+        candidates(&table).is_empty(),
+        "demoted owner RG must stay out of deferred bulk candidates"
+    );
+
+    table.activate_owner_rgs(&[1]);
+    assert_eq!(
+        candidates(&table).len(),
+        1,
+        "owner-RG activation must clear the marker even without row scans"
+    );
+}
+
+#[test]
+fn demote_reactivate_transient_seeds_stay_local_10402() {
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let seed_key = SessionKey {
+        src_port: 42427,
+        ..key_v4()
+    };
+    let mut seed_metadata = metadata();
+    seed_metadata.owner_rg_id = 1;
+    assert!(table.install_with_protocol_with_origin(
+        seed_key.clone(),
+        decision(),
+        seed_metadata.clone(),
+        SessionOrigin::MissingNeighborSeed,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let punt_key = SessionKey {
+        src_port: 42428,
+        ..key_v4()
+    };
+    let mut punt_metadata = metadata();
+    punt_metadata.owner_rg_id = 0;
+    assert!(table.install_with_protocol_with_origin(
+        punt_key.clone(),
+        decision(),
+        punt_metadata,
+        SessionOrigin::FabricPuntSeed,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+
+    let candidates = |table: &SessionTable, owner_rgs: &[i32]| {
+        crate::afxdp::forward_export_candidates_for_owner_rgs(table, owner_rgs, u64::MAX)
+    };
+    assert!(
+        candidates(&table, &[1]).is_empty(),
+        "MissingNeighborSeed must be excluded before demotion"
+    );
+    assert!(
+        candidates(&table, &[0]).is_empty(),
+        "owner-0 FabricPuntSeed must be excluded by transient provenance"
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&seed_key)
+            .expect("seed before demotion")
+            .2,
+        SessionOrigin::MissingNeighborSeed
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&punt_key)
+            .expect("punt seed before demotion")
+            .2,
+        SessionOrigin::FabricPuntSeed
+    );
+
+    assert_eq!(table.demote_owner_rg(1), vec![seed_key.clone()]);
+    assert!(
+        candidates(&table, &[1]).is_empty(),
+        "demotion must not make MissingNeighborSeed exportable"
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&seed_key)
+            .expect("seed after demotion")
+            .2,
+        SessionOrigin::MissingNeighborSeed
+    );
+
+    table.activate_owner_rgs(&[1]);
+    assert!(
+        table.refresh_for_ha_transition(
+            &seed_key,
+            decision(),
+            seed_metadata,
+            now + 1_000_000,
+        ),
+        "HA transition refresh must refresh the held seed"
+    );
+    assert!(
+        candidates(&table, &[1]).is_empty(),
+        "origin-preserving HA transition refresh must not export a transient seed"
+    );
+    assert_eq!(
+        table
+            .entry_with_origin(&seed_key)
+            .expect("seed after refresh")
+            .2,
+        SessionOrigin::MissingNeighborSeed
+    );
+    assert!(candidates(&table, &[0]).is_empty());
+    assert_eq!(
+        table
+            .entry_with_origin(&punt_key)
+            .expect("punt seed after reactivation")
+            .2,
+        SessionOrigin::FabricPuntSeed
+    );
+}
+
+#[test]
 fn demote_owner_rg_returns_synced_entries_for_transition_refresh() {
     let mut table = SessionTable::new();
     let now = 1_000_000_000u64;
@@ -9270,5 +9473,142 @@ fn expiry_over_capacity_tick_with_full_ring_loses_no_close_10309() {
     assert_eq!(
         overflow_closes, N,
         "every expiry Close spills when the tick starts with a full ring"
+    );
+}
+
+/// #10317: the authoritative bulk must be built from HELD sessions, not
+/// originated ones. A survivor holding imported-not-yet-hit (SyncImport),
+/// materialized (SharedMaterialize + fabric_ingress), fabric-promoted
+/// (SharedPromote + fabric_ingress), and split-RG fabric-ingress authoritative
+/// (ForwardFlow + fabric_ingress) sessions must re-export all four — otherwise
+/// a rebooted peer never learns them and a holding peer DELETES them at
+/// BulkEnd. Transient seeds, TUN-origin, reverse, and worker-local replicas
+/// stay out.
+#[test]
+fn bulk_export_includes_held_imported_promoted_and_fabric_ingress_10317() {
+    let mut table = SessionTable::new();
+    let mk_key = |port: u16| SessionKey {
+        src_port: port,
+        ..key_v4()
+    };
+    // (a) imported-not-yet-hit: peer wire import, never hit since failover.
+    let key_import = mk_key(41001);
+    assert!(table.install_with_protocol_with_origin(
+        key_import.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::SyncImport,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    // (b) fabric-promoted: synced hit promoted on a fabric-ingress packet.
+    let key_promoted = mk_key(41002);
+    let mut md_promoted = metadata();
+    md_promoted.fabric_ingress = true;
+    assert!(table.install_with_protocol_with_origin(
+        key_promoted.clone(),
+        decision(),
+        md_promoted,
+        SessionOrigin::SharedPromote,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    // (c) fabric-materialized: peer session materialized on a fabric-ingress
+    // hit, still authoritative for the owner RG.
+    let key_materialized = mk_key(41003);
+    let mut md_materialized = metadata();
+    md_materialized.fabric_ingress = true;
+    assert!(table.install_with_protocol_with_origin(
+        key_materialized.clone(),
+        decision(),
+        md_materialized,
+        SessionOrigin::SharedMaterialize,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    // (d) split-RG fabric-ingress authoritative: locally forwarding, arrived via fabric.
+    let key_fabric = mk_key(41004);
+    let mut md_fabric = metadata();
+    md_fabric.fabric_ingress = true;
+    assert!(table.install_with_protocol_with_origin(
+        key_fabric.clone(),
+        decision(),
+        md_fabric,
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    // Controls that must stay out: TUN-origin (node-local), transient seed,
+    // reverse, and worker-local replica (authoritative copy exports once).
+    let key_tun = mk_key(41005);
+    assert!(table.install_with_protocol_with_origin(
+        key_tun.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::TunOrigin,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let key_seed = mk_key(41006);
+    assert!(table.install_with_protocol_with_origin(
+        key_seed.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::MissingNeighborSeed,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let key_rev = mk_key(41007);
+    let mut md_rev = metadata();
+    md_rev.is_reverse = true;
+    assert!(table.install_with_protocol_with_origin(
+        key_rev.clone(),
+        decision(),
+        md_rev,
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let key_replica = mk_key(41008);
+    assert!(table.install_with_protocol_with_origin(
+        key_replica.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::WorkerLocalImport,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let got = crate::afxdp::forward_export_candidates_for_owner_rgs(&table, &[1], u64::MAX);
+    let keys: Vec<_> = got.iter().map(|(k, _, _, _)| k.clone()).collect();
+    assert!(
+        keys.contains(&key_import),
+        "#10317 RED: imported-not-yet-hit SyncImport omitted from authoritative bulk"
+    );
+    assert!(
+        keys.contains(&key_promoted),
+        "#10317 RED: fabric-promoted SharedPromote omitted from authoritative bulk"
+    );
+    assert!(
+        keys.contains(&key_materialized),
+        "#10317 RED: fabric-materialized SharedMaterialize omitted from authoritative bulk"
+    );
+    assert!(
+        keys.contains(&key_fabric),
+        "#10317 RED: split-RG fabric-ingress ForwardFlow omitted from authoritative bulk"
+    );
+    assert!(!keys.contains(&key_tun), "TUN-origin must stay node-local");
+    assert!(!keys.contains(&key_seed), "transient seeds must stay unexported");
+    assert!(!keys.contains(&key_rev), "reverse entries must stay out of the forward bulk");
+    assert!(
+        !keys.contains(&key_replica),
+        "worker-local replicas must not duplicate the authoritative export"
     );
 }

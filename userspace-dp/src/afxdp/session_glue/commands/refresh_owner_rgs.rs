@@ -31,6 +31,7 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
     if !owner_rgs.iter().any(|owner_rg_id| *owner_rg_id > 0) {
         return false;
     }
+    sessions.activate_owner_rgs(&owner_rgs);
 
     let refresh = collect_refresh_owner_rgs_items(
         sessions,

@@ -807,6 +807,7 @@ impl SessionTable {
         if owner_rg_id <= 0 {
             return Vec::new();
         }
+        self.demoted_owner_rgs.insert(owner_rg_id);
         let mut demoted_keys = Vec::new();
         for key in self.owner_rg_session_keys(&[owner_rg_id]) {
             let Some(entry) = self.entry_by_key_mut(&key) else {
@@ -815,9 +816,17 @@ impl SessionTable {
             // #3122: an in-place demote local→synced is count-neutral for a
             // counted logical session. WorkerLocalImport is not a demotion
             // target and remains excluded by the shared predicate.
+            // #10402 P2/round2: TunOrigin and transient local seeds never flip
+            // to SyncImport — with held SyncImport now bulk-exported, a
+            // demote→reactivate cycle would otherwise leak node-local state
+            // (TUN-derived rows) or authoritative-looking held state (a
+            // neighbor-resolved MissingNeighborSeed) to the peer. Both stay
+            // node-local, and their origins remain excluded from HA export.
             let old_origin = entry.origin;
             let is_reverse = entry.metadata.is_reverse;
-            let will_flip = !old_origin.is_peer_synced();
+            let will_flip = !old_origin.is_peer_synced()
+                && !old_origin.is_local_tun_origin()
+                && !old_origin.is_transient_local_seed();
             if will_flip {
                 entry.origin = SessionOrigin::SyncImport;
             }

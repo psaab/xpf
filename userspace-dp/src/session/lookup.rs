@@ -975,9 +975,8 @@ impl SessionTable {
     /// (via `metadata.owner_rg_id`, which the index key always equals —
     /// every index mutation pairs with the metadata write: install,
     /// update/refresh reindex, remove; demote touches neither), forward,
-    /// locally-owned, non-seed, non-fabric-ingress, disposition in
-    /// {ForwardCandidate, FabricRedirect}.
-    ///
+    /// locally-held, non-seed, non-worker-replica, non-TUN-origin,
+    /// disposition in {ForwardCandidate, FabricRedirect}.
     /// Unlike the refresh/sweep precedents, resumption is EXACT for the
     /// stated set, not deliberately approximate: a slot reused below the
     /// cursor holds a new incarnation with a higher epoch, so the epoch
@@ -1008,11 +1007,13 @@ impl SessionTable {
                 if !owner_rgs.contains(&entry.metadata.owner_rg_id) {
                     continue;
                 }
+                if self.demoted_owner_rgs.contains(&entry.metadata.owner_rg_id) {
+                    continue;
+                }
                 if entry.metadata.is_reverse
-                    || entry.origin.is_peer_synced()
+                    || entry.origin == SessionOrigin::WorkerLocalImport
                     || entry.origin.is_transient_local_seed()
                     || entry.origin.is_local_tun_origin()
-                    || entry.metadata.fabric_ingress
                 {
                     continue;
                 }
