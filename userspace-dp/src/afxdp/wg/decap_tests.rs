@@ -55,6 +55,11 @@ fn inner_v4(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
 /// Wrap `record` in Ethernet + IPv4 + UDP, as it arrives on the underlay.
 fn outer_frame(record: &[u8], dst_port: u16) -> Vec<u8> {
     let mut f = vec![0u8; 14 + 20 + 8 + record.len()];
+    // #10314: the poll-loop path validates the Ethernet destination against
+    // the underlay's configured MAC before it reaches tunnel decap. Keep this
+    // hermetic frame shaped like a real frame; an all-zero unicast destination
+    // is PACKET_OTHERHOST and would be recycled before #8274 runs.
+    f[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
     f[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
     f[14] = 0x45;
     let ip_total = (20 + 8 + record.len()) as u16;
@@ -1416,6 +1421,9 @@ fn drive_spoofed_plain_10038(
     // Exact-size wrap (byte-identical to `inner_flow_key`): the frame parser
     // validates against the IP-declared length, so padding breaks the parse.
     let mut frame = vec![0u8; 14 + inner.len()];
+    // #10314: same MAC-guard repair as `outer_frame` — an all-zero unicast
+    // destination is PACKET_OTHERHOST and would be recycled pre-L3.
+    frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
     frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
     frame[14..].copy_from_slice(inner);
     // From `wiring_meta` (same fence/generation/rx fields as every working

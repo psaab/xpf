@@ -47,21 +47,19 @@ pub(in crate::afxdp) struct WorkerHandle {
 
 pub(in crate::afxdp) struct LocalTunnelSourceHandle {
     pub(in crate::afxdp) stop: Arc<AtomicBool>,
-    /// #2412: the GRE local-origin thread blocks in poll(2) on this
-    /// eventfd. After setting `stop`, the join paths signal it so the
-    /// thread wakes immediately instead of waiting for the poll cap.
-    /// `None` for the WG control thread (it polls its UDP socket with its
-    /// own timeout cap and has no eventfd).
+    /// #2412/#10409: local-origin threads block in poll(2) on this eventfd.
+    /// After setting `stop`, join paths signal it so the thread wakes
+    /// immediately instead of waiting for the poll cap. WG control threads
+    /// also use it for worker-to-TUN local-delivery wakeups.
     pub(in crate::afxdp) wake: Option<Arc<TunnelWake>>,
     pub(in crate::afxdp) join: Option<JoinHandle<()>>,
 }
 
 impl LocalTunnelSourceHandle {
-    /// #2412: request stop and wake the thread's poll(2). Set `stop`
-    /// first so the woken thread observes it on its next stop-check, then
-    /// signal the eventfd so a thread blocked in poll exits immediately
-    /// rather than after the poll cap. The WG control thread has no
-    /// eventfd (`wake == None`); it relies on its own poll cap as before.
+    /// #2412/#10409: request stop and wake the thread's poll(2). Set
+    /// `stop` first so the woken thread observes it on its next stop-check,
+    /// then signal the eventfd so a thread blocked in poll exits immediately
+    /// rather than after the poll cap. Both GRE and WG handles use this wake.
     pub(in crate::afxdp) fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(wake) = &self.wake {
@@ -122,6 +120,10 @@ pub(crate) struct WgControlEntry {
         Option<std::sync::Arc<crate::afxdp::wg::endpoint_resolver::WgEndpointResolverTelemetry>>,
     /// Live (or finished-but-unswept) thread handle. `None` = tombstone.
     pub(in crate::afxdp) handle: Option<LocalTunnelSourceHandle>,
+    /// Delivery endpoint for the current WG control-thread spawn. Worker
+    /// local-delivery packets are queued here and written to the persistent
+    /// wgN TUN by that thread; publication is restricted to live handles.
+    pub(in crate::afxdp) delivery_tx: Option<LocalTunnelDelivery>,
     /// Address of the `Arc<WgEngine>` the thread was last spawned with.
     /// Kept outside `handle` so tombstones retain identity: the
     /// apply-time stale prune detects identity changes on tombstones

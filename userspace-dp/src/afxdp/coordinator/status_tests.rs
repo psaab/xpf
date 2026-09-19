@@ -529,6 +529,7 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
         ID,
         WgControlEntry {
             handle: None,
+            delivery_tx: None,
             engine_ptr: 0,
             spawned_ifindex: 41,
             spawned_tunnel_name: "wg0".into(),

@@ -67,6 +67,55 @@ pub(super) fn wg_poll_wait(socket_fd: i32, tun_fd: i32, timeout_ms: i32) -> Poll
     PollWait::Ready
 }
 
+/// Block in poll(2) on {socket, tun, wake} POLLIN. The wake fd is the
+/// worker-to-WG local-delivery eventfd; it is optional so the legacy test
+/// seam can continue to exercise the two-fd loop.
+pub(super) fn wg_poll_wait_with_wake(
+    socket_fd: i32,
+    tun_fd: i32,
+    wake_fd: i32,
+    timeout_ms: i32,
+) -> PollWait {
+    let mut fds = [
+        libc::pollfd {
+            fd: socket_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: tun_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let rc = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout_ms) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return PollWait::Ready;
+        }
+        return PollWait::Fatal("poll_failed");
+    }
+    if rc == 0 {
+        return PollWait::Idle;
+    }
+    if fds[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return PollWait::Fatal("tun_revents");
+    }
+    if fds[0].revents & libc::POLLNVAL != 0 {
+        return PollWait::Fatal("socket_pollnval");
+    }
+    if fds[2].revents & libc::POLLNVAL != 0 {
+        return PollWait::Fatal("wake_pollnval");
+    }
+    PollWait::Ready
+}
+
 /// Clamp the next timer deadline into a poll(2) timeout in ms
 /// (explicit ns->ms conversion, capped at WG_POLL_CAP_MS).
 pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {

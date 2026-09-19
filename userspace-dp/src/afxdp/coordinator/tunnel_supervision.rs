@@ -185,9 +185,19 @@ impl super::Coordinator {
     /// live handles only (tombstones and failed spawns never publish),
     /// minus `exclude` (the pass-2 stale set, for the
     /// unpublish-before-join store #1).
-    fn publish_local_tunnel_deliveries_excluding(&self, exclude: &[u16]) {
+    /// #1881/#10409: publish local-delivery endpoints from live GRE and WG
+    /// control threads. Tombstones and failed spawns never publish.
+    pub(super) fn publish_local_tunnel_deliveries_excluding(&self, exclude: &[u16]) {
         let mut map: BTreeMap<i32, LocalTunnelDelivery> = BTreeMap::new();
         for (id, entry) in self.tunnel_sources.iter() {
+            if exclude.contains(id) || entry.handle.is_none() {
+                continue;
+            }
+            if let Some(delivery) = entry.delivery_tx.as_ref() {
+                map.insert(entry.spawned_ifindex, delivery.clone());
+            }
+        }
+        for (id, entry) in self.wg_control_threads.iter() {
             if exclude.contains(id) || entry.handle.is_none() {
                 continue;
             }
@@ -542,7 +552,7 @@ impl super::Coordinator {
     /// which live in sibling files of this module after the split.
     pub(super) fn spawn_wg_control_threads(&mut self) {
         self.sweep_finished_wg_control_threads();
-
+        self.publish_local_tunnel_deliveries_excluding(&[]);
         // Current WG engines keyed by id, with their Arc address identity.
         let mut desired: BTreeMap<u16, usize> = BTreeMap::new();
         for endpoint in self.forwarding.tunnel_endpoints.values() {
@@ -621,6 +631,8 @@ impl super::Coordinator {
                 stale.push((*id, reason));
             }
         }
+        let stale_ids: Vec<u16> = stale.iter().map(|(id, _)| *id).collect();
+        self.publish_local_tunnel_deliveries_excluding(&stale_ids);
         self.stop_remove_wg_control_entries(stale);
 
         // Spawn pass (apply-time only — the periodic sweep never creates
@@ -640,6 +652,7 @@ impl super::Coordinator {
             }
             self.spawn_one_wg_control_thread(id);
         }
+        self.publish_local_tunnel_deliveries_excluding(&[]);
     }
 
     /// #1866 pass 1: join threads that already exited and tombstone
@@ -664,6 +677,7 @@ impl super::Coordinator {
                         let _ = join.join();
                     }
                 }
+                entry.delivery_tx = None;
                 eprintln!(
                     "xpf-userspace-dp: WG control thread exited endpoint={id} tun={} — tombstoned (respawn if still configured)",
                     entry.spawned_tunnel_name
@@ -680,6 +694,8 @@ impl super::Coordinator {
     /// Used by every multi-entry stop path (stale-prune, stop-all,
     /// deferred snapshot prune).
     fn stop_remove_wg_control_entries(&mut self, batch: Vec<(u16, &str)>) {
+        let stale_ids: Vec<u16> = batch.iter().map(|(id, _)| *id).collect();
+        self.publish_local_tunnel_deliveries_excluding(&stale_ids);
         let mut removed: Vec<(u16, &str, super::LocalTunnelSourceHandle, String)> = Vec::new();
         for (id, reason) in batch {
             if let Some(mut entry) = self.wg_control_threads.remove(&id) {
@@ -703,13 +719,13 @@ impl super::Coordinator {
             );
         }
     }
-
     /// #1866 pass 2 helper: stop + join + REMOVE one entry (live thread
     /// or tombstone). The only place entries leave the map besides
     /// `stop_inner` and the defer-branch snapshot prune. Single-entry
     /// callers only; multi-entry paths use the bulk signal-then-join
     /// helper above.
     fn stop_remove_wg_control_entry(&mut self, id: u16, reason: &str) {
+        self.publish_local_tunnel_deliveries_excluding(&[id]);
         if let Some(mut entry) = self.wg_control_threads.remove(&id) {
             if let Some(mut handle) = entry.handle.take() {
                 handle.request_stop();
@@ -912,17 +928,49 @@ impl super::Coordinator {
             .and_then(|e| e.resolver_telemetry.clone())
             .unwrap_or_default();
         let thread_resolver_telemetry = Arc::clone(&resolver_telemetry);
-        // #10038: TUN-origin session-publish handles — the same live handles
-        // the GRE local-tunnel source threads receive (`spawn_one_local_tunnel_source`),
-        // minus worker_commands (shared-only publish by design) and minus the
-        // GRE-only delivery plumbing. All live Arcs, no spawn-time snapshots,
-        // so no #2921-style restart gate is needed for them.
+        // #10038/#10409: TUN-origin session-publish handles and the live
+        // local-delivery channel. The WG control loop receives the same
+        // session handles as GRE and additionally owns its queue/wake pair;
+        // all are live Arcs with no spawn-time snapshots, so no #2921-style
+        // restart gate is needed for them.
         let thread_ha_state = self.ha.rg_runtime.clone();
         let thread_dynamic_neighbors = self.neighbors.dynamic.clone();
         let thread_shared_sessions = self.sessions.synced.clone();
         let thread_shared_nat_sessions = self.sessions.nat.clone();
         let thread_shared_forward_wire_sessions = self.sessions.forward_wire.clone();
         let thread_shared_owner_rg_indexes = self.sessions.owner_rg_indexes.clone();
+        let (delivery_tx_raw, delivery_rx) =
+            std::sync::mpsc::sync_channel(LOCAL_TUNNEL_DELIVERY_QUEUE_DEPTH);
+        let delivery_wake = match TunnelWake::new() {
+            Ok(wake) => Arc::new(wake),
+            Err(err) => {
+                eprintln!(
+                    "xpf-userspace-dp: WG control thread spawn FAILED endpoint={id}: delivery wake: {err}"
+                );
+                self.wg_control_threads.insert(
+                    id,
+                    WgControlEntry {
+                        handle: None,
+                        delivery_tx: None,
+                        engine_ptr,
+                        spawned_kernel_transport: kernel_transport,
+                        spawned_ifindex,
+                        spawned_tunnel_name: tunnel_name,
+                        spawned_outer_mtu: outer_mtu,
+                        spawned_outer_bind_device: outer_bind_device,
+                        spawned_per_peer_outer_mtu: per_peer_outer_mtu,
+                        last_spawn_attempt_ns: monotonic_nanos(),
+                        resolver_telemetry: Some(resolver_telemetry),
+                    },
+                );
+                return;
+            }
+        };
+        let delivery = LocalTunnelDelivery {
+            tx: delivery_tx_raw,
+            wake: delivery_wake.clone(),
+        };
+        let thread_delivery_wake = delivery_wake.clone();
         eprintln!(
             "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} device={outer_bind_device:?} kernel_transport={kernel_transport:?}"
         );
@@ -950,15 +998,17 @@ impl super::Coordinator {
                     thread_shared_nat_sessions,
                     thread_shared_forward_wire_sessions,
                     thread_shared_owner_rg_indexes,
+                    delivery_rx,
+                    thread_delivery_wake,
                 );
             },
         );
         let handle = match join {
             Ok(join) => Some(LocalTunnelSourceHandle {
                 stop,
-                // #2412: the WG control thread polls its UDP socket with
-                // its own timeout cap and has no delivery eventfd.
-                wake: None,
+                // Worker local-delivery enqueue wakes the WG control loop
+                // immediately; stop also signals the same eventfd.
+                wake: Some(delivery_wake.clone()),
                 join: Some(join),
             }),
             Err(err) => {
@@ -974,10 +1024,12 @@ impl super::Coordinator {
                 None
             }
         };
+        let delivery_tx = handle.as_ref().map(|_| delivery);
         self.wg_control_threads.insert(
             id,
             WgControlEntry {
                 handle,
+                delivery_tx,
                 engine_ptr,
                 spawned_kernel_transport: kernel_transport,
                 spawned_ifindex,
@@ -1010,6 +1062,7 @@ impl super::Coordinator {
         latest_snapshot: Option<&crate::ConfigSnapshot>,
     ) {
         self.sweep_finished_wg_control_threads();
+        self.publish_local_tunnel_deliveries_excluding(&[]);
         let Some(snapshot) = latest_snapshot else {
             return;
         };
@@ -1033,6 +1086,7 @@ impl super::Coordinator {
             self.spawn_one_wg_control_thread(id);
             break; // ≤1 spawn attempt per invocation
         }
+        self.publish_local_tunnel_deliveries_excluding(&[]);
     }
 
     /// #1866: whether a tombstone respawn for `id` is coherent — the
