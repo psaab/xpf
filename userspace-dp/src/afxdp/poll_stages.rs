@@ -1409,7 +1409,7 @@ pub(super) fn reinject_ipsec_passthrough(
     worker_ctx: &WorkerContext,
 ) -> bool {
     let ipsec_decision = ipsec_passthrough_decision();
-    maybe_reinject_slow_path_from_frame(
+    maybe_reinject_slow_path_from_frame_with_outlet(
         &worker_ctx.ident,
         binding_live,
         worker_ctx.slow_path,
@@ -1417,7 +1417,7 @@ pub(super) fn reinject_ipsec_passthrough(
         packet_frame,
         meta,
         ipsec_decision,
-        false,
+        SlowPathOutlet::Adjudicated,
         worker_ctx.recent_exceptions,
         "slow_path",
         worker_ctx.forwarding,

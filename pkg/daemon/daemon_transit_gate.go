@@ -107,20 +107,21 @@ const armedTransitReinjectIfname = "xpf-usp1"
 // armedTransitFenceSpec resolves the only ingress pinholes permitted while
 // armed:
 //   - tracked runtime XDP links whose kernel names still resolve;
-//   - the daemon-owned delegated slow-path TUN xpf-usp1, when the live link is
-//     a TUN under the fixed name.
+//   - the daemon-owned xpf-usp1 delegated slow-path TUN, but only when the
+//     queue classifier has set the adjudicated skb mark.
 //
-// xpf-usp1 is a deliberately documented residual: the delegated outlet
-// multiplexes xfrm/reinject traffic and destination-judged delegated traffic,
-// which are indistinguishable at the FORWARD hook by iifname today. xpf-usp0
-// is LocalDelivery/gated-only and is not a FORWARD pinhole.
+// xpf-usp1 is a deliberate residual: both adjudicated xfrm reinjects and
+// delegated traffic arrive with the same iifname. The queue-index classifier
+// marks only the adjudicated queue; the fence always requires the interface
+// and exact mark conjunction. xpf-usp0 is LocalDelivery/gated-only and is not
+// a FORWARD pinhole.
 //
 // Missing capability, an unknown ifindex alongside another resolved ifindex, or
 // a mismatched link type all produce fewer pinholes, never a broader one. If
 // every supplied tracked ifindex is unknown, or kernel link enumeration fails,
 // arming is fatal and leaves the gate closed. Direct route-based IPsec plaintext
 // arrives on its daemon-owned xfrmi and remains absent from the allowlist;
-// kernel-XFRM reinjection instead arrives through xpf-usp1.
+// kernel-XFRM reinjection instead arrives through the marked xpf-usp1 queue.
 func (d *Daemon) armedTransitFenceSpec() (xnft.ForwardFenceSpec, error) {
 	var ifindexes []int
 	if src, ok := d.dataplane().(attachedXDPIfindexSource); ok && src != nil {
@@ -140,7 +141,8 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 	if err != nil {
 		return xnft.ForwardFenceSpec{}, fmt.Errorf("resolve armed transit fence interfaces: %w", err)
 	}
-	names := make([]string, 0, len(tracked)+1)
+	names := make([]string, 0, len(tracked))
+	marked := make([]xnft.ForwardFenceMark, 0, 1)
 	resolvedTracked := false
 	for _, link := range links {
 		if link == nil || link.Attrs() == nil {
@@ -148,7 +150,9 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 		}
 		attrs := link.Attrs()
 		if _, ok := tracked[attrs.Index]; ok {
-			names = append(names, attrs.Name)
+			if attrs.Name != armedTransitReinjectIfname {
+				names = append(names, attrs.Name)
+			}
 			delete(tracked, attrs.Index)
 			resolvedTracked = true
 		}
@@ -157,7 +161,11 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 		}
 		tun, ok := link.(*netlink.Tuntap)
 		if ok && tun.Mode == netlink.TUNTAP_MODE_TUN {
-			names = append(names, attrs.Name)
+			marked = append(marked, xnft.ForwardFenceMark{
+				Ifname: attrs.Name,
+				Mark:   xnft.AdjudicatedTransitMark,
+				Mask:   xnft.AdjudicatedTransitMarkMask,
+			})
 		}
 	}
 	if len(ifindexes) > 0 && !resolvedTracked {
@@ -173,7 +181,7 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 		}
 		out = append(out, name)
 	}
-	return xnft.ForwardFenceSpec{AllowedIfnames: out}, nil
+	return xnft.ForwardFenceSpec{AllowedIfnames: out, AllowedMarks: marked}, nil
 }
 
 var (

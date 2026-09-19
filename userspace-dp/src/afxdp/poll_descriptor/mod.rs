@@ -7139,11 +7139,27 @@ pub(super) fn poll_binding_process_descriptor(
                     // already counted by record_forwarding_disposition
                     // above and recycled by the recycle_now epilogue
                     // below — no leak, no double-count.
+                    let missing_neighbor_adjudicated =
+                        missing_neighbor_slow_path_decision.is_some();
                     let slow_path_decision =
                         missing_neighbor_slow_path_decision.unwrap_or(decision);
                     if !suppress_slow_path_reinject {
                         if slow_path_admit(&binding.live, decision.resolution.disposition) {
-                            maybe_reinject_slow_path_from_frame(
+                            let outlet = if missing_neighbor_adjudicated {
+                                // The neighbor policy decision is the explicit
+                                // userspace adjudication proof. It shares
+                                // xpf-usp1 with delegation but selects queue
+                                // zero, whose TC classifier adds the fence
+                                // mark.
+                                SlowPathOutlet::Adjudicated
+                            } else if reinject_host_authorized(
+                                decision.resolution.disposition,
+                            ) {
+                                SlowPathOutlet::Trusted
+                            } else {
+                                SlowPathOutlet::Delegated
+                            };
+                            maybe_reinject_slow_path_from_frame_with_outlet(
                                 &worker_ctx.ident,
                                 &binding.live,
                                 worker_ctx.slow_path,
@@ -7151,16 +7167,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 packet_frame,
                                 meta,
                                 slow_path_decision,
-                                // #9637 operator narrowing: the ONLY trusted path
-                                // through this filtered chokepoint is a
-                                // LocalDelivery disposition — every such frame
-                                // passed the session-hit / session-miss /
-                                // flowless host-inbound gates upstream (each deny
-                                // `continue`s before reinject). NoRoute (incl.
-                                // capped), transit-adjudicated MissingNeighbor
-                                // and any other disposition take the delegated
-                                // outlet (destination-judged as pre-#9637).
-                                reinject_host_authorized(decision.resolution.disposition),
+                                outlet,
                                 worker_ctx.recent_exceptions,
                                 "slow_path",
                                 worker_ctx.forwarding,

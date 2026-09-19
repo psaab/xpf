@@ -1254,16 +1254,12 @@ fn reinject_outlet_selection_records_on_matching_status() {
     assert_eq!(r.status().dropped_packets, trusted_drops);
 }
 
-// #9637 operator narrowing: every production reinject site declares its
-// outlet, and only the filtered chokepoint may derive it from the
-// disposition. The two unfiltered sites (ForwardCandidate fallback,
-// synthetic IPsec passthrough) must pass a literal `false`: their classes
-// never passed a host gate, so inferring from disposition there would be
-// wrong the day a gated class shares the site. The chokepoint must pass
-// `reinject_host_authorized(...)` (not a literal): it serves all
-// dispositions that survive the allow-list. A site that stops declaring
-// (or starts inferring) reds here; the mapping's own exhaustiveness is
-// pinned by reinject_host_authorized_maps_only_gated_local_delivery_to_trusted.
+// #9637/#10391 operator narrowing: every production reinject site declares
+// its outlet, and only the filtered chokepoint may derive Trusted from the
+// disposition. The ForwardCandidate fallback remains delegated; synthetic
+// IPsec passthrough is explicitly adjudicated because it is a policy-exempt
+// xfrm/reinject class whose queue must carry the fence mark. A site that
+// stops declaring its structural outlet reds here.
 #[test]
 fn reinject_outlet_declared_per_production_site_9637() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1291,16 +1287,17 @@ fn reinject_outlet_declared_per_production_site_9637() {
         !fc.contains("reinject_host_authorized("),
         "FC fallback must not infer authorization from disposition"
     );
-    // Synthetic IPsec passthrough: literal false (exempt classes never
-    // gate-passed; IKE-new is destination-judged on identical tokens).
+    // Synthetic IPsec passthrough: explicit adjudication (exempt classes
+    // never gate-passed, but their xfrm/reinject packets must carry the
+    // structural fence mark).
     let ipsec = after_call(
         &read("src/afxdp/poll_stages.rs"),
         "let ipsec_decision = ipsec_passthrough_decision();",
         1400,
     );
     assert!(
-        ipsec.contains("false,"),
-        "IPsec passthrough must pass literal false as host_authorized"
+        ipsec.contains("SlowPathOutlet::Adjudicated"),
+        "IPsec passthrough must select the adjudicated outlet"
     );
     assert!(
         !ipsec.contains("reinject_host_authorized("),
@@ -1311,11 +1308,11 @@ fn reinject_outlet_declared_per_production_site_9637() {
     let choke = after_call(
         &read("src/afxdp/poll_descriptor/mod.rs"),
         "if slow_path_admit(&binding.live, decision.resolution.disposition) {",
-        1400,
+        2200,
     );
     assert!(
-        choke.contains("reinject_host_authorized(decision.resolution.disposition)"),
-        "filtered chokepoint must derive host_authorized from the disposition mapping"
+        choke.contains("reinject_host_authorized("),
+        "filtered chokepoint must derive Trusted from the disposition mapping"
     );
 }
 

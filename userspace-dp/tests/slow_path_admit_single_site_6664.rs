@@ -210,13 +210,17 @@ fn both_reinject_refusal_points_call_slow_path_admit_6664() {
 /// reflected in the primitive's doc block in the same change.
 #[test]
 fn raw_reinject_primitive_caller_set_is_pinned_7480() {
-    let sites = production_call_sites("maybe_reinject_slow_path_from_frame(");
+    let mut sites = production_call_sites("maybe_reinject_slow_path_from_frame(");
+    sites.extend(production_call_sites(
+        "maybe_reinject_slow_path_from_frame_with_outlet(",
+    ));
     let mut files: Vec<String> = sites.iter().map(|s| rel(&s.file)).collect();
     files.sort();
 
     let expected = vec![
         "afxdp/poll_descriptor/mod.rs".to_string(),
         "afxdp/poll_stages.rs".to_string(),
+        "afxdp/tx/dispatch/slow_path.rs".to_string(),
         "afxdp/tx/dispatch/slow_path.rs".to_string(),
         "afxdp/tx/dispatch/slow_path.rs".to_string(),
     ];
@@ -229,7 +233,7 @@ fn raw_reinject_primitive_caller_set_is_pinned_7480() {
     assert_eq!(
         files, expected,
         "the raw reinject primitive's production caller set changed. Found {listed:?}.\n\
-         Every caller of this primitive can hand an unadjudicated frame to the \
+         Every caller of either primitive can hand an unadjudicated frame to the \
          kernel FIB, where there is no nftables `hook forward` chain, ip_forward \
          is force-enabled while armed, and rp_filter is 0 on the TUN — so nothing \
          downstream re-checks it. A new site must be classified filtered vs \

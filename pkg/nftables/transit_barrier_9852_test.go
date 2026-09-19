@@ -1,11 +1,13 @@
 package nftables
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"testing"
 
 	gnft "github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
@@ -138,3 +140,60 @@ func TestArmedTransitFencePlanShape10302(t *testing.T) {
 		t.Fatalf("empty armed fence emitted %d ACCEPT rules, want none", len(empty.rules))
 	}
 }
+func TestArmedTransitFenceMarkPinhole10391(t *testing.T) {
+	p := newBuildPlan(t, "xpf_transit_10391_mark", *gnft.ChainPriorityFilter)
+	p.chain = transitBarrierChain(p.table)
+	emitTransitFencePinhole(p, ForwardFenceSpec{
+		AllowedMarks: []ForwardFenceMark{{
+			Ifname: armedTransitReinjectIfname10391,
+			Mark:   AdjudicatedTransitMark,
+			Mask:   AdjudicatedTransitMarkMask,
+		}},
+	})
+	if p.err != nil {
+		t.Fatalf("marked pinhole plan failed: %v", p.err)
+	}
+	if len(p.rules) != 1 {
+		t.Fatalf("marked fence emitted %d rules, want one", len(p.rules))
+	}
+	rule := p.rules[0]
+	if len(rule) < 6 {
+		t.Fatalf("marked pinhole expression count = %d, want iif+mark conjunction plus verdict", len(rule))
+	}
+	if meta, ok := rule[0].(*expr.Meta); !ok || meta.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("marked pinhole first expression = %#v, want iifname meta", rule[0])
+	}
+	if meta, ok := rule[2].(*expr.Meta); !ok || meta.Key != expr.MetaKeyMARK {
+		t.Fatalf("marked pinhole mark expression = %#v, want mark meta", rule[2])
+	}
+	if bitwise, ok := rule[3].(*expr.Bitwise); !ok {
+		t.Fatalf("marked pinhole bitwise expression = %#v, want bitwise mask", rule[3])
+	} else {
+		if !bytes.Equal(bitwise.Mask, binaryutil.NativeEndian.PutUint32(AdjudicatedTransitMarkMask)) {
+			t.Fatalf("marked pinhole mask bytes = %x, want %x", bitwise.Mask,
+				binaryutil.NativeEndian.PutUint32(AdjudicatedTransitMarkMask))
+		}
+		if !bytes.Equal(bitwise.Xor, []byte{0, 0, 0, 0}) {
+			t.Fatalf("marked pinhole xor bytes = %x, want zero", bitwise.Xor)
+		}
+	}
+	if cmp, ok := rule[4].(*expr.Cmp); !ok {
+		t.Fatalf("marked pinhole comparison = %#v, want mark comparison", rule[4])
+	} else if cmp.Op != expr.CmpOpEq || cmp.Register != 1 {
+		t.Fatalf("marked pinhole comparison op/register = %v/%d, want eq/1", cmp.Op, cmp.Register)
+	} else if !bytes.Equal(cmp.Data, binaryutil.NativeEndian.PutUint32(
+		AdjudicatedTransitMark&AdjudicatedTransitMarkMask,
+	)) {
+		t.Fatalf("marked pinhole comparison bytes = %x, want %x", cmp.Data,
+			binaryutil.NativeEndian.PutUint32(AdjudicatedTransitMark&AdjudicatedTransitMarkMask))
+	} else if !bytes.Equal(cmp.Data, []byte{0x01, 0x50, 0x46, 0x58}) {
+		// Literal LE golden for 0x58465001 (BE would be 58 46 50 01):
+		// guards against a joint impl+test endian flip (#10410 P0).
+		t.Fatalf("marked pinhole comparison bytes = %x, want LE golden 01504658", cmp.Data)
+	}
+	if verdict, ok := rule[len(rule)-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictAccept {
+		t.Fatalf("marked pinhole verdict = %#v, want ACCEPT", rule[len(rule)-1])
+	}
+}
+
+const armedTransitReinjectIfname10391 = "xpf-usp1"
