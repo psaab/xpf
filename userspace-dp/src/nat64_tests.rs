@@ -7764,4 +7764,164 @@ fn nat64_v6_to_v4_nonfirst_accepts_payload_at_65515_boundary_10191() {
     assert_eq!(n, 65535);
     assert_eq!(u16::from_be_bytes([out[2], out[3]]), 65535);
 }
+// ---------------------------------------------------------------------------
+// #10432: embedded ICMP rewrite must advertise the ORIGINAL inner datagram
+// length (RFC 7915 §§4.2/5.2), not the captured quote length, while emitting
+// only the quoted bytes (outer truncation stays safe).
+// ---------------------------------------------------------------------------
+
+/// A 48-byte quote (40B IPv6 header + 8B TCP) of a 1500-byte original IPv6
+/// datagram (Payload Length 1460, no extension headers).
+fn quoted_v6_truncated_10432() -> Vec<u8> {
+    let mut q = vec![0u8; 40];
+    q[0] = 0x60;
+    q[4..6].copy_from_slice(&1460u16.to_be_bytes());
+    q[6] = PROTO_TCP;
+    q[7] = 64;
+    q[8..24].copy_from_slice(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
+    q[24..40].copy_from_slice(&Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0x0a00, 0x0001).octets());
+    q.extend_from_slice(&[0x30u8, 0x39, 0x00, 0x50, 0xaa, 0xbb, 0xcc, 0xdd]);
+    q
+}
+
+/// A 28-byte quote (20B IPv4 header + 8B TCP) of a 1500-byte original IPv4
+/// datagram (Total Length 1500, IHL 20).
+fn quoted_v4_truncated_10432() -> Vec<u8> {
+    let mut q = vec![0u8; 20];
+    q[0] = 0x45;
+    q[2..4].copy_from_slice(&1500u16.to_be_bytes());
+    q[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
+    q[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+    q[8] = 64;
+    q[9] = PROTO_TCP;
+    q[12..16].copy_from_slice(&Ipv4Addr::new(198, 51, 100, 1).octets());
+    q[16..20].copy_from_slice(&Ipv4Addr::new(192, 0, 2, 5).octets());
+    q.extend_from_slice(&[0x30u8, 0x39, 0x00, 0x50, 0xaa, 0xbb, 0xcc, 0xdd]);
+    q
+}
+
+fn embed_map_v6_to_v4_10432() -> EmbeddedV6ToV4 {
+    EmbeddedV6ToV4 {
+        mapped_embedded_src: Ipv4Addr::new(192, 0, 2, 1),
+        mapped_embedded_dst: Ipv4Addr::new(10, 0, 0, 1),
+        mapped_embedded_dst_port: None,
+    }
+}
+
+fn embed_map_v4_to_v6_10432() -> EmbeddedV4ToV6 {
+    let mut prefix_bytes = [0u8; 12];
+    prefix_bytes[..4].copy_from_slice(&[0x00, 0x64, 0xff, 0x9b]);
+    EmbeddedV4ToV6 {
+        mapped_embedded_src: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+        prefix_bytes,
+        mapped_embedded_src_port: None,
+    }
+}
+
+#[test]
+fn embedded_v6_to_v4_advertises_original_len_10432() {
+    // 48-byte input quote of a 1500-byte (PL=1460) original, no ext headers.
+    // Must advertise IPv4 Total Length 20+1460=1480 while emitting only
+    // 20+8=28 translated bytes.
+    let q = quoted_v6_truncated_10432();
+    assert_eq!(q.len(), 48, "input must be a 48-byte truncated quote");
+    let mut out = [0u8; MAX_EMBEDDED_LEN];
+    let n = translate_embedded_v6_to_v4(&mut out, &q, &embed_map_v6_to_v4_10432())
+        .expect("truncated quote must translate, not drop");
+    assert_eq!(n, 28, "emitted length must be 20 + 8 quoted L4 bytes");
+    assert_eq!(
+        u16::from_be_bytes([out[2], out[3]]),
+        1480,
+        "RFC 7915 §5.2: advertised IPv4 Total must be 20 + original PL 1460"
+    );
+    assert_eq!(&out[20..28], &q[40..48], "emitted L4 must be the quoted bytes");
+    assert_eq!(
+        checksum16(&out[..20]),
+        0,
+        "embedded IPv4 header checksum must verify over advertised length"
+    );
+}
+
+#[test]
+fn embedded_v4_to_v6_advertises_original_len_10432() {
+    // 28-byte input quote of a 1500-byte (Total=1500, IHL=20) original.
+    // Must advertise IPv6 Payload Length 1500-20=1480 while emitting only
+    // 40+8=48 translated bytes.
+    let q = quoted_v4_truncated_10432();
+    assert_eq!(q.len(), 28, "input must be a 28-byte truncated quote");
+    let mut out = [0u8; MAX_EMBEDDED_LEN];
+    let n = translate_embedded_v4_to_v6(&mut out, &q, &embed_map_v4_to_v6_10432())
+        .expect("truncated quote must translate, not drop");
+    assert_eq!(n, 48, "emitted length must be 40 + 8 quoted L4 bytes");
+    assert_eq!(
+        u16::from_be_bytes([out[4], out[5]]),
+        1480,
+        "RFC 7915 §4.2: advertised IPv6 Payload must be original Total 1500 - IHL 20"
+    );
+    assert_eq!(&out[40..48], &q[20..28], "emitted L4 must be the quoted bytes");
+}
+
+#[test]
+fn embedded_v6_to_v4_pmtud_preserves_original_len_10432() {
+    // PMTUD shape: ICMPv6 Packet-Too-Big (MTU 1500) quoting the truncated v6
+    // packet -> ICMPv4 Frag-Needed (MTU 1480). Outer message stays truncated
+    // (8 + 28 = 36 bytes) while the embedded header advertises 1480.
+    let quote = quoted_v6_truncated_10432();
+    let icmp6 = build_icmpv6_error(2, 0, 1500u32.to_be_bytes(), &quote);
+    let mut out = [0u8; MAX_EMBEDDED_LEN];
+    let n = translate_icmpv6_message_to_icmpv4(&mut out, &icmp6, &embed_map_v6_to_v4_10432())
+        .expect("PTB with truncated quote must translate");
+    assert_eq!(n, 36, "outer must stay truncated: 8-byte header + 28 emitted");
+    assert_eq!(out[0], 3, "ICMPv4 Dest-Unreachable type");
+    assert_eq!(out[1], 4, "Frag-Needed code");
+    assert_eq!(&out[4..6], &[0, 0], "Frag-Needed unused word must be zero");
+    assert_eq!(
+        u16::from_be_bytes([out[6], out[7]]),
+        1480,
+        "next-hop MTU must be 1500 - 20"
+    );
+    let emb = &out[8..n];
+    assert_eq!(emb.len(), 28, "embedded emitted length stays truncated");
+    assert_eq!(
+        u16::from_be_bytes([emb[2], emb[3]]),
+        1480,
+        "embedded advertised IPv4 Total must be the original 1480"
+    );
+    assert_eq!(&emb[20..28], &quote[40..48], "embedded L4 stays the quoted bytes");
+    assert_eq!(
+        checksum16(&out[..n]),
+        0,
+        "outer ICMPv4 checksum must verify"
+    );
+}
+
+#[test]
+fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
+    // PMTUD shape: ICMPv4 Frag-Needed (MTU 1400) quoting the truncated v4
+    // packet -> ICMPv6 Packet-Too-Big (MTU 1420). Outer stays truncated
+    // (8 + 48 = 56) while the embedded header advertises 1480.
+    let quote = quoted_v4_truncated_10432();
+    let rest = [0u8, 0, (1400u16 >> 8) as u8, 1400u16 as u8];
+    let icmp4 = build_icmpv4_error(3, 4, rest, &quote);
+    let mut out = [0u8; MAX_EMBEDDED_LEN];
+    let n = translate_icmpv4_message_to_icmpv6(&mut out, &icmp4, &embed_map_v4_to_v6_10432())
+        .expect("Frag-Needed with truncated quote must translate");
+    assert_eq!(n, 56, "outer must stay truncated: 8-byte header + 48 emitted");
+    assert_eq!(out[0], 2, "ICMPv6 Packet-Too-Big type");
+    assert_eq!(out[1], 0, "PTB code 0");
+    assert_eq!(
+        u32::from_be_bytes([out[4], out[5], out[6], out[7]]),
+        1420,
+        "PTB MTU must be v4 next-hop MTU + 20"
+    );
+    assert_eq!(&out[2..4], &[0, 0], "ICMPv6 checksum left zeroed for caller");
+    let emb = &out[8..n];
+    assert_eq!(emb.len(), 48, "embedded emitted length stays truncated");
+    assert_eq!(
+        u16::from_be_bytes([emb[4], emb[5]]),
+        1480,
+        "embedded advertised IPv6 Payload must be the original 1480"
+    );
+    assert_eq!(&emb[40..48], &quote[20..28], "embedded L4 stays the quoted bytes");
+}
 

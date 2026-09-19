@@ -3252,6 +3252,17 @@ fn translate_embedded_v6_to_v4(
     // advertised IPv6 payload (`40 + payload_len`), capped by the bytes
     // actually quoted. The IPv6 extension headers between byte 40 and
     // `l4_offset` are stripped, mirroring the outer translation.
+    //
+    // Keep the advertised IPv4 Total Length separate from the emitted quote
+    // length. RFC 7915 §5.2 preserves the original inner datagram's payload
+    // length after stripping extension headers; an ICMP error commonly carries
+    // only the IP header plus 8 L4 bytes.
+    let stripped_ext_len = l4_offset.checked_sub(40)?;
+    let translated_payload_len = payload_len.checked_sub(stripped_ext_len)?;
+    let advertised_total = 20usize.checked_add(translated_payload_len)?;
+    if advertised_total > u16::MAX as usize {
+        return None;
+    }
     let payload_end = 40usize.checked_add(payload_len)?;
     let quoted_end = payload_end.min(quote_in.len());
     if l4_offset > quoted_end {
@@ -3260,11 +3271,14 @@ fn translate_embedded_v6_to_v4(
     let l4 = quote_in.get(l4_offset..quoted_end)?;
     let l4_len = l4.len();
 
-    let total = 20 + l4_len;
+    // `total` is the bytes physically emitted into the fixed scratch buffer,
+    // not the advertised length above. Never size this slice from a truncated
+    // quote's original datagram length.
+    let total = 20usize.checked_add(l4_len)?;
     let out = dst.get_mut(..total)?;
     out[0] = 0x45;
     out[1] = traffic_class;
-    out[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    out[2..4].copy_from_slice(&(advertised_total as u16).to_be_bytes());
     // #9128: carry the quoted packet's fragmentation fields instead of pinning
     // ID=0 / DF=1 unconditionally. RFC 7915 §5.2 defers to §5.1 for the
     // embedded header, and §5.1 requires -- when a Fragment Header is present
@@ -3351,6 +3365,9 @@ fn translate_embedded_v4_to_v6(
     let ttl = quote_in[8];
     let protocol = quote_in[9];
     let total_len_field = u16::from_be_bytes([quote_in[2], quote_in[3]]) as usize;
+    if total_len_field < ihl {
+        return None;
+    }
 
     let next_header = match protocol {
         PROTO_ICMP => PROTO_ICMPV6,
@@ -3376,10 +3393,20 @@ fn translate_embedded_v4_to_v6(
     let v4_ident = u16::from_be_bytes([quote_in[4], quote_in[5]]);
     let is_fragment = v4_more || v4_offset_units != 0;
     let frag_hdr_len = if is_fragment { 8 } else { 0 };
+    // RFC 7915 §4.2 preserves the original IPv4 payload length and adds only
+    // the generated Fragment Header, if this quoted packet needs one. This is
+    // independent of how many quoted L4 bytes are physically available.
+    let advertised_payload_len = total_len_field
+        .checked_sub(ihl)?
+        .checked_add(frag_hdr_len)?;
+    if advertised_payload_len > u16::MAX as usize {
+        return None;
+    }
 
     // Quoted L4 bytes after the IPv4 header, capped by the advertised total
-    // length and what was actually quoted.
-    let end = total_len_field.clamp(ihl, quote_in.len());
+    // length and what was actually quoted. The advertised IPv6 Payload Length
+    // is computed separately from the original IPv4 Total Length below.
+    let end = total_len_field.min(quote_in.len());
     let mut l4 = quote_in.get(ihl..end)?;
 
     // The Fragment Header costs 8 bytes the caller's scratch was not sized
@@ -3402,8 +3429,9 @@ fn translate_embedded_v4_to_v6(
     out[1] = (tos & 0x0f) << 4;
     out[2] = 0;
     out[3] = 0;
-    // Payload length counts the Fragment Header too, when present.
-    out[4..6].copy_from_slice(&((frag_hdr_len + l4_len) as u16).to_be_bytes());
+    // Payload length advertises the original IPv4 payload plus any generated
+    // Fragment Header, while `total` remains the physically emitted quote size.
+    out[4..6].copy_from_slice(&(advertised_payload_len as u16).to_be_bytes());
     // A fragmented datagram chains a Fragment Header (44) after the base
     // header; the base next-header points at it and the Fragment Header carries
     // the real upper-layer protocol.
