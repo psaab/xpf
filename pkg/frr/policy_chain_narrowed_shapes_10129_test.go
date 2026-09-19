@@ -10,30 +10,22 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// policy_chain_narrowed_shapes_10129_test.go — #10129 measurement-first.
+// policy_chain_narrowed_shapes_10129_test.go — #10129 regression coverage.
 //
 // F-008 follow-up of #9947: a narrowed BGP policy chain (some members survive)
-// renders the surviving subset permit-terminated (Junos BGP default-accept,
-// #2998). STEP-0 RED (since removed) proved it on base: [ACCEPTER,GHOST]
-// attached ACCEPTER permit-terminated and ApplyFull returned nil.
+// used to render the surviving subset permit-terminated (Junos BGP
+// default-accept, #2998). The RED baseline was [ACCEPTER,GHOST] attaching the
+// shared ACCEPTER map and ApplyFull returning nil. Production now attaches a
+// private deny-terminated alias for suffix-narrowed fall-through and empty
+// survivors, leaving shared maps untouched.
 //
-// ADJUDICATION (2 hostile plan reviews, pre-implementation): HostilePlanA KILL +
-// HostilePlanB RESCOPE killed the render-rejection plan — suffix-only reject is
-// incoherent (the #8363 suffix rule constrains deny SYNTHESIS, not rejection;
-// ghost-first/middle would still install the hole), strict already rejects every
-// narrowed candidate at store.Commit so commit-path loudness is unreachable and
-// 100% of firings are lenient log-and-continue (warm keeps last-good narrowed —
-// hole persists loudly; cold boot with no prior managed section leaves FRR
-// without managed peers/routes — outage, not a filter), and any reject
-// wedges the ipmon failover actuator plus sync/rollback/feed divergence on an
-// unmeasured population. The parent constraint (migration-safe: no silent
-// load-time outage) kills the immediate-deny alternative for the same unmeasured
-// population. So this ships NO behavior change: warn-only stays, and these cells
-// pin the per-shape reachability the issue owes BEFORE any deny ships
-// ("terminating-default survivors and match-all-final-term survivors need
-// per-shape reachability cells"), plus the attached-map baselines a future deny
-// diffs against. Deny/reject behavior stays OPEN at #10129 pending fleet split +
-// migration rollout design. See docs/log/10129.md.
+// The rollout deliberately keeps the #8363 discriminator: ghost-first/middle
+// sites retain their surviving members and do not receive an inserted
+// terminator, while terminating-default and match-all-final-term survivors
+// remain on their explicitly terminating shared map. Strict commit still
+// rejects undefined references; tolerant load, peer-sync, and rollback use the
+// render-side collision belt and the alias preserves the known-safe shapes.
+// See docs/log/10129.md and the cohort evidence in docs/log/9947.md.
 
 func policyOptions10129() *config.PolicyOptionsConfig {
 	over := func() []string { return []string{"PL"} }
@@ -106,10 +98,10 @@ func routeMapSeqBody10129(t *testing.T, section, name string, seq int) string {
 	return ""
 }
 
-// Baseline: narrowed suffix-safe single-kept chain attaches the surviving
-// standalone map permit-terminated. Pins today's hole (fall-through permitted)
-// so a future deny diffs against fact, not argument.
-func TestNarrowedSuffixSafePopulatedSingleAttachesPermitTerminated10129(t *testing.T) {
+// Production behavior: a suffix-narrowed fall-through survivor attaches a
+// private deny-terminated alias. The shared standalone map remains
+// permit-terminated for intact attachments.
+func TestNarrowedSuffixSafePopulatedSingleAttachesDenyAlias10129(t *testing.T) {
 	po := policyOptions10129()
 	fc := &FullConfig{
 		PolicyOptions: po,
@@ -124,35 +116,26 @@ func TestNarrowedSuffixSafePopulatedSingleAttachesPermitTerminated10129(t *testi
 	if len(sites) != 1 || !sites[0].GhostsAreSuffix || len(sites[0].Kept) != 1 || sites[0].Kept[0] != "ACCEPTER" {
 		t.Fatalf("want single suffix-narrowed [ACCEPTER], got %+v", sites)
 	}
+	alias := narrowedAliasName10129([]string{"ACCEPTER"})
 	section := New().buildManagedSection(fc)
-	if !strings.Contains(section, "neighbor 10.0.2.1 route-map ACCEPTER in\n") {
-		t.Fatalf("must attach surviving ACCEPTER, got:\n%s", section)
+	if !strings.Contains(section, "neighbor 10.0.2.1 route-map "+alias+" in\n") {
+		t.Fatalf("must attach narrowed alias %s, got:\n%s", alias, section)
 	}
-	headers := routeMapHeaders6807(section, "ACCEPTER")
-	if len(headers) != 2 {
-		t.Fatalf("surviving single must render exactly [match, trailing], got %v:\n%s", headers, section)
+	headers := routeMapHeaders6807(section, alias)
+	if len(headers) != 2 || !strings.HasSuffix(headers[1], " deny 20") {
+		t.Fatalf("narrowed alias must render [match, deny], got %v:\n%s", headers, section)
 	}
-	if !strings.HasSuffix(headers[1], " permit 20") {
-		t.Fatalf("surviving single must end in permit-20, got %q:\n%s", headers[1], section)
+	if body := routeMapSeqBody10129(t, section, alias, 20); strings.Contains(body, "match ") {
+		t.Fatalf("alias deny-20 must be unconditional:\n%s", section)
 	}
-	// The terminal permit must be UNCONDITIONAL (no match clause): deleting the
-	// BGP default-accept fallback would leave a conditional permit + FRR's
-	// implicit deny, which a last-header-says-permit check cannot tell apart.
-	if body := routeMapSeqBody10129(t, section, "ACCEPTER", 20); strings.Contains(body, "match ") {
-		t.Fatalf("trailing permit-20 must be unconditional (fall-through permitted):\n%s", section)
-	}
-	for _, h := range headers {
-		if f := strings.Fields(h); f[2] == "deny" {
-			t.Fatalf("warn-only baseline must render no deny in the survivor, got %q:\n%s", h, section)
-		}
+	if !strings.Contains(section, "route-map ACCEPTER permit 20\n") {
+		t.Fatalf("shared standalone map must retain its trailing permit:\n%s", section)
 	}
 }
 
-// Kept pin guarding the KILL: narrowed warn-only still applies cleanly at the
-// ApplyFull boundary (no rejection shipped). A future render-level deny would
-// redden the permit-terminated baselines above; a future ApplyFull-level
-// rejection would redden THIS cell instead — the two guards cover the two
-// layers the hostile reviews distinguished.
+// The production apply path writes the narrowed alias and still completes a
+// clean reload. A collision in the alias belt is covered separately as a
+// fail-closed apply.
 func TestNarrowedSuffixSafeStillAppliesCleanly10129(t *testing.T) {
 	po := policyOptions10129()
 	fc := &FullConfig{
@@ -171,20 +154,22 @@ func TestNarrowedSuffixSafeStillAppliesCleanly10129(t *testing.T) {
 	}
 	m := &Manager{frrConf: confPath, exec: &fakeExecutor{}}
 	if err := m.ApplyFull(fc); err != nil {
-		t.Fatalf("warn-only narrowing must apply cleanly (no rejection shipped), got: %v", err)
+		t.Fatalf("narrowed alias must apply cleanly, got: %v", err)
 	}
 	data, err := os.ReadFile(confPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "neighbor 10.0.2.1 route-map ACCEPTER in\n") {
-		t.Fatalf("applied config must attach the surviving subset:\n%s", data)
+	alias := narrowedAliasName10129([]string{"ACCEPTER"})
+	if !strings.Contains(string(data), "neighbor 10.0.2.1 route-map "+alias+" in\n") ||
+		!strings.Contains(string(data), "route-map "+alias+" deny 20\n") {
+		t.Fatalf("applied config must attach the deny alias %q:\n%s", alias, data)
 	}
 }
 
-// Baseline: narrowed suffix-safe multi-kept chain attaches the composed
-// surviving subset permit-terminated, members in order.
-func TestNarrowedSuffixSafePopulatedComposedAttachesPermitTerminated10129(t *testing.T) {
+// Production behavior: a suffix-narrowed composed chain attaches a private
+// deny-terminated alias, preserving both surviving members in order.
+func TestNarrowedSuffixSafePopulatedComposedAttachesDenyAlias10129(t *testing.T) {
 	po := policyOptions10129()
 	fc := &FullConfig{
 		PolicyOptions: po,
@@ -199,30 +184,26 @@ func TestNarrowedSuffixSafePopulatedComposedAttachesPermitTerminated10129(t *tes
 	if len(sites) != 1 || !sites[0].GhostsAreSuffix || len(sites[0].Kept) != 2 {
 		t.Fatalf("want single suffix-narrowed [ACCEPTER B], got %+v", sites)
 	}
-	const composed = "ACCEPTER-B-xpf-chain"
+	alias := narrowedAliasName10129([]string{"ACCEPTER", "B"})
+	const shared = "ACCEPTER-B-xpf-chain"
 	section := New().buildManagedSection(fc)
-	if !strings.Contains(section, "neighbor 10.0.2.2 route-map "+composed+" in\n") {
-		t.Fatalf("must attach composed surviving subset %s, got:\n%s", composed, section)
+	if !strings.Contains(section, "neighbor 10.0.2.2 route-map "+alias+" in\n") {
+		t.Fatalf("must attach narrowed alias %s, got:\n%s", alias, section)
 	}
-	headers := routeMapHeaders6807(section, composed)
-	if len(headers) != 3 {
-		t.Fatalf("surviving composed must render exactly [A, B, trailing], got %v:\n%s", headers, section)
+	headers := routeMapHeaders6807(section, alias)
+	if len(headers) != 3 || !strings.HasSuffix(headers[2], " deny 30") {
+		t.Fatalf("narrowed alias must render [A, B, deny], got %v:\n%s", headers, section)
 	}
-	if !strings.HasSuffix(headers[2], " permit 30") {
-		t.Fatalf("surviving composed must end in unconditional permit-30, got %q:\n%s", headers[2], section)
+	if body := routeMapSeqBody10129(t, section, alias, 30); strings.Contains(body, "match ") {
+		t.Fatalf("alias deny-30 must be unconditional:\n%s", section)
 	}
-	// Unconditional: deleting the fall-off-the-end fallback would leave
-	// conditional permits + FRR's implicit deny behind a last-header-says-permit
-	// check.
-	if body := routeMapSeqBody10129(t, section, composed, 30); strings.Contains(body, "match ") {
-		t.Fatalf("trailing permit-30 must be unconditional (fall-through permitted):\n%s", section)
-	}
-	// Both survivors' DISTINCT matches present, in chain order (nothing deleted
-	// today; PL vs PL2 tells a swap or duplication apart).
-	a := strings.Index(section, "route-map "+composed+" permit 10\n match ip address prefix-list PL\n")
-	b := strings.Index(section, "route-map "+composed+" permit 20\n match ip address prefix-list PL2")
+	a := strings.Index(section, "route-map "+alias+" permit 10\n match ip address prefix-list PL\n")
+	b := strings.Index(section, "route-map "+alias+" permit 20\n match ip address prefix-list PL2")
 	if a < 0 || b < 0 || a > b {
-		t.Fatalf("both survivors must render distinctly and in order in %s:\n%s", composed, section)
+		t.Fatalf("alias must preserve both survivors distinctly and in order:\n%s", section)
+	}
+	if !strings.Contains(section, "route-map "+shared+" permit 30\n") {
+		t.Fatalf("shared composed map must retain its trailing permit:\n%s", section)
 	}
 }
 
@@ -425,12 +406,10 @@ func TestExplicitDefaultStandaloneAliasTrailing10129(t *testing.T) {
 	}
 }
 
-// Empty-survivor narrowed baseline: [EMPTY,GHOST] attaches EMPTY standalone as
-// lone match-all permit-10 (permit-all today). The synthesis direction is pinned
-// by TestEmptySurvivorSynthesizedDenyIsReachable9947 (member deny lands deny-10,
-// reachable by all: permit-all→deny-all flip, highest-impact denominator member,
-// NOT an over-count). This cell pins the ATTACHED today those futures diff.
-func TestEmptySurvivorNarrowedAttachesPermitAll10129(t *testing.T) {
+// Empty-survivor narrowed chains attach a private deny-all alias. An empty
+// survivor contributes no match sequence, so the alias's lone deny-10 is
+// reachable by every route (permit-all → deny-all).
+func TestEmptySurvivorNarrowedAttachesDenyAll10129(t *testing.T) {
 	po := policyOptions10129()
 	fc := &FullConfig{
 		PolicyOptions: po,
@@ -445,16 +424,17 @@ func TestEmptySurvivorNarrowedAttachesPermitAll10129(t *testing.T) {
 	if len(sites) != 1 || !sites[0].GhostsAreSuffix || len(sites[0].Kept) != 1 || sites[0].Kept[0] != "EMPTY" {
 		t.Fatalf("want single suffix-narrowed [EMPTY], got %+v", sites)
 	}
+	alias := narrowedAliasName10129([]string{"EMPTY"})
 	section := New().buildManagedSection(fc)
-	if !strings.Contains(section, "neighbor 10.0.2.5 route-map EMPTY in\n") {
-		t.Fatalf("must attach surviving EMPTY, got:\n%s", section)
+	if !strings.Contains(section, "neighbor 10.0.2.5 route-map "+alias+" in\n") {
+		t.Fatalf("must attach empty-survivor alias %q, got:\n%s", alias, section)
 	}
-	headers := routeMapHeaders6807(section, "EMPTY")
-	if len(headers) != 1 || !strings.HasSuffix(headers[0], " permit 10") {
-		t.Fatalf("empty survivor must render lone permit-10, got %v:\n%s", headers, section)
+	headers := routeMapHeaders6807(section, alias)
+	if len(headers) != 1 || !strings.HasSuffix(headers[0], " deny 10") {
+		t.Fatalf("empty alias must render lone deny-10, got %v:\n%s", headers, section)
 	}
-	if body := routeMapSeqBody10129(t, section, "EMPTY", 10); strings.Contains(body, "match ") {
-		t.Fatalf("empty permit-10 must be match-all:\n%s", section)
+	if body := routeMapSeqBody10129(t, section, alias, 10); strings.Contains(body, "match ") {
+		t.Fatalf("empty alias deny-10 must be match-all:\n%s", section)
 	}
 }
 
@@ -490,10 +470,9 @@ func TestNarrowedSuffixDiscriminatorForNewShapes10129(t *testing.T) {
 	}
 }
 
-// VRF instances narrow exactly like global: same detector, same warn path,
-// same permit-terminated attachment. A future deny must therefore cover VRF
-// attachments with the same alias/dedupe rules (shared surviving chain across
-// neighbors/VRFs/instances dedupes to one alias definition).
+// VRF instances narrow exactly like global and attach the same private alias.
+// A shared surviving chain across neighbors/VRFs/instances dedupes to one
+// alias definition while each attachment points at it.
 func TestNarrowedVRFMatchesGlobal10129(t *testing.T) {
 	po := policyOptions10129()
 	fc := &FullConfig{
@@ -516,15 +495,16 @@ func TestNarrowedVRFMatchesGlobal10129(t *testing.T) {
 	}
 	m := New()
 	section := m.buildManagedSection(fc)
-	if !strings.Contains(section, "neighbor 10.0.3.1 route-map ACCEPTER in\n") {
-		t.Fatalf("VRF must attach the same surviving subset:\n%s", section)
+	alias := narrowedAliasName10129([]string{"ACCEPTER"})
+	if !strings.Contains(section, "neighbor 10.0.3.1 route-map "+alias+" in\n") {
+		t.Fatalf("VRF must attach the narrowed alias %q:\n%s", alias, section)
 	}
-	headers := routeMapHeaders6807(section, "ACCEPTER")
-	if len(headers) != 2 || !strings.HasSuffix(headers[1], " permit 20") {
-		t.Fatalf("VRF survivor must be permit-terminated like global, got %v:\n%s", headers, section)
+	headers := routeMapHeaders6807(section, alias)
+	if len(headers) != 2 || !strings.HasSuffix(headers[1], " deny 20") {
+		t.Fatalf("VRF alias must be deny-terminated, got %v:\n%s", headers, section)
 	}
-	if body := routeMapSeqBody10129(t, section, "ACCEPTER", 20); strings.Contains(body, "match ") {
-		t.Fatalf("VRF trailing permit-20 must be unconditional:\n%s", section)
+	if body := routeMapSeqBody10129(t, section, alias, 20); strings.Contains(body, "match ") {
+		t.Fatalf("VRF alias deny-20 must be unconditional:\n%s", section)
 	}
 	if got := m.NarrowedPolicyChains(); len(got) != 1 {
 		t.Fatalf("VRF site must feed the narrowed gauges, got %v", got)

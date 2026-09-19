@@ -10,10 +10,9 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// RED-then-GREEN in-harness for #10129 deny mechanism (non-activated).
-// These helpers are NOT wired to attachment sites (no behavior flip);
-// they prove the alias machinery is ready for a measured rollout.
-// Existing attachment baselines (permit-terminated) stay green throughout.
+// RED-then-GREEN in-harness for #10129's production deny mechanism.
+// Eligible suffix-narrowed chains use a private alias; shared maps and
+// non-eligible shapes retain their existing semantics.
 
 func TestNarrowedAliasNameIsDistinct10129(t *testing.T) {
 	// Single kept: alias must differ from standalone, end in reserved suffix.
@@ -243,9 +242,9 @@ func TestNarrowedAliasManagedSectionEndToEndTestMode10129(t *testing.T) {
 	if err := os.WriteFile(confPath, []byte("log syslog informational\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	m := &Manager{frrConf: confPath, exec: &fakeExecutor{}, narrowedAliasesEnabled10129: true}
+	m := &Manager{frrConf: confPath, exec: &fakeExecutor{}}
 	if err := m.ApplyFull(fc); err != nil {
-		t.Fatalf("test-mode narrowed alias apply failed: %v", err)
+		t.Fatalf("narrowed alias apply failed: %v", err)
 	}
 	data, err := os.ReadFile(confPath)
 	if err != nil {

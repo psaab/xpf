@@ -140,12 +140,12 @@ type Manager struct {
 	// describes the CURRENT rendered section: a commit that reduces the
 	// policy clears it without needing a separate clear path.
 	quarantined map[string]struct{}
-	// #8363: narrowing set + its lock. See resetNarrowed/recordNarrowed.
+	// #8363/#10129: narrowed-chain state is rebuilt on every render. Eligible
+	// suffix-narrowed fall-through and empty survivors attach a private
+	// deny-terminated alias; non-suffix and deny-inert shapes stay on the
+	// surviving shared map per the #10129 discriminator.
 	narrowedMu sync.Mutex
 	narrowed   []narrowedChainSite
-	// #10129 test-only mechanism switch. Production remains warn-only until
-	// the survivor-shape census authorizes the load-time behavior flip.
-	narrowedAliasesEnabled10129 bool
 
 	// retryMu guards the degraded-retry episode fields below. Lock
 	// order: reloadMu → retryMu (retryMu is a leaf).
@@ -566,10 +566,11 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 	// no new BGP/IGP redistribution leak — rather than emitting a colliding
 	// route-map FRR would merge.
 	if fc.PolicyOptions != nil {
-		if m.narrowedAliasesEnabled10129 {
-			if err := narrowedAliasCollision10129(fc); err != nil {
-				return err
-			}
+		// #10129: run the narrowed-alias collision belt on every render path.
+		// Tolerant load, peer-sync, and rollback must fail closed rather than
+		// let FRR merge an alias with an operator or generated route-map.
+		if err := narrowedAliasCollision10129(fc); err != nil {
+			return err
 		}
 		if err := redistAliasCollision(fc.PolicyOptions, collectAllBGPAcceptDefault(fc)); err != nil {
 			return err
@@ -702,18 +703,18 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 		// here beside the per-policy route-maps; FRR resolves the neighbor's
 		// `route-map <name>` reference regardless of definition order.
 		b.WriteString(m.renderComposedBGPChains(fc))
-		if m.narrowedAliasesEnabled10129 {
-			b.WriteString(m.renderNarrowedAliases10129(fc))
-		}
+		// #10129: eligible narrowed chains use a private deny-terminated alias,
+		// leaving standalone/composed maps shared by intact attachments.
+		b.WriteString(m.renderNarrowedAliases10129(fc))
 	}
 	// #7625: the bounded deny an EMPTIED policy chain attaches. Emitted OUTSIDE
 	// the PolicyOptions guard above — a nil PolicyOptions makes every authored
 	// policy name a ghost, which is exactly when the deny is referenced and when
 	// skipping its definition would leave that reference dangling.
 	b.WriteString(m.renderEmptiedChainDeny(fc))
-	// #8363: a NARROWED chain keeps today's behaviour (the synthesized deny is
-	// only safe when the undefined members form a suffix — see the measurement
-	// in policy_chain_narrowed_eval_8363_test.go), but it is no longer silent.
+	// #8363/#10129: a narrowed chain records its warning and eligible
+	// suffix-narrowed fall-through/empty shapes attach a private deny alias.
+	// Non-suffix and deny-inert shapes retain the surviving shared map.
 	m.warnNarrowedChains(fc)
 
 	// Resolve forwarding-table export policy for ECMP. Sets fc.ConsistentHash
