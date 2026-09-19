@@ -918,6 +918,13 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 		b.WriteString("LinkLocalAddressing=no\n")
 		return b.String()
 	}
+	// VLAN/logical interfaces without a MAC-backed .link or .netdev file
+	// carry their configured MTU in the .network unit. Physical interfaces
+	// and generated bond/bridge devices keep their existing MTU writers.
+	if ifc.MTU > 0 && ifc.MACAddress == "" && !ifc.IsVLANParent && !ifc.IsBond && !ifc.IsBridge {
+		b.WriteString("\n[Link]\n")
+		fmt.Fprintf(&b, "MTUBytes=%d\n", ifc.MTU)
+	}
 
 	if ifc.IsVLANParent {
 		b.WriteString("\n[Link]\n")
