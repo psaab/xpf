@@ -357,9 +357,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 
 	// #5619 secure-tunnel plaintext advisory. Route-based IPsec decrypts in
-	// the KERNEL XFRM stack and the plaintext is forwarded by Linux routing,
-	// which xpf does not adjudicate — no zone policy, no session, no NAT, no
-	// screen. Before #5619 the config gave an affirmative FALSE signal: a zone
+	// the KERNEL XFRM stack and the plaintext is not adjudicated by xpf:
+	// FORWARD transit is fence-dropped while armed; INPUT/host-bound still
+	// reaches local input without tunnel-zone policy, session, NAT or screen.
+	// Before #5619 the config gave an affirmative FALSE signal: a zone
 	// on the tunnel interface commits cleanly and is programmed, so the posture
 	// READS as enforced. This states the truth at commit.
 	//

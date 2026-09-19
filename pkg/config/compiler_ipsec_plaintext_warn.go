@@ -100,8 +100,11 @@ import ()
 // #7949 NARROWED WHAT "AN OPERATOR WHO ZONES A VPN INTERFACE HAS BEEN TOLD
 // SOMETHING UNTRUE" MEANS, and the direction matters. This advisory is about
 // the INGRESS half — the plaintext the kernel XFRM stack delivers ON the
-// xfrmi, which is still kernel-forwarded and still unadjudicated (#9506 owns
-// that half; the exclusion above is what makes it so). It is NOT about the
+// xfrmi, which remains unadjudicated (#9506 owns that half; the exclusion
+// above is what makes it so): FORWARD transit is fence-dropped while armed
+// (#10302: policy-DROP + XDP/mark pinholes, xfrmi absent — fail-closed,
+// not forwarded), and INPUT/host-bound plaintext still reaches the local
+// input path without tunnel-zone policy. It is NOT about the
 // EGRESS half. Before #7949 a `bind-interface`-only tunnel produced no
 // interface row at all, so its LAN -> tunnel direction resolved NoRoute and was
 // slow-path reinjected to the kernel too; that direction is now adjudicated
@@ -223,9 +226,13 @@ func secureTunnelPlaintextAdvisoryWording() plaintextAdvisoryWording {
 		zonedHeading:   ipsecPlaintextZonedHeading,
 		zonedSuffix:    "but that zone does NOT govern its decrypted traffic",
 		unzonedHeading: ipsecPlaintextUnzonedHeading,
+		// r6-plan §7.2: keep the operator-visible mechanism aligned with the
+		// fence-dropped FORWARD and local-input residuals.
 		mechanism: "Route-based IPsec decrypts in the kernel XFRM stack and the plaintext is " +
-			"forwarded by Linux routing, which xpf does not adjudicate: no zone policy, no " +
-			"session, no NAT and no screen are applied to it.",
+			"not adjudicated by xpf: FORWARD transit is fence-dropped while the armed " +
+			"transit fence is installed, INPUT/host-bound plaintext still reaches the " +
+			"local input path without tunnel-zone policy, and no session, NAT or screen " +
+			"are applied to either half.",
 		unzonedCaveat: ipsecPlaintextUnzonedCaveat,
 		remedy: "Restrict what the tunnel can reach with routing or with the peer's own " +
 			"policy until this is enforced.",
