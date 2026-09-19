@@ -815,6 +815,11 @@ type mockSweepDP struct {
 	// receive loop applies the same key. nil everywhere else.
 	onDeleteV4 func(dataplane.SessionKey)
 	onDeleteV6 func(dataplane.SessionKeyV6)
+	// beforeBatchV4/beforeBatchV6 run after a batch has copied its rows but
+	// before callbacks consume them. They make the sweep's pause-close-resume
+	// interleaving deterministic for #10318. nil in every other test.
+	beforeBatchV4 func()
+	beforeBatchV6 func()
 }
 
 // Sessions implements clusterRuntime by wrapping the mock in the same
@@ -854,11 +859,53 @@ func (m *mockSweepDP) IterateSessionsV6(fn func(dataplane.SessionKeyV6, dataplan
 }
 
 func (m *mockSweepDP) BatchIterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
-	return m.IterateSessions(fn)
+	if m.beforeBatchV4 == nil {
+		return m.IterateSessions(fn)
+	}
+	entries := make([]struct {
+		key dataplane.SessionKey
+		val dataplane.SessionValue
+	}, 0, len(m.v4sessions))
+	for key, val := range m.v4sessions {
+		entries = append(entries, struct {
+			key dataplane.SessionKey
+			val dataplane.SessionValue
+		}{key, val})
+	}
+	hook := m.beforeBatchV4
+	m.beforeBatchV4 = nil
+	hook()
+	for _, entry := range entries {
+		if !fn(entry.key, entry.val) {
+			break
+		}
+	}
+	return nil
 }
 
 func (m *mockSweepDP) BatchIterateSessionsV6(fn func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
-	return m.IterateSessionsV6(fn)
+	if m.beforeBatchV6 == nil {
+		return m.IterateSessionsV6(fn)
+	}
+	entries := make([]struct {
+		key dataplane.SessionKeyV6
+		val dataplane.SessionValueV6
+	}, 0, len(m.v6sessions))
+	for key, val := range m.v6sessions {
+		entries = append(entries, struct {
+			key dataplane.SessionKeyV6
+			val dataplane.SessionValueV6
+		}{key, val})
+	}
+	hook := m.beforeBatchV6
+	m.beforeBatchV6 = nil
+	hook()
+	for _, entry := range entries {
+		if !fn(entry.key, entry.val) {
+			break
+		}
+	}
+	return nil
 }
 
 func (m *mockSweepDP) GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error) {
@@ -5664,4 +5711,139 @@ func TestNoRedriveWhenNoColdPrimeOwed_5718(t *testing.T) {
 			"disconnect (#466 flap suppression)", got)
 	}
 	ss.Stop()
+}
+
+// TestSyncSweepPauseCloseResumeDoesNotReinstall10318 is the deterministic
+// pause-close-resume probe for #10318. The batch has copied the live row,
+// the close removes it and queues its delete while the sweep is paused, and
+// resuming the sweep must observe the missing key rather than stamp/send the
+// stale batch copy.
+func TestSyncSweepPauseCloseResumeDoesNotReinstall10318(t *testing.T) {
+	now := monotonicSeconds()
+	key := dataplane.SessionKey{
+		SrcIP:    [4]byte{10, 103, 18, 1},
+		DstIP:    [4]byte{10, 103, 18, 2},
+		Protocol: 6,
+		SrcPort:  41018,
+		DstPort:  443,
+	}
+	dp := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State:       dataplane.SessStateEstablished,
+				Created:     now,
+				IngressZone: 1,
+				SessionID:   10318,
+			},
+		},
+	}
+	receiverDP := &mockSweepDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: dp.v4sessions[key],
+		},
+	}
+	receiver := NewSessionSync(":0", "10.0.0.3:4785", receiverDP)
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.stats.Connected.Store(true)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = now - 1
+	ss.testSweepNow = func() uint64 { return now }
+
+	batchRead := make(chan struct{})
+	resume := make(chan struct{})
+	dp.beforeBatchV4 = func() {
+		close(batchRead)
+		<-resume
+	}
+	sweepDone := make(chan int, 1)
+	go func() { sweepDone <- ss.syncSweep() }()
+	select {
+	case <-batchRead:
+	case <-time.After(time.Second):
+		t.Fatal("sweep did not reach its paused batch read")
+	}
+
+	delete(dp.v4sessions, key)
+	ss.QueueDeleteV4(key, false)
+	close(resume)
+	if got := <-sweepDone; got != 0 {
+		t.Fatalf("#10318 RED: sweep sent %d stale installs after the close", got)
+	}
+	if got := len(ss.sendCh); got != 1 {
+		t.Fatalf("#10318: queued frames = %d, want only the close delete", got)
+	}
+	msg := <-ss.sendCh
+	if msg[4] != syncMsgDeleteV4 {
+		t.Fatalf("#10318: queued frame type = %d, want delete-v4 %d", msg[4], syncMsgDeleteV4)
+	}
+	receiver.handleMessage(nil, syncMsgDeleteV4, msg[syncHeaderSize:])
+	if _, err := receiverDP.GetSessionV4(key); err == nil {
+		t.Fatal("#10318: receiver still holds the closed v4 session")
+	}
+}
+
+// TestSyncSweepPauseCloseResumeDoesNotReinstallV6_10318 is the IPv6 twin of
+// the pause-close-resume race probe.
+func TestSyncSweepPauseCloseResumeDoesNotReinstallV6_10318(t *testing.T) {
+	now := monotonicSeconds()
+	key := dataplane.SessionKeyV6{
+		SrcIP:    [16]byte{0x20, 0x01, 0x0d, 0xb8, 0x10, 0x31, 0x80, 0x00, 0, 0, 0, 0, 0, 0, 0, 1},
+		DstIP:    [16]byte{0x20, 0x01, 0x0d, 0xb8, 0x10, 0x31, 0x80, 0x00, 0, 0, 0, 0, 0, 0, 0, 2},
+		Protocol: 6,
+		SrcPort:  41019,
+		DstPort:  443,
+	}
+	dp := &mockSweepDP{
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			key: {
+				State:       dataplane.SessStateEstablished,
+				Created:     now,
+				IngressZone: 1,
+				SessionID:   10318,
+			},
+		},
+	}
+	receiverDP := &mockSweepDP{
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			key: dp.v6sessions[key],
+		},
+	}
+	receiver := NewSessionSync(":0", "10.0.0.3:4785", receiverDP)
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.stats.Connected.Store(true)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.lastSweepTime = now - 1
+	ss.testSweepNow = func() uint64 { return now }
+
+	batchRead := make(chan struct{})
+	resume := make(chan struct{})
+	dp.beforeBatchV6 = func() {
+		close(batchRead)
+		<-resume
+	}
+	sweepDone := make(chan int, 1)
+	go func() { sweepDone <- ss.syncSweep() }()
+	select {
+	case <-batchRead:
+	case <-time.After(time.Second):
+		t.Fatal("v6 sweep did not reach its paused batch read")
+	}
+
+	delete(dp.v6sessions, key)
+	ss.QueueDeleteV6(key, false)
+	close(resume)
+	if got := <-sweepDone; got != 0 {
+		t.Fatalf("#10318 RED: v6 sweep sent %d stale installs after the close", got)
+	}
+	if got := len(ss.sendCh); got != 1 {
+		t.Fatalf("#10318: v6 queued frames = %d, want only the close delete", got)
+	}
+	msg := <-ss.sendCh
+	if msg[4] != syncMsgDeleteV6 {
+		t.Fatalf("#10318: v6 queued frame type = %d, want delete-v6 %d", msg[4], syncMsgDeleteV6)
+	}
+	receiver.handleMessage(nil, syncMsgDeleteV6, msg[syncHeaderSize:])
+	if _, err := receiverDP.GetSessionV6(key); err == nil {
+		t.Fatal("#10318: receiver still holds the closed v6 session")
+	}
 }

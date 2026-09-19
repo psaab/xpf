@@ -84,6 +84,47 @@ func (s *SessionSync) sweepNow() uint64 {
 	return monotonicSeconds()
 }
 
+// stampSweepV4 rechecks a batch-read mirror row while holding the same
+// generation fence used by queue-time deletes. A close that wins the recheck
+// removes the row and is skipped; a close that races after the recheck waits
+// for this stamp and draws a strictly newer delete generation.
+func (s *SessionSync) stampSweepV4(
+	key dataplane.SessionKey,
+	threshold, now uint64,
+) (dataplane.SessionValue, bool) {
+	s.bulkSnapshotGenMu.Lock()
+	defer s.bulkSnapshotGenMu.Unlock()
+	current, err := s.sessions.GetV4(key)
+	if err != nil ||
+		current.IsReverse != 0 ||
+		current.Created < threshold ||
+		current.Created > now ||
+		!s.ShouldSyncZone(current.IngressZone) {
+		return dataplane.SessionValue{}, false
+	}
+	s.stampInstallGenV4(key, &current)
+	return current, true
+}
+
+// stampSweepV6 is the IPv6 twin of stampSweepV4.
+func (s *SessionSync) stampSweepV6(
+	key dataplane.SessionKeyV6,
+	threshold, now uint64,
+) (dataplane.SessionValueV6, bool) {
+	s.bulkSnapshotGenMu.Lock()
+	defer s.bulkSnapshotGenMu.Unlock()
+	current, err := s.sessions.GetV6(key)
+	if err != nil ||
+		current.IsReverse != 0 ||
+		current.Created < threshold ||
+		current.Created > now ||
+		!s.ShouldSyncZone(current.IngressZone) {
+		return dataplane.SessionValueV6{}, false
+	}
+	s.stampInstallGenV6(key, &current)
+	return current, true
+}
+
 func (s *SessionSync) syncSweep() int {
 	if s.IsPrimaryFn == nil && s.IsPrimaryForRGFn == nil {
 		return 0
@@ -221,7 +262,11 @@ func (s *SessionSync) syncSweep() int {
 		}
 		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
 			announced := s.installTableAnnouncedV4(key)
-			s.stampInstallGenV4(key, &val)
+			var ok bool
+			val, ok = s.stampSweepV4(key, threshold, now)
+			if !ok {
+				return true
+			}
 			// #9752 round 4: the sweep is its own transmission path — it
 			// must judge the fence, not bypass it. A skip is intentional
 			// (never backpressure): no count, no overflow. Retried not by
@@ -265,7 +310,11 @@ func (s *SessionSync) syncSweep() int {
 		}
 		if val.Created >= threshold && val.Created <= now && s.ShouldSyncZone(val.IngressZone) {
 			announced := s.installTableAnnouncedV6(key)
-			s.stampInstallGenV6(key, &val)
+			var ok bool
+			val, ok = s.stampSweepV6(key, threshold, now)
+			if !ok {
+				return true
+			}
 			// #9752 round 4: v6 twin of the sweep fence above.
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v6") {
 				return true
