@@ -79,11 +79,17 @@ var requiredLeaseColumns = map[int][]string{
 
 // ddnsLease is one active lease as the reconciler needs it: a stable
 // owner identity, the address, the offered name(s), the subnet, and the
-// expiry. Inactive/expired/declined rows are dropped at parse time.
+// expiry. In addition to the packed Identity used by the DDNS reconciler,
+// v4 hardware address and client-id are retained separately for the
+// lease-sync memfile fallback. The packed identity is intentionally kept
+// client-id-preferred for DDNS ownership stability; it is not a lossless
+// transport for the two v4 columns.
 type ddnsLease struct {
 	Family     int // 4 or 6
 	Address    string
 	Identity   string // v4: client-id||hwaddr ; v6: DUID/IAID
+	HWAddress  string // v4 hardware address, retained for lease sync
+	ClientID   string // v4 client identifier, retained for lease sync
 	SubnetID   string
 	HostName   string // host-name option
 	ClientFQDN string // client-supplied FQDN option (fqdn_fwd implied)
@@ -93,12 +99,12 @@ type ddnsLease struct {
 	// fallback (readSyncLeasesViaMemfile) preserves IA_PD vs IA_NA instead of
 	// mis-seeding a prefix-delegation lease as an address lease (#2262). These
 	// are NOT used by the DDNS reconciler (it keys on identity+address) — the
-	// fields are inert for v4 and for the DDNS path. lease_type / prefix_len are
-	// OPTIONAL memfile columns (not in requiredLeaseColumns): an old memfile or
-	// a v4 file leaves LeaseType == keaLeaseTypeIANA and LeaseTypeOK == true,
-	// preserving the prior (hardcoded IA_NA) behavior. A PRESENT but
-	// unparseable lease_type sets LeaseTypeOK == false so the sync path can
-	// skip the row rather than silently mis-type it.
+	// fields are inert for v4 and for the DDNS path. lease_type / prefix_len
+	// are OPTIONAL memfile columns (not in requiredLeaseColumns): an old
+	// memfile or a v4 file leaves LeaseType == keaLeaseTypeIANA and
+	// LeaseTypeOK == true, preserving the prior (hardcoded IA_NA) behavior. A
+	// PRESENT but unparseable lease_type sets LeaseTypeOK == false so the sync
+	// path can skip the row rather than silently mis-type it.
 	LeaseType   int  // Kea numeric lease_type: 0=IA_NA, 1=IA_TA, 2=IA_PD
 	LeaseTypeOK bool // false ⇒ lease_type column present but unparseable
 	PrefixLen   int  // v6 IA_PD delegated prefix length (0 when absent)
@@ -480,7 +486,9 @@ func parseActiveLeasesFileInto(path string, family int, now time.Time, acc *ddns
 				}
 			}
 		} else {
-			l.Identity = identity4(get(fields, "client_id"), get(fields, "hwaddr"))
+			l.HWAddress = get(fields, "hwaddr")
+			l.ClientID = get(fields, "client_id")
+			l.Identity = identity4(l.ClientID, l.HWAddress)
 		}
 		acc.latest[addr] = l
 	}
