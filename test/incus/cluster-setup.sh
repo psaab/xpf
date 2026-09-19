@@ -268,9 +268,11 @@ create_networks() {
 		# Enable IPv6 on cluster LAN bridge so incus doesn't strip IPv6
 		# routes from containers. ra-param=*,0,0 suppresses default
 		# router advertisements so only the firewall's embedded RA sender is used.
+		# NOTE: fd42:cafe::/64 collides with a foreign bpfrx-clan bridge
+		# present on shared lab hosts; xpf-clan uses a distinct ULA.
 		if [[ "$name" == "$NET_CLAN" && "$NET_CLAN" != "none" ]]; then
 			incus network set "$(r "$name")" \
-				ipv6.address=fd42:cafe::1/64 \
+				ipv6.address=fd42:cafe:1::1/64 \
 				ipv6.nat=false \
 				ipv6.dhcp=false \
 				raw.dnsmasq=ra-param=*,0,0
