@@ -1122,25 +1122,29 @@ For that reason `NoRoute` must **stay** slow-path eligible: dropping it instead
 would black-hole every learned destination for the width of that window.
 `xpf_userspace_binding_slow_path_no_route_packets_total` is the signal.
 
-**What actually happened to that requirement (#7480, then #9054).** The
-paragraph above states the requirement and the tree did not meet it. #7480 made
-a `NoRoute` frame get adjudicated against the #3110 unzoned egress sentinel
-before the slow-path chokepoint; no zone-pair or `junos-global` permit can match
-that sentinel, so the DEFAULT action decides and a Junos-default deny box DROPS
-the frame. For the narrow inter-publish window described above that was a
-deliberate, bounded trade against the #6664 kernel-delegation bypass.
+**What actually happened to that requirement (#7480, #9054, then #9522).**
+The paragraph above states the requirement and the tree did not meet it.
+#7480 made a `NoRoute` frame get adjudicated against the #3110 unzoned egress
+sentinel before the slow-path chokepoint; no zone-pair or `junos-global`
+permit can match that sentinel, so the DEFAULT action decides and a
+Junos-default deny box DROPS the frame. For the narrow inter-publish window
+described above that was a deliberate, bounded trade against the #6664
+kernel-delegation bypass.
 
-**The window is not always narrow.** This section does not mention the #8355
-learned-route cap, and it is the unbounded-width version of exactly the
-divergence described here: above ~65,000 kernel routes the daemon declines the
-ENTIRE learned-route import, so every dynamically learned destination resolves
-`NoRoute` until the table shrinks. Composed with #7480 that was a silent total
-blackhole of the dynamic FIB — and #8355's operator log line said traffic still
-forwarded through the kernel.
+**The window was not always narrow.** Above ~65,000 kernel routes the #8355
+daemon declines the ENTIRE learned-route import, so every dynamically learned
+destination resolves `NoRoute` until the table shrinks. #9054 restored
+slow-path delegation while `learned_route_import_capped` was set, making every
+kernel-routable destination the helper did not import eligible for transit with
+no zone policy, session, NAT or screen. That was the unowned, permitted-by-
+absence path filed as #9522.
 
-#9054 closes the composition rather than either half: `buildRouteSnapshots`
-now reports whether the cap declined the import, the snapshot carries
-`learned_route_import_capped` (snapshot protocol 10 — an older helper REFUSES
-the snapshot rather than applying it and black-holing), and while the flag is
-set the helper restores the slow-path delegation for `NoRoute` frames only.
-#7480's adjudication is untouched for an uncapped snapshot.
+**#9522 owns the fail-closed disposition.** `buildRouteSnapshots` still
+reports whether the cap declined the import and the snapshot still carries
+`learned_route_import_capped`, but the helper now adjudicates capped `NoRoute`
+frames exactly as uncapped ones. A deny is downgraded to `PolicyDenied` and
+dropped; only a policy `Permit` result keeps the ordinary slow-path
+delegation. `xpf_learned_route_import_capped` reports the live diagnostic
+state, `xpf_learned_route_cap_hits_total` counts declined builds, and
+`xpf_policy_denies_total` counts the resulting denials. Snapshot protocol **27**
+refuses a v26 helper that would still restore the old delegation.
