@@ -127,11 +127,16 @@ The broad finding was fixed by `a7d102c5f`/#9637: ordinary zone rules are
 `zones_host_inbound.go:563-586`: shared parents, lifelines, and VRF slaves are
 excluded; `netlink_hostinbound_ingress_9637.go` returns when the resolved set is
 empty; `netlink_hostinbound.go:157-178` still emits the destination-only zone
-rules. The current `junos_host_vrf_scope_6619_test.go` row “VRF-enslaved, only
-interface” measures the state as `wantScoped=nil`, `wantRules=false`, warning
-only. A warning does not enforce the configured cross-zone perimeter while the
-commit succeeds. Issue #10431 records the narrow residual and requires
-VRF-master (or equivalent fail-closed) handling.
+rules. The actual view-builder measurement is
+`host_inbound_ingress_9637_test.go:56-89`:
+`TestZoneHostInboundViewIngressNetdevs9637` expects the VRF-enslaved `sfmix`
+and lifeline `mgmt` views to have empty `IngressNetdevs`; its companion
+`TestHostInboundViewIngressNetdevsExcludesSharedClaims9637` at `:92-113`
+measures shared-parent exclusion. Separately, the downstream program fixture
+`junos_host_vrf_scope_6619_test.go:118-136` measures the VRF-only consequence as
+`wantRules=false` with warning only. A warning does not enforce the configured
+cross-zone perimeter while the commit succeeds. Issue #10431 records the
+narrow residual and requires VRF-master (or equivalent fail-closed) handling.
 
 ### `073` — input-chain rule cannot be a routed-transit drop
 
