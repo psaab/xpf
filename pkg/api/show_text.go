@@ -40,6 +40,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			for _, name := range sortedKeys(cfg.Schedulers) {
 				sched := cfg.Schedulers[name]
+				if sched == nil {
+					// #10439: tolerate present-but-nil slots from lenient
+					// restore/peer-sync loads.
+					continue
+				}
 				fmt.Fprintf(&buf, "Scheduler: %s\n", name)
 				if sched.StartTime != "" {
 					fmt.Fprintf(&buf, "  Start time: %s\n", sched.StartTime)
@@ -95,6 +100,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				// show-text carries no login class to gate on.
 				for _, name := range sortedKeys(snmpCfg.Communities) {
 					comm := snmpCfg.Communities[name]
+					if comm == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %s: %s\n",
 						config.SNMPCommunityDisplayName(name, true), comm.Authorization)
 				}
@@ -103,6 +113,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("Trap groups:\n")
 				for _, name := range sortedKeys(snmpCfg.TrapGroups) {
 					tg := snmpCfg.TrapGroups[name]
+					if tg == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %s: %s\n", name, strings.Join(tg.Targets, ", "))
 				}
 			}
@@ -117,6 +132,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("Server groups:\n")
 				for _, name := range sortedKeys(relay.ServerGroups) {
 					sg := relay.ServerGroups[name]
+					if sg == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %s: %s\n", name, strings.Join(sg.Servers, ", "))
 				}
 			}
@@ -124,6 +144,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("Relay groups:\n")
 				for _, name := range sortedKeys(relay.Groups) {
 					g := relay.Groups[name]
+					if g == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %s:\n", name)
 					fmt.Fprintf(&buf, "    Interfaces: %s\n", strings.Join(g.Interfaces, ", "))
 					fmt.Fprintf(&buf, "    Active server group: %s\n", g.ActiveServerGroup)
@@ -139,8 +164,18 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 			printFilters := func(family string, filters map[string]*config.FirewallFilter) {
 				for _, name := range sortedKeys(filters) {
 					filter := filters[name]
+					if filter == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "Filter: %s (family: %s)\n", name, family)
 					for _, term := range filter.Terms {
+						if term == nil {
+							// #10439: tolerate present-but-nil terms from
+							// lenient restore/peer-sync loads.
+							continue
+						}
 						fmt.Fprintf(&buf, "  Term: %s\n", term.Name)
 						if len(term.Protocols) > 0 {
 							fmt.Fprintf(&buf, "    From protocol: %s\n", strings.Join(term.Protocols, ", "))
@@ -188,6 +223,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			for _, name := range sortedKeys(cfg.Security.DynamicAddress.FeedServers) {
 				feed := cfg.Security.DynamicAddress.FeedServers[name]
+				if feed == nil {
+					// #10439: tolerate present-but-nil slots from lenient
+					// restore/peer-sync loads.
+					continue
+				}
 				fmt.Fprintf(&buf, "Feed server: %s\n", name)
 				// Redact embedded userinfo / query-string credentials before
 				// rendering to the REST client (#5521).
@@ -214,6 +254,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("Addresses:\n")
 				for _, name := range sortedKeys(ab.Addresses) {
 					addr := ab.Addresses[name]
+					if addr == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %-20s %s\n", name, addr.Value)
 				}
 			}
@@ -221,6 +266,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("Address sets:\n")
 				for _, name := range sortedKeys(ab.AddressSets) {
 					as := ab.AddressSets[name]
+					if as == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %-20s members: %s\n", name, strings.Join(as.Addresses, ", "))
 				}
 			}
@@ -234,6 +284,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("Applications:\n")
 				for _, name := range sortedKeys(cfg.Applications.Applications) {
 					app := cfg.Applications.Applications[name]
+					if app == nil {
+						// #10439: tolerate present-but-nil slots from lenient
+						// restore/peer-sync loads.
+						continue
+					}
 					fmt.Fprintf(&buf, "  %-20s proto=%-6s", name, app.Protocol)
 					if app.DestinationPort != "" {
 						fmt.Fprintf(&buf, " dst-port=%s", app.DestinationPort)
@@ -266,6 +321,11 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 			buf.WriteString("Flow monitoring (NetFlow v9):\n")
 			for _, name := range sortedKeys(v9.Templates) {
 				tmpl := v9.Templates[name]
+				if tmpl == nil {
+					// #10439: tolerate present-but-nil slots from lenient
+					// restore/peer-sync loads.
+					continue
+				}
 				fmt.Fprintf(&buf, "  Template: %s\n", name)
 				if tmpl.FlowActiveTimeout > 0 {
 					fmt.Fprintf(&buf, "    Active timeout: %ds\n", tmpl.FlowActiveTimeout)
