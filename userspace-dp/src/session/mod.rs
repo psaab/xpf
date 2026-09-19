@@ -1769,6 +1769,19 @@ impl SessionTable {
             record.entry.filter_revalidated = stamp;
         }
     }
+    /// #10467: keep a route-transition hit stale until the pair teardown has
+    /// completed. If teardown is refused or delayed, the surviving entry must
+    /// not look freshly judged under the new generation while still carrying
+    /// the old route decision.
+    pub(crate) fn clear_filter_revalidation(&mut self, key: &SessionKey) {
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.filter_revalidated = FilterRevalidationStamp::UNVALIDATED;
+        }
+    }
+
 
     /// #7212 test view: the boolean half of
     /// [`SessionTable::stale_filter_revalidation_key`]. A `.is_some()` over the

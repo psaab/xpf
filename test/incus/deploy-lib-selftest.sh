@@ -31,6 +31,7 @@ bad()  { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 # (MainPID, ExecStart path) the filesystem alone cannot express.
 FAKE_VM=""
 FAKE_MAINPID="0"
+FAKE_HELPER_PIDS=""
 FAKE_EXECSTART="/usr/local/sbin/xpfd"
 # #6493: verdict the fake `xpfd verify-dataplane` probe returns, and an ordered
 # log of every incus call the lib made. The log is what lets a test assert what
@@ -54,6 +55,7 @@ FAKE_MKTEMP_SEQ=""
 setup_fake_vm() {
 	FAKE_VM=$(mktemp -d)
 	FAKE_MAINPID="0"
+	FAKE_HELPER_PIDS=""
 	FAKE_EXECSTART="/usr/local/sbin/xpfd"
 	FAKE_VERIFY_RC=0
 	FAKE_CALL_LOG=$(mktemp)
@@ -74,6 +76,7 @@ teardown_fake_vm() {
 	FAKE_VM=""
 	[[ -n "$FAKE_CALL_LOG" ]] && rm -f "$FAKE_CALL_LOG"
 	FAKE_CALL_LOG=""
+	FAKE_HELPER_PIDS=""
 	FAKE_REJECT_EXISTING=0
 	[[ -n "$FAKE_MKTEMP_SEQ" ]] && rm -f "$FAKE_MKTEMP_SEQ"
 	FAKE_MKTEMP_SEQ=""
@@ -290,6 +293,16 @@ _fake_remote_bash() {
 		return $?
 	fi
 	# deploy_verify_running_xpfd: MainPID + sha256sum /proc/PID/exe
+	# deploy_running_xpf_userspace_dp_sha256: exactly one helper PID is
+	# required; a missing or duplicated helper must not fall back to disk.
+	if [[ "$body" == *"pidof xpf-userspace-dp"* ]]; then
+		local helper_pids="$FAKE_HELPER_PIDS"
+		# Match the remote `set -- $pids; [ "$#" -eq 1 ]` guard.
+		read -r -a helper_pid_array <<<"$helper_pids"
+		(( ${#helper_pid_array[@]} == 1 )) || return 1
+		sha256sum "$FAKE_VM/usr/local/sbin/xpf-userspace-dp" 2>/dev/null || return 1
+		return 0
+	fi
 	if [[ "$body" == *MainPID* && "$body" == *"/proc/"* ]]; then
 		[[ "$FAKE_MAINPID" != "0" ]] || return 1
 		# The "running exe" is the file the fake pid points at: we model it as
@@ -573,6 +586,75 @@ test_running_sha_empty_instance_does_not_read_the_local_host() {
 		bad "running_sha: empty instance gave rc=$rc out='$got'"
 	fi
 	teardown_fake_vm
+}
+
+test_helper_running_sha_returns_live_sha() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "HELPER-RUNNING-OK"
+	cp "$lb" "$FAKE_VM/usr/local/sbin/xpf-userspace-dp"
+	FAKE_HELPER_PIDS="4242"
+	local want got
+	want=$(sha256sum "$lb" | awk '{print $1}')
+	got=$(deploy_running_xpf_userspace_dp_sha256 vm 1)
+	if [[ "$got" == "$want" ]]; then
+		ok "helper_running_sha: echoes the LIVE helper image sha256"
+	else
+		bad "helper_running_sha: got '$got', want '$want'"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_helper_running_sha_rejects_empty_instance() {
+	setup_fake_vm
+	local got rc
+	got=$(deploy_running_xpf_userspace_dp_sha256 "" 1); rc=$?
+	if [[ $rc -ne 0 && -z "$got" ]]; then
+		ok "helper_running_sha: empty instance returns EMPTY rc!=0"
+	else
+		bad "helper_running_sha: empty instance gave rc=$rc out='$got'"
+	fi
+	teardown_fake_vm
+}
+
+test_helper_running_sha_rejects_absent_helper() {
+	setup_fake_vm
+	FAKE_HELPER_PIDS=""
+	local got rc
+	got=$(deploy_running_xpf_userspace_dp_sha256 vm 1); rc=$?
+	if [[ $rc -ne 0 && -z "$got" ]]; then
+		ok "helper_running_sha: absent helper returns EMPTY rc!=0"
+	else
+		bad "helper_running_sha: absent helper gave rc=$rc out='$got'"
+	fi
+	teardown_fake_vm
+}
+
+test_helper_running_sha_rejects_duplicate_helpers() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "HELPER-DUPLICATE"
+	cp "$lb" "$FAKE_VM/usr/local/sbin/xpf-userspace-dp"
+	FAKE_HELPER_PIDS="4242 4343"
+	local got rc
+	got=$(deploy_running_xpf_userspace_dp_sha256 vm 1); rc=$?
+	if [[ $rc -ne 0 && -z "$got" ]]; then
+		ok "helper_running_sha: duplicate helper PIDs fail closed"
+	else
+		bad "helper_running_sha: duplicate PIDs gave rc=$rc out='$got'"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_helper_verify_stale_binary_hardfails() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "HELPER-NEW-BUILD"
+	make_local_bin "$FAKE_VM/usr/local/sbin/xpf-userspace-dp" "HELPER-OLD-BUILD"
+	FAKE_HELPER_PIDS="4242"
+	if ( deploy_verify_running_xpf_userspace_dp vm "$lb" ) >/dev/null 2>&1; then
+		bad "helper_verify_running: stale helper MUST hard-fail"
+	else
+		ok "helper_verify_running: stale helper hard-fails"
+	fi
+	rm -f "$lb"; teardown_fake_vm
 }
 
 test_verify_running_stale_pin_hardfails() {
@@ -1434,6 +1516,11 @@ test_reconcile_dangling_sbin_keeps_valid
 test_verify_running_match
 test_running_sha_returns_the_live_sha
 test_running_sha_empty_instance_does_not_read_the_local_host
+test_helper_running_sha_returns_live_sha
+test_helper_running_sha_rejects_empty_instance
+test_helper_running_sha_rejects_absent_helper
+test_helper_running_sha_rejects_duplicate_helpers
+test_helper_verify_stale_binary_hardfails
 test_verify_running_stale_pin_hardfails
 test_verify_running_stale_binary_hardfails
 test_reassert_verifier_accepts_all_primary

@@ -93,6 +93,7 @@ use super::poll_stages::{
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp;
 
+
 use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
@@ -104,8 +105,10 @@ use filter::{
     collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit,
     evaluate_non_pbr_input_filter, evaluate_non_pbr_input_filter_counters_cached,
-    evaluate_non_pbr_input_filter_log_only, filter_terminal, host_inbound_gated_lo0_action,
-    lo0_action_for_solicited_reply,
+    evaluate_non_pbr_input_filter_log_only, filter_terminal,
+    host_inbound_gated_lo0_action, lo0_action_for_solicited_reply,
+    revalidate_static_pbr_route_on_session_hit, NonPbrInputFilterEval,
+    SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
 };
 
 // Per-batch packet processing lifted from `poll_binding` (#678).
@@ -747,7 +750,7 @@ pub(super) fn poll_binding_process_descriptor(
                 // loads, on this cold cache-miss/resolve path only.
                 let neighbor_epoch_snapshot = worker_ctx.dynamic_neighbors.snapshot_shard_epochs();
                 let mut decision = if let Some(flow) = flow.as_ref() {
-                    if let Some(resolved) = resolve_flow_session_decision_with_conntrack(
+                if let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
                         sessions,
                         binding.bpf_maps.session_map.handle(),
                         conntrack_v4_fd,
@@ -802,6 +805,28 @@ pub(super) fn poll_binding_process_descriptor(
                         // #9519; the arrival zone for a foreign packet.
                         let authority_zone =
                             foreign_arrival_zone.unwrap_or(resolved.metadata.ingress_zone);
+                        // #10467: a changed PBR route identity must not mutate
+                        // only this direction's cached decision.  Tear down the
+                        // pair and let the next packet take the normal miss
+                        // path, which recomputes both egress-zone policy and
+                        // forward/reverse route state.  Unchanged identities
+                        // stay on the #8114 fast path; foreign arrivals cannot
+                        // revoke the admitting session.
+                        let stale_pbr_route = if foreign_arrival_zone.is_none() {
+                            revalidate_static_pbr_route_on_session_hit(
+                                worker_ctx.forwarding,
+                                worker_ctx.dynamic_neighbors,
+                                sessions,
+                                &resolved.key,
+                                flow,
+                                packet_frame,
+                                meta,
+                                ingress_zone_override,
+                                resolved.decision,
+                            )
+                        } else {
+                            None
+                        };
                         // #3073: re-count this established-session packet against
                         // the admitting policy's hit counter. The cold path
                         // counts the first packet in `try_match_rule`; this
@@ -960,35 +985,65 @@ pub(super) fn poll_binding_process_descriptor(
                         // the reverse companion of a NAT64 flow; `None` otherwise.
                         session_nat64_reverse = resolved.metadata.nat64_reverse;
                         flow_cache_owner_rg_id = resolved.metadata.owner_rg_id;
-                        // #3073: carry the admitting rule's hit-counter handle so
-                        // the flow-cache entry populated below re-counts cached
-                        // packets against the same policy.
+                        // #3073: carry the admitting rule's hit-counter handle
+                        // to the flow-cache entry populated below.
                         flow_cache_policy_counter_idx = resolved.metadata.policy_counter_idx;
-                        // #3322: carry the bound handle from the established
-                        // session onto the flow-cache entry too.
-                        // #5445: hand the already-sourced bound counter to the
-                        // flow-cache entry (was `resolved.metadata.policy_counter
-                        // .clone()`, a SECOND per-packet Arc clone on top of the
-                        // now-removed lookup-return clone). `bound_policy_counter`
-                        // above already resolved the same handle exactly once.
+                        // #3322/#5445: reuse the one bound counter sourced above
+                        // rather than cloning from the hit lookup again.
                         flow_cache_policy_counter = bound_policy_counter;
                         apply_nat_on_fabric = true;
-                        // #1430/#2362 per-packet re-eval + #7212 static
-                        // revalidation, folded onto ONE per-interface input
-                        // filter lookup. `None` — no input filter on this
-                        // ingress interface in this family, or a static filter
-                        // whose verdict this session already carries under the
-                        // live config generation — is the common case and costs
-                        // exactly that one lookup.
-                        if let Some(input_filter_hit) = evaluate_input_filter_on_session_hit(
-                            worker_ctx.forwarding,
-                            sessions,
-                            &resolved.key,
-                            packet_frame,
-                            Some(flow),
-                            meta,
-                            Some(authority_zone),
-                        ) {
+                        // Evaluate ordinary input policy first so a real
+                        // discard/reject keeps its counted/logged semantics.
+                        // A route transition overrides only an ordinary
+                        // Accept, including the per-packet route-filter arm.
+                        let ordinary_input_filter_hit =
+                            evaluate_input_filter_on_session_hit(
+                                worker_ctx.forwarding,
+                                sessions,
+                                &resolved.key,
+                                packet_frame,
+                                Some(flow),
+                                meta,
+                                Some(authority_zone),
+                            );
+                        let input_filter_hit = match ordinary_input_filter_hit {
+                            Some(hit)
+                                if hit.eval.action == crate::filter::FilterAction::Accept =>
+                            {
+                                if let Some(route) = stale_pbr_route {
+                                    // The ordinary evaluator may have stamped
+                                    // this entry fresh on its Accept path.
+                                    if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                        sessions.clear_filter_revalidation(revoked_key);
+                                    }
+                                    Some(SessionHitInputFilterEval {
+                                        eval: NonPbrInputFilterEval {
+                                            action: crate::filter::FilterAction::Discard,
+                                            cached_log: None,
+                                        },
+                                        revoked_key: route.revoked_key,
+                                        log_source: FilterLogSource::Pbr,
+                                    })
+                                } else {
+                                    Some(hit)
+                                }
+                            }
+                            Some(hit) => Some(hit),
+                            None => stale_pbr_route.map(|route| {
+                                if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                    sessions.clear_filter_revalidation(revoked_key);
+                                }
+                                SessionHitInputFilterEval {
+                                    eval: NonPbrInputFilterEval {
+                                        action: crate::filter::FilterAction::Discard,
+                                        cached_log: None,
+                                    },
+                                    revoked_key: route.revoked_key,
+                                    log_source: FilterLogSource::Pbr,
+                                }
+                            }),
+                        };
+                        if let Some(input_filter_hit) = input_filter_hit {
                             let input_filter_eval = input_filter_hit.eval;
                             let input_filter_revoked_key = input_filter_hit.revoked_key;
                             // #8114 item 1: a verdict that came from a matched
@@ -2097,7 +2152,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // RST/ICMP reply (byte-identical to a non-PBR
                         // `then reject`); on `RouteOverride::Drop` recycle the
                         // frame and skip the route-lookup/forward entirely.
-                        let (route_table_override, pbr_install_table) = match ingress_route_table_override(
+                        let route_override = ingress_route_table_override(
                             worker_ctx.forwarding,
                             packet_frame,
                             meta,
@@ -2110,7 +2165,8 @@ pub(super) fn poll_binding_process_descriptor(
                                 ingress_ifindex: binding.ifindex,
                                 counters: &mut *telemetry.counters,
                             }),
-                        ) {
+                        );
+                        let (route_table_override, pbr_install_table) = match route_override {
                             RouteOverride::Drop => {
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
@@ -4487,7 +4543,7 @@ pub(super) fn poll_binding_process_descriptor(
                     // identical to the flowless non-PBR input-filter deny above.
                     // On `RouteOverride::Drop` recycle the frame and skip the
                     // override/route-lookup/forward.
-                    let route_table_override = match l3_ctx
+                    let (route_table_override, pbr_install_table) = match l3_ctx
                         .as_ref()
                         .map(|l3_flow| {
                             ingress_route_table_override(
@@ -4507,8 +4563,10 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        RouteOverride::Table { table, .. } => Some(table),
-                        RouteOverride::None => None,
+                        RouteOverride::Table { table, domain, check } => {
+                            (Some(table), Some((domain, check)))
+                        }
+                        RouteOverride::None => (None, None),
                     };
                     // #6472: NAT64 (cross-family) ICMP error translation
                     // (RFC 7915 §4.2/§5.2), wired HERE on the flowless arm —
@@ -5098,11 +5156,27 @@ pub(super) fn poll_binding_process_descriptor(
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
                     }
+                    // The flowless base resolver checks ingress-local and
+                    // interface-NAT local delivery before consulting the
+                    // override table. Preserve the table identity only for
+                    // dispositions that came from the transit lookup; a
+                    // local/redirect arm is table-free.
+                    let resolved_in_table = !matches!(
+                        final_resolution.disposition,
+                        ForwardingDisposition::LocalDelivery
+                            | ForwardingDisposition::FabricRedirect
+                    );
+                    let (install_table_domain, install_table_check) =
+                        crate::afxdp::forwarding::install_table_stamp_for_miss(
+                            pbr_install_table,
+                            resolved_in_table,
+                            final_resolution,
+                        );
                     SessionDecision {
                         resolution: final_resolution,
                         nat: NatDecision::default(),
-                        install_table_domain: 0,
-                        install_table_check: 0,
+                        install_table_domain,
+                        install_table_check,
                     }
                 };
                 // Safety net: convert any remaining HAInactive to fabric
@@ -7158,11 +7232,21 @@ pub(super) fn poll_binding_process_descriptor(
                     // already counted by record_forwarding_disposition
                     // above and recycled by the recycle_now epilogue
                     // below — no leak, no double-count.
+                    // #10467: an explicit FBF/native-RI table owns the
+                    // resolution. If that table misses, delegating the
+                    // original frame to the kernel loses the userspace
+                    // ingress identity and can forward it through MAIN.
+                    // Ordinary MAIN-table NoRoute still delegates during the
+                    // normal FIB-refresh window; only a non-default install
+                    // identity is terminal here.
+                    let stamped_table_no_route =
+                        decision.resolution.disposition == ForwardingDisposition::NoRoute
+                            && decision.install_table_domain != 0;
                     let missing_neighbor_adjudicated =
                         missing_neighbor_slow_path_decision.is_some();
                     let slow_path_decision =
                         missing_neighbor_slow_path_decision.unwrap_or(decision);
-                    if !suppress_slow_path_reinject {
+                    if !suppress_slow_path_reinject && !stamped_table_no_route {
                         if slow_path_admit(&binding.live, decision.resolution.disposition) {
                             let outlet = if missing_neighbor_adjudicated {
                                 // The neighbor policy decision is the explicit

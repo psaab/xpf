@@ -775,6 +775,8 @@ harness_exe_scope() {
 harness_result_emit() {
 	local gate="" env="" verdict="" void_reason="" headline="" direction=""
 	local metrics="" build_git_sha="" build_exe="" running_exe="" exe_check=""
+	local build_helper_exe="" running_helper_exe="" helper_exe_check=""
+	local running_helper_exe_peer="" helper_exe_scope=""
 	local duration_s="" artifacts="" adapter="" ledger="" node="" ts=""
 	local node_peer="" running_exe_peer="" exe_scope=""
 	while (($#)); do
@@ -790,6 +792,11 @@ harness_result_emit() {
 		--build-exe-sha256) build_exe="$2"; shift 2 ;;
 		--running-exe-sha256) running_exe="$2"; shift 2 ;;
 		--exe-check) exe_check="$2"; shift 2 ;;
+		--build-helper-exe-sha256) build_helper_exe="$2"; shift 2 ;;
+		--running-helper-exe-sha256) running_helper_exe="$2"; shift 2 ;;
+		--running-helper-exe-sha256-peer) running_helper_exe_peer="$2"; shift 2 ;;
+		--helper-exe-check) helper_exe_check="$2"; shift 2 ;;
+		--helper-exe-scope) helper_exe_scope="$2"; shift 2 ;;
 		--duration-s) duration_s="$2"; shift 2 ;;
 		--artifacts) artifacts="$2"; shift 2 ;;
 		--adapter) adapter="$2"; shift 2 ;;
@@ -827,6 +834,12 @@ harness_result_emit() {
 	MATCH | MISMATCH | UNAVAILABLE | NOT-APPLICABLE) ;;
 	*) _hr_warn "REFUSED: --exe-check must be MATCH, MISMATCH, UNAVAILABLE or NOT-APPLICABLE (got '${exe_check}')"; return 2 ;;
 	esac
+	if [[ -n "$helper_exe_check" ]]; then
+		case "$helper_exe_check" in
+		MATCH | MISMATCH | UNAVAILABLE | NOT-APPLICABLE) ;;
+		*) _hr_warn "REFUSED: --helper-exe-check must be MATCH, MISMATCH, UNAVAILABLE or NOT-APPLICABLE (got '${helper_exe_check}')"; return 2 ;;
+		esac
+	fi
 	if [[ "$verdict" != "VOID" && ( "$exe_check" == "MISMATCH" || "$exe_check" == "UNAVAILABLE" ) ]]; then
 		_hr_warn "REFUSED: exe_check=$exe_check on a $verdict row — a measurement of a binary we cannot name is a VOID, not a result (#2176)"
 		return 2
@@ -868,6 +881,9 @@ harness_result_emit() {
 			HR_VERDICT="$verdict" HR_VOID_REASON="$void_reason" HR_HEADLINE="$headline" \
 			HR_DIRECTION="$direction" HR_METRICS="$metrics" HR_GITSHA="$build_git_sha" \
 			HR_BUILD_EXE="$build_exe" HR_RUN_EXE="$running_exe" HR_EXE_CHECK="$exe_check" \
+			HR_BUILD_HELPER_EXE="$build_helper_exe" HR_RUN_HELPER_EXE="$running_helper_exe" \
+			HR_RUN_HELPER_EXE_PEER="$running_helper_exe_peer" \
+			HR_HELPER_EXE_CHECK="$helper_exe_check" HR_HELPER_EXE_SCOPE="$helper_exe_scope" \
 			HR_DURATION="$duration_s" HR_ARTIFACTS="$artifacts" HR_ADAPTER="$adapter" \
 			HR_NODE="$node" HR_NODE_PEER="$node_peer" \
 			HR_RUN_EXE_PEER="$running_exe_peer" HR_EXE_SCOPE="$exe_scope" \
@@ -938,6 +954,13 @@ row = {
     "build_exe_sha256": os.environ.get("HR_BUILD_EXE", ""),
     "running_exe_sha256": os.environ.get("HR_RUN_EXE", ""),
     "exe_check": os.environ["HR_EXE_CHECK"],
+    # Optional userspace-helper provenance, required by the wire-routing
+    # separation gate and additive for older rows.
+    "build_helper_exe_sha256": opt("HR_BUILD_HELPER_EXE"),
+    "running_helper_exe_sha256": opt("HR_RUN_HELPER_EXE"),
+    "helper_exe_check": opt("HR_HELPER_EXE_CHECK"),
+    "running_helper_exe_sha256_peer": opt("HR_RUN_HELPER_EXE_PEER"),
+    "helper_exe_scope": opt("HR_HELPER_EXE_SCOPE"),
     "duration_s": num(duration) if duration else None,
     "artifacts": opt("HR_ARTIFACTS"),
     "adapter": opt("HR_ADAPTER"),
@@ -1005,7 +1028,8 @@ PY
 # aggregates green' is exactly the failure the assurance layer exists to catch.
 # The ledger-coverage census reads the absence either way.
 harness_result_run() {
-	local gate="" adapter="" env="" mode="cluster" node="" build_exe="" artifacts="" ledger=""
+	local gate="" adapter="" env="" mode="cluster" node="" build_exe="" build_helper_exe="" artifacts="" ledger=""
+	local require_helper=0
 	local peer_node_arg=""
 	while (($#)); do
 		case "$1" in
@@ -1014,12 +1038,14 @@ harness_result_run() {
 		--env) env="$2"; shift 2 ;;
 		--cluster) mode="cluster"; shift ;;
 		--hermetic) mode="hermetic"; shift ;;
+		--require-helper-attestation) require_helper=1; shift ;;
 		--node) node="$2"; shift 2 ;;
 		# #9044: the peer is normally resolved from cluster-env.sh like --node
 		# is; the flag exists so a caller (and the self-test) can name it
 		# explicitly, the same reason --node exists.
 		--node-peer) peer_node_arg="$2"; shift 2 ;;
 		--build-exe) build_exe="$2"; shift 2 ;;
+		--build-helper-exe) build_helper_exe="$2"; shift 2 ;;
 		--artifacts) artifacts="$2"; shift 2 ;;
 		--ledger) ledger="$2"; shift 2 ;;
 		--) shift; break ;;
@@ -1066,8 +1092,9 @@ harness_result_run() {
 	headline=$(cut -f3 <<<"$adapted")
 	direction=$(cut -f4 <<<"$adapted")
 	metrics=$(cut -f5 <<<"$adapted")
-
 	local build_git_sha build_exe_sha running_exe_sha exe_check
+	local build_helper_exe_sha="" running_helper_exe_sha=""
+	local peer_running_helper_exe_sha="" helper_exe_check="" helper_exe_scope=""
 	# Initialised explicitly: the run wrapper executes under `set -u`, and a
 	# value-less `local` makes the first `[[ -z "$peer_node" ]]` an unbound-
 	# variable error rather than a false test (#9044).
@@ -1148,6 +1175,44 @@ harness_result_run() {
 			fi
 		fi
 	fi
+	if ((require_helper)); then
+		[[ -z "$build_helper_exe" ]] && build_helper_exe="$root/xpf-userspace-dp"
+		[[ -f "$build_helper_exe" ]] &&
+			build_helper_exe_sha=$(sha256sum "$build_helper_exe" | awk '{print $1}')
+		if [[ "$mode" == "cluster" && -n "$node" ]] &&
+			declare -F deploy_running_xpf_userspace_dp_sha256 >/dev/null; then
+			running_helper_exe_sha=$(
+				deploy_running_xpf_userspace_dp_sha256 \
+					"$node" "${XPF_EXE_READBACK_TRIES:-3}" || true
+			)
+			if [[ -n "$peer_node" && "$peer_node" != "$node" ]]; then
+				peer_running_helper_exe_sha=$(
+					deploy_running_xpf_userspace_dp_sha256 \
+						"$peer_node" "${XPF_EXE_READBACK_TRIES:-3}" || true
+				)
+			fi
+		else
+			_hr_warn "helper running-image readback unavailable; the wire gate cannot prove xpf-userspace-dp provenance"
+		fi
+		helper_exe_check=$(
+			harness_exe_check "${build_helper_exe_sha:-}" \
+				"${running_helper_exe_sha:-}" "$mode"
+		)
+		helper_exe_scope=$(
+			harness_exe_scope "$mode" "${peer_node:-}" \
+				"${peer_running_helper_exe_sha:-}"
+		)
+		# The wire gate depends on either HA node after failover, so a missing
+		# peer helper readback is not partial evidence: require both images.
+		if [[ "$helper_exe_check" == "MATCH" && -n "$peer_node" &&
+			"$peer_node" != "$node" && -z "$peer_running_helper_exe_sha" ]]; then
+			helper_exe_check="UNAVAILABLE"
+		elif [[ "$helper_exe_check" == "MATCH" &&
+			-n "$peer_running_helper_exe_sha" &&
+			"$peer_running_helper_exe_sha" != "$build_helper_exe_sha" ]]; then
+			helper_exe_check="MISMATCH"
+		fi
+	fi
 	exe_check=$(harness_exe_check "${build_exe_sha:-}" "${running_exe_sha:-}" "$mode")
 	exe_scope=$(harness_exe_scope "$mode" "${peer_node:-}" "${peer_running_exe_sha:-}")
 
@@ -1192,9 +1257,19 @@ harness_result_run() {
 		metrics=""
 		_hr_warn "$gate gate verdict was $gate_verdict but exe_check=$exe_check — the row is recorded VOID (unattributable), the gate's own exit status is unchanged"
 	fi
+	if ((require_helper)) && [[ "$verdict" != "VOID" &&
+		"$helper_exe_check" != "MATCH" ]]; then
+		void_reason="helper_exe_check=$helper_exe_check: the running xpf-userspace-dp image could not be confirmed on both nodes (build_helper_exe_sha256=${build_helper_exe_sha:-<none>} running_helper_exe_sha256=${running_helper_exe_sha:-<none>} peer=${peer_node:-<none>} peer_running_helper_exe_sha256=${peer_running_helper_exe_sha:-<none>} helper_exe_scope=${helper_exe_scope:-<none>}) — the gate reported $verdict but helper provenance is unknown"
+		verdict="VOID"
+		headline=""
+		direction=""
+		metrics=""
+		_hr_warn "$gate gate verdict was $gate_verdict but helper_exe_check=$helper_exe_check — the row is recorded VOID until helper provenance is attested"
+	fi
 
 	local ledger_arg=()
 	[[ -n "$ledger" ]] && ledger_arg=(--ledger "$ledger")
+	local emit_failed=0
 	# #9922 F-087: a PASS whose row cannot be written is "passed but
 	# unrecorded", not a pass. Exit 0 claims "passed AND recorded"; 2 claims
 	# "could not record", which is the true one — every refusal mode that
@@ -1202,13 +1277,17 @@ harness_result_run() {
 	# green' is the defect. A measured FAIL is never demoted (rc preserved,
 	# mirroring the adapter-refusal path); only the PASS branch moves, and
 	# only from 0 to 2.
-	local emit_failed=0
 	if ! harness_result_emit \
 		--gate "$gate" --env "$env" --verdict "$verdict" \
 		--void-reason "$void_reason" --headline-metric "$headline" \
 		--headline-direction "$direction" --metrics "$metrics" \
 		--build-git-sha "$build_git_sha" --build-exe-sha256 "${build_exe_sha:-}" \
 		--running-exe-sha256 "${running_exe_sha:-}" --exe-check "$exe_check" \
+		--build-helper-exe-sha256 "${build_helper_exe_sha:-}" \
+		--running-helper-exe-sha256 "${running_helper_exe_sha:-}" \
+		--running-helper-exe-sha256-peer "${peer_running_helper_exe_sha:-}" \
+		--helper-exe-check "${helper_exe_check:-}" \
+		--helper-exe-scope "${helper_exe_scope:-}" \
 		--duration-s "$((t1 - t0))" --artifacts "$artifacts" --adapter "$adapter" \
 		--node "$node" --node-peer "${peer_node:-}" \
 		--running-exe-sha256-peer "${peer_running_exe_sha:-}" \

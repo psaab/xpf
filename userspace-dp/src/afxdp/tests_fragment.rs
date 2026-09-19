@@ -995,26 +995,14 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
     // that WITHOUT the gate the fragment forwards via the base table.
     // RED-on-revert: the flowless arm ignored PBR -> base route -> forward.
     //
-    // #7409 — THIS COMMENT USED TO SAY "-> NoRoute -> drop". It does NOT drop.
-    // NoRoute is slow-path eligible, so the steered fragment is REINJECTED to
-    // the kernel, which resolves it in the MAIN table and forwards it down the
-    // very path the operator steered it away from. That is the second vector on
-    // #7409: pkg/routing BuildPBRRules deliberately drops `is-fragment` (and
-    // tcp-flags / icmp-type / port-except) terms from the kernel ip-rule mirror
-    // because they are unrepresentable there, on the stated theory that the
-    // userspace filter path enforces the term exactly. It does enforce the
-    // MATCH exactly — the steer happens — but the CONSEQUENCE is undone by the
-    // reinject when the steered table is empty.
-    //
-    // The assertions below now pin that REAL behaviour rather than the drop the
-    // old comment imagined. Asserting "the packet did not reach the slow path"
-    // would be false today and would stay false after #7409's import, because
-    // this fixture builds an empty `scrub` table by construction. Making it
-    // true requires deciding whether NoRoute should drop instead of reinject —
-    // deliberately out of scope while the FIB refresh window is still open
-    // (see the NoRoute note in poll_descriptor/mod.rs).
+    // #10467: the userspace route lookup reaches NoRoute in the explicit
+    // `scrub` table. That result is terminal at the poll chokepoint; handing
+    // the original frame to the kernel would lose the ingress/table identity
+    // and allow MAIN to forward it. Ordinary MAIN-table NoRoute keeps its
+    // existing slow-path behavior, but a non-default install identity does not.
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
+    snapshot.interfaces[0].hardware_addr = "02:bf:72:00:80:08".to_string();
     snapshot.policies.clear();
     snapshot.interfaces[0].filter_input_v4 = "frag-to-scrub".to_string();
     snapshot.filters = vec![FirewallFilterSnapshot {
@@ -1054,23 +1042,14 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
         dbg.no_route, 1,
         "#3291: the PBR-steered fragment resolves NoRoute in the empty scrub table"
     );
-    // #7409: the fragment REACHES the slow-path reinject site. This harness
-    // installs no reinjector (`slow_path: None` in tests_support), so a frame
-    // that gets there bumps `slow_path_drops` and records a
-    // "slow_path_unavailable" exception instead of being enqueued —
-    // `slow_path_no_route_packets` is bumped only AFTER a reinjector is
-    // selected, so asserting on that counter here would read 0 whether or not
-    // the packet reached the slow path, i.e. it would be vacuous.
-    //
-    // RED-on-revert in BOTH directions: 0 means the fragment was dropped or
-    // forwarded before the reinject site (the behaviour the old comment
-    // claimed); >1 means it reached it more than once.
+    // #10467: an explicit-table NoRoute is terminal before generic reinjection.
+    // This harness installs no reinjector (`slow_path: None`), so a regression
+    // that reaches the enqueue site would bump `slow_path_drops` to 1. The
+    // fixed scoped gate must leave it at zero.
     assert_eq!(
         binding.live.slow_path_drops.load(Ordering::Relaxed),
-        1,
-        "#7409: the PBR-steered NoRoute fragment IS reinjected to the kernel, \
-         not dropped — it reaches the slow path exactly once (no reinjector \
-         installed in this harness, so the attempt lands in slow_path_drops)"
+        0,
+        "#10467: the PBR-steered NoRoute fragment must not reach the slow path"
     );
 }
 

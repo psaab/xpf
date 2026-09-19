@@ -931,6 +931,14 @@ deploy_vm() {
 	# effective ExecStart is the base-unit path — a HARD failure if a version pin
 	# survived or systemd is launching stale code.
 	deploy_verify_running_xpfd "$rinst" "$PROJECT_ROOT/xpfd"
+	if [[ -f "$PROJECT_ROOT/xpf-userspace-dp" ]]; then
+		# The helper is a child of xpfd, so verify its LIVE process image
+		# separately from xpfd. A successful file push alone cannot prove
+		# the process that forwards packets is the new helper.
+		deploy_verify_running_xpf_userspace_dp "$rinst" "$PROJECT_ROOT/xpf-userspace-dp"
+	else
+		warn "xpf-userspace-dp unavailable locally; helper process provenance was not verified on $vm"
+	fi
 
 	info "Deploy complete for $vm."
 }

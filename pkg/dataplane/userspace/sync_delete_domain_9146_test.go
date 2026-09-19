@@ -307,6 +307,45 @@ func TestDeleteV6WireCarriesDomainForBothHalves9146(t *testing.T) {
 	}
 }
 
+// A reverse-companion refusal must be returned to the caller, not swallowed
+// after the forward delete succeeded. This sync-only cell drives the exact
+// second helper request without requiring CAP_BPF and proves a retry emits
+// both halves again.
+func TestSyncDeleteReverseCompanionRefusalIsRetryable9146(t *testing.T) {
+	m, rec := newSyncOnlyManager9146(t)
+	k := key9146()
+	rev := dataplane.SessionKey{
+		SrcIP: k.DstIP, DstIP: k.SrcIP,
+		SrcPort: k.DstPort, DstPort: k.SrcPort, Protocol: k.Protocol,
+	}
+	val := dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}
+	rec.refuseNth(2, "injected reverse helper delete failure")
+
+	m.mu.Lock()
+	err := m.syncDeleteV4Locked(k, val, true)
+	m.mu.Unlock()
+	if err == nil {
+		t.Fatal("reverse helper refusal was swallowed")
+	}
+	if got := rec.all(); len(got) != 2 {
+		t.Fatalf("first attempt emitted %d requests, want forward + reverse", len(got))
+	}
+
+	rec.mu.Lock()
+	rec.refuseAt = 0
+	rec.refusal = ""
+	rec.mu.Unlock()
+	m.mu.Lock()
+	err = m.syncDeleteV4Locked(k, val, true)
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("retry after reverse refusal: %v", err)
+	}
+	if got := rec.all(); len(got) != 4 {
+		t.Fatalf("retry emitted %d total requests, want two complete delete pairs", len(got))
+	}
+}
+
 // THE FULL WIRING BIND — DeleteSession itself.
 //
 // Mutation M5 severed DeleteSession's call to syncDeleteV4Locked and SURVIVED,
@@ -364,5 +403,98 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 				"fetched three lines earlier and its domain must reach the wire (#9146)",
 				i, r.RoutingDomain, tenant)
 		}
+	}
+}
+// A helper refusal is not a successful mirror deletion.  The authoritative
+// row must remain discoverable so a retry can retract the helper session; the
+// old mirror-first order made this impossible and leaked the helper row until
+// idle timeout.
+func TestDeleteSessionHelperFailureKeepsMirrorRetryable9146(t *testing.T) {
+	dir, err := os.MkdirTemp("", "x9146retry")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	m := New()
+	m.proc = &exec.Cmd{}
+	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
+	injectSessionMaps(t, m) // skips without BPF privileges
+	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
+
+	k := key9146()
+	if err := m.bpfShim.SetSessionV4(k, dataplane.SessionValue{RoutingDomain: 100007}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	rec.refuseFirst("injected helper delete failure")
+	if err := m.DeleteSession(k); err == nil {
+		t.Fatal("DeleteSession succeeded when the helper refused the delete")
+	}
+	if _, err := m.bpfShim.GetSessionV4(k); err != nil {
+		t.Fatalf("helper failure deleted the mirror row (%v); retry became impossible", err)
+	}
+
+	rec.mu.Lock()
+	rec.refuseAt = 0
+	rec.refusal = ""
+	rec.mu.Unlock()
+	if err := m.DeleteSession(k); err != nil {
+		t.Fatalf("retry DeleteSession: %v", err)
+	}
+	if _, err := m.bpfShim.GetSessionV4(k); err == nil {
+		t.Fatal("successful retry left the BPF mirror row behind")
+	}
+}
+
+// The reverse companion is the second helper request. Refusing it must still
+// return an error and leave the authoritative BPF row available for a complete
+// retry; a forward-only refusal cell cannot catch a swallowed reverse error.
+func TestDeleteSessionReverseHelperFailureKeepsMirrorRetryable9146(t *testing.T) {
+	dir, err := os.MkdirTemp("", "x9146reverse-retry")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	m := New()
+	m.proc = &exec.Cmd{}
+	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
+	injectSessionMaps(t, m) // skips without BPF privileges
+	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
+
+	k := key9146()
+	rev := dataplane.SessionKey{
+		SrcIP: k.DstIP, DstIP: k.SrcIP,
+		SrcPort: k.DstPort, DstPort: k.SrcPort, Protocol: k.Protocol,
+	}
+	if err := m.bpfShim.SetSessionV4(k, dataplane.SessionValue{
+		RoutingDomain: 100007,
+		ReverseKey:    rev,
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	rec.refuseNth(2, "injected reverse helper delete failure")
+	if err := m.DeleteSession(k); err == nil {
+		t.Fatal("DeleteSession succeeded when the reverse helper refused the delete")
+	}
+	if got := rec.all(); len(got) != 2 {
+		t.Fatalf("reverse refusal emitted %d helper requests, want forward + reverse", len(got))
+	}
+	if _, err := m.bpfShim.GetSessionV4(k); err != nil {
+		t.Fatalf("reverse helper failure deleted the mirror row (%v); retry became impossible", err)
+	}
+
+	rec.mu.Lock()
+	rec.refuseAt = 0
+	rec.refusal = ""
+	rec.mu.Unlock()
+	if err := m.DeleteSession(k); err != nil {
+		t.Fatalf("retry DeleteSession after reverse refusal: %v", err)
+	}
+	if _, err := m.bpfShim.GetSessionV4(k); err == nil {
+		t.Fatal("successful retry left the BPF mirror row behind")
+	}
+	if got := rec.all(); len(got) != 4 {
+		t.Fatalf("retry emitted %d total helper requests, want two complete delete pairs", len(got))
 	}
 }

@@ -51,7 +51,8 @@ fn session_key(routing_domain: u32) -> SessionKey {
     }
 }
 
-fn decision_snatting_to(snat: Ipv4Addr) -> SessionDecision {
+fn decision_snatting_to(snat: Ipv4Addr, install_table_domain: u32) -> SessionDecision {
+    let install_table_check = if install_table_domain == 0 { 0 } else { 1 };
     SessionDecision { resolution: ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
         local_ifindex: 0,
@@ -69,7 +70,7 @@ fn decision_snatting_to(snat: Ipv4Addr) -> SessionDecision {
         rewrite_dst_port: None,
         nat64: false,
         nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 }
+    }, install_table_domain, install_table_check }
 }
 
 fn forward_metadata() -> SessionMetadata {
@@ -109,7 +110,18 @@ fn drive_lan_segment(
             iface.routing_domain = lan_routing_domain;
         }
     }
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    // The hand-built session below carries an explicit native-RI install
+    // identity. Seed the corresponding registry row so route-hit
+    // revalidation can distinguish this fixture's table from MAIN.
+    forwarding.install_tables.insert(
+        TENANT_DOMAIN,
+        crate::afxdp::types::InstallTables {
+            v4: Some("tenant.inet.0".to_string()),
+            v6: None,
+            h2: 1,
+        },
+    );
     let ha_state = txn_ha_state();
 
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
@@ -158,7 +170,7 @@ fn a_segment_on_a_routing_instance_member_matches_that_instances_session_7160() 
         // cannot be what makes the right answer come out.
         assert!(sessions.install_with_protocol(
             session_key(0),
-            decision_snatting_to(DEFAULT_SNAT),
+            decision_snatting_to(DEFAULT_SNAT, 0),
             forward_metadata(),
             100_000_000_000,
             PROTO_TCP,
@@ -166,7 +178,7 @@ fn a_segment_on_a_routing_instance_member_matches_that_instances_session_7160() 
         ));
         assert!(sessions.install_with_protocol(
             session_key(TENANT_DOMAIN),
-            decision_snatting_to(TENANT_SNAT),
+            decision_snatting_to(TENANT_SNAT, TENANT_DOMAIN),
             forward_metadata(),
             100_000_000_000,
             PROTO_TCP,
@@ -205,7 +217,7 @@ fn a_segment_with_no_routing_instance_membership_is_unchanged_7160() {
     let out = drive_lan_segment(0, |sessions| {
         assert!(sessions.install_with_protocol(
             session_key(0),
-            decision_snatting_to(DEFAULT_SNAT),
+            decision_snatting_to(DEFAULT_SNAT, 0),
             forward_metadata(),
             100_000_000_000,
             PROTO_TCP,

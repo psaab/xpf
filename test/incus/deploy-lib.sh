@@ -165,6 +165,35 @@ deploy_running_xpfd_sha256() {
 	printf '%s\n' "$run_sum"
 }
 
+# deploy_running_xpf_userspace_dp_sha256 <rinst> [tries]
+#
+# Read back the sha256 of the LIVE xpf-userspace-dp process image on <rinst>.
+# The helper is a child of xpfd rather than its own systemd unit, so pidof
+# selects the helper process and /proc/<pid>/exe remains the authority on what
+# is executing. Exactly one helper PID is required: multiple matching helpers
+# make the image identity ambiguous and therefore fail closed. Empty output
+# with rc 1 means the helper was not running or the readback failed; callers
+# must not substitute the on-disk path's hash.
+deploy_running_xpf_userspace_dp_sha256() {
+	local rinst="${1:-}" tries_max="${2:-15}"
+	[[ -n "$rinst" ]] || return 1
+	local tries=0 run_raw="" run_sum=""
+	while [[ $tries -lt $tries_max ]]; do
+		run_raw=$(incus exec "$rinst" -- bash -c '
+			pids=$(pidof xpf-userspace-dp 2>/dev/null)
+			set -- $pids
+			[ "$#" -eq 1 ] || exit 1
+			sha256sum "/proc/$1/exe" 2>/dev/null || exit 1
+		' 2>/dev/null || true)
+		run_sum=${run_raw%% *}
+		[[ -n "$run_sum" ]] && break
+		tries=$((tries + 1))
+		[[ $tries -lt $tries_max ]] && sleep 1
+	done
+	[[ -n "$run_sum" ]] || return 1
+	printf '%s\n' "$run_sum"
+}
+
 # deploy_verify_running_xpfd <rinst> <local_xpfd_path>
 #
 # After (re)start, assert the LIVE xpfd process is the binary we just pushed
@@ -199,6 +228,26 @@ deploy_verify_running_xpfd() {
 		die "running xpfd on $rinst (sha256=$run_sum) does not match the pushed build (sha256=$local_sum) — the deploy did NOT take effect (#2176); the node is running STALE code"
 	fi
 	info "Verified running xpfd on $rinst matches the pushed build ($local_sum, ExecStart=$exec_path)."
+}
+
+# deploy_verify_running_xpf_userspace_dp <rinst> <local_helper_path>
+#
+# After xpfd restarts, assert that the helper process image is the helper
+# binary just pushed. Unlike xpfd, the helper is not a systemd unit; the
+# process-image readback is the only authoritative identity check.
+deploy_verify_running_xpf_userspace_dp() {
+	local rinst="$1" local_helper="$2"
+	local local_sum
+	local_sum=$(sha256sum "$local_helper" | awk '{print $1}')
+	local run_sum=""
+	run_sum=$(deploy_running_xpf_userspace_dp_sha256 "$rinst" || true)
+	if [[ -z "$run_sum" ]]; then
+		die "xpf-userspace-dp is not running on $rinst after deploy — cannot verify the helper binary"
+	fi
+	if [[ "$run_sum" != "$local_sum" ]]; then
+		die "running xpf-userspace-dp on $rinst (sha256=$run_sum) does not match the pushed build (sha256=$local_sum) — the node is running STALE helper code"
+	fi
+	info "Verified running xpf-userspace-dp on $rinst matches the pushed build ($local_sum)."
 }
 
 # ── Rolling-deploy node ordering (#4009) ─────────────────────────────
