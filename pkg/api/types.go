@@ -505,6 +505,9 @@ type NATSourceInfo struct {
 	ToZone   string `json:"to_zone"`
 	Type     string `json:"type"`
 	Pool     string `json:"pool,omitempty"`
+	// SourceMatch is the complete canonical source-address/name predicate.
+	// It is additive so older REST consumers keep the existing fields.
+	SourceMatch string `json:"source_match"`
 	// #7473: the snapshot builder's fail-closed verdict. NotInstalled true
 	// means every other field here is CONFIGURATION, not live state — a hit
 	// counter's zero then means "not armed", not "no traffic matched".

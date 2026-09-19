@@ -552,6 +552,9 @@ message NATSourceInfo {
   string to_zone = 2;
   string type = 3;
   string pool = 4;
+  // source_match is the complete canonical source-address/name predicate.
+  // Additive: older clients decode this as the empty string.
+  string source_match = 7;
   // #7473: the snapshot builder's fail-closed verdict for this object.
   //
   // `not_installed` true means the userspace builder REFUSED to install it, so

@@ -3741,6 +3741,9 @@ type NATSourceInfo struct {
 	ToZone   string                 `protobuf:"bytes,2,opt,name=to_zone,json=toZone,proto3" json:"to_zone,omitempty"`
 	Type     string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
 	Pool     string                 `protobuf:"bytes,4,opt,name=pool,proto3" json:"pool,omitempty"`
+	// source_match is the complete canonical source-address/name predicate.
+	// Additive: older clients decode this as the empty string.
+	SourceMatch string `protobuf:"bytes,7,opt,name=source_match,json=sourceMatch,proto3" json:"source_match,omitempty"`
 	// #7473: the snapshot builder's fail-closed verdict for this object.
 	//
 	// `not_installed` true means the userspace builder REFUSED to install it, so
@@ -3813,6 +3816,13 @@ func (x *NATSourceInfo) GetType() string {
 func (x *NATSourceInfo) GetPool() string {
 	if x != nil {
 		return x.Pool
+	}
+	return ""
+}
+
+func (x *NATSourceInfo) GetSourceMatch() string {
+	if x != nil {
+		return x.SourceMatch
 	}
 	return ""
 }
@@ -9090,12 +9100,13 @@ const file_xpf_proto_rawDesc = "" +
 	"\fmax_sessions\x18\f \x01(\x04R\vmaxSessions\"\x15\n" +
 	"\x13GetNATSourceRequest\"C\n" +
 	"\x14GetNATSourceResponse\x12+\n" +
-	"\x05rules\x18\x01 \x03(\v2\x15.xpf.v1.NATSourceInfoR\x05rules\"\xc4\x01\n" +
+	"\x05rules\x18\x01 \x03(\v2\x15.xpf.v1.NATSourceInfoR\x05rules\"\xe7\x01\n" +
 	"\rNATSourceInfo\x12\x1b\n" +
 	"\tfrom_zone\x18\x01 \x01(\tR\bfromZone\x12\x17\n" +
 	"\ato_zone\x18\x02 \x01(\tR\x06toZone\x12\x12\n" +
 	"\x04type\x18\x03 \x01(\tR\x04type\x12\x12\n" +
-	"\x04pool\x18\x04 \x01(\tR\x04pool\x12#\n" +
+	"\x04pool\x18\x04 \x01(\tR\x04pool\x12!\n" +
+	"\fsource_match\x18\a \x01(\tR\vsourceMatch\x12#\n" +
 	"\rnot_installed\x18\x05 \x01(\bR\fnotInstalled\x120\n" +
 	"\x14not_installed_reason\x18\x06 \x01(\tR\x12notInstalledReason\"\x1a\n" +
 	"\x18GetNATDestinationRequest\"\xca\x01\n" +
