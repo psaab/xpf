@@ -59,7 +59,7 @@ func fabricEnforcingInterceptor(serverKey []byte) grpc.UnaryServerInterceptor {
 		if len(serverKey) == 0 {
 			return handler(ctx, req) // unkeyed: cannot enforce, dual-accept
 		}
-		want, err := oracle.GetRequestMetadata(ctx)
+		want, err := oracle.GetRequestMetadata(grpcapi.WithFabricAuthMethod(ctx, info.FullMethod))
 		if err != nil {
 			return nil, err
 		}
@@ -185,12 +185,13 @@ func TestDialPeerFabricCredMatchesDaemonScheme(t *testing.T) {
 
 	cliCreds := grpcapi.NewFabricAuthCreds(c.fabricAuthKey)
 	daemonCreds := grpcapi.NewFabricAuthCreds(func() []byte { return key })
+	method := pb.BpfrxService_GetStatus_FullMethodName
 
-	cliMD, err := cliCreds.GetRequestMetadata(context.Background())
+	cliMD, err := cliCreds.GetRequestMetadata(grpcapi.WithFabricAuthMethod(context.Background(), method))
 	if err != nil {
 		t.Fatalf("cli GetRequestMetadata: %v", err)
 	}
-	daemonMD, err := daemonCreds.GetRequestMetadata(context.Background())
+	daemonMD, err := daemonCreds.GetRequestMetadata(grpcapi.WithFabricAuthMethod(context.Background(), method))
 	if err != nil {
 		t.Fatalf("daemon GetRequestMetadata: %v", err)
 	}

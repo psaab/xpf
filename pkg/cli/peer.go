@@ -67,14 +67,12 @@ func (c *CLI) dialPeer() *grpc.ClientConn {
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		// #5324: authenticate every RPC we dial on the peer's fabric listener
-		// with the #4107 control-link PSK, mirroring the daemon-side dialer
-		// (grpcapi Server.dialPeer). GetRequestMetadata is read per RPC so the
-		// token rotates with the auth window; an unkeyed cluster resolves an
-		// empty key -> no token -> the peer's dual-accept grace still admits the
-		// call (no unkeyed-cluster regression). Without this credential the peer
-		// rejects the tokenless CLI dial Unauthenticated once the fabric guard
-		// arms, silently breaking CLI peer observability/role control.
+		// with the #4107 control-link PSK, mirroring the daemon-side dialer.
+		// The client interceptors carry each full method to the credential so
+		// captured tokens cannot be replayed across RPC methods.
 		grpc.WithPerRPCCredentials(grpcapi.NewFabricAuthCreds(c.fabricAuthKey)),
+		grpc.WithUnaryInterceptor(grpcapi.FabricAuthUnaryClientInterceptor),
+		grpc.WithStreamInterceptor(grpcapi.FabricAuthStreamClientInterceptor),
 	}
 	if c.fabricVRFDevice != "" {
 		dialOpts = append(dialOpts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
