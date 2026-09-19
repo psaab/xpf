@@ -3666,16 +3666,23 @@ pub(super) fn poll_binding_process_descriptor(
                                             worker_id,
                                         );
                                     }
-                                    let reverse_resolution = reverse_resolution_for_session(
-                                        worker_ctx.forwarding,
-                                        worker_ctx.ha_state,
-                                        worker_ctx.dynamic_neighbors,
-                                        flow.src_ip,
-                                        from_zone_id,
-                                        fabric_ingress,
-                                        now_secs,
-                                        false,
-                                    );
+                                    // #10312: derive the reply target's table
+                                    // from the forward ingress' native domain.
+                                    // Never inherit the directional PBR table.
+                                    let (reverse_context, reverse_decision) =
+                                        crate::afxdp::shared_ops::reverse_session_decision_for_flow(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.ha_state,
+                                            worker_ctx.dynamic_neighbors,
+                                            flow,
+                                            meta.ingress_ifindex as i32,
+                                            meta.ingress_vlan_id,
+                                            from_zone_id,
+                                            fabric_ingress,
+                                            now_secs,
+                                            false,
+                                            decision.nat,
+                                        );
                                     // Install the reverse entry even if the initial reply-side
                                     // resolution is not immediately usable. On live traffic the
                                     // first server reply can arrive before the reverse neighbor
@@ -3683,12 +3690,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     // entry creation turns that race into a hard policy miss. The
                                     // hit path re-resolves on demand and can fall back to the
                                     // cached decision when neighbor convergence is still in flight.
-                                    let reverse_decision = SessionDecision { resolution: reverse_resolution, nat: decision.nat.reverse(
-                                        flow.src_ip,
-                                        flow.dst_ip,
-                                        flow.forward_key.src_port,
-                                        flow.forward_key.dst_port,
-                                    ), install_table_domain: 0, install_table_check: 0 };
+
                                     // For NAT64: the reverse key is IPv4 (different AF
                                     // from the forward IPv6 key). The reply arrives as
                                     // IPv4: src=dst_v4, dst=snat_v4.
@@ -3779,7 +3781,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         crate::afxdp::forwarding::leak_incarnation_for_resolution(
                                             worker_ctx.forwarding,
                                             reverse_key.dst_ip,
-                                            None,
+                                            reverse_context.install_table.as_deref(),
                                         );
                                     let reverse_metadata = SessionMetadata {
                                         ingress_zone: to_zone_id,

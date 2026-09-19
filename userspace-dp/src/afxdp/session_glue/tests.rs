@@ -12483,9 +12483,11 @@ fn cancelled_shared_recycle_unknown_slot_rescues_in_single_region_9904() {
     );
 }
 
-/// #9752 (R1): synthesized reverse companions stamp (0,0) — the reverse
-/// direction resolves the client in the default table by construction
-/// (`reverse_resolution_for_session`), never in the forward's PBR table.
+/// #9752 (R1): synthesized reverse companions stamp (0,0) for a
+/// default-instance forward — the reverse resolves the client in the
+/// default table via `reverse_session_decision_for_flow` (native-RI
+/// forwards derive the client instance table since #10312), never in
+/// the forward's PBR table.
 #[test]
 fn reverse_companion_stamps_zero_install_table_9752() {
     use crate::afxdp::shared_ops::build_reverse_session_from_forward_match;

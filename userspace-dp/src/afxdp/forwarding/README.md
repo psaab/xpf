@@ -453,15 +453,16 @@ forward-direction collision.
   missed, reached the kernel and skipped the filter. Cells:
   `session_glue/steering_row_owners_9560_tests.rs`, `bpf_map/steering_owners.rs`,
   `coordinator/tests.rs` and `ha_tests.rs`.
-- **PBR `then routing-instance` is the ONLY per-VRF forwarding path.** An
-  interface's native `routing_instance` selects only the connected-route
-  table NAME (#2388 above) — it does NOT scope a transit packet's
-  destination-FIB lookup. Only a PBR interface filter's
-  `ingress_route_table_override` (`forwarding/mod.rs`, callers in
-  `poll_descriptor/mod.rs`) actually steers a transit packet to a per-VRF
-  table. In default (non-PBR) mode the destination FIB is the global
-  `inet.0`/`inet6.0` and local-delivery uses the global `local_v[46]` sets,
-  so overlapping-address multi-VRF does not forward correctly there at all.
+- **Native RI members and PBR both scope per-VRF forwarding (#10312).** A
+  member interface's native `routing_instance` supplies the destination-FIB
+  scope for transit packets through the validated ingress `routing_domain`;
+  `ingress_route_table_override` uses that native table when no explicit PBR
+  routing-instance term matches. An explicit PBR term remains higher
+  precedence, including its existing `Drop` behavior. In default (domain-zero)
+  mode the destination FIB remains global `inet.0`/`inet6.0`; a nonzero domain
+  with no current per-family table is terminal rather than falling through to
+  MAIN. Reverse session synthesis derives the client-side native scope instead
+  of inheriting a directional PBR table.
 - **PBR `routing-instance` + a drop action is a DENY, not a forward (#4392).**
   A term `from { ... } then { routing-instance X; reject | discard; }` carries
   BOTH a routing-instance override AND a terminating drop action. Before #4392

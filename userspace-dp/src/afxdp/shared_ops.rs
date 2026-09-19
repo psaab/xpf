@@ -1170,20 +1170,55 @@ pub(super) fn build_reverse_session_from_forward_match(
     now_secs: u64,
     ha_startup_grace_until_secs: u64,
 ) -> SessionLookup {
-    build_reverse_session_from_forward_match_in_table(
+    // #10312: an RI-native forward stores its ingress routing domain on the
+    // key. Use that domain for the reply target, not the PBR installing table:
+    // PBR is directional, while the reply must find the original client in
+    // the client's native instance.
+    let table_context = crate::afxdp::forwarding::native_route_table_for_flow_target(
+        forwarding,
+        forward_match.key.routing_domain,
+        forward_match.metadata.ingress_ifindex as i32,
+        forward_match.metadata.ingress_vlan_id,
+        None,
+        forward_match.key.src_ip,
+    );
+    let (table, install_table_domain, install_table_check, table_unresolvable) = match table_context
+    {
+        crate::afxdp::forwarding::NativeRouteTable::Default => (None, 0, 0, false),
+        crate::afxdp::forwarding::NativeRouteTable::Table {
+            table,
+            domain,
+            check,
+        } => (Some(table), domain, check, false),
+        crate::afxdp::forwarding::NativeRouteTable::Unresolvable { domain } => {
+            (None, domain, 0, true)
+        }
+    };
+    let mut lookup = build_reverse_session_from_forward_match_in_table(
         forwarding,
         ha_state,
         dynamic_neighbors,
         forward_match,
         now_secs,
         ha_startup_grace_until_secs,
-        None,
-    )
+        table.as_deref(),
+    );
+    if table_unresolvable {
+        lookup.decision.resolution = crate::afxdp::forwarding::table_unavailable_resolution();
+    }
+    // `_in_table` is also the explicit TUN-origin API; keep that generic path
+    // zero-stamped. Only the native-RI wrapper carries this identity forward
+    // into later session re-resolves.
+    lookup.decision.install_table_domain = install_table_domain;
+    lookup.decision.install_table_check = install_table_check;
+    lookup
 }
 
 /// Table-scoped twin of `build_reverse_session_from_forward_match` (#10038
-/// item 6): threads `table` into the reply-target resolution. `None` is
-/// byte-identical to the untabled twin.
+/// item 6): threads `table` into the reply-target resolution. `None`
+/// preserves default-instance behavior while the untabled wrapper performs
+/// native-RI derivation (#10312).
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_reverse_session_from_forward_match_in_table(
     forwarding: &ForwardingState,
@@ -1296,19 +1331,48 @@ pub(super) fn synthesized_synced_reverse_entry(
     entry: &SyncedSessionEntry,
     now_secs: u64,
 ) -> Option<SyncedSessionEntry> {
-    synthesized_synced_reverse_entry_in_table(
+    let table_context = crate::afxdp::forwarding::native_route_table_for_flow_target(
+        forwarding,
+        entry.key.routing_domain,
+        entry.metadata.ingress_ifindex as i32,
+        entry.metadata.ingress_vlan_id,
+        None,
+        entry.key.src_ip,
+    );
+    let (table, install_table_domain, install_table_check, table_unresolvable) = match table_context
+    {
+        crate::afxdp::forwarding::NativeRouteTable::Default => (None, 0, 0, false),
+        crate::afxdp::forwarding::NativeRouteTable::Table {
+            table,
+            domain,
+            check,
+        } => (Some(table), domain, check, false),
+        crate::afxdp::forwarding::NativeRouteTable::Unresolvable { domain } => {
+            (None, domain, 0, true)
+        }
+    };
+    let mut reverse = synthesized_synced_reverse_entry_in_table(
         forwarding,
         ha_state,
         dynamic_neighbors,
         entry,
         now_secs,
-        None,
-    )
+        table.as_deref(),
+    )?;
+    if table_unresolvable {
+        reverse.decision.resolution = crate::afxdp::forwarding::table_unavailable_resolution();
+    }
+    // Keep explicit TUN-origin `_in_table` calls zero-stamped; native RI
+    // synthesis is the only untabled wrapper that carries this identity.
+    reverse.decision.install_table_domain = install_table_domain;
+    reverse.decision.install_table_check = install_table_check;
+    Some(reverse)
 }
-
-/// Table-scoped twin of `synthesized_synced_reverse_entry` (#10038 item 6):
-/// the reply-target resolution runs in `table`. `None` is byte-identical
-/// to the untabled twin; only the TUN-origin builders pass `Some`.
+/// Table-scoped twin of `synthesized_synced_reverse_entry` (#10038):
+/// the reply-target resolution runs in `table`. `None` preserves
+/// default-instance behavior while the untabled wrapper performs native-RI
+/// derivation (#10312); explicit table-scoped callers include both the
+/// TUN-origin builders and the native-RI wrapper.
 pub(super) fn synthesized_synced_reverse_entry_in_table(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -1355,6 +1419,73 @@ pub(super) fn synthesized_synced_reverse_entry_in_table(
     })
 }
 
+/// #10312: the reverse resolution plus the native installing-table identity
+/// derived from the original forward ingress. PBR's installing table is
+/// deliberately ignored here: a PBR term is directional, while the reply
+/// target belongs to the forward ingress interface's native routing instance.
+pub(super) struct ReverseSessionResolution {
+    pub(super) resolution: ForwardingResolution,
+    pub(super) install_table: Option<String>,
+    pub(super) install_table_domain: u32,
+    pub(super) install_table_check: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reverse_resolution_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+) -> ReverseSessionResolution {
+    let table_context = crate::afxdp::forwarding::native_route_table_for_flow_target(
+        forwarding,
+        flow.forward_key.routing_domain,
+        ingress_ifindex,
+        ingress_vlan_id,
+        fabric_ingress.then_some(ingress_zone),
+        flow.src_ip,
+    );
+    let (install_table, install_table_domain, install_table_check, table_unresolvable) =
+        match table_context {
+            crate::afxdp::forwarding::NativeRouteTable::Default => (None, 0, 0, false),
+            crate::afxdp::forwarding::NativeRouteTable::Table {
+                table,
+                domain,
+                check,
+            } => (Some(table), domain, check, false),
+            crate::afxdp::forwarding::NativeRouteTable::Unresolvable { domain } => {
+                (None, domain, 0, true)
+            }
+        };
+    let resolution = if table_unresolvable {
+        crate::afxdp::forwarding::table_unavailable_resolution()
+    } else {
+        reverse_resolution_for_session_in_table(
+            forwarding,
+            ha_state,
+            dynamic_neighbors,
+            flow.src_ip,
+            ingress_zone,
+            fabric_ingress,
+            now_secs,
+            allow_unseeded_tunnel_local,
+            install_table.as_deref(),
+        )
+    };
+    ReverseSessionResolution {
+        resolution,
+        install_table,
+        install_table_domain,
+        install_table_check,
+    }
+}
+
 pub(super) fn reverse_resolution_for_session(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -1377,14 +1508,57 @@ pub(super) fn reverse_resolution_for_session(
         None,
     )
 }
+/// #10312: the exact session-miss constructor used by the transit poll path.
+/// Keeping the reverse resolution and the reverse decision's installing-table
+/// stamp together prevents a caller from resolving in one VRF and storing a
+/// zero-stamped decision that later falls back to MAIN.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reverse_session_decision_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+    nat: NatDecision,
+) -> (ReverseSessionResolution, SessionDecision) {
+    let context = reverse_resolution_for_flow(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        flow,
+        ingress_ifindex,
+        ingress_vlan_id,
+        ingress_zone,
+        fabric_ingress,
+        now_secs,
+        allow_unseeded_tunnel_local,
+    );
+    let decision = SessionDecision {
+        resolution: context.resolution,
+        nat: nat.reverse(
+            flow.src_ip,
+            flow.dst_ip,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+        ),
+        install_table_domain: context.install_table_domain,
+        install_table_check: context.install_table_check,
+    };
+    (context, decision)
+}
 
 /// Table-scoped twin of `reverse_resolution_for_session` (#10038 item 6):
 /// the reply-target FIB lookup (and the table-scoped local-delivery
 /// decision, #3769) runs in `table` instead of the default table, so a
 /// VRF reverse resolves against its instance's connected/local view.
-/// `None` is byte-identical to the untabled twin. Only the TUN-origin
-/// builders pass `Some` today; every other caller keeps default-table
-/// behavior (transit/HA VRF synthesis is a pre-existing gap, out of scope).
+/// `None` preserves default-instance behavior. Besides the TUN-origin
+/// builders, the native-RI reverse synthesis (#10312) passes `Some`;
+/// remaining transit/HA VRF synthesis gaps are out of scope.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reverse_resolution_for_session_in_table(
     forwarding: &ForwardingState,
@@ -1456,7 +1630,12 @@ pub(super) fn install_reverse_session_from_forward_match(
         ha_startup_grace_until_secs,
     );
     let reverse_leak_incarnation =
-        leak_incarnation_for_resolution(forwarding, reverse_key.dst_ip, None).unwrap_or(0);
+        crate::afxdp::session_glue::leak_incarnation_for_session(
+            forwarding,
+            reverse.decision,
+            reverse_key.dst_ip,
+        )
+        .unwrap_or(0);
     // #1861 §5.4: the synthesized decision is returned EVEN when the
     // install fails (max_sessions) so the reply keeps forwarding — but
     // the caller must know the outcome: `created` telemetry and the
