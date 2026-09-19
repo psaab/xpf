@@ -40,9 +40,9 @@ func ctxWithToken(token string) context.Context {
 // call flips the sticky peer-authenticated flag.
 func TestFabricAuthUnary_ValidTokenAllowed(t *testing.T) {
 	s := keyedServer(fabricTestKey)
-	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now())
-	probe := &unaryCallProbe{}
 	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_GetSessions_FullMethodName}
+	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now(), info.FullMethod)
+	probe := &unaryCallProbe{}
 	resp, err := s.fabricAuthUnaryInterceptor(ctxWithToken(token), nil, info, probe.handler)
 	if err != nil {
 		t.Fatalf("valid token: expected allow, got %v", err)
@@ -61,7 +61,7 @@ func TestFabricAuthUnary_ValidTokenAllowed(t *testing.T) {
 func TestFabricAuthUnary_InvalidTokenRejected(t *testing.T) {
 	s := keyedServer(fabricTestKey)
 	// A token computed from a DIFFERENT key must not verify.
-	badToken := fabricAuthTokenHex([]byte("attacker-guess"), time.Now())
+	badToken := fabricAuthTokenHex([]byte("attacker-guess"), time.Now(), pb.BpfrxService_ClearSessions_FullMethodName)
 	probe := &unaryCallProbe{}
 	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_ClearSessions_FullMethodName}
 	_, err := s.fabricAuthUnaryInterceptor(ctxWithToken(badToken), nil, info, probe.handler)
@@ -184,7 +184,7 @@ func TestFabricAuthStream_Enforced(t *testing.T) {
 	info := &grpc.StreamServerInfo{FullMethod: pb.BpfrxService_MonitorInterface_FullMethodName}
 
 	// Valid token: allowed.
-	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now())
+	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now(), info.FullMethod)
 	if err := s.fabricAuthStreamInterceptor(nil, fakeServerStream{ctx: ctxWithToken(token)}, info, handler); err != nil {
 		t.Errorf("stream valid token: expected allow, got %v", err)
 	}
@@ -194,7 +194,7 @@ func TestFabricAuthStream_Enforced(t *testing.T) {
 
 	// Invalid token: rejected, handler not reached.
 	handlerCalled = false
-	bad := fabricAuthTokenHex([]byte("wrong"), time.Now())
+	bad := fabricAuthTokenHex([]byte("wrong"), time.Now(), info.FullMethod)
 	err := s.fabricAuthStreamInterceptor(nil, fakeServerStream{ctx: ctxWithToken(bad)}, info, handler)
 	if status.Code(err) != codes.Unauthenticated {
 		t.Errorf("stream invalid token: expected Unauthenticated, got %v", err)
@@ -242,7 +242,7 @@ func TestFabricAuthChainStopsDestructiveUnauth(t *testing.T) {
 	}
 	// Authenticated but destructive: auth passes, allowlist rejects zeroize.
 	probe = &unaryCallProbe{}
-	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now())
+	token := fabricAuthTokenHex([]byte(fabricTestKey), time.Now(), info.FullMethod)
 	_, err = chained(ctxWithToken(token), req, info, probe.handler)
 	if status.Code(err) != codes.PermissionDenied {
 		t.Errorf("authed zeroize: expected PermissionDenied from allowlist, got %v", err)
@@ -291,20 +291,27 @@ func TestFabricAuthTokenRoundTrip(t *testing.T) {
 // (it must ride the fabric's insecure transport).
 func TestFabricAuthCreds(t *testing.T) {
 	creds := fabricAuthCreds{keyFn: func() []byte { return []byte(fabricTestKey) }}
-	md, err := creds.GetRequestMetadata(context.Background())
+	method := pb.BpfrxService_GetStatus_FullMethodName
+	md, err := creds.GetRequestMetadata(withFabricAuthMethod(context.Background(), method))
 	if err != nil {
 		t.Fatalf("GetRequestMetadata: %v", err)
 	}
 	tok := md[fabricAuthMetadataKey]
-	if tok == "" || !verifyFabricAuthToken([]byte(fabricTestKey), tok) {
-		t.Errorf("creds emitted no/invalid token: %q", tok)
+	if tok == "" || !verifyFabricAuthToken([]byte(fabricTestKey), tok, method) {
+		t.Errorf("creds emitted no/invalid method-bound token: %q", tok)
 	}
 	if creds.RequireTransportSecurity() {
 		t.Error("fabric creds must not require transport security")
 	}
+	// Without the method-carrying interceptor no metadata is emitted rather
+	// than falling back to a cross-method replayable token.
+	unbound, err := creds.GetRequestMetadata(context.Background())
+	if err != nil || len(unbound) != 0 {
+		t.Errorf("missing-method creds: expected empty metadata, got %v (err %v)", unbound, err)
+	}
 	// No key => no metadata (tokenless dual-accept dial).
 	empty := fabricAuthCreds{keyFn: func() []byte { return nil }}
-	md, err = empty.GetRequestMetadata(context.Background())
+	md, err = empty.GetRequestMetadata(withFabricAuthMethod(context.Background(), method))
 	if err != nil || len(md) != 0 {
 		t.Errorf("no-key creds: expected empty metadata, got %v (err %v)", md, err)
 	}

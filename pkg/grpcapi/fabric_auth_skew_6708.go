@@ -13,26 +13,26 @@ import (
 // #6708: turn a wall-clock skew that kills every fabric RPC from a silent,
 // mislabelled failure into a measured, named one.
 //
-// The fabric token is HMAC(PSK, unix_time / 30) and the verifier accepts the
-// current window ±1. Beyond roughly a minute of skew every inbound fabric RPC
-// rejects with "invalid auth token" — permanently, because skew does not
-// self-correct without NTP. Measured on the loss userspace cluster: 141s of
-// skew, NTPSynchronized=no on both nodes, every cross-node RPC dead. The
+// The fabric token is HMAC(PSK, domain || method || unix_time / 30) and the
+// verifier accepts the current window ±1. Beyond roughly a minute of skew every
+// inbound fabric RPC rejects with "invalid auth token" — permanently, because
+// skew does not self-correct without NTP. Measured on the loss userspace cluster:
+// 141s of skew, NTPSynchronized=no on both nodes, every cross-node RPC dead. The
 // symptom the operator saw named SESSIONS ("fw0 has only 1 established
 // sessions"); the cause was the clock, and finding that cost an investigation.
 //
 // WHAT THIS DOES NOT DO, and why. #6708's first suggested fix is to widen
 // acceptance to ±N windows. That is not implemented here: the accept band is
-// the replay horizon. A captured token is replayable for as long as the
-// verifier will honour it, and the allowlisted fabric RPCs include
-// ClearSessions and cross-node redundancy-group failover, so widening to cover
-// the measured 141s would multiply the horizon of a real attack to buy
-// tolerance for an operational fault that the operator can see and fix in
-// seconds once it is NAMED. The accept band is therefore unchanged at ±1 and
-// this file only adds diagnosis. Making fabric RPC genuinely skew-independent
-// (a monotonic window floor per peer, or a peer-clock offset carried over the
-// authenticated heartbeat) is a design change with its own HA gate, tracked
-// separately.
+// the same-method replay horizon. A captured token is replayable on its
+// original method for as long as the verifier will honour it, and the
+// allowlisted fabric RPCs include ClearSessions and cross-node redundancy-group
+// failover, so widening to cover the measured 141s would multiply the
+// same-method replay horizon of a real attack to buy tolerance for an operational
+// fault that the operator can see and fix in seconds once it is NAMED. The
+// accept band is therefore unchanged at ±1 and this file only adds diagnosis.
+// Making fabric RPC genuinely skew-independent (a monotonic window floor per peer,
+// or a peer-clock offset carried over the authenticated heartbeat) is a design
+// change with its own HA gate, tracked separately.
 //
 // WHAT THE MEASUREMENT PROVES, AND WHAT IT DOES NOT. The scan below reports an
 // offset only when the presented token matches a window under an ACCEPTED KEY.
@@ -46,11 +46,12 @@ import (
 //
 //   - NOT CERTAIN: that the peer's clock is skewed. Producing the token needs
 //     the key; PRESENTING it does not. Tokens ride every fabric RPC on the
-//     control link, and this verifier has no nonce (replay-within-window is
-//     accepted Residual 1 in fabric_auth.go), so an on-segment attacker can
-//     CAPTURE a token and replay it later. Replayed from outside the accept
-//     band but inside the scan band, it fails verification — correctly — and
-//     lands here indistinguishable from a drifting clock.
+//     control link and are bound to their method, but this verifier has no
+//     nonce (same-method replay within the accepted window remains the bounded
+//     Residual 1 in fabric_auth.go), so an on-segment attacker can CAPTURE a
+//     token and replay it later on that same method. Replayed from outside the
+//     accept band but inside the scan band, it fails verification — correctly —
+//     and lands here indistinguishable from a drifting clock.
 //
 // The truth condition for "the peer's clock is skewed" is therefore production
 // under the key AND arrival within that window's lifetime, and this scan can
@@ -109,7 +110,7 @@ type fabricSkewState struct {
 // caller must NOT present a skew in that case, or a bad-PSK failure would be
 // mislabelled as a clock problem, which is the same class of mistake #6708 is
 // about.
-func measureFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time) (int64, bool) {
+func measureFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time, method ...string) (int64, bool) {
 	if len(keys) == 0 || tokenHex == "" {
 		return 0, false
 	}
@@ -127,7 +128,7 @@ func measureFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time) (int64
 		// accept band costs a handful of HMACs, not the whole band.
 		for delta := int64(1); delta <= fabricAuthSkewScanWindows; delta++ {
 			for _, w := range [2]int64{base + delta, base - delta} {
-				if hmac.Equal(got, computeFabricAuthToken(key, w)) {
+				if hmac.Equal(got, computeFabricAuthToken(key, w, method...)) {
 					return (w - base) * fabricAuthWindowSeconds, true
 				}
 			}
@@ -141,7 +142,7 @@ func measureFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time) (int64
 // when the token is not explained by clock skew.
 //
 // now is injected so a test does not have to move the machine's clock.
-func (s *Server) noteFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time) string {
+func (s *Server) noteFabricAuthSkew(keys [][]byte, tokenHex string, now time.Time, method ...string) string {
 	nowNanos := now.UnixNano()
 	last := s.fabricSkew.lastScanNanos.Load()
 	if last != 0 && nowNanos-last < int64(fabricAuthSkewScanInterval) {
@@ -152,7 +153,7 @@ func (s *Server) noteFabricAuthSkew(keys [][]byte, tokenHex string, now time.Tim
 	}
 	s.fabricSkew.lastScanNanos.Store(nowNanos)
 
-	skew, ok := measureFabricAuthSkew(keys, tokenHex, now)
+	skew, ok := measureFabricAuthSkew(keys, tokenHex, now, method...)
 	if !ok {
 		// Not a clock problem. Clear any stale measurement so a status surface
 		// does not keep asserting a skew that no longer explains anything.

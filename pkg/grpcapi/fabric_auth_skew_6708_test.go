@@ -29,9 +29,9 @@ const skewTestWindow = int64(fabricAuthWindowSeconds)
 func skewTestKey() []byte { return []byte("shared-control-link-psk") }
 
 // tokenAtOffset builds the token a peer whose clock is `offset` out would send.
-func tokenAtOffset(t *testing.T, key []byte, now time.Time, offset time.Duration) string {
+func tokenAtOffset(t *testing.T, key []byte, now time.Time, offset time.Duration, method ...string) string {
 	t.Helper()
-	return fabricAuthTokenHex(key, now.Add(offset))
+	return fabricAuthTokenHex(key, now.Add(offset), method...)
 }
 
 // TestMeasureFabricAuthSkewOnlyReportsAnAuthenticatedWindow6708 is the truth
@@ -145,8 +145,8 @@ func TestRejectedSkewedTokenNamesTheClock6708(t *testing.T) {
 		wantClock  bool
 		wantStatus bool // a skew should be visible in `show chassis cluster status`
 	}{
-		{"skewed_peer_names_the_clock", tokenAtOffset(t, key, now, 141*time.Second), true, true},
-		{"wrong_psk_does_not_name_the_clock", tokenAtOffset(t, []byte("other-psk"), now, 0), false, false},
+		{"skewed_peer_names_the_clock", tokenAtOffset(t, key, now, 141*time.Second, "/xpf.v1.BpfrxService/GetSessions"), true, true},
+		{"wrong_psk_does_not_name_the_clock", tokenAtOffset(t, []byte("other-psk"), now, 0, "/xpf.v1.BpfrxService/GetSessions"), false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,7 +254,7 @@ func TestRecoveredFabricAuthClearsTheSkew6708(t *testing.T) {
 	s.fabricAuthKeyFn = func() []byte { return key }
 
 	skewed := metadata.NewIncomingContext(context.Background(),
-		metadata.Pairs(fabricAuthMetadataKey, tokenAtOffset(t, key, now, 141*time.Second)))
+		metadata.Pairs(fabricAuthMetadataKey, tokenAtOffset(t, key, now, 141*time.Second, "/m")))
 	if err := s.checkFabricAuth(skewed, "/m"); err == nil {
 		t.Fatal("skewed token was admitted")
 	}
@@ -263,7 +263,7 @@ func TestRecoveredFabricAuthClearsTheSkew6708(t *testing.T) {
 	}
 
 	healthy := metadata.NewIncomingContext(context.Background(),
-		metadata.Pairs(fabricAuthMetadataKey, fabricAuthTokenHex(key, now)))
+		metadata.Pairs(fabricAuthMetadataKey, fabricAuthTokenHex(key, now, "/m")))
 	if err := s.checkFabricAuth(healthy, "/m"); err != nil {
 		t.Fatalf("an in-window token was rejected: %v", err)
 	}
@@ -301,10 +301,11 @@ func TestClusterStatusWarnsOnlyWhenSkewed6708(t *testing.T) {
 // #6708's scan proves the token verified under an accepted key at some window.
 // That makes the PSK certainly correct, and the clock only PROBABLY skewed:
 // producing the token requires the key, but PRESENTING it does not. Tokens ride
-// every fabric RPC on the control link and this verifier has no nonce
-// (replay-within-window is accepted Residual 1), so a captured token replayed
-// from outside the accept band but inside the scan band fails verification —
-// correctly — and arrives here indistinguishable from a drifting clock.
+// every fabric RPC on the control link and are method-bound; this verifier has
+// no nonce (same-method replay within the accepted window remains the bounded
+// Residual 1), so a captured token replayed from outside the accept band but
+// inside the scan band fails verification — correctly — and arrives here
+// indistinguishable from a drifting clock.
 //
 // This test is the guard on the WORDING, because that is where the defect would
 // be: an unhedged "peer wall clock is Ns behind ours" is a confident wrong

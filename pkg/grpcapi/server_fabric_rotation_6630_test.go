@@ -49,7 +49,7 @@ func TestFabricRotation6630(t *testing.T) {
 	// Mid-rotation: this node signs the NEW key, still accepts the OLD one.
 	// The peer has not moved yet, so its token is minted under the old key.
 	s := rotatingFabricServer(t, fabricRotNew, fabricRotOld)
-	peerToken := fabricAuthTokenHex([]byte(fabricRotOld), time.Now())
+	peerToken := fabricAuthTokenHex([]byte(fabricRotOld), time.Now(), info.FullMethod)
 	probe := &unaryCallProbe{}
 	if _, err := s.fabricAuthUnaryInterceptor(ctxWithToken(peerToken), nil, info, probe.handler); err != nil {
 		t.Fatalf("mid-rotation, a token minted under the ACCEPTED (not-yet-retired) key must "+
@@ -63,7 +63,7 @@ func TestFabricRotation6630(t *testing.T) {
 	// The current key obviously still works — so the acceptance above is the
 	// overlap, not the gate having stopped checking anything.
 	probe2 := &unaryCallProbe{}
-	newToken := fabricAuthTokenHex([]byte(fabricRotNew), time.Now())
+	newToken := fabricAuthTokenHex([]byte(fabricRotNew), time.Now(), info.FullMethod)
 	if _, err := s.fabricAuthUnaryInterceptor(ctxWithToken(newToken), nil, info, probe2.handler); err != nil {
 		t.Fatalf("the signing key must still authenticate mid-rotation: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestFabricRotation6630(t *testing.T) {
 	// A third, unrelated key must NOT be admitted — the overlap widens to
 	// exactly the configured additional key, not to anything presented.
 	probe3 := &unaryCallProbe{}
-	strangerToken := fabricAuthTokenHex([]byte("some-other-key-entirely"), time.Now())
+	strangerToken := fabricAuthTokenHex([]byte("some-other-key-entirely"), time.Now(), info.FullMethod)
 	_, err := s.fabricAuthUnaryInterceptor(ctxWithToken(strangerToken), nil, info, probe3.handler)
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("a token under an unconfigured key must be rejected, got %v", err)
