@@ -1074,10 +1074,9 @@ func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, compose
 
 // renderComposedRouteMapWithDefault is the common chain renderer. The
 // fallbackAction is emitted only when every member falls through; explicit
-// policy defaults still terminate exactly as authored. Keeping the fallback
-// as an argument lets a future narrowed-chain alias deny the surviving
-// subset without mutating the shared composed map or changing ordinary BGP
-// chains.
+// policy defaults still terminate exactly as authored. Production narrowed
+// aliases pass "deny" here without mutating the shared composed map or
+// changing ordinary BGP chains.
 func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConfig, composedName string, chain []string, fallbackAction string) string {
 	// #5732 render-side belt: this composed route-map numbers its members'
 	// sequences with ONE running counter, so a chain whose members each pass the

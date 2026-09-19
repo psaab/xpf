@@ -225,9 +225,9 @@ func TestNarrowedChainSitesReportsOnlyRealNarrowing8363(t *testing.T) {
 	}
 }
 
-// Visibility must not come at the cost of a behaviour change: the rendered
-// section for a narrowed chain is byte-identical to what it was.
-func TestNarrowingWarningChangesNoRenderedOutput8363(t *testing.T) {
+// Visibility closes the fall-through for eligible suffix narrowing without
+// mutating the shared policy map used by intact attachments.
+func TestNarrowingWarningClosesEligibleRenderedAttachment8363(t *testing.T) {
 	po := &config.PolicyOptionsConfig{
 		PolicyStatements: map[string]*config.PolicyStatement{
 			"REAL": {Name: "REAL", Terms: []*config.PolicyTerm{{Name: "t1", PrefixList: []string{"PL"}}}},
@@ -249,12 +249,22 @@ func TestNarrowingWarningChangesNoRenderedOutput8363(t *testing.T) {
 	}
 	narrowed := New().buildManagedSection(mk([]string{"REAL", "GHOST"}))
 	intact := New().buildManagedSection(mk([]string{"REAL"}))
-	if narrowed != intact {
-		t.Errorf("a narrowed chain must render exactly as its surviving subset "+
-			"(behaviour unchanged; only the log differs)\n--- narrowed ---\n%s\n--- intact ---\n%s",
-			narrowed, intact)
+	alias := narrowedAliasName10129([]string{"REAL"})
+	if !strings.Contains(narrowed, "neighbor 10.0.2.1 route-map "+alias+" in\n") {
+		t.Fatalf("eligible narrowing must attach its deny alias %q:\n%s", alias, narrowed)
 	}
-	// Anti-vacuity: that equality is only meaningful if the narrowing was real.
+	if !strings.Contains(narrowed, "route-map "+alias+" deny 20\n") {
+		t.Fatalf("eligible narrowing alias must close the fall-through:\n%s", narrowed)
+	}
+	if strings.Contains(intact, "route-map "+alias+" ") {
+		t.Fatalf("intact policy must not use the narrowed alias:\n%s", intact)
+	}
+	if !strings.Contains(intact, "neighbor 10.0.2.1 route-map REAL in\n") ||
+		!strings.Contains(intact, "route-map REAL permit 20\n") {
+		t.Fatalf("intact policy must retain its shared permit-terminated map:\n%s", intact)
+	}
+	// Anti-vacuity: the rendered closure is only meaningful if the input
+	// actually narrowed.
 	if s := narrowedChainSites(mk([]string{"REAL", "GHOST"}).BGP, po); len(s) != 1 {
 		t.Fatalf("fixture did not actually narrow: %+v", s)
 	}

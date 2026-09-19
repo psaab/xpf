@@ -25,11 +25,10 @@ import (
 // affected population arrives through the lenient load path, because strict
 // commit rejects an undefined policy reference outright.
 //
-// These cells assert TODAY'S behaviour. #8369 is deferred rather than
-// implemented (see the decision recorded in policy_chain_narrowing_warn_8363.go),
-// so the value here is a measured baseline: whoever takes the deny later gets a
-// green pin of what the chain does now, and any divergence is a diff against a
-// fact rather than against an argument.
+// These cells pin the SHARED primitive renderer, not the attached production
+// path. #10129 now closes eligible suffix-narrowed attachments with a private
+// alias; ordinary composed maps must remain permit-terminated for intact
+// references, so these baselines catch accidental mutation of the shared map.
 //
 // #9947 CORRECTION to the "UNREACHABLE" inference below (not to the cells —
 // they still pin today's render exactly). The inference assumed a trailing
@@ -149,39 +148,24 @@ func TestEmptySurvivorMakesASynthesizedDenyUNREACHABLE8369(t *testing.T) {
 	}
 }
 
-// TestNarrowedChainStillPermitsFallThroughToday8369 names the DIRECTION of the
-// change #8369 proposes, as an assertion rather than as prose.
+// TestSharedComposedMapStillPermitsFallThrough8369 pins the ordinary
+// renderComposedRouteMap primitive. The production attachment path uses the
+// #10129 alias for eligible suffix-narrowed chains; changing this shared
+// renderer would mutate intact references and reopen unrelated behavior.
 //
-// A narrowed chain is carrying traffic right now with its fall-through
-// PERMITTED (#2998, the Junos BGP default-accept). Synthesizing a deny converts
-// that to denied. Because strict commit rejects an undefined policy reference in
-// both directions, the entire affected population arrives via the LENIENT path —
-// Store.Load / SyncApply — so the change would land on a reboot, a peer sync or
-// a rollback: a routing change triggered by an unrelated event, on a config the
-// operator did not just edit, with no commit to warn them at.
-//
-// On the first prefix it bites, the operator sees the route simply absent from
-// the neighbour's adj-rib — no log line at the moment of the drop, because a
-// route-map deny is silent — with the only breadcrumb being the narrowed-chain
-// warning emitted at load time and the xpf_frr_policy_chains_narrowed gauge.
-//
-// MUTATION: emit a deny for a suffix-narrowed chain and this cell reds, which is
-// the intended behaviour of that change — the assertion is here so it cannot
-// happen silently.
-func TestNarrowedChainStillPermitsFallThroughToday8369(t *testing.T) {
+// The empty-survivor and alias attachment cells cover the production deny
+// path. This primitive cell intentionally remains permit-terminated and is
+// not a claim that the attached narrowed path still permits fall-through.
+func TestSharedComposedMapStillPermitsFallThrough8369(t *testing.T) {
 	po := emptySurvivorPolicyOptions8369()
 	got := New().renderComposedRouteMap(po, "N-xpf-chain", []string{"ACCEPTER"})
 
 	if strings.Contains(got, "route-map N-xpf-chain deny") {
-		t.Errorf("a narrowed chain now renders a DENY sequence. That is #8369's proposed "+
-			"change and it converts a chain that is currently carrying traffic with "+
-			"fall-through PERMITTED into one that denies — at load time, via the lenient "+
-			"path, with no commit to warn the operator at. If this is intended, the "+
-			"deferral recorded in policy_chain_narrowing_warn_8363.go must be revisited "+
-			"in the same change:\n%s", got)
+		t.Errorf("shared composed renderer unexpectedly renders a DENY sequence; "+
+			"the production #10129 alias must not mutate ordinary composed maps:\n%s", got)
 	}
 	if !strings.Contains(got, "route-map N-xpf-chain permit") {
-		t.Fatalf("the chain renders no permit sequence at all; the fall-through this cell "+
-			"is about does not exist and the assertion above is vacuous:\n%s", got)
+		t.Fatalf("shared composed renderer lost its permit fall-through; the "+
+			"ordinary reference would change behavior:\n%s", got)
 	}
 }

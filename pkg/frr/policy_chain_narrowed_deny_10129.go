@@ -102,11 +102,13 @@ func narrowedSurvivorShape10129(kept []string, po *config.PolicyOptionsConfig) s
 	return "fall-through"
 }
 
-// narrowedAliasEligible10129 is the future behavior gate. Non-suffix chains
-// are never eligible because a synthesized terminating member there deletes
-// later survivors. Terminating-default and match-all-final-term survivors are
-// safe to leave on the existing map: their suffix deny is unreachable. The
-// only shapes that need a deny alias are fall-through and empty survivors.
+// narrowedAliasEligible10129 identifies the subset whose missing authored
+// members can be closed without changing the surviving chain semantics.
+// Non-suffix chains remain on the existing surviving map because inserting a
+// terminating member at a ghost position would delete later survivors.
+// Terminating-default and match-all-final-term survivors remain on the shared
+// map because their explicit termination makes a trailing deny unreachable.
+// Fall-through and empty survivors receive a private deny alias.
 func narrowedAliasEligible10129(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
 	if len(site.Kept) == 0 || !site.GhostsAreSuffix {
 		return false
@@ -116,10 +118,9 @@ func narrowedAliasEligible10129(site narrowedChainSite, po *config.PolicyOptions
 }
 
 // renderNarrowedChainAlias10129 renders a deny-terminated attached-map alias
-// without mutating the shared standalone or composed map. It is intentionally
-// not wired into neighbor attachment sites until fleet measurement authorizes
-// the behavior flip. Explicit member defaults remain authoritative; only a
-// no-default fall-through reaches the alias's explicit deny.
+// without mutating the shared standalone or composed map. Explicit member
+// defaults remain authoritative; only a no-default fall-through reaches the
+// alias's explicit deny.
 func (m *Manager) renderNarrowedChainAlias10129(po *config.PolicyOptionsConfig, kept []string) (string, string) {
 	name := narrowedAliasName10129(kept)
 	if po == nil || po.PolicyStatements == nil {
@@ -138,10 +139,9 @@ func (m *Manager) renderNarrowedChainAlias10129(po *config.PolicyOptionsConfig, 
 }
 
 // narrowedAliasCollision10129 is the render-side collision belt for the
-// future alias attachment. It checks all four same-name merge hazards:
-// operator policy, composed chain, the #7625 emptied deny, and two distinct
-// narrowed survivors. It is kept separate from ApplyFull until the measured
-// behavior flip wires aliases into the managed section.
+// production narrowed alias attachment. It checks all four same-name merge
+// hazards: operator policy, composed chain, the #7625 emptied deny, and two
+// distinct narrowed survivors.
 func narrowedAliasCollision10129(fc *FullConfig) error {
 	if fc == nil || fc.PolicyOptions == nil {
 		return nil
@@ -154,38 +154,56 @@ func narrowedAliasCollision10129(fc *FullConfig) error {
 	for _, inst := range fc.Instances {
 		add(inst.BGP)
 	}
-	aliases := make(map[string][]string)
+
+	type aliasIdentity struct {
+		raw  string
+		kept []string
+	}
+	aliases := make(map[string]aliasIdentity)
+	operatorNames := make([]string, 0, len(fc.PolicyOptions.PolicyStatements))
+	for name := range fc.PolicyOptions.PolicyStatements {
+		operatorNames = append(operatorNames, name)
+	}
+	sort.Strings(operatorNames)
 	for _, site := range sites {
 		if !narrowedAliasEligible10129(site, fc.PolicyOptions) {
 			continue
 		}
 		alias := narrowedAliasName10129(site.Kept)
-		if _, ok := fc.PolicyOptions.PolicyStatements[alias]; ok {
-			return fmt.Errorf("narrowed BGP policy-chain alias %q collides with operator policy-statement", alias)
+		final := frrName(alias)
+		// Policy names are rendered through frrName too. Compare final FRR
+		// names, not only raw map keys, so a tolerant invalid alias cannot
+		// sanitize into an operator-owned route-map.
+		for _, operatorName := range operatorNames {
+			if frrName(operatorName) == final {
+				return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides with operator policy-statement %q", alias, final, operatorName)
+			}
 		}
-		if alias == emptiedChainDenyName {
-			return fmt.Errorf("narrowed BGP policy-chain alias %q collides with emptied-chain deny", alias)
+		if final == frrName(emptiedChainDenyName) {
+			return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides with emptied-chain deny", alias, final)
 		}
-		if prev, ok := aliases[alias]; ok && !equalStringSlice(prev, site.Kept) {
-			return fmt.Errorf("narrowed BGP policy-chain alias %q collides for distinct surviving chains %q and %q", alias, strings.Join(prev, ","), strings.Join(site.Kept, ","))
+		if prev, ok := aliases[final]; ok && !equalStringSlice(prev.kept, site.Kept) {
+			return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides for distinct surviving chains %q and %q", alias, final, strings.Join(prev.kept, ","), strings.Join(site.Kept, ","))
 		}
-		aliases[alias] = append([]string(nil), site.Kept...)
+		aliases[final] = aliasIdentity{raw: alias, kept: append([]string(nil), site.Kept...)}
 	}
+
 	composed := make(map[string][]string)
 	collectBGPComposedChains(fc.BGP, fc.PolicyOptions, composed)
 	for _, inst := range fc.Instances {
 		collectBGPComposedChains(inst.BGP, fc.PolicyOptions, composed)
 	}
-	for alias, chain := range aliases {
-		if other, ok := composed[alias]; ok && !equalStringSlice(other, chain) {
-			return fmt.Errorf("narrowed BGP policy-chain alias %q collides with composed chain %q", alias, strings.Join(other, ","))
+	for composedName, chain := range composed {
+		final := frrName(composedName)
+		if alias, ok := aliases[final]; ok {
+			return fmt.Errorf("narrowed BGP policy-chain alias %q (rendered %q) collides with composed chain %q", alias.raw, final, strings.Join(chain, ","))
 		}
 	}
 	return nil
 }
 
 // narrowedAliasNames10129 returns eligible aliases in deterministic order for
-// future managed-section emission and makes dedupe observable in tests.
+// managed-section emission and makes dedupe observable in tests.
 func narrowedAliasNames10129(fc *FullConfig) []string {
 	if fc == nil || fc.PolicyOptions == nil {
 		return nil
@@ -234,11 +252,11 @@ func narrowedAliasChains10129(fc *FullConfig) map[string][]string {
 	return out
 }
 
-// narrowedAliasRef10129 swaps one attachment to its prepared alias only when
-// the explicit test-only mechanism switch is enabled. All ordinary callers
-// retain the existing reference and therefore the current warn-only behavior.
+// narrowedAliasRef10129 swaps one eligible attachment to its prepared alias.
+// Non-eligible narrowed shapes retain the existing reference so ghost-first
+// and ghost-middle survivors are not deleted by an inserted terminator.
 func (m *Manager) narrowedAliasRef10129(n *config.BGPNeighbor, bgp *config.BGPConfig, global []string, po *config.PolicyOptionsConfig, export bool) string {
-	if !m.narrowedAliasesEnabled10129 || n == nil || bgp == nil || po == nil {
+	if n == nil || bgp == nil || po == nil {
 		return ""
 	}
 	var authored, kept []string
@@ -264,10 +282,10 @@ func (m *Manager) narrowedAliasRef10129(n *config.BGPNeighbor, bgp *config.BGPCo
 	return ""
 }
 
-// renderNarrowedAliases10129 emits every prepared alias definition beside the
-// ordinary policy maps. The test-only attachment switch and this definition
-// emitter share narrowedAliasChains10129, so references and definitions are
-// emitted together by construction.
+// renderNarrowedAliases10129 emits every production narrowed alias definition
+// beside the ordinary policy maps. The attachment and definition paths share
+// narrowedAliasChains10129, so references and definitions are emitted
+// together by construction.
 func (m *Manager) renderNarrowedAliases10129(fc *FullConfig) string {
 	chains := narrowedAliasChains10129(fc)
 	if len(chains) == 0 {

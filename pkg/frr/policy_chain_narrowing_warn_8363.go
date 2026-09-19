@@ -7,62 +7,33 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// policy_chain_narrowing_warn_8363.go — #8363 visibility.
+// policy_chain_narrowing_warn_8363.go — #8363 visibility and #10129 closure.
 //
 // A NARROWED policy chain — some authored members resolve, some do not — is a
-// real deviation from authored intent: the operator wrote a filter and is
-// getting a weaker one. Unlike the EMPTIED case (#7625/#8362) it is not a hole,
-// so the behaviour is deliberately unchanged; but before this it was also
-// completely SILENT. The rendered section is internally consistent, the session
-// works, `show route-map` displays a real well-formed policy, and nothing
-// anywhere says a member of the authored chain was discarded.
+// real deviation from authored intent: the operator wrote a filter and the
+// renderer must not silently discard its missing members. The current
+// production split is deliberately narrow:
+// suffix-narrowed fall-through and empty survivors attach a private
+// deny-terminated alias (#10129), while ghost-first/middle chains retain the
+// surviving members and deny-inert survivors retain their authored terminal
+// shared map. The warning and shape gauges remain for every narrowed site.
 //
-// Why the behaviour is not "fixed" here as well: see the #8363 measurement in
-// policy_chain_narrowed_eval_8363_test.go. Synthesizing a deny for the missing
-// member is safe ONLY when the undefined members form a suffix of the authored
-// chain — renderComposedRouteMap breaks on the first member with a terminating
-// default action, so a deny at a non-final ghost position DELETES every later
-// member and renders deny-all. Making the narrowing visible is correct under
-// either outcome of that decision, which is why it lands separately from it.
+// The position rule is load-bearing. A synthesized terminating member at a
+// non-final ghost position deletes every later survivor
+// (#8363/#10129), so non-suffix sites remain on the shared map rather than
+// receiving a deny that changes their chain semantics. Terminating-default and
+// match-all-final-term survivors already terminate evaluation, so a trailing
+// alias deny is not emitted for them.
 //
-// #8369 — THE DENY IS DEFERRED, NOT PENDING IMPLEMENTATION. Three reasons, and
-// the third is new evidence rather than a restatement of the issue.
-//
-//  1. THE DIRECTION IS A ROUTING CHANGE AT LOAD TIME. A narrowed chain is
-//     carrying traffic right now with its fall-through PERMITTED (#2998, the
-//     Junos BGP default-accept). A deny converts that to denied. Strict commit
-//     rejects an undefined policy reference in both directions, so the ENTIRE
-//     affected population arrives via the lenient path (Store.Load / SyncApply)
-//     — a reboot, a peer sync or a rollback. The operator gets a routing change
-//     triggered by an unrelated event, on a config they did not just edit, with
-//     no commit to warn them at, and a route-map deny is silent: the first
-//     symptom is a prefix simply absent from the neighbour's adj-rib.
-//     TestNarrowedChainStillPermitsFallThroughToday8369 asserts the direction
-//     so it cannot change silently.
-//
-//  2. THE POPULATION IS UNMEASURED, and #8369 makes measuring it a
-//     precondition ("Do not decide this from argument"). No fleet split has
-//     been collected.
-//
-//  3. THE EMPTY-SURVIVOR SHAPE IS THE HIGHEST-IMPACT MEMBER, NOT AN
-//     OVER-COUNT. (Corrects the earlier "gauge over-counts" version of
-//     this reason — #9947.) A surviving policy statement that is DEFINED
-//     but carries no terms renders today as one match-all sequence,
-//     `route-map C permit 10`. The earlier inference was that a trailing
-//     deny would sit unreachable behind it. Measured against the actual
-//     synthesis shape — a chain MEMBER with a terminating default —
-//     EMPTY contributes zero sequences, so [EMPTY,SYNTH-DENY] renders
-//     lone deny-10, reachable by every route: the shape flips permit-all
-//     to deny-all (TestEmptySurvivorSynthesizedDenyIsReachable9947).
-//     xpf_frr_policy_chains_narrowed_deny_safe counts it correctly;
-//     excluding it would hide an outage case, not correct an over-count.
-//
-// What a future implementation still owes, beyond the issue's own list: the
-// migration decision must weigh that the empty-survivor population flips
-// from permit-all to deny-all (not inert), and reachability must be
-// re-derived per survivor shape (terminating-default and match-all-final-
-// term survivors are code-read, not yet pinned — see the F-008 tracker).
-
+// Historical #8369 rationale (superseded for the eligible suffix shapes):
+// narrowed chains originally carried traffic with their fall-through PERMITTED
+// (#2998), and a deny would convert that to denied on a tolerant load, peer
+// sync, or rollback. The fleet census/migration gate remains owed only for any
+// future non-suffix expansion; the suffix-only control is the #10129 rollout
+// boundary. The empty-survivor shape remains in the affected denominator:
+// [EMPTY,SYNTH-DENY] renders lone deny-10, reachable by every route
+// (TestEmptySurvivorSynthesizedDenyIsReachable9947), so it flips permit-all to
+// deny-all rather than being an over-count.
 // narrowedChainSite is one attachment whose resolved chain is a strict, non-empty
 // subset of what the operator authored.
 type narrowedChainSite struct {
@@ -75,13 +46,10 @@ type narrowedChainSite struct {
 	// position decides whether a synthesized member deletes survivors,
 	// while body shape decides whether a trailing deny is reachable.
 	SurvivorShape string
-	// GhostsAreSuffix reports whether every undefined member sits AFTER every
-	// surviving one. That is the #8363 safety condition for ever synthesizing a
-	// deny here: renderComposedRouteMap breaks on the first member with a
-	// terminating default action, so a deny at a non-final ghost position does
-	// not shadow the rest of the chain, it DELETES it. Recorded now, while
-	// behaviour is unchanged, so the decision on whether to synthesize is sized
-	// on how often the safe shape actually occurs rather than on argument.
+	// GhostsAreSuffix selects the position-safe production alias path:
+	// every undefined member sits AFTER every surviving one. A deny at a
+	// non-final ghost position would delete later survivors, so those sites
+	// retain the shared map instead.
 	GhostsAreSuffix bool
 }
 
@@ -157,9 +125,10 @@ func narrowedChainSites(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) [
 	return out
 }
 
-// warnNarrowedChains emits one warning per narrowed attachment across fc. It
-// changes no rendered output — it is the operator-visible signal that a filter
-// is weaker than authored.
+// warnNarrowedChains emits one warning per narrowed attachment across fc and
+// rebuilds the operator-visible narrowed/shape gauges. Eligible suffix
+// fall-through and empty sites are closed by the alias renderer in the same
+// managed-section build; non-eligible sites retain their shared map.
 func (m *Manager) warnNarrowedChains(fc *FullConfig) {
 	m.resetNarrowed()
 	if fc == nil {
