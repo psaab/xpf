@@ -289,6 +289,11 @@ pub(super) fn demote_shared_owner_rgs(
         let mut sessions = lock_shared_recover(shared_sessions);
         for key in owner_rg_session_keys(&shared_owner_rg_indexes.sessions, owner_rgs) {
             if let Some(entry) = sessions.get_mut(&key) {
+                // Preserve every transient-local provenance in each alias:
+                // later materialization must never make a local seed HA-exportable.
+                if entry.origin.is_local_tun_origin() || entry.origin.is_transient_local_seed() {
+                    continue;
+                }
                 let previous = entry.clone();
                 entry.origin = SessionOrigin::SyncImport;
                 demoted_entries.push((previous, entry.clone()));
@@ -308,6 +313,9 @@ pub(super) fn demote_shared_owner_rgs(
         let mut sessions = lock_shared_recover(shared_nat_sessions);
         for key in owner_rg_session_keys(&shared_owner_rg_indexes.nat_sessions, owner_rgs) {
             if let Some(entry) = sessions.get_mut(&key) {
+                if entry.origin.is_local_tun_origin() || entry.origin.is_transient_local_seed() {
+                    continue;
+                }
                 entry.origin = SessionOrigin::SyncImport;
             }
         }
@@ -317,6 +325,9 @@ pub(super) fn demote_shared_owner_rgs(
         for key in owner_rg_session_keys(&shared_owner_rg_indexes.forward_wire_sessions, owner_rgs)
         {
             if let Some(entry) = sessions.get_mut(&key) {
+                if entry.origin.is_local_tun_origin() || entry.origin.is_transient_local_seed() {
+                    continue;
+                }
                 entry.origin = SessionOrigin::SyncImport;
             }
         }

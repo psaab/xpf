@@ -415,6 +415,13 @@ fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
     );
 
     assert!(promoted.fabric_ingress);
+    let exported = crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &[1], u64::MAX);
+    assert!(
+        exported.iter().any(|(candidate_key, _, metadata, _)| {
+            candidate_key == &key && metadata.fabric_ingress
+        }),
+        "fabric-promoted held session must remain in authoritative bulk candidates"
+    );
 }
 
 /// #9412: a promote republishes the session with its LIVE close class.
@@ -4127,6 +4134,189 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
 }
 
 #[test]
+fn demote_shared_owner_rgs_preserves_tun_origin_10402() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let key = test_key();
+    let mut decision = test_decision();
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(40_001),
+        ..NatDecision::default()
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::TunOrigin,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+
+    demote_shared_owner_rgs(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &test_forwarding_state_with_fabric(),
+        &Arc::new(ShardedNeighborMap::new()),
+        &[1],
+    );
+
+    assert_eq!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&key)
+            .expect("TUN shared entry")
+            .origin,
+        SessionOrigin::TunOrigin
+    );
+    let reverse_wire = reverse_session_key(&key, entry.decision.nat);
+    assert_eq!(
+        shared_nat_sessions
+            .lock()
+            .expect("shared nat")
+            .get(&reverse_wire)
+            .expect("TUN nat alias")
+            .origin,
+        SessionOrigin::TunOrigin
+    );
+    let wire_key = forward_wire_key(&key, entry.decision.nat);
+    assert_ne!(
+        wire_key, key,
+        "fixture must exercise the forward-wire alias"
+    );
+    assert_eq!(
+        shared_forward_wire_sessions
+            .lock()
+            .expect("shared forward wire")
+            .get(&wire_key)
+            .expect("TUN forward-wire alias")
+            .origin,
+        SessionOrigin::TunOrigin
+    );
+}
+
+#[test]
+fn demote_shared_owner_rgs_preserves_transient_seed_aliases_10402() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut seed_key = test_key();
+    seed_key.src_port = 40_001;
+    let mut seed_decision = test_decision();
+    seed_decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(40_001),
+        ..NatDecision::default()
+    };
+    let seed = SyncedSessionEntry {
+        key: seed_key.clone(),
+        decision: seed_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::MissingNeighborSeed,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let mut control_key = test_key();
+    control_key.src_port = 40_002;
+    let mut control_decision = test_decision();
+    control_decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 9))),
+        rewrite_src_port: Some(40_002),
+        ..NatDecision::default()
+    };
+    let control = SyncedSessionEntry {
+        key: control_key.clone(),
+        decision: control_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    for entry in [&seed, &control] {
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            entry,
+        );
+    }
+
+    demote_shared_owner_rgs(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &test_forwarding_state_with_fabric(),
+        &Arc::new(ShardedNeighborMap::new()),
+        &[1],
+    );
+
+    let assert_aliases = |entry: &SyncedSessionEntry, expected: SessionOrigin| {
+        assert_eq!(
+            shared_sessions
+                .lock()
+                .expect("shared sessions")
+                .get(&entry.key)
+                .expect("shared entry")
+                .origin,
+            expected
+        );
+        let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
+        assert_eq!(
+            shared_nat_sessions
+                .lock()
+                .expect("shared nat")
+                .get(&reverse_wire)
+                .expect("nat alias")
+                .origin,
+            expected
+        );
+        let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
+        assert_ne!(
+            wire_key, entry.key,
+            "fixture must exercise forward-wire alias"
+        );
+        assert_eq!(
+            shared_forward_wire_sessions
+                .lock()
+                .expect("shared forward wire")
+                .get(&wire_key)
+                .expect("forward-wire alias")
+                .origin,
+            expected
+        );
+    };
+    assert_aliases(&seed, SessionOrigin::MissingNeighborSeed);
+    assert_aliases(&control, SessionOrigin::SyncImport);
+}
+
+#[test]
 fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -4908,8 +5098,8 @@ fn export_owner_rg_sessions_skips_locally_demoted_entries() {
 
     assert_eq!(results.exported_sequences, vec![11]);
     assert_eq!(results.export_owner_rgs, vec![1]);
-    // Driving the recorded RGs through the chunked-export candidate walk must
-    // still emit nothing: the session was demoted out of owner RG 1's index.
+    // The coordinator scope remains recorded, but the demotion marker makes
+    // the deferred candidate walk reject the stale owner-RG row.
     export_forward_sessions_for_owner_rgs(&mut sessions, &results.export_owner_rgs);
     assert!(
         sessions.drain_deltas(16).is_empty(),
@@ -6324,8 +6514,8 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
     //   2. The `cancelled_keys_seen` FxHashSet dedup (#5155, was a
     //      linear `!cancelled_keys.iter().any(|key| key == &demoted_key)`
     //      scan) skips key_rg5 the SECOND time it surfaces. This is NOT
-    //      belt-and-braces — `SessionTable::demote_owner_rg` only
-    //      flips the session's origin to `SyncImport`; it does NOT
+    //      belt-and-braces — `SessionTable::demote_owner_rg` retags eligible
+    //      origins but preserves TunOrigin/transient seeds; it does NOT
     //      remove the entry from `owner_rg_sessions[5]`. So the
     //      second `Demote{[5]}` arm in the command stream re-discovers
     //      key_rg5 in the bucket and would re-cancel it without this
@@ -7190,24 +7380,31 @@ fn upsert_local_at_cap_replaces_existing_local_entry_without_growth() {
     assert_eq!(sessions.create_drops(), 0);
 }
 
-/// Pins the expected (permanent, by-origin) bulk-export behavior:
-/// local-tunnel entries carry SyncImport and are skipped by
-/// export_forward_sessions_for_owner_rgs at ANY occupancy — their
-/// exclusion is origin design, not a cap artifact (Codex #1870 plan
-/// r1 finding 3; refuted v1's "at-cap bulk-export gap" claim).
+/// Pins the expected node-local tunnel-origin bulk-export behavior:
+/// TUN-origin entries are held in the worker table for local forwarding but
+/// never cross the HA wire. Their exclusion is positive provenance, not an
+/// occupancy or cap artifact.
 #[test]
-fn upsert_local_entries_stay_out_of_owner_rg_bulk_export() {
+fn tun_origin_entries_stay_out_of_owner_rg_bulk_export() {
     let mut sessions = SessionTable::new();
-    let (forward, reverse) = local_tunnel_pair();
-    apply_upsert_local_pair(&mut sessions, &forward, &reverse);
-    assert!(sessions.entry_with_origin(&forward.key).is_some());
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::TunOrigin,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    assert!(sessions.entry_with_origin(&key).is_some());
     assert!(sessions.drain_deltas(usize::MAX).is_empty());
 
     export_forward_sessions_for_owner_rgs(&mut sessions, &[1]);
 
     assert!(
         sessions.drain_deltas(usize::MAX).is_empty(),
-        "peer-synced-origin local-tunnel entries must not bulk-export"
+        "TUN-origin entries must not bulk-export"
     );
 }
 

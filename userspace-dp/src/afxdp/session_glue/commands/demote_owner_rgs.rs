@@ -13,11 +13,12 @@ use super::super::*;
 ///
 /// #5155: the dedup uses a companion `cancelled_keys_seen`
 /// `FxHashSet` for an O(1) membership test rather than a linear
-/// `cancelled_keys.iter().any(..)` scan. `SessionTable::demote_owner_rg`
-/// only flips origin to `SyncImport` — it does NOT remove the entry
-/// from `owner_rg_sessions[rg]` — so a repeated `Demote{[rg]}` in the
-/// same command stream re-discovers the same key and the dedup is
-/// load-bearing (see the dispatcher order-pin test). The old scan was
+/// `SessionTable::demote_owner_rg` retags eligible local origins as
+/// `SyncImport` but preserves node-local `TunOrigin` and transient local
+/// seeds; it does NOT remove the entry from `owner_rg_sessions[rg]` — so a
+/// repeated `Demote{[rg]}` in the same command stream re-discovers the same
+/// key and the dedup is load-bearing (see the dispatcher order-pin test).
+/// The old scan was
 /// O(N^2) over the growing `cancelled_keys` Vec: `demote_owner_rg`
 /// yields unique keys per RG, so every `.any()` reached the tail. With
 /// `max_sessions` = 131072 that is ~8.6e9 `SessionKey` comparisons on
@@ -51,17 +52,19 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
             continue;
         }
         for demoted_key in sessions.demote_owner_rg(owner_rg_id) {
-            let Some((decision, metadata, _origin)) = sessions.entry_with_origin(&demoted_key)
+            let Some((decision, metadata, origin)) = sessions.entry_with_origin(&demoted_key)
             else {
                 continue;
             };
-            // Demotion retags a local owner as SyncImport, so the receiver
-            // mirror must become peer-synced without rebuilding its row.
+            // Keep the kernel receiver-origin bit aligned with the resulting
+            // provenance. Ordinary local demotions become SyncImport, while
+            // preserved TunOrigin rows and transient local seeds must remain
+            // node-local.
             crate::afxdp::bpf_map::update_session_cluster_synced_origin(
                 conntrack_v4_fd,
                 conntrack_v6_fd,
                 &demoted_key,
-                true,
+                origin.is_cluster_synced_origin(),
             );
             let flow = SessionFlow {
                 src_ip: demoted_key.src_ip,
