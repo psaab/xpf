@@ -132,11 +132,16 @@ rules. The actual view-builder measurement is
 `TestZoneHostInboundViewIngressNetdevs9637` expects the VRF-enslaved `sfmix`
 and lifeline `mgmt` views to have empty `IngressNetdevs`; its companion
 `TestHostInboundViewIngressNetdevsExcludesSharedClaims9637` at `:92-113`
-measures shared-parent exclusion. Separately, the downstream program fixture
-`junos_host_vrf_scope_6619_test.go:118-136` measures the VRF-only consequence as
-`wantRules=false` with warning only. A warning does not enforce the configured
-cross-zone perimeter while the commit succeeds. Issue #10431 records the
-narrow residual and requires VRF-master (or equivalent fail-closed) handling.
+measures shared-parent exclusion. Combining that result with the ingress
+emitter's empty-scope early return and the generic destination-only emitter
+establishes the RED fallback at master. The separate
+`junos_host_vrf_scope_6619_test.go:118-136` fixture is corroboration for the
+independent Junos-host deny projection (`wantRules=false` with warning only),
+not a test of the generic bare-daddr fallback. Exclusions, early return,
+bare-daddr fallback, and the documenting comment all remain at `6fa3310c0`;
+no VRF-master scoping exists anywhere in the host-inbound render path. Issue
+#10431 records the narrow residual and requires VRF-master (or equivalent
+fail-closed) handling.
 
 ### `073` — input-chain rule cannot be a routed-transit drop
 
