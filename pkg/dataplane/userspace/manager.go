@@ -155,6 +155,7 @@ type Manager struct {
 	restartTimerFn func(time.Duration, func())
 	cfg            config.UserspaceConfig
 	clusterHA      bool
+	captureEpochProvider CaptureEpochProvider
 	// helperHAStatePublished records whether THIS helper process has been sent a
 	// clustered HA inventory at least once (a successful update_ha_state with a
 	// non-empty group set). It is NOT derivable from len(m.haGroups): that is the

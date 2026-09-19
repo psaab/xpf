@@ -286,11 +286,21 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// the daemon. buildSnapshot* returns the error up here; ApplyConfig
 	// fails closed and the previously published snapshot / dataplane state
 	// is retained (m.lastSnapshot is not advanced on the error path).
-	// #9684: read before the build samples the kernel (resampleForCompileLocked).
+	// Capture the authority callback without invoking it under m.mu. The daemon
+	// owns the S4 snapshot and may need its own locks while producing the wire
+	// epochs; the manager lock only protects callback replacement.
+	m.mu.Lock()
+	epochProvider := m.captureEpochProvider
+	m.mu.Unlock()
 	partialEpoch := m.partialUpdateEpoch.Load()
 	snap, err := buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState, m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs)
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
+	}
+	if epochProvider != nil {
+		permitEpoch, queueEpochs := epochProvider()
+		snap.PermitEpoch = permitEpoch
+		snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
 	}
 	snap.partialUpdateEpoch = partialEpoch
 	// #1620: stamp the cold-path sample mask onto the snapshot. The

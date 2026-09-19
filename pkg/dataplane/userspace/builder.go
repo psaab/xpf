@@ -14,6 +14,37 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 	return buildSnapshotWithSchedulerState(cfg, ucfg, generation, fibGeneration, nil, nil, nil)
 }
 
+// CaptureEpochProvider is the optional S4 authority feed used while a capture
+// pipeline is active. It is deliberately a callback so the userspace builder
+// does not import daemon (which would create a package cycle).
+type CaptureEpochProvider func() (permitEpoch uint64, queueEpochs []QueueEpochSnapshot)
+
+// SetCaptureEpochProvider wires the live S4 authority feed into every full
+// snapshot compiled by this manager. A nil provider clears the feed and
+// preserves the pre-capture zero/nil wire fields.
+func (m *Manager) SetCaptureEpochProvider(provider CaptureEpochProvider) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.captureEpochProvider = provider
+	m.mu.Unlock()
+}
+
+// buildSnapshotWithEpochProvider is the additive epoch-aware builder entry
+// point. Existing callers keep the zero/nil authority fields; the daemon can
+// supply a supervisor-backed provider when the pipeline is active.
+func buildSnapshotWithEpochProvider(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, provider CaptureEpochProvider) (*ConfigSnapshot, error) {
+	snap, err := buildSnapshot(cfg, ucfg, generation, fibGeneration)
+	if err != nil || provider == nil {
+		return snap, err
+	}
+	permitEpoch, queueEpochs := provider()
+	snap.PermitEpoch = permitEpoch
+	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
+	return snap, nil
+}
+
 func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string) (*ConfigSnapshot, error) {
 	return buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, nil)
 }
@@ -29,14 +60,14 @@ func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceCo
 func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32) (*ConfigSnapshot, error) {
 	if cfg == nil {
 		return &ConfigSnapshot{
-			Version:              ProtocolVersion,
-			Generation:           generation,
-			FIBGeneration:        0,
-			GeneratedAt:          time.Now().UTC(),
-			Capabilities:         deriveUserspaceCapabilities(nil),
-			MapPins:              userspaceMapPins(),
-			Userspace:             ucfg,
-			schedulerActiveState: copyPolicySchedulerActiveState(activeState),
+			Version:                 ProtocolVersion,
+			Generation:              generation,
+			FIBGeneration:           0,
+			GeneratedAt:             time.Now().UTC(),
+			Capabilities:            deriveUserspaceCapabilities(nil),
+			MapPins:                 userspaceMapPins(),
+			Userspace:               ucfg,
+			schedulerActiveState:    copyPolicySchedulerActiveState(activeState),
 			schedulerActiveStateSet: true,
 		}, nil
 	}
@@ -86,14 +117,14 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	mirrorConfigs, mirrorExclusions := buildMirrorConfigSnapshots(cfg, interfaces)
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	snap := &ConfigSnapshot{
-		Version:                ProtocolVersion,
-		Generation:             generation,
-		FIBGeneration:          fibGeneration,
+		Version:                 ProtocolVersion,
+		Generation:              generation,
+		FIBGeneration:           fibGeneration,
 		GeneratedAt:             time.Now().UTC(),
-		Capabilities:           caps,
-		MapPins:                userspaceMapPins(),
-		Userspace:              ucfg,
-		schedulerActiveState:   copyPolicySchedulerActiveState(activeState),
+		Capabilities:            caps,
+		MapPins:                 userspaceMapPins(),
+		Userspace:               ucfg,
+		schedulerActiveState:    copyPolicySchedulerActiveState(activeState),
 		schedulerActiveStateSet: true,
 		// #6311: the chassis-cluster node id becomes the high bit of every
 		// worker's session-id namespace on the helper. Read from the compiled

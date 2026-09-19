@@ -436,7 +436,7 @@ EOF'
 	# never compiles Go — `make build` runs on the host, `test-deploy` pushes the
 	# binary). clang/llvm/libbpf-dev kept for ad-hoc in-instance debugging.
 	info "Installing packages (this may take a few minutes)..."
-	incus exec "$INSTANCE_NAME" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential clang llvm libbpf-dev tcpdump iproute2 iperf3 bpftool frr strongswan strongswan-swanctl kea-dhcp4-server kea-dhcp6-server chrony mtr-tiny bind9-host pciutils curl wget ripgrep'
+	incus exec "$INSTANCE_NAME" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential clang llvm libbpf-dev tcpdump iproute2 iperf3 bpftool frr nftables strongswan strongswan-swanctl kea-dhcp4-server kea-dhcp6-server chrony mtr-tiny bind9-host pciutils curl wget ripgrep'
 
 	# Kernel-coupled provisioning is VM-ONLY (Codex r1 HIGH). A container shares
 	# the HOST kernel, so `uname -r` inside it is the host's (here a Debian

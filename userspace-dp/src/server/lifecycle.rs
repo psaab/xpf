@@ -15,6 +15,12 @@
 
 use super::super::*;
 use std::time::Instant;
+use arc_swap::ArcSwapOption;
+use crate::server::reinject_9506::{
+    derive_reinject_complete_path, derive_reinject_submit_path, spawn_reinject_socket_servers,
+    ReinjectSocketServers,
+};
+use crate::slowpath::SlowPathReinjector;
 
 // Target for the kernel socket-buffer sysctls, in bytes. MUST match the Go
 // control plane's `tuneSocketBuffers` target (`pkg/dataplane/userspace/
@@ -165,7 +171,7 @@ fn create_runtime_dir(path: &Path) -> std::io::Result<()> {
 /// Restrict a bound Unix socket to its owner. Called AFTER `bind` — there is no
 /// atomic bind-with-mode, so the window between bind and chmod is closed by the
 /// accept-side peer check rather than by the mode.
-fn restrict_socket_mode(path: &str) -> Result<(), String> {
+pub(crate) fn restrict_socket_mode(path: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE))
         .map_err(|e| format!("restrict mode on {path}: {e}"))
@@ -293,6 +299,12 @@ pub(crate) fn run() -> Result<(), String> {
     }
     // Only unlink a stale Unix socket left by a prior run — never blindly
     // delete a regular file or other object at these privileged paths (#2974).
+    let reinject_submit_socket = derive_reinject_submit_path(&args.control_socket);
+    let reinject_complete_socket = derive_reinject_complete_path(&args.control_socket);
+    remove_stale_socket(&reinject_submit_socket)
+        .map_err(|e| format!("reinject submit socket {reinject_submit_socket}: {e}"))?;
+    remove_stale_socket(&reinject_complete_socket)
+        .map_err(|e| format!("reinject complete socket {reinject_complete_socket}: {e}"))?;
     // A non-socket aborts bind with a diagnostic instead of being destroyed.
     remove_stale_socket(&args.control_socket)
         .map_err(|e| format!("control socket {}: {e}", args.control_socket))?;
@@ -568,6 +580,61 @@ pub(crate) fn run() -> Result<(), String> {
     };
     let main_session_domain = session_domain.clone();
 
+    let reinject_core = crate::slowpath_reinject_9506::ReinjectCore::new_shared();
+    let reinject_fallback = reinject_core.clone();
+    let reinject_handoff = Arc::new(std::sync::Mutex::new(()));
+    let reinject_target: Arc<ArcSwapOption<SlowPathReinjector>> =
+        Arc::new(ArcSwapOption::new(None));
+    let reinject_servers: ReinjectSocketServers =
+        spawn_reinject_socket_servers(
+            &args.control_socket,
+            reinject_core,
+            reinject_target.clone(),
+            running.clone(),
+            reinject_handoff.clone(),
+        )?;
+    eprintln!(
+        "xpf-userspace-dp: reinject sockets at {} and {}",
+        reinject_servers.submit_path, reinject_servers.complete_path
+    );
+    let target_sync_state = state.clone();
+    let target_sync = reinject_target.clone();
+    let target_sync_fallback = reinject_fallback.clone();
+    let target_sync_handoff = reinject_handoff.clone();
+    let target_sync_running = running.clone();
+    let target_sync_thread = thread::Builder::new()
+        .name("xpf-reinject-target".to_string())
+        .spawn(move || {
+            let mut installed_target: Option<Arc<SlowPathReinjector>> = None;
+            while target_sync_running.load(Ordering::Acquire) {
+                let slow_path = target_sync_state
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.afxdp.slow_path.clone());
+                let changed = match (&installed_target, &slow_path) {
+                    (None, None) => false,
+                    (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+                    _ => true,
+                };
+                if changed {
+                    let _handoff_guard = target_sync_handoff
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let source_core = installed_target
+                        .as_ref()
+                        .map(|previous| previous.reinject_core())
+                        .unwrap_or_else(|| target_sync_fallback.clone());
+                    match slow_path.as_ref() {
+                        Some(current) => current.reinject_core().copy_authority_from(&source_core),
+                        None => target_sync_fallback.copy_authority_from(&source_core),
+                    }
+                    target_sync.store(slow_path.clone());
+                    installed_target = slow_path;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        })
+        .map_err(|e| format!("spawn reinject target sync: {e}"))?;
     // Start the event stream sender (connects to daemon's event listener socket).
     {
         let event_socket_path = derive_event_socket_path(&args.control_socket);
@@ -713,6 +780,15 @@ pub(crate) fn run() -> Result<(), String> {
     if let Err(panic) = session_thread.join() {
         eprintln!("xpf-userspace-dp: session thread panicked: {panic:?}");
     }
+    if let Err(panic) = target_sync_thread.join() {
+        eprintln!("xpf-userspace-dp: reinject target sync panicked: {panic:?}");
+    }
+    if let Err(panic) = reinject_servers.submit_thread.join() {
+        eprintln!("xpf-userspace-dp: reinject submit thread panicked: {panic:?}");
+    }
+    if let Err(panic) = reinject_servers.complete_thread.join() {
+        eprintln!("xpf-userspace-dp: reinject complete thread panicked: {panic:?}");
+    }
     {
         // #9900 F-094: `.expect` kept — shutdown teardown, not a request: the
         // daemon is exiting, so there is no next request to recover FOR, and
@@ -728,6 +804,16 @@ pub(crate) fn run() -> Result<(), String> {
     // sockets, never a non-socket object (#2974). Keep the existing
     // best-effort posture — a cleanup failure logs a warning and does not
     // fail shutdown.
+    if let Err(e) = remove_stale_socket(&reinject_submit_socket) {
+        eprintln!(
+            "xpf-userspace-dp: reinject submit socket cleanup {reinject_submit_socket}: {e}"
+        );
+    }
+    if let Err(e) = remove_stale_socket(&reinject_complete_socket) {
+        eprintln!(
+            "xpf-userspace-dp: reinject complete socket cleanup {reinject_complete_socket}: {e}"
+        );
+    }
     if let Err(e) = remove_stale_socket(&args.control_socket) {
         eprintln!(
             "xpf-userspace-dp: control socket cleanup {}: {e}",

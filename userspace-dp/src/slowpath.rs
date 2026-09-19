@@ -1,4 +1,8 @@
 use crate::io_uring_write::WriteResult;
+use crate::slowpath_reinject_9506::{
+    classify_leased_write, AdmissionClass, AdmitDecision, ReinjectCore, ReinjectLease, SubmitFrame,
+    TransferVerdict, ADMIT_BAD_LEASE, SUBMIT_FLAG_DRY_RUN,
+};
 use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io;
@@ -120,6 +124,17 @@ enum PacketQueue {
 struct PacketRequest {
     bytes: Vec<u8>,
     queue: PacketQueue,
+    /// Some only for the adjudicated 9506 path. Trusted/delegated and the
+    /// legacy adjudicated caller intentionally retain lease=None semantics.
+    lease: Option<ReinjectLease>,
+    flow_tag: u64,
+}
+fn admission_class(queue: PacketQueue) -> Option<AdmissionClass> {
+    match queue {
+        PacketQueue::Adjudicated => Some(AdmissionClass::Adjudicated),
+        PacketQueue::Delegated => Some(AdmissionClass::Delegated),
+        PacketQueue::Trusted => None,
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlowPathWorkerOutlet {
@@ -402,6 +417,24 @@ impl RateLimiter {
         self.byte_tokens -= need_bytes;
         true
     }
+    fn would_allow(&self, packet_len: usize) -> bool {
+        let elapsed = Instant::now()
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        let packet_cap = self.max_packets_per_sec as f64;
+        let byte_cap = self.max_bytes_per_sec as f64;
+        let packets = if self.max_packets_per_sec == 0 {
+            0.0
+        } else {
+            (self.packet_tokens + elapsed * packet_cap).min(packet_cap)
+        };
+        let bytes = if self.max_bytes_per_sec == 0 {
+            0.0
+        } else {
+            (self.byte_tokens + elapsed * byte_cap).min(byte_cap)
+        };
+        packets >= 1.0 && bytes >= packet_len as f64
+    }
 }
 
 enum WriteMode {
@@ -615,6 +648,9 @@ impl SharedStatus {
 }
 
 pub struct SlowPathReinjector {
+    /// 9506 completion/epoch state. This mutex is independent of the
+    /// snapshot-wide ServerState lock and is safe for socket + worker threads.
+    reinject_core: Arc<ReinjectCore>,
     tx: SyncSender<PacketRequest>,
     /// #9637 operator narrowing: outlet for reinjects that did NOT pass a
     /// userspace host-inbound gate (delegated NoRoute/MissingNeighbor,
@@ -686,13 +722,23 @@ impl SlowPathReinjector {
     /// are not dropped on the TUN egress (#2408). The caller sources it from
     /// the config snapshot (`ConfigSnapshot::slow_path_mtu`), never hardcoded.
     pub fn new(name: &str, mtu: i32) -> Result<Self, String> {
+        let reinject_core = ReinjectCore::new_shared();
         let status = Arc::new(SharedStatus::new());
         let (tx, rx) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
         let thread_status = status.clone();
         let name = name.to_string();
         thread::Builder::new()
             .name("xpf-slowpath".to_string())
-            .spawn(move || slow_path_worker(&name, mtu, rx, thread_status, SlowPathWorkerOutlet::Trusted))
+            .spawn(move || {
+                slow_path_worker(
+                    &name,
+                    mtu,
+                    rx,
+                    thread_status,
+                    SlowPathWorkerOutlet::Trusted,
+                    None,
+                )
+            })
             .map_err(|e| format!("spawn slow-path worker: {e}"))?;
         // #9637 operator narrowing: the delegated outlet gets its own worker
         // + TUN. Either worker failing to come up fails construction: an
@@ -702,10 +748,20 @@ impl SlowPathReinjector {
         let status_delegated = Arc::new(SharedStatus::new());
         let (tx_delegated, rx_delegated) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
         let thread_status_delegated = status_delegated.clone();
+        let delegated_core = reinject_core.clone();
         let delegated_name = crate::afxdp::DELEGATED_SLOW_PATH_TUN.to_string();
         thread::Builder::new()
             .name("xpf-slowpath-delegated".to_string())
-            .spawn(move || slow_path_worker(&delegated_name, mtu, rx_delegated, thread_status_delegated, SlowPathWorkerOutlet::Delegated))
+            .spawn(move || {
+                slow_path_worker(
+                    &delegated_name,
+                    mtu,
+                    rx_delegated,
+                    thread_status_delegated,
+                    SlowPathWorkerOutlet::Delegated,
+                    Some(delegated_core),
+                )
+            })
             .map_err(|e| format!("spawn delegated slow-path worker: {e}"))?;
 
         // #7820: wait for the worker to report EITHER that it is live or why it
@@ -750,6 +806,7 @@ impl SlowPathReinjector {
             }
         }
         Ok(Self {
+            reinject_core,
             tx,
             tx_delegated,
             limiter: Mutex::new(RateLimiter::new(
@@ -787,6 +844,16 @@ impl SlowPathReinjector {
     /// as a claim that a device exists.
     #[cfg(test)]
     pub(crate) fn new_without_worker(mtu: i32) -> Self {
+        Self::new_without_worker_with_core(mtu, ReinjectCore::new_shared())
+    }
+
+    /// Same hermetic constructor with an injected completion core for the
+    /// lease/socket tests.
+    #[cfg(test)]
+    pub(crate) fn new_without_worker_with_core(
+        mtu: i32,
+        reinject_core: Arc<ReinjectCore>,
+    ) -> Self {
         let status = Arc::new(SharedStatus::new());
         let (tx, rx) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
         std::mem::forget(rx);
@@ -798,6 +865,7 @@ impl SlowPathReinjector {
         status_delegated.active.store(true, Ordering::Relaxed);
         status_delegated.init_state.store(OutletInit::Live as u8, Ordering::Relaxed);
         Self {
+            reinject_core,
             tx,
             tx_delegated,
             limiter: Mutex::new(RateLimiter::new(
@@ -839,6 +907,16 @@ impl SlowPathReinjector {
         self.mtu.store(mtu as i64, Ordering::Relaxed);
         self.status.live_mtu.store(live_mtu as i64, Ordering::Relaxed);
         self.status.degraded.store(degraded, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_delegated_mtu_state_for_test(&self, live_mtu: i32, degraded: bool) {
+        self.status_delegated
+            .live_mtu
+            .store(live_mtu as i64, Ordering::Relaxed);
+        self.status_delegated
+            .degraded
+            .store(degraded, Ordering::Relaxed);
     }
 
     /// Reprogram the live slow-path TUN to `desired_mtu` on a day-2 config MTU
@@ -1005,11 +1083,8 @@ impl SlowPathReinjector {
         queue: PacketQueue,
     ) -> Result<EnqueueOutcome, String> {
         let packet_len = bytes.len() as u64;
-        // #2471: refuse frames larger than the live TUN MTU. When MTU
-        // programming failed the live TUN is at 1500; injecting a jumbo frame
-        // would be silently dropped by the kernel on TUN egress while status
-        // still reported `active`. Drop it here with an explicit counter so the
-        // degradation is firewall-visible, not hidden in the kernel.
+        // Refuse frames larger than the live TUN MTU before they reach a
+        // worker; this keeps the existing degraded-path accounting intact.
         let live_mtu = status.live_mtu.load(Ordering::Relaxed);
         if live_mtu > 0 && packet_len > live_mtu as u64 {
             status.mtu_dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -1017,6 +1092,9 @@ impl SlowPathReinjector {
             status
                 .dropped_bytes
                 .fetch_add(packet_len, Ordering::Relaxed);
+            if let Some(class) = admission_class(queue) {
+                self.reinject_core.record_class_refused(class);
+            }
             return Ok(EnqueueOutcome::MtuExceeded);
         }
         let allowed = self
@@ -1032,11 +1110,24 @@ impl SlowPathReinjector {
             status
                 .rate_limited_packets
                 .fetch_add(1, Ordering::Relaxed);
+            if let Some(class) = admission_class(queue) {
+                self.reinject_core.record_class_refused(class);
+            }
             return Ok(EnqueueOutcome::RateLimited);
         }
         status.queued_packets.fetch_add(1, Ordering::Relaxed);
-        match tx.try_send(PacketRequest { bytes, queue }) {
-            Ok(()) => Ok(EnqueueOutcome::Accepted),
+        match tx.try_send(PacketRequest {
+            bytes,
+            queue,
+            lease: None,
+            flow_tag: 0,
+        }) {
+            Ok(()) => {
+                if let Some(class) = admission_class(queue) {
+                    self.reinject_core.record_class_admitted(class);
+                }
+                Ok(EnqueueOutcome::Accepted)
+            }
             Err(TrySendError::Full(req)) => {
                 status.queued_packets.fetch_sub(1, Ordering::Relaxed);
                 status.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -1046,6 +1137,9 @@ impl SlowPathReinjector {
                 status
                     .queue_full_packets
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(class) = admission_class(queue) {
+                    self.reinject_core.record_class_refused(class);
+                }
                 Ok(EnqueueOutcome::QueueFull)
             }
             Err(TrySendError::Disconnected(req)) => {
@@ -1054,13 +1148,174 @@ impl SlowPathReinjector {
                 status
                     .dropped_bytes
                     .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
+                if let Some(class) = admission_class(queue) {
+                    self.reinject_core.record_class_refused(class);
+                }
                 let err = "slow-path worker is not running".to_string();
                 status.set_last_error(err.clone());
                 Err(err)
             }
         }
     }
+    /// Admit and enqueue one leased adjudicated frame. This is the only
+    /// production caller that creates `PacketRequest { lease: Some(..) }`;
+    /// trusted/delegated and legacy adjudicated APIs remain lease-free.
+    /// Validate-only socket path. It performs MTU and limiter checks but never
+    /// allocates a PacketRequest or touches the worker channel/TUN.
+    pub(crate) fn validate_dry_run_frame(&self, frame: SubmitFrame) -> AdmitDecision {
+        let mut decision = self.reinject_core.validate_dry_run(&frame);
+        if decision.admitted {
+            let packet_len = frame.bytes.len() as u64;
+            let live_mtu = self.status_delegated.live_mtu.load(Ordering::Relaxed);
+            if live_mtu > 0 && packet_len > live_mtu as u64 {
+                decision.admitted = false;
+                decision.reason = ADMIT_BAD_LEASE;
+            } else {
+                let allowed = self
+                    .limiter
+                    .lock()
+                    .map(|limiter| limiter.would_allow(frame.bytes.len()))
+                    .unwrap_or(false);
+                if !allowed {
+                    decision.admitted = false;
+                    decision.reason = ADMIT_BAD_LEASE;
+                }
+            }
+        }
+        self.reinject_core.note_dry_run(decision.admitted);
+        decision
+    }
 
+    pub(crate) fn submit_adjudicated_frame(&self, frame: SubmitFrame) -> AdmitDecision {
+        if frame.flags & SUBMIT_FLAG_DRY_RUN != 0 {
+            self.reinject_core
+                .record_class_refused(AdmissionClass::Adjudicated);
+            return self.reinject_core.refuse_non_dry_run(&frame);
+        }
+        let packet_len = frame.bytes.len() as u64;
+        let live_mtu = self.status_delegated.live_mtu.load(Ordering::Relaxed);
+        if live_mtu > 0 && packet_len > live_mtu as u64 {
+            self.status_delegated
+                .mtu_dropped_packets
+                .fetch_add(1, Ordering::Relaxed);
+            self.status_delegated
+                .dropped_packets
+                .fetch_add(1, Ordering::Relaxed);
+            self.status_delegated
+                .dropped_bytes
+                .fetch_add(packet_len, Ordering::Relaxed);
+            self.reinject_core
+                .record_class_refused(AdmissionClass::Adjudicated);
+            return AdmitDecision {
+                request_id: frame.lease.request_id,
+                permit_epoch: frame.lease.permit_epoch,
+                queue_epoch: frame.lease.queue_epoch,
+                queue_number: frame.lease.queue_number,
+                family: frame.origin.family,
+                hook: frame.origin.hook,
+                owned_ifindex: frame.origin.owned_ifindex,
+                admitted: false,
+                reason: ADMIT_BAD_LEASE,
+            };
+        }
+
+        let mut decision = self
+            .reinject_core
+            .admit_with_class(&frame, Some(AdmissionClass::Adjudicated));
+        if !decision.admitted {
+            return decision;
+        }
+        let allowed = match self.limiter.lock() {
+            Ok(mut limiter) => limiter.allow(frame.bytes.len()),
+            Err(_) => false,
+        };
+        if !allowed {
+            self.reinject_core
+                .refuse_queued(&frame.lease, "rate limited".to_string());
+            self.reinject_core
+                .record_class_refused(AdmissionClass::Adjudicated);
+            self.status_delegated
+                .rate_limited_packets
+                .fetch_add(1, Ordering::Relaxed);
+            self.status_delegated
+                .dropped_packets
+                .fetch_add(1, Ordering::Relaxed);
+            self.status_delegated
+                .dropped_bytes
+                .fetch_add(packet_len, Ordering::Relaxed);
+            decision.admitted = false;
+            decision.reason = ADMIT_BAD_LEASE;
+            return decision;
+        }
+
+        self.status_delegated
+            .queued_packets
+            .fetch_add(1, Ordering::Relaxed);
+        let request = PacketRequest {
+            bytes: frame.bytes,
+            queue: PacketQueue::Adjudicated,
+            lease: Some(frame.lease),
+            flow_tag: frame.flow_tag,
+        };
+        match self.tx_delegated.try_send(request) {
+            Ok(()) => decision,
+            Err(TrySendError::Full(req)) => {
+                self.status_delegated
+                    .queued_packets
+                    .fetch_sub(1, Ordering::Relaxed);
+                self.status_delegated
+                    .queue_full_packets
+                    .fetch_add(1, Ordering::Relaxed);
+                self.status_delegated
+                    .dropped_packets
+                    .fetch_add(1, Ordering::Relaxed);
+                self.status_delegated
+                    .dropped_bytes
+                    .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
+                self.reinject_core
+                    .refuse_queued(&frame.lease, "queue full".to_string());
+                self.reinject_core
+                    .record_class_refused(AdmissionClass::Adjudicated);
+                decision.admitted = false;
+                decision.reason = ADMIT_BAD_LEASE;
+                decision
+            }
+            Err(TrySendError::Disconnected(req)) => {
+                self.status_delegated
+                    .queued_packets
+                    .fetch_sub(1, Ordering::Relaxed);
+                self.status_delegated
+                    .dropped_packets
+                    .fetch_add(1, Ordering::Relaxed);
+                self.status_delegated
+                    .dropped_bytes
+                    .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
+                self.reinject_core
+                    .refuse_queued(&frame.lease, "worker stopped".to_string());
+                self.reinject_core
+                    .record_class_refused(AdmissionClass::Adjudicated);
+                decision.admitted = false;
+                decision.reason = ADMIT_BAD_LEASE;
+                decision
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn submit_leased(&self, frame: SubmitFrame) -> AdmitDecision {
+        self.submit_adjudicated_frame(frame)
+    }
+    pub(crate) fn publish_reinject_epochs(&self, permit_epoch: u64, queue_epochs: &[(u16, u64)]) {
+        self.reinject_core.publish_epochs(permit_epoch, queue_epochs);
+    }
+
+    pub(crate) fn reinject_core(&self) -> Arc<ReinjectCore> {
+        self.reinject_core.clone()
+    }
+
+    pub(crate) fn reinject_stats(&self) -> crate::slowpath_reinject_9506::ReinjectStats {
+        self.reinject_core.stats_snapshot()
+    }
     pub fn status(&self) -> SlowPathStatus {
         self.status.snapshot()
     }
@@ -1079,6 +1334,7 @@ fn slow_path_worker(
     rx: Receiver<PacketRequest>,
     status: Arc<SharedStatus>,
     outlet: SlowPathWorkerOutlet,
+    reinject_core: Option<Arc<ReinjectCore>>,
 ) {
     let (tun, adjudicated_tun, actual_name, _classifier) = match outlet {
         SlowPathWorkerOutlet::Trusted => match open_tun_with_flags(name, false) {
@@ -1172,10 +1428,38 @@ fn slow_path_worker(
                 continue;
             }
         };
+        // The q0 lease check is the authorization linearization point:
+        // immediately before entering the TUN write, never at admission.
+        let lease = req.lease;
+        if let Some(lease) = lease {
+            let pre = reinject_core
+                .as_ref()
+                .map(|core| core.pre_write_check(&lease))
+                .unwrap_or(crate::slowpath_reinject_9506::PreWrite::Unknown);
+            if !matches!(pre, crate::slowpath_reinject_9506::PreWrite::Proceed) {
+                status.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                status
+                    .dropped_bytes
+                    .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
+                continue;
+            }
+        }
         // The owned packet buffer MOVES into the write path. In io_uring mode
         // a deferred outcome moves it into the ring's in-flight registry.
         let bytes_len = req.bytes.len();
-        let outcome = write_packet_with_mode(&mut mode, fd, req.bytes);
+        let (outcome, leased_verdict) = if lease.is_some() {
+            let (verdict, outcome) = write_packet_with_lease(&mut mode, fd, req.bytes);
+            (outcome, Some(verdict))
+        } else {
+            (write_packet_with_mode(&mut mode, fd, req.bytes), None)
+        };
+        if let (Some(lease), Some(verdict), Some(core)) =
+            (lease, leased_verdict, reinject_core.as_ref())
+        {
+            // No post-write epoch check: a definitive full-frame success
+            // after WRITE_STARTED is the REINJECT COMMIT point.
+            core.resolve_write(&lease, verdict);
+        }
         apply_slowpath_outcome(outcome, &mut mode, bytes_len, &status);
     }
     status.active.store(false, Ordering::Relaxed);
@@ -1232,7 +1516,123 @@ fn write_packet_with_mode(
         },
     }
 }
+/// Lease-aware writer preserving the structural io_uring taxonomy. The legacy
+/// writer remains untouched for lease=None calls; this arm converts the
+/// classifier's verdict to the old status outcome only after classification.
+fn write_packet_with_lease(
+    mode: &mut WriteMode,
+    fd: i32,
+    bytes: Vec<u8>,
+) -> (TransferVerdict, SlowPathWriteOutcome) {
+    match mode {
+        WriteMode::IoUring(ring) => {
+            let result = ring.write(fd, bytes, false, "slow-path");
+            let leased = classify_leased_write(result, |buffer| {
+                sync_classified_verdict(fd, &buffer)
+            });
+            let legacy = leased_outcome_to_status(
+                &leased.verdict,
+                leased.ring_terminal,
+                leased.demotion_cause.clone(),
+            );
+            (leased.verdict, legacy)
+        }
+        WriteMode::SyncFallback => {
+            let classified = write_packet_sync_classified(fd, &bytes);
+            let verdict = classified_verdict(&classified);
+            let status = classified_outcome_to_status(classified);
+            (verdict, status)
+        }
+    }
+}
 
+#[derive(Debug)]
+enum SyncWriteOutcome {
+    Written(u32),
+    NothingWritten(String),
+    Transferred(String),
+}
+
+fn write_packet_sync_classified(fd: i32, bytes: &[u8]) -> SyncWriteOutcome {
+    let len = bytes.len();
+    loop {
+        let rc = unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), len) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return SyncWriteOutcome::NothingWritten(format!("slow-path write: {err}"));
+        }
+        let count = rc as usize;
+        if count == len {
+            return SyncWriteOutcome::Written(len as u32);
+        }
+        if count == 0 {
+            return SyncWriteOutcome::NothingWritten(
+                "slow-path short write on packet fd: 0".to_string(),
+            );
+        }
+        return SyncWriteOutcome::Transferred(format!(
+            "slow-path short write on packet fd: wrote {count} of {len} bytes"
+        ));
+    }
+}
+
+fn classified_verdict(outcome: &SyncWriteOutcome) -> TransferVerdict {
+    match outcome {
+        SyncWriteOutcome::Written(bytes) => TransferVerdict::Written { bytes: *bytes },
+        SyncWriteOutcome::NothingWritten(reason) => TransferVerdict::Refused {
+            reason: reason.clone(),
+        },
+        SyncWriteOutcome::Transferred(reason) => TransferVerdict::Uncertain {
+            reason: reason.clone(),
+        },
+    }
+}
+
+fn sync_classified_verdict(fd: i32, bytes: &[u8]) -> TransferVerdict {
+    match write_packet_sync_classified(fd, bytes) {
+        SyncWriteOutcome::Written(bytes) => TransferVerdict::Written { bytes },
+        SyncWriteOutcome::NothingWritten(reason) => TransferVerdict::Refused { reason },
+        SyncWriteOutcome::Transferred(reason) => TransferVerdict::Uncertain { reason },
+    }
+}
+
+fn classified_outcome_to_status(outcome: SyncWriteOutcome) -> SlowPathWriteOutcome {
+    let result = match outcome {
+        SyncWriteOutcome::Written(_) => Ok(()),
+        SyncWriteOutcome::NothingWritten(reason) => Err(reason),
+        SyncWriteOutcome::Transferred(reason) => Err(reason),
+    };
+    SlowPathWriteOutcome {
+        result,
+        ring_terminal: false,
+        demotion_cause: None,
+    }
+}
+
+fn leased_outcome_to_status(
+    verdict: &TransferVerdict,
+    ring_terminal: bool,
+    demotion_cause: Option<String>,
+) -> SlowPathWriteOutcome {
+    let result = match verdict {
+        TransferVerdict::Written { .. } => Ok(()),
+        TransferVerdict::Refused { reason } | TransferVerdict::Uncertain { reason } => {
+            Err(reason.clone())
+        }
+        TransferVerdict::Fenced => Err("fenced".to_string()),
+        TransferVerdict::Denied => Err("denied".to_string()),
+        TransferVerdict::Accepted => Ok(()),
+        TransferVerdict::WouldReinject => Ok(()),
+    };
+    SlowPathWriteOutcome {
+        result,
+        ring_terminal,
+        demotion_cause,
+    }
+}
 /// Classify a single io_uring [`WriteResult`] into a [`SlowPathWriteOutcome`]
 /// (#5172 + #5800). Separates packet-transfer certainty (the #2477 sync-fallback
 /// decision) from ring health, and distinguishes the four outcomes the acceptance

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -35,6 +36,9 @@ func (d *Daemon) startIpsecSupervisorLoop(ctx context.Context, wg *sync.WaitGrou
 				d.pollIpsecTopology()
 			case now := <-t.C:
 				s.supervisorTickOnce(now)
+				if err := d.reconcileIpsecCaptureAuthority(); err != nil {
+					slog.Debug("ipsec capture authority announce deferred", "err", err)
+				}
 				d.reconcileIpsecHostInputFence(ctx)
 			}
 		}

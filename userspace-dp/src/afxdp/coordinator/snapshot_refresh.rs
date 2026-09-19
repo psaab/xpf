@@ -491,6 +491,16 @@ impl super::Coordinator {
         // `store_runtime_view` records the intended pair + the previous view
         // for the RED-on-revert test.
         self.publish_runtime_view();
+        // #9506 S5: rotate reinject authority at the same committed
+        // snapshot boundary as the worker-visible runtime view.
+        if let Some(slow_path) = self.slow_path.as_ref() {
+            let queue_epochs: Vec<(u16, u64)> = snapshot
+                .queue_epochs
+                .iter()
+                .map(|entry| (entry.queue, entry.epoch))
+                .collect();
+            slow_path.publish_reinject_epochs(snapshot.permit_epoch, &queue_epochs);
+        }
         // #1432 S2a (Copilot C1): reconcile WG control threads on every
         // runtime-snapshot refresh, not just initial bring-up, so a
         // same-plan apply that adds/removes/changes a WG endpoint starts,

@@ -453,7 +453,7 @@ EOF'
 	# linux-modules package and no linux-modules-extra-* exists for this kernel.
 	# frr-pythontools and ethtool exist on Ubuntu with the same names.
 	info "Installing packages ($vm, this may take a few minutes)..."
-	incus exec "$rinst" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential clang llvm libbpf-dev linux-headers-$(uname -r) linux-tools-$(uname -r) tcpdump iproute2 iperf3 bpftool frr frr-pythontools strongswan strongswan-swanctl kea-dhcp4-server kea-dhcp6-server chrony ethtool mtr-tiny bind9-host pciutils curl wget ripgrep'
+	incus exec "$rinst" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential clang llvm libbpf-dev linux-headers-$(uname -r) linux-tools-$(uname -r) tcpdump iproute2 iperf3 bpftool frr frr-pythontools nftables strongswan strongswan-swanctl kea-dhcp4-server kea-dhcp6-server chrony ethtool mtr-tiny bind9-host pciutils curl wget ripgrep'
 
 	# Ubuntu 26.04 ships a stock kernel >= 6.18, so the Debian-unstable kernel
 	# dance is gone. Assert the floor and the SR-IOV VF driver presence (mlx5),

@@ -499,6 +499,16 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// deleted would fall after the stamp and escape the sweep, which is the
 	// stale-authorization direction and strictly worse than the over-clear this
 	// closes. Captured here, that gap is the call itself.
+	captureOld, captureStaged, captureStageErr := d.stageIpsecCapture(cfg)
+	d.ipsecCaptureMu.Lock()
+	captureStagePending := d.ipsecCaptureStagePending
+	d.ipsecCaptureMu.Unlock()
+	captureCommitted := captureStageErr != nil || !captureStagePending
+	defer func() {
+		if !captureCommitted && captureStagePending {
+			_ = d.rollbackIpsecCaptureStage(captureOld, captureStaged)
+		}
+	}()
 	d.policyActivationSecs = daemonMonotonicSeconds()
 	commitOverlay, networkdErr, applyErr, vrfTermErr, err := d.applyDataplaneAndHACore(ctx, cfg)
 	if err != nil {
@@ -518,11 +528,31 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		// silently deferred by the cancel). closeoutHostAuthOnCancel runs just
 		// those security-critical owners to completion — bounded (two nft loads +
 		// local credential reconciles, no FRR/netlink reload) and non-cancellable
+
 		// — against the committed config before propagating the cancellation. A
 		// non-cancellation error (an ordinary compile-abort) returns unchanged.
 		// The non-security tail is intentionally left to next-boot convergence
 		// (the #2926 C3 contract).
 		return d.closeoutHostAuthOnCancel(err, cfg)
+	}
+	var captureCommitErr error
+	if !captureStagePending {
+		captureCommitted = true
+	} else {
+		switch {
+		case applyErr != nil:
+			captureCommitErr = errors.New("ipsec capture: dataplane snapshot apply failed; staged divert withheld")
+		case !d.hostInboundDataplaneFresh.Load():
+			captureCommitErr = errors.New("ipsec capture: dataplane snapshot publication deferred; staged divert withheld")
+		default:
+			captureCommitErr = d.commitIpsecCaptureStage(captureOld, captureStaged)
+			d.ipsecCaptureMu.Lock()
+			published := !d.ipsecCaptureStagePending && d.ipsecCapture == captureStaged
+			d.ipsecCaptureMu.Unlock()
+			if captureCommitErr == nil || published {
+				captureCommitted = true
+			}
+		}
 	}
 
 	// #9947 F-007: apply the FRR managed section (step 3) on the full path
@@ -567,6 +597,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	vrfErr = errors.Join(vrfErr, vrfTermErr)
 
 	ipsecErr, dhcpServerErr := d.applyServicesReconcile(cfg)
+	ipsecErr = errors.Join(ipsecErr, captureStageErr, captureCommitErr)
 
 	// Steps 8–21: tail reconcile dispatches (VRRP, system config, syslog,
 	// login/SSH, archival, observability, cluster runtime, host tunables).

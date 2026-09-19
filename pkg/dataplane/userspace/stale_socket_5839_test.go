@@ -382,6 +382,13 @@ func TestPreflightHelperPathsRejectsAliasedPaths_5839(t *testing.T) {
 				StateFile:     "/run/xpf/state.json",
 			},
 		},
+		{
+			name: "dot-segment reinject submit aliases control",
+			cfg: config.UserspaceConfig{
+				ControlSocket: "/run/xpf/./reinject-submit.sock",
+				StateFile:     "/run/xpf/state.json",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,5 +408,21 @@ func TestPreflightHelperPathsRejectsAliasedPaths_5839(t *testing.T) {
 	}
 	if err := preflightHelperPaths(ok); err != nil {
 		t.Fatalf("preflightHelperPaths() on the default-shaped path set = %v, want nil", err)
+	}
+}
+
+func TestPreflightHelperPathsRejectsReinjectRegularFile9506(t *testing.T) {
+	dir := shortSocketDir(t)
+	cfg := config.UserspaceConfig{
+		ControlSocket: filepath.Join(dir, "control.sock"),
+		StateFile:     filepath.Join(dir, "state.json"),
+	}
+	reinjectSubmit, _ := helperReinjectSocketPaths(cfg)
+	if err := os.WriteFile(reinjectSubmit, []byte("not a socket"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := preflightHelperPaths(cfg)
+	if err == nil || !strings.Contains(err.Error(), "reinject submit socket") {
+		t.Fatalf("preflightHelperPaths()=%v, want reinject regular-file refusal", err)
 	}
 }

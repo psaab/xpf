@@ -706,6 +706,17 @@ pub(super) fn apply_snapshot(
             }
         }
     };
+    // #9506 S5: publish the committed snapshot's reinject authority only
+    // after the slow-path object is live. Epoch zero intentionally closes the
+    // authority; stale or reordered snapshots are rejected inside the core.
+    if let Some(slow_path) = coord.slow_path.as_ref() {
+        let queue_epochs: Vec<(u16, u64)> = snapshot
+            .queue_epochs
+            .iter()
+            .map(|entry| (entry.queue, entry.epoch))
+            .collect();
+        slow_path.publish_reinject_epochs(snapshot.permit_epoch, &queue_epochs);
+    }
     coord
         .local_tunnel_deliveries
         .store(Arc::new(BTreeMap::new()));

@@ -321,7 +321,10 @@ const (
 	// delegation for capped NoRoute frames; v27 adjudicates them and drops a
 	// policy denial. Exact equality must refuse the mixed pairing or an old
 	// helper preserves the #9054 security bypass.
-	ProtocolVersion = 27
+	// v27 -> v28 (#9506 S5): `permit_epoch` and `queue_epochs` carry the
+	// epoch-scoped q0 capture authority. An older helper would ignore those
+	// fields and admit/reject against stale queue ownership.
+	ProtocolVersion = 28
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -546,11 +549,22 @@ type ControlResponse struct {
 	SessionCounters []SessionCounterRow `json:"session_counters,omitempty"`
 }
 
+// QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than
+// a map so the wire order remains deterministic across Go and Rust.
+type QueueEpochSnapshot struct {
+	Queue uint16 `json:"queue"`
+	Epoch uint64 `json:"epoch"`
+}
+
 type ConfigSnapshot struct {
-	Version         int                      `json:"version"`
-	Generation      uint64                   `json:"generation"`
-	FIBGeneration   uint32                   `json:"fib_generation,omitempty"`
-	GeneratedAt     time.Time                `json:"generated_at"`
+	Version       int       `json:"version"`
+	Generation    uint64    `json:"generation"`
+	FIBGeneration uint32    `json:"fib_generation,omitempty"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	// PermitEpoch and QueueEpochs are additive S4 authority feed fields.
+	// Zero/nil means no active #9506 pipeline authority.
+	PermitEpoch     uint64                   `json:"permit_epoch,omitempty"`
+	QueueEpochs     []QueueEpochSnapshot     `json:"queue_epochs,omitempty"`
 	Summary         SnapshotSummary          `json:"summary"`
 	Capabilities    UserspaceCapabilities    `json:"capabilities"`
 	MapPins         UserspaceMapPins         `json:"map_pins"`
@@ -600,10 +614,9 @@ type ConfigSnapshot struct {
 	// still restore delegation while a v27 helper adjudicates, even though the
 	// JSON bytes are identical.
 	//
-	// The snapshot is therefore NOT skew-tolerant. ProtocolVersion 27 refuses a
-	// mismatched pairing rather than silently preserving the #9054 kernel
-	// bypass. A v26 helper is not allowed to apply a snapshot whose capped
-	// NoRoute meaning it would interpret differently.
+	// The v27 learned-route contract is therefore NOT skew-tolerant. The
+	// current ProtocolVersion 28 also fences the additive #9506 authority
+	// fields rather than silently preserving either stale-ownership behavior.
 	LearnedRouteImportCapped bool `json:"learned_route_import_capped,omitempty"`
 
 	DefaultLogSessionInit  bool                         `json:"default_log_session_init,omitempty"`
