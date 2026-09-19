@@ -88,6 +88,351 @@ both_nodes_present() {
     [[ "$1" == 1 && "$2" == 1 ]]
 }
 
+# ---- r6 observer inventory -------------------------------------------------
+# The fixture already proves that nft diversion and NFQUEUE handles exist.
+# These observers keep the stronger claims separate:
+#   * static ruleset shape is read from nft JSON;
+#   * listener/queue economics is read from the live process and procfs;
+#   * per-packet CaptureOrigin, permit state, adjudication, and physical q0
+#     ACK are NOT inferred from those surfaces.  They remain VOID unless the
+#     running binary exports an authoritative witness.
+observe_ruleset_shape() {
+    # observe_ruleset_shape <ruleset.json>
+    # Prints: readable fence_pinhole_shape divert_shape order_shape stn_rules.
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        doc = json.load(fh)
+    items = doc.get("nftables")
+    if not isinstance(items, list):
+        raise ValueError("missing nftables list")
+except Exception:
+    print("0 0 0 0")
+    raise SystemExit(0)
+
+chains = {}
+rules = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    chain = item.get("chain")
+    if isinstance(chain, dict):
+        key = (str(chain.get("family")), str(chain.get("table")), str(chain.get("name")))
+        chains[key] = chain
+    rule = item.get("rule")
+    if isinstance(rule, dict):
+        rules.append(rule)
+
+fence = 1
+for family in ("inet", "bridge"):
+    chain = chains.get((family, "xpf_transit_barrier", "forward"))
+    if not isinstance(chain, dict) or chain.get("hook") != "forward" or \
+       chain.get("prio") not in (0, "filter") or \
+       str(chain.get("policy", "")).lower() != "drop":
+        fence = 0
+
+fence_rules = {}
+for rule in rules:
+    if rule.get("table") != "xpf_transit_barrier" or rule.get("chain") != "forward":
+        continue
+    expr = rule.get("expr")
+    if not isinstance(expr, list):
+        continue
+    fence_rules.setdefault(str(rule.get("family")), []).append(expr)
+
+# The rendered rule shape is intentionally structural.  Dynamic iifname set
+# values may be elided by nft JSON, so this is not promoted to an exact
+# pinhole-set claim unless the two expected rule forms are present.
+for family in ("inet", "bridge"):
+    exprs = fence_rules.get(family, [])
+    has_ifset = any(
+        any(isinstance(e, dict) and isinstance(e.get("match"), dict) and
+            isinstance(e["match"].get("right"), dict) and
+            "set" in e["match"]["right"] for e in expr)
+        and any(isinstance(e, dict) and "accept" in e for e in expr)
+        for expr in exprs
+    )
+    has_marked = any(
+        any(isinstance(e, dict) and isinstance(e.get("match"), dict) and
+            e["match"].get("right") == "xpf-usp1" for e in expr)
+        and any(isinstance(e, dict) and isinstance(e.get("match"), dict) and
+            e["match"].get("left", {}).get("meta", {}).get("key") == "mark" and
+            e["match"].get("right") == 0x58465001 for e in expr)
+        and any(isinstance(e, dict) and "accept" in e for e in expr)
+        for expr in exprs
+    )
+    if not (has_ifset and has_marked):
+        fence = 0
+
+expected = {("inet", "forward"), ("inet", "input"),
+            ("bridge", "forward"), ("bridge", "input")}
+divert_shape = 1
+order_shape = 1
+stn_rules = 0
+for family, hook in expected:
+    chain = chains.get((family, "xpf_ipsec_divert", hook))
+    if not isinstance(chain, dict) or chain.get("hook") != hook or \
+       chain.get("prio") != -175 or \
+       str(chain.get("policy", "")).lower() != "accept":
+        divert_shape = 0
+        order_shape = 0
+    for rule in rules:
+        if rule.get("family") != family or rule.get("table") != "xpf_ipsec_divert" or \
+           rule.get("chain") != hook:
+            continue
+        expr = rule.get("expr")
+        if not isinstance(expr, list) or len(expr) != 2:
+            divert_shape = 0
+            continue
+        match, queue = expr
+        left = match.get("match", {}) if isinstance(match, dict) else {}
+        right = queue.get("queue", {}) if isinstance(queue, dict) else {}
+        if left.get("op") != "==" or \
+           left.get("left", {}).get("meta", {}).get("key") != "iifname" or \
+           not str(left.get("right", "")).startswith("st9506.") or \
+           not isinstance(right, dict) or not isinstance(right.get("num"), int):
+            divert_shape = 0
+        else:
+            stn_rules += 1
+
+if stn_rules == 0:
+    divert_shape = 0
+if any(
+    isinstance(c, dict) and c.get("table") == "xpf_ipsec_divert" and
+    c.get("hook") in ("forward", "input") and c.get("prio") != -175
+    for c in chains.values()
+):
+    order_shape = 0
+print(f"1 {fence} {divert_shape} {order_shape} {stn_rules}")
+PY
+}
+
+observe_provenance_metadata() {
+    # observe_provenance_metadata <ruleset.json> <nfqueue.txt>
+    # Static queue→family/hook/stN mapping is measurable.  Packet metadata
+    # requires CaptureOrigin counters/logs from the running actor and is
+    # deliberately reported as zero rather than inferred.
+    python3 - "$1" "$2" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict) or not isinstance(doc.get("nftables"), list):
+        raise ValueError("missing nftables list")
+except Exception:
+    print("static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0")
+    raise SystemExit(0)
+queue_ids = set()
+try:
+    for line in open(sys.argv[2], encoding="utf-8"):
+        fields = line.split()
+        if len(fields) >= 3 and fields[0].isdigit():
+            queue_ids.add(int(fields[0]))
+except OSError:
+    pass
+rule_ids = set()
+static = 1
+for item in doc.get("nftables", []):
+    rule = item.get("rule") if isinstance(item, dict) else None
+    if not isinstance(rule, dict) or rule.get("table") != "xpf_ipsec_divert":
+        continue
+    expr = rule.get("expr")
+    if not isinstance(expr, list) or len(expr) != 2:
+        static = 0
+        continue
+    match = expr[0].get("match", {}) if isinstance(expr[0], dict) else {}
+    queue = expr[1].get("queue", {}) if isinstance(expr[1], dict) else {}
+    if match.get("left", {}).get("meta", {}).get("key") != "iifname" or \
+       not re.fullmatch(r"st9506\.[0-9]+", str(match.get("right", ""))) or \
+       not isinstance(queue, dict) or not isinstance(queue.get("num"), int):
+        static = 0
+    else:
+        rule_ids.add(queue["num"])
+static = int(static and bool(rule_ids))
+mismatch = int(bool(queue_ids) and not rule_ids.issubset(queue_ids))
+print(
+    f"static={static} queue_rows={len(queue_ids)} queue_ids={len(rule_ids)} "
+    f"packet_samples=0 mismatch={mismatch}"
+)
+PY
+}
+observer_field() {
+    local text="$1" key="$2" word
+    for word in $text; do
+        if [[ "$word" == "$key="* ]]; then
+            printf '%s\n' "${word#*=}"
+            return 0
+        fi
+    done
+    printf '0\n'
+}
+
+observe_runtime() {
+    # observe_runtime <node> <directory> <tag>
+    # Capture authoritative helper status plus the daemon/process/socket and
+    # nfnetlink queue surfaces.  The helper status has no S5 actor counters;
+    # callers must not relabel these fields as consumed/adjudicated/REINJECT.
+    local node="$1"
+    local dir="$2"
+    local tag="$3"
+    local status proc
+    status="$dir/${tag}-status.json"
+    proc="$dir/${tag}-runtime.txt"
+    mkdir -p "$dir"
+    remote "$node" "python3 - <<'PY'
+import socket
+try:
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(2)
+    s.connect('/run/xpf/userspace-dp.sock')
+    s.sendall(b'{\"type\":\"status\"}\\n')
+    chunks = []
+    while True:
+        part = s.recv(1048576)
+        if not part:
+            break
+        chunks.append(part)
+        if b'\\n' in part:
+            break
+    print(b''.join(chunks).decode(errors='replace'))
+except Exception as exc:
+    print('STATUS_ERROR=' + str(exc))
+PY" >"$status" 2>&1 || :
+    remote "$node" 'set +e
+pid="$(pidof xpfd | awk "{print \$1}")"
+printf "xpfd_pid=%s\n" "${pid:-0}"
+if [[ -n "${pid:-}" && -r "/proc/$pid/fd" ]]; then
+    printf "xpfd_fd_count=%s\n" "$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+else
+    printf "xpfd_fd_count=0\n"
+fi
+for sock in /run/xpf/reinject-submit.sock /run/xpf/reinject-complete.sock /run/xpf/userspace-dp.sock; do
+    [[ -S "$sock" ]] && printf "socket_%s=1\n" "$(basename "$sock" .sock | tr - _)" ||
+        printf "socket_%s=0\n" "$(basename "$sock" .sock | tr - _)"
+done
+cat /proc/net/netfilter/nfnetlink_queue 2>&1
+printf "===NETLINK===\n"
+cat /proc/net/netlink 2>&1' >"$proc" 2>&1 || :
+    RUNTIME_STATUS_FILE="$status"
+    RUNTIME_PROC_FILE="$proc"
+    RUNTIME_PID=0
+    RUNTIME_FD_COUNT=0
+    RUNTIME_QUEUE_ROWS=0
+    RUNTIME_QUEUE_PENDING=0
+    RUNTIME_QUEUE_DROPS=0
+    RUNTIME_DAEMON_ACTIVE=0
+    RUNTIME_SOCKET_READY=0
+    RUNTIME_ACTOR_ACTIVE=0
+    RUNTIME_REINJECT_SOCKETS=0
+    RUNTIME_PERMIT_OPEN=0
+    RUNTIME_CONSUMED=0
+    RUNTIME_ADJUDICATED=0
+    RUNTIME_REINJECTED=0
+    RUNTIME_DELIVERED=0
+    RUNTIME_REASON="product-observer-unavailable:permit-and-capture-actor-counters-not-exported"
+    RUNTIME_PID="$(sed -n 's/^xpfd_pid=//p' "$proc" | head -n 1)"
+    RUNTIME_FD_COUNT="$(sed -n 's/^xpfd_fd_count=//p' "$proc" | head -n 1)"
+    [[ "$RUNTIME_PID" =~ ^[0-9]+$ ]] || RUNTIME_PID=0
+    [[ "$RUNTIME_FD_COUNT" =~ ^[0-9]+$ ]] || RUNTIME_FD_COUNT=0
+    local submit complete control
+    submit="$(sed -n 's/^socket_reinject_submit=//p' "$proc" | head -n 1)"
+    complete="$(sed -n 's/^socket_reinject_complete=//p' "$proc" | head -n 1)"
+    control="$(sed -n 's/^socket_userspace_dp=//p' "$proc" | head -n 1)"
+    if [[ "$RUNTIME_PID" != 0 ]]; then
+        RUNTIME_DAEMON_ACTIVE=1
+    fi
+    if [[ "$submit" == 1 && "$complete" == 1 && "$control" == 1 ]]; then
+        RUNTIME_SOCKET_READY=1
+        RUNTIME_REINJECT_SOCKETS=2
+    fi
+    # xpfd and the Rust helper sockets are separate from the Go S5 capture
+    # actor; only a product-owned status/counter surface can identify the
+    # actor and its permit/reinject lifecycle.
+    RUNTIME_ACTOR_ACTIVE=0
+    RUNTIME_QUEUE_ROWS="$(awk '/^===NETLINK===/{exit} /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {n++} END {print n+0}' "$proc")"
+    RUNTIME_QUEUE_PENDING="$(awk '/^===NETLINK===/{exit} /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {sum += $3} END {print sum+0}' "$proc")"
+    RUNTIME_QUEUE_DROPS="$(awk '/^===NETLINK===/{exit} /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {sum += $6 + $7} END {print sum+0}' "$proc")"
+    # The helper socket is not authoritative for the Go S5 permit/actor
+    # lifecycle; remain conservative rather than inferring permit OPEN.
+    RUNTIME_PERMIT_OPEN=0
+    printf 'RUNTIME tag=%s daemon_active=%s pid=%s fd_count=%s socket_ready=%s reinject_sockets=%s actor_active=%s queue_rows=%s queue_pending=%s queue_drops=%s permit_open=%s consumed=%s adjudicated=%s reinjected=%s delivered=%s reason=%s\n' \
+        "$tag" "$RUNTIME_DAEMON_ACTIVE" "$RUNTIME_PID" "$RUNTIME_FD_COUNT" \
+        "$RUNTIME_SOCKET_READY" "$RUNTIME_REINJECT_SOCKETS" "$RUNTIME_ACTOR_ACTIVE" \
+        "$RUNTIME_QUEUE_ROWS" "$RUNTIME_QUEUE_PENDING" "$RUNTIME_QUEUE_DROPS" \
+        "$RUNTIME_PERMIT_OPEN" "$RUNTIME_CONSUMED" "$RUNTIME_ADJUDICATED" \
+        "$RUNTIME_REINJECTED" "$RUNTIME_DELIVERED" "$RUNTIME_REASON"
+}
+
+observe_queue_economics() {
+    # observe_queue_economics <ruleset.json> <runtime.txt> <nfqueue.txt>
+    local ruleset="$1" runtime="$2" nfqueue="$3"
+    local queue_instances fd_count queue_pending queue_drops
+    queue_instances="$(fix9506_divert_queue_ids "$ruleset" 2>/dev/null | wc -l)"
+    fd_count="$(sed -n 's/^xpfd_fd_count=//p' "$runtime" | head -n 1)"
+    queue_pending="$(awk '/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {sum += $3} END {print sum+0}' "$nfqueue" 2>/dev/null)"
+    queue_drops="$(awk '/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+/ {sum += $6 + $7} END {print sum+0}' "$nfqueue" 2>/dev/null)"
+    [[ "$queue_instances" =~ ^[0-9]+$ ]] || queue_instances=0
+    [[ "$fd_count" =~ ^[0-9]+$ ]] || fd_count=0
+    [[ "$queue_pending" =~ ^[0-9]+$ ]] || queue_pending=0
+    [[ "$queue_drops" =~ ^[0-9]+$ ]] || queue_drops=0
+    # Queue buffer reservations and rotation overlap are not exposed by the
+    # procfs rows; unknown is safer than pricing them from source constants.
+    printf 'queue_instances=%s recv_buffers_mib=unknown socket_buffers_mib=unknown fd_count=%s queue_pending=%s queue_drops=%s rotation_overlap=unknown teardown=unknown\n' \
+        "$queue_instances" "$fd_count" "$queue_pending" "$queue_drops"
+}
+
+observe_chain_overhead() {
+    # observe_chain_overhead <node> <directory> <tag>
+    # Chain/listener census is read-only. Workload deltas are supplied by the
+    # caller's same-day baseline phases; this function never invents samples.
+    local node="$1"
+    local dir="$2"
+    local tag="$3"
+    local out
+    out="$dir/${tag}-overhead.txt"
+    remote "$node" 'printf "listener_unix="; ss -lxH 2>/dev/null | wc -l
+printf "listener_reinject="; ss -lxH 2>/dev/null | grep -cE "reinject-(submit|complete)" || true
+printf "listener_userspace="; ss -lxH 2>/dev/null | grep -c "userspace-dp" || true
+printf "pid_xpfd="; pidof xpfd 2>/dev/null | awk "{print NF+0}"
+printf "nfqueue_rows="; awk "NR>0 && NF>=3 && \$1 ~ /^[0-9]+$/ {n++} END {print n+0}" /proc/net/netfilter/nfnetlink_queue 2>/dev/null' >"$out" 2>&1 || :
+    CHAIN_OVERHEAD_FILE="$out"
+    CHAIN_OVERHEAD_LISTENERS="$(sed -n 's/^listener_unix=//p' "$out" | head -n 1)"
+    CHAIN_OVERHEAD_REINJECT="$(sed -n 's/^listener_reinject=//p' "$out" | head -n 1)"
+    CHAIN_OVERHEAD_XPFD="$(sed -n 's/^pid_xpfd=//p' "$out" | head -n 1)"
+    CHAIN_OVERHEAD_NFQUEUE="$(sed -n 's/^nfqueue_rows=//p' "$out" | head -n 1)"
+    [[ "$CHAIN_OVERHEAD_LISTENERS" =~ ^[0-9]+$ ]] || CHAIN_OVERHEAD_LISTENERS=0
+    [[ "$CHAIN_OVERHEAD_REINJECT" =~ ^[0-9]+$ ]] || CHAIN_OVERHEAD_REINJECT=0
+    [[ "$CHAIN_OVERHEAD_XPFD" =~ ^[0-9]+$ ]] || CHAIN_OVERHEAD_XPFD=0
+    [[ "$CHAIN_OVERHEAD_NFQUEUE" =~ ^[0-9]+$ ]] || CHAIN_OVERHEAD_NFQUEUE=0
+    printf 'OVERHEAD tag=%s listeners=%s reinject_listeners=%s xpfd=%s nfqueue_rows=%s baseline_samples=0 idle_samples=0 detached_samples=0\n' \
+        "$tag" "$CHAIN_OVERHEAD_LISTENERS" "$CHAIN_OVERHEAD_REINJECT" \
+        "$CHAIN_OVERHEAD_XPFD" "$CHAIN_OVERHEAD_NFQUEUE"
+}
+
+observe_vrf_scope() {
+    # observe_vrf_scope <node> <directory> <tag>
+    local node="$1"
+    local dir="$2"
+    local tag="$3"
+    local out
+    out="$dir/${tag}-vrf.txt"
+    remote "$node" 'ip -d -j link show type xfrm 2>&1; printf "\n===RULES===\n"; ip -j rule show 2>&1; printf "\n===ROUTES===\n"; ip -j route show table all 2>&1' >"$out" 2>&1 || :
+    VRF_SCOPE_FILE="$out"
+    VRF_TEST_CREATED=0
+    VRF_ATTACHED=0
+    VRF_MASTER_INDEX=0
+    VRF_INPUT_QUEUE_HITS=0
+    VRF_SCOPE_REASON="measurement-incomplete:test-vrf-not-created-by-fixture"
+    printf 'VRF tag=%s test_created=%s attached=%s master_index=%s input_queue_hits=%s reason=%s\n' \
+        "$tag" "$VRF_TEST_CREATED" "$VRF_ATTACHED" "$VRF_MASTER_INDEX" \
+        "$VRF_INPUT_QUEUE_HITS" "$VRF_SCOPE_REASON"
+}
 # The selftest is hermetic: it must not source cluster-env, call incus, or
 # create ledger rows.  It checks the conservative refusal model and cell shape.
 if [[ "$MODE" == selftest ]]; then
@@ -166,8 +511,14 @@ EOF
         "$(ruleset_flags "$parser_dir/malformed.json")"
     expect "ruleset parser accepts empty nftables list as readable" "0 0 0 0 0 1" \
         "$(ruleset_flags "$parser_dir/empty-list.json")"
+    printf '%s\n' '1094 0 0 0 0 0' >"$parser_dir/nfqueue.txt"
+    expect "observer ruleset parser reports structural-only positive" "1 0 0 1 0" \
+        "$(observe_ruleset_shape "$parser_dir/positive.json")"
+    expect "observer provenance parser reports static mapping without packets" \
+        "static=0 queue_rows=1 queue_ids=0 packet_samples=0 mismatch=0" \
+        "$(observe_provenance_metadata "$parser_dir/positive.json" "$parser_dir/nfqueue.txt")"
     rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 18 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 20 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -209,6 +560,7 @@ remote() {
     local node="$1" command="$2"
     sg incus-admin -c "incus exec -n $(printf '%q' "$node") -- bash -lc $(printf '%q' "$command")"
 }
+
 
 fixture_measure_traffic() {
     # fixture_measure_traffic <shape> <count> <dir>: exercise both decrypted
@@ -269,6 +621,12 @@ run_fixture_measure() {
     MEASURE_PACKETS=0
     MEASURE_XFRM_TUNNEL0_PACKETS=0
     MEASURE_LOSS=100
+    MEASURE_RUNTIME_FW0=""
+    MEASURE_RUNTIME_FW1=""
+    MEASURE_PROVENANCE_FW0="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
+    MEASURE_PROVENANCE_FW1="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
+    MEASURE_QUEUE_ECON_FW0="queue_instances=0 recv_buffers_mib=unknown socket_buffers_mib=unknown fd_count=0 queue_pending=0 queue_drops=0 rotation_overlap=unknown teardown=unknown"
+    MEASURE_QUEUE_ECON_FW1="$MEASURE_QUEUE_ECON_FW0"
     if [[ "$FIXTURE_PHASE_BLOCKED" == 1 || "$ACTIVE_FIXTURE_SETUP" == 1 ]]; then
         MEASURE_REASON="fixture-lifecycle-blocked:previous fixture was not restored"
         return 1
@@ -290,6 +648,16 @@ run_fixture_measure() {
     MEASURE_READY=1
     fix9506_probe_node "$FIX9506_NODE0" "$dir" measure-fw0
     fix9506_probe_node "$FIX9506_NODE1" "$dir" measure-fw1
+    observe_runtime "$FIX9506_NODE0" "$dir" measure-fw0
+    MEASURE_RUNTIME_FW0="$RUNTIME_PROC_FILE"
+    observe_runtime "$FIX9506_NODE1" "$dir" measure-fw1
+    MEASURE_RUNTIME_FW1="$RUNTIME_PROC_FILE"
+    observe_chain_overhead "$FIX9506_NODE0" "$dir" measure-fw0
+    observe_chain_overhead "$FIX9506_NODE1" "$dir" measure-fw1
+    MEASURE_PROVENANCE_FW0="$(observe_provenance_metadata "$dir/measure-fw0-ruleset.json" "$dir/measure-fw0-nfqueue.txt")"
+    MEASURE_PROVENANCE_FW1="$(observe_provenance_metadata "$dir/measure-fw1-ruleset.json" "$dir/measure-fw1-nfqueue.txt")"
+    MEASURE_QUEUE_ECON_FW0="$(observe_queue_economics "$dir/measure-fw0-ruleset.json" "$MEASURE_RUNTIME_FW0" "$dir/measure-fw0-nfqueue.txt")"
+    MEASURE_QUEUE_ECON_FW1="$(observe_queue_economics "$dir/measure-fw1-ruleset.json" "$MEASURE_RUNTIME_FW1" "$dir/measure-fw1-nfqueue.txt")"
     MEASURE_QUEUE_CLASSES="$(fix9506_divert_queues "$dir/measure-fw0-ruleset.json")"
     MEASURE_QUEUE_CLASSES_NODE1="$(fix9506_divert_queues "$dir/measure-fw1-ruleset.json")"
     read -r _ _ _ _ MEASURE_QUEUE_TOTAL <<<"$MEASURE_QUEUE_CLASSES"
@@ -299,6 +667,10 @@ run_fixture_measure() {
         MEASURE_QUEUE_BOTH=1
     fi
     fixture_measure_traffic "$shape" "$count" "$dir"
+    observe_runtime "$FIX9506_NODE0" "$dir" measure-fw0-post
+    observe_runtime "$FIX9506_NODE1" "$dir" measure-fw1-post
+    observe_chain_overhead "$FIX9506_NODE0" "$dir" measure-fw0-post
+    observe_chain_overhead "$FIX9506_NODE1" "$dir" measure-fw1-post
     if fix9506_teardown "$count" "$dir"; then
         MEASURE_TEARDOWN=1
         ACTIVE_FIXTURE_SETUP=0
@@ -356,6 +728,10 @@ POST1="$ARCHIVE_DIR/fw1-post.set"
 snapshot_node "$NODE0" "$BASE0" || true
 snapshot_node "$NODE1" "$BASE1" || true
 normalize_config "$BASE0" >"$BASE0.norm" 2>/dev/null || :
+observe_chain_overhead "$NODE0" "$ARCHIVE_DIR" t12-fence-alone-fw0
+T12_OVERHEAD_FENCE_ALONE_FW0="$CHAIN_OVERHEAD_FILE"
+observe_chain_overhead "$NODE1" "$ARCHIVE_DIR" t12-fence-alone-fw1
+T12_OVERHEAD_FENCE_ALONE_FW1="$CHAIN_OVERHEAD_FILE"
 normalize_config "$BASE1" >"$BASE1.norm" 2>/dev/null || :
 
 # T12 uses a small real v4 fixture for the exact shape and no-bypass cells.
@@ -451,6 +827,68 @@ if grep -qE 'xpf-usp1' "$ARCHIVE_DIR/fw0-q0-mark.txt" 2>/dev/null &&
     grep -qE '58465001|queue_mapping' "$ARCHIVE_DIR/fw1-q0-mark.txt" 2>/dev/null; then
     has_q0=1
 fi
+read -r T12_RULESET_READ T12_FENCE_SHAPE T12_DIVERT_SHAPE T12_ORDER_SHAPE T12_STN_RULES < <(
+    observe_ruleset_shape "$ARCHIVE_DIR/fw0-ruleset.json"
+)
+read -r T12_RULESET_READ1 T12_FENCE_SHAPE1 T12_DIVERT_SHAPE1 T12_ORDER_SHAPE1 T12_STN_RULES1 < <(
+    observe_ruleset_shape "$ARCHIVE_DIR/fw1-ruleset.json"
+)
+T12_STATIC_FENCE=0
+T12_STATIC_DIVERT=0
+T12_STATIC_ORDER=0
+if [[ "$T12_RULESET_READ" == 1 && "$T12_RULESET_READ1" == 1 &&
+      "$T12_FENCE_SHAPE" == 1 && "$T12_FENCE_SHAPE1" == 1 ]]; then
+    T12_STATIC_FENCE=1
+fi
+if [[ "$T12_RULESET_READ" == 1 && "$T12_RULESET_READ1" == 1 &&
+      "$T12_DIVERT_SHAPE" == 1 && "$T12_DIVERT_SHAPE1" == 1 ]]; then
+    T12_STATIC_DIVERT=1
+fi
+if [[ "$T12_RULESET_READ" == 1 && "$T12_RULESET_READ1" == 1 &&
+      "$T12_ORDER_SHAPE" == 1 && "$T12_ORDER_SHAPE1" == 1 ]]; then
+    T12_STATIC_ORDER=1
+fi
+observe_runtime "$NODE0" "$ARCHIVE_DIR" t12-fw0-pre
+T12_RUNTIME_FW0_PRE="$RUNTIME_PROC_FILE"
+observe_runtime "$NODE1" "$ARCHIVE_DIR" t12-fw1-pre
+T12_RUNTIME_FW1_PRE="$RUNTIME_PROC_FILE"
+observe_chain_overhead "$NODE0" "$ARCHIVE_DIR" t12-fw0-pre
+T12_OVERHEAD_FW0_PRE="$CHAIN_OVERHEAD_FILE"
+observe_chain_overhead "$NODE1" "$ARCHIVE_DIR" t12-fw1-pre
+T12_OVERHEAD_FW1_PRE="$CHAIN_OVERHEAD_FILE"
+T12_FENCE_ALONE_LISTENERS_FW0="$(sed -n 's/^listener_unix=//p' "$T12_OVERHEAD_FENCE_ALONE_FW0" | head -n 1)"
+T12_FENCE_ALONE_LISTENERS_FW1="$(sed -n 's/^listener_unix=//p' "$T12_OVERHEAD_FENCE_ALONE_FW1" | head -n 1)"
+T12_DIVERT_LISTENERS_FW0="$(sed -n 's/^listener_unix=//p' "$T12_OVERHEAD_FW0_PRE" | head -n 1)"
+T12_DIVERT_LISTENERS_FW1="$(sed -n 's/^listener_unix=//p' "$T12_OVERHEAD_FW1_PRE" | head -n 1)"
+[[ "$T12_FENCE_ALONE_LISTENERS_FW0" =~ ^[0-9]+$ ]] || T12_FENCE_ALONE_LISTENERS_FW0=0
+[[ "$T12_FENCE_ALONE_LISTENERS_FW1" =~ ^[0-9]+$ ]] || T12_FENCE_ALONE_LISTENERS_FW1=0
+[[ "$T12_DIVERT_LISTENERS_FW0" =~ ^[0-9]+$ ]] || T12_DIVERT_LISTENERS_FW0=0
+[[ "$T12_DIVERT_LISTENERS_FW1" =~ ^[0-9]+$ ]] || T12_DIVERT_LISTENERS_FW1=0
+observe_vrf_scope "$NODE0" "$ARCHIVE_DIR" t12-fw0
+observe_vrf_scope "$NODE1" "$ARCHIVE_DIR" t12-fw1
+T12_PROVENANCE_FW0="$(observe_provenance_metadata "$ARCHIVE_DIR/fw0-ruleset.json" "$T12_FIXTURE_DIR/fw0-nfqueue.txt")"
+T12_PROVENANCE_FW1="$(observe_provenance_metadata "$ARCHIVE_DIR/fw1-ruleset.json" "$T12_FIXTURE_DIR/fw1-nfqueue.txt")"
+T12_QUEUE_ECON_FW0="$(observe_queue_economics "$ARCHIVE_DIR/fw0-ruleset.json" "$T12_RUNTIME_FW0_PRE" "$T12_FIXTURE_DIR/fw0-nfqueue.txt")"
+T12_QUEUE_ECON_FW1="$(observe_queue_economics "$ARCHIVE_DIR/fw1-ruleset.json" "$T12_RUNTIME_FW1_PRE" "$T12_FIXTURE_DIR/fw1-nfqueue.txt")"
+printf 'T12_G2_OBSERVERS fence_structural=%s divert_structural=%s order_structural=%s fence_exact=0 divert_exact=0 order_exact=0 fw0_provenance="%s" fw1_provenance="%s" fw0_queue_economics="%s" fw1_queue_economics="%s"\n' \
+    "$T12_STATIC_FENCE" "$T12_STATIC_DIVERT" "$T12_STATIC_ORDER" \
+    "$T12_PROVENANCE_FW0" "$T12_PROVENANCE_FW1" "$T12_QUEUE_ECON_FW0" "$T12_QUEUE_ECON_FW1"
+T12_PROV_STATIC_FW0="$(observer_field "$T12_PROVENANCE_FW0" static)"
+T12_PROV_STATIC_FW1="$(observer_field "$T12_PROVENANCE_FW1" static)"
+T12_PROV_QUEUE_ROWS_FW0="$(observer_field "$T12_PROVENANCE_FW0" queue_rows)"
+T12_PROV_QUEUE_ROWS_FW1="$(observer_field "$T12_PROVENANCE_FW1" queue_rows)"
+T12_PROV_PACKET_SAMPLES_FW0="$(observer_field "$T12_PROVENANCE_FW0" packet_samples)"
+T12_PROV_PACKET_SAMPLES_FW1="$(observer_field "$T12_PROVENANCE_FW1" packet_samples)"
+T12_PROV_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" mismatch)"
+T12_PROV_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" mismatch)"
+T12_QUEUE_INSTANCES_FW0="$(observer_field "$T12_QUEUE_ECON_FW0" queue_instances)"
+T12_QUEUE_INSTANCES_FW1="$(observer_field "$T12_QUEUE_ECON_FW1" queue_instances)"
+T12_QUEUE_FDS_FW0="$(observer_field "$T12_QUEUE_ECON_FW0" fd_count)"
+T12_QUEUE_FDS_FW1="$(observer_field "$T12_QUEUE_ECON_FW1" fd_count)"
+T12_QUEUE_PENDING_FW0="$(observer_field "$T12_QUEUE_ECON_FW0" queue_pending)"
+T12_QUEUE_PENDING_FW1="$(observer_field "$T12_QUEUE_ECON_FW1" queue_pending)"
+T12_QUEUE_DROPS_FW0="$(observer_field "$T12_QUEUE_ECON_FW0" queue_drops)"
+T12_QUEUE_DROPS_FW1="$(observer_field "$T12_QUEUE_ECON_FW1" queue_drops)"
 fixture=0
 if [[ "$T12_FIXTURE_SETUP" == 1 && "$has_st" == 1 && "$has_sa" == 1 && "$has_divert" == 1 ]]; then fixture=1; fi
 printf 'T12_G2_PRECONDITIONS stn=%s stn_fw0=%s stn_fw1=%s xfrm_sa=%s xfrm_sa_fw0=%s xfrm_sa_fw1=%s divert_table=%s fence_table=%s q0_mark_surface=%s ruleset_fw0_readable=%s ruleset_fw1_readable=%s complete_fixture=%s\n' \
@@ -469,6 +907,15 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     T12_TRAFFIC_LOSS="$MEASURE_LOSS"
     T12_TRAFFIC_LAN_OK="$MEASURE_LAN_OK"
     T12_TRAFFIC_PEER_OK="$MEASURE_PEER_OK"
+fi
+if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
+    observe_runtime "$NODE0" "$ARCHIVE_DIR" t12-fw0-post
+    T12_RUNTIME_FW0_POST="$RUNTIME_PROC_FILE"
+    observe_runtime "$NODE1" "$ARCHIVE_DIR" t12-fw1-post
+    T12_RUNTIME_FW1_POST="$RUNTIME_PROC_FILE"
+    observe_chain_overhead "$NODE0" "$ARCHIVE_DIR" t12-fw0-post
+    observe_chain_overhead "$NODE1" "$ARCHIVE_DIR" t12-fw1-post
+    printf 'T12_G2_CONSUMER actor_active=0 permit_open=0 consumed=0 adjudicated=0 reinjected=0 delivered=0 reason=product-observer-unavailable:internal-S5-state\n'
 fi
 
 # Cell result helper.  Every cell names its plan section/predicate and emits a
@@ -538,23 +985,23 @@ LIVE_REASON="${PREASON:-harness-void}"
 # r6 §5.2 cells.
 if [[ "$has_fence" == 1 ]]; then
     emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' \
-        'both nodes readable; base chain shape observed but dynamic armed pinholes were not parsed' VOID \
+        "both nodes readable; structural fence observer=$T12_STATIC_FENCE; dynamic armed pinholes and prohibited-name absence were not parsed" VOID \
         "measurement-incomplete:exact-armed-pinhole-set" \
-        "cell_failed=1 fence_chain_exact=1 fence_both_nodes=1 pinholes_validated=0"
+        "cell_failed=1 fence_chain_exact=0 fence_structural=$T12_STATIC_FENCE fence_both_nodes=1 pinholes_validated=0"
 else
     emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' \
         'xpf_transit_barrier absent from observed ruleset or observer unavailable' VOID "$LIVE_REASON" \
-        "cell_failed=1 fence_chain_exact=0 fence_both_nodes=0 pinholes_validated=0"
+        "cell_failed=1 fence_chain_exact=0 fence_structural=$T12_STATIC_FENCE fence_both_nodes=0 pinholes_validated=0"
 fi
 if [[ "$has_divert" == 1 ]]; then
     emit_cell t12_9506_divert_order 'r6 §5.2.2-§5.2.3' 'divert chains at P_divert before filter fence; four provenance classes' \
-        "queue classes counted ($F0_IF/$F0_II/$F0_BF/$F0_BI) but per-rule provenance and same-priority-chain absence were not parsed" VOID \
+        "queue classes counted ($F0_IF/$F0_II/$F0_BF/$F0_BI); structural observer divert=$T12_STATIC_DIVERT order=$T12_STATIC_ORDER, but exact per-rule provenance/PF binds/same-priority-chain absence were not parsed" VOID \
         "measurement-incomplete:exact-provenance-rule-set" \
-        "cell_failed=1 divert_table=1 provenance_classes=0 priority_divert=-175 priority_fence=0"
+        "cell_failed=1 divert_table=1 divert_structural=$T12_STATIC_DIVERT order_structural=$T12_STATIC_ORDER provenance_classes=0 priority_divert=-175 priority_fence=0"
 else
     emit_cell t12_9506_divert_order 'r6 §5.2.2-§5.2.3' 'divert chains at P_divert before filter fence; four provenance classes' \
         'xpf_ipsec_divert absent from observed ruleset or observer unavailable' VOID "$LIVE_REASON" \
-        "cell_failed=1 divert_table=0 provenance_classes=0 priority_divert=0 priority_fence=0"
+        "cell_failed=1 divert_table=0 divert_structural=$T12_STATIC_DIVERT order_structural=$T12_STATIC_ORDER provenance_classes=0 priority_divert=0 priority_fence=0"
 fi
 if [[ "$has_q0" == 1 && "$T12_TRAFFIC_PACKETS" -gt 0 ]]; then
     emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' \
@@ -566,12 +1013,18 @@ else
         "${PREASON:-q0 mark surface or bidirectional traffic absent}" VOID "$LIVE_REASON" \
         "cell_failed=1 q0_mark_surface=$has_q0 packet_rows=$T12_TRAFFIC_PACKETS xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS"
 fi
-emit_cell t12_9506_vrf_refusal 'r6 §5.2.5a' 'VRF/l3mdev enslaving revokes permit and publishes ACKed host fence' "${PREASON:-requires test VRF + owned stN fixture}" VOID "$LIVE_REASON" \
-    "cell_failed=1 vrf_attach=0 fence_ack=0 conntrack_ack=0"
-emit_cell t12_9506_coexistence_order 'r6 §5.2.3' 'both-family divert priority precedes filter; no same-priority base chain; mixed OPEN generation forbidden' "$LIVE_REASON" VOID "$LIVE_REASON" \
-    "cell_failed=1 inet_order=0 bridge_order=0 mixed_open=0 rotation_budget_ms=0"
-emit_cell t12_9506_provenance_metadata 'r6 §5.2.3-§5.2.4' 'queue-id, nfgen_family, hook, ifindex, owner and stN agree for every packet' "$LIVE_REASON" VOID "$LIVE_REASON" \
-    "cell_failed=1 packets=0 provenance_mismatch=0"
+emit_cell t12_9506_vrf_refusal 'r6 §5.2.5a' 'VRF/l3mdev enslaving revokes permit and publishes ACKed host fence' \
+    "VRF scope census captured, but fixture did not create/enslave a test VRF; permit/fence ACK state is not exported" VOID \
+    "measurement-incomplete:test-vrf-not-created-by-fixture" \
+    "cell_failed=1 vrf_test_created=0 vrf_attached=0 fence_ack=0 conntrack_ack=0 input_queue_hits=0"
+emit_cell t12_9506_coexistence_order 'r6 §5.2.3' 'both-family divert priority precedes filter; no same-priority base chain; mixed OPEN generation forbidden' \
+    "structural divert order=$T12_STATIC_ORDER; exact same-priority-chain absence and mixed OPEN generation were not observed" VOID \
+    "measurement-incomplete:exact-order-and-permit-observer-unavailable" \
+    "cell_failed=1 inet_order_structural=$T12_STATIC_ORDER bridge_order_structural=$T12_STATIC_ORDER mixed_open=0 rotation_budget_ms=0"
+emit_cell t12_9506_provenance_metadata 'r6 §5.2.3-§5.2.4' 'queue-id, nfgen_family, hook, ifindex, owner and stN agree for every packet' \
+    "static queue map fw0=$T12_PROVENANCE_FW0 fw1=$T12_PROVENANCE_FW1; packet CaptureOrigin and actor counters unavailable" VOID \
+    "product-observer-unavailable:CaptureOrigin-permit-adjudication-reinject-counters" \
+    "cell_failed=1 packets=0 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_mismatch_fw0=$T12_PROV_MISMATCH_FW0 provenance_mismatch_fw1=$T12_PROV_MISMATCH_FW1 queue_rows_fw0=$T12_PROV_QUEUE_ROWS_FW0 queue_rows_fw1=$T12_PROV_QUEUE_ROWS_FW1"
 emit_cell t12_9506_ifindex_recreate 'r6 §5.2.3-§5.2.4' 'device delete/recreate/name reuse with changed ifindex drops and counts' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 delete_recreate=0 changed_ifindex=0 mismatch_drop=0"
 
@@ -604,17 +1057,30 @@ fi
 # r6 §5.1 G2 measurements. The per-shape rows exercise live routed-inet
 # traffic, queue cardinality, teardown, and packet loss. Provenance and
 # overhead cells remain VOID unless their dedicated observer is present.
+QUEUE32_READY=0
+QUEUE32_ECON_FW0="queue_instances=0 recv_buffers_mib=unknown socket_buffers_mib=unknown fd_count=0 queue_pending=0 queue_drops=0 rotation_overlap=unknown teardown=unknown"
+QUEUE32_ECON_FW1="$QUEUE32_ECON_FW0"
+QUEUE32_PROVENANCE_FW0="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
+QUEUE32_PROVENANCE_FW1="$QUEUE32_PROVENANCE_FW0"
 g2_emit_measured() {
     local shape="$1" tunnels="$2" gate="g2_9506_${shape}_${tunnels}"
-    local observed
+    local observed prov0 prov1 mismatch0 mismatch1 qinst0 qinst1 qfd0 qfd1
     if run_fixture_measure "$shape" "$tunnels" g2; then
         local qif qii qbf qbi qt
         read -r qif qii qbf qbi qt <<<"$MEASURE_QUEUE_CLASSES"
-        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
+        prov0="$(observer_field "$MEASURE_PROVENANCE_FW0" packet_samples)"
+        prov1="$(observer_field "$MEASURE_PROVENANCE_FW1" packet_samples)"
+        mismatch0="$(observer_field "$MEASURE_PROVENANCE_FW0" mismatch)"
+        mismatch1="$(observer_field "$MEASURE_PROVENANCE_FW1" mismatch)"
+        qinst0="$(observer_field "$MEASURE_QUEUE_ECON_FW0" queue_instances)"
+        qinst1="$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances)"
+        qfd0="$(observer_field "$MEASURE_QUEUE_ECON_FW0" fd_count)"
+        qfd1="$(observer_field "$MEASURE_QUEUE_ECON_FW1" fd_count)"
+        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 queue_econ_fw0=$MEASURE_QUEUE_ECON_FW0 queue_econ_fw1=$MEASURE_QUEUE_ECON_FW1"
         emit_cell "$gate" 'r6 §5.1' \
             "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
-            "$observed" VOID "measurement-incomplete:provenance-and-overhead-observer-unavailable" \
-            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 overhead_ns=0 queue_instances=$MEASURE_QUEUE_TOTAL queue_instances_fw1=$MEASURE_QUEUE_TOTAL_NODE1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+            "$observed" VOID "product-consumer-path-unavailable:delivered=0; CaptureOrigin/permit/adjudication/reinject counters unavailable" \
+            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 provenance_mismatch_fw0=$mismatch0 provenance_mismatch_fw1=$mismatch1 overhead_ns=0 queue_instances=$qinst0 queue_instances_fw1=$qinst1 fd_count=$qfd0 fd_count_fw1=$qfd1 recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
     else
         observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
         emit_cell "$gate" 'r6 §5.1' \
@@ -622,43 +1088,50 @@ g2_emit_measured() {
             "$observed" VOID "${MEASURE_REASON:-fixture-measurement-failed}" \
             "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 overhead_ns=0 queue_instances=$MEASURE_QUEUE_TOTAL queue_instances_fw1=$MEASURE_QUEUE_TOTAL_NODE1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
     fi
+    if [[ "$shape" == v4_native && "$tunnels" == 32 ]]; then
+        QUEUE32_READY="$MEASURE_READY"
+        QUEUE32_ECON_FW0="$MEASURE_QUEUE_ECON_FW0"
+        QUEUE32_ECON_FW1="$MEASURE_QUEUE_ECON_FW1"
+        QUEUE32_PROVENANCE_FW0="$MEASURE_PROVENANCE_FW0"
+        QUEUE32_PROVENANCE_FW1="$MEASURE_PROVENANCE_FW1"
+    fi
 }
 emit_cell g2_9506_fence_baseline 'r6 §5.1' 'fence-alone baseline with concurrent routed+bridged non-tunnel traffic' \
-    'same-day baseline workload/latency observer not implemented' VOID \
-    "measurement-incomplete:fence-baseline-observer-unavailable" \
-    "cell_failed=1 baseline_samples=0 offered=0 observed=0"
+    "fence-alone listener census fw0=$T12_FENCE_ALONE_LISTENERS_FW0 fw1=$T12_FENCE_ALONE_LISTENERS_FW1; workload/latency samples were not executed" VOID \
+    "measurement-incomplete:fence-baseline-workload-observer-unavailable" \
+    "cell_failed=1 baseline_samples=0 offered=0 observed=0 fence_alone_listeners_fw0=$T12_FENCE_ALONE_LISTENERS_FW0 fence_alone_listeners_fw1=$T12_FENCE_ALONE_LISTENERS_FW1"
 emit_cell g2_9506_divert_detached 'r6 §5.1' 'fence+divert detached-listener overhead delta' \
-    'detached-listener workload/latency observer not implemented' VOID \
-    "measurement-incomplete:detached-listener-observer-unavailable" \
-    "cell_failed=1 baseline_samples=0 detached_samples=0 overhead_ns=0"
+    "fence+divert listener census fw0=$T12_DIVERT_LISTENERS_FW0 fw1=$T12_DIVERT_LISTENERS_FW1; detached-listener workload/latency samples were not executed" VOID \
+    "measurement-incomplete:detached-listener-workload-observer-unavailable" \
+    "cell_failed=1 baseline_samples=0 detached_samples=0 overhead_ns=0 divert_listeners_fw0=$T12_DIVERT_LISTENERS_FW0 divert_listeners_fw1=$T12_DIVERT_LISTENERS_FW1"
 emit_cell g2_9506_divert_idle 'r6 §5.1' 'fence+divert attached-idle listener overhead delta' \
-    'attached-idle listener workload/latency observer not implemented' VOID \
-    "measurement-incomplete:idle-listener-observer-unavailable" \
-    "cell_failed=1 detached_samples=0 idle_samples=0 overhead_ns=0"
+    "fence+divert attached-idle listener census fw0=$T12_DIVERT_LISTENERS_FW0 fw1=$T12_DIVERT_LISTENERS_FW1; idle workload/latency samples were not executed" VOID \
+    "measurement-incomplete:idle-listener-workload-observer-unavailable" \
+    "cell_failed=1 detached_samples=0 idle_samples=0 overhead_ns=0 divert_listeners_fw0=$T12_DIVERT_LISTENERS_FW0 divert_listeners_fw1=$T12_DIVERT_LISTENERS_FW1"
 if run_fixture_measure v4_native 8 g2-capture; then
     emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
-        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN" VOID \
-        "measurement-incomplete:provenance-observer-unavailable" \
-        "cell_failed=1 tunnels=8 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0"
+        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_fw0=$MEASURE_PROVENANCE_FW0 provenance_fw1=$MEASURE_PROVENANCE_FW1 queue_econ_fw0=$MEASURE_QUEUE_ECON_FW0 queue_econ_fw1=$MEASURE_QUEUE_ECON_FW1" VOID \
+        "product-consumer-path-unavailable:delivered=0; CaptureOrigin/permit/adjudication/reinject counters unavailable" \
+        "cell_failed=1 tunnels=8 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" packet_samples) provenance_samples_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" packet_samples) provenance_mismatch_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" mismatch) provenance_mismatch_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" mismatch) queue_instances=$(observer_field "$MEASURE_QUEUE_ECON_FW0" queue_instances) queue_instances_fw1=$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances) loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
 else
     emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
         "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN" VOID \
         "${MEASURE_REASON:-fixture-measurement-failed}" \
-        "cell_failed=1 tunnels=8 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS packets=$MEASURE_PACKETS provenance_mismatch=0"
+        "cell_failed=1 tunnels=8 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
 fi
 emit_cell g2_9506_vrf_overhead 'r6 §5.1' 'mandatory live VRF refusal overhead: pre-close status quo, ACKed host fence, post-close DROP' \
-    'live VRF/l3mdev refusal transition observer not implemented' VOID \
-    "measurement-incomplete:vrf-refusal-observer-unavailable" \
-    "cell_failed=1 preclose_samples=0 fence_ack_samples=0 postclose_samples=0 input_queue_hits=0"
-emit_cell g2_9506_queue_economics 'r6 §5.1' '32-tunnel admission prices 128 queue/socket instances, buffers, FDs, rotation and teardown' \
-    'queue count is collected per fixture shape; FD/buffer/rotation observer not implemented' VOID \
-    "measurement-incomplete:queue-economics-observer-unavailable" \
-    "cell_failed=1 tunnels=32 queue_instances=0 recv_buffers_mib=0 fd_peak=0 rotation_overlap=0"
+    "VRF scope census test_created=0 attached=0; transition workload/latency samples were not executed" VOID \
+    "measurement-incomplete:test-vrf-not-created-by-fixture" \
+    "cell_failed=1 preclose_samples=0 fence_ack_samples=0 postclose_samples=0 input_queue_hits=0 vrf_test_created=0 vrf_attached=0"
 for shape in v4_native v4_nat_t v6_native v6_nat_t; do
     for tunnels in 8 16 32; do
         g2_emit_measured "$shape" "$tunnels"
     done
 done
+emit_cell g2_9506_queue_economics 'r6 §5.1' '32-tunnel admission prices 128 queue/socket instances, buffers, FDs, rotation and teardown' \
+    "retained v4_native 32-tunnel observer ready=$QUEUE32_READY fw0=$QUEUE32_ECON_FW0 fw1=$QUEUE32_ECON_FW1; buffer reservations/rotation/teardown ownership are not exposed" VOID \
+    "measurement-incomplete:queue-buffer-and-rotation-observer-unavailable" \
+    "cell_failed=1 tunnels=32 observer_ready=$QUEUE32_READY queue_instances=$(observer_field "$QUEUE32_ECON_FW0" queue_instances) queue_instances_fw1=$(observer_field "$QUEUE32_ECON_FW1" queue_instances) fd_count=$(observer_field "$QUEUE32_ECON_FW0" fd_count) fd_count_fw1=$(observer_field "$QUEUE32_ECON_FW1" fd_count) queue_pending=$(observer_field "$QUEUE32_ECON_FW0" queue_pending) queue_pending_fw1=$(observer_field "$QUEUE32_ECON_FW1" queue_pending) queue_drops=$(observer_field "$QUEUE32_ECON_FW0" queue_drops) queue_drops_fw1=$(observer_field "$QUEUE32_ECON_FW1" queue_drops) recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 teardown_known=0"
 
 # Full restore/residue proof.  No temporary fixture is created by this
 # conservative first live cell; deployment is intentionally outside config
