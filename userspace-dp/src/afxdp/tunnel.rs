@@ -61,7 +61,7 @@ impl TunnelWake {
 
     /// Clear the readable state after a poll wake. EFD_NONBLOCK, so an
     /// empty counter returns EAGAIN — harmless.
-    fn drain(&self) {
+    pub(crate) fn drain(&self) {
         let mut val: u64 = 0;
         // SAFETY: reading 8 bytes into a u64 from the owned eventfd.
         unsafe {
@@ -127,7 +127,7 @@ fn local_tunnel_io_error_is_fatal(err: &io::Error) -> bool {
 /// the fresh thread). On READS, `EINVAL` remains fatal (fd/iface-level
 /// condition). `EBADF`/`EBADFD`/`ENODEV`/`ENXIO` stay fatal in both
 /// directions — the fd is genuinely dead (anchor deleted/recreated).
-fn local_tunnel_write_error_is_fatal(err: &io::Error) -> bool {
+pub(crate) fn local_tunnel_write_error_is_fatal(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),
         Some(code)

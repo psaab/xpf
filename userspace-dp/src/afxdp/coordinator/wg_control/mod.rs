@@ -18,10 +18,11 @@
 //! path ESP rides), and a dedicated shim early-return steers WG-port
 //! local-destination UDP to the kernel deterministically, so this kernel
 //! `UdpSocket` receives ALL inbound WG datagrams — handshake AND
-//! transport. There is no AF_XDP hot-path decap stage and no
-//! worker→control packet channel in S2a; the only worker→control
-//! coupling is the relaxed-atomic NoSession handshake-request edge that
-//! `WgEngine::request_handshake` records and this thread consumes.
+//! transport. The control thread still handles handshake/cookie records and
+//! unsteered/degraded transport. Worker-decapped packets addressed to the WG
+//! interface use the coordinator-published local-delivery channel and this
+//! thread writes them to the persistent TUN; handshake requests remain the
+//! relaxed-atomic worker→control edge.
 //!
 //! That was S2a. Since #8274 the shim claims TRANSPORT-DATA records for the
 //! steered listen port and the worker decapsulates them in the pipeline, so on
@@ -95,7 +96,7 @@ use attempt::{
 use dispatch::{EncapOutcome, InboundOutcome, dispatch_inbound, encap_and_send};
 use sock::{
     PollWait, WgRecv, bind_wg_socket, bind_wg_socket_with_device, canonicalize_endpoint,
-    poll_timeout_ms, set_recv_tos_options, wg_poll_wait, wg_recvmsg,
+    poll_timeout_ms, set_recv_tos_options, wg_poll_wait, wg_poll_wait_with_wake, wg_recvmsg,
 };
 pub(super) use sock::wg_outer_bind_device_for_transport_table;
 
@@ -171,6 +172,10 @@ pub(super) fn wg_control_loop(
     shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: SharedSessionOwnerRgIndexes,
+    // Worker LocalDelivery packets for this WG endpoint are written to the
+    // persistent wgN TUN by this control thread.
+    delivery_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    delivery_wake: Arc<TunnelWake>,
 ) {
     // Bind the UDP socket. v6 dual-stack ([::]:port) accepts both v4 and
     // v6 peers where the kernel allows it; fall back to v4 only for a
@@ -284,6 +289,8 @@ pub(super) fn wg_control_loop(
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
+        Some(delivery_rx),
+        Some(delivery_wake),
     );
     // #1866 D3: clean stop-flag exit (teardown) — rare, one line.
     eprintln!("xpf-userspace-dp: WG control thread stopped tun={tunnel_name}");
@@ -341,6 +348,8 @@ fn run_wg_control_loop(
         shared_nat_sessions,
         shared_forward_wire_sessions,
         shared_owner_rg_indexes,
+        None,
+        None,
     );
 }
 
@@ -509,6 +518,8 @@ fn run_wg_control_loop_with_kernel_path(
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    delivery_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    delivery_wake: Option<Arc<TunnelWake>>,
 ) {
     use std::collections::HashMap;
     // #9594: ask the kernel for each datagram's receiving interface. Set HERE,
@@ -534,6 +545,8 @@ fn run_wg_control_loop_with_kernel_path(
 
     let socket_fd = socket.as_raw_fd();
     let tun_fd = tun.as_raw_fd();
+    let delivery_wake_fd = delivery_wake.as_ref().map(|wake| wake.raw_fd());
+    let delivery_rx = delivery_rx;
 
     // #1888 S5 / #1434 per-peer timer state. `next_deadline` starts at 0
     // so the FIRST iteration always runs a timer pass and computes real
@@ -613,6 +626,46 @@ fn run_wg_control_loop_with_kernel_path(
             monotonic_nanos(),
         );
 
+        // Worker-decapped packets addressed to this WG interface arrive through
+        // the shared local-delivery channel. Write them into the persistent
+        // wgN TUN so the kernel receives the packet on the intended interface;
+        // never send them through the TUN-read encap direction. An attachment
+        // fence failure drains and drops rather than replaying stale plaintext.
+        if let Some(wake) = delivery_wake.as_ref() {
+            wake.drain();
+        }
+        if let Some(rx) = delivery_rx.as_ref() {
+            for _ in 0..WG_RX_BURST {
+                match rx.try_recv() {
+                    Ok(packet) => {
+                        did_work = true;
+                        if !tun_origin_attached {
+                            continue;
+                        }
+                        if let Err(err) =
+                            crate::slowpath::write_packet_nonblocking(tun_fd, &packet)
+                        {
+                            if crate::afxdp::tunnel::local_tunnel_write_error_is_fatal(&err) {
+                                record_local_tunnel_exception(
+                                    recent_exceptions,
+                                    tunnel_name,
+                                    format!("wg_local_delivery_fatal:{err}"),
+                                );
+                                return;
+                            }
+                            WgCounters::bump(&engine.counters().tun_write_errors);
+                            record_local_tunnel_exception(
+                                recent_exceptions,
+                                tunnel_name,
+                                format!("wg_local_delivery_write:{err}"),
+                            );
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                    | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
         // --- Inbound: kernel socket → engine → TUN ---
         for _ in 0..WG_RX_BURST {
             // #2317: recvmsg (not recv_from) so the outer IP TOS /
@@ -953,7 +1006,14 @@ fn run_wg_control_loop_with_kernel_path(
         }
 
         if !did_work {
-            match wg_poll_wait(socket_fd, tun_fd, poll_timeout_ms(next_deadline, now)) {
+            let timeout_ms = poll_timeout_ms(next_deadline, now);
+            let wait = match delivery_wake_fd {
+                Some(wake_fd) => {
+                    wg_poll_wait_with_wake(socket_fd, tun_fd, wake_fd, timeout_ms)
+                }
+                None => wg_poll_wait(socket_fd, tun_fd, timeout_ms),
+            };
+            match wait {
                 PollWait::Idle | PollWait::Ready => {}
                 PollWait::Fatal(reason) => {
                     record_local_tunnel_exception(

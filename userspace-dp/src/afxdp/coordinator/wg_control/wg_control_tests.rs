@@ -312,6 +312,151 @@ fn poll_loop_wakes_on_socket_readiness() {
     assert!(seen, "datagram not processed within 300ms of arrival");
 }
 
+/// #10409: a worker-decapped packet addressed to the WG interface must reach
+/// the persistent wgN TUN through the WG control thread's local-delivery
+/// channel. This cell pins queue consumption, wakeup, attachment fencing, and
+/// byte-exact TUN delivery; publication is pinned separately below.
+#[test]
+fn worker_local_delivery_reaches_wg_tun_10409() {
+    let engine = Arc::new(crate::afxdp::wg::WgEngine::new(
+        crate::afxdp::wg::WgEngineConfig {
+            local_private_key: [7u8; 32].into(),
+            listen_port: 0,
+            peers: vec![],
+        },
+    ));
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    socket.set_nonblocking(true).unwrap();
+    let (tun, tun_test_end) = super::tun_standin_pair_9521();
+    let exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let forwarding = Arc::new(build_forwarding_state(
+        &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
+    ));
+    assert!(
+        super::tun_origin::wg_endpoint_attachment_valid(&forwarding, 1, 400, "wg0"),
+        "WG delivery fixture must have the endpoint attachment fence"
+    );
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+        crate::afxdp::types::ValidationState::default(),
+        forwarding,
+    )));
+    let tun_origin = TunOriginLoopTestHandles {
+        reader: channel.reader(),
+        ..TunOriginLoopTestHandles::detached()
+    };
+    let (delivery_tx, delivery_rx) =
+        std::sync::mpsc::sync_channel(LOCAL_TUNNEL_DELIVERY_QUEUE_DEPTH);
+    let delivery_wake = Arc::new(TunnelWake::new().expect("delivery eventfd"));
+    let delivery = LocalTunnelDelivery {
+        tx: delivery_tx,
+        wake: delivery_wake.clone(),
+    };
+    let (stop_t, exc_t, wake_t) = (stop.clone(), exceptions.clone(), delivery_wake.clone());
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop_with_kernel_path(
+            "wg0",
+            &engine,
+            &socket,
+            false,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            crate::afxdp::types::WgKernelTransport::Deliver,
+            &kernel_path::UncoveredKernelPathView,
+            1,
+            400,
+            &tun_origin.reader,
+            &tun_origin.ha,
+            &tun_origin.neighbors,
+            &tun_origin.shared,
+            &tun_origin.nat,
+            &tun_origin.forward_wire,
+            &tun_origin.indexes,
+            Some(delivery_rx),
+            Some(wake_t),
+        );
+    });
+    std::thread::sleep(Duration::from_millis(120));
+    let packet = super::inner_v4_9521();
+    delivery.try_send(packet.clone()).expect("queue WG local delivery");
+    let mut delivered = None;
+    for _ in 0..50 {
+        if let Some(bytes) = super::tun_standin_recv_9521(&tun_test_end) {
+            delivered = Some(bytes);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, Ordering::Relaxed);
+    delivery_wake.signal();
+    handle.join().expect("WG control thread");
+    assert_eq!(
+        delivered,
+        Some(packet),
+        "worker local delivery must be written byte-identically to wgN TUN"
+    );
+}
+
+
+/// #10409: the coordinator publishes live WG delivery senders and removes
+/// them before a tombstone/stopped entry can retain a cloned sender.
+#[test]
+fn wg_local_delivery_publication_tracks_live_entry_10409() {
+    let mut coordinator = Coordinator::new();
+    let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+    let wake = Arc::new(TunnelWake::new().expect("delivery eventfd"));
+    coordinator.wg_control_threads.insert(
+        7,
+        WgControlEntry {
+            handle: Some(LocalTunnelSourceHandle {
+                stop: Arc::new(AtomicBool::new(false)),
+                wake: Some(wake.clone()),
+                join: None,
+            }),
+            delivery_tx: Some(LocalTunnelDelivery {
+                tx,
+                wake: wake.clone(),
+            }),
+            engine_ptr: 0,
+            spawned_ifindex: 400,
+            spawned_tunnel_name: "wg0".into(),
+            spawned_outer_mtu: WG_DEFAULT_OUTER_MTU,
+            spawned_outer_bind_device: None,
+            spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
+            last_spawn_attempt_ns: 0,
+            spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
+            resolver_telemetry: None,
+        },
+    );
+    coordinator.publish_local_tunnel_deliveries_excluding(&[]);
+    assert!(
+        coordinator
+            .local_tunnel_deliveries
+            .load()
+            .contains_key(&400),
+        "live WG control entry must publish its delivery sender"
+    );
+
+    let entry = coordinator
+        .wg_control_threads
+        .get_mut(&7)
+        .expect("WG entry");
+    entry.handle = None;
+    entry.delivery_tx = None;
+    coordinator.publish_local_tunnel_deliveries_excluding(&[]);
+    assert!(
+        !coordinator
+            .local_tunnel_deliveries
+            .load()
+            .contains_key(&400),
+        "tombstoned WG entry must be absent from the delivery map"
+    );
+}
 /// Fatal-fd guard: destroying the TUN under the loop (pipe write
 /// end dropped => POLLHUP on the read end) exits the thread
 /// cleanly WITHOUT the stop flag — the #1872 tombstone respawn is
@@ -1315,6 +1460,8 @@ fn observe_one_record_9594(
             &tun_origin.nat,
             &tun_origin.forward_wire,
             &tun_origin.indexes,
+            None,
+            None,
         );
     });
     // The loop enables pktinfo on its first line, and a datagram queued before
