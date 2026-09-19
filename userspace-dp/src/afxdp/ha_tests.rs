@@ -38,6 +38,67 @@ fn activated_owner_rgs_detects_inactive_to_active_transitions() {
     assert_eq!(activated_owner_rgs(&previous, &current), vec![1]);
 }
 
+/// #10366: a state update can demote one RG and activate another. The worker
+/// queue must apply the demotion before the activation refresh; otherwise the
+/// refresh can publish a stale `WorkerLocalImport` origin after the demote's
+/// provenance transition.
+#[test]
+fn update_ha_state_orders_demote_before_refresh_10366() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    let worker_commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_commands.clone())),
+        None,
+    );
+
+    coordinator
+        .update_ha_state(&[
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                ..HAGroupStatus::default()
+            },
+        ])
+        .expect("seed active/inactive HA state");
+    worker_commands.lock().expect("commands").clear();
+
+    coordinator
+        .update_ha_state(&[
+            HAGroupStatus {
+                rg_id: 1,
+                active: false,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+        ])
+        .expect("apply simultaneous demote and refresh");
+
+    let commands = worker_commands.lock().expect("commands");
+    assert!(matches!(
+        commands.front(),
+        Some(WorkerCommand::DemoteOwnerRGS { owner_rgs }) if owner_rgs == &vec![1]
+    ));
+    assert!(matches!(
+        commands.get(1),
+        Some(WorkerCommand::VacateAllSharedExactSlots)
+    ));
+    assert!(matches!(
+        commands.get(2),
+        Some(WorkerCommand::RefreshOwnerRGS { owner_rgs }) if owner_rgs == &vec![2]
+    ));
+}
+
 #[test]
 fn update_ha_state_seeds_lease_for_active_group_without_watchdog() {
     let coordinator = Coordinator::new();

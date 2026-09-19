@@ -3044,6 +3044,60 @@ fn apply_worker_commands_demotes_local_owner_rg_sessions_to_sync_import() {
     assert_eq!(origin, SessionOrigin::SyncImport);
 }
 
+/// #10366: exercise the production command path, not just the table helper.
+/// `DemoteOwnerRGS` must flip a worker-local replica before the following
+/// `RefreshOwnerRGS` sees it, so both conntrack writers use the same
+/// peer-origin stamp.
+#[test]
+fn apply_worker_commands_demotes_worker_replica_before_refresh_10366() {
+    let commands = Arc::new(Mutex::new(VecDeque::from([
+        WorkerCommand::DemoteOwnerRGS { owner_rgs: vec![1] },
+        WorkerCommand::RefreshOwnerRGS { owner_rgs: vec![1] },
+    ])));
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let mut metadata = test_metadata();
+    metadata.owner_rg_id = 1;
+    assert!(sessions.upsert_synced_with_origin(
+        SessionInstall {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+        false,
+    ));
+
+    let forwarding = test_forwarding_state();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let results = apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+
+    assert_eq!(results.cancelled_keys, vec![key.clone()]);
+    let (_, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("worker replica survives demote and refresh");
+    assert_eq!(origin, SessionOrigin::SyncImport);
+    assert!(origin.is_cluster_synced_origin());
+}
+
 #[test]
 fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
     let commands = Arc::new(Mutex::new(VecDeque::new()));

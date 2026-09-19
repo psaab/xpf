@@ -2755,6 +2755,125 @@ fn demote_reactivate_tun_stays_local_10402() {
     );
 }
 
+/// #10366: demote must deterministically flip-or-evict a `WorkerLocalImport`
+/// replica. The old `will_flip` gate (`!is_peer_synced()`) left the replica
+/// unflipped, so demote and refresh had no common peer-origin decision for the
+/// shared BPF row and cleanup could converge only after later bulks.
+/// FAIL-ON-REVERT: restoring the peer-synced-only gate leaves the replica
+/// `WorkerLocalImport` -> RED.
+#[test]
+fn demote_flips_worker_replica_to_sync_import_10366() {
+    // Repeat the exact transition enough times to make a scheduler-dependent
+    // RMW/refresh outcome observable in this cell if the provenance gate is
+    // ever weakened again.
+    for _ in 0..64 {
+        let mut table = SessionTable::new();
+        let now = 1_000_000_000u64;
+        let key = key_v4();
+        let mut meta = metadata();
+        meta.owner_rg_id = 1;
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: key.clone(),
+                decision: decision(),
+                metadata: meta,
+                origin: SessionOrigin::WorkerLocalImport,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0x10,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+            false,
+        ));
+        assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
+        match table.entry_with_origin(&key) {
+            None => {}
+            Some((_, _, origin)) => assert_eq!(
+                origin,
+                SessionOrigin::SyncImport,
+                "demote must flip a worker replica to SyncImport (marked/deletable)"
+            ),
+        }
+        if let Some((_, _, origin)) = table.entry_with_origin(&key) {
+            assert!(
+                origin.is_cluster_synced_origin(),
+                "post-demote replica provenance must read cluster-synced so demote-RMW and refresh agree (both SET)"
+            );
+        }
+    }
+}
+
+/// #10366: the demote transition must land before the HA refresh observes the
+/// row. This pins the production demote→refresh contract at the table seam:
+/// the refresh preserves the newly-flipped `SyncImport` provenance rather than
+/// re-reading a still-local `WorkerLocalImport` replica.
+#[test]
+fn demote_then_refresh_preserves_replica_origin_10366() {
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let key = key_v4();
+    let mut meta = metadata();
+    meta.owner_rg_id = 1;
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: key.clone(),
+            decision: decision(),
+            metadata: meta.clone(),
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            session_id: 0,
+            tcp_close_class: 0,
+        },
+        false,
+    ));
+
+    assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
+    assert!(table.refresh_for_ha_transition(
+        &key,
+        decision(),
+        meta,
+        now + 1_000_000,
+    ));
+    let (_, _, origin) = table
+        .entry_with_origin(&key)
+        .expect("demoted replica survives refresh");
+    assert_eq!(
+        origin,
+        SessionOrigin::SyncImport,
+        "refresh must preserve demote's peer-origin flip"
+    );
+    assert!(origin.is_cluster_synced_origin());
+}
+
+/// #10366 control: demoting a live local session keeps the row (flip, not
+/// delete) — a present-in-bulk live row survives regardless of the stamp.
+/// GREEN at base; must stay GREEN.
+#[test]
+fn demoted_live_local_rows_kept_10366() {
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let key = key_v4();
+    let mut meta = metadata();
+    meta.owner_rg_id = 1;
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        meta,
+        now,
+        PROTO_TCP,
+        0x10,
+    ));
+    assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
+    let (_, _, origin) = table
+        .entry_with_origin(&key)
+        .expect("live demoted row must be kept");
+    assert_eq!(origin, SessionOrigin::SyncImport);
+    assert!(origin.is_cluster_synced_origin());
+}
+
 #[test]
 fn demotion_marker_clears_on_owner_rg_activation_10317() {
     let mut table = SessionTable::new();

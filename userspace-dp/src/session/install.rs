@@ -814,8 +814,10 @@ impl SessionTable {
                 continue;
             };
             // #3122: an in-place demote local→synced is count-neutral for a
-            // counted logical session. WorkerLocalImport is not a demotion
-            // target and remains excluded by the shared predicate.
+            // counted logical session. A WorkerLocalImport replica is flipped
+            // to SyncImport here so every surviving demoted row has the same
+            // peer-origin contract; that uncounted→counted transition charges
+            // this worker's now-authoritative copy exactly once.
             // #10402 P2/round2: TunOrigin and transient local seeds never flip
             // to SyncImport — with held SyncImport now bulk-exported, a
             // demote→reactivate cycle would otherwise leak node-local state
@@ -824,8 +826,15 @@ impl SessionTable {
             // node-local, and their origins remain excluded from HA export.
             let old_origin = entry.origin;
             let is_reverse = entry.metadata.is_reverse;
-            let will_flip = !old_origin.is_peer_synced()
-                && !old_origin.is_local_tun_origin()
+            // #10366: WorkerLocalImport is a local replica, but demotion must
+            // make every ordinary live row agree on one peer-origin stamp.
+            // Leaving this origin unchanged made the demote RMW and the
+            // following full-value refresh derive their writes from a
+            // cleanup-protected replica provenance. Flip ordinary replicas to
+            // SyncImport; the only origins that remain node-local across
+            // demotion are explicit local TUN sessions and transient
+            // neighbor/fabric seeds.
+            let will_flip = !old_origin.is_local_tun_origin()
                 && !old_origin.is_transient_local_seed();
             if will_flip {
                 entry.origin = SessionOrigin::SyncImport;
