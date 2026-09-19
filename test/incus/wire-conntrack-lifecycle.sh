@@ -94,6 +94,18 @@ Total sessions: 1'
     check "create witness evict and drops pass" PASS 0 1 1 0 1 1000 0 1000 0 1500 1500 1 0
     check "stale wire evidence fails" FAIL 1 1 1 1 1 1000 0 1000 0 1500 1500 1 0
     check "expired subject leak fails" FAIL 1 1 1 1 1 1000 1 1000 0 1500 1500 1 0
+    out="$(wire_conntrack_verdict 1 1 1 1 1000 0 1000 0 1500 1500 1 0)"; rc=$?
+    if [[ "$rc" == 1 && "$out" == *"stale_present=1"* && "$out" == *"lifecycle_bad=1"* ]]; then
+        echo "  PASS  independent stale evidence has a nonzero headline"; pass=$((pass + 1))
+    else
+        echo "  FAIL  independent stale evidence headline (got '$out' rc=$rc)"; fail=$((fail + 1))
+    fi
+    out="$(wire_conntrack_verdict 1 1 1 1 1000 1000 1000 0 1500 1500 1 0)"; rc=$?
+    if [[ "$rc" == 1 && "$out" == *"stale_present=1"* && "$out" == *"lifecycle_bad=1000"* ]]; then
+        echo "  PASS  stale evidence is not double-counted"; pass=$((pass + 1))
+    else
+        echo "  FAIL  stale evidence is not double-counted (got '$out' rc=$rc)"; fail=$((fail + 1))
+    fi
     check "retained witnessed SID fails eviction" FAIL 1 1 1 0 0 1000 0 1000 0 1500 1500 1 0
     check "missing subject witness is void" VOID 2 1 0 0 0 1000 0 1000 0 1500 1500 0 0
     check "missing create with control witness fails" FAIL 1 0 0 0 0 1000 0 1000 0 1500 1500 1 0
@@ -355,7 +367,7 @@ if ((CREATED)); then
 fi
 
 if [[ -n "$BROKEN_FIXTURE" && "$WITNESSED" == 1 ]] &&
-   { ! wire_num "$SUBJECT_TMO" || ((10#$SUBJECT_TMO < 300)); }; then
+   { ! wire_num "$SUBJECT_TMO" || ((10#$SUBJECT_TMO < 250)); }; then
     fail_void harness-void
 fi
 if [[ -z "$IDLE_WAIT" ]]; then

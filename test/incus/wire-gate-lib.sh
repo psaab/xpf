@@ -564,7 +564,10 @@ wire_conntrack_verdict() {
 	fi
 	local evicted=0
 	if ((10#$sa == 1)); then evicted=1; fi
-	local bad=$((10#$el + 10#$fl + 10#$st))
+	# stale_present can be independently asserted by a transcript, so count
+	# that predicate only when no leaked-packet count already represents it.
+	local bad=$((10#$el + 10#$fl))
+	if ((10#$st > 0 && 10#$el == 0)); then bad=$((bad + 1)); fi
 	((10#$cr == 0)) && bad=$((bad + 1))
 	((10#$w == 0)) && bad=$((bad + 1))
 	((10#$cs == 0)) && bad=$((bad + 1))
