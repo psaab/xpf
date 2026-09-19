@@ -193,6 +193,8 @@ source "${SCRIPT_DIR}/harness-result.sh"
 ENV_NAME="${HARNESS_ENV:-loss-userspace-cluster}"
 # shellcheck source=test/incus/deploy-lib.sh
 source "${SCRIPT_DIR}/deploy-lib.sh"
+# shellcheck source=test/incus/ipsec-9506-fixture.sh
+source "${SCRIPT_DIR}/ipsec-9506-fixture.sh"
 NODE0="${FW0:-${INCUS_REMOTE:-loss}:xpf-userspace-fw0}"
 NODE1="${FW1:-${INCUS_REMOTE:-loss}:xpf-userspace-fw1}"
 ARCHIVE_DIR="${XPF_9506_T12_G2_ARCHIVE_DIR:-${TMPDIR:-/var/tmp}/xpf-t12-g2-9506-$(date +%s)}"
@@ -208,11 +210,121 @@ remote() {
     sg incus-admin -c "incus exec -n $(printf '%q' "$node") -- bash -lc $(printf '%q' "$command")"
 }
 
+fixture_measure_traffic() {
+    # fixture_measure_traffic <shape> <count> <dir>: exercise both decrypted
+    # directions with the real peer/inner addresses and retain raw output.
+    # The current workload is an inner-index-0 smoke probe.  Keep its XFRM
+    # state delta explicitly tunnel-scoped; it must not stand in for a
+    # per-tunnel G2 workload.
+    local shape="$1" count="$2" dir="$3" family inner peer_out lan_out lan6
+    local fw0_before="$dir/xfrm-fw0-before.txt" fw1_before="$dir/xfrm-fw1-before.txt"
+    local fw0_after="$dir/xfrm-fw0-after.txt" fw1_after="$dir/xfrm-fw1-after.txt"
+    local before_packets after_packets
+    family="$(fix9506_shape_family "$shape")"
+    inner="$(fix9506_inner4_ip 0)"
+    lan_out="$dir/lan-to-peer.txt"
+    peer_out="$dir/peer-to-lan.txt"
+    fix9506_remote "$FIX9506_NODE0" 'ip -s xfrm state' >"$fw0_before" 2>&1 || :
+    fix9506_remote "$FIX9506_NODE1" 'ip -s xfrm state' >"$fw1_before" 2>&1 || :
+    if [[ "$family" == v4 ]]; then
+        fix9506_remote "$FIX9506_LAN_REF" "ip -4 route get $inner; ping -c 4 -W 2 $inner" >"$lan_out" 2>&1 || :
+        fix9506_remote "$FIX9506_PEER_REF" "ping -c 4 -W 2 -I $inner $LAN_HOST_IP" >"$peer_out" 2>&1 || :
+    else
+        inner="$(fix9506_inner6_ip 0)"
+        lan6="$(fix9506_remote "$FIX9506_LAN_REF" 'ip -6 -o addr show scope global | sed -n "1{s/.*inet6 \([^/ ]*\)\/.*/\1/p;}"' 2>/dev/null || true)"
+        fix9506_remote "$FIX9506_LAN_REF" "ip -6 route get $inner; ping -6 -c 4 -W 2 $inner" >"$lan_out" 2>&1 || :
+        fix9506_remote "$FIX9506_PEER_REF" "ping -6 -c 4 -W 2 -I $inner ${lan6:-$LAN_VIP6}" >"$peer_out" 2>&1 || :
+    fi
+    fix9506_remote "$FIX9506_NODE0" 'ip -s xfrm state' >"$fw0_after" 2>&1 || :
+    fix9506_remote "$FIX9506_NODE1" 'ip -s xfrm state' >"$fw1_after" 2>&1 || :
+    before_packets=$(( $(fix9506_count_xfrm_packets "$fw0_before") + $(fix9506_count_xfrm_packets "$fw1_before") ))
+    after_packets=$(( $(fix9506_count_xfrm_packets "$fw0_after") + $(fix9506_count_xfrm_packets "$fw1_after") ))
+    MEASURE_XFRM_TUNNEL0_PACKETS=$((after_packets - before_packets))
+    ((MEASURE_XFRM_TUNNEL0_PACKETS < 0)) && MEASURE_XFRM_TUNNEL0_PACKETS=0
+    local lan_ok=0 peer_ok=0
+    grep -Eq '(^|[[:space:],])0% packet loss' "$lan_out" 2>/dev/null && lan_ok=1 || :
+    grep -Eq '(^|[[:space:],])0% packet loss' "$peer_out" 2>/dev/null && peer_ok=1 || :
+    MEASURE_LAN_OK="$lan_ok"
+    MEASURE_PEER_OK="$peer_ok"
+    MEASURE_PACKETS=$((lan_ok * 4 + peer_ok * 4))
+    MEASURE_LOSS=0
+    ((lan_ok == 1 && peer_ok == 1)) || MEASURE_LOSS=100
+}
+
+run_fixture_measure() {
+    # Populate MEASURE_* globals. Setup/teardown failures are never promoted
+    # into PASS; all raw probes stay in the per-shape archive directory.
+    local shape="$1" count="$2" label="$3"
+    local dir="$ARCHIVE_DIR/fixture-${label}-${shape}-${count}"
+    mkdir -p "$dir"
+    MEASURE_REASON=""
+    MEASURE_READY=0
+    MEASURE_TEARDOWN=0
+    MEASURE_QUEUE_TOTAL=0
+    MEASURE_QUEUE_TOTAL_NODE1=0
+    MEASURE_QUEUE_EXPECT=$((count * 4))
+    MEASURE_QUEUE_CLASSES="0 0 0 0 0"
+    MEASURE_QUEUE_CLASSES_NODE1="0 0 0 0 0"
+    MEASURE_QUEUE_BOTH=0
+    MEASURE_PACKETS=0
+    MEASURE_XFRM_TUNNEL0_PACKETS=0
+    MEASURE_LOSS=100
+    if [[ "$FIXTURE_PHASE_BLOCKED" == 1 || "$ACTIVE_FIXTURE_SETUP" == 1 ]]; then
+        MEASURE_REASON="fixture-lifecycle-blocked:previous fixture was not restored"
+        return 1
+    fi
+    ACTIVE_FIXTURE_SETUP=1
+    ACTIVE_FIXTURE_COUNT="$count"
+    ACTIVE_FIXTURE_DIR="$dir"
+    if ! fix9506_setup "$shape" "$count" "$dir"; then
+        MEASURE_REASON="fixture-setup-failed:${shape}x${count} (inspect ${dir}; no live-SA verdict)"
+        if fix9506_teardown "$count" "$dir"; then
+            ACTIVE_FIXTURE_SETUP=0
+            ACTIVE_FIXTURE_COUNT=0
+            ACTIVE_FIXTURE_DIR=""
+        else
+            FIXTURE_PHASE_BLOCKED=1
+        fi
+        return 1
+    fi
+    MEASURE_READY=1
+    fix9506_probe_node "$FIX9506_NODE0" "$dir" measure-fw0
+    fix9506_probe_node "$FIX9506_NODE1" "$dir" measure-fw1
+    MEASURE_QUEUE_CLASSES="$(fix9506_divert_queues "$dir/measure-fw0-ruleset.json")"
+    MEASURE_QUEUE_CLASSES_NODE1="$(fix9506_divert_queues "$dir/measure-fw1-ruleset.json")"
+    read -r _ _ _ _ MEASURE_QUEUE_TOTAL <<<"$MEASURE_QUEUE_CLASSES"
+    read -r _ _ _ _ MEASURE_QUEUE_TOTAL_NODE1 <<<"$MEASURE_QUEUE_CLASSES_NODE1"
+    if [[ "$MEASURE_QUEUE_TOTAL" == "$MEASURE_QUEUE_EXPECT" &&
+          "$MEASURE_QUEUE_TOTAL_NODE1" == "$MEASURE_QUEUE_EXPECT" ]]; then
+        MEASURE_QUEUE_BOTH=1
+    fi
+    fixture_measure_traffic "$shape" "$count" "$dir"
+    if fix9506_teardown "$count" "$dir"; then
+        MEASURE_TEARDOWN=1
+        ACTIVE_FIXTURE_SETUP=0
+        ACTIVE_FIXTURE_COUNT=0
+        ACTIVE_FIXTURE_DIR=""
+    else
+        MEASURE_REASON="fixture-restore-failed:${shape}x${count} (config/SAs/divert/queue/RG residue)"
+    fi
+    if ((MEASURE_TEARDOWN != 1)); then
+        return 1
+    fi
+    return 0
+}
+
 snapshot_node() {
     local node="$1" path="$2"
     remote "$node" 'cli -c "show configuration | display set"' >"$path" 2>&1
 }
-normalize_config() { sed -n '/^set /p' "$1"; }
+normalize_config() {
+    # The config renderer leaves empty top-level security containers after
+    # deleting their last fixture child. They carry no policy/proposal/state
+    # and are not semantic residue; ignore these display-set artifacts while
+    # comparing the pre/post configuration snapshots.
+    sed -n '/^set /p' "$1" |
+        sed -E '/^set security (ike|ipsec)$/d; /^set security address-book global$/d'
+}
 
 # Determine the source/build identity before any live verdict is emitted.
 GIT_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
@@ -246,11 +358,52 @@ snapshot_node "$NODE1" "$BASE1" || true
 normalize_config "$BASE0" >"$BASE0.norm" 2>/dev/null || :
 normalize_config "$BASE1" >"$BASE1.norm" 2>/dev/null || :
 
-# A real S5 capture fixture requires an owned xfrmi, an xpf_ipsec_divert table,
-# four provenance-specific queues/listeners, and at least one live XFRM state.
-# The probes below are read-only and retain their raw output as evidence.
-remote "$NODE0" 'ip -o link show | sed -n "/: st[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}:/p"' >"$ARCHIVE_DIR/fw0-st-links.txt" 2>&1 || :
-remote "$NODE1" 'ip -o link show | sed -n "/: st[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}:/p"' >"$ARCHIVE_DIR/fw1-st-links.txt" 2>&1 || :
+# T12 uses a small real v4 fixture for the exact shape and no-bypass cells.
+# The fixture builder owns setup failure cleanup; successful setup remains
+# live until the cell rows have been emitted and then is torn down below.
+T12_FIXTURE_SHAPE="${XPF_9506_T12_SHAPE:-v4_native}"
+T12_FIXTURE_COUNT="${XPF_9506_T12_COUNT:-2}"
+T12_FIXTURE_DIR="$ARCHIVE_DIR/fixture-t12-${T12_FIXTURE_SHAPE}-${T12_FIXTURE_COUNT}"
+T12_FIXTURE_SETUP=0
+T12_FIXTURE_REASON=""
+T12_FIXTURE_RESTORE_OK=1
+ACTIVE_FIXTURE_SETUP=1
+ACTIVE_FIXTURE_COUNT="$T12_FIXTURE_COUNT"
+ACTIVE_FIXTURE_DIR="$T12_FIXTURE_DIR"
+FIXTURE_PHASE_BLOCKED=0
+T12_FIXTURE_CLEANED=0
+t12_fixture_cleanup() {
+    local rc=$?
+    trap - EXIT
+    if [[ "$ACTIVE_FIXTURE_SETUP" == 1 ]]; then
+        echo "t12-g2-9506: EXIT cleanup for live fixture count=$ACTIVE_FIXTURE_COUNT dir=$ACTIVE_FIXTURE_DIR" >&2
+        if ! fix9506_teardown "$ACTIVE_FIXTURE_COUNT" "$ACTIVE_FIXTURE_DIR"; then
+            T12_FIXTURE_RESTORE_OK=0
+            rc=1
+        else
+            ACTIVE_FIXTURE_SETUP=0
+            ACTIVE_FIXTURE_COUNT=0
+            ACTIVE_FIXTURE_DIR=""
+        fi
+    fi
+    exit "$rc"
+}
+trap t12_fixture_cleanup EXIT
+if fix9506_setup "$T12_FIXTURE_SHAPE" "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
+    T12_FIXTURE_SETUP=1
+else
+    T12_FIXTURE_REASON="fixture-setup-failed:${T12_FIXTURE_SHAPE}x${T12_FIXTURE_COUNT} (inspect ${T12_FIXTURE_DIR}; no live-SA verdict)"
+    if fix9506_teardown "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
+        ACTIVE_FIXTURE_SETUP=0
+        ACTIVE_FIXTURE_COUNT=0
+        ACTIVE_FIXTURE_DIR=""
+    else
+        T12_FIXTURE_RESTORE_OK=0
+        FIXTURE_PHASE_BLOCKED=1
+    fi
+fi
+remote "$NODE0" 'ip -d -o link show type xfrm | sed -n "/: st[0-9][0-9]*\(\.[0-9][0-9]*\)\?\(@[^:]*\)\?:/p"' >"$ARCHIVE_DIR/fw0-st-links.txt" 2>&1 || :
+remote "$NODE1" 'ip -d -o link show type xfrm | sed -n "/: st[0-9][0-9]*\(\.[0-9][0-9]*\)\?\(@[^:]*\)\?:/p"' >"$ARCHIVE_DIR/fw1-st-links.txt" 2>&1 || :
 remote "$NODE0" 'ip -s xfrm state' >"$ARCHIVE_DIR/fw0-xfrm-state.txt" 2>&1 || :
 remote "$NODE1" 'ip -s xfrm state' >"$ARCHIVE_DIR/fw1-xfrm-state.txt" 2>&1 || :
 remote "$NODE0" 'nft -j list ruleset' >"$ARCHIVE_DIR/fw0-ruleset.json" 2>&1 || :
@@ -258,15 +411,15 @@ remote "$NODE1" 'nft -j list ruleset' >"$ARCHIVE_DIR/fw1-ruleset.json" 2>&1 || :
 remote "$NODE0" 'ip -d link show xpf-usp1; tc filter show dev xpf-usp1 ingress' >"$ARCHIVE_DIR/fw0-q0-mark.txt" 2>&1 || :
 remote "$NODE1" 'ip -d link show xpf-usp1; tc filter show dev xpf-usp1 ingress' >"$ARCHIVE_DIR/fw1-q0-mark.txt" 2>&1 || :
 has_st_fw0=0
-if grep -qE 'st[0-9]+(\.[0-9]+)?' "$ARCHIVE_DIR/fw0-st-links.txt" 2>/dev/null; then has_st_fw0=1; fi
+if grep -qE 'st9506[0-9]*(\.[0-9]+)?' "$ARCHIVE_DIR/fw0-st-links.txt" 2>/dev/null; then has_st_fw0=1; fi
 has_st_fw1=0
-if grep -qE 'st[0-9]+(\.[0-9]+)?' "$ARCHIVE_DIR/fw1-st-links.txt" 2>/dev/null; then has_st_fw1=1; fi
+if grep -qE 'st9506[0-9]*(\.[0-9]+)?' "$ARCHIVE_DIR/fw1-st-links.txt" 2>/dev/null; then has_st_fw1=1; fi
 has_st=0
 if both_nodes_present "$has_st_fw0" "$has_st_fw1"; then has_st=1; fi
 has_sa_fw0=0
-if grep -qE '^src |^.*src ' "$ARCHIVE_DIR/fw0-xfrm-state.txt" 2>/dev/null; then has_sa_fw0=1; fi
+if grep -qE 'if_id (0x2522[0-9a-fA-F]{4}|622985[0-9]+)' "$ARCHIVE_DIR/fw0-xfrm-state.txt" 2>/dev/null; then has_sa_fw0=1; fi
 has_sa_fw1=0
-if grep -qE '^src |^.*src ' "$ARCHIVE_DIR/fw1-xfrm-state.txt" 2>/dev/null; then has_sa_fw1=1; fi
+if grep -qE 'if_id (0x2522[0-9a-fA-F]{4}|622985[0-9]+)' "$ARCHIVE_DIR/fw1-xfrm-state.txt" 2>/dev/null; then has_sa_fw1=1; fi
 has_sa=0
 if both_nodes_present "$has_sa_fw0" "$has_sa_fw1"; then has_sa=1; fi
 
@@ -276,12 +429,21 @@ read -r F0_TABLE F0_EXACT F0_INET_DIVERT F0_BRIDGE_DIVERT F0_DIVERT_EXACT F0_REA
 read -r F1_TABLE F1_EXACT F1_INET_DIVERT F1_BRIDGE_DIVERT F1_DIVERT_EXACT F1_READ < <(
     ruleset_flags "$ARCHIVE_DIR/fw1-ruleset.json"
 )
+read -r F0_IF F0_II F0_BF F0_BI F0_QTOTAL < <(fix9506_divert_queues "$ARCHIVE_DIR/fw0-ruleset.json")
+read -r F1_IF F1_II F1_BF F1_BI F1_QTOTAL < <(fix9506_divert_queues "$ARCHIVE_DIR/fw1-ruleset.json")
 has_fence=0
 if [[ "$F0_READ" == 1 && "$F1_READ" == 1 && "$F0_EXACT" == 1 && "$F1_EXACT" == 1 ]]; then has_fence=1; fi
 has_inet_divert=0
 if [[ "$F0_READ" == 1 && "$F1_READ" == 1 && "$F0_INET_DIVERT" == 1 && "$F1_INET_DIVERT" == 1 ]]; then has_inet_divert=1; fi
 has_divert=0
-if [[ "$F0_READ" == 1 && "$F1_READ" == 1 && "$F0_DIVERT_EXACT" == 1 && "$F1_DIVERT_EXACT" == 1 ]]; then has_divert=1; fi
+if [[ "$T12_FIXTURE_SETUP" == 1 && "$F0_READ" == 1 && "$F1_READ" == 1 &&
+      "$F0_DIVERT_EXACT" == 1 && "$F1_DIVERT_EXACT" == 1 &&
+      "$F0_IF" -ge "$T12_FIXTURE_COUNT" && "$F0_II" -ge "$T12_FIXTURE_COUNT" &&
+      "$F0_BF" -ge "$T12_FIXTURE_COUNT" && "$F0_BI" -ge "$T12_FIXTURE_COUNT" &&
+      "$F1_IF" -ge "$T12_FIXTURE_COUNT" && "$F1_II" -ge "$T12_FIXTURE_COUNT" &&
+      "$F1_BF" -ge "$T12_FIXTURE_COUNT" && "$F1_BI" -ge "$T12_FIXTURE_COUNT" ]]; then
+    has_divert=1
+fi
 has_q0=0
 if grep -qE 'xpf-usp1' "$ARCHIVE_DIR/fw0-q0-mark.txt" 2>/dev/null &&
     grep -qE '58465001|queue_mapping' "$ARCHIVE_DIR/fw0-q0-mark.txt" 2>/dev/null &&
@@ -290,9 +452,24 @@ if grep -qE 'xpf-usp1' "$ARCHIVE_DIR/fw0-q0-mark.txt" 2>/dev/null &&
     has_q0=1
 fi
 fixture=0
-if [[ "$has_st" == 1 && "$has_sa" == 1 && "$has_divert" == 1 ]]; then fixture=1; fi
+if [[ "$T12_FIXTURE_SETUP" == 1 && "$has_st" == 1 && "$has_sa" == 1 && "$has_divert" == 1 ]]; then fixture=1; fi
 printf 'T12_G2_PRECONDITIONS stn=%s stn_fw0=%s stn_fw1=%s xfrm_sa=%s xfrm_sa_fw0=%s xfrm_sa_fw1=%s divert_table=%s fence_table=%s q0_mark_surface=%s ruleset_fw0_readable=%s ruleset_fw1_readable=%s complete_fixture=%s\n' \
     "$has_st" "$has_st_fw0" "$has_st_fw1" "$has_sa" "$has_sa_fw0" "$has_sa_fw1" "$has_divert" "$has_fence" "$has_q0" "$F0_READ" "$F1_READ" "$fixture"
+T12_TRAFFIC_PACKETS=0
+T12_TRAFFIC_LOSS=100
+T12_TRAFFIC_XFRM_TUNNEL0_PACKETS=0
+T12_TRAFFIC_LAN_OK=0
+T12_TRAFFIC_PEER_OK=0
+if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
+    T12_TRAFFIC_DIR="$T12_FIXTURE_DIR/traffic"
+    mkdir -p "$T12_TRAFFIC_DIR"
+    fixture_measure_traffic "$T12_FIXTURE_SHAPE" "$T12_FIXTURE_COUNT" "$T12_TRAFFIC_DIR"
+    T12_TRAFFIC_XFRM_TUNNEL0_PACKETS="$MEASURE_XFRM_TUNNEL0_PACKETS"
+    T12_TRAFFIC_PACKETS="$MEASURE_PACKETS"
+    T12_TRAFFIC_LOSS="$MEASURE_LOSS"
+    T12_TRAFFIC_LAN_OK="$MEASURE_LAN_OK"
+    T12_TRAFFIC_PEER_OK="$MEASURE_PEER_OK"
+fi
 
 # Cell result helper.  Every cell names its plan section/predicate and emits a
 # dedicated ledger row.  Metrics are numeric so the row remains auditable by
@@ -350,6 +527,8 @@ missing=""
 [[ "$has_divert" == 1 ]] || missing="${missing:+$missing,}xpf_ipsec_divert"
 [[ "$F0_READ" == 1 ]] || missing="${missing:+$missing,}fw0-nft-unavailable"
 [[ "$F1_READ" == 1 ]] || missing="${missing:+$missing,}fw1-nft-unavailable"
+[[ "$EXE_CHECK" == MATCH ]] || missing="${missing:+$missing,}exe-attestation-${EXE_CHECK}-requires-MATCH"
+[[ "$T12_FIXTURE_RESTORE_OK" == 1 ]] || missing="${missing:+$missing,}t12-fixture-restore-failed"
 if [[ -n "$missing" ]]; then
     PREASON="missing-precondition:${missing} (r6 §5.1/§5.2 real-SA routed-inet fixture unavailable; unreadable ruleset observers are not treated as absence)"
 else
@@ -358,25 +537,34 @@ fi
 LIVE_REASON="${PREASON:-harness-void}"
 # r6 §5.2 cells.
 if [[ "$has_fence" == 1 ]]; then
-    emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' 'chain/table shape observed; dynamic armed pinhole set was not independently validated' VOID "${PREASON:-harness-void}" \
+    emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' \
+        'both nodes readable; base chain shape observed but dynamic armed pinholes were not parsed' VOID \
+        "measurement-incomplete:exact-armed-pinhole-set" \
         "cell_failed=1 fence_chain_exact=1 fence_both_nodes=1 pinholes_validated=0"
 else
-    emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' 'xpf_transit_barrier absent from observed ruleset or observer unavailable' VOID "$LIVE_REASON" \
+    emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' \
+        'xpf_transit_barrier absent from observed ruleset or observer unavailable' VOID "$LIVE_REASON" \
         "cell_failed=1 fence_chain_exact=0 fence_both_nodes=0 pinholes_validated=0"
 fi
-if [[ -z "$PREASON" && "$has_divert" == 1 ]]; then
-    emit_cell t12_9506_divert_order 'r6 §5.2.2-§5.2.3' 'divert chains at P_divert before filter fence; four provenance classes' 'xpf_ipsec_divert observed; ordering requires packet-level JSON inspection' VOID harness-void \
-        "cell_failed=1 divert_table=1 provenance_classes=0"
+if [[ "$has_divert" == 1 ]]; then
+    emit_cell t12_9506_divert_order 'r6 §5.2.2-§5.2.3' 'divert chains at P_divert before filter fence; four provenance classes' \
+        "queue classes counted ($F0_IF/$F0_II/$F0_BF/$F0_BI) but per-rule provenance and same-priority-chain absence were not parsed" VOID \
+        "measurement-incomplete:exact-provenance-rule-set" \
+        "cell_failed=1 divert_table=1 provenance_classes=0 priority_divert=-175 priority_fence=0"
 else
-    emit_cell t12_9506_divert_order 'r6 §5.2.2-§5.2.3' 'divert chains at P_divert before filter fence; four provenance classes' "${PREASON:-divert table absent}" VOID "$LIVE_REASON" \
-        "cell_failed=1 divert_table=$has_divert provenance_classes=0"
+    emit_cell t12_9506_divert_order 'r6 §5.2.2-§5.2.3' 'divert chains at P_divert before filter fence; four provenance classes' \
+        'xpf_ipsec_divert absent from observed ruleset or observer unavailable' VOID "$LIVE_REASON" \
+        "cell_failed=1 divert_table=0 provenance_classes=0 priority_divert=0 priority_fence=0"
 fi
-if [[ -z "$PREASON" && "$has_q0" == 1 ]]; then
-    emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' 'q0 mark surface present but requires real packet/SA exercise' VOID harness-void \
-        "cell_failed=1 q0_mark_surface=1 packet_rows=0"
+if [[ "$has_q0" == 1 && "$T12_TRAFFIC_PACKETS" -gt 0 ]]; then
+    emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' \
+        "bidirectional decrypted delivery observed packets=$T12_TRAFFIC_PACKETS; xfrm_tunnel0_state_delta=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS; q0/wrong-mark/resumption matrix not injected" VOID \
+        "measurement-incomplete:no-bypass-matrix" \
+        "cell_failed=1 q0_mark_surface=1 packet_rows=$T12_TRAFFIC_PACKETS xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS lan_to_peer=$T12_TRAFFIC_LAN_OK peer_to_lan=$T12_TRAFFIC_PEER_OK"
 else
-    emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' "${PREASON:-q0 mark surface absent}" VOID "$LIVE_REASON" \
-        "cell_failed=1 q0_mark_surface=$has_q0 packet_rows=0"
+    emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' \
+        "${PREASON:-q0 mark surface or bidirectional traffic absent}" VOID "$LIVE_REASON" \
+        "cell_failed=1 q0_mark_surface=$has_q0 packet_rows=$T12_TRAFFIC_PACKETS xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS"
 fi
 emit_cell t12_9506_vrf_refusal 'r6 §5.2.5a' 'VRF/l3mdev enslaving revokes permit and publishes ACKed host fence' "${PREASON:-requires test VRF + owned stN fixture}" VOID "$LIVE_REASON" \
     "cell_failed=1 vrf_attach=0 fence_ack=0 conntrack_ack=0"
@@ -386,6 +574,7 @@ emit_cell t12_9506_provenance_metadata 'r6 §5.2.3-§5.2.4' 'queue-id, nfgen_fam
     "cell_failed=1 packets=0 provenance_mismatch=0"
 emit_cell t12_9506_ifindex_recreate 'r6 §5.2.3-§5.2.4' 'device delete/recreate/name reuse with changed ifindex drops and counts' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 delete_recreate=0 changed_ifindex=0 mismatch_drop=0"
+
 emit_cell t12_9506_bridge_conformance 'r6 §5.2.5' 'accepted bridge enslavement receives forward+input AF_BRIDGE then DROP-counts; rejection takes degraded branch' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 enslavement_attempt=0 bridge_forward_rx=0 bridge_input_rx=0 bridge_drop=0"
 emit_cell t12_9506_l2_refusal 'r6 §5.2.4-§5.2.5' 'bridge-forward/input never q0-reinject; unsupported L2 is DROP-and-count' "$LIVE_REASON" VOID "$LIVE_REASON" \
@@ -397,27 +586,77 @@ emit_cell t12_9506_integration_ownership 'r6 §5.2.6' 'divert install/rotation/t
 emit_cell t12_9506_pf_bind_scope 'r6 §5.2.2-§5.2.6' 'inet PF binds AF_INET/AF_INET6 and supported bridge binds AF_BRIDGE only' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 inet_pf_bind=0 bridge_pf_bind=0 pf_mismatch=0"
 
-# r6 §5.1 G2 measurements are not fabricated from ruleset presence.  They
-# require the same-day non-tunnel baseline plus a real 8-tunnel routed-inet
-# XFRM workload and both detached/idle listener phases.
-emit_cell g2_9506_fence_baseline 'r6 §5.1' 'fence-alone baseline with concurrent routed+bridged non-tunnel traffic' "${PREASON:-traffic baseline not started}" VOID "$LIVE_REASON" \
+# T12's live fixture must be fully removed before the independent G2 phases;
+# keeping stN/SAs here would invalidate the post-run residue predicate.
+if [[ "$T12_FIXTURE_SETUP" == 1 && "$T12_FIXTURE_CLEANED" != 1 ]]; then
+    if fix9506_teardown "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
+        T12_FIXTURE_CLEANED=1
+        ACTIVE_FIXTURE_SETUP=0
+        ACTIVE_FIXTURE_COUNT=0
+        ACTIVE_FIXTURE_DIR=""
+    else
+        T12_FIXTURE_REASON="fixture-restore-failed:${T12_FIXTURE_SHAPE}x${T12_FIXTURE_COUNT}"
+        T12_FIXTURE_RESTORE_OK=0
+        FIXTURE_PHASE_BLOCKED=1
+    fi
+fi
+
+# r6 §5.1 G2 measurements. The per-shape rows exercise live routed-inet
+# traffic, queue cardinality, teardown, and packet loss. Provenance and
+# overhead cells remain VOID unless their dedicated observer is present.
+g2_emit_measured() {
+    local shape="$1" tunnels="$2" gate="g2_9506_${shape}_${tunnels}"
+    local observed
+    if run_fixture_measure "$shape" "$tunnels" g2; then
+        local qif qii qbf qbi qt
+        read -r qif qii qbf qbi qt <<<"$MEASURE_QUEUE_CLASSES"
+        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
+        emit_cell "$gate" 'r6 §5.1' \
+            "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
+            "$observed" VOID "measurement-incomplete:provenance-and-overhead-observer-unavailable" \
+            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 overhead_ns=0 queue_instances=$MEASURE_QUEUE_TOTAL queue_instances_fw1=$MEASURE_QUEUE_TOTAL_NODE1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+    else
+        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
+        emit_cell "$gate" 'r6 §5.1' \
+            "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
+            "$observed" VOID "${MEASURE_REASON:-fixture-measurement-failed}" \
+            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 overhead_ns=0 queue_instances=$MEASURE_QUEUE_TOTAL queue_instances_fw1=$MEASURE_QUEUE_TOTAL_NODE1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+    fi
+}
+emit_cell g2_9506_fence_baseline 'r6 §5.1' 'fence-alone baseline with concurrent routed+bridged non-tunnel traffic' \
+    'same-day baseline workload/latency observer not implemented' VOID \
+    "measurement-incomplete:fence-baseline-observer-unavailable" \
     "cell_failed=1 baseline_samples=0 offered=0 observed=0"
-emit_cell g2_9506_divert_detached 'r6 §5.1' 'fence+divert detached-listener overhead delta' "${PREASON:-detached-listener phase not started}" VOID "$LIVE_REASON" \
+emit_cell g2_9506_divert_detached 'r6 §5.1' 'fence+divert detached-listener overhead delta' \
+    'detached-listener workload/latency observer not implemented' VOID \
+    "measurement-incomplete:detached-listener-observer-unavailable" \
     "cell_failed=1 baseline_samples=0 detached_samples=0 overhead_ns=0"
-emit_cell g2_9506_divert_idle 'r6 §5.1' 'fence+divert attached-idle listener overhead delta' "${PREASON:-idle-listener phase not started}" VOID "$LIVE_REASON" \
+emit_cell g2_9506_divert_idle 'r6 §5.1' 'fence+divert attached-idle listener overhead delta' \
+    'attached-idle listener workload/latency observer not implemented' VOID \
+    "measurement-incomplete:idle-listener-observer-unavailable" \
     "cell_failed=1 detached_samples=0 idle_samples=0 overhead_ns=0"
-emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' "${PREASON:-8-tunnel routed-inet workload not started}" VOID "$LIVE_REASON" \
-    "cell_failed=1 tunnels=0 packets=0 provenance_mismatch=0"
-emit_cell g2_9506_vrf_overhead 'r6 §5.1' 'mandatory live VRF refusal overhead: pre-close status quo, ACKed host fence, post-close DROP' "$LIVE_REASON" VOID "$LIVE_REASON" \
+if run_fixture_measure v4_native 8 g2-capture; then
+    emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
+        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN" VOID \
+        "measurement-incomplete:provenance-observer-unavailable" \
+        "cell_failed=1 tunnels=8 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0"
+else
+    emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
+        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN" VOID \
+        "${MEASURE_REASON:-fixture-measurement-failed}" \
+        "cell_failed=1 tunnels=8 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS packets=$MEASURE_PACKETS provenance_mismatch=0"
+fi
+emit_cell g2_9506_vrf_overhead 'r6 §5.1' 'mandatory live VRF refusal overhead: pre-close status quo, ACKed host fence, post-close DROP' \
+    'live VRF/l3mdev refusal transition observer not implemented' VOID \
+    "measurement-incomplete:vrf-refusal-observer-unavailable" \
     "cell_failed=1 preclose_samples=0 fence_ack_samples=0 postclose_samples=0 input_queue_hits=0"
-emit_cell g2_9506_queue_economics 'r6 §5.1' '32-tunnel admission prices 128 queue/socket instances, buffers, FDs, rotation and teardown' "$LIVE_REASON" VOID "$LIVE_REASON" \
-    "cell_failed=1 tunnels=0 queue_instances=0 recv_buffers_mib=0 fd_peak=0 rotation_overlap=0"
+emit_cell g2_9506_queue_economics 'r6 §5.1' '32-tunnel admission prices 128 queue/socket instances, buffers, FDs, rotation and teardown' \
+    'queue count is collected per fixture shape; FD/buffer/rotation observer not implemented' VOID \
+    "measurement-incomplete:queue-economics-observer-unavailable" \
+    "cell_failed=1 tunnels=32 queue_instances=0 recv_buffers_mib=0 fd_peak=0 rotation_overlap=0"
 for shape in v4_native v4_nat_t v6_native v6_nat_t; do
     for tunnels in 8 16 32; do
-        emit_cell "g2_9506_${shape}_${tunnels}" 'r6 §5.1' \
-            "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
-            "$LIVE_REASON" VOID "$LIVE_REASON" \
-            "cell_failed=1 tunnels=0 offered=0 observed=0 provenance_mismatch=0 overhead_ns=0"
+        g2_emit_measured "$shape" "$tunnels"
     done
 done
 
@@ -449,9 +688,11 @@ printf 'T12_G2_RESTORE fw0_config_cmp=%s fw1_config_cmp=%s fw0_residue_clear=%s 
     "$restore0" "$restore1" "$residue0" "$residue1" "$residue_probe_error" "$ARCHIVE_DIR"
 
 restore_ok=1
-if [[ "$restore0" != 1 || "$restore1" != 1 || "$residue0" != 1 || "$residue1" != 1 || "$residue_probe_error" != 0 ]]; then
+if [[ "$restore0" != 1 || "$restore1" != 1 || "$residue0" != 1 || "$residue1" != 1 ||
+      "$residue_probe_error" != 0 || "$T12_FIXTURE_RESTORE_OK" != 1 ||
+      "$ACTIVE_FIXTURE_SETUP" != 0 ]]; then
     restore_ok=0
-    echo "T12_G2_RESTORE FAIL (configuration/residue mismatch on one or both nodes)" >&2
+    echo "T12_G2_RESTORE FAIL (configuration/fixture/residue mismatch on one or both nodes)" >&2
 fi
 
 # Only now, after both node snapshots and residue checks, write the ledger
@@ -471,10 +712,14 @@ while IFS=$'\t' read -r gate section predicate observed verdict reason metrics; 
     fi
     emit_cell "$gate" "$section" "$predicate" "$observed" "$verdict" "$reason" "$metrics"
 done <"$CELL_ROWS_FILE"
+row_count_ok=1
+if [[ "$CELL_COUNT" != 30 ]]; then
+    row_count_ok=0
+    echo "T12_G2_RESTORE FAIL (expected 30 ledger rows, got $CELL_COUNT)" >&2
+fi
 printf 'T12_G2_SUMMARY cells=%s pass=%s fail=%s void=%s exe_check=%s archive=%s\n' \
     "$CELL_COUNT" "$CELL_PASS" "$CELL_FAIL" "$CELL_VOID" "$EXE_CHECK" "$ARCHIVE_DIR"
-if [[ "$restore_ok" != 1 ]]; then exit 1; fi
-# Missing fixtures are an honest VOID/Refs outcome, not a passing gate.
+if [[ "$restore_ok" != 1 || "$row_count_ok" != 1 ]]; then exit 1; fi
 if ((CELL_FAIL > 0)); then exit 1; fi
 if ((CELL_VOID > 0)); then exit 2; fi
 exit 0
