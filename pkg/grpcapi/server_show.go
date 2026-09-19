@@ -652,12 +652,10 @@ const chassisForwardingSeparator = "--------------------------------------------
 // so the peer renders local-only and never recurses back. Returns
 // the peer's formatted block or an error if the peer is unreachable.
 //
-// Timeout note: dialPeer() internally uses context.Background() for
-// its 2s × N-fabric probes (server_diag.go) — that 4s worst-case
-// dial budget is NOT bound by `ctx`. The 5s WithTimeout below only
-// covers the post-dial ShowText RPC. Total worst case is therefore
-// up to ~9s. On the peer side, buildLocalForwarding may block on
-// userspace.Manager.mu during a failover — under that case the
-// 5s outer can fire spuriously and the peer block renders
-// "(peer unreachable)" even on a healthy-but-loaded peer. Future
-// fix: thread ctx into dialPeer to bound the full path.
+// Timeout note: dialPeer derives each 2s × N-fabric probe deadline from
+// `ctx`, so caller cancellation/deadline now aborts the full path. The 5s
+// WithTimeout below only covers the post-dial ShowText RPC. When the caller
+// has no deadline, total worst case remains up to ~9s. On the peer side,
+// buildLocalForwarding may block on userspace.Manager.mu during a failover —
+// under that case the 5s outer can fire spuriously and the peer block renders
+// "(peer unreachable)" even on a healthy-but-loaded peer.

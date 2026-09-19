@@ -846,7 +846,7 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 // that never grants stream quota cannot pin the slot without reaching the
 // forwarding loop; the bound does not lifetime-limit the established stream.
 func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse], release func()) (error, bool) {
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(stream.Context())
 	if err != nil {
 		return err, false
 	}

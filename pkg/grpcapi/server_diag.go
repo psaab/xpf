@@ -25,13 +25,20 @@ var peerFabricGRPCPort = "50051"
 // dialPeer establishes a gRPC connection to the cluster peer via the fabric link.
 // Tries fab0 first, then fab1 if dual-fabric is configured and fab0 fails.
 // Returns the connection or an error if not in cluster mode / all addresses fail.
-func (s *Server) dialPeer() (*grpc.ClientConn, error) {
+// The caller context bounds both connection establishment and each liveness probe.
+func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	if s.fabricPeerAddrFn == nil {
 		return nil, status.Error(codes.Unavailable, "not in cluster mode")
 	}
 	peerIPs := s.fabricPeerAddrFn()
 	if len(peerIPs) == 0 {
 		return nil, status.Error(codes.Unavailable, "cluster peer address not available")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 
 	// #4107: authenticate every RPC we dial on the peer's fabric listener with
@@ -63,6 +70,9 @@ func (s *Server) dialPeer() (*grpc.ClientConn, error) {
 	// Try each fabric address; return first successful connection.
 	var lastErr error
 	for _, ip := range peerIPs {
+		if err := ctx.Err(); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
 		// #8597 (muse-004 K29): net.JoinHostPort, not "%s:port". An IPv6
 		// fabric literal formatted the old way yields `2001:db8::2:50051`,
 		// which grpc.NewClient parses as a bogus host:port — so an IPv6-only
@@ -77,11 +87,17 @@ func (s *Server) dialPeer() (*grpc.ClientConn, error) {
 			lastErr = err
 			continue
 		}
-		// Verify the connection is usable with a short deadline.
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Verify the connection is usable with a short deadline derived from
+		// the caller. The caller's earlier deadline wins, so cancellation
+		// aborts the probe immediately rather than waiting for 2 seconds.
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		client := pb.NewBpfrxServiceClient(conn)
-		_, err = client.GetStatus(ctx, &pb.GetStatusRequest{})
+		_, err = client.GetStatus(probeCtx, &pb.GetStatusRequest{})
 		cancel()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			conn.Close()
+			return nil, status.FromContextError(ctxErr).Err()
+		}
 		// #8597 (muse-004 K28): a ResourceExhausted answer PROVES the peer is
 		// alive and must not be read as a dead connection.
 		//
@@ -118,6 +134,9 @@ func (s *Server) dialPeer() (*grpc.ClientConn, error) {
 			continue
 		}
 		return conn, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 	return nil, status.Errorf(codes.Unavailable, "cannot connect to peer on any fabric address: %v", lastErr)
 }

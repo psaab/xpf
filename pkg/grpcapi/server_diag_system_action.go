@@ -29,7 +29,7 @@ func (s *Server) proxyPeerSystemAction(ctx context.Context, req *pb.SystemAction
 	if s.peerSystemActionFn != nil {
 		return s.peerSystemActionFn(peerCtx, req)
 	}
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(peerCtx)
 	if err != nil {
 		return nil, err
 	}
