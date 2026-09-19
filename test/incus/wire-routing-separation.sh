@@ -36,6 +36,12 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/wire-gate-lib.sh
 source "${SCRIPT_DIR}/wire-gate-lib.sh"
+cli_commit_succeeded() {
+    local out="$1"
+    grep -qE '^[[:space:]]*configuration check succeeds[[:space:]]*$' <<<"$out" &&
+        grep -qE '^[[:space:]]*commit complete([: ].*)?$' <<<"$out"
+}
+
 
 if [[ "$MODE" == selftest ]]; then
     pass=0
@@ -56,6 +62,21 @@ if [[ "$MODE" == selftest ]]; then
             fail=$((fail + 1))
         fi
     }
+    marker_cell() {
+        local label="$1" want="$2" text="$3" got
+        if cli_commit_succeeded "$text"; then got=0; else got=1; fi
+        if [[ "$got" == "$want" ]]; then
+            echo "  PASS  $label"
+            pass=$((pass + 1))
+        else
+            echo "  FAIL  $label (got rc=$got)"
+            fail=$((fail + 1))
+        fi
+    }
+    marker_cell "bare commit marker" 0 $'configuration check succeeds\ncommit complete'
+    marker_cell "summary commit marker" 0 $'configuration check succeeds\ncommit complete: 1 statement(s) changed (1 added, 0 removed)'
+    marker_cell "embedded commit marker rejected" 1 $'configuration check succeeds\nerror: commit failed before commit complete'
+
     if wire_gate_finalizer_selftest; then
         echo "  PASS  cleanup finalizer shields restore"
         pass=$((pass + 1))
@@ -193,8 +214,7 @@ cli_commit_ri() {
             return 1
         }
     fi
-    if ! grep -qE '^[[:space:]]*configuration check succeeds[[:space:]]*$' <<<"$out" ||
-        ! grep -qE '^[[:space:]]*commit complete[[:space:]]*$' <<<"$out"; then
+    if ! cli_commit_succeeded "$out"; then
         printf '%s\n' "$out" >&2
         return 1
     fi
