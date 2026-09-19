@@ -835,6 +835,11 @@ func TestGenerateConfig_NATTraversal_Disable(t *testing.T) {
 	doc.hasNoSettingAnywhere(t, "forceencaps")
 }
 
+// #10474: xpf's `force` value maps to the swanctl setting `encap = yes`,
+// not the legacy ipsec.conf/starter `forceencaps` setting. strongSwan's
+// migration table maps the latter to `connections.<conn>.encap`; the
+// generated swanctl config must contain only the native key so strongSwan
+// 6.x accepts and establishes the tunnel.
 func TestGenerateConfig_NATTraversal_Force(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
@@ -848,7 +853,7 @@ func TestGenerateConfig_NATTraversal_Force(t *testing.T) {
 	}
 	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
 	conn.requireSetting(t, "encap", "yes")
-	conn.requireSetting(t, "forceencaps", "yes")
+	conn.hasNoSetting(t, "forceencaps")
 }
 
 func TestGenerateConfig_NATTraversal_Enable(t *testing.T) {
