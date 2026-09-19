@@ -44,10 +44,10 @@ func TestAnnounceReinjectPublishesPersistentAuthorityFrames9506(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	if err := client.AnnounceReinject(7, true, []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}); err != nil {
+	if err := client.AnnounceReinject("test-run", 9, 7, true, []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}); err != nil {
 		t.Fatalf("open announce: %v", err)
 	}
-	if err := client.AnnounceReinject(7, false, []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}); err != nil {
+	if err := client.AnnounceReinject("test-run", 9, 7, false, []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}); err != nil {
 		t.Fatalf("close announce: %v", err)
 	}
 	defer client.Close()
@@ -57,22 +57,28 @@ func TestAnnounceReinjectPublishesPersistentAuthorityFrames9506(t *testing.T) {
 		case err := <-errs:
 			t.Fatalf("server frame %d: %v", i, err)
 		case payload := <-frames:
-			if len(payload) != 21 {
-				t.Fatalf("frame %d payload length=%d, want 21", i, len(payload))
+			if len(payload) != 38 {
+				t.Fatalf("frame %d payload length=%d, want 38", i, len(payload))
 			}
-			if got := binary.BigEndian.Uint64(payload[:8]); got != 7 {
+			if payload[0] != 8 || string(payload[1:9]) != "test-run" {
+				t.Fatalf("frame %d run id=%q, want test-run", i, payload[1:9])
+			}
+			if got := binary.BigEndian.Uint64(payload[9:17]); got != 9 {
+				t.Fatalf("frame %d generation=%d, want 9", i, got)
+			}
+			if got := binary.BigEndian.Uint64(payload[17:25]); got != 7 {
 				t.Fatalf("frame %d permit=%d, want 7", i, got)
 			}
-			if payload[8] != wantOpen {
-				t.Fatalf("frame %d open=%d, want %d", i, payload[8], wantOpen)
+			if payload[25] != wantOpen {
+				t.Fatalf("frame %d open=%d, want %d", i, payload[25], wantOpen)
 			}
-			if got := binary.BigEndian.Uint16(payload[9:11]); got != 1 {
+			if got := binary.BigEndian.Uint16(payload[26:28]); got != 1 {
 				t.Fatalf("frame %d queue count=%d, want 1", i, got)
 			}
-			if got := binary.BigEndian.Uint16(payload[11:13]); got != 12 {
+			if got := binary.BigEndian.Uint16(payload[28:30]); got != 12 {
 				t.Fatalf("frame %d queue=%d, want 12", i, got)
 			}
-			if got := binary.BigEndian.Uint64(payload[13:21]); got != 31 {
+			if got := binary.BigEndian.Uint64(payload[30:38]); got != 31 {
 				t.Fatalf("frame %d epoch=%d, want 31", i, got)
 			}
 		case <-time.After(time.Second):
@@ -83,6 +89,7 @@ func TestAnnounceReinjectPublishesPersistentAuthorityFrames9506(t *testing.T) {
 
 func TestAnnounceReinjectReplaysLatestAuthorityBeforeSubmitAfterReconnect9506(t *testing.T) {
 	dir := t.TempDir()
+	rows := []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}
 	submitPath := filepath.Join(dir, "reinject-submit.sock")
 	listener, err := net.Listen("unix", submitPath)
 	if err != nil {
@@ -149,8 +156,7 @@ func TestAnnounceReinjectReplaysLatestAuthorityBeforeSubmitAfterReconnect9506(t 
 		t.Fatalf("new client: %v", err)
 	}
 	defer client.Close()
-	rows := []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}
-	if err := client.AnnounceReinject(7, true, rows); err != nil {
+	if err := client.AnnounceReinject("test-run", 9, 7, true, rows); err != nil {
 		t.Fatalf("first announce: %v", err)
 	}
 	select {
@@ -197,7 +203,7 @@ func TestAnnounceReinjectReplaysLatestAuthorityBeforeSubmitAfterReconnect9506(t 
 }
 
 func TestEncodeAnnounceRejectsDuplicateQueue9506(t *testing.T) {
-	if _, err := encodeAnnounce(3, true, []ReinjectQueueEpoch{{Queue: 1, Epoch: 2}, {Queue: 1, Epoch: 3}}); err == nil {
+	if _, err := encodeAnnounce("test-run", 9, 3, true, []ReinjectQueueEpoch{{Queue: 1, Epoch: 2}, {Queue: 1, Epoch: 3}}); err == nil {
 		t.Fatal("duplicate queue authority must be rejected before socket write")
 	}
 }

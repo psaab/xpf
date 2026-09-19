@@ -63,19 +63,40 @@ func TestIpsecCaptureWiringBuildsFourClassSpecAndOrigins9506(t *testing.T) {
 func TestIpsecCaptureRuntimeAnnounceSnapshotPreservesClosingEpoch9506(t *testing.T) {
 	supervisor := newIpsecSupervisor()
 	supervisor.permit.Store(&permitRecord{state: ipsecPermitOpen, permitEpoch: 17})
-	runtime := &ipsecCaptureRuntime{supervisor: supervisor, handles: wiringHandles9506()}
-	epoch, open, rows := runtime.authoritySnapshot()
-	if epoch != 17 || !open || len(rows) != 4 {
-		t.Fatalf("open authority=(%d,%v,%+v), want epoch 17/open/4 rows", epoch, open, rows)
+	runtime := &ipsecCaptureRuntime{supervisor: supervisor, handles: wiringHandles9506(), runID: "test-run"}
+	runID, generation, epoch, open, rows := runtime.authoritySnapshot()
+	if runID != "test-run" || generation != 4 || epoch != 17 || !open || len(rows) != 4 {
+		t.Fatalf("open authority=(%q,%d,%d,%v,%+v), want test-run/4/17/open/4 rows", runID, generation, epoch, open, rows)
 	}
 	supervisor.permit.Store(&permitRecord{state: ipsecPermitClosing, permitEpoch: 17})
-	epoch, open, rows = runtime.authoritySnapshot()
-	if epoch != 17 || open || len(rows) != 4 {
-		t.Fatalf("closing authority=(%d,%v,%+v), want epoch 17/closed/4 rows", epoch, open, rows)
+	runID, generation, epoch, open, rows = runtime.authoritySnapshot()
+	if runID != "test-run" || generation != 4 || epoch != 17 || open || len(rows) != 4 {
+		t.Fatalf("closing authority=(%q,%d,%d,%v,%+v), want test-run/4/17/closed/4 rows", runID, generation, epoch, open, rows)
 	}
 	snapshotEpoch, snapshotRows := runtime.epochSnapshot()
 	if snapshotEpoch != 0 || snapshotRows != nil {
 		t.Fatalf("closed compile snapshot=(%d,%+v), want zero/nil", snapshotEpoch, snapshotRows)
+	}
+}
+func TestIpsecCaptureRuntimeJoinKeyUsesWiredGeneration9506(t *testing.T) {
+	supervisor := newIpsecSupervisor()
+	supervisor.permit.Store(&permitRecord{state: ipsecPermitOpen, permitEpoch: 17})
+	handles := wiringHandles9506()
+	actor := &IpsecCapturePipeline{
+		supervisor: supervisor,
+		queues:     []IpsecCaptureQueue{{Generation: handles[0].Key.Generation}},
+		rotation:   newIpsecRotation(),
+		runID:      "test-run",
+	}
+	runtime := &ipsecCaptureRuntime{
+		supervisor: supervisor,
+		handles:    handles,
+		actor:      actor,
+		runID:      "test-run",
+	}
+	runID, generation, epoch, open, _ := runtime.authoritySnapshot()
+	if runID != "test-run" || generation != handles[0].Key.Generation || epoch != 17 || !open {
+		t.Fatalf("join key=(%q,%d,%d,%v), want test-run/%d/17/open", runID, generation, epoch, open, handles[0].Key.Generation)
 	}
 }
 
@@ -115,7 +136,7 @@ func (f *fakeIpsecReinjectSubmitter9506) CancelReinject([]uint64, uint64, []nfqu
 	return nil, nil
 }
 
-func (f *fakeIpsecReinjectSubmitter9506) AnnounceReinject(uint64, bool, []nfqueue.ReinjectQueueEpoch) error {
+func (f *fakeIpsecReinjectSubmitter9506) AnnounceReinject(string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) error {
 	f.announces++
 	return nil
 }

@@ -47,6 +47,7 @@ pub(crate) const ORIGIN_INPUT: u8 = 2;
 pub(crate) const SUBMIT_FLAG_SHADOW: u8 = 0x01;
 pub(crate) const SUBMIT_FLAG_DRY_RUN: u8 = 0x02;
 pub(crate) const ORIGIN_MAX_OWNER: usize = 64;
+pub(crate) const RUN_ID_MAX: usize = 64;
 pub(crate) const ORIGIN_MAX_STN: usize = 16;
 
 /// CANCEL scope flags.
@@ -62,6 +63,8 @@ pub(crate) const ANNOUNCE_MAX_QUEUES: usize = 128;
 /// deterministic and mirrors the ConfigSnapshot queue-epoch list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AuthorityAnnouncement {
+    pub run_id: String,
+    pub generation: u64,
     pub permit_epoch: u64,
     pub permit_open: bool,
     pub queue_epochs: Vec<(u16, u64)>,
@@ -254,6 +257,8 @@ pub(crate) trait ReinjectAuthority {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuthorityState {
+    run_id: String,
+    generation: u64,
     permit_epoch: u64,
     queue_epochs: BTreeMap<u16, u64>,
     /// Queue/epoch pairs cancelled by an applied queue-scope cancel. These
@@ -297,11 +302,29 @@ impl AuthorityState {
     }
     pub(crate) fn publish_announce(
         &mut self,
+        run_id: &str,
+        generation: u64,
         permit_epoch: u64,
         permit_open: bool,
         queue_epochs: &[(u16, u64)],
     ) -> bool {
+        if run_id.is_empty() || run_id.len() > RUN_ID_MAX || generation == 0 {
+            return false;
+        }
+        if !self.run_id.is_empty() && self.run_id != run_id {
+            // A daemon restart starts a fresh authority timeline. Do not let
+            // the previous process's epoch fence reject its first announce.
+            self.run_id = run_id.to_string();
+            self.generation = generation;
+            self.permit_epoch = 0;
+            self.closed_epoch = 0;
+            self.queue_epochs.clear();
+            self.tombstones.clear();
+            self.open = false;
+        }
         if permit_epoch == 0 {
+            self.run_id = run_id.to_string();
+            self.generation = generation;
             self.queue_epochs.clear();
             self.open = false;
             self.closed_epoch = self.closed_epoch.max(self.permit_epoch);
@@ -310,12 +333,15 @@ impl AuthorityState {
         if permit_epoch < self.permit_epoch {
             return false;
         }
+        // Same-epoch generation advance is a legitimate queue rotation: the
+        // daemon mints a new handles generation under an unchanged permit
+        // epoch, so accept and adopt the announced generation (#10478).
+        self.run_id = run_id.to_string();
+        self.generation = generation;
         if permit_epoch > self.permit_epoch {
             self.permit_epoch = permit_epoch;
-            self.open = permit_open && permit_epoch > self.closed_epoch;
-        } else {
-            self.open = permit_open && permit_epoch > self.closed_epoch;
         }
+        self.open = permit_open && permit_epoch > self.closed_epoch;
         self.queue_epochs = queue_epochs
             .iter()
             .copied()
@@ -430,6 +456,36 @@ pub(crate) struct ReinjectStats {
     pub dry_run_refused: u64,
     pub non_dry_run_refused: u64,
 }
+pub(crate) const PROVENANCE_MAX: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReinjectProvenanceRow {
+    pub request_id: u64,
+    pub permit_epoch: u64,
+    pub queue_epoch: u64,
+    pub queue_number: u16,
+    pub family: u8,
+    pub hook: u8,
+    pub owned_ifindex: u32,
+    pub owner: String,
+    pub stn: String,
+    pub outcome: String,
+    pub bytes_written: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReinjectStatusSnapshot {
+    pub run_id: String,
+    pub generation: u64,
+    pub permit_epoch: u64,
+    pub permit_open: bool,
+    pub stats: ReinjectStats,
+    pub provenance: Vec<ReinjectProvenanceRow>,
+    // No product-owned witness currently observes downstream delivery after
+    // the Rust TUN write; this must never be inferred from completed_written.
+    pub delivered_available: bool,
+    pub delivered: u64,
+}
 
 impl ReinjectStats {
     pub(crate) fn is_empty(&self) -> bool {
@@ -520,6 +576,7 @@ struct CoreInner {
     /// write releases the exact ids without losing their terminal records.
     reserved: BTreeSet<u64>,
     announce_events: VecDeque<Vec<u8>>,
+    provenance: VecDeque<ReinjectProvenanceRow>,
     stats: ReinjectStats,
     shutdown: bool,
 }
@@ -540,6 +597,7 @@ impl ReinjectCore {
                 ready_count: 0,
                 reserved: BTreeSet::new(),
                 announce_events: VecDeque::new(),
+                provenance: VecDeque::new(),
                 stats: ReinjectStats::default(),
                 shutdown: false,
             }),
@@ -555,15 +613,28 @@ impl ReinjectCore {
 
     pub(crate) fn announce_epochs(
         &self,
+        run_id: &str,
+        generation: u64,
         permit_epoch: u64,
         permit_open: bool,
         queue_epochs: &[(u16, u64)],
     ) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let accepted = inner
-            .authority
-            .publish_announce(permit_epoch, permit_open, queue_epochs);
-        if !accepted {
+        let prev_run = inner.authority.run_id.clone();
+        let accepted = inner.authority.publish_announce(
+            run_id,
+            generation,
+            permit_epoch,
+            permit_open,
+            queue_epochs,
+        );
+        if accepted {
+            if !prev_run.is_empty() && prev_run.as_str() != run_id {
+                // A daemon restart starts a fresh run timeline; old-run
+                // provenance rows must not be relabeled under the new run.
+                inner.provenance.clear();
+            }
+        } else {
             inner.stats.epoch_rejects += 1;
         }
         accepted
@@ -574,9 +645,11 @@ impl ReinjectCore {
         inner.authority.reset_baseline();
     }
 
-    pub(crate) fn authority_snapshot(&self) -> (u64, bool, Vec<(u16, u64)>) {
+    pub(crate) fn authority_snapshot(&self) -> (String, u64, u64, bool, Vec<(u16, u64)>) {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         (
+            inner.authority.run_id.clone(),
+            inner.authority.generation,
             inner.authority.permit_epoch,
             inner.authority.open,
             inner.authority.queue_epochs.iter().map(|(n, e)| (*n, *e)).collect(),
@@ -1167,6 +1240,32 @@ impl ReinjectCore {
         stats.oldest_unacked_ms = oldest;
         stats
     }
+    pub(crate) fn status_snapshot(&self) -> Option<ReinjectStatusSnapshot> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.authority.run_id.is_empty() || inner.authority.generation == 0 {
+            return None;
+        }
+        let oldest = inner
+            .entries
+            .values()
+            .map(|entry| entry.since)
+            .min()
+            .map(|since| since.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let mut stats = inner.stats.clone();
+        stats.live_descriptors = inner.entries.len();
+        stats.oldest_unacked_ms = oldest;
+        Some(ReinjectStatusSnapshot {
+            run_id: inner.authority.run_id.clone(),
+            generation: inner.authority.generation,
+            permit_epoch: inner.authority.permit_epoch,
+            permit_open: inner.authority.open,
+            stats,
+            provenance: inner.provenance.iter().cloned().collect(),
+            delivered_available: false,
+            delivered: 0,
+        })
+    }
 
     pub(crate) fn record_class_admitted(&self, class: AdmissionClass) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1184,12 +1283,12 @@ impl ReinjectCore {
         outcome: ReinjectOutcome,
         bytes_written: u32,
     ) -> bool {
-        let (flow_tag, already_terminal) = {
+        let (flow_tag, already_terminal, provenance) = {
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return false;
             };
             let already = matches!(entry.state, EntryState::Terminal(_));
-            if !already {
+            let provenance = if !already {
                 entry.state = EntryState::Terminal(ReinjectCompletion {
                     request_id: id,
                     permit_epoch: entry.lease.permit_epoch,
@@ -1202,11 +1301,32 @@ impl ReinjectCore {
                     bytes_written,
                     flow_tag: entry.flow_tag,
                 });
-            }
-            (entry.flow_tag, already)
+                Some(ReinjectProvenanceRow {
+                    request_id: id,
+                    permit_epoch: entry.lease.permit_epoch,
+                    queue_epoch: entry.lease.queue_epoch,
+                    queue_number: entry.lease.queue_number,
+                    family: entry.origin.family,
+                    hook: entry.origin.hook,
+                    owned_ifindex: entry.origin.owned_ifindex,
+                    owner: entry.origin.owner.clone(),
+                    stn: entry.origin.stn.clone(),
+                    outcome: outcome.as_str().to_string(),
+                    bytes_written,
+                })
+            } else {
+                None
+            };
+            (entry.flow_tag, already, provenance)
         };
         if already_terminal {
             return false;
+        }
+        if let Some(row) = provenance {
+            inner.provenance.push_back(row);
+            while inner.provenance.len() > PROVENANCE_MAX {
+                inner.provenance.pop_front();
+            }
         }
         let _ = flow_tag;
         inner.ready_count += 1;
@@ -1491,8 +1611,15 @@ pub(crate) fn decode_cancel(payload: &[u8]) -> Result<CancelScope, CodecError> {
 }
 
 pub(crate) fn encode_announce(announcement: &AuthorityAnnouncement) -> Vec<u8> {
+    assert!(!announcement.run_id.is_empty());
+    assert!(announcement.run_id.len() <= RUN_ID_MAX);
+    assert!(announcement.generation != 0);
     assert!(announcement.queue_epochs.len() <= ANNOUNCE_MAX_QUEUES);
-    let mut out = Vec::with_capacity(11 + announcement.queue_epochs.len() * 10);
+    let mut out =
+        Vec::with_capacity(1 + announcement.run_id.len() + 19 + announcement.queue_epochs.len() * 10);
+    out.push(announcement.run_id.len() as u8);
+    out.extend_from_slice(announcement.run_id.as_bytes());
+    push_u64(&mut out, announcement.generation);
     push_u64(&mut out, announcement.permit_epoch);
     out.push(u8::from(announcement.permit_open));
     push_u16(&mut out, announcement.queue_epochs.len() as u16);
@@ -1507,6 +1634,16 @@ pub(crate) fn encode_announce(announcement: &AuthorityAnnouncement) -> Vec<u8> {
 
 pub(crate) fn decode_announce(payload: &[u8]) -> Result<AuthorityAnnouncement, CodecError> {
     let mut c = Cursor::new(payload);
+    let run_id_len = c.u8()? as usize;
+    if run_id_len == 0 || run_id_len > RUN_ID_MAX {
+        return Err(CodecError::BadValue);
+    }
+    let run_id =
+        String::from_utf8(c.take(run_id_len)?.to_vec()).map_err(|_| CodecError::BadValue)?;
+    let generation = c.u64()?;
+    if generation == 0 {
+        return Err(CodecError::BadValue);
+    }
     let permit_epoch = c.u64()?;
     let permit_open = match c.u8()? {
         0 => false,
@@ -1531,12 +1668,13 @@ pub(crate) fn decode_announce(payload: &[u8]) -> Result<AuthorityAnnouncement, C
         return Err(CodecError::TrailingBytes);
     }
     Ok(AuthorityAnnouncement {
+        run_id,
+        generation,
         permit_epoch,
         permit_open,
         queue_epochs,
     })
 }
-
 pub(crate) fn encode_admit(decisions: &[AdmitDecision]) -> Vec<u8> {
     assert!(decisions.len() <= SUBMIT_MAX_FRAMES);
     let mut out = Vec::with_capacity(2 + decisions.len() * 32);

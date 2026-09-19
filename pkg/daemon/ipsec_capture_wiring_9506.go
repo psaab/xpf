@@ -122,7 +122,7 @@ func ipsecCaptureQueueEpochSnapshot(handles []ipsecQueueHandle) []dpuserspace.Qu
 
 type ipsecReinjectSubmitter interface {
 	nfqueue.ReinjectSubmitter
-	AnnounceReinject(permitEpoch uint64, permitOpen bool, epochs []nfqueue.ReinjectQueueEpoch) error
+	AnnounceReinject(runID string, generation, permitEpoch uint64, permitOpen bool, epochs []nfqueue.ReinjectQueueEpoch) error
 	Close() error
 }
 
@@ -134,12 +134,15 @@ type ipsecCaptureRuntime struct {
 	actor      *IpsecCapturePipeline
 	submitter  ipsecReinjectSubmitter
 	spec       xnft.IpsecDivertSpec
+	runID      string
 
-	authorityMu     sync.Mutex
-	announced       bool
-	announcedPermit uint64
-	announcedOpen   bool
-	announcedRows   []nfqueue.ReinjectQueueEpoch
+	authorityMu         sync.Mutex
+	announced           bool
+	announcedRunID      string
+	announcedGeneration uint64
+	announcedPermit     uint64
+	announcedOpen       bool
+	announcedRows       []nfqueue.ReinjectQueueEpoch
 }
 
 func (r *ipsecCaptureRuntime) sameKeys(keys []ipsecQueueKey) bool {
@@ -169,36 +172,57 @@ func (r *ipsecCaptureRuntime) epochSnapshot() (uint64, []dpuserspace.QueueEpochS
 	return permit.permitEpoch, ipsecCaptureQueueEpochSnapshot(r.handles)
 }
 
-func (r *ipsecCaptureRuntime) authoritySnapshot() (uint64, bool, []nfqueue.ReinjectQueueEpoch) {
+func (r *ipsecCaptureRuntime) authoritySnapshot() (string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) {
 	if r == nil || r.supervisor == nil {
-		return 0, false, nil
+		return "", 0, 0, false, nil
 	}
 	permit := r.supervisor.loadPermit()
 	if permit == nil {
-		return 0, false, nil
+		return r.runID, r.generation(), 0, false, nil
+	}
+	runID := r.runID
+	generation := r.generation()
+	if r.actor != nil {
+		status := r.actor.Status()
+		if status.RunID != "" {
+			runID = status.RunID
+		}
+		if status.Generation != 0 {
+			generation = status.Generation
+		}
 	}
 	rows := ipsecCaptureQueueEpochSnapshot(r.handles)
 	wireRows := make([]nfqueue.ReinjectQueueEpoch, 0, len(rows))
 	for _, row := range rows {
 		wireRows = append(wireRows, nfqueue.ReinjectQueueEpoch{Queue: row.Queue, Epoch: row.Epoch})
 	}
-	return permit.permitEpoch, permit.state == ipsecPermitOpen, wireRows
+	return runID, generation, permit.permitEpoch, permit.state == ipsecPermitOpen, wireRows
+}
+
+func (r *ipsecCaptureRuntime) generation() uint64 {
+	if r == nil || len(r.handles) == 0 {
+		return 0
+	}
+	return r.handles[0].Key.Generation
 }
 
 func (r *ipsecCaptureRuntime) announceAuthorityLocked() error {
 	if r == nil || r.submitter == nil {
 		return nil
 	}
-	permitEpoch, permitOpen, wireRows := r.authoritySnapshot()
-	if r.announced && r.announcedPermit == permitEpoch && r.announcedOpen == permitOpen &&
+	runID, generation, permitEpoch, permitOpen, wireRows := r.authoritySnapshot()
+	if r.announced && r.announcedRunID == runID && r.announcedGeneration == generation &&
+		r.announcedPermit == permitEpoch && r.announcedOpen == permitOpen &&
 		sameReinjectQueueEpochs(r.announcedRows, wireRows) {
 		return nil
 	}
-	if err := r.submitter.AnnounceReinject(permitEpoch, permitOpen, wireRows); err != nil {
+	if err := r.submitter.AnnounceReinject(runID, generation, permitEpoch, permitOpen, wireRows); err != nil {
 		r.announced = false
 		return err
 	}
 	r.announced = true
+	r.announcedRunID = runID
+	r.announcedGeneration = generation
 	r.announcedPermit = permitEpoch
 	r.announcedOpen = permitOpen
 	r.announcedRows = append(r.announcedRows[:0], wireRows...)
@@ -437,6 +461,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		actor:      actor,
 		submitter:  submitter,
 		spec:       spec,
+		runID:      actor.Status().RunID,
 	}
 	d.ipsecCaptureStaged = staged
 	d.ipsecCaptureStagePending = true

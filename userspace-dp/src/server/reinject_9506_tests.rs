@@ -383,6 +383,8 @@ fn announce_before_target_install_is_handed_off_before_submit() {
     });
 
     let announcement = crate::slowpath_reinject_9506::AuthorityAnnouncement {
+        run_id: "run-1".to_string(),
+        generation: 4,
         permit_epoch: PERMIT,
         permit_open: true,
         queue_epochs: vec![(1, QEPOCH)],
@@ -394,13 +396,13 @@ fn announce_before_target_install_is_handed_off_before_submit() {
         ))
         .unwrap();
     for _ in 0..100 {
-        if fallback.authority_snapshot().0 == PERMIT {
+        if fallback.authority_snapshot().2 == PERMIT {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(
-        fallback.authority_snapshot().0,
+        fallback.authority_snapshot().2,
         PERMIT,
         "ANNOUNCE must apply while no target is installed"
     );

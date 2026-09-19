@@ -411,6 +411,136 @@ impl From<crate::slowpath::SlowPathStatus> for SlowPathStatus {
         }
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct S5ReinjectProvenance {
+    #[serde(default)]
+    pub request_id: u64,
+    #[serde(default)]
+    pub permit_epoch: u64,
+    #[serde(default)]
+    pub queue_epoch: u64,
+    #[serde(default)]
+    pub queue_number: u16,
+    #[serde(default)]
+    pub family: u8,
+    #[serde(default)]
+    pub hook: u8,
+    #[serde(default)]
+    pub owned_ifindex: u32,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub stn: String,
+    #[serde(default)]
+    pub outcome: String,
+    #[serde(default)]
+    pub bytes_written: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct S5ReinjectStatus {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub permit_epoch: u64,
+    #[serde(default)]
+    pub permit_state: String,
+    #[serde(default)]
+    pub live_descriptors: usize,
+    #[serde(default)]
+    pub oldest_unacked_ms: u64,
+    #[serde(default)]
+    pub completed_written: u64,
+    #[serde(default)]
+    pub reinjected: u64,
+    #[serde(default)]
+    pub completed_stale: u64,
+    #[serde(default)]
+    pub completed_cancelled: u64,
+    #[serde(default)]
+    pub completed_refused: u64,
+    #[serde(default)]
+    pub completed_uncertain: u64,
+    #[serde(default)]
+    pub adjudicated_admitted: u64,
+    #[serde(default)]
+    pub adjudicated_refused: u64,
+    #[serde(default)]
+    pub delegated_admitted: u64,
+    #[serde(default)]
+    pub delegated_refused: u64,
+    #[serde(default)]
+    pub purged_queued: u64,
+    #[serde(default)]
+    pub purged_unacked: u64,
+    #[serde(default)]
+    pub epoch_rejects: u64,
+    #[serde(default)]
+    pub dry_run_admitted: u64,
+    #[serde(default)]
+    pub dry_run_refused: u64,
+    #[serde(default)]
+    pub non_dry_run_refused: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<S5ReinjectProvenance>,
+    /// No downstream product-owned witness exists after the TUN write yet;
+    /// never alias completed_written/reinjected into delivered.
+    #[serde(default)]
+    pub delivered_available: bool,
+    #[serde(default)]
+    pub delivered: u64,
+}
+
+impl From<crate::slowpath_reinject_9506::ReinjectStatusSnapshot> for S5ReinjectStatus {
+    fn from(value: crate::slowpath_reinject_9506::ReinjectStatusSnapshot) -> Self {
+        let stats = value.stats;
+        Self {
+            run_id: value.run_id,
+            generation: value.generation,
+            permit_epoch: value.permit_epoch,
+            permit_state: if value.permit_open { "OPEN" } else { "CLOSED" }.to_string(),
+            live_descriptors: stats.live_descriptors,
+            oldest_unacked_ms: stats.oldest_unacked_ms,
+            completed_written: stats.completed_written,
+            reinjected: stats.completed_written,
+            completed_stale: stats.completed_stale,
+            completed_cancelled: stats.completed_cancelled,
+            completed_refused: stats.completed_refused,
+            completed_uncertain: stats.completed_uncertain,
+            adjudicated_admitted: stats.adjudicated_admitted,
+            adjudicated_refused: stats.adjudicated_refused,
+            delegated_admitted: stats.delegated_admitted,
+            delegated_refused: stats.delegated_refused,
+            purged_queued: stats.purged_queued,
+            purged_unacked: stats.purged_unacked,
+            epoch_rejects: stats.epoch_rejects,
+            dry_run_admitted: stats.dry_run_admitted,
+            dry_run_refused: stats.dry_run_refused,
+            non_dry_run_refused: stats.non_dry_run_refused,
+            provenance: value
+                .provenance
+                .into_iter()
+                .map(|row| S5ReinjectProvenance {
+                    request_id: row.request_id,
+                    permit_epoch: row.permit_epoch,
+                    queue_epoch: row.queue_epoch,
+                    queue_number: row.queue_number,
+                    family: row.family,
+                    hook: row.hook,
+                    owned_ifindex: row.owned_ifindex,
+                    owner: row.owner,
+                    stn: row.stn,
+                    outcome: row.outcome,
+                    bytes_written: row.bytes_written,
+                })
+                .collect(),
+            delivered_available: value.delivered_available,
+            delivered: value.delivered,
+        }
+    }
+}
 
 /// #1434: one WG PEER's telemetry row inside a `WgTunnelStatus`. The
 /// Go mirror is `WgPeerStatus` in `pkg/dataplane/userspace/protocol.go`

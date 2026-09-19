@@ -23,6 +23,7 @@ const (
 	reinjectMaxData        = 65535
 	reinjectMaxMessage     = 1 << 20
 	reinjectMaxQueues      = 128
+	reinjectMaxRunID       = 64
 	reinjectOriginInet     = 1
 	reinjectOriginBridge   = 2
 	reinjectOriginForward  = 1
@@ -221,20 +222,27 @@ func (s *SocketReinjectSubmitter) roundTripLocked(conn net.Conn, typ byte, paylo
 	return response, nil
 }
 
-// AnnounceReinject publishes the current permit/queue authority on the
-// persistent submit stream. Unlike submit/cancel it has no response frame;
-// subsequent submits still receive their normal ADMIT response.
-func (s *SocketReinjectSubmitter) AnnounceReinject(permitEpoch uint64, permitOpen bool, epochs []ReinjectQueueEpoch) error {
+// AnnounceReinject publishes the current permit/queue authority and its
+// run/generation join key on the persistent submit stream. Unlike submit/
+// cancel it has no response frame; subsequent submits still receive their
+// normal ADMIT response.
+func (s *SocketReinjectSubmitter) AnnounceReinject(runID string, generation, permitEpoch uint64, permitOpen bool, epochs []ReinjectQueueEpoch) error {
 	if s == nil {
 		return errors.New("nfqueue: nil reinject socket client")
 	}
 	if len(epochs) > reinjectMaxQueues {
 		return fmt.Errorf("nfqueue: reinject authority has %d queues, cap %d", len(epochs), reinjectMaxQueues)
 	}
+	if !utf8.ValidString(runID) || len(runID) == 0 || len(runID) > reinjectMaxRunID {
+		return errors.New("nfqueue: reinject authority requires a bounded UTF-8 run id")
+	}
+	if generation == 0 {
+		return errors.New("nfqueue: reinject authority requires generation")
+	}
 	if permitOpen && permitEpoch == 0 {
 		return errors.New("nfqueue: open reinject authority requires permit epoch")
 	}
-	payload, err := encodeAnnounce(permitEpoch, permitOpen, epochs)
+	payload, err := encodeAnnounce(runID, generation, permitEpoch, permitOpen, epochs)
 	if err != nil {
 		return err
 	}
@@ -282,14 +290,23 @@ func (s *SocketReinjectSubmitter) Close() error {
 	return firstErr
 }
 
-func encodeAnnounce(permitEpoch uint64, permitOpen bool, epochs []ReinjectQueueEpoch) ([]byte, error) {
+func encodeAnnounce(runID string, generation, permitEpoch uint64, permitOpen bool, epochs []ReinjectQueueEpoch) ([]byte, error) {
 	if len(epochs) > reinjectMaxQueues {
 		return nil, fmt.Errorf("nfqueue: reinject authority has %d queues, cap %d", len(epochs), reinjectMaxQueues)
+	}
+	if !utf8.ValidString(runID) || len(runID) == 0 || len(runID) > reinjectMaxRunID {
+		return nil, errors.New("nfqueue: reinject authority requires a bounded UTF-8 run id")
+	}
+	if generation == 0 {
+		return nil, errors.New("nfqueue: reinject authority requires generation")
 	}
 	if permitOpen && permitEpoch == 0 {
 		return nil, errors.New("nfqueue: open reinject authority requires permit epoch")
 	}
-	out := make([]byte, 0, 11+len(epochs)*10)
+	out := make([]byte, 0, 1+len(runID)+19+len(epochs)*10)
+	out = append(out, byte(len(runID)))
+	out = append(out, runID...)
+	putU64(&out, generation)
 	putU64(&out, permitEpoch)
 	if permitOpen {
 		out = append(out, 1)

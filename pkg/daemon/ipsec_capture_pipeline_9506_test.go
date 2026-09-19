@@ -39,6 +39,29 @@ func TestIpsecCapturePipelineDefaultInactive9506(t *testing.T) {
 		t.Fatal("actor active after Stop")
 	}
 }
+func TestIpsecCapturePipelineDefaultRunIDIsProcessLifetime9506(t *testing.T) {
+	registry := new(nfqueue.OriginRegistry)
+	first, err := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{
+		Supervisor: newIpsecSupervisor(),
+		Registry:   registry,
+		Pipeline:   nfqueue.CapturePipelineConfig{Phase: nfqueue.PipelineQuarantine},
+	})
+	if err != nil {
+		t.Fatalf("first actor: %v", err)
+	}
+	second, err := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{
+		Supervisor: newIpsecSupervisor(),
+		Registry:   registry,
+		Pipeline:   nfqueue.CapturePipelineConfig{Phase: nfqueue.PipelineQuarantine},
+	})
+	if err != nil {
+		t.Fatalf("second actor: %v", err)
+	}
+	firstRunID := first.Status().RunID
+	if firstRunID == "" || firstRunID != second.Status().RunID {
+		t.Fatalf("process run IDs=%q/%q, want one nonempty lifetime ID", firstRunID, second.Status().RunID)
+	}
+}
 
 func TestIpsecCapturePipelineRotationStageActivateRollback9506(t *testing.T) {
 	actor, err := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{Supervisor: newIpsecSupervisor(), Registry: new(nfqueue.OriginRegistry), Pipeline: nfqueue.CapturePipelineConfig{Phase: nfqueue.PipelineQuarantine}})

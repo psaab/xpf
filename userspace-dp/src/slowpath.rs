@@ -1,7 +1,7 @@
 use crate::io_uring_write::WriteResult;
 use crate::slowpath_reinject_9506::{
-    classify_leased_write, AdmissionClass, AdmitDecision, ReinjectCore, ReinjectLease, SubmitFrame,
-    TransferVerdict, ADMIT_BAD_LEASE, SUBMIT_FLAG_DRY_RUN,
+    classify_leased_write, AdmissionClass, AdmitDecision, ReinjectCore, ReinjectLease,
+    ReinjectStatusSnapshot, SubmitFrame, TransferVerdict, ADMIT_BAD_LEASE, SUBMIT_FLAG_DRY_RUN,
 };
 use std::ffi::CString;
 use std::fs::OpenOptions;
@@ -1315,6 +1315,9 @@ impl SlowPathReinjector {
 
     pub(crate) fn reinject_stats(&self) -> crate::slowpath_reinject_9506::ReinjectStats {
         self.reinject_core.stats_snapshot()
+    }
+    pub(crate) fn reinject_status(&self) -> Option<ReinjectStatusSnapshot> {
+        self.reinject_core.status_snapshot()
     }
     pub fn status(&self) -> SlowPathStatus {
         self.status.snapshot()

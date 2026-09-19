@@ -284,6 +284,16 @@ type xpfCollector struct {
 	managementListenerState  *prometheus.Desc
 	helperCrashEpisodesTotal *prometheus.Desc
 	forwardingSupported      *prometheus.Desc
+	// #10478: authenticated S5 capture actor/reinject witness. All samples
+	// share run_id/generation/permit_epoch labels so Go and Rust surfaces join
+	// without treating a process-local counter as a packet outcome.
+	ipsecCaptureActorActive      *prometheus.Desc
+	ipsecCapturePermitState      *prometheus.Desc
+	ipsecCaptureConsumedTotal    *prometheus.Desc
+	ipsecCaptureAdjudicatedTotal *prometheus.Desc
+	ipsecCaptureReinjectedTotal  *prometheus.Desc
+	ipsecCaptureDeliveredAvail   *prometheus.Desc
+	ipsecCaptureDeliveredTotal   *prometheus.Desc
 
 	// #3780: 0/1 gauge — 1 while the most recent scheduler-driven policy
 	// republish failed and has not yet converged (stale enforcement past
@@ -970,6 +980,13 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.managementListenerState
 	ch <- c.helperCrashEpisodesTotal
 	ch <- c.forwardingSupported
+	ch <- c.ipsecCaptureActorActive
+	ch <- c.ipsecCapturePermitState
+	ch <- c.ipsecCaptureConsumedTotal
+	ch <- c.ipsecCaptureAdjudicatedTotal
+	ch <- c.ipsecCaptureReinjectedTotal
+	ch <- c.ipsecCaptureDeliveredAvail
+	ch <- c.ipsecCaptureDeliveredTotal
 	ch <- c.configPersistDegraded
 	ch <- c.rollbackHistoryDegraded
 	ch <- c.journalPermsDegraded
@@ -1518,6 +1535,7 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// would blank the counter in exactly that case.
 	c.collectHelperCrashEpisodes(ch)
 	c.collectForwardingSupported(ch)
+	c.collectIpsecCaptureWitness(ch)
 
 	// #3780: scheduler republish-failure is a control-plane signal (the
 	// policy scheduler runs even in config-only mode) — emit it BEFORE

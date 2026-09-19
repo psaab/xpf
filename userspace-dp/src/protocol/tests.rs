@@ -17,7 +17,7 @@
 //! `crate::protocol::X` form for this purpose.
 
 use super::*;
-
+use crate::slowpath_reinject_9506::{ReinjectStats, ReinjectStatusSnapshot};
 
 // #3070: ZoneSnapshot host-inbound-traffic fields round-trip on the Go↔Rust
 // wire. The Go control plane (pkg/dataplane/userspace) emits exactly these
@@ -3491,4 +3491,67 @@ fn process_status_policy_revoked_sessions_total_roundtrip_10021() {
     let legacy: ProcessStatus =
         serde_json::from_value(value).expect("a status without the key must decode");
     assert_eq!(legacy.policy_revoked_sessions_total, 0);
+}
+#[test]
+fn process_status_s5_reinject_absent_vs_zero_and_written_not_delivered_10478() {
+    let absent = serde_json::to_value(ProcessStatus::default()).expect("serialize empty status");
+    assert!(absent.get("s5_reinject").is_none());
+
+    let witness: S5ReinjectStatus = ReinjectStatusSnapshot {
+        run_id: "run-1".to_string(),
+        generation: 4,
+        permit_epoch: 7,
+        permit_open: true,
+        stats: ReinjectStats {
+            completed_written: 3,
+            ..Default::default()
+        },
+        provenance: Vec::new(),
+        delivered_available: false,
+        delivered: 0,
+    }
+    .into();
+    let status = ProcessStatus {
+        s5_reinject: Some(witness),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&status).expect("serialize S5 witness");
+    assert_eq!(value["s5_reinject"]["run_id"], "run-1");
+    assert_eq!(value["s5_reinject"]["completed_written"], 3);
+    assert_eq!(value["s5_reinject"]["reinjected"], 3);
+    assert_eq!(value["s5_reinject"]["delivered_available"], false);
+    assert_eq!(value["s5_reinject"]["delivered"], 0);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize S5 witness");
+    let witness = back.s5_reinject.expect("present witness round-trips");
+    assert_eq!(witness.generation, 4);
+    assert_eq!(witness.completed_written, 3);
+    assert!(!witness.delivered_available);
+    assert_eq!(witness.delivered, 0);
+
+    let zero: S5ReinjectStatus = ReinjectStatusSnapshot {
+        run_id: "run-zero".to_string(),
+        generation: 5,
+        permit_epoch: 8,
+        permit_open: false,
+        stats: ReinjectStats::default(),
+        provenance: Vec::new(),
+        delivered_available: false,
+        delivered: 0,
+    }
+    .into();
+    let zero_value = serde_json::to_value(ProcessStatus {
+        s5_reinject: Some(zero),
+        ..Default::default()
+    })
+    .expect("serialize zero S5 witness");
+    let zero_block = &zero_value["s5_reinject"];
+    for key in [
+        "completed_written",
+        "reinjected",
+        "adjudicated_admitted",
+        "delegated_refused",
+        "delivered",
+    ] {
+        assert_eq!(zero_block[key], 0, "zero counter {key} must be explicit");
+    }
 }

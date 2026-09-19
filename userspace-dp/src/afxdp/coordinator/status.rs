@@ -929,6 +929,16 @@ impl super::Coordinator {
             .map(|slow| slow.delegated_status())
             .unwrap_or_else(|| self.last_slow_path_delegated_status.clone())
     }
+    /// #10478: q0 reinject witness. Absence means no daemon authority
+    /// announcement has supplied a join key; present zero counters are real.
+    pub fn s5_reinject_status(
+        &self,
+    ) -> Option<crate::slowpath_reinject_9506::ReinjectStatusSnapshot> {
+        self.slow_path
+            .as_ref()
+            .and_then(|slow| slow.reinject_status())
+            .or_else(|| self.last_s5_reinject_status.clone())
+    }
 
     pub fn cos_statuses(&self) -> Vec<crate::protocol::CoSInterfaceStatus> {
         let snapshots: Vec<Vec<_>> = self

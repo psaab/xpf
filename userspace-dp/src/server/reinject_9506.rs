@@ -168,6 +168,8 @@ fn serve_submit_conn_with_running(
                     Err(_) => break,
                 };
                 core.announce_epochs(
+                    &announcement.run_id,
+                    announcement.generation,
                     announcement.permit_epoch,
                     announcement.permit_open,
                     &announcement.queue_epochs,

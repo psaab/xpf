@@ -277,6 +277,9 @@ pub struct Coordinator {
     /// #10069: last published status for the delegated slow-path outlet,
     /// retained across teardown when no live reinjector is present.
     pub(crate) last_slow_path_delegated_status: SlowPathStatus,
+    /// #10478: q0 authority/outcome witness retained across slow-path teardown.
+    pub(crate) last_s5_reinject_status:
+        Option<crate::slowpath_reinject_9506::ReinjectStatusSnapshot>,
     /// #2408/#5801/#6097: the last snapshot slow-path MTU the day-2 reconcile
     /// ATTEMPTED on the live (preserved) reinjector. Since #5801 the reconcile
     /// reprograms the running TUN via `SIOCSIFMTU` rather than only warning, so
@@ -543,6 +546,7 @@ impl Coordinator {
             wg_control_threads: BTreeMap::new(),
             last_slow_path_status: SlowPathStatus::default(),
             last_slow_path_delegated_status: SlowPathStatus::default(),
+            last_s5_reinject_status: None,
             last_slow_path_mtu_reconciled: 0,
             ha,
             cos: SharedCoSState::new(),
@@ -929,6 +933,10 @@ impl Coordinator {
             .as_ref()
             .map(|slow| slow.delegated_status())
             .unwrap_or_default();
+        self.last_s5_reinject_status = self
+            .slow_path
+            .as_ref()
+            .and_then(|slow| slow.reinject_status());
         self.slow_path = None;
         // #7209: ONE store of the whole set; the previous set's fds close when
         // the last holder releases (see `BpfMaps`). With no readers this is
