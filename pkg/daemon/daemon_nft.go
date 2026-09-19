@@ -774,13 +774,15 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 			"err", err)
 	}
 	// #5566: reconcile Linux netfilter conntrack against the just-applied
-	// host-inbound set. The chain's leading `ct state established,related accept`
-	// precedes the per-zone coarse drops and table replacement does not flush
-	// conntrack, so an EXISTING direct-kernel connection admitted under a looser
-	// prior config would keep that authorization after a service is removed. Flush
-	// the now-denied host-directed entries so the next original-direction packet is
-	// re-evaluated against the current rules — mirroring the Rust userspace
-	// local-delivery per-hit re-eval/teardown. Best effort (see the function doc):
+	// host-inbound set. The early reply-direction established accept precedes
+	// the per-zone coarse drops, while original-direction established traffic
+	// is re-evaluated by ingress rules before the residual established accept.
+	// Table replacement does not flush conntrack, so an EXISTING direct-kernel
+	// connection admitted under a looser prior config could otherwise keep that
+	// authorization after a service is removed. Flush the now-denied host-directed
+	// entries so the next original-direction packet is re-evaluated against the
+	// current rules — mirroring the Rust userspace local-delivery per-hit
+	// re-eval/teardown. Best effort (see the function doc):
 	// enforcement for NEW connections is already in place, so a flush failure never
 	// fails the commit.
 	// #6802: record the outcome as retry DEBT. Still not a commit failure — the
@@ -1311,11 +1313,14 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 // distinct from the xpf_lo0 chain's priority 0 so this host-inbound backstop
 // evaluates AFTER the lo0 input filter, #3364):
 //
-//  1. ct state established,related accept   — return/ongoing host traffic.
+//  1. meta l4proto { 50, 51 } accept — raw ESP/AH exemption for
+//     host-terminated IPsec (mirrors the userspace
+//     stage_ipsec_passthrough_check); the kernel XFRM stack decrypts before
+//     any host-inbound deny can apply.
 //
-//  2. meta l4proto { 50, 51 } accept — raw ESP/AH exemption for host-terminated
-//     IPsec (mirrors the userspace stage_ipsec_passthrough_check); the kernel
-//     XFRM stack decrypts before any host-inbound deny can apply.
+//  2. ct state established,related ct direction reply accept — only
+//     firewall-originated reply traffic is admitted before ingress judgement;
+//     original-direction established traffic is intentionally re-evaluated.
 //
 //  3. icmpv6 ND + error/PMTUD accept, icmp error/PMTUD accept — IPv6 Neighbor
 //     Discovery and v4/v6 PMTUD/error control messages (dest-unreachable,
@@ -1333,7 +1338,14 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     only), so it mirrors the shim's local-destination scope without touching
 //     transit UDP; only the WG port is opened, so the restricted default holds.
 //
-//  4. Per host-inbound-configured zone, per family with addresses:
+//  4. Ingress-zone rules: match each view's effective ingress netdevs against
+//     every judged local address. Ambiguous effective targets instead receive
+//     an unconditional drop, so no destination-only fallback can admit them.
+//
+//  5. ct state established,related accept — residual original-direction
+//     established traffic that survived ingress judgement.
+//
+//  6. Per host-inbound-configured zone, per family with addresses:
 //     - if `any-service`: <fam> daddr <addrs> accept (and no deny — the
 //     operator opened the zone to all services). NOT `all`: #3226 narrowed
 //     `all` to the named union, so it flows through the per-match path below.
@@ -1459,8 +1471,9 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 	// residual full established accept, because Rust runs the fine junos-host
 	// policy after coarse ND/PMTUD admission (a denied source's ND/PMTUD/original-
 	// direction-established inbound MUST also be dropped, mirroring the per-hit
-	// re-eval/teardown at poll_descriptor/mod.rs:1291). With no junos-host program
-	// the chain is byte-identical to the pre-#4146 order.
+	// re-eval/teardown at poll_descriptor/mod.rs:1291). Both chain shapes keep
+	// the reply-direction split; original-direction established traffic is
+	// re-evaluated by ingress rules before the residual established accept.
 	if len(programs) > 0 {
 		// (1) Raw ESP (50) / AH (51) — GENUINELY fine-exempt: the userspace IPsec
 		// passthrough stage returns before the fine junos-host policy, and the
@@ -1484,10 +1497,7 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		// junos-host` deny of a WG source still wins; it is a coarse admit like
 		// the ND/PMTUD accepts.
 		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
-		// (5) Residual full established accept (non-denied established inbound).
-		rules = append(rules, "    ct state established,related accept")
 	} else {
-		rules = append(rules, "    ct state established,related accept")
 		// Raw ESP (50) / AH (51) are exempt from host-inbound enforcement so the
 		// kernel XFRM stack can decrypt host-terminated IPsec — mirroring the
 		// userspace stage_ipsec_passthrough_check, which runs BEFORE
@@ -1500,6 +1510,10 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		// regression once #3070 turns a previously-no-op `ike` stanza into real
 		// enforcement.
 		rules = append(rules, "    meta l4proto { 50, 51 } accept")
+		// Firewall-ORIGINATED reply traffic is accepted before ingress
+		// adjudication; original-direction established traffic reaches the
+		// residual accept only after the ingress-zone rules below.
+		rules = append(rules, "    ct state established,related ct direction reply accept")
 		emitHostInboundICMPAccepts(&rules)
 		// #5582: coarse WireGuard listen-port admission (see
 		// emitHostInboundWireGuardAccept). A single global accept on the input
@@ -1515,19 +1529,21 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		emitHostInboundReinjectAccept(&rules, "ip", reinjectV4)
 		emitHostInboundReinjectAccept(&rules, "ip6", reinjectV6)
 	}
-
 	// #9637: the ingress-zone rules come first. A packet that arrives on a
 	// view's own netdev is judged by that view's zone, whichever judged address
-	// it names, and ends here: a listed service accepts it, or the drop does. A
-	// packet on any other netdev matches none of these rules and meets the
-	// destination-address rules below, which are unchanged. A netdev the scope
-	// leaves out is judged exactly as before, and no packet reaches the accept
-	// policy that did not before, because both rule sets judge the same
-	// destination addresses.
+	// it names, and ends here: a listed service accepts it, or the drop does. An
+	// ambiguous effective netdev gets a fail-closed drop instead of a
+	// destination-only fallback. A packet on any other netdev reaches the
+	// residual established accept (after ingress judgement) or the
+	// destination-address rules below.
 	for _, v := range views {
 		emitHostInboundZoneIngress(&rules, v, "ip", ingressV4)
 		emitHostInboundZoneIngress(&rules, v, "ip6", ingressV6)
 	}
+	// Original-direction established host traffic reaches this residual accept
+	// only after ingress-zone judgement. This preserves established sessions on
+	// admitted ingress scopes while stale cross-zone sessions hit their drop.
+	rules = append(rules, "    ct state established,related accept")
 	for _, v := range views {
 		emitHostInboundZone(&rules, v, "ip", v.V4Addrs)
 		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs)
@@ -1580,11 +1596,12 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 // The XDP shim deliberately steers local-destination UDP on the configured WG
 // listen ports to the kernel (userspace-xdp wg_steer_to_kernel) so the userspace
 // WireGuard control socket receives the outer transport. Without this accept a
-// FRESH passive (responder-only) handshake — conntrack NEW, so the leading
-// `ct state established,related accept` does not cover it — misses the per-zone
-// service accepts and is dropped by the host-inbound catch-all (or the #4420
-// addressed-but-unzoned catch-all), so a supported responder-only WireGuard
-// listener can never come up on a restricted zoned address.
+// FRESH passive (responder-only) handshake — conntrack NEW, so neither the
+// early reply-direction established accept nor the residual full established
+// accept covers it — misses the per-zone service accepts and is dropped by the
+// host-inbound catch-all (or the #4420 addressed-but-unzoned catch-all), so a
+// supported responder-only WireGuard listener can never come up on a restricted
+// zoned address.
 //
 // The rule is emitted ONCE, not per zone. The nft input hook only ever sees
 // host-destined packets, so a bare `udp dport <port>` admits the WG port to
@@ -1897,9 +1914,9 @@ func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, fam
 	// ident-reset actively RESETS inbound ident (auth/TCP-113) probes rather
 	// than admitting them, so its rule carries `reject with tcp reset`. The
 	// reject rule is emitted here, BEFORE the catch-all drop below, so a fresh
-	// ident SYN (no `established` state) hits it; the leading
-	// `ct state established,related accept` and the global ND/ESP/ICMP accepts
-	// still precede it (a fresh probe is a SYN, so this is fine).
+	// ident SYN (no `established` state) hits it; the residual established
+	// accept and the global ND/ESP/ICMP accepts precede it (a fresh probe is a
+	// SYN, so this is fine).
 	for _, m := range rulesSet {
 		*rules = append(*rules, "    "+daddr+" "+m.match+" "+m.action)
 	}

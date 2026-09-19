@@ -68,11 +68,14 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 				t.Errorf("missing v6 reinject accept:\n%s\npayload:\n%s", wantV6, payload)
 			}
 			lines := strings.Split(payload, "\n")
-			acceptIdx, firstIngressIdx := -1, -1
+			acceptIdx, firstIngressIdx, residualIdx := -1, -1, -1
 			for i, l := range lines {
 				s := strings.TrimSpace(l)
 				if strings.Contains(l, `"xpf-usp0"`) {
 					acceptIdx = i
+				}
+				if s == "ct state established,related accept" {
+					residualIdx = i
 				}
 				// Program jumps also carry iifname but no daddr; the first
 				// ingress-zone rule is the first iifname+daddr line that is
@@ -87,11 +90,16 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 			if firstIngressIdx < 0 || acceptIdx > firstIngressIdx {
 				t.Errorf("reinject accept (line %d) must precede the first ingress-zone rule (line %d)", acceptIdx, firstIngressIdx)
 			}
-			// The global accepts precede the reinject accept in both shapes.
-			for _, global := range []string{"ct state established,related accept", "meta l4proto { 50, 51 } accept"} {
+			// Reply-direction established and raw ESP/AH accepts precede the
+			// reinject accept. Original-direction established traffic is
+			// re-evaluated by ingress rules before the residual accept.
+			for _, global := range []string{"ct state established,related ct direction reply accept", "meta l4proto { 50, 51 } accept"} {
 				if idx := strings.Index(payload, global); idx < 0 || strings.Index(payload, `"xpf-usp0"`) < idx {
 					t.Errorf("global %q must precede the reinject accept", global)
 				}
+			}
+			if residualIdx < 0 || firstIngressIdx < 0 || residualIdx < firstIngressIdx {
+				t.Errorf("residual established accept (line %d) must follow the first ingress-zone rule (line %d)", residualIdx, firstIngressIdx)
 			}
 			if tc.name == "with-programs" && !strings.Contains(payload, "jump") {
 				t.Error("with-programs shape must render program jumps ahead of the accept")

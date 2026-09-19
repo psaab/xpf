@@ -43,10 +43,17 @@ type ZoneHostInboundView struct {
 	// packets this view judges, whichever local address they name. They come
 	// from the view's own interfaces, minus three kinds: a netdev another view
 	// also claims, a lifeline's netdev, and a netdev enslaved to an l3mdev VRF.
-	// See hostInboundViewIngressNetdevs. Empty means the view judges by
-	// destination address only, as before #9637.
+	// VRF slaves are represented by their VRF master, which is the device name
+	// visible at LOCAL_IN. See hostInboundViewIngressNetdevsWithMasters.
 	IngressNetdevs []string
+	// IngressDenyNetdevs (#10431) are netdevs whose host-inbound claims could
+	// not be assigned to one unambiguous view (for example, a shared parent).
+	// The renderer emits an unconditional drop for every judged destination
+	// before destination-only rules, disabling the unsafe fallback. They are
+	// attached to one view only so each fail-closed guard is emitted once.
+	IngressDenyNetdevs []string
 }
+
 // stableRethLinkLocalTarget identifies one logical interface on which the
 // daemon may install the deterministic RETH router link-local. The value is
 // deliberately derived from config, not a live interface snapshot: the
@@ -161,7 +168,6 @@ func stableRethUnitHasIPv6(unit *config.InterfaceUnit) bool {
 	return unit.DHCPv6
 }
 
-
 // BuildZoneHostInboundViews returns one ZoneHostInboundView per configured
 // security zone (#3070; #3405 default-deny parity — every zone enforces, see
 // below), resolving each zone's firewall-local
@@ -218,6 +224,15 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 	lifelineShared := hostInboundLifelineSharedAddrs(cfg)
 	// #9637: netdevs that can never be an ingress scope.
 	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
+	vrfMasters := hostInboundVRFMasterNetdevs(cfg, ifaceSnaps)
+	if len(vrfMasters) > 0 {
+		if vrfEnslaved == nil {
+			vrfEnslaved = map[string]bool{}
+		}
+		for slave := range vrfMasters {
+			vrfEnslaved[slave] = true
+		}
+	}
 	// #3362: per-interface host-inbound override lookup (ref → override, with
 	// physical→unit expansion). An interface that declares an override is
 	// described ENTIRELY by it — the zone-level set is REPLACED, not unioned
@@ -503,7 +518,6 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		addAddr(getGroup(zoneName, svc, proto, target.iface), target.addr)
 	}
 
-
 	// Emit groups deterministically: the signature begins with the zone name,
 	// so sorting by signature orders views by zone then by token set. Addresses
 	// within a view are sorted for a reproducible nft payload.
@@ -511,6 +525,7 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 	for sig := range groups {
 		sigs = append(sigs, sig)
 	}
+	ambiguousIngressNetdevs := hostInboundViewIngressDenyNetdevs(netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters)
 	sort.Strings(sigs)
 	out := make([]ZoneHostInboundView, 0, len(sigs))
 	for _, sig := range sigs {
@@ -547,42 +562,148 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 			v4 = withoutLifelineShared(v4, lifelineShared)
 			v6 = withoutLifelineShared(v6, lifelineShared)
 		}
-		out = append(out, ZoneHostInboundView{
+		view := ZoneHostInboundView{
 			Zone:           g.zone,
 			Interfaces:     ifaces,
 			SystemServices: g.svc,
 			Protocols:      g.proto,
 			V4Addrs:        v4,
 			V6Addrs:        v6,
-			IngressNetdevs: hostInboundViewIngressNetdevs(sig, netdevSigs, lifelineNetdevs, vrfEnslaved),
-		})
+			IngressNetdevs: hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
+		}
+		if len(out) == 0 {
+			view.IngressDenyNetdevs = ambiguousIngressNetdevs
+		}
+		out = append(out, view)
 	}
 	return out
 }
 
-// hostInboundViewIngressNetdevs returns, sorted, the netdevs a view judges by
-// ingress (#9637): the ones this view's group claims and no other group does.
-// It leaves out:
-//   - a netdev claimed by two groups, in one zone or in two. Whichever group's
-//     rules came first would decide, which is the #3718 ambiguity in another
-//     shape;
-//   - a lifeline's netdev, so management and cluster control are never judged
-//     by a data zone;
-//   - a netdev enslaved to an l3mdev VRF (#6619). At LOCAL_IN, iifname names the
-//     VRF master, so a rule naming the slave would match nothing.
-//
-// A packet that arrives on a left-out netdev is still judged by the
-// destination-address rules, exactly as before #9637.
-func hostInboundViewIngressNetdevs(sig string, netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool) []string {
-	var out []string
-	for netdev, sigs := range netdevSigs {
-		if len(sigs) != 1 || !sigs[sig] || lifelineNetdevs[netdev] || vrfEnslaved[netdev] {
+// hostInboundVRFMasterNetdevs maps every snapshot row claimed by a non-
+// forwarding routing instance to the l3mdev master visible at LOCAL_IN
+// (#6619, #9754, #10431). InterfaceSnapshot.RoutingInstance already carries
+// the same bare-member fan-down used by the production VRF binder, including
+// tagged children of a bare routing-instance member.
+func hostInboundVRFMasterNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) map[string]string {
+	if cfg == nil || len(cfg.RoutingInstances) == 0 || len(snaps) == 0 {
+		return nil
+	}
+	vrfs := map[string]bool{}
+	for _, ri := range cfg.RoutingInstances {
+		// Mirror the production binder (bindRoutingInstanceMembers): skip
+		// forwarding instances and reserved names. Quarantined instances are
+		// already removed from cfg.RoutingInstances by the compiler, so the
+		// reserved check is belt-and-braces for hand-built configs.
+		if ri != nil && ri.Name != "" && ri.InstanceType != "forwarding" && !config.IsReservedRoutingInstanceName(ri.Name) {
+			vrfs[ri.Name] = true
+		}
+	}
+	out := map[string]string{}
+	for _, snap := range snaps {
+		if snap.LinuxName == "" || !vrfs[snap.RoutingInstance] {
 			continue
 		}
-		out = append(out, netdev)
+		master := config.LinuxIfName("vrf-" + snap.RoutingInstance)
+		if previous, exists := out[snap.LinuxName]; exists && previous != master {
+			// A collapsed netdev (base + unit 0 share one Linux device,
+			// #5699) split across two routing instances — e.g. a bare
+			// member in one and an explicit unit in another, where
+			// explicit-beats-bare (#10173) assigns the two rows to
+			// different VRFs — has no single LOCAL_IN identity: the
+			// kernel device can be enslaved to only one VRF master, so
+			// either candidate is a guess. Scoping to one risks judging
+			// the wrong VRF's members, and denying both candidates would
+			// drop all host traffic on two VRFs for one ambiguous
+			// device. Leave it to destination-only judgment (pre-#10431
+			// behavior): the claims stage skips the empty target, so no
+			// ingress scope is emitted for it.
+			out[snap.LinuxName] = ""
+			continue
+		}
+		if out[snap.LinuxName] == "" {
+			out[snap.LinuxName] = master
+		}
+	}
+	return out
+}
+
+// hostInboundIngressClaims rewrites raw interface claims to the netdev names
+// visible at LOCAL_IN and groups signatures by that effective target. A target
+// with multiple signatures is ambiguous and must not be assigned to a view.
+func hostInboundIngressClaims(netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool, vrfMasters map[string]string) map[string]map[string]bool {
+	// Lifelines are excluded by their effective LOCAL_IN identity. This keeps
+	// the invariant here, where both normal and ambiguous-scope callers share
+	// it, instead of relying on the builder to pre-mark every mapped master.
+	effectiveLifelines := map[string]bool{}
+	for netdev := range lifelineNetdevs {
+		target := netdev
+		if vrfEnslaved[netdev] {
+			target = vrfMasters[netdev]
+		}
+		if target != "" {
+			effectiveLifelines[target] = true
+		}
+	}
+
+	out := map[string]map[string]bool{}
+	for netdev, sigs := range netdevSigs {
+		if effectiveLifelines[netdev] {
+			continue
+		}
+		target := netdev
+		if vrfEnslaved[netdev] {
+			target = vrfMasters[netdev]
+			if target == "" {
+				continue
+			}
+		}
+		if effectiveLifelines[target] {
+			continue
+		}
+		if out[target] == nil {
+			out[target] = map[string]bool{}
+		}
+		for sig := range sigs {
+			out[target][sig] = true
+		}
+	}
+	return out
+}
+
+// hostInboundViewIngressNetdevsWithMasters returns, sorted, the effective
+// netdevs a view judges by ingress (#9637/#10431). A raw VRF slave becomes its
+// VRF master; shared or otherwise ambiguous targets go to neither view.
+func hostInboundViewIngressNetdevsWithMasters(sig string, netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool, vrfMasters map[string]string) []string {
+	claims := hostInboundIngressClaims(netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters)
+	var out []string
+	for netdev, sigs := range claims {
+		if len(sigs) == 1 && sigs[sig] {
+			out = append(out, netdev)
+		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// hostInboundViewIngressDenyNetdevs returns the effective netdevs whose claims
+// remain ambiguous after VRF-master normalization. The renderer attaches this
+// list to one view and emits an unconditional destination-scoped drop.
+func hostInboundViewIngressDenyNetdevs(netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool, vrfMasters map[string]string) []string {
+	claims := hostInboundIngressClaims(netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters)
+	var out []string
+	for netdev, sigs := range claims {
+		if len(sigs) > 1 {
+			out = append(out, netdev)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hostInboundViewIngressNetdevs preserves the narrow helper used by existing
+// unit tests and callers that do not have VRF master mappings.
+func hostInboundViewIngressNetdevs(sig string, netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool) []string {
+	return hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, nil)
 }
 
 // withoutLifelineShared returns addrs with every address that also lives on a

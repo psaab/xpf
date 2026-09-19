@@ -686,7 +686,7 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		{Zone: "mgmt", SystemServices: []string{"all"}, V4Addrs: []string{"10.0.9.1"}, IngressNetdevs: []string{"ge-0-0-9"}},
 		{Zone: "core", Protocols: []string{"all"}, V4Addrs: []string{"10.0.5.1"}, V6Addrs: []string{"2001:db8:5::1"}, IngressNetdevs: []string{"ge-0-0-5"}},
 		{Zone: "edge", SystemServices: []string{"ident-reset", "ssh"}, V4Addrs: []string{"10.0.7.1"}, IngressNetdevs: []string{"ge-0-0-7"}},
-		{Zone: "quarantine", V4Addrs: []string{"10.0.8.1"}, V6Addrs: []string{"2001:db8:8::1"}, IngressNetdevs: []string{"ge-0-0-8"}},
+		{Zone: "quarantine", V4Addrs: []string{"10.0.8.1"}, V6Addrs: []string{"2001:db8:8::1"}, IngressNetdevs: []string{"ge-0-0-8"}, IngressDenyNetdevs: []string{"shared-parent"}},
 		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.6.1"}, IngressNetdevs: []string{"ge-0-0-6"}},
 		// A v6-only view with an ingress scope. Its ip (v4) ingress drop is the
 		// ONLY reason its v4 deny counter is declared, so a counter pre-pass

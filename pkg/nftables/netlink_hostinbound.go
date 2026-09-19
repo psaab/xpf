@@ -48,10 +48,9 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		}
 		emitHostInboundICMPAcceptsNetlink(p)
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
-		p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	} else {
-		p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
+		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundICMPAcceptsNetlink(p)
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	}
@@ -70,6 +69,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundZoneIngressNetlink(p, v, famV4, ingressV4)
 		emitHostInboundZoneIngressNetlink(p, v, famV6, ingressV6)
 	}
+	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	for _, v := range spec.Views {
 		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs)
 		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs)

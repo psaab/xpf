@@ -34,6 +34,9 @@ type HostInboundZoneView struct {
 	V4Addrs        []string
 	V6Addrs        []string
 	IngressNetdevs []string // #9637: see dpuserspace.ZoneHostInboundView
+	// IngressDenyNetdevs is the #10431 fail-closed guard for an effective
+	// ingress netdev whose zone claims are ambiguous.
+	IngressDenyNetdevs []string
 }
 
 // JunosHostDenyL4 mirrors config.JunosHostDenyL4.

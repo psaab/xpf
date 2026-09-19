@@ -29,8 +29,13 @@ func hostInboundEmitsIngressDrop(v HostInboundZoneView, dests []string) bool {
 }
 
 // emitHostInboundZoneIngressNetlink mirrors emitHostInboundZoneIngress (#9637):
-// the view's matches, scoped to its ingress netdevs and every judged address.
+// an ambiguous effective target gets an unconditional destination-scoped drop
+// first (#10431), then normal view matches are scoped to ingress netdevs and
+// every judged address.
 func emitHostInboundZoneIngressNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, dests []string) {
+	if len(v.IngressDenyNetdevs) > 0 && len(dests) > 0 {
+		p.rule().iifname(v.IngressDenyNetdevs).daddr(f, dests, false).emit(verdictDrop()...)
+	}
 	if len(v.IngressNetdevs) == 0 || len(dests) == 0 {
 		return
 	}
