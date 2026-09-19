@@ -821,6 +821,97 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
     })
 }
 
+/// #10313: an AGREED-zone trunk — its configured tagged unit is in `lan` —
+/// with the physical parent row absent, the regression shape for unknown-VID
+/// ingress.
+///
+/// Parent 11 (`reth0`) is named only by the tagged unit `reth0.50` (logical
+/// 13, VID 50, `tenant-b`). The parent row may be unresolved/skipped during
+/// snapshot construction, so Rust has no physical `ifindex_to_config_name[11]`
+/// entry on master. A frame tagged with any OTHER VID (e.g. 99) falls back
+/// to parent 11 and is adjudicated as `lan`, a policy set written for the
+/// real unit. The fix rejects the unknown pair at the common boundary and
+/// keeps the fallback scope's parent config identity (`reth0`) separate from
+/// its empty zone.
+///
+/// Zones carry `any-service` host-inbound (admit) so a host-bound RED cell
+/// can only pass via the unknown-VLAN deny, never via the zone stanza; the
+/// `lan -> wan` permit proves the sibling zone WOULD admit, so an unknown
+/// VID denied under it is the fix working, not the policy. `reth1.0` (24,
+/// `wan`) is the transit egress. Routing domains are distinct nonzero
+/// sentinels (production values are Go's `StableRoutingInstanceTableID`; the
+/// Rust side treats the domain as an opaque label — see tests_snat_scope_9956).
+pub(super) fn agreed_zone_trunk_snapshot_10313() -> ConfigSnapshot {
+    v5(ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "lan".to_string(),
+                id: TEST_LAN_ZONE_ID,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["any-service".to_string()],
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_WAN_ZONE_ID,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["any-service".to_string()],
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            // Deliberately omit the base row: this is the real missing-parent
+            // shape from #10313. The configured tagged unit owns logical
+            // ifindex 13 and names physical parent ifindex 11; the parent
+            // row can be absent/skipped during snapshot construction.
+            InterfaceSnapshot {
+                name: "reth0.50".to_string(),
+                zone: "lan".to_string(),
+                routing_instance: "tenant-b".to_string(),
+                routing_domain: 100002,
+                linux_name: "ge-0-0-0.50".to_string(),
+                ifindex: 13,
+                parent_ifindex: 11,
+                vlan_id: 50,
+                hardware_addr: "02:bf:72:00:50:08".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "10.0.50.1/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+            // The wan transit egress.
+            InterfaceSnapshot {
+                name: "reth1.0".to_string(),
+                zone: "wan".to_string(),
+                linux_name: "ge-0-0-1".to_string(),
+                ifindex: 24,
+                hardware_addr: "02:bf:72:01:00:01".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "172.16.80.8/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+        ],
+        default_policy: "deny".to_string(),
+        policies: vec![PolicyRuleSnapshot {
+            name: "allow-lan-wan".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
 pub(super) fn nat_snapshot_with_fabric() -> ConfigSnapshot {
     let mut snapshot = nat_snapshot();
     snapshot.interfaces.push(InterfaceSnapshot {

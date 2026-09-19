@@ -248,6 +248,28 @@ pub(super) fn poll_binding_process_descriptor(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
+                // #10313: reject an unknown tagged VID at the common ingress
+                // boundary. This must run before destination classification,
+                // ARP/NDP learning, tunnel decapsulation, flow-cache lookup,
+                // session lookup, screen evaluation, and policy/NAT consumers:
+                // none of those stages may observe the parent's inherited
+                // sibling zone for an identity the snapshot does not own.
+                //
+                // The pre-routing scope helper independently preserves the
+                // parent config name for from-interface diagnostics and scope
+                // matching, while forcing its zone empty. The packet itself
+                // never reaches that downstream path for an unknown VID.
+                if meta.ingress_vlan_present != 0
+                    && crate::afxdp::forwarding::unknown_ingress_vlan(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                    )
+                {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #10314: perform destination acceptance before ARP/NDP
                 // classification as well as before decap, source-neighbor
                 // learning, and all L3 resolution.

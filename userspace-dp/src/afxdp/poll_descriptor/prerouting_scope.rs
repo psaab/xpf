@@ -57,17 +57,30 @@ pub(super) fn prerouting_ingress_scope(
     let logical_ifindex =
         resolve_ingress_logical_ifindex(forwarding, physical_ifindex, ingress_vlan_id)
             .unwrap_or(physical_ifindex);
+    let unknown_vlan = crate::afxdp::forwarding::unknown_ingress_vlan(
+        forwarding,
+        physical_ifindex,
+        ingress_vlan_id,
+    );
+    // #10313: preserve physical parent/unit config identity for interface/RI
+    // scope, but don't let parent's inherited sibling zone answer unknown VID.
+    // A fabric-encoded override remains authoritative; only the local
+    // ifindex-zone fallback is suppressed for an unknown local pair.
     // #919: ingress_zone_override is Option<u16>; DNAT/static NAT lookups take
     // zone names, so resolve ID→name lazily on this miss path. A fabric-encoded
     // override wins; else resolve the LOGICAL unit's zone (#5802).
     let zone_name = zone_override
         .and_then(|id| forwarding.zone_id_to_name.get(&id).map(|s| s.as_str()))
         .or_else(|| {
-            forwarding
-                .ifindex_to_zone_id
-                .get(&logical_ifindex)
-                .and_then(|id| forwarding.zone_id_to_name.get(id))
-                .map(|s| s.as_str())
+            if unknown_vlan {
+                None
+            } else {
+                forwarding
+                    .ifindex_to_zone_id
+                    .get(&logical_ifindex)
+                    .and_then(|id| forwarding.zone_id_to_name.get(id))
+                    .map(|s| s.as_str())
+            }
         })
         .unwrap_or("");
     // #3096: ingress interface config-name + routing-instance for the DNAT
