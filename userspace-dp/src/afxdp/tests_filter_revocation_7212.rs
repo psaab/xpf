@@ -13,7 +13,12 @@ use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
 use crate::test_zone_ids::*;
-use crate::{FirewallFilterSnapshot, FirewallTermSnapshot, PolicyRuleSnapshot};
+use crate::{
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot,
+    PolicyRuleSnapshot,
+};
+use crate::slowpath::SlowPathReinjector;
+use std::sync::atomic::Ordering;
 
 /// The generation the sessions below are STAMPED under: the config the operator
 /// had before editing the filter.
@@ -96,13 +101,45 @@ fn revocation_snapshot(terms: Vec<FirewallTermSnapshot>) -> ConfigSnapshot {
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
+            // The AF_XDP poll boundary rejects PACKET_OTHERHOST unicast
+            // frames. Match the synthetic frame's destination to this
+            // ingress interface so the test reaches session-hit revalidation.
+            iface.hardware_addr = "02:bf:72:00:80:08".into();
         }
+    }
+    // PBR cells need a live `blue` table identity while leaving the tested
+    // destination unrouted there. The address creates connected-table
+    // presence, but no route covers 172.16.80.200.
+    if snapshot.filters[0]
+        .terms
+        .iter()
+        .any(|term| !term.routing_instance.is_empty())
+    {
+        snapshot.interfaces.push(InterfaceSnapshot {
+            name: "blue0".into(),
+            zone: "lan".into(),
+            routing_instance: "blue".into(),
+            linux_name: "blue0".into(),
+            ifindex: 101,
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "10.250.0.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        // The second packet is a new flow after pair teardown. Keep the
+        // policy layer permissive so its unresolved explicit RI route remains
+        // the observable NoRoute verdict rather than being downgraded to a
+        // zone-policy deny because NoRoute has no egress zone.
+        snapshot.default_policy = "permit".into();
     }
     // A lan->wan permit so the session under test is a flow the POLICY would
     // still admit. Without it a revocation could be mistaken for a policy deny.
     snapshot.policies.push(PolicyRuleSnapshot {
         name: "allow-lan-wan".into(),
         from_zone: "lan".into(),
+
         to_zone: "wan".into(),
         source_addresses: vec!["any".into()],
         destination_addresses: vec!["any".into()],
@@ -126,16 +163,47 @@ fn term(name: &str, dport: &str, action: &str) -> FirewallTermSnapshot {
     }
 }
 
+fn pbr_term(name: &str, dport: &str) -> FirewallTermSnapshot {
+    FirewallTermSnapshot {
+        name: name.into(),
+        protocols: vec!["tcp".into()],
+        destination_ports: vec![dport.into()],
+        routing_instance: "blue".into(),
+        action: "accept".into(),
+        syslog: false,
+        reject_message_type: String::new(),
+        ..Default::default()
+    }
+}
+
+fn per_packet_pbr_term(name: &str, dport: &str) -> FirewallTermSnapshot {
+    let mut term = pbr_term(name, dport);
+    term.tcp_flags = Some(TCP_FLAG_SYN);
+    term
+}
+
 struct PollOutcome {
     sessions: SessionTable,
     revoked_scratch: Vec<crate::session::SessionKey>,
     revoked_count: u64,
+    slow_path_packets: u64,
+    no_route: u64,
+    policy_deny: u64,
+    session_miss: u64,
 }
 
 /// Pre-install the driven flow and its permitted SNAT sibling under
 /// `STAMPED_GENERATION`, then drive ONE packet of the driven flow through the
 /// real poll path under `LIVE_GENERATION`.
 fn drive_one_packet(terms: Vec<FirewallTermSnapshot>) -> PollOutcome {
+    drive_packets(terms, false, false)
+}
+
+fn drive_packets(
+    terms: Vec<FirewallTermSnapshot>,
+    second_packet: bool,
+    fresh_hit: bool,
+) -> PollOutcome {
     let snapshot = revocation_snapshot(terms);
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
@@ -161,28 +229,31 @@ fn drive_one_packet(terms: Vec<FirewallTermSnapshot>) -> PollOutcome {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    let meta_bytes = unsafe {
-        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    let push_packet = |binding: &mut BindingWorker| {
+        let meta_bytes = unsafe {
+            std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+        };
+        unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(meta_offset, meta_len)
+                .expect("meta slice")
+                .copy_from_slice(meta_bytes);
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("frame slice")
+                .copy_from_slice(&frame);
+        }
+        binding.xsk.rx.push_for_test(XdpDesc {
+            addr: frame_offset as u64,
+            len: frame.len() as u32,
+            options: 0,
+        });
     };
-    unsafe {
-        binding
-            .umem
-            .area()
-            .slice_mut_unchecked(meta_offset, meta_len)
-            .expect("meta slice")
-            .copy_from_slice(meta_bytes);
-        binding
-            .umem
-            .area()
-            .slice_mut_unchecked(frame_offset, frame.len())
-            .expect("frame slice")
-            .copy_from_slice(&frame);
-    }
-    binding.xsk.rx.push_for_test(XdpDesc {
-        addr: frame_offset as u64,
-        len: frame.len() as u32,
-        options: 0,
-    });
+    push_packet(&mut binding);
 
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&binding));
@@ -207,6 +278,7 @@ fn drive_one_packet(terms: Vec<FirewallTermSnapshot>) -> PollOutcome {
             burst: 0,
         },
     );
+    let slow_path = second_packet.then(|| Arc::new(SlowPathReinjector::new_without_worker(1500)));
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
@@ -220,9 +292,9 @@ fn drive_one_packet(terms: Vec<FirewallTermSnapshot>) -> PollOutcome {
         shared_sessions: &shared_sessions,
         shared_nat_sessions: &shared_nat_sessions,
         shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        slow_path: slow_path.as_ref(),
         shared_owner_rg_indexes: &shared_owner_rg_indexes,
         ike_exchanges: &ike_exchanges,
-        slow_path: None,
         event_stream: Some(&event_handle),
         local_tunnel_deliveries: &local_tunnel_deliveries,
         recent_exceptions: &recent_exceptions,
@@ -256,6 +328,12 @@ fn drive_one_packet(terms: Vec<FirewallTermSnapshot>) -> PollOutcome {
         PROTO_TCP,
         0,
     ));
+    if fresh_hit {
+        // The per-packet PBR cell must enforce the route transition even
+        // though this established entry already carries a live static stamp.
+        sessions.set_filter_revalidation_gen(LIVE_GENERATION);
+        sessions.mark_filter_revalidated(&flow_key(FLOW_DST_PORT), LAN_IFINDEX);
+    }
 
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
@@ -287,11 +365,39 @@ fn drive_one_packet(terms: Vec<FirewallTermSnapshot>) -> PollOutcome {
         &worker_ctx,
         &mut telemetry,
     );
+    if second_packet {
+        push_packet(&mut binding);
+        poll_binding_process_descriptor(
+            &mut binding,
+            0,
+            area_ptr,
+            1,
+            &mut sessions,
+            &mut screen,
+            ValidationState {
+                snapshot_installed: true,
+                config_generation: LIVE_GENERATION,
+                fib_generation: 9,
+            },
+            124_000_000_000,
+            124,
+            0,
+            0,
+            -1,
+            -1,
+            &worker_ctx,
+            &mut telemetry,
+        );
+    }
 
     PollOutcome {
         sessions,
         revoked_scratch: binding.scratch.scratch_filter_revoked_keys.clone(),
         revoked_count: dbg.filter_revoked_sessions,
+        slow_path_packets: binding.live.slow_path_packets.load(Ordering::Relaxed),
+        no_route: dbg.no_route,
+        policy_deny: dbg.policy_deny,
+        session_miss: dbg.session_miss,
     }
 }
 
@@ -324,6 +430,74 @@ fn static_discard_revokes_the_established_session_end_to_end_7212() {
         "the revoked key must reach the flow-cache eviction, or a cached \
          descriptor keeps forwarding the revoked tuple (#6457 failure mode)"
     );
+}
+
+/// #10467 end-to-end bind: an established MAIN session that becomes subject
+/// to a PBR steer into an empty VRF is dropped and revoked on the hit. The next
+/// packet will take the session-miss path; this packet must never use MAIN.
+#[test]
+fn stale_pbr_empty_vrf_denies_and_revokes_the_established_hit_10467() {
+    let out = drive_one_packet(vec![pbr_term("pbr-route", "5201")]);
+    let mut sessions = out.sessions;
+    assert!(
+        sessions
+            .lookup(&flow_key(FLOW_DST_PORT), 124_000_000_000, 0)
+            .is_none(),
+        "a stale PBR route transition must revoke the old MAIN session"
+    );
+    assert_eq!(
+        out.revoked_count, 1,
+        "the route transition must account for one revoked session"
+    );
+    assert!(
+        out.revoked_scratch.contains(&flow_key(FLOW_DST_PORT)),
+        "the route transition must evict the old flow-cache descriptor"
+    );
+}
+/// A per-packet PBR term is evaluated even when the established entry's
+/// generation/ingress stamp is Fresh. Its ordinary HIT evaluator returns
+/// Accept, so the poll caller must still apply the route transition and revoke
+/// the cached MAIN decision.
+#[test]
+fn fresh_per_packet_pbr_hit_revokes_cached_main_route_10467() {
+    let out = drive_packets(
+        vec![per_packet_pbr_term("pbr-syn", "5201")],
+        false,
+        true,
+    );
+    let mut sessions = out.sessions;
+    assert!(
+        sessions
+            .lookup(&flow_key(FLOW_DST_PORT), 124_000_000_000, 0)
+            .is_none(),
+        "a matching per-packet PBR steer must revoke the cached MAIN session"
+    );
+    assert_eq!(out.revoked_count, 1);
+    assert!(out.revoked_scratch.contains(&flow_key(FLOW_DST_PORT)));
+}
+
+/// The transition HIT is only half of the enforcement contract. After teardown,
+/// the next packet is a session MISS and must perform the same explicit empty
+/// table lookup without handing the original frame to the kernel MAIN FIB.
+/// `drive_packets` uses a worker-less live reinjector so an accidental
+/// slow-path enqueue is observable as `slow_path_packets == 1`.
+#[test]
+fn stale_pbr_empty_vrf_drops_the_followup_miss_10467() {
+    let out = drive_packets(vec![pbr_term("pbr-route", "5201")], true, false);
+
+    assert_eq!(
+        out.slow_path_packets, 0,
+        "the post-revocation MISS must not reinject the explicit-table NoRoute \
+         frame into MAIN"
+    );
+    assert_eq!(out.no_route, 1, "the follow-up MISS must resolve in the empty RI");
+    assert_eq!(
+        out.policy_deny, 0,
+        "the follow-up must reach route NoRoute, not fall through to policy deny"
+    );
+    assert_eq!(out.session_miss, 1, "the second packet must be a session MISS");
+    assert_eq!(out.revoked_count, 1);
+    assert!(out.revoked_scratch.contains(&flow_key(FLOW_DST_PORT)));
 }
 
 /// THE pinned acceptance case. A session on the SAME interface that the filter

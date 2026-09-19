@@ -1208,6 +1208,62 @@ if [[ "$(last_row_field exe_scope)" == "local-only" ]]; then
 else
 	bad "#9044: exe_scope is '$(last_row_field exe_scope)', expected local-only — without it this row is indistinguishable from a whole-cluster MATCH, which IS the finding"
 fi
+
+wire_target=$(sed -n '/^test-wire-routing-separation:/,/^$/p' \
+	"$HARNESS_RESULT_DIR/../../Makefile")
+if [[ "$wire_target" == *"--require-helper-attestation"* ]]; then
+	ok "#10467: test-wire-routing-separation requires helper provenance"
+else
+	bad "#10467: test-wire-routing-separation is missing --require-helper-attestation"
+fi
+# 10g. The routing-instance wire gate opts into helper provenance. A helper
+# readback is distinct from xpfd's readback: both node images must match the
+# local helper build before a PASS is attributable.
+printf 'pretend userspace helper\n' >"$WORK/xpf-userspace-dp"
+helper_sha=$(sha256sum "$WORK/xpf-userspace-dp" | awk '{print $1}')
+incus() {
+	case "$*" in
+	*'pidof xpf-userspace-dp'*) echo "$helper_sha  /proc/9876/exe" ;;
+	*) echo "$fake_sha  /proc/1234/exe" ;;
+	esac
+}
+(harness_result_run --ledger "$LEDGER" --cluster --require-helper-attestation \
+	--env testenv --gate fake-helper-ok --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+	--build-helper-exe "$WORK/xpf-userspace-dp" -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "PASS" &&
+	"$(last_row_field helper_exe_check)" == "MATCH" &&
+	"$(last_row_field helper_exe_scope)" == "both" ]]; then
+	ok "#10467: matching helper readbacks preserve PASS and record helper_exe_check=MATCH/both"
+else
+	bad "#10467: matching helper readbacks gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check) helper_exe_scope=$(last_row_field helper_exe_scope)"
+fi
+if [[ "$(last_row_field running_helper_exe_sha256)" == "$helper_sha" &&
+	"$(last_row_field running_helper_exe_sha256_peer)" == "$helper_sha" ]]; then
+	ok "#10467: the row carries both running helper image SHA256 values"
+else
+	bad "#10467: helper SHA fields were not recorded for both nodes"
+fi
+
+helper_stale_sha=$(printf 's%.0s' {1..64})
+incus() {
+	case "$*" in
+	*'pidof xpf-userspace-dp'*) echo "$helper_stale_sha  /proc/9876/exe" ;;
+	*) echo "$fake_sha  /proc/1234/exe" ;;
+	esac
+}
+(harness_result_run --ledger "$LEDGER" --cluster --require-helper-attestation \
+	--env testenv --gate fake-helper-stale --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+	--build-helper-exe "$WORK/xpf-userspace-dp" -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field helper_exe_check)" == "MISMATCH" &&
+	"$(last_row_field void_reason)" == *"helper_exe_check=MISMATCH"* ]]; then
+	ok "#10467: stale helper readback records MISMATCH and VOID, never a PASS"
+else
+	bad "#10467: stale helper gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
+fi
+rm -f "$WORK/xpf-userspace-dp"
 unset -f incus _peer_incus_mock
 
 # 10g. harness_exe_scope as a table. The three cells above drive it through the

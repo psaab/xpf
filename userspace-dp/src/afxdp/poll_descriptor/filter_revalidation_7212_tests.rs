@@ -12,7 +12,9 @@ use crate::afxdp::test_fixtures::policy_deny_snapshot;
 use crate::ip_proto::PROTO_TCP;
 use crate::session::{SessionKey, SessionMetadata, SessionOrigin};
 use crate::test_zone_ids::*;
-use crate::{FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot};
+use crate::{
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot,
+};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The LAN-side interface every cell attaches its input filter to. It is the
@@ -77,6 +79,98 @@ fn forwarding_with_input_filter(
             }
         }
     }
+    build_forwarding_state(&snapshot)
+}
+
+/// The exact stale-hit shape for #10467: the live filter now steers this
+/// tuple into `blue`, while `blue.inet.0` has only an unrelated connected
+/// prefix and therefore no route to the destination. The MAIN table in the
+/// shared fixture does have a default route; a hit that keeps its cached MAIN
+/// decision would therefore be observably wrong.
+fn forwarding_with_empty_blue_pbr() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![pbr_term("pbr-route", "5201", "accept")],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "blue0".into(),
+        zone: "lan".into(),
+        routing_instance: "blue".into(),
+        linux_name: "blue0".into(),
+        ifindex: 101,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.250.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+fn forwarding_with_empty_blue_per_packet_pbr() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    let mut term = pbr_term("pbr-syn", "5201", "accept");
+    term.tcp_flags = Some(crate::tcp_flags::TCP_SYN);
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![term],
+    }];
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "blue0".into(),
+        zone: "lan".into(),
+        routing_instance: "blue".into(),
+        linux_name: "blue0".into(),
+        ifindex: 101,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.250.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+/// Native RI membership is the route-table fallback when no PBR term matches.
+/// Keep this fixture separate from the empty-VRF PBR fixture so the fallback
+/// identity is exercised without an explicit route-lookup-affecting filter.
+fn forwarding_with_native_blue_ri() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    let (domain, _) = crate::session::install_table_identity("blue");
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.routing_instance = "blue".into();
+            iface.routing_domain = domain;
+        }
+    }
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "blue0".into(),
+        zone: "lan".into(),
+        routing_instance: "blue".into(),
+        routing_domain: domain,
+        linux_name: "blue0".into(),
+        ifindex: 101,
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.250.0.1/24".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
     build_forwarding_state(&snapshot)
 }
 
@@ -1371,12 +1465,9 @@ fn a_pbr_term_that_discards_revokes_the_session_8114() {
 /// — `ingress_route_table_override` applies the override and forwards.
 ///
 /// Without this cell "revoke whenever a PBR term matches" satisfies the cell
-/// above, and that would tear down every session an operator deliberately routes
-/// through a VRF the moment its stamp went stale.
-///
-/// It also pins the scope: an established session whose PBR term now points at a
-/// different instance keeps the route it was built with. #7212 revokes on DENY;
-/// revoking on a route CHANGE is a separate question.
+/// The current-generation control for #10467: a permitted PBR session keeps
+/// #8114's no-flap behavior. A separate stale-generation cell below covers a
+/// newly appearing/different steer, where the hit must not keep MAIN.
 #[test]
 fn a_plain_pbr_term_does_not_revoke_the_session_8114() {
     use std::sync::atomic::Ordering;
@@ -1390,7 +1481,9 @@ fn a_plain_pbr_term_does_not_revoke_the_session_8114() {
     let filter =
         crate::filter::interface_input_filter(&forwarding.filter_state, LAN_IFINDEX, false)
             .expect("the filter is attached");
-    let mut sessions = table_with_session(&flow, 7, None);
+    // Current-generation control: #8114's permitted PBR session remains
+    // established without per-hit route churn.
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
 
     assert!(
         evaluate_input_filter_on_session_hit(
@@ -1415,6 +1508,268 @@ fn a_plain_pbr_term_does_not_revoke_the_session_8114() {
     assert!(
         sessions.lookup(&flow.forward_key, 2_000, 0).is_some(),
         "the session survives"
+    );
+}
+
+/// A stale hit whose newly matching PBR term points at an empty VRF must
+/// re-resolve in that VRF, not continue with the cached MAIN route. The poll
+/// caller turns this route-transition result into a pair teardown/discard, so
+/// `NoRoute` here is the fail-closed route proof rather than a MAIN fallback.
+#[test]
+fn a_stale_pbr_steer_to_empty_vrf_does_not_keep_main_10467() {
+    let forwarding = forwarding_with_empty_blue_pbr();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        decision(),
+    )
+    .expect("the stale PBR term must produce a route-transition result");
+    assert_eq!(route.canonical_key, flow.forward_key);
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute,
+        "the explicit blue table is empty for this destination; resolving MAIN \
+         would preserve the pre-fix forwarding leak"
+    );
+}
+
+/// A Fresh HIT still evaluates per-packet PBR predicates against the current
+/// frame. The old `varies_per_packet_within_flow()` early return silently kept
+/// the cached MAIN identity and left route-changing terms unenforced.
+#[test]
+fn a_per_packet_pbr_route_is_revalidated_from_the_hit_frame_10467() {
+    let mut term = pbr_term("pbr-syn", "5201", "accept");
+    term.tcp_flags = Some(crate::tcp_flags::TCP_SYN);
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![term]);
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, None);
+    sessions.mark_filter_revalidated(&flow.forward_key, LAN_IFINDEX);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut hit_meta = meta(LAN_IFINDEX as u32, 0, false);
+    // The shim-stamped TCP flags are authoritative for the frame-derived
+    // matcher extra; the builder deliberately does not trust payload bytes.
+    hit_meta.tcp_flags = crate::tcp_flags::TCP_SYN;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        hit_meta,
+        Some(TEST_LAN_ZONE_ID),
+        decision(),
+    )
+    .expect("a matching per-packet PBR term must revalidate the fresh hit");
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute,
+        "the test table is intentionally empty; retaining cached MAIN would \
+         incorrectly avoid the route-transition result"
+    );
+}
+
+/// A FRESH NAT-alias HIT still carries the canonical session key into the
+/// per-packet route check. The wire tuple is not a teardown key: using it for
+/// revocation would leave the reverse entry alive after the steer changes.
+#[test]
+fn a_fresh_per_packet_pbr_nat_alias_hit_revokes_canonical_key_10467() {
+    let forwarding = forwarding_with_empty_blue_per_packet_pbr();
+    let reverse_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        src_port: 5201,
+        dst_port: 12345,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mut reverse_decision = decision();
+    reverse_decision.nat.rewrite_dst = Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)));
+    reverse_decision.nat.rewrite_dst_port = Some(5201);
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        reverse_decision,
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let wire_key = crate::session::translated_session_key(&reverse_key, reverse_decision.nat);
+    assert_ne!(
+        wire_key, reverse_key,
+        "fixture liveness: the wire tuple must differ from the canonical key"
+    );
+    let flow = SessionFlow {
+        src_ip: wire_key.src_ip,
+        dst_ip: wire_key.dst_ip,
+        forward_key: wire_key.clone(),
+    };
+    sessions.mark_filter_revalidated(&reverse_key, LAN_IFINDEX);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut hit_meta = meta(LAN_IFINDEX as u32, 0, false);
+    hit_meta.tcp_flags = crate::tcp_flags::TCP_SYN;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &wire_key,
+        &flow,
+        &frame(),
+        hit_meta,
+        Some(TEST_LAN_ZONE_ID),
+        decision(),
+    )
+    .expect("a matching fresh per-packet PBR alias must revalidate");
+    assert_eq!(route.canonical_key, reverse_key);
+    assert_eq!(route.revoked_key.as_ref(), Some(&reverse_key));
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute,
+        "the empty blue table must win over the cached MAIN route"
+    );
+}
+
+/// A PBR packet with no local session entry is a packet derivation, not a
+/// revocation: the route transition still fails closed, but there is no
+/// canonical entry to clear or tear down.
+#[test]
+fn a_per_packet_pbr_no_local_entry_derives_without_revocation_10467() {
+    let forwarding = forwarding_with_empty_blue_per_packet_pbr();
+    let flow = v4_flow(5201);
+    let sessions = SessionTable::new();
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut hit_meta = meta(LAN_IFINDEX as u32, 0, false);
+    hit_meta.tcp_flags = crate::tcp_flags::TCP_SYN;
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        hit_meta,
+        Some(TEST_LAN_ZONE_ID),
+        decision(),
+    )
+    .expect("a matching PBR packet must derive its empty-VRF route");
+    assert!(route.revoked_key.is_none());
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute
+    );
+}
+
+/// A sessionless packet with a route-affecting filter but no matching PBR term
+/// keeps the native MAIN identity; the route revalidator must not turn that
+/// ordinary nonmatch into a synthetic discard.
+#[test]
+fn a_per_packet_pbr_no_local_nonmatch_keeps_default_route_10467() {
+    let forwarding = forwarding_with_empty_blue_per_packet_pbr();
+    let flow = v4_flow(5202);
+    let sessions = SessionTable::new();
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let mut hit_meta = meta(LAN_IFINDEX as u32, 0, false);
+    hit_meta.tcp_flags = crate::tcp_flags::TCP_SYN;
+
+    assert!(
+        revalidate_static_pbr_route_on_session_hit(
+            &forwarding,
+            &neighbors,
+            &sessions,
+            &flow.forward_key,
+            &flow,
+            &frame(),
+            hit_meta,
+            Some(TEST_LAN_ZONE_ID),
+            decision(),
+        )
+        .is_none(),
+        "a nonmatching sessionless packet must keep native MAIN route handling"
+    );
+}
+
+/// A keyed-GRE/L3-only flow carries (0,0) synthetic ports. The HIT evaluator
+/// must set `ports_unknown` exactly as the MISS evaluator does, so a port
+/// constrained PBR term (including a negated/except form) cannot spuriously
+/// steer the session.
+#[test]
+fn a_zero_port_pbr_term_is_not_selected_on_a_hit_9894() {
+    let forwarding = forwarding_with_input_filter(
+        LAN_IFINDEX,
+        false,
+        vec![pbr_term("pbr-port-zero", "0", "accept")],
+    );
+    let mut flow = v4_flow(0);
+    flow.forward_key.src_port = 0;
+    flow.forward_key.dst_port = 0;
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+
+    assert!(
+        revalidate_static_pbr_route_on_session_hit(
+            &forwarding,
+            &neighbors,
+            &sessions,
+            &flow.forward_key,
+            &flow,
+            &frame(),
+            meta(LAN_IFINDEX as u32, 0, false),
+            Some(TEST_LAN_ZONE_ID),
+            decision(),
+        )
+        .is_none(),
+        "synthetic (0,0) ports must not match a port-constrained PBR term"
+    );
+}
+
+/// A stale hit on an unchanged native RI keeps #10312's table identity. The
+/// route revalidation must not treat "no PBR term" as an implicit MAIN switch.
+#[test]
+fn a_stale_native_ri_session_keeps_its_table_10312() {
+    let forwarding = forwarding_with_native_blue_ri();
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+    let (domain, check) = crate::session::install_table_identity("blue");
+    let mut native_decision = decision();
+    native_decision.install_table_domain = domain;
+    native_decision.install_table_check = check;
+
+    assert!(
+        revalidate_static_pbr_route_on_session_hit(
+            &forwarding,
+            &neighbors,
+            &sessions,
+            &flow.forward_key,
+            &flow,
+            &frame(),
+            meta(LAN_IFINDEX as u32, 0, false),
+            Some(TEST_LAN_ZONE_ID),
+            native_decision,
+        )
+        .is_none(),
+        "an unchanged native RI must not be torn down on a generation bump"
     );
 }
 

@@ -992,6 +992,7 @@ test-wire-routing-separation:
 	./test/incus/with-cluster.sh "wire-routing-separation #10136" -- \
 		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_routing_separation --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wire-routing-separation.sh
 
 test-wire-routing-separation-lib:
