@@ -281,6 +281,27 @@ pub(super) fn resolve_ingress_logical_ifindex(
         .copied()
 }
 
+/// #10313: true when a tagged frame arrived on a physical bind that carries
+/// configured logical VLAN units but no configured unit owns this VID.
+///
+/// The exact `(physical_ifindex, vlan_id)` map remains the logical-ingress
+/// resolver. This predicate is its miss-path authority: unlike an ordinary
+/// untagged port miss, a tagged miss on a trunk is an UNKNOWN identity and
+/// must be rejected before cache/session/ARP/decap can observe the parent's
+/// inherited zone.
+#[inline]
+pub(in crate::afxdp) fn unknown_ingress_vlan(
+    forwarding: &ForwardingState,
+    physical_ifindex: i32,
+    ingress_vlan_id: u16,
+) -> bool {
+    ingress_vlan_id != 0
+        && forwarding.ingress_vlan_parents.contains(&physical_ifindex)
+        && !forwarding
+            .ingress_logical_ifindex
+            .contains_key(&(physical_ifindex, ingress_vlan_id))
+}
+
 /// #7160 (#2387): the ROUTING DOMAIN a received frame's flow belongs to — the
 /// value stamped onto `SessionKey.routing_domain` so two routing instances
 /// that share a 5-tuple are two conntrack entries rather than one.

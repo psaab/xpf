@@ -225,6 +225,13 @@ pub(super) fn populate_interfaces(
         if iface.ifindex <= 0 {
             continue;
         }
+        // #10313: remember which physical bind ifindexes have logical unit
+        // rows. A tagged frame whose VID is absent from the exact ingress map
+        // is an unknown VLAN only on these parents; ordinary untagged ports
+        // keep their byte-identical physical fallback.
+        if iface.parent_ifindex > 0 && is_logical_unit_row(&iface.name, iface.is_unit) {
+            state.ingress_vlan_parents.insert(iface.parent_ifindex);
+        }
         let label = if iface.linux_name.is_empty() {
             iface.name.clone()
         } else {
@@ -234,6 +241,20 @@ pub(super) fn populate_interfaces(
         state
             .ifindex_to_config_name
             .insert(iface.ifindex, iface.name.clone());
+        // #10313: a tagged logical-unit row can be the only surviving
+        // snapshot row for its physical parent (the base row was unresolved
+        // or skipped). Keep the parent config identity available for the
+        // fallback `from interface` scope even though the parent has no own
+        // row. This is deliberately guarded by structural unit detection:
+        // dotted base interface names must not be mistaken for units.
+        if iface.parent_ifindex > 0 && is_logical_unit_row(&iface.name, iface.is_unit) {
+            if let Some((base_name, _unit)) = iface.name.rsplit_once('.') {
+                state
+                    .ifindex_to_config_name
+                    .entry(iface.parent_ifindex)
+                    .or_insert_with(|| base_name.to_string());
+            }
+        }
         // #9821 (#12): (routing_instance, routing_domain) recorded for an
         // ifindex always come from ONE row. A nonzero-domain (member) row
         // claims the ifindex for both maps; a zero-domain row writes its

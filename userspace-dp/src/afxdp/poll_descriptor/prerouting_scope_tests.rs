@@ -17,7 +17,8 @@ use super::*;
 mod prerouting_scope_tests {
     use super::*;
     use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
+    use super::super::tests_support::*;
 
     /// nat_snapshot() already carries reth0.80 (logical 12, parent 11,
     /// VID 80, zone `wan`, the parent's FIRST sub-interface). Add reth0.50
@@ -253,4 +254,181 @@ mod prerouting_scope_tests {
             Some(scope.zone_name),
         );
     }
+/// #10313 RED-on-master: an unknown tagged VID on an agreed-zone trunk must
+/// not inherit the parent's sibling zone. The same physical parent identity
+/// remains available for `from interface` / `from routing-instance` scope:
+/// only the zone/policy identity is unzoned.
+///
+/// The physical parent row is absent, so master has no
+/// `ifindex_to_config_name[11]` entry. The tagged unit `reth0.50` is the
+/// structurally-known owner from which the fix derives the parent name.
+/// VID 99 has no `(11, 99)` map entry. Before the fix,
+/// `prerouting_ingress_scope` falls back to physical ifindex 11 and reads the
+/// propagated `lan` zone while leaving `ifname` empty.
+
+#[test]
+fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
+    let forwarding =
+        build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
+
+    // Known VID control: the configured unit keeps its own logical identity
+    // and its `lan` zone.
+    let known = prerouting_ingress_scope(&forwarding, 11, 50, None);
+    assert_eq!(known.zone_name, "lan");
+    assert_eq!(known.ifname, "reth0.50");
+    assert_eq!(known.routing_instance, "tenant-b");
+    let (known_from, _) =
+        crate::afxdp::forwarding::zone_pair_ids_for_flow(&forwarding, known.logical_ifindex, 24);
+    assert_eq!(
+        known_from,
+        TEST_LAN_ZONE_ID,
+        "known VID traffic must remain in its configured sibling zone"
+    );
+
+    // Unknown VID regression: the scope keeps the physical parent identity
+    // for interface matching, but no configured unit owns VID 99, so the
+    // ingress zone must be the unzoned sentinel and the packet is rejected
+    // at the common ingress boundary.
+    let unknown = prerouting_ingress_scope(&forwarding, 11, 99, None);
+    assert_eq!(
+        unknown.zone_name, "",
+        "unknown VID must not inherit the agreed sibling zone"
+    );
+    let fabric_override = prerouting_ingress_scope(
+        &forwarding,
+        11,
+        99,
+        Some(TEST_WAN_ZONE_ID),
+    );
+    assert_eq!(
+        fabric_override.zone_name, "wan",
+        "a valid fabric ingress override remains authoritative for an unknown local VID"
+    );
+    assert_eq!(
+        unknown.ifname, "reth0",
+        "unknown VID must derive the parent config identity for from-interface scope"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 11, 99),
+        "unknown VID must be recognized at the common ingress boundary"
+    );
+    assert!(
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 11, 50),
+        "known VID must remain admitted to the normal logical-unit path"
+    );
+}
+
+
+fn broadcast_arp_reply_10313(sender_ip: Ipv4Addr, sender_mac: [u8; 6]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(42);
+    frame.extend_from_slice(&[0xff; 6]);
+    frame.extend_from_slice(&sender_mac);
+    frame.extend_from_slice(&[0x08, 0x06]);
+    // Ethernet/IPv4 ARP reply: htype, ptype, hlen, plen, opcode.
+    frame.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]);
+    frame.extend_from_slice(&sender_mac);
+    frame.extend_from_slice(&sender_ip.octets());
+    frame.extend_from_slice(&[0x00; 6]);
+    frame.extend_from_slice(&[10, 0, 0, 1]);
+    frame
+}
+
+/// #10313 packet-path guard: the unknown tagged VID must be recycled before
+/// ARP learning, while the exact known VID still learns under its logical
+/// ifindex and the untagged parent retains its normal physical fallback.
+#[test]
+fn unknown_vid_is_recycled_before_arp_learning_10313() {
+    let forwarding =
+        build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let neighbors = std::sync::Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::default());
+
+    let unknown_ip = Ipv4Addr::new(192, 0, 2, 99);
+    let unknown_meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 11,
+        ingress_vlan_id: 99,
+        ingress_vlan_present: 1,
+        l3_offset: 14,
+        pkt_len: 42,
+        addr_family: libc::AF_INET as u8,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &broadcast_arp_reply_10313(unknown_ip, [0x02, 0x99, 0, 0, 0, 1]),
+        unknown_meta,
+        &neighbors,
+    );
+    assert!(
+        neighbors.get(&(11, IpAddr::V4(unknown_ip))).is_none(),
+        "unknown VID must recycle before the physical-parent ARP learn"
+    );
+    assert!(
+        neighbors.get(&(13, IpAddr::V4(unknown_ip))).is_none(),
+        "unknown VID must not reach the logical-unit ARP learn either"
+    );
+
+    let known_ip = Ipv4Addr::new(192, 0, 2, 50);
+    let known_meta = UserspaceDpMeta {
+        ingress_vlan_id: 50,
+        ingress_vlan_present: 1,
+        ..unknown_meta
+    };
+    txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &broadcast_arp_reply_10313(known_ip, [0x02, 0x50, 0, 0, 0, 1]),
+        known_meta,
+        &neighbors,
+    );
+    assert!(
+        neighbors.get(&(13, IpAddr::V4(known_ip))).is_some(),
+        "known VID must reach ARP learning under logical ifindex 13"
+    );
+
+    let untagged_ip = Ipv4Addr::new(192, 0, 2, 1);
+    let untagged_meta = UserspaceDpMeta {
+        ingress_vlan_id: 0,
+        ingress_vlan_present: 0,
+        ..unknown_meta
+    };
+    txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &broadcast_arp_reply_10313(untagged_ip, [0x02, 0x01, 0, 0, 0, 1]),
+        untagged_meta,
+        &neighbors,
+    );
+    assert!(
+        neighbors.get(&(11, IpAddr::V4(untagged_ip))).is_some(),
+        "untagged parent traffic must retain its physical fallback"
+    );
+}
+/// The parent-name half of #10313 is independent of zone adjudication: when
+/// only a tagged unit row survives, the fallback scope must still expose the
+/// parent interface name for `from interface` matching.
+#[test]
+fn unknown_vid_scope_populates_parent_ifname_10313() {
+    let forwarding =
+        build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
+    let scope = prerouting_ingress_scope(&forwarding, 11, 99, None);
+    assert_eq!(
+        scope.ifname, "reth0",
+        "unknown VID must not leave the parent interface scope empty"
+    );
+}
 }
