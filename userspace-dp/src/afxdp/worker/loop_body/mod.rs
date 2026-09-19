@@ -53,6 +53,10 @@ mod idle_poll;
 #[path = "first_policy_purge_rotation_9526_tests.rs"]
 mod first_policy_purge_rotation_9526_tests;
 
+#[cfg(test)]
+#[path = "expiry_shared_retire_10419_tests.rs"]
+mod expiry_shared_retire_10419_tests;
+
 /// #6592: refresh the worker's per-tick `(validation, forwarding)` view from
 /// ONE `ArcSwap` load, so the two halves can never come from different
 /// generations.
@@ -1157,6 +1161,13 @@ pub(crate) fn worker_loop(
         // SAME node and the standby gauge stays 0.
         let local_expired =
             count_local_session_expiries(expired_entries.iter().map(|e| e.origin));
+        retire_expired_missing_neighbor_seeds(
+            &expired_entries,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+        );
         reap_expired_sessions(
             &mut bindings,
             &expired_entries,
@@ -1174,6 +1185,13 @@ pub(crate) fn worker_loop(
                     .session_expires
                     .fetch_add(local_expired, Ordering::Relaxed);
             }
+        }
+        // #10419: expire the local row and its shared/conntrack teardown
+        // before polling another packet. Otherwise a lookup can miss the
+        // removed local row, rematerialize the still-published shared copy,
+        // and forward one more packet on an expired session.
+        if !expired_entries.is_empty() {
+            drain_and_flush_all!();
         }
         // #10309: the expiry walk must remain all-in-one-call. A full ring
         // may have accepted the first Close deltas and returned the suffix
@@ -2066,6 +2084,38 @@ pass). Logged once per worker.",
     heartbeat.store(monotonic_nanos(), Ordering::Relaxed);
 }
 
+/// #10419: retire a missing-neighbor seed's shared publication when its local
+/// session expires. Seeds intentionally do not emit Close deltas, so they need
+/// this separate path; the origin and stable session id fence the removal to
+/// the exact expired incarnation and preserve a same-key replacement.
+fn retire_expired_missing_neighbor_seeds(
+    expired_entries: &[crate::session::ExpiredSession],
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+) {
+    for expired_entry in expired_entries {
+        if expired_entry.origin != SessionOrigin::MissingNeighborSeed
+            || expired_entry.session_id == 0
+        {
+            continue;
+        }
+        let expired_session_id = expired_entry.session_id;
+        let _ = crate::afxdp::shared_ops::remove_shared_session_if(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &expired_entry.key,
+            |entry| {
+                entry.origin == SessionOrigin::MissingNeighborSeed
+                    && entry.session_id == expired_session_id
+            },
+        );
+    }
+}
+
 /// #3776: apply the per-worker teardown side effects for every session the GC
 /// wheel reaped this sweep — release its SNAT allocation, delete its BPF
 /// redirect/conntrack entries, AND invalidate the per-worker flow-cache slot(s)
@@ -2102,6 +2152,7 @@ pass). Logged once per worker.",
 /// own key, so both directions' slots are covered. This is the reap path
 /// (bounded by the ~1/s GC sweep), so it adds no per-packet cost and does not
 /// regress the #2220 keepalive fast path.
+
 #[allow(clippy::too_many_arguments)]
 fn reap_expired_sessions(
     bindings: &mut [BindingWorker],
