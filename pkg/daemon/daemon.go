@@ -909,6 +909,23 @@ type Daemon struct {
 	// exercise the semaphore contract through the real applyConfig
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
+	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
+	// startup fixture. It is nil in production and exists so the setup path
+	// can be exercised without arming a host dataplane.
+	buildRuntimeDataPlaneForTest func(string) (dataplane.RuntimeDataPlane, error)
+	// afterNetworkdApplyForTest fires immediately after the networkd activation
+	// boundary in applyDataplaneAndHACore. It lets the VRF startup regression
+	// model networkd removing foreign policy rules without replacing the real
+	// apply pipeline.
+	afterNetworkdApplyForTest func()
+	// afterActiveConfigApplyForTest fires after the synchronous startup apply
+	// returns and before its final VRF miss-terminator reassertion. It models
+	// networkd work that completes just after Apply returns.
+	afterActiveConfigApplyForTest func()
+	// beforeFinalVRFMissReassertForTest fires at the end of the core apply,
+	// after management-VRF rebind and before the final terminator reassertion.
+	// It models late networkd cleanup without replacing the apply pipeline.
+	beforeFinalVRFMissReassertForTest func()
 	// confirmFeedDeferrals counts, per commit-confirmed generation, how often a
 	// timed-out rollback was deferred because its target waits on a
 	// dynamic-address feed (#9615). Read and written only by

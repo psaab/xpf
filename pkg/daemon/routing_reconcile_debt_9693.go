@@ -25,23 +25,34 @@ import (
 // (proxyARPReassertLoop #4001, fabricIPVLANReassertLoop #6791,
 // serviceReloadDebtReassertLoop #6800): a persistent debt latched by the apply
 // and an always-on re-assert loop that re-runs the idempotent reconcile until it
-// succeeds. The retry re-runs ONLY the ip-rule reconciles and the route-leak
-// republish, never the FRR apply, whose manager owns its own degraded retry.
+// succeeds. The retry re-runs the ip-rule reconciles, the route-leak republish,
+// and the VRF miss-terminator desired-state (#10421), never the FRR apply,
+// whose manager owns its own degraded retry.
 
 // routingReconcileReassertInterval paces the retry owner, matching its sibling
 // re-assert loops.
 var routingReconcileReassertInterval = 30 * time.Second
 
-// routingPolicyReconcileFn and routeLeakReconcileFn are the retry owner's two
-// reconciles, overridable in tests: the policy-routing reconcile writes the
-// kernel through a concrete *routing.Manager, so without a seam the retry could
-// only be observed with real ip rules.
+// routingPolicyReconcileFn, routeLeakReconcileFn, and
+// vrfMissTerminatorReconcileFn are the retry owner's reconciles, overridable in
+// tests: policy-routing and route-leak writes use concrete routing/dataplane
+// managers, while the VRF callback restores the #10421 post-networkd invariant.
 var (
 	routingPolicyReconcileFn = func(d *Daemon, cfg *config.Config) error {
 		return d.applyPolicyRoutingRules(cfg)
 	}
 	routeLeakReconcileFn = func(d *Daemon, cfg *config.Config, overlay []config.RouteOverlayEntry) error {
 		return d.reconcileRouteLeakSnapshot(cfg, overlay)
+	}
+	vrfMissTerminatorReconcileFn = func(d *Daemon) error {
+		if d.routing == nil || d.store == nil {
+			return nil
+		}
+		cfg := d.store.ActiveConfig()
+		if !d.shouldReassertVRFMissTerminator(cfg) {
+			return nil
+		}
+		return d.routing.ReassertVRFMissTerminator()
 	}
 )
 
@@ -133,6 +144,7 @@ func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 	err := errors.Join(
 		routingPolicyReconcileFn(d, cfg),
 		routeLeakReconcileFn(d, cfg, d.commitOverlayForConfig(cfg)),
+		vrfMissTerminatorReconcileFn(d),
 	)
 	d.noteRoutingReconcileResult(err)
 	if err != nil {

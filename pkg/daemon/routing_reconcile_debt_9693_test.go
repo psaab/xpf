@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,6 +230,10 @@ func TestRoutingReconcileRetryOwnerIsWired9693(t *testing.T) {
 		}
 	}
 	if len(retry["applyPolicyRoutingRules"]) == 0 || len(retry["reconcileRouteLeakSnapshot"]) == 0 {
-		t.Error("the retry owner must re-run both applyPolicyRoutingRules and reconcileRouteLeakSnapshot")
+		t.Error("the retry owner must re-run policy rules and route-leak snapshot")
+	}
+	retrySrc := stripLineComments6791(readDaemonSource(t, "routing_reconcile_debt_9693.go"))
+	if !strings.Contains(retrySrc, "vrfMissTerminatorReconcileFn(d)") {
+		t.Error("the retry owner must re-run the VRF miss terminator")
 	}
 }

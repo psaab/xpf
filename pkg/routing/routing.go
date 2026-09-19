@@ -133,6 +133,22 @@ func (m *Manager) IsManagedVRF(name string) bool { return m.vrf.IsManaged(name) 
 // See vrfManager.Reconcile for the full ownership contract.
 func (m *Manager) ReconcileVRFs(desired []VRFSpec) error { return m.vrf.Reconcile(desired) }
 
+// ReassertVRFMissTerminator restores the manager's desired miss-terminator
+// state after activation: it installs both families while an owned VRF exists,
+// retries a pending removal when ownership is empty, and otherwise is a no-op.
+// The apply path uses this after networkd activation because those operations
+// can remove a rule that ReconcileVRFs installed before realizing the VRF
+// devices (#10421).
+func (m *Manager) ReassertVRFMissTerminator() error {
+	return m.vrf.ReassertMissTerminator()
+}
+
+// VRFMissTerminatorNeedsReconcile reports whether the VRF manager still owns
+// terminator state that an apply boundary must restore or remove.
+func (m *Manager) VRFMissTerminatorNeedsReconcile() bool {
+	return m != nil && m.vrf != nil && m.vrf.MissTerminatorNeedsReconcile()
+}
+
 // BindInterfaceToVRF binds a network interface to a VRF device.
 func (m *Manager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	return m.vrf.BindInterfaceToVRF(ifaceName, instanceName)

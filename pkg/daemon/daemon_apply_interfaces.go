@@ -472,3 +472,27 @@ func managementVRFIfaceSet(cfg *config.Config) map[string]bool {
 	}
 	return out
 }
+
+// hasDesiredVRF reports whether the committed configuration owns at least one
+// VRF device. It mirrors the desired-device filters in applyVRFReconcile and
+// prevents the post-activation sweep from installing a global miss terminator
+// for a configuration with no VRFs.
+func hasDesiredVRF(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri.InstanceType != "forwarding" && !config.IsReservedRoutingInstanceName(ri.Name) {
+			return true
+		}
+	}
+	return len(managementVRFIfaceSet(cfg)) > 0
+}
+
+// shouldReassertVRFMissTerminator is the daemon-side ownership guard. The
+// config check covers a normal desired VRF; the manager state covers a stale
+// owned device or failed removal that must converge before the rule can clear.
+func (d *Daemon) shouldReassertVRFMissTerminator(cfg *config.Config) bool {
+	return d.routing != nil &&
+		(hasDesiredVRF(cfg) || d.routing.VRFMissTerminatorNeedsReconcile())
+}
