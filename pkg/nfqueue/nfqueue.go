@@ -96,11 +96,15 @@ const (
 
 	nfqnlCopyPacket = 2
 
-	nfqaPacketHdr  = 1
-	nfqaVerdictHdr = 2
-	nfqaPayload    = 10
-
-	nlmsgError = 2
+	nfqaPacketHdr      = 1
+	nfqaVerdictHdr     = 2
+	nfqaIfindexIndev   = 5
+	nfqaIfindexOutdev  = 6
+	nfqaIfindexPhysIn  = 7
+	nfqaIfindexPhysOut = 8
+	nfqaHwaddr         = 9
+	nfqaPayload        = 10
+	nlmsgError         = 2
 
 	nlmFRequest = 1
 	nlmFAck     = 4
@@ -167,6 +171,23 @@ type linuxMmsghdr struct {
 // never silently renumbers), and sets NFQNL_COPY_PACKET. No FAIL_OPEN flag is
 // set: a full or unresponsive queue drops (fail-closed).
 func Open(queueID uint16) (*Queue, error) {
+	return openWithFamilies(queueID, []int{unix.AF_INET, unix.AF_INET6})
+}
+
+// OpenFamily binds one protocol family to an NFQUEUE. This is used for
+// AF_BRIDGE queues, which must not be included in Open's shared IP-family
+// binding loop: a bridge PF_BIND failure must not prevent IPv4/IPv6 queues
+// from starting.
+func OpenFamily(queueID uint16, protocolFamily int) (*Queue, error) {
+	switch protocolFamily {
+	case unix.AF_INET, unix.AF_INET6, unix.AF_BRIDGE:
+	default:
+		return nil, fmt.Errorf("nfqueue: unsupported protocol family %d", protocolFamily)
+	}
+	return openWithFamilies(queueID, []int{protocolFamily})
+}
+
+func openWithFamilies(queueID uint16, protocolFamilies []int) (*Queue, error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_NETFILTER)
 	if err != nil {
 		return nil, fmt.Errorf("nfqueue: socket NETLINK_NETFILTER: %w", err)
@@ -188,10 +209,9 @@ func Open(queueID uint16) (*Queue, error) {
 
 	q := &Queue{id: int(queueID), fd: fd, recvBuf: make([]byte, recvBufSize)}
 	q.seq.Store(uint32(time.Now().UnixNano() & 0xffffff))
-
 	// Protocol-family binds. Another socket may already hold a family in this
 	// netns; that is not our queue, so EBUSY is tolerated here.
-	for _, pf := range []int{unix.AF_INET, unix.AF_INET6} {
+	for _, pf := range protocolFamilies {
 		if err := q.configure(0, nfqnlCfgCmdPFBind, pf, nil); err != nil {
 			if errors.Is(err, unix.EBUSY) {
 				continue
@@ -313,6 +333,9 @@ func (q *Queue) Recv(deadline time.Time) (*Packet, error) {
 }
 
 // Packet is one held packet. Payload is a copy valid after Recv returns.
+// The provenance fields mirror the nfgenmsg family and NFQA_* attributes
+// carried by the kernel. They are observational only; callers must validate
+// them against an OriginRegistry before any non-drop disposition.
 type Packet struct {
 	q        *Queue
 	id       uint32
@@ -320,8 +343,46 @@ type Packet struct {
 	recvTime time.Time
 	queueID  uint16
 
+	nfgenFamily   uint8
+	hook          uint8
+	indevIfindex  uint32
+	outdevIfindex uint32
+
 	done      atomic.Bool
 	verdictAt atomic.Int64 // unix-nano of first successful verdict, 0 until then
+}
+
+// NfgenFamily is the raw nfgenmsg address family (AF_INET, AF_INET6, or
+// AF_BRIDGE). Normalize it with ValidateProvenance before use.
+func (p *Packet) NfgenFamily() uint8 {
+	if p == nil {
+		return 0
+	}
+	return p.nfgenFamily
+}
+
+// Hook is the raw NF_INET_* hook number from NFQA_PACKET_HDR.
+func (p *Packet) Hook() uint8 {
+	if p == nil {
+		return 0
+	}
+	return p.hook
+}
+
+// IndevIfindex is NFQA_IFINDEX_INDEV, or zero when the kernel did not carry it.
+func (p *Packet) IndevIfindex() uint32 {
+	if p == nil {
+		return 0
+	}
+	return p.indevIfindex
+}
+
+// OutdevIfindex is NFQA_IFINDEX_OUTDEV, or zero when the kernel did not carry it.
+func (p *Packet) OutdevIfindex() uint32 {
+	if p == nil {
+		return 0
+	}
+	return p.outdevIfindex
 }
 
 // Payload returns the captured packet bytes.
@@ -341,6 +402,14 @@ func (p *Packet) VerdictTime() time.Time {
 
 // QueueID is the queue the packet was held on.
 func (p *Packet) QueueID() uint16 { return p.queueID }
+
+// PacketID returns the kernel packet identifier used by the terminal verdict.
+func (p *Packet) PacketID() uint32 {
+	if p == nil {
+		return 0
+	}
+	return p.id
+}
 
 // Verdict disposes the held packet. After Close it returns ErrClosed (never
 // panics, never silently accepts). A packet has one terminal verdict attempt:
@@ -630,9 +699,10 @@ func (q *Queue) parsePackets(buf []byte) ([]*Packet, error) {
 		}
 		end := off + mlen
 		if mtype == uint16(nfqnlMsgPacketType) && off+20 <= end {
+			nfgenFamily := buf[off+16]
 			resID := binary.BigEndian.Uint16(buf[off+18 : off+20])
 			if resID == q.ID() {
-				if pkt, ok := parseOnePacket(q, buf[off+20:end], now); ok {
+				if pkt, ok := parseOnePacket(q, buf[off+20:end], now, nfgenFamily); ok {
 					q.held.Add(1)
 					out = append(out, pkt)
 				}
@@ -644,9 +714,11 @@ func (q *Queue) parsePackets(buf []byte) ([]*Packet, error) {
 }
 
 // parseOnePacket parses the attribute stream of one NFQNL_MSG_PACKET.
-func parseOnePacket(q *Queue, attrs []byte, now time.Time) (*Packet, bool) {
+func parseOnePacket(q *Queue, attrs []byte, now time.Time, nfgenFamily uint8) (*Packet, bool) {
 	var id uint32
 	var haveID bool
+	var hook uint8
+	var indevIfindex, outdevIfindex uint32
 	var payload []byte
 	off := 0
 	for off+4 <= len(attrs) {
@@ -662,6 +734,17 @@ func parseOnePacket(q *Queue, attrs []byte, now time.Time) (*Packet, bool) {
 				id = binary.BigEndian.Uint32(body[:4])
 				haveID = true
 			}
+			if len(body) >= 7 {
+				hook = body[6]
+			}
+		case nfqaIfindexIndev:
+			if len(body) >= 4 {
+				indevIfindex = binary.BigEndian.Uint32(body[:4])
+			}
+		case nfqaIfindexOutdev:
+			if len(body) >= 4 {
+				outdevIfindex = binary.BigEndian.Uint32(body[:4])
+			}
 		case nfqaPayload:
 			payload = append([]byte(nil), body...)
 		}
@@ -670,5 +753,9 @@ func parseOnePacket(q *Queue, attrs []byte, now time.Time) (*Packet, bool) {
 	if !haveID {
 		return nil, false
 	}
-	return &Packet{q: q, id: id, payload: payload, recvTime: now, queueID: q.ID()}, true
+	return &Packet{
+		q: q, id: id, payload: payload, recvTime: now, queueID: q.ID(),
+		nfgenFamily: nfgenFamily, hook: hook,
+		indevIfindex: indevIfindex, outdevIfindex: outdevIfindex,
+	}, true
 }

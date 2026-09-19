@@ -187,8 +187,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // outer UDP socket is bound to `vrf-<instance>` via SO_BINDTODEVICE. An old
 // Rust helper would accept the same snapshot but keep that socket in the main
 // table, reopening #9909's containment escape.
+// v27 -> v28 (#9506 S5): `permit_epoch` and `queue_epochs` carry the
+// epoch-scoped q0 capture authority. An older helper would ignore those
+// fields and admit/reject against stale queue ownership.
 // Keep this line in lockstep with pkg/dataplane/userspace/protocol.go.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 27;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 28;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

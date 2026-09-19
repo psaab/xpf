@@ -1,0 +1,372 @@
+package nfqueue
+
+import (
+	"errors"
+	"testing"
+	"time"
+)
+
+func pipelineTestPacket(queue uint16, family uint8, hook uint8, ifindex uint32, id uint32) *Packet {
+	q := &Queue{id: int(queue), fd: -1}
+	return &Packet{
+		q: q, id: id, queueID: queue, payload: []byte{0x45, byte(id)},
+		nfgenFamily: family, hook: hook, indevIfindex: ifindex,
+		recvTime: time.Now(),
+	}
+}
+
+type pipelineTestSink struct {
+	verdicts []struct {
+		id uint32
+		v  Verdict
+	}
+	err   error
+	calls int
+}
+
+func (s *pipelineTestSink) Verdict(pkt *Packet, v Verdict) error {
+	s.calls++
+	if s.err != nil {
+		return s.err
+	}
+	s.verdicts = append(s.verdicts, struct {
+		id uint32
+		v  Verdict
+	}{pkt.id, v})
+	return nil
+}
+
+type pipelineTestMinter struct {
+	next uint64
+}
+
+func (m *pipelineTestMinter) MintLease(CaptureFrame) (ReinjectLease, error) {
+	m.next++
+	return ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: m.next}, nil
+}
+
+type queueScopedMinter struct {
+	next uint64
+}
+
+func (m *queueScopedMinter) MintLease(frame CaptureFrame) (ReinjectLease, error) {
+	m.next++
+	queue := frame.Packet.QueueID()
+	epoch := uint64(queue - 67)
+	return ReinjectLease{
+		PermitEpoch: 1,
+		QueueNumber: queue,
+		QueueEpoch:  epoch,
+		RequestID:   m.next,
+	}, nil
+}
+
+type pipelineTestSubmitter struct {
+	submitted []AdjudicatedFrame
+	admit     []ReinjectAdmission
+	drain     []ReinjectCompletion
+	cancelled []uint64
+}
+
+func (s *pipelineTestSubmitter) SubmitAdjudicated(frames []AdjudicatedFrame) ([]ReinjectAdmission, error) {
+	s.submitted = append(s.submitted, frames...)
+	if s.admit != nil {
+		return s.admit, nil
+	}
+	out := make([]ReinjectAdmission, 0, len(frames))
+	for _, f := range frames {
+		family, hook, err := originWire(f.Origin)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ReinjectAdmission{
+			RequestID: f.Lease.RequestID, PermitEpoch: f.Lease.PermitEpoch,
+			QueueNumber: f.Lease.QueueNumber, QueueEpoch: f.Lease.QueueEpoch,
+			Family: family, Hook: hook, OwnedIfindex: f.Origin.OwnedIfindex,
+			Admitted: true,
+		})
+	}
+	return out, nil
+}
+
+func (s *pipelineTestSubmitter) DrainReinjectCompletions(uint32) ([]ReinjectCompletion, error) {
+	out := append([]ReinjectCompletion(nil), s.drain...)
+	s.drain = nil
+	return out, nil
+}
+
+func (s *pipelineTestSubmitter) CancelReinject(ids []uint64, permit uint64, scopes []ReinjectQueueScope) ([]uint64, error) {
+	s.cancelled = append(s.cancelled, ids...)
+	return ids, nil
+}
+
+func pipelineTestRegistry(t *testing.T) *OriginRegistry {
+	t.Helper()
+	var registry OriginRegistry
+	if err := registry.Register(77, CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: "owner-a", STN: "st0", OwnedIfindex: 7}); err != nil {
+		t.Fatal(err)
+	}
+	return &registry
+}
+
+func TestCapturePipelineOwnerHomogeneousPartition9506(t *testing.T) {
+	origin := func(owner string) CaptureOrigin {
+		return CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: owner, STN: "st0", OwnedIfindex: 7}
+	}
+	frames := []CaptureFrame{
+		{FlowKey: "a", origin: origin("worker-a"), originSet: true},
+		{FlowKey: "b", origin: origin("worker-b"), originSet: true},
+		{FlowKey: "c", origin: origin("worker-a"), originSet: true},
+	}
+	parts := PartitionOwnerBatches(frames)
+	if len(parts) != 2 {
+		t.Fatalf("partitions=%d, want 2", len(parts))
+	}
+	for owner, batch := range parts {
+		if len(batch) == 0 {
+			t.Fatalf("owner %q has empty batch", owner)
+		}
+		for _, frame := range batch {
+			if frame.origin.Owner != owner {
+				t.Fatalf("owner %q batch contains %q", owner, frame.origin.Owner)
+			}
+		}
+	}
+	if got := len(DispatchWorkers(parts)); got != 2 {
+		t.Fatalf("dispatch workers=%d, want 2 (mixed batch may not use one worker)", got)
+	}
+}
+
+func TestCapturePipelineBoundedHandoff9506(t *testing.T) {
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:   pipelineTestRegistry(t),
+		Phase:      PipelineShadow,
+		Sink:       new(pipelineTestSink),
+		HandoffCap: 1,
+		BatchCap:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := CaptureFrame{Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "a"}
+	if err := p.Enqueue(frame); err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+	if err := p.Enqueue(frame); !errors.Is(err, ErrHandoffFull) {
+		t.Fatalf("second Enqueue=%v, want ErrHandoffFull", err)
+	}
+	if got := p.Stats().HandoffRefusals; got != 1 {
+		t.Fatalf("handoff refusals=%d, want 1", got)
+	}
+}
+
+func TestCapturePipelineShadowAndQuarantine9506(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase PipelinePhase
+		want  Verdict
+	}{
+		{"shadow", PipelineShadow, VerdictAccept},
+		{"quarantine", PipelineQuarantine, VerdictDrop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := new(pipelineTestSink)
+			p, err := NewCapturePipeline(CapturePipelineConfig{
+				Registry: pipelineTestRegistry(t), Phase: tc.phase, Sink: sink, HandoffCap: 2, BatchCap: 2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Enqueue(CaptureFrame{Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "a"}); err != nil {
+				t.Fatal(err)
+			}
+			if n := p.Drain(2); n != 1 || len(sink.verdicts) != 1 || sink.verdicts[0].v != tc.want {
+				t.Fatalf("Drain n=%d verdicts=%+v, want %v", n, sink.verdicts, tc.want)
+			}
+		})
+	}
+}
+
+func TestCapturePipelineScopedCancelKeepsOtherQueueLive9506(t *testing.T) {
+	sink := new(pipelineTestSink)
+	var registry OriginRegistry
+	for _, queue := range []uint16{77, 78} {
+		if err := registry.Register(queue, CaptureOrigin{
+			Family: CaptureFamilyInet, Hook: CaptureHookForward,
+			Owner: "owner-a", STN: "st0", OwnedIfindex: 7,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	submitter := new(pipelineTestSubmitter)
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: &registry, Phase: PipelineEnforcing, Sink: sink,
+		LeaseMinter: &queueScopedMinter{}, Submitter: submitter,
+		HandoffCap: 4, BatchCap: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, queue := range []uint16{77, 78} {
+		if err := p.Enqueue(CaptureFrame{
+			Packet:  pipelineTestPacket(queue, 2, 2, 7, uint32(queue)),
+			FlowKey: "same-flow",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := p.Drain(4); got != 2 {
+		t.Fatalf("Drain=%d, want 2", got)
+	}
+	if len(submitter.submitted) != 1 || submitter.submitted[0].Lease.QueueNumber != 77 {
+		t.Fatalf("initial submission=%+v, want queue 77 head", submitter.submitted)
+	}
+	if err := p.Cancel(1, 77, 10); err != nil {
+		t.Fatalf("scoped Cancel: %v", err)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].id != 77 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("scoped verdicts=%+v, want queue 77 DROP", sink.verdicts)
+	}
+	if len(submitter.submitted) != 2 || submitter.submitted[1].Lease.QueueNumber != 78 {
+		t.Fatalf("tail submission=%+v, want queue 78 after scoped cancel", submitter.submitted)
+	}
+	if len(p.pending) != 1 {
+		t.Fatalf("pending=%d, want unrelated queue 78 retained", len(p.pending))
+	}
+	if err := p.Cancel(0, 0, 0); err != nil {
+		t.Fatalf("global cleanup Cancel: %v", err)
+	}
+	if len(sink.verdicts) != 2 || sink.verdicts[1].id != 78 || sink.verdicts[1].v != VerdictDrop {
+		t.Fatalf("cleanup verdicts=%+v, want queue 78 DROP", sink.verdicts)
+	}
+}
+
+func TestCapturePipelineFragmentCompletionOneClass9506(t *testing.T) {
+	sink := new(pipelineTestSink)
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: pipelineTestRegistry(t), Phase: PipelineQuarantine, Sink: sink,
+		HandoffCap: 8, BatchCap: 8, FragmentSlots: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := FragmentKey{Version: 4, Tunnel: 1, VRF: 1, Generation: 1, ID: 5}
+	for i, frag := range []Fragment{{Offset: 0, More: true, Data: []byte("ab")}, {Offset: 2, More: false, Data: []byte("cd")}} {
+		if err := p.Enqueue(CaptureFrame{Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "frag", FragmentKey: &key, Fragment: &frag}); err != nil {
+			t.Fatalf("Enqueue fragment %d: %v", i, err)
+		}
+	}
+	if n := p.Drain(8); n != 2 || len(sink.verdicts) != 2 {
+		t.Fatalf("fragment Drain n=%d verdicts=%+v, want two original verdicts", n, sink.verdicts)
+	}
+	for _, verdict := range sink.verdicts {
+		if verdict.v != VerdictDrop {
+			t.Fatalf("fragment verdict=%v, want one class DROP", verdict.v)
+		}
+	}
+}
+
+func TestCapturePipelineAdmittedEchoMismatchCancelsUncertain9506(t *testing.T) {
+	sink := new(pipelineTestSink)
+	submitter := &pipelineTestSubmitter{
+		admit: []ReinjectAdmission{{
+			RequestID: 1, PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 99,
+			Family: reinjectOriginInet, Hook: reinjectOriginForward,
+			OwnedIfindex: 7, Admitted: true,
+		}},
+	}
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:    pipelineTestRegistry(t),
+		Phase:       PipelineEnforcing,
+		Sink:        sink,
+		LeaseMinter: &pipelineTestMinter{},
+		Submitter:   submitter,
+		HandoffCap:  2,
+		BatchCap:    2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "echo-mismatch",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("Drain=%d, want one submitted frame", got)
+	}
+	if len(submitter.cancelled) != 1 || submitter.cancelled[0] != 1 {
+		t.Fatalf("cancelled=%v, want request 1 after positive echo mismatch", submitter.cancelled)
+	}
+	stats := p.Stats()
+	if stats.AdmissionsRefused != 0 || stats.Uncertain != 1 {
+		t.Fatalf("stats=%+v, want uncertain mismatch rather than refusal", stats)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
+	}
+}
+
+func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
+	tests := []struct {
+		name          string
+		outcome       CompletionOutcome
+		wantStale     uint64
+		wantRefused   uint64
+		wantUncertain uint64
+		wantNotify    bool
+	}{
+		{name: "fenced is stale", outcome: CompletionFenced, wantStale: 1},
+		{name: "denied is refused", outcome: CompletionDenied, wantRefused: 1},
+		{name: "accepted is uncertain", outcome: CompletionAccepted, wantUncertain: 1, wantNotify: true},
+		{name: "would reinject is uncertain", outcome: CompletionWouldReinject, wantUncertain: 1, wantNotify: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := new(pipelineTestSink)
+			uncertainCalls := 0
+			p, err := NewCapturePipeline(CapturePipelineConfig{
+				Registry:    pipelineTestRegistry(t),
+				Phase:       PipelineEnforcing,
+				Sink:        sink,
+				OnUncertain: func(string) { uncertainCalls++ },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame := CaptureFrame{
+				Packet:  pipelineTestPacket(77, 2, 2, 7, 1),
+				FlowKey: "extended-outcome",
+			}
+			pending := &pendingReinject{
+				frame:    frame,
+				lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
+				deadline: time.Now().Add(time.Second),
+			}
+			p.mu.Lock()
+			p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
+			p.pending[pending.lease.RequestID] = pending
+			p.mu.Unlock()
+			if !p.resolveCompletion(ReinjectCompletion{
+				RequestID: 1, PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1,
+				Outcome: tc.outcome,
+			}) {
+				t.Fatal("resolveCompletion returned false")
+			}
+			stats := p.Stats()
+			if stats.Stale != tc.wantStale || stats.Refused != tc.wantRefused || stats.Uncertain != tc.wantUncertain {
+				t.Fatalf("stats=%+v, want stale=%d refused=%d uncertain=%d", stats, tc.wantStale, tc.wantRefused, tc.wantUncertain)
+			}
+			wantCalls := 0
+			if tc.wantNotify {
+				wantCalls = 1
+			}
+			if uncertainCalls != wantCalls {
+				t.Fatalf("uncertain callback count=%d, want %d", uncertainCalls, wantCalls)
+			}
+			if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+				t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
+			}
+		})
+	}
+}

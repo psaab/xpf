@@ -28,6 +28,14 @@ func helperEventSocketPath(cfg config.UserspaceConfig) string {
 	return filepath.Join(filepath.Dir(cfg.ControlSocket), "userspace-dp-events.sock")
 }
 
+func helperReinjectSocketPaths(cfg config.UserspaceConfig) (string, string) {
+	if cfg.ControlSocket == "" {
+		return "", ""
+	}
+	dir := filepath.Dir(cfg.ControlSocket)
+	return filepath.Join(dir, "reinject-submit.sock"),
+		filepath.Join(dir, "reinject-complete.sock")
+}
 // preflightHelperPaths rejects a helper path set that bring-up would have to
 // refuse anyway, while the RUNNING generation can still be spared (#5839).
 //
@@ -46,24 +54,36 @@ func helperEventSocketPath(cfg config.UserspaceConfig) string {
 // a new bring-up failure on a code path that used to have none.
 func preflightHelperPaths(cfg config.UserspaceConfig) error {
 	evtPath := helperEventSocketPath(cfg)
-	// The stale-socket primitive must never be pointed at the state file: a
-	// REGULAR FILE is expected there, so aliasing it onto a socket path would
-	// hand helper state to a socket unlink. Aliasing the two sockets onto each
-	// other is equally unworkable — the daemon's event listener would occupy
-	// the path the helper must bind.
+	reinjectSubmit, reinjectComplete := helperReinjectSocketPaths(cfg)
 	for _, pair := range []struct{ aName, a, bName, b string }{
 		{"control-socket", cfg.ControlSocket, "event socket", evtPath},
 		{"control-socket", cfg.ControlSocket, "state-file", cfg.StateFile},
 		{"event socket", evtPath, "state-file", cfg.StateFile},
+		{"reinject submit socket", reinjectSubmit, "reinject complete socket", reinjectComplete},
+		{"reinject submit socket", reinjectSubmit, "control-socket", cfg.ControlSocket},
+		{"reinject submit socket", reinjectSubmit, "event socket", evtPath},
+		{"reinject submit socket", reinjectSubmit, "state-file", cfg.StateFile},
+		{"reinject complete socket", reinjectComplete, "control-socket", cfg.ControlSocket},
+		{"reinject complete socket", reinjectComplete, "event socket", evtPath},
+		{"reinject complete socket", reinjectComplete, "state-file", cfg.StateFile},
 	} {
-		if pair.a != "" && pair.a == pair.b {
+		a, b := pair.a, pair.b
+		if a != "" {
+			a = filepath.Clean(a)
+		}
+		if b != "" {
+			b = filepath.Clean(b)
+		}
+		if a != "" && a == b {
 			return fmt.Errorf("userspace dataplane %s and %s must name distinct paths (both are %s)",
-				pair.aName, pair.bName, pair.a)
+				pair.aName, pair.bName, a)
 		}
 	}
 	for _, sock := range []struct{ kind, path string }{
 		{socketKindControl, cfg.ControlSocket},
 		{socketKindEventStream, evtPath},
+		{socketKindReinjectSubmit, reinjectSubmit},
+		{socketKindReinjectComplete, reinjectComplete},
 	} {
 		if sock.path == "" {
 			continue

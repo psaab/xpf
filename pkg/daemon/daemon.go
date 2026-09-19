@@ -136,7 +136,14 @@ type Daemon struct {
 
 	// #9506 S4 permit/queue authority. The pointer is initialized before
 	// background loops start and retained until Run's joined shutdown.
-	ipsecS4                     *ipsecSupervisor
+	ipsecS4 *ipsecSupervisor
+	// #9506 S5 capture actor and staged generation. The mutex protects
+	// provider/reconcile publication while queue receive loops remain lock-free.
+	ipsecCaptureMu              sync.Mutex
+	ipsecCapture                *ipsecCaptureRuntime
+	ipsecCaptureStaged          *ipsecCaptureRuntime
+	ipsecCaptureStagePending    bool
+	ipsecCaptureGeneration      atomic.Uint64
 	ipsecOverlay                atomic.Pointer[xnft.HostInputFenceOverlay]
 	ipsecOverlayAcked           atomic.Pointer[xnft.HostInputFenceOverlay]
 	ipsecOverlayRetryUntil      atomic.Int64

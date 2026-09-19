@@ -139,6 +139,11 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	stop()
 	wg.Wait()
 
+	// #9506 S5: remove the kernel divert before closing capture actors and
+	// their NFQUEUE descriptors. This runs after joined background loops so no
+	// new apply can stage a generation while shutdown drains the old one.
+	d.shutdownIpsecCapture()
+
 	// ── THE FAIL-CLOSED ACTIONS RUN FIRST (#9035) ──────────────────────
 	//
 	// This block used to sit ~90 lines below, after the telemetry, feeds, RPM,

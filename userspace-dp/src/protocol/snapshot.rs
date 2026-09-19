@@ -479,9 +479,27 @@ impl PartialEq<&str> for SynCookieMasterKeyHex {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct QueueEpochSnapshot {
+    #[serde(default)]
+    pub queue: u16,
+    #[serde(default)]
+    pub epoch: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConfigSnapshot {
     pub version: i32,
+    /// #9506 S5: epoch authority for leased q0 reinjects. Both fields are
+    /// additive and omitted when unset so old snapshots retain byte parity.
+    #[serde(
+        rename = "permit_epoch",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
+    pub permit_epoch: u64,
+    #[serde(rename = "queue_epochs", default, skip_serializing_if = "Vec::is_empty")]
+    pub queue_epochs: Vec<QueueEpochSnapshot>,
     pub generation: u64,
     #[serde(rename = "fib_generation", default)]
     pub fib_generation: u32,
@@ -673,9 +691,9 @@ pub(crate) struct ConfigSnapshot {
     /// state, while `xpf_learned_route_cap_hits_total` counts declined builds.
     ///
     /// NOT skew-tolerant: a v26 helper still restores kernel delegation while
-    /// this flag is set, which is the #9054 security bypass. The
-    /// `CONFIG_SNAPSHOT_PROTOCOL_VERSION` bump to 27 refuses a mismatched
-    /// pairing rather than silently preserving that old meaning.
+    /// this flag is set, which is the #9054 security bypass. The v27 contract
+    /// refuses that mismatched pairing, and the #9506 v28 contract likewise
+    /// fences stale q0 capture authority.
     /// Go-side mirror: `pkg/dataplane/userspace/protocol.go`
     /// `LearnedRouteImportCapped bool json:"learned_route_import_capped,omitempty"`.
     #[serde(rename = "learned_route_import_capped", default)]

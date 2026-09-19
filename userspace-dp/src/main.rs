@@ -22,6 +22,7 @@ mod prefix_set;
 mod screen;
 mod session;
 mod slowpath;
+mod slowpath_reinject_9506;
 #[cfg(test)]
 mod test_zone_ids;
 #[cfg(test)]

@@ -132,7 +132,9 @@ const preSecureTunnelProtocolVersion = 4
 // v26 delegates capped misses, while v27 adjudicates and denies them. Nothing
 // about secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) remains
 // untouched again.
-const secureTunnelSnapshotProtocolVersion = 27
+// Issue #9506 moves the current snapshot wire to v28 for q0 capture authority;
+// secure_tunnel still does not change, so its historical floor remains 7.
+const secureTunnelSnapshotProtocolVersion = 28
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

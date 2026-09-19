@@ -169,6 +169,28 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// so it cannot re-admit anything, and moving it any later re-opens the
 	// window. See daemon_policy_invalidate_capture.go.
 	d.capturePolicyInvalidationLocked(cfg)
+	if rt := d.dataplane(); rt != nil {
+		if adapter, ok := rt.(interface {
+			Manager() *dpuserspace.Manager
+		}); ok {
+			if mgr := adapter.Manager(); mgr != nil {
+				mgr.SetIngressFoldResolver(buildIngressFoldResolver(cfg))
+				mgr.SetCaptureEpochProvider(func() (uint64, []dpuserspace.QueueEpochSnapshot) {
+					d.ipsecCaptureMu.Lock()
+					pending := d.ipsecCaptureStagePending
+					capture := d.ipsecCapture
+					if pending {
+						capture = d.ipsecCaptureStaged
+					}
+					d.ipsecCaptureMu.Unlock()
+					if capture == nil {
+						return 0, nil
+					}
+					return capture.epochSnapshot()
+				})
+			}
+		}
+	}
 
 	var applyResult *dataplane.ApplyResult
 	if rt := d.dataplane(); rt != nil {
@@ -259,16 +281,6 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// And the reverse direction, used when a peer's session is imported: the
 	// fold the peer sent becomes THIS node's ifindex. Both closures share the
 	// same apply-time ifindex snapshot rationale.
-	if rt := d.dataplane(); rt != nil {
-		if adapter, ok := rt.(interface {
-			Manager() *dpuserspace.Manager
-		}); ok {
-			if mgr := adapter.Manager(); mgr != nil {
-				mgr.SetIngressFoldResolver(buildIngressFoldResolver(cfg))
-			}
-		}
-	}
-
 	// 2.45. #1956 V-4: managed->unmapped teardown MUST run BEFORE
 	// networkd.Apply so its stale-file sweep has nothing to half-clean.
 	// No-op idempotent when nothing transitioned (zero churn on an

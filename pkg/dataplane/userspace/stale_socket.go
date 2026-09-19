@@ -14,8 +14,10 @@ import (
 // operator-facing error, so keep them noun phrases that read as the subject of
 // "refusing to unlink <kind> <path>".
 const (
-	socketKindControl     = "control socket"
-	socketKindEventStream = "event stream socket"
+	socketKindControl          = "control socket"
+	socketKindEventStream      = "event stream socket"
+	socketKindReinjectSubmit  = "reinject submit socket"
+	socketKindReinjectComplete = "reinject complete socket"
 )
 
 // removeStaleUnixSocket removes only a PROVEN STALE Unix socket at path, and is

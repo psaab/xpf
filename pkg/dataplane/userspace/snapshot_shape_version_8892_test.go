@@ -226,7 +226,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "c098e2c1f595be54bd617f5ae0b2a2806ef8cfed34ce7cadad9c824d17b5c779"
+	snapshotShapeGolden8892 = "a497626cd7021af40daaf16fac0335547ce677cc5f947a1dfeee688c06fb5b68"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -358,7 +358,9 @@ const (
 	// disposition meaning. A v26 helper still delegates capped NoRoute frames;
 	// v27 adjudicates and denies them. The protocol version must move even
 	// without a snapshot-shape change so exact equality refuses that pairing.
-	snapshotShapeVersion8892 = 27
+	// v27 -> v28 BUMPED (#9506 S5): permit_epoch and queue_epochs are real
+	// transmitted authority fields; an old helper would use stale q0 ownership.
+	snapshotShapeVersion8892 = 28
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
