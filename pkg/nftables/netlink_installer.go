@@ -63,17 +63,24 @@ type Installer interface {
 	// kernel/permission failure -> error, preserving the fail-closed teardown
 	// contract #5790).
 	DeleteTable(name string) error
-	// InstallTransitBarrier installs the #7191 unarmed forward-hook DROP in the
-	// inet and bridge families. Idempotent.
+	// InstallIpsecDivert installs the S3 fence+divert capture table in both
+	// inet and bridge families. Queue rules are fail-closed (no bypass).
+	InstallIpsecDivert(spec IpsecDivertSpec) error
+	// RemoveIpsecDivert removes the S3 capture table from both families.
+	RemoveIpsecDivert() error
+
+	// InstallTransitBarrier installs the #7191 unarmed forward-hook DROP in
+	// the inet and bridge families. Idempotent.
 	InstallTransitBarrier() error
 	// InstallArmedTransitFence replaces the forward-hook DROP with the armed
 	// default-drop fence and its provenance-scoped XDP_PASS pinholes. The same
 	// table is used in both armed and unarmed states so a stale generation
 	// cannot leave two competing forward hooks behind.
 	InstallArmedTransitFence(spec ForwardFenceSpec) error
-	// RemoveTransitBarrier removes the transit table from both families.
+	// RemoveTransitBarrier removes the barrier from both families.
 	// Idempotent; a genuine failure is returned because a table that survives
-	// teardown leaves the kernel transit posture uncertain.
+	// teardown leaves the box transit-closed while armed — the black hole this
+	// design exists to avoid.
 	RemoveTransitBarrier() error
 }
 

@@ -39,9 +39,11 @@ func (noopNftInstaller) InstallTransitBarrier() error                  { return 
 func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
 	return nil
 }
-func (noopNftInstaller) RemoveTransitBarrier() error                  { return nil }
-func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) { return fakeLo0Rules(s), nil }
-func (noopNftInstaller) DeleteTable(string) error                     { return nil }
+func (noopNftInstaller) RemoveTransitBarrier() error                   { return nil }
+func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error { return nil }
+func (noopNftInstaller) RemoveIpsecDivert() error                      { return nil }
+func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)  { return fakeLo0Rules(s), nil }
+func (noopNftInstaller) DeleteTable(string) error                      { return nil }
 
 // fakeNftInstaller is the per-test failure-injection seam. A nil hook succeeds
 // (returns nil); a set hook decides the result and can capture the spec/name for
@@ -64,11 +66,15 @@ type fakeNftInstaller struct {
 	barrierCalls   []string
 	barrierInstall func() error
 	barrierRemove  func() error
-	// #10302: records armed-fence installs so fence cells can assert the armed
-	// action is a fence install, not a bare barrier removal.
+	// #10302: records armed-fence installs so fence cells can assert the
+	// armed action is a fence install, not a bare barrier removal.
 	fenceCalls10302   []string
 	fenceSpecs10302   []xnft.ForwardFenceSpec
 	fenceInstall10302 func(xnft.ForwardFenceSpec) error
+	// #9506 S3: divert installation is a separate failure-injection seam.
+	divertInstall func(xnft.IpsecDivertSpec) error
+	divertRemove  func() error
+	divertCalls   []string
 }
 
 func (f *fakeNftInstaller) InstallHostInbound(s xnft.HostInboundSpec) error {
@@ -244,10 +250,27 @@ func (f *fakeNftInstaller) InstallArmedTransitFence(spec xnft.ForwardFenceSpec) 
 	}
 	return nil
 }
+func (f *fakeNftInstaller) InstallIpsecDivert(spec xnft.IpsecDivertSpec) error {
+	f.divertCalls = append(f.divertCalls, "install")
+	if f.divertInstall != nil {
+		return f.divertInstall(spec)
+	}
+	return nil
+}
+
+func (f *fakeNftInstaller) RemoveIpsecDivert() error {
+	f.divertCalls = append(f.divertCalls, "remove")
+	if f.divertRemove != nil {
+		return f.divertRemove()
+	}
+	return nil
+}
 
 // #7191: barrier no-ops; this fake counts host-inbound installs only.
 func (c *countingNftInstaller) InstallTransitBarrier() error { return nil }
 func (c *countingNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
 	return nil
 }
-func (c *countingNftInstaller) RemoveTransitBarrier() error { return nil }
+func (c *countingNftInstaller) RemoveTransitBarrier() error                   { return nil }
+func (c *countingNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error { *c.calls++; return nil }
+func (c *countingNftInstaller) RemoveIpsecDivert() error                      { *c.calls++; return nil }
