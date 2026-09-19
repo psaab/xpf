@@ -6906,6 +6906,30 @@ strict paths (including that a rejected bootstrap leaves no active config).
 Negative controls assert a keyed cluster, a standalone (no `chassis cluster`)
 config, and a keyed unattended bootstrap are all unaffected.
 
+## Fabric zone-stamp private-L2 advisory (#10105)
+
+The zone-encoded fabric redirect source MAC (`02:bf:72:fe:<hi>:<lo>`) is
+validated by destination-MAC, RG-ownership and owner-RG gates, but its magic
+and public `StableZoneID` remain cloneable by an L2-adjacent host during a
+live split-RG placement. A software compiler cannot determine whether a
+fabric NIC is direct-attached, on a two-member bridge, or on a shared switch.
+
+When a compiled chassis cluster has `fabric-interface` or
+`fabric1-interface`, the strict commit/compiler paths append a #10105 warning:
+the operator MUST keep those links in a private two-peer L2 domain (direct
+attachment, dedicated VLAN/bridge, or operator-provided MACsec). Shared
+switching with a live RG split is unsupported. The warning is intentionally
+not emitted on tolerant boot/peer-sync paths, so an existing configuration
+does not produce repeat noise on every load; it is not a hard reject because
+the compiler cannot observe the cable plant and direct-attached fabrics are
+supported.
+
+This is an operator guardrail, not a wire-format change. The underlying
+stamp remains version-compatible and the existing #6458 gates remain
+unchanged. Regression coverage is
+`compiler_fabric_stamp_10105_test.go` (configured-fabric warning, no-fabric
+negative control, and tolerant-load suppression).
+
 ## Trailing-token arity on scalar value leaves (#3332)
 
 The mirror image of the multi-value contract is the **scalar** value leaf: a

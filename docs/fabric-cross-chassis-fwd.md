@@ -1197,3 +1197,130 @@ no-brick). Full rationale, the measured derivation table, and the deliberate
 scope boundary (`ge-0/0/99` — parses, derives, then fails visibly at netlink) are
 in `docs/config-schema.md` § "chassis-cluster fabric `member-interfaces` name
 validation (#8444)".
+
+## Fabric stamp authentication: document-and-constrain (#10105)
+
+Parent-filed from the #9901 lane (F-073 residual): the zone-encoded stamp
+(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, u16 BE `StableZoneID`)
+is cloneable by any L2-adjacent host on a shared fabric segment. #9901
+wired `routing_table` via the `ingress_routing_domain` SSOT with no wire
+change and left this protocol-design question: shared-secret MAC vs
+asymmetric signatures vs document-and-constrain. Decision: **document-and-
+constrain**. No wire change; the only code change is a strict compile-time
+operator advisory tied to a configured fabric interface.
+
+### Threat model and observability
+
+Production L2-adjacency inventory is not observable from this repository, so
+the following separates known reference topologies from the possible attacker
+placement. The shipped/reference wiring is private; a production shared VLAN
+or hypervisor/switch-port co-tenant is a deployment possibility, not a claim
+that the repository has measured one.
+
+- The stamp is 6 bytes of source MAC with zero spare room
+  (`resolve_zone_encoded_fabric_redirect_by_id`,
+  `userspace-dp/src/afxdp/forwarding/fabric.rs:537-555`), and
+  `StableZoneID` is a public FNV-1a fold (`pkg/config/zoneid.go:41-49`)
+  computable offline by anyone who knows a zone name.
+- The sender stamps EVERY HAInactive packet, including established-session
+  punts (`redirect_session_resolution_for_metadata`,
+  `userspace-dp/src/afxdp/session_glue/mod.rs:385-396`), and the receiver
+  parses at stage 9 on the per-packet poll path
+  (`stage_classify_fabric_ingress`, `userspace-dp/src/afxdp/poll_stages.rs:530-552`).
+  In split-RG active/active, stamp traffic is per-packet at fabric line
+  rate — any per-packet verify must cost nanoseconds, and any crypto
+  verify could only afford to run where the stamp drives a decision
+  (session-miss / V2 sites, new-flow rates).
+- All reference wiring keeps the fabric data link a private L2 domain:
+  direct cable (the Junos requirement), or a dedicated bridge carrying
+  exactly the two peers (test: `bpu-fab0` in
+  `docs/ha-cluster-userspace-wiring.yaml`, heartbeat separately on
+  `bpu-hb0`). L2-adjacent therefore means a THIRD speaker on that domain:
+  compromised host/hypervisor, shared-VLAN misprovision, co-tenant on
+  shared switching.
+- Single-primary steady state (the normal mode) is closed regardless of
+  segment sharing: V1b rejects every stamp on the primary and V2 degrades
+  every stamp on the backup (#6458 section above). The residual needs a
+  shared segment AND a live RG split AND L2 position — F-073 cohort
+  severity Low.
+
+### Why not asymmetric signatures
+
+Rejected as dominated on every axis. A reproducible single-thread baseline is
+recorded in `docs/log/10105.md` (Go 1.26.4 stdlib, Intel Xeon D-2146NT @
+2.30 GHz): 1,000,000 Ed25519 verifies took 88.07 s (88,066.9 ns each = 88.07
+cores at 1 Mpps), and 1,000,000 signs took 36.55 s (36,552.4 ns each =
+36.55 cores at 1 Mpps). The same-message HMAC-SHA256 compute+compare baseline
+was 3,439.1 ns (3.44 cores at 1 Mpps). These are Go bounds, not Rust
+dataplane throughput claims, but the exact recipe is preserved for reruns.
+Per-packet verification at stage 9 is infeasible on this measured baseline;
+miss-only verification is about 0.88 cores at 10 k miss/s, but leaves an
+L2-spammer CPU-DoS lever. Sender signing remains about 0.3655 cores at 10 k
+redirects/s. Signature deployment lacks authenticated peer-public-key
+provisioning/rotation and private-key storage lifecycle in this cluster;
+mTLS/PKI is one possible heavier mechanism, not a prerequisite of signatures.
+MAC can reuse the existing domain-separated control-link PSK. Both peers are
+equally trusted stamp issuers in different RG placements, so signatures add
+no non-repudiation value.
+
+### Why not a shared-secret MAC now
+
+Deferred as disproportionate, not as unbuildable. The issue's "needs key
+distribution" framing is stale: `chassis cluster authentication-key` is
+commit-mandatory (#6611 gate,
+`pkg/config/compiler_uniformgates_cluster_zone.go:469-523`) with rotation
+overlap (`additional-authentication-key`, #6630), and the same PSK already
+keys the heartbeat HMAC (XPFA trailer, #4326, hardened #6669), fabric-gRPC
+auth (#4357), and sync auth (#4369) — domain-separated reuse is
+precedented. What defers it:
+
+- No wire room: an inserted authenticated envelope/header would shift L3
+  offsets through the XDP shim and `verified_l3_or_stamp`; an appended tag
+  avoids that offset shift but changes frame length, MTU/MSS and padding
+  parsing. Either form is a full wire revision, not a field addition.
+- A tuple-bound MAC stops zone-byte cut-and-paste but NOT an exact replay of
+  an authenticated first packet. Replay resistance requires sender epoch plus
+  per-flow/packet sequence or nonce and a receiver replay window; packet
+  reordering across workers requires sharded state or cross-worker
+  coordination, failover must transfer epoch/high-water state, and reboot
+  needs a fresh epoch handshake or durable counter. A miss-only MAC may
+  explicitly accept ordinary L2 replay as out of scope, but it cannot claim
+  complete anti-replay authentication.
+If shared-segment active/active must ever be supported, the sketched path is
+domain-separated PSK MAC over (zone, inner tuple, epoch, sequence/nonce),
+verified at session-miss sites with replay-window state, then dual-parse
+rollout. That worker/reorder/failover state cost is intentionally deferred;
+signatures stay rejected even then.
+
+### The constraint (the operative support boundary)
+
+The fabric DATA link MUST be a private L2 domain: a direct cable, a
+dedicated VLAN/bridge with no third speaker (a 2-member bridge is
+point-to-point-equivalent for unicast and complies), or operator-switch-
+provided MACsec. Multi-tenant shared switching is UNSUPPORTED wherever an
+RG split is possible (split-RG active/active steady state, asymmetric
+failover windows). Single-primary clusters are unaffected by segment
+sharing for the stamp residual (V1b+V2 close it on both nodes) but SHOULD
+still run private L2 — defense in depth, and the control plane assumes an
+operator-controlled segment too (#4107).
+
+Explicit non-promise: product MACsec itself is unimplemented
+(`docs/vsrx-gaps.md`), so "or under MACsec" in the #6458 residual and the
+`fabric.rs:285-290` comment can only be satisfied by the OPERATOR's
+switching/NICs today — the implementable half of the constraint is the
+private L2 domain.
+
+### Why no configuration guardrail knob
+
+The compiler cannot hard-reject sharedness: a `fabric-interface` name says
+nothing about the cable plant, so no reliable software signal can distinguish
+a direct cable from an unsafe shared switch. An attestation-only configuration
+knob would be theater. The compiler DOES have a real, useful signal that a
+fabric trust boundary exists, however: a non-empty `fabric-interface` or
+`fabric1-interface`. The strict path therefore appends
+`fabricStampSharedSegmentAdvisories10105` (#10105), while its dedicated
+`suppressFabricStampAdvisory` option keeps tolerant boot/peer-sync paths quiet.
+This is an operator guardrail, not behavior-changing enforcement; disabling
+stamps on a declared-shared fabric would be forwarding logic and is out of
+scope. The existing control-link PSK mandate remains separately enforceable
+(#6611).
