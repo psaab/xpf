@@ -2960,18 +2960,25 @@ never lock an operator out of a remote box it manages.
   firewall-filter PBR), republishes the userspace route snapshot from that
   kernel state (`reconcileRouteLeakSnapshot`), and maintains the managed VRF
   miss-terminator desired state after networkd activation
-  (`ReassertVRFMissTerminator`). #5844, #5696, and #10421 make failures visible
-  as deferred commit errors, while this owner retries the three idempotent
-  reconciles. A transient failure previously left stale or missing cross-VRF
-  policy, a stale userspace FIB, or a missing VRF miss terminator until an
-  unrelated apply, and on applies nobody waits on (boot, DHCP lease, feed,
+  (`ReassertVRFMissTerminator`). #5844, #5696, #10421, and #10458 make failures
+  visible as deferred commit errors, while this owner retries the three
+  idempotent reconciles. A transient failure previously left stale or missing
+  cross-VRF policy, a stale userspace FIB, or a missing VRF miss terminator until
+  an unrelated apply, and on applies nobody waits on (boot, DHCP lease, feed,
   config-poll) it was only logged. The apply now latches
   `routingReconcileDebt` (`noteRoutingReconcileResult`). The always-on
-  `routingReconcileReassertLoop` re-runs all three reconciles every 30 s while
-  the debt is owed. Like its siblings, it takes `applySem` before reading the
-  active config and re-checks the debt inside. It never re-runs the FRR apply,
-  whose manager owns its own degraded retry. `RoutingReconcileDebt()` reports
-  the latch, a monotonic failure count and the last error.
+  `routingReconcileReassertLoop` re-runs the policy and route-leak reconciles
+  every 30 s while debt is owed, and reasserts the VRF terminator on every
+  eligible tick outside bootstrap. A no-debt tick uses `TryAcquire` to avoid
+  queueing behind an active commit, then takes `applySem` before reading the
+  active config; it invokes only the VRF callback unless debt is still owed.
+  A post-success asynchronous networkd delete is therefore repaired even when
+  the preceding apply had no error debt, while duplicate adds remain harmless
+  through the kernel's idempotent `EEXIST` behavior. Bootstrap mode suppresses
+  the VRF takeover write, and canceled ticks return before the fast path. It
+  never re-runs the FRR apply, whose manager owns its own degraded retry.
+  `RoutingReconcileDebt()` reports the latch, a monotonic failure count and the
+  last error.
 
   **Managed service-file reload debt (#6800, the recovery half of #6791/#6793
   applied to the two managed-FILE appliers):** `applySyslogFiles` and
