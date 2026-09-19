@@ -196,6 +196,7 @@ xpf_enter_destructive_cluster_cell "wire-conntrack-lifecycle $*" "$0" "$@"
 source "${SCRIPT_DIR}/cluster-env.sh"
 
 INCUS_REMOTE="${INCUS_REMOTE:-loss}"
+EVICT_GRACE="${EVICT_GRACE:-120}"
 NODE="${NODE:-${FW0:-xpf-userspace-fw0}}"
 FW_A="${FW0:-${INCUS_REMOTE}:xpf-userspace-fw0}"
 FW_B="${FW1:-${INCUS_REMOTE}:xpf-userspace-fw1}"
@@ -244,6 +245,7 @@ fail_void() {
     WIRE_GATE_FINAL_RC=3
     exit 3
 }
+wire_num "$EVICT_GRACE" || fail_void harness-void
 
 session_list() {
     printf 'show security flow session destination-prefix %s destination-port %s limit 10000\nexit\n' "$SINK_ADDR" "$1" | run_cli_t
@@ -440,13 +442,25 @@ fi
 SUBJ_ABSENT=0
 CTRL_SESS=0
 POST_SESS_OUT=""
-if [[ -n "$SUBJECT_SID" && -n "$CONTROL_SID" ]] &&
-   POST_SESS_OUT="$(session_poll "$LIFECYCLE_PORT")"; then
-    if transition="$(wire_conntrack_transition_flags "$MID_SESS_OUT" "$CONTROL_SESS_OUT" "$POST_SESS_OUT" "$SINK_ADDR" "$LIFECYCLE_PORT")"; then
-        read -r _ _ SUBJ_ABSENT CTRL_SESS <<<"$transition"
-    else
-        QUERY_BAD=1
-    fi
+POST_QUERY_OK=0
+if [[ -n "$SUBJECT_SID" && -n "$CONTROL_SID" ]]; then
+    EVICT_DEADLINE=$((SECONDS + 10#$EVICT_GRACE))
+    # The primary can drop the expired wire tuple before the HA close delta
+    # removes the peer-visible census row. Poll the complete census for a
+    # bounded grace period rather than declaring a healthy drop a lifecycle
+    # failure at the first post-probe sample.
+    while :; do
+        if POST_SESS_OUT="$(session_poll "$LIFECYCLE_PORT")"; then
+            if transition="$(wire_conntrack_transition_flags "$MID_SESS_OUT" "$CONTROL_SESS_OUT" "$POST_SESS_OUT" "$SINK_ADDR" "$LIFECYCLE_PORT")"; then
+                POST_QUERY_OK=1
+                read -r _ _ SUBJ_ABSENT CTRL_SESS <<<"$transition"
+                ((SUBJ_ABSENT == 1 && CTRL_SESS == 1)) && break
+            fi
+        fi
+        ((SECONDS >= EVICT_DEADLINE)) && break
+        sleep 1
+    done
+    ((POST_QUERY_OK)) || QUERY_BAD=1
 else
     QUERY_BAD=1
 fi
