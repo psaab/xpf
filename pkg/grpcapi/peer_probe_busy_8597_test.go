@@ -69,7 +69,7 @@ func dialProbePeer(t *testing.T, probeErr error) (*grpc.ClientConn, error) {
 	t.Cleanup(func() { peerFabricGRPCPort = old })
 
 	s := &Server{fabricPeerAddrFn: func() []string { return []string{host} }}
-	return s.dialPeer()
+	return s.dialPeer(context.Background())
 }
 
 func TestPeerAtScanCapacityIsReachable_8597(t *testing.T) {

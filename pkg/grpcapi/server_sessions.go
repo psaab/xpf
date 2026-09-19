@@ -725,7 +725,7 @@ func (s *Server) fetchPeerSessions(ctx context.Context, req *pb.GetSessionsReque
 		return
 	}
 	defer donePeerLeg()
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(ctx)
 	if err != nil {
 		slog.Warn("failed to dial peer for sessions", "err", err)
 		resp.PeerStatus = peerFetchErrorStatus(err)
@@ -1085,7 +1085,7 @@ func (s *Server) proxyPeerSessionSummary(ctx context.Context) (*pb.GetSessionSum
 		return nil, err
 	}
 	defer donePeerLeg()
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1261,7 +1261,7 @@ func (s *Server) proxyPeerZonePairSummary(ctx context.Context, req *pb.GetZonePa
 		return nil, err
 	}
 	defer donePeerLeg()
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(peerCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -1751,7 +1751,7 @@ func (s *Server) clearPeerSessions(ctx context.Context, req *pb.ClearSessionsReq
 		return fmt.Errorf("peer node %d ClearSessions: %w", peerID, err)
 	}
 	defer donePeerLeg()
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(ctx)
 	if err != nil {
 		return fmt.Errorf("dial peer node %d: %w", peerID, err)
 	}

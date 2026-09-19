@@ -123,7 +123,7 @@ func (s *Server) forwardingStatusDataplane() fwdstatus.DataPlaneAccessor {
 }
 
 func (s *Server) dialAndShowForwarding(ctx context.Context) (string, error) {
-	conn, err := s.dialPeer()
+	conn, err := s.dialPeer(ctx)
 	if err != nil {
 		return "", err
 	}
