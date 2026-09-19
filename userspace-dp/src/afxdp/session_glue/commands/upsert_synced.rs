@@ -127,17 +127,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             };
             resolution_target_for_session(&flow, entry.decision)
         };
-        let source_table = if entry.metadata.is_reverse {
-            None
-        } else {
-            install_table_name_for_session(forwarding, entry.decision, target)
-        };
-        entry.leak_incarnation = crate::afxdp::forwarding::leak_incarnation_for_resolution(
-            forwarding,
-            target,
-            source_table,
-        )
-        .unwrap_or(0);
+        entry.leak_incarnation =
+            super::super::leak_incarnation_for_session(forwarding, entry.decision, target)
+                .unwrap_or(0);
     }
 
     let metadata = entry.metadata.clone();

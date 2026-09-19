@@ -324,6 +324,70 @@ pub(in crate::afxdp) fn ingress_routing_domain(
         .unwrap_or(0)
 }
 
+/// #10312: native routing-instance table resolution has three outcomes.
+///
+/// `Default` is the real unscoped/main instance; `Table` is a validated
+/// per-family registry row; `Unresolvable` means a nonzero flow domain has no
+/// current owner or family table. Callers MUST NOT turn the last state into
+/// MAIN, because that recreates the RI-to-WAN leak.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum NativeRouteTable {
+    Default,
+    Table {
+        table: String,
+        domain: u32,
+        check: u32,
+    },
+    Unresolvable {
+        domain: u32,
+    },
+}
+
+/// #10312: resolve a native routing-instance member's destination table.
+///
+/// PBR remains an explicit override, but an interface's own routing-instance
+/// membership is also a route-table scope. The packet path has already stamped
+/// `flow_domain` from the logical ingress (`stage 9b`); the metadata fallback
+/// exists for flowless/L3-only contexts that deliberately carry domain 0.
+/// Returning the registry's collision check alongside the table keeps native
+/// synthesis on the same install-identity path as PBR installation.
+#[inline]
+pub(in crate::afxdp) fn native_route_table_for_flow_target(
+    forwarding: &ForwardingState,
+    flow_domain: u32,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress_zone: Option<u16>,
+    target: IpAddr,
+) -> NativeRouteTable {
+    let domain = if flow_domain != 0 {
+        flow_domain
+    } else {
+        ingress_routing_domain(
+            forwarding,
+            ingress_ifindex,
+            ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    };
+    if domain == 0 {
+        return NativeRouteTable::Default;
+    }
+    let Some(row) = forwarding.install_tables.get(&domain) else {
+        return NativeRouteTable::Unresolvable { domain };
+    };
+    let Some(table) = (match target {
+        IpAddr::V4(_) => row.v4.as_ref(),
+        IpAddr::V6(_) => row.v6.as_ref(),
+    }) else {
+        return NativeRouteTable::Unresolvable { domain };
+    };
+    NativeRouteTable::Table {
+        table: table.clone(),
+        domain,
+        check: row.h2,
+    }
+}
 // #989: clamp_tcp_mss / clamp_tcp_mss_frame relocated to `frame/tcp.rs`.
 
 #[cfg(test)]
@@ -354,3 +418,7 @@ mod tests_leak_overlap_9955;
 #[cfg(test)]
 #[path = "tests_snat_scope_9956.rs"]
 mod tests_snat_scope_9956;
+// #10312: native routing-instance member resolution and controls.
+#[cfg(test)]
+#[path = "tests_ri_native_10312.rs"]
+mod tests_ri_native_10312;

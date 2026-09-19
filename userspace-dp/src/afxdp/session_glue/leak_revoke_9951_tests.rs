@@ -14,9 +14,17 @@
 //! Cells 4-8 cover local/shared promotion, peer rematerialization, demotion,
 //! remove/re-add ABA rejection, and reverse-session synthesis. Cells 9-10
 //! cover nonzero UpsertSynced sibling installation and bring-up replay.
+//! Cells R1-R4 (#10312 follow-up, PR #10399 P1) cover the same provenance
+//! for RI-native reverses: the three reverse leak-incarnation arms must
+//! stamp the CLIENT RI's leak view, not MAIN.
 
 use super::*;
-use crate::{ConfigSnapshot, RouteSnapshot};
+use crate::session::install_table_identity;
+use crate::test_zone_ids::TEST_WAN_ZONE_ID;
+use crate::{
+    ConfigSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot, RouteSnapshot,
+    ZoneSnapshot,
+};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -949,5 +957,507 @@ fn bringup_replay_preserves_nonzero_leak_stamp_9951() {
         hit.disposition,
         ForwardingDisposition::NoRoute,
         "late bring-up of a removed leak must fail closed"
+    );
+}
+// ── #10312 R-cells (PR #10399 P1): RI-reverse leak provenance ──────────────
+//
+// Pre-fix the three reverse arms below derived the leak stamp from the MAIN
+// view (`None`), which was correct only while reverses were zero-stamped.
+// Post-#10312 an RI-native reverse rides its CLIENT instance's leak, so a
+// MAIN-derived stamp misses it: the session installs unstamped and the hit
+// path (`leak_incarnation_is_live(0) == true`) serves the stale resolution
+// across leak removal — a #9951-class revocation bypass in the RI.
+
+const RI_BLUE_IFINDEX: i32 = 12;
+
+/// R-fixture: `blue` owns ge-0/0/0.50 (12) and reaches 8.8.8.0/24 ONLY
+/// through a leak owned by `blue.inet.0` into `red.inet.0`. MAIN holds an
+/// unrelated 9.9.9.0/24 leak for the independence control. Route indices are
+/// pinned by premise asserts: [0] blue leak, [1] red target, [2] MAIN leak,
+/// [3] MAIN-leak target.
+fn ri_leak_snapshot() -> ConfigSnapshot {
+    let (domain, _check) = install_table_identity("blue");
+    ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/0.50".to_string(),
+            zone: "wan".to_string(),
+            routing_instance: "blue".to_string(),
+            routing_domain: domain,
+            linux_name: "ge-0-0-0.50".to_string(),
+            ifindex: RI_BLUE_IFINDEX,
+            hardware_addr: "02:bf:72:00:50:08".to_string(),
+            addresses: vec![InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "172.16.50.8/24".to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        }],
+        routes: vec![
+            RouteSnapshot {
+                table: "blue.inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "8.8.8.0/24".to_string(),
+                next_hops: vec![],
+                discard: false,
+                next_table: "red.inet.0".to_string(),
+                preference: 0,
+                rule_priority: 0,
+            },
+            RouteSnapshot {
+                table: "red.inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "8.8.8.0/24".to_string(),
+                next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
+                discard: false,
+                next_table: String::new(),
+                preference: 0,
+                rule_priority: 0,
+            },
+            RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "9.9.9.0/24".to_string(),
+                next_hops: vec![],
+                discard: false,
+                next_table: "red.inet.0".to_string(),
+                preference: 0,
+                rule_priority: 0,
+            },
+            RouteSnapshot {
+                table: "red.inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "9.9.9.0/24".to_string(),
+                next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
+                discard: false,
+                next_table: String::new(),
+                preference: 0,
+                rule_priority: 0,
+            },
+        ],
+        neighbors: vec![NeighborSnapshot {
+            interface: "ge-0-0-0.50".to_string(),
+            ifindex: RI_BLUE_IFINDEX,
+            family: "inet".to_string(),
+            ip: "172.16.50.1".to_string(),
+            mac: "00:11:22:33:44:55".to_string(),
+            state: "reachable".to_string(),
+            router: true,
+            link_local: false,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// Mirror of cell 8's synthetic forward, but RI-native: the reply target
+/// (8.8.8.8) belongs to the blue member's scope.
+fn ri_forward_match() -> (ForwardSessionMatch, SessionKey) {
+    let (domain, _check) = install_table_identity("blue");
+    let mut forward_key = leak_key();
+    forward_key.src_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    forward_key.routing_domain = domain;
+    let forward_match = ForwardSessionMatch {
+        key: forward_key.clone(),
+        decision: noroute_decision(),
+        metadata: leak_metadata(),
+    };
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    (forward_match, reverse_key)
+}
+
+fn ri_blue_leak_incarnation(forwarding: &ForwardingState, target: IpAddr) -> u64 {
+    crate::afxdp::forwarding::leak_incarnation_for_resolution(
+        forwarding,
+        target,
+        Some("blue.inet.0"),
+    )
+    .expect("premise broken: the blue view must identify its leak")
+}
+
+/// R1 (P1-1 RED-on-revert): `install_reverse_session_from_forward_match`
+/// stamps the CLIENT leak on the RI reverse; removing that leak revokes it.
+#[test]
+fn ri_reverse_synthesis_stamps_client_leak_and_revokes_on_removal_10312() {
+    let original = ri_leak_snapshot();
+    assert_eq!(
+        original.routes[0].table, "blue.inet.0",
+        "premise broken: routes[0] must be the blue leak"
+    );
+    assert_eq!(
+        original.routes[0].next_table, "red.inet.0",
+        "premise broken: routes[0] must leak into red"
+    );
+    let with_leak = build_forwarding_state(&original);
+    assert!(
+        with_leak.has_routing_domains,
+        "FIXTURE: the membership gate must be armed or this cell is vacuous"
+    );
+    let (domain, check) = install_table_identity("blue");
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let (forward_match, reverse_key) = ri_forward_match();
+    let target = reverse_key.dst_ip;
+    assert_eq!(
+        target,
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        "premise broken: the reverse target must be the leak-riding address"
+    );
+    // MAIN-view independence premise: MAIN sees NO leak for this target (its
+    // only leak covers 9.9.9.0/24), so a MAIN-derived stamp is unstamped.
+    assert!(
+        crate::afxdp::forwarding::leak_incarnation_for_resolution(&with_leak, target, None)
+            .is_none(),
+        "premise broken: the MAIN view must not cover 8.8.8.8"
+    );
+    let incarnation = ri_blue_leak_incarnation(&with_leak, target);
+    let reverse_flow = SessionFlow {
+        src_ip: reverse_key.src_ip,
+        dst_ip: reverse_key.dst_ip,
+        forward_key: reverse_key.clone(),
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let mut sessions = SessionTable::new();
+    let (lookup, installed) = install_reverse_session_from_forward_match(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &reverse_key,
+        forward_match,
+        1_000_000,
+        1,
+        0,
+        PROTO_TCP,
+        0x10,
+    );
+    assert!(installed, "reverse synthesis fixture must install");
+    assert_eq!(
+        lookup.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise broken: the RI reverse must ride the blue leak"
+    );
+    assert_eq!(
+        lookup.decision.resolution.egress_ifindex, RI_BLUE_IFINDEX,
+        "premise broken: the blue leak resolves via the member interface"
+    );
+    assert_eq!(
+        (
+            lookup.decision.install_table_domain,
+            lookup.decision.install_table_check
+        ),
+        (domain, check),
+        "premise broken: #10312 stamps the native client identity on the reverse"
+    );
+    assert_eq!(
+        sessions.leak_incarnation(&reverse_key),
+        Some(incarnation),
+        "P1-1: the RI reverse must stamp its CLIENT leak, not the MAIN view"
+    );
+    assert_eq!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&reverse_key)
+            .map(|entry| entry.leak_incarnation),
+        Some(incarnation),
+        "P1-1: reverse synthesis must publish the same CLIENT revocation stamp"
+    );
+
+    let mut removed = original;
+    removed.routes.remove(0);
+    let without_leak = rebuild_with_previous(&removed, &with_leak);
+    let hit = resolve_cached_hit(&mut sessions, &without_leak, &neighbors, &reverse_flow);
+    assert_eq!(
+        hit.disposition,
+        ForwardingDisposition::NoRoute,
+        "removing the client-RI leak must revoke the RI reverse, not serve \
+         the stale cached leak resolution (#10312)"
+    );
+}
+
+/// R2 (control, GREEN pre- and post-fix): removing the UNRELATED MAIN leak
+/// leaves the RI reverse pinned — revocation is per-leak, never global.
+#[test]
+fn unrelated_main_leak_removal_leaves_ri_reverse_pinned_10312() {
+    let original = ri_leak_snapshot();
+    assert_eq!(
+        original.routes[2].table, "inet.0",
+        "premise broken: routes[2] must be the MAIN leak"
+    );
+    assert_eq!(
+        original.routes[2].next_table, "red.inet.0",
+        "premise broken: routes[2] must leak into red"
+    );
+    let with_leak = build_forwarding_state(&original);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let (forward_match, reverse_key) = ri_forward_match();
+    let reverse_flow = SessionFlow {
+        src_ip: reverse_key.src_ip,
+        dst_ip: reverse_key.dst_ip,
+        forward_key: reverse_key.clone(),
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let mut sessions = SessionTable::new();
+    let (_, installed) = install_reverse_session_from_forward_match(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &reverse_key,
+        forward_match,
+        1_000_000,
+        1,
+        0,
+        PROTO_TCP,
+        0x10,
+    );
+    assert!(installed, "reverse synthesis fixture must install");
+    let pinned = resolve_cached_hit(&mut sessions, &with_leak, &neighbors, &reverse_flow);
+    assert_eq!(
+        pinned.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise broken: the RI reverse must pin while its leak exists"
+    );
+
+    let mut removed = original;
+    removed.routes.remove(2);
+    let without_main_leak = rebuild_with_previous(&removed, &with_leak);
+    let hit = resolve_cached_hit(&mut sessions, &without_main_leak, &neighbors, &reverse_flow);
+    assert_eq!(
+        hit.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "CONTROL: removing an unrelated MAIN leak must leave the RI reverse pinned"
+    );
+    assert_eq!(
+        hit.egress_ifindex, RI_BLUE_IFINDEX,
+        "CONTROL: the pinned RI reverse must keep its member egress"
+    );
+}
+
+/// R3 (P1-2 RED-on-revert): a zero-token HA-imported RI reverse recomputes
+/// its CLIENT leak stamp on UpsertSynced (wire imports always arrive zero).
+#[test]
+fn peer_upsert_recomputes_ri_reverse_leak_stamp_10312() {
+    let original = ri_leak_snapshot();
+    let with_leak = build_forwarding_state(&original);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let (forward_match, reverse_key) = ri_forward_match();
+    let incarnation = ri_blue_leak_incarnation(&with_leak, reverse_key.dst_ip);
+    let reverse = build_reverse_session_from_forward_match(
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        forward_match,
+        1,
+        0,
+    );
+    assert_eq!(
+        reverse.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise broken: the RI reverse must ride the blue leak"
+    );
+    assert!(
+        reverse.metadata.is_reverse,
+        "premise broken: the synthesized companion must be a reverse entry"
+    );
+    let entry = SyncedSessionEntry {
+        key: reverse_key.clone(),
+        decision: reverse.decision,
+        metadata: reverse.metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let mut sessions = SessionTable::new();
+    apply_upsert_synced_9951(&mut sessions, &with_leak, &neighbors, entry);
+    assert_eq!(
+        sessions.leak_incarnation(&reverse_key),
+        Some(incarnation),
+        "P1-2: an HA-imported RI reverse must recompute its CLIENT leak \
+         stamp, not install unstamped off the MAIN view"
+    );
+}
+
+/// R4 (P1-3 RED-on-revert): materializing a zero-token peer-published RI
+/// reverse recomputes its CLIENT leak stamp — and the stamp revokes once
+/// the client leak is removed.
+#[test]
+fn shared_materialize_recomputes_ri_reverse_leak_stamp_10312() {
+    let original = ri_leak_snapshot();
+    let with_leak = build_forwarding_state(&original);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let (forward_match, reverse_key) = ri_forward_match();
+    let incarnation = ri_blue_leak_incarnation(&with_leak, reverse_key.dst_ip);
+    let reverse = build_reverse_session_from_forward_match(
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        forward_match,
+        1,
+        0,
+    );
+    assert_eq!(
+        reverse.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise broken: the RI reverse must ride the blue leak"
+    );
+    let reverse_flow = SessionFlow {
+        src_ip: reverse_key.src_ip,
+        dst_ip: reverse_key.dst_ip,
+        forward_key: reverse_key.clone(),
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let peer_entry = SyncedSessionEntry {
+        key: reverse_key.clone(),
+        decision: reverse.decision,
+        metadata: reverse.metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_entry,
+    );
+
+    let mut sessions = SessionTable::new();
+    let first = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &reverse_flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("peer shared materialization");
+    assert_eq!(
+        first.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "premise broken: the materialized RI reverse must forward while its leak exists"
+    );
+    assert_eq!(
+        sessions.leak_incarnation(&reverse_key),
+        Some(incarnation),
+        "P1-3: a materialized RI reverse must recompute its CLIENT leak \
+         stamp, not install unstamped off the MAIN view"
+    );
+
+    sessions.delete(&reverse_key);
+    let mut removed = original;
+    removed.routes.remove(0);
+    let without_leak = rebuild_with_previous(&removed, &with_leak);
+    let second = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &without_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &reverse_flow,
+        3_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("peer shared rematerialization");
+    assert_eq!(
+        second.decision.resolution.disposition,
+        ForwardingDisposition::NoRoute,
+        "peer shared RI-reverse provenance must survive promotion and revoke \
+         after client-leak removal"
+    );
+}
+
+/// R5 (fail-closed guard): an invalid RI identity must not reinterpret
+/// `None` as MAIN and stamp an unrelated MAIN-view leak.
+#[test]
+fn unresolvable_ri_provenance_never_stamps_main_leak_10312() {
+    let forwarding = build_forwarding_state(&ri_leak_snapshot());
+    let target = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+    let main_incarnation =
+        crate::afxdp::forwarding::leak_incarnation_for_resolution(&forwarding, target, None)
+            .expect("premise broken: MAIN must have a matching leak");
+    let (domain, check) = install_table_identity("blue");
+    let decision = SessionDecision {
+        resolution: noroute_decision().resolution,
+        nat: NatDecision::default(),
+        install_table_domain: domain,
+        install_table_check: check.wrapping_add(1),
+    };
+    assert!(
+        matches!(
+            resolve_install_table_for_session(&forwarding, decision, target),
+            InstallTable::Unresolvable
+        ),
+        "premise broken: the mismatched RI identity must be unresolvable"
+    );
+    assert_eq!(
+        leak_incarnation_for_session(&forwarding, decision, target),
+        None,
+        "R5: Unresolvable must not stamp MAIN incarnation {main_incarnation}"
     );
 }

@@ -215,6 +215,23 @@ pub(super) fn install_table_name_for_session(
     }
 }
 
+/// #9951/#10312: derive leak provenance from the validated installing-table
+/// identity. `Unresolvable` is deliberately distinct from `Default`: it must
+/// not use `None`, because that would inspect MAIN and could stamp an
+/// unrelated leak after the native RI identity was invalidated.
+pub(super) fn leak_incarnation_for_session(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    target: IpAddr,
+) -> Option<u64> {
+    let source_table = match resolve_install_table_for_session(forwarding, decision, target) {
+        InstallTable::Default => None,
+        InstallTable::Table(table) => Some(table),
+        InstallTable::Unresolvable => return None,
+    };
+    super::forwarding::leak_incarnation_for_resolution(forwarding, target, source_table)
+}
+
 fn lookup_forwarding_resolution_for_session_with_cache(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -2188,18 +2205,8 @@ fn materialize_shared_session_hit(
                 };
                 resolution_target_for_session(&flow, replica.decision)
             };
-            let source_table = if replica.metadata.is_reverse {
-                None
-            } else {
-                install_table_name_for_session(forwarding, replica.decision, target)
-            };
             replica.leak_incarnation =
-                super::forwarding::leak_incarnation_for_resolution(
-                    forwarding,
-                    target,
-                    source_table,
-                )
-                .unwrap_or(0);
+                leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
         }
         sessions.upsert_synced_with_origin(
             SessionInstall {
@@ -2405,11 +2412,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 flow,
                 decision,
             );
-            let current_incarnation = super::forwarding::leak_incarnation_for_resolution(
-                forwarding,
-                resolution_target,
-                install_table_name_for_session(forwarding, decision, resolution_target),
-            );
+            let current_incarnation =
+                leak_incarnation_for_session(forwarding, decision, resolution_target);
             if current_incarnation.is_some_and(|current| current != stamped_incarnation) {
                 super::no_route_resolution(None)
             } else {

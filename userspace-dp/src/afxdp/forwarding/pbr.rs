@@ -68,18 +68,43 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     )
     .unwrap_or(meta.ingress_ifindex as i32);
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
-    // #6236 PR-2C: the `affects_route_lookup` precheck and the routing-instance
-    // evaluation used to look the SAME ingress ifindex up twice on the input fast
-    // map. Fold to ONE `.get()`: borrow the route-lookup-affecting filter (the
-    // precheck is now `.is_some()` of this same lookup+gate) and evaluate off
-    // that borrow. `None` collapses the precheck-false and no-filter cases — both
-    // return RouteOverride::None, exactly as before.
+    // #10312: native RI membership is the fallback route-table scope when no
+    // PBR routing-instance term supplies an explicit override. The same helper
+    // is used by reverse-session synthesis, so forward/reverse table identity
+    // cannot drift.
+    let native_route_table = || {
+        match crate::afxdp::forwarding::native_route_table_for_flow_target(
+            forwarding,
+            flow.forward_key.routing_domain,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            ingress_zone_override,
+            flow.dst_ip,
+        ) {
+            crate::afxdp::forwarding::NativeRouteTable::Default => RouteOverride::None,
+            crate::afxdp::forwarding::NativeRouteTable::Table {
+                table,
+                domain,
+                check,
+            } => RouteOverride::Table {
+                table,
+                domain,
+                check,
+            },
+            // A nonzero domain with a missing/invalid registry row MUST NOT
+            // fall through to MAIN. Drop is the existing terminal arm the
+            // poll caller handles without a second table lookup.
+            crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => RouteOverride::Drop,
+        }
+    };
+    // #6236 PR-2C: borrow the route-lookup-affecting filter once. A missing
+    // filter is the ordinary native-RI path, not an implicit MAIN override.
     let Some(filter) = crate::filter::interface_filter_route_lookup_affecting(
         &forwarding.filter_state,
         ingress_ifindex,
         is_v6,
     ) else {
-        return RouteOverride::None;
+        return native_route_table();
     };
     // #2362: PBR terms may carry per-packet L4 match conditions (tcp-flags /
     // is-fragment / icmp-type / icmp-code); build the extra inputs so a
@@ -110,7 +135,9 @@ pub(in crate::afxdp) fn ingress_route_table_override(
         meta.pkt_len as u64,
     ) {
         Some(result) => result,
-        None => return RouteOverride::None,
+        // #10312: a route-lookup-affecting filter can still have no matching
+        // routing-instance term. Native RI membership remains the table scope.
+        None => return native_route_table(),
     };
     // #4392: a matched PBR routing-instance term may ALSO carry a drop action
     // (`then { routing-instance X; reject | discard; }`). Such a term is a DENY,

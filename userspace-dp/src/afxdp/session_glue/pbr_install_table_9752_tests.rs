@@ -676,6 +676,68 @@ fn reverse_session_resolves_unstamped_in_default() {
     assert_eq!(lookup.decision.resolution.egress_ifindex, DEFAULT_IFINDEX);
 }
 
+/// #10312 F9 (RED-on-revert): an RI-native forward's reverse companion
+/// resolves the original client in the member's instance table, and carries
+/// that same native identity for later re-resolves. The forward PBR stamp is
+/// deliberately irrelevant here; the flow domain is the client ingress scope.
+#[test]
+fn native_ri_reverse_session_stays_in_client_instance_10312() {
+    let mut snapshot = pbr_snapshot();
+    let (domain, check) = blue_stamp();
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == BLUE_IFINDEX)
+        .expect("blue member")
+        .routing_domain = domain;
+    let forwarding = super::super::forwarding_build::build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    let src = IpAddr::V4(Ipv4Addr::new(172, 16, 50, 102));
+    let dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let flow = SessionFlow {
+        src_ip: src,
+        dst_ip: dst,
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: src,
+            dst_ip: dst,
+            src_port: 55_068,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: domain,
+        },
+    };
+    let (context, reverse_decision) = super::super::shared_ops::reverse_session_decision_for_flow(
+        &forwarding,
+        &active_ha(),
+        &Arc::new(ShardedNeighborMap::new()),
+        &flow,
+        BLUE_IFINDEX,
+        0,
+        2,
+        false,
+        NOW_SECS,
+        false,
+        NatDecision::default(),
+    );
+    assert_eq!(
+        context.resolution.egress_ifindex, BLUE_IFINDEX,
+        "reverse client lookup must stay in blue, not use MAIN/WAN"
+    );
+    assert_eq!(context.install_table.as_deref(), Some("blue.inet.0"));
+    assert_eq!(
+        (context.install_table_domain, context.install_table_check),
+        (domain, check)
+    );
+    assert_eq!(
+        reverse_decision.resolution.egress_ifindex, BLUE_IFINDEX,
+        "the session-miss reverse decision must install blue egress, not MAIN/WAN"
+    );
+    assert_eq!(reverse_decision.install_table_domain, domain);
+    assert_eq!(reverse_decision.install_table_check, check);
+}
+
 /// C6: demote preserves the stamp (failover does not lose the table).
 #[test]
 fn demote_preserves_installing_table() {
