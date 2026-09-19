@@ -703,9 +703,34 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// scheduler window transition's republish has not converged —
 		// otherwise stale enforcement past the window is invisible to
 		// monitoring.
-		SchedulerRepublishFailedFn:       d.SchedulerRepublishFailed,
-		HelperCrashEpisodesFn:            d.helperCrashEpisodes,
-		ForwardingSupportedFn:            d.forwardingSupported,
+		SchedulerRepublishFailedFn: d.SchedulerRepublishFailed,
+		HelperCrashEpisodesFn:      d.helperCrashEpisodes,
+		ForwardingSupportedFn:      d.forwardingSupported,
+		IpsecCaptureWitnessFn: func() api.IpsecCaptureWitness {
+			if d == nil {
+				return api.IpsecCaptureWitness{}
+			}
+			d.ipsecCaptureMu.Lock()
+			runtime := d.ipsecCapture
+			d.ipsecCaptureMu.Unlock()
+			if runtime == nil || runtime.actor == nil {
+				return api.IpsecCaptureWitness{}
+			}
+			status := runtime.actor.Status()
+			return api.IpsecCaptureWitness{
+				Available:          status.Available,
+				RunID:              status.RunID,
+				ActorActive:        status.Active && !status.Down,
+				PermitState:        status.PermitState,
+				PermitEpoch:        status.PermitEpoch,
+				Generation:         status.Generation,
+				Consumed:           status.Counters.Consumed,
+				Adjudicated:        status.Counters.Adjudicated,
+				Reinjected:         status.Counters.Reinjected,
+				DeliveredAvailable: status.DeliveredAvailable,
+				Delivered:          status.Delivered,
+			}
+		},
 		SchedulerRepublishStaleSecondsFn: d.SchedulerRepublishStaleSeconds,
 		// #5669: surface the bounded-age fail-closed escalation so
 		// xpf_scheduler_republish_fail_closed reads 1 once a persistently

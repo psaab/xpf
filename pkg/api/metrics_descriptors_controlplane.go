@@ -282,6 +282,41 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"root-authentication material.",
 		nil, nil,
 	)
+	c.ipsecCaptureActorActive = prometheus.NewDesc(
+		"xpf_ipsec_capture_actor_active",
+		"1 when the authenticated S5 capture actor is active; omitted when no product-owned actor witness is available (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCapturePermitState = prometheus.NewDesc(
+		"xpf_ipsec_capture_permit_state",
+		"1 for the current S5 permit state and 0 for the other enum states; labels join the Rust s5_reinject status block (#10478).",
+		[]string{"run_id", "generation", "permit_epoch", "state"}, nil,
+	)
+	c.ipsecCaptureConsumedTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_consumed_total",
+		"Capture frames received by the S5 actor boundary (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureAdjudicatedTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_adjudicated_total",
+		"Capture frames entering S5 q0 adjudication (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureReinjectedTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_reinjected_total",
+		"Frames with a terminal q0 Written outcome; this is not downstream delivery (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureDeliveredAvail = prometheus.NewDesc(
+		"xpf_ipsec_capture_delivered_available",
+		"1 only when an independent product-owned witness downstream of the TUN write exists; never inferred from Written (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureDeliveredTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_delivered_total",
+		"Independent downstream delivery witness; omitted as a count when unavailable (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
 	c.schedulerRepublishFailed = prometheus.NewDesc(
 		"xpf_scheduler_republish_failed",
 		"1 while the most recent scheduler-driven policy republish "+

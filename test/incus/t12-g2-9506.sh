@@ -212,9 +212,9 @@ PY
 
 observe_provenance_metadata() {
     # observe_provenance_metadata <ruleset.json> <nfqueue.txt>
-    # Static queue→family/hook/stN mapping is measurable.  Packet metadata
-    # requires CaptureOrigin counters/logs from the running actor and is
-    # deliberately reported as zero rather than inferred.
+    # Static queue→family/hook/stN mapping is measurable. Packet metadata
+    # requires the bounded Rust provenance rows and the Go actor join; the
+    # static observer never infers those rows from nft/procfs.
     python3 - "$1" "$2" <<'PY'
 import json
 import re
@@ -275,15 +275,17 @@ observer_field() {
 
 observe_runtime() {
     # observe_runtime <node> <directory> <tag>
-    # Capture authoritative helper status plus the daemon/process/socket and
-    # nfnetlink queue surfaces.  The helper status has no S5 actor counters;
-    # callers must not relabel these fields as consumed/adjudicated/REINJECT.
+    # Capture the Rust status block and authenticated-loopback Go metrics.
+    # The two surfaces are joined on run_id/generation/permit_epoch; a
+    # missing surface stays unavailable instead of becoming an all-zero actor.
     local node="$1"
     local dir="$2"
     local tag="$3"
-    local status proc
+    local status proc metrics metrics_url
     status="$dir/${tag}-status.json"
     proc="$dir/${tag}-runtime.txt"
+    metrics="$dir/${tag}-metrics.prom"
+    metrics_url="${METRICS_URL:-http://127.0.0.1:8080/metrics}"
     mkdir -p "$dir"
     remote "$node" "python3 - <<'PY'
 import socket
@@ -304,6 +306,7 @@ try:
 except Exception as exc:
     print('STATUS_ERROR=' + str(exc))
 PY" >"$status" 2>&1 || :
+    remote "$node" "curl -fsS --max-time 2 '$metrics_url'" >"$metrics" 2>&1 || :
     remote "$node" 'set +e
 pid="$(pidof xpfd | awk "{print \$1}")"
 printf "xpfd_pid=%s\n" "${pid:-0}"
@@ -320,6 +323,7 @@ cat /proc/net/netfilter/nfnetlink_queue 2>&1
 printf "===NETLINK===\n"
 cat /proc/net/netlink 2>&1' >"$proc" 2>&1 || :
     RUNTIME_STATUS_FILE="$status"
+    RUNTIME_METRICS_FILE="$metrics"
     RUNTIME_PROC_FILE="$proc"
     RUNTIME_PID=0
     RUNTIME_FD_COUNT=0
@@ -330,12 +334,18 @@ cat /proc/net/netlink 2>&1' >"$proc" 2>&1 || :
     RUNTIME_SOCKET_READY=0
     RUNTIME_ACTOR_ACTIVE=0
     RUNTIME_REINJECT_SOCKETS=0
+    RUNTIME_S5_AVAILABLE=0
+    RUNTIME_RUN_ID=""
+    RUNTIME_GENERATION=0
+    RUNTIME_PERMIT_EPOCH=0
+    RUNTIME_PERMIT_STATE="UNKNOWN"
     RUNTIME_PERMIT_OPEN=0
     RUNTIME_CONSUMED=0
     RUNTIME_ADJUDICATED=0
     RUNTIME_REINJECTED=0
+    RUNTIME_DELIVERED_AVAILABLE=0
     RUNTIME_DELIVERED=0
-    RUNTIME_REASON="product-observer-unavailable:permit-and-capture-actor-counters-not-exported"
+    RUNTIME_REASON="product-observer-unavailable:s5-status-or-go-metrics-absent"
     RUNTIME_PID="$(sed -n 's/^xpfd_pid=//p' "$proc" | head -n 1)"
     RUNTIME_FD_COUNT="$(sed -n 's/^xpfd_fd_count=//p' "$proc" | head -n 1)"
     [[ "$RUNTIME_PID" =~ ^[0-9]+$ ]] || RUNTIME_PID=0
@@ -351,22 +361,118 @@ cat /proc/net/netlink 2>&1' >"$proc" 2>&1 || :
         RUNTIME_SOCKET_READY=1
         RUNTIME_REINJECT_SOCKETS=2
     fi
-    # xpfd and the Rust helper sockets are separate from the Go S5 capture
-    # actor; only a product-owned status/counter surface can identify the
-    # actor and its permit/reinject lifecycle.
-    RUNTIME_ACTOR_ACTIVE=0
     RUNTIME_QUEUE_ROWS="$(awk '/^===NETLINK===/{exit} /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {n++} END {print n+0}' "$proc")"
     RUNTIME_QUEUE_PENDING="$(awk '/^===NETLINK===/{exit} /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {sum += $3} END {print sum+0}' "$proc")"
     RUNTIME_QUEUE_DROPS="$(awk '/^===NETLINK===/{exit} /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+/ {sum += $6 + $7} END {print sum+0}' "$proc")"
-    # The helper socket is not authoritative for the Go S5 permit/actor
-    # lifecycle; remain conservative rather than inferring permit OPEN.
-    RUNTIME_PERMIT_OPEN=0
-    printf 'RUNTIME tag=%s daemon_active=%s pid=%s fd_count=%s socket_ready=%s reinject_sockets=%s actor_active=%s queue_rows=%s queue_pending=%s queue_drops=%s permit_open=%s consumed=%s adjudicated=%s reinjected=%s delivered=%s reason=%s\n' \
+    local witness
+    witness="$(python3 - "$status" "$metrics" <<'PY'
+import json, re, sys
+status_path, metrics_path = sys.argv[1:3]
+def out(**values):
+    print(" ".join(f"{k}={values[k]}" for k in (
+        "available", "actor", "run_id", "generation", "epoch", "state",
+        "consumed", "adjudicated", "reinjected", "delivered_available",
+        "delivered", "reason"
+    )))
+try:
+    with open(status_path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if isinstance(doc, dict) and isinstance(doc.get("status"), dict):
+        doc = doc["status"]
+    rust = doc.get("s5_reinject") if isinstance(doc, dict) else None
+except Exception:
+    rust = None
+samples = {}
+try:
+    text = open(metrics_path, encoding="utf-8").read()
+except Exception:
+    text = ""
+for line in text.splitlines():
+    if not line or line.startswith("#"):
+        continue
+    m = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line)
+    if not m:
+        continue
+    labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', m.group(2)))
+    if all(key in labels for key in ("run_id", "generation", "permit_epoch")):
+        key = (labels["run_id"], labels["generation"], labels["permit_epoch"])
+        samples.setdefault(key, {})[m.group(1)] = (labels, m.group(3))
+if not isinstance(rust, dict):
+    out(available=0, actor=0, run_id="", generation=0, epoch=0, state="UNKNOWN",
+        consumed=0, adjudicated=0, reinjected=0, delivered_available=0,
+        delivered=0, reason="product-observer-unavailable:s5_reinject-status-absent")
+    raise SystemExit
+run_id = str(rust.get("run_id", ""))
+generation = str(rust.get("generation", 0))
+epoch = str(rust.get("permit_epoch", 0))
+state = str(rust.get("permit_state", "UNKNOWN"))
+row = samples.get((run_id, generation, epoch))
+if row is None:
+    out(available=0, actor=0, run_id=run_id, generation=generation, epoch=epoch,
+        state=state, consumed=0, adjudicated=0, reinjected=0,
+        delivered_available=int(bool(rust.get("delivered_available", False))),
+        delivered=int(rust.get("delivered", 0) or 0),
+        reason="product-observer-unavailable:go-rust-join-key-mismatch")
+    raise SystemExit
+def value(name):
+    item = row.get(name)
+    if item is None:
+        return None
+    try:
+        return int(float(item[1]))
+    except ValueError:
+        return None
+actor = value("xpf_ipsec_capture_actor_active")
+consumed = value("xpf_ipsec_capture_consumed_total")
+adjudicated = value("xpf_ipsec_capture_adjudicated_total")
+reinjected = value("xpf_ipsec_capture_reinjected_total")
+if None in (actor, consumed, adjudicated, reinjected):
+    out(available=0, actor=0, run_id=run_id, generation=generation, epoch=epoch,
+        state=state, consumed=0, adjudicated=0, reinjected=0,
+        delivered_available=int(bool(rust.get("delivered_available", False))),
+        delivered=int(rust.get("delivered", 0) or 0),
+        reason="product-observer-unavailable:go-witness-counters-absent")
+    raise SystemExit
+delivered_available = int(bool(rust.get("delivered_available", False)))
+delivered = int(rust.get("delivered", 0) or 0)
+reason = "witness-joined"
+if not delivered_available:
+    reason += ":residual-downstream-of-tun-witness-unavailable"
+out(available=1, actor=actor, run_id=run_id, generation=generation, epoch=epoch,
+    state=state, consumed=consumed, adjudicated=adjudicated, reinjected=reinjected,
+    delivered_available=delivered_available, delivered=delivered, reason=reason)
+PY
+)"
+    local key value
+    for key in available actor run_id generation epoch state consumed adjudicated reinjected delivered_available delivered reason; do
+        value=""
+        for word in $witness; do
+            if [[ "$word" == "$key="* ]]; then value="${word#*=}"; break; fi
+        done
+        case "$key" in
+        available) [[ "$value" == 1 ]] && RUNTIME_S5_AVAILABLE=1 ;;
+        actor) RUNTIME_ACTOR_ACTIVE="${value:-0}" ;;
+        run_id) RUNTIME_RUN_ID="${value:-}" ;;
+        generation) RUNTIME_GENERATION="${value:-0}" ;;
+        epoch) RUNTIME_PERMIT_EPOCH="${value:-0}" ;;
+        state) RUNTIME_PERMIT_STATE="${value:-UNKNOWN}" ;;
+        consumed) RUNTIME_CONSUMED="${value:-0}" ;;
+        adjudicated) RUNTIME_ADJUDICATED="${value:-0}" ;;
+        reinjected) RUNTIME_REINJECTED="${value:-0}" ;;
+        delivered_available) RUNTIME_DELIVERED_AVAILABLE="${value:-0}" ;;
+        delivered) RUNTIME_DELIVERED="${value:-0}" ;;
+        reason) RUNTIME_REASON="${value:-product-observer-unavailable}" ;;
+        esac
+    done
+    [[ "$RUNTIME_PERMIT_STATE" == OPEN ]] && RUNTIME_PERMIT_OPEN=1
+    printf 'RUNTIME tag=%s daemon_active=%s pid=%s fd_count=%s socket_ready=%s reinject_sockets=%s s5_available=%s actor_active=%s run_id=%s generation=%s permit_state=%s permit_epoch=%s queue_rows=%s queue_pending=%s queue_drops=%s consumed=%s adjudicated=%s reinjected=%s delivered_available=%s delivered=%s reason=%s\n' \
         "$tag" "$RUNTIME_DAEMON_ACTIVE" "$RUNTIME_PID" "$RUNTIME_FD_COUNT" \
-        "$RUNTIME_SOCKET_READY" "$RUNTIME_REINJECT_SOCKETS" "$RUNTIME_ACTOR_ACTIVE" \
-        "$RUNTIME_QUEUE_ROWS" "$RUNTIME_QUEUE_PENDING" "$RUNTIME_QUEUE_DROPS" \
-        "$RUNTIME_PERMIT_OPEN" "$RUNTIME_CONSUMED" "$RUNTIME_ADJUDICATED" \
-        "$RUNTIME_REINJECTED" "$RUNTIME_DELIVERED" "$RUNTIME_REASON"
+        "$RUNTIME_SOCKET_READY" "$RUNTIME_REINJECT_SOCKETS" "$RUNTIME_S5_AVAILABLE" \
+        "$RUNTIME_ACTOR_ACTIVE" "$RUNTIME_RUN_ID" "$RUNTIME_GENERATION" \
+        "$RUNTIME_PERMIT_STATE" "$RUNTIME_PERMIT_EPOCH" "$RUNTIME_QUEUE_ROWS" \
+        "$RUNTIME_QUEUE_PENDING" "$RUNTIME_QUEUE_DROPS" "$RUNTIME_CONSUMED" \
+        "$RUNTIME_ADJUDICATED" "$RUNTIME_REINJECTED" "$RUNTIME_DELIVERED_AVAILABLE" \
+        "$RUNTIME_DELIVERED" "$RUNTIME_REASON"
 }
 
 observe_queue_economics() {
@@ -476,6 +582,52 @@ if [[ "$MODE" == selftest ]]; then
     expect "paired fixture is complete" "1" \
         "$(if both_nodes_present 1 1; then echo 1; else echo 0; fi)"
     parser_dir="$(mktemp -d)"
+    cat >"$parser_dir/witness-check.py" <<'PY'
+import json, re, sys
+status_path, metrics_path, mode = sys.argv[1:]
+status = json.load(open(status_path, encoding="utf-8"))
+rust = status.get("s5_reinject")
+if mode == "absent":
+    if rust is not None:
+        raise SystemExit("absent fixture unexpectedly contains s5_reinject")
+    print("0")
+    raise SystemExit
+text = open(metrics_path, encoding="utf-8").read()
+samples = {}
+for line in text.splitlines():
+    m = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line)
+    if not m:
+        continue
+    labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', m.group(2)))
+    key = (labels.get("run_id"), labels.get("generation"), labels.get("permit_epoch"))
+    samples.setdefault(key, {})[m.group(1)] = float(m.group(3))
+key = (str(rust["run_id"]), str(rust["generation"]), str(rust["permit_epoch"]))
+joined = key in samples
+if mode == "join":
+    print(int(joined))
+elif mode == "zero":
+    print(int(joined and samples[key]["xpf_ipsec_capture_consumed_total"] == 0))
+elif mode == "refusal":
+    rows = rust.get("provenance", [])
+    print(int(any(row.get("outcome") == "refused" for row in rows)))
+elif mode == "delivery":
+    print(int(rust.get("delivered_available") == 0 and
+              rust.get("completed_written") == 3 and rust.get("delivered") == 0))
+PY
+    printf '%s\n' '{}' >"$parser_dir/absent.json"
+    printf '%s\n' '{"s5_reinject":{"run_id":"run-1","generation":4,"permit_epoch":7,"completed_written":3,"delivered_available":false,"delivered":0,"provenance":[{"outcome":"refused"}]}}' >"$parser_dir/witness.json"
+    printf '%s\n' 'xpf_ipsec_capture_consumed_total{run_id="run-1",generation="4",permit_epoch="7"} 0' >"$parser_dir/witness.prom"
+    printf '%s\n' 'xpf_ipsec_capture_consumed_total{run_id="run-other",generation="4",permit_epoch="7"} 0' >"$parser_dir/witness-mismatch.prom"
+    expect "absent S5 status stays unavailable" "0" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/absent.json" "$parser_dir/witness.prom" absent)"
+    expect "present zero counter stays authoritative zero" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" zero)"
+    expect "join mismatch stays unavailable" "0" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-mismatch.prom" join)"
+    expect "bounded provenance exposes refusal outcome" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" refusal)"
+    expect "written is not downstream delivered" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" delivery)"
     cat >"$parser_dir/positive.json" <<'EOF'
 {"nftables":[
 {"table":{"family":"inet","name":"xpf_transit_barrier"}},
@@ -518,7 +670,7 @@ EOF
         "static=0 queue_rows=1 queue_ids=0 packet_samples=0 mismatch=0" \
         "$(observe_provenance_metadata "$parser_dir/positive.json" "$parser_dir/nfqueue.txt")"
     rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 20 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 25 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -623,6 +775,20 @@ run_fixture_measure() {
     MEASURE_LOSS=100
     MEASURE_RUNTIME_FW0=""
     MEASURE_RUNTIME_FW1=""
+    MEASURE_S5_FW0=0
+    MEASURE_S5_FW1=0
+    MEASURE_CONSUMED_FW0=0
+    MEASURE_CONSUMED_FW1=0
+    MEASURE_ADJUDICATED_FW0=0
+    MEASURE_ADJUDICATED_FW1=0
+    MEASURE_REINJECTED_FW0=0
+    MEASURE_REINJECTED_FW1=0
+    MEASURE_DELIVERED_AVAILABLE_FW0=0
+    MEASURE_DELIVERED_AVAILABLE_FW1=0
+    MEASURE_DELIVERED_FW0=0
+    MEASURE_DELIVERED_FW1=0
+    MEASURE_REASON_FW0=product-observer-unavailable:s5-status-or-go-metrics-absent
+    MEASURE_REASON_FW1=product-observer-unavailable:s5-status-or-go-metrics-absent
     MEASURE_PROVENANCE_FW0="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
     MEASURE_PROVENANCE_FW1="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
     MEASURE_QUEUE_ECON_FW0="queue_instances=0 recv_buffers_mib=unknown socket_buffers_mib=unknown fd_count=0 queue_pending=0 queue_drops=0 rotation_overlap=unknown teardown=unknown"
@@ -668,7 +834,21 @@ run_fixture_measure() {
     fi
     fixture_measure_traffic "$shape" "$count" "$dir"
     observe_runtime "$FIX9506_NODE0" "$dir" measure-fw0-post
+    MEASURE_S5_FW0="$RUNTIME_S5_AVAILABLE"
+    MEASURE_CONSUMED_FW0="$RUNTIME_CONSUMED"
+    MEASURE_ADJUDICATED_FW0="$RUNTIME_ADJUDICATED"
+    MEASURE_REINJECTED_FW0="$RUNTIME_REINJECTED"
+    MEASURE_DELIVERED_AVAILABLE_FW0="$RUNTIME_DELIVERED_AVAILABLE"
+    MEASURE_DELIVERED_FW0="$RUNTIME_DELIVERED"
+    MEASURE_REASON_FW0="$RUNTIME_REASON"
     observe_runtime "$FIX9506_NODE1" "$dir" measure-fw1-post
+    MEASURE_S5_FW1="$RUNTIME_S5_AVAILABLE"
+    MEASURE_CONSUMED_FW1="$RUNTIME_CONSUMED"
+    MEASURE_ADJUDICATED_FW1="$RUNTIME_ADJUDICATED"
+    MEASURE_REINJECTED_FW1="$RUNTIME_REINJECTED"
+    MEASURE_DELIVERED_AVAILABLE_FW1="$RUNTIME_DELIVERED_AVAILABLE"
+    MEASURE_DELIVERED_FW1="$RUNTIME_DELIVERED"
+    MEASURE_REASON_FW1="$RUNTIME_REASON"
     observe_chain_overhead "$FIX9506_NODE0" "$dir" measure-fw0-post
     observe_chain_overhead "$FIX9506_NODE1" "$dir" measure-fw1-post
     if fix9506_teardown "$count" "$dir"; then
@@ -908,14 +1088,68 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     T12_TRAFFIC_LAN_OK="$MEASURE_LAN_OK"
     T12_TRAFFIC_PEER_OK="$MEASURE_PEER_OK"
 fi
+T12_S5_FW0=0
+T12_S5_FW1=0
+T12_ACTOR_FW0=0
+T12_ACTOR_FW1=0
+T12_RUN_ID_FW0=unknown
+T12_RUN_ID_FW1=unknown
+T12_GENERATION_FW0=0
+T12_GENERATION_FW1=0
+T12_PERMIT_STATE_FW0=UNKNOWN
+T12_PERMIT_STATE_FW1=UNKNOWN
+T12_PERMIT_EPOCH_FW0=0
+T12_PERMIT_EPOCH_FW1=0
+T12_CONSUMED_FW0=0
+T12_CONSUMED_FW1=0
+T12_ADJUDICATED_FW0=0
+T12_ADJUDICATED_FW1=0
+T12_REINJECTED_FW0=0
+T12_REINJECTED_FW1=0
+T12_DELIVERED_AVAILABLE_FW0=0
+T12_DELIVERED_AVAILABLE_FW1=0
+T12_DELIVERED_FW0=0
+T12_DELIVERED_FW1=0
+T12_REASON_FW0=product-observer-unavailable:s5-status-or-go-metrics-absent
+T12_REASON_FW1=product-observer-unavailable:s5-status-or-go-metrics-absent
 if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     observe_runtime "$NODE0" "$ARCHIVE_DIR" t12-fw0-post
     T12_RUNTIME_FW0_POST="$RUNTIME_PROC_FILE"
+    T12_STATUS_FW0_POST="$RUNTIME_STATUS_FILE"
+    T12_METRICS_FW0_POST="$RUNTIME_METRICS_FILE"
+    T12_S5_FW0="$RUNTIME_S5_AVAILABLE"
+    T12_ACTOR_FW0="$RUNTIME_ACTOR_ACTIVE"
+    T12_RUN_ID_FW0="$RUNTIME_RUN_ID"
+    T12_GENERATION_FW0="$RUNTIME_GENERATION"
+    T12_PERMIT_STATE_FW0="$RUNTIME_PERMIT_STATE"
+    T12_PERMIT_EPOCH_FW0="$RUNTIME_PERMIT_EPOCH"
+    T12_CONSUMED_FW0="$RUNTIME_CONSUMED"
+    T12_ADJUDICATED_FW0="$RUNTIME_ADJUDICATED"
+    T12_REINJECTED_FW0="$RUNTIME_REINJECTED"
+    T12_DELIVERED_AVAILABLE_FW0="$RUNTIME_DELIVERED_AVAILABLE"
+    T12_DELIVERED_FW0="$RUNTIME_DELIVERED"
+    T12_REASON_FW0="$RUNTIME_REASON"
     observe_runtime "$NODE1" "$ARCHIVE_DIR" t12-fw1-post
     T12_RUNTIME_FW1_POST="$RUNTIME_PROC_FILE"
+    T12_STATUS_FW1_POST="$RUNTIME_STATUS_FILE"
+    T12_METRICS_FW1_POST="$RUNTIME_METRICS_FILE"
+    T12_S5_FW1="$RUNTIME_S5_AVAILABLE"
+    T12_ACTOR_FW1="$RUNTIME_ACTOR_ACTIVE"
+    T12_RUN_ID_FW1="$RUNTIME_RUN_ID"
+    T12_GENERATION_FW1="$RUNTIME_GENERATION"
+    T12_PERMIT_STATE_FW1="$RUNTIME_PERMIT_STATE"
+    T12_PERMIT_EPOCH_FW1="$RUNTIME_PERMIT_EPOCH"
+    T12_CONSUMED_FW1="$RUNTIME_CONSUMED"
+    T12_ADJUDICATED_FW1="$RUNTIME_ADJUDICATED"
+    T12_REINJECTED_FW1="$RUNTIME_REINJECTED"
+    T12_DELIVERED_AVAILABLE_FW1="$RUNTIME_DELIVERED_AVAILABLE"
+    T12_DELIVERED_FW1="$RUNTIME_DELIVERED"
+    T12_REASON_FW1="$RUNTIME_REASON"
     observe_chain_overhead "$NODE0" "$ARCHIVE_DIR" t12-fw0-post
     observe_chain_overhead "$NODE1" "$ARCHIVE_DIR" t12-fw1-post
-    printf 'T12_G2_CONSUMER actor_active=0 permit_open=0 consumed=0 adjudicated=0 reinjected=0 delivered=0 reason=product-observer-unavailable:internal-S5-state\n'
+    printf 'T12_G2_CONSUMER fw0_actor_active=%s fw0_s5_available=%s fw0_run_id=%s fw0_generation=%s fw0_permit_state=%s fw0_permit_epoch=%s fw0_consumed=%s fw0_adjudicated=%s fw0_reinjected=%s fw0_delivered_available=%s fw0_delivered=%s fw0_reason=%s fw1_actor_active=%s fw1_s5_available=%s fw1_run_id=%s fw1_generation=%s fw1_permit_state=%s fw1_permit_epoch=%s fw1_consumed=%s fw1_adjudicated=%s fw1_reinjected=%s fw1_delivered_available=%s fw1_delivered=%s fw1_reason=%s\n' \
+        "$T12_ACTOR_FW0" "$T12_S5_FW0" "$T12_RUN_ID_FW0" "$T12_GENERATION_FW0" "$T12_PERMIT_STATE_FW0" "$T12_PERMIT_EPOCH_FW0" "$T12_CONSUMED_FW0" "$T12_ADJUDICATED_FW0" "$T12_REINJECTED_FW0" "$T12_DELIVERED_AVAILABLE_FW0" "$T12_DELIVERED_FW0" "$T12_REASON_FW0" \
+        "$T12_ACTOR_FW1" "$T12_S5_FW1" "$T12_RUN_ID_FW1" "$T12_GENERATION_FW1" "$T12_PERMIT_STATE_FW1" "$T12_PERMIT_EPOCH_FW1" "$T12_CONSUMED_FW1" "$T12_ADJUDICATED_FW1" "$T12_REINJECTED_FW1" "$T12_DELIVERED_AVAILABLE_FW1" "$T12_DELIVERED_FW1" "$T12_REASON_FW1"
 fi
 
 # Cell result helper.  Every cell names its plan section/predicate and emits a
@@ -1022,9 +1256,9 @@ emit_cell t12_9506_coexistence_order 'r6 §5.2.3' 'both-family divert priority p
     "measurement-incomplete:exact-order-and-permit-observer-unavailable" \
     "cell_failed=1 inet_order_structural=$T12_STATIC_ORDER bridge_order_structural=$T12_STATIC_ORDER mixed_open=0 rotation_budget_ms=0"
 emit_cell t12_9506_provenance_metadata 'r6 §5.2.3-§5.2.4' 'queue-id, nfgen_family, hook, ifindex, owner and stN agree for every packet' \
-    "static queue map fw0=$T12_PROVENANCE_FW0 fw1=$T12_PROVENANCE_FW1; packet CaptureOrigin and actor counters unavailable" VOID \
-    "product-observer-unavailable:CaptureOrigin-permit-adjudication-reinject-counters" \
-    "cell_failed=1 packets=0 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_mismatch_fw0=$T12_PROV_MISMATCH_FW0 provenance_mismatch_fw1=$T12_PROV_MISMATCH_FW1 queue_rows_fw0=$T12_PROV_QUEUE_ROWS_FW0 queue_rows_fw1=$T12_PROV_QUEUE_ROWS_FW1"
+    "static queue map fw0=$T12_PROVENANCE_FW0 fw1=$T12_PROVENANCE_FW1; fw0_s5_available=$T12_S5_FW0 fw1_s5_available=$T12_S5_FW1 actor counters are observational only" VOID \
+    "product-observer-unavailable:fw0=${T12_REASON_FW0};fw1=${T12_REASON_FW1};2b-attestation-required" \
+    "cell_failed=1 packets=0 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_mismatch_fw0=$T12_PROV_MISMATCH_FW0 provenance_mismatch_fw1=$T12_PROV_MISMATCH_FW1 queue_rows_fw0=$T12_PROV_QUEUE_ROWS_FW0 queue_rows_fw1=$T12_PROV_QUEUE_ROWS_FW1 fw0_consumed=$T12_CONSUMED_FW0 fw1_consumed=$T12_CONSUMED_FW1 fw0_adjudicated=$T12_ADJUDICATED_FW0 fw1_adjudicated=$T12_ADJUDICATED_FW1 fw0_reinjected=$T12_REINJECTED_FW0 fw1_reinjected=$T12_REINJECTED_FW1 fw0_delivered_available=$T12_DELIVERED_AVAILABLE_FW0 fw1_delivered_available=$T12_DELIVERED_AVAILABLE_FW1"
 emit_cell t12_9506_ifindex_recreate 'r6 §5.2.3-§5.2.4' 'device delete/recreate/name reuse with changed ifindex drops and counts' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 delete_recreate=0 changed_ifindex=0 mismatch_drop=0"
 
@@ -1076,11 +1310,11 @@ g2_emit_measured() {
         qinst1="$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances)"
         qfd0="$(observer_field "$MEASURE_QUEUE_ECON_FW0" fd_count)"
         qfd1="$(observer_field "$MEASURE_QUEUE_ECON_FW1" fd_count)"
-        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 queue_econ_fw0=$MEASURE_QUEUE_ECON_FW0 queue_econ_fw1=$MEASURE_QUEUE_ECON_FW1"
+        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 queue_econ_fw0=$MEASURE_QUEUE_ECON_FW0 queue_econ_fw1=$MEASURE_QUEUE_ECON_FW1"
         emit_cell "$gate" 'r6 §5.1' \
             "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
-            "$observed" VOID "product-consumer-path-unavailable:delivered=0; CaptureOrigin/permit/adjudication/reinject counters unavailable" \
-            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 provenance_mismatch_fw0=$mismatch0 provenance_mismatch_fw1=$mismatch1 overhead_ns=0 queue_instances=$qinst0 queue_instances_fw1=$qinst1 fd_count=$qfd0 fd_count_fw1=$qfd1 recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+            "$observed" VOID "product-consumer-path-unavailable:fw0=${MEASURE_REASON_FW0};fw1=${MEASURE_REASON_FW1};delivered-downstream-witness-unavailable;2b-attestation-required" \
+            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 provenance_mismatch_fw0=$mismatch0 provenance_mismatch_fw1=$mismatch1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 delivered_fw0=$MEASURE_DELIVERED_FW0 delivered_fw1=$MEASURE_DELIVERED_FW1 overhead_ns=0 queue_instances=$qinst0 queue_instances_fw1=$qinst1 fd_count=$qfd0 fd_count_fw1=$qfd1 recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
     else
         observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
         emit_cell "$gate" 'r6 §5.1' \

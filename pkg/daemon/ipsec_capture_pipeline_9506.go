@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -10,6 +12,16 @@ import (
 
 	"github.com/psaab/xpf/pkg/nfqueue"
 )
+
+var ipsecCaptureProcessRunID = newIpsecCaptureProcessRunID()
+
+func newIpsecCaptureProcessRunID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("xpfd-entropy-unavailable-%d", time.Now().UnixNano())
+	}
+	return "xpfd-" + hex.EncodeToString(raw[:])
+}
 
 // IpsecCapturePipelineConfig wires the S4 supervisor authority to the capture
 // actor. Construction is inert: no queue, divert table, goroutine, or permit
@@ -27,18 +39,26 @@ type IpsecCapturePipelineConfig struct {
 	Registry    *nfqueue.OriginRegistry
 	QueueEpochs map[uint16]uint64
 	Queues      []IpsecCaptureQueue
+	RunID       string
 	Pipeline    nfqueue.CapturePipelineConfig
 }
 
 // IpsecCapturePipelineStatus is the bounded live-evidence view exported by the
 // actor. PipelineStats contains the per-outcome, provenance, overlap, L2, and
-// per-flow terminal counters.
+// per-flow terminal counters. Delivered remains unavailable until an
+// independent product-owned witness downstream of the Rust TUN write exists.
 type IpsecCapturePipelineStatus struct {
-	Active     bool
-	Down       bool
-	Rotation   string
-	Generation uint64
-	Counters   nfqueue.PipelineStats
+	Available          bool
+	Active             bool
+	Down               bool
+	Rotation           string
+	RunID              string
+	Generation         uint64
+	PermitState        string
+	PermitEpoch        uint64
+	Counters           nfqueue.PipelineStats
+	DeliveredAvailable bool
+	Delivered          uint64
 }
 
 // IpsecCapturePipeline is the daemon-side actor for the S5 capture slice. S4
@@ -52,6 +72,7 @@ type IpsecCapturePipeline struct {
 	queues      []IpsecCaptureQueue
 	pipeline    *nfqueue.CapturePipeline
 	rotation    *ipsecRotation
+	runID       string
 	requestID   atomic.Uint64
 	active      bool
 	down        bool
@@ -75,12 +96,17 @@ func NewIpsecCapturePipeline(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipel
 		cfg.Registry = new(nfqueue.OriginRegistry)
 	}
 	cfg.Pipeline.Registry = cfg.Registry
+	runID := cfg.RunID
+	if runID == "" {
+		runID = ipsecCaptureProcessRunID
+	}
 	actor := &IpsecCapturePipeline{
 		supervisor:  cfg.Supervisor,
 		registry:    cfg.Registry,
 		queueEpochs: make(map[uint16]uint64, len(cfg.QueueEpochs)),
 		queues:      append([]IpsecCaptureQueue(nil), cfg.Queues...),
 		rotation:    newIpsecRotation(),
+		runID:       runID,
 	}
 	for queue, epoch := range cfg.QueueEpochs {
 		if queue == 0 || epoch == 0 {
@@ -256,21 +282,45 @@ func (a *IpsecCapturePipeline) Stop() error {
 	return firstErr
 }
 
-// Status returns actor lifecycle, rotation, and terminal counters.
+// Status returns actor lifecycle, authority join keys, and terminal counters.
 func (a *IpsecCapturePipeline) Status() IpsecCapturePipelineStatus {
 	if a == nil {
-		return IpsecCapturePipelineStatus{Rotation: ipsecRotationClosed.String()}
+		return IpsecCapturePipelineStatus{PermitState: ipsecPermitClosed.String(), Rotation: ipsecRotationClosed.String()}
 	}
 	a.mu.Lock()
 	active, down := a.active, a.down
 	rotation := a.rotation.state()
 	generation := a.rotation.openGeneration()
+	if generation == 0 && len(a.queues) != 0 {
+		generation = a.queues[0].Generation
+	}
+	runID := a.runID
 	a.mu.Unlock()
+	permitState := ipsecPermitClosed.String()
+	var permitEpoch uint64
+	if a.supervisor != nil {
+		if permit := a.supervisor.loadPermit(); permit != nil {
+			permitState = permit.state.String()
+			permitEpoch = permit.permitEpoch
+		}
+	}
 	var counters nfqueue.PipelineStats
 	if a.pipeline != nil {
 		counters = a.pipeline.Stats()
 	}
-	return IpsecCapturePipelineStatus{Active: active, Down: down, Rotation: rotation.String(), Generation: generation, Counters: counters}
+	return IpsecCapturePipelineStatus{
+		Available:          true,
+		Active:             active,
+		Down:               down,
+		Rotation:           rotation.String(),
+		RunID:              runID,
+		Generation:         generation,
+		PermitState:        permitState,
+		PermitEpoch:        permitEpoch,
+		Counters:           counters,
+		DeliveredAvailable: false, // no product-owned downstream-of-TUN witness yet
+		Delivered:          0,
+	}
 }
 
 // EpochSnapshot returns the authority payload for the currently active

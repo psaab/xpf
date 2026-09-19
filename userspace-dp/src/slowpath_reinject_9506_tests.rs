@@ -1312,8 +1312,10 @@ fn cancel_queue_scope_tombstones_pair_blocks_readmit_and_republish() {
 }
 
 #[test]
-fn announce_wire_roundtrip_pins_permit_open_and_queue_epochs() {
+fn announce_wire_roundtrip_pins_run_generation_permit_and_queue_epochs() {
     let announcement = AuthorityAnnouncement {
+        run_id: "run-1".to_string(),
+        generation: 4,
         permit_epoch: 9,
         permit_open: true,
         queue_epochs: vec![(1, 11), (2, 13)],
@@ -1322,6 +1324,8 @@ fn announce_wire_roundtrip_pins_permit_open_and_queue_epochs() {
     assert_eq!(
         payload,
         vec![
+            5, b'r', b'u', b'n', b'-', b'1', // run_id
+            0, 0, 0, 0, 0, 0, 0, 4, // generation
             0, 0, 0, 0, 0, 0, 0, 9, // permit_epoch
             1, // permit_open
             0, 2, // queue count
@@ -1332,7 +1336,10 @@ fn announce_wire_roundtrip_pins_permit_open_and_queue_epochs() {
     assert_eq!(decode_announce(&payload), Ok(announcement));
     assert_eq!(
         decode_announce(&[
-            0, 0, 0, 0, 0, 0, 0, 9, 2, // invalid bool
+            3, b'r', b'u', b'n',
+            0, 0, 0, 0, 0, 0, 0, 4,
+            0, 0, 0, 0, 0, 0, 0, 9,
+            2, // invalid bool
             0, 0,
         ]),
         Err(CodecError::BadValue)
@@ -1342,7 +1349,7 @@ fn announce_wire_roundtrip_pins_permit_open_and_queue_epochs() {
 #[test]
 fn authority_handoff_carries_announce_and_tombstones_to_target() {
     let fallback = ReinjectCore::new_shared();
-    assert!(fallback.announce_epochs(PERMIT, true, &[(1, QEPOCH), (2, 13)]));
+    assert!(fallback.announce_epochs("run-1", 4, PERMIT, true, &[(1, QEPOCH), (2, 13)]));
     let mut cancelled = frame(1, 1, 64);
     cancelled.lease.queue_number = 2;
     cancelled.lease.queue_epoch = 13;
@@ -1366,12 +1373,62 @@ fn authority_handoff_carries_announce_and_tombstones_to_target() {
 fn announce_zero_revokes_prior_open_permit() {
     let core = open_core();
     assert!(core.admit(&frame(1, 1, 64)).admitted);
-    assert!(core.announce_epochs(0, false, &[]));
+    assert!(core.announce_epochs("run-1", 4, 0, false, &[]));
 
     let mut old_lease = frame(2, 1, 64);
     let decision = core.admit(&old_lease);
     assert!(!decision.admitted);
     assert_eq!(decision.reason, ADMIT_STALE);
     old_lease.lease.request_id = 3;
-    assert_eq!(core.authority_snapshot(), (PERMIT, false, Vec::new()));
+    assert_eq!(
+        core.authority_snapshot(),
+        ("run-1".to_string(), 4, PERMIT, false, Vec::new())
+    );
+}
+#[test]
+fn authority_restart_accepts_new_run_id_with_lower_epoch() {
+    let core = ReinjectCore::new_shared();
+    assert!(core.announce_epochs("run-a", 4, 9, true, &[(1, 11)]));
+    assert!(core.announce_epochs("run-b", 1, 1, true, &[(1, 2)]));
+    assert_eq!(
+        core.authority_snapshot(),
+        ("run-b".to_string(), 1, 1, true, vec![(1, 2)])
+    );
+}
+#[test]
+fn authority_rotation_accepts_generation_advance_same_epoch() {
+    let core = ReinjectCore::new_shared();
+    assert!(core.announce_epochs("run-1", 4, PERMIT, true, &[(1, QEPOCH)]));
+    assert!(core.announce_epochs("run-1", 5, PERMIT, true, &[(1, QEPOCH + 1)]));
+    assert_eq!(
+        core.authority_snapshot(),
+        (
+            "run-1".to_string(),
+            5,
+            PERMIT,
+            true,
+            vec![(1, QEPOCH + 1)]
+        )
+    );
+}
+
+#[test]
+fn authority_restart_clears_old_run_provenance() {
+    let core = ReinjectCore::new_shared();
+    assert!(core.announce_epochs("run-a", 4, PERMIT, true, &[(1, QEPOCH)]));
+    assert!(core.admit(&frame(1, 1, 64)).admitted);
+    assert_eq!(core.pre_write_check(&lease(1)), PreWrite::Proceed);
+    assert!(core.resolve_write(&lease(1), written(64)));
+    assert_eq!(
+        core.status_snapshot()
+            .expect("announced core has a status")
+            .provenance
+            .len(),
+        1
+    );
+
+    assert!(core.announce_epochs("run-b", 1, 1, true, &[(1, 2)]));
+    let status = core.status_snapshot().expect("new run has a status");
+    assert_eq!(status.run_id, "run-b");
+    assert!(status.provenance.is_empty());
 }

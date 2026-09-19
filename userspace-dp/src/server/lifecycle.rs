@@ -525,6 +525,7 @@ pub(crate) fn run() -> Result<(), String> {
             last_resolution: None,
             slow_path: SlowPathStatus::default(),
             slow_path_delegated: SlowPathStatus::default(),
+            s5_reinject: None,
             debug_worker_threads: 0,
             debug_identity_slots: 0,
             debug_live_slots: 0,

@@ -188,6 +188,13 @@ type PipelineStats struct {
 	L2Unsupported        uint64
 	OverlapRefusals      uint64
 	FragmentDrops        uint64
+	// #10478 Phase 2a witness: drained from the bounded handoff into pipeline
+	// accounting (all receive-time dispositions).
+	Consumed uint64
+	// #10478 Phase 2a witness: entered q0 adjudication (lease minted).
+	Adjudicated uint64
+	// #10478 Phase 2a witness: terminal q0 Written completions (equals Written).
+	Reinjected uint64
 }
 
 type pipelineStats struct {
@@ -293,12 +300,15 @@ func (p *CapturePipeline) Phase() PipelinePhase {
 	return p.phase
 }
 
-// Enqueue is try-or-drop. Provenance mismatch is consumed by a terminal DROP
-// and counted before it can enter any worker or q0 path.
+// Enqueue is try-or-drop. Every non-nil received frame is counted as consumed;
+// provenance/phase/handoff dispositions then explain where it terminated.
 func (p *CapturePipeline) Enqueue(frame CaptureFrame) error {
 	if p == nil || frame.Packet == nil {
 		return errors.New("nfqueue: nil capture frame")
 	}
+	p.mu.Lock()
+	p.stats.Consumed++
+	p.mu.Unlock()
 	if err := ValidateProvenance(frame.Packet, p.registry); err != nil {
 		p.mu.Lock()
 		p.stats.ProvenanceMismatches++
@@ -543,6 +553,9 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 			}
 			adjudicated = append(adjudicated, AdjudicatedFrame{Frame: frame, Origin: frame.origin, Lease: lease})
 		}
+		p.mu.Lock()
+		p.stats.Adjudicated += uint64(len(adjudicated))
+		p.mu.Unlock()
 		if len(adjudicated) == 0 {
 			continue
 		}
@@ -862,6 +875,7 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		switch completion.Outcome {
 		case CompletionWritten:
 			p.stats.Written++
+			p.stats.Reinjected++
 		case CompletionStale, CompletionFenced:
 			p.stats.Stale++
 		case CompletionCancelled:

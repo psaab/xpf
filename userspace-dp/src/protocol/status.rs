@@ -980,6 +980,11 @@ pub(crate) struct ProcessStatus {
     /// operators can see its live MTU, degraded state, and counters.
     #[serde(rename = "slow_path_delegated", default)]
     pub slow_path_delegated: SlowPathStatus,
+    /// #10478: q0 reinject authority, terminal outcomes, and bounded
+    /// provenance. The block is absent until the daemon has announced the
+    /// run/generation join key; zero counters in a present block are real.
+    #[serde(rename = "s5_reinject", default, skip_serializing_if = "Option::is_none")]
+    pub s5_reinject: Option<S5ReinjectStatus>,
     #[serde(rename = "debug_worker_threads", default)]
     pub debug_worker_threads: usize,
     #[serde(rename = "debug_identity_slots", default)]

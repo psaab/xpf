@@ -93,6 +93,25 @@ type ClusterSessionService interface {
 // CompileHealthSnapshot mirrors daemon.CompileHealth without the import.
 // Keeping pkg/api -> pkg/daemon free of a back-edge preserves the layered
 // build shape; the daemon injects a callback that returns this struct.
+// IpsecCaptureWitness is the authenticated S5 capture/reinject witness.
+// Available distinguishes a real actor snapshot from an unwired daemon; zero
+// counters in an available snapshot are authoritative zeros, while an
+// unavailable snapshot is omitted from /metrics. run_id, generation, and
+// permit_epoch are the join key shared with the Rust s5_reinject status block.
+type IpsecCaptureWitness struct {
+	Available          bool
+	RunID              string
+	ActorActive        bool
+	PermitState        string
+	PermitEpoch        uint64
+	Generation         uint64
+	Consumed           uint64
+	Adjudicated        uint64
+	Reinjected         uint64
+	DeliveredAvailable bool
+	Delivered          uint64
+}
+
 type CompileHealthSnapshot struct {
 	EverSucceeded    bool
 	FailureCount     uint64
@@ -395,6 +414,10 @@ type Config struct {
 	// nil disables the metric -- deliberately, so a daemon that cannot see the
 	// dataplane emits no series rather than a fabricated 1.
 	ForwardingSupportedFn func() bool
+	// IpsecCaptureWitnessFn exposes the authenticated S5 actor counters. A nil
+	// callback means this daemon has no authoritative actor surface; an
+	// available snapshot with zero counters is an authoritative zero.
+	IpsecCaptureWitnessFn func() IpsecCaptureWitness
 	// SchedulerRepublishStaleSecondsFn returns how long the current
 	// scheduler-republish failure streak has gone unconverged, in
 	// seconds (0 when healthy) (#3780). Backs the
@@ -582,6 +605,7 @@ type Server struct {
 	frrNarrowedPolicyChainsDenySafeFn    func() []string
 	frrNarrowedPolicyChainShapesFn       func() map[string]int
 	natLenientTerminalActionRulesFn      func() []string
+	ipsecCaptureWitnessFn                func() IpsecCaptureWitness
 	ipsecRebindPendingFn                 func() bool
 	hostInboundConntrackRevocationOwedFn func() bool
 	hostInboundConntrackFlushFailuresFn  func() uint64
@@ -707,6 +731,7 @@ func NewServer(cfg Config) *Server {
 		frrNarrowedPolicyChainsDenySafeFn:    cfg.FRRNarrowedPolicyChainsDenySafeFn,
 		frrNarrowedPolicyChainShapesFn:       cfg.FRRNarrowedPolicyChainShapesFn,
 		natLenientTerminalActionRulesFn:      cfg.NATLenientTerminalActionRulesFn,
+		ipsecCaptureWitnessFn:                cfg.IpsecCaptureWitnessFn,
 		ipsecRebindPendingFn:                 cfg.IPsecRebindPendingFn,
 		hostInboundConntrackRevocationOwedFn: cfg.HostInboundConntrackRevocationOwedFn,
 		hostInboundConntrackFlushFailuresFn:  cfg.HostInboundConntrackFlushFailuresFn,

@@ -682,6 +682,7 @@ pub(super) fn apply_snapshot(
         );
         coord.last_slow_path_status = slow_path.status();
         coord.last_slow_path_delegated_status = slow_path.delegated_status();
+        coord.last_s5_reinject_status = slow_path.reinject_status();
         Some(slow_path)
     } else {
         // #2408: size the slow-path TUN to the largest configured
@@ -691,6 +692,7 @@ pub(super) fn apply_snapshot(
             Ok(reinjector) => {
                 coord.last_slow_path_status = reinjector.status();
                 coord.last_slow_path_delegated_status = reinjector.delegated_status();
+                coord.last_s5_reinject_status = reinjector.reinject_status();
                 Some(Arc::new(reinjector))
             }
             Err(err) => {
@@ -702,6 +704,7 @@ pub(super) fn apply_snapshot(
                     last_error: coord.last_slow_path_status.last_error.clone(),
                     ..SlowPathStatus::default()
                 };
+                coord.last_s5_reinject_status = None;
                 None
             }
         }
