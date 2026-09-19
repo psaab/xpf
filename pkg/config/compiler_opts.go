@@ -252,6 +252,14 @@ type compileOpts struct {
 	// committed, so firing on every boot and peer sync trains the operator to
 	// skip it.
 	suppressContestedTrunkZoneAdvisory bool
+	// suppressFabricStampAdvisory (#10105) suppresses the commit-time private
+	// L2 advisory on tolerant load / peer-sync paths. The warning is a
+	// deployment constraint, not a hard error: software cannot inspect the
+	// cable plant, and repeating it on every boot would train operators to
+	// ignore it. Keep this flag independent from every authentication gate —
+	// callers that relax cluster-key validation must not accidentally suppress
+	// the fabric trust-boundary warning.
+	suppressFabricStampAdvisory bool
 	// lenientIPsecPolicyProposalRef (#2073, #9919 F-090) downgrades the IPsec
 	// (Phase 2) reference-chain check from a hard error to a warning on the
 	// tolerant load / peer-sync paths. A dangling `proposals` reference, a
@@ -2906,6 +2914,7 @@ func lenientCompileOpts() compileOpts {
 		lenientEventAttributesMatch:            true,
 		suppressClusterNTPAdvisory:             true,
 		suppressContestedTrunkZoneAdvisory:     true,
+		suppressFabricStampAdvisory:            true,
 		lenientIPsecPolicyProposalRef:          true,
 		lenientSchedulerMapRef:                 true,
 		lenientCoSInterfaceRefs:                true,
