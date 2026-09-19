@@ -39,13 +39,14 @@ func (s *Server) GetNATSource(_ context.Context, _ *pb.GetNATSourceRequest) (*pb
 	resp := &pb.GetNATSourceResponse{}
 	for _, rs := range cfg.Security.NAT.Source {
 		for _, rule := range rs.Rules {
+			action := natshow.SourceRuleAction(rule)
 			info := &pb.NATSourceInfo{
-				FromZone: rs.FromZone,
-				ToZone:   rs.ToZone,
+				FromZone:    rs.FromZone,
+				ToZone:      rs.ToZone,
+				Type:        action,
+				SourceMatch: natshow.RuleMatchSource(rule),
 			}
-			if rule.Then.Interface {
-				info.Type = "interface"
-			} else if rule.Then.PoolName != "" {
+			if strings.HasPrefix(action, "pool ") {
 				info.Type = "pool"
 				info.Pool = rule.Then.PoolName
 			}
