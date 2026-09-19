@@ -10358,8 +10358,10 @@ reserved for whole-dataplane selection where a rewrite shim
       other spelling (including a `agressive` typo) fell back to main mode.
     - `nat-traversal` — `ValidateEnum([enable, disable, force])`. The
       `pkg/ipsec/policy.go` switch maps `disable`→`encap = no`,
-      `force`→`forceencaps = yes`, and default (`enable`/empty)→auto-detect;
-      an unrecognized value silently took the auto-detect default.
+      `force`→`encap = yes`, and default (`enable`/empty)→auto-detect.
+      `encap = yes` is the swanctl-native setting; the legacy
+      `forceencaps` ipsec.conf/starter keyword is never emitted because this
+      renderer writes swanctl.conf (strongSwan #10474).
 
     The accepted sets are EXACTLY the generator-recognized values (a value the
     generator handles but the enum omitted would be a false-reject regression).
