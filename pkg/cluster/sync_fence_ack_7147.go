@@ -407,15 +407,15 @@ type fenceAckWaiter struct {
 // confirmation the peer never gave for the fence in question.
 func (s *SessionSync) completeFenceAckWait(ack FenceAck) {
 	s.fenceAckMu.Lock()
+	defer s.fenceAckMu.Unlock()
 	waiter := s.fenceAckWaiters[ack.Seq]
-	delete(s.fenceAckWaiters, ack.Seq)
-	s.fenceAckMu.Unlock()
 	if waiter.ch == nil {
 		slog.Debug("cluster sync: dropping fence ack with no waiter", "seq", ack.Seq)
 		return
 	}
-	// Buffered (cap 1) and removed from the map under the same lock, so
-	// exactly one send can ever reach it and this cannot block the read loop.
+	delete(s.fenceAckWaiters, ack.Seq)
+	// The waiter is buffered (cap 1), so delivery cannot block while the
+	// lock establishes the completion-vs-timeout linearization point.
 	waiter.ch <- ack
 }
 
@@ -438,6 +438,8 @@ func (s *SessionSync) abortFenceAckWaiters() {
 // installed at all (superseded/evicted) — can never be answered. An idle
 // fabric flapping must not degrade a confirmed fence whose ack path is
 // healthy. Full disconnect (!connected) releases everything.
+// The close stays under fenceAckMu so the timeout arm cannot observe an
+// unregistered-but-not-yet-closed waiter and misreport a timeout.
 //
 // Lock order: the caller (handleDisconnect) holds s.mu; this takes fenceAckMu
 // and reads only the slot variables (never getActiveConn/installConn — that
@@ -445,12 +447,12 @@ func (s *SessionSync) abortFenceAckWaiters() {
 // slot state, so the no-arg wrapper above stays safe for its test callers.
 func (s *SessionSync) abortFenceAckWaitersFor(dropped net.Conn, connected bool) {
 	s.fenceAckMu.Lock()
+	defer s.fenceAckMu.Unlock()
 	kept := make(map[uint64]fenceAckWaiter, len(s.fenceAckWaiters))
-	var doomed []chan FenceAck
 	for seq, w := range s.fenceAckWaiters {
 		if !connected || w.conn == dropped || (w.conn != s.conn0 && w.conn != s.conn1) {
 			if w.ch != nil {
-				doomed = append(doomed, w.ch)
+				close(w.ch)
 			}
 			continue
 		}
@@ -461,9 +463,39 @@ func (s *SessionSync) abortFenceAckWaitersFor(dropped net.Conn, connected bool) 
 	} else {
 		s.fenceAckWaiters = kept
 	}
-	s.fenceAckMu.Unlock()
-	for _, ch := range doomed {
-		close(ch)
+}
+
+// fenceWaitResult is the outcome of waiting for a fence ack against its
+// deadline: either the waiter produced an ack (ok distinguishes an answer
+// from a closed channel, i.e. a dropped fabric), or the deadline fired.
+type fenceWaitResult struct {
+	ack      FenceAck
+	ok       bool
+	timedOut bool
+}
+
+// awaitFenceAck selects between the waiter and the deadline.
+func (s *SessionSync) awaitFenceAck(seq uint64, waiter <-chan FenceAck, timerC <-chan time.Time) fenceWaitResult {
+	select {
+	case ack, ok := <-waiter:
+		return fenceWaitResult{ack: ack, ok: ok}
+	case <-timerC:
+		return s.fenceAckAtTimeout(seq, waiter)
+	}
+}
+
+// fenceAckAtTimeout resolves the timeout arm after the deadline is ready.
+// fenceAckMu linearizes this check against completion and disconnect.
+func (s *SessionSync) fenceAckAtTimeout(seq uint64, waiter <-chan FenceAck) fenceWaitResult {
+	s.fenceAckMu.Lock()
+	defer s.fenceAckMu.Unlock()
+	select {
+	case ack, ok := <-waiter:
+		delete(s.fenceAckWaiters, seq)
+		return fenceWaitResult{ack: ack, ok: ok}
+	default:
+		delete(s.fenceAckWaiters, seq)
+		return fenceWaitResult{timedOut: true}
 	}
 }
 
@@ -545,23 +577,22 @@ func (s *SessionSync) SendFenceAwait(timeout time.Duration) (FenceAck, error) {
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	select {
-	case ack, ok := <-waiter:
-		if !ok {
-			// Channel closed by abortFenceAckWaiters: the fabric dropped
-			// before the peer answered.
-			return FenceAck{}, fmt.Errorf("session sync disconnected during fence ack wait seq=%d", seq)
-		}
-		s.stats.FenceAcksReceived.Add(1)
-		slog.Info("cluster sync: fence ack received",
-			"seq", ack.Seq,
-			"status", ack.Status,
-			"rgs_fenced", ack.RGsFenced,
-			"rgs_total", ack.RGsTotal)
-		return ack, nil
-	case <-timer.C:
-		unregister()
+	result := s.awaitFenceAck(seq, waiter, timer.C)
+	if !result.timedOut && !result.ok {
+		// Channel closed by abortFenceAckWaiters: the fabric dropped
+		// before the peer answered.
+		return FenceAck{}, fmt.Errorf("session sync disconnected during fence ack wait seq=%d", seq)
+	}
+	if result.timedOut {
 		s.stats.FenceAcksTimedOut.Add(1)
 		return FenceAck{}, fmt.Errorf("timed out after %s waiting for peer fence ack seq=%d", timeout, seq)
 	}
+	ack := result.ack
+	s.stats.FenceAcksReceived.Add(1)
+	slog.Info("cluster sync: fence ack received",
+		"seq", ack.Seq,
+		"status", ack.Status,
+		"rgs_fenced", ack.RGsFenced,
+		"rgs_total", ack.RGsTotal)
+	return ack, nil
 }
