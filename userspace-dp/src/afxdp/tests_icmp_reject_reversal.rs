@@ -363,6 +363,34 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
 
     let result = build_nat_reversed_icmp_error_v4(&frame, meta, &icmp_match)
         .expect("should build NAT-reversed frame");
+    assert_eq!(result[22], 63, "same-family IPv4 reversal decrements TTL");
+    let mut expired_frame = frame.clone();
+    expired_frame[14 + 8] = 1;
+    expired_frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
+    let expired_csum = checksum16(&expired_frame[14..34]);
+    expired_frame[14 + 10..14 + 12].copy_from_slice(&expired_csum.to_be_bytes());
+    assert!(
+        build_nat_reversed_icmp_error_v4(&expired_frame, meta, &icmp_match).is_none(),
+        "same-family IPv4 reversal drops TTL<=1"
+    );
+    let mut fabric_meta = meta;
+    fabric_meta.meta_flags |= FABRIC_INGRESS_FLAG;
+    let mut fabric_frame = frame.clone();
+    fabric_frame[14 + 8] = 1;
+    fabric_frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
+    let fabric_csum = checksum16(&fabric_frame[14..34]);
+    fabric_frame[14 + 10..14 + 12].copy_from_slice(&fabric_csum.to_be_bytes());
+    let fabric_result = build_nat_reversed_icmp_error_v4(
+        &fabric_frame,
+        fabric_meta,
+        &icmp_match,
+    )
+    .expect("fabric-ingress reversal must preserve peer-decremented TTL");
+    assert_eq!(
+        fabric_result[22], 1,
+        "fabric-ingress reversal must not decrement TTL again"
+    );
+
 
     // Verify Ethernet header
     assert_eq!(&result[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // dst MAC
@@ -896,6 +924,7 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
             is_reverse: false,
             nat64_reverse: None,
             log_session_init: false,
+
             log_session_close: false,
             policy_id: 0,
             inactivity_timeout_ns: None,
@@ -907,6 +936,27 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
 
     let result = build_nat_reversed_icmp_error_v6(&frame, meta, &icmp_match)
         .expect("should build NAT-reversed ICMPv6 frame");
+    assert_eq!(result[21], 63, "same-family IPv6 reversal decrements hop-limit");
+    let mut expired_frame = frame.clone();
+    expired_frame[14 + 7] = 1;
+    assert!(
+        build_nat_reversed_icmp_error_v6(&expired_frame, meta, &icmp_match).is_none(),
+        "same-family IPv6 reversal drops hop-limit<=1"
+    );
+    let mut fabric_meta = meta;
+    fabric_meta.meta_flags |= FABRIC_INGRESS_FLAG;
+    let mut fabric_frame = frame.clone();
+    fabric_frame[14 + 7] = 1;
+    let fabric_result = build_nat_reversed_icmp_error_v6(
+        &fabric_frame,
+        fabric_meta,
+        &icmp_match,
+    )
+    .expect("fabric-ingress reversal must preserve peer-decremented hop-limit");
+    assert_eq!(
+        fabric_result[21], 1,
+        "fabric-ingress reversal must not decrement hop-limit again"
+    );
 
     // Verify Ethernet header
     assert_eq!(&result[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // dst MAC
