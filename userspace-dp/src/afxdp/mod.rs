@@ -503,11 +503,12 @@ const BIND_RETRY_ATTEMPTS: usize = 20;
 const BIND_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_PATH_TUN: &str = "xpf-usp0";
 /// #9637-D4 (operator narrowing): the slow-path TUN for reinjects that did
-/// NOT pass a userspace host-inbound gate (NoRoute/capped delegates,
-/// transit-adjudicated MissingNeighbor, ForwardCandidate build-failure
-/// fallback, unconditionally-exempt IPsec classes). The kernel holds NO
-/// accept for this device, so these frames are judged by the destination
-/// rules exactly as pre-#9637. `xpf-usp0` stays the adjudicated-only TUN
+/// NOT pass a userspace host-inbound gate (NoRoute frames whose policy result
+/// is Permit, transit-adjudicated MissingNeighbor, ForwardCandidate
+/// build-failure fallback, unconditionally-exempt IPsec classes). A capped
+/// NoRoute DENY is adjudicated exactly like an uncapped NoRoute and never
+/// reaches this delegated outlet. The kernel holds NO accept for this device,
+/// so these frames are judged by the destination rules exactly as pre-#9637.
 /// (its accept admits solely gate-passed traffic). Must stay equal to the
 /// Go `HostInboundDelegatedIfname` (pinned by test, same as
 /// DEFAULT_SLOW_PATH_TUN ↔ HostInboundReinjectIfname).

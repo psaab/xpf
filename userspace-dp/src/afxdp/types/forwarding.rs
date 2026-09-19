@@ -430,10 +430,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// identity keyed on the RFC 2890 discriminator when this is set. Off, the
     /// packet stays flowless exactly as #6837 left it.
     pub(in crate::afxdp) gre_acceleration: bool,
-    /// #9054: the daemon withheld this snapshot's kernel-learned route import
-    /// (the #8355 cap), so this FIB is deliberately missing the dynamic table
-    /// and `NoRoute` does not mean "no route exists". Read only by
-    /// `noroute_policy_denial_gated`, which carries the reasoning.
+    /// #9522: the daemon withheld this snapshot's kernel-learned route import
+    /// (the #8355 cap), so the FIB is deliberately incomplete and status/metric
+    /// surfaces report the capped state. It does NOT alter NoRoute disposition:
+    /// `noroute_policy_denial_gated` adjudicates capped and uncapped misses
+    /// identically; only a policy Permit result keeps slow-path delegation.
     pub(in crate::afxdp) learned_route_import_capped: bool,
     /// `security flow power-mode-disable` (#2008 H14). vSRX power-mode is an
     /// express datapath; this flag forces the regular flow path when set. The

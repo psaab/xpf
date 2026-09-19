@@ -1,14 +1,23 @@
-//! #9054: what a `NoRoute` frame must do when the daemon WITHHELD the kernel
-//! route table.
+//! #9522: what a `NoRoute` frame must do when the daemon WITHHELD the kernel
+//! route table — SUPERSEDES #9054, with an owner.
 //!
-//! #8355 capped the learned-route import at ~65,000 routes and documented the
-//! degradation as "traffic still forwards through the kernel, just not on the
-//! fast path". #7480, landed separately, made a `NoRoute` frame get adjudicated
-//! against the #3110 unzoned egress sentinel — which no zone-pair or
-//! `junos-global` permit can match — so the verdict is the DEFAULT action and a
-//! Junos-default deny box DROPS it. Each is defensible alone. Composed, the cap
-//! turns the entire dynamic FIB into a blackhole and the operator log states the
-//! opposite.
+//! #9054 restored the pre-#7480 slow-path delegation for `NoRoute` while
+//! `learned_route_import_capped` is set, trading #7480's adjudication for the
+//! availability of the dynamic FIB. That tradeoff was accepted with no owner,
+//! and #9522 found what it costs: above the cap, every destination the kernel
+//! can route and userspace did not import transits with no zone policy,
+//! session, NAT or screen — a permitted-by-absence path that does not exist
+//! under an uncapped import. Both availability-preserving redesigns (a
+//! kernel-assisted adjudication and a chunked route verb) were plan-killed,
+//! so this issue OWNS the fail-closed horn instead:
+//!
+//! A capped route miss and an uncapped route miss now produce the SAME policy
+//! result. On a default-deny box a capped `NoRoute` frame is DROPPED as a
+//! policy denial — downgraded to `PolicyDenied` by the arm, counted in
+//! `policy_denied_packets` (`xpf_policy_denies_total`), and visible against
+//! the capped state in `xpf_learned_route_import_capped` — not forwarded. A
+//! default-permit box still delegates either way, so the availability cost
+//! lands only where the operator's own default says deny.
 //!
 //! The cells below are written against `noroute_policy_denial_gated`, the same
 //! function the arm calls. The arm itself is not drivable from this crate (it
@@ -64,32 +73,62 @@ fn verdict(state: &ForwardingState) -> Option<crate::policy::PolicyEvaluationRes
     )
 }
 
-/// THE DEFECT CELL. A capped import must NOT black-hole the learned table.
+/// THE DEFECT CELL. A capped import must NOT suspend the NoRoute adjudication.
 ///
-/// FAIL-ON-REVERT: delete the `learned_route_import_capped` early return from
-/// `noroute_policy_denial_gated` and this reds — which is exactly the master
-/// behaviour this issue reports.
+/// FAIL-ON-REVERT: restore the `learned_route_import_capped` early return in
+/// `noroute_policy_denial_gated` and this reds — which is exactly the #9522
+/// bypass: a `None` here keeps the `NoRoute` disposition, the trailing
+/// chokepoint reinjects the frame, and the kernel forwards it with no zone
+/// policy, session, NAT or screen.
 #[test]
-fn a_capped_import_delegates_noroute_instead_of_dropping_it_9054() {
+fn a_capped_import_adjudicates_noroute_instead_of_delegating_it_9522() {
     let capped = deny_state(true);
+    let got = verdict(&capped);
     assert!(
-        verdict(&capped).is_none(),
-        "a NoRoute frame was adjudicated (and therefore DROPPED on this deny box) while the \
-         daemon had declined the entire learned-route import. NoRoute does not mean \"no route \
-         exists\" in that state — it means the daemon withheld the table — so this is a silent \
-         total blackhole of the dynamic FIB, and #8355's own log line tells the operator that \
-         traffic still forwards through the kernel."
+        got.is_some(),
+        "a NoRoute frame was DELEGATED to the kernel while the daemon had \
+         declined the entire learned-route import. That is the unowned #9054 \
+         tradeoff #9522 closes: above the cap, every destination the kernel \
+         can route transits with no adjudication. On this deny box the frame \
+         must be DENIED and counted as a policy denial instead."
+    );
+    assert_eq!(
+        got.expect("verdict").action,
+        PolicyAction::Deny,
+        "a capped NoRoute frame on a default-deny box must deny, not merely \
+         return a non-permit — the arm downgrades on Some(..) and the denial \
+         is what the operator counts"
+    );
+}
+
+/// THE PARITY CELL. #9522's acceptance: a capped route miss and an uncapped
+/// route miss produce the SAME policy result, so a full-table cap crossing
+/// cannot silently change the posture.
+///
+/// FAIL-ON-REVERT: same as the defect cell — the early return makes the capped
+/// verdict `None` while the uncapped verdict stays `Some(deny)`.
+#[test]
+fn capped_and_uncapped_noroute_verdicts_are_identical_9522() {
+    let capped = deny_state(true);
+    let uncapped = deny_state(false);
+    assert_eq!(
+        verdict(&capped),
+        verdict(&uncapped),
+        "the cap changed the NoRoute policy result: the capped verdict and the \
+         uncapped verdict differ for the same packet on the same policy"
     );
 }
 
 /// THE CONTROL THAT KEEPS #7480 INTACT. Same state, same packet, same deny
-/// default — only the flag differs.
+/// default — only the flag differs. (Lineage: the #9054 control of the same
+/// name; the assertion is unchanged, only the issue tag moved.)
 ///
-/// Without this cell, "returns None" is satisfiable by deleting the
-/// adjudication outright, which would revert #7480's security fix under the
-/// banner of an availability fix. The pair is the assertion; neither half is.
+/// Without this cell, "returns Some" is satisfiable by denying unconditionally
+/// in a way that no longer answers the policy question — e.g. a hardcoded
+/// deny that ignores the policy state. The pair is the assertion; neither
+/// half is.
 #[test]
-fn an_uncapped_import_still_adjudicates_and_denies_9054() {
+fn an_uncapped_import_still_adjudicates_and_denies_9522() {
     let uncapped = deny_state(false);
     let got = verdict(&uncapped);
     assert!(
@@ -105,11 +144,12 @@ fn an_uncapped_import_still_adjudicates_and_denies_9054() {
     );
 }
 
-/// The gate is keyed on the CAP, not on the policy. A permit-default box
-/// delegates either way — so a cell that only tested a permit box would report
-/// the fix working while it did nothing.
+/// The disposition is keyed on the POLICY, not on the cap. A permit-default
+/// box delegates either way — so the #9522 fail-closed cost lands only where
+/// the operator's own default says deny, and a cell that only tested a permit
+/// box would report the fix working while it did nothing. (Lineage: #9054.)
 #[test]
-fn a_permit_default_box_delegates_with_or_without_the_cap_9054() {
+fn a_permit_default_box_delegates_with_or_without_the_cap_9522() {
     for capped in [false, true] {
         let mut state = ForwardingState::default();
         state.policy = parse_policy_state("permit", &[], &FxHashMap::default());
@@ -121,13 +161,15 @@ fn a_permit_default_box_delegates_with_or_without_the_cap_9054() {
     }
 }
 
-/// The bound is NARROW: the flag suspends the NoRoute adjudication and nothing
-/// else. A frame whose zone pair is fully resolved is still judged normally.
+/// The bound is NARROW: the flag never reaches an ordinary zone-pair verdict.
+/// A frame whose zone pair is fully resolved is still judged normally.
 ///
-/// This is the cell that stops "fix the blackhole" from drifting into "stop
-/// evaluating policy while capped".
+/// This is the cell that stops "adjudicate while capped" from drifting into
+/// "the cap changes policy evaluation". (Lineage: #9054; the assertion is
+/// unchanged — post-#9522 the flag reaches no policy verdict at all, ordinary
+/// or NoRoute.)
 #[test]
-fn the_cap_flag_does_not_reach_ordinary_policy_evaluation_9054() {
+fn the_cap_flag_does_not_reach_ordinary_policy_evaluation_9522() {
     let capped = deny_state(true);
     let result = crate::policy::evaluate_policy_result_l3_aware(
         &capped.policy,
@@ -145,8 +187,8 @@ fn the_cap_flag_does_not_reach_ordinary_policy_evaluation_9054() {
     assert_eq!(
         result.action,
         PolicyAction::Deny,
-        "the #9054 flag changed an ordinary zone-pair verdict; it must only suspend the NoRoute \
-         adjudication, which is the one decision taken against a FIB the daemon deliberately \
-         left incomplete"
+        "the cap flag changed an ordinary zone-pair verdict; it must reach no \
+         policy evaluation — the NoRoute adjudication answers the operator's \
+         policy identically whether or not the daemon withheld the table"
     );
 }

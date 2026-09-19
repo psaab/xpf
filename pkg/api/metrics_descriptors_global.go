@@ -82,18 +82,21 @@ func (c *xpfCollector) initGlobalDescriptors() {
 	)
 	c.learnedRouteCapHitsTotal = prometheus.NewDesc(
 		"xpf_learned_route_cap_hits_total",
-		"Total snapshot builds that declined learned routes at the cap, i.e. "+
-			"forwarded on a route set known to be incomplete. Always emitted, "+
-			"including at zero (#9019).",
+		"Total snapshot builds that declined learned routes at the cap, leaving "+
+			"the helper route set incomplete; capped NoRoute frames are then "+
+			"adjudicated, with denied results counted as policy denials and "+
+			"Permit results retaining ordinary delegation. Always emitted, "+
+			"including at zero (#9019, #9522).",
 		nil, nil,
 	)
 	c.learnedRouteImportCapped = prometheus.NewDesc(
 		"xpf_learned_route_import_capped",
 		"1 while the forwarding state the userspace helper's live workers serve "+
-			"has the learned-route import capped (NoRoute frames are delegated to "+
-			"the kernel FIB, #9054), 0 while it does not. ABSENT when unknown: no "+
-			"live helper worker, a helper that predates the field, or no helper "+
-			"status (#9654).",
+			"has the learned-route import capped (capped NoRoute frames are "+
+			"adjudicated; denied results are policy-denied and Permit results "+
+			"retain ordinary delegation, #9522), 0 while it does not. ABSENT "+
+			"when unknown: no live helper worker, a helper that predates the "+
+			"field, or no helper status (#9654).",
 		nil, nil,
 	)
 	c.degradedPathTotal = prometheus.NewDesc(

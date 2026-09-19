@@ -188,7 +188,7 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // Rust helper would accept the same snapshot but keep that socket in the main
 // table, reopening #9909's containment escape.
 // Keep this line in lockstep with pkg/dataplane/userspace/protocol.go.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 26;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 27;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

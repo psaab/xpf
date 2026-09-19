@@ -289,21 +289,18 @@ fn noroute_arm_adjudicates_before_reinjecting_7480() {
          existing chokepoint refuse the frame and account the fail-closed drop. \
          Evaluating without downgrading is a policy check whose result is discarded."
     );
-    // #9054: the adjudication's soundness has a PRECONDITION, and the arm must
-    // go through the entry point that checks it. `noroute_policy_denial` alone
-    // answers "does policy deny this?"; it cannot answer "does NoRoute mean
-    // anything right now?", and above the #8355 learned-route cap it does not —
-    // the daemon declined the entire kernel import, so every dynamically learned
-    // destination resolves NoRoute for a reason that has nothing to do with the
-    // destination. Calling the ungated function here restores the total
-    // blackhole this guard's sibling cells cannot see.
+    // #9522: the cap flag is diagnostic state, not a disposition predicate.
+    // The arm must still go through the shared entry point so capped and
+    // uncapped NoRoute frames receive the exact same policy adjudication.
+    // Calling the raw helper would make the caller drift from the explicit
+    // runtime-state contract and would let a future capped-only delegation
+    // fork bypass #7480 again.
     assert!(
         arm.contains("noroute_policy_denial_gated"),
-        "the NoRoute arm calls the UNGATED adjudication. It must call \
-         noroute_policy_denial_gated, which delegates to the kernel while \
-         ConfigSnapshot.learned_route_import_capped says the daemon withheld the \
-         learned-route table (#9054). Adjudicating a FIB the daemon deliberately \
-         left incomplete black-holes every learned destination on a default-deny \
-         box, and #8355's operator log line says the opposite."
+        "the NoRoute arm must call the shared noroute_policy_denial_gated \
+         entry point. That entry point now adjudicates capped and uncapped \
+         NoRoute frames identically; the cap flag is diagnostic state only. \
+         The arm must downgrade a denied result to PolicyDenied so the \
+         existing chokepoint refuses and counts the fail-closed drop."
     );
 }

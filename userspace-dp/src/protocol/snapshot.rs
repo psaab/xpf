@@ -653,27 +653,29 @@ pub(crate) struct ConfigSnapshot {
     pub config: serde_json::Value,
     #[serde(rename = "defer_workers", default)]
     pub defer_workers: bool,
-    /// #9054: the daemon's #8355 learned-route cap DECLINED this build's kernel
-    /// route import, so the FIB in this snapshot is deliberately incomplete.
+    /// #9522: the daemon's #8355 learned-route cap DECLINED this build's
+    /// kernel route import, so the FIB in this snapshot is deliberately
+    /// incomplete.
     ///
-    /// It is not telemetry. The `NoRoute` arm of `poll_binding_process_descriptor`
-    /// adjudicates against the #3110 unzoned egress sentinel (#7480), which no
-    /// zone-pair or `junos-global` permit can match, so the verdict is the
-    /// DEFAULT action — deny on a Junos-default box — and the frame is dropped
-    /// rather than delegated to the kernel. That is sound while this FIB is a
-    /// near-complete mirror of the kernel's, because `NoRoute` then really does
-    /// mean "no route exists". While this flag is set it does not: it means
-    /// "the daemon withheld the whole dynamic table", and dropping on a signal
-    /// that carries no information black-holes every learned destination.
+    /// It is diagnostic state, not a disposition exception. The `NoRoute` arm
+    /// adjudicates against the #3110 unzoned egress sentinel (#7480), which
+    /// no zone-pair or `junos-global` permit can match, so the verdict is the
+    /// DEFAULT action — deny on a Junos-default box — and the frame is
+    /// dropped as `PolicyDenied`, counted in `xpf_policy_denies_total`.
+    /// #9522 deliberately applies that same adjudication while this flag is
+    /// set: a capped route miss and an uncapped route miss have the same
+    /// policy result, and a kernel-routable destination cannot transit merely
+    /// because the daemon withheld the dynamic table.
     ///
-    /// So while it is set the arm restores the pre-#7480 slow-path delegation
-    /// for `NoRoute` — and only for `NoRoute`, and only while set.
+    /// The normal slow-path delegation remains only for a `NoRoute` result
+    /// whose policy evaluation is `Permit`; this flag does not widen that
+    /// predicate. `xpf_learned_route_import_capped` reports the live capped
+    /// state, while `xpf_learned_route_cap_hits_total` counts declined builds.
     ///
-    /// NOT skew-tolerant, unlike `node_id` above, and the difference is the
-    /// whole point of that field's comment: an older helper that ignores this
-    /// one keeps black-holing, and black-holing IS the defect it was added to
-    /// fix. `CONFIG_SNAPSHOT_PROTOCOL_VERSION` is bumped to 10 alongside it so
-    /// a mismatched pairing is refused loudly instead of silently reverting.
+    /// NOT skew-tolerant: a v26 helper still restores kernel delegation while
+    /// this flag is set, which is the #9054 security bypass. The
+    /// `CONFIG_SNAPSHOT_PROTOCOL_VERSION` bump to 27 refuses a mismatched
+    /// pairing rather than silently preserving that old meaning.
     /// Go-side mirror: `pkg/dataplane/userspace/protocol.go`
     /// `LearnedRouteImportCapped bool json:"learned_route_import_capped,omitempty"`.
     #[serde(rename = "learned_route_import_capped", default)]

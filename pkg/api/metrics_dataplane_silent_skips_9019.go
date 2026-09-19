@@ -45,8 +45,10 @@ import (
 //     with queues nobody is trying to repair any more.
 //
 //   - learned_route_cap_hits_total: a snapshot build that declined learned
-//     routes at the cap. Steady non-zero means the box is forwarding on a route
-//     set it knows is incomplete.
+//     routes at the cap. Steady non-zero means the helper route set is known
+//     incomplete; capped NoRoute frames are adjudicated, with denied results
+//     counted as policy denials and Permit results retaining ordinary
+//     delegation (#9522).
 //
 // ALWAYS EMITTED, INCLUDING AT ZERO, per the #3464 convention and for the
 // reason #8312 and #9042 both give: a counter that appears only once it fires
