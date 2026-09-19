@@ -31,11 +31,12 @@ func init() {
 // no kernel state.
 type noopNftInstaller struct{}
 
-func (noopNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error { return nil }
-func (noopNftInstaller) InstallColdBootFence(xnft.FenceSpec) error     { return nil }
-func (noopNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error  { return nil }
-func (noopNftInstaller) InstallGapFence(xnft.GapFenceSpec) error       { return nil }
-func (noopNftInstaller) InstallTransitBarrier() error                  { return nil }
+func (noopNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error             { return nil }
+func (noopNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverlay) error { return nil }
+func (noopNftInstaller) InstallColdBootFence(xnft.FenceSpec) error                 { return nil }
+func (noopNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error              { return nil }
+func (noopNftInstaller) InstallGapFence(xnft.GapFenceSpec) error                   { return nil }
+func (noopNftInstaller) InstallTransitBarrier() error                              { return nil }
 func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
 	return nil
 }
@@ -72,14 +73,22 @@ type fakeNftInstaller struct {
 	fenceSpecs10302   []xnft.ForwardFenceSpec
 	fenceInstall10302 func(xnft.ForwardFenceSpec) error
 	// #9506 S3: divert installation is a separate failure-injection seam.
-	divertInstall func(xnft.IpsecDivertSpec) error
-	divertRemove  func() error
-	divertCalls   []string
+	divertInstall   func(xnft.IpsecDivertSpec) error
+	divertRemove    func() error
+	divertCalls     []string
+	overlayReadback func(xnft.HostInputFenceOverlay) error
 }
 
 func (f *fakeNftInstaller) InstallHostInbound(s xnft.HostInboundSpec) error {
 	if f.hostInbound != nil {
 		return f.hostInbound(s)
+	}
+	return nil
+}
+
+func (f *fakeNftInstaller) VerifyHostInboundOverlay(o xnft.HostInputFenceOverlay) error {
+	if f.overlayReadback != nil {
+		return f.overlayReadback(o)
 	}
 	return nil
 }
@@ -143,6 +152,11 @@ func (f *fakeNftInstaller) DeleteTable(name string) error {
 // the nftables tail after a cancel, replacing the pre-PR-3 nftApplyPayload/
 // nftDeleteTable call counter.
 type countingNftInstaller struct{ calls *int }
+
+func (c countingNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverlay) error {
+	*c.calls++
+	return nil
+}
 
 func (c countingNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error { *c.calls++; return nil }
 func (c countingNftInstaller) InstallColdBootFence(xnft.FenceSpec) error     { *c.calls++; return nil }

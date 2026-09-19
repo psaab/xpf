@@ -393,6 +393,7 @@ func (d *Daemon) hostInboundConntrackReassertLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			d.retryHostInboundConntrackFlushOnce(ctx)
+			d.retryHostInputFenceConntrackFlushOnce(ctx)
 		}
 	}
 }

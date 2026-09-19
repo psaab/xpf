@@ -39,6 +39,14 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	for i, prog := range spec.Programs {
 		chains[i] = p.regularChain(HostInboundJunosHostChainName(i, prog.Zone))
 	}
+	if spec.Overlay != nil {
+		overlay := CanonicalHostInputFenceOverlay(*spec.Overlay)
+		if len(overlay.MasterSet) > 0 {
+			p.rule().iifname(overlay.MasterSet).
+				counterRef(HostInputFenceOverlayCounterName(overlay)).
+				emit(verdictDrop()...)
+		}
+	}
 	if len(spec.Programs) > 0 {
 		// junos-host path — coarse-then-fine order (#4146).
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
@@ -94,6 +102,9 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 		}
 		seen[name] = true
 		p.counterObj(name)
+	}
+	if spec.Overlay != nil {
+		decl(HostInputFenceOverlayCounterName(*spec.Overlay))
 	}
 	for _, typ := range HostInboundAcceptCounterTypes {
 		decl(HostInboundAcceptCounterName(typ))

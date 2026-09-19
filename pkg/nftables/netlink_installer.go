@@ -10,10 +10,14 @@ package nftables
 // failure-injection seam (a fake Installer that returns an error).
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
 
@@ -33,12 +37,12 @@ const (
 	hostInboundGapPriority = 11
 )
 
-// Installer is the netlink host-inbound / lo0 / fence installer seam. Each
-// method is one atomic kernel transaction. A fake implementation returning an
-// error drives the fail-closed regression tests without a live kernel (PR-3).
 type Installer interface {
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error
+	// VerifyHostInboundOverlay reads back the exact marker and leading DROP
+	// rule for a candidate overlay before publication.
+	VerifyHostInboundOverlay(overlay HostInputFenceOverlay) error
 	// InstallColdBootFence installs the #5644 cold-boot fail-closed fence
 	// (the xpf_hostinbound table reduced to mandatory admits + address drops).
 	InstallColdBootFence(spec FenceSpec) error
@@ -78,6 +82,7 @@ type Installer interface {
 	// cannot leave two competing forward hooks behind.
 	InstallArmedTransitFence(spec ForwardFenceSpec) error
 	// RemoveTransitBarrier removes the barrier from both families.
+
 	// Idempotent; a genuine failure is returned because a table that survives
 	// teardown leaves the box transit-closed while armed — the black hole this
 	// design exists to avoid.
@@ -109,6 +114,99 @@ func (in *netlinkInstaller) InstallHostInbound(spec HostInboundSpec) error {
 		buildHostInboundNetlink(p, spec)
 	})
 	return err
+}
+
+// counter proves all authority fields and canonical masters were committed;
+// for a nonempty set the first input rule is decoded and compared to the exact
+// master set plus the marker object and DROP verdict.
+func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverlay) error {
+	overlay = CanonicalHostInputFenceOverlay(overlay)
+	c, err := in.newConn()
+	if err != nil {
+		return fmt.Errorf("nftables conn: %w", err)
+	}
+	tbl := &nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundTableName}
+	objs, err := c.GetNamedObjects(tbl)
+	if err != nil {
+		return fmt.Errorf("read host overlay objects: %w", err)
+	}
+	marker := HostInputFenceOverlayCounterName(overlay)
+	found := false
+	for _, obj := range objs {
+		named, ok := obj.(*nftables.NamedObj)
+		if ok && named.Name == marker {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("host overlay marker %q absent", marker)
+	}
+	if len(overlay.MasterSet) == 0 {
+		return nil
+	}
+	sets, err := c.GetSets(tbl)
+	if err != nil {
+		return fmt.Errorf("read host overlay sets: %w", err)
+	}
+	setNames := map[string][]string{}
+	for _, set := range sets {
+		if set.KeyType.Name != "ifname" {
+			continue
+		}
+		elements, err := c.GetSetElements(set)
+		if err != nil {
+			return fmt.Errorf("read host overlay set %q: %w", set.Name, err)
+		}
+		for _, element := range elements {
+			setNames[set.Name] = append(setNames[set.Name], string(bytes.TrimRight(element.Key, "\x00")))
+		}
+	}
+	rules, err := c.GetRules(tbl, &nftables.Chain{Name: "input", Table: tbl})
+	if err != nil {
+		return fmt.Errorf("read host overlay rules: %w", err)
+	}
+	if len(rules) == 0 {
+		return fmt.Errorf("host overlay leading rule absent")
+	}
+	names, markerSeen, dropSeen := decodeHostOverlayRule(rules[0], setNames, marker)
+	sort.Strings(names)
+	want := overlay.MasterSet
+	sort.Strings(want)
+	if strings.Join(names, "\x00") != strings.Join(want, "\x00") || !markerSeen || !dropSeen {
+		return fmt.Errorf("host overlay readback mismatch: got masters=%v marker=%v drop=%v want=%v", names, markerSeen, dropSeen, want)
+	}
+	return nil
+}
+
+func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (names []string, markerSeen, dropSeen bool) {
+	pendingMeta := false
+	var reg uint32
+	for _, anyExpr := range rule.Exprs {
+		switch x := anyExpr.(type) {
+		case *expr.Meta:
+			pendingMeta = x.Key == expr.MetaKeyIIFNAME
+			reg = x.Register
+		case *expr.Cmp:
+			if pendingMeta && x.Register == reg {
+				names = append(names, string(bytes.TrimRight(x.Data, "\x00")))
+			}
+			pendingMeta = false
+		case *expr.Lookup:
+			if pendingMeta && x.SourceRegister == reg {
+				names = append(names, setNames[x.SetName]...)
+			}
+			pendingMeta = false
+		case *expr.Objref:
+			markerSeen = markerSeen || x.Name == marker
+		case *expr.Verdict:
+			dropSeen = dropSeen || x.Kind == expr.VerdictDrop
+			pendingMeta = false
+		default:
+			pendingMeta = false
+		}
+	}
+	return names, markerSeen, dropSeen
 }
 
 func (in *netlinkInstaller) InstallColdBootFence(spec FenceSpec) error {
