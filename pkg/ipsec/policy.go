@@ -251,8 +251,11 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			case "disable":
 				b.WriteString("    encap = no\n")
 			case "force":
+				// `forceencaps` is the legacy ipsec.conf/starter
+				// keyword, not a swanctl setting. `encap = yes` is
+				// the swanctl-native force mechanism on supported
+				// strongSwan releases (#10474).
 				b.WriteString("    encap = yes\n")
-				b.WriteString("    forceencaps = yes\n")
 			default:
 				// "enable" or empty = strongSwan default (auto-detect NAT)
 				if gw.NoNATTraversal {
