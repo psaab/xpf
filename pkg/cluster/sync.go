@@ -817,7 +817,8 @@ type SessionSync struct {
 	sendCh     chan []byte // buffered channel for outgoing messages
 	// queuedFrameMu protects the accepted/resolved watermark used by an
 	// authoritative table-truth bulk. Producers increment queuedFrameSeq while
-	// enqueuing; sendLoop increments queuedFrameResolved after a frame is
+	// enqueuing; sendLoop increments queuedFrameStarted when it owns
+	// bulkStartMu/writeMu for a frame and queuedFrameResolved after a frame is
 	// delivered or abandoned (and queuedFrameFailures records the latter).
 	// BulkStart snapshots the sequence and failure count while holding this
 	// mutex, so the watermark is an exact pre-marker cut and a failed frame
@@ -825,6 +826,7 @@ type SessionSync struct {
 	// reconcile.
 	queuedFrameMu       sync.Mutex
 	queuedFrameSeq      uint64
+	queuedFrameStarted  uint64
 	queuedFrameResolved uint64
 	queuedFrameFailures uint64
 
@@ -1676,6 +1678,15 @@ type SessionSync struct {
 	// fail-on-revert test can TryLock that mutex on the old path and park the
 	// marker until queued frames have definitely crossed the wire.
 	testAfterBulkSnapshot func()
+	// testAfterColdPrimeBarrierGate runs after the barrier's cold-prime gate
+	// passes and before its ordered marker is admitted. It is test-only and
+	// nil in production; #10387 uses it to park a replacement bulk attempt
+	// behind the serialized admission lock.
+	testAfterColdPrimeBarrierGate func()
+	// testAfterColdPrimePendingRead runs after the barrier gate samples pending
+	// state and before it re-reads the debt generation. It is test-only and
+	// nil in production; #10387 uses it to pin the generation-race recheck.
+	testAfterColdPrimePendingRead func()
 	// testBeforeBulkRows runs after BulkStart is written and before the first
 	// bulk row is stamped/serialized. It is test-only and nil in production;
 	// a fail-on-revert cell can queue a close/delete in that exact marker-to-row

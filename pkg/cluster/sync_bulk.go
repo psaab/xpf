@@ -59,6 +59,14 @@ var errBulkFencedForPeer = errors.New("bulk sync refused: peer lacks install-tab
 // authoritative window is destructive, whereas skipping this bulk only defers
 // the reconcile and every caller re-arms its cold-prime / resync obligation.
 func (s *SessionSync) doBulkSync() error {
+	return s.doBulkSyncWithBulkSend(false)
+}
+
+// doBulkSyncWithBulkSend runs the authoritative cold-start bulk. When
+// bulkSendHeld is true, the caller owns bulkSendMu across this function; that
+// scope is used by the survivor re-drive to close the clear-then-replace gap
+// before a barrier can be admitted (#10387).
+func (s *SessionSync) doBulkSyncWithBulkSend(bulkSendHeld bool) error {
 	if s.BulkSyncOverride != nil {
 		slog.Info("cluster sync: running bulk sync override (fast-population pre-step)")
 		if err := s.BulkSyncOverride(); err != nil {
@@ -74,7 +82,9 @@ func (s *SessionSync) doBulkSync() error {
 		// bulkStartMu, so this order is cycle-free; a second concurrent bulk
 		// then waits on bulkSendMu without holding bulkStartMu and parking
 		// sendLoop under the in-window bulk's watermark wait.
-		s.bulkSendMu.Lock()
+		if !bulkSendHeld {
+			s.bulkSendMu.Lock()
+		}
 		s.bulkStartMu.Lock()
 		// #9508: capture the fence BEFORE the snapshot is read; only a snapshot
 		// read after the capture holds every delta written before it.
@@ -84,7 +94,9 @@ func (s *SessionSync) doBulkSync() error {
 		if err != nil {
 			s.bulkSnapshotGenMu.Unlock()
 			s.bulkStartMu.Unlock()
-			s.bulkSendMu.Unlock()
+			if !bulkSendHeld {
+				s.bulkSendMu.Unlock()
+			}
 			// Fail closed — see the doc comment above.
 			return fmt.Errorf("bulk sync table-truth snapshot: %w", err)
 		}
@@ -100,6 +112,16 @@ func (s *SessionSync) doBulkSync() error {
 		walk.fence = fence
 		walk.holdBulkStart = true
 		walk.holdBulkSend = true
+		walk.bulkSendHeldByCaller = bulkSendHeld
+		return s.bulkSyncWindow(walk)
+	}
+	if bulkSendHeld {
+		if s.sessions == nil {
+			return fmt.Errorf("session store not ready")
+		}
+		walk := s.storeBulkWalk()
+		walk.holdBulkSend = true
+		walk.bulkSendHeldByCaller = true
 		return s.bulkSyncWindow(walk)
 	}
 	return s.BulkSync()
@@ -186,6 +208,10 @@ type bulkWalk struct {
 	// bulkSendMu on every return. Direct walks acquire bulkSendMu in this
 	// function.
 	holdBulkSend bool
+	// bulkSendHeldByCaller keeps bulkSyncWindow from releasing bulkSendMu when
+	// a survivor re-drive owns it across pending-bulk abandonment and the full
+	// replacement bulk (#10387).
+	bulkSendHeldByCaller bool
 	// queuedFrameWatermark and queuedFrameFailures are captured with
 	// queuedFrameMu while BulkStart is written. They are only populated for
 	// the held table-truth source; before BulkEnd that source waits for every
@@ -277,7 +303,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		releaseBulkSend = true
 	}
 	defer func() {
-		if releaseBulkSend {
+		if releaseBulkSend && !walk.bulkSendHeldByCaller {
 			s.bulkSendMu.Unlock()
 		}
 	}()
@@ -535,10 +561,14 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 // cut: the caller must abort before BulkEnd, because reconciling without that
 // frame would turn a transient send failure into a destructive stale delete.
 func (s *SessionSync) waitQueuedFrameWatermark(target, failures uint64) bool {
+	return s.waitQueuedFrameWatermarkFor(target, failures, syncWriteDeadline)
+}
+
+func (s *SessionSync) waitQueuedFrameWatermarkFor(target, failures uint64, timeout time.Duration) bool {
 	if target == 0 {
 		return true
 	}
-	deadline := time.Now().Add(syncWriteDeadline)
+	deadline := time.Now().Add(timeout)
 	for {
 		s.queuedFrameMu.Lock()
 		resolved := s.queuedFrameResolved
@@ -546,6 +576,30 @@ func (s *SessionSync) waitQueuedFrameWatermark(target, failures uint64) bool {
 		s.queuedFrameMu.Unlock()
 		if failed != failures || resolved >= target {
 			return failed == failures && resolved >= target
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitQueuedFrameWriteStartedFor waits until sendLoop owns bulkStartMu and
+// writeMu for the accepted frame. The barrier caller keeps bulkSendMu until
+// this point, so a replacement bulk cannot acquire bulkStartMu and write its
+// BulkStart ahead of the marker; the peer acknowledgement wait remains
+// outside the lock.
+func (s *SessionSync) waitQueuedFrameWriteStartedFor(target uint64, timeout time.Duration) bool {
+	if target == 0 {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		s.queuedFrameMu.Lock()
+		started := s.queuedFrameStarted
+		s.queuedFrameMu.Unlock()
+		if started >= target {
+			return true
 		}
 		if time.Now().After(deadline) {
 			return false
@@ -580,8 +634,12 @@ const BulkAckPendingRetryAfter = 35 * time.Second
 
 // clearPendingBulkAck forgets the pending outbound bulk: its epoch, its start
 // time, and the cold-prime generation it was sent to pay (#9626). Every path
-// that abandons a pending bulk goes through here, so a stale stamp cannot
-// survive to discharge a later debt.
+// that abandons a pending bulk goes through this helper, so a stale stamp
+// cannot survive to discharge a later debt.
+//
+// Survivor clear-plus-replace is serialized by bulkSendMu at its caller. The
+// disconnect and BulkAck paths may call this while holding s.mu or from a read
+// loop, so this helper intentionally remains lock-free.
 func (s *SessionSync) clearPendingBulkAck() {
 	s.pendingBulkAckEpoch.Store(0)
 	s.pendingBulkAckSince.Store(0)
@@ -590,9 +648,17 @@ func (s *SessionSync) clearPendingBulkAck() {
 
 // armColdPrimeLocked records a cold-prime obligation under a NEW generation
 // (#9626). Callers hold s.mu.
+//
+// Publication order is need-then-generation: needColdPrime is stored before
+// coldPrimeGen is bumped, so a lock-free need-first reader (notably
+// coldPrimeOwedGenAtomic) can never observe the new generation with
+// need==false and mistake a freshly armed debt for no debt. need==false
+// therefore implies pre-arm; a need==true read with a stale generation is
+// already covered by the predicate's generation re-read plus the barrier
+// admission's outer snapshot checks, which retry or refuse on change.
 func (s *SessionSync) armColdPrimeLocked() {
-	s.coldPrimeGen.Add(1)
 	s.needColdPrime.Store(true)
+	s.coldPrimeGen.Add(1)
 }
 
 // coldPrimeOwedGen is the generation of the outstanding cold-prime debt, or 0
@@ -600,6 +666,17 @@ func (s *SessionSync) armColdPrimeLocked() {
 func (s *SessionSync) coldPrimeOwedGen() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.needColdPrime.Load() {
+		return 0
+	}
+	return s.coldPrimeGen.Load()
+}
+
+// coldPrimeOwedGenAtomic is the barrier predicate's lock-free debt snapshot.
+// It avoids taking s.mu while bulkSendMu is held so the gate sample cannot
+// block behind disconnect bookkeeping. The later marker write still takes s.mu
+// through getActiveConn, in the consistent bulkSendMu -> s.mu order.
+func (s *SessionSync) coldPrimeOwedGenAtomic() uint64 {
 	if !s.needColdPrime.Load() {
 		return 0
 	}
@@ -633,6 +710,55 @@ func (s *SessionSync) coldPrimeAckAwaited() bool {
 	}
 	_, age, ok := s.PendingBulkAck()
 	return ok && age < BulkAckPendingRetryAfter
+}
+
+// coldPrimeOwedWithoutPendingBulk reports whether a cold-prime debt is
+// outstanding with no bulk in flight to pay it (#10387): needColdPrime is
+// armed for the current generation but no pending outbound bulk carries that
+// generation's stamp (pendingBulkOwed, #9626).
+//
+// A pending bulk stamped for the current debt preserves the ordered-barrier
+// contract — the barrier queues behind the bulk's frames, so its ack proves
+// the peer processed them — and is deliberately NOT gated here, even when
+// the ack is older than BulkAckPendingRetryAfter (a late ack is the sweep's
+// re-drive decision, not the barrier's). Only the absence of any qualifying
+// bulk — never queued (bulk-source failure) or already abandoned — requires
+// the drain caller to refuse until a prime is queued: without it the ack
+// proves nothing about the peer's table and the drain proceeds during
+// retry-wait with no prime ever demanded.
+//
+// It consults the generation-safe debt, never the sticky outboundBulkAcked,
+// which an older peer incarnation may have earned. The generation is read
+// again after the pending state so an arm racing the read cannot make an
+// old bulk look like it pays a newer debt; repeated churn fails closed.
+func (s *SessionSync) coldPrimeOwedWithoutPendingBulk() bool {
+	const maxGenerationChecks = 3
+	for range maxGenerationChecks {
+		owed := s.coldPrimeOwedGenAtomic()
+		if owed == 0 {
+			return false
+		}
+		pendingOwed := s.pendingBulkOwed.Load()
+		_, _, pending := s.PendingBulkAck()
+		if hook := s.testAfterColdPrimePendingRead; hook != nil {
+			hook()
+		}
+		if current := s.coldPrimeOwedGenAtomic(); current != owed {
+			continue
+		}
+		return pendingOwed != owed || !pending
+	}
+	// A peer-incarnation transition is in flight. Refuse the drain rather
+	// than admit a barrier on a state whose debt could not be sampled stably.
+	return true
+}
+
+// ColdPrimeOwedWithoutPendingBulk reports whether userspace demotion would
+// otherwise admit a vacuous barrier. Callers should perform this readiness
+// precheck before the demotion-specific barrier path; that path repeats the
+// predicate under bulkSendMu to close the admission race.
+func (s *SessionSync) ColdPrimeOwedWithoutPendingBulk() bool {
+	return s.coldPrimeOwedWithoutPendingBulk()
 }
 
 // TransferReadiness snapshots the sync state that makes manual failover
@@ -743,9 +869,14 @@ func (s *SessionSync) sendBulkAck(conn net.Conn, epoch uint64) {
 }
 
 func (s *SessionSync) writeBarrierMessage(payload []byte, timeout time.Duration) error {
+	_, _, err := s.writeBarrierMessageWithWatermark(payload, timeout)
+	return err
+}
+
+func (s *SessionSync) writeBarrierMessageWithWatermark(payload []byte, timeout time.Duration) (uint64, uint64, error) {
 	conn := s.getActiveConn()
 	if conn == nil {
-		return fmt.Errorf("session sync not connected")
+		return 0, 0, fmt.Errorf("session sync not connected")
 	}
 	// Barrier requests go through sendCh to preserve ordering with
 	// already-queued session messages. The peer's ack must prove it
@@ -753,12 +884,17 @@ func (s *SessionSync) writeBarrierMessage(payload []byte, timeout time.Duration)
 	msg := encodeRawMessage(syncMsgBarrier, payload)
 	deadline := time.Now().Add(timeout)
 	for {
-		if s.enqueueQueuedFrame(msg) {
-			break
+		if watermark, failures, ok := s.enqueueQueuedFrameWithWatermark(msg); ok {
+			seq := binary.LittleEndian.Uint64(payload)
+			slog.Info("cluster sync: barrier queued (ordered)",
+				"seq", seq,
+				"local", connLocalAddrString(conn),
+				"remote", connRemoteAddrString(conn))
+			return watermark, failures, nil
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return fmt.Errorf("timed out queueing session sync barrier")
+			return 0, 0, fmt.Errorf("timed out queueing session sync barrier")
 		}
 		poll := remaining
 		if poll > pacedQueuePoll {
@@ -768,26 +904,59 @@ func (s *SessionSync) writeBarrierMessage(payload []byte, timeout time.Duration)
 		<-timer.C
 		timer.Stop()
 	}
-	seq := binary.LittleEndian.Uint64(payload)
-	slog.Info("cluster sync: barrier queued (ordered)",
-		"seq", seq,
-		"local", connLocalAddrString(conn),
-		"remote", connRemoteAddrString(conn))
-	return nil
 }
 
 // WaitForPeerBarrier queues an ordered marker on the session-sync stream and
 // waits until the peer acknowledges that it processed all earlier messages.
+// The generic ordered barrier deliberately does not impose userspace cold-prime
+// policy; demotion callers use WaitForPeerBarrierAfterColdPrimeGate.
 func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
+	return s.waitForPeerBarrier(timeout, false)
+}
+
+// WaitForPeerBarrierAfterColdPrimeGate is the demotion-specific barrier path.
+// Its cold-prime predicate is revalidated while bulkSendMu is held, immediately
+// before marker admission, closing the race between the daemon's readiness
+// precheck and the ordered barrier write.
+func (s *SessionSync) WaitForPeerBarrierAfterColdPrimeGate(timeout time.Duration) error {
+	return s.waitForPeerBarrier(timeout, true)
+}
+
+func (s *SessionSync) waitForPeerBarrier(timeout time.Duration, requireColdPrimeGate bool) error {
 	if !s.stats.Connected.Load() {
 		return fmt.Errorf("session sync not connected")
+	}
+	if requireColdPrimeGate {
+		// Serialize demotion barrier admission with bulk send/re-drive under
+		// bulkSendMu. The lock is held only through marker write-start, not
+		// the peer acknowledgement wait. The survivor re-drive holds the same
+		// lock across pending clear and replacement bulk, so it cannot overtake.
+		s.bulkSendMu.Lock()
 	}
 	// #9508: snapshot the fence epoch BEFORE checking it, so a move between the
 	// two is still seen at wake-up.
 	fence := s.fence.epoch.Load()
 	if s.barrierFenced() {
+		if requireColdPrimeGate {
+			s.bulkSendMu.Unlock()
+		}
 		s.scheduleBarrierFenceReprime("barrier refused")
 		return barrierFencedError(0)
+	}
+	var coldPrimeGateGen uint64
+	if requireColdPrimeGate {
+		coldPrimeGateGen = s.coldPrimeGen.Load()
+		if s.coldPrimeOwedWithoutPendingBulk() {
+			s.bulkSendMu.Unlock()
+			return fmt.Errorf("cold prime owed without pending outbound bulk")
+		}
+		if s.coldPrimeGen.Load() != coldPrimeGateGen {
+			s.bulkSendMu.Unlock()
+			return fmt.Errorf("cold prime generation changed during barrier admission")
+		}
+		if hook := s.testAfterColdPrimeBarrierGate; hook != nil {
+			hook()
+		}
 	}
 	seq := s.barrierSeq.Add(1)
 	waiter := &barrierWaiter{ch: make(chan struct{})}
@@ -797,6 +966,13 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 	}
 	s.barrierWaiters[seq] = waiter
 	s.barrierWaitMu.Unlock()
+	if requireColdPrimeGate && s.coldPrimeGen.Load() != coldPrimeGateGen {
+		s.barrierWaitMu.Lock()
+		delete(s.barrierWaiters, seq)
+		s.barrierWaitMu.Unlock()
+		s.bulkSendMu.Unlock()
+		return fmt.Errorf("cold prime generation changed before barrier admission")
+	}
 
 	var payload [8]byte
 	binary.LittleEndian.PutUint64(payload[:], seq)
@@ -808,7 +984,18 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 		"sessions_installed", stats.SessionsInstalled,
 		"queue_len", len(s.sendCh),
 		"queue_cap", cap(s.sendCh))
-	if err := s.writeBarrierMessage(payload[:], timeout/2); err != nil {
+	var err error
+	if requireColdPrimeGate {
+		watermark, _, writeErr := s.writeBarrierMessageWithWatermark(payload[:], timeout/2)
+		err = writeErr
+		if err == nil && !s.waitQueuedFrameWriteStartedFor(watermark, timeout/2) {
+			err = fmt.Errorf("timed out starting session sync barrier write")
+		}
+		s.bulkSendMu.Unlock()
+	} else {
+		err = s.writeBarrierMessage(payload[:], timeout/2)
+	}
+	if err != nil {
 		s.barrierWaitMu.Lock()
 		delete(s.barrierWaiters, seq)
 		s.barrierWaitMu.Unlock()
@@ -840,6 +1027,9 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 			return barrierFencedError(seq)
 		}
 		if s.barrierAckSeq.Load() >= seq {
+			if requireColdPrimeGate && s.coldPrimeGen.Load() != coldPrimeGateGen {
+				return fmt.Errorf("cold prime generation changed during barrier wait seq=%d", seq)
+			}
 			return nil
 		}
 		return fmt.Errorf("session sync disconnected during barrier wait seq=%d", seq)

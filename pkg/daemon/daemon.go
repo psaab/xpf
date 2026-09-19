@@ -743,10 +743,14 @@ type Daemon struct {
 	neighborWarmDialer neighborWarmDialer
 	hbSuppressStart    atomic.Int64 // CLOCK_MONOTONIC nanos of first heartbeat suppression; 0 = inactive (#1792)
 	syncPrimeRetryGen  atomic.Uint64
-	syncReadyTimerGen  atomic.Uint64
-	syncReadyTimerMu   sync.Mutex
-	syncReadyTimer     *time.Timer
-	syncReadyTimeout   time.Duration
+	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
+	// sleep boundary for the 10387 drain-window cell. Nil in production.
+	syncPrimeRetryBeforeSleepForTest func()
+
+	syncReadyTimerGen atomic.Uint64
+	syncReadyTimerMu  sync.Mutex
+	syncReadyTimer    *time.Timer
+	syncReadyTimeout  time.Duration
 
 	// #7162 no-RETH startup promotion hold. RETH VRRP mode suppresses
 	// preemption at startup until bulk session sync completes
