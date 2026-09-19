@@ -115,7 +115,7 @@ func TestRouteBasedDefaultTrafficSelector(t *testing.T) {
 		// The operator said what they wanted: a selector-shaped identity still
 		// wins over the default, on either side independently.
 		{"identity wins over default", "st0.0", "10.0.0.0/24", "10.1.0.0/24", "10.0.0.0/24", "10.1.0.0/24"},
-		{"local identity only", "st0.0", "10.0.0.0/24", "", "10.0.0.0/24", ""},
+		{"local identity only", "st0.0", "10.0.0.0/24", "", "10.0.0.0/24", routeBasedDefaultTS},
 
 		// A non-selector identity is dropped by the belt, and because BOTH
 		// sides then end up empty the route-based default applies -- which is

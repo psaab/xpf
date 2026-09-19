@@ -532,7 +532,7 @@ func sortedVPNNames(vpns map[string]*config.IPsecVPN) []string {
 }
 
 // routeBasedDefaultTS is the traffic selector a route-based (XFRM-interface)
-// VPN gets when nothing else specifies one. Both families are offered because
+// VPN gets on each side that nothing else specifies. Both families are offered because
 // xpf is dual-stack and routing, not the selector, decides what enters the
 // tunnel; strongSwan narrows the pair during negotiation, so a v4-only peer
 // simply agrees on the v4 half.
@@ -604,8 +604,17 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 		// nothing and keeps strongSwan's `dynamic` default. An explicitly
 		// configured traffic-selector, and a selector-shaped local-identity,
 		// both still win over this default -- the operator said what they wanted.
-		if local == "" && remote == "" && xfrmiIfID(vpn.BindInterface) > 0 {
-			local, remote = routeBasedDefaultTS, routeBasedDefaultTS
+		//
+		// Default each empty side independently. An omitted side is an omission,
+		// not an instruction to let strongSwan apply its `dynamic` endpoint /32
+		// default, which would suppress routed transit on that side.
+		if xfrmiIfID(vpn.BindInterface) > 0 {
+			if local == "" {
+				local = routeBasedDefaultTS
+			}
+			if remote == "" {
+				remote = routeBasedDefaultTS
+			}
 		}
 		return []childSelector{{
 			Name:     connName,
