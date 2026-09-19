@@ -120,13 +120,19 @@ func ipsecCaptureQueueEpochSnapshot(handles []ipsecQueueHandle) []dpuserspace.Qu
 	return rows
 }
 
+type ipsecReinjectSubmitter interface {
+	nfqueue.ReinjectSubmitter
+	AnnounceReinject(permitEpoch uint64, permitOpen bool, epochs []nfqueue.ReinjectQueueEpoch) error
+	Close() error
+}
+
 type ipsecCaptureRuntime struct {
 	supervisor *ipsecSupervisor
 	handles    []ipsecQueueHandle
 	queues     []IpsecCaptureQueue
 	registry   *nfqueue.OriginRegistry
 	actor      *IpsecCapturePipeline
-	submitter  *nfqueue.SocketReinjectSubmitter
+	submitter  ipsecReinjectSubmitter
 	spec       xnft.IpsecDivertSpec
 
 	authorityMu     sync.Mutex
@@ -179,13 +185,11 @@ func (r *ipsecCaptureRuntime) authoritySnapshot() (uint64, bool, []nfqueue.Reinj
 	return permit.permitEpoch, permit.state == ipsecPermitOpen, wireRows
 }
 
-func (r *ipsecCaptureRuntime) announceAuthority() error {
+func (r *ipsecCaptureRuntime) announceAuthorityLocked() error {
 	if r == nil || r.submitter == nil {
 		return nil
 	}
 	permitEpoch, permitOpen, wireRows := r.authoritySnapshot()
-	r.authorityMu.Lock()
-	defer r.authorityMu.Unlock()
 	if r.announced && r.announcedPermit == permitEpoch && r.announcedOpen == permitOpen &&
 		sameReinjectQueueEpochs(r.announcedRows, wireRows) {
 		return nil
@@ -439,19 +443,45 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	return old, staged, nil
 }
 
+func lockIpsecCaptureAuthority(current, next *ipsecCaptureRuntime) func() {
+	if current != nil {
+		current.authorityMu.Lock()
+	}
+	if next != nil && next != current {
+		next.authorityMu.Lock()
+	}
+	return func() {
+		if next != nil && next != current {
+			next.authorityMu.Unlock()
+		}
+		if current != nil {
+			current.authorityMu.Unlock()
+		}
+	}
+}
+
 func (d *Daemon) restoreIpsecCaptureRuntime(runtime *ipsecCaptureRuntime) {
 	if d == nil {
 		return
 	}
+	d.ipsecCapturePublishMu.Lock()
+	defer d.ipsecCapturePublishMu.Unlock()
+	d.ipsecCaptureMu.Lock()
+	current := d.ipsecCapture
+	d.ipsecCaptureMu.Unlock()
+	unlock := lockIpsecCaptureAuthority(current, runtime)
+	defer unlock()
+	if current != nil {
+		current.announced = false
+	}
 	if runtime != nil {
-		runtime.authorityMu.Lock()
 		runtime.announced = false
-		runtime.authorityMu.Unlock()
 	}
 	d.ipsecCaptureMu.Lock()
 	d.ipsecCapture = runtime
 	d.ipsecCaptureStaged = nil
 	d.ipsecCaptureStagePending = false
+	d.ipsecCaptureAuthorityRevision.Add(1)
 	d.ipsecCaptureMu.Unlock()
 }
 
@@ -459,10 +489,24 @@ func (d *Daemon) publishIpsecCaptureCommitted(runtime *ipsecCaptureRuntime) {
 	if d == nil {
 		return
 	}
+	d.ipsecCapturePublishMu.Lock()
+	defer d.ipsecCapturePublishMu.Unlock()
+	d.ipsecCaptureMu.Lock()
+	current := d.ipsecCapture
+	d.ipsecCaptureMu.Unlock()
+	unlock := lockIpsecCaptureAuthority(current, runtime)
+	defer unlock()
+	if current != nil {
+		current.announced = false
+	}
+	if runtime != nil && runtime != current {
+		runtime.announced = false
+	}
 	d.ipsecCaptureMu.Lock()
 	d.ipsecCapture = runtime
 	d.ipsecCaptureStaged = nil
 	d.ipsecCaptureStagePending = false
+	d.ipsecCaptureAuthorityRevision.Add(1)
 	d.ipsecCaptureMu.Unlock()
 }
 
@@ -533,16 +577,33 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 	return nil
 }
 func (d *Daemon) reconcileIpsecCaptureAuthority() error {
+	return d.reconcileIpsecCaptureAuthorityWithHook(nil)
+}
+
+func (d *Daemon) reconcileIpsecCaptureAuthorityWithHook(afterSample func()) error {
 	if d == nil {
 		return nil
 	}
 	d.ipsecCaptureMu.Lock()
 	runtime := d.ipsecCapture
+	revision := d.ipsecCaptureAuthorityRevision.Load()
 	d.ipsecCaptureMu.Unlock()
 	if runtime == nil {
 		return nil
 	}
-	return runtime.announceAuthority()
+	if afterSample != nil {
+		afterSample()
+	}
+	runtime.authorityMu.Lock()
+	defer runtime.authorityMu.Unlock()
+	d.ipsecCaptureMu.Lock()
+	current := d.ipsecCapture
+	currentRevision := d.ipsecCaptureAuthorityRevision.Load()
+	d.ipsecCaptureMu.Unlock()
+	if current != runtime || currentRevision != revision {
+		return nil
+	}
+	return runtime.announceAuthorityLocked()
 }
 
 func (d *Daemon) shutdownIpsecCapture() {
@@ -561,11 +622,7 @@ func (d *Daemon) shutdownIpsecCapture() {
 			slog.Warn("ipsec capture shutdown: remove divert failed", "err", err)
 		}
 	}
-	d.ipsecCaptureMu.Lock()
-	d.ipsecCapture = nil
-	d.ipsecCaptureStaged = nil
-	d.ipsecCaptureStagePending = false
-	d.ipsecCaptureMu.Unlock()
+	d.restoreIpsecCaptureRuntime(nil)
 	if staged != nil && staged != active {
 		if err := staged.close(); err != nil {
 			slog.Warn("ipsec capture shutdown: close staged generation failed", "err", err)

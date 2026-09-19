@@ -139,18 +139,21 @@ type Daemon struct {
 	ipsecS4 *ipsecSupervisor
 	// #9506 S5 capture actor and staged generation. The mutex protects
 	// provider/reconcile publication while queue receive loops remain lock-free.
-	ipsecCaptureMu              sync.Mutex
-	ipsecCapture                *ipsecCaptureRuntime
-	ipsecCaptureStaged          *ipsecCaptureRuntime
-	ipsecCaptureStagePending    bool
-	ipsecCaptureGeneration      atomic.Uint64
-	ipsecOverlay                atomic.Pointer[xnft.HostInputFenceOverlay]
-	ipsecOverlayAcked           atomic.Pointer[xnft.HostInputFenceOverlay]
-	ipsecOverlayRetryUntil      atomic.Int64
-	ipsecOverlayRetryGeneration atomic.Uint64
-	ipsecOverlayRetrySequence   atomic.Uint64
-	ipsecTopologyDirty          atomic.Bool
-	ipsecTopologySubscribed     atomic.Bool
+	// Publication serializes current-runtime sampling with authority locking.
+	ipsecCaptureMu                sync.Mutex
+	ipsecCapturePublishMu         sync.Mutex
+	ipsecCapture                  *ipsecCaptureRuntime
+	ipsecCaptureStaged            *ipsecCaptureRuntime
+	ipsecCaptureStagePending      bool
+	ipsecCaptureGeneration        atomic.Uint64
+	ipsecCaptureAuthorityRevision atomic.Uint64
+	ipsecOverlay                  atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayAcked             atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayRetryUntil        atomic.Int64
+	ipsecOverlayRetryGeneration   atomic.Uint64
+	ipsecOverlayRetrySequence     atomic.Uint64
+	ipsecTopologyDirty            atomic.Bool
+	ipsecTopologySubscribed       atomic.Bool
 
 	// --- always-on transit-gate link watcher (#9848) ---
 	// The watcher has its own subscription seam so it remains independent of

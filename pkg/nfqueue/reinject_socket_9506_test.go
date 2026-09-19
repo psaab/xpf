@@ -64,6 +64,38 @@ func TestReinjectSocketDecodesExtendedCompletionOutcomes9506(t *testing.T) {
 	}
 }
 
+func TestReinjectSocketDecodesWrittenAndExtendedBatch9506(t *testing.T) {
+	codes := []byte{1, 6, 7, 8, 9}
+	payload := make([]byte, 2+len(codes)*37)
+	binary.BigEndian.PutUint16(payload[:2], uint16(len(codes)))
+	for i, code := range codes {
+		off := 2 + i*37
+		binary.BigEndian.PutUint64(payload[off:off+8], uint64(i+1))
+		binary.BigEndian.PutUint16(payload[off+24:off+26], uint16(100+i))
+		payload[off+32] = code
+		binary.BigEndian.PutUint32(payload[off+33:off+37], uint32(i+10))
+	}
+	completions, err := decodeCompletions(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completions) != len(codes) {
+		t.Fatalf("completions=%d, want %d", len(completions), len(codes))
+	}
+	want := []CompletionOutcome{
+		CompletionWritten,
+		CompletionFenced,
+		CompletionDenied,
+		CompletionAccepted,
+		CompletionWouldReinject,
+	}
+	for i, completion := range completions {
+		if completion.Outcome != want[i] || completion.BytesWritten != uint32(i+10) {
+			t.Fatalf("completion[%d]=%+v, want outcome=%s bytes=%d", i, completion, want[i], i+10)
+		}
+	}
+}
+
 func TestReinjectSocketRoundTripAndCompletion9506(t *testing.T) {
 	dir := t.TempDir()
 	submitPath := filepath.Join(dir, "submit.sock")

@@ -148,23 +148,26 @@ EOF
     printf '%s\n' '{"nftables":[{"table":{"family":"inet","name":"xpf_transit_barrier"}}]}' \
         >"$parser_dir/missing-bridge.json"
     printf '%s\n' '{}' >"$parser_dir/missing-list.json"
-    printf '%s\n' '[]' >"$parser_dir/scalar.json"
+    printf '%s\n' '42' >"$parser_dir/scalar.json"
     printf '%s\n' '{not-json' >"$parser_dir/malformed.json"
     printf '%s\n' '{"nftables":[]}' >"$parser_dir/empty-list.json"
+    printf '%s\n' '[]' >"$parser_dir/list-root.json"
     expect "ruleset parser accepts exact four-hook fixture" "1 1 1 1 1 1" \
         "$(ruleset_flags "$parser_dir/positive.json")"
     expect "ruleset parser rejects missing bridge family" "1 0 0 0 0 1" \
         "$(ruleset_flags "$parser_dir/missing-bridge.json")"
     expect "ruleset parser rejects missing nftables list" "0 0 0 0 0 0" \
         "$(ruleset_flags "$parser_dir/missing-list.json")"
-    expect "ruleset parser rejects scalar JSON" "0 0 0 0 0 0" \
+    expect "ruleset parser rejects true scalar JSON" "0 0 0 0 0 0" \
         "$(ruleset_flags "$parser_dir/scalar.json")"
+    expect "ruleset parser rejects list-root JSON" "0 0 0 0 0 0" \
+        "$(ruleset_flags "$parser_dir/list-root.json")"
     expect "ruleset parser rejects malformed JSON" "0 0 0 0 0 0" \
         "$(ruleset_flags "$parser_dir/malformed.json")"
     expect "ruleset parser accepts empty nftables list as readable" "0 0 0 0 0 1" \
         "$(ruleset_flags "$parser_dir/empty-list.json")"
     rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 17 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 18 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
