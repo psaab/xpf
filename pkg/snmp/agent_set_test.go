@@ -324,7 +324,7 @@ func buildV3DiscoveryRequest() []byte {
 
 	hdr := berEncodeIntegerTLV(7)
 	hdr = append(hdr, berEncodeIntegerTLV(maxPacketSize)...)
-	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagReport})...)
+	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagReportable})...)
 	hdr = append(hdr, berEncodeIntegerTLV(usmSecurityModel)...)
 	hdrSeq := berEncodeTLV(tagSequence, hdr)
 
