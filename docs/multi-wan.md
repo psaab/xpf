@@ -769,43 +769,31 @@ routing, and only on double fault).
     describable. The decline logs at WARN naming the count, the cap and
     the consequence, and increments a counter (`LearnedRouteCapHits`) so
     the state is readable without log scraping.
-  - **What "on the `NoRoute` slow path" means, corrected by #9054.** This
-    section used to say that neither option was an outage because the
-    kernel still forwarded. That was true when #8355 was written and had
-    already been made false by #7480, which landed separately: a
-    `NoRoute` frame is adjudicated against the #3110 unzoned egress
-    sentinel, no zone-pair or `junos-global` permit can match it, and the
-    DEFAULT action decides — so on a Junos-default deny box the frame was
-    **dropped**. A capped import on a full-table eBGP edge therefore
-    black-holed the entire dynamic FIB while the WARN line above told the
-    operator traffic still forwarded, which is the worst combination:
-    total loss plus a diagnostic pointing away from the cause.
-    The snapshot now carries `learned_route_import_capped`, and while it
-    is set the helper restores the pre-#7480 slow-path delegation **for
-    `NoRoute` frames only**. So "the kernel still forwards" is true again
-    rather than merely asserted, and it is true because of a mechanism
-    you can observe:
-    `xpf_userspace_binding_slow_path_no_route_packets_total` advances for
-    exactly those frames.
-    To see whether the box is capped **now**, read
-    `xpf_learned_route_import_capped` (#9654). It is 1 while the forwarding
-    state the helper's live workers serve is capped and 0 while it is not.
-    It is **absent** when that is unknown: no live helper worker, or a helper
-    older than the field. Alert on the value and on `absent()` separately,
-    and do not read absent as 0. `xpf_learned_route_cap_hits_total` counts
-    capped builds and stays non-zero after the import comes back under the
-    cap, so it cannot answer this.
-    Two consequences worth knowing before you rely on it. **The snapshot
-    protocol moved to 10**, so a helper older than that REFUSES a capped
-    snapshot outright instead of applying it and black-holing — loud and
-    fail-closed, per the rule in `pkg/dataplane/userspace/protocol.go`.
-    And **while capped, a `NoRoute` frame reaches the kernel FIB without
-    zone-policy adjudication** — the #6664 delegation that #7480
-    narrowed. The kernel FIB is still the authority, so a destination
-    with no kernel route is still dropped; but this is a real widening of
-    the delegated set, bounded to the capped state, and it is the trade
-    #9054 chose against a total blackhole. Reducing what FRR installs
-    into the kernel, or raising `learnedRoutePublishBudget`, removes both.
+  - **What "on the `NoRoute` slow path" means, corrected by #9054 and
+    re-owned by #9522.** This section used to say that neither option was an
+    outage because the kernel still forwarded. #7480 had already made that
+    premise false: a `NoRoute` frame is adjudicated against the #3110 unzoned
+    egress sentinel, no zone-pair or `junos-global` permit can match it, and
+    the DEFAULT action decides — so on a Junos-default deny box the frame was
+    **dropped**. #9054 restored the pre-#7480 slow-path delegation while the
+    cap flag was set, but that made every kernel-routable destination the
+    helper did not import eligible for transit with no zone policy, session,
+    NAT or screen. That unowned, permitted-by-absence path is #9522.
+  - **#9522 owns the fail-closed disposition.** The snapshot still carries
+    `learned_route_import_capped`, and the helper still reports
+    `xpf_learned_route_import_capped` while its live workers serve that state.
+    But the NoRoute arm now adjudicates capped frames exactly as uncapped ones:
+    a deny is downgraded to `PolicyDenied`, dropped, and counted by
+    `xpf_policy_denies_total`; only a policy `Permit` result keeps the normal
+    slow-path delegation. The cap-build counter
+    `xpf_learned_route_cap_hits_total` remains cumulative and is distinct from
+    the live capped gauge.
+  - The snapshot protocol moved to **27** because a v26 helper receiving the
+    same `learned_route_import_capped:true` bytes would still delegate while a
+    v27 helper adjudicates. Exact equality therefore REFUSES the mixed pairing
+    instead of silently preserving the #9054 bypass. Until a complete,
+    ordering-safe kernel-assisted or chunked-import design exists, this
+    fail-closed behavior is the owned bound.
   - It **narrows a window rather than closing it.** #7437 added the
     rtnetlink route listener (`pkg/daemon/daemon_route_listener.go`), so
     a kernel route change now drives a republish on its own — the
