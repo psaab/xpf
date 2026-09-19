@@ -12,13 +12,28 @@ import (
 // families while the dataplane is unarmed or armed (#7191/#10302).
 const TransitBarrierTableName = "xpf_transit_barrier"
 
+// ForwardFenceMark is an ingress-interface/packet-mark conjunction for the
+// armed forward fence. A mark is never admitted without its owning interface.
+type ForwardFenceMark struct {
+	Ifname string
+	Mark   uint32
+	Mask   uint32
+}
+
+// AdjudicatedTransitMark is the skb mark set by the xpf-usp1 ingress queue
+// classifier for userspace-adjudicated reinjects. Keep this outside the
+// reserved RPM probe range (0x1000 + index).
+const AdjudicatedTransitMark uint32 = 0x58465001
+
+const AdjudicatedTransitMarkMask uint32 = 0xffffffff
+
 // ForwardFenceSpec is the provenance-scoped allowlist for the armed forward
-// fence. Every other packet reaches the base chain's DROP policy. Names must be
-// resolved from runtime-owned XDP links (plus the daemon's owned reinjection
-// TUN); callers must never populate this from a global "any XDP on the host"
-// scan.
+// fence. Every other packet reaches the base chain's DROP policy. Names must
+// be resolved from runtime-owned XDP links; the xpf-usp1 TUN is admitted only
+// through an exact packet-mark conjunction supplied in AllowedMarks.
 type ForwardFenceSpec struct {
 	AllowedIfnames []string
+	AllowedMarks  []ForwardFenceMark
 }
 
 // ErrTransitBarrierBridgeUnsupported marks a kernel that does not provide the
@@ -160,10 +175,23 @@ func transitBarrierChain(tbl *nftables.Table) *nftables.Chain {
 }
 
 func emitTransitFencePinhole(p *nlPlan, spec ForwardFenceSpec) {
-	if len(spec.AllowedIfnames) == 0 {
-		return
+	if len(spec.AllowedIfnames) > 0 {
+		p.rule().iifname(spec.AllowedIfnames).emit(verdictAccept()...)
 	}
-	p.rule().iifname(spec.AllowedIfnames).emit(verdictAccept()...)
+	for _, marked := range spec.AllowedMarks {
+		if marked.Ifname == "" {
+			p.fail(errors.New("marked transit pinhole has an empty ingress interface"))
+			return
+		}
+		if marked.Mask == 0 {
+			p.fail(fmt.Errorf("marked transit pinhole %q has a zero mark mask", marked.Ifname))
+			return
+		}
+		p.rule().
+			iifname([]string{marked.Ifname}).
+			mark(marked.Mark, marked.Mask).
+			emit(verdictAccept()...)
+	}
 }
 
 func (in *netlinkInstaller) installBarrierFamily(family nftables.TableFamily, spec ForwardFenceSpec) error {

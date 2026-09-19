@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 )
 
@@ -49,14 +50,23 @@ func TestArmedForwardFenceDropsUnownedTransit10302(t *testing.T) {
 	if len(f.fenceSpecs10302) != 1 {
 		t.Fatalf("armed transit must supply exactly one forward-fence spec, got %d", len(f.fenceSpecs10302))
 	}
-	got := f.fenceSpecs10302[0].AllowedIfnames
-	want := []string{"xdp-owned0", armedTransitReinjectIfname}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("armed pinholes = %v, want only tracked XDP + delegated reinject TUN %v", got, want)
+	got := f.fenceSpecs10302[0]
+	if len(got.AllowedIfnames) != 1 || got.AllowedIfnames[0] != "xdp-owned0" {
+		t.Fatalf("armed unmarked pinholes = %v, want only tracked XDP xpf-usp1 excluded", got.AllowedIfnames)
 	}
-	for _, name := range got {
-		if name == "leave-alone0" || name == "unmanaged0" || name == "xfrm1" || name == "xpf-usp0" {
-			t.Fatalf("unowned/unadjudicated or LocalDelivery fixture %q must not be an armed forward pinhole: %v", name, got)
+	if len(got.AllowedMarks) != 1 {
+		t.Fatalf("armed marked pinholes = %v, want one xpf-usp1 mark conjunction", got.AllowedMarks)
+	}
+	marked := got.AllowedMarks[0]
+	if marked.Ifname != armedTransitReinjectIfname ||
+		marked.Mark != xnft.AdjudicatedTransitMark ||
+		marked.Mask != xnft.AdjudicatedTransitMarkMask {
+		t.Fatalf("armed marked pinhole = %+v, want xpf-usp1 mark %#x/%#x",
+			marked, xnft.AdjudicatedTransitMark, xnft.AdjudicatedTransitMarkMask)
+	}
+	for _, name := range got.AllowedIfnames {
+		if name == "leave-alone0" || name == "unmanaged0" || name == "xfrm1" || name == "xpf-usp0" || name == armedTransitReinjectIfname {
+			t.Fatalf("unowned/unadjudicated or LocalDelivery fixture %q must not be an unmarked forward pinhole: %v", name, got.AllowedIfnames)
 		}
 	}
 }

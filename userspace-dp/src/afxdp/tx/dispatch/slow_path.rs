@@ -147,26 +147,24 @@ pub(in crate::afxdp) fn slow_path_admit(
     false
 }
 
-/// #9637 operator narrowing: which slow-path TUN a reinject takes.
+/// #9637/#10391 operator narrowing: which slow-path outlet a reinject takes.
 ///
-/// Returns true for the adjudicated outlet (`xpf-usp0`, kernel-exempted by
-/// the host-inbound reinject accept) and false for the delegated outlet
-/// (`xpf-usp1`, judged by the destination rules exactly as pre-#9637).
-///
+/// `Trusted` is the gated LocalDelivery outlet (`xpf-usp0`). `Adjudicated`
+/// is policy-permitted xfrm/reinject traffic on queue zero of the shared
+/// `xpf-usp1` TUN; the TC classifier converts that queue identity to the
+/// fence mark. `Delegated` is queue one of `xpf-usp1` and remains unmarked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum SlowPathOutlet {
+    Trusted,
+    Adjudicated,
+    Delegated,
+}
+
 /// The ONLY trusted path is a `LocalDelivery` disposition through the
 /// FILTERED chokepoint (`poll_descriptor`, downstream of the session-hit /
-/// session-miss / flowless host-inbound gates — every deny `continue`s
-/// before reinject). All other reinject classes are delegated: forced and
-/// common-skew NoRoute (incl. capped), transit-adjudicated MissingNeighbor,
-/// ForwardCandidate build-failure fallback, and the synthetic IPsec
-/// passthrough (ESP/AH, ESP-in-UDP/NAT-T, seeded IKE — unconditionally
-/// exempt, never gate-passed; IKE-new passes its own gate but rides the
-/// unfiltered passthrough site, so the destination judges it on the same
-/// token set with identical verdicts).
-///
-/// Callers pass the result as `maybe_reinject_slow_path_from_frame`'s
-/// `host_authorized` flag; unfiltered sites pass `false` directly (their
-/// classes are enumerated here, not inferred). Exhaustively pinned below.
+/// session-miss / flowless host-inbound gates — every deny `continue`s before
+/// reinject). All other reinject classes are delegated or explicitly
+/// adjudicated at their policy-gated outlet.
 pub(in crate::afxdp) fn reinject_host_authorized(
     disposition: ForwardingDisposition,
 ) -> bool {
@@ -284,15 +282,43 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
     frame: &[u8],
     meta: impl Into<UserspaceDpMeta>,
     decision: SessionDecision,
-    // #9637 operator narrowing: true routes the frame to the adjudicated
-    // outlet (`xpf-usp0`, kernel-exempted); false to the delegated outlet
-    // (`xpf-usp1`, destination-judged). Callers declare the authorization
-    // they verified: the filtered chokepoint passes
-    // `reinject_host_authorized(disposition)`; unfiltered sites pass
-    // `false` (their classes are enumerated on that function, not inferred
-    // here — a new unfiltered caller that needs the trusted outlet must
-    // justify it at its site, not widen this primitive).
+    // #9637 compatibility wrapper: callers that already have the historical
+    // boolean contract map true to the trusted outlet and false to delegated.
     host_authorized: bool,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    reason: &'static str,
+    forwarding: &ForwardingState,
+) -> bool {
+    maybe_reinject_slow_path_from_frame_with_outlet(
+        binding,
+        live,
+        slow_path,
+        local_tunnel_deliveries,
+        frame,
+        meta,
+        decision,
+        if host_authorized {
+            SlowPathOutlet::Trusted
+        } else {
+            SlowPathOutlet::Delegated
+        },
+        recent_exceptions,
+        reason,
+        forwarding,
+    )
+}
+
+#[cold]
+#[inline(never)]
+pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame_with_outlet(
+    binding: &BindingIdentity,
+    live: &BindingLiveState,
+    slow_path: Option<&Arc<SlowPathReinjector>>,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    frame: &[u8],
+    meta: impl Into<UserspaceDpMeta>,
+    decision: SessionDecision,
+    outlet: SlowPathOutlet,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     reason: &'static str,
     forwarding: &ForwardingState,
@@ -399,14 +425,13 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
         );
         return false;
     };
-    // #9637 operator narrowing: the outlet IS the authorization proof the
-    // kernel accept keys on. Trusted ⟺ the caller verified host
-    // authorization; delegated frames meet the destination rules exactly as
-    // pre-#9637 (no accept references `xpf-usp1` on either render surface).
-    let enqueue_outcome = if host_authorized {
-        slow_path.enqueue(packet)
-    } else {
-        slow_path.enqueue_delegated(packet)
+    // #9637/#10391 operator narrowing: the outlet is structural. Trusted
+    // uses xpf-usp0; adjudicated and delegated share xpf-usp1 but queue zero
+    // alone receives the exact fence mark from the TC classifier.
+    let enqueue_outcome = match outlet {
+        SlowPathOutlet::Trusted => slow_path.enqueue(packet),
+        SlowPathOutlet::Adjudicated => slow_path.enqueue_adjudicated(packet),
+        SlowPathOutlet::Delegated => slow_path.enqueue_delegated(packet),
     };
     let accepted = match enqueue_outcome {
         Ok(EnqueueOutcome::Accepted) => {

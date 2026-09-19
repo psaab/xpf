@@ -302,6 +302,29 @@ func (a *ruleAsm) iifname(names []string) *ruleAsm {
 	return a.add(a.p.iifnameMatch(names)...)
 }
 
+// mark appends an exact (or masked) skb-mark comparison. The interface
+// conjunction is emitted by the caller so a mark from another ingress cannot
+// widen this fence. Mark bytes are host-order (NativeEndian), matching the
+// kernel's u32 nft META_MARK register format and the ctState golden; BigEndian
+// would never match the TC-written value on LE (#10410 P0).
+func (a *ruleAsm) mark(value, mask uint32) *ruleAsm {
+	return a.add(
+		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask:           binaryutil.NativeEndian.PutUint32(mask),
+			Xor:            make([]byte, 4),
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     binaryutil.NativeEndian.PutUint32(value & mask),
+		},
+	)
+}
+
 // ct appends a conntrack state / direction predicate (no deps).
 func (a *ruleAsm) ctEstablishedRelated() *ruleAsm { return a.add(ctEstablishedRelated()...) }
 func (a *ruleAsm) ctDirectionReply() *ruleAsm     { return a.add(ctDirectionReply()...) }

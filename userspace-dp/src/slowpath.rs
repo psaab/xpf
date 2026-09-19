@@ -1,4 +1,5 @@
 use crate::io_uring_write::WriteResult;
+use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
@@ -24,7 +25,17 @@ const DEFAULT_RATE_LIMIT_PACKETS_PER_SEC: u64 = 1_000_000;
 const DEFAULT_RATE_LIMIT_BYTES_PER_SEC: u64 = 4 * 1024 * 1024 * 1024;
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
 const IFF_TUN: libc::c_short = 0x0001;
+const IFF_MULTI_QUEUE: libc::c_short = 0x0100;
 const IFF_NO_PI: libc::c_short = 0x1000;
+
+/// Queue zero is opened by the sole adjudicated xpf-usp1 writer. Linux stores
+/// an RX queue in skb->queue_mapping as queue_index + 1, so the TC program
+/// matches mapping one; every other mapping is explicitly cleared to zero.
+const ADJUDICATED_QUEUE_INDEX: u32 = 0;
+const ADJUDICATED_QUEUE_MAPPING: u32 = ADJUDICATED_QUEUE_INDEX + 1;
+const ADJUDICATED_TRANSIT_MARK: u32 = 0x5846_5001;
+const ADJUDICATED_TRANSIT_MARK_MASK: u32 = 0xffff_ffff;
+const ADJUDICATED_TC_PRIORITY: u32 = 0x7fff;
 
 /// The MTU the kernel assigns a freshly created TUN device. When the
 /// desired-MTU programming ioctl fails, this is the MTU the live TUN still
@@ -96,8 +107,214 @@ pub enum EnqueueOutcome {
     MtuExceeded,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PacketQueue {
+    /// The xpf-usp0 single queue; no skb mark is needed there.
+    Trusted,
+    /// Queue zero of the xpf-usp1 multi-queue TUN; TC marks this packet.
+    Adjudicated,
+    /// Queue one of the xpf-usp1 multi-queue TUN; TC clears its mark.
+    Delegated,
+}
+
 struct PacketRequest {
     bytes: Vec<u8>,
+    queue: PacketQueue,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlowPathWorkerOutlet {
+    Trusted,
+    Delegated,
+}
+struct QueueMarkClassifier {
+    hook: libbpf_sys::bpf_tc_hook,
+    handle: u32,
+    priority: u32,
+    owns_clsact: bool,
+}
+
+impl Drop for QueueMarkClassifier {
+    fn drop(&mut self) {
+        let mut opts = libbpf_sys::bpf_tc_opts {
+            sz: std::mem::size_of::<libbpf_sys::bpf_tc_opts>() as u64,
+            handle: self.handle,
+            priority: self.priority,
+            ..Default::default()
+        };
+        // The TUN disappears with its last fd during normal teardown. A
+        // detach failure in that case is harmless; do not mask the worker's
+        // terminal status with a best-effort cleanup error.
+        unsafe {
+            let _ = libbpf_sys::bpf_tc_detach(&self.hook, &opts);
+            if self.owns_clsact {
+                let _ = libbpf_sys::bpf_tc_hook_destroy(&mut self.hook);
+            }
+        }
+    }
+}
+
+fn bpf_insn(code: u32, dst: u8, src: u8, off: i16, imm: i32) -> libbpf_sys::bpf_insn {
+    let mut insn = libbpf_sys::bpf_insn {
+        code: code as u8,
+        off,
+        imm,
+        ..Default::default()
+    };
+    insn.set_dst_reg(dst);
+    insn.set_src_reg(src);
+    insn
+}
+
+fn load_queue_mark_program(queue_mapping: u32, mark: u32) -> Result<i32, String> {
+    // tc ingress __sk_buff offsets are stable UAPI fields:
+    // mark=8 and queue_mapping=12. Clear mark for every queue first, then
+    // set the adjudicated value only for queue zero. Unknown queues therefore
+    // remain explicitly unmarked and hit the fence's DROP policy.
+    let insns = [
+        bpf_insn(
+            libbpf_sys::BPF_LDX | libbpf_sys::BPF_W | libbpf_sys::BPF_MEM,
+            2,
+            1,
+            12,
+            0,
+        ),
+        bpf_insn(
+            libbpf_sys::BPF_ALU64 | libbpf_sys::BPF_MOV | libbpf_sys::BPF_K,
+            0,
+            0,
+            0,
+            0,
+        ),
+        bpf_insn(
+            libbpf_sys::BPF_STX | libbpf_sys::BPF_W | libbpf_sys::BPF_MEM,
+            1,
+            0,
+            8,
+            0,
+        ),
+        bpf_insn(
+            libbpf_sys::BPF_JMP | libbpf_sys::BPF_JEQ | libbpf_sys::BPF_K,
+            2,
+            0,
+            1,
+            queue_mapping as i32,
+        ),
+        bpf_insn(libbpf_sys::BPF_JMP | libbpf_sys::BPF_JA, 0, 0, 3, 0),
+        bpf_insn(
+            libbpf_sys::BPF_ALU64 | libbpf_sys::BPF_MOV | libbpf_sys::BPF_K,
+            0,
+            0,
+            0,
+            mark as i32,
+        ),
+        bpf_insn(
+            libbpf_sys::BPF_STX | libbpf_sys::BPF_W | libbpf_sys::BPF_MEM,
+            1,
+            0,
+            8,
+            0,
+        ),
+        bpf_insn(
+            libbpf_sys::BPF_ALU64 | libbpf_sys::BPF_MOV | libbpf_sys::BPF_K,
+            0,
+            0,
+            0,
+            0,
+        ),
+        bpf_insn(
+            libbpf_sys::BPF_JMP | libbpf_sys::BPF_EXIT,
+            0,
+            0,
+            0,
+            0,
+        ),
+    ];
+    let name = b"xpf_usp1_queue_mark\0";
+    let license = b"GPL\0";
+    let mut opts = libbpf_sys::bpf_prog_load_opts {
+        sz: std::mem::size_of::<libbpf_sys::bpf_prog_load_opts>() as u64,
+        ..Default::default()
+    };
+    let fd = unsafe {
+        libbpf_sys::bpf_prog_load(
+            libbpf_sys::BPF_PROG_TYPE_SCHED_CLS,
+            name.as_ptr().cast(),
+            license.as_ptr().cast(),
+            insns.as_ptr(),
+            insns.len() as u64,
+            &mut opts,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "load xpf-usp1 queue-mark classifier: {}",
+            io::Error::from_raw_os_error(-fd)
+        ));
+    }
+    Ok(fd)
+}
+
+fn install_queue_mark_classifier(ifname: &str) -> Result<QueueMarkClassifier, String> {
+    let c_name = CString::new(ifname).map_err(|_| format!("invalid TUN name {ifname:?}"))?;
+    let ifindex = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    if ifindex == 0 {
+        return Err(format!(
+            "resolve xpf-usp1 ifindex for queue-mark classifier: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let prog_fd = load_queue_mark_program(
+        ADJUDICATED_QUEUE_MAPPING,
+        ADJUDICATED_TRANSIT_MARK,
+    )?;
+    let mut hook = libbpf_sys::bpf_tc_hook {
+        sz: std::mem::size_of::<libbpf_sys::bpf_tc_hook>() as u64,
+        ifindex: ifindex as i32,
+        attach_point: libbpf_sys::BPF_TC_INGRESS,
+        ..Default::default()
+    };
+    let create_rc = unsafe { libbpf_sys::bpf_tc_hook_create(&mut hook) };
+    let owns_clsact = match create_rc {
+        0 => true,
+        rc if rc == -libc::EEXIST => false,
+        rc => {
+            unsafe {
+                libc::close(prog_fd);
+            }
+            return Err(format!(
+                "create xpf-usp1 queue-mark clsact: {}",
+                io::Error::from_raw_os_error(-rc)
+            ));
+        }
+    };
+    let priority = ADJUDICATED_TC_PRIORITY;
+    let mut opts = libbpf_sys::bpf_tc_opts {
+        sz: std::mem::size_of::<libbpf_sys::bpf_tc_opts>() as u64,
+        prog_fd,
+        priority,
+        ..Default::default()
+    };
+    let attach_rc = unsafe { libbpf_sys::bpf_tc_attach(&hook, &mut opts) };
+    unsafe {
+        libc::close(prog_fd);
+    }
+    if attach_rc < 0 {
+        if owns_clsact {
+            unsafe {
+                let _ = libbpf_sys::bpf_tc_hook_destroy(&mut hook);
+            }
+        }
+        return Err(format!(
+            "attach xpf-usp1 queue-mark classifier: {}",
+            io::Error::from_raw_os_error(-attach_rc)
+        ));
+    }
+    Ok(QueueMarkClassifier {
+        hook,
+        handle: opts.handle,
+        priority,
+        owns_clsact,
+    })
 }
 
 /// Dual token-bucket rate limiter for the slow-path control queue (#2912).
@@ -475,7 +692,7 @@ impl SlowPathReinjector {
         let name = name.to_string();
         thread::Builder::new()
             .name("xpf-slowpath".to_string())
-            .spawn(move || slow_path_worker(&name, mtu, rx, thread_status))
+            .spawn(move || slow_path_worker(&name, mtu, rx, thread_status, SlowPathWorkerOutlet::Trusted))
             .map_err(|e| format!("spawn slow-path worker: {e}"))?;
         // #9637 operator narrowing: the delegated outlet gets its own worker
         // + TUN. Either worker failing to come up fails construction: an
@@ -488,7 +705,7 @@ impl SlowPathReinjector {
         let delegated_name = crate::afxdp::DELEGATED_SLOW_PATH_TUN.to_string();
         thread::Builder::new()
             .name("xpf-slowpath-delegated".to_string())
-            .spawn(move || slow_path_worker(&delegated_name, mtu, rx_delegated, thread_status_delegated))
+            .spawn(move || slow_path_worker(&delegated_name, mtu, rx_delegated, thread_status_delegated, SlowPathWorkerOutlet::Delegated))
             .map_err(|e| format!("spawn delegated slow-path worker: {e}"))?;
 
         // #7820: wait for the worker to report EITHER that it is live or why it
@@ -751,7 +968,20 @@ impl SlowPathReinjector {
     }
 
     pub fn enqueue(&self, bytes: Vec<u8>) -> Result<EnqueueOutcome, String> {
-        self.enqueue_on(&self.tx, &self.status, bytes)
+        self.enqueue_on(&self.tx, &self.status, bytes, PacketQueue::Trusted)
+    }
+
+    /// #10391: enqueue a userspace-adjudicated xfrm/reinject packet to queue
+    /// zero of the shared xpf-usp1 TUN. The TC ingress classifier maps that
+    /// structural queue identity to the fence mark; callers cannot choose the
+    /// queue through the delegated API.
+    pub fn enqueue_adjudicated(&self, bytes: Vec<u8>) -> Result<EnqueueOutcome, String> {
+        self.enqueue_on(
+            &self.tx_delegated,
+            &self.status_delegated,
+            bytes,
+            PacketQueue::Adjudicated,
+        )
     }
 
     /// #9637 operator narrowing: enqueue to the DELEGATED outlet
@@ -759,7 +989,12 @@ impl SlowPathReinjector {
     /// gate. Admission, rate limiting and counters run on that outlet's own
     /// status; the kernel holds no accept for it.
     pub fn enqueue_delegated(&self, bytes: Vec<u8>) -> Result<EnqueueOutcome, String> {
-        self.enqueue_on(&self.tx_delegated, &self.status_delegated, bytes)
+        self.enqueue_on(
+            &self.tx_delegated,
+            &self.status_delegated,
+            bytes,
+            PacketQueue::Delegated,
+        )
     }
 
     fn enqueue_on(
@@ -767,6 +1002,7 @@ impl SlowPathReinjector {
         tx: &SyncSender<PacketRequest>,
         status: &Arc<SharedStatus>,
         bytes: Vec<u8>,
+        queue: PacketQueue,
     ) -> Result<EnqueueOutcome, String> {
         let packet_len = bytes.len() as u64;
         // #2471: refuse frames larger than the live TUN MTU. When MTU
@@ -799,7 +1035,7 @@ impl SlowPathReinjector {
             return Ok(EnqueueOutcome::RateLimited);
         }
         status.queued_packets.fetch_add(1, Ordering::Relaxed);
-        match tx.try_send(PacketRequest { bytes }) {
+        match tx.try_send(PacketRequest { bytes, queue }) {
             Ok(()) => Ok(EnqueueOutcome::Accepted),
             Err(TrySendError::Full(req)) => {
                 status.queued_packets.fetch_sub(1, Ordering::Relaxed);
@@ -837,33 +1073,74 @@ impl SlowPathReinjector {
     }
 }
 
-fn slow_path_worker(name: &str, mtu: i32, rx: Receiver<PacketRequest>, status: Arc<SharedStatus>) {
-    let (tun, actual_name) = match open_tun(name) {
-        Ok(v) => v,
-        Err(err) => {
-            // Cause BEFORE outcome: the handshake reads the outcome first
-            // and the cause only after observing Failed, so the cause must
-            // already be present then.
-            status.set_last_error(err);
-            status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
-            status.active.store(false, Ordering::Relaxed);
-            return;
+fn slow_path_worker(
+    name: &str,
+    mtu: i32,
+    rx: Receiver<PacketRequest>,
+    status: Arc<SharedStatus>,
+    outlet: SlowPathWorkerOutlet,
+) {
+    let (tun, adjudicated_tun, actual_name, _classifier) = match outlet {
+        SlowPathWorkerOutlet::Trusted => match open_tun_with_flags(name, false) {
+            Ok((tun, actual_name)) => (tun, None, actual_name, None),
+            Err(err) => {
+                status.set_last_error(err);
+                status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
+                status.active.store(false, Ordering::Relaxed);
+                return;
+            }
+        },
+        SlowPathWorkerOutlet::Delegated => {
+            let first = match open_tun_with_flags(name, true) {
+                Ok(v) => v,
+                Err(err) => {
+                    status.set_last_error(err);
+                    status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
+                    status.active.store(false, Ordering::Relaxed);
+                    return;
+                }
+            };
+            let second = match open_tun_with_flags(name, true) {
+                Ok(v) => v,
+                Err(err) => {
+                    status.set_last_error(err);
+                    status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
+                    status.active.store(false, Ordering::Relaxed);
+                    return;
+                }
+            };
+            if first.1 != second.1 {
+                let err = format!(
+                    "xpf-usp1 multi-queue TUN name changed from {} to {}",
+                    first.1, second.1
+                );
+                status.set_last_error(err);
+                status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
+                status.active.store(false, Ordering::Relaxed);
+                return;
+            }
+            let classifier = match install_queue_mark_classifier(&first.1) {
+                Ok(classifier) => classifier,
+                Err(err) => {
+                    status.set_last_error(err);
+                    status.init_state.store(OutletInit::Failed as u8, Ordering::Relaxed);
+                    status.active.store(false, Ordering::Relaxed);
+                    return;
+                }
+            };
+            (second.0, Some(first.0), second.1, Some(classifier))
         }
     };
     // #2408: the kernel creates the TUN at the default 1500 MTU. Raise it to
-    // the largest configured data-interface MTU so reinjected jumbo frames are
-    // not silently dropped on the TUN egress. A failure here is non-fatal: the
-    // TUN is still usable for <=1500 frames, so the path stays active but is
-    // marked DEGRADED (#2471) — `live_mtu` falls back to 1500 and the enqueue
-    // path refuses frames above it rather than letting the kernel drop them
-    // silently while status reports a healthy `active`.
+    // the largest configured data-interface MTU so reinjected jumbo frames
+    // are not silently dropped on the TUN egress. A failure here is non-fatal:
+    // the TUN is still usable for <=1500 frames, so the path stays active but
+    // is marked DEGRADED (#2471).
     status.apply_mtu_status(&actual_name, mtu, set_if_mtu);
     status.set_device_name(&actual_name);
     status.active.store(true, Ordering::Relaxed);
-    // #9637 GPT-1: publish the initialization outcome AFTER `active` (same
-    // critical section in program order): the constructor handshake reads
-    // ONLY this atomic, so later diagnostics (io_uring note, MTU-degraded
-    // error) can never skew it back to failure.
+    // #9637 GPT-1: publish initialization only after the complete outlet
+    // setup, including the structural queue classifier.
     status.init_state.store(OutletInit::Live as u8, Ordering::Relaxed);
 
     let mut mode = match crate::io_uring_write::RingWriter::new(256) {
@@ -880,14 +1157,25 @@ fn slow_path_worker(name: &str, mtu: i32, rx: Receiver<PacketRequest>, status: A
 
     while let Ok(req) = rx.recv() {
         status.queued_packets.fetch_sub(1, Ordering::Relaxed);
-        // The owned packet buffer MOVES into the write path. In io_uring mode a
-        // Deferred outcome moves it into the ring's in-flight registry (retained
-        // until its CQE is reaped or the ring is torn down and drained) rather
-        // than freeing it here — the #5800 buffer-lifetime invariant. A reaped
-        // terminal outcome (Done / NothingWritten / Transferred) hands the buffer
-        // back, and it is dropped when this iteration ends.
+        let fd = match (outlet, req.queue) {
+            (SlowPathWorkerOutlet::Trusted, PacketQueue::Trusted)
+            | (SlowPathWorkerOutlet::Delegated, PacketQueue::Delegated) => tun.as_raw_fd(),
+            (SlowPathWorkerOutlet::Delegated, PacketQueue::Adjudicated) => adjudicated_tun
+                .as_ref()
+                .expect("delegated outlet owns the adjudicated queue")
+                .as_raw_fd(),
+            _ => {
+                status.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                status
+                    .dropped_bytes
+                    .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
+                continue;
+            }
+        };
+        // The owned packet buffer MOVES into the write path. In io_uring mode
+        // a deferred outcome moves it into the ring's in-flight registry.
         let bytes_len = req.bytes.len();
-        let outcome = write_packet_with_mode(&mut mode, tun.as_raw_fd(), req.bytes);
+        let outcome = write_packet_with_mode(&mut mode, fd, req.bytes);
         apply_slowpath_outcome(outcome, &mut mode, bytes_len, &status);
     }
     status.active.store(false, Ordering::Relaxed);
@@ -1317,18 +1605,24 @@ pub(crate) fn write_packet_nonblocking(fd: i32, bytes: &[u8]) -> io::Result<()> 
 }
 
 pub(crate) fn open_tun(name: &str) -> Result<(std::fs::File, String), String> {
+    open_tun_with_flags(name, false)
+}
+
+fn open_tun_with_flags(
+    name: &str,
+    multi_queue: bool,
+) -> Result<(std::fs::File, String), String> {
     // O_CLOEXEC so the TUN fd is NOT inherited by any child process xpfd execs
     // (frr-reload, ip, sysctl helpers, etc.) — a leaked TUN fd in a child both
     // wastes a descriptor and pins the device open past helper exit (#2480).
-    // Rust's OpenOptions does NOT set O_CLOEXEC by default on Unix, so request
-    // it explicitly via custom_flags.
     let tun = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_CLOEXEC)
         .open("/dev/net/tun")
         .map_err(|e| format!("open /dev/net/tun: {e}"))?;
-    let mut ifr = IfReq::new(name, IFF_TUN | IFF_NO_PI)?;
+    let flags = IFF_TUN | IFF_NO_PI | if multi_queue { IFF_MULTI_QUEUE } else { 0 };
+    let mut ifr = IfReq::new(name, flags)?;
     let rc = unsafe { libc::ioctl(tun.as_raw_fd(), TUNSETIFF, &mut ifr) };
     if rc < 0 {
         return Err(format!(
@@ -1343,15 +1637,8 @@ pub(crate) fn open_tun(name: &str) -> Result<(std::fs::File, String), String> {
     // reverse route still points at the real egress interface. Disable
     // per-device rp_filter so the kernel accepts those packets.
     set_ipv4_sysctl(&actual_name, "rp_filter", "0")?;
-    // The kernel computes the effective rp_filter for a packet as
-    // max(conf/all/rp_filter, conf/<dev>/rp_filter) (see
-    // Documentation/networking/ip-sysctl.rst). So the per-device 0 we just
-    // wrote is IGNORED if conf/all/rp_filter is non-zero (strict=1 / loose=2,
-    // a common Debian/Ubuntu default) — every slow-path reinjected IPv4 packet
-    // would then be silently dropped as a reverse-path failure (#2378). We do
-    // NOT mutate the host-global conf/all knob here (the helper owns no
-    // host-global sysctls); instead emit a one-time, operator-visible warning
-    // at TUN bringup. This is bringup-only, never per-packet.
+    // The kernel computes the effective rp_filter as max(conf/all, conf/dev).
+    // Do not mutate the host-global knob; emit the existing bringup warning.
     let all_rpf = read_all_rp_filter(ALL_RP_FILTER_PATH);
     if let Some(line) = rp_filter_all_warning(&actual_name, all_rpf) {
         eprintln!("{line}");
