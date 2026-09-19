@@ -335,3 +335,65 @@ fn flood_sketch_distinct_ports_independent_sustained() {
         "each (ip,port) sustained at threshold stays admitted independently: {ok80}/{ok443} of {total}"
     );
 }
+
+/// #10319 RED-on-revert: each count-min row is a consume-on-admit bucket,
+/// so a phase-staggered destination can borrow the other rows' capacity.  The
+/// flood sketch must instead admit only when every row has a token, keeping
+/// the sustained rate at the configured threshold for both IP and IP+port
+/// keys.
+#[test]
+fn flood_sketch_sustained_over_threshold_trips() {
+    const T: u32 = 100;
+    const NS: u64 = 1_000_000_000;
+    const SECONDS: u64 = 8;
+
+    fn measure_ip_port(use_port: bool, rate_multiplier: u64) -> u32 {
+        let mut s = SynRateSketch::for_flood_dst();
+        let dst = v4(10, 0, 3, 1);
+        let rows = if use_port {
+            s.cell_indices_ip_port(&dst, 443)
+        } else {
+            s.cell_indices(&dst)
+        };
+        // Desynchronise the four row buckets before the measured stream:
+        // drain each full bucket at a different quarter-second timestamp,
+        // then begin at the final drain timestamp.
+        for (row, &col) in rows.iter().enumerate() {
+            let phase_ns = row as u64 * NS / 4;
+            for _ in 0..T {
+                s.charge_cell(row, col, phase_ns, T);
+            }
+        }
+
+        let interval_ns = NS / (rate_multiplier * T as u64);
+        let total = T as u64 * SECONDS * rate_multiplier;
+        let mut now_ns = 3 * NS / 4;
+        let mut admitted = 0u32;
+        for _ in 0..total {
+            let over = if use_port {
+                s.increment_ip_port(&dst, 443, now_ns, T)
+            } else {
+                s.increment(&dst, now_ns, T)
+            };
+            if !over {
+                admitted += 1;
+            }
+            now_ns += interval_ns;
+        }
+        admitted
+    }
+
+    let max_sustained_with_initial_burst = T * (SECONDS as u32 + 1);
+    for rate_multiplier in [2, 4] {
+        let admitted_ip = measure_ip_port(false, rate_multiplier);
+        let admitted_ip_port = measure_ip_port(true, rate_multiplier);
+        assert!(
+            admitted_ip <= max_sustained_with_initial_burst,
+            "IP flood cap admitted {admitted_ip} at {rate_multiplier}x threshold; cap is phase-skewed"
+        );
+        assert!(
+            admitted_ip_port <= max_sustained_with_initial_burst,
+            "IP+port flood cap admitted {admitted_ip_port} at {rate_multiplier}x threshold; cap is phase-skewed"
+        );
+    }
+}

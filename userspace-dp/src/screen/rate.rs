@@ -211,6 +211,31 @@ impl TokenBucket {
     /// change needs no realloc), so the capacity clamp always tracks the live
     /// threshold.
     pub(super) fn admit_is_over(&mut self, now_ns: u64, threshold: u32) -> bool {
+        self.refill(now_ns, threshold);
+        if self.has_token() {
+            self.consume_one();
+            false // admitted
+        } else {
+            true // over limit — do NOT consume
+        }
+    }
+
+    /// Refill the bucket and report whether one whole token is available,
+    /// without consuming it. The flood sketch uses this as the first half of
+    /// its all-row admission transaction (#10319).
+    pub(super) fn prepare_admit(&mut self, now_ns: u64, threshold: u32) -> bool {
+        self.refill(now_ns, threshold);
+        self.has_token()
+    }
+
+    /// Commit one admission after every selected flood-sketch row prepared
+    /// successfully (#10319).
+    pub(super) fn commit_admit(&mut self) {
+        self.consume_one();
+    }
+
+    #[inline]
+    fn refill(&mut self, now_ns: u64, threshold: u32) {
         if self.last_refill_ns == 0 {
             // Cold start: begin FULL so a fresh zone admits the first
             // `threshold` events. `max(1)` never leaves the sentinel behind
@@ -221,25 +246,23 @@ impl TokenBucket {
             let elapsed = now_ns
                 .saturating_sub(self.last_refill_ns)
                 .min(MAX_REFILL_ELAPSED_NS);
-            // `saturating_add` before the `.min` clamp: `tokens_q` (<= capacity)
-            // plus a full-second refill only approaches `u64` at extreme
-            // thresholds, but saturate defensively so the accumulation cannot
-            // wrap before the clamp (Codex round-5).
             self.tokens_q = self
                 .tokens_q
                 .saturating_add(refill_q(elapsed, threshold))
                 .min(capacity_q(threshold));
-            // Keep `last_refill_ns` monotonic (high-water mark): a backwards
-            // `now_ns` accrued 0 refill above and must NOT rewind the mark, or a
-            // later forward step would over-credit against the dip.
             self.last_refill_ns = self.last_refill_ns.max(now_ns);
         }
-        if self.tokens_q >= ONE {
-            self.tokens_q -= ONE; // consume only on admit
-            false // admitted
-        } else {
-            true // over limit — do NOT consume
-        }
+    }
+
+    #[inline]
+    fn has_token(&self) -> bool {
+        self.tokens_q >= ONE
+    }
+
+    #[inline]
+    fn consume_one(&mut self) {
+        debug_assert!(self.has_token());
+        self.tokens_q -= ONE;
     }
 
     /// Whole tokens currently available (fixed-point value floored). Test seam.
