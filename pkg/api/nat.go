@@ -211,7 +211,7 @@ func (s *Server) natDestHandler(w http.ResponseWriter, _ *http.Request) {
 		for _, rule := range rs.Rules {
 			info := NATDestInfo{
 				Name:    rule.Name,
-				DstAddr: rule.Match.DestinationAddress,
+				DstAddr: natshow.RuleMatchDestination(rule),
 			}
 			if rule.Match.DestinationPort > 0 {
 				info.DstPort = uint16(rule.Match.DestinationPort)

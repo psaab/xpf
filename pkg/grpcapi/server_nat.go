@@ -74,7 +74,7 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 		for _, rule := range rs.Rules {
 			info := &pb.NATDestInfo{
 				Name:    rule.Name,
-				DstAddr: rule.Match.DestinationAddress,
+				DstAddr: natshow.RuleMatchDestination(rule),
 			}
 			if rule.Match.DestinationPort > 0 {
 				info.DstPort = uint32(rule.Match.DestinationPort)
