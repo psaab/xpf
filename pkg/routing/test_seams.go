@@ -78,3 +78,32 @@ func NewManagerWithRouteListerForTest(ops routeLister) *Manager {
 	m.routes = &routeReader{ops: ops}
 	return m
 }
+
+// NewManagerWithLinkAndTermOpsForTest builds a *Manager for VRF-reconcile
+// cells that must observe the #9819 miss-terminator installs the reconcile
+// issues alongside the link lifecycle (#10421: a clean restart must reassert
+// the managed pref-2000 rules while adopting the surviving VRF devices). It
+// wires the same link-lifecycle domains as NewManagerWithLinkOpsForTest and
+// additionally binds the VRF manager's terminator surface to term; the
+// rule/route domains stay nil as in the link-only constructor.
+//
+// Callers pass any values whose method sets match linkOps and
+// vrfMissTerminatorOps (all methods exported, so fakes defined in another
+// package satisfy them structurally, as with the sibling constructors).
+func NewManagerWithLinkAndTermOpsForTest(ops linkOps, term vrfMissTerminatorOps) *Manager {
+
+	m := NewManagerWithLinkOpsForTest(ops)
+	m.vrf.term = term
+	return m
+}
+
+// NewManagerWithLinkTermAndRuleOpsForTest combines the link/VRF fake with the
+// policy-rule fake for daemon apply-pipeline tests that must run both VRF
+// activation and the normal routing tail without a live netlink handle.
+func NewManagerWithLinkTermAndRuleOpsForTest(ops linkOps, term vrfMissTerminatorOps, rules ruleOps) *Manager {
+	m := NewManagerWithLinkAndTermOpsForTest(ops, term)
+	m.nextTbl = &nextTableManager{ops: rules}
+	m.ribGroup = &ribGroupManager{ops: rules}
+	m.pbr = &pbrManager{ops: rules}
+	return m
+}

@@ -23,15 +23,17 @@ import (
 // apply (#4407). Extracted verbatim from applyConfigLocked; the head-produced
 // state that the earlier decoupled phases do not touch stays local here —
 // rethMACPending and the deferred-worker-startup flag/defer are self-contained
-// — and the two values the tail still needs are returned: the ip-monitoring
+// and the values the tail still needs are returned: the ip-monitoring
 // commit overlay (fed to applyRoutingRules and the FRR render), the captured
-// networkd write error, and the DEFERRED ordinary dataplane-apply error
-// (#5679) — both threaded into applyTailReconciles' Join. The three early
-// error returns — the two #2926 context-abort boundaries (ctx.Err() before
-// ApplyConfig and before the FRR reload) and the compileErrorMustAbortApply
-// dataplane abort on an ApplyConfig failure — are preserved; the caller bails
-// (via the terminal `err` return) without running the routing / service / tail
-// reconciles, exactly as the inline `return err` did.
+// networkd write error, the DEFERRED ordinary dataplane-apply error (#5679),
+// and a separate VRF miss-terminator error (#10421). The latter is joined into
+// the VRF commit error and #9693 retry debt without being mislabeled as a
+// networkd failure. The early error returns — the two #2926 context-abort
+// boundaries (ctx.Err() before ApplyConfig and before the FRR reload) and the
+// compileErrorMustAbortApply dataplane abort on an ApplyConfig failure — are
+// preserved; the caller bails (via the terminal `err` return) without running
+// the routing / service / tail reconciles, exactly as the inline `return err`
+// did.
 //
 // applyErr (#5679) is DISTINCT from that terminal `err`: an ORDINARY (non-abort
 // -class) ApplyConfig failure does NOT disarm the dataplane — the OLD compiled
@@ -39,11 +41,11 @@ import (
 // (fail-closed but complete, exactly like networkdErr / ifaceErr). It is
 // returned as a deferred error the caller joins at the tail so the commit
 // reports FAILURE rather than silently succeeding against the stale policy,
-// instead of aborting the rest of the apply. commitOverlay, networkdErr, and
-// applyErr are named returns so the pre-networkd boundaries can return them
-// (nil) before the networkd / apply phases assign them. Runs in the same slot,
-// after the fabric-IPVLAN reconcile and before the routing rules.
-func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config) (commitOverlay []config.RouteOverlayEntry, networkdErr error, applyErr error, err error) {
+// instead of aborting the rest of the apply. commitOverlay, networkdErr,
+// applyErr, and vrfTermErr are named returns so the pre-networkd boundaries can
+// return them (nil) before the networkd / apply phases assign them. Runs in the
+// same slot, after the fabric-IPVLAN reconcile and before the routing rules.
+func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config) (commitOverlay []config.RouteOverlayEntry, networkdErr error, applyErr error, vrfTermErr error, err error) {
 	// #6871 (round 8): a link-cycle lease cannot outlive this function.
 	//
 	// This is the extent that contains BOTH ends of the cycle — step 2.6's
@@ -152,7 +154,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// follows it begin, they run as one unit (no mid-sequence abort) — the
 	// next boundary is before the FRR reload.
 	if err := ctx.Err(); err != nil {
-		return commitOverlay, networkdErr, nil, err
+		return commitOverlay, networkdErr, nil, nil, err
 	}
 
 	// #6948: capture the commit-time session-invalidation candidates HERE — the
@@ -184,7 +186,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// until a later apply succeeds).
 			d.hostInboundDataplaneFresh.Store(false)
 			if compileErrorMustAbortApply(err) {
-				return commitOverlay, networkdErr, nil, err
+				return commitOverlay, networkdErr, nil, nil, err
 			}
 			// #5679: an ORDINARY (non-abort-class) full-apply failure does
 			// NOT disarm the dataplane — the dataplane ApplyConfig leaves the OLD
@@ -314,8 +316,20 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// recorded just above (#5309) is not clobbered — both fail-closed.
 			networkdErr = errors.Join(networkdErr, fmt.Errorf("apply networkd config: %w", err))
 		}
+		// The test seam models networkd's foreign-rule cleanup only after the
+		// real activation call has run.
+		if d.afterNetworkdApplyForTest != nil {
+			d.afterNetworkdApplyForTest()
+		}
 	}
-
+	// #10421: networkd's foreign-rule cleanup can remove the VRF miss
+	// terminator that applyVRFReconcile installed before activation. Reassert
+	// immediately, before RETH/link-cycle work, on every apply boundary.
+	if d.shouldReassertVRFMissTerminator(cfg) {
+		if err := d.routing.ReassertVRFMissTerminator(); err != nil {
+			vrfTermErr = fmt.Errorf("reassert VRF miss terminator after networkd activation: %w", err)
+		}
+	}
 	// 2.6. Program deterministic virtual MACs on RETH member interfaces.
 	// Each node gets a per-node MAC (02:bf:72:CC:RR:NN) to avoid FDB conflicts
 	// when both nodes' members are on the same L2 domain. VRRP + gratuitous NA
@@ -517,6 +531,19 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			}
 		}
 	}
+	// A networkd activation can finish foreign-rule cleanup asynchronously
+	// after Apply returns. Reassert again at the end of the core, after the
+	// management-VRF rebind, so the apply's returned invariant covers that
+	// late cleanup as well as the immediate post-networkd boundary.
+	if d.beforeFinalVRFMissReassertForTest != nil {
+		d.beforeFinalVRFMissReassertForTest()
+	}
+	if d.shouldReassertVRFMissTerminator(cfg) {
+		if err := d.routing.ReassertVRFMissTerminator(); err != nil {
+			vrfTermErr = errors.Join(vrfTermErr,
+				fmt.Errorf("reassert VRF miss terminator at end of activation: %w", err))
+		}
+	}
 
 	// #2926 boundary C3: before the FRR reload. The dataplane apply and the
 	// RETH MAC / VIP / worker-rebind sequence above have completed; FRR still
@@ -527,10 +554,10 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// store.Commit the store already holds the new config, so this is a clean
 	// "apply the rest on next start" boundary, not a divergence.)
 	if err := ctx.Err(); err != nil {
-		return commitOverlay, networkdErr, nil, err
+		return commitOverlay, networkdErr, nil, vrfTermErr, err
 	}
 
-	return commitOverlay, networkdErr, applyErr, nil
+	return commitOverlay, networkdErr, applyErr, vrfTermErr, nil
 }
 
 // errRethPrepareLinkCycle classifies a programRethMAC failure that the #5103

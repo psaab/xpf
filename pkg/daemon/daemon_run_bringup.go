@@ -461,7 +461,11 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 		if cfg := d.store.ActiveConfig(); cfg != nil {
 			dpType = cfg.System.DataplaneType
 		}
-		dp, err := buildRuntimeDataPlane(dpType)
+		buildRuntime := buildRuntimeDataPlane
+		if d.buildRuntimeDataPlaneForTest != nil {
+			buildRuntime = d.buildRuntimeDataPlaneForTest
+		}
+		dp, err := buildRuntime(dpType)
 		if errors.Is(err, dataplane.ErrDPDKBackendRetired) {
 			// #1527 Phase 2 of the DPDK retirement (umbrella
 			// #1525): the runtime DPDK backend is gone, but a
@@ -560,9 +564,23 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 				// applying this pre-semaphore snapshot. The check above stays a
 				// cheap "is there anything to apply yet" guard.
 				d.applyActiveConfig()
+				// #10421: applyActiveConfig is synchronous, but networkd may
+				// finish foreign-rule cleanup just after Apply returns. Keep a
+				// startup-tail reassert in addition to the apply-boundary
+				// invariant, and latch failures into the #9693 retry owner.
+				if d.afterActiveConfigApplyForTest != nil {
+					d.afterActiveConfigApplyForTest()
+				}
+				if d.shouldReassertVRFMissTerminator(cfg) {
+					if err := d.routing.ReassertVRFMissTerminator(); err != nil {
+						slog.Warn("failed to reassert VRF miss terminator after startup apply", "err", err)
+						d.noteRoutingReconcileResult(err)
+					}
+				}
 			}
 		}
 	}
+
 	// #1715: the boot-time DNS reconcile (inside the apply above) ran
 	// before DHCP clients start, so its empty-merge policy was
 	// repair-only. From here on, an empty DNS merge means "clear DNS".

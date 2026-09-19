@@ -72,7 +72,7 @@ func TestApplyDataplaneCoreAlwaysAbandonsAHeldLease_6871(t *testing.T) {
 	t.Run("normal_return", func(t *testing.T) {
 		d, lc := newLeaseAbandonDaemon("")
 
-		if _, _, _, err := d.applyDataplaneAndHACore(context.Background(), &config.Config{}); err != nil {
+		if _, _, _, _, err := d.applyDataplaneAndHACore(context.Background(), &config.Config{}); err != nil {
 			t.Fatalf("applyDataplaneAndHACore: %v", err)
 		}
 
@@ -97,7 +97,7 @@ func TestApplyDataplaneCoreAlwaysAbandonsAHeldLease_6871(t *testing.T) {
 				}
 			}()
 			//nolint:errcheck // the call panics; the deferred release is the observable
-			_, _, _, _ = d.applyDataplaneAndHACore(context.Background(), &config.Config{})
+			_, _, _, _, _ = d.applyDataplaneAndHACore(context.Background(), &config.Config{})
 		}()
 
 		if lc.abandonCalls != 1 {

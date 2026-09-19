@@ -220,7 +220,7 @@ func TestApplyConfigLockedCapturesAndPassesFRRErr9947(t *testing.T) {
 	}
 	if strings.Contains(src[j:j+lend], "frrErr") {
 		t.Errorf("frrErr is latched into the routing reconcile debt; the #9693 "+
-			"owner re-runs only ip-rules and would falsely discharge it while "+
-			"FRR is still broken. Call: %s", src[j:j+lend+1])
+			"owner re-runs policy rules, route-leak, and VRF-terminator debt but "+
+			"would falsely discharge it while FRR is still broken. Call: %s", src[j:j+lend+1])
 	}
 }

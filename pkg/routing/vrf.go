@@ -48,6 +48,13 @@ type vrfManager struct {
 	// docs/pr/844-vrf-idempotent/plan.md.
 	mu   sync.Mutex
 	vrfs []string // currently managed VRF device names
+	// termRequired is the manager's desired presence state for the miss
+	// terminator, set before link operations so a failed create cannot lose
+	// install intent; it is not a second config snapshot.
+	// termRemovePending records a failed removal separately: the desired state
+	// is empty, but the stale kernel rules still need a retry.
+	termRequired      bool
+	termRemovePending bool
 }
 
 // Create creates a Linux VRF device and assigns it a routing table.
@@ -56,6 +63,7 @@ func (v *vrfManager) Create(name string, tableID int) error {
 	defer v.mu.Unlock()
 	// #9819: the miss terminator first, as in Reconcile.
 	if v.term != nil {
+		v.termRequired = true
 		if err := setVRFMissTerminator(v.term, true); err != nil {
 			return errors.Join(err, v.createLocked(name, tableID))
 		}
@@ -131,6 +139,8 @@ func (v *vrfManager) Reconcile(desired []VRFSpec) error {
 	defer v.mu.Unlock()
 	var termErr error
 	if v.term != nil && len(desired) > 0 {
+		v.termRequired = true
+		v.termRemovePending = false
 		termErr = setVRFMissTerminator(v.term, true)
 	}
 	newVrfs, err := reconcileVRFs(v.ops, v.vrfs, desired)
@@ -139,6 +149,16 @@ func (v *vrfManager) Reconcile(desired []VRFSpec) error {
 	// its misses still need ending: remove only once nothing is owned.
 	if v.term != nil && len(desired) == 0 && len(newVrfs) == 0 {
 		termErr = setVRFMissTerminator(v.term, false)
+		if termErr == nil {
+			v.termRequired = false
+			v.termRemovePending = false
+		} else {
+			v.termRequired = false
+			v.termRemovePending = true
+		}
+	} else if len(newVrfs) > 0 {
+		v.termRequired = true
+		v.termRemovePending = false
 	}
 	switch {
 	case termErr == nil:
@@ -147,6 +167,41 @@ func (v *vrfManager) Reconcile(desired []VRFSpec) error {
 		return termErr
 	}
 	return errors.Join(err, termErr)
+}
+
+// ReassertMissTerminator restores the managed pref-2000 l3mdev unreachable
+// rules, or retries a failed removal, without reconciling links or changing
+// ownership. The apply pipeline calls this after networkd activation on every
+// commit; the manager's ownership state keeps empty configurations from
+// installing a global rule while retaining removal debt.
+func (v *vrfManager) ReassertMissTerminator() error {
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.term == nil {
+		return nil
+	}
+	if v.termRequired || len(v.vrfs) > 0 {
+		v.termRemovePending = false
+		return setVRFMissTerminator(v.term, true)
+	}
+	if !v.termRemovePending {
+		return nil
+	}
+	if err := setVRFMissTerminator(v.term, false); err != nil {
+		return err
+	}
+	v.termRemovePending = false
+	return nil
+
+}
+
+// MissTerminatorNeedsReconcile reports whether the manager still owns a VRF
+// miss terminator state that the apply boundary must restore or remove.
+func (v *vrfManager) MissTerminatorNeedsReconcile() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.term != nil && (v.termRequired || v.termRemovePending)
 }
 
 // BindInterfaceToVRF binds a network interface to a VRF device.

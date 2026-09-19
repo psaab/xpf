@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -499,7 +500,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// stale-authorization direction and strictly worse than the over-clear this
 	// closes. Captured here, that gap is the call itself.
 	d.policyActivationSecs = daemonMonotonicSeconds()
-	commitOverlay, networkdErr, applyErr, err := d.applyDataplaneAndHACore(ctx, cfg)
+	commitOverlay, networkdErr, applyErr, vrfTermErr, err := d.applyDataplaneAndHACore(ctx, cfg)
 	if err != nil {
 		// #5643 (M35): applyDataplaneAndHACore bailed at a #2926 ctx-cancellation
 		// boundary (C2 before the dataplane apply, or C3 after it) because the
@@ -529,10 +530,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// failure (nothing applied) or a transient degraded reload (new lines
 	// live, stale removal deferred) fails the commit closed via the tail
 	// join so a removal that did not happen is never reported as an
-	// unqualified success; the persistent pytools-missing degraded state
-	// is tolerated (nil) with gauge + retry. This slot is NEVER latched
-	// into noteRoutingReconcileResult below — the #9693 owner re-runs
-	// only ip-rules + snapshot and is forbidden from touching FRR.
+	// unqualified success; the persistent pytools-missing degraded state is
+	// tolerated (nil) with gauge + retry. This slot is NEVER latched into
+	// noteRoutingReconcileResult below — the #9693 owner re-runs only ip-rules,
+	// the route-leak snapshot, and VRF miss-terminator reconciliation; it is
+	// forbidden from touching FRR.
 	frrErr := d.applyFRRFull(cfg, commitOverlay)
 
 	// #5844: applyRoutingRules RETURNS the joined next-table / rib-group / PBR
@@ -557,14 +559,12 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// this reconcile has no dirty-retry owner, so a swallowed failure would keep
 	// the stale leak on a "successful" commit.
 	routeLeakErr := d.reconcileRouteLeakSnapshot(cfg, commitOverlay)
-	// #9693: latch (or discharge) the routing reconcile debt. The two errors
-	// above fail the commit closed, but nothing RE-RAN the reconcile: a transient
-	// ip-rule or republish failure left stale cross-VRF policy in the kernel and
-	// the userspace FIB until an unrelated apply, and applies nobody waits on
-	// (boot, DHCP lease, feed, config-poll) only logged it at Warn.
-	// routingReconcileReassertLoop re-runs both until they succeed.
-	// (frrErr is deliberately NOT latched here — FRR owns its own retry.)
-	d.noteRoutingReconcileResult(routingRuleErr, routeLeakErr)
+	// #9693: latch (or discharge) routing reconcile debt. Policy-routing,
+	// route-leak, and post-networkd VRF miss-terminator failures are retried by
+	// the same owner; FRR remains deliberately separate because it owns its own
+	// degraded retry.
+	d.noteRoutingReconcileResult(routingRuleErr, routeLeakErr, vrfTermErr)
+	vrfErr = errors.Join(vrfErr, vrfTermErr)
 
 	ipsecErr, dhcpServerErr := d.applyServicesReconcile(cfg)
 
