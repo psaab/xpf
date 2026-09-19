@@ -179,6 +179,13 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			if rg.State != StatePrimary {
 				return electLocalPrimary, "Preempt: higher priority"
 			}
+			if peerGroup.State == StatePrimary {
+				// A preempt-enabled dual-active winner can already be
+				// primary, so there is no state transition to trigger the
+				// direct-VIP GARP/NA refresh. Reuse the reaffirm reason used
+				// by the non-preempt dual-active path.
+				return electNoChange, "Dual-active: winner stays"
+			}
 		} else if localEff < peerEff {
 			if rg.State != StateSecondary {
 				return electLocalSecondary, "Preempt: lower priority"
@@ -188,6 +195,9 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			if m.nodeID < m.peerNodeID {
 				if rg.State != StatePrimary {
 					return electLocalPrimary, "Lower node ID wins tie"
+				}
+				if peerGroup.State == StatePrimary {
+					return electNoChange, "Dual-active: winner stays"
 				}
 			} else if m.nodeID > m.peerNodeID {
 				if rg.State != StateSecondary {
