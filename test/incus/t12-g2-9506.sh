@@ -225,53 +225,431 @@ PY
 
 observe_provenance_metadata() {
     # observe_provenance_metadata <ruleset.json> <nfqueue.txt>
-    # Static queue→family/hook/stN mapping is measurable. Packet metadata
-    # requires the bounded Rust provenance rows and the Go actor join; the
-    # static observer never infers those rows from nft/procfs.
-    python3 - "$1" "$2" <<'PY'
+    #   [status.json] [metrics.prom] [st-links.txt]
+    # Static queue→family/hook/stN mapping is measurable from nft/procfs.
+    # Packet metadata joins bounded Rust rows against Go actor counters on
+    # (run_id, generation, permit_epoch). Missing surfaces remain the literal
+    # value "unavailable"; zero is emitted only for a present, authoritative
+    # counter/list.
+    #
+    # Rust rows carry NORMALIZED CaptureOrigin values: family 1=inet, 2=bridge
+    # and hook 1=forward, 2=input (slowpath_reinject_9506.rs ORIGIN_*).
+    # Raw AF_INET/AF_INET6/AF_BRIDGE and NF_INET_* values are pre-normalization
+    # packet values and must never be used for this status-row join.
+    python3 - "$1" "$2" "${3:-}" "${4:-}" "${5:-}" <<'PY'
 import json
 import re
 import sys
 
+ruleset_path, nfqueue_path = sys.argv[1:3]
+status_path = sys.argv[3]
+metrics_path = sys.argv[4]
+stlinks_path = sys.argv[5]
+classes = (("inet", "forward"), ("inet", "input"),
+           ("bridge", "forward"), ("bridge", "input"))
+class_counts = {item: 0 for item in classes}
+rule_map = {}
+rule_ids = set()
+UNAVAILABLE = "unavailable"
+ruleset_ok = True
+static = 1
+
 try:
-    with open(sys.argv[1], encoding="utf-8") as fh:
+    with open(ruleset_path, encoding="utf-8") as fh:
         doc = json.load(fh)
     if not isinstance(doc, dict) or not isinstance(doc.get("nftables"), list):
         raise ValueError("missing nftables list")
 except Exception:
-    print("static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0")
-    raise SystemExit(0)
-queue_ids = set()
+    ruleset_ok = False
+    static = 0
+
+if ruleset_ok:
+    for item in doc["nftables"]:
+        rule = item.get("rule") if isinstance(item, dict) else None
+        if not isinstance(rule, dict) or rule.get("table") != "xpf_ipsec_divert":
+            continue
+        expr = rule.get("expr")
+        if not isinstance(expr, list) or len(expr) != 2:
+            static = 0
+            continue
+        match = expr[0].get("match", {}) if isinstance(expr[0], dict) else {}
+        queue = expr[1].get("queue", {}) if isinstance(expr[1], dict) else {}
+        stn = str(match.get("right", ""))
+        qnum = queue.get("num") if isinstance(queue, dict) else None
+        valid = (
+            match.get("op") == "=="
+            and match.get("left", {}).get("meta", {}).get("key") == "iifname"
+            and re.fullmatch(r"st9506\.[0-9]+", stn) is not None
+            and isinstance(queue, dict)
+            and isinstance(qnum, int)
+            and not isinstance(qnum, bool)
+        )
+        if not valid:
+            static = 0
+            continue
+        fam = str(rule.get("family", ""))
+        hook = str(rule.get("chain", ""))
+        if (fam, hook) not in class_counts:
+            static = 0
+            continue
+        if qnum in rule_map:
+            # Queue numbers must be unique across all four lists: family and
+            # hook are part of CaptureOrigin and may not alias.
+            static = 0
+            continue
+        rule_map[qnum] = (fam, hook, stn)
+        rule_ids.add(qnum)
+        class_counts[(fam, hook)] += 1
+    static = int(static and bool(rule_ids))
+else:
+    static = 0
+
+proc_ids = set()
+proc_available = False
 try:
-    for line in open(sys.argv[2], encoding="utf-8"):
-        fields = line.split()
-        if len(fields) >= 3 and fields[0].isdigit():
-            queue_ids.add(int(fields[0]))
+    with open(nfqueue_path, encoding="utf-8") as fh:
+        proc_available = True
+        for line in fh:
+            fields = line.split()
+            if len(fields) >= 3 and fields[0].isdigit():
+                proc_ids.add(int(fields[0]))
 except OSError:
     pass
-rule_ids = set()
-static = 1
-for item in doc.get("nftables", []):
-    rule = item.get("rule") if isinstance(item, dict) else None
-    if not isinstance(rule, dict) or rule.get("table") != "xpf_ipsec_divert":
-        continue
-    expr = rule.get("expr")
-    if not isinstance(expr, list) or len(expr) != 2:
-        static = 0
-        continue
-    match = expr[0].get("match", {}) if isinstance(expr[0], dict) else {}
-    queue = expr[1].get("queue", {}) if isinstance(expr[1], dict) else {}
-    if match.get("left", {}).get("meta", {}).get("key") != "iifname" or \
-       not re.fullmatch(r"st9506\.[0-9]+", str(match.get("right", ""))) or \
-       not isinstance(queue, dict) or not isinstance(queue.get("num"), int):
-        static = 0
+queue_rows = len(proc_ids) if proc_available else UNAVAILABLE
+mismatch = int(bool(proc_ids) and not rule_ids.issubset(proc_ids)) if proc_available else UNAVAILABLE
+
+# Optional ifindex source. The ruleset has no ifindex field; when this source
+# is absent, ifindex is unavailable rather than silently treated as matching.
+ifindexes = {}
+ifindex_check = False
+if stlinks_path:
+    try:
+        with open(stlinks_path, encoding="utf-8") as fh:
+            ifindex_check = True
+            for line in fh:
+                m = re.search(r"(?:^|\s)([0-9]+):\s+(st9506\.[0-9]+)(?:@|:)", line)
+                if m:
+                    ifindexes[m.group(2)] = int(m.group(1))
+    except OSError:
+        pass
+
+join = UNAVAILABLE
+join_reason = "join-inputs-absent"
+packet_samples = UNAVAILABLE
+stale_samples = UNAVAILABLE
+malformed_samples = UNAVAILABLE
+packet_classes = UNAVAILABLE
+rows_if = rows_ii = rows_bf = rows_bi = UNAVAILABLE
+rows_pf_inet = rows_pf_bridge = UNAVAILABLE
+prov_mismatch = pf_mismatch = UNAVAILABLE
+go_uncertain = go_late = go_timeouts = go_stale = go_cancelled = go_refused = UNAVAILABLE
+rust_uncertain = rust_late = rust_timeouts = rust_stale = rust_cancelled = rust_refused = UNAVAILABLE
+counter_mismatch = UNAVAILABLE
+go_consumed = go_adjudicated = go_reinjected = go_written = UNAVAILABLE
+rust_written = rust_reinjected = UNAVAILABLE
+
+def parse_status(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except Exception:
+        return None, "s5-status-unreadable"
+    if isinstance(value, dict) and isinstance(value.get("status"), dict):
+        value = value["status"]
+    row = value.get("s5_reinject") if isinstance(value, dict) else None
+    if not isinstance(row, dict):
+        return None, "s5_reinject-status-absent"
+    return row, ""
+
+def parse_metrics(path):
+    samples = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except Exception:
+        return samples
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(
+            r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line
+        )
+        if not match:
+            continue
+        labels = dict(re.findall(
+            r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', match.group(2)
+        ))
+        if all(key in labels for key in ("run_id", "generation", "permit_epoch")):
+            key = (labels["run_id"], labels["generation"], labels["permit_epoch"])
+            samples.setdefault(key, {})[match.group(1)] = match.group(3)
+    return samples
+
+def number(value):
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+# These values are the serialized normalized CaptureOrigin values, not raw
+# nfgenmsg family/hook values.
+families = {1: "inet", 2: "bridge"}
+hooks = {1: "forward", 2: "input"}
+required_status = (
+    "run_id", "generation", "permit_epoch", "completed_written", "reinjected",
+)
+required_go = (
+    "xpf_ipsec_capture_actor_active",
+    "xpf_ipsec_capture_consumed_total",
+    "xpf_ipsec_capture_adjudicated_total",
+    "xpf_ipsec_capture_reinjected_total",
+    "xpf_ipsec_capture_written_total",
+    "xpf_ipsec_capture_uncertain_total",
+    "xpf_ipsec_capture_late_completions_total",
+    "xpf_ipsec_capture_timeouts_total",
+    "xpf_ipsec_capture_stale_total",
+    "xpf_ipsec_capture_cancelled_total",
+    "xpf_ipsec_capture_refused_total",
+)
+
+if status_path and metrics_path:
+    rust, reason = parse_status(status_path)
+    if rust is None:
+        join_reason = reason
+    elif any(key not in rust for key in required_status):
+        join_reason = "s5-status-fields-absent"
+    elif any(
+        not isinstance(rust[key], int) or isinstance(rust[key], bool)
+        for key in ("generation", "permit_epoch")
+    ):
+        join_reason = "s5-status-fields-invalid"
     else:
-        rule_ids.add(queue["num"])
-static = int(static and bool(rule_ids))
-mismatch = int(bool(queue_ids) and not rule_ids.issubset(queue_ids))
+        samples = parse_metrics(metrics_path)
+        key = (str(rust["run_id"]), str(rust["generation"]),
+               str(rust["permit_epoch"]))
+        row = samples.get(key)
+        if row is None:
+            join_reason = "go-rust-join-key-mismatch"
+        elif any(key not in row or number(row.get(key)) is None for key in required_go):
+            join_reason = "go-witness-counters-absent"
+        else:
+            provenance = rust.get("provenance", [])
+            if not isinstance(provenance, list):
+                join_reason = "provenance-malformed"
+            else:
+                join = "joined"
+                join_reason = "witness-joined"
+                current_provenance = []
+                stale_samples = 0
+                malformed_samples = 0
+                current_epoch = rust["permit_epoch"]
+                for candidate in provenance:
+                    if not isinstance(candidate, dict):
+                        malformed_samples += 1
+                    elif (
+                        not isinstance(candidate.get("permit_epoch"), int)
+                        or isinstance(candidate.get("permit_epoch"), bool)
+                    ):
+                        malformed_samples += 1
+                    elif candidate["permit_epoch"] != current_epoch:
+                        stale_samples += 1
+                    else:
+                        current_provenance.append(candidate)
+                packet_samples = len(current_provenance)
+                packet_class_counts = {item: 0 for item in classes}
+                pm = 0
+                bucket_counts = {
+                    "written": 0,
+                    "uncertain": 0,
+                    "late": 0,
+                    "timeouts": 0,
+                    "stale": 0,
+                    "cancelled": 0,
+                    "refused": 0,
+                    "unknown": 0,
+                }
+                pfm = 0
+                for packet in current_provenance:
+                    queue = packet.get("queue_number")
+                    family_raw = packet.get("family")
+                    hook_raw = packet.get("hook")
+                    family = families.get(family_raw) if isinstance(family_raw, int) and not isinstance(family_raw, bool) else None
+                    hook = hooks.get(hook_raw) if isinstance(hook_raw, int) and not isinstance(hook_raw, bool) else None
+                    stn = packet.get("stn")
+                    owner = packet.get("owner")
+                    valid_shape = (
+                        isinstance(queue, int) and not isinstance(queue, bool)
+                        and family is not None and hook is not None
+                        and isinstance(stn, str) and bool(stn)
+                        and isinstance(owner, str) and bool(owner)
+                        and isinstance(packet.get("owned_ifindex"), int)
+                        and not isinstance(packet.get("owned_ifindex"), bool)
+                        and packet.get("owned_ifindex") > 0
+                        and isinstance(packet.get("permit_epoch"), int)
+                        and not isinstance(packet.get("permit_epoch"), bool)
+                        and packet.get("permit_epoch") == current_epoch
+                        and isinstance(packet.get("outcome"), str)
+                        and bool(packet.get("outcome"))
+                    )
+                    if not valid_shape:
+                        pm += 1
+                        continue
+                    outcome = packet["outcome"].lower()
+                    outcome_bucket = {
+                        "written": "written",
+                        "accepted": "uncertain",
+                        "would_reinject": "uncertain",
+                        "uncertain": "uncertain",
+                        "stale": "stale",
+                        "fenced": "stale",
+                        "cancelled": "cancelled",
+                        "canceled": "cancelled",
+                        "refused": "refused",
+                        "denied": "refused",
+                    }.get(outcome, "unknown")
+                    bucket_counts[outcome_bucket] += 1
+                    packet_class_counts[(family, hook)] += 1
+                    expected = rule_map.get(queue)
+                    if expected is None:
+                        pm += 1
+                        continue
+                    expected_family, expected_hook, expected_stn = expected
+                    if (family, hook) != (expected_family, expected_hook):
+                        pfm += 1
+                    if stn != expected_stn:
+                        pm += 1
+                    # The fixture's owner names are vpn9506t<N>, where N is
+                    # the stN unit suffix. A wrong/poison owner is a mismatch.
+                    suffix = expected_stn.rsplit(".", 1)[-1]
+                    if owner != "vpn9506t" + suffix:
+                        pm += 1
+                    if ifindex_check:
+                        if ifindexes.get(expected_stn) != packet.get("owned_ifindex"):
+                            pm += 1
+                rows_if = packet_class_counts[("inet", "forward")]
+                rows_ii = packet_class_counts[("inet", "input")]
+                rows_bf = packet_class_counts[("bridge", "forward")]
+                rows_bi = packet_class_counts[("bridge", "input")]
+                rows_pf_inet = rows_if + rows_ii
+                rows_pf_bridge = rows_bf + rows_bi
+                packet_classes = sum(
+                    1 for item in classes if packet_class_counts[item] > 0
+                )
+                prov_mismatch = pm
+                pf_mismatch = pfm
+                go_consumed = number(row["xpf_ipsec_capture_consumed_total"])
+                go_adjudicated = number(row["xpf_ipsec_capture_adjudicated_total"])
+                go_reinjected = number(row["xpf_ipsec_capture_reinjected_total"])
+                go_written = number(row["xpf_ipsec_capture_written_total"])
+                go_uncertain = number(row["xpf_ipsec_capture_uncertain_total"])
+                go_late = number(row["xpf_ipsec_capture_late_completions_total"])
+                go_timeouts = number(row["xpf_ipsec_capture_timeouts_total"])
+                go_stale = number(row["xpf_ipsec_capture_stale_total"])
+                go_cancelled = number(row["xpf_ipsec_capture_cancelled_total"])
+                go_refused = number(row["xpf_ipsec_capture_refused_total"])
+                rust_written = bucket_counts["written"]
+                rust_uncertain = bucket_counts["uncertain"]
+                rust_late = 0
+                rust_timeouts = 0
+                rust_reinjected = rust_written
+                rust_stale = bucket_counts["stale"]
+                rust_cancelled = bucket_counts["cancelled"]
+                rust_refused = bucket_counts["refused"]
+                counter_mismatch = int(
+                    packet_samples != go_adjudicated
+                    or rust_reinjected != go_reinjected
+                    or rust_written != go_written
+                    or rust_uncertain != go_uncertain
+                    or rust_late != go_late
+                    or rust_timeouts != go_timeouts
+                    or rust_stale != go_stale
+                    or rust_cancelled != go_cancelled
+                    or bucket_counts["unknown"] != 0
+                    or rust_refused != go_refused
+                    or sum(bucket_counts.values()) != packet_samples
+                )
+                if malformed_samples:
+                    # A malformed bounded row cannot establish an exact
+                    # current-epoch witness, even when other rows are valid.
+                    join = UNAVAILABLE
+                    join_reason = "provenance-row-malformed"
+                    packet_samples = UNAVAILABLE
+                    packet_classes = UNAVAILABLE
+                    rows_if = rows_ii = rows_bf = rows_bi = UNAVAILABLE
+                    rows_pf_inet = rows_pf_bridge = UNAVAILABLE
+                    prov_mismatch = pf_mismatch = UNAVAILABLE
+                    counter_mismatch = UNAVAILABLE
+                    go_consumed = go_adjudicated = go_reinjected = go_written = UNAVAILABLE
+                    go_uncertain = go_late = go_timeouts = UNAVAILABLE
+                    go_stale = go_cancelled = go_refused = UNAVAILABLE
+                    rust_written = rust_reinjected = UNAVAILABLE
+                    rust_uncertain = rust_late = rust_timeouts = UNAVAILABLE
+                    rust_stale = rust_cancelled = rust_refused = UNAVAILABLE
+                elif packet_samples == 0 and go_consumed > 0:
+                    # Bounded history may contain only stale permit epochs.
+                    # A positive current-epoch Go count then cannot be joined
+                    # to exact Rust packet metadata.
+                    join = UNAVAILABLE
+                    join_reason = "provenance-epoch-no-current-rows"
+                    packet_samples = UNAVAILABLE
+                    packet_classes = UNAVAILABLE
+                    rows_if = rows_ii = rows_bf = rows_bi = UNAVAILABLE
+                    rows_pf_inet = rows_pf_bridge = UNAVAILABLE
+                    prov_mismatch = pf_mismatch = UNAVAILABLE
+                    counter_mismatch = UNAVAILABLE
+                    go_consumed = go_adjudicated = go_reinjected = go_written = UNAVAILABLE
+                    go_uncertain = go_late = go_timeouts = UNAVAILABLE
+                    go_stale = go_cancelled = go_refused = UNAVAILABLE
+                    rust_written = rust_reinjected = UNAVAILABLE
+                    rust_uncertain = rust_late = rust_timeouts = UNAVAILABLE
+                    rust_stale = rust_cancelled = rust_refused = UNAVAILABLE
+                if not ifindex_check:
+                    # The packet rows and actor counters are real, but the
+                    # required owned-ifindex witness is absent; do not expose
+                    # an exact join or substitute zeroes.
+                    join = UNAVAILABLE
+                    join_reason = "st-links-surface-absent"
+                    packet_samples = UNAVAILABLE
+                    packet_classes = UNAVAILABLE
+                    rows_if = rows_ii = rows_bf = rows_bi = UNAVAILABLE
+                    rows_pf_inet = rows_pf_bridge = UNAVAILABLE
+                    prov_mismatch = pf_mismatch = UNAVAILABLE
+                    counter_mismatch = UNAVAILABLE
+                    go_consumed = go_adjudicated = go_reinjected = go_written = UNAVAILABLE
+                    go_uncertain = go_late = go_timeouts = UNAVAILABLE
+                    go_stale = go_cancelled = go_refused = UNAVAILABLE
+                    rust_written = rust_reinjected = UNAVAILABLE
+                    rust_uncertain = rust_late = rust_timeouts = UNAVAILABLE
+                    rust_stale = rust_cancelled = rust_refused = UNAVAILABLE
+
 print(
-    f"static={static} queue_rows={len(queue_ids)} queue_ids={len(rule_ids)} "
-    f"packet_samples=0 mismatch={mismatch}"
+    f"static={static} queue_rows={queue_rows} queue_ids={len(rule_ids)} "
+    f"packet_samples={packet_samples} stale_samples={stale_samples} "
+    f"malformed_samples={malformed_samples} mismatch={mismatch} join={join} "
+    f"join_reason={join_reason} "
+    f"classes_inet_forward={class_counts[('inet', 'forward')]} "
+    f"classes_inet_input={class_counts[('inet', 'input')]} "
+    f"classes_bridge_forward={class_counts[('bridge', 'forward')]} "
+    f"classes_bridge_input={class_counts[('bridge', 'input')]} "
+    f"provenance_classes={sum(1 for item in classes if class_counts[item] > 0)} "
+    f"pf_inet={class_counts[('inet', 'forward')] + class_counts[('inet', 'input')]} "
+    f"pf_bridge={class_counts[('bridge', 'forward')] + class_counts[('bridge', 'input')]} "
+    f"packet_classes={packet_classes} rows_inet_forward={rows_if} "
+    f"rows_inet_input={rows_ii} rows_bridge_forward={rows_bf} "
+    f"rows_bridge_input={rows_bi} rows_pf_inet={rows_pf_inet} "
+    f"rows_pf_bridge={rows_pf_bridge} prov_mismatch={prov_mismatch} "
+    f"pf_mismatch={pf_mismatch} counter_mismatch={counter_mismatch} "
+    f"go_consumed={go_consumed} go_adjudicated={go_adjudicated} "
+    f"go_reinjected={go_reinjected} go_written={go_written} "
+    f"go_uncertain={go_uncertain} go_late={go_late} "
+    f"go_timeouts={go_timeouts} go_stale={go_stale} "
+    f"go_cancelled={go_cancelled} go_refused={go_refused} "
+    f"rust_written={rust_written} rust_reinjected={rust_reinjected} "
+    f"rust_uncertain={rust_uncertain} rust_late={rust_late} "
+    f"rust_timeouts={rust_timeouts} rust_stale={rust_stale} "
+    f"rust_cancelled={rust_cancelled} rust_refused={rust_refused} "
+    f"ifindex_checked={'1' if ifindex_check else UNAVAILABLE}"
 )
 PY
 }
@@ -668,13 +1046,13 @@ elif mode == "zero":
     print(int(joined and samples[key]["xpf_ipsec_capture_consumed_total"] == 0))
 elif mode == "dispositions":
     names = {
-        "xpf_ipsec_capture_written_total": 4.0,
-        "xpf_ipsec_capture_uncertain_total": 5.0,
-        "xpf_ipsec_capture_late_completions_total": 6.0,
-        "xpf_ipsec_capture_timeouts_total": 7.0,
-        "xpf_ipsec_capture_stale_total": 8.0,
-        "xpf_ipsec_capture_cancelled_total": 9.0,
-        "xpf_ipsec_capture_refused_total": 10.0,
+        "xpf_ipsec_capture_written_total": 3.0,
+        "xpf_ipsec_capture_uncertain_total": 0.0,
+        "xpf_ipsec_capture_late_completions_total": 0.0,
+        "xpf_ipsec_capture_timeouts_total": 0.0,
+        "xpf_ipsec_capture_stale_total": 0.0,
+        "xpf_ipsec_capture_cancelled_total": 0.0,
+        "xpf_ipsec_capture_refused_total": 1.0,
     }
     print(int(joined and all(samples[key].get(name) == value
                              for name, value in names.items())))
@@ -696,18 +1074,60 @@ elif mode in ("delivery", "delivery-positive", "delivery-missing-count",
         print(int(joined and available == 0.0 and count is not None))
 PY
     printf '%s\n' '{}' >"$parser_dir/absent.json"
-    printf '%s\n' '{"s5_reinject":{"run_id":"run-1","generation":4,"permit_epoch":7,"completed_written":3,"delivered_available":true,"delivered":999,"provenance":[{"outcome":"refused"}]}}' >"$parser_dir/witness.json"
+    cat >"$parser_dir/witness.json" <<'EOF'
+{"s5_reinject":{"run_id":"run-1","generation":4,"permit_epoch":7,"completed_written":4,"reinjected":4,"delivered_available":true,"delivered":999,"provenance":[{"request_id":1,"permit_epoch":7,"queue_epoch":1,"queue_number":1000,"family":1,"hook":1,"owned_ifindex":7,"owner":"vpn9506t0","stn":"st9506.0","outcome":"written","bytes_written":84},{"request_id":2,"permit_epoch":7,"queue_epoch":1,"queue_number":1001,"family":1,"hook":2,"owned_ifindex":7,"owner":"vpn9506t0","stn":"st9506.0","outcome":"written","bytes_written":84},{"request_id":3,"permit_epoch":7,"queue_epoch":1,"queue_number":1002,"family":2,"hook":1,"owned_ifindex":8,"owner":"vpn9506t1","stn":"st9506.1","outcome":"written","bytes_written":84},{"request_id":4,"permit_epoch":7,"queue_epoch":1,"queue_number":1003,"family":2,"hook":2,"owned_ifindex":8,"owner":"vpn9506t1","stn":"st9506.1","outcome":"refused","bytes_written":0}]}}
+EOF
+    python3 - "$parser_dir/witness.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["s5_reinject"]["completed_written"] = 3
+value["s5_reinject"]["reinjected"] = 3
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(value, fh)
+PY
     cat >"$parser_dir/witness.prom" <<'EOF'
-xpf_ipsec_capture_consumed_total{run_id="run-1",generation="4",permit_epoch="7"} 0
-xpf_ipsec_capture_written_total{run_id="run-1",generation="4",permit_epoch="7"} 4
-xpf_ipsec_capture_uncertain_total{run_id="run-1",generation="4",permit_epoch="7"} 5
-xpf_ipsec_capture_late_completions_total{run_id="run-1",generation="4",permit_epoch="7"} 6
-xpf_ipsec_capture_timeouts_total{run_id="run-1",generation="4",permit_epoch="7"} 7
-xpf_ipsec_capture_stale_total{run_id="run-1",generation="4",permit_epoch="7"} 8
-xpf_ipsec_capture_cancelled_total{run_id="run-1",generation="4",permit_epoch="7"} 9
-xpf_ipsec_capture_refused_total{run_id="run-1",generation="4",permit_epoch="7"} 10
+xpf_ipsec_capture_actor_active{run_id="run-1",generation="4",permit_epoch="7"} 1
+xpf_ipsec_capture_consumed_total{run_id="run-1",generation="4",permit_epoch="7"} 4
+xpf_ipsec_capture_adjudicated_total{run_id="run-1",generation="4",permit_epoch="7"} 4
+xpf_ipsec_capture_reinjected_total{run_id="run-1",generation="4",permit_epoch="7"} 3
+xpf_ipsec_capture_written_total{run_id="run-1",generation="4",permit_epoch="7"} 3
+xpf_ipsec_capture_uncertain_total{run_id="run-1",generation="4",permit_epoch="7"} 0
+xpf_ipsec_capture_late_completions_total{run_id="run-1",generation="4",permit_epoch="7"} 0
+xpf_ipsec_capture_timeouts_total{run_id="run-1",generation="4",permit_epoch="7"} 0
+xpf_ipsec_capture_stale_total{run_id="run-1",generation="4",permit_epoch="7"} 0
+xpf_ipsec_capture_cancelled_total{run_id="run-1",generation="4",permit_epoch="7"} 0
+xpf_ipsec_capture_refused_total{run_id="run-1",generation="4",permit_epoch="7"} 1
 xpf_ipsec_capture_delivered_available{run_id="run-1",generation="4",permit_epoch="7"} 0
 EOF
+    python3 - "$parser_dir/witness.prom" "$parser_dir/witness-zero.prom" <<'PY'
+import sys
+source, target = sys.argv[1:]
+lines = open(source, encoding="utf-8").read().splitlines()
+for index, line in enumerate(lines):
+    if line.startswith("xpf_ipsec_capture_") and "_total{" in line:
+        lines[index] = line.rsplit(" ", 1)[0] + " 0"
+with open(target, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+PY
+    python3 - "$parser_dir/witness.prom" "$parser_dir/witness-alias.prom" <<'PY'
+import sys
+source, target = sys.argv[1:]
+values = {
+    "xpf_ipsec_capture_reinjected_total": "1",
+    "xpf_ipsec_capture_written_total": "1",
+    "xpf_ipsec_capture_uncertain_total": "2",
+}
+lines = []
+for line in open(source, encoding="utf-8"):
+    name = line.split("{", 1)[0]
+    if name in values:
+        line = line.rsplit(" ", 1)[0] + " " + values[name] + "\n"
+    lines.append(line)
+with open(target, "w", encoding="utf-8") as fh:
+    fh.writelines(lines)
+PY
     printf '%s\n' \
         'xpf_ipsec_capture_delivered_available{run_id="run-1",generation="4",permit_epoch="7"} 1' \
         'xpf_ipsec_capture_delivered_total{run_id="run-1",generation="4",permit_epoch="7"} 11' \
@@ -723,7 +1143,7 @@ EOF
     expect "absent S5 status stays unavailable" "0" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/absent.json" "$parser_dir/witness.prom" absent)"
     expect "present zero counter stays authoritative zero" "1" \
-        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" zero)"
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-zero.prom" zero)"
     expect "join mismatch stays unavailable" "0" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-mismatch.prom" join)"
     expect "Go availability zero requires omitted delivered count" "1" \
@@ -752,6 +1172,75 @@ EOF
 {"chain":{"family":"bridge","table":"xpf_ipsec_divert","name":"input","hook":"input","prio":-175,"policy":"accept"}}
 ]}
 EOF
+    cat >"$parser_dir/provenance-rules.json" <<'EOF'
+{"nftables":[
+{"rule":{"family":"inet","table":"xpf_ipsec_divert","chain":"forward","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"st9506.0"}},{"queue":{"num":1000}}]}},
+{"rule":{"family":"inet","table":"xpf_ipsec_divert","chain":"input","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"st9506.0"}},{"queue":{"num":1001}}]}},
+{"rule":{"family":"bridge","table":"xpf_ipsec_divert","chain":"forward","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"st9506.1"}},{"queue":{"num":1002}}]}},
+{"rule":{"family":"bridge","table":"xpf_ipsec_divert","chain":"input","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"st9506.1"}},{"queue":{"num":1003}}]}}
+]}
+EOF
+    printf '%s\n' \
+        '1000 0 0 0 0 0' '1001 0 0 0 0 0' \
+        '1002 0 0 0 0 0' '1003 0 0 0 0 0' \
+        >"$parser_dir/provenance-nfqueue.txt"
+    printf '%s\n' '7: st9506.0@NONE:' '8: st9506.1@NONE:' \
+        >"$parser_dir/provenance-st-links.txt"
+    python3 - "$parser_dir/witness.json" "$parser_dir/zero-status.json" \
+        "$parser_dir/no-rows-status.json" "$parser_dir/poison-status.json" \
+        "$parser_dir/malformed-status.json" "$parser_dir/mixed-status.json" \
+        "$parser_dir/bool-status.json" "$parser_dir/alias-status.json" <<'PY'
+import copy
+import json
+import sys
+base = json.load(open(sys.argv[1], encoding="utf-8"))
+zero = copy.deepcopy(base)
+del zero["s5_reinject"]["provenance"]
+no_rows = copy.deepcopy(base)
+no_rows["s5_reinject"]["provenance"] = []
+poison = copy.deepcopy(base)
+poison["s5_reinject"]["provenance"][0]["family"] = 2
+poison["s5_reinject"]["provenance"][0]["owner"] = "poison"
+malformed = copy.deepcopy(base)
+malformed["s5_reinject"]["provenance"] = {"poison": True}
+mixed = copy.deepcopy(base)
+mixed["s5_reinject"]["provenance"][0]["permit_epoch"] = 6
+mixed["s5_reinject"]["provenance"].append(
+    copy.deepcopy(base["s5_reinject"]["provenance"][0])
+)
+mixed["s5_reinject"]["completed_written"] = 99
+mixed["s5_reinject"]["reinjected"] = 99
+bool_status = copy.deepcopy(base)
+bool_status["s5_reinject"]["provenance"][0]["family"] = True
+bool_status["s5_reinject"]["provenance"][1]["hook"] = True
+alias_status = copy.deepcopy(base)
+alias_status["s5_reinject"]["provenance"][0]["outcome"] = "accepted"
+alias_status["s5_reinject"]["provenance"][1]["outcome"] = "would_reinject"
+alias_status["s5_reinject"]["provenance"][2]["outcome"] = "written"
+alias_status["s5_reinject"]["provenance"][3]["outcome"] = "refused"
+for path, value in zip(sys.argv[2:], (
+    zero, no_rows, poison, malformed, mixed, bool_status, alias_status
+)):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(value, fh)
+PY
+    python3 - "$parser_dir/provenance-rules.json" \
+        "$parser_dir/poison-rules.json" "$parser_dir/unknown-rules.json" <<'PY'
+import copy
+import json
+import sys
+rules = json.load(open(sys.argv[1], encoding="utf-8"))
+poison = copy.deepcopy(rules)
+poison["nftables"][0]["rule"]["expr"][0]["match"]["op"] = "!="
+unknown = copy.deepcopy(rules)
+unknown["nftables"][0]["rule"]["chain"] = "bogus"
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    json.dump(poison, fh)
+with open(sys.argv[3], "w", encoding="utf-8") as fh:
+    json.dump(unknown, fh)
+PY
+    sed 's/run-1/run-other/g' "$parser_dir/witness.prom" \
+        >"$parser_dir/join-mismatch.prom"
     printf '%s\n' '{"nftables":[{"table":{"family":"inet","name":"xpf_transit_barrier"}}]}' \
         >"$parser_dir/missing-bridge.json"
     printf '%s\n' '{}' >"$parser_dir/missing-list.json"
@@ -776,11 +1265,134 @@ EOF
     printf '%s\n' '1094 0 0 0 0 0' >"$parser_dir/nfqueue.txt"
     expect "observer ruleset parser reports structural-only positive" "1 0 0 1 0" \
         "$(observe_ruleset_shape "$parser_dir/positive.json")"
-    expect "observer provenance parser reports static mapping without packets" \
-        "static=0 queue_rows=1 queue_ids=0 packet_samples=0 mismatch=0" \
-        "$(observe_provenance_metadata "$parser_dir/positive.json" "$parser_dir/nfqueue.txt")"
+    PROV_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/witness.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "exact observer joins Rust rows to Go counters" "joined" \
+        "$(observer_field "$PROV_OBS" join)"
+    expect "exact observer sees four packet samples" "4" \
+        "$(observer_field "$PROV_OBS" packet_samples)"
+    expect "four ruleset provenance classes are parsed" "4" \
+        "$(observer_field "$PROV_OBS" provenance_classes)"
+    expect "inet PF-family rule count is exact" "2" \
+        "$(observer_field "$PROV_OBS" pf_inet)"
+    expect "bridge PF-family rule count is exact" "2" \
+        "$(observer_field "$PROV_OBS" pf_bridge)"
+    expect "inet forward packet class row binds exactly" "1" \
+        "$(observer_field "$PROV_OBS" rows_inet_forward)"
+    expect "inet input packet class is parsed" "1" \
+        "$(observer_field "$PROV_OBS" rows_inet_input)"
+    expect "bridge forward packet class is parsed" "1" \
+        "$(observer_field "$PROV_OBS" rows_bridge_forward)"
+    expect "bridge input packet class is parsed" "1" \
+        "$(observer_field "$PROV_OBS" rows_bridge_input)"
+    expect "packet provenance has no rule mismatch" "0" \
+        "$(observer_field "$PROV_OBS" prov_mismatch)"
+    expect "packet PF-family has no mismatch" "0" \
+        "$(observer_field "$PROV_OBS" pf_mismatch)"
+    expect "Rust and Go written counters agree" "0" \
+        "$(observer_field "$PROV_OBS" counter_mismatch)"
+    MIXED_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/mixed-status.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "mixed epochs retain current packet rows only" "4" \
+        "$(observer_field "$MIXED_OBS" packet_samples)"
+    expect "mixed epochs expose stale row count" "1" \
+        "$(observer_field "$MIXED_OBS" stale_samples)"
+    expect "mixed epochs preserve counter agreement" "0" \
+        "$(observer_field "$MIXED_OBS" counter_mismatch)"
+    RULE_POISON_OBS="$(observe_provenance_metadata \
+        "$parser_dir/poison-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/witness.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    UNKNOWN_RULE_OBS="$(observe_provenance_metadata \
+        "$parser_dir/unknown-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/witness.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "poisoned operator and unknown class disable static map" "0 0" \
+        "$(printf '%s %s' "$(observer_field "$RULE_POISON_OBS" static)" \
+            "$(observer_field "$UNKNOWN_RULE_OBS" static)")"
+    BOOL_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/bool-status.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "boolean family and hook metadata is rejected" "2" \
+        "$(observer_field "$BOOL_OBS" prov_mismatch)"
+    ALIAS_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/alias-status.json" "$parser_dir/witness-alias.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "accepted and would_reinject map to uncertain" "0 2" \
+        "$(printf '%s %s' "$(observer_field "$ALIAS_OBS" counter_mismatch)" \
+            "$(observer_field "$ALIAS_OBS" rust_uncertain)")"
+    ABSENT_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/absent.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "absent Rust status stays unavailable" "unavailable" \
+        "$(observer_field "$ABSENT_OBS" packet_samples)"
+    expect "absent Rust status does not fabricate join" "unavailable" \
+        "$(observer_field "$ABSENT_OBS" join)"
+    OMITTED_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/zero-status.json" "$parser_dir/witness-zero.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "omitted provenance vector is authoritative zero" "0" \
+        "$(observer_field "$OMITTED_OBS" packet_samples)"
+    expect "omitted provenance vector remains joined with zero counters" "joined 0" \
+        "$(printf '%s %s' "$(observer_field "$OMITTED_OBS" join)" \
+            "$(observer_field "$OMITTED_OBS" counter_mismatch)")"
+    PRESENT_EMPTY_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/no-rows-status.json" "$parser_dir/witness-zero.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "present empty provenance is authoritative zero" "0" \
+        "$(observer_field "$PRESENT_EMPTY_OBS" packet_samples)"
+    expect "present empty provenance remains joined with zero counters" "joined 0" \
+        "$(printf '%s %s' "$(observer_field "$PRESENT_EMPTY_OBS" join)" \
+            "$(observer_field "$PRESENT_EMPTY_OBS" counter_mismatch)")"
+    NFQ_MISSING_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" \
+        "$parser_dir/no-such-nfqueue.txt" "$parser_dir/witness.json" \
+        "$parser_dir/witness.prom" "$parser_dir/provenance-st-links.txt")"
+    expect "missing nfqueue surface stays unavailable" "unavailable" \
+        "$(observer_field "$NFQ_MISSING_OBS" queue_rows)"
+    expect "missing nfqueue mismatch stays unavailable" "unavailable" \
+        "$(observer_field "$NFQ_MISSING_OBS" mismatch)"
+    STLINK_MISSING_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/witness.json" "$parser_dir/witness.prom" \
+        "$parser_dir/no-such-st-links.txt")"
+    expect "missing st-links surface stays packet-unavailable" "unavailable" \
+        "$(observer_field "$STLINK_MISSING_OBS" packet_samples)"
+    expect "missing st-links reason is explicit" "st-links-surface-absent" \
+        "$(observer_field "$STLINK_MISSING_OBS" join_reason)"
+    POISON_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/poison-status.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "poison family/owner metadata is rejected" "1" \
+        "$(observer_field "$POISON_OBS" prov_mismatch)"
+    expect "poison PF family is rejected" "1" \
+        "$(observer_field "$POISON_OBS" pf_mismatch)"
+    MISMATCH_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/witness.json" "$parser_dir/join-mismatch.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "join-key mismatch stays packet-unavailable" "unavailable" \
+        "$(observer_field "$MISMATCH_OBS" packet_samples)"
+    expect "join-key mismatch is named" "go-rust-join-key-mismatch" \
+        "$(observer_field "$MISMATCH_OBS" join_reason)"
+    MALFORMED_OBS="$(observe_provenance_metadata \
+        "$parser_dir/provenance-rules.json" "$parser_dir/provenance-nfqueue.txt" \
+        "$parser_dir/malformed-status.json" "$parser_dir/witness.prom" \
+        "$parser_dir/provenance-st-links.txt")"
+    expect "malformed provenance stays unavailable" "unavailable" \
+        "$(observer_field "$MALFORMED_OBS" packet_samples)"
     rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 31 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 63 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -950,8 +1562,8 @@ run_fixture_measure() {
     MEASURE_DELIVERED_FW1=0
     MEASURE_REASON_FW0=product-observer-unavailable:s5-status-or-go-metrics-absent
     MEASURE_REASON_FW1=product-observer-unavailable:s5-status-or-go-metrics-absent
-    MEASURE_PROVENANCE_FW0="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
-    MEASURE_PROVENANCE_FW1="static=0 queue_rows=0 queue_ids=0 packet_samples=0 mismatch=0"
+    MEASURE_PROVENANCE_FW0="static=0 queue_rows=0 queue_ids=0 packet_samples=unavailable mismatch=0 join=unavailable join_reason=inputs-absent"
+    MEASURE_PROVENANCE_FW1="$MEASURE_PROVENANCE_FW0"
     MEASURE_QUEUE_ECON_FW0="queue_instances=0 recv_buffers_mib=unknown socket_buffers_mib=unknown fd_count=0 queue_pending=0 queue_drops=0 rotation_overlap=unknown teardown=unknown"
     MEASURE_QUEUE_ECON_FW1="$MEASURE_QUEUE_ECON_FW0"
     if [[ "$FIXTURE_PHASE_BLOCKED" == 1 || "$ACTIVE_FIXTURE_SETUP" == 1 ]]; then
@@ -1026,6 +1638,16 @@ run_fixture_measure() {
     MEASURE_REASON_FW1="$RUNTIME_REASON"
     observe_chain_overhead "$FIX9506_NODE0" "$dir" measure-fw0-post
     observe_chain_overhead "$FIX9506_NODE1" "$dir" measure-fw1-post
+    # The pre-traffic read proves only static shape. Re-read after traffic so
+    # bounded Rust rows and Go counters are joined for the exact workload.
+    MEASURE_PROVENANCE_FW0="$(observe_provenance_metadata \
+        "$dir/measure-fw0-ruleset.json" "$dir/measure-fw0-nfqueue.txt" \
+        "$dir/measure-fw0-post-status.json" "$dir/measure-fw0-post-metrics.prom" \
+        "$dir/measure-fw0-st-links.txt")"
+    MEASURE_PROVENANCE_FW1="$(observe_provenance_metadata \
+        "$dir/measure-fw1-ruleset.json" "$dir/measure-fw1-nfqueue.txt" \
+        "$dir/measure-fw1-post-status.json" "$dir/measure-fw1-post-metrics.prom" \
+        "$dir/measure-fw1-st-links.txt")"
     if fix9506_teardown "$count" "$dir"; then
         MEASURE_TEARDOWN=1
         ACTIVE_FIXTURE_SETUP=0
@@ -1221,8 +1843,14 @@ T12_DIVERT_LISTENERS_FW1="$(sed -n 's/^listener_unix=//p' "$T12_OVERHEAD_FW1_PRE
 [[ "$T12_DIVERT_LISTENERS_FW1" =~ ^[0-9]+$ ]] || T12_DIVERT_LISTENERS_FW1=0
 observe_vrf_scope "$NODE0" "$ARCHIVE_DIR" t12-fw0
 observe_vrf_scope "$NODE1" "$ARCHIVE_DIR" t12-fw1
-T12_PROVENANCE_FW0="$(observe_provenance_metadata "$ARCHIVE_DIR/fw0-ruleset.json" "$T12_FIXTURE_DIR/fw0-nfqueue.txt")"
-T12_PROVENANCE_FW1="$(observe_provenance_metadata "$ARCHIVE_DIR/fw1-ruleset.json" "$T12_FIXTURE_DIR/fw1-nfqueue.txt")"
+T12_PROVENANCE_FW0="$(observe_provenance_metadata \
+    "$ARCHIVE_DIR/fw0-ruleset.json" "$T12_FIXTURE_DIR/fw0-nfqueue.txt" \
+    "$ARCHIVE_DIR/t12-fw0-pre-status.json" "$ARCHIVE_DIR/t12-fw0-pre-metrics.prom" \
+    "$ARCHIVE_DIR/fw0-st-links.txt")"
+T12_PROVENANCE_FW1="$(observe_provenance_metadata \
+    "$ARCHIVE_DIR/fw1-ruleset.json" "$T12_FIXTURE_DIR/fw1-nfqueue.txt" \
+    "$ARCHIVE_DIR/t12-fw1-pre-status.json" "$ARCHIVE_DIR/t12-fw1-pre-metrics.prom" \
+    "$ARCHIVE_DIR/fw1-st-links.txt")"
 T12_QUEUE_ECON_FW0="$(observe_queue_economics "$ARCHIVE_DIR/fw0-ruleset.json" "$T12_RUNTIME_FW0_PRE" "$T12_FIXTURE_DIR/fw0-nfqueue.txt")"
 T12_QUEUE_ECON_FW1="$(observe_queue_economics "$ARCHIVE_DIR/fw1-ruleset.json" "$T12_RUNTIME_FW1_PRE" "$T12_FIXTURE_DIR/fw1-nfqueue.txt")"
 printf 'T12_G2_OBSERVERS fence_structural=%s divert_structural=%s order_structural=%s fence_exact=0 divert_exact=0 order_exact=0 fw0_provenance="%s" fw1_provenance="%s" fw0_queue_economics="%s" fw1_queue_economics="%s"\n' \
@@ -1236,6 +1864,30 @@ T12_PROV_PACKET_SAMPLES_FW0="$(observer_field "$T12_PROVENANCE_FW0" packet_sampl
 T12_PROV_PACKET_SAMPLES_FW1="$(observer_field "$T12_PROVENANCE_FW1" packet_samples)"
 T12_PROV_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" mismatch)"
 T12_PROV_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" mismatch)"
+T12_PROV_JOIN_FW0="$(observer_field "$T12_PROVENANCE_FW0" join)"
+T12_PROV_JOIN_FW1="$(observer_field "$T12_PROVENANCE_FW1" join)"
+T12_PROV_CLASSES_FW0="$(observer_field "$T12_PROVENANCE_FW0" provenance_classes)"
+T12_PROV_CLASSES_FW1="$(observer_field "$T12_PROVENANCE_FW1" provenance_classes)"
+T12_PROV_PF_INET_FW0="$(observer_field "$T12_PROVENANCE_FW0" pf_inet)"
+T12_PROV_PF_INET_FW1="$(observer_field "$T12_PROVENANCE_FW1" pf_inet)"
+T12_PROV_PF_BRIDGE_FW0="$(observer_field "$T12_PROVENANCE_FW0" pf_bridge)"
+T12_PROV_PF_BRIDGE_FW1="$(observer_field "$T12_PROVENANCE_FW1" pf_bridge)"
+T12_PROV_PACKET_CLASSES_FW0="$(observer_field "$T12_PROVENANCE_FW0" packet_classes)"
+T12_PROV_PACKET_CLASSES_FW1="$(observer_field "$T12_PROVENANCE_FW1" packet_classes)"
+T12_PROV_ROWS_IF_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_inet_forward)"
+T12_PROV_ROWS_IF_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_inet_forward)"
+T12_PROV_ROWS_II_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_inet_input)"
+T12_PROV_ROWS_II_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_inet_input)"
+T12_PROV_ROWS_BF_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_bridge_forward)"
+T12_PROV_ROWS_BF_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_bridge_forward)"
+T12_PROV_ROWS_BI_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_bridge_input)"
+T12_PROV_ROWS_BI_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_bridge_input)"
+T12_PROV_PF_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" pf_mismatch)"
+T12_PROV_PF_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" pf_mismatch)"
+T12_PROV_COUNTER_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" counter_mismatch)"
+T12_PROV_PACKET_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" prov_mismatch)"
+T12_PROV_PACKET_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" prov_mismatch)"
+T12_PROV_COUNTER_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" counter_mismatch)"
 T12_QUEUE_INSTANCES_FW0="$(observer_field "$T12_QUEUE_ECON_FW0" queue_instances)"
 T12_QUEUE_INSTANCES_FW1="$(observer_field "$T12_QUEUE_ECON_FW1" queue_instances)"
 T12_QUEUE_FDS_FW0="$(observer_field "$T12_QUEUE_ECON_FW0" fd_count)"
@@ -1344,6 +1996,51 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     T12_REINJECTED_FW1="$RUNTIME_REINJECTED"
     T12_WRITTEN_FW1="$RUNTIME_WRITTEN"
     T12_UNCERTAIN_FW1="$RUNTIME_UNCERTAIN"
+    # Re-read provenance after traffic and the post-traffic actor snapshot.
+    # The pre-read above remains useful as the static baseline but cannot
+    # claim packet rows that did not yet exist.
+    T12_PROVENANCE_FW0="$(observe_provenance_metadata \
+        "$ARCHIVE_DIR/fw0-ruleset.json" "$T12_FIXTURE_DIR/fw0-nfqueue.txt" \
+        "$T12_STATUS_FW0_POST" "$T12_METRICS_FW0_POST" \
+        "$T12_FIXTURE_DIR/fw0-st-links.txt")"
+    T12_PROVENANCE_FW1="$(observe_provenance_metadata \
+        "$ARCHIVE_DIR/fw1-ruleset.json" "$T12_FIXTURE_DIR/fw1-nfqueue.txt" \
+        "$T12_STATUS_FW1_POST" "$T12_METRICS_FW1_POST" \
+        "$T12_FIXTURE_DIR/fw1-st-links.txt")"
+    T12_PROV_STATIC_FW0="$(observer_field "$T12_PROVENANCE_FW0" static)"
+    T12_PROV_STATIC_FW1="$(observer_field "$T12_PROVENANCE_FW1" static)"
+    T12_PROV_QUEUE_ROWS_FW0="$(observer_field "$T12_PROVENANCE_FW0" queue_rows)"
+    T12_PROV_QUEUE_ROWS_FW1="$(observer_field "$T12_PROVENANCE_FW1" queue_rows)"
+    T12_PROV_PACKET_SAMPLES_FW0="$(observer_field "$T12_PROVENANCE_FW0" packet_samples)"
+    T12_PROV_PACKET_SAMPLES_FW1="$(observer_field "$T12_PROVENANCE_FW1" packet_samples)"
+    T12_PROV_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" mismatch)"
+    T12_PROV_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" mismatch)"
+    T12_PROV_JOIN_FW0="$(observer_field "$T12_PROVENANCE_FW0" join)"
+    T12_PROV_JOIN_FW1="$(observer_field "$T12_PROVENANCE_FW1" join)"
+    T12_PROV_CLASSES_FW0="$(observer_field "$T12_PROVENANCE_FW0" provenance_classes)"
+    T12_PROV_CLASSES_FW1="$(observer_field "$T12_PROVENANCE_FW1" provenance_classes)"
+    T12_PROV_PF_INET_FW0="$(observer_field "$T12_PROVENANCE_FW0" pf_inet)"
+    T12_PROV_PF_INET_FW1="$(observer_field "$T12_PROVENANCE_FW1" pf_inet)"
+    T12_PROV_PF_BRIDGE_FW0="$(observer_field "$T12_PROVENANCE_FW0" pf_bridge)"
+    T12_PROV_PF_BRIDGE_FW1="$(observer_field "$T12_PROVENANCE_FW1" pf_bridge)"
+    T12_PROV_PACKET_CLASSES_FW0="$(observer_field "$T12_PROVENANCE_FW0" packet_classes)"
+    T12_PROV_PACKET_CLASSES_FW1="$(observer_field "$T12_PROVENANCE_FW1" packet_classes)"
+    T12_PROV_ROWS_IF_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_inet_forward)"
+    T12_PROV_ROWS_IF_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_inet_forward)"
+    T12_PROV_ROWS_II_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_inet_input)"
+    T12_PROV_ROWS_II_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_inet_input)"
+    T12_PROV_ROWS_BF_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_bridge_forward)"
+    T12_PROV_ROWS_BF_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_bridge_forward)"
+    T12_PROV_ROWS_BI_FW0="$(observer_field "$T12_PROVENANCE_FW0" rows_bridge_input)"
+    T12_PROV_ROWS_BI_FW1="$(observer_field "$T12_PROVENANCE_FW1" rows_bridge_input)"
+    T12_PROV_PF_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" pf_mismatch)"
+    T12_PROV_PF_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" pf_mismatch)"
+    T12_PROV_PACKET_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" prov_mismatch)"
+    T12_PROV_PACKET_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" prov_mismatch)"
+    T12_PROV_COUNTER_MISMATCH_FW0="$(observer_field "$T12_PROVENANCE_FW0" counter_mismatch)"
+    T12_PROV_COUNTER_MISMATCH_FW1="$(observer_field "$T12_PROVENANCE_FW1" counter_mismatch)"
+    printf 'T12_G2_PROVENANCE_EXACT fw0="%s" fw1="%s"\n' \
+        "$T12_PROVENANCE_FW0" "$T12_PROVENANCE_FW1"
     T12_LATE_COMPLETIONS_FW1="$RUNTIME_LATE_COMPLETIONS"
     T12_TIMEOUTS_FW1="$RUNTIME_TIMEOUTS"
     T12_STALE_FW1="$RUNTIME_STALE"
@@ -1462,10 +2159,21 @@ emit_cell t12_9506_coexistence_order 'r6 §5.2.3' 'both-family divert priority p
     "structural divert order=$T12_STATIC_ORDER; exact same-priority-chain absence and mixed OPEN generation were not observed" VOID \
     "measurement-incomplete:exact-order-and-permit-observer-unavailable" \
     "cell_failed=1 inet_order_structural=$T12_STATIC_ORDER bridge_order_structural=$T12_STATIC_ORDER mixed_open=0 rotation_budget_ms=0"
+T12_PROV_METRICS="cell_failed=1 packets=$T12_TRAFFIC_PACKETS provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_rule_classes_fw0=$T12_PROV_CLASSES_FW0 provenance_rule_classes_fw1=$T12_PROV_CLASSES_FW1 pf_rules_inet_fw0=$T12_PROV_PF_INET_FW0 pf_rules_inet_fw1=$T12_PROV_PF_INET_FW1 pf_rules_bridge_fw0=$T12_PROV_PF_BRIDGE_FW0 pf_rules_bridge_fw1=$T12_PROV_PF_BRIDGE_FW1"
+if [[ "$T12_PROV_JOIN_FW0" == joined ]]; then
+    T12_PROV_METRICS+=" packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_classes_fw0=$T12_PROV_PACKET_CLASSES_FW0 rows_if_fw0=$T12_PROV_ROWS_IF_FW0 rows_ii_fw0=$T12_PROV_ROWS_II_FW0 rows_bf_fw0=$T12_PROV_ROWS_BF_FW0 rows_bi_fw0=$T12_PROV_ROWS_BI_FW0 packet_mismatch_fw0=$T12_PROV_PACKET_MISMATCH_FW0 pf_mismatch_fw0=$T12_PROV_PF_MISMATCH_FW0 counter_mismatch_fw0=$T12_PROV_COUNTER_MISMATCH_FW0 go_consumed_fw0=$T12_CONSUMED_FW0 go_adjudicated_fw0=$T12_ADJUDICATED_FW0 go_reinjected_fw0=$T12_REINJECTED_FW0 go_written_fw0=$T12_WRITTEN_FW0"
+fi
+if [[ "$T12_PROV_JOIN_FW1" == joined ]]; then
+    T12_PROV_METRICS+=" packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 packet_classes_fw1=$T12_PROV_PACKET_CLASSES_FW1 rows_if_fw1=$T12_PROV_ROWS_IF_FW1 rows_ii_fw1=$T12_PROV_ROWS_II_FW1 rows_bf_fw1=$T12_PROV_ROWS_BF_FW1 rows_bi_fw1=$T12_PROV_ROWS_BI_FW1 packet_mismatch_fw1=$T12_PROV_PACKET_MISMATCH_FW1 pf_mismatch_fw1=$T12_PROV_PF_MISMATCH_FW1 counter_mismatch_fw1=$T12_PROV_COUNTER_MISMATCH_FW1 go_consumed_fw1=$T12_CONSUMED_FW1 go_adjudicated_fw1=$T12_ADJUDICATED_FW1 go_reinjected_fw1=$T12_REINJECTED_FW1 go_written_fw1=$T12_WRITTEN_FW1"
+fi
+T12_PROV_REASON="measurement-incomplete:verdict-flip-owned-by-v-flip"
+if [[ "$T12_PROV_JOIN_FW0" != joined || "$T12_PROV_JOIN_FW1" != joined ]]; then
+    T12_PROV_REASON="product-observer-unavailable:fw0=${T12_REASON_FW0};fw1=${T12_REASON_FW1}"
+fi
 emit_cell t12_9506_provenance_metadata 'r6 §5.2.3-§5.2.4' 'queue-id, nfgen_family, hook, ifindex, owner and stN agree for every packet' \
-    "static queue map fw0=$T12_PROVENANCE_FW0 fw1=$T12_PROVENANCE_FW1; fw0_s5_available=$T12_S5_FW0 fw1_s5_available=$T12_S5_FW1 actor counters are observational only" VOID \
-    "product-observer-unavailable:fw0=${T12_REASON_FW0};fw1=${T12_REASON_FW1};2b-attestation-required" \
-    "cell_failed=1 packets=0 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_mismatch_fw0=$T12_PROV_MISMATCH_FW0 provenance_mismatch_fw1=$T12_PROV_MISMATCH_FW1 queue_rows_fw0=$T12_PROV_QUEUE_ROWS_FW0 queue_rows_fw1=$T12_PROV_QUEUE_ROWS_FW1 fw0_consumed=$T12_CONSUMED_FW0 fw1_consumed=$T12_CONSUMED_FW1 fw0_adjudicated=$T12_ADJUDICATED_FW0 fw1_adjudicated=$T12_ADJUDICATED_FW1 fw0_reinjected=$T12_REINJECTED_FW0 fw1_reinjected=$T12_REINJECTED_FW1 fw0_written=$T12_WRITTEN_FW0 fw1_written=$T12_WRITTEN_FW1 fw0_uncertain=$T12_UNCERTAIN_FW0 fw1_uncertain=$T12_UNCERTAIN_FW1 fw0_late_completions=$T12_LATE_COMPLETIONS_FW0 fw1_late_completions=$T12_LATE_COMPLETIONS_FW1 fw0_timeouts=$T12_TIMEOUTS_FW0 fw1_timeouts=$T12_TIMEOUTS_FW1 fw0_stale=$T12_STALE_FW0 fw1_stale=$T12_STALE_FW1 fw0_cancelled=$T12_CANCELLED_FW0 fw1_cancelled=$T12_CANCELLED_FW1 fw0_refused=$T12_REFUSED_FW0 fw1_refused=$T12_REFUSED_FW1 fw0_delivered_available=$T12_DELIVERED_AVAILABLE_FW0 fw1_delivered_available=$T12_DELIVERED_AVAILABLE_FW1"
+    "ruleset_classes_fw0=$T12_PROV_CLASSES_FW0/$T12_PROV_PF_INET_FW0/$T12_PROV_PF_BRIDGE_FW0 ruleset_classes_fw1=$T12_PROV_CLASSES_FW1/$T12_PROV_PF_INET_FW1/$T12_PROV_PF_BRIDGE_FW1 join_fw0=$T12_PROV_JOIN_FW0 join_fw1=$T12_PROV_JOIN_FW1 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 packet_classes_fw0=$T12_PROV_PACKET_CLASSES_FW0 packet_classes_fw1=$T12_PROV_PACKET_CLASSES_FW1 rows_fw0=$T12_PROV_ROWS_IF_FW0/$T12_PROV_ROWS_II_FW0/$T12_PROV_ROWS_BF_FW0/$T12_PROV_ROWS_BI_FW0 rows_fw1=$T12_PROV_ROWS_IF_FW1/$T12_PROV_ROWS_II_FW1/$T12_PROV_ROWS_BF_FW1/$T12_PROV_ROWS_BI_FW1 packet_mismatch_fw0=$T12_PROV_PACKET_MISMATCH_FW0 packet_mismatch_fw1=$T12_PROV_PACKET_MISMATCH_FW1 pf_mismatch_fw0=$T12_PROV_PF_MISMATCH_FW0 pf_mismatch_fw1=$T12_PROV_PF_MISMATCH_FW1 counter_mismatch_fw0=$T12_PROV_COUNTER_MISMATCH_FW0 counter_mismatch_fw1=$T12_PROV_COUNTER_MISMATCH_FW1 fw0_reason=$T12_REASON_FW0 fw1_reason=$T12_REASON_FW1" VOID \
+    "$T12_PROV_REASON" \
+    "$T12_PROV_METRICS"
 emit_cell t12_9506_ifindex_recreate 'r6 §5.2.3-§5.2.4' 'device delete/recreate/name reuse with changed ifindex drops and counts' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 delete_recreate=0 changed_ifindex=0 mismatch_drop=0"
 
