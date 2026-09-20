@@ -88,6 +88,19 @@ both_nodes_present() {
     [[ "$1" == 1 && "$2" == 1 ]]
 }
 
+# The original discrimination probe exercised only inner index 0, which is
+# even and therefore RG1/node0.  That made fw1's zero counters a fixture-path
+# observation rather than an H1 feed diagnosis.  The live probe must exercise
+# both an even and odd tunnel index, in both decrypted directions, and retain
+# per-node offered deltas.
+fixture_probe_indices() {
+    printf '0\n1\n'
+}
+
+fixture_probe_directions() {
+    printf 'lan-to-peer\npeer-to-lan\n'
+}
+
 # ---- r6 observer inventory -------------------------------------------------
 # The fixture already proves that nft diversion and NFQUEUE handles exist.
 # These observers keep the stronger claims separate:
@@ -343,6 +356,13 @@ cat /proc/net/netlink 2>&1' >"$proc" 2>&1 || :
     RUNTIME_CONSUMED=0
     RUNTIME_ADJUDICATED=0
     RUNTIME_REINJECTED=0
+    RUNTIME_WRITTEN=0
+    RUNTIME_UNCERTAIN=0
+    RUNTIME_LATE_COMPLETIONS=0
+    RUNTIME_TIMEOUTS=0
+    RUNTIME_STALE=0
+    RUNTIME_CANCELLED=0
+    RUNTIME_REFUSED=0
     RUNTIME_DELIVERED_AVAILABLE=0
     RUNTIME_DELIVERED=0
     RUNTIME_REASON="product-observer-unavailable:s5-status-or-go-metrics-absent"
@@ -371,8 +391,9 @@ status_path, metrics_path = sys.argv[1:3]
 def out(**values):
     print(" ".join(f"{k}={values[k]}" for k in (
         "available", "actor", "run_id", "generation", "epoch", "state",
-        "consumed", "adjudicated", "reinjected", "delivered_available",
-        "delivered", "reason"
+        "consumed", "adjudicated", "reinjected", "written", "uncertain",
+        "late_completions", "timeouts", "stale", "cancelled", "refused",
+        "delivered_available", "delivered", "reason"
     )))
 try:
     with open(status_path, encoding="utf-8") as fh:
@@ -399,8 +420,10 @@ for line in text.splitlines():
         samples.setdefault(key, {})[m.group(1)] = (labels, m.group(3))
 if not isinstance(rust, dict):
     out(available=0, actor=0, run_id="", generation=0, epoch=0, state="UNKNOWN",
-        consumed=0, adjudicated=0, reinjected=0, delivered_available=0,
-        delivered=0, reason="product-observer-unavailable:s5_reinject-status-absent")
+        consumed=0, adjudicated=0, reinjected=0, written=0, uncertain=0,
+        late_completions=0, timeouts=0, stale=0, cancelled=0, refused=0,
+        delivered_available=0, delivered=0,
+        reason="product-observer-unavailable:s5_reinject-status-absent")
     raise SystemExit
 run_id = str(rust.get("run_id", ""))
 generation = str(rust.get("generation", 0))
@@ -409,8 +432,9 @@ state = str(rust.get("permit_state", "UNKNOWN"))
 row = samples.get((run_id, generation, epoch))
 if row is None:
     out(available=0, actor=0, run_id=run_id, generation=generation, epoch=epoch,
-        state=state, consumed=0, adjudicated=0, reinjected=0,
-        delivered_available=int(bool(rust.get("delivered_available", False))),
+        state=state, consumed=0, adjudicated=0, reinjected=0, written=0,
+        uncertain=0, late_completions=0, timeouts=0, stale=0, cancelled=0,
+        refused=0, delivered_available=int(bool(rust.get("delivered_available", False))),
         delivered=int(rust.get("delivered", 0) or 0),
         reason="product-observer-unavailable:go-rust-join-key-mismatch")
     raise SystemExit
@@ -426,10 +450,19 @@ actor = value("xpf_ipsec_capture_actor_active")
 consumed = value("xpf_ipsec_capture_consumed_total")
 adjudicated = value("xpf_ipsec_capture_adjudicated_total")
 reinjected = value("xpf_ipsec_capture_reinjected_total")
-if None in (actor, consumed, adjudicated, reinjected):
+written = value("xpf_ipsec_capture_written_total")
+uncertain = value("xpf_ipsec_capture_uncertain_total")
+late_completions = value("xpf_ipsec_capture_late_completions_total")
+timeouts = value("xpf_ipsec_capture_timeouts_total")
+stale = value("xpf_ipsec_capture_stale_total")
+cancelled = value("xpf_ipsec_capture_cancelled_total")
+refused = value("xpf_ipsec_capture_refused_total")
+if None in (actor, consumed, adjudicated, reinjected, written, uncertain,
+            late_completions, timeouts, stale, cancelled, refused):
     out(available=0, actor=0, run_id=run_id, generation=generation, epoch=epoch,
-        state=state, consumed=0, adjudicated=0, reinjected=0,
-        delivered_available=int(bool(rust.get("delivered_available", False))),
+        state=state, consumed=0, adjudicated=0, reinjected=0, written=0,
+        uncertain=0, late_completions=0, timeouts=0, stale=0, cancelled=0,
+        refused=0, delivered_available=int(bool(rust.get("delivered_available", False))),
         delivered=int(rust.get("delivered", 0) or 0),
         reason="product-observer-unavailable:go-witness-counters-absent")
     raise SystemExit
@@ -440,11 +473,13 @@ if not delivered_available:
     reason += ":residual-downstream-of-tun-witness-unavailable"
 out(available=1, actor=actor, run_id=run_id, generation=generation, epoch=epoch,
     state=state, consumed=consumed, adjudicated=adjudicated, reinjected=reinjected,
+    written=written, uncertain=uncertain, late_completions=late_completions,
+    timeouts=timeouts, stale=stale, cancelled=cancelled, refused=refused,
     delivered_available=delivered_available, delivered=delivered, reason=reason)
 PY
 )"
     local key value
-    for key in available actor run_id generation epoch state consumed adjudicated reinjected delivered_available delivered reason; do
+    for key in available actor run_id generation epoch state consumed adjudicated reinjected written uncertain late_completions timeouts stale cancelled refused delivered_available delivered reason; do
         value=""
         for word in $witness; do
             if [[ "$word" == "$key="* ]]; then value="${word#*=}"; break; fi
@@ -459,20 +494,29 @@ PY
         consumed) RUNTIME_CONSUMED="${value:-0}" ;;
         adjudicated) RUNTIME_ADJUDICATED="${value:-0}" ;;
         reinjected) RUNTIME_REINJECTED="${value:-0}" ;;
+        written) RUNTIME_WRITTEN="${value:-0}" ;;
+        uncertain) RUNTIME_UNCERTAIN="${value:-0}" ;;
+        late_completions) RUNTIME_LATE_COMPLETIONS="${value:-0}" ;;
+        timeouts) RUNTIME_TIMEOUTS="${value:-0}" ;;
+        stale) RUNTIME_STALE="${value:-0}" ;;
+        cancelled) RUNTIME_CANCELLED="${value:-0}" ;;
+        refused) RUNTIME_REFUSED="${value:-0}" ;;
         delivered_available) RUNTIME_DELIVERED_AVAILABLE="${value:-0}" ;;
         delivered) RUNTIME_DELIVERED="${value:-0}" ;;
         reason) RUNTIME_REASON="${value:-product-observer-unavailable}" ;;
         esac
     done
     [[ "$RUNTIME_PERMIT_STATE" == OPEN ]] && RUNTIME_PERMIT_OPEN=1
-    printf 'RUNTIME tag=%s daemon_active=%s pid=%s fd_count=%s socket_ready=%s reinject_sockets=%s s5_available=%s actor_active=%s run_id=%s generation=%s permit_state=%s permit_epoch=%s queue_rows=%s queue_pending=%s queue_drops=%s consumed=%s adjudicated=%s reinjected=%s delivered_available=%s delivered=%s reason=%s\n' \
+    printf 'RUNTIME tag=%s daemon_active=%s pid=%s fd_count=%s socket_ready=%s reinject_sockets=%s s5_available=%s actor_active=%s run_id=%s generation=%s permit_state=%s permit_epoch=%s queue_rows=%s queue_pending=%s queue_drops=%s consumed=%s adjudicated=%s reinjected=%s written=%s uncertain=%s late_completions=%s timeouts=%s stale=%s cancelled=%s refused=%s delivered_available=%s delivered=%s reason=%s\n' \
         "$tag" "$RUNTIME_DAEMON_ACTIVE" "$RUNTIME_PID" "$RUNTIME_FD_COUNT" \
         "$RUNTIME_SOCKET_READY" "$RUNTIME_REINJECT_SOCKETS" "$RUNTIME_S5_AVAILABLE" \
         "$RUNTIME_ACTOR_ACTIVE" "$RUNTIME_RUN_ID" "$RUNTIME_GENERATION" \
         "$RUNTIME_PERMIT_STATE" "$RUNTIME_PERMIT_EPOCH" "$RUNTIME_QUEUE_ROWS" \
         "$RUNTIME_QUEUE_PENDING" "$RUNTIME_QUEUE_DROPS" "$RUNTIME_CONSUMED" \
-        "$RUNTIME_ADJUDICATED" "$RUNTIME_REINJECTED" "$RUNTIME_DELIVERED_AVAILABLE" \
-        "$RUNTIME_DELIVERED" "$RUNTIME_REASON"
+        "$RUNTIME_ADJUDICATED" "$RUNTIME_REINJECTED" "$RUNTIME_WRITTEN" \
+        "$RUNTIME_UNCERTAIN" "$RUNTIME_LATE_COMPLETIONS" "$RUNTIME_TIMEOUTS" \
+        "$RUNTIME_STALE" "$RUNTIME_CANCELLED" "$RUNTIME_REFUSED" \
+        "$RUNTIME_DELIVERED_AVAILABLE" "$RUNTIME_DELIVERED" "$RUNTIME_REASON"
 }
 
 observe_queue_economics() {
@@ -581,6 +625,10 @@ if [[ "$MODE" == selftest ]]; then
         "$(if both_nodes_present 0 1; then echo 1; else echo 0; fi)"
     expect "paired fixture is complete" "1" \
         "$(if both_nodes_present 1 1; then echo 1; else echo 0; fi)"
+    expect "traffic probes cover even and odd tunnel owners" "0 1" \
+        "$(fixture_probe_indices | paste -sd ' ' -)"
+    expect "traffic probes cover both decrypted directions" "lan-to-peer peer-to-lan" \
+        "$(fixture_probe_directions | paste -sd ' ' -)"
     parser_dir="$(mktemp -d)"
     cat >"$parser_dir/witness-check.py" <<'PY'
 import json, re, sys
@@ -607,6 +655,18 @@ if mode == "join":
     print(int(joined))
 elif mode == "zero":
     print(int(joined and samples[key]["xpf_ipsec_capture_consumed_total"] == 0))
+elif mode == "dispositions":
+    names = {
+        "xpf_ipsec_capture_written_total": 4.0,
+        "xpf_ipsec_capture_uncertain_total": 5.0,
+        "xpf_ipsec_capture_late_completions_total": 6.0,
+        "xpf_ipsec_capture_timeouts_total": 7.0,
+        "xpf_ipsec_capture_stale_total": 8.0,
+        "xpf_ipsec_capture_cancelled_total": 9.0,
+        "xpf_ipsec_capture_refused_total": 10.0,
+    }
+    print(int(joined and all(samples[key].get(name) == value
+                             for name, value in names.items())))
 elif mode == "refusal":
     rows = rust.get("provenance", [])
     print(int(any(row.get("outcome") == "refused" for row in rows)))
@@ -616,7 +676,16 @@ elif mode == "delivery":
 PY
     printf '%s\n' '{}' >"$parser_dir/absent.json"
     printf '%s\n' '{"s5_reinject":{"run_id":"run-1","generation":4,"permit_epoch":7,"completed_written":3,"delivered_available":false,"delivered":0,"provenance":[{"outcome":"refused"}]}}' >"$parser_dir/witness.json"
-    printf '%s\n' 'xpf_ipsec_capture_consumed_total{run_id="run-1",generation="4",permit_epoch="7"} 0' >"$parser_dir/witness.prom"
+    cat >"$parser_dir/witness.prom" <<'EOF'
+xpf_ipsec_capture_consumed_total{run_id="run-1",generation="4",permit_epoch="7"} 0
+xpf_ipsec_capture_written_total{run_id="run-1",generation="4",permit_epoch="7"} 4
+xpf_ipsec_capture_uncertain_total{run_id="run-1",generation="4",permit_epoch="7"} 5
+xpf_ipsec_capture_late_completions_total{run_id="run-1",generation="4",permit_epoch="7"} 6
+xpf_ipsec_capture_timeouts_total{run_id="run-1",generation="4",permit_epoch="7"} 7
+xpf_ipsec_capture_stale_total{run_id="run-1",generation="4",permit_epoch="7"} 8
+xpf_ipsec_capture_cancelled_total{run_id="run-1",generation="4",permit_epoch="7"} 9
+xpf_ipsec_capture_refused_total{run_id="run-1",generation="4",permit_epoch="7"} 10
+EOF
     printf '%s\n' 'xpf_ipsec_capture_consumed_total{run_id="run-other",generation="4",permit_epoch="7"} 0' >"$parser_dir/witness-mismatch.prom"
     expect "absent S5 status stays unavailable" "0" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/absent.json" "$parser_dir/witness.prom" absent)"
@@ -628,6 +697,8 @@ PY
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" refusal)"
     expect "written is not downstream delivered" "1" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" delivery)"
+    expect "joined disposition counters are observed" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" dispositions)"
     cat >"$parser_dir/positive.json" <<'EOF'
 {"nftables":[
 {"table":{"family":"inet","name":"xpf_transit_barrier"}},
@@ -670,7 +741,7 @@ EOF
         "static=0 queue_rows=1 queue_ids=0 packet_samples=0 mismatch=0" \
         "$(observe_provenance_metadata "$parser_dir/positive.json" "$parser_dir/nfqueue.txt")"
     rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 25 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 28 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -716,45 +787,78 @@ remote() {
 
 fixture_measure_traffic() {
     # fixture_measure_traffic <shape> <count> <dir>: exercise both decrypted
-    # directions with the real peer/inner addresses and retain raw output.
-    # The current workload is an inner-index-0 smoke probe.  Keep its XFRM
-    # state delta explicitly tunnel-scoped; it must not stand in for a
-    # per-tunnel G2 workload.
-    local shape="$1" count="$2" dir="$3" family inner peer_out lan_out lan6
+    # directions on one even (RG1/node0) and one odd (RG2/node1) tunnel.
+    # The per-node XFRM deltas are the only offered proof; aggregate counters
+    # are retained for compatibility with the existing ledger fields.
+    local shape="$1" count="$2" dir="$3" family inner peer_out lan_out lan6 index
     local fw0_before="$dir/xfrm-fw0-before.txt" fw1_before="$dir/xfrm-fw1-before.txt"
     local fw0_after="$dir/xfrm-fw0-after.txt" fw1_after="$dir/xfrm-fw1-after.txt"
-    local before_packets after_packets
+    local fw0_before_packets fw0_after_packets fw1_before_packets fw1_after_packets
+    local lan_success peer_success ix0_window ix0_start ix0_end
+    ix0_window="$dir/ix0-window.txt"
+    ix0_start=""
+    ix0_end=""
+    printf 'probe_index=0 if_id_fw0=0x25220001 owner_fw0=node0 if_id_fw1=0x25220002 owner_fw1=node1\n' >"$ix0_window"
     family="$(fix9506_shape_family "$shape")"
-    inner="$(fix9506_inner4_ip 0)"
     lan_out="$dir/lan-to-peer.txt"
     peer_out="$dir/peer-to-lan.txt"
+    : >"$lan_out"
+    : >"$peer_out"
     fix9506_remote "$FIX9506_NODE0" 'ip -s xfrm state' >"$fw0_before" 2>&1 || :
     fix9506_remote "$FIX9506_NODE1" 'ip -s xfrm state' >"$fw1_before" 2>&1 || :
-    if [[ "$family" == v4 ]]; then
-        fix9506_remote "$FIX9506_LAN_REF" "ip -4 route get $inner; ping -c 4 -W 2 $inner" >"$lan_out" 2>&1 || :
-        fix9506_remote "$FIX9506_PEER_REF" "ping -c 4 -W 2 -I $inner $LAN_HOST_IP" >"$peer_out" 2>&1 || :
-    else
-        inner="$(fix9506_inner6_ip 0)"
+    if [[ "$family" == v6 ]]; then
         lan6="$(fix9506_remote "$FIX9506_LAN_REF" 'ip -6 -o addr show scope global | sed -n "1{s/.*inet6 \([^/ ]*\)\/.*/\1/p;}"' 2>/dev/null || true)"
-        fix9506_remote "$FIX9506_LAN_REF" "ip -6 route get $inner; ping -6 -c 4 -W 2 $inner" >"$lan_out" 2>&1 || :
-        fix9506_remote "$FIX9506_PEER_REF" "ping -6 -c 4 -W 2 -I $inner ${lan6:-$LAN_VIP6}" >"$peer_out" 2>&1 || :
     fi
+    while IFS= read -r index; do
+        if [[ "$index" == 0 ]]; then
+            ix0_start="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+        fi
+        if [[ "$family" == v4 ]]; then
+            inner="$(fix9506_inner4_ip "$index")"
+            printf 'probe_index=%s\n' "$index" >>"$lan_out"
+            fix9506_remote "$FIX9506_LAN_REF" "ip -4 route get $inner; ping -c 4 -W 2 $inner" >>"$lan_out" 2>&1 || :
+            printf 'probe_index=%s\n' "$index" >>"$peer_out"
+            fix9506_remote "$FIX9506_PEER_REF" "ping -c 4 -W 2 -I $inner $LAN_HOST_IP" >>"$peer_out" 2>&1 || :
+        else
+            inner="$(fix9506_inner6_ip "$index")"
+            printf 'probe_index=%s\n' "$index" >>"$lan_out"
+            fix9506_remote "$FIX9506_LAN_REF" "ip -6 route get $inner; ping -6 -c 4 -W 2 $inner" >>"$lan_out" 2>&1 || :
+            printf 'probe_index=%s\n' "$index" >>"$peer_out"
+            fix9506_remote "$FIX9506_PEER_REF" "ping -6 -c 4 -W 2 -I $inner ${lan6:-$LAN_VIP6}" >>"$peer_out" 2>&1 || :
+        fi
+        if [[ "$index" == 0 ]]; then
+            ix0_end="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+        fi
+    done < <(fixture_probe_indices)
+    printf 'ix0_window_start=%s\nix0_window_end=%s\n' "$ix0_start" "$ix0_end" >>"$ix0_window"
     fix9506_remote "$FIX9506_NODE0" 'ip -s xfrm state' >"$fw0_after" 2>&1 || :
     fix9506_remote "$FIX9506_NODE1" 'ip -s xfrm state' >"$fw1_after" 2>&1 || :
-    before_packets=$(( $(fix9506_count_xfrm_packets "$fw0_before") + $(fix9506_count_xfrm_packets "$fw1_before") ))
-    after_packets=$(( $(fix9506_count_xfrm_packets "$fw0_after") + $(fix9506_count_xfrm_packets "$fw1_after") ))
-    MEASURE_XFRM_TUNNEL0_PACKETS=$((after_packets - before_packets))
-    ((MEASURE_XFRM_TUNNEL0_PACKETS < 0)) && MEASURE_XFRM_TUNNEL0_PACKETS=0
+    # Index 0 is the even/RG1 tunnel owned by fw0; index 1 is the
+    # odd/RG2 tunnel owned by fw1.  Select by if_id so unrelated fixture
+    # tunnels and standing XFRM state cannot become offered evidence.
+    fw0_before_packets="$(fix9506_count_xfrm_packets_ifid "$fw0_before" 0x25220001)"
+    fw0_after_packets="$(fix9506_count_xfrm_packets_ifid "$fw0_after" 0x25220001)"
+    fw1_before_packets="$(fix9506_count_xfrm_packets_ifid "$fw1_before" 0x25220002)"
+    fw1_after_packets="$(fix9506_count_xfrm_packets_ifid "$fw1_after" 0x25220002)"
+    MEASURE_XFRM_FW0_PACKETS=$((fw0_after_packets - fw0_before_packets))
+    MEASURE_XFRM_FW1_PACKETS=$((fw1_after_packets - fw1_before_packets))
+    ((MEASURE_XFRM_FW0_PACKETS < 0)) && MEASURE_XFRM_FW0_PACKETS=0
+    ((MEASURE_XFRM_FW1_PACKETS < 0)) && MEASURE_XFRM_FW1_PACKETS=0
+    MEASURE_OFFERED_FW0="$MEASURE_XFRM_FW0_PACKETS"
+    MEASURE_OFFERED_FW1="$MEASURE_XFRM_FW1_PACKETS"
+    MEASURE_XFRM_TUNNEL0_PACKETS=$((MEASURE_OFFERED_FW0 + MEASURE_OFFERED_FW1))
+    lan_success="$(grep -cE '(^|[[:space:],])0% packet loss' "$lan_out" 2>/dev/null || true)"
+    peer_success="$(grep -cE '(^|[[:space:],])0% packet loss' "$peer_out" 2>/dev/null || true)"
     local lan_ok=0 peer_ok=0
-    grep -Eq '(^|[[:space:],])0% packet loss' "$lan_out" 2>/dev/null && lan_ok=1 || :
-    grep -Eq '(^|[[:space:],])0% packet loss' "$peer_out" 2>/dev/null && peer_ok=1 || :
+    ((lan_success == 2)) && lan_ok=1
+    ((peer_success == 2)) && peer_ok=1
     MEASURE_LAN_OK="$lan_ok"
     MEASURE_PEER_OK="$peer_ok"
-    MEASURE_PACKETS=$((lan_ok * 4 + peer_ok * 4))
+    MEASURE_PACKETS=$(((lan_success + peer_success) * 4))
     MEASURE_LOSS=0
-    ((lan_ok == 1 && peer_ok == 1)) || MEASURE_LOSS=100
-}
+    ((lan_success == 2 && peer_success == 2)) || MEASURE_LOSS=100
 
+}
 run_fixture_measure() {
     # Populate MEASURE_* globals. Setup/teardown failures are never promoted
     # into PASS; all raw probes stay in the per-shape archive directory.
@@ -772,6 +876,10 @@ run_fixture_measure() {
     MEASURE_QUEUE_BOTH=0
     MEASURE_PACKETS=0
     MEASURE_XFRM_TUNNEL0_PACKETS=0
+    MEASURE_XFRM_FW0_PACKETS=0
+    MEASURE_XFRM_FW1_PACKETS=0
+    MEASURE_OFFERED_FW0=0
+    MEASURE_OFFERED_FW1=0
     MEASURE_LOSS=100
     MEASURE_RUNTIME_FW0=""
     MEASURE_RUNTIME_FW1=""
@@ -783,6 +891,20 @@ run_fixture_measure() {
     MEASURE_ADJUDICATED_FW1=0
     MEASURE_REINJECTED_FW0=0
     MEASURE_REINJECTED_FW1=0
+    MEASURE_WRITTEN_FW0=0
+    MEASURE_WRITTEN_FW1=0
+    MEASURE_UNCERTAIN_FW0=0
+    MEASURE_UNCERTAIN_FW1=0
+    MEASURE_LATE_COMPLETIONS_FW0=0
+    MEASURE_LATE_COMPLETIONS_FW1=0
+    MEASURE_TIMEOUTS_FW0=0
+    MEASURE_TIMEOUTS_FW1=0
+    MEASURE_STALE_FW0=0
+    MEASURE_STALE_FW1=0
+    MEASURE_CANCELLED_FW0=0
+    MEASURE_CANCELLED_FW1=0
+    MEASURE_REFUSED_FW0=0
+    MEASURE_REFUSED_FW1=0
     MEASURE_DELIVERED_AVAILABLE_FW0=0
     MEASURE_DELIVERED_AVAILABLE_FW1=0
     MEASURE_DELIVERED_FW0=0
@@ -838,6 +960,13 @@ run_fixture_measure() {
     MEASURE_CONSUMED_FW0="$RUNTIME_CONSUMED"
     MEASURE_ADJUDICATED_FW0="$RUNTIME_ADJUDICATED"
     MEASURE_REINJECTED_FW0="$RUNTIME_REINJECTED"
+    MEASURE_WRITTEN_FW0="$RUNTIME_WRITTEN"
+    MEASURE_UNCERTAIN_FW0="$RUNTIME_UNCERTAIN"
+    MEASURE_LATE_COMPLETIONS_FW0="$RUNTIME_LATE_COMPLETIONS"
+    MEASURE_TIMEOUTS_FW0="$RUNTIME_TIMEOUTS"
+    MEASURE_STALE_FW0="$RUNTIME_STALE"
+    MEASURE_CANCELLED_FW0="$RUNTIME_CANCELLED"
+    MEASURE_REFUSED_FW0="$RUNTIME_REFUSED"
     MEASURE_DELIVERED_AVAILABLE_FW0="$RUNTIME_DELIVERED_AVAILABLE"
     MEASURE_DELIVERED_FW0="$RUNTIME_DELIVERED"
     MEASURE_REASON_FW0="$RUNTIME_REASON"
@@ -846,6 +975,13 @@ run_fixture_measure() {
     MEASURE_CONSUMED_FW1="$RUNTIME_CONSUMED"
     MEASURE_ADJUDICATED_FW1="$RUNTIME_ADJUDICATED"
     MEASURE_REINJECTED_FW1="$RUNTIME_REINJECTED"
+    MEASURE_WRITTEN_FW1="$RUNTIME_WRITTEN"
+    MEASURE_UNCERTAIN_FW1="$RUNTIME_UNCERTAIN"
+    MEASURE_LATE_COMPLETIONS_FW1="$RUNTIME_LATE_COMPLETIONS"
+    MEASURE_TIMEOUTS_FW1="$RUNTIME_TIMEOUTS"
+    MEASURE_STALE_FW1="$RUNTIME_STALE"
+    MEASURE_CANCELLED_FW1="$RUNTIME_CANCELLED"
+    MEASURE_REFUSED_FW1="$RUNTIME_REFUSED"
     MEASURE_DELIVERED_AVAILABLE_FW1="$RUNTIME_DELIVERED_AVAILABLE"
     MEASURE_DELIVERED_FW1="$RUNTIME_DELIVERED"
     MEASURE_REASON_FW1="$RUNTIME_REASON"
@@ -875,7 +1011,7 @@ normalize_config() {
     # and are not semantic residue; ignore these display-set artifacts while
     # comparing the pre/post configuration snapshots.
     sed -n '/^set /p' "$1" |
-        sed -E '/^set security (ike|ipsec)$/d; /^set security address-book global$/d'
+        sed -E '/^set security (ike|ipsec)$/d; /^set security address-book( global)?$/d'
 }
 
 # Determine the source/build identity before any live verdict is emitted.
@@ -1076,6 +1212,8 @@ printf 'T12_G2_PRECONDITIONS stn=%s stn_fw0=%s stn_fw1=%s xfrm_sa=%s xfrm_sa_fw0
 T12_TRAFFIC_PACKETS=0
 T12_TRAFFIC_LOSS=100
 T12_TRAFFIC_XFRM_TUNNEL0_PACKETS=0
+T12_TRAFFIC_OFFERED_FW0=0
+T12_TRAFFIC_OFFERED_FW1=0
 T12_TRAFFIC_LAN_OK=0
 T12_TRAFFIC_PEER_OK=0
 if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
@@ -1083,6 +1221,8 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     mkdir -p "$T12_TRAFFIC_DIR"
     fixture_measure_traffic "$T12_FIXTURE_SHAPE" "$T12_FIXTURE_COUNT" "$T12_TRAFFIC_DIR"
     T12_TRAFFIC_XFRM_TUNNEL0_PACKETS="$MEASURE_XFRM_TUNNEL0_PACKETS"
+    T12_TRAFFIC_OFFERED_FW0="$MEASURE_OFFERED_FW0"
+    T12_TRAFFIC_OFFERED_FW1="$MEASURE_OFFERED_FW1"
     T12_TRAFFIC_PACKETS="$MEASURE_PACKETS"
     T12_TRAFFIC_LOSS="$MEASURE_LOSS"
     T12_TRAFFIC_LAN_OK="$MEASURE_LAN_OK"
@@ -1106,6 +1246,20 @@ T12_ADJUDICATED_FW0=0
 T12_ADJUDICATED_FW1=0
 T12_REINJECTED_FW0=0
 T12_REINJECTED_FW1=0
+T12_WRITTEN_FW0=0
+T12_WRITTEN_FW1=0
+T12_UNCERTAIN_FW0=0
+T12_UNCERTAIN_FW1=0
+T12_LATE_COMPLETIONS_FW0=0
+T12_LATE_COMPLETIONS_FW1=0
+T12_TIMEOUTS_FW0=0
+T12_TIMEOUTS_FW1=0
+T12_STALE_FW0=0
+T12_STALE_FW1=0
+T12_CANCELLED_FW0=0
+T12_CANCELLED_FW1=0
+T12_REFUSED_FW0=0
+T12_REFUSED_FW1=0
 T12_DELIVERED_AVAILABLE_FW0=0
 T12_DELIVERED_AVAILABLE_FW1=0
 T12_DELIVERED_FW0=0
@@ -1126,6 +1280,13 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     T12_CONSUMED_FW0="$RUNTIME_CONSUMED"
     T12_ADJUDICATED_FW0="$RUNTIME_ADJUDICATED"
     T12_REINJECTED_FW0="$RUNTIME_REINJECTED"
+    T12_WRITTEN_FW0="$RUNTIME_WRITTEN"
+    T12_UNCERTAIN_FW0="$RUNTIME_UNCERTAIN"
+    T12_LATE_COMPLETIONS_FW0="$RUNTIME_LATE_COMPLETIONS"
+    T12_TIMEOUTS_FW0="$RUNTIME_TIMEOUTS"
+    T12_STALE_FW0="$RUNTIME_STALE"
+    T12_CANCELLED_FW0="$RUNTIME_CANCELLED"
+    T12_REFUSED_FW0="$RUNTIME_REFUSED"
     T12_DELIVERED_AVAILABLE_FW0="$RUNTIME_DELIVERED_AVAILABLE"
     T12_DELIVERED_FW0="$RUNTIME_DELIVERED"
     T12_REASON_FW0="$RUNTIME_REASON"
@@ -1142,6 +1303,13 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     T12_CONSUMED_FW1="$RUNTIME_CONSUMED"
     T12_ADJUDICATED_FW1="$RUNTIME_ADJUDICATED"
     T12_REINJECTED_FW1="$RUNTIME_REINJECTED"
+    T12_WRITTEN_FW1="$RUNTIME_WRITTEN"
+    T12_UNCERTAIN_FW1="$RUNTIME_UNCERTAIN"
+    T12_LATE_COMPLETIONS_FW1="$RUNTIME_LATE_COMPLETIONS"
+    T12_TIMEOUTS_FW1="$RUNTIME_TIMEOUTS"
+    T12_STALE_FW1="$RUNTIME_STALE"
+    T12_CANCELLED_FW1="$RUNTIME_CANCELLED"
+    T12_REFUSED_FW1="$RUNTIME_REFUSED"
     T12_DELIVERED_AVAILABLE_FW1="$RUNTIME_DELIVERED_AVAILABLE"
     T12_DELIVERED_FW1="$RUNTIME_DELIVERED"
     T12_REASON_FW1="$RUNTIME_REASON"
@@ -1239,13 +1407,13 @@ else
 fi
 if [[ "$has_q0" == 1 && "$T12_TRAFFIC_PACKETS" -gt 0 ]]; then
     emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' \
-        "bidirectional decrypted delivery observed packets=$T12_TRAFFIC_PACKETS; xfrm_tunnel0_state_delta=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS; q0/wrong-mark/resumption matrix not injected" VOID \
+        "bidirectional decrypted delivery observed packets=$T12_TRAFFIC_PACKETS; offered_fw0=$T12_TRAFFIC_OFFERED_FW0 offered_fw1=$T12_TRAFFIC_OFFERED_FW1; xfrm_tunnel0_state_delta=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS; q0/wrong-mark/resumption matrix not injected" VOID \
         "measurement-incomplete:no-bypass-matrix" \
-        "cell_failed=1 q0_mark_surface=1 packet_rows=$T12_TRAFFIC_PACKETS xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS lan_to_peer=$T12_TRAFFIC_LAN_OK peer_to_lan=$T12_TRAFFIC_PEER_OK"
+        "cell_failed=1 q0_mark_surface=1 packet_rows=$T12_TRAFFIC_PACKETS offered_fw0=$T12_TRAFFIC_OFFERED_FW0 offered_fw1=$T12_TRAFFIC_OFFERED_FW1 xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS lan_to_peer=$T12_TRAFFIC_LAN_OK peer_to_lan=$T12_TRAFFIC_PEER_OK"
 else
     emit_cell t12_9506_no_bypass 'r6 §5.2.4-§5.2.5' 'q0 exact mark admits; q1/wrong mark and resumed xfrmi ACCEPT remain DROP' \
         "${PREASON:-q0 mark surface or bidirectional traffic absent}" VOID "$LIVE_REASON" \
-        "cell_failed=1 q0_mark_surface=$has_q0 packet_rows=$T12_TRAFFIC_PACKETS xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS"
+        "cell_failed=1 q0_mark_surface=$has_q0 packet_rows=$T12_TRAFFIC_PACKETS offered_fw0=$T12_TRAFFIC_OFFERED_FW0 offered_fw1=$T12_TRAFFIC_OFFERED_FW1 xfrm_tunnel0_packets=$T12_TRAFFIC_XFRM_TUNNEL0_PACKETS"
 fi
 emit_cell t12_9506_vrf_refusal 'r6 §5.2.5a' 'VRF/l3mdev enslaving revokes permit and publishes ACKed host fence' \
     "VRF scope census captured, but fixture did not create/enslave a test VRF; permit/fence ACK state is not exported" VOID \
@@ -1258,7 +1426,7 @@ emit_cell t12_9506_coexistence_order 'r6 §5.2.3' 'both-family divert priority p
 emit_cell t12_9506_provenance_metadata 'r6 §5.2.3-§5.2.4' 'queue-id, nfgen_family, hook, ifindex, owner and stN agree for every packet' \
     "static queue map fw0=$T12_PROVENANCE_FW0 fw1=$T12_PROVENANCE_FW1; fw0_s5_available=$T12_S5_FW0 fw1_s5_available=$T12_S5_FW1 actor counters are observational only" VOID \
     "product-observer-unavailable:fw0=${T12_REASON_FW0};fw1=${T12_REASON_FW1};2b-attestation-required" \
-    "cell_failed=1 packets=0 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_mismatch_fw0=$T12_PROV_MISMATCH_FW0 provenance_mismatch_fw1=$T12_PROV_MISMATCH_FW1 queue_rows_fw0=$T12_PROV_QUEUE_ROWS_FW0 queue_rows_fw1=$T12_PROV_QUEUE_ROWS_FW1 fw0_consumed=$T12_CONSUMED_FW0 fw1_consumed=$T12_CONSUMED_FW1 fw0_adjudicated=$T12_ADJUDICATED_FW0 fw1_adjudicated=$T12_ADJUDICATED_FW1 fw0_reinjected=$T12_REINJECTED_FW0 fw1_reinjected=$T12_REINJECTED_FW1 fw0_delivered_available=$T12_DELIVERED_AVAILABLE_FW0 fw1_delivered_available=$T12_DELIVERED_AVAILABLE_FW1"
+    "cell_failed=1 packets=0 packet_samples_fw0=$T12_PROV_PACKET_SAMPLES_FW0 packet_samples_fw1=$T12_PROV_PACKET_SAMPLES_FW1 provenance_static_fw0=$T12_PROV_STATIC_FW0 provenance_static_fw1=$T12_PROV_STATIC_FW1 provenance_mismatch_fw0=$T12_PROV_MISMATCH_FW0 provenance_mismatch_fw1=$T12_PROV_MISMATCH_FW1 queue_rows_fw0=$T12_PROV_QUEUE_ROWS_FW0 queue_rows_fw1=$T12_PROV_QUEUE_ROWS_FW1 fw0_consumed=$T12_CONSUMED_FW0 fw1_consumed=$T12_CONSUMED_FW1 fw0_adjudicated=$T12_ADJUDICATED_FW0 fw1_adjudicated=$T12_ADJUDICATED_FW1 fw0_reinjected=$T12_REINJECTED_FW0 fw1_reinjected=$T12_REINJECTED_FW1 fw0_written=$T12_WRITTEN_FW0 fw1_written=$T12_WRITTEN_FW1 fw0_uncertain=$T12_UNCERTAIN_FW0 fw1_uncertain=$T12_UNCERTAIN_FW1 fw0_late_completions=$T12_LATE_COMPLETIONS_FW0 fw1_late_completions=$T12_LATE_COMPLETIONS_FW1 fw0_timeouts=$T12_TIMEOUTS_FW0 fw1_timeouts=$T12_TIMEOUTS_FW1 fw0_stale=$T12_STALE_FW0 fw1_stale=$T12_STALE_FW1 fw0_cancelled=$T12_CANCELLED_FW0 fw1_cancelled=$T12_CANCELLED_FW1 fw0_refused=$T12_REFUSED_FW0 fw1_refused=$T12_REFUSED_FW1 fw0_delivered_available=$T12_DELIVERED_AVAILABLE_FW0 fw1_delivered_available=$T12_DELIVERED_AVAILABLE_FW1"
 emit_cell t12_9506_ifindex_recreate 'r6 §5.2.3-§5.2.4' 'device delete/recreate/name reuse with changed ifindex drops and counts' "$LIVE_REASON" VOID "$LIVE_REASON" \
     "cell_failed=1 delete_recreate=0 changed_ifindex=0 mismatch_drop=0"
 
@@ -1310,17 +1478,17 @@ g2_emit_measured() {
         qinst1="$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances)"
         qfd0="$(observer_field "$MEASURE_QUEUE_ECON_FW0" fd_count)"
         qfd1="$(observer_field "$MEASURE_QUEUE_ECON_FW1" fd_count)"
-        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 queue_econ_fw0=$MEASURE_QUEUE_ECON_FW0 queue_econ_fw1=$MEASURE_QUEUE_ECON_FW1"
+        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 queue_economics_fw0=$MEASURE_QUEUE_ECON_FW0 queue_economics_fw1=$MEASURE_QUEUE_ECON_FW1"
         emit_cell "$gate" 'r6 §5.1' \
             "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
             "$observed" VOID "product-consumer-path-unavailable:fw0=${MEASURE_REASON_FW0};fw1=${MEASURE_REASON_FW1};delivered-downstream-witness-unavailable;2b-attestation-required" \
-            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 provenance_mismatch_fw0=$mismatch0 provenance_mismatch_fw1=$mismatch1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 delivered_fw0=$MEASURE_DELIVERED_FW0 delivered_fw1=$MEASURE_DELIVERED_FW1 overhead_ns=0 queue_instances=$qinst0 queue_instances_fw1=$qinst1 fd_count=$qfd0 fd_count_fw1=$qfd1 recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+            "cell_failed=1 tunnels=$tunnels offered_expected=16 offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 provenance_mismatch_fw0=$mismatch0 provenance_mismatch_fw1=$mismatch1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 delivered_fw0=$MEASURE_DELIVERED_FW0 delivered_fw1=$MEASURE_DELIVERED_FW1 overhead_ns=0 queue_instances=$qinst0 queue_instances_fw1=$qinst1 fd_count=$qfd0 fd_count_fw1=$qfd1 recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
     else
-        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
+        observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
         emit_cell "$gate" 'r6 §5.1' \
             "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
             "$observed" VOID "${MEASURE_REASON:-fixture-measurement-failed}" \
-            "cell_failed=1 tunnels=$tunnels offered=8 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 overhead_ns=0 queue_instances=$MEASURE_QUEUE_TOTAL queue_instances_fw1=$MEASURE_QUEUE_TOTAL_NODE1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+            "cell_failed=1 tunnels=$tunnels offered_expected=16 offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 overhead_ns=0 queue_instances=$MEASURE_QUEUE_TOTAL queue_instances_fw1=$MEASURE_QUEUE_TOTAL_NODE1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
     fi
     if [[ "$shape" == v4_native && "$tunnels" == 32 ]]; then
         QUEUE32_READY="$MEASURE_READY"
@@ -1344,14 +1512,14 @@ emit_cell g2_9506_divert_idle 'r6 §5.1' 'fence+divert attached-idle listener ov
     "cell_failed=1 detached_samples=0 idle_samples=0 overhead_ns=0 divert_listeners_fw0=$T12_DIVERT_LISTENERS_FW0 divert_listeners_fw1=$T12_DIVERT_LISTENERS_FW1"
 if run_fixture_measure v4_native 8 g2-capture; then
     emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
-        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_fw0=$MEASURE_PROVENANCE_FW0 provenance_fw1=$MEASURE_PROVENANCE_FW1 queue_econ_fw0=$MEASURE_QUEUE_ECON_FW0 queue_econ_fw1=$MEASURE_QUEUE_ECON_FW1" VOID \
-        "product-consumer-path-unavailable:delivered=0; CaptureOrigin/permit/adjudication/reinject counters unavailable" \
-        "cell_failed=1 tunnels=8 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" packet_samples) provenance_samples_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" packet_samples) provenance_mismatch_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" mismatch) provenance_mismatch_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" mismatch) queue_instances=$(observer_field "$MEASURE_QUEUE_ECON_FW0" queue_instances) queue_instances_fw1=$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances) loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 provenance_fw0=$MEASURE_PROVENANCE_FW0 provenance_fw1=$MEASURE_PROVENANCE_FW1 queue_economics_fw0=$MEASURE_QUEUE_ECON_FW0 queue_economics_fw1=$MEASURE_QUEUE_ECON_FW1" VOID \
+        "product-consumer-path-unavailable:downstream-delivered-witness-unavailable;2b-attestation-required" \
+        "cell_failed=1 tunnels=8 offered_expected=16 offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" packet_samples) provenance_samples_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" packet_samples) provenance_mismatch_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" mismatch) provenance_mismatch_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" mismatch) queue_instances=$(observer_field "$MEASURE_QUEUE_ECON_FW0" queue_instances) queue_instances_fw1=$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances) consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 delivered_fw0=$MEASURE_DELIVERED_FW0 delivered_fw1=$MEASURE_DELIVERED_FW1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
 else
     emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
-        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN" VOID \
+        "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN" VOID \
         "${MEASURE_REASON:-fixture-measurement-failed}" \
-        "cell_failed=1 tunnels=8 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
+        "cell_failed=1 tunnels=8 offered_expected=16 offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_mismatch=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
 fi
 emit_cell g2_9506_vrf_overhead 'r6 §5.1' 'mandatory live VRF refusal overhead: pre-close status quo, ACKed host fence, post-close DROP' \
     "VRF scope census test_created=0 attached=0; transition workload/latency samples were not executed" VOID \

@@ -584,6 +584,26 @@ fix9506_count_xfrm_packets() {
         END {print total + 0}
     ' "$1" 2>/dev/null || printf '0\n'
 }
+
+fix9506_count_xfrm_packets_ifid() {
+    # fix9506_count_xfrm_packets_ifid <ip-xfrm-state> <hex-if_id>
+    # Counts only the lifetime packet counters belonging to the selected
+    # fixture tunnel, rather than conflating unrelated live XFRM state.
+    local file="$1" target="$2"
+    awk -v target="$target" '
+        /^src / {selected=0; want=0; next}
+        $1 == "if_id" && $2 == target {selected=1; next}
+        /lifetime current:/ {want=1; next}
+        want && selected && match($0, /[0-9]+\(bytes\),[[:space:]]*[0-9]+\(packets\)/) {
+            text = substr($0, RSTART, RLENGTH)
+            sub(/.*,[[:space:]]*/, "", text)
+            sub(/\(packets\).*/, "", text)
+            total += text
+            want=0
+        }
+        END {print total + 0}
+    ' "$file" 2>/dev/null || printf '0\n'
+}
 fix9506_fixture_residue() {
     # Scoped residue probe: unrelated baseline XFRM/NFQUEUE state is allowed,
     # but this fixture's stN, if_id range, divert table, and queue bindings

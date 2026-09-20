@@ -370,3 +370,97 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 		})
 	}
 }
+
+func TestCapturePipelineDispositionCounters10478(t *testing.T) {
+	type completionCase struct {
+		name    string
+		outcome CompletionOutcome
+		want    func(PipelineStats) uint64
+	}
+	cases := []completionCase{
+		{name: "written", outcome: CompletionWritten, want: func(s PipelineStats) uint64 { return s.Written }},
+		{name: "stale", outcome: CompletionStale, want: func(s PipelineStats) uint64 { return s.Stale }},
+		{name: "cancelled", outcome: CompletionCancelled, want: func(s PipelineStats) uint64 { return s.Cancelled }},
+		{name: "refused", outcome: CompletionRefused, want: func(s PipelineStats) uint64 { return s.Refused }},
+		{name: "uncertain", outcome: CompletionUncertain, want: func(s PipelineStats) uint64 { return s.Uncertain }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := new(pipelineTestSink)
+			p, err := NewCapturePipeline(CapturePipelineConfig{
+				Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: sink,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame := CaptureFrame{
+				Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "disposition",
+			}
+			pending := &pendingReinject{
+				frame:    frame,
+				lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
+				deadline: time.Now().Add(time.Second),
+			}
+			p.mu.Lock()
+			p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
+			p.pending[pending.lease.RequestID] = pending
+			p.mu.Unlock()
+			completion := ReinjectCompletion{
+				RequestID: 1, PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1,
+				Outcome: tc.outcome,
+			}
+			if tc.outcome == CompletionWritten {
+				completion.BytesWritten = uint32(len(frame.Packet.Payload()))
+			}
+			if !p.resolveCompletion(completion) {
+				t.Fatal("resolveCompletion returned false")
+			}
+			if got := tc.want(p.Stats()); got != 1 {
+				t.Fatalf("stats=%+v, want %s=1", p.Stats(), tc.name)
+			}
+		})
+	}
+
+	t.Run("late completion", func(t *testing.T) {
+		p, err := NewCapturePipeline(CapturePipelineConfig{
+			Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: new(pipelineTestSink),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.resolveCompletion(ReinjectCompletion{RequestID: 99}) {
+			t.Fatal("unknown completion unexpectedly resolved")
+		}
+		if got := p.Stats().LateCompletions; got != 1 {
+			t.Fatalf("LateCompletions=%d, want 1", got)
+		}
+	})
+
+	t.Run("ack timeout", func(t *testing.T) {
+		p, err := NewCapturePipeline(CapturePipelineConfig{
+			Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: new(pipelineTestSink),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		frame := CaptureFrame{
+			Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "timeout",
+		}
+		pending := &pendingReinject{
+			frame:    frame,
+			lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
+			deadline: time.Now().Add(-time.Second),
+		}
+		p.mu.Lock()
+		p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
+		p.pending[pending.lease.RequestID] = pending
+		p.mu.Unlock()
+		if got := p.Poll(time.Now()); got != 1 {
+			t.Fatalf("Poll=%d, want one timeout resolution", got)
+		}
+		stats := p.Stats()
+		if stats.Timeouts != 1 || stats.Uncertain != 1 {
+			t.Fatalf("stats=%+v, want Timeouts=1 Uncertain=1", stats)
+		}
+	})
+}

@@ -42,6 +42,13 @@ func (c *xpfCollector) collectIpsecCaptureWitness(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureConsumedTotal, prometheus.CounterValue, float64(w.Consumed), labels...)
 	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureAdjudicatedTotal, prometheus.CounterValue, float64(w.Adjudicated), labels...)
 	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureReinjectedTotal, prometheus.CounterValue, float64(w.Reinjected), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureWrittenTotal, prometheus.CounterValue, float64(w.Written), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureUncertainTotal, prometheus.CounterValue, float64(w.Uncertain), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureLateCompletionsTotal, prometheus.CounterValue, float64(w.LateCompletions), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureTimeoutsTotal, prometheus.CounterValue, float64(w.Timeouts), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureStaleTotal, prometheus.CounterValue, float64(w.Stale), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureCancelledTotal, prometheus.CounterValue, float64(w.Cancelled), labels...)
+	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureRefusedTotal, prometheus.CounterValue, float64(w.Refused), labels...)
 	deliveredAvailable := 0.0
 	if w.DeliveredAvailable {
 		deliveredAvailable = 1

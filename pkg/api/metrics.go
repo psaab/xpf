@@ -287,13 +287,20 @@ type xpfCollector struct {
 	// #10478: authenticated S5 capture actor/reinject witness. All samples
 	// share run_id/generation/permit_epoch labels so Go and Rust surfaces join
 	// without treating a process-local counter as a packet outcome.
-	ipsecCaptureActorActive      *prometheus.Desc
-	ipsecCapturePermitState      *prometheus.Desc
-	ipsecCaptureConsumedTotal    *prometheus.Desc
-	ipsecCaptureAdjudicatedTotal *prometheus.Desc
-	ipsecCaptureReinjectedTotal  *prometheus.Desc
-	ipsecCaptureDeliveredAvail   *prometheus.Desc
-	ipsecCaptureDeliveredTotal   *prometheus.Desc
+	ipsecCaptureActorActive          *prometheus.Desc
+	ipsecCapturePermitState          *prometheus.Desc
+	ipsecCaptureConsumedTotal        *prometheus.Desc
+	ipsecCaptureAdjudicatedTotal     *prometheus.Desc
+	ipsecCaptureReinjectedTotal      *prometheus.Desc
+	ipsecCaptureWrittenTotal         *prometheus.Desc
+	ipsecCaptureUncertainTotal       *prometheus.Desc
+	ipsecCaptureLateCompletionsTotal *prometheus.Desc
+	ipsecCaptureTimeoutsTotal        *prometheus.Desc
+	ipsecCaptureStaleTotal           *prometheus.Desc
+	ipsecCaptureCancelledTotal       *prometheus.Desc
+	ipsecCaptureRefusedTotal         *prometheus.Desc
+	ipsecCaptureDeliveredAvail       *prometheus.Desc
+	ipsecCaptureDeliveredTotal       *prometheus.Desc
 
 	// #3780: 0/1 gauge — 1 while the most recent scheduler-driven policy
 	// republish failed and has not yet converged (stale enforcement past
@@ -985,6 +992,13 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ipsecCaptureConsumedTotal
 	ch <- c.ipsecCaptureAdjudicatedTotal
 	ch <- c.ipsecCaptureReinjectedTotal
+	ch <- c.ipsecCaptureWrittenTotal
+	ch <- c.ipsecCaptureUncertainTotal
+	ch <- c.ipsecCaptureLateCompletionsTotal
+	ch <- c.ipsecCaptureTimeoutsTotal
+	ch <- c.ipsecCaptureStaleTotal
+	ch <- c.ipsecCaptureCancelledTotal
+	ch <- c.ipsecCaptureRefusedTotal
 	ch <- c.ipsecCaptureDeliveredAvail
 	ch <- c.ipsecCaptureDeliveredTotal
 	ch <- c.configPersistDegraded

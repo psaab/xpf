@@ -307,6 +307,41 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 		"Frames with a terminal q0 Written outcome; this is not downstream delivery (#10478).",
 		[]string{"run_id", "generation", "permit_epoch"}, nil,
 	)
+	c.ipsecCaptureWrittenTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_written_total",
+		"Terminal q0 Written completions attributed by the Go actor; exported beside reinjected to prove the attribution live (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureUncertainTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_uncertain_total",
+		"Completions the Go actor could not attribute to a terminal q0 outcome: lease or byte-count mismatch, advisory outcome, submit loss, completion-drain error, terminal-sink error, or ack timeout; timeouts are also counted here, so do not sum Timeouts on top (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureLateCompletionsTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_late_completions_total",
+		"Completions arriving for unknown or already-retired request IDs; never counted as reinjected (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureTimeoutsTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_timeouts_total",
+		"Held q0 requests retired by ack timeout before any completion resolved them (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureStaleTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_stale_total",
+		"Terminal completions refused as stale or fenced (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureCancelledTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_cancelled_total",
+		"Terminal completions classified as cancelled by the Go actor after q0 cancellation (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
+	c.ipsecCaptureRefusedTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_refused_total",
+		"Frames refused by lease minting, admission, or a terminal q0 refused/denied completion (#10478).",
+		[]string{"run_id", "generation", "permit_epoch"}, nil,
+	)
 	c.ipsecCaptureDeliveredAvail = prometheus.NewDesc(
 		"xpf_ipsec_capture_delivered_available",
 		"1 only when an independent product-owned witness downstream of the TUN write exists; never inferred from Written (#10478).",
