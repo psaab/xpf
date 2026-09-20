@@ -963,7 +963,11 @@ I/O outside the lock is not an accepted shortcut because fd lifetime/close fenci
 be a second unbounded authority. Bounding only `unix.Send` is insufficient. A proven EAGAIN/timeout
 returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptYes, Err: timeout}` and
 records E35.
-Because an EAGAIN/timeout leaves the kernel-held packet in that queue, the recovery is generation
+If bounded `q.mu` acquisition itself times out after committer entry but before any fd syscall, it
+returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptNo, Err: q_mu_timeout}`;
+this is not the pre-committer invalid case, so no retained-handle DROP fallback or retry is allowed.
+`TerminalAttempted: TerminalAttemptYes` is reserved for an attempted fd send that returns EAGAIN/timeout.
+For either a post-committer lock timeout or an attempted-send EAGAIN/timeout, the recovery is generation
 scoped: fence the queue epoch and stop new admission, CAS every still-held reservation to uncertain
 exactly once, then perform a single queue-wide `Queue.Close`/rebind teardown to let the kernel drop
 the held packets (never present this collateral close as a per-packet cancellation). Open a fresh
@@ -1762,8 +1766,10 @@ touched (O-*/V-FLIP own those).
   proving no early ShadowSlab reuse or production session/NAT/flow-cache/HA/counter mutation;
   INPUT and FORWARD slab release is exactly once on deny, queue-full, worker death, timeout, stale
   drain, and late completion. The INPUT committer cell stalls both scalar `Packet.Verdict` and a
-  preceding `VerdictBatch` send, proves every fd-send path is bounded/nonblocking, maps EAGAIN to
-  structured uncertainty, and proves queue-close/rebind census and no `q.mu` deadlock.
+  preceding `VerdictBatch` send, forces a post-entry `q.mu` lock timeout with no fd syscall to
+  `{InputCommitUncertain, TerminalAttempted: TerminalAttemptNo}` and no retry, maps an attempted
+  send EAGAIN/timeout to `TerminalAttempted: TerminalAttemptYes`, proves every fd-send path is
+  bounded/nonblocking, and proves queue-close/rebind census and no `q.mu` deadlock.
 - Shadow flip cells verify one signed `PMechShadowBudget`/`PMechFlipAuthorizer`, `T_shadow_max` expiry,
   flood deferral, two-family guard ACK/readback, baseline-ACCEPT drain with late-result tombstones,
   exact-once `FLIP_GUARD` E26 DROP counters on the designated family/hook owner, and
