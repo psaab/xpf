@@ -482,11 +482,19 @@ allocation; batch rows carry (slot, len, tunnel key, flow key, queue-epoch, phas
   poll budget so neither physical ingress nor diverted ingress can starve the other; the fraction is a
   named const priced by T22/S7 (not a hardcoded ratio in this design).
 - Bounded verdict queue back (worker → `ReinjectCore`): `{request_ids, verdict: Permit{mutation_applied,
-  commit_mode: ForwardQ0|InputReady} | Deny{stage, reason, policy_id}, snapshot_generation,
-  event_flags}`. `InputReady` is NOT terminal; it carries session refs only if D12a Option B is
-  owner-authorized and its two-resource proof is present. Under candidate Option A, every INPUT miss is
-  stateless and the set is empty: no session, BPF flow-cache, HA, or stateful-counter publication.
-  Bounded, try-or-drop: verdict-loss fails closed via the existing `ackDeadline` (5ms) →
+  commit_mode: ForwardQ0|InputReady, provisional: Option<ProvisionalStateHandle>} |
+  Deny{stage, reason, policy_id}, snapshot_generation, event_flags}`. `InputReady` is NOT terminal; it
+  carries a handle only if D12a Option B is owner-authorized and its two-resource proof is present. Under
+  candidate Option A, every INPUT miss is stateless and `provisional` is `None`: no session, BPF
+  flow-cache, HA, or stateful-counter publication.
+- `ProvisionalStateHandle` is a typed, opaque Rust-owned record:
+  `{owner_worker, owner_generation, token, session_refs, nat_undo}`. `session_refs` is a bounded set of
+  newly installed forward/reverse entries; `nat_undo` is the bounded release/revert token for every
+  mutation in the permit branch. The owner worker is the sole authority that can consume the handle:
+  q0 `CompletionWritten` sends exactly one `CommitProvisional(handle)`, while refusal/uncertain/stale/
+  MTU/rate/queue failure sends exactly one `RollbackProvisional(handle)`. Existing-hit permits with no
+  new state carry `None`. Go transports the opaque handle/result but cannot mutate or finalize it.
+- Bounded, try-or-drop: verdict-loss fails closed via the existing `ackDeadline` (5ms) →
   uncertain → DROP path (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:259-260`, `:690-697`) — the loss window is bounded and terminal
   state is always DROP. Verdict-queue-full is counted (`ipsec_inner_verdict_queue_full_total`) + alarmed,
   never silent.
