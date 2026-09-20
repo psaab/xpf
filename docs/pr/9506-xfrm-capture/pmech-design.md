@@ -1401,8 +1401,9 @@ The `Taxonomy rows / emission` column is authoritative: shared symbols deliberat
 where the counter/event row identifies the finer cause. E11/E12/E14/E15 retain legacy bytes 5/6; E7
 does not invent a second PolicyDeny event and remains `ScreenPacketInfo`. The wire-version bump/floor
 in §5.6 is REQUIRED before any 32–60 reason is emitted; old decoders refuse rather than reinterpret it.
-E26 PMechFlipGuard terminals use the existing byte-50 `LEASE_EPOCH` wire symbol; `FLIP_GUARD` is
-the bounded alarm/metric reason carried in the E26 witness, not an unallocated wire byte.
+PMechFlipGuard nft terminals do not traverse the event codec: their fixed E26 metric and transition
+alarm reason is `FLIP_GUARD`. Only a user-space E26 event bridge, when needed, emits existing
+byte-50 `LEASE_EPOCH`; no new wire byte is allocated for the nft guard.
 
 - Rust policy/session/host denials emit `DataplaneEventKind::PolicyDeny` at the existing refusal site,
   with the rule `policy_id` when one exists. Screen denies retain `ScreenPacketInfo` rather than
@@ -1571,7 +1572,7 @@ Pipeline-stats/metrics naming follows the `ipsecCapture<Name>Total` +
 | E23 | Worker ingress queue full | D11 enqueue (try-or-drop) | DROP | `ipsec_inner_worker_queue_full_total` | `DenyEventSink` + `PMechAlarm{class=WORKER_QUEUE_FULL}` |
 | E24 | Verdict queue full / verdict lost | D11 verdict path / `ackDeadline` | Uncertain → DROP, no retry | `ipsec_inner_verdict_queue_full_total` / `Uncertain`+`Timeouts` | `DenyEventSink` + terminal accounting |
 | E25 | Slab pool exhausted | Socket admit (D15b) | Refuse | `ipsec_inner_slab_exhausted_total` | `DenyEventSink` (Go `AdmissionsRefused`) |
-| E26 | Lease/permit/epoch failure (closed, stale, mismatch, echo-mismatch, shutdown/cancel, handoff race), or any PMechFlipGuard terminal DROP during the guarded transition | `MintLease`/`allows()`/submit gate/echo check / `PMechFlipGuard` | Refuse/Uncertain → DROP | `Stale`/`Cancelled`/`Uncertain`/`AdmissionsRefused` / `ipsec_inner_flip_guard_drops_total{reason=FLIP_GUARD}` with persistent `PMechFlipGuardWitness` rollup | `DenyEventSink` with E26 wire reason `LEASE_EPOCH` + existing terminal accounting / `PMechAlarm{class=FLIP_GUARD,reason=FLIP_GUARD}` |
+| E26 | Lease/permit/epoch failure (closed, stale, mismatch, echo-mismatch, shutdown/cancel, handoff race), or any PMechFlipGuard terminal DROP during the guarded transition | `MintLease`/`allows()`/submit gate/echo check / `PMechFlipGuard` | Refuse/Uncertain → DROP | `Stale`/`Cancelled`/`Uncertain`/`AdmissionsRefused` / `ipsec_inner_flip_guard_drops_total{reason=FLIP_GUARD}` with persistent `PMechFlipGuardWitness` rollup | User-space E26: `DenyEventSink` with wire reason `LEASE_EPOCH`; nft flip guard: transition `PMechAlarm{class=FLIP_GUARD,reason=FLIP_GUARD}` plus terminal accounting |
 | E27 | Submitter unavailable, socket down, `submitGate` cancellation race, or staging queue-open failure (`QUEUE_OPEN`) | `submitEligible` / socket client / staging | Refuse/Uncertain → DROP | `Refused`/`Uncertain` / `StagingSkipped` (existing `ErrNoSubmitter`) | `DenyEventSink` + `PMechAlarm{class=STAGING_SKIP}` when staging caused it |
 | E28 | Evaluator unavailable (nil evaluator, nil/stale snapshot, or unavailable authoritative worker set) | Go pre-gate / Rust evaluator authority (D9/D16) | DROP (enforcing) / `shadow_unavailable` + ACCEPT (shadow) | `ZoneGateUnavailable` / `ShadowUnavailable` | `DenyEventSink` + witness labels |
 | E29 | FORWARD q0 MTU/queue/rate failure OR INPUT terminal-ACCEPT sink failure | `submit_adjudicated_frame` / Go terminal adapter | Refuse/uncertain → DROP | `mtu_dropped_packets`/`queue_full_packets`/`rate_limited_packets` / `ipsec_inner_input_accept_errors_total` | `DenyEventSink` + terminal accounting |
@@ -1948,7 +1949,9 @@ frames with that baseline. The flip mode has its own generation/status witness, 
 quarantine transition cannot be mistaken for a Shadow flip.
 Every `PMechFlipGuard` base-chain/per-ifindex DROP increments a named owner counter
 `xpf_ipsec_flip_guard_hits_<family>_<hook>_g<generation>_s<install_sequence>` exactly once per
-packet; later DROP hooks do not increment. The fixed metric/event reason is `FLIP_GUARD` (E26).
+packet; later DROP hooks do not increment. The fixed metric and transition-alarm reason is
+`FLIP_GUARD` (E26); these nft hits do not emit a wire event. A user-space E26 failure, if emitted,
+uses the existing `LEASE_EPOCH` byte through `DenyEventSink`.
 `PMechFlipGuardWitness` is retained without an actor or permit and exports `guard_accumulated + live`
 for both families. It retains a bounded metadata chain/rule with `{runID,generation,reason,
 install_sequence,label_schema}` and a `PMechFlipCounterJournal`; after hook detach/quiesce ACK it
