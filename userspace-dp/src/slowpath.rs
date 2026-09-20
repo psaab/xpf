@@ -1628,7 +1628,7 @@ fn leased_outcome_to_status(
         TransferVerdict::Fenced => Err("fenced".to_string()),
         TransferVerdict::Denied => Err("denied".to_string()),
         TransferVerdict::Accepted => Ok(()),
-        TransferVerdict::WouldReinject => Ok(()),
+        TransferVerdict::WouldReinject | TransferVerdict::WouldPermit => Ok(()),
     };
     SlowPathWriteOutcome {
         result,

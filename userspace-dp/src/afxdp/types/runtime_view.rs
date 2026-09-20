@@ -89,6 +89,116 @@ use super::*;
 /// Cheap to publish: `ValidationState` is `Copy` and `forwarding` is an `Arc`
 /// refcount bump, so a view reusing the current forwarding costs one small
 /// allocation and no table copying.
+/// A per-generation P-MECH tunnel row. It is stored inside the immutable
+/// `RuntimeView`, not beside it, so a D13 worker cannot accidentally pair
+/// generation-N tunnel identity with generation-(N+1) forwarding/zone maps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct IpsecTunnelRow {
+    pub(in crate::afxdp) stn: String,
+    pub(in crate::afxdp) if_id: u32,
+    pub(in crate::afxdp) logical_ifindex: i32,
+}
+
+/// Immutable exact-STN tunnel-row set published as part of one RuntimeView.
+/// Duplicate STNs and duplicate if_id claims are tracked per claimant:
+/// unrelated rows remain usable while every ambiguous claimant resolves to
+/// `None` at D14.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct IpsecTunnelRows {
+    rows: BTreeMap<String, IpsecTunnelRow>,
+    duplicate_stns: BTreeSet<String>,
+    ambiguous_if_ids: BTreeSet<u32>,
+}
+
+impl IpsecTunnelRows {
+    pub(in crate::afxdp) fn new(rows: impl IntoIterator<Item = IpsecTunnelRow>) -> Self {
+        let mut out = Self::default();
+        let mut if_id_claims: BTreeMap<u32, usize> = BTreeMap::new();
+        for row in rows {
+            if row.stn.is_empty() || row.if_id == 0 || row.logical_ifindex == 0 {
+                continue;
+            }
+            *if_id_claims.entry(row.if_id).or_default() += 1;
+            let stn = row.stn.clone();
+            if out.rows.insert(stn.clone(), row).is_some() {
+                out.duplicate_stns.insert(stn);
+            }
+        }
+        for (if_id, count) in if_id_claims {
+            if count > 1 {
+                out.ambiguous_if_ids.insert(if_id);
+            }
+        }
+        out
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn exact(&self, stn: &str) -> Option<&IpsecTunnelRow> {
+        let row = self.rows.get(stn)?;
+        if self.duplicate_stns.contains(stn) || self.ambiguous_if_ids.contains(&row.if_id) {
+            None
+        } else {
+            Some(row)
+        }
+    }
+
+    pub(in crate::afxdp) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub(in crate::afxdp) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Rows are immutable after construction; this accessor is only for
+    /// snapshot/control tests that need to inspect the published set.
+    pub(in crate::afxdp) fn duplicate(&self) -> bool {
+        !self.duplicate_stns.is_empty() || !self.ambiguous_if_ids.is_empty()
+    }
+}
+
+/// Number of admitted P-MECH tunnels and exact rows are part of the same
+/// immutable runtime binding as `ForwardingState`.
+///
+/// The normal two-argument `RuntimeView::new` keeps existing non-P-MECH
+/// consumers compatible by publishing an empty row set; the P-MECH control
+#[derive(Debug)]
+pub(in crate::afxdp) struct IpsecRuntimeBinding {
+    rows: Arc<IpsecTunnelRows>,
+    /// Authoritative generation of the tunnel-row/admit contract. It is
+    /// published with the same RuntimeView as forwarding + validation; zero is
+    /// unavailable and therefore E28, never "current".
+    snapshot_generation: u64,
+}
+
+impl Default for IpsecRuntimeBinding {
+    fn default() -> Self {
+        Self {
+            rows: Arc::new(IpsecTunnelRows::default()),
+            snapshot_generation: 0,
+        }
+    }
+}
+
+impl IpsecRuntimeBinding {
+    pub(in crate::afxdp) fn new(rows: Arc<IpsecTunnelRows>, snapshot_generation: u64) -> Self {
+        Self {
+            rows,
+            snapshot_generation,
+        }
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn rows(&self) -> &IpsecTunnelRows {
+        &self.rows
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn snapshot_generation(&self) -> u64 {
+        self.snapshot_generation
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::afxdp) struct RuntimeView {
     /// Generation stamps a packet's shim metadata is matched against
@@ -96,6 +206,10 @@ pub(in crate::afxdp) struct RuntimeView {
     validation: ValidationState,
     /// The policy / FIB / NAT tables a `Valid` packet is forwarded under.
     forwarding: Arc<ForwardingState>,
+    /// P-MECH tunnel identity rows are atomically paired with the forwarding
+    /// maps and validation generations. D13 receives this through the same
+    /// immutable view binding and never accepts a caller-supplied side table.
+    ipsec: IpsecRuntimeBinding,
 }
 
 impl Default for RuntimeView {
@@ -103,17 +217,15 @@ impl Default for RuntimeView {
         Self {
             validation: ValidationState::default(),
             forwarding: Arc::new(ForwardingState::default()),
+            ipsec: IpsecRuntimeBinding::default(),
         }
     }
 }
 
 impl RuntimeView {
     /// Build a view pairing `validation` with an already-published forwarding
-    /// `Arc` (refcount bump, no table copy). Used by the validation-only
-    /// publish path (`bump_fib_generation`) so the forwarding `Arc` identity —
-    /// and with it the worker's #1188 short-circuit — is preserved.
-    ///
-    /// THE only way to obtain a `RuntimeView` value (the type is not `Clone`).
+    /// `Arc` (refcount bump, no table copy). Non-P-MECH callers publish the
+    /// empty row set; P-MECH uses the explicit constructor below.
     pub(in crate::afxdp) fn new(
         validation: ValidationState,
         forwarding: Arc<ForwardingState>,
@@ -121,9 +233,25 @@ impl RuntimeView {
         Self {
             validation,
             forwarding,
+            ipsec: IpsecRuntimeBinding::default(),
         }
     }
 
+    /// Build a P-MECH view with tunnel rows as part of the SAME immutable
+    /// binding. There is no API to construct a D13 invocation from two
+    /// independently loaded views.
+    pub(in crate::afxdp) fn new_with_ipsec_tunnel_rows(
+        validation: ValidationState,
+        forwarding: Arc<ForwardingState>,
+        rows: Arc<IpsecTunnelRows>,
+        snapshot_generation: u64,
+    ) -> Self {
+        Self {
+            validation,
+            forwarding,
+            ipsec: IpsecRuntimeBinding::new(rows, snapshot_generation),
+        }
+    }
     /// The generation stamps half. `Copy`, so a caller gets a value it cannot
     /// write back.
     #[inline]
@@ -137,7 +265,19 @@ impl RuntimeView {
     pub(in crate::afxdp) fn forwarding(&self) -> &Arc<ForwardingState> {
         &self.forwarding
     }
+
+    /// The exact tunnel-row set paired with this view.
+    #[inline]
+    pub(in crate::afxdp) fn ipsec_tunnel_rows(&self) -> &IpsecTunnelRows {
+        self.ipsec.rows()
+    }
+    /// Authoritative tunnel-row generation paired with this view.
+    #[inline]
+    pub(in crate::afxdp) fn ipsec_snapshot_generation(&self) -> u64 {
+        self.ipsec.snapshot_generation()
+    }
 }
+
 
 /// The WRITE side of the runtime-view channel — the coordinator's handle.
 ///

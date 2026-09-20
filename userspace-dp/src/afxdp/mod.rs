@@ -35,7 +35,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr::NonNull;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -91,6 +91,8 @@ pub(crate) mod frame;
 #[path = "gre.rs"]
 mod gre;
 mod logical_ingress;
+mod ipsec_inner;
+mod ipsec_inner_queue;
 mod gre_discriminator;
 mod ha;
 // #6785: the control handler needs the synced-import outcome type and its
