@@ -268,8 +268,8 @@ If K2 triggers, a newly authorized re-plan + hostile review (r6 §6 procedure) n
    structurally but re-pin to new call sites).
 
 6. An explicit D12a owner record choosing Option A (and the exact stateless protocol/scope) or Option B
-   (two-resource session prepare/finalize, rollback, and accepted-without-session kill boundary). Until
-   that record exists, the replacement plan MUST claim no broad stateful INPUT permits.
+   (two-resource session prepare/finalize, rollback, and accepted-without-session kill boundary). Under
+   Option A, every stateful INPUT miss remains E37 DROP; only proven Option B can permit stateful INPUT.
 
 ### §1.8 Alternatives rejected (re-sign)
 
