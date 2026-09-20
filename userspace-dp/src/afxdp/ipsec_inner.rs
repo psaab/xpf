@@ -46,10 +46,8 @@ pub(crate) static ipsec_inner_parse_drops_total: AtomicU64 = AtomicU64::new(0);
 // The lowercase duplicate was a second, never-incremented `AtomicU64` — D13
 // passes only the canonical cell to the shared helper, so reads of the old
 // name observed a permanent 0 while drops accumulated invisibly in the
-// canonical cell. The alias keeps the §4.3 source-level name joinable to
-// the metric contract without a translation table. (`self::` qualification
-// is forced by edition-2024 `use` path rules; the binding is exactly the
-// canonical static.)
+// canonical static while keeping the §4.3 source-level name joinable to the
+// metric contract without a translation table.
 pub(crate) use IPSEC_INNER_ECN_ILLEGAL_DROPS as ipsec_inner_ecn_illegal_drops;
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_session_lookup_errors_total: AtomicU64 = AtomicU64::new(0);

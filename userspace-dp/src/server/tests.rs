@@ -8129,10 +8129,11 @@ fn refresh_status_projects_ipsec_inner_counters() {
 
 /// #9506 counter slice: the twelve fields SERIALIZE under their snake_case
 /// contract keys. The wiring cell pins that `refresh_status` fills them from
-/// the right sources; this pins the wire spelling the Go decoder will read.
+/// the right sources; this pins the wire spelling that a separate Go decoder
+/// and Prometheus collector slice must map explicitly.
 /// Both are needed and neither implies the other — a `refresh_status` that
 /// filled the fields correctly while serde renamed a key would leave the
-/// wiring cell green and ship a key the Go side never decodes.
+/// wiring cell green and ship a key the Go follow-up never maps.
 #[test]
 fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
     let status = ProcessStatus {

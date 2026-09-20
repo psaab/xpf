@@ -436,6 +436,20 @@ pub(crate) fn run() -> Result<(), String> {
             interface_snat_registry_cap_exhaustion_total: 0,
             worker_command_queue_poison_recoveries: 0,
             worker_command_queue_drops: 0,
+            // #9506: Rust-owned IPsec-inner counters start at zero and are
+            // refreshed from the cold-path atomic snapshot.
+            zone_gate_unzoned_total: 0,
+            zone_gate_ambiguous_total: 0,
+            zone_gate_stale_total: 0,
+            zone_gate_no_generation_total: 0,
+            ipsec_inner_parse_drops_total: 0,
+            ipsec_inner_ecn_illegal_drops: 0,
+            ipsec_inner_worker_queue_full_total: 0,
+            ipsec_inner_verdict_queue_full_total: 0,
+            ipsec_inner_slab_exhausted_total: 0,
+            ipsec_inner_worker_retired_total: 0,
+            ipsec_inner_worker_orphan_reaped_total: 0,
+            ipsec_inner_orphan_provisional_total: 0,
             session_delete_replica_dropped: 0,
             session_delete_replica_drop_repaired: 0,
             ha_transition_demote_dropped: 0,
@@ -569,7 +583,6 @@ pub(crate) fn run() -> Result<(), String> {
             fabric_link_skipped_malformed_total: 0,
             fabric_link_unresolved_peer_total: 0,
             learned_route_import_capped: None,
-            ..ProcessStatus::default()
         },
         snapshot: None,
         afxdp: {
