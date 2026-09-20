@@ -1349,7 +1349,7 @@ pre-dispatch deny events and operator alarms; Rust-side refusals use the same ev
 `EmitIpsecInnerDeny(IpsecInnerDeny)` plus `EmitPMechAlarm(PMechAlarm)`, where
 `PMechAlarm{class, reason, generation, queue_id, tunnel}` has a closed class enum:
 `STAGING_SKIP|OWNER_CONTESTED|NODE_WIDE_QUARANTINE|ZONE_AMBIGUOUS|DOMAIN_OVERLAP|WORKER_QUEUE_FULL|
-OWNER_UNAVAILABLE|BYPASS_FENCE|INPUT_COMPLETION|VERSION_SKEW`. The concrete consumer is the
+OWNER_UNAVAILABLE|BYPASS_FENCE|FLIP_GUARD|INPUT_COMPLETION|VERSION_SKEW`. The concrete consumer is the
 daemon `PMechAlarmConsumer` owned by `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go`;
 it updates the pipeline status/alarm witness and forwards the bounded record to the existing operator
 collector. Its transition key is `{generation, class, reason, queue_id, tunnel_ifindex}`; a state
@@ -1401,6 +1401,8 @@ The `Taxonomy rows / emission` column is authoritative: shared symbols deliberat
 where the counter/event row identifies the finer cause. E11/E12/E14/E15 retain legacy bytes 5/6; E7
 does not invent a second PolicyDeny event and remains `ScreenPacketInfo`. The wire-version bump/floor
 in §5.6 is REQUIRED before any 32–60 reason is emitted; old decoders refuse rather than reinterpret it.
+E26 PMechFlipGuard terminals use the existing byte-50 `LEASE_EPOCH` wire symbol; `FLIP_GUARD` is
+the bounded alarm/metric reason carried in the E26 witness, not an unallocated wire byte.
 
 - Rust policy/session/host denials emit `DataplaneEventKind::PolicyDeny` at the existing refusal site,
   with the rule `policy_id` when one exists. Screen denies retain `ScreenPacketInfo` rather than
@@ -1498,16 +1500,18 @@ Daemon-level `PMechStagingWitness` (owned by wiring/nft/fence and retained witho
 owns staging/table/bounded-sink counters: `StagingSkipped`, `SkippedTunnelDrops`,
 `BypassWindowDrops`, and `DenyEventUnavailable` (actor-path sink loss is merged into this global
 witness). The separate `QuarantineCounterWitness` supplies the authoritative
-`GenerationQuarantineDrops` rollup; these witness-only fields are not copied into `PipelineStats`,
-so actor and no-actor series cannot double-count.
+`GenerationQuarantineDrops` rollup, and `PMechFlipGuardWitness` supplies the authoritative
+`ipsec_inner_flip_guard_drops_total{reason=FLIP_GUARD}` rollup; these witness-only fields are not
+copied into `PipelineStats`, so actor and no-actor series cannot double-count.
 
 ### §4.4 Metrics + witness join
 
-Extend the 2a witness pattern (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go:14-60`) with three sources:
+Extend the 2a witness pattern (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go:14-60`) with four sources:
 the actor snapshot (`IpsecCapturePipelineStatus`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go:53-65`) gains the
 §4.3 actor fields; daemon/installer-owned `QuarantineCounterWitness` (§D1b) remains alive
-independently of actor creation and zero-admission permit state; and `PMechStagingWitness` carries
-pre-frame/staging/fence fields with the same lifetime. The collector merges all three sources as
+independently of actor creation and zero-admission permit state; `PMechStagingWitness` carries
+pre-frame/staging/fence fields with the same lifetime; and `PMechFlipGuardWitness` carries the
+flip-guard counter with the same no-actor lifetime. The collector merges all four sources as
 `CounterValue` with the EXISTING label set
 (`runID`, `generation`, `permitEpoch` — `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go:22-25`) PLUS a bounded closed `reason`
 label for deny families. Witness-only rows use the explicit no-permit sentinel `permitEpoch=0`
@@ -1520,15 +1524,18 @@ primary_reason, reason_mask, install_sequence, label_schema}` from the metadata 
 `Rule.UserData`/stable names or the durable journal (never from nonexistent counter userdata), reads
 the current counts, and resumes idempotent detach/rollup under the original `runID`; restart never
 resets or double-counts the witness series.
+`PMechFlipGuardWitness.Recover` performs the same enumeration and idempotent journal replay for
+`xpf_ipsec_flip_guard_hits_*` objects and `PMechFlipCounterJournal`, including a crash between final
+read and GC; it preserves the original `runID` and never adds a final delta twice.
 `staging_skipped_tunnel_total{reason}` uses only
 `IFID_UNDERIVABLE|LINK_LOOKUP|QUEUE_OPEN|OWNER_CONTESTED|DOMAIN_OVERLAP`; the named
 `ipsec_inner_skipped_tunnel_drops_total{reason}` and
 `ipsec_capture_generation_quarantine_drops_total{reason}` use that same five-value closed enum,
 while `ipsec_inner_bypass_window_drops_total{reason}` uses the fixed closed `BYPASS_FENCE` reason
-(E34), never a tunnel label. These
-staging/quarantine/bypass counters are owned by Go staging/nftables and the bounded witness, not
-duplicated as Rust worker increments. `ClassificationErrors`, `FragmentMetadataErrors`, and
-`FragmentLate` likewise originate in Go `receiveQueue`/pre-`FragPool`; Rust owns only the worker
+(E34), never a tunnel label. These staging/quarantine/bypass/flip counters are owned by Go
+staging/nftables and the bounded witness, not duplicated as Rust worker increments.
+`ClassificationErrors`, `FragmentMetadataErrors`, and `FragmentLate` likewise originate in Go
+`receiveQueue`/pre-`FragPool`; Rust owns only the worker
 causes listed in §4.3. NEVER use raw STN/tunnel names as label values: tunnel attribution belongs in
 the tuple-rich event/alarm payload and bounded logs, not metric cardinality. Rust `s5_reinject` stats
 block gains only the §4.3 Rust counters under the existing `(run_id, generation, permit_epoch)` join.
@@ -1564,7 +1571,7 @@ Pipeline-stats/metrics naming follows the `ipsecCapture<Name>Total` +
 | E23 | Worker ingress queue full | D11 enqueue (try-or-drop) | DROP | `ipsec_inner_worker_queue_full_total` | `DenyEventSink` + `PMechAlarm{class=WORKER_QUEUE_FULL}` |
 | E24 | Verdict queue full / verdict lost | D11 verdict path / `ackDeadline` | Uncertain → DROP, no retry | `ipsec_inner_verdict_queue_full_total` / `Uncertain`+`Timeouts` | `DenyEventSink` + terminal accounting |
 | E25 | Slab pool exhausted | Socket admit (D15b) | Refuse | `ipsec_inner_slab_exhausted_total` | `DenyEventSink` (Go `AdmissionsRefused`) |
-| E26 | Lease/permit/epoch failure (closed, stale, mismatch, echo-mismatch, shutdown/cancel, handoff race) | `MintLease`/`allows()`/submit gate/echo check | Refuse/Uncertain → DROP | `Stale`/`Cancelled`/`Uncertain`/`AdmissionsRefused` | `DenyEventSink` + existing terminal accounting |
+| E26 | Lease/permit/epoch failure (closed, stale, mismatch, echo-mismatch, shutdown/cancel, handoff race), or any PMechFlipGuard terminal DROP during the guarded transition | `MintLease`/`allows()`/submit gate/echo check / `PMechFlipGuard` | Refuse/Uncertain → DROP | `Stale`/`Cancelled`/`Uncertain`/`AdmissionsRefused` / `ipsec_inner_flip_guard_drops_total{reason=FLIP_GUARD}` with persistent `PMechFlipGuardWitness` rollup | `DenyEventSink` with E26 wire reason `LEASE_EPOCH` + existing terminal accounting / `PMechAlarm{class=FLIP_GUARD,reason=FLIP_GUARD}` |
 | E27 | Submitter unavailable, socket down, `submitGate` cancellation race, or staging queue-open failure (`QUEUE_OPEN`) | `submitEligible` / socket client / staging | Refuse/Uncertain → DROP | `Refused`/`Uncertain` / `StagingSkipped` (existing `ErrNoSubmitter`) | `DenyEventSink` + `PMechAlarm{class=STAGING_SKIP}` when staging caused it |
 | E28 | Evaluator unavailable (nil evaluator, nil/stale snapshot, or unavailable authoritative worker set) | Go pre-gate / Rust evaluator authority (D9/D16) | DROP (enforcing) / `shadow_unavailable` + ACCEPT (shadow) | `ZoneGateUnavailable` / `ShadowUnavailable` | `DenyEventSink` + witness labels |
 | E29 | FORWARD q0 MTU/queue/rate failure OR INPUT terminal-ACCEPT sink failure | `submit_adjudicated_frame` / Go terminal adapter | Refuse/uncertain → DROP | `mtu_dropped_packets`/`queue_full_packets`/`rate_limited_packets` / `ipsec_inner_input_accept_errors_total` | `DenyEventSink` + terminal accounting |
@@ -1624,8 +1631,8 @@ Go:
   is only the fenced, accounted teardown after EAGAIN/timeout, never per-packet cancellation.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go` —
   receive-time tunnel attribution (D8 secondary) + status snapshot fields (§4.4) +
-  `PMechAlarmConsumer`/bounded `DenyEventSink` bridge; actor-path sink loss merges into the global
-  staging witness.
+  signed `PMechShadowBudget` storage/validation input + `PMechAlarmConsumer`/bounded
+  `DenyEventSink` bridge; actor-path sink loss merges into the global staging witness.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go` —
   per-generation if_id→zone map build (§1.1) + config/fib generation capture at staging (D13) +
   duplicate-if_id detection (§3.5) + snapshot publication (D9) + explicit `QuarantineAll`/deny-only
@@ -1641,9 +1648,11 @@ Go:
   supervisor status/verifier hooks for INPUT completion.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_topology_owner_9506.go` —
   failover actuator and `failover_refused` status API/field; `PMechFailoverVerifier` checks peer
-  protocol/floor/tag equality, worker-set generation, fence, and transit-barrier readiness before OPEN.
+  protocol/floor/tag equality, worker-set generation, fence, and transit-barrier readiness before OPEN;
+  sole `PMechFlipAuthorizer` verifies the signed budget, owns the seven-step `PMechFlipGuard`
+  state machine, and publishes its status/witness before final OPEN.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go` (+
-  collector decls) — §4.4 actor/staging/quarantine witness merge, fixed
+  collector decls) — §4.4 actor/staging/quarantine/flip-guard witness merge, fixed
   `(runID,generation,permitEpoch,reason)` labels, and `permitEpoch=0` no-permit sentinel.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go` — exported
   `BindInterfaceOwnsRef` wrapper over the existing ownership predicate; this is the config SSOT used
@@ -1656,8 +1665,8 @@ Go:
   with the closed P-MECH reason/severity mappings; lockstep decoder tests remain in the owning package.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nftables/ipsec_divert.go` — explicit
   `QuarantineAll`/guard rendering on separate inet/bridge base-chain tables, two-family ACK/readback,
-  named family/hook counters, metadata-chain recovery, quiesce/final-read/fsync/GC lifecycle, and
-  replacement failure/bridge-degraded refusal.
+  named family/hook counters, `PMechFlipGuardWitness`/`PMechFlipCounterJournal` recovery,
+  quiesce/final-read/fsync/GC lifecycle, and replacement failure/bridge-degraded refusal.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go` —
   REQUIRED protocol-floor/tunnel-row/admit-reason contract and version bump (never conditional).
   Its exact Rust lockstep counterparts are also REQUIRED:
@@ -1752,9 +1761,11 @@ touched (O-*/V-FLIP own those).
   structured uncertainty, and proves queue-close/rebind census and no `q.mu` deadlock.
 - Shadow flip cells verify one signed `PMechShadowBudget`/`PMechFlipAuthorizer`, `T_shadow_max` expiry,
   flood deferral, two-family guard ACK/readback, baseline-ACCEPT drain with late-result tombstones,
-  and permit CLOSED through RuntimeView publish and both guard removals; only step-7 CAS opens it.
-  Partial-removal failure keeps CLOSED and restores a two-family guard before recovery; a
-  post-activation failure installs/ACKs a fresh guard before active-epoch drain/replacement.
+  exact-once `FLIP_GUARD` E26 DROP counters on the designated family/hook owner, and
+  `PMechFlipGuardWitness` final-read→fsync→GC/restart idempotence. Permit stays CLOSED through
+  RuntimeView publish and both guard removals; only step-7 CAS opens it. Partial-removal failure
+  keeps CLOSED and restores a two-family guard before recovery; a post-activation failure
+  installs/ACKs a fresh guard before active-epoch drain/replacement.
   Flow-cache rows missing discriminator/generation and DNS fastpath INPUT-miss behavior both refuse,
   never permit.
 - Staging/quarantine parity cells: each closed skip reason (`IFID_UNDERIVABLE`, `LINK_LOOKUP`,
@@ -1928,6 +1939,17 @@ to DROP/uncertain immediately after guard ACK. Shadow's existing NFQUEUE epoch r
 Go-owned ACCEPT baseline; flip mode fences only new Shadow submissions and drains already-held
 frames with that baseline. The flip mode has its own generation/status witness, so a D1b
 quarantine transition cannot be mistaken for a Shadow flip.
+Every `PMechFlipGuard` base-chain/per-ifindex DROP increments a named owner counter
+`xpf_ipsec_flip_guard_hits_<family>_<hook>_g<generation>_s<install_sequence>` exactly once per
+packet; later DROP hooks do not increment. The fixed metric/event reason is `FLIP_GUARD` (E26).
+`PMechFlipGuardWitness` is retained without an actor or permit and exports `guard_accumulated + live`
+for both families. It retains a bounded metadata chain/rule with `{runID,generation,reason,
+install_sequence,label_schema}` and a `PMechFlipCounterJournal`; after hook detach/quiesce ACK it
+reads final counters (including the read→detach interval), fsyncs the rollup before counter/metadata
+GC, and recovers idempotently after restart under the original `runID`. Counter userdata is never
+used. A failed ACK/removal leaves the named objects and witness live; the cell cannot silently lose
+an E26 terminal count.
+
 
 The flip is a guarded sequence, not a cross-subsystem atomic operation:
 1. Install the higher-priority two-family P-MECH flip guard and wait for D1b ACK/readback.
