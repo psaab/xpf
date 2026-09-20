@@ -161,7 +161,8 @@ impl IpsecTunnelRows {
 /// immutable runtime binding as `ForwardingState`.
 ///
 /// The normal two-argument `RuntimeView::new` keeps existing non-P-MECH
-/// consumers compatible by publishing an empty row set; the P-MECH control
+/// consumers compatible by publishing an empty row set; P-MECH control
+/// publication uses `new_with_ipsec_tunnel_rows` below.
 #[derive(Debug)]
 pub(in crate::afxdp) struct IpsecRuntimeBinding {
     rows: Arc<IpsecTunnelRows>,
@@ -276,6 +277,11 @@ impl RuntimeView {
     pub(in crate::afxdp) fn ipsec_snapshot_generation(&self) -> u64 {
         self.ipsec.snapshot_generation()
     }
+
+    #[inline]
+    pub(in crate::afxdp) fn ipsec_tunnel_rows_arc(&self) -> Arc<IpsecTunnelRows> {
+        self.ipsec.rows.clone()
+    }
 }
 
 
@@ -378,5 +384,42 @@ pub(in crate::afxdp) fn load_forwarding_if_changed(
         None
     } else {
         Some(view.forwarding().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_only_view_reuses_published_ipsec_rows() {
+        let rows = Arc::new(IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }]));
+        let forwarding = Arc::new(ForwardingState::default());
+        let first = RuntimeView::new_with_ipsec_tunnel_rows( // runtime-view-canary: test-local
+            ValidationState {
+                snapshot_installed: true,
+                config_generation: 7,
+                fib_generation: 3,
+            },
+            forwarding,
+            rows,
+            7,
+        );
+        let second = RuntimeView::new_with_ipsec_tunnel_rows( // runtime-view-canary: test-local
+            ValidationState {
+                snapshot_installed: true,
+                config_generation: 7,
+                fib_generation: 4,
+            },
+            first.forwarding().clone(),
+            first.ipsec_tunnel_rows_arc(),
+            first.ipsec_snapshot_generation(),
+        );
+        assert_eq!(second.ipsec_snapshot_generation(), 7);
+        assert_eq!(second.ipsec_tunnel_rows().exact("st0").map(|r| r.if_id), Some(9));
     }
 }

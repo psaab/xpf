@@ -78,20 +78,12 @@ pub(crate) static ipsec_inner_input_nat_mutation_unsupported_total: AtomicU64 = 
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_syn_cookie_refusals_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_ha_unknown_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_worker_retired_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_worker_orphan_reaped_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_orphan_provisional_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_fragment_late_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static nfq_reentry_unsupported_domain_total: AtomicU64 = AtomicU64::new(0);
 
 
-/// Advisory/generation fields appended to each Go submit row (+22 bytes). Go
+/// Advisory/generation fields appended to each Go submit row (+26 bytes). Go
 /// remains the pre-gate authority; Rust treats every value as advisory and
 /// cross-checks it against the exact tunnel row and the one RuntimeView loaded
 /// by the worker tick.

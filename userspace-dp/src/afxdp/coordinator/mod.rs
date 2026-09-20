@@ -1594,14 +1594,20 @@ impl Coordinator {
     /// publishes everything committed before it, so the #5166 CoS-map /
     /// `ha.fabrics` stores must also already have happened.
     fn store_runtime_view(&mut self, forwarding: Arc<ForwardingState>) {
-        let view = Arc::new(RuntimeView::new(self.validation, forwarding));
+        let previous = self.ha.runtime.load_full();
+        let view = Arc::new(RuntimeView::new_with_ipsec_tunnel_rows(
+            self.validation,
+            forwarding,
+            previous.ipsec_tunnel_rows_arc(),
+            previous.ipsec_snapshot_generation(),
+        ));
         // #6592 test seam — records the INTENDED pair and the still-visible
         // PREVIOUS view, so the regression test can assert both that a worker
         // observes exactly this pair and that the capture sits BEFORE the
         // store (hoist resistance). Absent from release builds.
         #[cfg(test)]
         {
-            self.runtime_view_at_publish = Some((view.clone(), self.ha.runtime.load_full()));
+            self.runtime_view_at_publish = Some((view.clone(), previous.clone()));
             // #6593: capture EVERY sibling that must already be worker-visible
             // here, not just the CoS owner map. Taken at the same instant and
             // from the same choke point, so no publish path can bypass it.

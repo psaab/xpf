@@ -250,6 +250,16 @@ impl IpsecInnerSlabPool {
         })
     }
 
+    /// Nonblocking mutable access for the socket/submit producer. Contention
+    /// is treated as a slab refusal; no producer path waits on a worker-held
+    /// buffer lock.
+    pub(crate) fn try_buffer(
+        &self,
+        slab_id: u32,
+    ) -> Option<std::sync::MutexGuard<'_, Vec<u8>>> {
+        self.slots.get(slab_id as usize)?.buf.try_lock().ok()
+    }
+
     /// Worker takes ownership at dequeue (ENQUEUED -> WORKER_OWNED).  The
     /// acquired reference is transferred to the worker; it is not dropped by
     /// the reaper while this state is live.
@@ -382,6 +392,41 @@ impl IpsecInnerSlabPool {
         }
         false
     }
+    /// Reclaim a slot after the owning worker has terminated and its join/
+    /// quiescence witness proves no late ACK can touch the bytes. Unlike
+    /// `force_release`, this may clear WORKER_OWNED/VERDICT_POSTED directly;
+    /// callers MUST NOT invoke it while the worker can still run.
+    pub(crate) fn reclaim_after_worker_death(&self, slab_id: u32) -> bool {
+        let Some(slot) = self.slots.get(slab_id as usize) else {
+            return false;
+        };
+        let state = slot.state.load(Ordering::Acquire);
+        if state == SLOT_ENQUEUED {
+            return self.force_release(slab_id);
+        }
+        if !matches!(state, SLOT_WORKER_OWNED | SLOT_VERDICT_POSTED | SLOT_REAP_PENDING) {
+            return false;
+        }
+        if state != SLOT_REAP_PENDING
+            && slot
+                .state
+                .compare_exchange(
+                    state,
+                    SLOT_REAP_PENDING,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return false;
+        }
+        slot.refs.store(0, Ordering::Release);
+        if let Ok(mut buf) = slot.buf.lock() {
+            buf.clear();
+        }
+        slot.state.store(SLOT_FREE, Ordering::Release);
+        true
+    }
 
     #[cfg(test)]
     pub(crate) fn free_count(&self) -> usize {
@@ -416,12 +461,16 @@ impl IpsecInnerIngressQueue {
         self.worker_id
     }
 
-    /// Try-or-drop enqueue. Full -> E23 DROP-and-count, producer never blocks.
+    /// Try-or-drop enqueue. Full or lock contention -> E23 DROP-and-count;
+    /// the producer never waits on a worker-owned queue.
     pub(crate) fn try_enqueue(
         &self,
         desc: IpsecInnerDescriptor,
     ) -> Result<(), IpsecInnerDescriptor> {
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(mut pending) = self.pending.try_lock() else {
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(desc);
+        };
         if pending.len() >= IPSEC_INNER_QUEUE_DEPTH {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
             return Err(desc);
@@ -526,7 +575,10 @@ impl IpsecInnerVerdictQueue {
     }
 
     pub(crate) fn try_post(&self, verdict: IpsecInnerVerdict) -> Result<(), IpsecInnerVerdict> {
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(mut pending) = self.pending.try_lock() else {
+            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(verdict);
+        };
         if pending.len() >= IPSEC_INNER_VERDICT_QUEUE_DEPTH {
             IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
             return Err(verdict);
@@ -743,18 +795,28 @@ impl WorkerSetAuthority {
         self.generation.load(Ordering::Acquire)
     }
 
+    pub(crate) fn try_is_authoritative(&self) -> Result<bool, ()> {
+        if self.published.load(Ordering::Acquire) == 0 {
+            return Ok(false);
+        }
+        let live = self.live.try_lock().map_err(|_| ())?;
+        Ok(!live.is_empty())
+    }
+
+    pub(crate) fn try_route(&self, flow_tag: u64) -> Result<Option<u32>, ()> {
+        let live = self.live.try_lock().map_err(|_| ())?;
+        if live.is_empty() {
+            return Ok(None);
+        }
+        let idx = (flow_tag % live.len() as u64) as usize;
+        Ok(live.iter().nth(idx).copied())
+    }
+
     pub(crate) fn is_authoritative(&self) -> bool {
         self.published.load(Ordering::Acquire) != 0
             && !self.live.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
-    pub(crate) fn is_live(&self, worker: u32, generation: u64) -> bool {
-        generation == self.generation()
-            && self.live.lock().unwrap_or_else(|e| e.into_inner()).contains(&worker)
-    }
-
-    /// Stable owner routing: same flow -> same live worker (per-worker FIFO
-    /// preserves per-flow order). `None` when no live worker exists (E28).
     pub(crate) fn route(&self, flow_tag: u64) -> Option<u32> {
         let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if live.is_empty() {
@@ -762,6 +824,10 @@ impl WorkerSetAuthority {
         }
         let idx = (flow_tag % live.len() as u64) as usize;
         live.iter().nth(idx).copied()
+    }
+    pub(crate) fn is_live(&self, worker: u32, generation: u64) -> bool {
+        generation == self.generation()
+            && self.live.lock().unwrap_or_else(|e| e.into_inner()).contains(&worker)
     }
 
     /// Retire one worker: remove from the live set and bump the generation so
@@ -802,21 +868,26 @@ impl IpsecInnerRouter {
         }
     }
 
-    /// Admit one frame for routing. Full per-flow bound or no live worker
-    /// refuses with the E-row reason (E23 / E28); a retired-set descriptor is
-    /// the caller's stale check (E4) — never misrouted.
+    /// Admit one frame for routing without waiting on authority or inflight
+    /// locks. Contention is an E23/E28 refusal; callers must release the
+    /// acquired slab when this returns `Err`.
     pub(crate) fn admit(
         &self,
         authority: &WorkerSetAuthority,
         flow_tag: u64,
     ) -> Result<u32, u8> {
-        if !authority.is_authoritative() {
-            return Err(reason::EVALUATOR_UNAVAILABLE);
+        match authority.try_is_authoritative() {
+            Ok(true) => {}
+            Ok(false) | Err(()) => return Err(reason::EVALUATOR_UNAVAILABLE),
         }
-        let Some(worker) = authority.route(flow_tag) else {
-            return Err(reason::EVALUATOR_UNAVAILABLE);
+        let worker = match authority.try_route(flow_tag) {
+            Ok(Some(worker)) => worker,
+            Ok(None) | Err(()) => return Err(reason::EVALUATOR_UNAVAILABLE),
         };
-        let mut inflight = self.inflight_by_flow.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(mut inflight) = self.inflight_by_flow.try_lock() else {
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(reason::WORKER_QUEUE_FULL);
+        };
         let count = inflight.entry(flow_tag).or_insert(0);
         if *count >= IPSEC_INNER_MAX_INFLIGHT_PER_FLOW {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -859,8 +930,7 @@ impl Default for IpsecInnerRouter {
 }
 
 /// Reaper terminalization of one orphaned descriptor: tombstone-claimed
-/// exactly once, slab force-released exactly once. Returns `true` iff this
-/// call owned the terminal accounting.
+/// exactly once. The worker-death join witness permits direct slot reclaim.
 pub(crate) fn reap_orphan_descriptor(
     pool: &IpsecInnerSlabPool,
     tombstone: &RequestTombstone,
@@ -870,7 +940,7 @@ pub(crate) fn reap_orphan_descriptor(
         return false;
     }
     IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL.fetch_add(1, Ordering::Relaxed);
-    pool.force_release(desc.slab_id);
+    pool.reclaim_after_worker_death(desc.slab_id);
     true
 }
 
@@ -888,8 +958,6 @@ pub(crate) fn reap_provisional_record(record: &ProvisionalRecord) -> Provisional
     }
 }
 
-/// Drain descriptors whose ack deadline passed. Each terminalizes E24
-/// (uncertain, no retry) exactly once via its tombstone.
 /// Drain descriptors whose ack deadline passed. Each terminalizes E24
 /// (uncertain, no retry) exactly once via its tombstone.
 pub(crate) fn drain_timed_out(
@@ -985,6 +1053,33 @@ mod tests {
         assert_eq!(reason_for_erow(19), Some(NO_ROUTE));
     }
 
+    #[test]
+    fn contended_try_enqueue_refuses_without_waiting() {
+        let before = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let queue = IpsecInnerIngressQueue::new(0);
+        let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(queue.try_enqueue(test_desc(81, 0)).is_err());
+        drop(guard);
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
+            1
+        );
+    }
+
+    #[test]
+    fn contended_try_post_refuses_without_waiting() {
+        let before = IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let queue = IpsecInnerVerdictQueue::new();
+        let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(queue
+            .try_post(IpsecInnerVerdict::WouldPermit { request_id: 81 })
+            .is_err());
+        drop(guard);
+        assert_eq!(
+            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
+            1
+        );
+    }
     #[test]
     fn ingress_queue_full_refuses_and_counts_once() {
         let before = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
@@ -1113,6 +1208,17 @@ mod tests {
         assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
         // No new descriptor routes to the retired worker.
         assert_eq!(authority.route(7), Some(4));
+    }
+
+    #[test]
+    fn worker_death_reclaims_owned_slot_after_join_witness() {
+        let pool = IpsecInnerSlabPool::new();
+        let id = pool.acquire().expect("slot");
+        assert!(pool.mark_worker_owned(id));
+        let desc = test_desc(91, id);
+        let tombstone = RequestTombstone::new(91, 1);
+        assert!(reap_orphan_descriptor(&pool, &tombstone, &desc));
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
     }
 
     #[test]

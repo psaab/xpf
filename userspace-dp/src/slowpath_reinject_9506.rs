@@ -5,6 +5,7 @@
 //! epoch publication is copied into `AuthorityState`, while submit/cancel/
 //! completion operations take only this module's short mutex.
 
+use crate::afxdp::ipsec_inner_queue::{IpsecInnerSlabPool, IPSEC_INNER_SLAB_BYTES};
 use crate::io_uring_write::WriteResult;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -1430,6 +1431,7 @@ pub(crate) enum CodecError {
     TrailingBytes,
     TooManyFrames,
     FrameTooLarge,
+    SlabExhausted,
     TooLarge,
     BadFlags,
     BadValue,
@@ -1593,6 +1595,123 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
     }
     if !c.done() {
         return Err(CodecError::TrailingBytes);
+    }
+    Ok(out)
+}
+
+/// A submit row whose packet bytes are already owned by a D11 slab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PooledSubmitFrame {
+    pub lease: ReinjectLease,
+    pub flow_tag: u64,
+    pub flags: u8,
+    pub origin: CaptureOrigin,
+    pub slab_id: u32,
+    pub bytes_len: u32,
+    pub snapshot_generation: u64,
+    pub config_generation: u64,
+    pub fib_generation: u32,
+    pub zone_id: u16,
+    pub if_id: u32,
+}
+
+/// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
+/// worker handoff path; unlike `decode_submit_batch`, it never materializes a
+/// `Vec<u8>` and then copies it into a slab.
+pub(crate) fn decode_submit_batch_into_pool(
+    payload: &[u8],
+    pool: &IpsecInnerSlabPool,
+) -> Result<Vec<PooledSubmitFrame>, CodecError> {
+    let mut c = Cursor::new(payload);
+    let n = c.u16()? as usize;
+    if n > SUBMIT_MAX_FRAMES {
+        return Err(CodecError::TooManyFrames);
+    }
+    let mut out = Vec::with_capacity(n);
+    let result = (|| {
+        for _ in 0..n {
+            let request_id = c.u64()?;
+            let permit_epoch = c.u64()?;
+            let queue_epoch = c.u64()?;
+            let queue_number = c.u16()?;
+            let flow_tag = c.u64()?;
+            let flags = c.u8()?;
+            if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN) != 0 {
+                return Err(CodecError::BadFlags);
+            }
+            let family = c.u8()?;
+            let hook = c.u8()?;
+            let owned_ifindex = c.u32()?;
+            let owner_len = c.u8()? as usize;
+            let owner_bytes = c.take(owner_len)?;
+            let stn_len = c.u8()? as usize;
+            let stn_bytes = c.take(stn_len)?;
+            let data_len = c.u32()? as usize;
+            if data_len > SUBMIT_MAX_DATA_LEN || data_len > IPSEC_INNER_SLAB_BYTES {
+                return Err(CodecError::FrameTooLarge);
+            }
+            let bytes = c.take(data_len)?;
+            let snapshot_generation = c.u64()?;
+            let config_generation = c.u64()?;
+            let fib_generation = c.u32()?;
+            let zone_id = c.u16()?;
+            let if_id = c.u32()?;
+            let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
+            let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
+            let valid = owned_ifindex != 0
+                && owner_len != 0
+                && stn_len != 0
+                && owner_len <= ORIGIN_MAX_OWNER
+                && stn_len <= ORIGIN_MAX_STN
+                && owner_valid_utf8
+                && stn_valid_utf8
+                && (family == ORIGIN_INET || family == ORIGIN_BRIDGE)
+                && (hook == ORIGIN_FORWARD || hook == ORIGIN_INPUT);
+            let Some(slab_id) = pool.acquire() else {
+                return Err(CodecError::SlabExhausted);
+            };
+            let Some(mut slab) = pool.try_buffer(slab_id) else {
+                pool.force_release(slab_id);
+                return Err(CodecError::SlabExhausted);
+            };
+            slab.clear();
+            slab.extend_from_slice(bytes);
+            out.push(PooledSubmitFrame {
+                lease: ReinjectLease {
+                    permit_epoch,
+                    queue_epoch,
+                    queue_number,
+                    request_id,
+                },
+                flow_tag,
+                flags,
+                origin: CaptureOrigin {
+                    family,
+                    hook,
+                    owned_ifindex,
+                    owner: String::from_utf8_lossy(owner_bytes).into_owned(),
+                    stn: String::from_utf8_lossy(stn_bytes).into_owned(),
+                    valid,
+                },
+                slab_id,
+                bytes_len: data_len as u32,
+                snapshot_generation,
+                config_generation,
+                fib_generation,
+                zone_id,
+                if_id,
+            });
+        }
+        if !c.done() {
+            return Err(CodecError::TrailingBytes);
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        for frame in out.drain(..) {
+            pool.force_release(frame.slab_id);
+        }
+        return Err(err);
     }
     Ok(out)
 }

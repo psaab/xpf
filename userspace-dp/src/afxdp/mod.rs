@@ -91,8 +91,8 @@ pub(crate) mod frame;
 #[path = "gre.rs"]
 mod gre;
 mod logical_ingress;
-mod ipsec_inner;
-mod ipsec_inner_queue;
+pub(crate) mod ipsec_inner;
+pub(crate) mod ipsec_inner_queue;
 mod gre_discriminator;
 mod ha;
 // #6785: the control handler needs the synced-import outcome type and its

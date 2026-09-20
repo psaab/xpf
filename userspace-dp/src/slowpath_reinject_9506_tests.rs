@@ -22,6 +22,7 @@
 //! - Legacy lease-None path unchanged, no completion tracking.
 
 use super::*;
+use crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_CAP;
 use std::sync::Arc;
 
 const PERMIT: u64 = 7;
@@ -718,6 +719,22 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     // Empty batch is a legal no-op.
     let empty = encode_submit_batch(&[]);
     assert_eq!(decode_submit_batch(&empty).unwrap(), vec![]);
+}
+
+#[test]
+fn pooled_submit_decode_owns_bytes_once_in_slab() {
+    let frame = frame(77, 9, 64);
+    let payload = encode_submit_batch(&[frame]);
+    let pool = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
+    let pooled = decode_submit_batch_into_pool(&payload, &pool).expect("pooled decode");
+    assert_eq!(pooled.len(), 1);
+    assert_eq!(pooled[0].bytes_len, 64);
+    let slab_id = pooled[0].slab_id;
+    let slab = pool.buffer(slab_id).expect("slab buffer");
+    assert_eq!(slab.as_slice(), &[0x45; 64]);
+    drop(slab);
+    assert!(pool.force_release(slab_id));
+    assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
 }
 
 #[test]
