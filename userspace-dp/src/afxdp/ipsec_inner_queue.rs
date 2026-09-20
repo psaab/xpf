@@ -41,6 +41,8 @@ pub(crate) const IPSEC_INNER_VERDICT_QUEUE_DEPTH: usize = 256;
 pub(crate) const IPSEC_INNER_MAX_INFLIGHT_PER_FLOW: u32 = 128;
 /// Slab payload capacity: must hold the largest admissible submit frame.
 pub(crate) const IPSEC_INNER_SLAB_BYTES: usize = 65_535;
+/// Maximum copied STN bytes retained in an immutable D11 descriptor.
+pub(crate) const IPSEC_INNER_STN_MAX: usize = 64;
 /// Cross-discriminator alias bucket bound (see `session` alias index).
 pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
 
@@ -145,6 +147,15 @@ pub(crate) struct IpsecInnerDescriptor {
     pub len: u32,
     pub tunnel_if_id: u32,
     pub stn_ifindex: u32,
+    pub stn: [u8; IPSEC_INNER_STN_MAX],
+    pub stn_len: u8,
+    pub inner_family: u8,
+    pub inner_eth_proto: u16,
+    pub protocol: u8,
+    pub rel_l4_offset: u16,
+    pub payload_offset: u16,
+    pub logical_ifindex: i32,
+    pub rx_queue_index: u32,
     pub flow_tag: u64,
     pub advisory_zone_id: u16,
     pub advisory_if_id: u32,
@@ -530,6 +541,7 @@ impl IpsecInnerIngressQueue {
 pub(crate) struct IpsecInnerDoubleBatch {
     batches: [Vec<IpsecInnerDescriptor>; 2],
     next: usize,
+    last: usize,
 }
 
 impl IpsecInnerDoubleBatch {
@@ -540,6 +552,7 @@ impl IpsecInnerDoubleBatch {
                 Vec::with_capacity(IPSEC_INNER_DRAIN_BUDGET),
             ],
             next: 0,
+            last: 0,
         }
     }
 
@@ -551,8 +564,13 @@ impl IpsecInnerDoubleBatch {
     ) -> &[IpsecInnerDescriptor] {
         let idx = self.next;
         self.next ^= 1;
+        self.last = idx;
         queue.drain_into(&mut self.batches[idx], IPSEC_INNER_DRAIN_BUDGET);
         &self.batches[idx]
+    }
+
+    pub(crate) fn current(&self) -> &[IpsecInnerDescriptor] {
+        &self.batches[self.last]
     }
 }
 
@@ -795,6 +813,17 @@ impl WorkerSetAuthority {
     pub(crate) fn publish(&self, live: BTreeSet<u32>) {
         *self.live.lock().unwrap_or_else(|e| e.into_inner()) = live;
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.published.store(1, Ordering::Release);
+    }
+
+    /// CONTROL-plane startup publication for a worker joining the shared set.
+    /// Idempotent for retries; packet producers only observe the resulting
+    /// generation through `try_route`.
+    pub(crate) fn add_worker(&self, worker: u32) {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        if live.insert(worker) {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
         self.published.store(1, Ordering::Release);
     }
 
@@ -1042,8 +1071,12 @@ impl IpsecInnerTombstones {
 /// that permits reclaiming worker-owned slabs.
 pub(crate) struct IpsecInnerWorkerTransport {
     pool: Arc<IpsecInnerSlabPool>,
-    queues: BTreeMap<u32, Arc<IpsecInnerIngressQueue>>,
+    queues: Mutex<BTreeMap<u32, Arc<IpsecInnerIngressQueue>>>,
     verdicts: Arc<IpsecInnerVerdictQueue>,
+    /// Fallback verdicts retain E24 results when the primary bounded queue is
+    /// contended/full. Capacity matches the slab cap, so an active descriptor
+    /// always has one bounded terminal handoff slot.
+    uncertain: Mutex<VecDeque<IpsecInnerVerdict>>,
     authority: Arc<WorkerSetAuthority>,
     router: Arc<IpsecInnerRouter>,
     tombstones: IpsecInnerTombstones,
@@ -1070,14 +1103,40 @@ impl IpsecInnerWorkerTransport {
         authority.publish(live);
         Self {
             pool: Arc::new(IpsecInnerSlabPool::new()),
-            queues,
+            queues: Mutex::new(queues),
             verdicts: Arc::new(IpsecInnerVerdictQueue::new()),
+            uncertain: Mutex::new(VecDeque::with_capacity(IPSEC_INNER_SLAB_CAP)),
             authority,
             router: Arc::new(IpsecInnerRouter::new()),
             tombstones: IpsecInnerTombstones::new(),
             active: Mutex::new(Vec::with_capacity(IPSEC_INNER_SLAB_CAP)),
             retired: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// Prepare a queue before its worker is spawned. Preparation never
+    /// publishes the worker-set authority; the complete live set is published
+    /// only after the bring-up readiness barrier succeeds.
+    pub(crate) fn prepare_worker(&self, worker_id: u32) {
+        let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+        queues
+            .entry(worker_id)
+            .or_insert_with(|| Arc::new(IpsecInnerIngressQueue::new(worker_id)));
+    }
+
+    /// Publish the complete worker set after every worker reports readiness.
+    /// This is the sole startup authority publication path.
+    pub(crate) fn publish_workers(&self, worker_ids: impl IntoIterator<Item = u32>) {
+        let live = worker_ids.into_iter().collect::<BTreeSet<_>>();
+        {
+            let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+            for worker_id in &live {
+                queues
+                    .entry(*worker_id)
+                    .or_insert_with(|| Arc::new(IpsecInnerIngressQueue::new(*worker_id)));
+            }
+        }
+        self.authority.publish(live);
     }
 
     pub(crate) fn pool(&self) -> &Arc<IpsecInnerSlabPool> {
@@ -1123,11 +1182,16 @@ impl IpsecInnerWorkerTransport {
         let slab_id = desc.slab_id;
         let flow_tag = desc.flow_tag;
         let request_id = desc.request_id;
-        let Some(queue) = self.queues.get(&worker) else {
+        let Some(queue) = self
+            .queues
+            .try_lock()
+            .ok()
+            .and_then(|queues| queues.get(&worker).cloned())
+        else {
             self.tombstones.try_remove(request_id);
             self.router.try_release(flow_tag);
             self.pool.force_release(slab_id);
-            return Err(reason::NO_ROUTE);
+            return Err(reason::WORKER_QUEUE_FULL);
         };
         if queue.try_enqueue(desc).is_err() {
             self.tombstones.try_remove(request_id);
@@ -1147,32 +1211,51 @@ impl IpsecInnerWorkerTransport {
         worker_id: u32,
         batch: &mut IpsecInnerDoubleBatch,
     ) -> usize {
-        let Some(queue) = self.queues.get(&worker_id) else {
+        let queue = self
+            .queues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&worker_id)
+            .cloned();
+        let Some(queue) = queue else {
             return 0;
         };
-        let descriptors = batch.drain_next(queue);
+        let _ = batch.drain_next(&queue);
+        let batch_index = batch.last;
+        let batch_len = batch.batches[batch_index].len();
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         let mut taken = 0;
-        for desc in descriptors {
-            if !self.pool.mark_worker_owned(desc.slab_id) {
+        for read_index in 0..batch_len {
+            let desc = batch.batches[batch_index][read_index].clone();
+            // The worker-set generation may rotate after admission but before
+            // this poll. Such a descriptor is stale E4 and must never reach
+            // D13/D14.
+            if IpsecInnerRouter::check_generation(
+                &self.authority,
+                worker_id,
+                desc.worker_set_generation,
+            )
+            .is_err()
+                || !self.pool.mark_worker_owned(desc.slab_id)
+            {
                 self.tombstones.claim_stale(desc.request_id);
                 self.pool.force_release(desc.slab_id);
                 self.router.release(desc.flow_tag);
                 continue;
             }
+            if taken != read_index {
+                batch.batches[batch_index][taken] = desc.clone();
+            }
             active.push(ActiveIpsecDescriptor {
                 worker_id,
-                desc: desc.clone(),
+                desc,
                 posted: false,
             });
             taken += 1;
         }
+        batch.batches[batch_index].truncate(taken);
         taken
     }
-
-    /// Post one worker adjudication result. The descriptor remains active
-    /// until `drain_verdicts_into` observes the completion and releases its
-    /// slab reference exactly once.
     pub(crate) fn post_worker_verdict(
         &self,
         worker_id: u32,
@@ -1185,16 +1268,51 @@ impl IpsecInnerWorkerTransport {
         else {
             return Err(verdict);
         };
+        let _ = self.pool.mark_verdict_posted(entry.desc.slab_id);
         if self.verdicts.try_post(verdict.clone()).is_err() {
-            return Err(verdict);
-        }
-        if !self.pool.mark_verdict_posted(entry.desc.slab_id) {
-            return Err(verdict);
+            let fallback = IpsecInnerVerdict::Deny {
+                request_id: verdict.request_id(),
+                stage: "d11_verdict_queue_full",
+                reason: reason::VERDICT_UNCERTAIN,
+                policy_id: 0,
+            };
+            let mut uncertain = self.uncertain.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert!(uncertain.len() < IPSEC_INNER_SLAB_CAP);
+            uncertain.push_back(fallback);
         }
         entry.posted = true;
         Ok(())
     }
 
+    /// Retry a worker-post failure through the guaranteed bounded E24
+    /// handoff. The active descriptor is retained until the verdict drain
+    /// terminalizes the matching request, so an admitted Go frame cannot
+    /// remain pending after a primary-queue refusal.
+    pub(crate) fn requeue_worker_verdict(
+        &self,
+        worker_id: u32,
+        verdict: IpsecInnerVerdict,
+    ) -> bool {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = active
+            .iter_mut()
+            .find(|entry| entry.worker_id == worker_id && entry.desc.request_id == verdict.request_id())
+        else {
+            return false;
+        };
+        let mut uncertain = self.uncertain.lock().unwrap_or_else(|e| e.into_inner());
+        if uncertain.len() == IPSEC_INNER_SLAB_CAP {
+            return false;
+        }
+        uncertain.push_back(IpsecInnerVerdict::Deny {
+            request_id: verdict.request_id(),
+            stage: "d11_verdict_queue_full",
+            reason: reason::VERDICT_UNCERTAIN,
+            policy_id: 0,
+        });
+        entry.posted = true;
+        true
+    }
     /// Drain bounded worker results into a caller-owned completion scratch.
     /// Stale verdicts from a joined worker are discarded by the tombstone and
     /// cannot release a reused slab.
@@ -1205,6 +1323,17 @@ impl IpsecInnerWorkerTransport {
         budget: usize,
     ) {
         self.verdicts.drain_into(queue_scratch, budget);
+        if queue_scratch.len() < budget {
+            if let Ok(mut uncertain) = self.uncertain.try_lock() {
+                let room = budget - queue_scratch.len();
+                for _ in 0..room {
+                    let Some(verdict) = uncertain.pop_front() else {
+                        break;
+                    };
+                    queue_scratch.push(verdict);
+                }
+            }
+        }
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         for verdict in queue_scratch.drain(..) {
             let Some(index) = active
@@ -1231,7 +1360,13 @@ impl IpsecInnerWorkerTransport {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(worker_id);
-        let Some(queue) = self.queues.get(&worker_id) else {
+        let queue = self
+            .queues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&worker_id)
+            .cloned();
+        let Some(queue) = queue else {
             return Some(0);
         };
         let mut reaped = 0;
@@ -1344,7 +1479,16 @@ mod tests {
             len: 64,
             tunnel_if_id: 1,
             stn_ifindex: 42,
-            flow_tag: 7,
+            stn: [0; IPSEC_INNER_STN_MAX],
+            stn_len: 0,
+            inner_family: 2,
+            inner_eth_proto: 0x0800,
+            protocol: 6,
+            rel_l4_offset: 20,
+            payload_offset: 20,
+            logical_ifindex: 42,
+            rx_queue_index: 0,
+            flow_tag: 99,
             advisory_zone_id: 2,
             advisory_if_id: 1,
             expected_routing_domain: 0,

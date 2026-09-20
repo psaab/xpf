@@ -22,7 +22,9 @@
 //! - Legacy lease-None path unchanged, no completion tracking.
 
 use super::*;
-use crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_CAP;
+use crate::afxdp::ipsec_inner_queue::{
+    reason as ipsec_reason, IpsecInnerVerdict, IPSEC_INNER_SLAB_CAP,
+};
 use std::sync::Arc;
 
 const PERMIT: u64 = 7;
@@ -70,6 +72,47 @@ fn uncertain() -> TransferVerdict {
     TransferVerdict::Uncertain {
         reason: "test-uncertain".to_string(),
     }
+}
+
+#[test]
+fn ipsec_inner_verdict_bridge_terminalizes_deny_and_would_permit() {
+    let core = open_core();
+    assert!(core.admit(&frame(901, 17, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
+        request_id: 901,
+        stage: "d14",
+        reason: 32,
+        policy_id: 0,
+    }));
+    assert_eq!(
+        core.drain_ready(1)[0].outcome,
+        ReinjectOutcome::Denied
+    );
+
+    assert!(core.admit(&frame(902, 17, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(
+        IpsecInnerVerdict::WouldPermit { request_id: 902 }
+    ));
+    assert_eq!(
+        core.drain_ready(1)[0].outcome,
+        ReinjectOutcome::WouldPermit
+    );
+}
+
+#[test]
+fn ipsec_inner_verdict_bridge_maps_e24_to_uncertain() {
+    let core = open_core();
+    assert!(core.admit(&frame(903, 17, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
+        request_id: 903,
+        stage: "d11",
+        reason: ipsec_reason::VERDICT_UNCERTAIN,
+        policy_id: 0,
+    }));
+    assert_eq!(
+        core.drain_ready(1)[0].outcome,
+        ReinjectOutcome::Uncertain
+    );
 }
 
 /// Test stub authority: scripts open/closed without publishing epochs.

@@ -180,6 +180,11 @@ pub(super) fn bring_up_workers(
     // `await_readiness` relies on (the barrier never sees `Disconnected` while
     // this sender lives).
     let (startup_report_tx, startup_report_rx) = mpsc::channel::<WorkerStartupReport>();
+    if let Some(slow_path) = coord.slow_path.as_ref() {
+        // D11 queue objects are prepared by the coordinator before launch.
+        // Workers never publish themselves into the authoritative set.
+        slow_path.prepare_ipsec_inner_workers(workers.keys().copied());
+    }
     match spawn_workers(
         coord,
         workers,
@@ -241,10 +246,13 @@ pub(super) fn bring_up_workers(
                 // coordinator, AFTER the teardown that clears the map, so the
                 // status the Go manager polls carries them for as long as the
                 // fault lasts. Ordering is the whole fix: recorded before
-                // `stop_inner` they would be cleared again.
-                record_bind_failure_causes(coord, &stage);
                 coord.last_reconcile_stage = stage.clone();
                 return Err(WorkerBringUpError::BindIncomplete(stage));
+            }
+            if let Some(slow_path) = coord.slow_path.as_ref() {
+                // Publish only after the readiness barrier proves the full
+                // worker set is live; partial binds remain unroutable.
+                slow_path.publish_ipsec_inner_workers(spawned_worker_ids.iter().copied());
             }
         }
     }

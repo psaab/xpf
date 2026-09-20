@@ -294,13 +294,8 @@ pub(crate) fn adjudicate_ipsec_inner(
     }
 }
 
-/// Post one D11 verdict. This is the only Rust-side output for V1; a full
-/// verdict queue is an E24 uncertain terminal (never a retry or q0 fallback).
-pub(crate) fn post_ipsec_inner_verdict(
-    queue: &IpsecInnerVerdictQueue,
-    decision: &IpsecInnerDecision,
-) -> Result<(), IpsecInnerDecision> {
-    let verdict = match decision {
+pub(crate) fn verdict_from_decision(decision: &IpsecInnerDecision) -> IpsecInnerVerdict {
+    match decision {
         IpsecInnerDecision::Deny {
             request_id,
             stage,
@@ -317,8 +312,16 @@ pub(crate) fn post_ipsec_inner_verdict(
                 request_id: *request_id,
             }
         }
-    };
-    queue.try_post(verdict).map_err(|_| {
+    }
+}
+
+/// Post one D11 verdict. This is the only Rust-side output for V1; a full
+/// verdict queue is an E24 uncertain terminal (never a retry or q0 fallback).
+pub(crate) fn post_ipsec_inner_verdict(
+    queue: &IpsecInnerVerdictQueue,
+    decision: &IpsecInnerDecision,
+) -> Result<(), IpsecInnerDecision> {
+    queue.try_post(verdict_from_decision(decision)).map_err(|_| {
         IpsecInnerDecision::Deny {
             request_id: decision.request_id(),
             stage: "d11_verdict_queue_full",

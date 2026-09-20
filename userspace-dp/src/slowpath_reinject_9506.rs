@@ -5,7 +5,9 @@
 //! epoch publication is copied into `AuthorityState`, while submit/cancel/
 //! completion operations take only this module's short mutex.
 
-use crate::afxdp::ipsec_inner_queue::{IpsecInnerSlabPool, IPSEC_INNER_SLAB_BYTES};
+use crate::afxdp::ipsec_inner_queue::{
+    reason as ipsec_reason, IpsecInnerSlabPool, IpsecInnerVerdict, IPSEC_INNER_SLAB_BYTES,
+};
 use crate::io_uring_write::WriteResult;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -1022,6 +1024,39 @@ impl ReinjectCore {
         }
         Self::terminalize(&mut inner, lease.request_id, outcome, bytes)
     }
+
+    /// Join a Rust D11 worker verdict to the Go-facing completion table.
+    /// V1 is deny-only: a deny becomes `Denied`, while a successful
+    /// adjudication becomes `WouldPermit` (never a q0 write or NF_ACCEPT).
+    pub(crate) fn resolve_ipsec_inner_verdict(
+        &self,
+        verdict: IpsecInnerVerdict,
+    ) -> bool {
+        let (request_id, outcome) = match verdict {
+            IpsecInnerVerdict::Deny {
+                request_id,
+                reason,
+                ..
+            } if reason == ipsec_reason::VERDICT_UNCERTAIN => {
+                (request_id, ReinjectOutcome::Uncertain)
+            }
+            IpsecInnerVerdict::Deny { request_id, .. } => {
+                (request_id, ReinjectOutcome::Denied)
+            }
+            IpsecInnerVerdict::WouldPermit { request_id } => {
+                (request_id, ReinjectOutcome::WouldPermit)
+            }
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = inner.entries.get(&request_id) else {
+            return false;
+        };
+        if !matches!(entry.state, EntryState::Queued) {
+            return false;
+        }
+        Self::terminalize(&mut inner, request_id, outcome, 0)
+    }
+
 
     /// Mark a queued descriptor as a definitive no-write refusal.
     pub(crate) fn refuse_queued(&self, lease: &ReinjectLease, _reason: String) -> bool {

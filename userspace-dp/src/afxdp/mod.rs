@@ -288,6 +288,15 @@ pub(crate) fn packet_rel_l4_offset_and_protocol_for_test(
     self::frame::packet_rel_l4_offset_and_protocol(packet, addr_family)
 }
 
+/// Production wrapper for the canonical ext-aware L4 walker used by the
+/// deny-only IPsec-inner descriptor path.
+pub(crate) fn packet_rel_l4_offset_and_protocol_for_ipsec(
+    packet: &[u8],
+    addr_family: u8,
+) -> Option<(usize, u8)> {
+    self::frame::packet_rel_l4_offset_and_protocol(packet, addr_family)
+}
+
 const USERSPACE_META_MAGIC: u32 = 0x4250_5553;
 const USERSPACE_META_VERSION: u16 = 4;
 const UMEM_FRAME_SIZE: u32 = 4096;

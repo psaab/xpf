@@ -31,7 +31,12 @@
 // and cos.rs use. Pure relocation — no production logic touched.
 
 use super::*;
-
+use crate::afxdp::ipsec_inner::{
+    adjudicate_descriptor, verdict_from_decision, IpsecInnerAdvisory, IpsecInnerInput,
+};
+use crate::afxdp::ipsec_inner_queue::{
+    IpsecInnerDoubleBatch, IpsecInnerVerdict, IPSEC_INNER_DRAIN_BUDGET,
+};
 // #1776: the one-shot setup phase (thread pin, TSC calibration,
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
 // cache, initial cos_status publish) lives in loop_body/setup.rs.
@@ -145,13 +150,13 @@ mod expiry_shared_retire_10419_tests;
 fn refresh_runtime_view(
     forwarding: &Arc<ForwardingState>,
     shared_runtime: &RuntimeViewReader,
-    between: impl FnOnce(ValidationState),
+    between: impl FnOnce(&crate::afxdp::types::RuntimeView),
 ) -> (Option<Arc<ForwardingState>>, ValidationState) {
     // ONE acquire-load. Everything below reads out of `view`, so the two
     // halves are from the same publish no matter what runs concurrently.
     let view = shared_runtime.load();
     let validation = view.validation();
-    between(validation);
+    between(&view);
     // #1188: adopt the forwarding Arc only when it actually rotated.
     let new_forwarding = if Arc::ptr_eq(forwarding, view.forwarding()) {
         None
@@ -322,7 +327,15 @@ pub(crate) fn worker_loop(
             recovered_fallbacks,
         });
     }
+    let ipsec_inner_transport = slow_path
+        .as_ref()
+        .map(|slow_path| slow_path.ipsec_inner_transport());
     const COS_STATUS_INTERVAL_NS: u64 = 100_000_000;
+    let mut ipsec_inner_batch = IpsecInnerDoubleBatch::new();
+    let mut ipsec_inner_queue_scratch =
+        Vec::<IpsecInnerVerdict>::with_capacity(IPSEC_INNER_DRAIN_BUDGET);
+    let mut ipsec_inner_completions =
+        Vec::<IpsecInnerVerdict>::with_capacity(IPSEC_INNER_DRAIN_BUDGET);
     let mut idle_iters = 0u32;
     // #6431: one-shot latch for the degraded-idle-poll log. The condition that
     // sets it (a hard errno, or a fault-only revents set) repeats every pass,
@@ -702,8 +715,66 @@ pub(crate) fn worker_loop(
         // is reachable. Still read BEFORE the CoS map Arcs below (#5166), and
         // still #1188-short-circuited on the forwarding Arc — see
         // `refresh_runtime_view`.
-        let (new_forwarding_opt, live_validation) =
-            refresh_runtime_view(&forwarding, &shared_runtime, |_| {});
+        let (new_forwarding_opt, live_validation) = refresh_runtime_view(
+            &forwarding,
+            &shared_runtime,
+            |view| {
+                let Some(transport) = ipsec_inner_transport.as_ref() else {
+                    return;
+                };
+                let taken = transport.drain_worker(worker_id, &mut ipsec_inner_batch);
+                if taken != 0 {
+                for descriptor in ipsec_inner_batch.current().iter().take(taken) {
+                    let stn_len = usize::from(descriptor.stn_len)
+                        .min(descriptor.stn.len());
+                    let stn = std::str::from_utf8(&descriptor.stn[..stn_len]).unwrap_or("");
+                    let input = IpsecInnerInput {
+                        slab_id: descriptor.slab_id,
+                        inner_packet: &[],
+                        stn,
+                        inner_family: descriptor.inner_family,
+                        inner_eth_proto: descriptor.inner_eth_proto,
+                        protocol: descriptor.protocol,
+                        rel_l4_offset: descriptor.rel_l4_offset,
+                        payload_offset: descriptor.payload_offset,
+                        logical_ifindex: view
+                            .ipsec_tunnel_rows()
+                            .exact(stn)
+                            .map(|row| row.logical_ifindex)
+                            .unwrap_or(0),
+                        rx_queue_index: descriptor.rx_queue_index,
+                        advisory: IpsecInnerAdvisory {
+                            snapshot_generation: descriptor.snapshot_generation,
+                            config_generation: descriptor.config_generation,
+                            fib_generation: descriptor.fib_generation,
+                            zone_id: descriptor.advisory_zone_id,
+                            if_id: descriptor.advisory_if_id,
+                        },
+                        descriptor: Some(descriptor),
+                    };
+                    let decision =
+                        adjudicate_descriptor(view, transport.pool().as_ref(), descriptor, input);
+                    let verdict = verdict_from_decision(&decision);
+                    if let Err(failed) = transport.post_worker_verdict(worker_id, verdict) {
+                        let _ = transport.requeue_worker_verdict(worker_id, failed);
+                    }
+                }
+                }
+                ipsec_inner_completions.clear();
+                transport.drain_verdicts_into(
+                    &mut ipsec_inner_queue_scratch,
+                    &mut ipsec_inner_completions,
+                    IPSEC_INNER_DRAIN_BUDGET,
+                );
+                if let Some(slow_path) = slow_path.as_ref() {
+                    for verdict in ipsec_inner_completions.drain(..) {
+                        let _ = slow_path.complete_ipsec_inner_verdict(verdict);
+                    }
+                } else {
+                    ipsec_inner_completions.clear();
+                }
+            },
+        );
         if live_validation != validation {
             validation = live_validation;
         }
