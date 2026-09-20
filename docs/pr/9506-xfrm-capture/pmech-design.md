@@ -491,9 +491,12 @@ allocation; batch rows carry (slot, len, tunnel key, flow key, queue-epoch, phas
   `{owner_worker, owner_generation, token, session_refs, nat_undo}`. `session_refs` is a bounded set of
   newly installed forward/reverse entries; `nat_undo` is the bounded release/revert token for every
   mutation in the permit branch. The owner worker is the sole authority that can consume the handle:
-  q0 `CompletionWritten` sends exactly one `CommitProvisional(handle)`, while refusal/uncertain/stale/
-  MTU/rate/queue failure sends exactly one `RollbackProvisional(handle)`. Existing-hit permits with no
-  new state carry `None`. Go transports the opaque handle/result but cannot mutate or finalize it.
+  a definitive successful q0 write linearizes `CommitProvisional(handle)` locally BEFORE it emits
+  `CompletionWritten`; a definitive pre-write/write refusal sends exactly one
+  `RollbackProvisional(handle)`. An ACK timeout/uncertain result does NOT roll back: the write may have
+  succeeded, so the committed state is retained and the possibly-emitted outcome is never retried.
+  Existing-hit permits with no new state carry `None`. Go transports the opaque handle/result but cannot
+  mutate or finalize it.
 - Bounded, try-or-drop: verdict-loss fails closed via the existing `ackDeadline` (5ms) →
   uncertain → DROP path (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:259-260`, `:690-697`) — the loss window is bounded and terminal
   state is always DROP. Verdict-queue-full is counted (`ipsec_inner_verdict_queue_full_total`) + alarmed,
@@ -792,14 +795,15 @@ screening. (e) Foreign-hit vs owner-entry: `session_hit_authority` + `foreign_hi
 (judge arrival zone's policy for THIS packet; no in-place install overwrite — the documented anti-hijack
 rule, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/session_hit_authority.rs:78-84`). (f) Go pre-gate vs Rust verdict: Rust authoritative; Go-pass +
 Rust-refuse = counted divergence, terminal DROP (never Go-override).
-q0 failure cleanup (FORWARD): session/NAT allocations are PROVISIONAL until the single q0
-`CompletionWritten` commit. A q0 refusal, stale fence, MTU/rate/queue refusal, or ACK timeout invokes
-exactly-once rollback for the worker-owned `session_refs` and NAT undo records; no BPF/flow-cache/HA
-publication occurs before that commit. If a later terminal failure observes already-published state, the
-same terminal owner closes/rolls it back exactly once before releasing the held NFQUEUE originals. INPUT
-Option A publishes no session state; Option B MUST specify the equivalent prepare/finalize rollback before
-it can claim stateful parity. A rollback failure is E10/E17-class DROP plus its existing counter, never
-an ACCEPT or retry.
+q0 failure cleanup (FORWARD): session/NAT allocations are PROVISIONAL until the single q0 write
+linearization. A definitive pre-write/write refusal, stale fence, MTU/rate/queue refusal, or other
+definitive failure before that linearization invokes exactly-once rollback for the worker-owned
+`session_refs` and NAT undo records. A successful q0 write first commits that handle locally and only
+then emits `CompletionWritten`; an ACK timeout/uncertain result therefore means "possibly emitted,
+state outcome committed" and is DROP/no-retry, never rollback. No BPF/flow-cache/HA publication occurs
+before the local commit. INPUT Option A publishes no session state; Option B MUST specify the equivalent
+prepare/finalize rollback before it can claim stateful parity. A rollback failure is E10/E17-class DROP
+plus its existing counter, never an ACCEPT or retry.
 
 ### §3.4 Established-hit path + Reject posture
 
