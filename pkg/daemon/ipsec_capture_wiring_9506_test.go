@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"errors"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -114,39 +112,87 @@ func TestIpsecCaptureQueuePlanKeepsValidKeysAndQuarantinesSkips9506(t *testing.T
 	}
 }
 func TestBuildPMechZoneSnapshotMarksDuplicateBindsAmbiguous9506(t *testing.T) {
+	bindA, ifIDA := config.XFRMIfNameAndID("st1")
+	bindB, ifIDB := config.XFRMIfNameAndID("st1.0")
+	if bindA == bindB || ifIDA == 0 || ifIDA != ifIDB {
+		t.Fatalf("collision premise broken: st1=(%q,%d) st1.0=(%q,%d)", bindA, ifIDA, bindB, ifIDB)
+	}
 	cfg := &config.Config{}
 	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
-		"vpn-a": {BindInterface: "st1.0"},
+		"vpn-a": {BindInterface: "st1"},
 		"vpn-b": {BindInterface: "st1.0"},
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"zone-a": {Interfaces: []string{"st1.0"}},
 	}
 	snapshot := buildPMechZoneSnapshot(cfg, wiringHandles9506(), 4, 4)
-	resolution := snapshot.ResolveSTN("st1.0")
-	if resolution.Reason != nfqueue.ZoneReasonAmbiguous || resolution.ZoneID != 0 {
-		t.Fatalf("duplicate bind snapshot resolution=%+v, want ambiguous/zone=0", resolution)
+	for _, stn := range []string{"st1", "st1.0"} {
+		resolution := snapshot.ResolveSTN(stn)
+		if resolution.Reason != nfqueue.ZoneReasonAmbiguous || resolution.ZoneID != 0 {
+			t.Fatalf("distinct duplicate bind %q resolution=%+v, want ambiguous/zone=0", stn, resolution)
+		}
 	}
 }
-
 func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
-	raw, err := os.ReadFile("ipsec_capture_wiring_9506.go")
+	origLink := ipsecCaptureLinkByName
+	origOpen := ipsecCaptureOpenQueue
+	origNew := ipsecCaptureNewPipeline
+	t.Cleanup(func() {
+		ipsecCaptureLinkByName = origLink
+		ipsecCaptureOpenQueue = origOpen
+		ipsecCaptureNewPipeline = origNew
+	})
+	ipsecCaptureLinkByName = func(name string) (netlink.Link, error) {
+		return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name, Index: 41}}, nil
+	}
+	ipsecCaptureOpenQueue = func(_ uint16, _ ipsecQueueFamily) (*nfqueue.Queue, error) {
+		return nil, nil
+	}
+	var captured IpsecCapturePipelineConfig
+	ipsecCaptureNewPipeline = func(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipeline, error) {
+		captured = cfg
+		// Queue objects are deliberately nil in this hermetic constructor seam;
+		// the stage/runtime handoff is what this test observes.
+		cfg.Queues = nil
+		return NewIpsecCapturePipeline(cfg)
+	}
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"vpn": {BindInterface: "st1.0"},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"zone": {Interfaces: []string{"st1.0"}},
+	}
+	daemon := &Daemon{}
+	old, staged, err := daemon.stageIpsecCapture(cfg)
 	if err != nil {
-		t.Fatalf("read wiring source: %v", err)
+		t.Fatalf("stage capture: %v", err)
 	}
-	source := string(raw)
-	start := strings.Index(source, "actor, actorErr := NewIpsecCapturePipeline")
-	if start < 0 {
-		t.Fatal("staged actor construction not found")
+	if old != nil || staged == nil || staged.actor == nil {
+		t.Fatalf("stage result old=%p staged=%+v", old, staged)
 	}
-	end := strings.Index(source[start:], "\n\t})")
-	if end < 0 {
-		t.Fatal("staged actor config terminator not found")
+	if len(captured.Queues) != 4 || len(staged.queues) != len(captured.Queues) {
+		t.Fatalf("captured staged queues=%d runtime queues=%d, want four", len(captured.Queues), len(staged.queues))
 	}
-	config := source[start : start+end]
-	if !strings.Contains(config, "QueueEpochs: queueEpochs") ||
-		!strings.Contains(config, "Queues:      queues") {
-		t.Fatalf("staged actor config does not carry queue set: %s", config)
+	if len(captured.QueueEpochs) != len(captured.Queues) {
+		t.Fatalf("captured queue epochs=%d queues=%d, want one epoch per queue", len(captured.QueueEpochs), len(captured.Queues))
+	}
+	for _, captureQueue := range captured.Queues {
+		if captureQueue.Queue != nil {
+			t.Fatal("hermetic queue opener unexpectedly returned a live queue")
+		}
+		if captured.QueueEpochs[captureQueue.QueueNumber] != captureQueue.QueueEpoch {
+			t.Fatalf("queue %d epoch=%d not carried in actor config: %+v", captureQueue.QueueNumber, captureQueue.QueueEpoch, captured.QueueEpochs)
+		}
+	}
+	if staged.actor.Status().Active {
+		t.Fatal("staged actor active before explicit start")
+	}
+	if err := staged.close(); err != nil {
+		t.Fatalf("first staged close: %v", err)
+	}
+	if err := staged.close(); err != nil {
+		t.Fatalf("second staged close: %v", err)
 	}
 }
 

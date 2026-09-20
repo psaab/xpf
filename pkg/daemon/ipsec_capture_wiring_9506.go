@@ -487,6 +487,7 @@ func (r *ipsecCaptureRuntime) close() error {
 
 var ipsecCaptureLinkByName = netlink.LinkByName
 var ipsecCaptureOpenQueue = openIpsecCaptureQueue
+var ipsecCaptureNewPipeline = NewIpsecCapturePipeline
 
 type ipsecCaptureQueuePlan struct {
 	Keys         []ipsecQueueKey
@@ -787,7 +788,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	for _, handle := range handles {
 		queueEpochs[handle.Number] = handle.Epoch
 	}
-	actor, actorErr := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{
+	actor, actorErr := ipsecCaptureNewPipeline(IpsecCapturePipelineConfig{
 		Supervisor:  d.ipsecS4,
 		Registry:    registry,
 		QueueEpochs: queueEpochs,

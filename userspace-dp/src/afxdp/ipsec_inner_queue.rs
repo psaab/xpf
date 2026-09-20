@@ -24,7 +24,7 @@
 //!   drained, and every orphan descriptor terminalized exactly once (E34).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Initial S7 sizing: 512 pooled descriptors. Final value S7/T22-owned.
@@ -458,6 +458,12 @@ impl Default for IpsecInnerSlabPool {
 pub(crate) struct IpsecInnerIngressQueue {
     worker_id: u32,
     pending: Mutex<VecDeque<IpsecInnerDescriptor>>,
+    /// Retirement fence. Set under the `pending` lock by `close_and_drain`;
+    /// checked under the same lock by `try_enqueue`. Closed queues stay
+    /// permanently closed: worker-ID reuse installs a fresh queue object so a
+    /// pre-retirement `Arc` clone can never enqueue stale work into the new
+    /// generation (ABA-safe).
+    closed: AtomicBool,
 }
 
 impl IpsecInnerIngressQueue {
@@ -465,6 +471,7 @@ impl IpsecInnerIngressQueue {
         Self {
             worker_id,
             pending: Mutex::new(VecDeque::with_capacity(IPSEC_INNER_QUEUE_DEPTH)),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -472,8 +479,12 @@ impl IpsecInnerIngressQueue {
         self.worker_id
     }
 
-    /// Try-or-drop enqueue. Full or lock contention -> E23 DROP-and-count;
-    /// the producer never waits on a worker-owned queue.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Try-or-drop enqueue. Full, contended, or retired (closed) -> E23
+    /// DROP-and-count; the producer never waits on a worker-owned queue.
     pub(crate) fn try_enqueue(
         &self,
         desc: IpsecInnerDescriptor,
@@ -482,12 +493,26 @@ impl IpsecInnerIngressQueue {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
             return Err(desc);
         };
+        if self.closed.load(Ordering::Acquire) {
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(desc);
+        }
         if pending.len() >= IPSEC_INNER_QUEUE_DEPTH {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
             return Err(desc);
         }
         pending.push_back(desc);
         Ok(())
+    }
+
+    /// Atomically close the queue and drain everything. Retirement/reaper path
+    /// only; allocation is outside the worker poll hot path. Idempotent: a
+    /// second call drains stragglers (normally none, since `try_enqueue`
+    /// rejects after close) without reopening.
+    pub(crate) fn close_and_drain(&self) -> Vec<IpsecInnerDescriptor> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        self.closed.store(true, Ordering::Release);
+        pending.drain(..).collect()
     }
 
     /// Drain up to `budget` descriptors into a caller-owned, preallocated
@@ -1069,7 +1094,7 @@ pub(crate) struct IpsecInnerWorkerTransport {
     router: Arc<IpsecInnerRouter>,
     tombstones: IpsecInnerTombstones,
     active: Mutex<Vec<ActiveIpsecDescriptor>>,
-    retired: Mutex<BTreeSet<u32>>,
+    retired: Mutex<BTreeMap<u32, Option<Arc<IpsecInnerIngressQueue>>>>,
 }
 
 impl IpsecInnerWorkerTransport {
@@ -1098,7 +1123,7 @@ impl IpsecInnerWorkerTransport {
             router: Arc::new(IpsecInnerRouter::new()),
             tombstones: IpsecInnerTombstones::new(),
             active: Mutex::new(Vec::with_capacity(IPSEC_INNER_SLAB_CAP)),
-            retired: Mutex::new(BTreeSet::new()),
+            retired: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1107,9 +1132,16 @@ impl IpsecInnerWorkerTransport {
     /// only after the bring-up readiness barrier succeeds.
     pub(crate) fn prepare_worker(&self, worker_id: u32) {
         let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
-        queues
-            .entry(worker_id)
-            .or_insert_with(|| Arc::new(IpsecInnerIngressQueue::new(worker_id)));
+        let replace = queues
+            .get(&worker_id)
+            .map(|queue| queue.is_closed())
+            .unwrap_or(true);
+        if replace {
+            queues.insert(
+                worker_id,
+                Arc::new(IpsecInnerIngressQueue::new(worker_id)),
+            );
+        }
     }
 
     /// Publish the complete worker set after every worker reports readiness.
@@ -1119,9 +1151,16 @@ impl IpsecInnerWorkerTransport {
         {
             let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
             for worker_id in &live {
-                queues
-                    .entry(*worker_id)
-                    .or_insert_with(|| Arc::new(IpsecInnerIngressQueue::new(*worker_id)));
+                let replace = queues
+                    .get(worker_id)
+                    .map(|queue| queue.is_closed())
+                    .unwrap_or(true);
+                if replace {
+                    queues.insert(
+                        *worker_id,
+                        Arc::new(IpsecInnerIngressQueue::new(*worker_id)),
+                    );
+                }
             }
         }
         self.authority.publish(live);
@@ -1181,6 +1220,12 @@ impl IpsecInnerWorkerTransport {
             self.pool.force_release(slab_id);
             return Err(reason::WORKER_QUEUE_FULL);
         };
+        if desc.worker_set_generation != self.authority.generation() {
+            self.tombstones.remove(request_id);
+            self.router.release(flow_tag);
+            self.pool.force_release(slab_id);
+            return Err(reason::STALE_GENERATION);
+        }
         if queue.try_enqueue(desc).is_err() {
             self.tombstones.remove(request_id);
             self.router.release(flow_tag);
@@ -1338,61 +1383,75 @@ impl IpsecInnerWorkerTransport {
         }
     }
 
-    /// Retire a worker generation and terminalize every descriptor still
-    /// ENQUEUED. WORKER_OWNED/VERDICT_POSTED descriptors remain pinned until
-    /// `join_worker_after_termination` proves that no late worker ACK exists.
-    pub(crate) fn retire_worker(&self, worker_id: u32) -> Option<usize> {
-        let generation = self.authority.retire_worker(worker_id)?;
-        self.retired
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(worker_id);
-        let queue = self
-            .queues
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&worker_id)
-            .cloned();
-        let Some(queue) = queue else {
-            return Some(0);
-        };
+    fn reap_closed_queue(&self, queue: &IpsecInnerIngressQueue) -> usize {
         let mut reaped = 0;
-        for desc in queue.drain_all() {
+        for desc in queue.close_and_drain() {
             if self.tombstones.claim_stale(desc.request_id) {
                 self.pool.reclaim_after_worker_death(desc.slab_id);
                 self.router.release(desc.flow_tag);
                 reaped += 1;
             }
         }
-        let _ = generation;
+        reaped
+    }
+
+    /// Retire a worker generation and terminalize every descriptor still
+    /// ENQUEUED. Closing the exact queue Arc under its pending mutex
+    /// linearizes retirement against `try_enqueue`; old producer clones are
+    /// rejected forever, while worker-ID reuse installs a fresh queue Arc.
+    /// WORKER_OWNED/VERDICT_POSTED descriptors remain pinned until
+    /// `join_worker_after_termination` proves that no late worker ACK exists.
+    pub(crate) fn retire_worker(&self, worker_id: u32) -> Option<usize> {
+        self.authority.retire_worker(worker_id)?;
+        let queue = self
+            .queues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&worker_id)
+            .cloned();
+        let reaped = queue
+            .as_ref()
+            .map(|queue| self.reap_closed_queue(queue))
+            .unwrap_or(0);
+        self.retired
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(worker_id, queue);
         Some(reaped)
     }
 
     /// Final worker-death join witness. Only after this call may slabs owned
-    /// by the dead worker be cleared and returned to the pool.
+    /// by the dead worker be cleared and returned to the pool. The retired
+    /// queue is retained by Arc so a replacement queue for the same worker ID
+    /// cannot be accidentally drained here.
     pub(crate) fn join_worker_after_termination(&self, worker_id: u32) -> usize {
-        let was_retired = self
+        let retired_queue = self
             .retired
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&worker_id);
-        if !was_retired {
+        let Some(retired_queue) = retired_queue else {
             return 0;
-        }
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        };
         let mut reaped = 0;
-        let mut index = 0;
-        while index < active.len() {
-            if active[index].worker_id != worker_id {
-                index += 1;
-                continue;
+        {
+            let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+            let mut index = 0;
+            while index < active.len() {
+                if active[index].worker_id != worker_id {
+                    index += 1;
+                    continue;
+                }
+                let entry = active.swap_remove(index);
+                self.tombstones.claim_stale(entry.desc.request_id);
+                self.pool
+                    .reclaim_after_worker_death(entry.desc.slab_id);
+                self.router.release(entry.desc.flow_tag);
+                reaped += 1;
             }
-            let entry = active.swap_remove(index);
-            self.tombstones.claim_stale(entry.desc.request_id);
-            self.pool
-                .reclaim_after_worker_death(entry.desc.slab_id);
-            self.router.release(entry.desc.flow_tag);
-            reaped += 1;
+        }
+        if let Some(queue) = retired_queue {
+            reaped += self.reap_closed_queue(&queue);
         }
         reaped
     }
@@ -1810,6 +1869,64 @@ mod tests {
         assert_eq!(transport.join_worker_after_termination(4), 1);
         assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
         assert_eq!(transport.join_worker_after_termination(4), 0);
+    }
+
+    #[test]
+    fn worker_transport_retirement_closes_old_queue_before_reuse() {
+        let transport = IpsecInnerWorkerTransport::new([7]);
+        let pool = transport.pool().clone();
+        let old_queue = transport
+            .queues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&7)
+            .cloned()
+            .expect("old queue");
+        let old_generation = transport.authority().generation();
+        let id = pool.acquire().expect("old slab");
+        let mut desc = test_desc(70, id);
+        desc.worker_set_generation = old_generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(7));
+
+        assert_eq!(transport.retire_worker(7), Some(1));
+        assert!(old_queue.is_closed());
+        assert_eq!(transport.join_worker_after_termination(7), 0);
+
+        let late_id = pool.acquire().expect("late slab");
+        let mut late = test_desc(71, late_id);
+        late.worker_set_generation = old_generation;
+        assert!(
+            old_queue.try_enqueue(late).is_err(),
+            "a producer holding the pre-retirement Arc must be rejected"
+        );
+        assert!(pool.force_release(late_id));
+
+        transport.prepare_worker(7);
+        transport.publish_workers([7]);
+        let new_queue = transport
+            .queues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&7)
+            .cloned()
+            .expect("new queue");
+        assert!(!new_queue.is_closed());
+        assert!(!std::sync::Arc::ptr_eq(&old_queue, &new_queue));
+        let stale_id = pool.acquire().expect("stale slab");
+        let mut stale = test_desc(73, stale_id);
+        stale.worker_set_generation = old_generation;
+        assert_eq!(
+            transport.admit_descriptor(stale),
+            Err(reason::STALE_GENERATION)
+        );
+        assert_eq!(new_queue.len(), 0);
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+        let new_generation = transport.authority().generation();
+        let new_id = pool.acquire().expect("new slab");
+        let mut next = test_desc(72, new_id);
+        next.worker_set_generation = new_generation;
+        assert_eq!(transport.admit_descriptor(next), Ok(7));
+        assert_eq!(new_queue.len(), 1);
     }
 
     #[test]
