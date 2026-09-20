@@ -964,8 +964,9 @@ be a second unbounded authority. Bounding only `unix.Send` is insufficient. A pr
 returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptYes, Err: timeout}` and
 records E35.
 If bounded `q.mu` acquisition itself times out after committer entry but before any fd syscall, it
-returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptNo, Err: q_mu_timeout}`;
-this is not the pre-committer invalid case, so no retained-handle DROP fallback or retry is allowed.
+returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptNo, Err: q_mu_timeout}` and
+records E35; this is not the pre-committer invalid case, so no retained-handle DROP fallback or retry
+is allowed.
 `TerminalAttempted: TerminalAttemptYes` is reserved for an attempted fd send that returns EAGAIN/timeout.
 For either a post-committer lock timeout or an attempted-send EAGAIN/timeout, the recovery is generation
 scoped: fence the queue epoch and stop new admission, CAS every still-held reservation to uncertain
