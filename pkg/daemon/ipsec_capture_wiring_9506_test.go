@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/nfqueue"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/vishvananda/netlink"
 )
 
 func wiringHandles9506() []ipsecQueueHandle {
@@ -57,6 +59,101 @@ func TestIpsecCaptureWiringBuildsFourClassSpecAndOrigins9506(t *testing.T) {
 	}
 	if _, err := ipsecCaptureDivertSpec(handles[:3]); err == nil {
 		t.Fatal("incomplete four-class generation was accepted")
+	}
+}
+func TestIpsecCaptureEmptyGenerationDefaultsToQuarantine9506(t *testing.T) {
+	spec, err := ipsecCaptureDivertSpec(nil)
+	if err != nil {
+		t.Fatalf("empty generation: %v", err)
+	}
+	if !spec.QuarantineAll {
+		t.Fatalf("empty generation spec = %+v, want QuarantineAll", spec)
+	}
+}
+
+func TestIpsecCaptureQueuePlanKeepsValidKeysAndQuarantinesSkips9506(t *testing.T) {
+	orig := ipsecCaptureLinkByName
+	t.Cleanup(func() { ipsecCaptureLinkByName = orig })
+	ipsecCaptureLinkByName = func(name string) (netlink.Link, error) {
+		if name == "st2.0" {
+			return &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: name, Index: 41}}, nil
+		}
+		return nil, errors.New("missing link")
+	}
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"bad-bind":  {BindInterface: "not-an-xfrmi"},
+		"good":      {BindInterface: "st2.0"},
+		"good-copy": {BindInterface: "st2.0"},
+	}
+	plan, err := buildIpsecCaptureQueuePlan(cfg, 7)
+	if err != nil {
+		t.Fatalf("queue plan: %v", err)
+	}
+	if len(plan.Keys) != 8 {
+		t.Fatalf("valid queue key count = %d, want eight classes for two claimants", len(plan.Keys))
+	}
+	for _, key := range plan.Keys {
+		if (key.Owner != "good" && key.Owner != "good-copy") || key.Ifindex != 41 || key.Generation != 7 {
+			t.Fatalf("queue key = %+v, want good claimants/ifindex=41/generation=7", key)
+		}
+	}
+	if !plan.Quarantine.QuarantineAll ||
+		plan.Quarantine.QuarantineReasonMask&xnft.IpsecQuarantineMaskIFIDUnderivable == 0 ||
+		plan.Quarantine.QuarantineReasonMask&xnft.IpsecQuarantineMaskOwnerContested == 0 {
+		t.Fatalf("skip quarantine = %+v, want IFID_UNDERIVABLE+OWNER_CONTESTED", plan.Quarantine)
+	}
+	if len(plan.Quarantine.CandidateIfindices) != 1 || plan.Quarantine.CandidateIfindices[0] != 41 {
+		t.Fatalf("candidate ifindices = %v, want [41]", plan.Quarantine.CandidateIfindices)
+	}
+	keys, err := ipsecCaptureQueueKeys(cfg, 7)
+	if err != nil || len(keys) != 8 {
+		t.Fatalf("queue key wrapper = %d/%v, want eight/nil", len(keys), err)
+	}
+}
+
+func TestIpsecCaptureStageInvalidVPNPublishesQuarantine9506(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"invalid": {BindInterface: "not-an-xfrmi"},
+	}
+	d := &Daemon{}
+	old, staged, err := d.stageIpsecCapture(cfg)
+	if err != nil {
+		t.Fatalf("stage invalid VPN: %v", err)
+	}
+	if old != nil || staged == nil || !staged.spec.QuarantineAll || staged.actor != nil {
+		t.Fatalf("stage result old=%p staged=%+v", old, staged)
+	}
+	if !d.ipsecCaptureStagePending {
+		t.Fatal("quarantine stage was not marked pending")
+	}
+	_ = staged.close()
+}
+
+func TestIpsecCaptureUnknownQueueKeyDenies9506(t *testing.T) {
+	handles := wiringHandles9506()
+	handles[0].Key.Family = ipsecQueueFamily(0xff)
+	spec, err := ipsecCaptureDivertSpec(handles)
+	if err != nil {
+		t.Fatalf("unknown queue key returned an error instead of quarantine: %v", err)
+	}
+	if !spec.QuarantineAll || spec.QuarantineRawReason == xnft.IpsecQuarantineReasonUnknown {
+		t.Fatalf("unknown queue key spec = %+v, want preserved raw reason and quarantine", spec)
+	}
+}
+
+func TestIpsecCaptureRawQuarantineMaskDenies9506(t *testing.T) {
+	handles := wiringHandles9506()
+	rawMask := xnft.IpsecQuarantineReasonMask(1 << 29)
+	spec, err := ipsecCaptureDivertSpecWithQuarantine(handles, xnft.IpsecDivertSpec{
+		QuarantineRawMask: rawMask,
+	})
+	if err != nil {
+		t.Fatalf("raw quarantine mask returned an error: %v", err)
+	}
+	if !spec.QuarantineAll || spec.QuarantineRawMask != rawMask {
+		t.Fatalf("raw quarantine mask spec = %+v, want quarantine with raw mask 0x%x", spec, rawMask)
 	}
 }
 
@@ -290,8 +387,8 @@ func TestCommitIpsecCaptureStageActorStartFailureRestoresDivert9506(t *testing.T
 	if err := d.commitIpsecCaptureStage(nil, staged); err == nil {
 		t.Fatal("actor start failure was swallowed")
 	}
-	if len(fake.divertCalls) != 2 || fake.divertCalls[0] != "install" || fake.divertCalls[1] != "remove" {
-		t.Fatalf("divert calls=%v, want install then remove", fake.divertCalls)
+	if len(fake.divertCalls) != 2 || fake.divertCalls[0] != "install" || fake.divertCalls[1] != "install" {
+		t.Fatalf("divert calls=%v, want install then deny-only install", fake.divertCalls)
 	}
 	if d.ipsecCapture != nil || d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
 		t.Fatalf("daemon state after actor failure = active=%p staged=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStaged, d.ipsecCaptureStagePending)

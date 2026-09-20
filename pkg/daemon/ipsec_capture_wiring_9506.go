@@ -20,24 +20,37 @@ import (
 // ipsecCaptureDivertSpec converts one complete four-class queue generation into
 // the nftables ruleset shape. The caller must provide all four provenance
 // classes for every tunnel; an incomplete generation is refused rather than
-// installing a partial inet/bridge or forward/input diversion.
+// installing a partial inet/bridge or forward/input diversion. An empty
+// generation is itself a closed quarantine request.
 func ipsecCaptureDivertSpec(handles []ipsecQueueHandle) (xnft.IpsecDivertSpec, error) {
 	var spec xnft.IpsecDivertSpec
 	if len(handles) == 0 {
-		return spec, fmt.Errorf("ipsec capture: empty queue generation")
+		spec.QuarantineAll = true
+		spec.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonUnknown
+		return spec, nil
+	}
+	unknown := func() (xnft.IpsecDivertSpec, error) {
+		return xnft.IpsecDivertSpec{
+			QuarantineAll:       true,
+			QuarantineRawReason: xnft.IpsecQuarantineReason(0xff),
+		}, nil
 	}
 	seen := make(map[uint16]struct{}, len(handles))
 	for _, handle := range handles {
 		if handle.Number == 0 || handle.Epoch == 0 || handle.Key.Owner == "" || handle.Key.STN == "" || handle.Key.Ifindex <= 0 {
-			return spec, fmt.Errorf("ipsec capture: invalid queue handle %+v", handle)
+			return unknown()
 		}
 		if _, exists := seen[handle.Number]; exists {
-			return spec, fmt.Errorf("ipsec capture: duplicate queue number %d", handle.Number)
+			return unknown()
 		}
 		seen[handle.Number] = struct{}{}
 		ifname, ifID := config.XFRMIfNameAndID(handle.Key.STN)
 		if ifID == 0 || ifname == "" {
-			return spec, fmt.Errorf("ipsec capture: invalid secure-tunnel interface %q", handle.Key.STN)
+			return xnft.IpsecDivertSpec{
+				QuarantineAll:           true,
+				QuarantineReasonMask:    xnft.IpsecQuarantineMaskIFIDUnderivable,
+				QuarantinePrimaryReason: xnft.IpsecQuarantineReasonIFIDUnderivable,
+			}, nil
 		}
 		rule := xnft.IpsecDivertRule{Ifname: ifname, Queue: handle.Number}
 		switch handle.Key.Family {
@@ -48,7 +61,7 @@ func ipsecCaptureDivertSpec(handles []ipsecQueueHandle) (xnft.IpsecDivertSpec, e
 			case ipsecHookInput:
 				spec.InetInput = append(spec.InetInput, rule)
 			default:
-				return spec, fmt.Errorf("ipsec capture: unknown inet hook %d", handle.Key.Hook)
+				return unknown()
 			}
 		case ipsecFamilyBridge:
 			switch handle.Key.Hook {
@@ -57,10 +70,10 @@ func ipsecCaptureDivertSpec(handles []ipsecQueueHandle) (xnft.IpsecDivertSpec, e
 			case ipsecHookInput:
 				spec.BridgeInput = append(spec.BridgeInput, rule)
 			default:
-				return spec, fmt.Errorf("ipsec capture: unknown bridge hook %d", handle.Key.Hook)
+				return unknown()
 			}
 		default:
-			return spec, fmt.Errorf("ipsec capture: unknown family %d", handle.Key.Family)
+			return unknown()
 		}
 	}
 	if len(spec.InetForward) == 0 || len(spec.InetInput) == 0 || len(spec.BridgeForward) == 0 || len(spec.BridgeInput) == 0 {
@@ -69,7 +82,17 @@ func ipsecCaptureDivertSpec(handles []ipsecQueueHandle) (xnft.IpsecDivertSpec, e
 	return spec, nil
 }
 
-// ipsecCaptureRegisterOrigins installs the immutable queue provenance registry
+func ipsecCaptureDivertSpecWithQuarantine(handles []ipsecQueueHandle, quarantine xnft.IpsecDivertSpec) (xnft.IpsecDivertSpec, error) {
+	if quarantine.QuarantineAll || quarantine.QuarantineReasonMask != 0 ||
+		quarantine.QuarantinePrimaryReason != xnft.IpsecQuarantineReasonUnknown ||
+		quarantine.QuarantineRawReason != xnft.IpsecQuarantineReasonUnknown ||
+		quarantine.QuarantineRawMask != 0 || len(quarantine.CandidateIfindices) != 0 {
+		quarantine.QuarantineAll = true
+		return quarantine, nil
+	}
+	return ipsecCaptureDivertSpec(handles)
+}
+
 // for one generation. A fresh registry is required on every rotation so a
 // recycled queue number cannot reinterpret an old held packet as the new
 // tunnel/hook/family owner.
@@ -122,10 +145,10 @@ func ipsecCaptureQueueEpochSnapshot(handles []ipsecQueueHandle) []dpuserspace.Qu
 }
 
 type pmechTunnelZone struct {
-	ifID     uint32
-	ifindex  uint32
-	zoneID   uint16
-	reason   nfqueue.ZoneReason
+	ifID    uint32
+	ifindex uint32
+	zoneID  uint16
+	reason  nfqueue.ZoneReason
 }
 
 // pmechZoneSnapshot is immutable after publication. The live-ifindex map is
@@ -194,7 +217,7 @@ func (s *pmechZoneSnapshot) ValidateOrigin(origin nfqueue.CaptureOrigin) nfqueue
 func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, generation uint64, fibGeneration uint32) *pmechZoneSnapshot {
 	snapshot := &pmechZoneSnapshot{
 		generation: generation, fibGeneration: fibGeneration,
-		tunnels: make(map[string]pmechTunnelZone),
+		tunnels:     make(map[string]pmechTunnelZone),
 		queueEpochs: make(map[uint16]uint64),
 	}
 	snapshot.current.Store(true)
@@ -297,14 +320,14 @@ type ipsecReinjectSubmitter interface {
 }
 
 type ipsecCaptureRuntime struct {
-	supervisor *ipsecSupervisor
-	handles    []ipsecQueueHandle
-	queues     []IpsecCaptureQueue
-	registry   *nfqueue.OriginRegistry
-	actor      *IpsecCapturePipeline
-	submitter  ipsecReinjectSubmitter
-	spec       xnft.IpsecDivertSpec
-	runID      string
+	supervisor   *ipsecSupervisor
+	handles      []ipsecQueueHandle
+	queues       []IpsecCaptureQueue
+	registry     *nfqueue.OriginRegistry
+	actor        *IpsecCapturePipeline
+	submitter    ipsecReinjectSubmitter
+	spec         xnft.IpsecDivertSpec
+	runID        string
 	zoneSnapshot *pmechZoneSnapshot
 
 	authorityMu         sync.Mutex
@@ -456,33 +479,126 @@ func (r *ipsecCaptureRuntime) close() error {
 	return firstErr
 }
 
-func ipsecCaptureQueueKeys(cfg *config.Config, generation uint64) ([]ipsecQueueKey, error) {
+var ipsecCaptureLinkByName = netlink.LinkByName
+var ipsecCaptureOpenQueue = openIpsecCaptureQueue
+
+type ipsecCaptureQueuePlan struct {
+	Keys         []ipsecQueueKey
+	Quarantine   xnft.IpsecDivertSpec
+	HasVPNConfig bool
+}
+
+func (p *ipsecCaptureQueuePlan) addQuarantine(reason xnft.IpsecQuarantineReason) {
+	if p == nil {
+		return
+	}
+	p.Quarantine.QuarantineAll = true
+	switch reason {
+	case xnft.IpsecQuarantineReasonIFIDUnderivable:
+		p.Quarantine.QuarantineReasonMask |= xnft.IpsecQuarantineMaskIFIDUnderivable
+	case xnft.IpsecQuarantineReasonLinkLookup:
+		p.Quarantine.QuarantineReasonMask |= xnft.IpsecQuarantineMaskLinkLookup
+	case xnft.IpsecQuarantineReasonQueueOpen:
+		p.Quarantine.QuarantineReasonMask |= xnft.IpsecQuarantineMaskQueueOpen
+	case xnft.IpsecQuarantineReasonOwnerContested:
+		p.Quarantine.QuarantineReasonMask |= xnft.IpsecQuarantineMaskOwnerContested
+	case xnft.IpsecQuarantineReasonDomainOverlap:
+		p.Quarantine.QuarantineReasonMask |= xnft.IpsecQuarantineMaskDomainOverlap
+	default:
+		p.Quarantine.QuarantineRawReason = reason
+	}
+}
+
+func (p *ipsecCaptureQueuePlan) finalize(generation uint64) {
+	if p == nil {
+		return
+	}
+	p.Quarantine.QuarantineGeneration = generation
+	if !p.Quarantine.QuarantineAll {
+		return
+	}
+	mask := p.Quarantine.QuarantineReasonMask
+	switch {
+	case mask&xnft.IpsecQuarantineMaskDomainOverlap != 0:
+		p.Quarantine.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonDomainOverlap
+	case mask&xnft.IpsecQuarantineMaskOwnerContested != 0:
+		p.Quarantine.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonOwnerContested
+	case mask&xnft.IpsecQuarantineMaskQueueOpen != 0:
+		p.Quarantine.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonQueueOpen
+	case mask&xnft.IpsecQuarantineMaskLinkLookup != 0:
+		p.Quarantine.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonLinkLookup
+	case mask&xnft.IpsecQuarantineMaskIFIDUnderivable != 0:
+		p.Quarantine.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonIFIDUnderivable
+	default:
+		p.Quarantine.QuarantinePrimaryReason = xnft.IpsecQuarantineReasonUnknown
+	}
+	seen := make(map[uint32]struct{}, len(p.Quarantine.CandidateIfindices))
+	candidates := p.Quarantine.CandidateIfindices[:0]
+	for _, ifindex := range p.Quarantine.CandidateIfindices {
+		if ifindex == 0 {
+			continue
+		}
+		if _, ok := seen[ifindex]; ok {
+			continue
+		}
+		seen[ifindex] = struct{}{}
+		candidates = append(candidates, ifindex)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i] < candidates[j] })
+	p.Quarantine.CandidateIfindices = candidates
+}
+
+func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCaptureQueuePlan, error) {
+	var plan ipsecCaptureQueuePlan
 	if cfg == nil || generation == 0 {
-		return nil, nil
+		return plan, nil
 	}
 	names := make([]string, 0, len(cfg.Security.IPsec.VPNs))
 	for name := range cfg.Security.IPsec.VPNs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	keys := make([]ipsecQueueKey, 0, len(names)*4)
+	plan.HasVPNConfig = len(names) != 0
+	type validTunnel struct {
+		name, bind    string
+		ifID, ifindex uint32
+	}
+	valid := make([]validTunnel, 0, len(names))
 	for _, name := range names {
 		vpn := cfg.Security.IPsec.VPNs[name]
 		if vpn == nil || vpn.BindInterface == "" {
+			plan.addQuarantine(xnft.IpsecQuarantineReasonIFIDUnderivable)
 			continue
 		}
 		ifname, ifID := config.XFRMIfNameAndID(vpn.BindInterface)
 		if ifID == 0 || ifname == "" {
-			return nil, fmt.Errorf("ipsec capture: VPN %q has invalid bind-interface %q", name, vpn.BindInterface)
+			plan.addQuarantine(xnft.IpsecQuarantineReasonIFIDUnderivable)
+			continue
 		}
-		link, err := netlink.LinkByName(ifname)
-		if err != nil {
-			return nil, fmt.Errorf("ipsec capture: find %s for VPN %q: %w", ifname, name, err)
+		link, err := ipsecCaptureLinkByName(ifname)
+		if err != nil || link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
+			plan.addQuarantine(xnft.IpsecQuarantineReasonLinkLookup)
+			continue
 		}
-		if link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
-			return nil, fmt.Errorf("ipsec capture: VPN %q bind-interface %s has no ifindex", name, ifname)
+		ifindex := uint32(link.Attrs().Index)
+		valid = append(valid, validTunnel{name: name, bind: vpn.BindInterface, ifID: ifID, ifindex: ifindex})
+		plan.Quarantine.CandidateIfindices = append(plan.Quarantine.CandidateIfindices, ifindex)
+	}
+	// Every distinct VPN claimant sharing one if_id is contested, including
+	// two VPNs that authored the same bind string.
+	owners := make(map[uint32]map[string]struct{}, len(valid))
+	for _, tunnel := range valid {
+		if owners[tunnel.ifID] == nil {
+			owners[tunnel.ifID] = make(map[string]struct{})
 		}
-		ifindex := link.Attrs().Index
+		owners[tunnel.ifID][tunnel.name] = struct{}{}
+	}
+	for _, claimants := range owners {
+		if len(claimants) > 1 {
+			plan.addQuarantine(xnft.IpsecQuarantineReasonOwnerContested)
+		}
+	}
+	for _, tunnel := range valid {
 		for _, class := range []struct {
 			family ipsecQueueFamily
 			hook   ipsecQueueHook
@@ -492,17 +608,25 @@ func ipsecCaptureQueueKeys(cfg *config.Config, generation uint64) ([]ipsecQueueK
 			{ipsecFamilyBridge, ipsecHookForward},
 			{ipsecFamilyBridge, ipsecHookInput},
 		} {
-			keys = append(keys, ipsecQueueKey{
+			plan.Keys = append(plan.Keys, ipsecQueueKey{
 				Generation: generation,
 				Family:     class.family,
 				Hook:       class.hook,
-				Owner:      name,
-				STN:        vpn.BindInterface,
-				Ifindex:    ifindex,
+				Owner:      tunnel.name,
+				STN:        tunnel.bind,
+				Ifindex:    int(tunnel.ifindex),
 			})
 		}
 	}
-	return keys, nil
+	plan.finalize(generation)
+	return plan, nil
+}
+func ipsecCaptureQueueKeys(cfg *config.Config, generation uint64) ([]ipsecQueueKey, error) {
+	plan, err := buildIpsecCaptureQueuePlan(cfg, generation)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Keys, nil
 }
 
 func openIpsecCaptureQueue(number uint16, family ipsecQueueFamily) (*nfqueue.Queue, error) {
@@ -517,10 +641,29 @@ func ipsecCaptureReinjectSocketPaths(controlSocket string) (string, string) {
 	return filepath.Join(dir, "reinject-submit.sock"), filepath.Join(dir, "reinject-complete.sock")
 }
 
+func stagedIpsecQuarantineRuntime(d *Daemon, generation uint64, spec xnft.IpsecDivertSpec) *ipsecCaptureRuntime {
+	if spec.QuarantineGeneration == 0 {
+		spec.QuarantineGeneration = generation
+	}
+	return &ipsecCaptureRuntime{
+		supervisor: d.ipsecS4,
+		spec:       spec,
+		runID:      fmt.Sprintf("ipsec-quarantine-g%d", generation),
+	}
+}
+
+func closeStagedCaptureQueues(queues []IpsecCaptureQueue) {
+	for _, captureQueue := range queues {
+		if captureQueue.Queue != nil {
+			_ = captureQueue.Queue.Close()
+		}
+	}
+}
+
 // stageIpsecCapture allocates, binds, and validates a complete generation but
-// does not install nftables or start receive loops. The staged runtime is
-// published before the dataplane compile so Manager.Compile stamps these
-// queue epochs into the same snapshot that authorizes the new diversion.
+// does not install nftables or start receive loops. A per-VPN failure is
+// retained in the generation-wide quarantine spec; valid VPN metadata is still
+// collected so the nft guard can deny every known candidate ifindex.
 func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptureRuntime, err error) {
 	if d == nil {
 		return nil, nil, nil
@@ -534,12 +677,19 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		d.ipsecS4 = newIpsecSupervisor()
 	}
 	generation := d.ipsecCaptureGeneration.Add(1)
-	keys, err := ipsecCaptureQueueKeys(cfg, generation)
+	plan, err := buildIpsecCaptureQueuePlan(cfg, generation)
 	if err != nil {
 		return old, old, err
 	}
-	if old != nil && old.sameKeys(keys) {
+	keys := plan.Keys
+	if !plan.Quarantine.QuarantineAll && old != nil && old.sameKeys(keys) && !old.spec.QuarantineAll {
 		return old, old, nil
+	}
+	if plan.Quarantine.QuarantineAll {
+		staged = stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine)
+		d.ipsecCaptureStaged = staged
+		d.ipsecCaptureStagePending = true
+		return old, staged, nil
 	}
 	if len(keys) == 0 {
 		if old == nil {
@@ -549,35 +699,45 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		return old, nil, nil
 	}
 	handles := make([]ipsecQueueHandle, 0, len(keys))
-	for _, key := range keys {
-		handle, allocErr := d.ipsecS4.allocateQueue(key)
-		if allocErr != nil {
-			for _, prior := range handles {
-				_ = d.ipsecS4.retireQueue(prior, true, true)
-			}
-			return old, old, allocErr
-		}
-		handles = append(handles, handle)
-	}
 	cleanupHandles := func() {
 		for _, handle := range handles {
 			_ = d.ipsecS4.retireQueue(handle, true, true)
 		}
 	}
+	quarantineWith := func(reason xnft.IpsecQuarantineReason, stageErr error) (*ipsecCaptureRuntime, error) {
+		plan.addQuarantine(reason)
+		plan.finalize(generation)
+		return stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine), nil
+	}
+	for _, key := range keys {
+		handle, allocErr := d.ipsecS4.allocateQueue(key)
+		if allocErr != nil {
+			cleanupHandles()
+			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, allocErr)
+			d.ipsecCaptureStaged = staged
+			d.ipsecCaptureStagePending = true
+			return old, staged, nil
+		}
+		handles = append(handles, handle)
+	}
 	registry := new(nfqueue.OriginRegistry)
-	if err := ipsecCaptureRegisterOrigins(registry, handles); err != nil {
+	if registerErr := ipsecCaptureRegisterOrigins(registry, handles); registerErr != nil {
 		cleanupHandles()
-		return old, old, err
+		staged, _ = quarantineWith(xnft.IpsecQuarantineReasonUnknown, registerErr)
+		d.ipsecCaptureStaged = staged
+		d.ipsecCaptureStagePending = true
+		return old, staged, nil
 	}
 	queues := make([]IpsecCaptureQueue, 0, len(handles))
 	for _, handle := range handles {
-		queue, openErr := openIpsecCaptureQueue(handle.Number, handle.Key.Family)
+		queue, openErr := ipsecCaptureOpenQueue(handle.Number, handle.Key.Family)
 		if openErr != nil {
-			for _, captureQueue := range queues {
-				_ = captureQueue.Queue.Close()
-			}
+			closeStagedCaptureQueues(queues)
 			cleanupHandles()
-			return old, old, openErr
+			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, openErr)
+			d.ipsecCaptureStaged = staged
+			d.ipsecCaptureStagePending = true
+			return old, staged, nil
 		}
 		queues = append(queues, IpsecCaptureQueue{
 			Queue:              queue,
@@ -592,19 +752,20 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	}
 	zoneSnapshot := buildPMechZoneSnapshot(cfg, handles, generation, uint32(generation))
 	submitPath, completePath := ipsecCaptureReinjectSocketPaths(dpuserspace.DefaultControlSocketPath(cfg))
-	submitter, err := nfqueue.NewSocketReinjectSubmitter(submitPath, completePath)
-	if err != nil {
-		for _, captureQueue := range queues {
-			_ = captureQueue.Queue.Close()
-		}
+	submitter, submitErr := nfqueue.NewSocketReinjectSubmitter(submitPath, completePath)
+	if submitErr != nil {
+		closeStagedCaptureQueues(queues)
 		cleanupHandles()
-		return old, old, err
+		staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, submitErr)
+		d.ipsecCaptureStaged = staged
+		d.ipsecCaptureStagePending = true
+		return old, staged, nil
 	}
 	queueEpochs := make(map[uint16]uint64, len(handles))
 	for _, handle := range handles {
 		queueEpochs[handle.Number] = handle.Epoch
 	}
-	actor, err := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{
+	actor, actorErr := NewIpsecCapturePipeline(IpsecCapturePipelineConfig{
 		Supervisor:  d.ipsecS4,
 		Registry:    registry,
 		QueueEpochs: queueEpochs,
@@ -619,20 +780,24 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			ZoneSnapshot:   zoneSnapshot,
 		},
 	})
-	if err != nil {
-		for _, captureQueue := range queues {
-			_ = captureQueue.Queue.Close()
-		}
+	if actorErr != nil {
+		closeStagedCaptureQueues(queues)
 		cleanupHandles()
-		return old, old, err
+		_ = submitter.Close()
+		staged, _ = quarantineWith(xnft.IpsecQuarantineReasonUnknown, actorErr)
+		d.ipsecCaptureStaged = staged
+		d.ipsecCaptureStagePending = true
+		return old, staged, nil
 	}
-	spec, err := ipsecCaptureDivertSpec(handles)
-	if err != nil {
-		for _, captureQueue := range queues {
-			_ = captureQueue.Queue.Close()
-		}
+	spec, specErr := ipsecCaptureDivertSpecWithQuarantine(handles, plan.Quarantine)
+	if specErr != nil {
+		closeStagedCaptureQueues(queues)
 		cleanupHandles()
-		return old, old, err
+		_ = submitter.Close()
+		staged, _ = quarantineWith(xnft.IpsecQuarantineReasonUnknown, specErr)
+		d.ipsecCaptureStaged = staged
+		d.ipsecCaptureStagePending = true
+		return old, staged, nil
 	}
 	staged = &ipsecCaptureRuntime{
 		supervisor:   d.ipsecS4,
@@ -729,8 +894,15 @@ func (d *Daemon) rollbackIpsecCaptureStage(old, staged *ipsecCaptureRuntime) err
 
 }
 
-// commitIpsecCaptureStage installs the divert atomically before starting the
+type ipsecCaptureGuardedInstaller interface {
+	InstallIpsecDivertWithDrain(xnft.IpsecDivertSpec, func() error) error
+}
 
+type ipsecCaptureQuarantineInstaller interface {
+	InstallIpsecQuarantineGuard(xnft.IpsecDivertSpec) error
+}
+
+// commitIpsecCaptureStage installs the divert atomically before starting the
 // actor. The old generation remains live until the new nftables transaction and
 // receive loops are both ready; every failure restores the old pointer and
 func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error {
@@ -760,23 +932,56 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 		}
 		return nil
 	}
-	if err := nftInstaller.InstallIpsecDivert(staged.spec); err != nil {
-		_ = d.rollbackIpsecCaptureStage(old, staged)
-		return fmt.Errorf("ipsec capture: install divert: %w", err)
-	}
-	if err := staged.actor.Start(); err != nil {
-		// The install is atomic, but an actor that cannot start must not leave
-		// packets diverted into a dead queue generation.
-		if old != nil {
-			_ = nftInstaller.InstallIpsecDivert(old.spec)
-		} else {
-			_ = nftInstaller.RemoveIpsecDivert()
+	oldRetired := false
+	guarded, canGuard := nftInstaller.(ipsecCaptureGuardedInstaller)
+	if old != nil && canGuard {
+		err := guarded.InstallIpsecDivertWithDrain(staged.spec, func() error {
+			err := old.close()
+			if err == nil {
+				oldRetired = true
+			}
+			return err
+		})
+		if err != nil {
+			// The guarded installer retains its deny authority on every
+			// post-ACK failure. Never restore old as an authority after the
+			// transition has been touched.
+			if !oldRetired {
+				_ = old.close()
+			}
+			d.restoreIpsecCaptureRuntime(nil)
+			_ = staged.close()
+			return fmt.Errorf("ipsec capture: guarded divert transition: %w", err)
 		}
-		_ = d.rollbackIpsecCaptureStage(old, staged)
-		return fmt.Errorf("ipsec capture: start actor: %w", err)
+	} else {
+		if err := nftInstaller.InstallIpsecDivert(staged.spec); err != nil {
+			_ = d.rollbackIpsecCaptureStage(old, staged)
+			return fmt.Errorf("ipsec capture: install divert: %w", err)
+		}
+	}
+	if staged.actor != nil {
+		if err := staged.actor.Start(); err != nil {
+			// A post-drain actor failure must leave a two-family DROP
+			// authority. Never remove both tables and fall through.
+			if old != nil && !oldRetired {
+				_ = nftInstaller.InstallIpsecDivert(old.spec)
+				_ = d.rollbackIpsecCaptureStage(old, staged)
+			} else {
+				quarantine := staged.spec
+				quarantine.QuarantineAll = true
+				if guardInstaller, ok := nftInstaller.(ipsecCaptureQuarantineInstaller); ok {
+					_ = guardInstaller.InstallIpsecQuarantineGuard(quarantine)
+				} else {
+					_ = nftInstaller.InstallIpsecDivert(quarantine)
+				}
+				d.restoreIpsecCaptureRuntime(nil)
+				_ = staged.close()
+			}
+			return fmt.Errorf("ipsec capture: start actor: %w", err)
+		}
 	}
 	d.publishIpsecCaptureCommitted(staged)
-	if old != nil {
+	if old != nil && !oldRetired {
 		if err := old.close(); err != nil {
 			return fmt.Errorf("ipsec capture: retire old generation: %w", err)
 		}

@@ -2,6 +2,7 @@ package nftables
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 
@@ -19,6 +20,165 @@ func TestIpsecDivertSpecRejectsProvenanceQueueAlias9506(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("queue alias across family/hook classes was accepted")
+	}
+}
+
+type fakeIpsecNftState struct {
+	tables map[gnft.TableFamily]map[string]bool
+}
+
+func newFakeIpsecNftState() *fakeIpsecNftState {
+	return &fakeIpsecNftState{
+		tables: map[gnft.TableFamily]map[string]bool{
+			gnft.TableFamilyINet:   {},
+			gnft.TableFamilyBridge: {},
+		},
+	}
+}
+
+func (s *fakeIpsecNftState) hasTable(family gnft.TableFamily, name string) bool {
+	return s.tables[family][name]
+}
+
+func (s *fakeIpsecNftState) dial(req []netlink.Message) ([]netlink.Message, error) {
+	for _, msg := range req {
+		kind := uint16(msg.Header.Type) & 0xff
+		if len(msg.Data) < 4 {
+			continue
+		}
+		family := gnft.TableFamily(msg.Data[0])
+		switch kind {
+		case unix.NFT_MSG_GETTABLE:
+			var response []netlink.Message
+			for name, present := range s.tables[family] {
+				if !present {
+					continue
+				}
+				attrs, err := netlink.MarshalAttributes([]netlink.Attribute{{
+					Type: unix.NFTA_TABLE_NAME,
+					Data: []byte(name + "\x00"),
+				}})
+				if err != nil {
+					return nil, err
+				}
+				response = append(response, netlink.Message{
+					Header: netlink.Header{
+						Type:     netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_NEWTABLE),
+						Sequence: msg.Header.Sequence,
+					},
+					Data: append([]byte{byte(family), 0, 0, 0}, attrs...),
+				})
+			}
+			return response, nil
+		case unix.NFT_MSG_GETCHAIN:
+			var response []netlink.Message
+			for name, present := range s.tables[family] {
+				if !present {
+					continue
+				}
+				for _, chainName := range []string{"forward", "input"} {
+					attrs, err := fakeIpsecChainAttrs(name, chainName)
+					if err != nil {
+						return nil, err
+					}
+					response = append(response, netlink.Message{
+						Header: netlink.Header{
+							Type:     netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_NEWCHAIN),
+							Sequence: msg.Header.Sequence,
+						},
+						Data: append([]byte{byte(family), 0, 0, 0}, attrs...),
+					})
+				}
+			}
+			return response, nil
+		case unix.NFT_MSG_NEWTABLE, unix.NFT_MSG_DELTABLE:
+			name, err := fakeIpsecAttrString(msg.Data, unix.NFTA_TABLE_NAME)
+			if err != nil {
+				return nil, err
+			}
+			if name == "" {
+				continue
+			}
+			if s.tables[family] == nil {
+				s.tables[family] = map[string]bool{}
+			}
+			s.tables[family][name] = kind == unix.NFT_MSG_NEWTABLE
+		}
+	}
+	return nil, nil
+}
+
+func fakeIpsecAttrString(data []byte, wanted uint16) (string, error) {
+	ad, err := netlink.NewAttributeDecoder(data[4:])
+	if err != nil {
+		return "", err
+	}
+	for ad.Next() {
+		if ad.Type() == wanted {
+			return ad.String(), ad.Err()
+		}
+	}
+	return "", ad.Err()
+}
+
+func fakeIpsecChainAttrs(tableName, chainName string) ([]byte, error) {
+	hook := uint32(unix.NF_INET_FORWARD)
+	if chainName == "input" {
+		hook = uint32(unix.NF_INET_LOCAL_IN)
+	}
+	priority := int32(IpsecDivertPriority)
+	policy := uint32(gnft.ChainPolicyAccept)
+	if tableName == IpsecQuarantineTableName {
+		priority = int32(IpsecQuarantinePriority)
+		policy = uint32(gnft.ChainPolicyDrop)
+	}
+	if tableName == IpsecDivertTableName {
+		policy = uint32(gnft.ChainPolicyDrop)
+	}
+	hookAttrs, err := netlink.MarshalAttributes([]netlink.Attribute{
+		{Type: unix.NFTA_HOOK_HOOKNUM, Data: binary.BigEndian.AppendUint32(nil, hook)},
+		{Type: unix.NFTA_HOOK_PRIORITY, Data: binary.BigEndian.AppendUint32(nil, uint32(priority))},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return netlink.MarshalAttributes([]netlink.Attribute{
+		{Type: unix.NFTA_CHAIN_TABLE, Data: []byte(tableName + "\x00")},
+		{Type: unix.NFTA_CHAIN_NAME, Data: []byte(chainName + "\x00")},
+		{Type: unix.NLA_F_NESTED | unix.NFTA_CHAIN_HOOK, Data: hookAttrs},
+		{Type: unix.NFTA_CHAIN_POLICY, Data: binary.BigEndian.AppendUint32(nil, policy)},
+		{Type: unix.NFTA_CHAIN_TYPE, Data: []byte("filter\x00")},
+	})
+}
+
+func TestIpsecQuarantineInstallRemoveRoundTripFake9506(t *testing.T) {
+	state := newFakeIpsecNftState()
+	in := newNetlinkInstallerConn(func() (*gnft.Conn, error) {
+		return gnft.New(gnft.WithTestDial(state.dial))
+	})
+	spec := IpsecDivertSpec{
+		QuarantineAll:        true,
+		QuarantineGeneration: 7,
+		CandidateIfindices:   []uint32{17},
+	}
+	if err := in.InstallIpsecDivert(spec); err != nil {
+		t.Fatalf("fake quarantine install: %v", err)
+	}
+	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
+		if !state.hasTable(family, IpsecDivertTableName) {
+			t.Fatalf("family %v missing deny divert table after install", family)
+		}
+		if state.hasTable(family, IpsecQuarantineTableName) {
+			t.Fatalf("family %v retained guard table after install", family)
+		}
+	}
+	if err := in.RemoveIpsecDivert(); err != nil {
+		t.Fatalf("fake quarantine remove: %v", err)
+	}
+	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
+		if state.hasTable(family, IpsecDivertTableName) || state.hasTable(family, IpsecQuarantineTableName) {
+			t.Fatalf("family %v retained ipsec tables after remove", family)
+		}
 	}
 }
 
@@ -204,5 +364,160 @@ func TestIpsecDivertRemoveFlushFailureIsNotBridgeDegraded9506(t *testing.T) {
 	}
 	if IsTransitBarrierBridgeUnsupportedOnly(err) {
 		t.Fatalf("remove flush failure was misclassified as bridge degraded: %v", err)
+	}
+}
+func TestIpsecQuarantineUnknownInputDeniesAndPreservesRaw9506(t *testing.T) {
+	rawMask := IpsecQuarantineReasonMask(1 << 29)
+	rawReason := IpsecQuarantineReason(0xfe)
+	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{
+		QuarantinePrimaryReason: rawReason,
+		QuarantineReasonMask:    rawMask,
+		InetForward:             []IpsecDivertRule{{Ifname: "st0", Queue: 1401}},
+	})
+	if !spec.QuarantineAll {
+		t.Fatal("unknown quarantine input did not close admission")
+	}
+	if spec.QuarantineRawMask != rawMask || spec.QuarantineRawReason != rawReason {
+		t.Fatalf("raw quarantine identity = mask 0x%x/reason %d, want 0x%x/%d",
+			spec.QuarantineRawMask, spec.QuarantineRawReason, rawMask, rawReason)
+	}
+	if len(spec.InetForward) != 0 || spec.QuarantineReasonMask&ipsecQuarantineMaskUnknown == 0 {
+		t.Fatalf("unknown quarantine retained admission rules or unknown bit: %+v", spec)
+	}
+	if err := validateIpsecDivertSpec(spec); err != nil {
+		t.Fatalf("normalized unknown quarantine was rejected: %v", err)
+	}
+}
+
+func TestIpsecQuarantineDefaultIsDenyAll9506(t *testing.T) {
+	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{QuarantineAll: true})
+	if !spec.QuarantineAll || spec.QuarantinePrimaryReason != IpsecQuarantineReasonUnknown {
+		t.Fatalf("default quarantine = %+v, want closed UNKNOWN", spec)
+	}
+	if spec.QuarantineReasonMask&ipsecQuarantineMaskUnknown == 0 {
+		t.Fatalf("default quarantine mask = 0x%x, want unknown bit", spec.QuarantineReasonMask)
+	}
+	if err := validateIpsecDivertSpec(spec); err != nil {
+		t.Fatalf("default quarantine rejected: %v", err)
+	}
+}
+
+func TestIpsecQuarantineRuleShape9506(t *testing.T) {
+	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{
+		QuarantineAll:        true,
+		QuarantineGeneration: 12,
+		CandidateIfindices:   []uint32{17},
+	})
+	tbl := &gnft.Table{Family: gnft.TableFamilyINet, Name: IpsecQuarantineTableName}
+	chain := ipsecDenyChain(tbl, "forward", gnft.ChainHookForward, IpsecQuarantinePriority)
+	p := newBuildPlan(t, IpsecQuarantineTableName, IpsecQuarantinePriority)
+	p.chain = chain
+	emitIpsecQuarantineRules(p, "inet", "forward", spec, true)
+	if p.err != nil {
+		t.Fatalf("render quarantine rules: %v", p.err)
+	}
+	if len(p.rules) != 2 {
+		t.Fatalf("quarantine rule count = %d, want candidate + base", len(p.rules))
+	}
+	if _, ok := p.rules[0][0].(*expr.Meta); !ok {
+		t.Fatalf("candidate first expression = %#v, want meta iif", p.rules[0][0])
+	}
+	if verdict, ok := p.rules[0][len(p.rules[0])-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictDrop {
+		t.Fatalf("candidate verdict = %#v, want DROP", p.rules[0][len(p.rules[0])-1])
+	}
+	if verdict, ok := p.rules[1][len(p.rules[1])-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictDrop {
+		t.Fatalf("base verdict = %#v, want DROP", p.rules[1][len(p.rules[1])-1])
+	}
+}
+func TestIpsecQuarantineLaterHookDropsWithoutCounter9506(t *testing.T) {
+	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{
+		QuarantineAll:      true,
+		CandidateIfindices: []uint32{17},
+	})
+	tbl := &gnft.Table{Family: gnft.TableFamilyBridge, Name: IpsecQuarantineTableName}
+	p := newBuildPlan(t, IpsecQuarantineTableName, IpsecQuarantinePriority)
+	p.chain = ipsecDenyChain(tbl, "input", gnft.ChainHookInput, IpsecQuarantinePriority)
+	emitIpsecQuarantineRules(p, "bridge", "input", spec, false)
+	if p.err != nil {
+		t.Fatalf("render later-hook rules: %v", p.err)
+	}
+	if len(p.counters) != 0 {
+		t.Fatalf("later-hook counters = %v, want none", p.counters)
+	}
+	for _, rule := range p.rules {
+		for _, expression := range rule {
+			if _, ok := expression.(*expr.Objref); ok {
+				t.Fatalf("later-hook rule contains counter reference: %#v", rule)
+			}
+		}
+	}
+}
+
+func TestIpsecQuarantineMetadataPreservesRawReason9506(t *testing.T) {
+	metadata := ipsecQuarantineMetadata(IpsecDivertSpec{
+		QuarantineGeneration: 4,
+		QuarantineRawReason:  IpsecQuarantineReason(0xfe),
+		QuarantineRawMask:    IpsecQuarantineReasonMask(1 << 29),
+	})
+	if !bytes.Contains(metadata, []byte("raw_reason=254")) ||
+		!bytes.Contains(metadata, []byte("raw_mask=0x20000000")) {
+		t.Fatalf("quarantine metadata = %q, want raw reason and mask", metadata)
+	}
+}
+
+func TestIpsecQuarantineInstallRemoveRoundTrip9506(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	spec := IpsecDivertSpec{
+		QuarantineAll:        true,
+		QuarantineGeneration: 19,
+		QuarantineReasonMask: IpsecQuarantineMaskLinkLookup,
+		CandidateIfindices:   []uint32{17, 3},
+	}
+	if err := in.InstallIpsecDivert(spec); err != nil {
+		if IsTransitBarrierBridgeUnsupportedOnly(err) {
+			t.Skipf("kernel lacks bridge nftables support; quarantine requires both families: %v", err)
+		}
+		t.Fatalf("quarantine install: %v", err)
+	}
+	c, err := gnft.New()
+	if err != nil {
+		t.Fatalf("new nftables conn: %v", err)
+	}
+	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
+		chains, err := c.ListChainsOfTableFamily(family)
+		if err != nil {
+			t.Fatalf("%v list chains: %v", family, err)
+		}
+		found := false
+		for _, chain := range chains {
+			if chain != nil && chain.Table != nil && chain.Table.Name == IpsecDivertTableName &&
+				(chain.Name == "forward" || chain.Name == "input") {
+				found = true
+				if chain.Policy == nil || *chain.Policy != gnft.ChainPolicyDrop {
+					t.Fatalf("%v %s policy = %v, want DROP", family, chain.Name, chain.Policy)
+				}
+			}
+			if chain != nil && chain.Table != nil && chain.Table.Name == IpsecQuarantineTableName {
+				t.Fatalf("%v quarantine guard remained after successful replacement", family)
+			}
+		}
+		if !found {
+			t.Fatalf("%v quarantine divert chains missing", family)
+		}
+	}
+	if err := in.RemoveIpsecDivert(); err != nil {
+		t.Fatalf("quarantine remove: %v", err)
+	}
+	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
+		tables, err := c.ListTablesOfFamily(family)
+		if err != nil {
+			t.Fatalf("%v list tables after remove: %v", family, err)
+		}
+		for _, table := range tables {
+			if table != nil && (table.Name == IpsecDivertTableName || table.Name == IpsecQuarantineTableName) {
+				t.Fatalf("%v stale IPsec table after remove: %q", family, table.Name)
+			}
+		}
 	}
 }
