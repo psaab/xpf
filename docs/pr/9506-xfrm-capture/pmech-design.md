@@ -1859,8 +1859,11 @@ touched (O-*/V-FLIP own those).
   removal proof; the permit is not CLOSED through steps 3–6 or opens before both removals are
   acknowledged; `FLIP_GUARD` E26 counters/witness are not exact-once and restart-persistent; or a
   post-activation failure drains/replaces the active epoch before a fresh two-family guard is
-  installed and ACKed. Any such result is PLAN-KILL or deny-only, and K-P12 is exercised by §5.4
-  Shadow flip cells and the full seven-step protocol in §5.7.
+  installed and ACKed. Before step 1, an unmet eligibility condition remains observational Shadow
+  pass-through or an explicitly owner-selected deny-only state, never OPEN. After step 1 installs
+  the guard, any listed transition failure remains deny-only; if the guard, witness, or proof cannot
+  be restored and proven within bounded recovery, the design is PLAN-KILLED. K-P12 is exercised by
+  §5.4 Shadow flip cells and the full seven-step protocol in §5.7.
 
 ### §5.6 Mixed-version and rolling-upgrade procedure
 
