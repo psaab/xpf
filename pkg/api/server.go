@@ -108,6 +108,13 @@ type IpsecCaptureWitness struct {
 	Consumed           uint64
 	Adjudicated        uint64
 	Reinjected         uint64
+	Written            uint64
+	Uncertain          uint64
+	LateCompletions    uint64
+	Timeouts           uint64
+	Stale              uint64
+	Cancelled          uint64
+	Refused            uint64
 	DeliveredAvailable bool
 	Delivered          uint64
 }

@@ -727,6 +727,13 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				Consumed:           status.Counters.Consumed,
 				Adjudicated:        status.Counters.Adjudicated,
 				Reinjected:         status.Counters.Reinjected,
+				Written:            status.Counters.Written,
+				Uncertain:          status.Counters.Uncertain,
+				LateCompletions:    status.Counters.LateCompletions,
+				Timeouts:           status.Counters.Timeouts,
+				Stale:              status.Counters.Stale,
+				Cancelled:          status.Counters.Cancelled,
+				Refused:            status.Counters.Refused,
 				DeliveredAvailable: status.DeliveredAvailable,
 				Delivered:          status.Delivered,
 			}
