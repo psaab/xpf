@@ -463,8 +463,10 @@ func decodeAdmissions(payload []byte) ([]ReinjectAdmission, error) {
 			ReasonCode:   payload[off+33],
 		}
 		row.Reason = fmt.Sprintf("reason-%d", row.ReasonCode)
-		if !reinjectAdmissionReasonValid(row.ReasonCode) {
+		if row.ReasonCode != reinjectAdmitOK {
 			row.Admitted = false
+		}
+		if !reinjectAdmissionReasonValid(row.ReasonCode) {
 			row.Reason = fmt.Sprintf("version-skew reason-%d", row.ReasonCode)
 		}
 		out = append(out, row)

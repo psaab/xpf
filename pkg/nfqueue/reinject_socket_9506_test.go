@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -98,20 +99,24 @@ func TestReinjectSocketDecodesWrittenAndExtendedBatch9506(t *testing.T) {
 	}
 }
 
-func TestReinjectSocketUnknownAdmissionReasonFailsClosed9506(t *testing.T) {
-	payload := make([]byte, 2+34)
-	binary.BigEndian.PutUint16(payload[:2], 1)
-	payload[2+32] = 1
-	payload[2+33] = 99
-	admissions, err := decodeAdmissions(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(admissions) != 1 {
-		t.Fatalf("admissions=%d, want one row", len(admissions))
-	}
-	if admissions[0].Admitted || admissions[0].ReasonCode != 99 {
-		t.Fatalf("admission=%+v, want unknown reason refusal", admissions[0])
+func TestReinjectSocketAdmissionReasonConsistencyFailsClosed9506(t *testing.T) {
+	for _, code := range []byte{reinjectAdmitNoGeneration, reinjectAdmitTunnelRowMissing, 99} {
+		t.Run(fmt.Sprintf("reason-%d", code), func(t *testing.T) {
+			payload := make([]byte, 2+34)
+			binary.BigEndian.PutUint16(payload[:2], 1)
+			payload[2+32] = 1
+			payload[2+33] = code
+			admissions, err := decodeAdmissions(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(admissions) != 1 {
+				t.Fatalf("admissions=%d, want one row", len(admissions))
+			}
+			if admissions[0].Admitted || admissions[0].ReasonCode != code {
+				t.Fatalf("admission=%+v, want refusal for non-OK reason", admissions[0])
+			}
+		})
 	}
 }
 
