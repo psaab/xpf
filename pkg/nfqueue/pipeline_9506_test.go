@@ -309,17 +309,19 @@ func TestCapturePipelineAdmittedEchoMismatchCancelsUncertain9506(t *testing.T) {
 
 func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 	tests := []struct {
-		name          string
-		outcome       CompletionOutcome
-		wantStale     uint64
-		wantRefused   uint64
-		wantUncertain uint64
-		wantNotify    bool
+		name           string
+		outcome        CompletionOutcome
+		wantStale      uint64
+		wantRefused    uint64
+		wantUncertain  uint64
+		wantSuppressed uint64
+		wantNotify     bool
 	}{
 		{name: "fenced is stale", outcome: CompletionFenced, wantStale: 1},
 		{name: "denied is refused", outcome: CompletionDenied, wantRefused: 1},
 		{name: "accepted is uncertain", outcome: CompletionAccepted, wantUncertain: 1, wantNotify: true},
 		{name: "would reinject is uncertain", outcome: CompletionWouldReinject, wantUncertain: 1, wantNotify: true},
+		{name: "would permit is suppressed", outcome: CompletionWouldPermit, wantSuppressed: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,8 +356,10 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 				t.Fatal("resolveCompletion returned false")
 			}
 			stats := p.Stats()
-			if stats.Stale != tc.wantStale || stats.Refused != tc.wantRefused || stats.Uncertain != tc.wantUncertain {
-				t.Fatalf("stats=%+v, want stale=%d refused=%d uncertain=%d", stats, tc.wantStale, tc.wantRefused, tc.wantUncertain)
+			if stats.Stale != tc.wantStale || stats.Refused != tc.wantRefused ||
+				stats.Uncertain != tc.wantUncertain || stats.V1PermitSuppressed != tc.wantSuppressed {
+				t.Fatalf("stats=%+v, want stale=%d refused=%d uncertain=%d suppressed=%d",
+					stats, tc.wantStale, tc.wantRefused, tc.wantUncertain, tc.wantSuppressed)
 			}
 			wantCalls := 0
 			if tc.wantNotify {
