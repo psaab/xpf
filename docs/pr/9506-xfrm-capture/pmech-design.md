@@ -1,12 +1,12 @@
 # P-MECH mechanism design: fail-closed zone enforcement on the S5-diverted path (#9506)
 
-- Status: CONDITIONAL PLAN AMENDMENT r5 (owner-requested; answers Step-0 unblock option 1 and r6 §9.1 Q1;
+- Status: CONDITIONAL PLAN AMENDMENT r6 (owner-requested; answers Step-0 unblock option 1 and r6 §9.1 Q1;
   folds hostile reviews PlanRevA + PlanRevB (r2, 22 findings — see §B.1), PlanRevAr2 + PlanRevBr2
-  (r3, 25 findings — see §B.2), and the r5 review closure matrix (§B.3)).
+  (r3, 25 findings — see §B.2), r5 review closure (§B.3), and the r6 nano-fold closure (§B.4)).
   D12a Option A is OWNER-AUTHORIZED with conditions (§2.5/D12a, §5.4–§5.5); Option B stays deferred.
   Stateful INPUT parity remains unauthorized/deferred: every stateful INPUT miss is E37 DROP until proven Option B.
 - Branch: `research/9506-pmech-design` (worktree `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign`), master base `1a6952b61`.
-- Date: 2026-09-20. r1: `482bc71c8` (comment `5747342362`); r2: `95a26a17f`; r3: `15ed7d529`; r4: `ddfaec71f`; r5: this follow-up commit on top.
+- Date: 2026-09-20. r1: `482bc71c8` (comment `5747342362`); r2: `95a26a17f`; r3: `15ed7d529`; r4: `ddfaec71f`; r5: `092344b2c`; r6: this follow-up commit on top.
 - Sources: r6 plan `/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-capture/r6-plan.md`
   (`research/9506-reground @ b4f1d3035`, 2111 lines) + companion
   `/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-capture/r6-delta.md` (126 lines);
@@ -303,7 +303,7 @@ permit authority from zone semantics — S4 keeps the former, never owns the lat
 | Rust snapshot zone maps (`ifindex_to_zone_id`, `ifindex_unambiguous_zone_id`) | forwarding build (existing) | `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/forwarding_build/interfaces.rs`, populated from snapshot interface rows |
 
 The existing host-fence reconciler is an OPEN writer, not merely an observer. Before
-`tryOpenPermitAfterFenceAck`/`tryOpenPermit` may CAS OPEN, the shared predicate MUST atomically
+`tryOpenIpsecPermitAfterFenceAck`/`tryOpenPermit` may CAS OPEN, the shared predicate MUST atomically
 recheck `ipsecReadySafe`, the current permit/topology/fence generation, `FailoverRefused` or
 `PMechAdmission=DENY_ONLY` (which forbids OPEN), and a generation-bound `PMechFlipAuthorizer`
 approval for an enforcing transition. An ordinary SAFE-census reconciliation racing a refusal,
@@ -1800,6 +1800,15 @@ touched (O-*/V-FLIP own those).
   poison/recovery, rollback, slab, mixed-version, unknown-tag, and orphan phases; no unmapped terminal
   emission — mechanical audit §4.5);
   stale-fence and fabricated-zero refusal; doubt arms D16.1–9 (each → DROP, never permit).
+- M3 cross-tunnel-source cell: stage two admitted tunnels with disjoint frozen `ingress_prefixes`
+  (for example tunnel A `10.1.0.0/16`, tunnel B `10.2.0.0/16`), stamp a frame to tunnel A, and
+  submit an inner source `10.2.0.1` from tunnel B. The worker MUST reject membership in A's exact
+  frozen set as E21, DROP-and-count, with no shared-q0 fallback or alternate outlet. Immediately
+  before commit, revalidate all six D5c items against the same immutable snapshot:
+  `{D_usp1/main-table route-domain, FIB generation, inventory generation, tunnel/if_id +
+  ingress-prefix membership, zone/policy hash, view generation}`; any mutation, stale view, or
+  cross-tunnel source remains DROP and never becomes a permit. The cell fails if it only exercises
+  staging overlap admission and does not exercise this per-frame cross-source case.
 - Additional contract cells: no fragment frame enters worker/session/NAT/q0, no duplicate parser is
   introduced, and pre-frame `DenyEventSink` `PreFrame` attribution is unattributed/queue-bounded;
   `ProvisionalJournal` CAS recovery for Prepared/WriteStarted/Committed worker-crash phases; shadow
@@ -2240,6 +2249,13 @@ delta (`/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-ca
 | 9 | `alarm_cooldown` value | **FIXED (INSTANTIATED).** `PMECH_ALARM_COOLDOWN=60s` per transition key, owned by the pipeline consumer; G5 may tune only with a finite bound and reviewer approval. | §4.1; §5.2 |
 | 10 | E29/E35 definitive-vs-uncertain split | **FIXED.** Only a pre-committer invalid outcome with explicit `TerminalAttemptNo` may use retained-handle DROP and is definitive E29; every post-committer pre-syscall validation error is E35 uncertain/no retry, and ANY post-entry syscall error is E35 with `TerminalAttemptYes`. The §5.4 committer cell proves each branch. | §2.5; E29/E35; §5.4 |
 | 11 | §4.3 counter owner split | **FIXED.** Worker-detected causes increment in Rust; pre-dispatch/completion/decode causes increment in Go; Go exports aggregated Rust stats without duplicate increments. | §4.3–§4.4 |
+
+### §B.4 r6 nano-fold closure (2 findings)
+
+| Finding | Disposition | Closed contract |
+|---|---|---|
+| Cross-tunnel-source membership proof | **FIXED.** The §5.4 cell uses disjoint admitted A/B ingress sets, sends A a B-only source, requires E21 DROP-and-count with no shared-q0 fallback, and revalidates the six grouped D5c items against one immutable snapshot. | §1.5/D5c; §5.4 |
+| Full OPEN writer anchor | **FIXED.** §1.2 now names `tryOpenIpsecPermitAfterFenceAck` exactly, matching the host-fence reconciler, §5.2, §5.4, and §B.3. | §1.2; §5.2; §5.4 |
 
 *(End of P-MECH mechanism design. G1/G2/G4 mechanisms are specified; G3 INPUT is authorized only for
 the proof-backed stateless Option A subset, while stateful INPUT remains E37 until Option B is proven.
