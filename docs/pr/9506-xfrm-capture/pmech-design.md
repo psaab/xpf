@@ -1,11 +1,12 @@
 # P-MECH mechanism design: fail-closed zone enforcement on the S5-diverted path (#9506)
 
-- Status: CONDITIONAL PLAN AMENDMENT r2 (owner-requested; answers Step-0 unblock option 1 and r6 §9.1 Q1;
-  folds hostile reviews PlanRevA + PlanRevB, 22 findings — see §B disposition table).
-  D12a Option A is OWNER-AUTHORIZED with conditions (§2.5/D12a, §5.4–§5.5); Option B stays deferred.
-  Stateful INPUT parity remains ungated: every stateful INPUT miss is E37 DROP until proven Option B.
+- Status: CONDITIONAL PLAN AMENDMENT r3 (owner-requested; answers Step-0 unblock option 1 and r6 §9.1 Q1;
+  folds hostile reviews PlanRevA + PlanRevB (r2, 22 findings — see §B.1) and PlanRevAr2 + PlanRevBr2
+  (r3, 25 findings — see §B.2)).
+  D12a Option A is OWNER-AUTHORIZED with conditions (§2.5/D12a, §5.4); Option B stays deferred.
+  Stateful INPUT parity remains unauthorized/deferred: every stateful INPUT miss is E37 DROP until proven Option B.
 - Branch: `research/9506-pmech-design` (worktree `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign`), master base `1a6952b61`.
-- Date: 2026-09-20. r1: `482bc71c8` (comment `5747342362`); r2: NEW commits on top — reviewers diff r1→r2.
+- Date: 2026-09-20. r1: `482bc71c8` (comment `5747342362`); r2: `95a26a17f`; r3: NEW commit on top — reviewers diff r2→r3.
 - Sources: r6 plan `/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-capture/r6-plan.md`
   (`research/9506-reground @ b4f1d3035`, 2111 lines) + companion
   `/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-capture/r6-delta.md` (126 lines);
@@ -13,9 +14,9 @@
   (825 lines); Step-0 gap report `/tmp/pmech-gaps-full.json` (G1–G6); master code at `1a6952b61`.
 - Scope: the zone-evaluation mechanism for S5-diverted IPsec-inner traffic ONLY (G1–G5 + G6 accounting).
   Non-goals: implementation, tests, live validation runs, observer exactness (O-*), verdict flips (V-FLIP),
-  doc-sync flips (D-SYNC), and owner-level shadow/flip rollout protocol. The evaluator's shadow behavior
-  and side-effect-free transport contract are specified in §2.3/§2.6, but rollout/flip authorization is
-  out of scope.
+  doc-sync flips (D-SYNC). The evaluator's shadow behavior and side-effect-free transport contract are
+  specified in §2.3/§2.6; the shadow-to-enforcing flip PROTOCOL (granularity, authorization, in-flight
+  rule, criteria, rollback) is specified in §5.7, but per-tunnel rollout AUTHORIZATION remains owner-level.
 - Path convention: every file path in this document is ABSOLUTE and worktree-rooted at
   `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/`. Relative paths are banned by design brief.
 
@@ -23,13 +24,13 @@
 
 | Gap | Decision (one line) | Section |
 |---|---|---|
-| G2 tunnel→zone | OWNERSHIP-AWARE if_id join (`bindInterfaceOwnsRef` after same-if_id; `StableZoneID` + quarantine); Rust if_id from NEW snapshot tunnel rows (scoped protocol bump); UNZONED/AMBIGUOUS → DROP-and-count | §1.1–§1.3 |
+| G2 tunnel→zone | OWNERSHIP-AWARE if_id join (`config.BindInterfaceOwnsRef` after same-if_id; `StableZoneID` + quarantine); Rust if_id from NEW snapshot tunnel rows (scoped protocol bump); UNZONED/AMBIGUOUS → DROP-and-count | §1.1–§1.3 |
 | G2 S12.5 #5 re-sign | **Y** — built mechanism conforms to every normative clause (citations re-grounded; line numbers drifted) | §1.4 |
 | G2 S12.5 #6 re-sign | **Y on the choice, identity supplied herein** (`D_usp1` = kernel main table, non-VRF) + 4 kill-conditioned must-proves M1–M4 | §1.5 |
 | G2 K2 | NOT triggered. Trigger conditions + re-plan needs stated plainly | §1.6–§1.7 |
 | G1 evaluator | 3 layers: Go pre-gate hook + Rust worker-pipeline adjudication via dedicated per-worker queues + `allows()` final guard | §2 |
 | G1 doubt | 9-arm definition; doubt → DROP-and-count (enforcing) / divergence-counted ACCEPT or shadow-unavailable (shadow) | §2.6 |
-| G3 order | Non-fragmented worker order BY CONSTRUCTION (parse/decap→screen→flow-cache→session→strict-SYN/syn-cookie→NAT→route→policy→SNAT→install); validated fragments are an explicit pre-worker E30 exclusion (shadow records divergence + ACCEPT); explicit consult/skip table including NoRoute/punt/HAInactive; Reject≡Deny V1 | §3 |
+| G3 order | Non-fragmented worker order BY CONSTRUCTION (parse/decap→screen→flow-cache→session→syn-cookie ACK→DNAT/NAT→route→strict-SYN for route-eligible transit→policy→SNAT→install); P-MECH suppresses all challenge TX; validated fragments are an explicit pre-worker E30 exclusion (shadow records divergence + ACCEPT); explicit consult/skip table including NoRoute/punt/HAInactive; Reject≡Deny V1 | §3 |
 | G3 INPUT session boundary | Option A AUTHORIZED (stateless ICMP/ICMPv6/flowless + T5 disposition + reply-deliverability proof cell); Option B deferred; stateful misses E37 DROP | §2.5/D12a, §3, §5.4–§5.5 |
 | G3 sessions | `SessionKey` + new `Ipsec(if_id)` discriminator (forward + reverse) + NEW cross-discriminator alias index (construction/eviction/multiplicity specified); ambiguity → doubt → DROP | §3.5 |
 | G4 deny | Reuse `PolicyDeny`/`UNATTRIBUTED_POLICY_ID` + per-stage events/counters; full taxonomy → DROP-and-count, no silent drops | §4 |
@@ -56,7 +57,9 @@ before any zone claim is recorded.)
      `security-zone <z> interfaces <ref>` member in `cfg.Security.Zones` (compiled `*config.Config`).
    - Derived: `if_id` via `XFRMIfNameAndID` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:52`,
      single source of truth; `if_id = stIndex<<16 | (unit+1)` at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:72`; `if_id == 0` ⇔ no device).
-   - Ownership: `bindInterfaceOwnsRef(bind, ref)` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:273-284`),
+   - Ownership: the exported config predicate `config.BindInterfaceOwnsRef(bind, ref)` (wrapper over the
+     existing helper at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:273-284`;
+     the wrapper is the only daemon-facing API and keeps config as the single source of truth),
      called ONLY after establishing `if_id(bind) == if_id(ref) != 0`. Rule: same base required; a BARE
      ref is owned only by a BARE bind (`!bindHasUnit`); a DOTTED ref is owned by either spelling.
    - Map value: `zoneID = config.StableZoneID(zoneName)`; on tolerant-load snapshots apply
@@ -73,12 +76,14 @@ before any zone claim is recorded.)
      `{stn, if_id, logical_ifindex}` snapshot rows; Rust D14 derives authoritative if_id by EXACT STN
      match (unknown STN ⇒ doubt ⇒ DROP). There is deliberately NO Rust-side `XFRMIfNameAndID` re-derivation
      (the Rust mirror was deleted rather than re-derived per #6691 — a second parser is a second alias bug).
-     Wire: new `MinProtocolIpsecTunnelRows` floor + exact-equality gate (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:10-15` lockstep
-     discipline); old snapshots without rows ⇒ `ADMIT_NO_GENERATION`-class refusal; upgrade per §5.6
-     lockstep-or-drain (mixed-version DROP window accepted + counted).
+     Wire: new `MinProtocolIpsecTunnelRows` floor + exact-equality gate; the floor constants are owned by
+     `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:343-389`
+     (with `ProtocolVersion` at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:327`), not the adjacent explanatory comment at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:10-15`.
+     Old snapshots without tunnel rows are E33 version-skew/refusal, never `ADMIT_NO_GENERATION`; upgrade
+     follows §5.6 lockstep-or-drain (mixed-version DROP window accepted + counted).
 2. Lookup path:
    - Build: for each admitted VPN bind `b` with `if_id(b) != 0`, for each zone member ref `r` with
-     `if_id(r) == if_id(b)`, record the claim `if_id(b) → zone(r)` ONLY IF `bindInterfaceOwnsRef(b, r)`.
+     `if_id(r) == if_id(b)`, record the claim `if_id(b) → zone(r)` ONLY IF `config.BindInterfaceOwnsRef(b, r)`.
      Non-owning same-if_id claims are IGNORED for that bind (they zone nothing). This is the SAME if_id
      join `collectZoneInterfaceRefsAST` uses
      (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/compiler_ipsec_plaintext_warn.go:262-268`),
@@ -91,9 +96,11 @@ before any zone claim is recorded.)
      → ownership-checked `if_id` → zone. Cross-check `Origin.OwnedIfindex` against the STAGED live ifindex
      for the frame's generation (D1c; mismatch → doubt → DROP).
 3. Fail-closed outcomes (no default zone, no silent inheritance):
-   - UNZONED (no OWNING zone claims the bind-device) → DROP-and-count (`zone_gate_unzoned_total` + deny event, §4).
+   - UNZONED (no OWNING zone claims the bind-device) → DROP-and-count (`zone_gate_unzoned_total` +
+     `DenyEventSink` event, §4.1–§4.2).
    - AMBIGUOUS (≥2 zones own claims on one bind-device, or duplicate-if_id across binds, or
-     quarantined/colliding zone claim) → DROP-and-count (`zone_gate_ambiguous_total`) + alarm (§4.7).
+     quarantined/colliding zone claim) → DROP-and-count (`zone_gate_ambiguous_total`) + the bounded
+     `PMechAlarm` class emitted by the `DenyEventSink` (§4.1–§4.2).
      This is REQUIRED (not inherited first-writer-wins) because: (a) the strict commit gate
      `validateZoneInterfaceMembershipStrict`
      (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/compiler_validate_strict_zones.go:274-314`)
@@ -113,15 +120,35 @@ before any zone claim is recorded.)
    - Stale generation (frame's captured config/fib generation ≠ worker's current) → DROP-and-count
      (fencing, #7167 invariant 5; §2.4).
 
-**D1b (staging partial failure: skip-mark-continue + alarm, never fail-all).** (PlanRevB-P2.)
+**D1b (staging partial failure: skip-mark-continue + bounded alarm, never fail-all).** (PlanRevB-P2.)
 `ipsecCaptureQueueKeys` currently returns `nil` + error on the FIRST invalid VPN
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go:300-310`),
-failing staging for ALL tunnels. S9.1 changes this to: per-VPN invalid (bad bind-interface, `LinkByName`
-failure, missing ifindex) ⇒ SKIP that tunnel + per-tunnel alarm + `staging_skipped_tunnel_total{tunnel}`
-metric, CONTINUE staging all others; duplicate if_id across admitted binds ⇒ ALL claimants marked
-AMBIGUOUS + alarm (D21 check moves here, at staging, so the mark not the lookup carries it). A generation
-with ZERO admitted tunnels stages an EMPTY capture set (all capture refused, counted) — never a
-generation-wide error that leaves the previous generation's queues authorizing new-attachment traffic.
+failing staging for ALL tunnels. S9.1 changes this to: per-VPN invalid (bad bind-interface,
+`LinkByName` failure, missing ifindex) ⇒ record a skip with one bounded `DenyEventSink` event and
+`PMechAlarm{class=STAGING_SKIP}` plus `staging_skipped_tunnel_total{reason}`, then CONTINUE building
+the metadata for the other tunnels. `reason` is closed
+(`IFID_UNDERIVABLE→E3|LINK_LOOKUP→E3|QUEUE_OPEN→E27|OWNER_CONTESTED→E2` for duplicate ownership,
+or `E21` for an M3 overlap); the generation-wide quarantine counter is a secondary counter on that
+underlying E-row, never a new terminal category. Tunnel names are event context only, never metric
+labels. Duplicate if_id across admitted binds ⇒ ALL claimants marked AMBIGUOUS +
+`PMechAlarm{class=OWNER_CONTESTED}`.
+
+Because a bad/underivable bind or failed `LinkByName` has no proven per-tunnel kernel match key, ANY
+skip (including an empty admitted set) sets a generation-wide quarantine field:
+`IpsecDivertSpec{QuarantineAll: true, QuarantineGeneration: g, QuarantineReason: reason}`.
+`ipsecCaptureDivertSpec` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go:19-26`)
+MUST accept that explicit quarantine instead of rejecting `len(handles)==0`; the field is rendered by
+`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nftables/ipsec_divert.go:22-38,123-141`
+as an atomically replaced DROP policy on every inet/bridge forward/input base chain. This is an
+explicit node-wide outage for those hooks (the current chain sees all traffic, not only XFRM inner
+traffic), authorized as the fail-closed failure mode; it is NOT described as a tunnel-only quarantine.
+The renderer emits `ipsec_capture_generation_quarantine_drops_total` plus
+`PMechAlarm{class=NODE_WIDE_QUARANTINE}`. No valid or skipped tunnel is permitted while that
+generation is quarantined, and activation remains deny-only until every skip is resolved and a
+non-quarantine spec is atomically installed. This deliberately chooses availability loss rather than
+guessing a missing kernel match key, and prevents the current ACCEPT policy from falling through when
+no queue rule exists. A generation-wide staging error is therefore an explicit, operator-visible
+deny-only outage, never an error path or old-spec reuse.
 
 **D1c (live-ifindex source: staged table + generation fence; no per-packet netlink, no stale cache).**
 (PlanRevB-P1.) The per-frame name-reuse cross-check reads ONLY the staged live-ifindex table
@@ -133,28 +160,41 @@ generations is closed by the generation fence (D13/D14: frame's captured generat
 A staging-cached table refreshed IN PLACE is FORBIDDEN (that is the stale cache the finding rules out):
 the table is immutable per generation; rotation publishes a NEW generation and fences the old.
 
-**D1d (VRF-enslavement bypass window bound + fence-ACK proof).** (PlanRevB-P1.) At LOCAL_IN the l3mdev
+**D1d (VRF-enslavement bypass exposure + fence-ACK proof).** (PlanRevB-P1.) At LOCAL_IN the l3mdev
 receive handler substitutes the VRF master for `skb->dev`, so `iifname==stN` divert MISSES while the
-master receives the packet; those packets never enter NFQUEUE and are judged only by host chains without
-tunnel-zone policy. This design closes the gap structurally (pre-admission enslavement refusal + runtime
-census revocation + host-input fence) AND bounds the residual window: S4 MUST publish the census interval
-bound `T_census` and prove fence installation is SYNCHRONOUS with revocation (fence-ACK before permit
-CLOSE completes); S9.7 measures the attach-to-fence-ACK window on the loss cluster and kills unless
-`window ≤ T_census + T_fence_ack` with the stated bounds. An unbounded census or async fence is a P-MECH
-kill (escalate to S4 — P-MECH cannot claim a closed threat model over an unbounded bypass window).
+master receives the packet. The existing owner can return while the permit is still OPEN and before
+the overlay is installed (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_host_fence_reconcile_9506.go:134-135`);
+therefore P-MECH MUST NOT claim that every packet is already fenced during attach-to-census detection.
+S4 MUST either (A) install a continuously present preemptive master/VRF fence before OPEN that matches
+the shared-device ingress independently of the future master name (including every later enslavement),
+or (B) leave P-MECH deny-only and record the pre-detection interval as an unresolved permit exposure.
+Option A requires the fence rule's future-master matching semantics and a proof that a newly created or
+enslaved master cannot receive a packet without the fence. The topology owner polls at
+`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_topology_owner_9506.go:13-18,62-85,127-151`;
+`T_census_max = 1s` is only the attach-to-detection measurement target, not a safety bound. Once
+detection occurs, the synchronous fence ACK MUST complete within `T_fence_ack_max = 100ms` before
+permit CLOSE completes. If the preemptive fence is absent or unproven, even a measured
+attach-to-detection interval ≤1s remains an unresolved exposure and is a PLAN-KILL; do NOT define
+`T_bypass_max = T_census + T_fence_ack`. With a proven preemptive fence, every LOCAL_IN/INPUT and
+FORWARD packet that would miss NFQUEUE is terminal fence/quarantine DROP, never a permit, counted by
+`ipsec_inner_bypass_window_drops_total`; S9.7 measures the ACK and per-hook verdicts. K-P11 kills if
+the preemptive fence is absent/unprovable, the post-detection ACK exceeds 100ms or is unmeasurable,
+or any packet is permitted during either transition.
 
 **D2 (why ownership-checked if_id, not strings and not raw if_id).** Bind `st0` + zone `st0.0` are the SAME
-device when the bind OWNS the ref (`bindInterfaceOwnsRef("st0","st0.0") == true`: same base, dotted ref —
-`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:273-284`,
+device when the bind OWNS the ref (`config.BindInterfaceOwnsRef("st0","st0.0") == true`: same base,
+dotted ref — `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:273-284`,
 `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/README.md:1301-1303`). String matching
 would mis-zone that pairing — the EXACT #5619 bug class
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/compiler_ipsec_plaintext_warn.go:246-253`:
 "Matching literally would miss that pairing and report a ZONED tunnel as unzoned").
 Conversely a wildcard NIC `st5` zoned `trust` + VPN `bind-interface st5.0` share if_id `0x50001` but the
-bind does NOT own the bare ref (`bindInterfaceOwnsRef("st5.0","st5") == false` — dotted bind, bare ref),
-so the NIC zone MUST NOT zone the VPN — the EXACT #6691 alias (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:231-238`: "`st5`, `st05`, `st+5`
-all derive if_id 0x50001 while LinuxIfName keeps them DIFFERENT devices"). Raw-if_id Build would silently
-inherit the NIC zone for FULL policy selection; ownership-checked Build ignores the non-owning claim.
+bind does NOT own the bare ref (`config.BindInterfaceOwnsRef("st5.0","st5") == false` — dotted bind,
+bare ref), so the NIC zone MUST NOT zone the VPN — the EXACT #6691 alias
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:231-238`: "`st5`, `st05`,
+`st+5` all derive if_id 0x50001 while LinuxIfName keeps them DIFFERENT devices"). Raw-if_id Build
+would silently inherit the NIC zone for FULL policy selection; ownership-checked Build ignores the
+non-owning claim.
 Different units (`st0.0` vs `st0.1`) are DIFFERENT devices (if_id 1 vs 2) with SEPARATE capture queues;
 zone does NOT inherit across units (a zone on `st0.1` does not zone a bind of `st0.0` — the bind is
 UNZONED → DROP with a clear counter; the #5619/#4515 advisory already warns on such configs).
@@ -260,22 +300,32 @@ D5b (clause table — honest conformance):
 | Multi-domain / VRF-singleton / bridge-permit revives option C | CONFORMS (no such claim in tree; bridge-permit refused at two layers, §1.4) | — |
 | RPDB steers nothing off main (implied by "ONE main-table domain": PBR/rib-group/next-table rules sit BEFORE main — `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/rules.go:88-90`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/rules.go:64-68`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/pbr_applied_7422.go:22-24` — and CAN match re-injected inner packets; NO iif-`xpf-usp1` exclusion exists in any rule manager — negative grep) | GAP → M1 | The "no rule steers q0 ingress elsewhere" premise (r6 §3.1) is UNPROVEN and likely FALSE under PBR/FBF configs |
 
-D5c (must-proves M1–M4 — kill-conditioned, owned by G5 §5):
+**D5c (must-proves M1–M4 — kill-conditioned, owned by G5 §5):**
 
 - M1 (RPDB non-steering proof): prove (live, loss cluster) that with the acceptance config's RPDB
   (PBR/FBF, rib-group, next-table, probe-pin bands), re-injected inner packets resolve via main and no
   earlier rule diverts them — OR ship an iif-`xpf-usp1`-scoped exclusion / RPDB-audit gate that fails
-  closed (tunnel DOWN + counted) when a steering rule appears. Kill: steering observed and un-gated →
+  closed (tunnel DOWN + counted) when a steering rule appears. Kill: steering observed and ungated →
   V1 scope refuses PBR/FBF coexistence (config gate) or K2 re-plan (§1.7).
 - M2 (main-table egress oracle): build the oracle item 6 names — post-commit confirmation that q0-egress
-  resolved in main (wire-observed egress + RPDB snapshot check at T2, or equivalent). Kill: un-oracleable
-  egress → no V1 claim of single-domain re-entry.
-M3 (overlap/domain admission + commit revalidation — reconciled with D21 and SNAT): the prefix source is
-the forwarding snapshot's inner-prefix inventory (connected/TS/RIB set pinned in S9.5), not a live ad-hoc
-lookup. A missing or stale inventory is M3 doubt: tunnel DOWN/refusal and `nfq_reentry_unsupported_domain_total`,
-never a permit. At admission, after ownership-aware tunnel identity and exact routing-domain scope are
-known, compare each admitted tunnel's inner prefixes/addresses with every other `D_usp1` candidate:
-
+  resolved in main (wire-observed egress plus RPDB snapshot check at T2, or equivalent). Kill:
+  un-oracleable egress → no V1 claim of single-domain re-entry.
+- M3 (overlap/domain admission + commit revalidation — reconciled with D21 and SNAT): the authoritative
+  prefix inventory is built at S9.1 staging and published in the immutable per-tunnel snapshot; it is
+  NOT read from the Rust forwarding snapshot, which has no compiled VPN traffic-selector inventory.
+  The inventory contains `{bind, if_id, prefixes, generation, fib_generation, source_kind}`:
+  (a) explicit/narrow local and remote prefixes from compiled VPN `TrafficSelectors` in
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/compiler_ipsec.go:616-629` and
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/types_security.go:1976-1994`;
+  (b) connected/static main-table routes whose egress resolves to that authored xfrmi, from
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/routes.go:26-63,81-97` and
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/routing.go:160-165`.
+  Route-based `ANY/ANY`, missing selectors, and an empty/partial selector result contribute NO usable
+  prefix and are a refusal, not an overlap exemption. If either source is absent, stale, or cannot be
+  joined to the authored bind and exact main table 254, the tunnel is DOWN/refused with E21 accounting.
+  At admission, after ownership-aware identity and exact `D_usp1` scope are known, compare every
+  admitted tunnel's inventory against every other candidate; a missing/stale inventory is never
+  treated as disjoint.
 - Without an explicitly proven per-install SNAT carve-out, overlapping prefixes are not admitted.
   Every overlapping claimant is marked DOWN/AMBIGUOUS and packets DROP-and-count (`E21`); no
   first-writer or policy-order tie-break exists.
@@ -287,20 +337,23 @@ known, compare each admitted tunnel's inner prefixes/addresses with every other 
   authorize policy-prefix overlap. A post-SNAT reply with more than one candidate remains `E9` and
   DROP. Precedence is identity/zone/if_id, then M3 admission conflict, then policy; no later policy
   result can cure a failed M3 proof.
-- Every descriptor carries the expected `D_usp1` routing-domain/main-table identity and the authorizing FIB generation. The worker route result MUST return that exact table/domain for FORWARD,
-  and `LocalDelivery` in that same domain for INPUT; a missing, other-table, other-VRF/RG, or stale
-  result is E22/E19 doubt → DROP. Immediately before the FORWARD q0 write or INPUT
-  `CompletionInputReady`, revalidate the route-domain identity against the same snapshot generation.
+- Every descriptor carries the expected `D_usp1` routing-domain/main-table identity, the authorizing
+  FIB generation, the immutable inventory generation, the zone/policy hash, and the worker `RuntimeView`
+  generation. The worker route result MUST return that exact table/domain for FORWARD, and `LocalDelivery`
+  in that same domain for INPUT; a missing, other-table, other-VRF/RG, stale, or view-mismatched result
+  is E22/E19 doubt → DROP. Immediately before the FORWARD q0 write or INPUT `CompletionInputReady`,
+  revalidate route-domain, inventory, zone/policy hash, and view generation against the same snapshot.
   This is the per-frame domain guard; packet bytes need not and MUST NOT pretend to carry VRF/FIB identity.
-
-Kill: any silently admitted overlap, missing prefix source, route-domain mismatch, or commit revalidation
-mismatch forces the affected tunnel(s) DOWN and removes the V1 permitted-flow claim; if the SNAT carve-out
-cannot be proved, V1 refuses overlap+SNAT together (VRF separation or PLAN-KILL). Failure to implement
-the route-domain check, or commit-time revalidation accepting another domain, is E22 plus M3 kill, not a
-permit.
 - M4 (shared-device inventory): inventory every netfilter hook, conntrack/NAT zone, RPF/martian posture,
   `accept_local` and forwarding sysctls for the shared `xpf-usp1` device (r6 §3.5 item 4 retarget);
   unproven hook/zone ⇒ DROP-and-count. Kill: un-inventoried hook/zone on the q0 path.
+
+Kill: any silently admitted overlap, ANY/ANY treated as a disjoint exception, missing/stale/partial
+prefix source, route-domain mismatch, or commit revalidation mismatch forces the affected tunnel(s)
+DOWN and removes the V1 permitted-flow claim; if the SNAT carve-out cannot be proved, V1 refuses
+overlap+SNAT together (VRF separation or PLAN-KILL). Failure to implement the route-domain, inventory,
+zone/policy-hash, or view-generation check, or commit-time revalidation accepting another domain, is
+E22 plus M3 kill, not a permit.
 
 Reasoning for Y-not-N: K2's kill targets the MECHANISM CHOICE. That choice (shared outlet + mark
 isolation + VRF-enslaved refusal + no per-domain TUNs) is built, live-witnessed, and sound; every gap
@@ -322,12 +375,12 @@ this amendment (§1.4 Y; §1.5 Y-with-identity). It triggers if and only if:
    (e.g. V1 refuses PBR coexistence by config gate instead of proving M1 — a scope cut, not a kill;
    silent non-coverage is never an option).
 
-Separate P-MECH gate (not K2): this r2 records owner authorization for D12a Option A's explicit
+Separate P-MECH gate (not K2): this r3 records owner authorization for D12a Option A's explicit
 stateless-only scope. S9.5 may implement or claim INPUT permits only after the two proof cells named
-in D12a pass (worker skip-install/reply deliverability and A-P2 T5 disposition); every stateful INPUT
-miss remains E37 DROP until a separately proven Option B. If the owner rescinds Option A, or either
-proof fails without a narrower authorized stateless subset, it is a P-MECH PLAN-KILL. There is no
-silent fallback to "accept without session".
+in D12a pass (D12a-C1 worker skip-install/reply deliverability and D12a-C2 T5 host-bound disposition);
+every stateful INPUT miss remains E37 DROP until a separately proven Option B. If the owner rescinds
+Option A, or either proof fails without a narrower authorized stateless subset, it is a P-MECH PLAN-KILL.
+There is no silent fallback to "accept without session".
 
 On K2 trigger: the r6 deliverable (S4-authorization + this P-MECH amendment built on it) is PLAN-KILLED;
 §1.7 lists exactly what a re-plan needs. No silent fallback to r5 TUN/VRF, no TAP/L2 revival, no
@@ -605,15 +658,16 @@ allocation; batch rows carry (slot, len, tunnel key, flow key, queue-epoch, phas
   the write may have succeeded; state stays committed and the outcome is never retried. Existing-hit
   permits with no new state carry `None`; Go transports but cannot finalize the handle.
 - Shadow is a separate bounded transport, not a production verdict replay: `ShadowFrame` carries an
-  immutable slab reference plus the captured snapshot/zone/generation, and enters the worker with
-  `EvaluationMode::Shadow`. Shadow execution has no q0 writer, no NFQUEUE terminal, no session/NAT
-  allocation, no BPF flow-cache/HA publication, and no production policy-counter mutation; attempted
-  side effects are redirected to a bounded `ShadowLedger` used only for divergence accounting.
+  immutable slab reference plus the captured snapshot/zone/generation, records `phase=Shadow`, and
+  carries no production `ReinjectLease`, request ID, permit epoch, q0 writer, or INPUT committer token.
+  It enters the worker with `EvaluationMode::Shadow`. Shadow execution has no q0 writer, no NFQUEUE
+  terminal, no session/NAT allocation, no BPF flow-cache/HA publication, and no production policy-counter
+  mutation; attempted side effects are redirected to a bounded `ShadowLedger` used only for divergence
+  accounting. An in-flight shadow result can report only divergence or `shadow_unavailable`; it can never
+  authorize an enforcing descriptor or be joined to a production completion.
   A stage that cannot prove this side-effect-free contract returns `shadow_unavailable` rather than
   running its production mutator. Shadow queue-full/dead-worker uses the same bounded unavailable
   accounting and ACCEPT-preserving semantics in §2.2; it cannot block capture or authorize enforcing.
-- Bounded, try-or-drop: verdict loss uses `ackDeadline` (5 ms) → uncertain → DROP
-  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:259-260,690-697`).
   Verdict-queue-full is counted (`ipsec_inner_verdict_queue_full_total`) and alarmed, never silent.
 
 **D12a (INPUT session boundary; Option A authorized with conditions).** Existing INPUT session HITS are
@@ -628,9 +682,9 @@ requires an atomic relationship between NF_ACCEPT and worker-owned session publi
   session, BPF flow-cache entry, HA record, or stateful policy counter. TCP/UDP/SCTP, application/ALG,
   and every `strict_syn_check_drops_new_flow`-ineligible or session-required miss are DROP + E37.
   This authorization does not claim broad INPUT parity.
-- The authorization is contingent on two proof cells before S9.5 permits: (1) B-P2 must show the
+- The authorization is contingent on two proof cells before S9.5 permits: (1) `D12a-C1` must show the
   worker path skips session/flow-cache install for the exact stateless ICMP/ICMPv6 shapes and that the
-  reply is deliverable through the proven host path; (2) A-P2 T5 must record the host-bound disposition
+  reply is deliverable through the proven host path; (2) `D12a-C2` must record the host-bound disposition
   for both verdicts. If either fails, narrow the allowed set to the proven shape(s), or authorize no
   INPUT permits; never silently widen to stateful parity.
 - **Option B — deferred:** full INPUT parity requires a bounded two-phase session prepare/finalize
@@ -678,8 +732,13 @@ against, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src
   generations; mismatch → STALE → DROP-and-count (never evaluate old-attachment bytes under new identity).
   Fabricating generations (`0`, fresh-read) is FORBIDDEN by the same invariant (a fabricated generation
   "always looks current" and violates fencing SILENTLY).
+- `RuntimeView`: at the start of each worker poll/tick, load one immutable runtime view and bind its
+  `view_generation` to the descriptor (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker/loop_body/mod.rs:60-159`;
+  view/setup publication `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker/loop_body/setup.rs:122-130`).
+  D14 and every later stage use that same view; no second snapshot read may interleave. A refresh after
+  admission leaves the descriptor on its old view and the final lease/generation/zone/policy-hash check
+  drops it (E4/E22/E33 as applicable), never mixing views.
 - `rx_queue_index`: the divert queue number (attribution; keeps per-queue accounting exact).
-
 The entry returns the adjudication SYNCHRONOUSLY within the worker's poll (it runs the §3 stage order
 inline — the worker IS the pipeline) and posts the verdict to the D11 verdict queue (async relative to
 the socket server). "Asynchronous" = decoupled from socket admit, NOT deferred within the worker.
@@ -703,16 +762,17 @@ unattributed logging).
 **D15.** `admit_with_class_owner` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/slowpath_reinject_9506.rs:801-874`) keeps its existing gates (flags,
 dry-run, shutdown, lease shape, `origin.wire_valid()`, BRIDGE-ONLY refusal; validated inet
 `{forward,input}` origins are eligible, then `allows()`, duplicate, capacity) and gains, IN ORDER after
-the `allows()` epoch check: (a) generation-capture presence (config/fib generations non-zero and
-wire-valid — missing ⇒ new `ADMIT_NO_GENERATION`); (b) slab availability (pool exhausted ⇒ `ADMIT_FULL`
-— an existing code, no new variant needed). Fragment metadata never reaches this socket admit: §3.6
-rejects it before `FragPool`/worker admission, so no fragment-group `ADMIT_BAD_LEASE` or batch code is
-introduced. New `ADMIT_*` reason codes extend the u8 enum
-(`ADMIT_OK..ADMIT_NON_DRY_RUN = 0..7`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/slowpath_reinject_9506.rs:33-40`): `ADMIT_NO_ZONE = 8`
-(zone gate D14 refuse), `ADMIT_ZONE_CONTESTED = 9`, `ADMIT_STALE_CONFIG = 10`,
-`ADMIT_NO_GENERATION = 11` — additive, wire-compatible (reason is a u8; Go's `decodeAdmissions` maps
-unknown codes to refusal, and Go MUST treat any unknown code as refusal).
-
+the `allows()` epoch check: (a) exact tunnel-row/protocol-floor presence and equality. A missing tunnel
+row, unknown row, or old snapshot is E33 version-skew/refusal (`ADMIT_TUNNEL_ROW_MISSING`), never a
+missing-generation success; (b) config/fib generation presence (non-zero and wire-valid — missing is E5
+`ADMIT_NO_GENERATION`); (c) slab availability (pool exhausted ⇒ `ADMIT_FULL` — an existing code, no new
+variant needed). Fragment metadata never reaches this socket admit: §3.6 rejects it before `FragPool`/
+worker admission, so no fragment-group `ADMIT_BAD_LEASE` or batch code is introduced. The only new
+socket-known admit codes are `ADMIT_NO_GENERATION = 11` and `ADMIT_TUNNEL_ROW_MISSING = 12` (the
+intermediate values are reserved and unknown values refuse). D14's zone/if_id/`RuntimeView` checks
+run only after worker admission and report `Deny{stage,reason,...}` through the completion taxonomy;
+they MUST NOT be represented as `ADMIT_NO_ZONE`, `ADMIT_ZONE_CONTESTED`, or `ADMIT_STALE_CONFIG`.
+Go's `decodeAdmissions` maps any unknown code to refusal and MUST never default it to `ADMIT_OK`.
 The old generic input-hook refusal is narrowed, not deleted: `{inet,input}` is admitted to the worker;
 `{bridge,input}` (and every non-inet/unsupported hook) remains a structural refusal and never reaches
 policy. For `{inet,input}`, the worker MUST NOT call `submit_adjudicated_frame`, set the q0 mark, or emit
@@ -737,17 +797,35 @@ const (
     InputCommitDropped                             // explicit nonzero: supervisor sink issued NF_DROP
     InputCommitUncertain                           // explicit nonzero: sink result unknown; never retry
 )
+type TerminalAttemptState uint8
+const (
+    TerminalAttemptUnknown TerminalAttemptState = iota // zero is conservative: treat as attempted
+    TerminalAttemptNo                                  // explicit proof: no sink syscall was attempted
+    TerminalAttemptYes                                 // sink syscall may have linearized
+)
+type InputPermitCommitOutcome struct {
+    Result            InputCommitResult
+    TerminalAttempted TerminalAttemptState
+    Err               error
+}
 type InputPermitCommitter interface {
-    CommitInputAccept(InputPermitCommit) (InputCommitResult, error)
+    CommitInputAccept(InputPermitCommit) InputPermitCommitOutcome
 }
 ```
 
-The adapter and resolver MUST reject `InputCommitInvalid`, any unknown result, `Accepted` with a non-nil
-error, and `Dropped`/`Uncertain` with a result/error combination that claims no terminal attempt; all
-such combinations are E35/uncertain → DROP. The daemon adapter registers each capture queue as the
-matching immutable supervisor gate kind (`ipsecGateInput` for inet/input), builds `ipsecPacketRef`, and
-calls `ipsecSupervisor.commitValidatedVerdict` with the live permit record. That existing method holds
-`commitLease.RLock` from full permit/gate/queue/snapshot validation through the packet sink syscall
+The adapter and resolver MUST interpret the structured outcome, not infer terminal state from an error
+string. `Accepted,nil` means supervisor NF_ACCEPT already issued and performs no sink call;
+`Accepted,error` is E35 uncertainty with no second sink call; `Dropped,nil` means supervisor NF_DROP
+already issued and performs no second sink call. `Uncertain,*`, `Dropped,error`, or any invalid/unknown
+result with `TerminalAttempted=TerminalAttemptYes` or `TerminalAttemptUnknown` is uncertainty accounting
+with no sink call or retry; zero/unknown is deliberately conservative once the committer was entered.
+Only `InputCommitInvalid`/unknown returned BEFORE committer entry with explicit
+`TerminalAttempted=TerminalAttemptNo` may use the retained `sinkHandle` to issue one DROP. A callback
+that does not prove no terminal attempt is never converted into a definitive DROP. The adapter MUST
+preserve this typed outcome through the resolver callback. The adapter registers each capture queue as
+the matching immutable supervisor gate kind (`ipsecGateInput` for inet/input), builds `ipsecPacketRef`,
+and calls `ipsecSupervisor.commitValidatedVerdict` with the live permit record. That existing method
+holds `commitLease.RLock` from full permit/gate/queue/snapshot validation through the packet sink syscall
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_reinject_supervisor.go:602-656`);
 the adapter MUST NOT use the generic `CapturePipelineConfig.Sink` fallback
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:275-281`) for ACCEPT.
@@ -755,16 +833,35 @@ On supervisor refusal the helper itself emits exactly one DROP; on sink error it
 `InputCommitUncertain`. `submitGate` only orders against pipeline cancellation; it is not an S4 authority
 check.
 The Go completion resolver accepts `CompletionInputReady` only for exact `{inet,input}`, zero bytes, and
-matching request/permit/queue/snapshot identities. For INPUT it MUST reserve the flow head terminal
-under `p.mu`, then unlock `p.mu` BEFORE taking `commitLease.RLock` or entering the supervisor committer;
-the packet sink and lease authority are never called while the pipeline mutex is held. The resolver
-invokes the committer: `InputCommitAccepted` means the supervisor has already NF_ACCEPTed the original
-held bytes, so the resolver performs a sink-skipping terminal pop/accounting operation (no second
-`finishFrame` sink call), records exactly one terminal result, and advances the per-flow head.
+matching request/permit/queue/snapshot identities. Under `p.mu` it atomically creates a bounded shared
+`InputTerminalReservation{RequestID, flowID, heldPacketRef, flowHeadToken, sinkHandle, state=Reserved,
+deadline, accountingOwner}` and only then removes the matching `RequestID` from `p.pending` and clears
+the corresponding `flow.pending` entry. The reservation retains the held-frame/sink authority and
+exactly-once accounting owner until terminal CAS; an absent, duplicate, or already-cancelled identity
+is E35 and cannot enter the committer.
+The resolver changes `Reserved→Committing` before taking `commitLease.RLock` or entering the supervisor
+committer; the packet sink and lease authority are never called while `p.mu` is held. A
+`CancelReinject` racing in `Reserved` CASes the reservation to `Cancelled`, uses the retained
+`sinkHandle` to own exactly one DROP terminalization, and removes the map entry; the resolver observes
+that CAS and does not call the committer. Once `Committing`, cancellation cannot create a second
+terminal: the committer's live epoch check returns DROP or uncertain, and the resolver records that one
+outcome without retry. A bounded reaper owns any reservation still `Reserved` at its deadline and CASes
+it to `Cancelled`/DROP through the retained sink handle. A reservation still `Committing` at its
+deadline is CASed to `Uncertain` only: the reaper MUST NOT issue a definitive DROP because NF_ACCEPT
+may already have linearized inside the blocking committer; a late callback is discarded by the terminal
+CAS, never re-enters `p.pending`, and never retries.
+The resolver invokes the committer: `InputCommitAccepted` means the supervisor has already NF_ACCEPTed
+the original held bytes, so the resolver performs a sink-skipping terminal pop/accounting operation (no
+second `finishFrame` sink call), records exactly one terminal result, and advances the per-flow head.
 `InputCommitDropped` records one DROP without a second sink call; `InputCommitUncertain` records
-uncertain/drop accounting and never retries. A committer timeout, panic/error after an unknown sink
-outcome, duplicate, or late completion is uncertain/E35 and terminalizes the held item exactly once. A
-`bytesMismatch` check MUST NOT reject this path solely because `BytesWritten == 0`; the zero-byte exemption is valid only for this exact INPUT identity and `InputCommitAccepted`.
+uncertain accounting and never retries. A committer timeout, panic/error after an unknown sink outcome,
+duplicate, or late completion is uncertain/E35 and terminalizes the reservation/accounting state exactly
+once (not a second sink verdict). A completion
+outcome carries an `event_emitted` bit: Rust emits only for frames that reached Rust, while the Go
+`DenyEventSink` owns pre-dispatch failures; the resolver emits a transport/completion failure only when
+that bit is clear, preventing duplicate events. A `bytesMismatch` check MUST NOT reject this path solely
+because `BytesWritten == 0`; the zero-byte exemption is valid only for this exact INPUT identity and
+`InputCommitAccepted`.
 Existing `CompletionAccepted`/`CompletionWouldReinject` remain advisory/nonterminal for FORWARD and are
 NOT aliases for `CompletionInputReady`.
 
@@ -791,7 +888,8 @@ Exhaustive arms (each maps to a §4 taxonomy row — no arm maps to permit):
    `PolicyState` build failure for the generation).
 7. Ambiguous match (session alias candidates > 1, §3.5; flow-owner transfer race lost, r5 §4.4).
 8. Version skew (socket protocol version ≠ `ProtocolVersion` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:327`); snapshot older than
-   `MinProtocol*` floors; Go/Rust wire-codec mismatch — exact-equality gates, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:12-15`).
+   `MinProtocol*` floors; Go/Rust wire-codec mismatch — exact-equality gates,
+   `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:343-389`).
 9. Revoked/closing authority (permit not OPEN; queue-scope cancel applied; contested-ifindex removal
    observed, #7509).
 
@@ -848,25 +946,31 @@ exhaustively in §3.2 (any stage not listed there is CONSULTED).
 Pinned order (forward/miss path, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs`) is the actual worker order, including work that
 precedes the first security decision: parse/decap and owned-frame construction → `stage_screen_check`
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:446`) as the FIRST security stage → flow-cache lookup
-(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:628-641`) → session resolve
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:628-641`) through the
+P-MECH decision-only helper (metadata only; no UMEM recycle, TX, or permit) → session resolve
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:752-753`) →
-[HIT: established revalidation §3.4] / [MISS: strict-SYN and syn-cookie checks
-(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2522`,
-`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1720`) →
-static-DNAT/DNAT (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1774-1789`) → NPTv6/NAT64 as configured → route/disposition
-(NoRoute is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:5799`) →
+[HIT: established revalidation §3.4] / [MISS: syn-cookie ACK validation before DNAT
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1720-1738`); any screen challenge or syn-cookie reply
+that would call `enqueue_syn_cookie_reply`
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:462-474`) is SUPPRESSED for P-MECH, the original packet
+is E7/E37 DROP, and no worker TX is emitted] → static-DNAT/DNAT
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1774-1789`) →
+NPTv6/NAT64 as configured → route/disposition (NoRoute is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:5799`)
+→ strict-SYN check ONLY for route-eligible `ForwardCandidate`/`MissingNeighbor`
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2522`) →
 LocalDelivery: host-inbound (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2625`) → `junos-host`
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2734`) / transit: zone-pair policy
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2962`, post-DNAT tuple
 `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2021-2064`) → permit-only SNAT alloc
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3207`) → session install
 and reverse publication (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3433`,
-`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3919`) → NAT counters at committed install]. DNS fastpath
-(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3300`) is consulted only after the exact tunnel discriminator, generation, screen, and current
-policy/session predicates pass; a miss or unsupported shape falls back to the normal stages. The worker's
-HAInactive (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4150`) and punt-seed
-(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4171`) arms are explicit consult/skip decisions in the table, not
-undocumented fallbacks.
+`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3919`) → NAT counters at committed install.
+P-MECH SKIPS the DNS fastpath entirely (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3296-3309`);
+it MUST NOT call `dns_reply_fastpath_admit` or use a no-NAT shortcut. DNS/UDP INPUT misses use the
+normal session path and E37 unless already an exact established hit. HAInactive
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4150`) and punt-seed
+(`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4171`) are guarded
+E34 DROP arms: no redirect, punt, or local session seed.
 
 INPUT has a deliberately distinct terminal path after the shared parse/decap, screen, fragment-shape,
 and flow-cache stages. The capture rule is an NFNETLINK input chain at priority `-175`
@@ -887,16 +991,17 @@ Deny at ANY stage ⇒ terminal DROP + §4 deny path; later stages skipped (deny-
 | Parse/decap + owned-frame construction | CONSULT | CONSULT | Parse is before the first security stage; malformed inner parse/ECN is DROP-and-count, never a default-zone permit. The shared `build_logical_ingress_packet` remains authoritative. |
 | `stage_screen_check` (from-zone screen) | CONSULT | CONSULT | FIRST security stage, every packet hit or miss (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:446`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4335-4336`); skipping creates an unscreened ingress class. |
 | Fragment metadata/shape gate | ENFORCING: E30 DROP before `FragPool`; SHADOW: would-drop/divergence + ACCEPT before `FragPool` | Same | Reuse `ClassifyCapturePayload`/`FragmentKey`/`FragmentPiece` validation; V1 never reassembles or permits fragments, so no cache/session/NAT/policy stage runs for this class (§3.6). |
-| Flow-cache lookup/hit | CONSULT only with exact `Ipsec(if_id)`, generation, policy/NAT hash, and screen revalidation | Existing exact hit may be CONSULTED; cache miss/new install is SKIP → normal session path | A native/old cache row lacking tunnel discriminator or generation is invalidated and treated as miss; Option A never seeds a new INPUT cache row. |
+| Flow-cache lookup/hit | CONSULT only with exact `Ipsec(if_id)`, generation, policy/NAT hash, and screen revalidation; P-MECH helper is decision-only | Existing exact hit may be CONSULTED; cache miss/new install is SKIP → normal session path | A native/old cache row lacking tunnel discriminator or generation is invalidated and treated as miss; the helper never recycles UMEM or emits TX; Option A never seeds a new INPUT cache row. |
 | Session lookup (shared + worker-local scopes) | CONSULT | CONSULT | Single session universe (§3.5); no second table. |
-| DNS fastpath | CONSULT only after exact identity/session/policy checks | SKIP for Option A misses; an existing translated/stateful hit follows the normal session path and cannot create an Option A permit | `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3300` is an optimization, not a policy/session bypass; UDP/DNS new INPUT flows remain E37. |
+| Syn-cookie ACK validation (pre-DNAT) | CONSULT on miss; challenge/reply TX suppressed and failed validation is E37 | CONSULT; stateful miss outside Option A ⇒ E37 | ACK validation is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1720-1738`; P-MECH never calls `enqueue_syn_cookie_reply` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:462-474`) and never emits a worker challenge. |
+| DNS fastpath | SKIP for P-MECH; fall through to normal stages | SKIP for P-MECH; fall through to normal stages | `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3296-3309` is not an admission/session bypass; no `dns_reply_fastpath_admit` call, no no-NAT shortcut, and new DNS/UDP INPUT misses are E37. |
 | Established-hit revalidation (#8356 policy, #3706 host, #7212 filter, `session_hit_authority` arrival-zone) | CONSULT | CONSULT; stored NAT rewrite/translation ⇒ E36 DROP | Hit authority is by construction; INPUT cannot accept an established translated session unchanged. |
-| Strict-SYN check / syn-cookie-on-miss | CONSULT (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2522`, then `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1720`) | CONSULT; session-required miss outside Option A ⇒ E37 | Same SYN-flood posture as native; Option A never turns a TCP/SCTP stateful miss into a permit. |
 | static-DNAT → DNAT (+ counter split) | CONSULT | CONSULT (decision-only: no-match/identity continues; any product rewrite ⇒ E36 DROP) | Junos pre-routing order for FORWARD; INPUT cannot replace an NF_ACCEPT payload, so a matching product rewrite is fail-closed. |
-| Route/disposition resolve (userspace FIB) | CONSULT | CONSULT — after the no-mutation proof, MUST resolve `LocalDelivery` in exact `D_usp1` | FORWARD determines egress + to-zone and MUST return the exact main-table/routing-domain identity; INPUT validates that the held pre-product-NAT tuple remains host-bound in that same domain. NoRoute or other-domain/other-table result is E19/E22 doubt → DROP. |
-| NoRoute / FIB miss (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:5799`) | CONSULT → E19 DROP | CONSULT → E19 DROP | No route is a doubt; neither hook gets an implicit default route or permit. |
-| HAInactive / redirect (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4150`) | CONSULT; no local session seed | CONSULT; no local session seed | Reconcile/redirect behavior is retained, but P-MECH never publishes a local session while the attachment is inactive. |
-| Punt-seed (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4171`) | SKIP for P-MECH | SKIP for P-MECH | P-MECH's owner-worker verdict and q0/input terminal are the only outlets; a punt seed would create an unowned second path. |
+| Route/disposition resolve (userspace FIB) | CONSULT | CONSULT — after the no-mutation proof, MUST resolve `LocalDelivery` in exact `D_usp1` | FORWARD determines egress + to-zone and MUST return the exact main-table/routing-domain identity; INPUT validates that the held pre-product-NAT tuple remains host-bound in that same domain. Other-domain/other-table result is E19/E22 doubt → DROP. |
+| NoRoute / FIB miss (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:5799`) | GUARD: E19 DROP; native NoRoute arm unreachable/SKIP | GUARD: E19 DROP; native NoRoute arm unreachable/SKIP | No route is a doubt; neither hook gets an implicit default route or permit. |
+| Strict-SYN check (after route; only `ForwardCandidate`/`MissingNeighbor`) | CONSULT; failed new-flow check is E37 and any challenge TX is suppressed | SKIP → E37 for INPUT (not route-eligible transit; session boundary handles INPUT) | The check is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2522`; it is not run before DNAT/route. |
+| HAInactive / redirect (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4150`) | GUARD: E34 DROP; no redirect or local session seed | GUARD: E34 DROP; no redirect or local session seed | P-MECH cannot redirect or consult a second outlet while the attachment is inactive. |
+| Punt-seed (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:4171`) | GUARD: E34 DROP; no seed | GUARD: E34 DROP; no seed | P-MECH's owner-worker verdict and q0/input terminal are the only outlets; a punt seed would create an unowned second path. |
 | Zone-pair policy (`evaluate_policy_result_with_icmp`, post-DNAT tuple, live ICMP type/code) | CONSULT | N/A (host path instead) | THE zone enforcement (from = tunnel zone D14, to = `egress_zone_id` unambiguous map — NEVER `ifindex_to_zone_id` for to-zone, #6722/`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/forwarding/mod.rs:235-250`). |
 | Host-inbound admission + lo0 gate | N/A | CONSULT | Mirrors physical LocalDelivery miss (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:2625`); kernel `xpf_hostinbound` chain re-judges post-ACCEPT at the input hook — AND-composition (both must permit), documented layering, no conflict. |
 | `junos-host` policy (`junos_host_local_policy`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/host_inbound_policy.rs:254`) | N/A | CONSULT | Runs AFTER host-inbound admission ("Junos order", `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1567-1570`); deny/reject ⇒ DROP + policy-deny RT_FLOW (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1570`). |
@@ -1021,8 +1126,9 @@ P-MECH table (forked return path and replication).
 
 **D22.** The current Go `FragPool` is bounded by `perFlowCap`, `maxDatagrams`, and
 `maxDatagramBytes` (64 KiB) (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/fragpool.go:79-110,114-180`);
-completed groups are popped at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/fragpool.go:319`. It does NOT currently provide the r5 design's claimed tombstones
-or a canonical L3 reassembly implementation, and P-MECH does not pretend otherwise.
+completed groups are popped at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/fragpool.go:319`. It does NOT
+provide the r5 design's claimed tombstones or canonical L3 reassembly, and P-MECH does not pretend
+otherwise.
 
 **V1 fragment permit boundary.** P-MECH permits no fragmented datagram on either FORWARD or INPUT.
 The existing sink/q0 interfaces provide no atomic batch verdict or kernel-reassembly purge primitive
@@ -1036,22 +1142,31 @@ explicit atomic batch primitive plus proof and is outside this amendment.
   P-MECH MUST reuse those validated fields, not add a second L3 parser. After `Enqueue` stamps
   `frame.phase` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:336-340`)
   and before `consumeFrames` calls `enqueueFlowLocked`/the existing `FragPool.Insert`
-  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:383-395,446-454`):
-- The current receive path drops `ClassifyCapturePayload`, `FragmentKey`, or `FragmentPiece` errors before
-  `CaptureFrame` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go:226-241`)
+  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:383-395,446-454`),
+  an enforcing fragment creates/refreshes a bounded `FragmentDenyTombstone` keyed by
+  `{family, src, dst, protocol, identification, if_id, capture_generation}`. The tombstone has a
+  fixed cap and expiry no later than the capture-generation retirement; a late fragment or name-reused
+  same-ID member hits the tombstone before `FragPool`, terminal-DROPs, and increments
+  `ipsec_inner_fragment_late_total`. It is a deny tombstone, not a reassembly cache. Shadow creates
+  no production tombstone; it records the would-drop and bounded `ShadowLedger` divergence only.
+- The current receive path drops `ClassifyCapturePayload`, `FragmentKey`, or `FragmentPiece` errors
+  before `CaptureFrame` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go:226-241`)
   with no cause evidence. S9.1 MUST add a bounded pre-frame `DenyEventSink`/counter path there:
   `ipsec_inner_classification_errors_total` for parse/codec failure and
   `ipsec_inner_fragment_metadata_errors_total` for key/piece failure, using the capture queue's
   trusted tunnel/generation attribution when available, otherwise `UNATTRIBUTED_POLICY_ID` and no
   fabricated `CaptureOrigin`. These structural pre-frame errors are always terminal DROP (there is no
   valid frame for shadow evaluation), and sink backpressure increments `deny_event_unavailable_total`.
-- Non-fragmented packets retain the normal §3 order. This early refusal deliberately bypasses today's
-  `FragPool` group/pending path on the P-MECH class, so no tombstone, canonical reassembly, N-write,
-  or N-acceptance protocol is needed or claimed. Each enforcing fragment original has one terminal
-  DROP and one bounded taxonomy/counter/event path: no late worker completion, partial q0 emission,
-  or cross-generation reassembly. A future authorized fragment-permit scope MUST add stable
-  occurrence/group identity, bounded tombstones, canonical L3 reassembly, and an atomic batch terminal
-  primitive before changing this V1 boundary.
+- Non-fragmented packets retain the normal §3 order. Every enforcing fragment original has one terminal
+  DROP and one bounded taxonomy/counter/event path: no late worker completion, partial q0 emission, or
+  cross-generation reassembly. Duplicate or byte-identical fragments are all denied in V1; the native
+  `FragPool` duplicate semantics are not silently claimed for this pre-pool path.
+- A future authorized fragment-permit scope MUST retain the key/cap/expiry/tombstone rules and add
+  canonical reassembly plus an atomic batch terminal primitive. Its canonical IPv4 output MUST set the
+  final total length, clear MF/fragment offset, and recompute the IPv4 header checksum. Its canonical
+  IPv6 output MUST remove the Fragment header, repair the preceding Next Header and Payload Length,
+  and bound the extension-header chain before any worker policy. Those semantics are not implemented
+  or permitted by V1.
 
 ### §3.7 Counter/deny-event points (per stage; Rust worker side)
 
@@ -1075,8 +1190,23 @@ its wire `reason` is a `u8` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdes
 not a free-form string. Existing policy and host-inbound reason values remain unchanged
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/event_emit.rs:12`, policy=5 and host-inbound=6). P-MECH allocates the closed contiguous
 new-reason band 32–60 (29 values) in the versioned Go/Rust wire contract; the exact assignments are
-below. Unknown bytes, including values outside legacy 5/6 and 32–60, are refusal/DROP, never a guessed
-label.
+below. An unknown byte at an event decoder is a version/decode refusal: increment
+`ipsec_inner_event_decode_errors_total`, emit the bounded `PMechAlarm{class=VERSION_SKEW}`, and do
+not invent a label or alter the already terminal packet verdict. An unknown reason at pre-admission is
+E33 refusal/DROP. Neither case becomes a permit.
+
+**Bounded event/alarm sink.** `DenyEventSink` is the single bounded daemon-side source for P-MECH
+pre-dispatch deny events and operator alarms; Rust-side refusals use the same event codec and set the
+`event_emitted` outcome bit. Its bounded API is conceptually
+`EmitIpsecInnerDeny(IpsecInnerDeny)` plus `EmitPMechAlarm(PMechAlarm)`, where
+`PMechAlarm{class, reason, generation, queue_id, tunnel}` has a closed class enum:
+`STAGING_SKIP|OWNER_CONTESTED|NODE_WIDE_QUARANTINE|ZONE_AMBIGUOUS|DOMAIN_OVERLAP|WORKER_QUEUE_FULL|
+OWNER_UNAVAILABLE|BYPASS_FENCE|INPUT_COMPLETION|VERSION_SKEW`. Tunnel/queue context is only in the
+event/alarm payload. The queue is rate-limited and emits one alarm per state transition or cooldown
+window, not one log per packet. `DenyEventSink` is REQUIRED for E2, E21, E23, E34, E35, staging
+skips, and generation-wide quarantine; sink backpressure increments
+`deny_event_unavailable_total` while the terminal DROP remains authoritative. Tunnel attribution is
+never a metric label.
 
 | Byte | Symbol | Taxonomy rows / emission |
 |---:|---|---|
@@ -1172,41 +1302,53 @@ without its counter fails review):
   mismatch and terminal-ACCEPT/completion protocol failures; E20/E35).
 - `ipsec_inner_input_stateful_without_session_total` (E37; Option A scope-cut refusal for stateful INPUT
   misses until Option B is proven).
-- Additional required Rust cause counters (not merged into generic drops): `ipsec_inner_parse_drops_total`
-  and `ipsec_inner_ecn_illegal_drops` (E8 worker parse/ECN), `ipsec_inner_syn_cookie_refusals_total`
-  (E37 strict-SYN/syn-cookie stateful miss), `ipsec_inner_ha_unknown_total` (E34 unknown HA
-  attachment), `ipsec_inner_alg_filter_policer_errors_total` (E11/E16 stage failure),
-  `ipsec_inner_session_rollback_failures_total` (E10 session-install rollback), `ipsec_inner_nat_rollback_failures_total`
-  (E17 NAT/SNAT rollback), `ipsec_inner_alias_overflow_total` (E9 bounded alias spill),
-  `ipsec_inner_worker_orphan_reaped_total` and `ipsec_inner_orphan_provisional_total` (E34), and
-  `deny_event_unavailable_total` (event bridge backpressure). Each is joined to the existing generation/permit labels and has one taxonomy owner.
-- `session_alias_ambiguous_total` (§3.5 multi-candidate replies).
-- `policy_reject_as_deny_total`, `tcp_rst_suppressed_total` (D20 V1 scope markers).
+- E8 cause counters: `ipsec_inner_parse_drops_total`, `ipsec_inner_ecn_illegal_drops`,
+  `ipsec_inner_session_lookup_errors_total` (session lookup/poison/unavailable).
+- E9/E10 cause counters: `session_alias_ambiguous_total`, `ipsec_inner_alias_overflow_total`,
+  `ipsec_inner_alias_replication_failures_total`, `ipsec_inner_session_rollback_failures_total`.
+- Stage-specific policy/NAT counters (NEVER merged): `ipsec_inner_alg_errors_total`,
+  `ipsec_inner_filter_errors_total`, `ipsec_inner_policer_errors_total` (E11), and
+  `ipsec_inner_nat_stage_errors_total` (E16), `ipsec_inner_nat_rollback_failures_total` (E17).
+- `ipsec_inner_syn_cookie_refusals_total` (E37 strict-SYN/syn-cookie stateful miss),
+  `ipsec_inner_ha_unknown_total` (E34 unknown HA attachment),
+  `ipsec_inner_worker_orphan_reaped_total` and `ipsec_inner_orphan_provisional_total` (E34).
+- `ipsec_inner_classification_errors_total`, `ipsec_inner_fragment_metadata_errors_total`,
+  `ipsec_inner_fragment_late_total`, `ipsec_inner_bypass_window_drops_total`,
+  `ipsec_inner_event_decode_errors_total`, and `deny_event_unavailable_total`.
 - Reused (existing, no rename): `policy_deny`, per-rule hit counters + `default_counter`
-  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/policy.rs`), `UNZONED_INGRESS_DENIED`, `host_inbound_denied_packets`, `screen_drops`,
-  `create_drops`, NAT per-rule counters + `snat_packets`/`dnat_packets`, `adjudicated_refused`/
-  class counters (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/slowpath_reinject_9506.rs:448-451`), `epoch_rejects`, `mtu_dropped_packets`,
-  `rate_limited_packets`, `queue_full_packets` (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/slowpath.rs`).
+  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/policy.rs`),
+  `UNZONED_INGRESS_DENIED`, `host_inbound_denied_packets`, `screen_drops`, `create_drops`,
+  NAT per-rule counters + `snat_packets`/`dnat_packets`, `adjudicated_refused`/class counters
+  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/slowpath_reinject_9506.rs:448-451`),
+  `epoch_rejects`, `mtu_dropped_packets`, `rate_limited_packets`, `queue_full_packets`
+  (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/slowpath.rs`).
 
 Go (`PipelineStats`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:171-198`,
 additive fields): `ZoneGateDrops`, `ZoneGateUnavailable`, `ZoneDivergences` (Go-pass/Rust-refuse),
-`PolicyDenies`, `AliasAmbiguous`, `DenyEventUnavailable`, `SessionRollbackFailures`, `NatRollbackFailures`, `ClassificationErrors`,
-`FragmentMetadataErrors`, `WorkerOrphans`, `OrphanProvisionals`, `VersionSkews`, `InputAcceptErrors`,
-`NoRoute`, `HaUnknown`, and `ShadowUnavailable`. Existing reused: `ProvenanceMismatches`,
+`PolicyDenies`, `AliasAmbiguous`, `AliasReplicationFailures`, `SessionLookupErrors`,
+`DenyEventUnavailable`, `SessionRollbackFailures`, `NatRollbackFailures`, `AlgErrors`, `FilterErrors`,
+`PolicerErrors`, `ClassificationErrors`, `FragmentMetadataErrors`, `FragmentLate`,
+`WorkerOrphans`, `OrphanProvisionals`, `VersionSkews`, `InputAcceptErrors`, `NoRoute`, `HaUnknown`,
+`ShadowUnavailable`, `StagingSkipped`, `SkippedTunnelDrops`, `GenerationQuarantineDrops`,
+`BypassWindowDrops`, and `EventDecodeErrors`. Existing reused: `ProvenanceMismatches`,
 `L2Unsupported`, `OverlapRefusals`, `FragmentDrops`, `AdmissionsRefused`, `Refused`, `Uncertain`,
-`Stale`, `Cancelled`, `Timeouts`, `LateCompletions`, `HandoffRefusals`, `ShadowDivergences`. Every
-field is exported in the witness (§4.4); an unexported cause is operator-invisible and fails review.
+`Stale`, `Cancelled`, `Timeouts`, `LateCompletions`, `HandoffRefusals`, `ShadowDivergences`.
+Every field is exported in the witness (§4.4); an unexported cause is operator-invisible and fails
+review.
 
 ### §4.4 Metrics + witness join
 
 Extend the 2a witness pattern (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go:14-60`): the actor snapshot
 (`IpsecCapturePipelineStatus`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go:53-65`) gains the §4.3 Go fields; the
 collector emits them as `CounterValue` with the EXISTING label set (`runID`, `generation`,
-`permitEpoch` — `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go:22-25`) PLUS a bounded `reason` label for deny families (zone_unzoned,
-zone_ambiguous, zone_stale, policy_deny, alias_ambiguous, … — closed enum, no high-cardinality values:
-NEVER raw STN/tunnel names as label values — tunnel attribution belongs in EVENTS (Rust side, tuple-rich)
-and logs, not in metric cardinality). Rust `s5_reinject` stats block gains the §4.3 Rust counters under
-the existing `(run_id, generation, permit_epoch)` join. Pipeline-stats/metrics naming follows the
+`permitEpoch` — `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go:22-25`) PLUS a bounded closed `reason`
+label for deny families. `staging_skipped_tunnel_total{reason}` uses only
+`IFID_UNDERIVABLE|LINK_LOOKUP|QUEUE_OPEN|OWNER_CONTESTED`; the named
+`ipsec_inner_skipped_tunnel_drops_total{reason}`, `ipsec_capture_generation_quarantine_drops_total{reason}`,
+and `ipsec_inner_bypass_window_drops_total{reason}` counters use closed reason enums. NEVER use raw
+STN/tunnel names as label values: tunnel attribution belongs in the tuple-rich event/alarm payload
+and bounded logs, not metric cardinality. Rust `s5_reinject` stats block gains the §4.3 Rust counters
+under the existing `(run_id, generation, permit_epoch)` join. Pipeline-stats/metrics naming follows the
 `ipsecCapture<Name>Total` + `xpf_ipsec_capture_<name>_total` convention of the existing collector.
 
 ### §4.5 Error taxonomy (EVERY failure → DROP-and-count; no silent drops, no permit-on-error)
@@ -1214,47 +1356,47 @@ the existing `(run_id, generation, permit_epoch)` join. Pipeline-stats/metrics n
 | # | Failure | Detector | Terminal | Counter | Event |
 |---|---|---|---|---|---|
 | E1 | Tunnel UNZONED | Go pre-gate / Rust D14 gate | DROP (never submitted / refused) | `zone_gate_unzoned_total` (+Go `ZoneGateDrops`) | `PolicyDeny`/`DenyEventSink`, reason `ZONE_UNZONED` |
-| E2 | Tunnel AMBIGUOUS (multi-claim if_id) | Snapshot build (mark) + gates | DROP | `zone_gate_ambiguous_total` | `PolicyDeny`/`DenyEventSink` + alarm |
-| E3 | if_id underivable (unknown STN / 0) | Wiring (staging refuse) + gates | DROP | `zone_gate_unzoned_total` (same family) | `PolicyDeny`/`DenyEventSink` |
+| E2 | Tunnel AMBIGUOUS (multi-claim if_id) | Snapshot build (mark) + gates | DROP | `zone_gate_ambiguous_total` | `PolicyDeny`/`DenyEventSink` + `PMechAlarm{class=ZONE_AMBIGUOUS}` |
+| E3 | if_id underivable (unknown STN / 0) | Wiring (staging refuse) + gates | DROP | `zone_gate_unzoned_total` (same family) | `PolicyDeny`/`DenyEventSink` + `PMechAlarm{class=STAGING_SKIP}` when staging caused the refusal |
 | E4 | Stale config/fib/permit/queue generation | D14 fence + `allows()` + Go `Current()` | DROP | `zone_gate_stale_total` / `Stale` | `PolicyDeny`/`DenyEventSink` |
 | E5 | Missing generations on wire | Socket admit (D15a) | Refuse (never queued) | `zone_gate_no_generation_total` | `DenyEventSink` (pre-admission; Go `AdmissionsRefused`) |
 | E6 | Zone/Go-advisory mismatch | D14 cross-check | DROP | `ZoneDivergences` | `PolicyDeny`/`DenyEventSink` |
 | E7 | Screen deny | `stage_screen_check` | DROP | `screen_drops` | Screen alarm |
-| E8 | Session lookup/inner parse/ECN/codec error (poison or unavailable) | Lookup/parse/codec | DROP (frame); table recovers | `ipsec_inner_parse_drops_total` / `ipsec_inner_ecn_illegal_drops` / session-error counter | `PolicyDeny`/`DenyEventSink` + recovery counter |
+| E8 | Session lookup/inner parse/ECN/codec error (poison or unavailable) | Lookup/parse/codec | DROP (frame); table recovers | `ipsec_inner_parse_drops_total` / `ipsec_inner_ecn_illegal_drops` / `ipsec_inner_session_lookup_errors_total` | `PolicyDeny`/`DenyEventSink` + recovery counter |
 | E9 | Session alias ambiguous or bounded alias overflow (multi-candidate reply) | Reverse/alias resolution (§3.5) | DROP | `session_alias_ambiguous_total` / `ipsec_inner_alias_overflow_total` | `PolicyDeny`/`DenyEventSink` |
-| E10 | Session install refused (cap 131072/worker, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/session/install.rs:152-154`) or session-install rollback failure | Session install/rollback | DROP + session rollback; rollback failure remains DROP | `create_drops` / `ipsec_inner_session_rollback_failures_total` | `PolicyDeny`/`DenyEventSink` |
-| E11 | Zone-pair policy DENY, filter/ALG/policer deny | `evaluate_policy_*` / unchanged worker stages | DROP (silent) | `policy_deny` + rule/default counter / `ipsec_inner_alg_filter_policer_errors_total` | `PolicyDeny`/`DenyEventSink` (rule-attributed where available) |
+| E10 | Session install refused (cap 131072/worker, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/session/install.rs:152-154`), session-install rollback failure, or alias replication failure | Session install/rollback/alias commit | DROP + session rollback; rollback failure remains DROP | `create_drops` / `ipsec_inner_session_rollback_failures_total` / `ipsec_inner_alias_replication_failures_total` | `PolicyDeny`/`DenyEventSink` |
+| E11 | Zone-pair policy DENY, filter/ALG/policer deny | `evaluate_policy_*` / unchanged worker stages | DROP (silent) | `policy_deny` + rule/default counter; `ipsec_inner_filter_errors_total` / `ipsec_inner_alg_errors_total` / `ipsec_inner_policer_errors_total` for stage failures | `PolicyDeny`/`DenyEventSink` (rule-attributed where available) |
 | E12 | Zone-pair policy REJECT | `evaluate_policy_*` | DROP (silent V1, D20) | `policy_reject_as_deny_total` + rule counter | `PolicyDeny`/`DenyEventSink` (logs DENY per suppressed-reject precedent `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/reject_reply_tests.rs:1551+`) |
 | E13 | `tcp-rst`-on-deny (zone screen option) | Deny arm | DROP (no RST V1, D20) | `tcp_rst_suppressed_total` | `PolicyDeny`/`DenyEventSink` |
 | E14 | junos-host policy deny/reject | `junos_host_local_policy` | DROP | `policy_deny` + rule counter | policy-deny RT_FLOW (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1570`) |
 | E15 | Host-inbound deny | Host-inbound gate | DROP (silent, session torn down `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:1457-1461`) | `host_inbound_denied_packets` | `emit_host_inbound_deny` |
-| E16 | Static/DNAT match error, scope failure, ALG/filter/policer error | Pre-routing NAT / worker stage | DROP | existing NAT-error counters / `ipsec_inner_alg_filter_policer_errors_total` | `PolicyDeny`/`DenyEventSink` |
+| E16 | Static/DNAT match error or scope failure | Pre-routing NAT stage | DROP | `ipsec_inner_nat_stage_errors_total` | `PolicyDeny`/`DenyEventSink` |
 | E17 | SNAT alloc failure (pool exhausted, non-first-frag gate `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3026`, NPTv6 refuse `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:3182`) or NAT/SNAT rollback failure | Permit-branch NAT | DROP + release partial; rollback failure remains DROP | `record_source_nat_failure` / `ipsec_inner_nat_rollback_failures_total` | `PolicyDeny`/`DenyEventSink` |
 | E18 | NAT64/NPTv6 translation failure | Translation | DROP | existing translation counters | `PolicyDeny`/`DenyEventSink` |
 | E19 | Route NoRoute/FIB miss | Route/FIB resolve | DROP (doubt) | `ipsec_inner_noroute_total` | `PolicyDeny`/`DenyEventSink` |
 | E20 | Hook/disposition mismatch (FORWARD resolves `LocalDelivery`; INPUT resolves transit/`FabricRedirect`/non-local) | Route/disposition check (§3.2) | DROP (doubt; never switch hooks) | `ipsec_inner_routed_local_total` / `ipsec_inner_input_routed_transit_total` | `PolicyDeny`/`DenyEventSink` |
-| E21 | Inner-prefix overlap admitted (M3 violation observed) | M3 admission/commit checks | Tunnel DOWN + DROP | `nfq_reentry_unsupported_domain_total` (r6 §3.5 item 6 name — REUSED, not reinvented) | `PolicyDeny`/`DenyEventSink` + alarm |
+| E21 | Inner-prefix overlap admitted (M3 violation observed) | M3 admission/commit checks | Tunnel DOWN + DROP | `nfq_reentry_unsupported_domain_total` (r6 §3.5 item 6 name — REUSED, not reinvented) | `PolicyDeny`/`DenyEventSink` + `PMechAlarm{class=DOMAIN_OVERLAP}` |
 | E22 | Other-VRF/RG/FIB packet at admission | M3 expected-domain stamp + route/disposition/commit revalidation | DROP | `nfq_reentry_unsupported_domain_total` | `PolicyDeny`/`DenyEventSink` |
-| E23 | Worker ingress queue full | D11 enqueue (try-or-drop) | DROP | `ipsec_inner_worker_queue_full_total` | `DenyEventSink` + alarm |
+| E23 | Worker ingress queue full | D11 enqueue (try-or-drop) | DROP | `ipsec_inner_worker_queue_full_total` | `DenyEventSink` + `PMechAlarm{class=WORKER_QUEUE_FULL}` |
 | E24 | Verdict queue full / verdict lost | D11 verdict path / `ackDeadline` | Uncertain → DROP, no retry | `ipsec_inner_verdict_queue_full_total` / `Uncertain`+`Timeouts` | `DenyEventSink` + terminal accounting |
 | E25 | Slab pool exhausted | Socket admit (D15b) | Refuse | `ipsec_inner_slab_exhausted_total` | `DenyEventSink` (Go `AdmissionsRefused`) |
 | E26 | Lease/permit/epoch failure (closed, stale, mismatch, echo-mismatch, shutdown/cancel, handoff race) | `MintLease`/`allows()`/submit gate/echo check | Refuse/Uncertain → DROP | `Stale`/`Cancelled`/`Uncertain`/`AdmissionsRefused` | `DenyEventSink` + existing terminal accounting |
-| E27 | Submitter unavailable, socket down, or `submitGate` cancellation race | `submitEligible` / socket client / cancellation | Refuse/Uncertain → DROP | `Refused`/`Uncertain` (existing `ErrNoSubmitter`) | `DenyEventSink` |
+| E27 | Submitter unavailable, socket down, `submitGate` cancellation race, or staging queue-open failure (`QUEUE_OPEN`) | `submitEligible` / socket client / staging | Refuse/Uncertain → DROP | `Refused`/`Uncertain` / `StagingSkipped` (existing `ErrNoSubmitter`) | `DenyEventSink` + `PMechAlarm{class=STAGING_SKIP}` when staging caused it |
 | E28 | Evaluator unavailable (nil evaluator, nil/stale snapshot, or unavailable authoritative worker set) | Go pre-gate / Rust evaluator authority (D9/D16) | DROP (enforcing) / `shadow_unavailable` + ACCEPT (shadow) | `ZoneGateUnavailable` / `ShadowUnavailable` | `DenyEventSink` + witness labels |
 | E29 | FORWARD q0 MTU/queue/rate failure OR INPUT terminal-ACCEPT sink failure | `submit_adjudicated_frame` / Go terminal adapter | Refuse/uncertain → DROP | `mtu_dropped_packets`/`queue_full_packets`/`rate_limited_packets` / `ipsec_inner_input_accept_errors_total` | `DenyEventSink` + terminal accounting |
-| E30 | Validated fragment metadata on P-MECH path OR pre-frame classification/key-piece error | Receive classification + pre-FragPool phase gate (§3.6) | Validated fragment: ENFORCING DROP exactly once; SHADOW would-drop/divergence + ACCEPT. Pre-frame error: DROP in both phases (no valid frame exists) | `FragmentDrops` / `ClassificationErrors` / `FragmentMetadataErrors` | `DenyEventSink` (pre-frame uses `PreFrame`/unattributed origin) |
+| E30 | Validated fragment metadata on P-MECH path OR pre-frame classification/key-piece error | Receive classification + pre-FragPool phase gate (§3.6) | Validated fragment: ENFORCING DROP exactly once; SHADOW would-drop/divergence + ACCEPT. Pre-frame error: DROP in both phases (no valid frame exists) | `FragmentDrops` / `ClassificationErrors` / `FragmentMetadataErrors` / `ipsec_inner_fragment_late_total` | `DenyEventSink` (pre-frame uses `PreFrame`/unattributed origin) |
 | E31 | Provenance mismatch / unregistered queue | `Enqueue` | DROP (never q0) | `ProvenanceMismatches` (existing) | `DenyEventSink` |
 | E32 | Non-inet or unsupported hook at submit (bridge is quarantine; inet/input is supported) | `submitEligible` family/hook gate | DROP | `L2Unsupported` (existing) | `DenyEventSink` |
-| E33 | Version skew, unknown admit/reason/tag, or mixed-version wire | Exact-equality gates (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:12-15`) | Refuse snapshot / DROP | `VersionSkews` + existing version-gate counters | `DenyEventSink` + operator-visible abort |
-| E34 | Owner-worker down, worker-set retired, unknown HA attachment, orphan descriptor, or verdict-issued provisional handle | Router/fence/reaper/journal and HA decoder | DROP (never misroute; reaper terminalizes orphans; journal conservatively commits write-started state) | `ipsec_inner_worker_retired_total` / `ipsec_inner_worker_orphan_reaped_total` / `ipsec_inner_orphan_provisional_total` / `ipsec_inner_ha_unknown_total` | `DenyEventSink` + alarm |
-| E35 | Invalid/mis-scoped `CompletionInputReady` (non-inet/input, nonzero bytes except exact INPUT exemption, duplicate/late, or terminal identity mismatch) | Go completion resolver / worker outcome codec | DROP/uncertain | `ipsec_inner_input_accept_errors_total` + `Uncertain` | `DenyEventSink` + alarm |
+| E33 | Version skew, unknown admit/reason/tag, missing tunnel row, or mixed-version wire | Exact-equality gates (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:327,343-389`) | Refuse snapshot / DROP | `VersionSkews` + existing version-gate counters | `DenyEventSink` + operator-visible abort |
+| E34 | Owner-worker down, worker-set retired, unknown HA attachment, HAInactive/redirect, punt-seed, preemptive/post-detection bypass-fence drop, orphan descriptor, or verdict-issued provisional handle | Router/fence/reaper/journal and HA decoder | DROP (never misroute; no redirect/punt; reaper terminalizes orphans; journal conservatively commits write-started state) | `ipsec_inner_worker_retired_total` / `ipsec_inner_worker_orphan_reaped_total` / `ipsec_inner_orphan_provisional_total` / `ipsec_inner_ha_unknown_total` / `ipsec_inner_bypass_window_drops_total` | `DenyEventSink` + `PMechAlarm{class=OWNER_UNAVAILABLE|BYPASS_FENCE}` |
+| E35 | Invalid/mis-scoped `CompletionInputReady` (non-inet/input, nonzero bytes except exact INPUT exemption, duplicate/late, or terminal identity mismatch) | Go completion resolver / worker outcome codec | DROP/uncertain | `ipsec_inner_input_accept_errors_total` + `Uncertain` | `DenyEventSink` + `PMechAlarm{class=INPUT_COMPLETION}` |
 | E36 | INPUT product NAT would rewrite or cross-family translate (NF_ACCEPT cannot replace payload) | Decision-only NAT consult | DROP (before policy/route) | `ipsec_inner_input_nat_mutation_unsupported_total` | `PolicyDeny`/`DenyEventSink` |
 | E37 | INPUT stateful miss outside authorized D12a Option A, strict-SYN/syn-cookie new-flow miss, or session-required shape | D12a session boundary | DROP before NF_ACCEPT | `ipsec_inner_input_stateful_without_session_total` / `ipsec_inner_syn_cookie_refusals_total` | `PolicyDeny`/`DenyEventSink` |
 
-Coverage claim: arms D16.1–9 ⊂ {E1–E37}; every `resolveRefusal`/`resolveUncertain`/terminal-DROP call site
+Coverage claim: arms D16.1–9 ⊂ {E1–E37}; generation-wide `QuarantineAll` drops map by closed reason to E3/E27/E2/E21 as D1b specifies, and preemptive/post-detection bypass-fence drops map to E34. Every `resolveRefusal`/`resolveUncertain`/terminal-DROP call site
 in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go` maps to exactly one row; every Rust refuse path maps to exactly one row. The G5 slice
 MUST include a mechanical audit (grep every `VerdictDrop`/refuse/uncertain emission on the S5 path against
-this table; unmapped emission = review failure). No row maps to permit, ACCEPT (except shadow-divergence
+this table and the closed quarantine/fence reason map; unmapped emission = review failure). No row maps to permit, ACCEPT (except shadow-divergence
 ACCEPT per §2.6 matrix), retry, or silence. `CompletionInputReady` is non-terminal and is covered by
 E35 on any malformed or mis-scoped use; E36 covers product-NAT mutation; E37 covers stateful INPUT
 misses when Option A is the only authorized scope.
@@ -1294,24 +1436,44 @@ Go:
   `ZoneSnapshotRef` + config fields + `submitEligible` call site (D7–D10) + `PipelineStats` fields (§4.3)
   + `ErrNoZoneEvaluator`.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go` —
-  receive-time tunnel attribution (D8 secondary) + status snapshot fields (§4.4).
+  receive-time tunnel attribution (D8 secondary) + status snapshot fields (§4.4) + the bounded
+  `DenyEventSink`/`PMechAlarm` bridge.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go` —
   per-generation if_id→zone map build (§1.1) + config/fib generation capture at staging (D13) +
-  duplicate-if_id detection (§3.5) + snapshot atomic publication (D9).
+  duplicate-if_id detection (§3.5) + snapshot atomic publication (D9) + explicit
+  `QuarantineAll`/deny-only activation.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/reinject_socket.go` — wire:
-  generations and per-frame descriptor identity on submit (D13/D15); unknown admit-reason ⇒ refusal (D15).
+  generations and per-frame descriptor identity on submit (D13/D15); unknown admit-reason ⇒ refusal
+  (D15).
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/api/metrics_ipsec_capture_10478.go` (+
-  collector decls) — §4.4 witness extension + `reason` label.
-- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go` — ONLY if
-  snapshot lacks a stamp P-MECH needs (audit first; `Generation`/`FIBGeneration`/epochs all present —
-  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:561-567`; a version bump needs the lockstep procedure,
-  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:12-15`).
+  collector decls) — §4.4 witness extension + closed `reason` label.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go` — exported
+  `BindInterfaceOwnsRef` wrapper over the existing ownership predicate; this is the config SSOT used
+  by staging and the D14 zone gate.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/routes.go` and
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/routing/routing.go` — M3 connected/static
+  route inventory for authored xfrmi egress, with `ANY/ANY`/missing-selector refusal.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/logging/ringbuf.go` — extend the existing
+  `closeReasonName` decoder (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/logging/ringbuf.go:1297-1316`)
+  with the closed P-MECH reason/severity mappings; lockstep decoder tests remain in the owning package.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nftables/ipsec_divert.go` — explicit
+  `QuarantineAll` policy/drop rendering on the inet/bridge base chains and its node-wide counter.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go` —
+  REQUIRED protocol-floor/tunnel-row/admit-reason contract and version bump (never conditional).
+  Its exact Rust lockstep counterparts are also REQUIRED:
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/protocol/control.rs`
+  (version/equality gate and control wire) and
+  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/protocol/snapshot.rs`
+  (snapshot DTO/wire fields). A mismatch is E33, not a decode default.
 
 Rust (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/`):
 
 - N `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/ipsec_inner.rs` (worker entry D13 + zone gate D14 + verdict post) + N `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/ipsec_inner_queue.rs`
   (D11 per-worker ingress queues + slab pool + verdict queue + poll-budget drain) — NEW files (no
   suitable existing owner; adjacent to `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/gre.rs` and `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/wg/decap.rs` precedent).
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs` —
+  exact worker stage order, decision-only flow-cache/DNS handling, syn-cookie/challenge suppression,
+  strict-SYN route-eligibility, HAInactive/punt guards, and E7/E11–E20/E34/E37 deny arms.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/logical_ingress.rs` — NOTHING (reuse as-is; the entry CALLS `build_logical_ingress_packet`).
   If the entry needs a param the struct lacks, extend `LogicalIngressParams` (all-fields-required
   discipline preserved — `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/logical_ingress.rs:26-40`).
@@ -1327,8 +1489,11 @@ Rust (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/`)
   cross-discriminator alias index, multiplicity/eviction/generation checks, and ambiguous reverse
   refusal (D21; `reverse_translated_index` remains separate).
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker/loop_body/mod.rs`
-  (the actual `worker_loop` poll body) and
-  `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker_queue.rs` —
+  (the actual `worker_loop` poll body).
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker/loop_body/setup.rs` —
+  one immutable `RuntimeView` load for worker setup, preserving the same-view binding used by the
+  per-tick poll body; a view refresh interleaving is a generation refusal, not a mixed decision.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker_queue.rs` —
   D11 bounded drain/verdict post, orphan-reaper handoff, and `WorkerCommand` generation/worker-set
   control variants only (D12).
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/policy.rs` — NOTHING
@@ -1365,12 +1530,17 @@ touched (O-*/V-FLIP own those).
 - Unit cells (fail-on-revert): zone map (zoned/unzoned/ambiguous/cross-spelling/duplicate-if_id/stale);
   Go hook (pass/drop/nil/stale/shadow-matrix); typed reason/zero-value refusal; admit codes (each new
   code + unknown-code-refusal); supervisor committer result matrix (invalid/unknown/accepted/dropped/
-  uncertain + stale-after-lease and sink-failure); route-domain identity (exact `D_usp1`/main-table
+  uncertain; `Accepted+error`, `Dropped+error`, unknown result, explicit `terminalAttempted` true/false,
+  stale-after-lease, sink-failure, and timeout); only pre-committer `terminalAttempted=false` may
+  use the retained handle for one DROP, while any post-entry inconsistency is uncertain with no retry
+  or second sink call; route-domain identity (exact `D_usp1`/main-table
   result, other-domain refusal, commit revalidation); discriminator (forward separation, reverse
   unique/ambiguous/native-miss, wire round-trip, unknown-tag import refusal); fragments (validated
   metadata bypasses `FragPool` and is E30: enforcing DROP exactly once, shadow would-drop/divergence +
   ACCEPT; pre-frame classification/key-piece errors DROP in both modes with pre-frame counters/events);
-  taxonomy (each E-row fires its counter/event once; no unmapped terminal emission — mechanical audit §4.5);
+  taxonomy fault-injection/unit/integration cells (each E-row fires its counter/event once, including
+  poison/recovery, rollback, slab, mixed-version, unknown-tag, and orphan phases; no unmapped terminal
+  emission — mechanical audit §4.5);
   stale-fence and fabricated-zero refusal; doubt arms D16.1–9 (each → DROP, never permit).
 - Additional contract cells: no fragment frame enters worker/session/NAT/q0, no duplicate parser is
   introduced, and pre-frame `DenyEventSink` `PreFrame` attribution is unattributed/queue-bounded;
@@ -1378,17 +1548,34 @@ touched (O-*/V-FLIP own those).
   transport queue-full/dead-worker and a before/after production-state snapshot proving no session,
   NAT, flow-cache, HA, or production-counter mutation; flow-cache rows missing discriminator/
   generation and DNS fastpath INPUT-miss behavior (both must refuse/fallback, never permit).
+- Staging/quarantine parity cells: each closed skip reason (`IFID_UNDERIVABLE`, `LINK_LOOKUP`,
+  `QUEUE_OPEN`, `OWNER_CONTESTED`) maps to its E3/E27/E2/E21 row; one skip with otherwise valid
+  handles yields `QuarantineAll` and a node-wide DROP counter/alarm; zero skips yields no quarantine;
+  old-spec replacement is atomic and never reused after a skip. Test the E34 mapping for preemptive
+  and post-detection fence drops, including the future-master case, and record detection→fence ACK
+  latency separately from pre-detection exposure.
+- D22 cells: bounded tombstone cap and expiry at generation retirement; late fragment/name-reuse
+  refusal and `ipsec_inner_fragment_late_total`; duplicate/byte-identical fragment denial; no
+  `FragPool` entry in either phase. RuntimeView setup/tick loads are single-view and refresh
+  interleaving refuses; the DNS/flow-cache helpers cannot recycle, TX, or seed production state.
 - Affected suites + reverse-deps with numbers (run at slice end; parent validates project-wide).
-- THE live run (loss cluster, real SAs — MATCH-gated attestation): denied AND permitted FORWARD v4+v6
-  decrypted-ingress flows with policy/session/counter/event evidence (FORWARD→q0→fence delivered
-  witness). INPUT live evidence is conditional on the two D12a Option A proof cells: the worker
-  ICMP/ICMPv6 skip-install + reply-deliverability proof and A-P2 T5 host-bound disposition for both
-  verdicts. Only the proven stateless shapes may claim `CompletionInputReady`→supervisor
+- THE live run (loss cluster, real SAs — MATCH-gated attestation): representative denied AND permitted
+  FORWARD v4+v6 decrypted-ingress flows with policy/session/counter/event evidence (FORWARD→q0→fence
+  delivered witness). INPUT live evidence is conditional on the two D12a Option A proof cells:
+  D12a-C1 ICMP/ICMPv6 skip-install + reply-deliverability and D12a-C2 T5 host-bound disposition for
+  both verdicts. Only the proven stateless shapes may claim `CompletionInputReady`→supervisor
   `InputPermitCommitter`→NF_ACCEPT, never q0; all stateful INPUT remains E37 and Option B is deferred.
-  Both hooks still cover each deny family at least once (zone-unzoned, zone-ambiguous, policy-deny,
-  screen-deny, host-inbound-deny, alias-ambiguous (crafted overlap), stale-generation (rotation during
-  flow), and fragment-deny (validated metadata plus malformed classification/key-piece error), NAT-T +
-  native, multiple tunnels (incl. same-zone overlap pair for D21 + M3 evidence), 8/16/32 scale spot.
+- Live deny coverage is by UNION across hooks; the exhaustive E1–E37 claim belongs to the
+  fault-injection/unit/integration cells above, not to a safe live-SA run. Each hook independently
+  exercises the shared ingress families `ZONE_UNZONED`, `ZONE_AMBIGUOUS`, `SCREEN_DENY`,
+  stale-generation, fragment-deny (validated metadata plus malformed classification/key-piece error),
+  alias ambiguity, and transport refusal. FORWARD-specific mandatory live cells are zone-pair policy
+  DENY/REJECT, DNAT/SNAT/NAT failure, NoRoute, route/disposition mismatch, queue/q0/MTU, NAT-T +
+  native, and multiple tunnels (including the same-zone overlap pair for D21 + M3). INPUT-specific
+  mandatory live cells are host-inbound deny, `junos-host` deny, product-NAT mutation E36,
+  `LocalDelivery`/non-local E20 guard, exact `CompletionInputReady` invalid/accepted/uncertain
+  outcomes, and the D12a-C1/C2 proof shapes. Scale spots remain 8/16/32 tunnels; a hook does not
+  claim a branch it cannot reach.
 - HA feasibility: RG-failover during P-MECH flows (standby imports `ForwardFlow`/`LocalMiss` via existing
   sync — D21; sessions survive per existing close-class/wheel semantics; capture runs primary-only per S4
   lifecycle). NOTE (honest): full split-brain/dual-active proof is out of V1 (r5 §12.6 residual 10 carries
@@ -1409,6 +1596,8 @@ touched (O-*/V-FLIP own those).
   claims are valid under delegated load (a coupled q0 refusal under flood must be proven within
   overload-shed budget, else DROP-and-count the coupled class per §3.5 item 2).
 
+
+### §5.5 Kill conditions
 
 - K-P1: any E-row unmappable or any terminal emission unmapped (§4.5 audit fails).
 - K-P2: any doubt arm permits (D16 matrix violation) in any test or live cell.
@@ -1433,28 +1622,80 @@ touched (O-*/V-FLIP own those).
   one CAS terminal and bounded expiry/reconciliation, or a worker crash causes blind rollback after
   a possible q0 write. The affected permit class is DROP-only until fixed; no leak or misdelivery
   is accepted.
+- K-P11: S4 does not prove a continuously present preemptive master/VRF fence matching every future
+  master, or the implementation treats pre-detection exposure as bounded by `T_census_max`; the
+  measured post-detection fence ACK exceeds `T_fence_ack_max=100ms` or is unmeasurable; or any
+  bypass permit exists while ownership/fence state is unresolved. Any such result is PLAN-KILL, not
+  a latency-tuning task. The validation cells in §5.4 must show preemptive-fence presence/future-master
+  coverage, detection→ACK measurement, and bypass-fence drops mapped to E34.
 
 ### §5.6 Mixed-version and rolling-upgrade procedure
 
 P-MECH's tunnel-row fields, `Ipsec(if_id)` discriminator tag, `CompletionInputReady` fields, and
 u8 deny-reason range are one wire contract. The current dataplane `ProtocolVersion` is 28
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:327`);
-the version/minimum floors at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:12-15` are extended atomically. Go and Rust versions are either
-lockstep-compatible (exact version and all P-MECH floors match) or they use this drain procedure:
+the P-MECH tunnel rows and protocol-floor/admit-reason definitions are mandatory at
+`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:343-389`.
+The Rust lockstep codec is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/protocol/control.rs`
+and `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/protocol/snapshot.rs`.
+Go and Rust are either lockstep-compatible (exact version, tunnel rows, and all P-MECH floors match)
+or they use this deny-only drain procedure:
 
-1. Fence new P-MECH capture admission and stop minting new permits on the retiring version.
-2. Drain every old-version descriptor to a terminal result under its old codec; a timeout or
-   missing worker is E24/E34 DROP-and-count, never a retry through the new decoder.
-3. Retire old worker-set generations and reclaim slabs/alias rows only after the drain witness is
-   complete. Bring up the new Rust workers, publish tunnel rows/reason map/discriminator floor, and
-   verify exact generation/protocol equality.
-4. Activate new capture queues only after the new snapshot and transit barrier are committed. HA
-   standby is upgraded/published first; failover is refused while either side lacks the new contract.
+1. Put the retiring side in deny-only mode: fence new P-MECH capture admission, stop minting permits,
+   and publish the retirement generation. Do not let a new decoder consume an old descriptor.
+2. Upgrade the HA standby FIRST by keeping its old Go/Rust binaries and codecs alive while it fences
+   new admission, drains every old-version descriptor under the old codec, and retires its old
+   worker-set generations/slabs/alias rows only after the drain witness. A timeout or missing worker
+   is E24/E34 DROP-and-count, never a retry through a new decoder.
+3. Replace the standby Go protocol mirror, Rust snapshot/control codec, `Ipsec(if_id)` discriminator,
+   tunnel rows, and closed reason map. Apply the new snapshot only after exact version/floor equality,
+   worker-set generation, and a standby fence/status witness; do not activate capture yet.
+4. Perform the same fence→old-codec drain→retire sequence on the active side, then upgrade/publish
+   the new codec, tunnel rows, reason map, and discriminator floor. Verify exact generation/protocol
+   equality and the new transit barrier on both sides before activating capture queues.
+5. For an unplanned failover, absent peer floors/tags or a missing equality witness sets
+   `failover_refused`, leaves the node fenced/deny-only, and forbids OPEN. A live status read must
+   show the new snapshot, tunnel-row floor, worker-set generation, and fence before activation.
+
+Downgrade/rollback is symmetric and never mixed-version: stop new admission, fence the new generation,
+drain all new descriptors under the new codec, retire its workers and aliases, then restore the old
+binary and old snapshot. Because the old side lacks P-MECH tunnel rows/reason fields, rollback remains
+deny-only until the old exact contract is proven; it MUST NOT consume a new tag or permit a P-MECH frame.
+If an old side receives a new HA session tag, its
+`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/session/discriminator.rs`
+decoder yields `WireDiscriminator::Unrecognized`/absent, maps to E33, and refuses import.
 
 Any mixed-version frame, unknown admit/reason/tag, missing tunnel row, or old descriptor arriving
 after the fence is E33 → DROP-and-count. There is no best-effort decode, default reason, or permit
 during a version mismatch. The drain/activation witness is a prerequisite to S9.7 permitted-flow
 claims; if it cannot be bounded, P-MECH remains deny-only or is PLAN-KILLED.
+### §5.7 Shadow-to-enforcing flip protocol
+
+Shadow is an **observational pass-through** phase, not deny-only: the existing Go call site
+`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:383-428` owns the baseline
+`finishFrame(frame, VerdictAccept)` for the held frame. The Rust shadow evaluator observes a bounded
+copy/result and cannot authorize, deny, or otherwise change that in-flight terminal. Install each
+generation in shadow with immutable `phase=Shadow`, generation, hook, tunnel-owner authorization, and
+permit epoch captured in every descriptor. Shadow carries no production lease, request ID, session/NAT/
+flow-cache/HA row, production counter, or verdict; its `would-drop`/divergence lives only in
+`ShadowLedger`. The bounded shadow transport is the one in D11/D12a, not the production verdict queue.
+`shadow_unavailable` therefore preserves the Go-owned ACCEPT baseline, exactly as §2.2/§2.6 require;
+it MUST NOT silently become enforcing or deny-only.
+
+Flip only after the shadow generation is quiesced and drained: `shadow_unavailable=0`, every required
+hook/tunnel has an owner-authorized shadow result, divergence is within the signed budget with no
+unknown reason, all §5.4 D12a-C1/C2 and M1–M4 cells are attached to the same generation, and the
+deny/event/counter witness has no loss. Publish a new generation with `phase=Enforcing`, atomically
+replace the quarantine/spec and permit epoch, then admit only descriptors stamped with that new phase.
+Pre-flip Shadow descriptors finish under the Go baseline pass-through; they are drained and never
+reinterpreted as enforcing.
+
+On any unavailable evaluator, isolation violation, budget breach, stale generation, missing owner
+authorization, or witness gap BEFORE the flip, remain in Shadow pass-through and retain
+`shadow_unavailable`/reason evidence. If the failure occurs AFTER Enforcing activation, fence the
+active permit epoch and atomically enter deny-only for a new generation; drain that phase, and never
+reopen the old epoch. There is no live V-FLIP claim until this protocol and its generation-scoped
+witness are proven; otherwise P-MECH remains observational Shadow or deny-only, or is PLAN-KILLED.
 
 ---
 
@@ -1548,7 +1789,7 @@ delta (`/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-ca
   §12 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-xfrm-capture/docs/pr/9506-xfrm-capture/plan.md:641-825`).
 
 ---
-
+| ZONE-JOIN | PlanRevA-A-P1, PlanRevB-B-P1 | **FIXED.** Rebuttal (A-P1): r2 removes raw `if_id`-only claiming. D1 joins same `if_id` only after `config.BindInterfaceOwnsRef` and marks duplicate/quarantined claims ambiguous; the ownership rule is grounded in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:227-285` and staging in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go:285-332`. |
 ## §B Design-input review steers (adopted; grounded above, not taken on authority)
 
 1. Worker-pipeline adjudication (not socket-thread mirrored evaluation): adopted as D6/D13 — grounded in
@@ -1564,20 +1805,47 @@ delta (`/home/ps/git/pi-xpf/.claude/worktrees/9506-reground/docs/pr/9506-xfrm-ca
 
 | Consolidated group | Reviewer IDs | r2 disposition and evidence |
 |---|---|---|
-| ZONE-JOIN | PlanRevA-A-P1, PlanRevB-B-P1 | **FIXED.** Rebuttal (A-P1): r2 removes raw `if_id`-only claiming. D1 joins same `if_id` only after `bindInterfaceOwnsRef` and marks duplicate/quarantined claims ambiguous; the ownership rule is grounded in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:227-285` and staging in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go:285-332`. |
+| ZONE-JOIN | PlanRevA-A-P1, PlanRevB-B-P1 | **FIXED.** Rebuttal (A-P1): r2 removes raw `if_id`-only claiming. D1 joins same `if_id` only after `config.BindInterfaceOwnsRef` and marks duplicate/quarantined claims ambiguous; the ownership rule is grounded in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/config/xfrmi.go:227-285` and staging in `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go:285-332`. |
+| LIVE-IFINDEX | PlanRevB-P1 | **FIXED / KILL-GATED.** Rebuttal: D1c makes the live-ifindex table immutable per capture generation, refuses delete/recreate/name reuse via generation mismatch, and tests T12; D1d separately refuses to claim pre-census safety and K-P11 requires a continuously present future-master fence plus measured post-detection ACK. |
 | FRAGMENTS | PlanRevA-A-P1 | **FIXED-SCOPE-CUT / KILL-GATED.** Rebuttal (A-P1): V1 refuses validated fragments before `FragPool` admission and never permits a fragmented datagram, so no partial emission or multi-original terminal protocol exists to get wrong. The design reuses `ClassifyCapturePayload`, `FragmentKey`, and `FragmentPiece`; malformed/uncertain pre-frame classification is counted and denied through the bounded `DenyEventSink`. A future fragment-permit contract is explicitly out of scope and would require the atomic batch/tombstone/canonical-L3 machinery before scope expansion. |
 | REVERSE | PlanRevA-A-P1, PlanRevB-B-P1 | **FIXED.** Rebuttal (A-P1/B-P1): r2 names a NEW cross-discriminator alias index with atomic construction, eviction/generation/scope checks, native `None` collision counting, bounded multiplicity, and T22 cases; it no longer claims existing reverse machinery solves this. Existing 1:N index evidence is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/session/mod.rs:29-39,1100-1106`; discriminator source is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/session/key.rs:42-81`. |
-| M3 | PlanRevA-A-P1, PlanRevB-B-P2 | **FIXED.** Rebuttal (A-P1/B-P2): r2 reconciles D21 with M3: snapshot-pinned prefix source, no-NAT overlap refusal, narrowly proven SNAT carve-out, commit revalidation, and E9 post-SNAT ambiguity. The four must-proves and kill polarity are explicit at §1.5/D5c (lines 271-294 in this document). |
+| M3 | PlanRevA-A-P1, PlanRevB-B-P2 | **FIXED.** Rebuttal (A-P1/B-P2): r2 reconciles D21 with M3: snapshot-pinned prefix source, no-NAT overlap refusal, narrowly proven SNAT carve-out, commit revalidation, and E9 post-SNAT ambiguity. The four must-proves and kill polarity are explicit at §1.5/D5c. |
 | WORKER | PlanRevA-A-P1, PlanRevB-B-P1 | **FIXED-CONTRACT / KILL-GATED.** Rebuttal (A-P1/B-P1): r2 adds worker-set generation, bounded queue/flow/slab caps, dead-worker orphan reaper, `ProvisionalJournal` CAS recovery for verdict-issued handles, and priced `Vec` allocation rather than a false no-allocation claim. Anchors: `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/logical_ingress.rs:79-85`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker_queue.rs:37-80`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker/loop_body/mod.rs:1-120`; K-P10 kills blind rollback/leak. |
 | SHADOW | PlanRevA-A-P1 | **FIXED-CONTRACT / KILL-GATED.** Rebuttal (A-P1): r2 gives an explicit `consumeFrames` call site and a separate bounded `ShadowFrame`/`EvaluationMode::Shadow` transport with no production session/NAT/flow-cache/HA/counter side effects. The call site is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:383-428`; K-P9 forces unavailable/disable or PLAN-KILL if isolation is not proven. |
 | DENY | PlanRevA-A-P2 (three findings) | **FIXED.** Rebuttal (A-P2): r2 replaces strings with a `u8` reason contract, allocates the legacy 5/6 values plus closed 32–60 range, maps Rust and Go terminals, and adds bounded `DenyEventSink` plus alarm/counter loss handling. The wire evidence is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/event_stream/codec/rt_flow.rs:100-104`, `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/event_emit.rs:12,138,279`; E1–E37 now include poison, ECN/parse, HA, ALG/policer, rollback, shutdown/handoff, submit-gate, pre-worker fragment refusal/classification error, evaluator unavailable, and policy-unavailable terminals. |
-| STAGES | PlanRevA-A-P2 | **FIXED-CONTRACT.** Rebuttal (A-P2): r2 corrects “screen first” to “first security stage after parse/decap,” requires discriminator/generation/policy-hash flow-cache validation, makes DNS fastpath FORWARD-only after identity/session checks, and makes Option-A INPUT DNS misses SKIP→E37. Actual worker anchors are `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:446,477-595,628-641,1720,2522,3300,4150,4171,5799`. |
+| STAGES | PlanRevA-A-P2 | **FIXED-CONTRACT.** Rebuttal (A-P2): r2 corrects “screen first” to “first security stage after parse/decap,” requires discriminator/generation/policy-hash flow-cache validation, makes the P-MECH DNS fastpath SKIP for both hooks (INPUT misses E37), and suppresses challenge/reply TX. Actual worker anchors are `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/poll_descriptor/mod.rs:446,628-641,1720-1738,2522,3296-3309,4150,4171,5799`. |
 | INPUT | PlanRevA-A-P2 | **FIXED.** Rebuttal (A-P2): r2 defines sink-skipping terminalization after supervisor NF_ACCEPT, exact zero-byte exemption only for `CompletionInputReady`, per-frame terminal identity, timeout uncertainty, and unlock-before-committer (`p.mu` never spans lease/sink). Supervisor authority is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_reinject_supervisor.go:602-656`; resolver state is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:707-746,848-904`. |
 | STAGING | PlanRevB-B-P2 | **FIXED.** Rebuttal (B-P2): r2 changes first-invalid fail-all to per-tunnel skip-mark-continue, alarm/counter, and empty-generation refusal. Existing all-or-nothing behavior is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_wiring_9506.go:285-332`; D1b is the replacement contract. |
-| UPGRADE | PlanRevB-B-P2 | **FIXED.** Rebuttal (B-P2): r2 adds §5.6 exact lockstep-or-drain rolling procedure, old descriptor drain, retired-generation fencing, standby-first publication, and mixed-version DROP; protocol base is `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go:12-15,327`. |
+| UPGRADE | PlanRevB-B-P2 | **FIXED.** Rebuttal (B-P2): r3 §5.6 adds mandatory Go/Rust lockstep codecs, protocol-floor/tunnel-row anchors, standby-first upgrade, old-descriptor drain, symmetric deny-only rollback, and `failover_refused` without peer floors/tags. |
 | SLICE | PlanRevA-A-P2 | **FIXED.** Rebuttal (A-P2): r2 names the actual worker poll file, the alias-index files, the deny bridge, the no-permits-before-S9.5 proof invariant, and corrected pre-worker fragment-refusal cells; no wildcard-only owner remains. Slice files/order are §5.2–§5.4 and actual worker loop `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/afxdp/worker/loop_body/mod.rs`. |
 | CITES | PlanRevA-A-P3 | **FIXED/REBUTTED.** Rebuttal (A-P3): drifted r1 claims are corrected in r2's D1, D11, D21, D22, §3.2, §4.1, §5.2, and §A anchors; every changed code claim names the master worktree and line range. The source/base statement is at `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/docs/pr/9506-xfrm-capture/pmech-design.md:7-13` and §A. |
 | D12a | PlanRevA-A-P2, PlanRevB-B-P2 | **FIXED/DECIDED.** Rebuttal (A-P2/B-P2): Option A is explicitly authorized only for stateless ICMP/ICMPv6/flowless shapes, with two proof cells; Option B is deferred; stateful INPUT remains E37. The exact boundary is D12a and the proof/kill gates are §5.3–§5.5. |
+
+### §B.2 r3 hostile-review closure matrix (25 findings → 21 consolidated items)
+
+| # | Consolidated finding | r3 disposition | Closed contract |
+|---:|---|---|---|
+| 1 | D1 ownership predicate | **FIXED.** Export `BindInterfaceOwnsRef`; config remains the single ownership authority. | §1.1/D1–D3; §5.2 |
+| 2 | M3 selector/route inventory | **FIXED / KILL-GATED.** S9.1 inventory is explicit selectors plus authored xfrmi connected/static routes; `ANY/ANY`, missing selectors, stale source, and overlap are refusal. | §1.5/D5c; E21/E22 |
+| 3 | Bounded deny/alarm owner | **FIXED.** One bounded `DenyEventSink` emits tuple-rich deny events and rate-limited `PMechAlarm`; sink loss is counted and never changes DROP. | §4.1–§4.2 |
+| 4 | Metric cardinality and cause split | **FIXED.** Closed reason labels only; no raw tunnel labels; session, alias, ALG, filter, policer, fragment, bypass, quarantine, and decode causes are separate. | §4.3–§4.4 |
+| 5 | Proof-cell completeness | **FIXED / KILL-GATED.** Fault-injection cells cover E1–E37; staging, tombstone, RuntimeView, quarantine, and fence cells are explicit; live cells are representative and hook-reachable. | §5.4–§5.5 |
+| 6 | VRF-master bypass exposure | **FIXED / PLAN-KILL IF UNPROVEN.** Preemptive future-master fence is required; census timing is not treated as safety; post-detection ACK is measured. | §1.1/D1d; K-P11 |
+| 7 | Live-ifindex/name reuse | **FIXED.** Immutable per-generation table plus T12 delete/recreate/name-reuse mismatch refusal. | §1.1/D1c; §5.4 |
+| 8 | D12a proof identity and dangling references | **FIXED.** D12a-C1 and D12a-C2 are the sole stable proof labels; stateful INPUT remains E37. | §1.6; §3.2; §5.4–§5.5 |
+| 9 | Missing tunnel-row wire admission | **FIXED.** Missing/unknown rows are E33 `ADMIT_TUNNEL_ROW_MISSING`, never a generation default. | §2.5/D15; E33 |
+| 10 | Worker stage order and fastpaths | **FIXED.** Parse→screen→decision-only flow-cache→session→ACK check→DNAT/NAT→route→route-eligible strict-SYN→policy→SNAT→install; DNS/challenge TX paths are suppressed or skipped. | §3.1–§3.2/D17 |
+| 11 | NoRoute/HAInactive/punt guards | **FIXED.** NoRoute, non-local INPUT, HAInactive, redirect, and punt-seed paths are explicit DROP guards with no alternate outlet. | §3.2; E19/E20/E34 |
+| 12 | Session lookup observability | **FIXED.** Lookup/poison/unavailable has its own `ipsec_inner_session_lookup_errors_total` and E8 event. | §4.3; E8 |
+| 13 | Reason decoder ownership | **FIXED.** `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/logging/ringbuf.go` owns closed reason decoding/severity mappings and lockstep tests; unknown bytes are E33/decode refusal. | §4.1; §5.2; E33 |
+| 14 | Partial staging and quarantine semantics | **FIXED / AVAILABILITY COST EXPLICIT.** Per-tunnel skip continues only to build metadata, then any skip installs atomic node-wide `QuarantineAll`; no old spec or permit remains. | §1.1/D1b; E3/E27/E2/E21 |
+| 15 | RuntimeView refresh interleaving | **FIXED.** Setup and poll tick load one immutable view; every stage binds `view_generation`, and refresh interleaving refuses. | §2.4/D13; §5.2; §5.4 |
+| 16 | Upgrade, downgrade, and failover | **FIXED / DENY-ONLY FALLBACK.** Mandatory Go/Rust codec lockstep, standby-first upgrade, old-descriptor drain, symmetric rollback, and `failover_refused` without peer floors/tags. | §5.2; §5.6 |
+| 17 | Shadow flip semantics | **FIXED.** Shadow is observational Go-owned ACCEPT pass-through with no production side effects; only a drained, evidenced generation may become enforcing. | §2.3/D10; §2.6; §5.7 |
+| 18 | M3 self-reference | **FIXED.** The design now points to §1.5/D5c rather than mutable document line numbers. | §1.5/D5c; §B.1 |
+| 19 | Fragment late/duplicate handling | **FIXED-SCOPE-CUT.** V1 denies all fragments with bounded generation tombstones; late/name-reuse and duplicate cells exist; no `FragPool` reassembly claim. | §3.6/D22; E30; §5.4 |
+| 20 | Protocol-floor implementation ownership | **FIXED.** Go `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/dataplane/userspace/protocol.go` and Rust `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/protocol/control.rs` + `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/userspace-dp/src/protocol/snapshot.rs` are mandatory, not conditional; floors anchor at the tunnel-row definitions. | §5.2; §5.6; E33 |
+| 21 | Alias replication failure | **FIXED.** Replication failure is an E10 terminal with `ipsec_inner_alias_replication_failures_total`; it is not folded into ambiguity or generic rollback. | §3.5/D21; §4.3; E10 |
 
 *(End of P-MECH mechanism design. G1/G2/G4 mechanisms are specified; G3 INPUT is authorized only for
 the proof-backed stateless Option A subset, while stateful INPUT remains E37 until Option B is proven.
