@@ -700,6 +700,9 @@ func addIpsecDivertMetadata(c *gnft.Conn, tbl *gnft.Table, spec IpsecDivertSpec)
 }
 
 func (in *netlinkInstaller) installIpsecQuarantineTableAtomic(spec IpsecDivertSpec, tableName string, priority gnft.ChainPriority) error {
+	if err := in.checkIpsecDivertNoRollback(spec); err != nil {
+		return err
+	}
 	c, err := in.newConn()
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)

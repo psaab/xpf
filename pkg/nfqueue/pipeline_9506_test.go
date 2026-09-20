@@ -109,6 +109,60 @@ func pipelineTestRegistry(t *testing.T) *OriginRegistry {
 	return &registry
 }
 
+type passZoneSnapshot9506 struct{}
+
+func (passZoneSnapshot9506) ResolveSTN(string) ZoneResolution {
+	return ZoneResolution{ZoneID: 1, IfID: 7, Reason: ZoneReasonZoned}
+}
+func (passZoneSnapshot9506) Generations() (uint64, uint32) { return 1, 1 }
+func (passZoneSnapshot9506) Current() bool                 { return true }
+
+type passZoneEvaluator9506 struct{}
+
+func (passZoneEvaluator9506) Evaluate(CaptureOrigin, ZoneSnapshotRef) ZoneEvaluation {
+	return ZoneEvaluation{Decision: ZonePass, ZoneID: 1, IfID: 7, Reason: ZoneReasonZoned}
+}
+
+func TestCapturePipelineRoutineV1SuppressionHasNoDenyEvent9506(t *testing.T) {
+	sink := new(pipelineTestSink)
+	denyEvents := 0
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:      pipelineTestRegistry(t),
+		Phase:         PipelineEnforcing,
+		Sink:          sink,
+		ZoneEvaluator: passZoneEvaluator9506{},
+		ZoneSnapshot:  passZoneSnapshot9506{},
+		DenyEvents: DenyEventSinkFunc(func(IpsecInnerDeny) bool {
+			denyEvents++
+			return true
+		}),
+		HandoffCap: 2,
+		BatchCap:   2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "routine-v1",
+		Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1,
+		FIBGeneration: 1, QueueNumber: 77, QueueEpoch: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("Drain=%d, want one frame", got)
+	}
+	if stats := p.Stats(); stats.V1PermitSuppressed != 1 {
+		t.Fatalf("stats=%+v, want one routine suppression", stats)
+	}
+	if denyEvents != 0 {
+		t.Fatalf("routine suppression emitted %d deny events, want none", denyEvents)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
+	}
+}
+
 func TestCapturePipelineOwnerHomogeneousPartition9506(t *testing.T) {
 	origin := func(owner string) CaptureOrigin {
 		return CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: owner, STN: "st0", OwnedIfindex: 7}

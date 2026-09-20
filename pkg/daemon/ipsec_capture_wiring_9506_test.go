@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +111,42 @@ func TestIpsecCaptureQueuePlanKeepsValidKeysAndQuarantinesSkips9506(t *testing.T
 	keys, err := ipsecCaptureQueueKeys(cfg, 7)
 	if err != nil || len(keys) != 8 {
 		t.Fatalf("queue key wrapper = %d/%v, want eight/nil", len(keys), err)
+	}
+}
+func TestBuildPMechZoneSnapshotMarksDuplicateBindsAmbiguous9506(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"vpn-a": {BindInterface: "st1.0"},
+		"vpn-b": {BindInterface: "st1.0"},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"zone-a": {Interfaces: []string{"st1.0"}},
+	}
+	snapshot := buildPMechZoneSnapshot(cfg, wiringHandles9506(), 4, 4)
+	resolution := snapshot.ResolveSTN("st1.0")
+	if resolution.Reason != nfqueue.ZoneReasonAmbiguous || resolution.ZoneID != 0 {
+		t.Fatalf("duplicate bind snapshot resolution=%+v, want ambiguous/zone=0", resolution)
+	}
+}
+
+func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
+	raw, err := os.ReadFile("ipsec_capture_wiring_9506.go")
+	if err != nil {
+		t.Fatalf("read wiring source: %v", err)
+	}
+	source := string(raw)
+	start := strings.Index(source, "actor, actorErr := NewIpsecCapturePipeline")
+	if start < 0 {
+		t.Fatal("staged actor construction not found")
+	}
+	end := strings.Index(source[start:], "\n\t})")
+	if end < 0 {
+		t.Fatal("staged actor config terminator not found")
+	}
+	config := source[start : start+end]
+	if !strings.Contains(config, "QueueEpochs: queueEpochs") ||
+		!strings.Contains(config, "Queues:      queues") {
+		t.Fatalf("staged actor config does not carry queue set: %s", config)
 	}
 }
 

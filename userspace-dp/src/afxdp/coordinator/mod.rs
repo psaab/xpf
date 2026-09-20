@@ -882,6 +882,20 @@ impl Coordinator {
         // nothing can name them again. Why all ids, and why this is not the
         // `dead`-keyed sweep, is on `retire_all_worker_holders`.
         self.retire_all_worker_holders();
+        // #9506: retire the outgoing D11 worker set before signalling worker
+        // threads. This drains ENQUEUED descriptors and fences new admits;
+        // WORKER_OWNED descriptors remain pinned until the corresponding
+        // worker join proves no late completion can touch their slabs.
+        let ipsec_inner_transport = self
+            .slow_path
+            .as_ref()
+            .map(|slow| slow.ipsec_inner_transport());
+        let ipsec_inner_worker_ids: Vec<u32> = self.workers.records().keys().copied().collect();
+        if let Some(transport) = ipsec_inner_transport.as_ref() {
+            for worker_id in &ipsec_inner_worker_ids {
+                let _ = transport.retire_worker(*worker_id);
+            }
+        }
         // #7209: ONE load bound to a local — two loads could straddle a store
         // and mix generations, and the local keeps the fds alive for the call.
         let maps = self.bpf_maps.load();
@@ -889,6 +903,11 @@ impl Coordinator {
             maps.map_fd.as_ref(),
             maps.heartbeat_map_fd.as_ref(),
         );
+        if let Some(transport) = ipsec_inner_transport.as_ref() {
+            for worker_id in &ipsec_inner_worker_ids {
+                let _ = transport.join_worker_after_termination(*worker_id);
+            }
+        }
         // #9560: every worker is now joined, so none can claim a steering row. Retire their
         // claims WITHOUT BPF deletes: those sessions died with their workers and their rows
         // linger unowned, as before #9560. The registry itself is kept, so an HA delete

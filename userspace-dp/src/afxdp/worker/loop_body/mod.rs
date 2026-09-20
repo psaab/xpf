@@ -737,11 +737,9 @@ pub(crate) fn worker_loop(
                         protocol: descriptor.protocol,
                         rel_l4_offset: descriptor.rel_l4_offset,
                         payload_offset: descriptor.payload_offset,
-                        logical_ifindex: view
-                            .ipsec_tunnel_rows()
-                            .exact(stn)
-                            .map(|row| row.logical_ifindex)
-                            .unwrap_or(0),
+                        // The Go owned_ifindex claim is untrusted; D14 compares
+                        // it against the authoritative tunnel-row identity.
+                        logical_ifindex: i32::try_from(descriptor.stn_ifindex).unwrap_or(0),
                         rx_queue_index: descriptor.rx_queue_index,
                         advisory: IpsecInnerAdvisory {
                             snapshot_generation: descriptor.snapshot_generation,

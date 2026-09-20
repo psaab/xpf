@@ -98,8 +98,9 @@ const (
 	CompletionDenied        CompletionOutcome = "denied"
 	CompletionAccepted      CompletionOutcome = "accepted"
 	CompletionWouldReinject CompletionOutcome = "would_reinject"
-	// Rust code 10 is a worker policy would-permit. V1 still closes the
-	// terminal q0 permit gate and records E28/byte 52 instead.
+	// Rust code 10 is a worker policy would-permit. The terminal completion
+	// maps that outcome to E28/byte 52 and records suppression; routine V1
+	// pre-submit suppression is deny-only and emits no E28 event.
 	CompletionWouldPermit CompletionOutcome = "would_permit"
 )
 
@@ -706,7 +707,6 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 			p.mu.Lock()
 			p.stats.V1PermitSuppressed++
 			p.mu.Unlock()
-			p.emitDeny(frame, ReasonEvaluatorUnavailable)
 			p.finishFrame(frame, VerdictDrop)
 		}
 	}

@@ -323,12 +323,24 @@ func TestIpsecQuarantineInstallRemoveRoundTripFake9506(t *testing.T) {
 	if err != nil || got != second {
 		t.Fatalf("fake restarted identity = %+v (err=%v), want %+v", got, err, second)
 	}
+	if err := in.InstallIpsecQuarantineGuard(firstSpec); err == nil {
+		t.Fatal("stale quarantine guard install unexpectedly replaced newer divert witness")
+	}
+	if state.hasTable(gnft.TableFamilyINet, IpsecQuarantineTableName) ||
+		state.hasTable(gnft.TableFamilyBridge, IpsecQuarantineTableName) {
+		t.Fatal("stale quarantine guard install left a partial guard table")
+	}
+	got, err = parseIpsecDivertIdentity([]byte(state.userdata[len(state.userdata)-1]))
+	if err != nil || got != second {
+		t.Fatalf("stale quarantine install changed active identity = %+v (err=%v), want %+v", got, err, second)
+	}
 	secondRemove, err := secondAllocator.Allocate()
 	if err != nil {
 		t.Fatalf("second remove identity allocation: %v", err)
 	}
 	if err := in.RemoveIpsecDivertWithIdentity9506(IpsecDivertRemovalIdentity9506{
-		Owner:     second,
+		Owner: second,
+
 		Operation: secondRemove,
 	}); err != nil {
 		t.Fatalf("fake quarantine remove (restarted run): %v", err)
@@ -336,6 +348,43 @@ func TestIpsecQuarantineInstallRemoveRoundTripFake9506(t *testing.T) {
 	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
 		if state.hasTable(family, IpsecDivertTableName) || state.hasTable(family, IpsecQuarantineTableName) {
 			t.Fatalf("family %v retained ipsec tables after restarted remove", family)
+		}
+	}
+}
+func TestIpsecDivertNilOwnerRemovalClearsForeignWitness9506(t *testing.T) {
+	state := newFakeIpsecNftState()
+	in := newNetlinkInstallerConn(func() (*gnft.Conn, error) {
+		return gnft.New(gnft.WithTestDial(state.dial))
+	})
+	allocator, err := NewIpsecDivertIdentityAllocator(filepath.Join(t.TempDir(), "identity"))
+	if err != nil {
+		t.Fatalf("identity allocator: %v", err)
+	}
+	owner, err := allocator.Allocate()
+	if err != nil {
+		t.Fatalf("owner identity: %v", err)
+	}
+	spec := IpsecDivertSpec{
+		QuarantineAll:   true,
+		RunID:           owner.RunID,
+		InstallSequence: owner.InstallSequence,
+		LabelSchema:     owner.LabelSchema,
+	}
+	if err := in.InstallIpsecDivert(spec); err != nil {
+		t.Fatalf("install foreign witness: %v", err)
+	}
+	operation, err := allocator.Allocate()
+	if err != nil {
+		t.Fatalf("operation identity: %v", err)
+	}
+	if err := in.RemoveIpsecDivertWithIdentity9506(IpsecDivertRemovalIdentity9506{
+		Operation: operation,
+	}); err != nil {
+		t.Fatalf("nil-owner removal: %v", err)
+	}
+	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
+		if state.hasTable(family, IpsecDivertTableName) || state.hasTable(family, IpsecQuarantineTableName) {
+			t.Fatalf("family %v retained table after nil-owner teardown", family)
 		}
 	}
 }
@@ -686,5 +735,41 @@ func TestIpsecDivertIdentityRejectsFutureSchema9506(t *testing.T) {
 	}
 	if _, err := parseIpsecDivertIdentity([]byte("run=current install_sequence=0 label_schema=v1")); err == nil {
 		t.Fatal("current metadata without sequence was accepted")
+	}
+}
+
+func TestIpsecDivertIdentityEmptyLegacyRoundTrip9506(t *testing.T) {
+	raw := formatIpsecDivertIdentity(IpsecDivertSpec{})
+	got, err := parseIpsecDivertIdentity(raw)
+	if err != nil {
+		t.Fatalf("empty identity metadata %q did not parse: %v", raw, err)
+	}
+	want := IpsecDivertIdentity{RunID: "unassigned"}
+	if got != want || !got.legacy() {
+		t.Fatalf("empty identity = %+v, want legacy %+v", got, want)
+	}
+	formatted := formatIpsecDivertIdentity(IpsecDivertSpec{
+		RunID:           got.RunID,
+		InstallSequence: got.InstallSequence,
+		LabelSchema:     got.LabelSchema,
+	})
+	again, err := parseIpsecDivertIdentity(formatted)
+	if err != nil || again != got {
+		t.Fatalf("legacy round-trip = %+v/%v, want %+v", again, err, got)
+	}
+}
+
+func TestIpsecDivertIdentitySchemaLessLegacyRoundTrip9506(t *testing.T) {
+	raw := []byte("run=unassigned generation=9 primary=unknown raw_reason=0 mask=0x00000000 raw_mask=0x00000000")
+	got, err := parseIpsecDivertIdentity(raw)
+	if err != nil {
+		t.Fatalf("schema-less legacy metadata did not parse: %v", err)
+	}
+	formatted := formatIpsecDivertIdentity(IpsecDivertSpec{
+		RunID: got.RunID, InstallSequence: got.InstallSequence, LabelSchema: got.LabelSchema,
+	})
+	again, err := parseIpsecDivertIdentity(formatted)
+	if err != nil || again != got {
+		t.Fatalf("schema-less legacy round-trip = %+v/%v, want %+v", again, err, got)
 	}
 }

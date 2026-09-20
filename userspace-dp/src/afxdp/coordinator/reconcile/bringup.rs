@@ -239,6 +239,7 @@ pub(super) fn bring_up_workers(
                 // typed bind-incomplete identity is recorded once, after the
                 // teardown, and survives.
                 coord.stop_inner(false);
+                record_bind_failure_causes(coord, &stage);
                 // #8558: `stop_inner` above emptied `workers.live`, which is
                 // what makes `refresh_bindings` route every slot through
                 // `zero_unbound_slot` and erase the per-slot `last_error` the

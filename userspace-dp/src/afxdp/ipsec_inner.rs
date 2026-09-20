@@ -511,6 +511,33 @@ mod tests {
     }
 
     #[test]
+    fn d14_input_logical_ifindex_mismatch_is_ifid_underivable() {
+        let mut forwarding = ForwardingState::default();
+        forwarding.ifindex_to_zone_id.insert(10, 1);
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let v = view_with_rows(1, 1, rows, forwarding);
+        let mut claimed = input(
+            &[0x45; 20],
+            IpsecInnerAdvisory {
+                snapshot_generation: 1,
+                config_generation: 1,
+                fib_generation: 1,
+                zone_id: 1,
+                if_id: 1,
+            },
+        );
+        claimed.logical_ifindex = 11;
+        assert_eq!(
+            adjudicate_ipsec_inner(&v, claimed).reason(),
+            Some(reason::IFID_UNDERIVABLE)
+        );
+    }
+
+    #[test]
     fn d14_advisory_zone_and_ifid_mismatch_drop() {
         let mut forwarding = ForwardingState::default();
         forwarding.ifindex_to_zone_id.insert(10, 1);

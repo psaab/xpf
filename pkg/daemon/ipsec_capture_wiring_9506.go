@@ -245,6 +245,12 @@ func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, gene
 		if ifID == 0 {
 			continue
 		}
+		binds := seenBind[ifID]
+		if binds == nil {
+			binds = make(map[string]struct{})
+			seenBind[ifID] = binds
+		}
+		binds[vpnName] = struct{}{}
 		owned := uint16(0)
 		claimSeen := false
 		ambiguous := false
@@ -785,6 +791,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		Supervisor:  d.ipsecS4,
 		Registry:    registry,
 		QueueEpochs: queueEpochs,
+		Queues:      queues,
 		RunID:       runID,
 		Pipeline: nfqueue.CapturePipelineConfig{
 			Phase:          nfqueue.PipelineEnforcing,

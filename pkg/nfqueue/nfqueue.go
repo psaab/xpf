@@ -487,6 +487,10 @@ func (p *Packet) Verdict(v Verdict) error {
 		q.verdictUncertain.Add(1)
 		q.verdictErrors.Add(1)
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			// MSG_DONTWAIT reports local backpressure before the verdict
+			// datagram is accepted. Release the terminal reservation so the
+			// caller can retry; other send errors remain terminal-but-uncertain.
+			p.done.CompareAndSwap(true, false)
 			return fmt.Errorf("%w: verdict %s id=%d: %w", ErrVerdictTimeout, v, p.id, err)
 		}
 		return fmt.Errorf("nfqueue: verdict %s id=%d: %w", v, p.id, err)

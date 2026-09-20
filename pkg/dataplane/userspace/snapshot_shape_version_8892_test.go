@@ -360,7 +360,9 @@ const (
 	// without a snapshot-shape change so exact equality refuses that pairing.
 	// v27 -> v28 BUMPED (#9506 S5): permit_epoch and queue_epochs are real
 	// transmitted authority fields; an old helper would use stale q0 ownership.
-	snapshotShapeVersion8892 = 28
+	// v28 -> v29 BUMPED (#9506 P-MECH): IPsec tunnel-row identity carries
+	// the D14 authoritative stn/if_id/logical_ifindex fence.
+	snapshotShapeVersion8892 = 29
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

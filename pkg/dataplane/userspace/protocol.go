@@ -321,10 +321,14 @@ const (
 	// delegation for capped NoRoute frames; v27 adjudicates them and drops a
 	// policy denial. Exact equality must refuse the mixed pairing or an old
 	// helper preserves the #9054 security bypass.
-	// v27 -> v28 (#9506 S5): `permit_epoch` and `queue_epochs` carry the
-	// epoch-scoped q0 capture authority. An older helper would ignore those
+	// v27 -> v28 (#9506 S5): `permit_epoch` and `queue_epochs` carry
+	// the epoch-scoped q0 capture authority. An older helper would ignore those
 	// fields and admit/reject against stale queue ownership.
-	ProtocolVersion = 28
+	// v28 -> v29 (#9506 P-MECH): IPsec tunnel-row identity carries the
+	// authoritative `{stn, if_id, logical_ifindex}` D14 fence. An older helper
+	// would omit the row contract and let the Rust worker pair a claimed
+	// tunnel with an untrusted or stale snapshot.
+	ProtocolVersion = 29
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

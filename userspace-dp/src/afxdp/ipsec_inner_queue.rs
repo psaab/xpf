@@ -938,16 +938,6 @@ impl IpsecInnerRouter {
         self.release_locked(&mut inflight, flow_tag);
     }
 
-    /// Bounded producer rollback. Queue admission failure must not wait for
-    /// the terminal drain's mutex; a failed try leaves the reservation for a
-    /// caller that can retry the rollback from a non-hot path.
-    pub(crate) fn try_release(&self, flow_tag: u64) -> bool {
-        let Ok(mut inflight) = self.inflight_by_flow.try_lock() else {
-            return false;
-        };
-        self.release_locked(&mut inflight, flow_tag);
-        true
-    }
 
     fn release_locked(&self, inflight: &mut HashMap<u64, u32>, flow_tag: u64) {
         match inflight.get_mut(&flow_tag) {
@@ -1029,10 +1019,8 @@ impl IpsecInnerTombstones {
         true
     }
 
-    fn try_remove(&self, request_id: u64) {
-        let Ok(mut entries) = self.entries.try_lock() else {
-            return;
-        };
+    fn remove(&self, request_id: u64) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(index) = entries.iter().position(|(id, _)| *id == request_id) {
             entries.swap_remove(index);
         }
@@ -1175,7 +1163,7 @@ impl IpsecInnerWorkerTransport {
             .tombstones
             .try_insert(desc.request_id, desc.worker_set_generation)
         {
-            self.router.try_release(desc.flow_tag);
+            self.router.release(desc.flow_tag);
             self.pool.force_release(desc.slab_id);
             return Err(reason::LEASE_EPOCH);
         }
@@ -1188,21 +1176,20 @@ impl IpsecInnerWorkerTransport {
             .ok()
             .and_then(|queues| queues.get(&worker).cloned())
         else {
-            self.tombstones.try_remove(request_id);
-            self.router.try_release(flow_tag);
+            self.tombstones.remove(request_id);
+            self.router.release(flow_tag);
             self.pool.force_release(slab_id);
             return Err(reason::WORKER_QUEUE_FULL);
         };
         if queue.try_enqueue(desc).is_err() {
-            self.tombstones.try_remove(request_id);
-            self.router.try_release(flow_tag);
+            self.tombstones.remove(request_id);
+            self.router.release(flow_tag);
             // The queue owns no reference after a failed enqueue.
             self.pool.force_release(slab_id);
             return Err(reason::WORKER_QUEUE_FULL);
         }
         Ok(worker)
     }
-
     /// Drain one worker's bounded ingress prefix into its reusable double
     /// batch and transfer each descriptor's hazard from ENQUEUED to
     /// WORKER_OWNED. This is the worker-side join point.
@@ -1569,6 +1556,49 @@ mod tests {
         assert_eq!(
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
             1
+        );
+    }
+
+    #[test]
+    fn admission_queue_full_rolls_back_flow_and_tombstone() {
+        let transport = IpsecInnerWorkerTransport::new([0]);
+        let pool = transport.pool().clone();
+        let generation = transport.authority().generation();
+        for request_id in 1..=IPSEC_INNER_QUEUE_DEPTH as u64 {
+            let slab_id = pool.acquire().expect("admission slab");
+            let mut desc = test_desc(request_id, slab_id);
+            desc.flow_tag = request_id;
+            desc.worker_set_generation = generation;
+            assert_eq!(transport.admit_descriptor(desc), Ok(0));
+        }
+
+        let refused_id = IPSEC_INNER_QUEUE_DEPTH as u64 + 1;
+        let refused_flow = 900_000;
+        let slab_id = pool.acquire().expect("refused admission slab");
+        let mut refused = test_desc(refused_id, slab_id);
+        refused.flow_tag = refused_flow;
+        refused.worker_set_generation = generation;
+        assert_eq!(
+            transport.admit_descriptor(refused),
+            Err(reason::WORKER_QUEUE_FULL)
+        );
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP - IPSEC_INNER_QUEUE_DEPTH);
+        assert!(
+            !transport
+                .tombstones
+                .entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|(request_id, _)| *request_id == refused_id)
+        );
+        assert!(
+            !transport
+                .router
+                .inflight_by_flow
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&refused_flow)
         );
     }
 

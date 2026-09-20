@@ -208,22 +208,28 @@ func newIpsecDivertRunID9506() string {
 	return fmt.Sprintf("xpfd-entropy-unavailable-%d-%d", os.Getpid(), time.Now().UnixNano())
 }
 
-// formatIpsecDivertIdentity renders the metadata witness. Empty identity
-// fields are retained as an explicit unassigned witness for legacy/unit-only
-// callers; daemon production paths always provide a durable identity.
+// formatIpsecDivertIdentity renders the metadata witness. A completely empty
+// identity is emitted in the schema-less legacy shape so its round-trip remains
+// parseable; daemon production paths always provide a durable identity.
 func formatIpsecDivertIdentity(spec IpsecDivertSpec) []byte {
 	runID := spec.RunID
 	if runID == "" {
 		runID = "unassigned"
 	}
+	metadata := fmt.Sprintf("run=%s generation=%d primary=%s raw_reason=%d mask=0x%08x raw_mask=0x%08x",
+		runID, spec.QuarantineGeneration,
+		spec.QuarantinePrimaryReason.String(), uint8(spec.QuarantineRawReason),
+		uint32(spec.QuarantineReasonMask), uint32(spec.QuarantineRawMask))
+	if spec.InstallSequence == 0 && spec.LabelSchema == "" &&
+		(spec.RunID == "" || spec.RunID == "unassigned") {
+		return []byte(metadata)
+	}
 	schema := spec.LabelSchema
 	if schema == "" {
 		schema = IpsecDivertLabelSchema9506
 	}
-	return []byte(fmt.Sprintf("run=%s install_sequence=%d label_schema=%s generation=%d primary=%s raw_reason=%d mask=0x%08x raw_mask=0x%08x",
-		runID, spec.InstallSequence, schema, spec.QuarantineGeneration,
-		spec.QuarantinePrimaryReason.String(), uint8(spec.QuarantineRawReason),
-		uint32(spec.QuarantineReasonMask), uint32(spec.QuarantineRawMask)))
+	return []byte(fmt.Sprintf("run=%s install_sequence=%d label_schema=%s %s",
+		runID, spec.InstallSequence, schema, metadata[len("run="+runID+" "):]))
 }
 
 // parseIpsecDivertIdentity parses both the current install_sequence key and
@@ -415,6 +421,9 @@ func (in *netlinkInstaller) removeIpsecDivertWithIdentityUnlocked9506(req IpsecD
 	if err := req.Operation.valid(); err != nil {
 		return err
 	}
+	ownerSpecified := req.Owner.RunID != "" ||
+		req.Owner.InstallSequence != 0 ||
+		req.Owner.LabelSchema != ""
 	for _, tableName := range []string{IpsecDivertTableName, IpsecQuarantineTableName} {
 		identities, tables, err := in.readIpsecDivertIdentities9506(tableName)
 		if err != nil {
@@ -430,9 +439,9 @@ func (in *netlinkInstaller) removeIpsecDivertWithIdentityUnlocked9506(req IpsecD
 			if have.stale() {
 				continue
 			}
-			if req.Owner.RunID == "" || req.Owner.InstallSequence == 0 || req.Owner.LabelSchema == "" ||
+			if ownerSpecified && (req.Owner.RunID == "" || req.Owner.InstallSequence == 0 || req.Owner.LabelSchema == "" ||
 				have.RunID != req.Owner.RunID || have.InstallSequence != req.Owner.InstallSequence ||
-				have.LabelSchema != req.Owner.LabelSchema {
+				have.LabelSchema != req.Owner.LabelSchema) {
 				return fmt.Errorf("ipsec divert: remove owner mismatch in %s (active run=%s sequence=%d, requested run=%s sequence=%d)",
 					tableName, have.RunID, have.InstallSequence, req.Owner.RunID, req.Owner.InstallSequence)
 			}
