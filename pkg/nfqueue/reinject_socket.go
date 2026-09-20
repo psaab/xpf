@@ -28,6 +28,9 @@ const (
 	reinjectOriginBridge   = 2
 	reinjectOriginForward  = 1
 	reinjectOriginInput    = 2
+	// P-MECH submit advisory tail: snapshot generation, config generation,
+	// FIB generation, zone ID, and authoritative interface ID.
+	reinjectSubmitPMechTailLen = 26
 )
 
 // ReinjectQueueEpoch is the allocator identity the Rust authority accepts for
@@ -330,7 +333,7 @@ func encodeAnnounce(runID string, generation, permitEpoch uint64, permitOpen boo
 }
 
 func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
-	out := make([]byte, 2, 2+len(frames)*128)
+	out := make([]byte, 2, 2+len(frames)*(128+reinjectSubmitPMechTailLen))
 	binary.BigEndian.PutUint16(out, uint16(len(frames)))
 	for _, item := range frames {
 		if item.Frame.Packet == nil {
@@ -364,6 +367,13 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 		out = append(out, stn...)
 		putU32(&out, uint32(len(data)))
 		out = append(out, data...)
+		// Keep this tail after data: Rust's strict decoder uses the exact
+		// data length and 26-byte advisory suffix as the frame boundary.
+		putU64(&out, item.Frame.SnapshotGeneration)
+		putU64(&out, item.Frame.ConfigGeneration)
+		putU32(&out, item.Frame.FIBGeneration)
+		putU16(&out, item.ZoneID)
+		putU32(&out, item.IfID)
 	}
 	return out, nil
 }
@@ -425,9 +435,9 @@ func decodeAdmissions(payload []byte) ([]ReinjectAdmission, error) {
 			Hook:         payload[off+27],
 			OwnedIfindex: binary.BigEndian.Uint32(payload[off+28 : off+32]),
 			Admitted:     payload[off+32] == 1,
+			ReasonCode:   payload[off+33],
 		}
-		reason := payload[off+33]
-		row.Reason = fmt.Sprintf("reason-%d", reason)
+		row.Reason = fmt.Sprintf("reason-%d", row.ReasonCode)
 		out = append(out, row)
 		off += 34
 	}
@@ -494,6 +504,8 @@ func decodeOutcome(code byte) CompletionOutcome {
 		return CompletionAccepted
 	case 9:
 		return CompletionWouldReinject
+	case 10:
+		return CompletionWouldPermit
 	default:
 		return ""
 	}

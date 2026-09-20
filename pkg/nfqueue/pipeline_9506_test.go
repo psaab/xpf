@@ -218,26 +218,26 @@ func TestCapturePipelineScopedCancelKeepsOtherQueueLive9506(t *testing.T) {
 	if got := p.Drain(4); got != 2 {
 		t.Fatalf("Drain=%d, want 2", got)
 	}
-	if len(submitter.submitted) != 1 || submitter.submitted[0].Lease.QueueNumber != 77 {
-		t.Fatalf("initial submission=%+v, want queue 77 head", submitter.submitted)
+	if len(submitter.submitted) != 0 || len(submitter.cancelled) != 0 {
+		t.Fatalf("fail-closed gate submitted=%+v cancelled=%v, want no reinject activity", submitter.submitted, submitter.cancelled)
+	}
+	stats := p.Stats()
+	if stats.ZoneGateUnavailable != 2 || stats.ZoneGateDrops != 2 {
+		t.Fatalf("stats=%+v, want two unavailable zone-gate drops", stats)
+	}
+	if len(sink.verdicts) != 2 {
+		t.Fatalf("verdicts=%+v, want both frames terminal", sink.verdicts)
+	}
+	for _, verdict := range sink.verdicts {
+		if verdict.v != VerdictDrop {
+			t.Fatalf("verdicts=%+v, want only DROP", sink.verdicts)
+		}
 	}
 	if err := p.Cancel(1, 77, 10); err != nil {
 		t.Fatalf("scoped Cancel: %v", err)
 	}
-	if len(sink.verdicts) != 1 || sink.verdicts[0].id != 77 || sink.verdicts[0].v != VerdictDrop {
-		t.Fatalf("scoped verdicts=%+v, want queue 77 DROP", sink.verdicts)
-	}
-	if len(submitter.submitted) != 2 || submitter.submitted[1].Lease.QueueNumber != 78 {
-		t.Fatalf("tail submission=%+v, want queue 78 after scoped cancel", submitter.submitted)
-	}
-	if len(p.pending) != 1 {
-		t.Fatalf("pending=%d, want unrelated queue 78 retained", len(p.pending))
-	}
-	if err := p.Cancel(0, 0, 0); err != nil {
-		t.Fatalf("global cleanup Cancel: %v", err)
-	}
-	if len(sink.verdicts) != 2 || sink.verdicts[1].id != 78 || sink.verdicts[1].v != VerdictDrop {
-		t.Fatalf("cleanup verdicts=%+v, want queue 78 DROP", sink.verdicts)
+	if len(sink.verdicts) != 2 {
+		t.Fatalf("scoped cancel changed terminal verdicts=%+v", sink.verdicts)
 	}
 }
 
@@ -293,14 +293,14 @@ func TestCapturePipelineAdmittedEchoMismatchCancelsUncertain9506(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := p.Drain(1); got != 1 {
-		t.Fatalf("Drain=%d, want one submitted frame", got)
+		t.Fatalf("Drain=%d, want one terminal frame", got)
 	}
-	if len(submitter.cancelled) != 1 || submitter.cancelled[0] != 1 {
-		t.Fatalf("cancelled=%v, want request 1 after positive echo mismatch", submitter.cancelled)
+	if len(submitter.submitted) != 0 || len(submitter.cancelled) != 0 {
+		t.Fatalf("fail-closed gate submitted=%+v cancelled=%v, want no reinject activity", submitter.submitted, submitter.cancelled)
 	}
 	stats := p.Stats()
-	if stats.AdmissionsRefused != 0 || stats.Uncertain != 1 {
-		t.Fatalf("stats=%+v, want uncertain mismatch rather than refusal", stats)
+	if stats.ZoneGateUnavailable != 1 || stats.ZoneGateDrops != 1 {
+		t.Fatalf("stats=%+v, want one unavailable zone-gate drop", stats)
 	}
 	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
 		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)

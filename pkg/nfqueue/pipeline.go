@@ -69,6 +69,7 @@ type ReinjectAdmission struct {
 	OwnedIfindex uint32
 	Admitted     bool
 	Reason       string
+	ReasonCode   uint8
 }
 
 // ReinjectCompletion is the terminal q0 result. Epoch and queue-number fields
@@ -97,6 +98,9 @@ const (
 	CompletionDenied        CompletionOutcome = "denied"
 	CompletionAccepted      CompletionOutcome = "accepted"
 	CompletionWouldReinject CompletionOutcome = "would_reinject"
+	// Rust code 10 is a worker policy would-permit. V1 still closes the
+	// terminal q0 permit gate and records E28/byte 52 instead.
+	CompletionWouldPermit CompletionOutcome = "would_permit"
 )
 
 // ReinjectSubmitter is the data-plane handoff seam. The concrete two-socket
@@ -122,10 +126,10 @@ func (f packetVerdictSinkFunc) Verdict(packet *Packet, verdict Verdict) error {
 }
 
 type CaptureFrame struct {
-	Packet      *Packet
-	FlowKey     string
-	FragmentKey *FragmentKey
-	Fragment    *Fragment
+	Packet       *Packet
+	FlowKey      string
+	FragmentKey  *FragmentKey
+	Fragment     *Fragment
 	InnerOverlap bool
 	// The four identities are captured at receive time and must all match the
 	// immutable zone snapshot before an enforcing decision is considered.
@@ -149,11 +153,9 @@ type AdjudicatedFrame struct {
 	Frame  CaptureFrame
 	Origin CaptureOrigin
 	Lease  ReinjectLease
+	ZoneID uint16
+	IfID   uint32
 }
-
-// InputPermitCommitter is intentionally not part of the V1 deny-only path.
-// It is added with the D12a Option-A permit slice in S9.5.
-type InputPermitCommitter interface{}
 
 // CapturePipelineConfig controls all bounded resources and the P-MECH
 // pre-gate. The enforcing phase is fail-closed when the evaluator/snapshot
@@ -178,46 +180,46 @@ type CapturePipelineConfig struct {
 }
 
 var (
-	ErrHandoffFull    = errors.New("nfqueue: capture handoff capacity exceeded")
-	ErrPipelineClosed = errors.New("nfqueue: capture pipeline closed")
-	ErrNoSubmitter    = errors.New("nfqueue: adjudication submitter unavailable")
-	ErrNoLeaseMinter  = errors.New("nfqueue: adjudication lease minter unavailable")
+	ErrHandoffFull     = errors.New("nfqueue: capture handoff capacity exceeded")
+	ErrPipelineClosed  = errors.New("nfqueue: capture pipeline closed")
+	ErrNoSubmitter     = errors.New("nfqueue: adjudication submitter unavailable")
+	ErrNoLeaseMinter   = errors.New("nfqueue: adjudication lease minter unavailable")
 	ErrNoZoneEvaluator = errors.New("nfqueue: zone evaluator unavailable")
 )
 
 // PipelineStats is a monotonic snapshot of fail-closed pipeline accounting.
 type PipelineStats struct {
-	HandoffRefusals      uint64
-	ProvenanceMismatches uint64
-	ShadowDivergences    uint64
-	ShadowUnavailable    uint64
-	ZoneGateDrops        uint64
-	ZoneGateUnavailable  uint64
-	ZoneGateStale        uint64
-	ZoneDivergences      uint64
-	V1PermitSuppressed   uint64
-	ClassificationErrors uint64
+	HandoffRefusals        uint64
+	ProvenanceMismatches   uint64
+	ShadowDivergences      uint64
+	ShadowUnavailable      uint64
+	ZoneGateDrops          uint64
+	ZoneGateUnavailable    uint64
+	ZoneGateStale          uint64
+	ZoneDivergences        uint64
+	V1PermitSuppressed     uint64
+	ClassificationErrors   uint64
 	FragmentMetadataErrors uint64
-	FragmentLate         uint64
-	VersionSkews         uint64
-	EventDecodeErrors    uint64
-	InputAcceptErrors    uint64
-	Dropped              uint64
-	Accepted             uint64
-	Submitted            uint64
-	AdmissionsRefused    uint64
-	Stale                uint64
-	Cancelled            uint64
-	Refused              uint64
-	Uncertain            uint64
-	Written              uint64
-	Timeouts             uint64
-	LateCompletions      uint64
-	FlowRetires          uint64
-	Retries              uint64
-	L2Unsupported        uint64
-	OverlapRefusals      uint64
-	FragmentDrops        uint64
+	FragmentLate           uint64
+	VersionSkews           uint64
+	EventDecodeErrors      uint64
+	InputAcceptErrors      uint64
+	Dropped                uint64
+	Accepted               uint64
+	Submitted              uint64
+	AdmissionsRefused      uint64
+	Stale                  uint64
+	Cancelled              uint64
+	Refused                uint64
+	Uncertain              uint64
+	Written                uint64
+	Timeouts               uint64
+	LateCompletions        uint64
+	FlowRetires            uint64
+	Retries                uint64
+	L2Unsupported          uint64
+	OverlapRefusals        uint64
+	FragmentDrops          uint64
 	// #10478 Phase 2a witness: drained from the bounded handoff into pipeline
 	// accounting (all receive-time dispositions).
 	Consumed uint64
@@ -274,7 +276,6 @@ type CapturePipeline struct {
 	stats            pipelineStats
 }
 
-
 // NewCapturePipeline constructs a pipeline with explicit bounded resources.
 func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	if cfg.Registry == nil {
@@ -319,7 +320,7 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 		submitter: cfg.Submitter, sink: cfg.Sink, onUncertain: cfg.OnUncertain,
 		zoneEvaluator: cfg.ZoneEvaluator, zoneSnapshot: cfg.ZoneSnapshot,
 		denyEvents: cfg.DenyEvents,
-		handoff: make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
+		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
 		ackDeadline: cfg.AckDeadline, fragmentDeadline: cfg.FragmentDeadline, fragPool: fragPool,
 		fragHolds: make(map[FragmentKey][]CaptureFrame), fragTimes: make(map[FragmentKey]time.Time),
 		flows: make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
@@ -566,9 +567,13 @@ func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) 
 	if p == nil || p.denyEvents == nil || !reason.Valid() {
 		return
 	}
+	queueID := uint16(0)
+	if frame.Packet != nil {
+		queueID = frame.Packet.QueueID()
+	}
 	_ = p.denyEvents.EmitIpsecInnerDeny(IpsecInnerDeny{
 		Reason: reason, Origin: frame.origin, OriginSet: frame.originSet,
-		QueueID: frame.Packet.QueueID(), Tunnel: frame.origin.STN,
+		QueueID: queueID, Tunnel: frame.origin.STN,
 		Generation: frame.Generation,
 	})
 }
@@ -695,17 +700,16 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 				p.finishFrame(frame, VerdictDrop)
 				continue
 			}
-			// V1 is deliberately deny-only. A valid Go pre-gate result is
-			// observable evidence of a would-permit, not permission to mint a
-			// lease; S9.5 removes this suppression after the worker verdict/q0
-			// join and M1/M2 proofs land.
+			// V1 stays pre-submit deny-only until the Rust D11 worker/verdict
+			// join is wired into the reinject server. Sending flags=0 here
+			// would reach the legacy delegated writer without S9 adjudication.
 			p.mu.Lock()
 			p.stats.V1PermitSuppressed++
 			p.mu.Unlock()
 			p.emitDeny(frame, ReasonEvaluatorUnavailable)
 			p.finishFrame(frame, VerdictDrop)
 		}
-}
+	}
 }
 
 func (p *CapturePipeline) lease(frame CaptureFrame) (ReinjectLease, error) {
@@ -933,6 +937,8 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		completion.QueueEpoch != pending.lease.QueueEpoch
 	bytesMismatch := completion.Outcome == CompletionWritten &&
 		completion.BytesWritten != uint32(len(pending.frame.Packet.Payload()))
+	wouldPermit := completion.Outcome == CompletionWouldPermit &&
+		!identityMismatch && !bytesMismatch
 	outcomeUncertain := completion.Outcome == CompletionUncertain ||
 		completion.Outcome == CompletionAccepted ||
 		completion.Outcome == CompletionWouldReinject
@@ -953,6 +959,8 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 			p.stats.Cancelled++
 		case CompletionRefused, CompletionDenied:
 			p.stats.Refused++
+		case CompletionWouldPermit:
+			p.stats.V1PermitSuppressed++
 		default:
 			p.stats.Uncertain++
 		}
@@ -968,6 +976,11 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		p.uncertain(reason)
 		p.finishFrame(pending.frame, VerdictDrop)
 		p.retireFlow(pending.frame.FlowKey)
+		return true
+	}
+	if wouldPermit {
+		p.emitDeny(pending.frame, ReasonEvaluatorUnavailable)
+		p.finishFrame(pending.frame, VerdictDrop)
 		return true
 	}
 	p.finishFrame(pending.frame, VerdictDrop)
@@ -1140,7 +1153,7 @@ func (p *CapturePipeline) Stats() PipelineStats {
 	defer p.mu.Unlock()
 	return p.stats.PipelineStats
 }
- 
+
 // ZoneDecision is the Go pre-gate outcome. ZonePass means only that the
 // frame may be sent to the authoritative worker; it is never a permit.
 type ZoneDecision uint8
@@ -1167,15 +1180,15 @@ const (
 
 type ZoneResolution struct {
 	ZoneID uint16
-	IfID uint32
+	IfID   uint32
 	Reason ZoneReason
 }
 
 type ZoneEvaluation struct {
 	Decision ZoneDecision
-	ZoneID uint16
-	IfID uint32
-	Reason ZoneReason
+	ZoneID   uint16
+	IfID     uint32
+	Reason   ZoneReason
 }
 
 type ZoneSnapshotRef interface {
@@ -1259,37 +1272,37 @@ func ValidateZoneEvaluation(e ZoneEvaluation) ZoneReason {
 type IpsecInnerReason uint8
 
 const (
-	ReasonLegacyPolicyDeny IpsecInnerReason = 5
-	ReasonLegacyHostDeny IpsecInnerReason = 6
-	ReasonZoneUnzoned IpsecInnerReason = 32
-	ReasonZoneAmbiguous IpsecInnerReason = 33
-	ReasonIfIDUnderivable IpsecInnerReason = 34
-	ReasonStaleGeneration IpsecInnerReason = 35
-	ReasonMissingGeneration IpsecInnerReason = 36
+	ReasonLegacyPolicyDeny     IpsecInnerReason = 5
+	ReasonLegacyHostDeny       IpsecInnerReason = 6
+	ReasonZoneUnzoned          IpsecInnerReason = 32
+	ReasonZoneAmbiguous        IpsecInnerReason = 33
+	ReasonIfIDUnderivable      IpsecInnerReason = 34
+	ReasonStaleGeneration      IpsecInnerReason = 35
+	ReasonMissingGeneration    IpsecInnerReason = 36
 	ReasonZoneAdvisoryMismatch IpsecInnerReason = 37
-	ReasonScreenDeny IpsecInnerReason = 38
-	ReasonParseECN IpsecInnerReason = 39
-	ReasonSessionAlias IpsecInnerReason = 40
-	ReasonInstallRollback IpsecInnerReason = 41
-	ReasonTCPRSTSuppressed IpsecInnerReason = 42
-	ReasonNATStage IpsecInnerReason = 43
-	ReasonHookRouteMismatch IpsecInnerReason = 44
-	ReasonDomainOverlap IpsecInnerReason = 45
-	ReasonOtherDomain IpsecInnerReason = 46
-	ReasonWorkerQueueFull IpsecInnerReason = 47
-	ReasonVerdictUncertain IpsecInnerReason = 48
-	ReasonSlabExhausted IpsecInnerReason = 49
-	ReasonLeaseEpoch IpsecInnerReason = 50
-	ReasonSubmitUnavailable IpsecInnerReason = 51
+	ReasonScreenDeny           IpsecInnerReason = 38
+	ReasonParseECN             IpsecInnerReason = 39
+	ReasonSessionAlias         IpsecInnerReason = 40
+	ReasonInstallRollback      IpsecInnerReason = 41
+	ReasonTCPRSTSuppressed     IpsecInnerReason = 42
+	ReasonNATStage             IpsecInnerReason = 43
+	ReasonHookRouteMismatch    IpsecInnerReason = 44
+	ReasonDomainOverlap        IpsecInnerReason = 45
+	ReasonOtherDomain          IpsecInnerReason = 46
+	ReasonWorkerQueueFull      IpsecInnerReason = 47
+	ReasonVerdictUncertain     IpsecInnerReason = 48
+	ReasonSlabExhausted        IpsecInnerReason = 49
+	ReasonLeaseEpoch           IpsecInnerReason = 50
+	ReasonSubmitUnavailable    IpsecInnerReason = 51
 	ReasonEvaluatorUnavailable IpsecInnerReason = 52
-	ReasonEgressResource IpsecInnerReason = 53
-	ReasonFragmentRefused IpsecInnerReason = 54
-	ReasonProvenance IpsecInnerReason = 55
-	ReasonUnsupportedHook IpsecInnerReason = 56
-	ReasonVersionSkew IpsecInnerReason = 57
-	ReasonWorkerOrphanHA IpsecInnerReason = 58
-	ReasonInputBoundary IpsecInnerReason = 59
-	ReasonNoRoute IpsecInnerReason = 60
+	ReasonEgressResource       IpsecInnerReason = 53
+	ReasonFragmentRefused      IpsecInnerReason = 54
+	ReasonProvenance           IpsecInnerReason = 55
+	ReasonUnsupportedHook      IpsecInnerReason = 56
+	ReasonVersionSkew          IpsecInnerReason = 57
+	ReasonWorkerOrphanHA       IpsecInnerReason = 58
+	ReasonInputBoundary        IpsecInnerReason = 59
+	ReasonNoRoute              IpsecInnerReason = 60
 )
 
 func (r IpsecInnerReason) Valid() bool {
@@ -1298,38 +1311,70 @@ func (r IpsecInnerReason) Valid() bool {
 
 func (r IpsecInnerReason) String() string {
 	switch r {
-	case ReasonLegacyPolicyDeny: return "LEGACY_POLICY_DENY"
-	case ReasonLegacyHostDeny: return "LEGACY_HOST_INBOUND_DENY"
-	case ReasonZoneUnzoned: return "ZONE_UNZONED"
-	case ReasonZoneAmbiguous: return "ZONE_AMBIGUOUS"
-	case ReasonIfIDUnderivable: return "IFID_UNDERIVABLE"
-	case ReasonStaleGeneration: return "STALE_GENERATION"
-	case ReasonMissingGeneration: return "MISSING_GENERATION"
-	case ReasonZoneAdvisoryMismatch: return "ZONE_ADVISORY_MISMATCH"
-	case ReasonScreenDeny: return "SCREEN_DENY"
-	case ReasonParseECN: return "PARSE_ECN"
-	case ReasonSessionAlias: return "SESSION_ALIAS"
-	case ReasonInstallRollback: return "INSTALL_ROLLBACK"
-	case ReasonTCPRSTSuppressed: return "TCP_RST_SUPPRESSED"
-	case ReasonNATStage: return "NAT_STAGE"
-	case ReasonHookRouteMismatch: return "HOOK_ROUTE_MISMATCH"
-	case ReasonDomainOverlap: return "DOMAIN_OVERLAP"
-	case ReasonOtherDomain: return "OTHER_DOMAIN"
-	case ReasonWorkerQueueFull: return "WORKER_QUEUE_FULL"
-	case ReasonVerdictUncertain: return "VERDICT_UNCERTAIN"
-	case ReasonSlabExhausted: return "SLAB_EXHAUSTED"
-	case ReasonLeaseEpoch: return "LEASE_EPOCH"
-	case ReasonSubmitUnavailable: return "SUBMIT_UNAVAILABLE"
-	case ReasonEvaluatorUnavailable: return "EVALUATOR_UNAVAILABLE"
-	case ReasonEgressResource: return "EGRESS_RESOURCE"
-	case ReasonFragmentRefused: return "FRAGMENT_REFUSED"
-	case ReasonProvenance: return "PROVENANCE"
-	case ReasonUnsupportedHook: return "UNSUPPORTED_HOOK"
-	case ReasonVersionSkew: return "VERSION_SKEW"
-	case ReasonWorkerOrphanHA: return "WORKER_ORPHAN_HA"
-	case ReasonInputBoundary: return "INPUT_BOUNDARY"
-	case ReasonNoRoute: return "NO_ROUTE"
-	default: return "UNKNOWN"
+	case ReasonLegacyPolicyDeny:
+		return "LEGACY_POLICY_DENY"
+	case ReasonLegacyHostDeny:
+		return "LEGACY_HOST_INBOUND_DENY"
+	case ReasonZoneUnzoned:
+		return "ZONE_UNZONED"
+	case ReasonZoneAmbiguous:
+		return "ZONE_AMBIGUOUS"
+	case ReasonIfIDUnderivable:
+		return "IFID_UNDERIVABLE"
+	case ReasonStaleGeneration:
+		return "STALE_GENERATION"
+	case ReasonMissingGeneration:
+		return "MISSING_GENERATION"
+	case ReasonZoneAdvisoryMismatch:
+		return "ZONE_ADVISORY_MISMATCH"
+	case ReasonScreenDeny:
+		return "SCREEN_DENY"
+	case ReasonParseECN:
+		return "PARSE_ECN"
+	case ReasonSessionAlias:
+		return "SESSION_ALIAS"
+	case ReasonInstallRollback:
+		return "INSTALL_ROLLBACK"
+	case ReasonTCPRSTSuppressed:
+		return "TCP_RST_SUPPRESSED"
+	case ReasonNATStage:
+		return "NAT_STAGE"
+	case ReasonHookRouteMismatch:
+		return "HOOK_ROUTE_MISMATCH"
+	case ReasonDomainOverlap:
+		return "DOMAIN_OVERLAP"
+	case ReasonOtherDomain:
+		return "OTHER_DOMAIN"
+	case ReasonWorkerQueueFull:
+		return "WORKER_QUEUE_FULL"
+	case ReasonVerdictUncertain:
+		return "VERDICT_UNCERTAIN"
+	case ReasonSlabExhausted:
+		return "SLAB_EXHAUSTED"
+	case ReasonLeaseEpoch:
+		return "LEASE_EPOCH"
+	case ReasonSubmitUnavailable:
+		return "SUBMIT_UNAVAILABLE"
+	case ReasonEvaluatorUnavailable:
+		return "EVALUATOR_UNAVAILABLE"
+	case ReasonEgressResource:
+		return "EGRESS_RESOURCE"
+	case ReasonFragmentRefused:
+		return "FRAGMENT_REFUSED"
+	case ReasonProvenance:
+		return "PROVENANCE"
+	case ReasonUnsupportedHook:
+		return "UNSUPPORTED_HOOK"
+	case ReasonVersionSkew:
+		return "VERSION_SKEW"
+	case ReasonWorkerOrphanHA:
+		return "WORKER_ORPHAN_HA"
+	case ReasonInputBoundary:
+		return "INPUT_BOUNDARY"
+	case ReasonNoRoute:
+		return "NO_ROUTE"
+	default:
+		return "UNKNOWN"
 	}
 }
 
@@ -1350,20 +1395,20 @@ const (
 )
 
 type PMechAlarm struct {
-	Class PMechAlarmClass
-	Reason string
+	Class      PMechAlarmClass
+	Reason     string
 	Generation uint64
-	QueueID uint16
-	Tunnel string
+	QueueID    uint16
+	Tunnel     string
 }
 
 type IpsecInnerDeny struct {
-	Reason IpsecInnerReason
-	PolicyID uint32
-	Origin CaptureOrigin
-	OriginSet bool
-	QueueID uint16
-	Tunnel string
+	Reason     IpsecInnerReason
+	PolicyID   uint32
+	Origin     CaptureOrigin
+	OriginSet  bool
+	QueueID    uint16
+	Tunnel     string
 	Generation uint64
 }
 
@@ -1375,7 +1420,9 @@ type DenyEventSink interface {
 type DenyEventSinkFunc func(IpsecInnerDeny) bool
 
 func (f DenyEventSinkFunc) EmitIpsecInnerDeny(event IpsecInnerDeny) bool {
-	if f == nil { return false }
+	if f == nil {
+		return false
+	}
 	return f(event)
 }
 
