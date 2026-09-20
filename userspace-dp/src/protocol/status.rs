@@ -507,6 +507,45 @@ pub(crate) struct ProcessStatus {
     pub session_delete_replica_dropped: u64,
     #[serde(rename = "session_delete_replica_drop_repaired", default)]
     pub session_delete_replica_drop_repaired: u64,
+    /// #9506 counter slice: IPsec-inner (D11/D13/D14) deny-cause + queue
+    /// counters, projected from one
+    /// `crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot()` call.
+    /// Each key is byte-identical to its Rust static (lowercased) — no
+    /// translation table. Additive / defaulted for backward compatibility
+    /// (#1961: no wire bump); the Go decoder + Prometheus export is a
+    /// separate follow-up slice, so these ride the JSON status only.
+    /// D14 zone-gate refusals: unzoned admission, unknown/ambiguous STN or
+    /// ifid mismatch, stale generation, missing generation.
+    #[serde(rename = "zone_gate_unzoned_total", default)]
+    pub zone_gate_unzoned_total: u64,
+    #[serde(rename = "zone_gate_ambiguous_total", default)]
+    pub zone_gate_ambiguous_total: u64,
+    #[serde(rename = "zone_gate_stale_total", default)]
+    pub zone_gate_stale_total: u64,
+    #[serde(rename = "zone_gate_no_generation_total", default)]
+    pub zone_gate_no_generation_total: u64,
+    /// D13/D11 logical-frame build failures (including ECN-combine
+    /// refusals), and D13 RFC 6040 §4.2 illegal inner-ECN refusals.
+    #[serde(rename = "ipsec_inner_parse_drops_total", default)]
+    pub ipsec_inner_parse_drops_total: u64,
+    #[serde(rename = "ipsec_inner_ecn_illegal_drops", default)]
+    pub ipsec_inner_ecn_illegal_drops: u64,
+    /// D11 queue/slab/verdict/orphan accounting: ingress-enqueue refusals
+    /// (contended/closed/full/per-flow cap), verdict-post refusals, slab
+    /// exhaustion, worker-set retirements, post-mortem slot reclaims, and
+    /// provisional-journal reaps.
+    #[serde(rename = "ipsec_inner_worker_queue_full_total", default)]
+    pub ipsec_inner_worker_queue_full_total: u64,
+    #[serde(rename = "ipsec_inner_verdict_queue_full_total", default)]
+    pub ipsec_inner_verdict_queue_full_total: u64,
+    #[serde(rename = "ipsec_inner_slab_exhausted_total", default)]
+    pub ipsec_inner_slab_exhausted_total: u64,
+    #[serde(rename = "ipsec_inner_worker_retired_total", default)]
+    pub ipsec_inner_worker_retired_total: u64,
+    #[serde(rename = "ipsec_inner_worker_orphan_reaped_total", default)]
+    pub ipsec_inner_worker_orphan_reaped_total: u64,
+    #[serde(rename = "ipsec_inner_orphan_provisional_total", default)]
+    pub ipsec_inner_orphan_provisional_total: u64,
     /// #9720: the per-command split of `worker_command_queue_drops` for the
     /// three RG-transition commands (`DemoteOwnerRGS`, `RefreshOwnerRGS`,
     /// `VacateAllSharedExactSlots`), in PUSHES. Each refusal is recorded as

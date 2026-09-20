@@ -13,6 +13,9 @@
 use super::logical_ingress::{build_logical_ingress_packet, LogicalIngressParams};
 use super::ipsec_inner_queue::{
     reason, IpsecInnerDescriptor, IpsecInnerSlabPool, IpsecInnerVerdict, IpsecInnerVerdictQueue,
+    IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL, IPSEC_INNER_SLAB_EXHAUSTED_TOTAL,
+    IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL,
+    IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_RETIRED_TOTAL,
 };
 use super::{
     ForwardingState, IpsecTunnelRow, IpsecTunnelRows, RuntimeView, UserspaceDpMeta,
@@ -39,8 +42,15 @@ pub(crate) static zone_gate_no_generation_total: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ipsec_inner_input_stateful_without_session_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_parse_drops_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_ecn_illegal_drops: AtomicU64 = AtomicU64::new(0);
+// #9506 counter slice: one storage cell for the IPsec-inner ECN refusal.
+// The lowercase duplicate was a second, never-incremented `AtomicU64` — D13
+// passes only the canonical cell to the shared helper, so reads of the old
+// name observed a permanent 0 while drops accumulated invisibly in the
+// canonical cell. The alias keeps the §4.3 source-level name joinable to
+// the metric contract without a translation table. (`self::` qualification
+// is forced by edition-2024 `use` path rules; the binding is exactly the
+// canonical static.)
+pub(crate) use IPSEC_INNER_ECN_ILLEGAL_DROPS as ipsec_inner_ecn_illegal_drops;
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_session_lookup_errors_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
@@ -81,6 +91,54 @@ pub(crate) static ipsec_inner_syn_cookie_refusals_total: AtomicU64 = AtomicU64::
 pub(crate) static ipsec_inner_fragment_late_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static nfq_reentry_unsupported_domain_total: AtomicU64 = AtomicU64::new(0);
+
+/// #9506 counter slice: one-call snapshot of the Rust-incremented
+/// IPsec-inner counters. Definition-only §4.3 statics stay local until their
+/// stage arms land; exporting permanent zero series would widen this slice
+/// without adding an operator-visible signal. Go-owned counters are likewise
+/// excluded.
+///
+/// Field names match their static names (lowercased), except the canonical
+/// ECN cell whose design name intentionally has no `_total` suffix.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IpsecInnerCounterSnapshot {
+    pub zone_gate_unzoned_total: u64,
+    pub zone_gate_ambiguous_total: u64,
+    pub zone_gate_stale_total: u64,
+    pub zone_gate_no_generation_total: u64,
+    pub ipsec_inner_parse_drops_total: u64,
+    pub ipsec_inner_ecn_illegal_drops: u64,
+    pub ipsec_inner_worker_queue_full_total: u64,
+    pub ipsec_inner_verdict_queue_full_total: u64,
+    pub ipsec_inner_slab_exhausted_total: u64,
+    pub ipsec_inner_worker_retired_total: u64,
+    pub ipsec_inner_worker_orphan_reaped_total: u64,
+    pub ipsec_inner_orphan_provisional_total: u64,
+}
+
+/// Load every counter in [`IpsecInnerCounterSnapshot`] once. `Relaxed` is
+/// sufficient: these are stats-only, and no cross-counter invariant is read
+/// here.
+pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
+    IpsecInnerCounterSnapshot {
+        zone_gate_unzoned_total: zone_gate_unzoned_total.load(Ordering::Relaxed),
+        zone_gate_ambiguous_total: zone_gate_ambiguous_total.load(Ordering::Relaxed),
+        zone_gate_stale_total: zone_gate_stale_total.load(Ordering::Relaxed),
+        zone_gate_no_generation_total: zone_gate_no_generation_total.load(Ordering::Relaxed),
+        ipsec_inner_parse_drops_total: ipsec_inner_parse_drops_total.load(Ordering::Relaxed),
+        ipsec_inner_ecn_illegal_drops: IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed),
+        ipsec_inner_worker_queue_full_total: IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
+            .load(Ordering::Relaxed),
+        ipsec_inner_verdict_queue_full_total: IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
+            .load(Ordering::Relaxed),
+        ipsec_inner_slab_exhausted_total: IPSEC_INNER_SLAB_EXHAUSTED_TOTAL.load(Ordering::Relaxed),
+        ipsec_inner_worker_retired_total: IPSEC_INNER_WORKER_RETIRED_TOTAL.load(Ordering::Relaxed),
+        ipsec_inner_worker_orphan_reaped_total: IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL
+            .load(Ordering::Relaxed),
+        ipsec_inner_orphan_provisional_total: IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
+            .load(Ordering::Relaxed),
+    }
+}
 
 
 /// Advisory/generation fields appended to each Go submit row (+26 bytes). Go
