@@ -31,6 +31,19 @@ const (
 	// P-MECH submit advisory tail: snapshot generation, config generation,
 	// FIB generation, zone ID, and authoritative interface ID.
 	reinjectSubmitPMechTailLen = 26
+
+	// Rust admission refusal reasons are closed-world values. Unknown bytes
+	// are version skew and must never be treated as ADMIT_OK.
+	reinjectAdmitOK               = 0
+	reinjectAdmitStale            = 1
+	reinjectAdmitFull             = 2
+	reinjectAdmitBadLease         = 3
+	reinjectAdmitShutdown         = 4
+	reinjectAdmitBridge           = 5
+	reinjectAdmitInputHook        = 6
+	reinjectAdmitNonDryRun        = 7
+	reinjectAdmitNoGeneration     = 11
+	reinjectAdmitTunnelRowMissing = 12
 )
 
 // ReinjectQueueEpoch is the allocator identity the Rust authority accepts for
@@ -399,6 +412,7 @@ func encodeCancel(ids []uint64, permit uint64, scopes []ReinjectQueueScope) ([]b
 			putU64(&out, id)
 		}
 	}
+
 	if flags&0x02 != 0 {
 		putU64(&out, permit)
 	}
@@ -410,6 +424,17 @@ func encodeCancel(ids []uint64, permit uint64, scopes []ReinjectQueueScope) ([]b
 		}
 	}
 	return out, nil
+}
+func reinjectAdmissionReasonValid(reason byte) bool {
+	switch reason {
+	case reinjectAdmitOK, reinjectAdmitStale, reinjectAdmitFull,
+		reinjectAdmitBadLease, reinjectAdmitShutdown, reinjectAdmitBridge,
+		reinjectAdmitInputHook, reinjectAdmitNonDryRun,
+		reinjectAdmitNoGeneration, reinjectAdmitTunnelRowMissing:
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeAdmissions(payload []byte) ([]ReinjectAdmission, error) {
@@ -438,6 +463,10 @@ func decodeAdmissions(payload []byte) ([]ReinjectAdmission, error) {
 			ReasonCode:   payload[off+33],
 		}
 		row.Reason = fmt.Sprintf("reason-%d", row.ReasonCode)
+		if !reinjectAdmissionReasonValid(row.ReasonCode) {
+			row.Admitted = false
+			row.Reason = fmt.Sprintf("version-skew reason-%d", row.ReasonCode)
+		}
 		out = append(out, row)
 		off += 34
 	}
