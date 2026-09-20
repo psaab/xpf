@@ -958,9 +958,11 @@ fd-send path bounded. `Packet.Verdict` sends on a queue-wide fd while holding `q
 `VerdictBatch` holds that mutex across `sendmmsg`
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/nfqueue.go:266-283,418-437,459-504`);
 `Queue.Close` also needs `q.mu`, so a stalled batch can otherwise block INPUT and close. The contract
-must use a bounded/nonblocking mutex acquisition plus `SOCK_NONBLOCK`/`SO_SNDTIMEO`, or move socket I/O
-outside the shared lock; bounding only `unix.Send` is insufficient. A proven EAGAIN/timeout returns
-`{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptYes, Err: timeout}` and records E35.
+must use a bounded/nonblocking `q.mu` acquisition plus `SOCK_NONBLOCK`/`SO_SNDTIMEO`; moving socket
+I/O outside the lock is not an accepted shortcut because fd lifetime/close fencing would otherwise
+be a second unbounded authority. Bounding only `unix.Send` is insufficient. A proven EAGAIN/timeout
+returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptYes, Err: timeout}` and
+records E35.
 Because an EAGAIN/timeout leaves the kernel-held packet in that queue, the recovery is generation
 scoped: fence the queue epoch and stop new admission, CAS every still-held reservation to uncertain
 exactly once, then perform a single queue-wide `Queue.Close`/rebind teardown to let the kernel drop
@@ -1628,10 +1630,10 @@ Go:
   `ZoneSnapshotRef` + config fields + `submitEligible` call site (D7–D10) + `PipelineStats` fields (§4.3)
   + `ErrNoZoneEvaluator`.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/nfqueue.go` — every fd-send path
-  (`Packet.Verdict` and `VerdictBatch`/`sendmmsg`) uses bounded/nonblocking `q.mu` acquisition or
-  moves socket I/O outside the shared lock, plus `SOCK_NONBLOCK`/`SO_SNDTIMEO`; the close/rebind path
-  proves no `q.mu` deadlock, performs generation-level queue recovery, and uses queue-wide close only
-  as the fenced, accounted teardown after EAGAIN/timeout, never per-packet cancellation.
+  (`Packet.Verdict` and `VerdictBatch`/`sendmmsg`) MUST use bounded/nonblocking `q.mu` acquisition
+  together with `SOCK_NONBLOCK`/`SO_SNDTIMEO`; the close/rebind path proves no `q.mu` deadlock,
+  performs generation-level queue recovery, and uses queue-wide close only as the fenced, accounted
+  teardown after EAGAIN/timeout, never per-packet cancellation.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go` —
   receive-time tunnel attribution (D8 secondary) + status snapshot fields (§4.4) +
   signed `PMechShadowBudget` storage/validation input + `PMechAlarmConsumer`/bounded
