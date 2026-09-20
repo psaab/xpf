@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/nfqueue"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
 var ipsecCaptureProcessRunID = newIpsecCaptureProcessRunID()
@@ -35,18 +36,20 @@ type IpsecCaptureQueue struct {
 }
 
 type IpsecCapturePipelineConfig struct {
-	Supervisor  *ipsecSupervisor
-	Registry    *nfqueue.OriginRegistry
-	QueueEpochs map[uint16]uint64
-	Queues      []IpsecCaptureQueue
-	RunID       string
-	Pipeline    nfqueue.CapturePipelineConfig
+	Supervisor             *ipsecSupervisor
+	Registry               *nfqueue.OriginRegistry
+	QueueEpochs            map[uint16]uint64
+	Queues                 []IpsecCaptureQueue
+	RunID                  string
+	Pipeline               nfqueue.CapturePipelineConfig
+	DeliveredCounterReader func() (xnft.TransitFenceCounter, bool, error)
 }
 
 // IpsecCapturePipelineStatus is the bounded live-evidence view exported by the
 // actor. PipelineStats contains the per-outcome, provenance, overlap, L2, and
-// per-flow terminal counters. Delivered remains unavailable until an
-// independent product-owned witness downstream of the Rust TUN write exists.
+// per-flow terminal counters. Delivered is the inet q0 mark-counter delta
+// downstream of the TUN write; q0 is shared with transit MissingNeighbor, so
+// it is authoritative only under a quiesced S5 window.
 type IpsecCapturePipelineStatus struct {
 	Available          bool
 	Active             bool
@@ -78,6 +81,11 @@ type IpsecCapturePipeline struct {
 	down        bool
 	cancel      context.CancelFunc
 	done        chan struct{}
+
+	deliveredCounterReader func() (xnft.TransitFenceCounter, bool, error)
+	deliveredBaseline      uint64
+	deliveredBaselineSet   bool
+	deliveredUnavailable   bool
 }
 
 var (
@@ -95,18 +103,22 @@ func NewIpsecCapturePipeline(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipel
 	if cfg.Registry == nil {
 		cfg.Registry = new(nfqueue.OriginRegistry)
 	}
+	if cfg.DeliveredCounterReader == nil {
+		cfg.DeliveredCounterReader = xnft.ReadTransitFenceCounter
+	}
 	cfg.Pipeline.Registry = cfg.Registry
 	runID := cfg.RunID
 	if runID == "" {
 		runID = ipsecCaptureProcessRunID
 	}
 	actor := &IpsecCapturePipeline{
-		supervisor:  cfg.Supervisor,
-		registry:    cfg.Registry,
-		queueEpochs: make(map[uint16]uint64, len(cfg.QueueEpochs)),
-		queues:      append([]IpsecCaptureQueue(nil), cfg.Queues...),
-		rotation:    newIpsecRotation(),
-		runID:       runID,
+		supervisor:             cfg.Supervisor,
+		registry:               cfg.Registry,
+		queueEpochs:            make(map[uint16]uint64, len(cfg.QueueEpochs)),
+		queues:                 append([]IpsecCaptureQueue(nil), cfg.Queues...),
+		rotation:               newIpsecRotation(),
+		runID:                  runID,
+		deliveredCounterReader: cfg.DeliveredCounterReader,
 	}
 	for queue, epoch := range cfg.QueueEpochs {
 		if queue == 0 || epoch == 0 {
@@ -153,7 +165,15 @@ func (a *IpsecCapturePipeline) Start() error {
 	a.done = make(chan struct{})
 	done := a.done
 	queues := append([]IpsecCaptureQueue(nil), a.queues...)
+	a.deliveredBaseline = 0
+	a.deliveredBaselineSet = false
+	a.deliveredUnavailable = false
 	a.mu.Unlock()
+
+	// Capture exactly one baseline at actor start. An absent/disarmed fence,
+	// read error, or any later reset latches this actor run unavailable;
+	// re-baselining would turn a partial run into a false delivery claim.
+	a.establishDeliveredBaseline()
 
 	var workers sync.WaitGroup
 	workers.Add(1)
@@ -282,6 +302,60 @@ func (a *IpsecCapturePipeline) Stop() error {
 	return firstErr
 }
 
+// establishDeliveredBaseline captures the one baseline sample for this actor
+// run. It intentionally latches unavailable instead of waiting for a fence
+// install or re-baselining after a reset.
+func (a *IpsecCapturePipeline) establishDeliveredBaseline() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	reader := a.deliveredCounterReader
+	a.mu.Unlock()
+	if reader == nil {
+		a.mu.Lock()
+		a.deliveredUnavailable = true
+		a.mu.Unlock()
+		return
+	}
+	sample, available, err := reader()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil || !available {
+		a.deliveredUnavailable = true
+		return
+	}
+	a.deliveredBaseline = sample.Packets
+	a.deliveredBaselineSet = true
+}
+
+// deliveredSnapshot returns the monotonic packet delta from the start
+// baseline. A negative delta, absent/disarmed fence, or read error permanently
+// invalidates this actor run; it must never be converted to an authoritative
+// zero or repaired by a new baseline.
+func (a *IpsecCapturePipeline) deliveredSnapshot() (bool, uint64) {
+	if a == nil {
+		return false, 0
+	}
+	a.mu.Lock()
+	if a.deliveredUnavailable || !a.deliveredBaselineSet || a.deliveredCounterReader == nil {
+		a.mu.Unlock()
+		return false, 0
+	}
+	reader := a.deliveredCounterReader
+	baseline := a.deliveredBaseline
+	a.mu.Unlock()
+
+	sample, available, err := reader()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.deliveredUnavailable || err != nil || !available || sample.Packets < baseline {
+		a.deliveredUnavailable = true
+		return false, 0
+	}
+	return true, sample.Packets - baseline
+}
+
 // Status returns actor lifecycle, authority join keys, and terminal counters.
 func (a *IpsecCapturePipeline) Status() IpsecCapturePipelineStatus {
 	if a == nil {
@@ -308,6 +382,7 @@ func (a *IpsecCapturePipeline) Status() IpsecCapturePipelineStatus {
 	if a.pipeline != nil {
 		counters = a.pipeline.Stats()
 	}
+	deliveredAvailable, delivered := a.deliveredSnapshot()
 	return IpsecCapturePipelineStatus{
 		Available:          true,
 		Active:             active,
@@ -318,8 +393,8 @@ func (a *IpsecCapturePipeline) Status() IpsecCapturePipelineStatus {
 		PermitState:        permitState,
 		PermitEpoch:        permitEpoch,
 		Counters:           counters,
-		DeliveredAvailable: false, // no product-owned downstream-of-TUN witness yet
-		Delivered:          0,
+		DeliveredAvailable: deliveredAvailable,
+		Delivered:          delivered,
 	}
 }
 

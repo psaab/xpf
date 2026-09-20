@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -73,13 +74,14 @@ type Installer interface {
 	// RemoveIpsecDivert removes the S3 capture table from both families.
 	RemoveIpsecDivert() error
 
-	// InstallTransitBarrier installs the #7191 unarmed forward-hook DROP in
-	// the inet and bridge families. Idempotent.
+	// InstallTransitBarrier installs the unarmed forward-hook DROP in both
+	// families. It retains replace-on-call behavior because the unarmed fence
+	// carries no delivered-witness counter.
 	InstallTransitBarrier() error
-	// InstallArmedTransitFence replaces the forward-hook DROP with the armed
-	// default-drop fence and its provenance-scoped XDP_PASS pinholes. The same
-	// table is used in both armed and unarmed states so a stale generation
-	// cannot leave two competing forward hooks behind.
+	// InstallArmedTransitFence ensures the armed forward-hook DROP with its
+	// provenance-scoped XDP_PASS pinholes. The q0 witness shape performs an
+	// internal canonical live-table comparison and skips delete+add only on
+	// exact equality; all other calls retain replace-on-call behavior.
 	InstallArmedTransitFence(spec ForwardFenceSpec) error
 	// RemoveTransitBarrier removes the barrier from both families.
 
@@ -95,6 +97,28 @@ type netlinkInstaller struct {
 	// newConn returns a fresh *nftables.Conn. Overridable so tests can bind the
 	// installer to a private network namespace (WithNetNSFd).
 	newConn func() (*nftables.Conn, error)
+	// forwardFenceMu guards the forward-fence install memory below. The memory
+	// is consulted and mutated ONLY by the forward-fence installers in
+	// transit_barrier.go (InstallTransitBarrier, InstallArmedTransitFence,
+	// RemoveTransitBarrier); every other table installer is untouched and
+	// keeps its unconditional replace semantics.
+	forwardFenceMu sync.Mutex
+	// forwardFenceInstalled reports whether this installer process has
+	// successfully installed forwardFenceSpec and has not removed it since.
+	// A repeat install of a byte-equal spec skips the kernel delete+recreate
+	// ONLY when the live tables are verified present (see installForwardFence);
+	// any doubt reinstalls, so the zero value is fail-closed.
+	forwardFenceInstalled bool
+	forwardFenceSpec      ForwardFenceSpec
+	// forwardFenceBridgeUnsupported records that the memorised install
+	// succeeded on inet while the bridge family reported unsupported (the
+	// documented degraded-success shape). The live check then waives the
+	// bridge table, so a bridge-less kernel does not churn inet every tick.
+	forwardFenceBridgeUnsupported bool
+	// These two seams are nil in production and let unit cells exercise the
+	// skip/reinstall decision without manufacturing netlink dump messages.
+	forwardFenceLiveEqualFn func(ForwardFenceSpec) (bool, error)
+	forwardFenceReplaceFn   func(ForwardFenceSpec) error
 }
 
 // NewNetlinkInstaller returns an Installer that talks to the host's default

@@ -434,8 +434,7 @@ if row is None:
     out(available=0, actor=0, run_id=run_id, generation=generation, epoch=epoch,
         state=state, consumed=0, adjudicated=0, reinjected=0, written=0,
         uncertain=0, late_completions=0, timeouts=0, stale=0, cancelled=0,
-        refused=0, delivered_available=int(bool(rust.get("delivered_available", False))),
-        delivered=int(rust.get("delivered", 0) or 0),
+        refused=0, delivered_available=0, delivered=0,
         reason="product-observer-unavailable:go-rust-join-key-mismatch")
     raise SystemExit
 def value(name):
@@ -446,6 +445,20 @@ def value(name):
         return int(float(item[1]))
     except ValueError:
         return None
+def delivery_value():
+    availability = value("xpf_ipsec_capture_delivered_available")
+    if availability is None:
+        return 0, 0, "go-delivery-availability-absent"
+    if availability not in (0, 1):
+        return 0, 0, "go-delivery-availability-invalid"
+    count = value("xpf_ipsec_capture_delivered_total")
+    if availability == 0:
+        if count is not None:
+            return 0, 0, "go-delivery-count-present-while-unavailable"
+        return 0, 0, "residual-downstream-of-tun-witness-unavailable"
+    if count is None:
+        return 0, 0, "go-delivery-count-absent"
+    return 1, count, ""
 actor = value("xpf_ipsec_capture_actor_active")
 consumed = value("xpf_ipsec_capture_consumed_total")
 adjudicated = value("xpf_ipsec_capture_adjudicated_total")
@@ -462,15 +475,13 @@ if None in (actor, consumed, adjudicated, reinjected, written, uncertain,
     out(available=0, actor=0, run_id=run_id, generation=generation, epoch=epoch,
         state=state, consumed=0, adjudicated=0, reinjected=0, written=0,
         uncertain=0, late_completions=0, timeouts=0, stale=0, cancelled=0,
-        refused=0, delivered_available=int(bool(rust.get("delivered_available", False))),
-        delivered=int(rust.get("delivered", 0) or 0),
+        refused=0, delivered_available=0, delivered=0,
         reason="product-observer-unavailable:go-witness-counters-absent")
     raise SystemExit
-delivered_available = int(bool(rust.get("delivered_available", False)))
-delivered = int(rust.get("delivered", 0) or 0)
+delivered_available, delivered, delivery_reason = delivery_value()
 reason = "witness-joined"
-if not delivered_available:
-    reason += ":residual-downstream-of-tun-witness-unavailable"
+if delivery_reason:
+    reason += ":" + delivery_reason
 out(available=1, actor=actor, run_id=run_id, generation=generation, epoch=epoch,
     state=state, consumed=consumed, adjudicated=adjudicated, reinjected=reinjected,
     written=written, uncertain=uncertain, late_completions=late_completions,
@@ -670,12 +681,22 @@ elif mode == "dispositions":
 elif mode == "refusal":
     rows = rust.get("provenance", [])
     print(int(any(row.get("outcome") == "refused" for row in rows)))
-elif mode == "delivery":
-    print(int(rust.get("delivered_available") == 0 and
-              rust.get("completed_written") == 3 and rust.get("delivered") == 0))
+elif mode in ("delivery", "delivery-positive", "delivery-missing-count",
+              "delivery-count-while-unavailable"):
+    row = samples.get(key, {})
+    available = row.get("xpf_ipsec_capture_delivered_available")
+    count = row.get("xpf_ipsec_capture_delivered_total")
+    if mode == "delivery":
+        print(int(joined and available == 0.0 and count is None))
+    elif mode == "delivery-positive":
+        print(int(joined and available == 1.0 and count == 11.0))
+    elif mode == "delivery-missing-count":
+        print(int(joined and available == 1.0 and count is None))
+    else:
+        print(int(joined and available == 0.0 and count is not None))
 PY
     printf '%s\n' '{}' >"$parser_dir/absent.json"
-    printf '%s\n' '{"s5_reinject":{"run_id":"run-1","generation":4,"permit_epoch":7,"completed_written":3,"delivered_available":false,"delivered":0,"provenance":[{"outcome":"refused"}]}}' >"$parser_dir/witness.json"
+    printf '%s\n' '{"s5_reinject":{"run_id":"run-1","generation":4,"permit_epoch":7,"completed_written":3,"delivered_available":true,"delivered":999,"provenance":[{"outcome":"refused"}]}}' >"$parser_dir/witness.json"
     cat >"$parser_dir/witness.prom" <<'EOF'
 xpf_ipsec_capture_consumed_total{run_id="run-1",generation="4",permit_epoch="7"} 0
 xpf_ipsec_capture_written_total{run_id="run-1",generation="4",permit_epoch="7"} 4
@@ -685,7 +706,19 @@ xpf_ipsec_capture_timeouts_total{run_id="run-1",generation="4",permit_epoch="7"}
 xpf_ipsec_capture_stale_total{run_id="run-1",generation="4",permit_epoch="7"} 8
 xpf_ipsec_capture_cancelled_total{run_id="run-1",generation="4",permit_epoch="7"} 9
 xpf_ipsec_capture_refused_total{run_id="run-1",generation="4",permit_epoch="7"} 10
+xpf_ipsec_capture_delivered_available{run_id="run-1",generation="4",permit_epoch="7"} 0
 EOF
+    printf '%s\n' \
+        'xpf_ipsec_capture_delivered_available{run_id="run-1",generation="4",permit_epoch="7"} 1' \
+        'xpf_ipsec_capture_delivered_total{run_id="run-1",generation="4",permit_epoch="7"} 11' \
+        >"$parser_dir/witness-delivered.prom"
+    printf '%s\n' \
+        'xpf_ipsec_capture_delivered_available{run_id="run-1",generation="4",permit_epoch="7"} 1' \
+        >"$parser_dir/witness-delivered-missing-count.prom"
+    printf '%s\n' \
+        'xpf_ipsec_capture_delivered_available{run_id="run-1",generation="4",permit_epoch="7"} 0' \
+        'xpf_ipsec_capture_delivered_total{run_id="run-1",generation="4",permit_epoch="7"} 11' \
+        >"$parser_dir/witness-delivered-count-while-unavailable.prom"
     printf '%s\n' 'xpf_ipsec_capture_consumed_total{run_id="run-other",generation="4",permit_epoch="7"} 0' >"$parser_dir/witness-mismatch.prom"
     expect "absent S5 status stays unavailable" "0" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/absent.json" "$parser_dir/witness.prom" absent)"
@@ -693,10 +726,16 @@ EOF
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" zero)"
     expect "join mismatch stays unavailable" "0" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-mismatch.prom" join)"
+    expect "Go availability zero requires omitted delivered count" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" delivery)"
+    expect "Go availability one joins delivered count" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-delivered.prom" delivery-positive)"
+    expect "Go availability one without count stays unavailable" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-delivered-missing-count.prom" delivery-missing-count)"
+    expect "Go unavailable gauge rejects present count" "1" \
+        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness-delivered-count-while-unavailable.prom" delivery-count-while-unavailable)"
     expect "bounded provenance exposes refusal outcome" "1" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" refusal)"
-    expect "written is not downstream delivered" "1" \
-        "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" delivery)"
     expect "joined disposition counters are observed" "1" \
         "$(python3 "$parser_dir/witness-check.py" "$parser_dir/witness.json" "$parser_dir/witness.prom" dispositions)"
     cat >"$parser_dir/positive.json" <<'EOF'
@@ -741,7 +780,7 @@ EOF
         "static=0 queue_rows=1 queue_ids=0 packet_samples=0 mismatch=0" \
         "$(observe_provenance_metadata "$parser_dir/positive.json" "$parser_dir/nfqueue.txt")"
     rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 28 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 31 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -1481,7 +1520,7 @@ g2_emit_measured() {
         observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 queue_classes_fw0=${qif}/${qii}/${qbf}/${qbi} packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 queue_economics_fw0=$MEASURE_QUEUE_ECON_FW0 queue_economics_fw1=$MEASURE_QUEUE_ECON_FW1"
         emit_cell "$gate" 'r6 §5.1' \
             "${shape} routed-inet real-SA workload at ${tunnels} tunnels with provenance and non-tunnel overhead" \
-            "$observed" VOID "product-consumer-path-unavailable:fw0=${MEASURE_REASON_FW0};fw1=${MEASURE_REASON_FW1};delivered-downstream-witness-unavailable;2b-attestation-required" \
+            "$observed" VOID "measurement-incomplete:verdict-flip-unimplemented;fw0=${MEASURE_REASON_FW0};fw1=${MEASURE_REASON_FW1}" \
             "cell_failed=1 tunnels=$tunnels offered_expected=16 offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 observed=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$prov0 provenance_samples_fw1=$prov1 provenance_mismatch_fw0=$mismatch0 provenance_mismatch_fw1=$mismatch1 s5_available_fw0=$MEASURE_S5_FW0 s5_available_fw1=$MEASURE_S5_FW1 consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 delivered_fw0=$MEASURE_DELIVERED_FW0 delivered_fw1=$MEASURE_DELIVERED_FW1 overhead_ns=0 queue_instances=$qinst0 queue_instances_fw1=$qinst1 fd_count=$qfd0 fd_count_fw1=$qfd1 recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
     else
         observed="fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN"
@@ -1513,7 +1552,7 @@ emit_cell g2_9506_divert_idle 'r6 §5.1' 'fence+divert attached-idle listener ov
 if run_fixture_measure v4_native 8 g2-capture; then
     emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \
         "fixture_ready=$MEASURE_READY queues_fw0=$MEASURE_QUEUE_TOTAL queues_fw1=$MEASURE_QUEUE_TOTAL_NODE1 packets=$MEASURE_PACKETS offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS loss_pct=$MEASURE_LOSS teardown=$MEASURE_TEARDOWN consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 provenance_fw0=$MEASURE_PROVENANCE_FW0 provenance_fw1=$MEASURE_PROVENANCE_FW1 queue_economics_fw0=$MEASURE_QUEUE_ECON_FW0 queue_economics_fw1=$MEASURE_QUEUE_ECON_FW1" VOID \
-        "product-consumer-path-unavailable:downstream-delivered-witness-unavailable;2b-attestation-required" \
+        "measurement-incomplete:verdict-flip-unimplemented;fw0=${MEASURE_REASON_FW0};fw1=${MEASURE_REASON_FW1}" \
         "cell_failed=1 tunnels=8 offered_expected=16 offered_fw0=$MEASURE_OFFERED_FW0 offered_fw1=$MEASURE_OFFERED_FW1 packets=$MEASURE_PACKETS xfrm_tunnel0_packets=$MEASURE_XFRM_TUNNEL0_PACKETS provenance_samples_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" packet_samples) provenance_samples_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" packet_samples) provenance_mismatch_fw0=$(observer_field "$MEASURE_PROVENANCE_FW0" mismatch) provenance_mismatch_fw1=$(observer_field "$MEASURE_PROVENANCE_FW1" mismatch) queue_instances=$(observer_field "$MEASURE_QUEUE_ECON_FW0" queue_instances) queue_instances_fw1=$(observer_field "$MEASURE_QUEUE_ECON_FW1" queue_instances) consumed_fw0=$MEASURE_CONSUMED_FW0 consumed_fw1=$MEASURE_CONSUMED_FW1 adjudicated_fw0=$MEASURE_ADJUDICATED_FW0 adjudicated_fw1=$MEASURE_ADJUDICATED_FW1 reinjected_fw0=$MEASURE_REINJECTED_FW0 reinjected_fw1=$MEASURE_REINJECTED_FW1 written_fw0=$MEASURE_WRITTEN_FW0 written_fw1=$MEASURE_WRITTEN_FW1 uncertain_fw0=$MEASURE_UNCERTAIN_FW0 uncertain_fw1=$MEASURE_UNCERTAIN_FW1 late_completions_fw0=$MEASURE_LATE_COMPLETIONS_FW0 late_completions_fw1=$MEASURE_LATE_COMPLETIONS_FW1 timeouts_fw0=$MEASURE_TIMEOUTS_FW0 timeouts_fw1=$MEASURE_TIMEOUTS_FW1 stale_fw0=$MEASURE_STALE_FW0 stale_fw1=$MEASURE_STALE_FW1 cancelled_fw0=$MEASURE_CANCELLED_FW0 cancelled_fw1=$MEASURE_CANCELLED_FW1 refused_fw0=$MEASURE_REFUSED_FW0 refused_fw1=$MEASURE_REFUSED_FW1 delivered_available_fw0=$MEASURE_DELIVERED_AVAILABLE_FW0 delivered_available_fw1=$MEASURE_DELIVERED_AVAILABLE_FW1 delivered_fw0=$MEASURE_DELIVERED_FW0 delivered_fw1=$MEASURE_DELIVERED_FW1 loss_pct=$MEASURE_LOSS restore_clean=$MEASURE_TEARDOWN"
 else
     emit_cell g2_9506_capture_8t 'r6 §5.1' '8-tunnel routed-inet capture cost and provenance validation' \

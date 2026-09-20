@@ -12,6 +12,13 @@ import (
 // families while the dataplane is unarmed or armed (#7191/#10302).
 const TransitBarrierTableName = "xpf_transit_barrier"
 
+// TransitFenceDeliveredCounterName is the named counter attached to the
+// inet-forward q0 mark-conjunction rule. It is deliberately a named object:
+// the daemon reads it back through netlink and treats its packet delta as a
+// downstream-of-TUN witness. The object is not a verdict and therefore cannot
+// alter the fence's ACCEPT/DROP decision.
+const TransitFenceDeliveredCounterName = "xpf_transit_q0_delivered"
+
 // ForwardFenceMark is an ingress-interface/packet-mark conjunction for the
 // armed forward fence. A mark is never admitted without its owning interface.
 type ForwardFenceMark struct {
@@ -33,7 +40,7 @@ const AdjudicatedTransitMarkMask uint32 = 0xffffffff
 // through an exact packet-mark conjunction supplied in AllowedMarks.
 type ForwardFenceSpec struct {
 	AllowedIfnames []string
-	AllowedMarks  []ForwardFenceMark
+	AllowedMarks   []ForwardFenceMark
 }
 
 // ErrTransitBarrierBridgeUnsupported marks a kernel that does not provide the
@@ -129,8 +136,9 @@ func transitBarrierFamilies() []nftables.TableFamily {
 }
 
 // InstallTransitBarrier installs an unconditional forward-hook DROP in every
-// barrier family. It is idempotent: an existing table is replaced in the same
-// transaction, so a re-assert on the apply tail cannot accumulate chains.
+// barrier family. It retains the historical replace-on-call behavior because
+// the unarmed fence has no delivered-witness counter; the armed q0 path uses
+// the internal canonical live-shape check in installForwardFence.
 //
 // A per-family failure is returned joined rather than short-circuited: the inet
 // leg must still install when a kernel lacks bridge netfilter support. A bridge
@@ -149,6 +157,41 @@ func (in *netlinkInstaller) InstallArmedTransitFence(spec ForwardFenceSpec) erro
 }
 
 func (in *netlinkInstaller) installForwardFence(spec ForwardFenceSpec) error {
+	in.forwardFenceMu.Lock()
+	defer in.forwardFenceMu.Unlock()
+
+	// Only the q0 witness-carrying armed shape may skip the old delete/add
+	// transaction. Every other fence call keeps the pre-existing behavior.
+	if forwardFenceSpecHasWitness(spec) &&
+		in.forwardFenceInstalled &&
+		forwardFenceSpecsEqual(in.forwardFenceSpec, spec) {
+		equal, err := in.forwardFenceLiveEqualLocked(spec)
+		if err == nil && equal {
+			return nil
+		}
+		// Fetch errors, malformed/unknown live shapes, and any inequality all
+		// fail toward the old behavior: replace the whole fence.
+	}
+	if !forwardFenceSpecHasWitness(spec) {
+		in.forwardFenceInstalled = false
+		in.forwardFenceBridgeUnsupported = false
+	}
+	err := in.installForwardFenceReplace(spec)
+	if err == nil || IsTransitBarrierBridgeUnsupportedOnly(err) {
+		in.forwardFenceInstalled = true
+		in.forwardFenceSpec = cloneForwardFenceSpec(spec)
+		in.forwardFenceBridgeUnsupported = IsTransitBarrierBridgeUnsupportedOnly(err)
+	} else {
+		in.forwardFenceInstalled = false
+		in.forwardFenceBridgeUnsupported = false
+	}
+	return err
+}
+
+func (in *netlinkInstaller) installForwardFenceReplace(spec ForwardFenceSpec) error {
+	if in.forwardFenceReplaceFn != nil {
+		return in.forwardFenceReplaceFn(spec)
+	}
 	var errs []error
 	for _, family := range transitBarrierFamilies() {
 		if err := in.installBarrierFamily(family, spec); err != nil {
@@ -159,6 +202,13 @@ func (in *netlinkInstaller) installForwardFence(spec ForwardFenceSpec) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (in *netlinkInstaller) forwardFenceLiveEqualLocked(spec ForwardFenceSpec) (bool, error) {
+	if in.forwardFenceLiveEqualFn != nil {
+		return in.forwardFenceLiveEqualFn(spec)
+	}
+	return in.readForwardFenceLiveEqual(spec)
 }
 
 func transitBarrierChain(tbl *nftables.Table) *nftables.Chain {
@@ -178,6 +228,7 @@ func emitTransitFencePinhole(p *nlPlan, spec ForwardFenceSpec) {
 	if len(spec.AllowedIfnames) > 0 {
 		p.rule().iifname(spec.AllowedIfnames).emit(verdictAccept()...)
 	}
+	witnessDeclared := false
 	for _, marked := range spec.AllowedMarks {
 		if marked.Ifname == "" {
 			p.fail(errors.New("marked transit pinhole has an empty ingress interface"))
@@ -187,10 +238,24 @@ func emitTransitFencePinhole(p *nlPlan, spec ForwardFenceSpec) {
 			p.fail(fmt.Errorf("marked transit pinhole %q has a zero mark mask", marked.Ifname))
 			return
 		}
-		p.rule().
+		counter := ""
+		if p.table.Family == nftables.TableFamilyINet && isTransitFenceWitnessMark(marked) {
+			counter = TransitFenceDeliveredCounterName
+			if !witnessDeclared {
+				p.counterObj(counter)
+				witnessDeclared = true
+			}
+		}
+		rule := p.rule().
 			iifname([]string{marked.Ifname}).
-			mark(marked.Mark, marked.Mask).
-			emit(verdictAccept()...)
+			mark(marked.Mark, marked.Mask)
+		if counter != "" {
+			// CounterObj is a non-terminating accounting expression. The
+			// ACCEPT remains the final verdict, so this witness is verdict-
+			// neutral and cannot widen or narrow the security fence.
+			rule.counterRef(counter)
+		}
+		rule.emit(verdictAccept()...)
 	}
 }
 
@@ -229,6 +294,10 @@ func (in *netlinkInstaller) installBarrierFamily(family nftables.TableFamily, sp
 // could not be removed leaves the box transit-closed while armed — the black
 // hole this design exists to avoid — and the caller must be able to see it.
 func (in *netlinkInstaller) RemoveTransitBarrier() error {
+	in.forwardFenceMu.Lock()
+	defer in.forwardFenceMu.Unlock()
+	in.forwardFenceInstalled = false
+	in.forwardFenceBridgeUnsupported = false
 	var errs []error
 	for _, family := range transitBarrierFamilies() {
 		if err := in.removeBarrierFamily(family); err != nil {
