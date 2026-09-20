@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -120,6 +121,175 @@ func ipsecCaptureQueueEpochSnapshot(handles []ipsecQueueHandle) []dpuserspace.Qu
 	return rows
 }
 
+type pmechTunnelZone struct {
+	ifID     uint32
+	ifindex  uint32
+	zoneID   uint16
+	reason   nfqueue.ZoneReason
+}
+
+// pmechZoneSnapshot is immutable after publication. The live-ifindex map is
+// frozen per generation; rotations publish a new value and mark the old one
+// stale before any old descriptor can be interpreted by a new generation.
+type pmechZoneSnapshot struct {
+	generation    uint64
+	fibGeneration uint32
+	current       atomic.Bool
+	tunnels       map[string]pmechTunnelZone
+	queueEpochs   map[uint16]uint64
+}
+
+func (s *pmechZoneSnapshot) ResolveSTN(stn string) nfqueue.ZoneResolution {
+	if s == nil {
+		return nfqueue.ZoneResolution{Reason: nfqueue.ZoneReasonEvaluatorUnavailable}
+	}
+	if !s.Current() {
+		return nfqueue.ZoneResolution{Reason: nfqueue.ZoneReasonStaleGeneration}
+	}
+	tunnel, ok := s.tunnels[stn]
+	if !ok {
+		return nfqueue.ZoneResolution{Reason: nfqueue.ZoneReasonUnknownGeneration}
+	}
+	return nfqueue.ZoneResolution{ZoneID: tunnel.zoneID, IfID: tunnel.ifID, Reason: tunnel.reason}
+}
+
+func (s *pmechZoneSnapshot) Generations() (uint64, uint32) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.generation, s.fibGeneration
+}
+
+func (s *pmechZoneSnapshot) QueueEpoch(queue uint16) uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.queueEpochs[queue]
+}
+
+func (s *pmechZoneSnapshot) Current() bool {
+	return s != nil && s.current.Load()
+}
+
+func (s *pmechZoneSnapshot) ValidateOrigin(origin nfqueue.CaptureOrigin) nfqueue.ZoneReason {
+	if s == nil || !s.Current() {
+		return nfqueue.ZoneReasonStaleGeneration
+	}
+	tunnel, ok := s.tunnels[origin.STN]
+	if !ok || tunnel.ifID == 0 {
+		return nfqueue.ZoneReasonUnknownGeneration
+	}
+	if tunnel.ifindex == 0 || tunnel.ifindex != origin.OwnedIfindex {
+		return nfqueue.ZoneReasonStaleGeneration
+	}
+	if tunnel.reason != nfqueue.ZoneReasonZoned {
+		return tunnel.reason
+	}
+	return nfqueue.ZoneReasonZoned
+}
+
+// buildPMechZoneSnapshot performs the D1 ownership-aware if_id join. It
+// intentionally takes already-staged handles: no packet-path netlink lookup
+// is possible, and the resulting live-ifindex table is immutable.
+func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, generation uint64, fibGeneration uint32) *pmechZoneSnapshot {
+	snapshot := &pmechZoneSnapshot{
+		generation: generation, fibGeneration: fibGeneration,
+		tunnels: make(map[string]pmechTunnelZone),
+		queueEpochs: make(map[uint16]uint64),
+	}
+	snapshot.current.Store(true)
+	if cfg == nil {
+		return snapshot
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	quarantined := config.QuarantinedZoneNames(zoneNames)
+	seenBind := make(map[uint32]map[string]struct{})
+	vpnNames := make([]string, 0, len(cfg.Security.IPsec.VPNs))
+	for name := range cfg.Security.IPsec.VPNs {
+		vpnNames = append(vpnNames, name)
+	}
+	sort.Strings(vpnNames)
+	for _, vpnName := range vpnNames {
+		vpn := cfg.Security.IPsec.VPNs[vpnName]
+		if vpn == nil || vpn.BindInterface == "" {
+			continue
+		}
+		_, ifID := config.XFRMIfNameAndID(vpn.BindInterface)
+		if ifID == 0 {
+			continue
+		}
+		owned := uint16(0)
+		claimSeen := false
+		ambiguous := false
+		for _, zoneName := range zoneNames {
+			zone := cfg.Security.Zones[zoneName]
+			if zone == nil {
+				continue
+			}
+			for _, ref := range zone.Interfaces {
+				_, refID := config.XFRMIfNameAndID(ref)
+				if refID != ifID || !config.BindInterfaceOwnsRef(vpn.BindInterface, ref) {
+					continue
+				}
+				claimSeen = true
+				if _, blocked := quarantined[zoneName]; blocked {
+					ambiguous = true
+					continue
+				}
+				zoneID := config.StableZoneID(zoneName)
+				if owned != 0 && owned != zoneID {
+					ambiguous = true
+					continue
+				}
+				owned = zoneID
+			}
+		}
+		reason := nfqueue.ZoneReasonUnzoned
+		zoneID := owned
+		if ambiguous {
+			zoneID = 0
+			reason = nfqueue.ZoneReasonAmbiguous
+		} else if claimSeen && owned != 0 {
+			reason = nfqueue.ZoneReasonZoned
+		}
+		if prior, ok := snapshot.tunnels[vpn.BindInterface]; ok && prior.ifID == ifID {
+			reason = nfqueue.ZoneReasonAmbiguous
+			zoneID = 0
+		}
+		snapshot.tunnels[vpn.BindInterface] = pmechTunnelZone{ifID: ifID, zoneID: zoneID, reason: reason}
+	}
+	for _, handle := range handles {
+		snapshot.queueEpochs[handle.Number] = handle.Epoch
+		tunnel, ok := snapshot.tunnels[handle.Key.STN]
+		if !ok {
+			continue
+		}
+		if tunnel.ifindex != 0 && tunnel.ifindex != uint32(handle.Key.Ifindex) {
+			tunnel.reason = nfqueue.ZoneReasonStaleGeneration
+			tunnel.zoneID = 0
+		}
+		tunnel.ifindex = uint32(handle.Key.Ifindex)
+		snapshot.tunnels[handle.Key.STN] = tunnel
+	}
+	for ifID, binds := range seenBind {
+		if len(binds) < 2 {
+			continue
+		}
+		for stn, tunnel := range snapshot.tunnels {
+			if tunnel.ifID == ifID {
+				tunnel.reason = nfqueue.ZoneReasonAmbiguous
+				tunnel.zoneID = 0
+				snapshot.tunnels[stn] = tunnel
+			}
+		}
+	}
+	return snapshot
+}
+
 type ipsecReinjectSubmitter interface {
 	nfqueue.ReinjectSubmitter
 	AnnounceReinject(runID string, generation, permitEpoch uint64, permitOpen bool, epochs []nfqueue.ReinjectQueueEpoch) error
@@ -135,6 +305,7 @@ type ipsecCaptureRuntime struct {
 	submitter  ipsecReinjectSubmitter
 	spec       xnft.IpsecDivertSpec
 	runID      string
+	zoneSnapshot *pmechZoneSnapshot
 
 	authorityMu         sync.Mutex
 	announced           bool
@@ -244,6 +415,9 @@ func sameReinjectQueueEpochs(a, b []nfqueue.ReinjectQueueEpoch) bool {
 func (r *ipsecCaptureRuntime) close() error {
 	if r == nil {
 		return nil
+	}
+	if r.zoneSnapshot != nil {
+		r.zoneSnapshot.current.Store(false)
 	}
 	var firstErr error
 	wasActive := false
@@ -406,11 +580,17 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			return old, old, openErr
 		}
 		queues = append(queues, IpsecCaptureQueue{
-			Queue:      queue,
-			Tunnel:     uint32(handle.Key.Ifindex),
-			Generation: handle.Key.Generation,
+			Queue:              queue,
+			QueueNumber:        handle.Number,
+			Tunnel:             uint32(handle.Key.Ifindex),
+			Generation:         handle.Key.Generation,
+			SnapshotGeneration: handle.Key.Generation,
+			ConfigGeneration:   handle.Key.Generation,
+			FIBGeneration:      uint32(handle.Key.Generation),
+			QueueEpoch:         handle.Epoch,
 		})
 	}
+	zoneSnapshot := buildPMechZoneSnapshot(cfg, handles, generation, uint32(generation))
 	submitPath, completePath := ipsecCaptureReinjectSocketPaths(dpuserspace.DefaultControlSocketPath(cfg))
 	submitter, err := nfqueue.NewSocketReinjectSubmitter(submitPath, completePath)
 	if err != nil {
@@ -428,7 +608,6 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		Supervisor:  d.ipsecS4,
 		Registry:    registry,
 		QueueEpochs: queueEpochs,
-		Queues:      queues,
 		Pipeline: nfqueue.CapturePipelineConfig{
 			Phase:          nfqueue.PipelineEnforcing,
 			HandoffCap:     16384,
@@ -436,6 +615,8 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			FragmentSlots:  128,
 			FragmentPieces: 128,
 			Submitter:      submitter,
+			ZoneEvaluator:  nfqueue.DefaultZoneEvaluator{},
+			ZoneSnapshot:   zoneSnapshot,
 		},
 	})
 	if err != nil {
@@ -454,14 +635,15 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		return old, old, err
 	}
 	staged = &ipsecCaptureRuntime{
-		supervisor: d.ipsecS4,
-		handles:    handles,
-		queues:     queues,
-		registry:   registry,
-		actor:      actor,
-		submitter:  submitter,
-		spec:       spec,
-		runID:      actor.Status().RunID,
+		supervisor:   d.ipsecS4,
+		handles:      handles,
+		queues:       queues,
+		registry:     registry,
+		actor:        actor,
+		submitter:    submitter,
+		spec:         spec,
+		runID:        actor.Status().RunID,
+		zoneSnapshot: zoneSnapshot,
 	}
 	d.ipsecCaptureStaged = staged
 	d.ipsecCaptureStagePending = true

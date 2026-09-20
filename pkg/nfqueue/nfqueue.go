@@ -60,6 +60,10 @@ func (v Verdict) String() string {
 // packet cannot be disposed. Never panics, never silently accepts.
 var ErrClosed = errors.New("nfqueue: queue closed")
 
+// ErrVerdictTimeout reports a bounded verdict gate or nonblocking socket send
+// that could not complete. The held packet is terminal-but-uncertain.
+var ErrVerdictTimeout = errors.New("nfqueue: bounded verdict send timeout")
+
 // ErrTimeout reports a Recv deadline expiry with no packet. The hold is
 // unaffected: packets stay queued until a verdict or queue destruction.
 var ErrTimeout = errors.New("nfqueue: recv deadline exceeded")
@@ -139,8 +143,11 @@ type Queue struct {
 	id int
 	fd int
 
-	mu     sync.Mutex // serializes close, per-packet and batch verdicts
+	mu     sync.Mutex // protects close state and terminal reservation
 	closed bool
+
+	sendGateOnce sync.Once
+	sendGate     chan struct{}
 
 	seq     atomic.Uint32
 	pending []*Packet
@@ -155,6 +162,35 @@ type Queue struct {
 	verdictAttempted  atomic.Uint64
 	verdictSuccessful atomic.Uint64
 	verdictUncertain  atomic.Uint64
+}
+
+const verdictGateTimeout = 5 * time.Millisecond
+
+func (q *Queue) initSendGate() chan struct{} {
+	q.sendGateOnce.Do(func() {
+		q.sendGate = make(chan struct{}, 1)
+		q.sendGate <- struct{}{}
+	})
+	return q.sendGate
+}
+
+func (q *Queue) acquireSend() error {
+	select {
+	case <-q.initSendGate():
+		return nil
+	case <-time.After(verdictGateTimeout):
+		q.verdictUncertain.Add(1)
+		q.verdictErrors.Add(1)
+		return ErrVerdictTimeout
+	}
+}
+
+func (q *Queue) releaseSend() {
+	q.initSendGate() <- struct{}{}
+}
+
+func (q *Queue) acquireSendBlocking() {
+	<-q.initSendGate()
 }
 
 // linuxMmsghdr mirrors Linux's struct mmsghdr ABI. x/sys/unix exposes
@@ -242,6 +278,7 @@ func openWithFamilies(queueID uint16, protocolFamilies []int) (*Queue, error) {
 		closeOnErr()
 		return nil, fmt.Errorf("nfqueue: set queue length %d: %w", queueID, err)
 	}
+	_ = unix.SetNonblock(fd, true)
 	return q, nil
 }
 
@@ -268,6 +305,8 @@ func (q *Queue) Stats() QueueStats {
 // ErrClosed. Packets still held when the socket is destroyed die by the
 // kernel's default queue teardown behavior.
 func (q *Queue) Close() error {
+	q.acquireSendBlocking()
+	defer q.releaseSend()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
@@ -282,10 +321,6 @@ func (q *Queue) Close() error {
 	_ = q.sendConfig(q.ID(), nfqnlCfgCmdUnbind, 0, nil, false)
 	return unix.Close(q.fd)
 }
-
-// Recv returns the next held packet, waiting until deadline. It returns
-// ErrTimeout on deadline expiry (the hold is unaffected). Recv must not race
-// with Close and is intended to have one consumer.
 func (q *Queue) Recv(deadline time.Time) (*Packet, error) {
 	if len(q.pending) > 0 {
 		pkt := q.pending[0]
@@ -314,6 +349,9 @@ func (q *Queue) Recv(deadline time.Time) (*Packet, error) {
 		}
 		nr, _, err := unix.Recvfrom(q.fd, q.recvBuf, 0)
 		if err != nil {
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+				continue
+			}
 			if err == unix.ENOBUFS {
 				q.recvOverruns.Add(1)
 				continue
@@ -417,25 +455,40 @@ func (p *Packet) PacketID() uint32 {
 // already applied it.
 func (p *Packet) Verdict(v Verdict) error {
 	q := p.q
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.closed {
-		q.verdictErrors.Add(1)
+	if q == nil {
 		return ErrClosed
 	}
 	if v != VerdictAccept && v != VerdictDrop {
 		q.verdictErrors.Add(1)
 		return fmt.Errorf("nfqueue: unsupported verdict %d", v)
 	}
+	if err := q.acquireSend(); err != nil {
+		if p.done.CompareAndSwap(false, true) {
+			return err
+		}
+		return ErrAlreadyVerdicted
+	}
+	defer q.releaseSend()
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		q.verdictErrors.Add(1)
+		return ErrClosed
+	}
 	if !p.done.CompareAndSwap(false, true) {
+		q.mu.Unlock()
 		q.verdictErrors.Add(1)
 		return ErrAlreadyVerdicted
 	}
 	msg := buildVerdict(q.ID(), p.id, uint32(v))
 	q.verdictAttempted.Add(1)
-	if err := unix.Send(q.fd, msg, 0); err != nil {
+	q.mu.Unlock()
+	if err := unix.Send(q.fd, msg, unix.MSG_DONTWAIT); err != nil {
 		q.verdictUncertain.Add(1)
 		q.verdictErrors.Add(1)
+		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			return fmt.Errorf("%w: verdict %s id=%d: %w", ErrVerdictTimeout, v, p.id, err)
+		}
 		return fmt.Errorf("nfqueue: verdict %s id=%d: %w", v, p.id, err)
 	}
 	q.verdictSuccessful.Add(1)
@@ -460,26 +513,38 @@ func (q *Queue) VerdictBatch(v Verdict, pkts []*Packet) error {
 	if len(pkts) == 0 {
 		return nil
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.closed {
-		q.verdictErrors.Add(uint64(len(pkts)))
-		return ErrClosed
-	}
 	if v != VerdictAccept && v != VerdictDrop {
 		q.verdictErrors.Add(uint64(len(pkts)))
 		return fmt.Errorf("nfqueue: unsupported verdict %d", v)
 	}
-	// Prevalidate before reserving any packet. The lock means no concurrent
-	// per-packet/batch verdict on this queue can win between validation and
+	if err := q.acquireSend(); err != nil {
+		for _, pkt := range pkts {
+			if pkt != nil && pkt.q == q {
+				pkt.done.CompareAndSwap(false, true)
+			}
+		}
+		q.verdictUncertain.Add(uint64(len(pkts)))
+		return err
+	}
+	defer q.releaseSend()
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		q.verdictErrors.Add(uint64(len(pkts)))
+		return ErrClosed
+	}
+	// Prevalidate before reserving any packet. The lock prevents a concurrent
+	// per-packet verdict on this queue from winning between validation and
 	// reservation, and packets from another queue are never accepted.
 	seen := make(map[*Packet]struct{}, len(pkts))
 	for _, pkt := range pkts {
 		if pkt == nil || pkt.q != q || pkt.done.Load() {
+			q.mu.Unlock()
 			q.verdictErrors.Add(1)
 			return ErrAlreadyVerdicted
 		}
 		if _, ok := seen[pkt]; ok {
+			q.mu.Unlock()
 			q.verdictErrors.Add(1)
 			return ErrAlreadyVerdicted
 		}
@@ -487,10 +552,12 @@ func (q *Queue) VerdictBatch(v Verdict, pkts []*Packet) error {
 	}
 	for _, pkt := range pkts {
 		if !pkt.done.CompareAndSwap(false, true) {
+			q.mu.Unlock()
 			q.verdictErrors.Add(1)
 			return ErrAlreadyVerdicted
 		}
 	}
+	q.mu.Unlock()
 	msgs := make([]linuxMmsghdr, len(pkts))
 	iovs := make([]unix.Iovec, len(pkts))
 	bufs := make([][]byte, len(pkts))
@@ -524,11 +591,14 @@ func (q *Queue) VerdictBatch(v Verdict, pkts []*Packet) error {
 	}
 	if err != nil {
 		q.verdictErrors.Add(uint64(len(pkts) - sent))
+		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			return fmt.Errorf("%w: batch verdict %s: sent %d/%d: %w", ErrVerdictTimeout, v, sent, len(pkts), err)
+		}
 		return fmt.Errorf("nfqueue: batch verdict %s: sent %d/%d: %w", v, sent, len(pkts), err)
 	}
 	if sent != len(pkts) {
 		q.verdictErrors.Add(uint64(len(pkts) - sent))
-		return fmt.Errorf("nfqueue: batch verdict %s: sent %d/%d (short send)", v, sent, len(pkts))
+		return fmt.Errorf("%w: batch verdict %s: sent %d/%d (short send)", ErrVerdictTimeout, v, sent, len(pkts))
 	}
 	return nil
 }

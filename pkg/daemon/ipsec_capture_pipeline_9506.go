@@ -29,10 +29,15 @@ func newIpsecCaptureProcessRunID() string {
 // is started until Start is called explicitly. Queues, when supplied, are
 // consumed by bounded Recv loops owned by this actor.
 type IpsecCaptureQueue struct {
-	Queue      *nfqueue.Queue
-	Tunnel     uint32
-	VRF        uint32
-	Generation uint64
+	Queue              *nfqueue.Queue
+	QueueNumber        uint16
+	Tunnel             uint32
+	VRF                uint32
+	Generation         uint64
+	SnapshotGeneration uint64
+	ConfigGeneration   uint64
+	FIBGeneration      uint32
+	QueueEpoch         uint64
 }
 
 type IpsecCapturePipelineConfig struct {
@@ -228,7 +233,15 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 			_ = packet.Verdict(nfqueue.VerdictDrop)
 			continue
 		}
-		frame := nfqueue.CaptureFrame{Packet: packet, FlowKey: classification.FlowKey}
+		frame := nfqueue.CaptureFrame{
+			Packet: packet, FlowKey: classification.FlowKey,
+			Generation: captureQueue.Generation,
+			SnapshotGeneration: captureQueue.SnapshotGeneration,
+			ConfigGeneration: captureQueue.ConfigGeneration,
+			FIBGeneration: captureQueue.FIBGeneration,
+			QueueNumber: captureQueue.QueueNumber,
+			QueueEpoch: captureQueue.QueueEpoch,
+		}
 		if classification.IsFragment {
 			key, keyOK := classification.FragmentKey(captureQueue.Tunnel, captureQueue.VRF, captureQueue.Generation)
 			piece, pieceOK := classification.FragmentPiece(packet.Payload())
