@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Initial S7 sizing: 512 pooled descriptors. Final value S7/T22-owned.
 pub(crate) const IPSEC_INNER_SLAB_CAP: usize = 512;
@@ -596,6 +596,13 @@ impl IpsecInnerVerdictQueue {
     pub(crate) fn len(&self) -> usize {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+    pub(crate) fn drain_into(&self, scratch: &mut Vec<IpsecInnerVerdict>, budget: usize) -> bool {
+        scratch.clear();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let take = pending.len().min(budget);
+        scratch.extend(pending.drain(..take));
+        !pending.is_empty()
+    }
 }
 
 impl Default for IpsecInnerVerdictQueue {
@@ -899,6 +906,21 @@ impl IpsecInnerRouter {
 
     pub(crate) fn release(&self, flow_tag: u64) {
         let mut inflight = self.inflight_by_flow.lock().unwrap_or_else(|e| e.into_inner());
+        self.release_locked(&mut inflight, flow_tag);
+    }
+
+    /// Bounded producer rollback. Queue admission failure must not wait for
+    /// the terminal drain's mutex; a failed try leaves the reservation for a
+    /// caller that can retry the rollback from a non-hot path.
+    pub(crate) fn try_release(&self, flow_tag: u64) -> bool {
+        let Ok(mut inflight) = self.inflight_by_flow.try_lock() else {
+            return false;
+        };
+        self.release_locked(&mut inflight, flow_tag);
+        true
+    }
+
+    fn release_locked(&self, inflight: &mut HashMap<u64, u32>, flow_tag: u64) {
         match inflight.get_mut(&flow_tag) {
             Some(count) if *count > 1 => *count -= 1,
             Some(_) => {
@@ -907,7 +929,6 @@ impl IpsecInnerRouter {
             None => {}
         }
     }
-
     /// Generation fence: a descriptor stamped with any other worker-set
     /// generation than the live one is stale (E4 DROP), never evaluated.
     pub(crate) fn check_generation(
@@ -939,9 +960,320 @@ pub(crate) fn reap_orphan_descriptor(
     if !tombstone.claim_stale() {
         return false;
     }
+
     IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL.fetch_add(1, Ordering::Relaxed);
     pool.reclaim_after_worker_death(desc.slab_id);
     true
+}
+
+struct ActiveIpsecDescriptor {
+    worker_id: u32,
+    desc: IpsecInnerDescriptor,
+    posted: bool,
+}
+
+/// Fixed-capacity tombstone table shared by the socket producer, worker
+/// completion drain, and worker-death reaper. Its backing Vec is allocated at
+/// construction; admission uses try_lock and never grows it on the hot path.
+struct IpsecInnerTombstones {
+    entries: Mutex<Vec<(u64, RequestTombstone)>>,
+}
+
+impl IpsecInnerTombstones {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(Vec::with_capacity(IPSEC_INNER_SLAB_CAP)),
+        }
+    }
+
+    fn try_insert(&self, request_id: u64, generation: u64) -> bool {
+        let Ok(mut entries) = self.entries.try_lock() else {
+            return false;
+        };
+        if request_id == 0
+            || entries.iter().any(|(existing, _)| *existing == request_id)
+            || entries.len() == IPSEC_INNER_SLAB_CAP
+        {
+            return false;
+        }
+        entries.push((request_id, RequestTombstone::new(request_id, generation)));
+        true
+    }
+
+    fn try_remove(&self, request_id: u64) {
+        let Ok(mut entries) = self.entries.try_lock() else {
+            return;
+        };
+        if let Some(index) = entries.iter().position(|(id, _)| *id == request_id) {
+            entries.swap_remove(index);
+        }
+    }
+
+    fn claim_stale(&self, request_id: u64) -> bool {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(index) = entries.iter().position(|(id, _)| *id == request_id) else {
+            return false;
+        };
+        if !entries[index].1.claim_stale() {
+            return false;
+        }
+        entries.swap_remove(index);
+        true
+    }
+
+    fn complete(&self, request_id: u64) -> bool {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(index) = entries.iter().position(|(id, _)| *id == request_id) else {
+            return false;
+        };
+        let tombstone = &entries[index].1;
+        if !tombstone.complete() || !tombstone.claim_accounting() {
+            return false;
+        }
+        entries.swap_remove(index);
+        true
+    }
+}
+
+/// D11 worker/verdict join. This is the only owner of per-worker queue
+/// selection and descriptor lifecycle after the socket has admitted a frame.
+/// `retire_worker` drains descriptors that never reached a worker; the
+/// separate `join_worker_after_termination` call is the quiescence witness
+/// that permits reclaiming worker-owned slabs.
+pub(crate) struct IpsecInnerWorkerTransport {
+    pool: Arc<IpsecInnerSlabPool>,
+    queues: BTreeMap<u32, Arc<IpsecInnerIngressQueue>>,
+    verdicts: Arc<IpsecInnerVerdictQueue>,
+    authority: Arc<WorkerSetAuthority>,
+    router: Arc<IpsecInnerRouter>,
+    tombstones: IpsecInnerTombstones,
+    active: Mutex<Vec<ActiveIpsecDescriptor>>,
+    retired: Mutex<BTreeSet<u32>>,
+}
+
+impl IpsecInnerWorkerTransport {
+    pub(crate) fn new(worker_ids: impl IntoIterator<Item = u32>) -> Self {
+        let mut queues = BTreeMap::new();
+        let mut live = BTreeSet::new();
+        for worker_id in worker_ids {
+            if queues
+                .insert(
+                    worker_id,
+                    Arc::new(IpsecInnerIngressQueue::new(worker_id)),
+                )
+                .is_none()
+            {
+                live.insert(worker_id);
+            }
+        }
+        let authority = Arc::new(WorkerSetAuthority::new());
+        authority.publish(live);
+        Self {
+            pool: Arc::new(IpsecInnerSlabPool::new()),
+            queues,
+            verdicts: Arc::new(IpsecInnerVerdictQueue::new()),
+            authority,
+            router: Arc::new(IpsecInnerRouter::new()),
+            tombstones: IpsecInnerTombstones::new(),
+            active: Mutex::new(Vec::with_capacity(IPSEC_INNER_SLAB_CAP)),
+            retired: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    pub(crate) fn pool(&self) -> &Arc<IpsecInnerSlabPool> {
+        &self.pool
+    }
+
+    pub(crate) fn authority(&self) -> &Arc<WorkerSetAuthority> {
+        &self.authority
+    }
+
+    pub(crate) fn verdict_queue(&self) -> &Arc<IpsecInnerVerdictQueue> {
+        &self.verdicts
+    }
+
+    /// Admit a descriptor after its socket bytes have been written to
+    /// `slab_id`. All refusal paths return the slot to the pool and roll back
+    /// the per-flow reservation.
+    pub(crate) fn admit_descriptor(&self, desc: IpsecInnerDescriptor) -> Result<u32, u8> {
+        let generation = self.authority.generation();
+        if generation == 0 {
+            self.pool.force_release(desc.slab_id);
+            return Err(reason::EVALUATOR_UNAVAILABLE);
+        }
+        if desc.worker_set_generation != generation {
+            self.pool.force_release(desc.slab_id);
+            return Err(reason::STALE_GENERATION);
+        }
+        let worker = match self.router.admit(&self.authority, desc.flow_tag) {
+            Ok(worker) => worker,
+            Err(erow) => {
+                self.pool.force_release(desc.slab_id);
+                return Err(erow);
+            }
+        };
+        if !self
+            .tombstones
+            .try_insert(desc.request_id, desc.worker_set_generation)
+        {
+            self.router.try_release(desc.flow_tag);
+            self.pool.force_release(desc.slab_id);
+            return Err(reason::LEASE_EPOCH);
+        }
+        let slab_id = desc.slab_id;
+        let flow_tag = desc.flow_tag;
+        let request_id = desc.request_id;
+        let Some(queue) = self.queues.get(&worker) else {
+            self.tombstones.try_remove(request_id);
+            self.router.try_release(flow_tag);
+            self.pool.force_release(slab_id);
+            return Err(reason::NO_ROUTE);
+        };
+        if queue.try_enqueue(desc).is_err() {
+            self.tombstones.try_remove(request_id);
+            self.router.try_release(flow_tag);
+            // The queue owns no reference after a failed enqueue.
+            self.pool.force_release(slab_id);
+            return Err(reason::WORKER_QUEUE_FULL);
+        }
+        Ok(worker)
+    }
+
+    /// Drain one worker's bounded ingress prefix into its reusable double
+    /// batch and transfer each descriptor's hazard from ENQUEUED to
+    /// WORKER_OWNED. This is the worker-side join point.
+    pub(crate) fn drain_worker(
+        &self,
+        worker_id: u32,
+        batch: &mut IpsecInnerDoubleBatch,
+    ) -> usize {
+        let Some(queue) = self.queues.get(&worker_id) else {
+            return 0;
+        };
+        let descriptors = batch.drain_next(queue);
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let mut taken = 0;
+        for desc in descriptors {
+            if !self.pool.mark_worker_owned(desc.slab_id) {
+                self.tombstones.claim_stale(desc.request_id);
+                self.pool.force_release(desc.slab_id);
+                self.router.release(desc.flow_tag);
+                continue;
+            }
+            active.push(ActiveIpsecDescriptor {
+                worker_id,
+                desc: desc.clone(),
+                posted: false,
+            });
+            taken += 1;
+        }
+        taken
+    }
+
+    /// Post one worker adjudication result. The descriptor remains active
+    /// until `drain_verdicts_into` observes the completion and releases its
+    /// slab reference exactly once.
+    pub(crate) fn post_worker_verdict(
+        &self,
+        worker_id: u32,
+        verdict: IpsecInnerVerdict,
+    ) -> Result<(), IpsecInnerVerdict> {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = active
+            .iter_mut()
+            .find(|entry| entry.worker_id == worker_id && entry.desc.request_id == verdict.request_id())
+        else {
+            return Err(verdict);
+        };
+        if self.verdicts.try_post(verdict.clone()).is_err() {
+            return Err(verdict);
+        }
+        if !self.pool.mark_verdict_posted(entry.desc.slab_id) {
+            return Err(verdict);
+        }
+        entry.posted = true;
+        Ok(())
+    }
+
+    /// Drain bounded worker results into a caller-owned completion scratch.
+    /// Stale verdicts from a joined worker are discarded by the tombstone and
+    /// cannot release a reused slab.
+    pub(crate) fn drain_verdicts_into(
+        &self,
+        queue_scratch: &mut Vec<IpsecInnerVerdict>,
+        out: &mut Vec<IpsecInnerVerdict>,
+        budget: usize,
+    ) {
+        self.verdicts.drain_into(queue_scratch, budget);
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        for verdict in queue_scratch.drain(..) {
+            let Some(index) = active
+                .iter()
+                .position(|entry| entry.desc.request_id == verdict.request_id())
+            else {
+                continue;
+            };
+            let entry = active.swap_remove(index);
+            self.pool.ack_release(entry.desc.slab_id);
+            self.router.release(entry.desc.flow_tag);
+            if self.tombstones.complete(verdict.request_id()) {
+                out.push(verdict);
+            }
+        }
+    }
+
+    /// Retire a worker generation and terminalize every descriptor still
+    /// ENQUEUED. WORKER_OWNED/VERDICT_POSTED descriptors remain pinned until
+    /// `join_worker_after_termination` proves that no late worker ACK exists.
+    pub(crate) fn retire_worker(&self, worker_id: u32) -> Option<usize> {
+        let generation = self.authority.retire_worker(worker_id)?;
+        self.retired
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(worker_id);
+        let Some(queue) = self.queues.get(&worker_id) else {
+            return Some(0);
+        };
+        let mut reaped = 0;
+        for desc in queue.drain_all() {
+            if self.tombstones.claim_stale(desc.request_id) {
+                self.pool.reclaim_after_worker_death(desc.slab_id);
+                self.router.release(desc.flow_tag);
+                reaped += 1;
+            }
+        }
+        let _ = generation;
+        Some(reaped)
+    }
+
+    /// Final worker-death join witness. Only after this call may slabs owned
+    /// by the dead worker be cleared and returned to the pool.
+    pub(crate) fn join_worker_after_termination(&self, worker_id: u32) -> usize {
+        let was_retired = self
+            .retired
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&worker_id);
+        if !was_retired {
+            return 0;
+        }
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reaped = 0;
+        let mut index = 0;
+        while index < active.len() {
+            if active[index].worker_id != worker_id {
+                index += 1;
+                continue;
+            }
+            let entry = active.swap_remove(index);
+            self.tombstones.claim_stale(entry.desc.request_id);
+            self.pool
+                .reclaim_after_worker_death(entry.desc.slab_id);
+            self.router.release(entry.desc.flow_tag);
+            reaped += 1;
+        }
+        reaped
+    }
 }
 
 /// Reaper handling of one journal record left by a dead worker: Prepared rolls
@@ -1260,6 +1592,64 @@ mod tests {
         );
         router.release(7);
         router.admit(&authority, 7).expect("slot freed");
+    }
+
+    #[test]
+    fn worker_transport_verdict_join_releases_slab_once() {
+        let transport = IpsecInnerWorkerTransport::new([3]);
+        let pool = transport.pool().clone();
+        let id = pool.acquire().expect("slot");
+        let generation = transport.authority().generation();
+        let mut desc = test_desc(31, id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(3));
+
+        let mut batch = IpsecInnerDoubleBatch::new();
+        assert_eq!(transport.drain_worker(3, &mut batch), 1);
+        assert!(transport
+            .post_worker_verdict(3, IpsecInnerVerdict::WouldPermit { request_id: 31 })
+            .is_ok());
+        let mut queue_scratch = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        let mut out = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        transport.drain_verdicts_into(
+            &mut queue_scratch,
+            &mut out,
+            IPSEC_INNER_DRAIN_BUDGET,
+        );
+        assert_eq!(out, vec![IpsecInnerVerdict::WouldPermit { request_id: 31 }]);
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+    }
+
+    #[test]
+    fn worker_transport_join_reclaims_only_after_retirement() {
+        let transport = IpsecInnerWorkerTransport::new([4]);
+        let pool = transport.pool().clone();
+        let id = pool.acquire().expect("slot");
+        let generation = transport.authority().generation();
+        let mut desc = test_desc(32, id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(4));
+        let mut batch = IpsecInnerDoubleBatch::new();
+        assert_eq!(transport.drain_worker(4, &mut batch), 1);
+        assert_eq!(transport.retire_worker(4), Some(0));
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP - 1);
+        assert_eq!(transport.join_worker_after_termination(4), 1);
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+        assert_eq!(transport.join_worker_after_termination(4), 0);
+    }
+
+    #[test]
+    fn worker_transport_retirement_reaps_queued_descriptors() {
+        let transport = IpsecInnerWorkerTransport::new([5]);
+        let pool = transport.pool().clone();
+        let id = pool.acquire().expect("slot");
+        let generation = transport.authority().generation();
+        let mut desc = test_desc(33, id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(5));
+        assert_eq!(transport.retire_worker(5), Some(1));
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+        assert_eq!(transport.join_worker_after_termination(5), 0);
     }
 
     #[test]
