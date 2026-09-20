@@ -661,6 +661,7 @@ pub(super) fn apply_snapshot(
     // reconcile) and is exactly what #7209 makes reachable, which is why the
     // filter must move rather than be dropped as dead.
     coord.forwarding = new_forwarding;
+    coord.set_ipsec_tunnel_rows_from_snapshot(snapshot);
     // #6592: ONE worker-visible store carrying both halves. `coord.validation`
     // was assigned at the head of this function and `coord.forwarding` is the
     // reconciled table, so this publishes the new generation's coherent pair

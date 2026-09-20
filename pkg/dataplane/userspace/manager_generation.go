@@ -157,6 +157,10 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		slog.Warn("userspace: failed to bump FIB generation", "err", err)
 		return newGen, fmt.Errorf("bump fib generation: %w", err)
 	}
+	if committer := m.captureAuthorityCommitter; committer != nil && m.appliedSnapshot.Generation != 0 {
+		committer(m.appliedSnapshot.Generation, newGen,
+			m.appliedSnapshot.CaptureGeneration)
+	}
 	return newGen, shimErr
 }
 

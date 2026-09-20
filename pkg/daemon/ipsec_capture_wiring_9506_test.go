@@ -259,6 +259,36 @@ func TestIpsecCaptureRuntimeAnnounceSnapshotPreservesClosingEpoch9506(t *testing
 		t.Fatalf("closed compile snapshot=(%d,%+v), want zero/nil", snapshotEpoch, snapshotRows)
 	}
 }
+
+func TestIpsecCapturePublishesAdmittedTunnelRows10485(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
+		"vpn-a": {BindInterface: "st1.0"},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"zone-a": {Interfaces: []string{"st1.0"}},
+	}
+	handles := wiringHandles9506()
+	zoneSnapshot := buildPMechZoneSnapshot(cfg, handles, handles[0].Key.Generation, 7)
+	runtime := &ipsecCaptureRuntime{handles: handles, zoneSnapshot: zoneSnapshot}
+	daemon := &Daemon{ipsecCapture: runtime}
+
+	_, _, captureGeneration, rows := daemon.ipsecCaptureConfigSnapshot(33, 9)
+	if captureGeneration != handles[0].Key.Generation || len(rows) != 1 {
+		t.Fatalf("authority=(%d,%+v), want capture generation %d and one row",
+			captureGeneration, rows, handles[0].Key.Generation)
+	}
+	if got := rows[0]; got.STN != "st1.0" || got.IfID == 0 || got.LogicalIfindex != 17 {
+		t.Fatalf("published row=%+v, want st1.0/nonzero-if_id/ifindex=17", got)
+	}
+
+	daemon.publishIpsecCaptureCommitted(nil)
+	_, _, captureGeneration, rows = daemon.ipsecCaptureConfigSnapshot(34, 10)
+	if captureGeneration != 0 || rows != nil {
+		t.Fatalf("teardown authority=(%d,%+v), want zero/nil", captureGeneration, rows)
+	}
+}
+
 func TestIpsecCaptureRuntimeJoinKeyUsesWiredGeneration9506(t *testing.T) {
 	supervisor := newIpsecSupervisor()
 	supervisor.permit.Store(&permitRecord{state: ipsecPermitOpen, permitEpoch: 17})
@@ -362,6 +392,34 @@ func TestReconcileIpsecCaptureRejectsStaleSampleAfterRestore9506(t *testing.T) {
 	}
 	if submitter.announces != 0 {
 		t.Fatalf("stale reconcile sent %d authority announcements", submitter.announces)
+	}
+}
+
+func TestIpsecCaptureZeroRowStageTokenFence10485(t *testing.T) {
+	tests := []struct {
+		name    string
+		staged  *ipsecCaptureRuntime
+		token   uint64
+	}{
+		{name: "teardown", staged: nil, token: 41},
+		{name: "quarantine", staged: &ipsecCaptureRuntime{}, token: 42},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{
+				ipsecCaptureStagePending:  true,
+				ipsecCaptureStaged:        tt.staged,
+				ipsecCaptureStageGeneration: tt.token,
+			}
+			d.publishIpsecCaptureSnapshotAuthority(7, 9, tt.token-1)
+			if d.ipsecCaptureSnapshotLandedForStage() {
+				t.Fatal("stale zero-row callback landed replacement stage")
+			}
+			d.publishIpsecCaptureSnapshotAuthority(7, 9, tt.token)
+			if !d.ipsecCaptureSnapshotLandedForStage() {
+				t.Fatal("matching zero-row callback did not land stage")
+			}
+		})
 	}
 }
 

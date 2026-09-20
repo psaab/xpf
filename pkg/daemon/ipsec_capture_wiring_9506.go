@@ -326,16 +326,16 @@ type ipsecReinjectSubmitter interface {
 }
 
 type ipsecCaptureRuntime struct {
-	supervisor   *ipsecSupervisor
-	handles      []ipsecQueueHandle
-	queues       []IpsecCaptureQueue
-	registry     *nfqueue.OriginRegistry
-	actor        *IpsecCapturePipeline
-	submitter    ipsecReinjectSubmitter
-	spec         xnft.IpsecDivertSpec
-	runID        string
-	zoneSnapshot *pmechZoneSnapshot
-
+	supervisor     *ipsecSupervisor
+	handles        []ipsecQueueHandle
+	queues         []IpsecCaptureQueue
+	registry       *nfqueue.OriginRegistry
+	actor          *IpsecCapturePipeline
+	submitter      ipsecReinjectSubmitter
+	spec           xnft.IpsecDivertSpec
+	runID          string
+	stageGeneration uint64
+	zoneSnapshot   *pmechZoneSnapshot
 	authorityMu         sync.Mutex
 	announced           bool
 	announcedRunID      string
@@ -371,6 +371,168 @@ func (r *ipsecCaptureRuntime) epochSnapshot() (uint64, []dpuserspace.QueueEpochS
 	}
 	return permit.permitEpoch, ipsecCaptureQueueEpochSnapshot(r.handles)
 }
+
+// tunnelRowsSnapshot returns one immutable identity row per admitted STN.
+// Rows come only from the staged queue handles and their ownership-checked
+// zone snapshot: a config VPN that never received admitted queues is not
+// published. Any incomplete or conflicting join is omitted so Rust binds an
+// empty/partial authority set and denies closed-world rather than guessing.
+func (r *ipsecCaptureRuntime) tunnelRowsSnapshot() []dpuserspace.IpsecTunnelRowSnapshot {
+	if r == nil || r.zoneSnapshot == nil || !r.zoneSnapshot.Current() || len(r.handles) == 0 {
+		return nil
+	}
+	rowsBySTN := make(map[string]dpuserspace.IpsecTunnelRowSnapshot, len(r.handles))
+	invalid := make(map[string]struct{})
+	for _, handle := range r.handles {
+		stn := handle.Key.STN
+		if stn == "" || handle.Key.Ifindex <= 0 || int64(handle.Key.Ifindex) > int64(1<<31-1) {
+			if stn != "" {
+				invalid[stn] = struct{}{}
+			}
+			continue
+		}
+		tunnel, ok := r.zoneSnapshot.tunnels[stn]
+		if !ok || tunnel.ifID == 0 || tunnel.ifindex == 0 ||
+			tunnel.ifindex != uint32(handle.Key.Ifindex) {
+			invalid[stn] = struct{}{}
+			continue
+		}
+		row := dpuserspace.IpsecTunnelRowSnapshot{
+			STN:            stn,
+			IfID:           tunnel.ifID,
+			LogicalIfindex: int32(tunnel.ifindex),
+		}
+		if previous, exists := rowsBySTN[stn]; exists && previous != row {
+			invalid[stn] = struct{}{}
+			continue
+		}
+		rowsBySTN[stn] = row
+	}
+	for stn := range invalid {
+		delete(rowsBySTN, stn)
+	}
+	stns := make([]string, 0, len(rowsBySTN))
+	for stn := range rowsBySTN {
+		stns = append(stns, stn)
+	}
+	sort.Strings(stns)
+	rows := make([]dpuserspace.IpsecTunnelRowSnapshot, 0, len(stns))
+	for _, stn := range stns {
+		rows = append(rows, rowsBySTN[stn])
+	}
+	return rows
+}
+
+// configSnapshotAuthority is the single daemon-side feed used by the
+// userspace snapshot compiler. It preserves the permit-gated S5 epoch feed
+// while publishing the staged P-MECH identity rows even when the permit is
+// temporarily closed; nftables and Rust D14 remain fail-closed until it opens.
+func (r *ipsecCaptureRuntime) configSnapshotAuthority() (
+	uint64,
+	[]dpuserspace.QueueEpochSnapshot,
+	uint64,
+	[]dpuserspace.IpsecTunnelRowSnapshot,
+) {
+	permitEpoch, queueEpochs := r.epochSnapshot()
+	return permitEpoch, queueEpochs, r.generation(), r.tunnelRowsSnapshot()
+}
+
+// publishSnapshotAuthority updates the shared config/FIB half of packet
+// advisories only after the corresponding ConfigSnapshot has been accepted.
+// The capture-generation half remains immutable per admitted handle.
+func (r *ipsecCaptureRuntime) publishSnapshotAuthority(configGeneration uint64, fibGeneration uint32) {
+	if r == nil || r.actor == nil {
+		return
+	}
+	r.actor.publishSnapshotAuthority(configGeneration, fibGeneration)
+}
+
+// ipsecCaptureConfigSnapshot selects the generation that an in-flight
+// snapshot apply is about to commit. Staged queues must win while pending so
+// the helper's rows and nftables authority describe the same admitted set;
+// a failed apply never reaches publishIpsecCaptureCommitted and therefore
+// leaves the previous runtime selected on the next snapshot.
+func (d *Daemon) ipsecCaptureConfigSnapshot(configGeneration uint64, fibGeneration uint32) (
+	uint64,
+	[]dpuserspace.QueueEpochSnapshot,
+	uint64,
+	[]dpuserspace.IpsecTunnelRowSnapshot,
+) {
+	if d == nil {
+		return 0, nil, 0, nil
+	}
+	d.ipsecCaptureMu.Lock()
+	pending := d.ipsecCaptureStagePending
+	stageGeneration := d.ipsecCaptureStageGeneration
+	capture := d.ipsecCapture
+	if pending {
+		capture = d.ipsecCaptureStaged
+	}
+	d.ipsecCaptureMu.Unlock()
+	if capture == nil {
+		if pending {
+			return 0, nil, stageGeneration, nil
+		}
+		return 0, nil, 0, nil
+	}
+	permitEpoch, queueEpochs, captureGeneration, rows := capture.configSnapshotAuthority()
+	if pending {
+		captureGeneration = stageGeneration
+	}
+	return permitEpoch, queueEpochs, captureGeneration, rows
+}
+
+// publishIpsecCaptureSnapshotAuthority commits the config/FIB half only after
+// the helper has ACKed the matching snapshot. Selecting staged first mirrors
+// ipsecCaptureConfigSnapshot and makes a same-key apply safe without mutating
+// receive goroutines' copied queue descriptors.
+func (d *Daemon) publishIpsecCaptureSnapshotAuthority(
+	configGeneration uint64,
+	fibGeneration uint32,
+	captureGeneration uint64,
+) {
+	if d == nil {
+		return
+	}
+	d.ipsecCaptureMu.Lock()
+	defer d.ipsecCaptureMu.Unlock()
+	pending := d.ipsecCaptureStagePending
+	capture := d.ipsecCapture
+	if pending {
+		capture = d.ipsecCaptureStaged
+		if captureGeneration != d.ipsecCaptureStageGeneration {
+			return
+		}
+	} else if capture == nil {
+		if captureGeneration != 0 {
+			return
+		}
+	} else if capture.generation() != captureGeneration {
+		return
+	}
+	if capture != nil {
+		capture.publishSnapshotAuthority(configGeneration, fibGeneration)
+	}
+	if pending {
+		// This callback is invoked only from Manager's applied-snapshot
+		// success boundary. The daemon must retain a staged runtime even when
+		// ApplyConfig later reports a post-publish status error. Recording the
+		// stage token under this same mutex prevents an old callback from
+		// marking a replacement stage as landed.
+		d.ipsecCaptureSnapshotLandedGeneration = d.ipsecCaptureStageGeneration
+	}
+}
+
+func (d *Daemon) ipsecCaptureSnapshotLandedForStage() bool {
+	if d == nil {
+		return false
+	}
+	d.ipsecCaptureMu.Lock()
+	defer d.ipsecCaptureMu.Unlock()
+	return d.ipsecCaptureStagePending &&
+		d.ipsecCaptureSnapshotLandedGeneration == d.ipsecCaptureStageGeneration
+}
+
 
 func (r *ipsecCaptureRuntime) authoritySnapshot() (string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) {
 	if r == nil || r.supervisor == nil {
@@ -657,9 +819,10 @@ func stagedIpsecQuarantineRuntime(d *Daemon, generation uint64, spec xnft.IpsecD
 		runID = ipsecCaptureProcessRunID
 	}
 	return &ipsecCaptureRuntime{
-		supervisor: d.ipsecS4,
-		spec:       spec,
-		runID:      runID,
+		supervisor:      d.ipsecS4,
+		spec:            spec,
+		runID:           runID,
+		stageGeneration: generation,
 	}
 }
 
@@ -688,6 +851,8 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		d.ipsecS4 = newIpsecSupervisor()
 	}
 	generation := d.ipsecCaptureGeneration.Add(1)
+	d.ipsecCaptureStageGeneration = generation
+	d.ipsecCaptureSnapshotLandedGeneration = 0
 	plan, err := buildIpsecCaptureQueuePlan(cfg, generation)
 	if err != nil {
 		return old, old, err
@@ -829,15 +994,16 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		spec.LabelSchema = xnft.IpsecDivertLabelSchema9506
 	}
 	staged = &ipsecCaptureRuntime{
-		supervisor:   d.ipsecS4,
-		handles:      handles,
-		queues:       queues,
-		registry:     registry,
-		actor:        actor,
-		submitter:    submitter,
-		spec:         spec,
-		runID:        actor.Status().RunID,
-		zoneSnapshot: zoneSnapshot,
+		supervisor:       d.ipsecS4,
+		handles:          handles,
+		queues:           queues,
+		registry:         registry,
+		actor:            actor,
+		submitter:        submitter,
+		spec:             spec,
+		runID:            actor.Status().RunID,
+		stageGeneration:  generation,
+		zoneSnapshot:     zoneSnapshot,
 	}
 	d.ipsecCaptureStaged = staged
 	d.ipsecCaptureStagePending = true

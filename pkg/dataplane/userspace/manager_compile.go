@@ -288,7 +288,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// is retained (m.lastSnapshot is not advanced on the error path).
 	// Capture the authority callback without invoking it under m.mu. The daemon
 	// owns the S4 snapshot and may need its own locks while producing the wire
-	// epochs; the manager lock only protects callback replacement.
+	// epochs and P-MECH rows; the manager lock only protects callback replacement.
 	m.mu.Lock()
 	epochProvider := m.captureEpochProvider
 	m.mu.Unlock()
@@ -298,9 +298,11 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
 	}
 	if epochProvider != nil {
-		permitEpoch, queueEpochs := epochProvider()
+		permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows := epochProvider(snap.Generation, snap.FIBGeneration)
 		snap.PermitEpoch = permitEpoch
 		snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
+		snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
+		snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
 	}
 	snap.partialUpdateEpoch = partialEpoch
 	// #1620: stamp the cold-path sample mask onto the snapshot. The

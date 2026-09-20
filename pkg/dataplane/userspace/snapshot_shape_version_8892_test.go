@@ -226,7 +226,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "a497626cd7021af40daaf16fac0335547ce677cc5f947a1dfeee688c06fb5b68"
+	snapshotShapeGolden8892 = "be54264e89003799aba55622b1bf5db4fc5a22664c83041a2c7da71aa8ce5822"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -362,7 +362,9 @@ const (
 	// transmitted authority fields; an old helper would use stale q0 ownership.
 	// v28 -> v29 BUMPED (#9506 P-MECH): IPsec tunnel-row identity carries
 	// the D14 authoritative stn/if_id/logical_ifindex fence.
-	snapshotShapeVersion8892 = 29
+	// v29 -> v30 BUMPED (#10485): the capture-generation stamp paired with
+	// tunnel rows rejects same-key stale NFQUEUE identity.
+	snapshotShapeVersion8892 = 30
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

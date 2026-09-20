@@ -328,7 +328,11 @@ const (
 	// authoritative `{stn, if_id, logical_ifindex}` D14 fence. An older helper
 	// would omit the row contract and let the Rust worker pair a claimed
 	// tunnel with an untrusted or stale snapshot.
-	ProtocolVersion = 29
+	// v29 -> v30 (#10485): the capture-generation stamp paired with
+	// `ipsec_tunnel_rows` fences rows against same-key config/FIB publishes.
+	// A v29 helper can decode the rows but cannot prove that the packet's
+	// admitted handle generation is the one in the RuntimeView.
+	ProtocolVersion = 30
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -381,6 +385,20 @@ const (
 	// ignore the scope and import a lease as domain 0.
 	MinProtocolPersistentNatLeaseScope = 25
 
+	// MinProtocolIpsecTunnelRows is the FIRST snapshot protocol version whose
+	// ConfigSnapshot carries the immutable per-admitted-tunnel P-MECH identity
+	// rows consumed by Rust D14. A helper below this floor cannot prove the
+	// `{stn, if_id, logical_ifindex}` join and must never be paired with a
+	// snapshot that claims the feature.
+	MinProtocolIpsecTunnelRows = 29
+
+	// MinProtocolIpsecTunnelSnapshotGeneration is the first version that
+	// carries the capture-generation fence paired with the row set. Keep this
+	// distinct from MinProtocolIpsecTunnelRows: the rows themselves landed in
+	// v29, while the generation needed to reject same-key stale pairing landed
+	// in v30.
+	MinProtocolIpsecTunnelSnapshotGeneration = 30
+
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
 	// contract spans THREE bumps on the #5619/#6691 branch — v5 added
 	// InterfaceSnapshot.SecureTunnel (be8aec13e), v6 the every-owner refusal
@@ -390,7 +408,8 @@ const (
 	// is the first version that reads all of it. (The subsequent 7 -> 8 bump
 	// was collision resolution against #6722's parallel v5, not a fourth change
 	// to this contract — see the ProtocolVersion comment above.)
-	MinProtocolSecureTunnelRefusal   = 7
+
+	MinProtocolSecureTunnelRefusal = 7
 	InjectPacketTupleProtocolVersion = 1
 	TypeUserspace                    = "userspace"
 
@@ -559,6 +578,19 @@ type QueueEpochSnapshot struct {
 	Queue uint16 `json:"queue"`
 	Epoch uint64 `json:"epoch"`
 }
+// IpsecTunnelRowSnapshot is one per-admitted-tunnel P-MECH identity row (#10485,
+// design section 1.1 D1). The daemon publishes one row per admitted tunnel:
+// STN is always the authored vpn.BindInterface, IfID is the ownership-checked
+// config.XFRMIfNameAndID derivation, and LogicalIfindex is the staged live
+// ifindex frozen for the snapshot generation (D1c). Rust D14 derives the
+// authoritative if_id by EXACT STN match and an unknown STN is doubt and
+// DROPs. There is deliberately no Rust-side if_id re-derivation (a second
+// parser is a second alias bug, #6691).
+type IpsecTunnelRowSnapshot struct {
+	STN            string `json:"stn"`
+	IfID           uint32 `json:"if_id"`
+	LogicalIfindex int32  `json:"logical_ifindex"`
+}
 
 type ConfigSnapshot struct {
 	Version       int       `json:"version"`
@@ -567,8 +599,19 @@ type ConfigSnapshot struct {
 	GeneratedAt   time.Time `json:"generated_at"`
 	// PermitEpoch and QueueEpochs are additive S4 authority feed fields.
 	// Zero/nil means no active #9506 pipeline authority.
-	PermitEpoch     uint64                   `json:"permit_epoch,omitempty"`
-	QueueEpochs     []QueueEpochSnapshot     `json:"queue_epochs,omitempty"`
+	PermitEpoch uint64               `json:"permit_epoch,omitempty"`
+	QueueEpochs []QueueEpochSnapshot `json:"queue_epochs,omitempty"`
+	// IpsecTunnelRows is the immutable per-admitted-tunnel P-MECH identity
+	// set (#10485, design section 1.1 D1). Nil/empty is deliberate deny-only
+	// state: Rust binds an empty set to generation 0, so every D14 submit
+	// remains E28-denied exactly as before the publisher exists.
+	IpsecTunnelRows []IpsecTunnelRowSnapshot `json:"ipsec_tunnel_rows,omitempty"`
+	// IpsecTunnelSnapshotGeneration is the daemon capture-generation stamp
+	// paired with IpsecTunnelRows. It is distinct from ConfigSnapshot.Generation:
+	// the latter advances for ordinary config/FIB publishes, while the former
+	// advances only when admitted NFQUEUE handles rotate. Rust D14 compares its
+	// packet snapshot-generation advisory against this exact capture authority.
+	IpsecTunnelSnapshotGeneration uint64 `json:"ipsec_tunnel_snapshot_generation,omitempty"`
 	Summary         SnapshotSummary          `json:"summary"`
 	Capabilities    UserspaceCapabilities    `json:"capabilities"`
 	MapPins         UserspaceMapPins         `json:"map_pins"`

@@ -20,8 +20,9 @@ import "github.com/psaab/xpf/pkg/config"
 // sites), so its Config and its Generation are both the helper's currently
 // applied generation by construction.
 type appliedSnapshot struct {
-	Config     *config.Config
-	Generation uint64
+	Config            *config.Config
+	Generation        uint64
+	CaptureGeneration uint64
 }
 
 // AppliedNATPoolStatus is one source-NAT pool's deduplicated live
@@ -115,8 +116,13 @@ func (m *Manager) markAppliedSnapshotLocked() {
 		return
 	}
 	m.appliedSnapshot = appliedSnapshot{
-		Config:     m.lastSnapshot.Config,
-		Generation: m.lastSnapshot.Generation,
+		Config:            m.lastSnapshot.Config,
+		Generation:        m.lastSnapshot.Generation,
+		CaptureGeneration: m.lastSnapshot.IpsecTunnelSnapshotGeneration,
+	}
+	if committer := m.captureAuthorityCommitter; committer != nil {
+		committer(m.appliedSnapshot.Generation, m.lastSnapshot.FIBGeneration,
+			m.appliedSnapshot.CaptureGeneration)
 	}
 }
 

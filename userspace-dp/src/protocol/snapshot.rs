@@ -487,6 +487,16 @@ pub(crate) struct QueueEpochSnapshot {
     pub epoch: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecTunnelRowSnapshot {
+    #[serde(rename = "stn", default)]
+    pub stn: String,
+    #[serde(rename = "if_id", default)]
+    pub if_id: u32,
+    #[serde(rename = "logical_ifindex", default)]
+    pub logical_ifindex: i32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConfigSnapshot {
     pub version: i32,
@@ -500,6 +510,18 @@ pub(crate) struct ConfigSnapshot {
     pub permit_epoch: u64,
     #[serde(rename = "queue_epochs", default, skip_serializing_if = "Vec::is_empty")]
     pub queue_epochs: Vec<QueueEpochSnapshot>,
+    /// #10485: capture-generation authority paired with the immutable
+    /// per-admitted-tunnel rows. This is intentionally distinct from the
+    /// manager config generation below: same-key applies may advance config
+    /// and FIB generations without rotating NFQUEUE handles.
+    #[serde(
+        rename = "ipsec_tunnel_snapshot_generation",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
+    pub ipsec_tunnel_snapshot_generation: u64,
+    #[serde(rename = "ipsec_tunnel_rows", default, skip_serializing_if = "Vec::is_empty")]
+    pub ipsec_tunnel_rows: Vec<IpsecTunnelRowSnapshot>,
     pub generation: u64,
     #[serde(rename = "fib_generation", default)]
     pub fib_generation: u32,
@@ -1219,5 +1241,28 @@ mod slow_path_mtu_tests {
             ..Default::default()
         };
         assert_eq!(snap.slow_path_mtu(), 9216);
+    }
+}
+
+#[cfg(test)]
+mod ipsec_tunnel_rows_tests {
+    use super::*;
+
+    #[test]
+    fn serializes_capture_generation_and_rows() {
+        let snapshot = ConfigSnapshot {
+            ipsec_tunnel_snapshot_generation: 17,
+            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+                stn: "st0".to_string(),
+                if_id: 9,
+                logical_ifindex: 10,
+            }],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(snapshot).expect("serialize");
+        assert_eq!(value["ipsec_tunnel_snapshot_generation"], 17);
+        assert_eq!(value["ipsec_tunnel_rows"][0]["stn"], "st0");
+        assert_eq!(value["ipsec_tunnel_rows"][0]["if_id"], 9);
+        assert_eq!(value["ipsec_tunnel_rows"][0]["logical_ifindex"], 10);
     }
 }

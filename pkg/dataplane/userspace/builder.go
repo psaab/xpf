@@ -14,13 +14,24 @@ func buildSnapshot(cfg *config.Config, ucfg config.UserspaceConfig, generation u
 	return buildSnapshotWithSchedulerState(cfg, ucfg, generation, fibGeneration, nil, nil, nil)
 }
 
-// CaptureEpochProvider is the optional S4 authority feed used while a capture
-// pipeline is active. It is deliberately a callback so the userspace builder
-// does not import daemon (which would create a package cycle).
-type CaptureEpochProvider func() (permitEpoch uint64, queueEpochs []QueueEpochSnapshot)
+// CaptureEpochProvider is the optional S4/P-MECH authority feed used while a
+// capture pipeline is active. It is deliberately a callback so the userspace
+// builder does not import daemon (which would create a package cycle).
+//
+// The requested config/FIB generations let the daemon refresh the packet
+// descriptor authority on every successful snapshot build. The third result
+// is the immutable capture-generation stamp for the per-admitted-tunnel rows;
+// it must not be confused with ConfigSnapshot.Generation, which advances on
+// ordinary config/FIB publishes even when NFQUEUE handles are unchanged.
+type CaptureEpochProvider func(configGeneration uint64, fibGeneration uint32) (
+	permitEpoch uint64,
+	queueEpochs []QueueEpochSnapshot,
+	tunnelSnapshotGeneration uint64,
+	tunnelRows []IpsecTunnelRowSnapshot,
+)
 
-// SetCaptureEpochProvider wires the live S4 authority feed into every full
-// snapshot compiled by this manager. A nil provider clears the feed and
+// SetCaptureEpochProvider wires the live S4/P-MECH authority feed into every
+// full snapshot compiled by this manager. A nil provider clears the feed and
 // preserves the pre-capture zero/nil wire fields.
 func (m *Manager) SetCaptureEpochProvider(provider CaptureEpochProvider) {
 	if m == nil {
@@ -31,19 +42,53 @@ func (m *Manager) SetCaptureEpochProvider(provider CaptureEpochProvider) {
 	m.mu.Unlock()
 }
 
-// buildSnapshotWithEpochProvider is the additive epoch-aware builder entry
-// point. Existing callers keep the zero/nil authority fields; the daemon can
-// supply a supervisor-backed provider when the pipeline is active.
+// SetCaptureAuthorityCommitter wires the success-boundary callback used by
+// full and FIB-only applies. It is separate from CaptureEpochProvider because
+// preparing a snapshot must not mutate the currently active packet authority
+// before the helper acknowledges that snapshot.
+func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, uint64)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.captureAuthorityCommitter = committer
+	m.mu.Unlock()
+}
+
+
+// refreshCaptureAuthorityLocked refreshes retained snapshots immediately
+// before a deferred/catch-up publish. The retained snapshot may have been
+// built from a staged runtime that an XSK deferral rolled back; asking the
+// current provider here prevents rows from retired NFQUEUE handles surviving
+// into the later apply_snapshot.
+func (m *Manager) refreshCaptureAuthorityLocked(snap *ConfigSnapshot) {
+	if m == nil || snap == nil || m.captureEpochProvider == nil {
+		return
+	}
+	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows :=
+		m.captureEpochProvider(snap.Generation, snap.FIBGeneration)
+	snap.PermitEpoch = permitEpoch
+	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
+	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
+	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+}
+
+// buildSnapshotWithEpochProvider is the additive epoch-aware entry point.
+// Existing callers keep the zero/nil authority fields; the daemon can supply
+// a supervisor-backed provider when the pipeline is active.
 func buildSnapshotWithEpochProvider(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, provider CaptureEpochProvider) (*ConfigSnapshot, error) {
 	snap, err := buildSnapshot(cfg, ucfg, generation, fibGeneration)
 	if err != nil || provider == nil {
 		return snap, err
 	}
-	permitEpoch, queueEpochs := provider()
+	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows := provider(generation, fibGeneration)
 	snap.PermitEpoch = permitEpoch
 	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
+	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
+	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
 	return snap, nil
 }
+
 
 func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string) (*ConfigSnapshot, error) {
 	return buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, nil)
