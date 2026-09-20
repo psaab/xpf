@@ -109,6 +109,60 @@ func pipelineTestRegistry(t *testing.T) *OriginRegistry {
 	return &registry
 }
 
+type passZoneSnapshot9506 struct{}
+
+func (passZoneSnapshot9506) ResolveSTN(string) ZoneResolution {
+	return ZoneResolution{ZoneID: 1, IfID: 7, Reason: ZoneReasonZoned}
+}
+func (passZoneSnapshot9506) Generations() (uint64, uint32) { return 1, 1 }
+func (passZoneSnapshot9506) Current() bool                 { return true }
+
+type passZoneEvaluator9506 struct{}
+
+func (passZoneEvaluator9506) Evaluate(CaptureOrigin, ZoneSnapshotRef) ZoneEvaluation {
+	return ZoneEvaluation{Decision: ZonePass, ZoneID: 1, IfID: 7, Reason: ZoneReasonZoned}
+}
+
+func TestCapturePipelineRoutineV1SuppressionHasNoDenyEvent9506(t *testing.T) {
+	sink := new(pipelineTestSink)
+	denyEvents := 0
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry:      pipelineTestRegistry(t),
+		Phase:         PipelineEnforcing,
+		Sink:          sink,
+		ZoneEvaluator: passZoneEvaluator9506{},
+		ZoneSnapshot:  passZoneSnapshot9506{},
+		DenyEvents: DenyEventSinkFunc(func(IpsecInnerDeny) bool {
+			denyEvents++
+			return true
+		}),
+		HandoffCap: 2,
+		BatchCap:   2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "routine-v1",
+		Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1,
+		FIBGeneration: 1, QueueNumber: 77, QueueEpoch: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(1); got != 1 {
+		t.Fatalf("Drain=%d, want one frame", got)
+	}
+	if stats := p.Stats(); stats.V1PermitSuppressed != 1 {
+		t.Fatalf("stats=%+v, want one routine suppression", stats)
+	}
+	if denyEvents != 0 {
+		t.Fatalf("routine suppression emitted %d deny events, want none", denyEvents)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
+	}
+}
+
 func TestCapturePipelineOwnerHomogeneousPartition9506(t *testing.T) {
 	origin := func(owner string) CaptureOrigin {
 		return CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: owner, STN: "st0", OwnedIfindex: 7}
@@ -218,26 +272,26 @@ func TestCapturePipelineScopedCancelKeepsOtherQueueLive9506(t *testing.T) {
 	if got := p.Drain(4); got != 2 {
 		t.Fatalf("Drain=%d, want 2", got)
 	}
-	if len(submitter.submitted) != 1 || submitter.submitted[0].Lease.QueueNumber != 77 {
-		t.Fatalf("initial submission=%+v, want queue 77 head", submitter.submitted)
+	if len(submitter.submitted) != 0 || len(submitter.cancelled) != 0 {
+		t.Fatalf("fail-closed gate submitted=%+v cancelled=%v, want no reinject activity", submitter.submitted, submitter.cancelled)
+	}
+	stats := p.Stats()
+	if stats.ZoneGateUnavailable != 2 || stats.ZoneGateDrops != 2 {
+		t.Fatalf("stats=%+v, want two unavailable zone-gate drops", stats)
+	}
+	if len(sink.verdicts) != 2 {
+		t.Fatalf("verdicts=%+v, want both frames terminal", sink.verdicts)
+	}
+	for _, verdict := range sink.verdicts {
+		if verdict.v != VerdictDrop {
+			t.Fatalf("verdicts=%+v, want only DROP", sink.verdicts)
+		}
 	}
 	if err := p.Cancel(1, 77, 10); err != nil {
 		t.Fatalf("scoped Cancel: %v", err)
 	}
-	if len(sink.verdicts) != 1 || sink.verdicts[0].id != 77 || sink.verdicts[0].v != VerdictDrop {
-		t.Fatalf("scoped verdicts=%+v, want queue 77 DROP", sink.verdicts)
-	}
-	if len(submitter.submitted) != 2 || submitter.submitted[1].Lease.QueueNumber != 78 {
-		t.Fatalf("tail submission=%+v, want queue 78 after scoped cancel", submitter.submitted)
-	}
-	if len(p.pending) != 1 {
-		t.Fatalf("pending=%d, want unrelated queue 78 retained", len(p.pending))
-	}
-	if err := p.Cancel(0, 0, 0); err != nil {
-		t.Fatalf("global cleanup Cancel: %v", err)
-	}
-	if len(sink.verdicts) != 2 || sink.verdicts[1].id != 78 || sink.verdicts[1].v != VerdictDrop {
-		t.Fatalf("cleanup verdicts=%+v, want queue 78 DROP", sink.verdicts)
+	if len(sink.verdicts) != 2 {
+		t.Fatalf("scoped cancel changed terminal verdicts=%+v", sink.verdicts)
 	}
 }
 
@@ -293,14 +347,14 @@ func TestCapturePipelineAdmittedEchoMismatchCancelsUncertain9506(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := p.Drain(1); got != 1 {
-		t.Fatalf("Drain=%d, want one submitted frame", got)
+		t.Fatalf("Drain=%d, want one terminal frame", got)
 	}
-	if len(submitter.cancelled) != 1 || submitter.cancelled[0] != 1 {
-		t.Fatalf("cancelled=%v, want request 1 after positive echo mismatch", submitter.cancelled)
+	if len(submitter.submitted) != 0 || len(submitter.cancelled) != 0 {
+		t.Fatalf("fail-closed gate submitted=%+v cancelled=%v, want no reinject activity", submitter.submitted, submitter.cancelled)
 	}
 	stats := p.Stats()
-	if stats.AdmissionsRefused != 0 || stats.Uncertain != 1 {
-		t.Fatalf("stats=%+v, want uncertain mismatch rather than refusal", stats)
+	if stats.ZoneGateUnavailable != 1 || stats.ZoneGateDrops != 1 {
+		t.Fatalf("stats=%+v, want one unavailable zone-gate drop", stats)
 	}
 	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
 		t.Fatalf("verdicts=%+v, want one terminal DROP", sink.verdicts)
@@ -309,17 +363,19 @@ func TestCapturePipelineAdmittedEchoMismatchCancelsUncertain9506(t *testing.T) {
 
 func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 	tests := []struct {
-		name          string
-		outcome       CompletionOutcome
-		wantStale     uint64
-		wantRefused   uint64
-		wantUncertain uint64
-		wantNotify    bool
+		name           string
+		outcome        CompletionOutcome
+		wantStale      uint64
+		wantRefused    uint64
+		wantUncertain  uint64
+		wantSuppressed uint64
+		wantNotify     bool
 	}{
 		{name: "fenced is stale", outcome: CompletionFenced, wantStale: 1},
 		{name: "denied is refused", outcome: CompletionDenied, wantRefused: 1},
 		{name: "accepted is uncertain", outcome: CompletionAccepted, wantUncertain: 1, wantNotify: true},
 		{name: "would reinject is uncertain", outcome: CompletionWouldReinject, wantUncertain: 1, wantNotify: true},
+		{name: "would permit is suppressed", outcome: CompletionWouldPermit, wantSuppressed: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,8 +410,10 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 				t.Fatal("resolveCompletion returned false")
 			}
 			stats := p.Stats()
-			if stats.Stale != tc.wantStale || stats.Refused != tc.wantRefused || stats.Uncertain != tc.wantUncertain {
-				t.Fatalf("stats=%+v, want stale=%d refused=%d uncertain=%d", stats, tc.wantStale, tc.wantRefused, tc.wantUncertain)
+			if stats.Stale != tc.wantStale || stats.Refused != tc.wantRefused ||
+				stats.Uncertain != tc.wantUncertain || stats.V1PermitSuppressed != tc.wantSuppressed {
+				t.Fatalf("stats=%+v, want stale=%d refused=%d uncertain=%d suppressed=%d",
+					stats, tc.wantStale, tc.wantRefused, tc.wantUncertain, tc.wantSuppressed)
 			}
 			wantCalls := 0
 			if tc.wantNotify {

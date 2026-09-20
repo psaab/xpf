@@ -3,6 +3,8 @@ package nfqueue
 import (
 	"errors"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestVerdictBatchPrevalidatesDuplicate9506 protects the reservation boundary:
@@ -50,5 +52,31 @@ func TestVerdictAfterCloseReturnsErrClosed9506(t *testing.T) {
 	pkt := &Packet{q: q, id: 3}
 	if err := pkt.Verdict(VerdictAccept); !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed queue verdict=%v, want ErrClosed", err)
+	}
+}
+
+func TestVerdictEAGAINLeavesPacketRetryable9506(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+	fill := make([]byte, 4096)
+	for {
+		if err := unix.Send(fds[0], fill, unix.MSG_DONTWAIT); err != nil {
+			if err != unix.EAGAIN && err != unix.EWOULDBLOCK {
+				t.Fatalf("fill socket: %v", err)
+			}
+			break
+		}
+	}
+	q := &Queue{id: 61, fd: fds[0]}
+	pkt := &Packet{q: q, id: 4}
+	if err := pkt.Verdict(VerdictAccept); !errors.Is(err, ErrVerdictTimeout) {
+		t.Fatalf("EAGAIN verdict error=%v, want ErrVerdictTimeout", err)
+	}
+	if pkt.done.Load() {
+		t.Fatal("EAGAIN verdict consumed terminal reservation")
 	}
 }

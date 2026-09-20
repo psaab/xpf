@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -45,10 +46,11 @@ func TestReinjectSocketWriteHandlesShortWrites9506(t *testing.T) {
 
 func TestReinjectSocketDecodesExtendedCompletionOutcomes9506(t *testing.T) {
 	want := map[byte]CompletionOutcome{
-		6: CompletionFenced,
-		7: CompletionDenied,
-		8: CompletionAccepted,
-		9: CompletionWouldReinject,
+		6:  CompletionFenced,
+		7:  CompletionDenied,
+		8:  CompletionAccepted,
+		9:  CompletionWouldReinject,
+		10: CompletionWouldPermit,
 	}
 	for code, expected := range want {
 		payload := make([]byte, 2+37)
@@ -65,7 +67,7 @@ func TestReinjectSocketDecodesExtendedCompletionOutcomes9506(t *testing.T) {
 }
 
 func TestReinjectSocketDecodesWrittenAndExtendedBatch9506(t *testing.T) {
-	codes := []byte{1, 6, 7, 8, 9}
+	codes := []byte{1, 6, 7, 8, 9, 10}
 	payload := make([]byte, 2+len(codes)*37)
 	binary.BigEndian.PutUint16(payload[:2], uint16(len(codes)))
 	for i, code := range codes {
@@ -88,11 +90,98 @@ func TestReinjectSocketDecodesWrittenAndExtendedBatch9506(t *testing.T) {
 		CompletionDenied,
 		CompletionAccepted,
 		CompletionWouldReinject,
+		CompletionWouldPermit,
 	}
 	for i, completion := range completions {
 		if completion.Outcome != want[i] || completion.BytesWritten != uint32(i+10) {
 			t.Fatalf("completion[%d]=%+v, want outcome=%s bytes=%d", i, completion, want[i], i+10)
 		}
+	}
+}
+
+func TestReinjectSocketAdmissionReasonConsistencyFailsClosed9506(t *testing.T) {
+	for _, code := range []byte{reinjectAdmitNoGeneration, reinjectAdmitTunnelRowMissing, 99} {
+		t.Run(fmt.Sprintf("reason-%d", code), func(t *testing.T) {
+			payload := make([]byte, 2+34)
+			binary.BigEndian.PutUint16(payload[:2], 1)
+			payload[2+32] = 1
+			payload[2+33] = code
+			admissions, err := decodeAdmissions(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(admissions) != 1 {
+				t.Fatalf("admissions=%d, want one row", len(admissions))
+			}
+			if admissions[0].Admitted || admissions[0].ReasonCode != code {
+				t.Fatalf("admission=%+v, want refusal for non-OK reason", admissions[0])
+			}
+		})
+	}
+}
+
+func TestEncodeSubmitBatchPMechTailTwoFrames9506(t *testing.T) {
+	origin := CaptureOrigin{
+		Family: CaptureFamilyInet, Hook: CaptureHookForward,
+		Owner: "owner-a", STN: "st0", OwnedIfindex: 7,
+	}
+	frames := []AdjudicatedFrame{
+		{
+			Frame: CaptureFrame{
+				Packet:             pipelineTestPacket(77, 2, 2, 7, 1),
+				FlowKey:            "flow-a",
+				SnapshotGeneration: 11,
+				ConfigGeneration:   12,
+				FIBGeneration:      13,
+			},
+			Origin: origin,
+			Lease:  ReinjectLease{RequestID: 1, PermitEpoch: 2, QueueNumber: 77, QueueEpoch: 3},
+			ZoneID: 4,
+			IfID:   7,
+		},
+		{
+			Frame: CaptureFrame{
+				Packet:             pipelineTestPacket(77, 2, 2, 7, 2),
+				FlowKey:            "flow-b",
+				SnapshotGeneration: 21,
+				ConfigGeneration:   22,
+				FIBGeneration:      23,
+			},
+			Origin: origin,
+			Lease:  ReinjectLease{RequestID: 2, PermitEpoch: 3, QueueNumber: 77, QueueEpoch: 4},
+			ZoneID: 5,
+			IfID:   8,
+		},
+	}
+	payload, err := encodeSubmitBatch(frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixedRowLen = 8 + 8 + 8 + 2 + 8 + 3 + 4
+	rowLen := fixedRowLen + 1 + len(origin.Owner) + 1 + len(origin.STN) +
+		4 + len(frames[0].Frame.Packet.Payload()) + reinjectSubmitPMechTailLen
+	if want := 2 + 2*rowLen; len(payload) != want {
+		t.Fatalf("payload length=%d, want %d", len(payload), want)
+	}
+	tail := 2 + rowLen - reinjectSubmitPMechTailLen
+	if got := binary.BigEndian.Uint64(payload[tail : tail+8]); got != 11 {
+		t.Fatalf("first snapshot generation=%d, want 11", got)
+	}
+	if got := binary.BigEndian.Uint64(payload[tail+8 : tail+16]); got != 12 {
+		t.Fatalf("first config generation=%d, want 12", got)
+	}
+	if got := binary.BigEndian.Uint32(payload[tail+16 : tail+20]); got != 13 {
+		t.Fatalf("first FIB generation=%d, want 13", got)
+	}
+	if got := binary.BigEndian.Uint16(payload[tail+20 : tail+22]); got != 4 {
+		t.Fatalf("first zone ID=%d, want 4", got)
+	}
+	if got := binary.BigEndian.Uint32(payload[tail+22 : tail+26]); got != 7 {
+		t.Fatalf("first if ID=%d, want 7", got)
+	}
+	second := 2 + rowLen
+	if got := binary.BigEndian.Uint64(payload[second : second+8]); got != 2 {
+		t.Fatalf("second request ID=%d, want 2 (tail boundary=%d)", got, tail)
 	}
 }
 

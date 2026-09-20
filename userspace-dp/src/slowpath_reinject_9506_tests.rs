@@ -22,6 +22,9 @@
 //! - Legacy lease-None path unchanged, no completion tracking.
 
 use super::*;
+use crate::afxdp::ipsec_inner_queue::{
+    reason as ipsec_reason, IpsecInnerVerdict, IPSEC_INNER_SLAB_CAP,
+};
 use std::sync::Arc;
 
 const PERMIT: u64 = 7;
@@ -49,6 +52,11 @@ fn frame(id: u64, flow_tag: u64, len: usize) -> SubmitFrame {
         flags: 0,
         origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
         bytes: vec![0x45u8; len],
+        snapshot_generation: 1,
+        config_generation: 2,
+        fib_generation: 3,
+        zone_id: 4,
+        if_id: 5,
     }
 }
 
@@ -64,6 +72,47 @@ fn uncertain() -> TransferVerdict {
     TransferVerdict::Uncertain {
         reason: "test-uncertain".to_string(),
     }
+}
+
+#[test]
+fn ipsec_inner_verdict_bridge_terminalizes_deny_and_would_permit() {
+    let core = open_core();
+    assert!(core.admit(&frame(901, 17, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
+        request_id: 901,
+        stage: "d14",
+        reason: 32,
+        policy_id: 0,
+    }));
+    assert_eq!(
+        core.drain_ready(1)[0].outcome,
+        ReinjectOutcome::Denied
+    );
+
+    assert!(core.admit(&frame(902, 17, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(
+        IpsecInnerVerdict::WouldPermit { request_id: 902 }
+    ));
+    assert_eq!(
+        core.drain_ready(1)[0].outcome,
+        ReinjectOutcome::WouldPermit
+    );
+}
+
+#[test]
+fn ipsec_inner_verdict_bridge_maps_e24_to_uncertain() {
+    let core = open_core();
+    assert!(core.admit(&frame(903, 17, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
+        request_id: 903,
+        stage: "d11",
+        reason: ipsec_reason::VERDICT_UNCERTAIN,
+        policy_id: 0,
+    }));
+    assert_eq!(
+        core.drain_ready(1)[0].outcome,
+        ReinjectOutcome::Uncertain
+    );
 }
 
 /// Test stub authority: scripts open/closed without publishing epochs.
@@ -632,20 +681,44 @@ fn completion_queue_cannot_lose_terminals() {
 
 #[test]
 fn codec_submit_roundtrip_and_exact_bytes() {
-    let frames = vec![SubmitFrame {
-        lease: ReinjectLease {
-            permit_epoch: 7,
-            queue_epoch: 11,
-            queue_number: 9,
-            request_id: 1,
+    let frames = vec![
+        SubmitFrame {
+            lease: ReinjectLease {
+                permit_epoch: 7,
+                queue_epoch: 11,
+                queue_number: 9,
+                request_id: 1,
+            },
+            flow_tag: 2,
+            flags: SUBMIT_FLAG_DRY_RUN,
+            origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
+            bytes: vec![0x45, 0x00],
+            snapshot_generation: 13,
+            config_generation: 17,
+            fib_generation: 19,
+            zone_id: 23,
+            if_id: 29,
         },
-        flow_tag: 2,
-        flags: SUBMIT_FLAG_DRY_RUN,
-        origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
-        bytes: vec![0x45, 0x00],
-    }];
+        SubmitFrame {
+            lease: ReinjectLease {
+                permit_epoch: 8,
+                queue_epoch: 12,
+                queue_number: 10,
+                request_id: 2,
+            },
+            flow_tag: 3,
+            flags: SUBMIT_FLAG_SHADOW,
+            origin: CaptureOrigin::inet_forward(43, "owner2", "stn2"),
+            bytes: vec![0xaa],
+            snapshot_generation: 14,
+            config_generation: 18,
+            fib_generation: 20,
+            zone_id: 24,
+            if_id: 30,
+        },
+    ];
     let payload = encode_submit_batch(&frames);
-    let mut expected = vec![0x00, 0x01];
+    let mut expected = vec![0x00, 0x02];
     expected.extend_from_slice(&1u64.to_be_bytes());
     expected.extend_from_slice(&7u64.to_be_bytes());
     expected.extend_from_slice(&11u64.to_be_bytes());
@@ -660,11 +733,51 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(b"stn");
     expected.extend_from_slice(&2u32.to_be_bytes());
     expected.extend_from_slice(&[0x45, 0x00]);
+    expected.extend_from_slice(&13u64.to_be_bytes());
+    expected.extend_from_slice(&17u64.to_be_bytes());
+    expected.extend_from_slice(&19u32.to_be_bytes());
+    expected.extend_from_slice(&23u16.to_be_bytes());
+    expected.extend_from_slice(&29u32.to_be_bytes());
+    expected.extend_from_slice(&2u64.to_be_bytes());
+    expected.extend_from_slice(&8u64.to_be_bytes());
+    expected.extend_from_slice(&12u64.to_be_bytes());
+    expected.extend_from_slice(&10u16.to_be_bytes());
+    expected.extend_from_slice(&3u64.to_be_bytes());
+    expected.push(SUBMIT_FLAG_SHADOW);
+    expected.extend_from_slice(&[ORIGIN_INET, ORIGIN_FORWARD]);
+    expected.extend_from_slice(&43u32.to_be_bytes());
+    expected.push(6);
+    expected.extend_from_slice(b"owner2");
+    expected.push(4);
+    expected.extend_from_slice(b"stn2");
+    expected.extend_from_slice(&1u32.to_be_bytes());
+    expected.push(0xaa);
+    expected.extend_from_slice(&14u64.to_be_bytes());
+    expected.extend_from_slice(&18u64.to_be_bytes());
+    expected.extend_from_slice(&20u32.to_be_bytes());
+    expected.extend_from_slice(&24u16.to_be_bytes());
+    expected.extend_from_slice(&30u32.to_be_bytes());
     assert_eq!(payload, expected);
     assert_eq!(decode_submit_batch(&payload).unwrap(), frames);
     // Empty batch is a legal no-op.
     let empty = encode_submit_batch(&[]);
     assert_eq!(decode_submit_batch(&empty).unwrap(), vec![]);
+}
+
+#[test]
+fn pooled_submit_decode_owns_bytes_once_in_slab() {
+    let frame = frame(77, 9, 64);
+    let payload = encode_submit_batch(&[frame]);
+    let pool = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
+    let pooled = decode_submit_batch_into_pool(&payload, &pool).expect("pooled decode");
+    assert_eq!(pooled.len(), 1);
+    assert_eq!(pooled[0].bytes_len, 64);
+    let slab_id = pooled[0].slab_id;
+    let slab = pool.buffer(slab_id).expect("slab buffer");
+    assert_eq!(slab.as_slice(), &[0x45; 64]);
+    drop(slab);
+    assert!(pool.force_release(slab_id));
+    assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
 }
 
 #[test]
@@ -678,7 +791,8 @@ fn codec_submit_rejects_over_caps() {
     );
     // data_len > 65535 rejected.
     let mut payload = encode_submit_batch(&[frame(1, 1, 64)]);
-    let data_len_pos = payload.len() - 64 - std::mem::size_of::<u32>();
+    let data_len_pos =
+        payload.len() - 64 - SUBMIT_PMECH_TAIL_LEN - std::mem::size_of::<u32>();
     payload[data_len_pos..data_len_pos + 4].copy_from_slice(&65536u32.to_be_bytes());
     assert_eq!(
         decode_submit_batch(&payload).unwrap_err(),

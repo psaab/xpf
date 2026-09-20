@@ -35,7 +35,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr::NonNull;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -91,6 +91,8 @@ pub(crate) mod frame;
 #[path = "gre.rs"]
 mod gre;
 mod logical_ingress;
+pub(crate) mod ipsec_inner;
+pub(crate) mod ipsec_inner_queue;
 mod gre_discriminator;
 mod ha;
 // #6785: the control handler needs the synced-import outcome type and its
@@ -280,6 +282,15 @@ use self::umem::*;
 // afxdp-private in production — this wrapper exists only under `cfg(test)`.
 #[cfg(test)]
 pub(crate) fn packet_rel_l4_offset_and_protocol_for_test(
+    packet: &[u8],
+    addr_family: u8,
+) -> Option<(usize, u8)> {
+    self::frame::packet_rel_l4_offset_and_protocol(packet, addr_family)
+}
+
+/// Production wrapper for the canonical ext-aware L4 walker used by the
+/// deny-only IPsec-inner descriptor path.
+pub(crate) fn packet_rel_l4_offset_and_protocol_for_ipsec(
     packet: &[u8],
     addr_family: u8,
 ) -> Option<(usize, u8)> {

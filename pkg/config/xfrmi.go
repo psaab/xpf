@@ -284,6 +284,19 @@ func bindInterfaceOwnsRef(bindIface, ref string) bool {
 	return true
 }
 
+// BindInterfaceOwnsRef reports whether the xfrmi device an authored
+// `bind-interface` string creates IS the device an interface ref denotes.
+// It is the exported daemon-facing wrapper over bindInterfaceOwnsRef and the
+// only ownership API the P-MECH (#9506) staging path may call; config remains
+// the single source of truth for ownership.
+//
+// Callers MUST have already established that both strings derive the same
+// nonzero if_id via XFRMIfNameAndID. Rule: same base required; a BARE ref is
+// owned only by a BARE bind, while a DOTTED ref is owned by either spelling.
+func BindInterfaceOwnsRef(bindIface, ref string) bool {
+	return bindInterfaceOwnsRef(bindIface, ref)
+}
+
 // SecureTunnelNetdevForRef returns the Linux netdev the xfrmi reconciler
 // creates for a secure-tunnel UNIT reference (e.g. "st0.0"), resolved from the
 // AUTHORED `bind-interface` string rather than reconstructed from the ref.

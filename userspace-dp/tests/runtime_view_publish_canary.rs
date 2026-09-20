@@ -592,8 +592,15 @@ fn code_blob_no_whitespace(content: &str) -> String {
 
 /// Does this line CONSTRUCT a `RuntimeView` (as opposed to naming the type in a
 /// signature)? `-> RuntimeView {` is a return type, not a construction.
+///
+/// P-MECH's tunnel-row constructor is still a RuntimeView construction choke
+/// point. It is recognized explicitly rather than treated as an unguarded
+/// alternate spelling.
 fn constructs_runtime_view(line: &str) -> bool {
-    if line.contains("RuntimeView::new(") || line.contains("RuntimeView::default()") {
+    if line.contains("RuntimeView::new(")
+        || line.contains("RuntimeView::new_with_ipsec_tunnel_rows(")
+        || line.contains("RuntimeView::default()")
+    {
         return true;
     }
     line.contains("RuntimeView {") && !line.contains("-> RuntimeView {")

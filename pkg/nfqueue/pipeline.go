@@ -69,6 +69,7 @@ type ReinjectAdmission struct {
 	OwnedIfindex uint32
 	Admitted     bool
 	Reason       string
+	ReasonCode   uint8
 }
 
 // ReinjectCompletion is the terminal q0 result. Epoch and queue-number fields
@@ -97,6 +98,10 @@ const (
 	CompletionDenied        CompletionOutcome = "denied"
 	CompletionAccepted      CompletionOutcome = "accepted"
 	CompletionWouldReinject CompletionOutcome = "would_reinject"
+	// Rust code 10 is a worker policy would-permit. The terminal completion
+	// maps that outcome to E28/byte 52 and records suppression; routine V1
+	// pre-submit suppression is deny-only and emits no E28 event.
+	CompletionWouldPermit CompletionOutcome = "would_permit"
 )
 
 // ReinjectSubmitter is the data-plane handoff seam. The concrete two-socket
@@ -127,6 +132,14 @@ type CaptureFrame struct {
 	FragmentKey  *FragmentKey
 	Fragment     *Fragment
 	InnerOverlap bool
+	// The four identities are captured at receive time and must all match the
+	// immutable zone snapshot before an enforcing decision is considered.
+	Generation         uint64 // legacy queue/capture generation alias
+	SnapshotGeneration uint64
+	ConfigGeneration   uint64
+	FIBGeneration      uint32
+	QueueNumber        uint16
+	QueueEpoch         uint64
 
 	origin    CaptureOrigin
 	originSet bool
@@ -141,9 +154,13 @@ type AdjudicatedFrame struct {
 	Frame  CaptureFrame
 	Origin CaptureOrigin
 	Lease  ReinjectLease
+	ZoneID uint16
+	IfID   uint32
 }
 
-// CapturePipelineConfig controls all bounded resources.
+// CapturePipelineConfig controls all bounded resources and the P-MECH
+// pre-gate. The enforcing phase is fail-closed when the evaluator/snapshot
+// pair is absent; no frame can silently become a permit.
 type CapturePipelineConfig struct {
 	Queues           []*Queue
 	Registry         *OriginRegistry
@@ -158,36 +175,52 @@ type CapturePipelineConfig struct {
 	FragmentPieces   int
 	FragmentDeadline time.Duration
 	OnUncertain      func(reason string)
+	ZoneEvaluator    ZoneEvaluator
+	ZoneSnapshot     ZoneSnapshotRef
+	DenyEvents       DenyEventSink
 }
 
 var (
-	ErrHandoffFull    = errors.New("nfqueue: capture handoff capacity exceeded")
-	ErrPipelineClosed = errors.New("nfqueue: capture pipeline closed")
-	ErrNoSubmitter    = errors.New("nfqueue: adjudication submitter unavailable")
-	ErrNoLeaseMinter  = errors.New("nfqueue: adjudication lease minter unavailable")
+	ErrHandoffFull     = errors.New("nfqueue: capture handoff capacity exceeded")
+	ErrPipelineClosed  = errors.New("nfqueue: capture pipeline closed")
+	ErrNoSubmitter     = errors.New("nfqueue: adjudication submitter unavailable")
+	ErrNoLeaseMinter   = errors.New("nfqueue: adjudication lease minter unavailable")
+	ErrNoZoneEvaluator = errors.New("nfqueue: zone evaluator unavailable")
 )
 
 // PipelineStats is a monotonic snapshot of fail-closed pipeline accounting.
 type PipelineStats struct {
-	HandoffRefusals      uint64
-	ProvenanceMismatches uint64
-	ShadowDivergences    uint64
-	Dropped              uint64
-	Accepted             uint64
-	Submitted            uint64
-	AdmissionsRefused    uint64
-	Stale                uint64
-	Cancelled            uint64
-	Refused              uint64
-	Uncertain            uint64
-	Written              uint64
-	Timeouts             uint64
-	LateCompletions      uint64
-	FlowRetires          uint64
-	Retries              uint64
-	L2Unsupported        uint64
-	OverlapRefusals      uint64
-	FragmentDrops        uint64
+	HandoffRefusals        uint64
+	ProvenanceMismatches   uint64
+	ShadowDivergences      uint64
+	ShadowUnavailable      uint64
+	ZoneGateDrops          uint64
+	ZoneGateUnavailable    uint64
+	ZoneGateStale          uint64
+	ZoneDivergences        uint64
+	V1PermitSuppressed     uint64
+	ClassificationErrors   uint64
+	FragmentMetadataErrors uint64
+	FragmentLate           uint64
+	VersionSkews           uint64
+	EventDecodeErrors      uint64
+	InputAcceptErrors      uint64
+	Dropped                uint64
+	Accepted               uint64
+	Submitted              uint64
+	AdmissionsRefused      uint64
+	Stale                  uint64
+	Cancelled              uint64
+	Refused                uint64
+	Uncertain              uint64
+	Written                uint64
+	Timeouts               uint64
+	LateCompletions        uint64
+	FlowRetires            uint64
+	Retries                uint64
+	L2Unsupported          uint64
+	OverlapRefusals        uint64
+	FragmentDrops          uint64
 	// #10478 Phase 2a witness: drained from the bounded handoff into pipeline
 	// accounting (all receive-time dispositions).
 	Consumed uint64
@@ -227,6 +260,9 @@ type CapturePipeline struct {
 	submitter        ReinjectSubmitter
 	sink             PacketVerdictSink
 	onUncertain      func(string)
+	zoneEvaluator    ZoneEvaluator
+	zoneSnapshot     ZoneSnapshotRef
+	denyEvents       DenyEventSink
 	handoff          chan CaptureFrame
 	batchCap         int
 	ackDeadline      time.Duration
@@ -283,7 +319,9 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	return &CapturePipeline{
 		phase: cfg.Phase, registry: cfg.Registry, leaseMinter: cfg.LeaseMinter,
 		submitter: cfg.Submitter, sink: cfg.Sink, onUncertain: cfg.OnUncertain,
-		handoff: make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
+		zoneEvaluator: cfg.ZoneEvaluator, zoneSnapshot: cfg.ZoneSnapshot,
+		denyEvents: cfg.DenyEvents,
+		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
 		ackDeadline: cfg.AckDeadline, fragmentDeadline: cfg.FragmentDeadline, fragPool: fragPool,
 		fragHolds: make(map[FragmentKey][]CaptureFrame), fragTimes: make(map[FragmentKey]time.Time),
 		flows: make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
@@ -416,6 +454,7 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 			}
 		}
 		for _, frame := range shadow {
+			p.evaluateShadowFrame(frame)
 			p.finishFrame(frame, VerdictAccept)
 		}
 		if len(enforcing) != 0 {
@@ -525,6 +564,68 @@ func DispatchWorkers(parts map[string][]CaptureFrame) []string {
 	sort.Strings(owners)
 	return owners
 }
+func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) {
+	if p == nil || p.denyEvents == nil || !reason.Valid() {
+		return
+	}
+	queueID := uint16(0)
+	if frame.Packet != nil {
+		queueID = frame.Packet.QueueID()
+	}
+	_ = p.denyEvents.EmitIpsecInnerDeny(IpsecInnerDeny{
+		Reason: reason, Origin: frame.origin, OriginSet: frame.originSet,
+		QueueID: queueID, Tunnel: frame.origin.STN,
+		Generation: frame.Generation,
+	})
+}
+
+func zoneReasonWire(reason ZoneReason) IpsecInnerReason {
+	switch reason {
+	case ZoneReasonUnzoned:
+		return ReasonZoneUnzoned
+	case ZoneReasonAmbiguous:
+		return ReasonZoneAmbiguous
+	case ZoneReasonStaleGeneration:
+		return ReasonStaleGeneration
+	case ZoneReasonUnknownGeneration:
+		return ReasonMissingGeneration
+	case ZoneReasonVersionSkew:
+		return ReasonVersionSkew
+	case ZoneReasonEvaluatorUnavailable:
+		return ReasonEvaluatorUnavailable
+	default:
+		return ReasonIfIDUnderivable
+	}
+}
+
+func (p *CapturePipeline) evaluateShadowFrame(frame CaptureFrame) {
+	if p == nil || p.zoneEvaluator == nil || p.zoneSnapshot == nil || !p.zoneSnapshot.Current() {
+		if p != nil {
+			p.mu.Lock()
+			p.stats.ShadowUnavailable++
+			p.mu.Unlock()
+		}
+		return
+	}
+	if reason := validateCapturedGenerations(frame, frame.origin, p.zoneSnapshot); reason != ZoneReasonZoned {
+		p.mu.Lock()
+		p.stats.ShadowUnavailable++
+		p.mu.Unlock()
+		return
+	}
+	evaluation := p.zoneEvaluator.Evaluate(frame.origin, p.zoneSnapshot)
+	if ValidateZoneEvaluation(evaluation) == ZoneReasonVersionSkew {
+		p.mu.Lock()
+		p.stats.ShadowUnavailable++
+		p.mu.Unlock()
+		return
+	}
+	if evaluation.Decision == ZoneDrop {
+		p.mu.Lock()
+		p.stats.ShadowDivergences++
+		p.mu.Unlock()
+	}
+}
 
 func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 	if len(frames) == 0 {
@@ -537,103 +638,77 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 		if len(batch) > p.batchCap {
 			batch = batch[:p.batchCap]
 		}
-		adjudicated := make([]AdjudicatedFrame, 0, len(batch))
 		for _, frame := range batch {
-			if frame.origin.Family != CaptureFamilyInet || frame.origin.Hook != CaptureHookForward {
+			if frame.origin.Family != CaptureFamilyInet ||
+				(frame.origin.Hook != CaptureHookForward && frame.origin.Hook != CaptureHookInput) {
 				p.mu.Lock()
 				p.stats.L2Unsupported++
 				p.mu.Unlock()
+				p.emitDeny(frame, ReasonUnsupportedHook)
 				p.finishFrame(frame, VerdictDrop)
 				continue
 			}
-			lease, err := p.lease(frame)
-			if err != nil {
-				p.resolveRefusal(frame, err)
+			if p.zoneEvaluator == nil || p.zoneSnapshot == nil {
+				p.mu.Lock()
+				p.stats.ZoneGateUnavailable++
+				p.stats.ZoneGateDrops++
+				p.mu.Unlock()
+				p.emitDeny(frame, ReasonEvaluatorUnavailable)
+				p.finishFrame(frame, VerdictDrop)
 				continue
 			}
-			adjudicated = append(adjudicated, AdjudicatedFrame{Frame: frame, Origin: frame.origin, Lease: lease})
-		}
-		p.mu.Lock()
-		p.stats.Adjudicated += uint64(len(adjudicated))
-		p.mu.Unlock()
-		if len(adjudicated) == 0 {
-			continue
-		}
-		if p.submitter == nil {
-			for _, frame := range adjudicated {
-				p.resolveRefusal(frame.Frame, ErrNoSubmitter)
+			if !p.zoneSnapshot.Current() {
+				p.mu.Lock()
+				p.stats.ZoneGateStale++
+				p.stats.ZoneGateDrops++
+				p.mu.Unlock()
+				p.emitDeny(frame, ReasonStaleGeneration)
+				p.finishFrame(frame, VerdictDrop)
+				continue
 			}
-			continue
-		}
-		// A revoke takes submitGate's write side, so this bounded data-plane
-		// call either linearizes before the revoke or is refused before send.
-		p.submitGate.RLock()
-		p.mu.Lock()
-		if p.closed || p.revoked {
+			if generationReason := validateCapturedGenerations(frame, frame.origin, p.zoneSnapshot); generationReason != ZoneReasonZoned {
+				p.mu.Lock()
+				p.stats.ZoneGateDrops++
+				if generationReason == ZoneReasonStaleGeneration {
+					p.stats.ZoneGateStale++
+				} else {
+					p.stats.ZoneGateUnavailable++
+				}
+				p.mu.Unlock()
+				p.emitDeny(frame, zoneReasonWire(generationReason))
+				p.finishFrame(frame, VerdictDrop)
+				continue
+			}
+			evaluation := p.zoneEvaluator.Evaluate(frame.origin, p.zoneSnapshot)
+			reason := ValidateZoneEvaluation(evaluation)
+			if reason == ZoneReasonVersionSkew {
+				p.mu.Lock()
+				p.stats.VersionSkews++
+				p.stats.ZoneGateDrops++
+				p.mu.Unlock()
+				p.emitDeny(frame, ReasonVersionSkew)
+				p.finishFrame(frame, VerdictDrop)
+				continue
+			}
+			if evaluation.Decision != ZonePass {
+				p.mu.Lock()
+				p.stats.ZoneGateDrops++
+				if reason == ZoneReasonStaleGeneration {
+					p.stats.ZoneGateStale++
+				}
+				p.mu.Unlock()
+				p.emitDeny(frame, zoneReasonWire(reason))
+				p.finishFrame(frame, VerdictDrop)
+				continue
+			}
+			// V1 stays pre-submit deny-only until the Rust D11 worker/verdict
+			// join is wired into the reinject server. Sending flags=0 here
+			// would reach the legacy delegated writer without S9 adjudication.
+			p.mu.Lock()
+			p.stats.V1PermitSuppressed++
 			p.mu.Unlock()
-			p.submitGate.RUnlock()
-			for _, frame := range adjudicated {
-				p.finishFrame(frame.Frame, VerdictDrop)
-			}
-			continue
+			p.finishFrame(frame, VerdictDrop)
 		}
-		p.mu.Unlock()
-		admissions, err := p.submitter.SubmitAdjudicated(adjudicated)
-		p.submitGate.RUnlock()
-		if err != nil {
-			p.uncertain("submit response loss")
-			for _, frame := range adjudicated {
-				p.resolveUncertain(frame.Frame, frame.Lease.RequestID)
-			}
-			continue
-		}
-		admitByID := make(map[uint64]ReinjectAdmission, len(admissions))
-		for _, admission := range admissions {
-			admitByID[admission.RequestID] = admission
-		}
-		now := time.Now()
-		p.mu.Lock()
-		for _, item := range adjudicated {
-			family, hook, originErr := originWire(item.Origin)
-			admission, ok := admitByID[item.Lease.RequestID]
-			if originErr != nil || !ok || !admission.Admitted {
-				p.stats.AdmissionsRefused++
-				p.mu.Unlock()
-				reason := errors.New(admission.Reason)
-				if originErr != nil {
-					reason = originErr
-				}
-				p.resolveRefusal(item.Frame, reason)
-				p.mu.Lock()
-				continue
-			}
-			echoMismatch := admission.PermitEpoch != item.Lease.PermitEpoch ||
-				admission.QueueNumber != item.Lease.QueueNumber ||
-				admission.QueueEpoch != item.Lease.QueueEpoch ||
-				admission.Family != family ||
-				admission.Hook != hook ||
-				admission.OwnedIfindex != item.Origin.OwnedIfindex
-			if echoMismatch {
-				p.mu.Unlock()
-				p.cancelUncertainLease(item.Lease)
-				p.resolveUncertain(item.Frame, item.Lease.RequestID)
-				p.mu.Lock()
-				continue
-			}
-			pending := &pendingReinject{frame: item.Frame, lease: item.Lease, deadline: now.Add(p.ackDeadline)}
-			p.pending[item.Lease.RequestID] = pending
-			flow := p.flows[item.Frame.FlowKey]
-			if flow != nil {
-				flow.pending = pending
-				if len(flow.frames) > 0 && flow.frames[0].Packet != item.Frame.Packet {
-					delete(p.pending, item.Lease.RequestID)
-					flow.pending = nil
-					p.stats.Refused++
-				}
-			}
-			p.stats.Submitted++
-		}
-		p.mu.Unlock()
 	}
 }
 
@@ -862,6 +937,8 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		completion.QueueEpoch != pending.lease.QueueEpoch
 	bytesMismatch := completion.Outcome == CompletionWritten &&
 		completion.BytesWritten != uint32(len(pending.frame.Packet.Payload()))
+	wouldPermit := completion.Outcome == CompletionWouldPermit &&
+		!identityMismatch && !bytesMismatch
 	outcomeUncertain := completion.Outcome == CompletionUncertain ||
 		completion.Outcome == CompletionAccepted ||
 		completion.Outcome == CompletionWouldReinject
@@ -882,6 +959,8 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 			p.stats.Cancelled++
 		case CompletionRefused, CompletionDenied:
 			p.stats.Refused++
+		case CompletionWouldPermit:
+			p.stats.V1PermitSuppressed++
 		default:
 			p.stats.Uncertain++
 		}
@@ -897,6 +976,11 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		p.uncertain(reason)
 		p.finishFrame(pending.frame, VerdictDrop)
 		p.retireFlow(pending.frame.FlowKey)
+		return true
+	}
+	if wouldPermit {
+		p.emitDeny(pending.frame, ReasonEvaluatorUnavailable)
+		p.finishFrame(pending.frame, VerdictDrop)
 		return true
 	}
 	p.finishFrame(pending.frame, VerdictDrop)
@@ -1069,3 +1153,277 @@ func (p *CapturePipeline) Stats() PipelineStats {
 	defer p.mu.Unlock()
 	return p.stats.PipelineStats
 }
+
+// ZoneDecision is the Go pre-gate outcome. ZonePass means only that the
+// frame may be sent to the authoritative worker; it is never a permit.
+type ZoneDecision uint8
+
+const (
+	ZoneInvalid ZoneDecision = iota
+	ZonePass
+	ZoneDrop
+)
+
+type ZoneReason uint8
+
+const (
+	ZoneReasonInvalid ZoneReason = iota
+	ZoneReasonZoned
+	ZoneReasonUnzoned
+	ZoneReasonAmbiguous
+	ZoneReasonStaleGeneration
+	ZoneReasonUnknownGeneration
+	ZoneReasonLookupError
+	ZoneReasonEvaluatorUnavailable
+	ZoneReasonVersionSkew
+)
+
+type ZoneResolution struct {
+	ZoneID uint16
+	IfID   uint32
+	Reason ZoneReason
+}
+
+type ZoneEvaluation struct {
+	Decision ZoneDecision
+	ZoneID   uint16
+	IfID     uint32
+	Reason   ZoneReason
+}
+
+type ZoneSnapshotRef interface {
+	ResolveSTN(stn string) ZoneResolution
+	Generations() (configGen uint64, fibGen uint32)
+	Current() bool
+}
+
+type ZoneSnapshotQueueEpochRef interface {
+	QueueEpoch(queue uint16) uint64
+}
+
+type ZoneSnapshotOriginValidator interface {
+	ValidateOrigin(origin CaptureOrigin) ZoneReason
+}
+
+type ZoneEvaluator interface {
+	Evaluate(origin CaptureOrigin, snap ZoneSnapshotRef) ZoneEvaluation
+}
+
+type DefaultZoneEvaluator struct{}
+
+func (DefaultZoneEvaluator) Evaluate(origin CaptureOrigin, snap ZoneSnapshotRef) ZoneEvaluation {
+	if snap == nil {
+		return ZoneEvaluation{Decision: ZoneDrop, Reason: ZoneReasonEvaluatorUnavailable}
+	}
+	if !snap.Current() {
+		return ZoneEvaluation{Decision: ZoneDrop, Reason: ZoneReasonStaleGeneration}
+	}
+	resolution := snap.ResolveSTN(origin.STN)
+	if resolution.Reason != ZoneReasonZoned || resolution.ZoneID == 0 || resolution.IfID == 0 {
+		if resolution.Reason == ZoneReasonInvalid {
+			resolution.Reason = ZoneReasonLookupError
+		}
+		return ZoneEvaluation{Decision: ZoneDrop, ZoneID: resolution.ZoneID, IfID: resolution.IfID, Reason: resolution.Reason}
+	}
+	validator, ok := snap.(ZoneSnapshotOriginValidator)
+	if !ok {
+		return ZoneEvaluation{Decision: ZoneDrop, ZoneID: resolution.ZoneID, IfID: resolution.IfID, Reason: ZoneReasonEvaluatorUnavailable}
+	}
+	if reason := validator.ValidateOrigin(origin); reason != ZoneReasonZoned {
+		return ZoneEvaluation{Decision: ZoneDrop, ZoneID: resolution.ZoneID, IfID: resolution.IfID, Reason: reason}
+	}
+	return ZoneEvaluation{Decision: ZonePass, ZoneID: resolution.ZoneID, IfID: resolution.IfID, Reason: ZoneReasonZoned}
+}
+
+func validateCapturedGenerations(frame CaptureFrame, origin CaptureOrigin, snap ZoneSnapshotRef) ZoneReason {
+	if snap == nil {
+		return ZoneReasonEvaluatorUnavailable
+	}
+	configGen, fibGen := snap.Generations()
+	if frame.SnapshotGeneration == 0 || frame.ConfigGeneration == 0 || frame.FIBGeneration == 0 ||
+		frame.QueueEpoch == 0 || configGen == 0 || fibGen == 0 {
+		return ZoneReasonUnknownGeneration
+	}
+	if frame.SnapshotGeneration != configGen || frame.ConfigGeneration != configGen ||
+		frame.FIBGeneration != fibGen {
+		return ZoneReasonStaleGeneration
+	}
+	if frame.Generation != 0 && frame.Generation != frame.SnapshotGeneration {
+		return ZoneReasonStaleGeneration
+	}
+	if epochs, ok := snap.(ZoneSnapshotQueueEpochRef); ok {
+		if expected := epochs.QueueEpoch(frame.QueueNumber); expected == 0 || expected != frame.QueueEpoch {
+			return ZoneReasonStaleGeneration
+		}
+	}
+	return ZoneReasonZoned
+}
+
+func ValidateZoneEvaluation(e ZoneEvaluation) ZoneReason {
+	if e.Decision == ZonePass && (e.Reason != ZoneReasonZoned || e.ZoneID == 0 || e.IfID == 0) {
+		return ZoneReasonVersionSkew
+	}
+	if e.Decision != ZonePass && e.Reason == ZoneReasonInvalid {
+		return ZoneReasonVersionSkew
+	}
+	return e.Reason
+}
+
+type IpsecInnerReason uint8
+
+const (
+	ReasonLegacyPolicyDeny     IpsecInnerReason = 5
+	ReasonLegacyHostDeny       IpsecInnerReason = 6
+	ReasonZoneUnzoned          IpsecInnerReason = 32
+	ReasonZoneAmbiguous        IpsecInnerReason = 33
+	ReasonIfIDUnderivable      IpsecInnerReason = 34
+	ReasonStaleGeneration      IpsecInnerReason = 35
+	ReasonMissingGeneration    IpsecInnerReason = 36
+	ReasonZoneAdvisoryMismatch IpsecInnerReason = 37
+	ReasonScreenDeny           IpsecInnerReason = 38
+	ReasonParseECN             IpsecInnerReason = 39
+	ReasonSessionAlias         IpsecInnerReason = 40
+	ReasonInstallRollback      IpsecInnerReason = 41
+	ReasonTCPRSTSuppressed     IpsecInnerReason = 42
+	ReasonNATStage             IpsecInnerReason = 43
+	ReasonHookRouteMismatch    IpsecInnerReason = 44
+	ReasonDomainOverlap        IpsecInnerReason = 45
+	ReasonOtherDomain          IpsecInnerReason = 46
+	ReasonWorkerQueueFull      IpsecInnerReason = 47
+	ReasonVerdictUncertain     IpsecInnerReason = 48
+	ReasonSlabExhausted        IpsecInnerReason = 49
+	ReasonLeaseEpoch           IpsecInnerReason = 50
+	ReasonSubmitUnavailable    IpsecInnerReason = 51
+	ReasonEvaluatorUnavailable IpsecInnerReason = 52
+	ReasonEgressResource       IpsecInnerReason = 53
+	ReasonFragmentRefused      IpsecInnerReason = 54
+	ReasonProvenance           IpsecInnerReason = 55
+	ReasonUnsupportedHook      IpsecInnerReason = 56
+	ReasonVersionSkew          IpsecInnerReason = 57
+	ReasonWorkerOrphanHA       IpsecInnerReason = 58
+	ReasonInputBoundary        IpsecInnerReason = 59
+	ReasonNoRoute              IpsecInnerReason = 60
+)
+
+func (r IpsecInnerReason) Valid() bool {
+	return r == ReasonLegacyPolicyDeny || r == ReasonLegacyHostDeny || (r >= ReasonZoneUnzoned && r <= ReasonNoRoute)
+}
+
+func (r IpsecInnerReason) String() string {
+	switch r {
+	case ReasonLegacyPolicyDeny:
+		return "LEGACY_POLICY_DENY"
+	case ReasonLegacyHostDeny:
+		return "LEGACY_HOST_INBOUND_DENY"
+	case ReasonZoneUnzoned:
+		return "ZONE_UNZONED"
+	case ReasonZoneAmbiguous:
+		return "ZONE_AMBIGUOUS"
+	case ReasonIfIDUnderivable:
+		return "IFID_UNDERIVABLE"
+	case ReasonStaleGeneration:
+		return "STALE_GENERATION"
+	case ReasonMissingGeneration:
+		return "MISSING_GENERATION"
+	case ReasonZoneAdvisoryMismatch:
+		return "ZONE_ADVISORY_MISMATCH"
+	case ReasonScreenDeny:
+		return "SCREEN_DENY"
+	case ReasonParseECN:
+		return "PARSE_ECN"
+	case ReasonSessionAlias:
+		return "SESSION_ALIAS"
+	case ReasonInstallRollback:
+		return "INSTALL_ROLLBACK"
+	case ReasonTCPRSTSuppressed:
+		return "TCP_RST_SUPPRESSED"
+	case ReasonNATStage:
+		return "NAT_STAGE"
+	case ReasonHookRouteMismatch:
+		return "HOOK_ROUTE_MISMATCH"
+	case ReasonDomainOverlap:
+		return "DOMAIN_OVERLAP"
+	case ReasonOtherDomain:
+		return "OTHER_DOMAIN"
+	case ReasonWorkerQueueFull:
+		return "WORKER_QUEUE_FULL"
+	case ReasonVerdictUncertain:
+		return "VERDICT_UNCERTAIN"
+	case ReasonSlabExhausted:
+		return "SLAB_EXHAUSTED"
+	case ReasonLeaseEpoch:
+		return "LEASE_EPOCH"
+	case ReasonSubmitUnavailable:
+		return "SUBMIT_UNAVAILABLE"
+	case ReasonEvaluatorUnavailable:
+		return "EVALUATOR_UNAVAILABLE"
+	case ReasonEgressResource:
+		return "EGRESS_RESOURCE"
+	case ReasonFragmentRefused:
+		return "FRAGMENT_REFUSED"
+	case ReasonProvenance:
+		return "PROVENANCE"
+	case ReasonUnsupportedHook:
+		return "UNSUPPORTED_HOOK"
+	case ReasonVersionSkew:
+		return "VERSION_SKEW"
+	case ReasonWorkerOrphanHA:
+		return "WORKER_ORPHAN_HA"
+	case ReasonInputBoundary:
+		return "INPUT_BOUNDARY"
+	case ReasonNoRoute:
+		return "NO_ROUTE"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+type PMechAlarmClass uint8
+
+const (
+	PMechAlarmStagingSkip PMechAlarmClass = iota + 1
+	PMechAlarmOwnerContested
+	PMechAlarmNodeWideQuarantine
+	PMechAlarmZoneAmbiguous
+	PMechAlarmDomainOverlap
+	PMechAlarmWorkerQueueFull
+	PMechAlarmOwnerUnavailable
+	PMechAlarmBypassFence
+	PMechAlarmFlipGuard
+	PMechAlarmInputCompletion
+	PMechAlarmVersionSkew
+)
+
+type PMechAlarm struct {
+	Class      PMechAlarmClass
+	Reason     string
+	Generation uint64
+	QueueID    uint16
+	Tunnel     string
+}
+
+type IpsecInnerDeny struct {
+	Reason     IpsecInnerReason
+	PolicyID   uint32
+	Origin     CaptureOrigin
+	OriginSet  bool
+	QueueID    uint16
+	Tunnel     string
+	Generation uint64
+}
+
+type DenyEventSink interface {
+	EmitIpsecInnerDeny(IpsecInnerDeny) bool
+	EmitPMechAlarm(PMechAlarm) bool
+}
+
+type DenyEventSinkFunc func(IpsecInnerDeny) bool
+
+func (f DenyEventSinkFunc) EmitIpsecInnerDeny(event IpsecInnerDeny) bool {
+	if f == nil {
+		return false
+	}
+	return f(event)
+}
+
+func (f DenyEventSinkFunc) EmitPMechAlarm(PMechAlarm) bool { return false }

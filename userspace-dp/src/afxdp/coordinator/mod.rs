@@ -882,6 +882,20 @@ impl Coordinator {
         // nothing can name them again. Why all ids, and why this is not the
         // `dead`-keyed sweep, is on `retire_all_worker_holders`.
         self.retire_all_worker_holders();
+        // #9506: retire the outgoing D11 worker set before signalling worker
+        // threads. This drains ENQUEUED descriptors and fences new admits;
+        // WORKER_OWNED descriptors remain pinned until the corresponding
+        // worker join proves no late completion can touch their slabs.
+        let ipsec_inner_transport = self
+            .slow_path
+            .as_ref()
+            .map(|slow| slow.ipsec_inner_transport());
+        let ipsec_inner_worker_ids: Vec<u32> = self.workers.records().keys().copied().collect();
+        if let Some(transport) = ipsec_inner_transport.as_ref() {
+            for worker_id in &ipsec_inner_worker_ids {
+                let _ = transport.retire_worker(*worker_id);
+            }
+        }
         // #7209: ONE load bound to a local — two loads could straddle a store
         // and mix generations, and the local keeps the fds alive for the call.
         let maps = self.bpf_maps.load();
@@ -889,6 +903,11 @@ impl Coordinator {
             maps.map_fd.as_ref(),
             maps.heartbeat_map_fd.as_ref(),
         );
+        if let Some(transport) = ipsec_inner_transport.as_ref() {
+            for worker_id in &ipsec_inner_worker_ids {
+                let _ = transport.join_worker_after_termination(*worker_id);
+            }
+        }
         // #9560: every worker is now joined, so none can claim a steering row. Retire their
         // claims WITHOUT BPF deletes: those sessions died with their workers and their rows
         // linger unowned, as before #9560. The registry itself is kept, so an HA delete
@@ -1594,14 +1613,20 @@ impl Coordinator {
     /// publishes everything committed before it, so the #5166 CoS-map /
     /// `ha.fabrics` stores must also already have happened.
     fn store_runtime_view(&mut self, forwarding: Arc<ForwardingState>) {
-        let view = Arc::new(RuntimeView::new(self.validation, forwarding));
+        let previous = self.ha.runtime.load_full();
+        let view = Arc::new(RuntimeView::new_with_ipsec_tunnel_rows(
+            self.validation,
+            forwarding,
+            previous.ipsec_tunnel_rows_arc(),
+            previous.ipsec_snapshot_generation(),
+        ));
         // #6592 test seam — records the INTENDED pair and the still-visible
         // PREVIOUS view, so the regression test can assert both that a worker
         // observes exactly this pair and that the capture sits BEFORE the
         // store (hoist resistance). Absent from release builds.
         #[cfg(test)]
         {
-            self.runtime_view_at_publish = Some((view.clone(), self.ha.runtime.load_full()));
+            self.runtime_view_at_publish = Some((view.clone(), previous.clone()));
             // #6593: capture EVERY sibling that must already be worker-visible
             // here, not just the CoS owner map. Taken at the same instant and
             // from the same choke point, so no publish path can bypass it.

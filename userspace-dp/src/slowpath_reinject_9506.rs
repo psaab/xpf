@@ -5,6 +5,9 @@
 //! epoch publication is copied into `AuthorityState`, while submit/cancel/
 //! completion operations take only this module's short mutex.
 
+use crate::afxdp::ipsec_inner_queue::{
+    reason as ipsec_reason, IpsecInnerSlabPool, IpsecInnerVerdict, IPSEC_INNER_SLAB_BYTES,
+};
 use crate::io_uring_write::WriteResult;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -20,6 +23,9 @@ pub(crate) const SUBMIT_MAX_FRAMES: usize = 64;
 pub(crate) const SUBMIT_MAX_DATA_LEN: usize = 65_535;
 /// Maximum complete binary message, including its type byte.
 pub(crate) const REINJECT_MAX_MSG: usize = 1_048_576;
+/// P-MECH submit tail size: snapshot u64 + config u64 + FIB u32 + zone u16
+/// + if_id u32. Keep this shared with strict codec tests (26 bytes).
+pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 26;
 
 /// Dedicated data-plane message types. Control-socket JSON is intentionally not
 /// used for packet admission or completion handoff.
@@ -29,7 +35,9 @@ pub(crate) const MSG_ANNOUNCE: u8 = 3;
 pub(crate) const MSG_ADMIT: u8 = 11;
 pub(crate) const MSG_COMPLETE: u8 = 12;
 
-/// ADMIT reason codes (payload wire values).
+/// ADMIT reason codes (payload wire values). Values 11/12 are the only
+/// P-MECH additions; intermediate values remain reserved and decode rejects
+/// them rather than applying a permissive default.
 pub(crate) const ADMIT_OK: u8 = 0;
 pub(crate) const ADMIT_STALE: u8 = 1;
 pub(crate) const ADMIT_FULL: u8 = 2;
@@ -38,6 +46,24 @@ pub(crate) const ADMIT_SHUTDOWN: u8 = 4;
 pub(crate) const ADMIT_BRIDGE: u8 = 5;
 pub(crate) const ADMIT_INPUT_HOOK: u8 = 6;
 pub(crate) const ADMIT_NON_DRY_RUN: u8 = 7;
+pub(crate) const ADMIT_NO_GENERATION: u8 = 11;
+pub(crate) const ADMIT_TUNNEL_ROW_MISSING: u8 = 12;
+
+fn admit_reason_valid(reason: u8) -> bool {
+    matches!(
+        reason,
+        ADMIT_OK
+            | ADMIT_STALE
+            | ADMIT_FULL
+            | ADMIT_BAD_LEASE
+            | ADMIT_SHUTDOWN
+            | ADMIT_BRIDGE
+            | ADMIT_INPUT_HOOK
+            | ADMIT_NON_DRY_RUN
+            | ADMIT_NO_GENERATION
+            | ADMIT_TUNNEL_ROW_MISSING
+    )
+}
 
 /// Submit-capture origin wire values.
 pub(crate) const ORIGIN_INET: u8 = 1;
@@ -70,7 +96,6 @@ pub(crate) struct AuthorityAnnouncement {
     pub queue_epochs: Vec<(u16, u64)>,
 }
 
-
 /// COMPLETE outcome wire values.
 pub(crate) const OUTCOME_WRITTEN: u8 = 1;
 pub(crate) const OUTCOME_STALE: u8 = 2;
@@ -81,6 +106,7 @@ pub(crate) const OUTCOME_FENCED: u8 = 6;
 pub(crate) const OUTCOME_DENIED: u8 = 7;
 pub(crate) const OUTCOME_ACCEPTED: u8 = 8;
 pub(crate) const OUTCOME_WOULD_REINJECT: u8 = 9;
+pub(crate) const OUTCOME_WOULD_PERMIT: u8 = 10;
 
 /// Immutable nfqueue capture provenance carried with every submitted frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +170,13 @@ pub(crate) struct SubmitFrame {
     pub flags: u8,
     pub origin: CaptureOrigin,
     pub bytes: Vec<u8>,
+    /// P-MECH advisory tail. These values are checked against the immutable
+    /// RuntimeView and exact STN tunnel row by the Rust worker.
+    pub snapshot_generation: u64,
+    pub config_generation: u64,
+    pub fib_generation: u32,
+    pub zone_id: u16,
+    pub if_id: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +190,7 @@ pub(crate) enum ReinjectOutcome {
     Denied,
     Accepted,
     WouldReinject,
+    WouldPermit,
 }
 
 impl ReinjectOutcome {
@@ -171,6 +205,7 @@ impl ReinjectOutcome {
             Self::Denied => OUTCOME_DENIED,
             Self::Accepted => OUTCOME_ACCEPTED,
             Self::WouldReinject => OUTCOME_WOULD_REINJECT,
+            Self::WouldPermit => OUTCOME_WOULD_PERMIT,
         }
     }
 
@@ -185,6 +220,7 @@ impl ReinjectOutcome {
             OUTCOME_DENIED => Self::Denied,
             OUTCOME_ACCEPTED => Self::Accepted,
             OUTCOME_WOULD_REINJECT => Self::WouldReinject,
+            OUTCOME_WOULD_PERMIT => Self::WouldPermit,
             _ => return None,
         })
     }
@@ -200,6 +236,7 @@ impl ReinjectOutcome {
             Self::Denied => "denied",
             Self::Accepted => "accepted",
             Self::WouldReinject => "would_reinject",
+            Self::WouldPermit => "would_permit",
         }
     }
 }
@@ -214,6 +251,7 @@ pub(crate) enum TransferVerdict {
     Denied,
     Accepted,
     WouldReinject,
+    WouldPermit,
 }
 
 /// Completion held until the Go poller drains it.
@@ -428,6 +466,7 @@ pub(crate) fn decide_resolve(
         TransferVerdict::Denied => (ReinjectOutcome::Denied, 0),
         TransferVerdict::Accepted => (ReinjectOutcome::Accepted, 0),
         TransferVerdict::WouldReinject => (ReinjectOutcome::WouldReinject, 0),
+        TransferVerdict::WouldPermit => (ReinjectOutcome::WouldPermit, 0),
     }
 }
 
@@ -729,7 +768,7 @@ impl ReinjectCore {
             Some(ADMIT_BAD_LEASE)
         } else if frame.origin.family == ORIGIN_BRIDGE {
             Some(ADMIT_BRIDGE)
-        } else if frame.origin.hook == ORIGIN_INPUT {
+        } else if frame.origin.hook == ORIGIN_INPUT && frame.origin.family != ORIGIN_INET {
             Some(ADMIT_INPUT_HOOK)
         } else if !inner.authority.allows(
             frame.lease.permit_epoch,
@@ -737,6 +776,13 @@ impl ReinjectCore {
             frame.lease.queue_epoch,
         ) {
             Some(ADMIT_STALE)
+        } else if frame.snapshot_generation == 0
+            || frame.config_generation == 0
+            || frame.fib_generation == 0
+        {
+            Some(ADMIT_NO_GENERATION)
+        } else if frame.if_id == 0 || frame.origin.stn.is_empty() {
+            Some(ADMIT_TUNNEL_ROW_MISSING)
         } else if inner.entries.contains_key(&frame.lease.request_id) {
             Some(ADMIT_BAD_LEASE)
         } else if inner.entries.len() >= N_LIVE {
@@ -978,6 +1024,39 @@ impl ReinjectCore {
         }
         Self::terminalize(&mut inner, lease.request_id, outcome, bytes)
     }
+
+    /// Join a Rust D11 worker verdict to the Go-facing completion table.
+    /// V1 is deny-only: a deny becomes `Denied`, while a successful
+    /// adjudication becomes `WouldPermit` (never a q0 write or NF_ACCEPT).
+    pub(crate) fn resolve_ipsec_inner_verdict(
+        &self,
+        verdict: IpsecInnerVerdict,
+    ) -> bool {
+        let (request_id, outcome) = match verdict {
+            IpsecInnerVerdict::Deny {
+                request_id,
+                reason,
+                ..
+            } if reason == ipsec_reason::VERDICT_UNCERTAIN => {
+                (request_id, ReinjectOutcome::Uncertain)
+            }
+            IpsecInnerVerdict::Deny { request_id, .. } => {
+                (request_id, ReinjectOutcome::Denied)
+            }
+            IpsecInnerVerdict::WouldPermit { request_id } => {
+                (request_id, ReinjectOutcome::WouldPermit)
+            }
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = inner.entries.get(&request_id) else {
+            return false;
+        };
+        if !matches!(entry.state, EntryState::Queued) {
+            return false;
+        }
+        Self::terminalize(&mut inner, request_id, outcome, 0)
+    }
+
 
     /// Mark a queued descriptor as a definitive no-write refusal.
     pub(crate) fn refuse_queued(&self, lease: &ReinjectLease, _reason: String) -> bool {
@@ -1338,7 +1417,8 @@ impl ReinjectCore {
             | ReinjectOutcome::Fenced
             | ReinjectOutcome::Denied
             | ReinjectOutcome::Accepted
-            | ReinjectOutcome::WouldReinject => inner.stats.completed_refused += 1,
+            | ReinjectOutcome::WouldReinject
+            | ReinjectOutcome::WouldPermit => inner.stats.completed_refused += 1,
             ReinjectOutcome::Uncertain => inner.stats.completed_uncertain += 1,
         }
         true
@@ -1386,15 +1466,13 @@ pub(crate) enum CodecError {
     TrailingBytes,
     TooManyFrames,
     FrameTooLarge,
+    SlabExhausted,
     TooLarge,
     BadFlags,
     BadValue,
     Io(String),
 }
 
-fn push_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
 fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_be_bytes());
 }
@@ -1402,9 +1480,12 @@ fn push_u32(out: &mut Vec<u8>, value: u32) {
 fn push_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_be_bytes());
 }
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
 pub(crate) fn encode_submit_batch(frames: &[SubmitFrame]) -> Vec<u8> {
     assert!(frames.len() <= SUBMIT_MAX_FRAMES);
-    let mut out = Vec::with_capacity(2 + frames.len() * 120);
+    let mut out = Vec::with_capacity(2 + frames.len() * 142);
     push_u16(&mut out, frames.len() as u16);
     for frame in frames {
         assert!(frame.bytes.len() <= SUBMIT_MAX_DATA_LEN);
@@ -1425,6 +1506,13 @@ pub(crate) fn encode_submit_batch(frames: &[SubmitFrame]) -> Vec<u8> {
         out.extend_from_slice(frame.origin.stn.as_bytes());
         push_u32(&mut out, frame.bytes.len() as u32);
         out.extend_from_slice(&frame.bytes);
+        // P-MECH advisory tail is deliberately after the packet bytes so old
+        // framing cannot accidentally reinterpret a generation as payload.
+        push_u64(&mut out, frame.snapshot_generation);
+        push_u64(&mut out, frame.config_generation);
+        push_u32(&mut out, frame.fib_generation);
+        push_u16(&mut out, frame.zone_id);
+        push_u32(&mut out, frame.if_id);
     }
     out
 }
@@ -1494,10 +1582,6 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
         let owner_bytes = c.take(owner_len)?;
         let stn_len = c.u8()? as usize;
         let stn_bytes = c.take(stn_len)?;
-        let data_len = c.u32()? as usize;
-        if data_len > SUBMIT_MAX_DATA_LEN {
-            return Err(CodecError::FrameTooLarge);
-        }
         let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
         let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
         let valid = owned_ifindex != 0
@@ -1509,6 +1593,16 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
             && stn_valid_utf8
             && (family == ORIGIN_INET || family == ORIGIN_BRIDGE)
             && (hook == ORIGIN_FORWARD || hook == ORIGIN_INPUT);
+        let data_len = c.u32()? as usize;
+        if data_len > SUBMIT_MAX_DATA_LEN {
+            return Err(CodecError::FrameTooLarge);
+        }
+        let bytes = c.take(data_len)?.to_vec();
+        let snapshot_generation = c.u64()?;
+        let config_generation = c.u64()?;
+        let fib_generation = c.u32()?;
+        let zone_id = c.u16()?;
+        let if_id = c.u32()?;
         out.push(SubmitFrame {
             lease: ReinjectLease {
                 permit_epoch,
@@ -1526,11 +1620,133 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
                 stn: String::from_utf8_lossy(stn_bytes).into_owned(),
                 valid,
             },
-            bytes: c.take(data_len)?.to_vec(),
+            bytes,
+            snapshot_generation,
+            config_generation,
+            fib_generation,
+            zone_id,
+            if_id,
         });
     }
     if !c.done() {
         return Err(CodecError::TrailingBytes);
+    }
+    Ok(out)
+}
+
+/// A submit row whose packet bytes are already owned by a D11 slab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PooledSubmitFrame {
+    pub lease: ReinjectLease,
+    pub flow_tag: u64,
+    pub flags: u8,
+    pub origin: CaptureOrigin,
+    pub slab_id: u32,
+    pub bytes_len: u32,
+    pub snapshot_generation: u64,
+    pub config_generation: u64,
+    pub fib_generation: u32,
+    pub zone_id: u16,
+    pub if_id: u32,
+}
+
+/// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
+/// worker handoff path; unlike `decode_submit_batch`, it never materializes a
+/// `Vec<u8>` and then copies it into a slab.
+pub(crate) fn decode_submit_batch_into_pool(
+    payload: &[u8],
+    pool: &IpsecInnerSlabPool,
+) -> Result<Vec<PooledSubmitFrame>, CodecError> {
+    let mut c = Cursor::new(payload);
+    let n = c.u16()? as usize;
+    if n > SUBMIT_MAX_FRAMES {
+        return Err(CodecError::TooManyFrames);
+    }
+    let mut out = Vec::with_capacity(n);
+    let result = (|| {
+        for _ in 0..n {
+            let request_id = c.u64()?;
+            let permit_epoch = c.u64()?;
+            let queue_epoch = c.u64()?;
+            let queue_number = c.u16()?;
+            let flow_tag = c.u64()?;
+            let flags = c.u8()?;
+            if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN) != 0 {
+                return Err(CodecError::BadFlags);
+            }
+            let family = c.u8()?;
+            let hook = c.u8()?;
+            let owned_ifindex = c.u32()?;
+            let owner_len = c.u8()? as usize;
+            let owner_bytes = c.take(owner_len)?;
+            let stn_len = c.u8()? as usize;
+            let stn_bytes = c.take(stn_len)?;
+            let data_len = c.u32()? as usize;
+            if data_len > SUBMIT_MAX_DATA_LEN || data_len > IPSEC_INNER_SLAB_BYTES {
+                return Err(CodecError::FrameTooLarge);
+            }
+            let bytes = c.take(data_len)?;
+            let snapshot_generation = c.u64()?;
+            let config_generation = c.u64()?;
+            let fib_generation = c.u32()?;
+            let zone_id = c.u16()?;
+            let if_id = c.u32()?;
+            let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
+            let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
+            let valid = owned_ifindex != 0
+                && owner_len != 0
+                && stn_len != 0
+                && owner_len <= ORIGIN_MAX_OWNER
+                && stn_len <= ORIGIN_MAX_STN
+                && owner_valid_utf8
+                && stn_valid_utf8
+                && (family == ORIGIN_INET || family == ORIGIN_BRIDGE)
+                && (hook == ORIGIN_FORWARD || hook == ORIGIN_INPUT);
+            let Some(slab_id) = pool.acquire() else {
+                return Err(CodecError::SlabExhausted);
+            };
+            let Some(mut slab) = pool.try_buffer(slab_id) else {
+                pool.force_release(slab_id);
+                return Err(CodecError::SlabExhausted);
+            };
+            slab.clear();
+            slab.extend_from_slice(bytes);
+            out.push(PooledSubmitFrame {
+                lease: ReinjectLease {
+                    permit_epoch,
+                    queue_epoch,
+                    queue_number,
+                    request_id,
+                },
+                flow_tag,
+                flags,
+                origin: CaptureOrigin {
+                    family,
+                    hook,
+                    owned_ifindex,
+                    owner: String::from_utf8_lossy(owner_bytes).into_owned(),
+                    stn: String::from_utf8_lossy(stn_bytes).into_owned(),
+                    valid,
+                },
+                slab_id,
+                bytes_len: data_len as u32,
+                snapshot_generation,
+                config_generation,
+                fib_generation,
+                zone_id,
+                if_id,
+            });
+        }
+        if !c.done() {
+            return Err(CodecError::TrailingBytes);
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        for frame in out.drain(..) {
+            pool.force_release(frame.slab_id);
+        }
+        return Err(err);
     }
     Ok(out)
 }
@@ -1714,7 +1930,7 @@ pub(crate) fn decode_admit(payload: &[u8]) -> Result<Vec<AdmitDecision>, CodecEr
             _ => return Err(CodecError::BadValue),
         };
         let reason = c.u8()?;
-        if reason > ADMIT_NON_DRY_RUN {
+        if !admit_reason_valid(reason) {
             return Err(CodecError::BadValue);
         }
         out.push(AdmitDecision {
