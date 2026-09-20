@@ -1627,9 +1627,11 @@ Go:
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go` — `ZoneEvaluator` +
   `ZoneSnapshotRef` + config fields + `submitEligible` call site (D7–D10) + `PipelineStats` fields (§4.3)
   + `ErrNoZoneEvaluator`.
-- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/nfqueue.go` — bounded/nonblocking
-  verdict send (`SOCK_NONBLOCK`/`SO_SNDTIMEO`) and generation-level queue recovery; queue-wide close
-  is only the fenced, accounted teardown after EAGAIN/timeout, never per-packet cancellation.
+- M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/nfqueue.go` — every fd-send path
+  (`Packet.Verdict` and `VerdictBatch`/`sendmmsg`) uses bounded/nonblocking `q.mu` acquisition or
+  moves socket I/O outside the shared lock, plus `SOCK_NONBLOCK`/`SO_SNDTIMEO`; the close/rebind path
+  proves no `q.mu` deadlock, performs generation-level queue recovery, and uses queue-wide close only
+  as the fenced, accounted teardown after EAGAIN/timeout, never per-packet cancellation.
 - M `/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/daemon/ipsec_capture_pipeline_9506.go` —
   receive-time tunnel attribution (D8 secondary) + status snapshot fields (§4.4) +
   signed `PMechShadowBudget` storage/validation input + `PMechAlarmConsumer`/bounded
