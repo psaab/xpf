@@ -949,9 +949,11 @@ holds `commitLease.RLock` from full permit/gate/queue/snapshot validation throug
 the adapter MUST NOT use the generic `CapturePipelineConfig.Sink` fallback
 (`/home/ps/git/pi-xpf/.claude/worktrees/9506-mechdesign/pkg/nfqueue/pipeline.go:275-281`) for ACCEPT.
 On supervisor refusal the helper itself emits exactly one DROP and returns the structured
-`{Result: InputCommitDropped, TerminalAttempted: TerminalAttemptYes, Err: nil}`; on sink error it
-returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptYes, Err: err}`. A refusal
-proven before committer entry returns `{InputCommitInvalid, TerminalAttempted: TerminalAttemptNo, Err: err}`.
+`{Result: InputCommitDropped, TerminalAttempted: TerminalAttemptYes, Err: nil}`; an error after fd
+syscall entry returns `{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptYes, Err: err}`.
+A post-committer `q.mu` acquisition timeout before any fd syscall returns
+`{Result: InputCommitUncertain, TerminalAttempted: TerminalAttemptNo, Err: q_mu_timeout}` and E35.
+A refusal proven before committer entry returns `{InputCommitInvalid, TerminalAttempted: TerminalAttemptNo, Err: err}`.
 `submitGate` only orders against pipeline cancellation; it is not an S4 authority check.
 Because this method currently holds `commitLease.RLock` across the sink syscall, S9.1 MUST make every
 fd-send path bounded. `Packet.Verdict` sends on a queue-wide fd while holding `q.mu`, and
