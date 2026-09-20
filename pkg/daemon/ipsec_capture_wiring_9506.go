@@ -645,10 +645,14 @@ func stagedIpsecQuarantineRuntime(d *Daemon, generation uint64, spec xnft.IpsecD
 	if spec.QuarantineGeneration == 0 {
 		spec.QuarantineGeneration = generation
 	}
+	runID := spec.RunID
+	if runID == "" {
+		runID = ipsecCaptureProcessRunID
+	}
 	return &ipsecCaptureRuntime{
 		supervisor: d.ipsecS4,
 		spec:       spec,
-		runID:      fmt.Sprintf("ipsec-quarantine-g%d", generation),
+		runID:      runID,
 	}
 }
 
@@ -684,6 +688,18 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	keys := plan.Keys
 	if !plan.Quarantine.QuarantineAll && old != nil && old.sameKeys(keys) && !old.spec.QuarantineAll {
 		return old, old, nil
+	}
+	var runID string
+	if plan.Quarantine.QuarantineAll || len(keys) != 0 {
+		var identityErr error
+		runID, identityErr = ipsecCaptureRunID9506()
+		if identityErr != nil {
+			return old, old, identityErr
+		}
+		plan.Quarantine.RunID = runID
+		if ipsecCaptureDurableIdentityEnabled9506() {
+			plan.Quarantine.LabelSchema = xnft.IpsecDivertLabelSchema9506
+		}
 	}
 	if plan.Quarantine.QuarantineAll {
 		staged = stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine)
@@ -769,6 +785,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		Supervisor:  d.ipsecS4,
 		Registry:    registry,
 		QueueEpochs: queueEpochs,
+		RunID:       runID,
 		Pipeline: nfqueue.CapturePipelineConfig{
 			Phase:          nfqueue.PipelineEnforcing,
 			HandoffCap:     16384,
@@ -798,6 +815,10 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		d.ipsecCaptureStaged = staged
 		d.ipsecCaptureStagePending = true
 		return old, staged, nil
+	}
+	spec.RunID = runID
+	if ipsecCaptureDurableIdentityEnabled9506() {
+		spec.LabelSchema = xnft.IpsecDivertLabelSchema9506
 	}
 	staged = &ipsecCaptureRuntime{
 		supervisor:   d.ipsecS4,
@@ -920,7 +941,11 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 		return errors.New("ipsec capture: nftables installer is unavailable")
 	}
 	if staged == nil {
-		if err := nftInstaller.RemoveIpsecDivert(); err != nil {
+		var owner *xnft.IpsecDivertSpec
+		if old != nil {
+			owner = &old.spec
+		}
+		if err := removeIpsecDivert9506(owner); err != nil {
 			d.restoreIpsecCaptureRuntime(old)
 			return fmt.Errorf("ipsec capture: remove divert: %w", err)
 		}
@@ -932,6 +957,12 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 		}
 		return nil
 	}
+	installSpec, err := ipsecCaptureInstallSpec9506(staged.spec)
+	if err != nil {
+		_ = d.rollbackIpsecCaptureStage(old, staged)
+		return fmt.Errorf("ipsec capture: allocate divert identity: %w", err)
+	}
+	staged.spec = installSpec
 	oldRetired := false
 	guarded, canGuard := nftInstaller.(ipsecCaptureGuardedInstaller)
 	if old != nil && canGuard {
@@ -964,15 +995,32 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 			// A post-drain actor failure must leave a two-family DROP
 			// authority. Never remove both tables and fall through.
 			if old != nil && !oldRetired {
-				_ = nftInstaller.InstallIpsecDivert(old.spec)
-				_ = d.rollbackIpsecCaptureStage(old, staged)
-			} else {
-				quarantine := staged.spec
-				quarantine.QuarantineAll = true
-				if guardInstaller, ok := nftInstaller.(ipsecCaptureQuarantineInstaller); ok {
-					_ = guardInstaller.InstallIpsecQuarantineGuard(quarantine)
+				rollbackSpec, identityErr := ipsecCaptureInstallSpec9506(old.spec)
+				rollbackOK := false
+				if identityErr == nil {
+					if rollbackErr := nftInstaller.InstallIpsecDivert(rollbackSpec); rollbackErr != nil {
+						slog.Warn("ipsec capture: old divert rollback install failed", "err", rollbackErr)
+					} else {
+						rollbackOK = true
+						old.spec = rollbackSpec
+					}
 				} else {
-					_ = nftInstaller.InstallIpsecDivert(quarantine)
+					slog.Warn("ipsec capture: old divert rollback identity allocation failed", "err", identityErr)
+				}
+				if rollbackOK {
+					_ = d.rollbackIpsecCaptureStage(old, staged)
+				} else {
+					// Never restore old as an authority after a failed
+					// kernel reinstall. Keep/attempt deny-first authority.
+					if quarantineErr := installIpsecQuarantine9506(staged.spec); quarantineErr != nil {
+						slog.Warn("ipsec capture: quarantine fallback after rollback failure failed", "err", quarantineErr)
+					}
+					d.restoreIpsecCaptureRuntime(nil)
+					_ = staged.close()
+				}
+			} else {
+				if quarantineErr := installIpsecQuarantine9506(staged.spec); quarantineErr != nil {
+					slog.Warn("ipsec capture: quarantine fallback identity allocation failed", "err", quarantineErr)
 				}
 				d.restoreIpsecCaptureRuntime(nil)
 				_ = staged.close()
@@ -1030,7 +1078,11 @@ func (d *Daemon) shutdownIpsecCapture() {
 		return
 	}
 	if nftInstaller != nil {
-		if err := nftInstaller.RemoveIpsecDivert(); err != nil {
+		var owner *xnft.IpsecDivertSpec
+		if active != nil {
+			owner = &active.spec
+		}
+		if err := removeIpsecDivert9506(owner); err != nil {
 			slog.Warn("ipsec capture shutdown: remove divert failed", "err", err)
 		}
 	}

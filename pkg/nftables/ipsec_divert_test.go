@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"testing"
-
 	gnft "github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
 )
 
 func TestIpsecDivertSpecRejectsProvenanceQueueAlias9506(t *testing.T) {
@@ -24,12 +26,18 @@ func TestIpsecDivertSpecRejectsProvenanceQueueAlias9506(t *testing.T) {
 }
 
 type fakeIpsecNftState struct {
-	tables map[gnft.TableFamily]map[string]bool
+	tables   map[gnft.TableFamily]map[string]bool
+	userdata []string
+	metadata map[gnft.TableFamily]map[string]map[string]string
 }
 
 func newFakeIpsecNftState() *fakeIpsecNftState {
 	return &fakeIpsecNftState{
 		tables: map[gnft.TableFamily]map[string]bool{
+			gnft.TableFamilyINet:   {},
+			gnft.TableFamilyBridge: {},
+		},
+		metadata: map[gnft.TableFamily]map[string]map[string]string{
 			gnft.TableFamilyINet:   {},
 			gnft.TableFamilyBridge: {},
 		},
@@ -89,8 +97,48 @@ func (s *fakeIpsecNftState) dial(req []netlink.Message) ([]netlink.Message, erro
 						Data: append([]byte{byte(family), 0, 0, 0}, attrs...),
 					})
 				}
+				for chainName := range s.metadata[family][name] {
+					attrs, err := fakeIpsecChainAttrs(name, chainName)
+					if err != nil {
+						return nil, err
+					}
+					response = append(response, netlink.Message{
+						Header: netlink.Header{
+							Type:     netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_NEWCHAIN),
+							Sequence: msg.Header.Sequence,
+						},
+						Data: append([]byte{byte(family), 0, 0, 0}, attrs...),
+					})
+				}
 			}
 			return response, nil
+		case unix.NFT_MSG_GETRULE:
+			table, err := fakeIpsecAttrString(msg.Data, unix.NFTA_RULE_TABLE)
+			if err != nil {
+				return nil, err
+			}
+			chain, err := fakeIpsecAttrString(msg.Data, unix.NFTA_RULE_CHAIN)
+			if err != nil {
+				return nil, err
+			}
+			if user := s.metadata[family][table][chain]; user != "" {
+				attrs, err := netlink.MarshalAttributes([]netlink.Attribute{
+					{Type: unix.NFTA_RULE_TABLE, Data: []byte(table + "\x00")},
+					{Type: unix.NFTA_RULE_CHAIN, Data: []byte(chain + "\x00")},
+					{Type: unix.NFTA_RULE_USERDATA, Data: []byte(user)},
+				})
+				if err != nil {
+					return nil, err
+				}
+				return []netlink.Message{{
+					Header: netlink.Header{
+						Type:     netlink.HeaderType((unix.NFNL_SUBSYS_NFTABLES << 8) | unix.NFT_MSG_NEWRULE),
+						Sequence: msg.Header.Sequence,
+					},
+					Data: append([]byte{byte(family), 0, 0, 0}, attrs...),
+				}}, nil
+			}
+			return nil, nil
 		case unix.NFT_MSG_NEWTABLE, unix.NFT_MSG_DELTABLE:
 			name, err := fakeIpsecAttrString(msg.Data, unix.NFTA_TABLE_NAME)
 			if err != nil {
@@ -102,7 +150,36 @@ func (s *fakeIpsecNftState) dial(req []netlink.Message) ([]netlink.Message, erro
 			if s.tables[family] == nil {
 				s.tables[family] = map[string]bool{}
 			}
+			if kind == unix.NFT_MSG_DELTABLE {
+				delete(s.metadata[family], name)
+			}
 			s.tables[family][name] = kind == unix.NFT_MSG_NEWTABLE
+		case unix.NFT_MSG_NEWRULE:
+			ad, err := netlink.NewAttributeDecoder(msg.Data[4:])
+			if err != nil {
+				return nil, err
+			}
+			var table, chain, user string
+			for ad.Next() {
+				switch ad.Type() {
+				case unix.NFTA_RULE_TABLE:
+					table = ad.String()
+				case unix.NFTA_RULE_CHAIN:
+					chain = ad.String()
+				case unix.NFTA_RULE_USERDATA:
+					user = string(ad.Bytes())
+					s.userdata = append(s.userdata, user)
+				}
+			}
+			if err := ad.Err(); err != nil {
+				return nil, err
+			}
+			if table != "" && chain != "" && user != "" && strings.HasPrefix(chain, "xpf_ipsec_") {
+				if s.metadata[family][table] == nil {
+					s.metadata[family][table] = map[string]string{}
+				}
+				s.metadata[family][table][chain] = user
+			}
 		}
 	}
 	return nil, nil
@@ -156,28 +233,109 @@ func TestIpsecQuarantineInstallRemoveRoundTripFake9506(t *testing.T) {
 	in := newNetlinkInstallerConn(func() (*gnft.Conn, error) {
 		return gnft.New(gnft.WithTestDial(state.dial))
 	})
-	spec := IpsecDivertSpec{
+	identityPath := filepath.Join(t.TempDir(), "ipsec-quarantine-identity")
+	firstAllocator, err := NewIpsecDivertIdentityAllocator(identityPath)
+	if err != nil {
+		t.Fatalf("first identity allocator: %v", err)
+	}
+	first, err := firstAllocator.Allocate()
+	if err != nil {
+		t.Fatalf("first identity allocation: %v", err)
+	}
+	firstSpec := IpsecDivertSpec{
 		QuarantineAll:        true,
 		QuarantineGeneration: 7,
+		RunID:                first.RunID,
+		InstallSequence:      first.InstallSequence,
+		LabelSchema:          first.LabelSchema,
 		CandidateIfindices:   []uint32{17},
 	}
-	if err := in.InstallIpsecDivert(spec); err != nil {
-		t.Fatalf("fake quarantine install: %v", err)
+	if err := in.InstallIpsecDivert(firstSpec); err != nil {
+		t.Fatalf("fake quarantine install (first run): %v", err)
+	}
+	metadata := string(ipsecQuarantineMetadata(firstSpec))
+	if !bytes.Contains([]byte(metadata), []byte("run="+first.RunID)) ||
+		!bytes.Contains([]byte(metadata), []byte("install_sequence=1")) ||
+		!bytes.Contains([]byte(metadata), []byte("label_schema="+IpsecDivertLabelSchema9506)) {
+		t.Fatalf("first quarantine metadata = %q, want durable identity", metadata)
+	}
+	if len(state.userdata) == 0 {
+		t.Fatal("fake netlink did not receive quarantine metadata rule")
+	}
+	got, err := parseIpsecDivertIdentity([]byte(state.userdata[len(state.userdata)-1]))
+	if err != nil || got != first {
+		t.Fatalf("fake installed identity = %+v (err=%v), want %+v", got, err, first)
 	}
 	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
 		if !state.hasTable(family, IpsecDivertTableName) {
-			t.Fatalf("family %v missing deny divert table after install", family)
+			t.Fatalf("family %v missing deny divert table after first install", family)
 		}
 		if state.hasTable(family, IpsecQuarantineTableName) {
-			t.Fatalf("family %v retained guard table after install", family)
+			t.Fatalf("family %v retained guard table after first install", family)
 		}
 	}
-	if err := in.RemoveIpsecDivert(); err != nil {
-		t.Fatalf("fake quarantine remove: %v", err)
+	firstRemove, err := firstAllocator.Allocate()
+	if err != nil {
+		t.Fatalf("first remove identity allocation: %v", err)
+	}
+	if err := in.RemoveIpsecDivertWithIdentity9506(IpsecDivertRemovalIdentity9506{
+		Owner:     IpsecDivertIdentity{RunID: "stale", InstallSequence: first.InstallSequence, LabelSchema: first.LabelSchema},
+		Operation: firstRemove,
+	}); err == nil {
+		t.Fatal("stale owner was allowed to remove first installation")
+	}
+	firstRemove, err = firstAllocator.Allocate()
+	if err != nil {
+		t.Fatalf("authorized remove identity allocation: %v", err)
+	}
+	if err := in.RemoveIpsecDivertWithIdentity9506(IpsecDivertRemovalIdentity9506{
+		Owner:     first,
+		Operation: firstRemove,
+	}); err != nil {
+		t.Fatalf("fake quarantine remove (first run): %v", err)
+	}
+	// A fresh allocator models a daemon restart: the run changes, while the
+	// durable operation sequence continues instead of resetting to one.
+	secondAllocator, err := NewIpsecDivertIdentityAllocator(identityPath)
+	if err != nil {
+		t.Fatalf("second identity allocator: %v", err)
+	}
+	second, err := secondAllocator.Allocate()
+	if err != nil {
+		t.Fatalf("second identity allocation: %v", err)
+	}
+	if second.RunID == first.RunID || second.InstallSequence <= first.InstallSequence {
+		t.Fatalf("restart identities first=%+v second=%+v, want distinct run and increasing sequence", first, second)
+	}
+	secondSpec := firstSpec
+	secondSpec.QuarantineGeneration++
+	secondSpec.RunID = second.RunID
+	secondSpec.InstallSequence = second.InstallSequence
+	if err := in.InstallIpsecDivert(secondSpec); err != nil {
+		t.Fatalf("fake quarantine install (restarted run): %v", err)
+	}
+	metadata = string(ipsecQuarantineMetadata(secondSpec))
+	if !bytes.Contains([]byte(metadata), []byte("run="+second.RunID)) ||
+		!bytes.Contains([]byte(metadata), []byte("install_sequence="+strconv.FormatUint(second.InstallSequence, 10))) {
+		t.Fatalf("restarted quarantine metadata = %q, want second durable identity", metadata)
+	}
+	got, err = parseIpsecDivertIdentity([]byte(state.userdata[len(state.userdata)-1]))
+	if err != nil || got != second {
+		t.Fatalf("fake restarted identity = %+v (err=%v), want %+v", got, err, second)
+	}
+	secondRemove, err := secondAllocator.Allocate()
+	if err != nil {
+		t.Fatalf("second remove identity allocation: %v", err)
+	}
+	if err := in.RemoveIpsecDivertWithIdentity9506(IpsecDivertRemovalIdentity9506{
+		Owner:     second,
+		Operation: secondRemove,
+	}); err != nil {
+		t.Fatalf("fake quarantine remove (restarted run): %v", err)
 	}
 	for _, family := range []gnft.TableFamily{gnft.TableFamilyINet, gnft.TableFamilyBridge} {
 		if state.hasTable(family, IpsecDivertTableName) || state.hasTable(family, IpsecQuarantineTableName) {
-			t.Fatalf("family %v retained ipsec tables after remove", family)
+			t.Fatalf("family %v retained ipsec tables after restarted remove", family)
 		}
 	}
 }
@@ -519,5 +677,14 @@ func TestIpsecQuarantineInstallRemoveRoundTrip9506(t *testing.T) {
 				t.Fatalf("%v stale IPsec table after remove: %q", family, table.Name)
 			}
 		}
+	}
+}
+
+func TestIpsecDivertIdentityRejectsFutureSchema9506(t *testing.T) {
+	if _, err := parseIpsecDivertIdentity([]byte("run=future install_sequence=7 label_schema=v2")); err == nil {
+		t.Fatal("future metadata schema was accepted")
+	}
+	if _, err := parseIpsecDivertIdentity([]byte("run=current install_sequence=0 label_schema=v1")); err == nil {
+		t.Fatal("current metadata without sequence was accepted")
 	}
 }

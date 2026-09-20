@@ -198,12 +198,26 @@ type IpsecDivertRule struct {
 // numbers must be unique across all four lists: family and hook are part of
 // CaptureOrigin and may not alias (§2.2/T12).
 type IpsecDivertSpec struct {
-	InetForward             []IpsecDivertRule
-	InetInput               []IpsecDivertRule
-	BridgeForward           []IpsecDivertRule
-	BridgeInput             []IpsecDivertRule
-	QuarantineAll           bool
-	QuarantineGeneration    uint64
+	InetForward          []IpsecDivertRule
+	InetInput            []IpsecDivertRule
+	BridgeForward        []IpsecDivertRule
+	BridgeInput          []IpsecDivertRule
+	QuarantineAll        bool
+	QuarantineGeneration uint64
+	// RunID identifies the daemon incarnation that authored this nftables
+	// mutation. It is sourced from the durable D1b identity allocator and is
+	// intentionally distinct from QuarantineGeneration, which is the logical
+	// queue/config generation used by the capture actor and Rust dataplane.
+	RunID string
+	// InstallSequence is a durable operation number. It advances for each
+	// install/remove mutation and must not be treated as a replacement for
+	// QuarantineGeneration.
+	InstallSequence uint64
+	// LabelSchema identifies the metadata witness layout.
+	LabelSchema string
+	// IdentityLockPath names the same durable lock used for allocator updates.
+	// It is internal coordination metadata and is never emitted on wire.
+	IdentityLockPath        string
 	QuarantineReasonMask    IpsecQuarantineReasonMask
 	QuarantinePrimaryReason IpsecQuarantineReason
 	// QuarantineRawReason preserves an unknown primary enum value without
@@ -221,6 +235,13 @@ type IpsecDivertSpec struct {
 // removes the guard only after a successful readback. If any later phase
 // fails, the guard is intentionally retained as the sole deny authority.
 func (in *netlinkInstaller) InstallIpsecDivert(spec IpsecDivertSpec) error {
+	if spec.IdentityLockPath != "" {
+		path := spec.IdentityLockPath
+		spec.IdentityLockPath = ""
+		return withIpsecDivertIdentityLock9506(path, func() error {
+			return in.InstallIpsecDivert(spec)
+		})
+	}
 	spec = normalizeIpsecQuarantineSpec(spec)
 	if err := validateIpsecDivertSpec(spec); err != nil {
 		return err
@@ -248,7 +269,7 @@ func (in *netlinkInstaller) InstallIpsecDivert(spec IpsecDivertSpec) error {
 		if !transitBarrierFamilyUnsupported(err) {
 			return fmt.Errorf("bridge capability probe: %w", err)
 		}
-		inetErr := in.installIpsecDivertFamily(gnft.TableFamilyINet, spec.InetForward, spec.InetInput)
+		inetErr := in.installIpsecDivertFamily(gnft.TableFamilyINet, spec.InetForward, spec.InetInput, spec)
 		bridgeErr := &transitBarrierBridgeUnsupportedError{err: err}
 		if inetErr != nil {
 			return errors.Join(fmt.Errorf("inet: %w", inetErr), fmt.Errorf("bridge: %w", bridgeErr))
@@ -336,7 +357,14 @@ func (in *netlinkInstaller) installNormalUnderQuarantineGuard(spec IpsecDivertSp
 		return err
 	}
 	if !guardPresent {
-		guard := IpsecDivertSpec{QuarantineAll: true, QuarantineGeneration: spec.QuarantineGeneration}
+		guard := IpsecDivertSpec{
+			QuarantineAll:        true,
+			QuarantineGeneration: spec.QuarantineGeneration,
+			RunID:                spec.RunID,
+			InstallSequence:      spec.InstallSequence,
+			LabelSchema:          spec.LabelSchema,
+			IdentityLockPath:     spec.IdentityLockPath,
+		}
 		if err := in.installIpsecQuarantineTableAtomic(normalizeIpsecQuarantineSpec(guard), IpsecQuarantineTableName, IpsecQuarantinePriority); err != nil {
 			return fmt.Errorf("quarantine recovery guard install: %w", err)
 		}
@@ -410,6 +438,13 @@ func (in *netlinkInstaller) requireIpsecBridgeFamily() error {
 // deny-first guard. It intentionally has no removal counterpart here: callers
 // may retain it as the sole authority after any later transition failure.
 func (in *netlinkInstaller) InstallIpsecQuarantineGuard(spec IpsecDivertSpec) error {
+	if spec.IdentityLockPath != "" {
+		path := spec.IdentityLockPath
+		spec.IdentityLockPath = ""
+		return withIpsecDivertIdentityLock9506(path, func() error {
+			return in.InstallIpsecQuarantineGuard(spec)
+		})
+	}
 	spec.QuarantineAll = true
 	spec = normalizeIpsecQuarantineSpec(spec)
 	if err := in.requireIpsecBridgeFamily(); err != nil {
@@ -429,6 +464,13 @@ func (in *netlinkInstaller) InstallIpsecQuarantineGuard(spec IpsecDivertSpec) er
 // ACKed/read back; a callback or replacement failure deliberately retains the
 // guard and never reuses the old generation.
 func (in *netlinkInstaller) InstallIpsecDivertWithDrain(spec IpsecDivertSpec, drain func() error) error {
+	if spec.IdentityLockPath != "" {
+		path := spec.IdentityLockPath
+		spec.IdentityLockPath = ""
+		return withIpsecDivertIdentityLock9506(path, func() error {
+			return in.InstallIpsecDivertWithDrain(spec, drain)
+		})
+	}
 	spec = normalizeIpsecQuarantineSpec(spec)
 	if err := validateIpsecDivertSpec(spec); err != nil {
 		return err
@@ -439,7 +481,14 @@ func (in *netlinkInstaller) InstallIpsecDivertWithDrain(spec IpsecDivertSpec, dr
 	if spec.QuarantineAll {
 		return in.installIpsecQuarantineWithDrain(spec, drain)
 	}
-	guard := IpsecDivertSpec{QuarantineAll: true, QuarantineGeneration: spec.QuarantineGeneration}
+	guard := IpsecDivertSpec{
+		QuarantineAll:        true,
+		QuarantineGeneration: spec.QuarantineGeneration,
+		RunID:                spec.RunID,
+		InstallSequence:      spec.InstallSequence,
+		IdentityLockPath:     spec.IdentityLockPath,
+		LabelSchema:          spec.LabelSchema,
+	}
 	guardPresent, err := in.ipsecTableBothFamiliesPresent(IpsecQuarantineTableName)
 	if err != nil {
 		return err
@@ -621,14 +670,25 @@ func emitIpsecQuarantineRules(p *nlPlan, family, hook string, spec IpsecDivertSp
 }
 
 func ipsecQuarantineMetadata(spec IpsecDivertSpec) []byte {
-	return []byte(fmt.Sprintf("run=d1b generation=%d primary=%s raw_reason=%d mask=0x%08x raw_mask=0x%08x",
-		spec.QuarantineGeneration, spec.QuarantinePrimaryReason.String(), uint8(spec.QuarantineRawReason),
-		uint32(spec.QuarantineReasonMask), uint32(spec.QuarantineRawMask)))
+	return formatIpsecDivertIdentity(spec)
 }
 
 func addIpsecQuarantineMetadata(c *gnft.Conn, tbl *gnft.Table, spec IpsecDivertSpec) {
 	meta := c.AddChain(&gnft.Chain{
-		Name:  fmt.Sprintf("xpf_ipsec_quarantine_meta_g%d", spec.QuarantineGeneration),
+		Name:  fmt.Sprintf("xpf_ipsec_quarantine_meta_g%d_s%d", spec.QuarantineGeneration, spec.InstallSequence),
+		Table: tbl,
+	})
+	c.AddRule(&gnft.Rule{
+		Table:    tbl,
+		Chain:    meta,
+		UserData: ipsecQuarantineMetadata(spec),
+		Exprs:    []expr.Any{&expr.Verdict{Kind: expr.VerdictReturn}},
+	})
+}
+
+func addIpsecDivertMetadata(c *gnft.Conn, tbl *gnft.Table, spec IpsecDivertSpec) {
+	meta := c.AddChain(&gnft.Chain{
+		Name:  fmt.Sprintf("%s%d", ipsecDivertMetaChainPrefix9506, spec.InstallSequence),
 		Table: tbl,
 	})
 	c.AddRule(&gnft.Rule{
@@ -787,6 +847,9 @@ func ensureIpsecDivertPriorityFree(c *gnft.Conn, family gnft.TableFamily) error 
 }
 
 func (in *netlinkInstaller) installIpsecDivertAtomic(spec IpsecDivertSpec) error {
+	if err := in.checkIpsecDivertNoRollback(spec); err != nil {
+		return err
+	}
 	c, err := in.newConn()
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)
@@ -820,6 +883,7 @@ func (in *netlinkInstaller) installIpsecDivertAtomic(spec IpsecDivertSpec) error
 		if p.err != nil {
 			return p.err
 		}
+		addIpsecDivertMetadata(c, tbl, spec)
 	}
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("nftables flush %s: %w", IpsecDivertTableName, err)
@@ -827,7 +891,10 @@ func (in *netlinkInstaller) installIpsecDivertAtomic(spec IpsecDivertSpec) error
 	return nil
 }
 
-func (in *netlinkInstaller) installIpsecDivertFamily(family gnft.TableFamily, forward, input []IpsecDivertRule) error {
+func (in *netlinkInstaller) installIpsecDivertFamily(family gnft.TableFamily, forward, input []IpsecDivertRule, spec IpsecDivertSpec) error {
+	if err := in.checkIpsecDivertNoRollback(spec); err != nil {
+		return err
+	}
 	c, err := in.newConn()
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)
@@ -853,6 +920,7 @@ func (in *netlinkInstaller) installIpsecDivertFamily(family gnft.TableFamily, fo
 	if p.err != nil {
 		return p.err
 	}
+	addIpsecDivertMetadata(c, tbl, spec)
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("nftables flush %s: %w", IpsecDivertTableName, err)
 	}
