@@ -1853,6 +1853,13 @@ touched (O-*/V-FLIP own those).
   bypass permit exists while ownership/fence state is unresolved. Any such result is PLAN-KILL, not
   a latency-tuning task. The validation cells in §5.4 must show preemptive-fence presence/future-master
   coverage, detection→ACK measurement, and bypass-fence drops mapped to E34.
+- K-P12: the signed `PMechShadowBudget`/sole `PMechFlipAuthorizer` is missing, duplicated, expired,
+  or bypassed; `FloodDeferralGuard` is bypassed; either family lacks flip-guard ACK/readback or
+  removal proof; the permit is not CLOSED through steps 3–6 or opens before both removals are
+  acknowledged; `FLIP_GUARD` E26 counters/witness are not exact-once and restart-persistent; or a
+  post-activation failure drains/replaces the active epoch before a fresh two-family guard is
+  installed and ACKed. Any such result is PLAN-KILL or deny-only, and K-P12 is exercised by §5.4
+  Shadow flip cells and the full seven-step protocol in §5.7.
 
 ### §5.6 Mixed-version and rolling-upgrade procedure
 
@@ -1949,6 +1956,10 @@ reads final counters (including the read→detach interval), fsyncs the rollup b
 GC, and recovers idempotently after restart under the original `runID`. Counter userdata is never
 used. A failed ACK/removal leaves the named objects and witness live; the cell cannot silently lose
 an E26 terminal count.
+For the §4.4 collector key, every flip-witness row projects
+`primary_reason=FLIP_GUARD`, `reason_mask=0`, and `counter_sequence=install_sequence`; thus its
+`{source,generation,primary_reason,reason_mask,counter_sequence}` identity is stable across restart
+and cannot double-add a journaled final delta.
 
 
 The flip is a guarded sequence, not a cross-subsystem atomic operation:
