@@ -41,12 +41,13 @@ type userspaceCounterSnapshot struct {
 }
 
 // totalDrops (#4477) is the aggregate "Packets dropped" figure surfaced by
-// GlobalCtrDrops. It sums the firewall's ENFORCEMENT drops — policy
-// denies, screen/IDS drops, host-inbound admission denies, and source-NAT
-// allocation failures. These are exactly the four breakdown lines rendered
-// beneath "Packets dropped" in `show security flow statistics`, so the
-// aggregate equals the sum of its parts (a total-with-breakdown, not a
-// double count into any single reason's own index). Before #4477 GlobalCtrDrops
+// GlobalCtrDrops. It sums the firewall's ENFORCEMENT drops — policy denies,
+// screen/IDS drops, host-inbound admission denies, unknown-VLAN rejects,
+// destination-MAC rejects, and source-NAT allocation failures. These are
+// exactly the six breakdown lines rendered beneath "Packets dropped" in
+// `show security flow statistics`, so the aggregate equals the sum of its parts
+// (a total-with-breakdown, not a double count into any single reason's own
+// index). Before #4477 GlobalCtrDrops
 // was never written and printed a false, always-0 value.
 //
 // #4508: this is ENFORCEMENT drops only, NOT the literal total of every packet

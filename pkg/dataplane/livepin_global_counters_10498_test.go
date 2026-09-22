@@ -43,6 +43,9 @@ func TestGlobalCountersMapEntryUpgradeFromOldPin10498(t *testing.T) {
 }
 
 func TestGlobalCountersCAndGoMaxEntriesParity10498(t *testing.T) {
+	if GlobalCtrMax != 43 {
+		t.Fatalf("Go GlobalCtrMax = %d, want exact ABI size 43", GlobalCtrMax)
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

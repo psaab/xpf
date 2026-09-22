@@ -86,6 +86,28 @@ fn named_pre_l3_counters_round_trip_and_reset_10498() {
         (7, 11, 13),
         "flush must carry named pre-L3 drops batch → live"
     );
+    assert_eq!(
+        (
+            batch.umem_slice_dropped,
+            batch.unknown_vlan_dropped,
+            batch.dst_mac_dropped,
+        ),
+        (0, 0, 0),
+        "flush must reset named pre-L3 batch counters"
+    );
+    batch.flush(&live);
+    assert_eq!(
+        (
+            live.umem_slice_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            live.unknown_vlan_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            live.dst_mac_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+        (7, 11, 13),
+        "repeated flush of a reset batch must be idempotent"
+    );
 
     let snap = live.snapshot();
     assert_eq!(

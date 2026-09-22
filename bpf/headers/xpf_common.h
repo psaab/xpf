@@ -303,7 +303,7 @@ struct icmp6hdr {
 #define GLOBAL_CTR_FLOW_CACHE_INVALIDATE 39
 #define GLOBAL_CTR_VLAN_PUSH_FAIL        40
 #define GLOBAL_CTR_UNKNOWN_VLAN_DROPS    41
-#define GLOBAL_CTR_DST_MAC_DROPS        42
+#define GLOBAL_CTR_DST_MAC_DROPS         42
 #define GLOBAL_CTR_MAX                   43
 
 /* Flow timeout indices for flow_timeouts ARRAY map */

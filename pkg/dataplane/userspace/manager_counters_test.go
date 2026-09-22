@@ -359,7 +359,7 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 				HostInboundDeniedPackets: 14,
 				UMEMSliceDropped:         19,
 				UnknownVLANDropped:       8,
-				DstMACDropped:            7,
+				DstMACDropped:            8,
 				NatAllocFail:             16,
 			},
 		},
@@ -376,13 +376,13 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrUnknownVLANDrops); got != 9 {
 		t.Fatalf("GlobalCtrUnknownVLANDrops = %d, want 9", got)
 	}
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDstMACDrops); got != 9 {
-		t.Fatalf("GlobalCtrDstMACDrops = %d, want 9", got)
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDstMACDrops); got != 10 {
+		t.Fatalf("GlobalCtrDstMACDrops = %d, want 10", got)
 	}
 	// GlobalCtrDrops includes the configured VLAN/MAC admission reasons but
-	// excludes UMEM hygiene: 10 + 6 + 20 + 24 + 9 + 9 = 78.
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 78 {
-		t.Fatalf("GlobalCtrDrops = %d, want 78", got)
+	// excludes UMEM hygiene: 10 + 6 + 20 + 24 + 9 + 10 = 79.
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 79 {
+		t.Fatalf("GlobalCtrDrops = %d, want 79", got)
 	}
 
 	// A second poll with the same cumulative totals produces zero deltas.
@@ -392,8 +392,8 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 	for idx, want := range map[uint32]uint64{
 		dataplane.GlobalCtrNATAllocFail:     24,
 		dataplane.GlobalCtrUnknownVLANDrops: 9,
-		dataplane.GlobalCtrDstMACDrops:      9,
-		dataplane.GlobalCtrDrops:            78,
+		dataplane.GlobalCtrDstMACDrops:      10,
+		dataplane.GlobalCtrDrops:            79,
 	} {
 		if got := m.bpfShim.ReadUserspaceCounterOffset(idx); got != want {
 			t.Fatalf("counter %d after idempotent re-poll = %d, want %d", idx, got, want)
@@ -403,7 +403,7 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 	// A subsequent poll advances only by each changed cumulative delta.
 	status.Bindings[0].NatAllocFail = 18       // +10
 	status.Bindings[0].UnknownVLANDropped = 11 // +10
-	status.Bindings[1].DstMACDropped = 27      // +20
+	status.Bindings[1].DstMACDropped = 28      // +20
 	m.mu.Lock()
 	m.syncBPFCountersLocked(status)
 	m.mu.Unlock()
@@ -413,11 +413,11 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrUnknownVLANDrops); got != 19 {
 		t.Fatalf("GlobalCtrUnknownVLANDrops after delta = %d, want 19", got)
 	}
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDstMACDrops); got != 29 {
-		t.Fatalf("GlobalCtrDstMACDrops after delta = %d, want 29", got)
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDstMACDrops); got != 30 {
+		t.Fatalf("GlobalCtrDstMACDrops after delta = %d, want 30", got)
 	}
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 118 {
-		t.Fatalf("GlobalCtrDrops after deltas = %d, want 118", got)
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 119 {
+		t.Fatalf("GlobalCtrDrops after deltas = %d, want 119", got)
 	}
 }
 

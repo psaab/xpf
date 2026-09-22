@@ -1,7 +1,7 @@
 # Plan: dedicated telemetry for named pre-L3 drops (#10498)
 
-Status: DRAFT v2 — revised after hostile plan review; parent delta review is
-next. No production code in this round.
+Status: IMPLEMENTED/READY — implementation landed; parent delta review is
+next. This document records the shipped counter plumbing and its verification.
 
 ## 1. Issue framing
 
@@ -165,9 +165,11 @@ For each counter, implement and test every checkpoint below:
 10. `sumBindingCounters` aggregation across bindings.
 11. The existing status summary one-pass aggregation and status rows, with
     golden fixture values distinct per row.
-12. Prometheus descriptor registration plus collector emission, summed
-    across bindings into three aggregate process-level unlabeled series and
-    emitted unconditionally (zero is a real signal).
+12. Prometheus descriptor registration plus collector emission: all three
+    counters are summed across bindings into three aggregate process-level
+    unlabeled series and emitted unconditionally (zero is a real signal).
+    Only the VLAN/MAC admission reasons enter the GlobalCtr bridge; UMEM
+    remains userspace status/Prometheus-only.
 13. CLI/REST/gRPC show surfaces for the named rows and, for the two folded
     admission reasons, their global counter breakdowns.
 14. Documentation of status labels, metric names, and Packets dropped scope.
@@ -189,9 +191,9 @@ Concrete current owners for those checkpoints are `userspace-dp/src/afxdp/mod.rs
 
 The two new global indices are not mixed-version-safe merely because the
 BindingStatus wire fields use serde defaults and Go `omitempty`. The pinned
-`global_counters` map is a separate ABI: `bpf/headers/xpf_common.h:305`
+`global_counters` map is a separate ABI: `bpf/headers/xpf_common.h:307`
 currently defines `GLOBAL_CTR_MAX` as 43, `bpf/headers/xpf_maps.h:324` uses that C
-value for `max_entries`, `pkg/dataplane/types.go:982` defines the Go
+value for `max_entries`, `pkg/dataplane/types.go:984` defines the Go
 `GlobalCtrMax` as 43, and `pkg/dataplane/loader_userspace_shim.go:728`
 creates the Go shared map with that value. Adding indices 41 and 42 required
 all of these max-entry values to become 43. There is no Rust `GlobalCtrMax`
@@ -319,7 +321,8 @@ the proof honest by splitting the harnesses while pinning their seam.
 - Three head cells drive `txn_run_descriptor` / the existing poll-head
   harness, one for each named arm. Each asserts its target BatchCounters
   slot is 1, the other two are 0, the descriptor is recycled, and the
-  downstream stage is unreached. Reverting any one bump makes its named head
+  downstream stage is unreached (no session, forward request, local delivery,
+  or route-miss accounting). Reverting any one bump makes its named head
   cell RED.
 - The UMEM cell uses a custom XdpDesc variant: metadata remains valid, but
   the descriptor's frame range is outside the UMEM slice. This proves
@@ -329,8 +332,9 @@ the proof honest by splitting the harnesses while pinning their seam.
 - Unknown-VLAN uses the existing tagged unknown-VID recycle fixture. Dst-MAC
   uses the existing wrong-unicast destination fixture plus positive
   broadcast/multicast and expected-MAC controls.
-- A flush/round-trip cell seeds distinct BatchCounters values (1, 2, 3),
-  flushes into BindingLiveState, snapshots, copies into BindingStatus, and
+- A flush/round-trip cell seeds distinct BatchCounters values (7, 11, 13),
+  flushes into BindingLiveState, asserts the batch resets to zero, repeats the
+  flush to prove idempotence, then snapshots, copies into BindingStatus, and
   checks each distinct value survives before zero_unbound_slot clears all
   three. Reverting any flush arm or copy/zero assignment makes the distinct
   assertion RED.
