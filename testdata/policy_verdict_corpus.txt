@@ -192,6 +192,24 @@ q trust untrust 10.0.1.100 10.0.2.5 tcp 1234 80 permit p-lab
 q trust untrust 10.0.1.101 10.0.2.5 tcp 1234 80 deny -
 end
 
+# ---------------------------------------------------------------- named terminal action
+# A named zone-pair policy's terminal reject must survive lowering as an active
+# reject, not silently become a deny/drop. The reverse direction confirms the
+# default permit posture remains independent of the named rule.
+case named-policy-then-reject
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy permit-all
+set security policies from-zone trust to-zone untrust policy p-reject match source-address any
+set security policies from-zone trust to-zone untrust policy p-reject match destination-address any
+set security policies from-zone trust to-zone untrust policy p-reject match application any
+set security policies from-zone trust to-zone untrust policy p-reject then reject
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 reject p-reject
+q untrust trust 10.0.2.5 10.0.1.5 tcp 1234 80 permit -
+end
+
 # ---------------------------------------------------------------- the #6576 escape
 # THE demonstrated escape this corpus exists for. #6505 taught the RUST junos-host
 # gate the #4569 fragment-associated deny and touched no Go, so the Go simulator
