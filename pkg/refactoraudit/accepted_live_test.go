@@ -73,9 +73,12 @@ func TestAcceptedEntryFloorBoundaries(t *testing.T) {
 	}{
 		{name: "watch just below", tier: tierWatch, loc: 1499, wantWords: "prune"},
 		{name: "watch at floor", tier: tierWatch, loc: 1500, wantLive: true},
+		{name: "watch just above", tier: tierWatch, loc: 1501, wantLive: true},
 		{name: "watch above refactor floor", tier: tierWatch, loc: 2001, wantLive: true},
 		{name: "refactor just below", tier: tierRefactor, loc: 1999, wantWords: "demote it to [WATCH] or prune"},
 		{name: "refactor at floor", tier: tierRefactor, loc: 2000, wantLive: true},
+		{name: "refactor just above", tier: tierRefactor, loc: 2001, wantLive: true},
+		{name: "unknown tier", tier: "[UNKNOWN]", loc: 1, wantWords: "unknown tier"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
