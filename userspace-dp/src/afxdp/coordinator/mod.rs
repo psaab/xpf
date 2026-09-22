@@ -823,6 +823,7 @@ impl Coordinator {
         // guard, mirroring the resolver join below.
         self.neighbors.stop_and_join_monitor();
         // #1636 / #6314: stop the neighbor warmer, drop the producer handle so
+        // the worker's recv side disconnects, and JOIN it — mirroring the
         // monitor (above) and resolver (below) siblings. Signalling + dropping
         // the queue alone left the warmer detached (the pre-#5165 odd-one-out):
         // a warmer blocked in recv_timeout could fire one stray ARP/NDP solicit
@@ -974,8 +975,10 @@ impl Coordinator {
         // identical to the seven field assignments it replaces.
         self.bpf_maps.store(Arc::new(BpfMaps::default()));
         self.forwarding = ForwardingState::default();
-        // #6592: reset BOTH halves before the single worker-visible publish.
+        // Re-attach the shared SA store: the default above drops it.
         self.forwarding.ipsec_sa = self.neighbors.ipsec_sa_monitor.store.clone();
+        // #6592: reset BOTH halves before the single worker-visible publish.
+        // `self.validation` was defaulted further down pre-#6592 — after the
         // old `shared_validation` / `ha.forwarding` stores — which was
         // harmless while the two were independent Arcs stored with explicit
         // values, but would now publish a default forwarding paired with the

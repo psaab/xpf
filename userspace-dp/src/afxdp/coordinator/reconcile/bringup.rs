@@ -601,7 +601,11 @@ pub(in crate::afxdp) fn ensure_ipsec_sa_monitor(coord: &mut Coordinator) {
     {
         return;
     }
-    coord.neighbors.ipsec_sa_monitor.store.reset_for_monitor_start();
+    coord
+        .neighbors
+        .ipsec_sa_monitor
+        .store
+        .reset_for_monitor_start();
     let stop = Arc::new(AtomicBool::new(false));
     let store = coord.neighbors.ipsec_sa_monitor.store.clone();
     let stop_for_thread = stop.clone();
@@ -618,9 +622,17 @@ pub(in crate::afxdp) fn ensure_ipsec_sa_monitor(coord: &mut Coordinator) {
     }
 }
 
-/// #6240 phase: RESOLVER (best-effort, ATTEMPTED before worker launch).
-/// Spawn the shared on-demand neighbor resolver so every worker's
-/// `WorkerSharedDataplane::from_coord` captures a clone of the handle.
+/// #6240 phase: RESOLVER (best-effort, ATTEMPTED before worker launch). Spawn
+/// the shared on-demand neighbor resolver so every worker's
+/// `WorkerSharedDataplane::from_coord` captures a clone of the handle. Guarded
+/// by `resolver.is_none()` so a re-reconcile reuses the existing thread. The
+/// attempt is BEST-EFFORT: on spawn failure `coord.neighbors.resolver` stays
+/// `None` and workers still launch (with `resolver: None`) — the invariant is
+/// attempt-before-launch, NOT resolver-must-exist, so the resolver is NEVER
+/// threaded into `spawn_workers` as a required input. Returns the resulting
+/// handle (`Some` when installed/already-present, `None` when the spawn failed)
+/// so the ordering/best-effort contract is directly unit-testable. Verbatim
+/// move of the pre-#6240 inline block.
 
 pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<NeighborResolver>> {
     // #1769: spawn the shared on-demand neighbor resolver BEFORE the

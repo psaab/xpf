@@ -28,7 +28,7 @@ pub(in crate::afxdp) struct IpsecSaKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct IpsecSaEpoch {
+pub(in crate::afxdp) struct IpsecSaEpoch {
     generation: u64,
     /// Presence-episode identifier. Fresh whenever the key transitions from
     /// absent to present; preserved across updates and redump retention, so
@@ -224,15 +224,6 @@ impl IpsecSaStore {
     #[inline]
     pub(in crate::afxdp) fn load_snapshot(&self) -> Arc<IpsecSaSnapshot> {
         self.snapshot.load_full()
-    }
-
-    fn publish_snapshot(&self, mut snapshot: IpsecSaSnapshot) {
-        // Stamp ordinary publications with the current epochs. Fenced paths
-        // use the next-epoch helper, which releases each changed epoch only
-        // after its replacement snapshot is visible.
-        snapshot.stale_epoch = self.stale_epoch.load(Ordering::Acquire);
-        snapshot.removal_epoch = self.removal_epoch.load(Ordering::Acquire);
-        self.snapshot.store(Arc::new(snapshot));
     }
 
     #[inline]
@@ -699,6 +690,9 @@ pub(in crate::afxdp) fn esp_in_udp_miss_reason(
     dst_port: u16,
     declared_end: usize,
 ) -> IpsecSaMissReason {
+    // Deliberately coarse: any non-4500 input (e.g. UDP/500 non-IKE data
+    // that survived the IKE screens) cannot be ESP-in-UDP and is counted
+    // as truncated. Drop-correct; no finer counter exists for this shape.
     if dst_port != 4500 {
         return IpsecSaMissReason::Truncated;
     }
@@ -786,7 +780,7 @@ fn recv_xfrm_events(fd: libc::c_int, store: &IpsecSaStore, stop: &AtomicBool) ->
     let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
     if n < 0 {
         let err = std::io::Error::last_os_error().raw_os_error();
-        if matches!(err, Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)) {
+        if err == Some(libc::EAGAIN) {
             return XfrmEventResult::Idle;
         }
         if err == Some(libc::ENOBUFS) {
@@ -1259,12 +1253,22 @@ mod tests {
         });
 
         // The deleting snapshot is already published, but the release epoch
-        // is deliberately withheld. The old batch may still linearize before
-        // revocation, but it must never see a new epoch with the old map.
+        // is deliberately withheld. Capture the staged-ahead-of-released
+        // observations now and assert after release/join: the old batch may
+        // still linearize before revocation, but it must never see a new
+        // epoch with the old map — and an order reversal must fail the
+        // staged asserts below instead of stranding the worker on the
+        // barrier.
         snapshot_published.wait();
-        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        let staged = store.snapshot.load();
+        let staged_has_key = staged.entries.contains_key(&key(1));
+        let staged_removal_epoch = store.removal_epoch.load(Ordering::Relaxed);
+        let pre_release = store.lookup_loaded(&batch, key(1));
         release_epoch.wait();
         worker.join().expect("fenced publication worker");
+        assert!(!staged_has_key);
+        assert_eq!(staged_removal_epoch, batch.removal_epoch);
+        assert_eq!(pre_release, IpsecSaLookup::Hit);
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
     }
 
@@ -1440,6 +1444,31 @@ mod tests {
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
         assert_eq!(store.lookup_loaded(&batch, key(2)), IpsecSaLookup::Hit);
     }
+    #[test]
+    fn loaded_batch_fences_cap_evicted_key_but_keeps_survivor() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        for n in 0..IPSEC_SA_SNAPSHOT_CAP {
+            entries.insert(
+                key(n as u32),
+                IpsecSaEpoch {
+                    generation: n as u64,
+                    incarnation: 0,
+                },
+            );
+        }
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+
+        // The store is exactly at cap: one more insert evicts key(0), the
+        // oldest by dump order. Eviction is a removal and must fence.
+        store.upsert(key(IPSEC_SA_SNAPSHOT_CAP as u32));
+
+        assert_eq!(store.lookup_loaded(&batch, key(0)), IpsecSaLookup::Stale);
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
+        let refreshed = store.load_snapshot();
+        assert_eq!(store.lookup_loaded(&refreshed, key(0)), IpsecSaLookup::Miss);
+    }
 
     #[test]
     fn loaded_batch_snapshot_fences_after_mark_stale() {
@@ -1559,6 +1588,39 @@ mod tests {
         monitor.store.publish_empty_dump_for_test();
         assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
     }
+    #[test]
+    fn monitor_stop_reset_dump_restores_ready() {
+        let mut monitor = IpsecSaMonitor::new();
+        let mut entries = FastMap::default();
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
+        monitor.store.publish_full_dump(entries);
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Hit);
+
+        monitor.stop_and_join();
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
+        assert!(!monitor.store.wait_ready(Duration::from_millis(50)));
+
+        monitor.store.reset_for_monitor_start();
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
+
+        let mut redump = FastMap::default();
+        redump.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 2,
+                incarnation: 0,
+            },
+        );
+        monitor.store.publish_full_dump(redump);
+        assert!(monitor.store.wait_ready(Duration::from_secs(5)));
+        assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Hit);
+    }
 
     #[test]
     fn full_dump_and_incremental_upsert_share_cap_order_domain() {
@@ -1646,6 +1708,16 @@ mod tests {
         );
         assert_eq!(
             esp_in_udp_miss_reason(&frame, l4_offset, 4500, tiny_first_fragment_end),
+            IpsecSaMissReason::Truncated
+        );
+    }
+    #[test]
+    fn non_4500_miss_is_counted_truncated() {
+        // Pins the deliberately coarse label: non-NAT-T ports cannot be
+        // ESP-in-UDP and share the truncated counter.
+        let frame = vec![0u8; 64];
+        assert_eq!(
+            esp_in_udp_miss_reason(&frame, 0, 500, frame.len()),
             IpsecSaMissReason::Truncated
         );
     }

@@ -51,13 +51,17 @@ pub(crate) struct NeighborManager {
     /// Shared inbound XFRM-SA existence state.  It lives beside the
     /// neighbour monitor lifecycle so stop/reconcile joins the only writer
     /// before resetting worker-visible forwarding state.
-    pub(crate) ipsec_sa_monitor: super::super::forwarding::IpsecSaMonitor,
+    pub(in crate::afxdp) ipsec_sa_monitor: super::super::forwarding::IpsecSaMonitor,
     pub(crate) monitor_stop: Option<Arc<AtomicBool>>,
     /// #5165: join handle for the neighbor-monitor thread. Retained (like the
     /// sibling `resolver_join`, no longer discarded via `.ok()`) so `stop_inner`
     /// can JOIN the monitor after signalling stop — joining is what enforces the
-    /// no-mutation-after-stop invariant that the loop's 500ms `SO_RCVTIMEO`
-    /// bounds.
+    /// no-mutation-after-stop invariant that the loop's stop re-check alone
+    /// cannot: a retired old-generation monitor blocked in `recv()` could
+    /// otherwise apply a queued kernel neighbor event to `dynamic` AFTER a
+    /// reconcile cleared the map and a fresh baseline repopulated it. Join
+    /// latency is bounded by the monitor's 500ms `SO_RCVTIMEO` (the same bound
+    /// the resolver's 500ms recv timeout provides).
     pub(crate) monitor_join: Option<std::thread::JoinHandle<()>>,
     // #1636 option C: proactive neighbor warming.
     /// Per-(ifindex, hop) last-probe timestamp (monotonic ns) for the
