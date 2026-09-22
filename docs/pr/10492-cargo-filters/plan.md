@@ -73,17 +73,18 @@ The four actual filtered outputs contained these unique full-path counts:
 
 The per-filter sum is 3,157; pair overlaps are frame/nat 95,
 frame/session 32, frame/checksum 37, nat/session 119, nat/checksum 32,
-session/checksum 0. After union/deduplication, the actual current debug
-membership is **2,857** unique raw paths, all target-qualified entries
-unique as well.
+session/checksum 0. After union/deduplication, the legacy filter listing
+(`F ∩ L`) contains **2,857** unique raw paths; subtracting the two ignored
+family paths leaves **2,855 runnable exact candidates** (`F ∩ R`), all with
+unique target-qualified entries.
 
-Target distribution of those 2,857 paths: `xpf-userspace-dp` bin 2,852;
-`frag_assoc_reverse_unreachable_9957` 1;
-`session_id_node_namespace_6311_guard` 1;
-`snat_contract_doc_guard` 1; `vrf_session_identity_doc_guard` 2; the
-other nine targets 0. The current union has no duplicate raw path, so one
-exact-filter invocation is currently possible; the validator pins a
-fail-closed collision rule below.
+Target distribution of the 2,857 listed paths: `xpf-userspace-dp` bin
+2,852 (2,850 runnable); `frag_assoc_reverse_unreachable_9957` 1;
+`session_id_node_namespace_6311_guard` 1; `snat_contract_doc_guard` 1;
+`vrf_session_identity_doc_guard` 2; the other nine targets 0. The current
+runnable candidate set has no duplicate raw path, so one exact-filter
+invocation is currently possible; the validator pins a fail-closed
+collision rule below.
 
 `coordinator` contains `nat` at character index 6. The actual list has
 **287** selected paths under a `::coordinator::` module segment (all
@@ -178,7 +179,7 @@ Structural facts constraining the design:
   (`src/main.rs` and `src/bin/fairness-eval.rs`); `--tests` adds 12
   integration targets. The current 14-section list must therefore be
   normalized by target, not by one global first-result parser.
-- The validator's normalized key is `(target-kind, target-name, full-test-path)`.
+- The validator's normalized key is `(target-name, full-test-path)`, matching the registry's two columns; `cargo metadata --no-deps` shows all 14 bin/test target names unique across kinds, so the kind adds no identity.
   For each target discovered from Cargo metadata, capture both
   `cargo test --bin/--test <target> -- --list` and the corresponding
   `--list --ignored`; parse every `: test` line and sum every target. This
@@ -269,8 +270,8 @@ a reason, and any transition between `I` and `R` fails until the registry is
 updated in the same change. This preserves today's non-ignored execution
 semantics without silently dropping a family test.
 
-Multi-target selector rule is pinned: current `F ∩ R` has 2,857 unique raw
-paths and 236,228 bytes of filter arguments; host `ARG_MAX` is 2,097,152.
+Multi-target selector rule is pinned: current `F ∩ R` has 2,855 unique raw
+paths and 236,137 bytes of filter arguments (`F ∩ L` is 2,857 = 2,855 runnable + 2 ignored); host `ARG_MAX` is 2,097,152.
 The implementation asserts the expanded argv remains below 1 MiB and passes
 the deduplicated exact paths to one `--bins --tests` invocation. If a future
 target collision violates uniqueness or the 1 MiB bound, the validator fails
@@ -280,7 +281,7 @@ before execution and the same change must switch to target-grouped
 - Pro: exactness catches rename and substitution/growth drift; target
   identity and ignored transitions are explicit; registry diffs are a
   review surface; one current invocation stays below the measured bound.
-- Con: approximately 2,857 entries are churn-prone; the live validator
+- Con: approximately 2,855 entries are churn-prone; the live validator
   needs 14 target-list probes and a small parser; coordinator exclusions
   require per-path review.
 
@@ -401,7 +402,7 @@ test-rust: check-userspace-dt-needed
    `--include-ignored`; every ignored family path is explicit in `X`.
 5. Multi-target normalization sums all 14 target sections, retains target
    identity, and rejects a selected duplicate raw path or expanded argv
-   at/above 1 MiB (current selected argv is 236,228 B; host ARG_MAX is
+   at/above 1 MiB (current selected argv is 236,137 B; host ARG_MAX is
    2,097,152 B).
 6. Release leg remains the same command and full-suite scope; its historical
    5877 result is not asserted as a current baseline.
@@ -434,7 +435,7 @@ Operability.
   sections, and fail closed on unknown format or duplicate selected paths.
 - **Performance — Low-Medium, bounded.** Risk: 14 warm list probes and the
   exact allowlist increase gate overhead. Mitigation: probes reuse compiled
-  artifacts; current selected argv is 236,228 B versus a 1 MiB assertion;
+   artifacts; current selected argv is 236,137 B versus a 1 MiB assertion;
   one exact invocation remains the current path; no per-test process loop.
   Implementation reports timing and flags >2x the historical 213 s cold /
   65 s run for review.
@@ -452,9 +453,9 @@ cluster/incus commands in Wave 1):
 1. **Live membership contract:** with isolated
    `CARGO_TARGET_DIR=/dev/shm/cargo-10492`, discover all 14 targets and
    capture both `--list` and `--list --ignored` per target. Assert the
-   current baseline (6,724 total entries, 2,857 family matches, 6 ignored,
-   2 ignored-family entries), then run the registry equations with zero
-   unclassified diffs.
+   current baseline (6,724 total entries, F ∩ L = 2,857, F ∩ R = 2,855,
+   6 ignored, 2 ignored-family entries), then run the registry equations
+   with zero unclassified diffs.
 2. **Static validator self-test:** run the registered
    `scripts/debug-leg-census-selftest.sh` fixtures. Kill cases must include
    empty allowlist, empty live list, broken parser/classifier positive
@@ -475,7 +476,7 @@ cluster/incus commands in Wave 1):
    contain `coordinator` are not excluded by name.
 6. **Target normalization/argv:** fixture two targets with the same raw
    path and exceed the 1 MiB expansion; validator must fail before cargo
-   runs. Verify current selected set has no collision and 236,228 B.
+   runs. Verify current selected set has no collision and 236,137 B.
 7. **Oracle re-proof:** re-apply the #9499 planted mutant
    (`wrapping_add` -> `+` in `afxdp/frame/tcp.rs`); the exact registry must
    include `reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499`; the
@@ -528,6 +529,6 @@ invariants:
    in Makefile and docs, or be shortened after the registries land?
 7. Where should the static census self-test fixture files live so they are
    discoverable beside the existing Miri/ignored-cell selftests?
-8. After implementation, does the measured 2,857-path run stay within the
+8. After implementation, does the measured 2,855-path run stay within the
    >2x review bound, and does coordinator IN/OUT assignment change that
    report enough to revisit the filtered-second-build rationale?
