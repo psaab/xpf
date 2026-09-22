@@ -1,6 +1,6 @@
-# DRAFT v3 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
+# DRAFT v4 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
 
-- Status: DRAFT v3 (plan only; no production code, no test changes in this lane).
+- Status: DRAFT v4 (plan only; no production code, no test changes in this lane).
 - Base: `7dcdd7383` (`sessions: share protocol filter contract across REST/gRPC/CLI (#10486)`), branch `fix/10504-fixture-mac`.
 - Pinned research base: `b71c52d6` (issue body; our HEAD is newer — see STEP-0 drift note).
 - Date: 2026-09-22.
@@ -165,7 +165,8 @@ per-cell causality, so this plan intentionally does not claim sub-counts.
   H-EXPECT is separately owned by #10552. Their independent disposition and
   explicit two-block residual denominator are in §4, §6, and §9.
 - Class V — six vacuous survivors are green, not part of the 183-red sum, but are
-  load-bearing. They are named in §5 and receive positive hit/admission guards.
+  load-bearing. Five descriptor survivors receive positive hit guards; #6's
+  ifindex-0 decline coverage moves to helper-level per §5/Q1.
 - The cited family arithmetic is consistent: 58 revocation + 36 embedded +
   19 fragment + 10 authority = 123 red families; the remaining 60 failure blocks
   are 58 outside-family working M-MAC attributions plus H-TUN and H-EXPECT.
@@ -201,10 +202,11 @@ correct; production AF_XDP ingress always carries a configured MAC).
   ICMP-v6 7/3; fragment eth 9/2 plus transit wrapper 13/3; and deny-SYN 13/6.
   The combined ICMP-v4 41/13 regex is a census across both modules, not a
   descriptor migration denominator. The deny-SYN sites are M2 arrivals, not a
-  generic default: `tests_support.rs:715-778`, `tests_nat64_tunnel.rs:898,975`,
-  `tests_embedded_poll_filter.rs` LAN-bound sites including `:3149` (VLAN
-  special arrival; pass the logical-unit MAC), `tests_gre_local_delivery.rs:643`,
-  and `poll_descriptor/filter_revalidation_7212_tests.rs:348`. The
+  generic default: `tests_support.rs:715-778`, `tests_nat64_tunnel.rs:897,974`,
+  and `tests_embedded_poll_filter.rs` LAN-bound sites at `:2899,:3149,:3362,
+  :3539,:3773,:3965`; `:3149` is the VLAN special arrival and must pass the
+  logical-unit MAC. Also migrate `tests_gre_local_delivery.rs:643` and
+  `poll_descriptor/filter_revalidation_7212_tests.rs:348`. The
   `tests_filter_revocation_7212.rs:212` occurrence is a control interaction:
   pass the new argument mechanically if the signature requires it, but preserve
   its WAN-MAC-on-LAN shape under the #10554 exemption; it is not an M-MAC repair.
@@ -339,8 +341,9 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
 2. Fixture diffs are MAC/additive-only on the policy/zone/route/NAT/filter axes:
    no rule, zone id, route, neighbor, or filter verdict changes except where a cell's
    stated subject requires it (none anticipated).
-3. No assert weakened anywhere; preconditions only added. The six V cells keep their
-   outcome asserts (`revoked==0`, counts) and gain hit guards.
+3. No assert weakened anywhere; preconditions only added. The five descriptor V
+   cells keep their outcome asserts (`revoked==0`, counts) and gain hit guards;
+   #6's decline coverage moves to helper-level per §5/Q1.
 4. Genuine survivors (§5 #7-8) stay green on every commit of the fix stack.
    The filter-revocation control 6/0 also remains a tripwire, and its post-
    `policy_deny_snapshot()` WAN-MAC-on-LAN overwrite is intentionally exempt
@@ -402,7 +405,8 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
 - M1: `tests_policy_revocation_8356` TCP subset (drive_one_packet cells) flips
   revoke-cells red→green on outcome asserts with new hit guards passing;
   `cargo test --release --bin xpf-userspace-dp -- --test-threads=1
-  tests_policy_revocation_8356` → 66/66 after the Q1 helper move. Revert check:
+  tests_policy_revocation_8356` → 65/65 descriptor cells plus one helper-level
+  #9513 proof (66 declarations covered) after Q1 helper move. Revert check:
   temporarily blank the LAN MAC → the five descriptor hit guards red (not
   outcome asserts alone); the helper-level #9513 pin has its own revert proof.
 - M2: `tests_session_hit_authority_9519` → 10/10 (phase-1 `admitted()` tx==1
@@ -495,7 +499,7 @@ Day-zero order (in this lane's successor implementation):
    any additional red as H-NONMAC with evidence. Treat 181 + 1 + 1 = 183 as
    baseline cohort accounting; if unchanged, the expected aggregate is 6573
    passed / 2 failed / 6 ignored. Do not require release 0-failed.
-8. Open the implementation PR (this DRAFT v3 becomes its plan section); parent
+8. Open the implementation PR (this DRAFT v4 becomes its plan section); parent
    lanes run delta plan review next — no reviewer dispatch from this lane.
 
 ## 11. Open questions (incl. PLAN-KILL)
@@ -554,7 +558,7 @@ Day-zero order (in this lane's successor implementation):
 | B10 | Gate symbol fan-out | `ingress_destination_mac_accepted` 4 uses / 3 files (def + poll call site + tests) | regex |
 | B11 | Fixture file sizes | `test_fixtures.rs` 2126 lines / 88K; `tests_support.rs` 2852 lines / 104K; `fabric.rs` 820; `poll_descriptor/mod.rs` 7312 (read-only) | `wc -l`, `du -sh` |
 | B12 | PR #10544 file overlap with this issue | 0 paths (that PR: Makefile + 2 docs + 2 Go files; this issue: `userspace-dp/src/afxdp/**` only) | PR body Files(5) vs §2.2 map |
-| B13 | Fix touch estimate (strategy §4) | builder audit uses the descriptor-only 195 raw-hit denominator: txn-v4 104 = 1 definition + 103 external uses; txn-v6 low-level 7 = 1 definition + 1 wrapper-internal use + 5 external uses; txn-v6 SYN wrapper 18 = 1 definition + 17 external uses; ICMP-v4 descriptor 24 = 1 definition + 23 external uses; ICMP-v6 7 = 1 definition + 6 external uses; frag eth 9 = 1 definition + 8 external uses; frag transit wrapper 13 = 1 definition + 12 external uses; deny-SYN 13 = 1 definition + 12 external uses. Thus 8 definitions + 1 wrapper-internal use + 186 external uses = 195 descriptor-bound hits; frame/ ICMP-v4 17/6 (1 definition + 16 uses) is pure-frame/no-touch, and the combined raw regex is 212, not a migration denominator. Fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); drivers: 2-3 fns + five descriptor guards + one helper-level guard; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact per-site checklist at implementation |
+| B13 | Fix touch estimate (strategy §4) | builder audit uses the 195 raw-hit builder migration denominator: txn-v4 104 = 1 definition + 103 external uses; txn-v6 low-level 7 = 1 definition + 1 wrapper-internal use + 5 external uses; txn-v6 SYN wrapper 18 = 1 definition + 17 external uses; ICMP-v4 descriptor 24 = 1 definition + 23 external uses; ICMP-v6 7 = 1 definition + 6 external uses; frag eth 9 = 1 definition + 1 wrapper-internal use + 7 external uses; frag transit wrapper 13 = 1 definition + 12 external uses; deny-SYN 13 = 1 definition + 12 external uses. Thus 8 definitions + 2 wrapper-internal uses + 185 external uses = 195 builder migration hits. Five are mechanical frame/-dir co-touches (`frame/mod.rs` 1, `frame/tests_9782_copy.rs` 2 v4 + 2 SYN-wrapper) that still require signature migration but do not drive descriptors. The separate frame/ ICMP-v4 17/6 (1 definition + 16 uses) is pure-frame/no-touch, and the combined raw regex is 212, not a migration denominator. Fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); drivers: 2-3 fns + five descriptor guards + one helper-level guard; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact per-site checklist at implementation |
 | B14 | Go gate live proof | `TestStructMetricIsTypesNotFields6937` FAIL (CompileResult 32f/21t vs floor 20) | RUN §2.1 |
 
 Evidence sources: in-repo source census for B2/B6-B10, `wc -l`/`du -sh` for B11,
