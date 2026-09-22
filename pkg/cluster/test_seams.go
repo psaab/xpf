@@ -122,7 +122,7 @@ func (s *SessionSync) DeleteJournalGenerationV4ForTesting(key dataplane.SessionK
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
 			continue
 		}
-		got, gen, _, ok := parseDeleteV4Wire(raw[syncHeaderSize:])
+		got, gen, _, _, _, ok := parseDeleteV4Wire(raw[syncHeaderSize:])
 		if ok && got == key {
 			return gen, true
 		}

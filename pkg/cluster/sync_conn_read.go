@@ -192,7 +192,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDeleteV4:
 		s.stats.DeletesReceived.Add(1)
 		if s.sessions != nil {
-			key, gen, forwardOnly, ok := parseDeleteV4Wire(payload)
+			key, gen, forwardOnly, _, _, ok := parseDeleteV4Wire(payload)
 			if ok {
 				s.deleteClusterSyncedV4(key, gen, forwardOnly)
 			}
@@ -200,7 +200,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 	case syncMsgDeleteV6:
 		s.stats.DeletesReceived.Add(1)
 		if s.sessions != nil {
-			key, gen, forwardOnly, ok := parseDeleteV6Wire(payload)
+			key, gen, forwardOnly, _, _, ok := parseDeleteV6Wire(payload)
 			if ok {
 				s.deleteClusterSyncedV6(key, gen, forwardOnly)
 			}
