@@ -465,8 +465,9 @@ pub(super) fn populate_interfaces(
                 // The dataplane sees an IFINDEX, not a unit, so it cannot tell
                 // the two apart with anything on the wire today. When it cannot
                 // know which zone a packet belongs to, the firewall must decline
-                // to pick one rather than guess. Declining = no entry, so
-                // adjudication falls to the default policy.
+                // to pick one rather than guess. Transit is denied as unattributed
+                // before the implicit default policy (#6682); host-bound traffic
+                // is denied by the contested-parent host-inbound sentinel (#10503).
                 //
                 // This also collapses an asymmetry rather than adding a second
                 // mechanism: the egress half already resolves a contested
@@ -785,10 +786,16 @@ pub(super) fn populate_interfaces(
         let ids: Vec<String> = zones.iter().map(|z| z.to_string()).collect();
         eprintln!(
             "xpf-userspace-dp: WARNING zone contest on shared base ifindex {}: units \
-             claim zone ids [{}] — the ingress zone is UNSET for it and its traffic \
-             falls to the default policy in BOTH directions (#7509). The dataplane \
-             sees an ifindex, not a unit, so it cannot tell which unit a packet \
-             arrived on; give the units distinct netdevs or put them in one zone.",
+             claim zone ids [{}] — the ingress zone is UNSET for it (#7509). Transit \
+             arriving there is DENIED as unattributed before any policy is consulted \
+             (#6682); default-policy permit-all does not admit it, and the deny logs \
+             as unattributed (#9989, counter UNZONED_INGRESS_DENIED). Host-bound \
+             traffic to the firewall itself is denied by the contested-parent \
+             host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages \
+             remain admitted; an explicit per-interface host-inbound stanza still \
+             takes precedence). The dataplane sees an ifindex, not a unit, so it \
+             cannot tell which unit a packet arrived on; give the units distinct \
+             netdevs or put them in one zone.",
             ifindex,
             ids.join(", ")
         );
@@ -800,8 +807,9 @@ pub(super) fn populate_interfaces(
     // row that actually receives frames on this ifindex names a different zone
     // or none at all. One line per ifindex per build, naming the zone ids the
     // unit rows refused, so an operator whose untagged trunk or unit-0 tunnel
-    // traffic starts hitting the default policy can reach the cause without
-    // reading source. The commit-time advisory
+    // traffic is denied as unattributed for transit or by the host-inbound
+    // sentinel for host-bound traffic can reach the cause without reading
+    // source. The commit-time advisory
     // (`pkg/config/contested_trunk_zone_advisory_7509.go`) is the one that can
     // name the INTERFACE; this one is the runtime corroboration.
     for (ifindex, zones) in &unit_refused_zones {
@@ -814,8 +822,14 @@ pub(super) fn populate_interfaces(
             "xpf-userspace-dp: WARNING ifindex {} carries a logical unit the operator \
              left out of zone ids [{}]: that unit is what receives frames on the \
              device, so the zone its base interface INHERITED from a sibling unit is \
-             refused and the ifindex is UNZONED (#7509). Traffic arriving on it falls \
-             to the default policy. Zone the unit explicitly if it must forward.",
+             refused and the ifindex is UNZONED (#7509). Transit arriving there is \
+             DENIED as unattributed before any policy is consulted (#6682); \
+             default-policy permit-all does not admit it, and the deny logs as \
+             unattributed (#9989, counter UNZONED_INGRESS_DENIED). Host-bound \
+             traffic to the firewall itself is denied by the contested-parent \
+             host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages \
+             remain admitted; an explicit per-interface host-inbound stanza still \
+             takes precedence). Zone the unit explicitly if it must forward.",
             ifindex,
             ids.join(", ")
         );

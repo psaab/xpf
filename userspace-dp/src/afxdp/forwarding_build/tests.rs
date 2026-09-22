@@ -2195,6 +2195,156 @@ fn contested_trunk_parent_denies_transit_and_host_inbound_10503() {
         &state, LAN_IFINDEX, lan_zone, PROTO_TCP, 22, false, 0
     ));
 }
+// #10520: pin the contested-parent transit mechanism independently of the
+// operator-facing wording. The unzoned-ingress arm must win in both default
+// modes, so neither a default permit nor a default deny can hide a regression.
+fn contested_parent_snapshot_10520(default_policy: &str) -> ConfigSnapshot {
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "wan".into(),
+                id: 7,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["any-service".into()],
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "lan".into(),
+                id: 8,
+                host_inbound_configured: true,
+                host_inbound_system_services: vec!["any-service".into()],
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.80".into(),
+                zone: "wan".into(),
+                linux_name: "ge-0-0-0.80".into(),
+                ifindex: 12,
+                parent_ifindex: 11,
+                vlan_id: 80,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "172.16.80.8/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.50".into(),
+                zone: "lan".into(),
+                linux_name: "ge-0-0-0.50".into(),
+                ifindex: 13,
+                parent_ifindex: 11,
+                vlan_id: 50,
+                hardware_addr: "02:bf:72:00:50:08".into(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.0.50.8/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+        default_policy: default_policy.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn contested_trunk_parent_transit_is_unattributed_deny_in_both_default_modes_10520() {
+    const PARENT_IFINDEX: i32 = 11;
+    const WAN_ZONE: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+
+    for default_policy in ["deny", "permit"] {
+        let state = build_forwarding_state(&contested_parent_snapshot_10520(default_policy));
+        let from_id = state
+            .ifindex_to_zone_id
+            .get(&PARENT_IFINDEX)
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(
+            from_id, 0,
+            "{default_policy}: contested parent must resolve to the zone-0 sentinel"
+        );
+
+        let unzoned_before =
+            crate::policy::UNZONED_INGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed);
+        let default_before = state.policy.default_counter.test_packet_count();
+        let transit = crate::policy::evaluate_policy_result_with_icmp(
+            &state.policy,
+            from_id,
+            WAN_ZONE,
+            "198.51.100.2".parse().unwrap(),
+            "172.16.80.8".parse().unwrap(),
+            PROTO_TCP,
+            40000,
+            22,
+            None,
+            64,
+        );
+
+        assert_eq!(
+            transit.action,
+            crate::policy::PolicyAction::Deny,
+            "{default_policy}: contested-parent transit must be denied before the default"
+        );
+        assert_eq!(
+            transit.policy_id,
+            crate::policy::UNATTRIBUTED_POLICY_ID,
+            "{default_policy}: contested-parent transit must log as unattributed (#9989)"
+        );
+        let unzoned_after =
+            crate::policy::UNZONED_INGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            unzoned_after - unzoned_before,
+            1,
+            "{default_policy}: #6682 must increment UNZONED_INGRESS_DENIED"
+        );
+        assert_eq!(
+            state.policy.default_counter.test_packet_count() - default_before,
+            0,
+            "{default_policy}: #6682 must not increment the default-policy counter"
+        );
+    }
+}
+
+#[test]
+fn contested_trunk_parent_host_bound_sentinel_preserves_controls_10520() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const PARENT_IFINDEX: i32 = 11;
+    const WAN_IFINDEX: i32 = 12;
+    const LAN_IFINDEX: i32 = 13;
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+
+    let state = build_forwarding_state(&contested_parent_snapshot_10520("deny"));
+    assert!(
+        !host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "contested parent host-bound ssh must be denied by the #10503 sentinel"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, PARENT_IFINDEX, 0, PROTO_ICMP, 0, false, 3),
+        "contested parent ICMP destination-unreachable must remain admitted"
+    );
+
+    let wan_zone = state.ifindex_to_zone_id[&WAN_IFINDEX];
+    let lan_zone = state.ifindex_to_zone_id[&LAN_IFINDEX];
+    assert!(
+        host_inbound_admits_iface(&state, WAN_IFINDEX, wan_zone, PROTO_TCP, 22, false, 0),
+        "tagged WAN-unit host-bound controls must remain admitted"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, LAN_IFINDEX, lan_zone, PROTO_TCP, 22, false, 0),
+        "tagged LAN-unit host-bound controls must remain admitted"
+    );
+}
 
 // #10503 fold pins: the post-walk guard covers every finalized contested
 // ifindex, including parent fan-UP conflicts, lifeline parents, parent-authored

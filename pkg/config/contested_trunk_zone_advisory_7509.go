@@ -12,13 +12,15 @@ import (
 // WHY THIS EXISTS AS WELL AS THE DATAPLANE CHANGE. The dataplane now leaves a
 // contested parent ifindex UNZONED rather than adjudicating a packet against
 // whichever sibling unit was walked first (`forwarding_build/interfaces.rs`).
-// That makes the failure SAFE — traffic falls to the default policy instead of
-// being policed under a zone the operator never wrote for it. It does not make
-// it LEGIBLE: an operator whose untagged trunk traffic starts being denied has
-// no way to reach "these units share a base netdev and disagree about their
-// zone" without reading source. That is the #8296 shape, where a config
-// committed clean, rendered back verbatim, and reached no consumer while
-// traffic died with nothing in the logs.
+// That makes the failure SAFE — transit is DENIED as unattributed (#6682
+// refuses it before the implicit default policy) instead of being policed
+// under a zone the operator never wrote for it, and host-bound traffic to the
+// firewall itself is denied by the contested-parent host-inbound sentinel
+// (#10503). It does not make it LEGIBLE: an operator whose untagged trunk
+// traffic starts being denied has no way to reach "these units share a base
+// netdev and disagree about their zone" without reading source. That is the
+// #8296 shape, where a config committed clean, rendered back verbatim, and
+// reached no consumer while traffic died with nothing in the logs.
 //
 // The dataplane also only knows an IFINDEX. It cannot name `ge-0/0/0.100`, and
 // "contested ifindex 42" is not something an operator can act on. The config
@@ -100,8 +102,10 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 // left out of every zone, even when the base interface's row carries a zone —
 // because that zone was INHERITED from a sibling unit on another device
 // (`InterfaceZoneMap` fans a unit-suffixed reference UP to the base) and the
-// unit that actually receives frames on the device was never zoned. Traffic
-// arriving there falls to the default policy in both directions.
+// unit that actually receives frames on the device was never zoned. Transit
+// there is DENIED as unattributed before any policy is consulted (#6682), and
+// host-bound traffic to the firewall itself is denied by the contested-parent
+// host-inbound sentinel (#10503).
 //
 // SCOPED TO THE UNITS THAT ACTUALLY COLLAPSE, which is the difference between
 // this and a restatement of the contest above. A unit on its OWN device is
@@ -184,9 +188,15 @@ func appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg *Config, opts compileOpts) 
 			"interface %s has unit(s) %s in no security zone sharing one kernel "+
 				"device with %s, whose other units ARE zoned: the dataplane sees the "+
 				"device, not the unit, so it declines to adjudicate that traffic under "+
-				"a sibling unit's zone and leaves it UNZONED — it falls to the default "+
-				"policy in both directions (#7509). Put those units in a zone if their "+
-				"traffic must be forwarded.",
+				"a sibling unit's zone and leaves it UNZONED (#7509). Transit arriving "+
+				"there is DENIED as unattributed — #6682 refuses it before the implicit "+
+				"default policy is consulted, default-policy permit-all does not admit "+
+				"it, and the deny logs as unattributed (#9989, counter "+
+				"UNZONED_INGRESS_DENIED); host-bound traffic to the firewall itself is "+
+				"denied by the contested-parent host-inbound sentinel (#10503; ICMP "+
+				"errors/PMTUD/ND control messages remain admitted; an explicit "+
+				"per-interface host-inbound stanza still takes precedence). Put those "+
+				"units in a zone if their traffic must be forwarded.",
 			base, strings.Join(shared[base], ", "), base))
 	}
 }
@@ -220,10 +230,16 @@ func appendContestedTrunkZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
 			"interface %s has units in more than one security zone (%s): UNTAGGED "+
 				"traffic arriving on %s cannot be attributed to a unit, so it is left "+
-				"UNZONED and falls to the default policy in both directions (#7509). "+
-				"Tagged traffic on each unit is unaffected. Give the units distinct "+
-				"devices, or put them in one zone, if untagged traffic on %s must be "+
-				"forwarded.",
+				"UNZONED (#7509). Transit arriving there is DENIED as unattributed — "+
+				"#6682 refuses it before the implicit default policy is consulted, "+
+				"default-policy permit-all does not admit it, and the deny logs as "+
+				"unattributed (#9989, counter UNZONED_INGRESS_DENIED); host-bound "+
+				"traffic to the firewall itself is denied by the contested-parent "+
+				"host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages "+
+				"remain admitted; an explicit per-interface host-inbound stanza still "+
+				"takes precedence). Tagged traffic on each unit is unaffected. Give "+
+				"the units distinct devices, or put them in one zone, if untagged "+
+				"traffic on %s must be forwarded.",
 			base, strings.Join(contested[base], ", "), base, base))
 	}
 }

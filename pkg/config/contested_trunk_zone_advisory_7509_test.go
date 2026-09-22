@@ -29,9 +29,9 @@ func warningsMentioning(cfg *Config, sub string) []string {
 // whose units span two zones must be reported AT COMMIT, naming the interface,
 // both zones, and the consequence.
 //
-// The dataplane change makes this failure safe; this makes it legible. Without
-// it the operator's only signal is untagged traffic silently falling to the
-// default policy, with nothing on the box saying why (#8296's shape).
+// The dataplane change makes this failure safe and explicit: transit is denied
+// as unattributed before the implicit default policy (#6682), while host-bound
+// traffic is denied by the contested-parent host-inbound sentinel (#10503).
 func TestContestedTrunkZoneAdvisoryFires7509(t *testing.T) {
 	cfg := contestedCfg7509(t, map[string][]string{
 		"lan": {"ge-0/0/0.100"},
@@ -47,10 +47,16 @@ func TestContestedTrunkZoneAdvisoryFires7509(t *testing.T) {
 	// The operator has to be able to act on it: which interface, which zones,
 	// and what actually changes. A warning that says only "contested" sends
 	// them back to source, which is the gap this exists to close.
-	for _, want := range []string{"ge-0/0/0", "lan", "wan", "UNTAGGED", "default policy"} {
+	for _, want := range []string{
+		"ge-0/0/0", "lan", "wan", "UNTAGGED", "unattributed", "DENIED",
+		"host-inbound", "#6682", "#10503",
+	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("advisory must name %q so it is actionable; got: %s", want, got[0])
 		}
+	}
+	if strings.Contains(got[0], "falls to the default policy") {
+		t.Fatalf("advisory must not claim traffic falls to default policy; got: %s", got[0])
 	}
 }
 
@@ -166,10 +172,16 @@ func TestSharedDeviceUnzonedUnitAdvisoryFires7509(t *testing.T) {
 		t.Fatalf("expected exactly one advisory naming the unzoned device-sharing "+
 			"unit; got %d: %v", len(got), cfg.Warnings)
 	}
-	for _, want := range []string{"ge-0/0/0", "ge-0/0/0.0", "UNZONED", "default policy"} {
+	for _, want := range []string{
+		"ge-0/0/0", "ge-0/0/0.0", "UNZONED", "unattributed", "DENIED",
+		"host-inbound", "#6682", "#10503",
+	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("advisory must name %q so it is actionable; got: %s", want, got[0])
 		}
+	}
+	if strings.Contains(got[0], "falls to the default policy") {
+		t.Fatalf("advisory must not claim traffic falls to default policy; got: %s", got[0])
 	}
 }
 
@@ -221,9 +233,10 @@ func TestFullyZonedInterfaceIsSilent7509(t *testing.T) {
 	}
 }
 
-// And the case with NO zoned unit at all: an interface entirely outside every
-// zone already fell to the default policy before #7509 and nothing changed for
-// it, so it must stay silent too.
+// And the case with NO zoned unit at all: it remains outside every zone and
+// therefore has no contested-parent advisory; its transit is handled by the
+// unzoned-ingress path (#6682), and host-bound admission is not changed by
+// #10503's contested-parent sentinel. It must stay silent too.
 func TestWhollyUnzonedInterfaceIsSilent7509(t *testing.T) {
 	cfg := sharedDeviceCfg7509(t, "ge-0/0/0", false,
 		map[int]int{0: 0, 100: 100},
