@@ -1,392 +1,560 @@
-# DRAFT v1 cluster plan: zone-rename trio (#10509, #10510, #10511)
+# DRAFT v2 cluster plan: zone-rename trio (#10509, #10510, #10511)
 
-Status: DRAFT v1 (STEP-0 complete; plan review comes from parent lanes next).
+Status: DRAFT v2 after hostile round-1 review and parent adjudication.
 Base: `2781465ee` (docs: correct session-sync contract documentation, #10508).
 Worktree: `.claude/worktrees/10509-zonerenames`, branch `fix/10509-zone-renames`.
-Lane: Wave-4 cluster lane, SERIAL route (single lane for all three to avoid merge conflicts).
-Gate result: ALL THREE need design. No production code on this path.
+Lane: Wave-4 cluster lane, SERIAL route; one plan lane avoids shared transport
+and invalidation conflicts. No production code is included in this plan.
 
-## 1. Per-issue problem + STEP-0 evidence
+## 0. Round-1 verdicts and gate
 
-All three are OPEN, all validated-by:research (3/3 MATERIAL Low), pinned `b71c52d6`.
-Base-liveness check at `2781465ee`: `git log --all --grep 10509/10510/10511` empty
-(no merged fix); every symbol below read live from source at HEAD.
+- **#10509: PLAN-NEEDS-MINOR.** The measurement-first path is retained, but
+  the verdict statement and harness are corrected: Foreign is deterministic;
+  Drop is conditional. Stage A is measurement/pinning only. Stage B remains
+  deferred until the measured shape matrix is reviewed.
+- **#10510: PLAN-NEEDS-MAJOR.** Option A (bare positional-index binding) is
+  rejected as skew-unsafe. Option B is selected with the complete
+  sync-derived-origin discriminator, an explicit old/new zone-diff descriptor,
+  purge-wins ordering, and split owner-absent/failover tests.
+- **#10511: CONDITIONAL-KILL CLEARED BY SOURCE PROOF; PLAN-NEEDS-MAJOR.** The
+  three kill-class questions are answered below: a viable Go evaluator already
+  exists, false rename classification is prevented by explicit Rename ancestry
+  plus resolved-fingerprint validation, and capture/id-0/bulk cost are scoped.
+  If Rename ancestry cannot be threaded through the existing commit/snapshot
+  boundary, this leg becomes PLAN-KILL rather than falling back to a
+  content-only classifier.
 
-### 1.1 #10509 — commit-window transient foreign drops on every rename
+STEP-0 source evidence is complete. The merged-PR cache query
+`pr://psaab/xpf?state=merged&limit=100` returned recent merged work (#10558
+through #10377) and no merged #10509, #10510, or #10511 fix; the three issue
+pages remain OPEN. The local base search was also scoped to the pre-plan base
+`2781465ee`, not the plan commit itself.
 
-Problem: after a zone rename, the live arrival id (new `StableZoneID` hash, a
-pure function of the zone name) can never equal the recorded
-`metadata.ingress_zone` (old hash), so `session_hit_authority` returns Foreign
-unavoidably; `foreign_hit_verdict` judges the (new arrival id, old recorded
-egress id) pair, matches no rule, and falls to default deny. Bounded
-commit-window transient: deterministic trigger (every rename, cluster-wide,
-silent but for `foreign_authority_drops`). The persistent-outage form was
-RETRACTED; R2/R3/R4 split into separate filings.
+## 1. Per-issue problem and STEP-0 evidence
 
-STEP-0 evidence (all verified live):
+All three issue pages are OPEN and carry validated-by-research (3/3 MATERIAL,
+Low), pinned `b71c52d6`. The evidence below was read from source at the base.
 
-| Claim | Location |
+### 1.1 #10509 — commit-window transient foreign classification
+
+**Corrected problem statement.** A zone rename changes the live arrival
+`StableZoneID` (pure name hash), while an existing session still records the
+old `metadata.ingress_zone`. Therefore `session_hit_authority` deterministically
+returns `Foreign` during the transition. **Drop is conditional, not
+unavoidable:** `foreign_hit_verdict` re-evaluates the live pair
+`(arrival_zone, recorded egress_zone)`. A single-zone rename with an unchanged
+egress zone and an equivalent permit commonly returns `Forward`; a dead pair,
+default-deny, or another verdict-changing shape returns `Drop`. The stale row
+is not repaired by this Foreign path. The issue is the bounded, deterministic
+commit-window Foreign classification and its conditional packet impact; the
+retracted claim was a life-of-session outage.
+
+Evidence:
+
+| Claim | Source |
 |---|---|
-| `StableZoneID` pure name hash (FNV-1a) | `pkg/config/zoneid.go:38` |
-| arrival-vs-recorded compare, Foreign on mismatch | `userspace-dp/src/afxdp/poll_descriptor/session_hit_authority.rs:139-167` |
-| foreign verdict judges (arrival_zone, recorded egress), Drop falls through | same file `:259-305` |
-| silent drop counter | `poll_descriptor/mod.rs:1278-1279`, declared `types/runtime.rs:691` |
-| per-hit idle refresh sustains rows | `userspace-dp/src/session/lookup.rs:267` |
+| Stable id is a pure FNV-1a name hash | `pkg/config/zoneid.go:38-44` |
+| live arrival id is compared with recorded ingress id | `userspace-dp/src/afxdp/poll_descriptor/session_hit_authority.rs:139-167` |
+| Foreign verdict evaluates arrival zone against recorded egress zone | same file `:259-298` |
+| only the non-permit result reaches Drop; Revoke is later and gated | same file `:299-325` |
+| drop is counted in the packet dispatch | `userspace-dp/src/afxdp/poll_descriptor/mod.rs:1278-1284` |
+| counter storage | `userspace-dp/src/afxdp/types/runtime.rs:691` |
+| every hit refreshes `last_seen_ns` | `userspace-dp/src/session/lookup.rs:263-268` |
 
-Blast radius: Rust dataplane per-packet hit path, cluster-wide, on every zone
-rename, for the duration of the commit window (until the session restamps,
-re-resolves, or ends). Sessions survive; packets drop. Severity Low.
+**Blast radius.** Rust per-packet hit classification, cluster-wide, during
+the interval before the commit invalidation sweep or session end. Depending on
+shape, packets either forward under the Foreign verdict or drop; the stale row
+can remain live because hit refresh updates `last_seen`. This is Low severity
+and is not evidence that every rename drops traffic.
 
-### 1.2 #10510 — first-policy (id 0) synced rows survive rename (owner-absent + failover-before-rename)
+### 1.2 #10510 — first-policy id-0 synced rows survive in bounded HA subsets
 
-Problem: synced sessions admitted by the FIRST policy (`policy_id` 0) in a
-renamed pair persist with stale recorded zones when the owner cannot purge
-them. Three compounding skips: (a) the Go commit sweep (M1) skips id 0;
-(b) the #9526 helper purge matches only bound `metadata.policy_counter`
-handles, while SyncImport installs `policy_counter: None` and `reresolve`
-keeps `None => stamped`, so promoted first-policy rows stay unbound;
-(c) the authority compare is generation-independent and Foreign/Drop is
-silent, while per-hit `last_seen` refresh sustains the row under traffic.
-Cases: owner-down/partition/crash, and failover-before-rename with both nodes
-up (ex-owner close filtered after demotion). Normal two-node rename is COVERED
-(owner bound purge + close delta).
+Synced sessions admitted by literal first policy id 0 can survive with stale
+recorded zones when the owner cannot purge them. M1 deliberately skips id 0
+because wire zero is overloaded; #9526's Rust purge matches only a bound
+`policy_counter`, but SyncImport sets that handle to `None` and
+`reresolve_session_policy_id` retains the frozen stamped id for an unbound row.
+Promotion retags the row to `SharedPromote` while preserving the unbound
+metadata, so a SyncImport-only purge would miss the target. Foreign handling
+then silently drops or forwards per the live pair while `last_seen` keeps the
+row alive. The affected cases are owner-down/partition/crash and
+failover-before-rename where the ex-owner's close is correctly filtered. A
+normal two-node owner rename is already covered by bound purge plus close
+sync.
 
-STEP-0 evidence (all verified live):
+Evidence:
 
-| Claim | Location |
+| Claim | Source |
 |---|---|
-| M1 skips id 0 (overloaded wire value) | `pkg/daemon/daemon_policy_invalidate.go:104-108` (+ doc `:37-66`) |
-| #9526 purge matches bound handles only | `userspace-dp/src/afxdp/session_glue/mod.rs:711-714` |
-| #9526 fires on delete AND rename (stable-id disappearance) | same file `:655-678` |
-| SyncImport installs `policy_counter: None` | `userspace-dp/src/server/helpers/session_sync.rs:485` |
-| wire carries `policy_counter_idx` but handle stays None | same file `:477-485` |
-| reresolve `None => stamped` (frozen id kept) | `userspace-dp/src/policy.rs:1817` (fn `:1801-1818`) |
-| per-hit `last_seen` refresh | `userspace-dp/src/session/lookup.rs:267` |
-| demoted-owner close filter (non-fabric OwnerRGID path) | `pkg/daemon/daemon_ha_userspace_stream.go:67` (`shouldSyncUserspaceDelta`) |
-| close deltas gated by same predicate | same file `:970-985`; walk at `:914` |
+| M1 skips overloaded id 0 | `pkg/daemon/daemon_policy_invalidate.go:37-66,93-117` |
+| #9526 recognizes delete/rename by stable rule disappearance | `userspace-dp/src/afxdp/session_glue/mod.rs:655-678` |
+| #9526 purge requires a bound counter handle and skips reverse rows | same file `:680-718` |
+| SyncImport carries the index but installs no counter handle | `userspace-dp/src/server/helpers/session_sync.rs:477-485` |
+| unbound reresolve keeps the frozen id | `userspace-dp/src/policy.rs:1801-1818` |
+| promotion retags to SharedPromote and republishes | `userspace-dp/src/afxdp/session_glue/promote.rs:94-151` |
+| peer-synced and promotable-origin predicates | `userspace-dp/src/session/entry.rs:466-486` |
+| sync-derived family includes peer-synced or SharedPromote | `userspace-dp/src/afxdp/shared_ops.rs:225-243` |
+| per-hit idle refresh | `userspace-dp/src/session/lookup.rs:263-268` |
+| demoted-owner eligibility and close walk | `pkg/daemon/daemon_ha_userspace_stream.go:133-141,914-985` |
 
-Blast radius: HA sync + Rust rotation purge, owner-absent and
-failover-before-rename subsets only. Survivors forward under stale recorded
-zones until idle/GC (sustained by traffic). Severity Low.
+**Corrected blast radius.** HA sync plus Rust rotation purge, limited to
+owner-absent and failover-before-rename subsets. Packets can be Foreign and
+silently Drop (or Forward when the live pair permits); the stale row itself
+persists under refreshed `last_seen` until idle/GC. This is not a claim that
+all id-0 rows are policy rows or that every row is swept.
 
-### 1.3 #10511 — policy-rematch extensive tears down renamed policies (Junos parity gap)
+### 1.3 #10511 — extensive rematch tears down renamed policies
 
-Problem: `StablePolicyRuleID` embeds the policy name (`<from>-><to>/<name>`),
-so a rename makes the old key disappear; `deletedPolicyRuntimeIDs` inserts the
-old nonzero id with no rematch gate, `changedPolicyRuntimeIDs` skips
-absent/deleted keys, and `clearSessionsForDeletedPolicies` tears down
-unconditionally. Under `policy-rematch extensive` a renamed policy's sessions
-die even when another policy still permits the flow. Junos parity: DEFAULT
-closes on rename (xpf correct), PLAIN covers changed policies only (xpf
-correct), EXTENSIVE keeps the session when another allowing policy matches
-(xpf gaps). Fix MUST be extensive-only; a global rename exemption would break
-default/plain parity.
+`StablePolicyRuleID` embeds policy name, so a policy or zone rename removes the
+old stable key and appears as delete plus add. `deletedPolicyRuntimeIDs` adds
+old nonzero ids without a rematch gate; `changedPolicyRuntimeIDs` intentionally
+skips absent keys; `clearSessionsForDeletedPolicies` then tears down
+unconditionally. Under `policy-rematch extensive`, Junos retains a session
+when the post-rename policy set still permits it through another rule. xpf's
+default and plain-rematch teardown behavior is correct and must remain
+unchanged; only the extensive retain arm is in scope.
 
-STEP-0 evidence (all verified live):
+Evidence:
 
-| Claim | Location |
+| Claim | Source |
 |---|---|
-| stable key embeds zones + name | `pkg/dataplane/userspace/policies_ids.go:108` |
-| deleted set: no rematch gate, id-0 excluded | `pkg/daemon/daemon_policy_invalidate.go:93-117` |
-| unconditional teardown of deleted set | same file `:154-167` |
-| changed set skips absent keys (deletion-clear owns them) | same file `:663-666` |
-| extensive fingerprints common keys only | same file `:652-655`, `:733-746` |
-| M3 precedence: arrival-zone mismatch sets Foreign before M2 | `session_hit_authority.rs` + dispatch (issue cites `mod.rs` arms) |
+| stable key contains from-zone, to-zone, and name | `pkg/dataplane/userspace/policies_ids.go:107-110` |
+| deleted set has no rematch gate and excludes id 0 | `pkg/daemon/daemon_policy_invalidate.go:93-117` |
+| deleted sessions are cleared unconditionally | same file `:154-167` |
+| changed set skips absent/deleted keys | same file `:631-666` |
+| extensive fingerprints are built for common stable keys only | same file `:643-655,720-746` |
+| Foreign dispatch precedes Owner revalidation | `userspace-dp/src/afxdp/poll_descriptor/mod.rs:794-806,1249-1284` |
 
-Blast radius: Go daemon commit path, extensive-mode deployments only, on
-policy rename (and zone rename via the same key-disappearance mechanism).
-Availability/parity: sessions torn down that Junos extensive would keep.
-Severity Low.
+**Blast radius.** Go commit invalidation for extensive-mode deployments on
+rename, plus the Rust first-policy rotation leg when id 0 is involved. Without
+the new explicit ancestry contract, non-rename delete/add changes remain on
+the current teardown path. Severity is Low availability/parity, not a global
+teardown correctness defect.
 
-## 2. Coupling map
+## 2. Coupling, separation, and shippability
 
-### 2.1 Shared root cause
+### 2.1 Shared root and actual shared boundaries
 
-Stable identity is name-derived in both planes: `StableZoneID` (zone-name
-hash) and `StablePolicyRuleID` (`<from>-><to>/<name>`). There is no rename
-event or identity epoch anywhere in the pipeline: every rename lands as
-delete + add with no continuity link. All three issues are facets of that one
-missing concept:
+Both zone ids and policy rule ids are name-derived. There is currently no
+per-object old-to-new rename-continuity link, although a coarse commit epoch
+already exists (`ConfigSnapshot.generation`, session/flow generation stamps).
+The missing link manifests in three different consumers:
 
-- #10509: the dataplane hit authority compares a live name-derived id
-  against a recorded name-derived id with no rename continuity.
-- #10510: the rename-as-delete teardown path orphans rows it cannot see
-  (unbound id-0 synced rows) in exactly the cases the owner cannot help.
-- #10511: the commit-time deleted-set teardown cannot tell rename from
-  delete, so extensive mode cannot apply its keep-if-permitted rule.
+1. Rust hit authority compares a live zone id with a recorded zone id (#10509).
+2. Go commit invalidation and Rust first-policy rotation handle delete-plus-add
+   rows differently (#10510).
+3. Go extensive rematch has no way to distinguish an explicit rename from a
+   delete plus add (#10511).
 
-### 2.2 Shared code paths
+The shared **transport boundary** is real, not an assertion that Go and Rust
+can call one function: the existing commit-to-snapshot path must carry a
+validated rename descriptor and the extensive gate. The shared **behavioral
+classifier** is a cross-language semantic contract, not one source-level
+function.
 
-1. Rename commit path (Go): daemon apply -> `deletedPolicyRuntimeIDs` /
-   `changedPolicyRuntimeIDs` -> `clearSessionsForDeletedPolicies` /
-   `clearSessionsForModifiedPolicies` -> HA delete-sync (#2468). Touched by
-   any #10510 (M1 side) or #10511 fix.
-2. Rotation teardown path (Rust): forwarding-snapshot rotation ->
-   `deleted_first_policy_rule_id` -> `purge_sessions_bound_to_deleted_first_policy`
-   (#9526). Touched by any #10510 (helper side) fix; must agree with (1) on
-   what "renamed policy's session" means.
-3. Authority verdict plane (Rust): `session_hit_authority` /
-   `foreign_hit_verdict` (#10509's drop site). This is also what makes
-   #10510's survivors SILENT (generation-independent Foreign/Drop) and what
-   #10511's M3 precedence notes (Foreign set before M2 revalidation, so
-   session-hit revalidation never sees the renamed flow). Any #10509 change
-   to the compare moves the floor under #10510 and #10511.
-4. Sync/promotion plane (Go + Rust): SyncImport (`policy_counter: None`) ->
-   promotion -> `reresolve None => stamped`; delta eligibility
-   (`shouldSyncUserspaceDelta`) shared by incremental and bulk paths.
-   #10510's home ground; #10511's retained sessions must also sync
-   coherently after a rename.
+### 2.2 Independent slices
 
-### 2.3 Fix-order dependencies
+| Leg | Can ship alone? | Shared prerequisite | Safe fallback |
+|---|---|---|---|
+| #10509 Stage A measurement/pin | Yes; no production behavior change | none | no dataplane change |
+| #10509 Stage B shrink | Yes after Stage A, but deferred | optional rename-map/epoch transport | accept bounded Foreign window |
+| #10510 Option B | Yes after additive rename descriptor reaches Rust snapshot | descriptor + sync-derived origin gate | old helper behavior for snapshots without descriptor |
+| #10511 Go extensive retain | Yes after explicit ancestry/capture transport | descriptor, capture rework, Go evaluator | delete teardown for unproven changes |
+| #10511 Rust id-0 arm | Yes with #10510 descriptor and extensive bit | same additive snapshot fields | current bound-only first-policy purge |
 
-1. #10509 measurement FIRST. Its acceptance is measure-then-decide
-   (shrink-vs-accept). If the window is shrunk (restamp/versioning), both
-   #10510's authority-repair option and #10511's re-evaluation timing change.
-   If accepted-with-pin, the other two design against a fixed floor.
-2. #10510 and #10511 MUST be designed jointly: they push the rename
-   teardown path in opposite directions (purge survivors vs retain
-   re-permitted sessions). The joint contract (section 4) must define the
-   partition so neither fix undoes the other: extensive-retain must not
-   retain rows #10510 purges, and the #10510 purge must not kill rows #10511
-   retains.
-3. Rust rotation purge vs Go commit sweep ordering must be settled once for
-   both #10510 and #10511 (rotation-time vs commit-time teardown agree on
-   rename semantics; no double-teardown races, no gaps).
+The lane remains serial because #10510 and #10511 touch the same descriptor,
+capture, and first-policy rotation boundaries. They are still per-leg
+shippable: Stage A first; then the additive descriptor transport; then #10510
+purge; then #10511 retain/evaluator; finally joint tests. #10511 is not allowed
+to weaken #10510's unbound id-0 safety.
 
-Recommended implementation order (after plan approval): #10509 measure+pin ->
-joint #10510+#10511 design lock -> #10510 -> #10511 -> joint regression.
+### 2.3 Revised cross-language contract
+
+**C1 — single provenance source, dual consumers.** Do not require one function
+across Go and Rust. The configstore `RenameAsPlantClass` operation has an
+unambiguous mutation boundary (`pkg/configstore/store_command.go:292-324`),
+so it can record source/destination ancestry in the candidate commit. Go validates
+that ancestry against old/new policy objects and emits an additive
+`RenameDescriptor` in the config snapshot/apply event. Go invalidation and Rust
+rotation both consume that descriptor. If an input was produced by generic
+set/delete or ancestry is missing, it is not a rename for retention purposes.
+The descriptor's normalized schema and an equivalence corpus are the semantic
+contract; no second content-only detector is permitted.
+
+**C2 — post-fix eligibility partition, purge-wins for unsafe rows.** The
+partition is evaluated in this order:
+
+1. An unbound, sync-derived, forward id-0 row whose old zones are covered by a
+   validated descriptor is purged by #10510. It is never retained merely
+   because a broad extensive evaluator would find a permit.
+2. A bound row carrying a validated renamed policy id is re-evaluated only
+   when both `PolicyRematch` and `PolicyRematchExtensive` are enabled. A permit
+   retains it; a non-permit uses the existing companion-aware teardown.
+3. Default mode, plain rematch, ambiguous ancestry, and non-renames use the
+   existing deletion path.
+
+This is a **post-fix** invariant. It intentionally excludes unbound overloaded
+zero rows from extensive retention because they lack an admitting-rule
+identity; this is what prevents a later delete from missing stale state and
+prevents a false purge of unrelated zero populations.
 
 ## 3. Design per issue
 
-### 3.1 #10509 design
+### 3.1 #10509 — Stage A measurement first
 
-Acceptance mandates measurement before mechanism. Two stages:
+No mechanism change is selected before measurement. The harness must emulate
+the existing commit-window boundary: publish the new forwarding snapshot,
+record the rename timestamp, then invoke the same invalidation/sweep boundary
+used by M1 after a controlled, measured delay. The window ends at that sweep
+or at session termination, **not** when `reresolve_session_policy_id` runs;
+that function changes policy id only, and Foreign rows do not enter the
+Owner-only next-packet revalidation path.
 
-Stage A — quantify + pin (no behavior change):
-- Harness: drive a zone rename against a live session table in the
-  userspace-dp test rig (Rust-side rotation + synthetic arrival packets with
-  old recorded zones), counting `foreign_authority_drops` and affected
-  sessions per rename until the row restamps/ends. Pin the observed bound as
-  a regression (upper-bound assertion: drops-per-rename <= measured max, so
-  future growth reds).
-- Decide shrink-vs-accept on the measured data with reviewers.
+The Stage-A shape matrix is mandatory:
 
-Stage B — shrink options (only if data justifies; each needs review sign-off):
-- Option 1 (restamp on rotation): at forwarding-snapshot rotation, rewrite
-  recorded `ingress_zone`/`egress_zone` for rows whose zones were renamed.
-  Needs a rename map (old id -> new id) plumbed from the Go commit into the
-  snapshot; risk is restamping rows the Foreign protection must still judge
-  (interaction with #9519/#9384 re-zone revocation).
-- Option 2 (generation/epoch-aware compare): stamp rows and snapshots with a
-  config generation; `session_hit_authority` treats a same-generation rename
-  pair as continuous. Needs the epoch on the wire for HA coherence; larger
-  blast radius.
-- Option 3 (accept + pin): keep the transient, keep the pinned bound, close
-  the issue as accepted-risk. Legitimate terminal state per the issue text.
+| Shape | Expected authority/verdict before sweep | Expected drop oracle |
+|---|---|---|
+| single-zone rename, egress unchanged, equivalent permit | Foreign, then Forward | zero drops; proves Foreign is not synonymous with Drop |
+| single-zone rename, egress unchanged, default deny or no permit | Foreign, then Drop | positive conditional-drop cell |
+| multi-zone rename, recorded egress id dead, default deny | Foreign, then Drop | positive dead-pair control |
+| multi-zone rename, recorded egress id dead, default permit | Foreign, then Forward | zero-drop default-policy variant |
 
-Recommendation: Stage A now; Stage B option chosen on data. Default to
-Option 3 unless the window is operationally visible.
+For every row, count packets, distinct affected sessions, and
+`foreign_authority_drops` until the sweep-emulated boundary. Report the
+observed max and distribution per shape, then decide shrink-vs-accept with
+reviewers. The positive dead-pair cell must observe at least one drop before
+any upper-bound assertion; it prevents a measured maximum of zero from making
+the RED cell vacuous.
 
-### 3.2 #10510 design
+Stage B remains deferred:
 
-Acceptance: bind or purge id-0 synced rows on promotion/rename (or repair
-authority generation-independently). Options:
+- **Option 1, restamp:** use the validated descriptor to rewrite old zone ids
+  at rotation. Risk: accidentally converts a genuine re-zone into Owner and
+  bypasses #9384 revocation.
+- **Option 2, epoch-aware authority:** use the existing coarse generation plus
+  a per-object descriptor; HA wire coherence and old-helper defaults are
+  required. This is larger than Stage A.
+- **Option 3, accept + pin:** keep the bounded Foreign window and publish the
+  measured shape-specific bound. This is the default recommendation unless
+  Stage A shows operationally material drops.
 
-- Option A (bind at promotion): resolve the wire `policy_counter_idx`
-  (already carried, `session_sync.rs:477-484`) against the local
-  `PolicyCounterStore` at SyncImport/promotion time, so promoted rows arrive
-  bound and the #9526 purge sees them. Design questions: idx validity during
-  config skew (rename commit windows where the two nodes hold different
-  snapshots — idx may name the wrong rule on the peer); old-peer idx 0
-  ("no counter") must stay unbound; what binds when the rule is absent
-  locally (keep None = today's behavior).
-- Option B (purge unbound id-0 on rename rotation): extend the #9526 purge
-  to unbound rows carrying the renamed first policy's stamped id. Needs a
-  NEW discriminator: unbound + stamped-0 is also the shape of host-local,
-  neighbor-seed, fabric, tunnel, and legacy rows. Candidate discriminators:
-  `SessionOrigin::SyncImport` (or promoted-from-sync bit if promotion
-  preserves it) + stamped policy_id 0 + recorded zones in the renamed pair.
-  Must prove the discriminator cannot match the overloaded-zero populations
-  the Go sweep deliberately spares.
-- Option C (authority repair): make the Foreign compare generation-aware so
-  stale-zone survivors re-resolve instead of silently dropping (shared with
-  #10509 Option 2). Widest blast radius; only if #10509 Stage B goes there.
+### 3.2 #10510 — Option B selected; Option A killed
 
-Recommendation: Option A if the skew analysis holds (idx resolution keyed to
-a generation check, fall back to None on mismatch); else Option B with a
-proven discriminator. Option C only as a #10509 Stage B cohort.
+**Option A is rejected for this plan.** `policy_counter_idx` is positional in
+the sender's rule table. The policy source warning at
+`userspace-dp/src/policy.rs:1738-1762` states that resolving it against the
+current table after insertion/reorder can misattribute the session. The sync
+wire carries install generation, policy id, and counter index
+(`userspace-dp/src/protocol/control.rs:976-1004`), but not a sender config
+generation or stable rule id. A bare receiver-side bind is therefore
+skew-unsafe. A future Option A would require an additive stable rule id or
+sender config generation plus an explicit None fallback; that is not this
+cluster's implementation.
 
-Failover-before-rename half: the ex-owner close filter
-(`shouldSyncUserspaceDelta` demotion path) is CORRECT behavior for live
-ownership (a demoted node must not emit); the fix is on the receiver/rotation
-side (bind or purge), not by re-opening the demoted-owner emit gate. Do not
-"fix" the filter.
+**Option B discriminator.** Extend the #9526 rotation purge to accept the
+validated old/new zone descriptor and match only all of:
 
-### 3.3 #10511 design
+- `metadata.policy_counter.is_none()`;
+- forward half (`!metadata.is_reverse`);
+- stamped policy id is the overloaded first-policy value 0;
+- `origin.is_peer_synced() || origin == SessionOrigin::SharedPromote` (the
+  existing `sync_derived` family);
+- recorded ingress/egress zones are the old ids in the descriptor's zone map.
 
-Acceptance: under `PolicyRematchExtensive` with an alternate allowing policy,
-a rename re-evaluates and retains the session. Extensive-only. Components:
+The descriptor is produced from explicit Rename ancestry and validated against
+the old/new policy snapshots. If the zone mapping is absent or ambiguous, no
+new overloaded-zero sweep is attempted. The purge runs before any extensive
+retention decision, enforcing C2.
 
-1. Rename-vs-delete detection (Go, commit time): a deleted stable key K_old
-   with id N is a RENAME (not a delete) iff exactly one added stable key
-   K_new in the same commit carries a policy whose verdict-relevant content
-   equals K_old's (match sets + action, same comparators as
-   `policyMatchOrActionChanged`, plus scheduler effective state). Zone
-   rename is the bulk form: every key in the renamed pair remaps; detection
-   must run in near-linear time (index added keys by content fingerprint,
-   not O(deleted x added)). Ambiguity rule: zero or >1 content-equal
-   candidates => NOT a rename (fall back to delete teardown). This keeps
-   default/plain behavior byte-identical (detection result consumed only on
-   the extensive path).
-2. Re-evaluation of the renamed policy's sessions: for each session carrying
-   a renamed id, re-judge the flow against the NEW policy set; retain iff
-   another (or the renamed) policy permits. Open design point: where the
-   evaluator lives. Candidates: (i) Go-side match via `pkg/policymatch`
-   (needs verdict-parity proof vs the Rust evaluator, incl. NAT-rewrite
-   tuples, ICMP-type gates, scheduler fail-closed, global/wildcard tiers);
-   (ii) Rust-helper query at commit (round-trip that does not exist today).
-   The retained session keeps forwarding and its next-packet path re-derives
-   normally; teardown (when no policy permits) reuses the existing
-   companion-aware delete + HA delete-sync.
-3. Gating: the retain path executes iff `newCfg.Security.PolicyRematch`
-   AND `newCfg.Security.PolicyRematchExtensive`; all other modes keep the
-   exact current teardown. The capture path (#6948,
-   `daemon_policy_invalidate_capture.go`) must carry the renamed-id set
-   alongside deleted/modified.
+Producer enumeration and negative controls are explicit. The sync-derived
+family includes `SyncImport`, `SharedMaterialize`, `WorkerLocalImport`, and
+`SharedPromote`; promotion specifically retags `SyncImport` to
+`SharedPromote`. Other origins are `ForwardFlow`, `ReverseFlow`, `LocalMiss`,
+`MissingNeighborSeed`, `FabricPuntSeed`, and `TunOrigin`
+(`userspace-dp/src/session/entry.rs:402-440`). The unbound gate excludes
+locally bound demote-flipped replicas; origin- and zone-negative tests cover
+all of these variants, plus legacy/old-peer rows. The demoted-owner close
+filter remains unchanged; receiver/rotation ownership is the fix.
 
-Recommendation: component 1 as specified; component 2 needs the evaluator
-decision (open question O-10511-1, PLAN-KILL class) before implementation.
+Additive snapshot/apply fields carry the descriptor and
+`policy_rematch_extensive` to Rust. Old helpers decode empty/false and retain
+today's behavior, while new peers receive the validated map. No cluster
+command or external API is required.
 
-## 4. Contracts + invariants
+### 3.3 #10511 — explicit ancestry, evaluator, capture, and id-0 scope
 
-Joint contract (all three fixes must hold these):
+#### Rename classification is provenance-first and false-rename safe
 
-- C1 (rename detection single source): exactly one function decides
-  rename-vs-delete at commit; the #10510 purge side and #10511 retain side
-  consume its result, never re-derive it.
-- C2 (partition): a renamed policy's session is retained (extensive +
-  re-permitted) XOR purged (covered by #10510 bind/purge) XOR torn down
-  (default/plain, or extensive with no permitting policy). No session may
-  satisfy two arms; the arms are evaluated in that order.
-- C3 (teardown reuse): every teardown arm uses the companion-aware delete +
-  HA delete-sync (#2468); no new delete path.
-- C4 (capture coherence, #6948): any new id set (renamed ids) is captured
-  pre-publication alongside deleted/modified, against old numbering.
+A content-only deleted-key/added-key matcher is not sound: a delete plus add
+of one of two identical policies is indistinguishable from a name rename when
+only snapshots are compared. Therefore the detector does **not** infer intent
+from a single equal fingerprint. `Store.RenameAsPlantClass` already receives
+source and destination paths while holding the candidate lock
+(`pkg/configstore/store_command.go:292-324`); add a candidate ancestry record
+there and carry it through commit to the daemon/snapshot descriptor.
 
-Invariants (must not regress):
+Validation rules:
 
-- I1: default/plain rename teardown unchanged (Junos parity) — byte-identical
-  behavior when extensive is off.
-- I2: wire-0 populations (host-local, neighbor-seed, fabric, tunnel,
-  legacy/old-peer) are never swept by a first-policy operation.
-- I3: Foreign protection (#9519/#9384/#9604) unchanged: no #10509 shrink may
-  convert a genuinely-foreign arrival into Owner, and the #9384 admitting-
-  interface revoke still fires.
-- I4: demoted-owner emit gate stays closed (`shouldSyncUserspaceDelta`
-  demotion path); receiver/rotation side owns the #10510 fix.
-- I5: rolling upgrade safe: old-peer (idx 0 / policy_id 0 / no epoch) rows
-  behave as today under every new path.
+1. Expand each explicit source/destination ancestry record to the affected
+   stable policy keys in old/new configs.
+2. Require a one-to-one ancestry mapping. Overlapping moves, A→B→A chains
+   that do not normalize to one final mapping, and duplicate destinations are
+   ambiguous and fall back to deletion.
+3. Compute a verdict-only **resolved fingerprint** for each mapped old/new
+   policy: resolved source/destination address prefixes, application terms,
+   action, scheduler binding/effective state, protocol/port terms, and all
+   other runtime verdict fields; strip identity-only from-zone, to-zone, name,
+   and runtime id fields before hashing. The existing
+   `PolicyResolvedFingerprints` implementation proves that resolved addresses
+   and application expansions are available (`pkg/dataplane/userspace/policies_resolved_fingerprint.go:13-75`),
+   but its identity-bearing whole snapshot hash is not used directly.
+4. A fingerprint mismatch, a missing old/new rule, or a one-to-many/many-to-one
+   expansion is not a rename and uses existing teardown. Generic
+   set/delete/add commits carry no ancestry and always use this safe fallback.
 
-## 5. Risks
+This makes the single-duplicate false-rename case fail closed: only an
+explicit Rename operation can nominate it, and the resolved-fingerprint and
+one-to-one checks can still reject it. A true explicit zone/policy rename is
+not lost to duplicate content. Bulk zone rename cost is one ancestry expansion
+plus one old/new policy pass and hash-index lookup: O(P + R + S) time and
+O(P + R) temporary memory for P policy slots, R rename records, and S captured
+sessions; no deleted-by-added quadratic scan.
 
-- R1 (evaluator parity, #10511): a Go-side re-judge that disagrees with the
-  Rust evaluator retains sessions Junos would drop (stale permit) or drops
-  sessions Junos would keep (the bug persists). Mitigation: parity corpus
-  between the two evaluators before relying on it; else helper query.
-- R2 (wrong-rule binding, #10510-A): idx resolution under config skew binds
-  a synced row to the wrong rule's counter (misattribution + wrong purge
-  fate). Mitigation: generation check on resolve, None on mismatch.
-- R3 (discriminator overreach, #10510-B): an unbound-row purge that matches
-  overloaded-zero populations causes a forwarding blip on rename (the exact
-  harm the id-0 exclusion exists to prevent). Mitigation: origin-gated
-  discriminator + negative tests over every zero population.
-- R4 (Foreign weakening, #10509-B): restamp/epoch compare that erases a real
-  zone-mismatch signal. Mitigation: existing #9519/#9384/#9604 suites must
-  stay green unchanged; new tests assert Foreign still fires post-rename for
-  genuinely moved interfaces.
-- R5 (rename-detection ambiguity, #10511): duplicate-content policies or
-  simultaneous delete+add with equal content misclassified. Mitigation: the
-  exactly-one-candidate rule (ambiguity => delete teardown, today's
-  behavior).
-- R6 (zone-rename scale): zone rename remaps every key in the pair; naive
-  pairwise detection is quadratic per commit. Mitigation: content-indexed
-  detection, near-linear.
-- R7 (serial-lane conflicts): all three fixes share the commit/rotation
-  paths by construction; implement in the section 2.3 order on this branch.
+#### Go evaluator is the selected implementation
 
-## 6. Test plan (incl. RED cells)
+`pkg/policymatch.Match` is already the Go simulator with the runtime's exact
+precedence: exact pair, merged single wildcard, both-any, global scope, and
+default (`pkg/policymatch/policymatch.go:1059-1075,1243-1344`). It already
+threads scheduler fail-closed state with `PolicyInactiveFn`
+(`:330-351`) and ICMP type/code semantics (`:266-279`). A new helper uses the
+same commit-time scheduler maps already computed in
+`daemon_policy_invalidate.go:209-214`.
 
-Conventions: each fix ships a regression that FAILS on the pre-fix code
-(RED-on-revert firsthand) and PASSES post-fix; each new behavior also ships
-the negative control proving the populations it must not touch.
+The captured query contract is explicit:
 
-- T-10509-A (measure + pin): Rust rig test — live table + zone rename
-  rotation + arrival packets; assert `foreign_authority_drops`-per-rename <=
-  pinned bound and affected-sessions counted. RED cell: bound set to
-  measured-max - 1 must FAIL (proves the pin measures the real window, not
-  zero). Negative: genuinely-moved-interface arrivals still Foreign + Drop
-  (#9519 controls green unchanged).
-- T-10509-B (shrink, if taken): same rig; assert post-shrink drops == 0 (or
-  the new bound) for rename continuity AND Foreign still fires for true
-  re-zone. RED cell: revert shrink, keep test => FAIL.
-- T-10510-A (bind) or T-10510-B (purge): owner-absent rename rig — synced
-  id-0 row (SyncImport `policy_counter: None`, first-policy stamped id, old
-  zones) + rename rotation/commit; assert no stale survivor past idle/GC
-  (bound-and-purged or rebound with new zones). Failover-before-rename rig:
-  demoted ex-owner close filtered (existing probe shape:
-  `walkUserspaceSessionDeltas` primary CLOSE n=1, demoted n=0) + receiver
-  rotation; assert ex-owner rows cleared or rebound. RED cells: revert fix =>
-  survivor present => FAIL. Negatives: every overloaded-zero population
-  (host-local, neighbor-seed, fabric, tunnel, legacy) survives the new purge
-  untouched; normal two-node rename still covered by existing paths.
-- T-10511 (extensive retain): Go daemon test — two policies, rename one
-  under `PolicyRematch + Extensive` with the other permitting the flow;
-  assert the renamed policy's session is re-evaluated and RETAINED (and a
-  sendable packet still forwards). RED cell: revert fix => session torn down
-  => FAIL. Negatives: default mode teardown unchanged; plain-rematch
-  teardown unchanged (existing #8993/#9387 suites green); extensive with NO
-  alternate permit still tears down; ambiguous rename (duplicate content)
-  falls back to delete teardown; zone-rename bulk form retains across the
-  pair.
-- Joint regression: one test exercising rename under extensive + HA sync +
-  first-policy involvement, asserting the C2 partition (each fixture session
-  lands in exactly its arm).
+- forward rows are evaluated once; reverse rows use their canonical forward
+  companion;
+- source remains the original session source, while destination and port use
+  the captured DNAT rewrite when present, matching the Rust Foreign evaluator
+  (`session_hit_authority.rs:274-295`);
+- `SessionValue` carries NAT source/destination addresses and ports
+  (`pkg/dataplane/bpf_session_value.go:99-103,170-173`); NPTv6 has no per-row
+  rewrite field, so the original tuple is used and pinned in parity tests;
+- session-sync rows carry no ICMP type/code, so Query leaves these nil. The
+  existing Go evaluator fails closed for type-constrained terms when nil,
+  matching runtime `packet_icmp = None`;
+- established-session rows are queried as L4-present/non-first-fragment;
+  global/wildcard/default and scheduler gates remain in the existing evaluator.
 
-## 7. Open questions (incl. PLAN-KILL)
+The parity corpus extends `testdata/policy_verdict_corpus.txt` and the existing
+`pkg/policymatch/policy_verdict_corpus_9167_test.go` with NAT, NPTv6,
+ICMP-unknown, scheduler, global, wildcard, duplicate, and default cases. Go
+asserts the retained/deleted decision; Rust or a joint harness asserts that a
+retained session still forwards. A new Rust RPC is not required.
 
-- O-10509-1: What is the measured window (packets/sessions per rename)?
-  PLAN-KILL class for Stage B: if ~0 in practice, Stage B is accept+pin
-  (Option 3) and no shrink is designed.
-- O-10509-2: Can a restamp map (old zone id -> new zone id) be plumbed from
-  the Go commit into the Rust snapshot rotation without a wire-format break?
-- O-10510-1: Is `policy_counter_idx` resolution against the local store safe
-  during rename commit skew (nodes on different snapshots)? What generation
-  check gates it, and what is the None-fallback behavior?
-- O-10510-2 (Option B): does promotion preserve a from-sync marker usable as
-  the purge discriminator, or must one be added? Enumerate every producer of
-  unbound stamped-0 rows to prove the discriminator.
-- O-10510-3: Are the owner-absent + failover-before-rename subsets reachable
-  in a rig without cluster commands (unit/harness only)? PLAN-KILL class: if
-  untestable, the fix cannot carry its RED cell and the design must change.
-- O-10511-1: Where does commit-time re-evaluation live — Go `pkg/policymatch`
-  (needs verdict-parity proof vs the Rust evaluator) or a new Rust-helper
-  query (round-trip that does not exist)? PLAN-KILL class: if neither is
-  viable without scope explosion, extensive rename-retain needs rescoping.
-- O-10511-2: Which tuple fields re-enter evaluation for NAT'd sessions
-  (pre/post-rewrite), and how do ICMP-type gates, scheduler fail-closed, and
-  global/wildcard tiers participate?
-- O-10511-3: Exact rename-identity predicate — content equality over match
-  sets + action + scheduler state, or narrower? Zone-rename bulk remap vs
-  pairwise detection performance budget per commit.
-- O-JOINT-1: Do #10510 and #10511 agree on one rename-detection source (C1)?
-  Lock the shared helper signature before either implements.
+#### Capture and id-0 extensive rework
 
-## Appendix: STEP-0 verification commands (all run at HEAD in this worktree)
+`policyInvalidationCapture` gains a pre-publication `renamed` descriptor map
+alongside deleted/modified sets. The capture remains old-numbering based
+(#6948), enumerates each affected forward row once, and sends only the rows
+that fail the extensive re-evaluation to the existing companion-aware delete
+and HA delete-sync path. This avoids post-publication id contamination.
 
-- `git log --all --oneline --grep='10509\|10510\|10511'` => empty (no merged fix).
-- `git log --all --oneline --grep='zone rename\|rematch\|StableZoneID\|foreign.*drop' -i`
-  => related history only (#9526, #9098/#9387/#9649 rematch, #9949, #9604).
-- Symbol greps + file reads listed in the section 1 tables (Rust
-  `userspace-dp/src/...`, Go `pkg/daemon/...`, `pkg/config/zoneid.go:38`,
-  `pkg/dataplane/userspace/policies_ids.go:108`).
-- Working tree clean before/after (`git status --short` empty except this plan).
+The Go deleted-id set continues to exclude id 0. The additive snapshot fields
+carry `policy_rematch_extensive` and the first-policy rename descriptor to the
+Rust worker. On rotation:
+
+1. Option B purges unbound sync-derived id-0 rows first.
+2. For a bound first-policy row and an explicit rename under extensive mode,
+   Rust re-evaluates the row against the new forwarding policy using its
+   existing policy evaluator; permit retains, non-permit invokes the existing
+   full-pair purge. With extensive off, the current unconditional #9526 purge
+   remains unchanged.
+3. Thus the #10511 extensive-retain oracle covers id 0 without asking Go to
+   infer a bound handle from an overloaded wire scalar.
+
+The Rust rotation walk is one session-table pass. The Go capture is one
+session-table pass plus the O(P+R) descriptor index. This is the specified
+bulk cost for a zone rename affecting many policy keys.
+
+## 4. Contracts and invariants
+
+### Cross-language contracts
+
+- **C1 provenance transport:** configstore Rename ancestry is the only source
+  of rename intent; Go validates and serializes a descriptor; Go and Rust
+  consume that descriptor. No content-only detector and no impossible
+  cross-language shared function.
+- **C2 post-fix partition:** purge unsafe unbound id-0 sync-derived rows first;
+  retain only bound rows re-permitted by extensive evaluation; otherwise use
+  existing teardown. Ambiguous/no-ancestry changes are deletes.
+- **C3 teardown reuse:** every purge/deletion arm uses the existing
+  companion-aware delete and HA delete-sync (#2468), including Rust id-0.
+- **C4 capture coherence:** descriptor and old ids are captured before
+  publication, alongside deleted/modified capture, so old numbering cannot be
+  contaminated by live-row refresh.
+- **C5 compatibility:** additive descriptor/extensive fields default empty/false
+  for old peers/helpers; no old wire row is rebound from a positional index.
+
+### Invariants
+
+- I1 default and plain-rematch rename teardown is unchanged.
+- I2 overloaded wire-zero host-local, neighbor-seed, fabric, tunnel, legacy,
+  and non-sync local rows are never swept by the first-policy purge.
+- I3 a genuine interface re-zone still reaches Foreign and #9384 revoke; no
+  #10509 Stage-B option may convert genuine Foreign to Owner.
+- I4 demoted-owner close emission remains filtered by owner RG; receiver-side
+  purge/rebind owns #10510.
+- I5 old-peer rows lacking descriptor, sender config epoch, stable rule id, or
+  ICMP type retain today's safe behavior.
+- I6 extensive retention never leaves an unbound stale id-0 row or stale zone
+  stamp that a later deletion cannot target.
+- I7 explicit Rename ancestry with changed verdict content, duplicate/ambiguous
+  expansion, or missing capture falls back to teardown (fail closed).
+
+## 5. Risks and mitigations
+
+- **R1 wrong authority shrink (#10509):** restamp/epoch could mask a genuine
+  re-zone. Stage B is deferred; any candidate must keep #9519/#9384 controls.
+- **R2 vacuous measurement:** a single-zone permit has zero drops. The dead-pair
+  positive control and shape matrix require a reachable positive cell first.
+- **R3 id-0 overreach (#10510):** origin + unbound + zero + old-zone descriptor
+  gates and exhaustive negative origins prevent sweeping overloaded zero rows.
+- **R4 positional misbind (#10510-A):** killed in this plan; no bare
+  `policy_counter_idx` resolution is permitted.
+- **R5 ancestry transport loss (#10511):** missing/ambiguous provenance falls
+  back to delete; if the descriptor cannot cross the commit/snapshot boundary,
+  #10511 is PLAN-KILL rather than content inference.
+- **R6 evaluator parity (#10511):** Go evaluator is already the maintained
+  parity simulator; corpus adds NAT, NPTv6, scheduler, ICMP-unknown, and tier
+  cases, and Rust forwarding is asserted separately.
+- **R7 stale retain:** purge-wins unbound ordering plus bound-id re-resolution
+  prevents a later delete from missing retained state.
+- **R8 bulk commit cost:** O(P+R+S), one indexed pass per side; no pairwise
+  deleted×added comparison and no second full sweep.
+
+## 6. Test plan and RED cells
+
+No tests are run on the design path. Implementers must run the full affected
+file/module, not only the expected-to-flip cell, and record RED-on-revert
+firsthand for each issue.
+
+### #10509
+
+- Full authority module: `userspace-dp/src/afxdp/poll_descriptor/session_hit_authority_tests.rs`
+  plus affected packet-dispatch tests.
+- Stage-A harness matrix above; assert the dead-pair control observes
+  `foreign_authority_drops > 0` before sweep emulation, then assert the
+  measured upper bound. The single-zone permit control asserts Foreign with
+  Forward and zero drops. RED-on-revert: removing the drop accounting or
+  changing the conditional verdict fails the positive cell; setting the bound
+  to observed-max minus one is valid only after the positive cell proves
+  observed-max > 0.
+- Sweep emulation asserts packets after the boundary no longer count against
+  the rename window, while the stale-row/last-seen control proves the window
+  is not falsely ended by policy-id refresh.
+
+### #10510
+
+- Full Rust first-policy files: `deleted_first_policy_purge_9526_tests.rs`
+  and `worker/loop_body/first_policy_purge_rotation_9526_tests.rs`; full Go
+  `userspace_sync_test.go` for the owner-RG close controls.
+- Owner-absent rename: promoted `SharedPromote`, unbound, stamped id-0 row
+  with old zones is purged; RED-on-revert leaves it alive. Failover-before-
+  rename: demoted ex-owner close remains n=0 while receiver rotation purges or
+  repairs the row; RED-on-revert leaves the survivor.
+- Negative controls enumerate all origins in `SessionOrigin`, old/legacy peer
+  rows, nonzero policy ids, reverse halves, bound rows, and zone pairs outside
+  the descriptor. None may be removed by Option B. A separate test pins that
+  Option A's bare positional index is rejected/does not bind under skew.
+
+### #10511
+
+- Full Go invalidation/rematch files: `daemon_policy_invalidate_test.go`,
+  `daemon_policy_rematch_extensive_8993_test.go`, and
+  `policy_reused_id_overclear_6948_test.go`.
+- Explicit ancestry + extensive + alternate permit: capture re-evaluates and
+  retains the bound renamed session. RED-on-revert tears it down. Go asserts
+  the retain/delete decision; the Rust/joint forwarding cell asserts the
+  retained packet forwards.
+- Full negative matrix: default mode teardown, plain-rematch teardown,
+  extensive with no alternate permit, generic delete+add with no ancestry,
+  two identical policies with ambiguous ancestry, resolved-fingerprint change,
+  scheduler active-to-inactive in the same commit, NAT destination rewrite,
+  NPTv6, unknown ICMP type, and global/wildcard tiers.
+- First-policy id-0 extensive: bound row is re-evaluated in Rust and retained
+  only on permit; unbound sync-derived row is purged first. RED-on-revert
+  covers both the Rust gate and Go capture partition.
+- Full Rust worker rotation module is required after the id-0 arm changes; no
+  single-test-only acceptance.
+
+### Joint regression
+
+One HA fixture covers explicit zone/policy ancestry, snapshot descriptor,
+owner-absent promoted id-0, bound alternate permit, and default/plain controls;
+it asserts C2's post-fix partition exactly. The fixture also measures the
+shape-specific #10509 window without claiming that every Foreign packet drops.
+
+## 7. Open questions, resolved questions, and PLAN-KILL conditions
+
+### Resolved by source for v2
+
+- **10509 measurement:** unresolved by design and intentionally first. The
+  matrix makes a zero single-zone result meaningful rather than vacuous.
+- **10510 Option A safety:** bare binding is unsafe by the documented
+  positional-index warning and is removed from this plan; a future stable-id
+  or sender-epoch wire addition is separate work.
+- **10510 promotion marker:** no new marker is needed; promotion's
+  `SharedPromote` is covered by the existing sync-derived predicate.
+- **10511 evaluator:** Go `policymatch.Match` is viable and already implements
+  the runtime tier/scheduler/ICMP behavior. Session rows supply NAT fields but
+  not ICMP type, so nil is the explicit fail-closed fallback; Rust forwarding
+  is a separate oracle.
+- **10511 false rename:** snapshot content alone is insufficient. Explicit
+  Rename ancestry from `Store.RenameAsPlantClass` is the required provenance;
+  resolved identity-stripped fingerprints validate, rather than invent,
+  intent. Generic delete+add falls back to teardown.
+- **10511 capture/id-0/bulk:** pre-publication `renamed` capture, additive
+  extensive/descriptor snapshot fields, Rust bound-id-0 re-evaluation, and
+  O(P+R+S) passes are the specified scope.
+
+### Remaining open questions
+
+- **O-10509-1 (PLAN-KILL for Stage B only):** what is the measured packet/session
+  bound for each matrix shape? If no shape has a material positive window,
+  Stage B is killed and Option 3 accept+pin closes the issue.
+- **O-10509-2:** if Stage B is selected, can the descriptor be reused for a
+  rotation-local restamp without weakening genuine Foreign/revoke semantics?
+- **O-10510-1:** can all supported snapshot producers emit the descriptor with
+  old-helper empty defaults? If not, the unsupported producer cohort stays on
+  current behavior and is explicitly excluded from acceptance.
+- **O-10510-2:** can the full origin/zone negative enumeration be run without
+  cluster commands? Existing unit harnesses and `walkUserspaceSessionDeltas`
+  probes indicate yes; if not, the owner-absent acceptance leg is PLAN-KILL.
+- **O-10511-1 (conditional-KILL):** can Rename ancestry travel from the
+  configstore candidate commit through daemon capture and the Rust snapshot
+  with bounded additive fields? Source proves the mutation API and existing
+  additive serde snapshot pattern. If implementation discovery disproves that
+  boundary, concede PLAN-KILL for #10511; do not substitute a content-only
+  classifier.
+- **O-10511-2:** exact NAT/NPTv6 and ICMP-unknown parity cases must be added to
+  the existing corpus before implementation is accepted.
+- **O-JOINT-1:** lock the descriptor schema and C2 ordering before either
+  #10510 or #10511 production leg lands.
+
+## 8. STEP-0 and review verification record
+
+- First action reported `pwd`, branch `fix/10509-zone-renames`, HEAD
+  `2781465ee`, and assigned scope.
+- Read all three issue pages and source sections listed in §1.
+- Local merged-fix search was scoped to base `2781465ee`; the actual merged-PR
+  cache query was `pr://psaab/xpf?state=merged&limit=100`, with no #10509,
+  #10510, or #10511 fix present.
+- Consistency checks covered every authority callsite, daemon invalidation and
+  capture callsite, SyncImport/promotion origin predicate, and first-policy
+  purge caller. No production file was edited.
+- Round-1 findings folded: corrected Foreign/Drop statement and blast radius;
+  shape matrix and sweep-emulated window; SharedPromote discriminator and
+  complete origin enumeration; Option A kill; provenance transport replacing
+  impossible C1; purge-wins replacing stale retain order; Go evaluator,
+  capture/id-0/bulk scope, and split Go/Rust tests for #10511.
