@@ -2345,6 +2345,191 @@ fn contested_trunk_parent_host_bound_sentinel_preserves_controls_10520() {
         "tagged LAN-unit host-bound controls must remain admitted"
     );
 }
+// #10520 refusal matrix: same-ifindex unit rows can produce a full refusal,
+// an addressed/tunnel host sentinel, or a retained agreed-zone entry. Keeping
+// these shapes together makes the warning's conditional wording testable.
+fn unit_refused_snapshot_10520(shape: &str) -> ConfigSnapshot {
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    let trust = ZoneSnapshot {
+        name: "trust".into(),
+        id: 7,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into()],
+        ..Default::default()
+    };
+    let untrust = ZoneSnapshot {
+        name: "untrust".into(),
+        id: 8,
+        host_inbound_configured: true,
+        ..Default::default()
+    };
+    match shape {
+        "addressed" | "addressless" => {
+            let addresses = if shape == "addressed" {
+                vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "192.0.2.21/24".into(),
+                    ..Default::default()
+                }]
+            } else {
+                Vec::new()
+            };
+            ConfigSnapshot {
+                zones: vec![trust],
+                interfaces: vec![
+                    InterfaceSnapshot {
+                        name: "reth0.0".into(),
+                        zone: "trust".into(),
+                        linux_name: "reth0".into(),
+                        ifindex: 21,
+                        is_unit: Some(true),
+                        ..Default::default()
+                    },
+                    InterfaceSnapshot {
+                        name: "reth0.100".into(),
+                        zone: "".into(),
+                        linux_name: "reth0".into(),
+                        ifindex: 21,
+                        is_unit: Some(true),
+                        addresses,
+                        ..Default::default()
+                    },
+                ],
+                default_policy: "permit".into(),
+                ..Default::default()
+            }
+        }
+        "partial" => ConfigSnapshot {
+            zones: vec![trust, untrust],
+            interfaces: vec![
+                InterfaceSnapshot {
+                    name: "reth1".into(),
+                    zone: "untrust".into(),
+                    linux_name: "reth1".into(),
+                    ifindex: 31,
+                    is_unit: Some(false),
+                    ..Default::default()
+                },
+                InterfaceSnapshot {
+                    name: "reth1.0".into(),
+                    zone: "trust".into(),
+                    linux_name: "reth1".into(),
+                    ifindex: 31,
+                    is_unit: Some(true),
+                    ..Default::default()
+                },
+            ],
+            policies: vec![crate::protocol::PolicyRuleSnapshot {
+                name: "partial-zone-deny".into(),
+                from_zone: "trust".into(),
+                to_zone: "untrust".into(),
+                source_addresses: vec!["any".into()],
+                destination_addresses: vec!["any".into()],
+                applications: vec!["any".into()],
+                action: "deny".into(),
+                ..Default::default()
+            }],
+            default_policy: "permit".into(),
+            ..Default::default()
+        },
+        _ => panic!("unknown unit-refusal fixture shape: {shape}"),
+    }
+}
+#[test]
+fn unit_refused_host_bound_and_partial_transit_10520() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+
+    // Addressed full refusal: #5659 installs an empty per-interface sentinel.
+    let addressed = build_forwarding_state(&unit_refused_snapshot_10520("addressed"));
+    assert!(
+        !addressed.ifindex_to_zone_id.contains_key(&21),
+        "addressed refusal must leave the ifindex without an ingress zone"
+    );
+    assert!(
+        addressed.ifindex_host_inbound.contains_key(&21),
+        "addressed refusal must carry the #5659 host-inbound sentinel"
+    );
+    assert!(
+        !host_inbound_admits_iface(&addressed, 21, 0, PROTO_TCP, 22, false, 0),
+        "addressed refusal must deny host-bound ssh"
+    );
+    assert!(
+        host_inbound_admits_iface(&addressed, 21, 0, PROTO_ICMP, 0, false, 3),
+        "addressed refusal must retain global ICMP error admission"
+    );
+
+    // Address-less, non-tunnel full refusal: no #5659 sentinel is armed, so
+    // the deliberate global None => true host-inbound path remains admitted.
+    let addressless = build_forwarding_state(&unit_refused_snapshot_10520("addressless"));
+    assert!(
+        !addressless.ifindex_host_inbound.contains_key(&21),
+        "address-less non-tunnel refusal must not arm a host sentinel"
+    );
+    assert!(
+        host_inbound_admits_iface(&addressless, 21, 0, PROTO_TCP, 22, false, 0),
+        "address-less non-tunnel refusal keeps the global host admit"
+    );
+
+    // Partial admission: the retained agreed zone is host-inbound-gated and
+    // transit reaches the explicit zone-pair policy, not the #6682 arm.
+    let partial = build_forwarding_state(&unit_refused_snapshot_10520("partial"));
+    assert_eq!(
+        partial.ifindex_to_zone_id.get(&31).copied(),
+        Some(7),
+        "partial refusal must retain the agreed unit zone"
+    );
+    assert!(
+        !partial.ifindex_host_inbound.contains_key(&31),
+        "partial refusal must not install a full-refusal host sentinel"
+    );
+    assert!(
+        host_inbound_admits_iface(&partial, 31, 7, PROTO_TCP, 22, false, 0),
+        "retained-zone host-inbound ssh must follow the zone admission set"
+    );
+    assert!(
+        !host_inbound_admits_iface(&partial, 31, 7, PROTO_TCP, 443, false, 0),
+        "retained-zone host-inbound https must remain zone-gated"
+    );
+    let unzoned_before =
+        crate::policy::UNZONED_INGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed);
+    let default_before = partial.policy.default_counter.test_packet_count();
+    let transit = crate::policy::evaluate_policy_result_with_icmp(
+        &partial.policy,
+        7,
+        8,
+        "198.51.100.2".parse().unwrap(),
+        "203.0.113.8".parse().unwrap(),
+        PROTO_TCP,
+        40000,
+        443,
+        None,
+        64,
+    );
+    assert_eq!(
+        transit.action,
+        crate::policy::PolicyAction::Deny,
+        "partial refusal must consult the retained zone-pair policy"
+    );
+    assert_ne!(
+        transit.policy_counter_idx, 0,
+        "partial refusal deny must carry the explicit policy counter handle"
+    );
+    assert_eq!(
+        crate::policy::UNZONED_INGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed)
+            - unzoned_before,
+        0,
+        "partial refusal must not use the #6682 unzoned-ingress arm"
+    );
+    assert_eq!(
+        partial.policy.default_counter.test_packet_count() - default_before,
+        0,
+        "partial refusal's explicit policy deny must not touch default counter"
+    );
+}
 
 // #10503 fold pins: the post-walk guard covers every finalized contested
 // ifindex, including parent fan-UP conflicts, lifeline parents, parent-authored
@@ -2413,6 +2598,29 @@ fn contested_lifeline_parents_keep_unconditional_host_admit_10503() {
             "{label} lifeline must keep unconditional host-bound ssh admission"
         );
     }
+}
+#[test]
+fn contested_lifeline_host_admit_skips_sentinel_10520() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7), any_service_zone_10503("lan", 8)],
+        interfaces: vec![
+            contested_row_10503("fab0.100", "fab0", "wan", 502, 501, Some(true)),
+            contested_row_10503("fab0.200", "fab0", "lan", 503, 501, Some(true)),
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    assert!(
+        !state.ifindex_host_inbound.contains_key(&501),
+        "lifeline contest must keep the #10503 sentinel disarmed"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, 501, 0, 6, 22, false, 0),
+        "lifeline contest must keep host-bound ssh admitted"
+    );
 }
 
 #[test]

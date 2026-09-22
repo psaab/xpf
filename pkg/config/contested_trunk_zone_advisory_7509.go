@@ -102,10 +102,14 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 // left out of every zone, even when the base interface's row carries a zone —
 // because that zone was INHERITED from a sibling unit on another device
 // (`InterfaceZoneMap` fans a unit-suffixed reference UP to the base) and the
-// unit that actually receives frames on the device was never zoned. Transit
-// there is DENIED as unattributed before any policy is consulted (#6682), and
-// host-bound traffic to the firewall itself is denied by the contested-parent
-// host-inbound sentinel (#10503).
+// unit that actually receives frames on the device was never zoned. Transit is
+// denied as unattributed before any policy is consulted (#6682) only when the
+// resulting ingress is fully unzoned; a retained unit zone is policy-evaluated.
+// Host-bound handling is shape-dependent: addressed/tunnel traffic is denied by
+// the #5659 empty-zone host-inbound sentinel, address-less non-tunnel traffic
+// remains on the global `None => true` admit path, and retained-zone traffic is
+// zone-gated. ICMP errors/PMTUD/ND control messages remain admitted, and an
+// explicit per-interface host-inbound stanza takes precedence.
 //
 // SCOPED TO THE UNITS THAT ACTUALLY COLLAPSE, which is the difference between
 // this and a restatement of the contest above. A unit on its OWN device is
@@ -183,7 +187,18 @@ func appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg *Config, opts compileOpts) 
 		bases = append(bases, base)
 	}
 	sort.Strings(bases)
+	lifelines := HostInboundLifelineSet(cfg)
 	for _, base := range bases {
+		hostBound := "Host-bound handling is shape-dependent: addressed/tunnel traffic " +
+			"is denied by the #5659 empty-zone host-inbound sentinel (ICMP " +
+			"errors/PMTUD/ND control messages remain admitted; an explicit " +
+			"per-interface host-inbound stanza still takes precedence); address-less " +
+			"non-tunnel traffic remains admitted via the global None => true path; " +
+			"retained sibling-zone traffic is zone-gated. "
+		if HostInboundLifelineInterface(base, lifelines) {
+			hostBound = "Host-bound traffic on this lifeline remains admitted; #5659 " +
+				"deliberately does not arm an empty-zone host-inbound sentinel. "
+		}
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
 			"interface %s has unit(s) %s in no security zone sharing one kernel "+
 				"device with %s, whose other units ARE zoned: the dataplane sees the "+
@@ -192,12 +207,9 @@ func appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg *Config, opts compileOpts) 
 				"there is DENIED as unattributed — #6682 refuses it before the implicit "+
 				"default policy is consulted, default-policy permit-all does not admit "+
 				"it, and the deny logs as unattributed (#9989, counter "+
-				"UNZONED_INGRESS_DENIED); host-bound traffic to the firewall itself is "+
-				"denied by the contested-parent host-inbound sentinel (#10503; ICMP "+
-				"errors/PMTUD/ND control messages remain admitted; an explicit "+
-				"per-interface host-inbound stanza still takes precedence). Put those "+
-				"units in a zone if their traffic must be forwarded.",
-			base, strings.Join(shared[base], ", "), base))
+				"UNZONED_INGRESS_DENIED); %sPut those units in a zone if their "+
+				"traffic must be forwarded.",
+			base, strings.Join(shared[base], ", "), base, hostBound))
 	}
 }
 
@@ -226,20 +238,26 @@ func appendContestedTrunkZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 		bases = append(bases, base)
 	}
 	sort.Strings(bases)
+	lifelines := HostInboundLifelineSet(cfg)
 	for _, base := range bases {
+		hostBound := "Host-bound traffic to the firewall itself is denied by the " +
+			"contested-parent host-inbound sentinel (#10503; ICMP errors/PMTUD/ND " +
+			"control messages remain admitted; an explicit per-interface " +
+			"host-inbound stanza still takes precedence). "
+		if HostInboundLifelineInterface(base, lifelines) {
+			hostBound = "Host-bound traffic on this lifeline remains admitted; #10503 " +
+				"deliberately does not arm a contested-parent sentinel. "
+		}
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
 			"interface %s has units in more than one security zone (%s): UNTAGGED "+
 				"traffic arriving on %s cannot be attributed to a unit, so it is left "+
 				"UNZONED (#7509). Transit arriving there is DENIED as unattributed — "+
 				"#6682 refuses it before the implicit default policy is consulted, "+
 				"default-policy permit-all does not admit it, and the deny logs as "+
-				"unattributed (#9989, counter UNZONED_INGRESS_DENIED); host-bound "+
-				"traffic to the firewall itself is denied by the contested-parent "+
-				"host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages "+
-				"remain admitted; an explicit per-interface host-inbound stanza still "+
-				"takes precedence). Tagged traffic on each unit is unaffected. Give "+
-				"the units distinct devices, or put them in one zone, if untagged "+
-				"traffic on %s must be forwarded.",
-			base, strings.Join(contested[base], ", "), base, base))
+				"unattributed (#9989, counter UNZONED_INGRESS_DENIED); %sTagged "+
+				"traffic on each unit is unaffected. Give the units distinct "+
+				"devices, or put them in one zone, if untagged traffic on %s must be "+
+				"forwarded.",
+			base, strings.Join(contested[base], ", "), base, hostBound, base))
 	}
 }

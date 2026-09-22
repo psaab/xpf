@@ -498,9 +498,10 @@ logging rules, not these specific hot-path constants.
 
     A zero zone on a RESOLVED ifindex means the box does not consider that
     interface to be in any zone: an operator de-zone, a #7509 contested
-    ifindex, or an uncorroborated Go claim. New flows there already fall
-    to the default policy, so declining to re-judge established ones was
-    exactly the asymmetry #8356 exists to remove.
+    ifindex, or an uncorroborated Go claim. For a FULL ingress refusal,
+    `from_id == 0` takes the #6682 unattributed-deny arm before the implicit
+    default, regardless of whether the default posture is deny or permit. A
+    retained ingress zone is evaluated under its zone policy instead.
 
     The fix is NOT "revoke on zero". Zero has a fourth cause that must
     keep declining — **no egress ifindex at all**, which is a flow with no
@@ -511,11 +512,14 @@ logging rules, not these specific hot-path constants.
     its ingress twin (fabric ingress keeps the entry's zone, so its twin
     is `metadata.ingress_zone == 0`), and everything else is EVALUATED.
 
-    Evaluated, not special-cased: `evaluate_policy_result_*` (#3110)
-    refuses to match any zone-pair or `junos-global` rule against the 0
-    sentinel and falls to the default action — the same verdict a NEW flow
-    on that interface gets. So it is automatically right under both
-    postures: `default-policy deny` revokes, `permit-all` keeps.
+    Evaluated with an important ingress/egress boundary:
+    `evaluate_policy_result_*` (#3110) refuses to match any zone-pair or
+    `junos-global` rule against a zero sentinel. A FULL ingress refusal has
+    already taken the `from_id == 0` #6682 unattributed-deny arm before this
+    fallback; a retained ingress zone reaches its ordinary policy tiers.
+    An unresolved egress `to_id == 0` still reaches the implicit default action:
+    `default-policy deny` revokes and `permit-all` keeps, preserving the
+    deliberate egress scope.
 
   - **Only the session's OWNER may re-derive it; a packet from another
     zone is adjudicated, never trusted (#9519).** `SessionKey` has no zone

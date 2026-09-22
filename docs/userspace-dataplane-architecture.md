@@ -1360,15 +1360,25 @@ Scope of the fallback:
   is observable.
 
   **Accepted cost.** Where a unit the operator left out of every zone shares a
-  device with a zoned sibling, that traffic now falls to the default policy in
-  BOTH directions rather than being adjudicated under the sibling's zone. In
-  practice that is untagged traffic on a mixed-zone trunk and unit-0 traffic on
-  an interface-level tunnel. It is Junos parity — `st0.0` and `st0.1` are
-  different units and may be in different zones or none, and a unit in no zone
-  forwards nothing — and it removes a policy BYPASS: the sibling's zone is a
-  policy set the operator wrote for a different interface. It is reported so it is
-  not silent, and the two reports are NOT equally effective — measured, not
-  assumed:
+  device with a zoned sibling, the dataplane refuses to guess the sibling's
+  zone. A FULL refusal denies transit as unattributed before the implicit
+  default policy (#6682), in both default-policy postures, rather than
+  adjudicating under the sibling's zone. Host-bound handling is shape-dependent:
+  addressed or tunnel traffic gets the #5659 empty-zone host-inbound sentinel
+  (with ICMP errors/PMTUD/ND controls admitted and explicit per-interface
+  overrides taking precedence); address-less non-tunnel traffic remains on the
+  global `None => true` admit path; and a retained agreed zone is
+  policy-evaluated (zone-gated). A contested lifeline still emits the warning,
+  but #10503 deliberately skips its host-inbound sentinel, so host-bound
+  lifeline traffic remains admitted.
+
+  In practice the full-refusal transit shape is untagged traffic on a mixed-zone
+  trunk and unit-0 traffic on an interface-level tunnel. It is Junos parity —
+  `st0.0` and `st0.1` are different units and may be in different zones or none,
+  and a unit in no zone forwards nothing — and it removes a policy BYPASS: the
+  sibling's zone is a policy set the operator wrote for a different interface.
+  It is reported so the consequence is not silent, and the two reports are NOT
+  equally effective — measured, not assumed:
 
   - the **runtime warning** from `forwarding_build/interfaces.rs` names the
     ifindex and the refused zone ids, one line per contested ifindex per build.

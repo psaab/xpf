@@ -93,6 +93,47 @@ enum UnitZoneClaim {
     Disagree,
 }
 
+
+const UNIT_REFUSED_TRANSIT_FULL_10520: &str =
+    "Transit arriving there is DENIED as unattributed before any policy is consulted \
+     (#6682); default-policy permit-all does not admit it, and the deny logs as \
+     unattributed (#9989, counter UNZONED_INGRESS_DENIED).";
+const UNIT_REFUSED_TRANSIT_RETAINED_10520: &str =
+    "Transit is evaluated under the retained zone's policy (zone-gated; the #6682 \
+     unzoned-ingress deny does not apply), so its verdict follows that policy.";
+const UNIT_REFUSED_HOST_BOUND_10520: &str =
+    "Host-bound handling is shape-dependent: addressed/tunnel traffic is denied by \
+     the #5659 empty-zone host-inbound sentinel (ICMP errors/PMTUD/ND control \
+     messages remain admitted; an explicit per-interface host-inbound stanza still \
+     takes precedence); address-less non-tunnel traffic remains admitted via the \
+     global None => true path; retained sibling-zone traffic is zone-gated.";
+
+fn unit_refused_transit_warning_10520(retained_zone: bool) -> &'static str {
+    if retained_zone {
+        UNIT_REFUSED_TRANSIT_RETAINED_10520
+    } else {
+        UNIT_REFUSED_TRANSIT_FULL_10520
+    }
+}
+
+#[cfg(test)]
+mod warning_text_tests_10520 {
+    use super::*;
+
+    #[test]
+    fn refusal_warning_text_pins_full_and_partial_mechanisms_10520() {
+        assert!(UNIT_REFUSED_TRANSIT_FULL_10520.contains("#6682"));
+        assert!(UNIT_REFUSED_TRANSIT_FULL_10520.contains("#9989"));
+        assert!(UNIT_REFUSED_TRANSIT_FULL_10520.contains("UNZONED_INGRESS_DENIED"));
+        assert!(UNIT_REFUSED_TRANSIT_RETAINED_10520.contains("zone-gated"));
+        assert!(UNIT_REFUSED_TRANSIT_RETAINED_10520.contains("does not apply"));
+        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("#5659"));
+        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("address-less"));
+        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("None => true"));
+        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("zone-gated"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_10520.contains("#10503"));
+    }
+}
 /// True for a snapshot row that names a LOGICAL UNIT (`st0.0`, `reth1.0`,
 /// `ge-0/0/9.100`) rather than an interface (`st0`, `reth1`, `ge-0/0/9`).
 ///
@@ -465,9 +506,10 @@ pub(super) fn populate_interfaces(
                 // The dataplane sees an IFINDEX, not a unit, so it cannot tell
                 // the two apart with anything on the wire today. When it cannot
                 // know which zone a packet belongs to, the firewall must decline
-                // to pick one rather than guess. Transit is denied as unattributed
-                // before the implicit default policy (#6682); host-bound traffic
-                // is denied by the contested-parent host-inbound sentinel (#10503).
+                // Transit is denied as unattributed before the implicit default
+                // policy (#6682); non-lifeline host-bound traffic is denied by
+                // the contested-parent host-inbound sentinel (#10503), while
+                // lifeline contests remain admitted by deliberate sentinel skip.
                 //
                 // This also collapses an asymmetry rather than adding a second
                 // mechanism: the egress half already resolves a contested
@@ -784,18 +826,28 @@ pub(super) fn populate_interfaces(
     // interface count for one fact.
     for (ifindex, zones) in &contested_parent_zones {
         let ids: Vec<String> = zones.iter().map(|z| z.to_string()).collect();
+        let host_bound = if state
+            .ifindex_to_config_name
+            .get(ifindex)
+            .is_some_and(|name| is_host_inbound_lifeline(name))
+        {
+            "Host-bound traffic on this lifeline remains admitted; #10503 deliberately \
+             does not arm a contested-parent sentinel."
+        } else {
+            "Host-bound traffic to the firewall itself is denied by the contested-parent \
+             host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages remain \
+             admitted; an explicit per-interface host-inbound stanza still takes \
+             precedence)."
+        };
         eprintln!(
             "xpf-userspace-dp: WARNING zone contest on shared base ifindex {}: units \
              claim zone ids [{}] — the ingress zone is UNSET for it (#7509). Transit \
              arriving there is DENIED as unattributed before any policy is consulted \
              (#6682); default-policy permit-all does not admit it, and the deny logs \
-             as unattributed (#9989, counter UNZONED_INGRESS_DENIED). Host-bound \
-             traffic to the firewall itself is denied by the contested-parent \
-             host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages \
-             remain admitted; an explicit per-interface host-inbound stanza still \
-             takes precedence). The dataplane sees an ifindex, not a unit, so it \
-             cannot tell which unit a packet arrived on; give the units distinct \
-             netdevs or put them in one zone.",
+             as unattributed (#9989, counter UNZONED_INGRESS_DENIED). {host_bound} \
+             The dataplane sees an ifindex, not a unit, so it cannot tell which unit \
+             a packet arrived on; give the units distinct netdevs or put them in one \
+             zone.",
             ifindex,
             ids.join(", ")
         );
@@ -806,10 +858,12 @@ pub(super) fn populate_interfaces(
     // carries a zone it INHERITED from a unit on another ifindex, and the unit
     // row that actually receives frames on this ifindex names a different zone
     // or none at all. One line per ifindex per build, naming the zone ids the
-    // unit rows refused, so an operator whose untagged trunk or unit-0 tunnel
-    // traffic is denied as unattributed for transit or by the host-inbound
-    // sentinel for host-bound traffic can reach the cause without reading
-    // source. The commit-time advisory
+    // unit rows refused. A FULL refusal leaves no ingress-zone entry and takes
+    // the #6682 unattributed deny; a retained zone is policy-evaluated instead.
+    // Host-bound handling is shape-dependent: addressed/tunnel traffic is denied
+    // by the #5659 empty-zone sentinel, address-less non-tunnel traffic remains
+    // on the global None => true admit path, and retained-zone traffic is
+    // zone-gated. The commit-time advisory
     // (`pkg/config/contested_trunk_zone_advisory_7509.go`) is the one that can
     // name the INTERFACE; this one is the runtime corroboration.
     for (ifindex, zones) in &unit_refused_zones {
@@ -818,18 +872,15 @@ pub(super) fn populate_interfaces(
             continue;
         }
         let ids: Vec<String> = zones.iter().map(|z| z.to_string()).collect();
+        let transit =
+            unit_refused_transit_warning_10520(state.ifindex_to_zone_id.contains_key(ifindex));
+        let host_bound = UNIT_REFUSED_HOST_BOUND_10520;
         eprintln!(
             "xpf-userspace-dp: WARNING ifindex {} carries a logical unit the operator \
              left out of zone ids [{}]: that unit is what receives frames on the \
              device, so the zone its base interface INHERITED from a sibling unit is \
-             refused and the ifindex is UNZONED (#7509). Transit arriving there is \
-             DENIED as unattributed before any policy is consulted (#6682); \
-             default-policy permit-all does not admit it, and the deny logs as \
-             unattributed (#9989, counter UNZONED_INGRESS_DENIED). Host-bound \
-             traffic to the firewall itself is denied by the contested-parent \
-             host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages \
-             remain admitted; an explicit per-interface host-inbound stanza still \
-             takes precedence). Zone the unit explicitly if it must forward.",
+             refused (#7509). {transit} {host_bound} Zone the unit explicitly if it \
+             must forward.",
             ifindex,
             ids.join(", ")
         );
