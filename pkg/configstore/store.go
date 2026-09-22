@@ -782,9 +782,10 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// same way today. This is the same doctrine as the #1733/#1798/#1814
 	// lenient compile gates (see freetext.go); the operator's next strict
 	// commit rejects the stale value loudly.
-	if err := s.schemaValidateExpandedTree(tree); err != nil {
+	schemaErr := s.schemaValidateExpandedTree(tree)
+	if schemaErr != nil {
 		slog.Warn("typed-leaf schema violation in tolerated config; continuing (a strict commit would reject this)",
-			"err", err, "issue", "#1319")
+			"err", schemaErr, "issue", "#1319")
 	}
 	var compiled *config.Config
 	var err error
@@ -792,6 +793,16 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 		compiled, err = config.CompileConfigForNodeLenient(tree, s.nodeID)
 	} else {
 		compiled, err = config.CompileConfigLenient(tree)
+	}
+	if err == nil && compiled != nil && config.IsTypedLeafSchemaError(schemaErr) {
+		// Keep the pre-compile typed-leaf error on the compiled object. The
+		// typed compiler may discard the offending token while preserving the
+		// tolerant no-brick behaviour, so ValidateConfig cannot reconstruct
+		// this violation. Wrap only Error(): schema validation owns redaction
+		// for secret leaves (#8441/#8434).
+		compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
+			"%s %s (strict commit would reject this; issue #10515)",
+			config.ToleratedTypedLeafWarningPrefix, schemaErr.Error()))
 	}
 	// #4185 (review Finding 2): the lenient Load/SyncApply path must NOT
 	// hard-reject a node-id mismatch (that would blackout-boot the node or

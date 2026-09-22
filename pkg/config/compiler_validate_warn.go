@@ -79,6 +79,31 @@ func sortedPoolNames(pools map[string]*NATPool) []string {
 	return names
 }
 
+// ToleratedTypedLeafWarningPrefix identifies schema violations admitted only
+// by the tolerant Load/SyncApply compiler path. The prefix is intentionally
+// stable so existing alarm renderers can expose this violation class without
+// turning every compiler warning into an alarm.
+const ToleratedTypedLeafWarningPrefix = "[typed-leaf-tolerated]"
+
+// ToleratedTypedLeafWarnings returns the schema warnings persisted on a
+// compiled config by the tolerant ingress. It deliberately filters the
+// dedicated marker rather than returning cfg.Warnings wholesale: most
+// compiler warnings are commit-response/apply-log advisories, not active
+// alarms.
+func ToleratedTypedLeafWarnings(cfg *Config) []string {
+	if cfg == nil || len(cfg.Warnings) == 0 {
+		return nil
+	}
+	prefix := ToleratedTypedLeafWarningPrefix + " "
+	var warnings []string
+	for _, warning := range cfg.Warnings {
+		if strings.HasPrefix(warning, prefix) {
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings
+}
+
 // ValidateConfig performs non-fatal validation on a compiled config.
 // Returns warnings for unresolved references and operator-visible
 // compatibility/deprecation conditions.
