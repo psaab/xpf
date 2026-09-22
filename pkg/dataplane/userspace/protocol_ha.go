@@ -40,6 +40,12 @@ type SessionExportRequest struct {
 
 type SessionSyncRequest struct {
 	Operation   string `json:"operation,omitempty"`
+	// #10512: every helper-first tuple mutation carries a process-generation
+	// epoch and a manager-local idempotency identity. Older helpers ignore these
+	// additive fields; the new helper uses them to quarantine stale retries.
+	HelperEpoch uint64 `json:"helper_epoch,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	MutationID  string `json:"mutation_id,omitempty"`
 	AddrFamily  uint8  `json:"addr_family,omitempty"`
 	Protocol    uint8  `json:"protocol,omitempty"`
 	SrcIP       string `json:"src_ip,omitempty"`
@@ -193,6 +199,9 @@ type SessionSyncRequest struct {
 	// InstallTableDomain/InstallTableCheck (#9752): forwarded from
 	// SessionValue{,V6}.InstallTable* so the standby's helper imports a
 	// PBR-steered session with the table its steer installed, re-resolving
+	// #10512: clear continuation echoes the helper-owned exclusive fence.
+	ClearFenceID      uint64 `json:"clear_fence_id,omitempty"`
+	ClearContinuation string `json:"clear_continuation,omitempty"`
 	// there instead of inet.0 after failover. (0,0) = default table, which
 	// imports exactly as before. userspace-dp's SessionSyncRequest
 	// declares the same keys.

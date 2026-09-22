@@ -14,6 +14,7 @@ package userspace
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -34,8 +35,48 @@ func (m *Manager) syncSessionV6Locked(op string, key dataplane.SessionKeyV6, val
 	req := m.buildSessionSyncRequestV6(op, key, val)
 	return m.syncSessionRequestLocked(req)
 }
+func (m *Manager) stampSessionMutationLocked(req *SessionSyncRequest) {
+	req.HelperEpoch = m.procGen
+	if req.OperationID == "" {
+		m.sessionOperationID++
+		req.OperationID = fmt.Sprintf("%d-%d", req.HelperEpoch, m.sessionOperationID)
+	}
+	if req.MutationID == "" {
+		if req.RTFlowSessionID == 0 && req.Generation == 0 {
+			// A bare tuple is not an incarnation. Keep ordinary deletes and
+			// legacy rows from suppressing a later session that reuses it.
+			req.MutationID = "op:" + req.OperationID
+			return
+		}
+		req.MutationID = fmt.Sprintf(
+			"%s|%d|%d|%s|%s|%d|%d|%d|%d|%d|%s|%s|%d|%d",
+			req.Operation,
+			req.AddrFamily,
+			req.Protocol,
+			req.SrcIP,
+			req.DstIP,
+			req.SrcPort,
+			req.DstPort,
+			req.RoutingDomain,
+			req.Generation,
+			req.RTFlowSessionID,
+			req.NATSrcIP,
+			req.NATDstIP,
+			req.NATSrcPort,
+			req.NATDstPort,
+		)
+	}
+}
 
 func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
+	_, err := m.syncSessionRequestResponseLocked(req)
+	return err
+}
+
+func (m *Manager) syncSessionRequestResponseLocked(
+	req SessionSyncRequest,
+) (ControlResponse, error) {
+	m.stampSessionMutationLocked(&req)
 	// Build the control request under mu (for data access), then release mu
 	// before the socket I/O so snapshot publishes aren't blocked.
 	ctrlReq := ControlRequest{
@@ -44,12 +85,12 @@ func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
 		SessionSync:    &req,
 	}
 	m.mu.Unlock()
-	err := m.requestSessionSync(ctrlReq)
+	resp, err := m.requestSessionSyncResponse(ctrlReq)
 	m.mu.Lock()
 	if err != nil {
 		slog.Debug("userspace session sync mirror failed", "operation", req.Operation, "err", err)
 	}
-	return err
+	return resp, err
 }
 
 // sendSessionSyncBatch transmits reqs through send, which performs one
@@ -143,6 +184,9 @@ func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) [
 	if len(reqs) == 0 {
 		return nil
 	}
+	for i := range reqs {
+		m.stampSessionMutationLocked(&reqs[i])
+	}
 	m.mu.Unlock()
 	outcomes := sendSessionSyncBatchOutcomes(reqs, m.requestSessionSync)
 	m.mu.Lock()
@@ -176,12 +220,12 @@ func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) [
 //
 // It returns the FIRST helper IPC error encountered, or nil if all succeeded.
 // The bare batch callers discard the result (#5096 best-effort); the scoped
-// batch (#10513) and the authoritative clear-all path (#5881) propagate it
-// so a failed helper revocation is reported instead of masquerading as
-// success.
 func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
 	if len(reqs) == 0 {
 		return nil
+	}
+	for i := range reqs {
+		m.stampSessionMutationLocked(&reqs[i])
 	}
 	m.mu.Unlock()
 	err := sendSessionSyncBatch(reqs, m.requestSessionSync)

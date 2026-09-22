@@ -691,7 +691,7 @@ impl Coordinator {
 
     /// See [`Coordinator::upsert_synced_session`].
     pub fn delete_synced_session(&self, key: crate::session::SessionKey, forward_only: bool) {
-        self.session_domain.delete_synced_session(key, forward_only)
+        self.session_domain.delete_synced_session(key, forward_only);
     }
 
     /// See [`Coordinator::upsert_synced_session`].

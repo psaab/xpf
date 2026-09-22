@@ -140,6 +140,11 @@ pub(crate) fn handle_stream(
         idle_leases: Vec::new(),
         display_leases: Vec::new(),
         session_counters: Vec::new(),
+        session_mirror_v4_count: 0,
+        session_mirror_v6_count: 0,
+        session_mirror_complete: false,
+        session_mirror_fence_id: 0,
+        session_mirror_continuation: String::new(),
     };
     let mut persist_state = false;
     // Capture suppress_status before the match — bool is Copy so this

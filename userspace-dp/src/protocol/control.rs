@@ -194,7 +194,7 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // generations, and the closed admit-reason/completion contract are mandatory.
 // v29 -> v30 (#10485): the capture-generation stamp paired with tunnel rows
 // prevents same-key config/FIB publishes from reusing stale NFQUEUE identity.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 30;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 31;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -809,6 +809,18 @@ pub(crate) struct ControlResponse {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub display_leases: Vec<DisplayLeaseWire>,
+    /// #10512: mirror-clear transaction metadata. Non-clear verbs carry zero
+    /// values; additive serde defaults preserve rolling compatibility.
+    #[serde(rename = "session_mirror_v4_count", default)]
+    pub session_mirror_v4_count: u64,
+    #[serde(rename = "session_mirror_v6_count", default)]
+    pub session_mirror_v6_count: u64,
+    #[serde(rename = "session_mirror_complete", default)]
+    pub session_mirror_complete: bool,
+    #[serde(rename = "session_mirror_fence_id", default)]
+    pub session_mirror_fence_id: u64,
+    #[serde(rename = "session_mirror_continuation", default)]
+    pub session_mirror_continuation: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -875,6 +887,14 @@ pub(crate) struct InjectPacketRequest {
 pub(crate) struct SessionSyncRequest {
     #[serde(default)]
     pub operation: String,
+    /// #10512: helper process epoch and idempotency identity. Additive for
+    /// rolling upgrades; tuple verbs reject an epoch older than the process.
+    #[serde(rename = "helper_epoch", default)]
+    pub helper_epoch: u64,
+    #[serde(rename = "operation_id", default)]
+    pub operation_id: String,
+    #[serde(rename = "mutation_id", default)]
+    pub mutation_id: String,
     #[serde(rename = "addr_family", default)]
     pub addr_family: u8,
     #[serde(default)]
@@ -1117,6 +1137,10 @@ pub(crate) struct SessionSyncRequest {
     ///
     /// The rename MUST match the Go struct tag
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
+    #[serde(rename = "clear_fence_id", default)]
+    pub clear_fence_id: u64,
+    #[serde(rename = "clear_continuation", default)]
+    pub clear_continuation: String,
     #[serde(rename = "install_table_domain", default)]
     pub install_table_domain: u32,
     /// #9752: owner check for `install_table_domain` (high 32 of the FNV-64).

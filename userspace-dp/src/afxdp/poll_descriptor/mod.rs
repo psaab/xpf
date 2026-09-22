@@ -3362,6 +3362,160 @@ pub(super) fn poll_binding_process_descriptor(
                                         binding.scratch.scratch_recycle.push(desc.addr);
                                         continue;
                                     }
+                                    // SessionTable mutation and its conntrack
+                                    // publication below. Refuse this packet
+                                    // rather than mutating local truth and
+                                    // silently dropping a mirror write.
+                                    // #10312: derive the reply target's table
+                                    // from the forward ingress' native domain.
+                                    // Never inherit the directional PBR table.
+                                    let (reverse_context, reverse_decision) =
+                                        crate::afxdp::shared_ops::reverse_session_decision_for_flow(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.ha_state,
+                                            worker_ctx.dynamic_neighbors,
+                                            flow,
+                                            meta.ingress_ifindex as i32,
+                                            meta.ingress_vlan_id,
+                                            from_zone_id,
+                                            fabric_ingress,
+                                            now_secs,
+                                            false,
+                                            decision.nat,
+                                        );
+                                    // Install the reverse entry even if the initial reply-side
+                                    // resolution is not immediately usable. On live traffic the
+                                    // first server reply can arrive before the reverse neighbor
+                                    // state has converged on every worker, and dropping the reverse
+                                    // entry creation turns that race into a hard policy miss. The
+                                    // hit path re-resolves on demand and can fall back to the
+                                    // cached decision when neighbor convergence is still in flight.
+
+                                    // For NAT64: the reverse key is IPv4 (different AF
+                                    // from the forward IPv6 key). The reply arrives as
+                                    // IPv4: src=dst_v4, dst=snat_v4.
+                                    let (reverse_key, reverse_protocol) = if nat64_info.is_some() {
+                                        let nat = decision.nat;
+                                        let dst_v4 = match nat.rewrite_dst {
+                                            Some(IpAddr::V4(v4)) => v4,
+                                            _ => Ipv4Addr::UNSPECIFIED,
+                                        };
+                                        let snat_v4 = match nat.rewrite_src {
+                                            Some(IpAddr::V4(v4)) => v4,
+                                            _ => Ipv4Addr::UNSPECIFIED,
+                                        };
+                                        // Map protocol: ICMPv6→ICMP for the reverse key.
+                                        let rev_proto = match meta.protocol {
+                                            PROTO_ICMPV6 => PROTO_ICMP,
+                                            p => p,
+                                        };
+                                        // #4381: the reply's L4 field the server
+                                        // replies TO is the UNIQUE translated
+                                        // source port / echo identifier (carried
+                                        // in `rewrite_src_port`), NOT the
+                                        // original v6 client value. The reverse
+                                        // key must therefore key on the
+                                        // translated value or the reply misses
+                                        // the session. For TCP/UDP the reply's
+                                        // destination port is the translated
+                                        // port; for ICMP echo the reply's
+                                        // identifier (mapped to `src_port` by
+                                        // `parse_flow_ports`) is the translated
+                                        // id.
+                                        let translated_l4 = nat
+                                            .rewrite_src_port
+                                            .unwrap_or(flow.forward_key.src_port);
+                                        let (src_port, dst_port) =
+                                            if matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6) {
+                                                (translated_l4, flow.forward_key.dst_port)
+                                            } else {
+                                                (flow.forward_key.dst_port, translated_l4)
+                                            };
+                                        (
+                                            SessionKey {
+                                                addr_family: libc::AF_INET as u8,
+                                                protocol: rev_proto,
+                                                src_ip: IpAddr::V4(dst_v4),
+                                                dst_ip: IpAddr::V4(snat_v4),
+                                                src_port,
+                                                dst_port,
+                                                discriminator: Default::default(),
+                                                // #9033: carry the forward flow's
+                                                // routing domain. The sibling arm below
+                                                // builds its reverse companion through
+                                                // `reverse_session_key`, which preserves
+                                                // it verbatim, so hardcoding 0 here gave
+                                                // the same flow a different identity
+                                                // purely because it took the NAT64
+                                                // branch -- and the reply, whose key IS
+                                                // domain-stamped on ingress, then missed
+                                                // this installed companion.
+                                                //
+                                                // This is an INSTALLED companion, not a
+                                                // reverse-MATCH index key. The
+                                                // deliberate domain-agnostic convention
+                                                // in session/key.rs belongs to
+                                                // `reverse_wire_key` /
+                                                // `reverse_canonical_key`, whose probes
+                                                // are zeroed to match by
+                                                // `reverse_match_key`; that pairing is
+                                                // self-consistent and independent of
+                                                // what an installed session carries.
+                                                //
+                                                // The `discriminator` above is left as
+                                                // it is on purpose: NAT64 is v6<->v4
+                                                // translation, not tunnelling, and the
+                                                // embedded-ICMP discriminator erasure is
+                                                // #9031's subject, which needs the
+                                                // quoted GRE header parsed rather than a
+                                                // field copied.
+                                                routing_domain: flow.forward_key.routing_domain,
+                                            },
+                                            rev_proto,
+                                        )
+                                    } else {
+                                        (flow.reverse_key_with_nat(decision.nat), meta.protocol)
+                                    };
+                                    let install_permits = if track_in_userspace {
+                                        let mut gate_keys = vec![flow.forward_key.clone()];
+                                        if install_local_reverse {
+                                            gate_keys.push(reverse_key.clone());
+                                        }
+                                        match crate::afxdp::bpf_map::global_tuple_gate()
+                                            .try_acquire_installs(gate_keys)
+                                        {
+                                            Ok(permits) => permits,
+                                            Err(_) => {
+                                                sessions.note_admission_refused();
+                                                rollback_source_nat_allocation_for_worker(
+                                                    &worker_ctx.forwarding.iface_nat_allocators,
+                                                    &worker_ctx.forwarding.source_nat_rules,
+                                                    source_nat_release_key
+                                                        .as_ref()
+                                                        .unwrap_or(&flow.forward_key),
+                                                    decision.nat,
+                                                    false,
+                                                    now_ns,
+                                                    worker_id,
+                                                );
+                                                crate::nat64::rollback_nat64_allocation_for_worker(
+                                                    &worker_ctx.forwarding.nat64,
+                                                    &flow.forward_key,
+                                                    decision.nat,
+                                                    false,
+                                                    now_ns,
+                                                    worker_id,
+                                                );
+                                                binding.scratch.scratch_recycle.push(desc.addr);
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let mut install_permits = install_permits.into_iter();
+                                    let _forward_install_permit = install_permits.next();
+                                    let reverse_install_permit = install_permits.next();
                                     // #3322: bind the admitting rule's shared
                                     // hit counter ONCE here, where
                                     // `policy_result.policy_counter_idx` still
@@ -3672,7 +3826,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // #8125: see the sibling site.
                                         let ct_timeout_secs =
                                             sessions.timeout_secs_for(&flow.forward_key);
-                                        publish_bpf_conntrack_entry(
+                                        publish_bpf_conntrack_entry_under_gate(
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
                                             &flow.forward_key,
@@ -3751,116 +3905,6 @@ pub(super) fn poll_binding_process_descriptor(
                                             worker_id,
                                         );
                                     }
-                                    // #10312: derive the reply target's table
-                                    // from the forward ingress' native domain.
-                                    // Never inherit the directional PBR table.
-                                    let (reverse_context, reverse_decision) =
-                                        crate::afxdp::shared_ops::reverse_session_decision_for_flow(
-                                            worker_ctx.forwarding,
-                                            worker_ctx.ha_state,
-                                            worker_ctx.dynamic_neighbors,
-                                            flow,
-                                            meta.ingress_ifindex as i32,
-                                            meta.ingress_vlan_id,
-                                            from_zone_id,
-                                            fabric_ingress,
-                                            now_secs,
-                                            false,
-                                            decision.nat,
-                                        );
-                                    // Install the reverse entry even if the initial reply-side
-                                    // resolution is not immediately usable. On live traffic the
-                                    // first server reply can arrive before the reverse neighbor
-                                    // state has converged on every worker, and dropping the reverse
-                                    // entry creation turns that race into a hard policy miss. The
-                                    // hit path re-resolves on demand and can fall back to the
-                                    // cached decision when neighbor convergence is still in flight.
-
-                                    // For NAT64: the reverse key is IPv4 (different AF
-                                    // from the forward IPv6 key). The reply arrives as
-                                    // IPv4: src=dst_v4, dst=snat_v4.
-                                    let (reverse_key, reverse_protocol) = if nat64_info.is_some() {
-                                        let nat = decision.nat;
-                                        let dst_v4 = match nat.rewrite_dst {
-                                            Some(IpAddr::V4(v4)) => v4,
-                                            _ => Ipv4Addr::UNSPECIFIED,
-                                        };
-                                        let snat_v4 = match nat.rewrite_src {
-                                            Some(IpAddr::V4(v4)) => v4,
-                                            _ => Ipv4Addr::UNSPECIFIED,
-                                        };
-                                        // Map protocol: ICMPv6→ICMP for the reverse key.
-                                        let rev_proto = match meta.protocol {
-                                            PROTO_ICMPV6 => PROTO_ICMP,
-                                            p => p,
-                                        };
-                                        // #4381: the reply's L4 field the server
-                                        // replies TO is the UNIQUE translated
-                                        // source port / echo identifier (carried
-                                        // in `rewrite_src_port`), NOT the
-                                        // original v6 client value. The reverse
-                                        // key must therefore key on the
-                                        // translated value or the reply misses
-                                        // the session. For TCP/UDP the reply's
-                                        // destination port is the translated
-                                        // port; for ICMP echo the reply's
-                                        // identifier (mapped to `src_port` by
-                                        // `parse_flow_ports`) is the translated
-                                        // id.
-                                        let translated_l4 = nat
-                                            .rewrite_src_port
-                                            .unwrap_or(flow.forward_key.src_port);
-                                        let (src_port, dst_port) =
-                                            if matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6) {
-                                                (translated_l4, flow.forward_key.dst_port)
-                                            } else {
-                                                (flow.forward_key.dst_port, translated_l4)
-                                            };
-                                        (
-                                            SessionKey {
-                                                addr_family: libc::AF_INET as u8,
-                                                protocol: rev_proto,
-                                                src_ip: IpAddr::V4(dst_v4),
-                                                dst_ip: IpAddr::V4(snat_v4),
-                                                src_port,
-                                                dst_port,
-                                                discriminator: Default::default(),
-                                                // #9033: carry the forward flow's
-                                                // routing domain. The sibling arm below
-                                                // builds its reverse companion through
-                                                // `reverse_session_key`, which preserves
-                                                // it verbatim, so hardcoding 0 here gave
-                                                // the same flow a different identity
-                                                // purely because it took the NAT64
-                                                // branch -- and the reply, whose key IS
-                                                // domain-stamped on ingress, then missed
-                                                // this installed companion.
-                                                //
-                                                // This is an INSTALLED companion, not a
-                                                // reverse-MATCH index key. The
-                                                // deliberate domain-agnostic convention
-                                                // in session/key.rs belongs to
-                                                // `reverse_wire_key` /
-                                                // `reverse_canonical_key`, whose probes
-                                                // are zeroed to match by
-                                                // `reverse_match_key`; that pairing is
-                                                // self-consistent and independent of
-                                                // what an installed session carries.
-                                                //
-                                                // The `discriminator` above is left as
-                                                // it is on purpose: NAT64 is v6<->v4
-                                                // translation, not tunnelling, and the
-                                                // embedded-ICMP discriminator erasure is
-                                                // #9031's subject, which needs the
-                                                // quoted GRE header parsed rather than a
-                                                // field copied.
-                                                routing_domain: flow.forward_key.routing_domain,
-                                            },
-                                            rev_proto,
-                                        )
-                                    } else {
-                                        (flow.reverse_key_with_nat(decision.nat), meta.protocol)
-                                    };
                                     let _ = reverse_protocol; // used below for install
                                     let reverse_leak_incarnation =
                                         crate::afxdp::forwarding::leak_incarnation_for_resolution(
@@ -3923,6 +3967,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     // fork.
                                     let reverse_installed = forward_installed
                                         && install_local_reverse
+                                        && reverse_install_permit.is_some()
                                         && sessions.install_with_protocol_with_origin(
                                             reverse_key.clone(),
                                             reverse_decision,

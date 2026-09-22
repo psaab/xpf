@@ -142,6 +142,9 @@ type Manager struct {
 	// which counts CONFIG snapshots: one config can outlive many helper
 	// processes across a crash-restart, and one helper can serve many configs.
 	procGen uint64
+	// sessionOperationID is monotonic within this Manager/helper lifecycle and
+	// is paired with procGen on every helper-first tuple mutation.
+	sessionOperationID uint64
 	// helperCrashEpisodes is the #8397 bounded history of RECOVERED crash
 	// episodes, oldest-first, and helperCrashEpisodesTotal the unbounded count
 	// of them. Separate from helperCrash because that record is episode-scoped

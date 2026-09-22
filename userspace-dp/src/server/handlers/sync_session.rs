@@ -92,7 +92,10 @@ pub(super) fn handle(
             // identity for every Unrecognized value — only 0 maps to the
             // marker 1 — and no other raw domain maps onto one), so resolving
             // it is exact, not a guess.
-            if sync_req.operation.as_str() != "delete" {
+            if !matches!(
+                sync_req.operation.as_str(),
+                "delete" | "mirror_delete" | "mirror_delete_batch"
+            ) {
                 domain.note_unknown_routing_domain_import();
                 response.ok = false;
                 response.error =
@@ -102,8 +105,39 @@ pub(super) fn handle(
             Some(sync_req.routing_domain)
         }
     };
+    let epoch_scoped = matches!(
+        sync_req.operation.as_str(),
+        "mirror_upsert"
+            | "mirror_publish_only"
+            | "mirror_delete"
+            | "mirror_delete_batch"
+            | "mirror_clear_chunk"
+    );
+    if epoch_scoped && !domain.accepts_helper_epoch(sync_req.helper_epoch) {
+        response.ok = false;
+        response.error = "helper-epoch-stale".to_string();
+        return;
+    }
+    if epoch_scoped
+        && !sync_req.operation_id.is_empty()
+        && !sync_req.mutation_id.is_empty()
+    {
+        match domain.helper_mutation_seen(
+            sync_req.helper_epoch,
+            &sync_req.operation_id,
+            &sync_req.mutation_id,
+        ) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(reason) => {
+                response.ok = false;
+                response.error = reason.to_string();
+                return;
+            }
+        }
+    }
     match sync_req.operation.as_str() {
-        "upsert" if resolved_domain.is_none() => {
+        "upsert" | "mirror_upsert" | "mirror_publish_only" if resolved_domain.is_none() => {
             domain.note_unknown_routing_domain_import();
             response.ok = false;
             response.error = format!(
@@ -113,7 +147,7 @@ pub(super) fn handle(
                     .expect("a rejection always carries a reason token")
             );
         }
-        "upsert" => match build_synced_session_entry(
+        "upsert" | "mirror_upsert" => match build_synced_session_entry(
             &sync_req,
             view.zone_name_to_id(),
             resolved_domain.expect("the None arm above already returned"),
@@ -133,16 +167,50 @@ pub(super) fn handle(
                 // and gates takeover-readiness (#5247), whereas a refusal is the
                 // correct answer from a HEALTHY helper and must not block
                 // failover on a node that is working.
-                let outcome = domain.upsert_synced_session(entry);
+                let outcome = if sync_req.operation == "mirror_upsert" {
+                    domain.upsert_synced_session_mirror(entry)
+                } else {
+                    domain.upsert_synced_session(entry)
+                };
                 if let Some(reason) = outcome.refusal_reason() {
                     response.ok = false;
-                    response.error =
-                        format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}");
+                    response.error = if reason == "mirror-write-failed" {
+                        reason.to_string()
+                    } else {
+                        format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}")
+                    };
                 }
             }
             Err(err) => {
                 response.ok = false;
                 response.error = err;
+            }
+        },
+        "mirror_publish_only" => match build_synced_session_entry(
+            &sync_req,
+            view.zone_name_to_id(),
+            resolved_domain.expect("the None arm above already returned"),
+        ) {
+            Ok(entry) => {
+                if let Err(err) = view.publish_mirror_only(&entry) {
+                    response.ok = false;
+                    response.error = format!("mirror-publish:{err}");
+                }
+            }
+            Err(err) => {
+                response.ok = false;
+                response.error = err;
+            }
+        },
+        "mirror_clear_chunk" => match domain.clear_mirror() {
+            Ok((v4, v6)) => {
+                response.session_mirror_v4_count = v4 as u64;
+                response.session_mirror_v6_count = v6 as u64;
+                response.session_mirror_complete = true;
+            }
+            Err(err) => {
+                response.ok = false;
+                response.error = format!("mirror-clear:{err}");
             }
         },
         // #7188: a delete reconstructs the key with `Delete` intent, so a peer
@@ -158,7 +226,7 @@ pub(super) fn handle(
         // the 5-tuple did not already name. Two different fields, one rule —
         // fail closed where an identity is PUBLISHED, fail open where one is
         // only RETRACTED.
-        "delete" => match build_synced_session_key(
+        "delete" | "mirror_delete" | "mirror_delete_batch" => match build_synced_session_key(
             &sync_req,
             resolved_domain.unwrap_or(0),
             SyncedKeyIntent::Delete,
@@ -174,17 +242,28 @@ pub(super) fn handle(
                 // the same value. Only an ownership refusal — whether the early
                 // #9714 check or the under-lock #9960 concurrent check — is
                 // answered in-band with the peer-delete token. A stale-generation
-                // refusal means the helper already holds something newer, so there
-                // is nothing for the Go side to preserve and nothing to tell it
-                // about.
                 let forward_only = sync_req.forward_only;
-                let delete = |key| {
+                let strict_mirror = matches!(
+                    sync_req.operation.as_str(),
+                    "mirror_delete" | "mirror_delete_batch"
+                );
+                let mut mirror_delete_error = false;
+                let mut delete = |key| {
                     if sync_req.peer_delete {
-                        domain
-                            .delete_peer_synced_session(key, forward_only)
-                            .keeps_caller_rows()
+                        let outcome = if strict_mirror {
+                            domain.delete_peer_synced_session_mirror(key, forward_only)
+                        } else {
+                            domain.delete_peer_synced_session(key, forward_only)
+                        };
+                        mirror_delete_error |= outcome.mirror_delete_failed();
+                        outcome.keeps_caller_rows()
                     } else {
-                        domain.delete_synced_session(key, forward_only);
+                        let outcome = if strict_mirror {
+                            domain.delete_synced_session_mirror(key, forward_only)
+                        } else {
+                            domain.delete_synced_session(key, forward_only)
+                        };
+                        mirror_delete_error |= outcome.mirror_delete_failed();
                         false
                     }
                 };
@@ -315,7 +394,10 @@ pub(super) fn handle(
                         }
                     }
                 }
-                if refused && response.ok {
+                if mirror_delete_error && response.ok {
+                    response.ok = false;
+                    response.error = "mirror-write-failed".to_string();
+                } else if refused && response.ok {
                     response.ok = false;
                     response.error =
                         format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned");
@@ -330,5 +412,12 @@ pub(super) fn handle(
             response.ok = false;
             response.error = format!("unknown session sync operation {other}");
         }
+    }
+    if epoch_scoped && response.ok {
+        domain.record_helper_mutation(
+            sync_req.helper_epoch,
+            &sync_req.operation_id,
+            &sync_req.mutation_id,
+        );
     }
 }

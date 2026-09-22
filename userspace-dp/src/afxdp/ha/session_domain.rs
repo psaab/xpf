@@ -70,7 +70,8 @@ pub(crate) enum HaRefreshOutcome {
 
 /// A cloneable, lock-free handle onto the peer-synced session domain.
 ///
-/// Cheap to clone (eight `Arc` bumps) and valid for the coordinator's whole life:
+/// Cheap to clone (the live references and two mutation-lifecycle cells are
+/// all `Arc`s) and valid for the coordinator's whole life:
 /// none of the fields it mirrors is ever REASSIGNED on the `Coordinator` — only
 /// mutated through its own interior synchronization — which is what makes a
 /// handle taken at startup observe every later change rather than a snapshot.
@@ -86,11 +87,14 @@ pub(crate) struct SessionDomain {
     /// rows in, so an HA delete racing a teardown or bringup sees their claims.
     pub(in crate::afxdp) steering_owners: Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
     pub(in crate::afxdp) rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    pub(in crate::afxdp) dynamic_neighbors: Arc<ShardedNeighborMap>,
     /// #9629: the HA leaf mutex (`HaState::ha_mutex`), shared — not copied —
     /// so the session fast path serializes against the locked path across the
     /// load→decisions→store section. Same `Arc`, same mutex, same µs hold.
     pub(in crate::afxdp) ha_mutex: Arc<Mutex<()>>,
-    pub(in crate::afxdp) dynamic_neighbors: Arc<ShardedNeighborMap>,
+    pub(in crate::afxdp) helper_epoch: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::afxdp) helper_mutations:
+        Arc<Mutex<std::collections::HashMap<(u64, String), String>>>,
     /// #6819 §7 test seam, SHARED rather than copied. The six tests that set it
     /// do so on the `Coordinator` after construction; a copied `usize` would
     /// leave the handle reading 0 and every cap assertion would pass against
@@ -117,6 +121,81 @@ pub(crate) struct SessionDomain {
         Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 impl SessionDomain {
+    /// Session mutations from a previous helper generation must not be applied
+    /// after a restart. Zero preserves compatibility with pre-epoch peers.
+    pub(crate) fn accepts_helper_epoch(&self, epoch: u64) -> bool {
+        if epoch == 0 {
+            return true;
+        }
+        use std::sync::atomic::Ordering;
+        let current = self.helper_epoch.load(Ordering::Acquire);
+        if current == 0 {
+            self.helper_epoch
+                .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
+                .map_or_else(|actual| actual == epoch, |_| true)
+        } else {
+            current == epoch
+        }
+    }
+    /// Return whether this mutation was already applied. The two identities
+    /// are both checked: reusing an operation id with a different mutation is
+    /// rejected, while a retry carrying the same mutation id is idempotent.
+    pub(crate) fn helper_mutation_seen(
+        &self,
+        epoch: u64,
+        operation_id: &str,
+        mutation_id: &str,
+    ) -> Result<bool, &'static str> {
+        if operation_id.is_empty() || mutation_id.is_empty() {
+            return Ok(false);
+        }
+        let seen = self
+            .helper_mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(previous) = seen.get(&(epoch, format!("op:{operation_id}")))
+            && previous != mutation_id
+        {
+            return Err("operation-id-reused");
+        }
+        Ok(seen.contains_key(&(epoch, format!("mut:{mutation_id}"))))
+    }
+
+    pub(crate) fn record_helper_mutation(
+        &self,
+        epoch: u64,
+        operation_id: &str,
+        mutation_id: &str,
+    ) {
+        if operation_id.is_empty() || mutation_id.is_empty() {
+            return;
+        }
+        let mut seen = self
+            .helper_mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const MAX_MUTATIONS: usize = 16_384;
+        if seen.len() >= MAX_MUTATIONS * 2
+            && let Some(((old_epoch, old_key), old_value)) =
+                seen.iter().next().map(|(key, value)| (key.clone(), value.clone()))
+        {
+            seen.remove(&(old_epoch, old_key.clone()));
+            let counterpart = if old_key.starts_with("op:") {
+                format!("mut:{old_value}")
+            } else {
+                format!("op:{old_value}")
+            };
+            seen.remove(&(old_epoch, counterpart));
+        }
+        seen.insert(
+            (epoch, format!("op:{operation_id}")),
+            mutation_id.to_string(),
+        );
+        seen.insert(
+            (epoch, format!("mut:{mutation_id}")),
+            operation_id.to_string(),
+        );
+    }
     /// #9629 test-only rendezvous: notify immediately before the fast path
     /// attempts its shared HA leaf mutex. The production build has no sender
     /// field or callback, so this cannot alter the lock ordering.
@@ -168,7 +247,8 @@ impl SessionDomain {
     ///
     /// Takes borrows of the live fields rather than an `&Coordinator`, so it
     /// can be called from inside `Coordinator::new`'s struct construction —
-    /// and so the compiler enforces that it reads exactly these eight things.
+    /// and so the compiler enforces that it reads exactly these six live
+    /// sources (plus the test-only cap seam).
     pub(in crate::afxdp) fn new(
         sessions: &Arc<SessionManager>,
         workers: &WorkerManager,
@@ -187,6 +267,8 @@ impl SessionDomain {
             rg_runtime: Arc::clone(&ha.rg_runtime),
             ha_mutex: Arc::clone(&ha.ha_mutex),
             dynamic_neighbors: Arc::clone(&neighbors.dynamic),
+            helper_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            helper_mutations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             #[cfg(test)]
             synced_import_cap_override: Arc::clone(synced_import_cap_override),
             #[cfg(test)]
@@ -515,6 +597,28 @@ impl SessionDomainView<'_> {
     /// ID fields.
     pub(crate) fn zone_name_to_id(&self) -> &FastMap<String, u16> {
         &self.view.forwarding().zone_name_to_id
+    }
+    pub(crate) fn publish_mirror_only(
+        &self,
+        entry: &crate::afxdp::worker::SyncedSessionEntry,
+    ) -> Result<(), &'static str> {
+        let _lease = crate::afxdp::bpf_map::global_tuple_gate()
+            .acquire_lease([entry.key.clone()])
+            .map_err(|_| "gate-busy")?;
+        match self
+            .domain
+            .publish_mirror_only(self.view.forwarding(), entry)
+        {
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written
+            | crate::afxdp::bpf_map::ConntrackPublishResult::IntentionallySkipped => Ok(()),
+            crate::afxdp::bpf_map::ConntrackPublishResult::GateBusy => Err("gate-busy"),
+            crate::afxdp::bpf_map::ConntrackPublishResult::KernelError => {
+                Err("mirror-write-failed")
+            }
+            crate::afxdp::bpf_map::ConntrackPublishResult::NoMap => {
+                Err("mirror-map-unavailable")
+            }
+        }
     }
 }
 

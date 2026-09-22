@@ -332,7 +332,7 @@ const (
 	// `ipsec_tunnel_rows` fences rows against same-key config/FIB publishes.
 	// A v29 helper can decode the rows but cannot prove that the packet's
 	// admitted handle generation is the one in the RuntimeView.
-	ProtocolVersion = 30
+	ProtocolVersion = 31
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -556,6 +556,12 @@ type ControlResponse struct {
 	// helper's `unknown request type` error and surfaces as
 	// ErrSessionCountersUnsupported, never as an empty answer.
 	SessionCounters []SessionCounterRow `json:"session_counters,omitempty"`
+	// #10512: helper-owned clear transaction metadata.
+	SessionMirrorV4Count      uint64 `json:"session_mirror_v4_count,omitempty"`
+	SessionMirrorV6Count      uint64 `json:"session_mirror_v6_count,omitempty"`
+	SessionMirrorComplete     bool   `json:"session_mirror_complete,omitempty"`
+	SessionMirrorFenceID      uint64 `json:"session_mirror_fence_id,omitempty"`
+	SessionMirrorContinuation string `json:"session_mirror_continuation,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than

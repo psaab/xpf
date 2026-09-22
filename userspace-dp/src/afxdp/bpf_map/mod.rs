@@ -1,4 +1,6 @@
 use super::*;
+mod tuple_gate;
+pub(crate) use tuple_gate::*;
 
 /// #9517: `has_routing_domains` DEMOTES a `PASS_TO_KERNEL` row to `REDIRECT`,
 /// for the same reason the `lo0`-filter gate in `session_glue` already does.
@@ -806,8 +808,49 @@ pub(super) struct ConntrackPublishSampling;
 pub(super) fn conntrack_publishes() -> Vec<ConntrackPublishRecord> {
     CONNTRACK_PUBLISHES.with(|records| records.borrow().clone())
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConntrackPublishResult {
+    Written,
+    IntentionallySkipped,
+    GateBusy,
+    KernelError,
+    NoMap,
+}
 
-pub(super) fn publish_bpf_conntrack_entry(
+pub(crate) fn publish_bpf_conntrack_entry(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    zone_name_to_id: &FastMap<String, u16>,
+    alg_disable_flags: u8,
+    app_id: u16,
+    session_id: u64,
+    timeout_secs: u32,
+    origin: SessionOrigin,
+) -> ConntrackPublishResult {
+    match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, || {
+        publish_bpf_conntrack_entry_raw(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            key,
+            decision,
+            metadata,
+            zone_name_to_id,
+            alg_disable_flags,
+            app_id,
+            session_id,
+            timeout_secs,
+            origin,
+        )
+    }) {
+        Ok(result) => result,
+        Err(_) => ConntrackPublishResult::GateBusy,
+    }
+}
+
+fn publish_bpf_conntrack_entry_raw(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
@@ -833,7 +876,7 @@ pub(super) fn publish_bpf_conntrack_entry(
     // (SessionTable::timeout_secs_for); 0 = no live entry.
     timeout_secs: u32,
     origin: SessionOrigin,
-) {
+) -> ConntrackPublishResult {
     // #6965: record the call BEFORE the `fd >= 0` gate below. The gate is what
     // makes this a no-op under a unit test's `-1` fds, and the property the
     // #6965 tests bind is that the call SITE exists on the transit install
@@ -885,7 +928,7 @@ pub(super) fn publish_bpf_conntrack_entry(
                 app_id,
                 session_id,
                 timeout_secs,
-            );
+            )
         }
         (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
             publish_conntrack::publish_v6_session(
@@ -903,40 +946,153 @@ pub(super) fn publish_bpf_conntrack_entry(
                 app_id,
                 session_id,
                 timeout_secs,
-            );
+            )
         }
-        _ => {}
+        (libc::AF_INET, IpAddr::V4(..), IpAddr::V4(..)) => ConntrackPublishResult::NoMap,
+        (libc::AF_INET6, IpAddr::V6(..), IpAddr::V6(..)) => ConntrackPublishResult::NoMap,
+        _ => ConntrackPublishResult::IntentionallySkipped,
+    }
+}
+
+/// Publish while the caller owns the tuple admission lease.
+///
+/// The low-level write intentionally does not acquire a second permit: worker
+/// callers must acquire `try_acquire_install` before mutating their table, and
+/// helper callers hold a `GateLease` across their complete transaction.
+pub(crate) fn publish_bpf_conntrack_entry_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    zone_name_to_id: &FastMap<String, u16>,
+    alg_disable_flags: u8,
+    app_id: u16,
+    session_id: u64,
+    timeout_secs: u32,
+    origin: SessionOrigin,
+) -> ConntrackPublishResult {
+    publish_bpf_conntrack_entry_raw(
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        key,
+        decision,
+        metadata,
+        zone_name_to_id,
+        alg_disable_flags,
+        app_id,
+        session_id,
+        timeout_secs,
+        origin,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConntrackDeleteResult {
+    Deleted,
+    GateBusy,
+    KernelError,
+}
+
+/// Delete a session entry from the BPF conntrack map and retain gate refusal.
+pub(crate) fn delete_bpf_conntrack_entry_result(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> ConntrackDeleteResult {
+    match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, || {
+        delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key)
+    }) {
+        Ok(true) => ConntrackDeleteResult::Deleted,
+        Ok(false) => ConntrackDeleteResult::KernelError,
+        Err(_) => ConntrackDeleteResult::GateBusy,
     }
 }
 
 /// Delete a session entry from the BPF conntrack map.
-pub(super) fn delete_bpf_conntrack_entry(
+pub(crate) fn delete_bpf_conntrack_entry(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
-) {
+) -> bool {
+    matches!(
+        delete_bpf_conntrack_entry_result(conntrack_v4_fd, conntrack_v6_fd, key),
+        ConntrackDeleteResult::Deleted
+    )
+}
+
+fn delete_bpf_conntrack_entry_raw(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> bool {
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
         (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
-            let bpf_key = bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
-            let _ = unsafe {
+            let bpf_key =
+                bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+            let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
                     conntrack_v4_fd,
                     (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                 )
             };
+            rc >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
         }
         (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
-            let bpf_key = bpf_session_key_v6(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
-            let _ = unsafe {
+            let bpf_key =
+                bpf_session_key_v6(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+            let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
                     conntrack_v6_fd,
                     (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                 )
             };
+            rc >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
         }
-        _ => {}
+        _ => false,
     }
 }
+
+/// Delete while the caller owns the tuple admission lease.
+pub(crate) fn delete_bpf_conntrack_entry_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> bool {
+    delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key)
+}
+
+pub(crate) fn clear_bpf_conntrack_maps(conntrack_v4_fd: c_int, conntrack_v6_fd: c_int) -> (usize, usize) {
+    fn clear_one(fd: c_int, key_size: usize) -> usize {
+        if fd < 0 {
+            return 0;
+        }
+        let mut key = vec![0u8; key_size];
+        let mut next = vec![0u8; key_size];
+        let mut current: *const c_void = std::ptr::null();
+        let mut deleted = 0usize;
+        loop {
+            let rc = unsafe {
+                libbpf_sys::bpf_map_get_next_key(fd, current, next.as_mut_ptr().cast::<c_void>())
+            };
+            if rc != 0 {
+                break;
+            }
+            let _ = unsafe {
+                libbpf_sys::bpf_map_delete_elem(fd, next.as_ptr().cast::<c_void>())
+            };
+            deleted += 1;
+            key.copy_from_slice(&next);
+            current = key.as_ptr().cast::<c_void>();
+        }
+        deleted
+    }
+    (
+        clear_one(conntrack_v4_fd, std::mem::size_of::<BpfSessionKeyV4>()),
+        clear_one(conntrack_v6_fd, std::mem::size_of::<BpfSessionKeyV6>()),
+    )
+}
+
 
 /// Update `last_seen` in BPF conntrack entries for active userspace sessions.
 ///
