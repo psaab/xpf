@@ -270,6 +270,65 @@ fn process_status_neighbor_phase3_counters_roundtrip() {
     assert_eq!(legacy.neg_neigh_keys, 0);
 }
 
+#[test]
+fn process_status_ipsec_sa_counters_roundtrip() {
+    let status = ProcessStatus {
+        ipsec_sa_miss_dropped_packets_total: 1,
+        ipsec_sa_miss_no_sa_total: 2,
+        ipsec_sa_miss_truncated_total: 3,
+        ipsec_sa_miss_malformed_ike_total: 4,
+        ipsec_sa_miss_keepalive_total: 5,
+        ipsec_sa_snapshot_stale_deny_total: 6,
+        ipsec_sa_inserts_total: 7,
+        ipsec_sa_removes_total: 8,
+        ipsec_sa_expiry_removes_total: 9,
+        ipsec_sa_evictions_total: 10,
+        ipsec_sa_netlink_enobufs_total: 11,
+        ipsec_sa_netlink_redumps_total: 12,
+        ipsec_sa_netlink_redump_upserts_total: 13,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    let keys = [
+        ("ipsec_sa_miss_dropped_packets_total", 1u64),
+        ("ipsec_sa_miss_no_sa_total", 2),
+        ("ipsec_sa_miss_truncated_total", 3),
+        ("ipsec_sa_miss_malformed_ike_total", 4),
+        ("ipsec_sa_miss_keepalive_total", 5),
+        ("ipsec_sa_snapshot_stale_deny_total", 6),
+        ("ipsec_sa_inserts_total", 7),
+        ("ipsec_sa_removes_total", 8),
+        ("ipsec_sa_expiry_removes_total", 9),
+        ("ipsec_sa_evictions_total", 10),
+        ("ipsec_sa_netlink_enobufs_total", 11),
+        ("ipsec_sa_netlink_redumps_total", 12),
+        ("ipsec_sa_netlink_redump_upserts_total", 13),
+    ];
+    for (key, want) in keys {
+        assert_eq!(value[key], want, "wire key {key}");
+    }
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.ipsec_sa_miss_dropped_packets_total, 1);
+    assert_eq!(back.ipsec_sa_miss_no_sa_total, 2);
+    assert_eq!(back.ipsec_sa_miss_truncated_total, 3);
+    assert_eq!(back.ipsec_sa_miss_malformed_ike_total, 4);
+    assert_eq!(back.ipsec_sa_miss_keepalive_total, 5);
+    assert_eq!(back.ipsec_sa_snapshot_stale_deny_total, 6);
+    assert_eq!(back.ipsec_sa_inserts_total, 7);
+    assert_eq!(back.ipsec_sa_removes_total, 8);
+    assert_eq!(back.ipsec_sa_expiry_removes_total, 9);
+    assert_eq!(back.ipsec_sa_evictions_total, 10);
+    assert_eq!(back.ipsec_sa_netlink_enobufs_total, 11);
+    assert_eq!(back.ipsec_sa_netlink_redumps_total, 12);
+    assert_eq!(back.ipsec_sa_netlink_redump_upserts_total, 13);
+
+    let legacy: ProcessStatus = serde_json::from_value(serde_json::json!({}))
+        .expect("legacy payload decodes with additive defaults");
+    assert_eq!(legacy.ipsec_sa_miss_dropped_packets_total, 0);
+    assert_eq!(legacy.ipsec_sa_netlink_redump_upserts_total, 0);
+}
+
 // #2375: round-trip + backward-compat pin for the pending_neigh
 // distinct-hop capacity-drop counter. The wire key feeds
 // pkg/dataplane/userspace/protocol.go and the Prometheus counter

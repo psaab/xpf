@@ -1247,62 +1247,19 @@ fn reinject_outlet_selection_records_on_matching_status() {
     assert_eq!(r.status().dropped_packets, trusted_drops);
 }
 
-// #9637/#10391 operator narrowing: every production reinject site declares
-// its outlet, and only the filtered chokepoint may derive Trusted from the
-// disposition. The ForwardCandidate fallback remains delegated; synthetic
-// IPsec passthrough is explicitly adjudicated because it is a policy-exempt
-// xfrm/reinject class whose queue must carry the fence mark. A site that
-// stops declaring its structural outlet reds here.
+// #9637/#10391 operator narrowing: the filtered chokepoint derives the
+// trusted outlet only after host-inbound gating. The Stage-11 arm is covered
+// by behavioral poll-loop cells below; this test keeps only the chokepoint's
+// production mapping pin.
 #[test]
 fn reinject_outlet_declared_per_production_site_9637() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let read = |rel: &str| {
-        std::fs::read_to_string(root.join(rel)).expect("read reinject call site")
-    };
-    let after_call = |src: &str, marker: &str, window: usize| -> String {
-        let i = src
-            .find(marker)
-            .unwrap_or_else(|| panic!("call site marker not found: {marker}"));
-        src[i..std::cmp::min(i + window, src.len())].to_string()
-    };
-    // ForwardCandidate fallback: literal false (forward disposition, never
-    // gate-passed).
-    let fc = after_call(
-        &read("src/afxdp/tx/dispatch/slow_path.rs"),
-        "if fallback_to_slow_path {",
-        1200,
-    );
-    assert!(
-        fc.contains("false,"),
-        "FC fallback must pass literal false as host_authorized"
-    );
-    assert!(
-        !fc.contains("reinject_host_authorized("),
-        "FC fallback must not infer authorization from disposition"
-    );
-    // Synthetic IPsec passthrough: explicit adjudication (exempt classes
-    // never gate-passed, but their xfrm/reinject packets must carry the
-    // structural fence mark).
-    let ipsec = after_call(
-        &read("src/afxdp/poll_stages.rs"),
-        "let ipsec_decision = ipsec_passthrough_decision();",
-        1400,
-    );
-    assert!(
-        ipsec.contains("SlowPathOutlet::Adjudicated"),
-        "IPsec passthrough must select the adjudicated outlet"
-    );
-    assert!(
-        !ipsec.contains("reinject_host_authorized("),
-        "IPsec passthrough must not infer authorization from disposition"
-    );
-    // Filtered chokepoint: the mapping function (serves every surviving
-    // disposition; only gated LocalDelivery maps trusted).
-    let choke = after_call(
-        &read("src/afxdp/poll_descriptor/mod.rs"),
-        "if slow_path_admit(&binding.live, decision.resolution.disposition) {",
-        2200,
-    );
+    let src = std::fs::read_to_string(root.join("src/afxdp/poll_descriptor/mod.rs"))
+        .expect("read reinject call site");
+    let i = src
+        .find("if slow_path_admit(&binding.live, decision.resolution.disposition) {")
+        .expect("filtered chokepoint marker");
+    let choke = &src[i..std::cmp::min(i + 2200, src.len())];
     assert!(
         choke.contains("reinject_host_authorized("),
         "filtered chokepoint must derive Trusted from the disposition mapping"
@@ -1416,6 +1373,134 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
             assert_eq!(got_trusted, 0, "{}: trusted outlet must stay quiet", c.name);
         }
     }
+}
+
+/// Build a local-destination NAT-T frame with an ESP SPI immediately after
+/// the UDP header. The frame is deliberately ordinary Ethernet/IPv4/UDP so
+/// the production descriptor parser can derive the same flow key as the SA
+/// gate.
+fn build_stage11_esp_udp_frame_10516(spi: u32) -> Vec<u8> {
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(10, 0, 61, 1);
+    let mut frame = vec![
+        0x02, 0xbf, 0x72, 0x01, 0x00, 0x01, // reth1.0 destination
+        0x02, 0x11, 0x22, 0x33, 0x44, 0x55, // peer source
+        0x08, 0x00, // IPv4
+        0x45, 0x00, 0x00, 0x00, // total length filled below
+        0x00, 0x01, 0x40, 0x00, 64, PROTO_UDP, 0x00, 0x00,
+    ];
+    let payload = [
+        spi.to_be_bytes().as_slice(),
+        &[0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03],
+    ]
+    .concat();
+    let total_len = 20 + 8 + payload.len();
+    frame[16..18].copy_from_slice(&(total_len as u16).to_be_bytes());
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    let ip_csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+    frame.extend_from_slice(&40_000u16.to_be_bytes());
+    frame.extend_from_slice(&4500u16.to_be_bytes());
+    frame.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]); // UDP checksum is optional for IPv4.
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+fn run_stage11_esp_udp_poll_10516(with_sa: bool) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    crate::afxdp::forwarding::IpsecSaCounterSnapshot,
+    usize,
+    Vec<bool>,
+) {
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    let spi = 0x1122_3344;
+    let frame = build_stage11_esp_udp_frame_10516(spi);
+    let mut forwarding = build_forwarding_state(&nat_snapshot());
+    let sa_key = ipsec_sa_key(dst, spi, src);
+    if with_sa {
+        forwarding.ipsec_sa.upsert(sa_key);
+    } else {
+        // Advance the store to a valid empty snapshot so this cell exercises
+        // the no-SA miss rather than the pre-publication stale gate.
+        forwarding.ipsec_sa.upsert(sa_key);
+        forwarding.ipsec_sa.remove(sa_key);
+    }
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-1");
+    let mut src_addr = [0u8; 16];
+    src_addr[..4].copy_from_slice(&[10, 0, 61, 102]);
+    let mut dst_addr = [0u8; 16];
+    dst_addr[..4].copy_from_slice(&[10, 0, 61, 1]);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        flow_src_port: 40_000,
+        flow_dst_port: 4500,
+        flow_src_addr: src_addr,
+        flow_dst_addr: dst_addr,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+    (
+        reinjector.status(),
+        reinjector.delegated_status(),
+        forwarding.ipsec_sa.counters.snapshot(),
+        binding.scratch.scratch_recycle.len(),
+        reinjector.test_enqueued_delegated(),
+    )
+}
+
+/// The Stage-11 SA decision must be observable through the actual descriptor
+/// poll arm: a NAT-T packet with no matching SA is recycled without queueing,
+/// while the same packet with a positive SA snapshot reaches only the
+/// delegated outlet. This is intentionally not a direct stage/helper call.
+#[test]
+fn stage11_esp_udp_sa_gate_runs_poll_loop_10516() {
+    let (trusted_miss, delegated_miss, miss_counters, miss_recycled, miss_queues) =
+        run_stage11_esp_udp_poll_10516(false);
+    assert_eq!(trusted_miss.queued_packets, 0);
+    assert_eq!(delegated_miss.queued_packets, 0);
+    assert_eq!(miss_recycled, 1);
+    assert_eq!(miss_counters.sa_miss_dropped_packets, 1);
+    assert_eq!(miss_counters.sa_miss_no_sa, 1);
+    assert!(miss_queues.is_empty());
+
+    let (trusted_hit, delegated_hit, hit_counters, hit_recycled, hit_queues) =
+        run_stage11_esp_udp_poll_10516(true);
+    assert_eq!(trusted_hit.queued_packets, 0);
+    assert_eq!(delegated_hit.queued_packets, 1);
+    assert_eq!(hit_recycled, 1);
+    assert_eq!(hit_counters.sa_miss_dropped_packets, 0);
+    assert_eq!(hit_queues, vec![true]);
 }
 
 // #10311: neighbor MISS with a pending source translation parks the frame

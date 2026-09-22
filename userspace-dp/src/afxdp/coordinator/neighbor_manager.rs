@@ -48,16 +48,16 @@ pub(crate) struct NeighborManager {
     /// fence and never advances it.
     pub(crate) applied_manager_generation: Arc<AtomicU64>,
     pub(crate) manager_keys: Arc<Mutex<FastSet<(i32, IpAddr)>>>,
+    /// Shared inbound XFRM-SA existence state.  It lives beside the
+    /// neighbour monitor lifecycle so stop/reconcile joins the only writer
+    /// before resetting worker-visible forwarding state.
+    pub(crate) ipsec_sa_monitor: super::super::forwarding::IpsecSaMonitor,
     pub(crate) monitor_stop: Option<Arc<AtomicBool>>,
-    /// #5165: join handle for the neighbor-monitor thread. Retained (like the
-    /// sibling `resolver_join`, no longer discarded via `.ok()`) so `stop_inner`
-    /// can JOIN the monitor after signalling stop — joining is what enforces the
-    /// no-mutation-after-stop invariant that the loop's stop re-check alone
-    /// cannot: a retired old-generation monitor blocked in `recv()` could
-    /// otherwise apply a queued kernel neighbor event to `dynamic` AFTER a
-    /// reconcile cleared the map and a fresh baseline repopulated it. Join
-    /// latency is bounded by the monitor's 500ms `SO_RCVTIMEO` (the same bound
-    /// the resolver's 500ms recv timeout provides).
+    /// #5165: join handle for the neighbor-monitor thread. Retained (like
+    /// the sibling `resolver_join`, no longer discarded via `.ok()`) so
+    /// `stop_inner` can JOIN the monitor after signalling stop — joining is
+    /// what enforces the no-mutation-after-stop invariant that the loop's
+    /// 500ms SO_RCVTIMEO bounds.
     pub(crate) monitor_join: Option<std::thread::JoinHandle<()>>,
     // #1636 option C: proactive neighbor warming.
     /// Per-(ifindex, hop) last-probe timestamp (monotonic ns) for the
@@ -137,6 +137,7 @@ impl NeighborManager {
             generation: Arc::new(AtomicU64::new(0)),
             applied_manager_generation: Arc::new(AtomicU64::new(0)),
             manager_keys: Arc::new(Mutex::new(FastSet::default())),
+            ipsec_sa_monitor: super::super::forwarding::IpsecSaMonitor::new(),
             monitor_stop: None,
             monitor_join: None,
             last_probed_at: Arc::new(Mutex::new(FastMap::default())),
@@ -180,6 +181,13 @@ impl NeighborManager {
         if let Some(join) = self.monitor_join.take() {
             let _ = join.join();
         }
+    }
+
+    /// Stop and join the XFRM-SA monitor before workers or forwarding state
+    /// are retired.  This mirrors the neighbour-monitor join contract and
+    /// makes stale event application after teardown impossible.
+    pub(crate) fn stop_and_join_ipsec_sa_monitor(&mut self) {
+        self.ipsec_sa_monitor.stop_and_join();
     }
 
     /// #6314: signal the neighbor-warmer thread to stop, drop the producer

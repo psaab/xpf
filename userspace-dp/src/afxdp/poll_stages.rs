@@ -1407,6 +1407,7 @@ pub(super) fn reinject_ipsec_passthrough(
     meta: UserspaceDpMeta,
     binding_live: &BindingLiveState,
     worker_ctx: &WorkerContext,
+    outlet: SlowPathOutlet,
 ) -> bool {
     let ipsec_decision = ipsec_passthrough_decision();
     maybe_reinject_slow_path_from_frame_with_outlet(
@@ -1417,7 +1418,7 @@ pub(super) fn reinject_ipsec_passthrough(
         packet_frame,
         meta,
         ipsec_decision,
-        SlowPathOutlet::Adjudicated,
+        outlet,
         worker_ctx.recent_exceptions,
         "slow_path",
         worker_ctx.forwarding,

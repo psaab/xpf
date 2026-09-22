@@ -150,6 +150,41 @@ pub(in crate::afxdp) fn classify_ipsec_admission(
     }
 }
 
+/// Stage-11 outlet discriminator for an already-admitted IKE packet.  The
+/// admission stage may permit a short NEW-IKE packet, but only a complete
+/// ISAKMP header can be forwarded to the kernel.  A complete responder-SPI
+/// header is likewise required before this branch bypasses the ESP gate.
+#[inline]
+pub(in crate::afxdp) fn is_admitted_positive_ike(
+    packet_frame: &[u8],
+    l4_offset: usize,
+    protocol: u8,
+    dst_port: u16,
+) -> bool {
+    matches!(
+        isakmp_demux(packet_frame, l4_offset, protocol, dst_port),
+        IsakmpDemux::Isakmp(payload) if payload.len() >= 16
+    )
+}
+
+/// Return true for a packet that demuxes as IKE but cannot carry the complete
+/// 16-byte SPI prefix required by the outlet discriminator.  UDP-4500 values
+/// without the four-byte non-ESP marker remain ESP-in-UDP data and are handled
+/// by the SPI parser instead.
+#[inline]
+pub(in crate::afxdp) fn is_malformed_ike(
+    packet_frame: &[u8],
+    l4_offset: usize,
+    protocol: u8,
+    dst_port: u16,
+) -> bool {
+    match isakmp_demux(packet_frame, l4_offset, protocol, dst_port) {
+        IsakmpDemux::Truncated => true,
+        IsakmpDemux::Isakmp(payload) => payload.len() < 16,
+        IsakmpDemux::NotIsakmp => false,
+    }
+}
+
 /// #6471: the Initiator SPI of a genuine IKE INITIATION (an ISAKMP header
 /// with an all-zero Responder SPI), or `None` when the packet is not a
 /// parseable initiation (not IKE, truncated, or Responder SPI non-zero).

@@ -273,15 +273,19 @@ pub(super) fn apply(
                 // the SAME way: refresh status, do NOT persist. Only the
                 // message differs from the pre-teardown integrity faults.
                 if let crate::afxdp::ReconcileError::WorkerSpawn(stage)
-                | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage) = &err
+                | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage)
+                | crate::afxdp::ReconcileError::IpsecSaNotReady(stage) = &err
                 {
-                    // Distinct verb per class (the #4952 tests pin "worker
-                    // spawn failed"); both fail closed identically.
-                    let verb = if matches!(err, crate::afxdp::ReconcileError::WorkerBindIncomplete(_))
-                    {
-                        "worker bind incomplete"
-                    } else {
-                        "worker spawn failed"
+                    // Distinct verb per post-teardown failure class; all
+                    // leave the dataplane down and must not persist.
+                    let verb = match &err {
+                        crate::afxdp::ReconcileError::WorkerBindIncomplete(_) => {
+                            "worker bind incomplete"
+                        }
+                        crate::afxdp::ReconcileError::IpsecSaNotReady(_) => {
+                            "ipsec SA monitor not ready"
+                        }
+                        _ => "worker spawn failed",
                     };
                     response.error = format!(
                         "{verb} after teardown ({stage}); dataplane down — snapshot not persisted"
@@ -442,37 +446,28 @@ pub(super) fn apply(
             );
         } else if let Err(err) = reconcile_status_bindings(guard) {
             if let crate::afxdp::ReconcileError::WorkerSpawn(stage)
-            | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage) = &err
+            | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage)
+            | crate::afxdp::ReconcileError::IpsecSaNotReady(stage) = &err
             {
-                // #4952 / #5143: POST-TEARDOWN worker-bringup failure — a
-                // worker that failed to SPAWN (#4952) or one that spawned but
-                // bound an INCOMPLETE queue set / never reported readiness
-                // (#5143). Unlike the pre-teardown integrity/map faults below
-                // — where the old workers + forwarding stayed live and
-                // restoring the prior bindings is truthful — here tear_down
-                // already stopped the old workers and the new bring-up did not
-                // produce a full XSK-bound worker set, so this queue set has NO
-                // XSK-bound worker: the data plane is DOWN. Fail closed so the
-                // broken snapshot is NOT persisted as the boot baseline. Roll
-                // the in-memory baseline back to the prior good snapshot +
-                // status generation (a retry / forwarding toggle then
-                // reconciles last-good), but DO NOT restore existing_bindings —
-                // refresh_status must report the REAL post-teardown per-binding
-                // state, not the pre-teardown workers that no longer exist.
+                // #4952 / #5143 / #10516: POST-TEARDOWN worker bring-up
+                // failure. The new queue set is not operational, so preserve
+                // the last-good baseline but report real dataplane-down
+                // status rather than restoring stale bindings.
                 guard.snapshot = prev_snapshot;
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
-                // Distinct verb per class (the #4952/#6140 tests pin "worker
-                // spawn failed"); both fail closed identically.
-                let verb =
-                    if matches!(err, crate::afxdp::ReconcileError::WorkerBindIncomplete(_)) {
+                let verb = match &err {
+                    crate::afxdp::ReconcileError::WorkerBindIncomplete(_) => {
                         "worker bind incomplete"
-                    } else {
-                        "worker spawn failed"
-                    };
+                    }
+                    crate::afxdp::ReconcileError::IpsecSaNotReady(_) => {
+                        "ipsec SA monitor not ready"
+                    }
+                    _ => "worker spawn failed",
+                };
                 response.error = format!(
                     "{verb} after teardown ({stage}); dataplane down — snapshot not persisted"
                 );

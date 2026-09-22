@@ -341,6 +341,13 @@ pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
             return Err(err);
         }
     };
+    // Runtime state, unlike configuration, survives every successful
+    // forwarding rebuild.  In particular the XFRM-SA monitor owns this Arc;
+    // replacing it here would make the first packet after every config apply
+    // fail closed until a fresh kernel dump.
+    if let Some(previous) = previous {
+        state.ipsec_sa = previous.ipsec_sa.clone();
+    }
     attach_zone_counters(&mut state, snapshot, previous);
     Ok(state)
 }
