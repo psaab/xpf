@@ -657,22 +657,26 @@ func assertIpsecQuarantineLoopbackAccept9506(t *testing.T, rule []expr.Any) {
 	}
 }
 
-func TestIpsecQuarantineLoopbackExemptionBothHooks10501(t *testing.T) {
+func TestIpsecQuarantineLoopbackExemptionBothFamiliesAndHooks10501(t *testing.T) {
 	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{QuarantineAll: true})
 	for _, tc := range []struct {
 		name          string
+		family        string
+		tableFamily   gnft.TableFamily
 		hook          string
 		hooknum       *gnft.ChainHook
 		countingOwner bool
 	}{
-		{name: "forward", hook: "forward", hooknum: gnft.ChainHookForward, countingOwner: true},
-		{name: "input", hook: "input", hooknum: gnft.ChainHookInput},
+		{name: "inet-forward", family: "inet", tableFamily: gnft.TableFamilyINet, hook: "forward", hooknum: gnft.ChainHookForward, countingOwner: true},
+		{name: "inet-input", family: "inet", tableFamily: gnft.TableFamilyINet, hook: "input", hooknum: gnft.ChainHookInput},
+		{name: "bridge-forward", family: "bridge", tableFamily: gnft.TableFamilyBridge, hook: "forward", hooknum: gnft.ChainHookForward},
+		{name: "bridge-input", family: "bridge", tableFamily: gnft.TableFamilyBridge, hook: "input", hooknum: gnft.ChainHookInput},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tbl := &gnft.Table{Family: gnft.TableFamilyINet, Name: IpsecQuarantineTableName}
+			tbl := &gnft.Table{Family: tc.tableFamily, Name: IpsecQuarantineTableName}
 			p := newBuildPlan(t, IpsecQuarantineTableName, IpsecQuarantinePriority)
 			p.chain = ipsecDenyChain(tbl, tc.hook, tc.hooknum, IpsecQuarantinePriority)
-			emitIpsecQuarantineRules(p, "inet", tc.hook, spec, tc.countingOwner)
+			emitIpsecQuarantineRules(p, tc.family, tc.hook, spec, tc.countingOwner)
 			if p.err != nil {
 				t.Fatalf("render quarantine rules: %v", p.err)
 			}
@@ -686,6 +690,7 @@ func TestIpsecQuarantineLoopbackExemptionBothHooks10501(t *testing.T) {
 		})
 	}
 }
+
 func TestIpsecQuarantineLaterHookDropsWithoutCounter9506(t *testing.T) {
 	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{
 		QuarantineAll:      true,
