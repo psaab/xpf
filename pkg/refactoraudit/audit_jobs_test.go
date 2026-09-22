@@ -509,6 +509,9 @@ func TestTouchedRename10488(t *testing.T) {
 		if row.isNew || row.baseLOC != 2100 || row.headLOC != 2100 {
 			t.Fatalf("explicit rename detection must beat user config: %+v", row)
 		}
+		if crossings := thresholdCrossings(rows); len(crossings) != 0 {
+			t.Fatalf("pure staged rename must not cross: %+v", crossings)
+		}
 	})
 
 	t.Run("source destination order", func(t *testing.T) {
@@ -524,6 +527,157 @@ func TestTouchedRename10488(t *testing.T) {
 		row := requireTouchedPath(t, r.touched("master"), "pkg/swap_c.go")
 		if row.isNew || row.baseLOC != 1700 || row.headLOC != 1700 {
 			t.Fatalf("rename baseline must come from source, not destination: %+v", row)
+		}
+	})
+
+	t.Run("fake R byte order with both blobs", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.writeFile("pkg/order_src.go", 1700)
+		r.writeFile("pkg/order_dst.go", 900)
+		r.commit("fake R byte-order base")
+		r.git("checkout", "-q", "-b", "feature")
+		r.writeFile("pkg/order_dst.go", 1700)
+		fakeBin := installFakeGit(t, r, `
+case " $* " in
+  *" diff --name-status -z "*)
+    printf 'R100\000pkg/order_src.go\000pkg/order_dst.go\000'
+    exit 0
+    ;;
+esac`)
+		stdout, stderr, err := r.script([]string{
+			"XPF_AUDIT_BASE_REF=master",
+			"PATH=" + prependPath(fakeBin),
+		}, "scripts/refactoring-audit-touched.sh")
+		if err != nil {
+			t.Fatalf("fake R producer: %v\n%s", err, stderr)
+		}
+		row := requireTouchedPath(t, parseTouched(t, "fake R producer", stdout),
+			"pkg/order_dst.go")
+		if row.isNew || row.baseLOC != 1700 || row.headLOC != 1700 {
+			t.Fatalf("R source must precede destination even when destination has a base blob: %+v", row)
+		}
+	})
+
+	t.Run("defensive unmerged coalescing", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			stream string
+		}{
+			{name: "U then M", stream: `U\000pkg/coalesce.go\000M\000pkg/coalesce.go\000`},
+			{name: "M then U", stream: `M\000pkg/coalesce.go\000U\000pkg/coalesce.go\000`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				r := newFixtureRepo(t)
+				r.writeFile("pkg/coalesce.go", 2)
+				r.commit("coalesce base")
+				r.git("checkout", "-q", "-b", "feature")
+				r.writeFile("pkg/coalesce.go", 6)
+				fakeBin := installFakeGit(t, r, fmt.Sprintf(`
+case " $* " in
+  *" diff --name-status -z "*)
+    printf '%%b' '%s'
+    exit 0
+    ;;
+esac`, tc.stream))
+				stdout, stderr, err := r.script([]string{
+					"XPF_AUDIT_BASE_REF=master",
+					"PATH=" + prependPath(fakeBin),
+				}, "scripts/refactoring-audit-touched.sh")
+				if err != nil {
+					t.Fatalf("fake U+M producer: %v\n%s", err, stderr)
+				}
+				rows := parseTouched(t, "fake U+M producer", stdout)
+				if len(rows) != 1 {
+					t.Fatalf("U+M must produce one row, got %+v", rows)
+				}
+				row := rows[0]
+				if row.path != "pkg/coalesce.go" || row.isNew || row.baseLOC != 2 || row.headLOC != 6 {
+					t.Fatalf("U+M must measure one same-path row: %+v", row)
+				}
+			})
+		}
+	})
+
+	t.Run("lone unmerged status fails", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.commit("lone U base")
+		r.git("checkout", "-q", "-b", "feature")
+		fakeBin := installFakeGit(t, r, `
+case " $* " in
+  *" diff --name-status -z "*)
+    printf 'U\000pkg/lone.go\000'
+    exit 0
+    ;;
+esac`)
+		stdout, _, err := r.script([]string{
+			"XPF_AUDIT_BASE_REF=master",
+			"PATH=" + prependPath(fakeBin),
+		}, "scripts/refactoring-audit-touched.sh")
+		if err == nil || strings.TrimSpace(stdout) != "" {
+			t.Fatalf("lone U must fail with no rows: err=%v stdout=%q", err, stdout)
+		}
+	})
+
+	t.Run("unknown and broken statuses warn", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.writeFile("pkg/unknown.go", 10)
+		r.writeFile("pkg/broken.go", 10)
+		r.commit("X B base")
+		r.git("checkout", "-q", "-b", "feature")
+		r.writeFile("pkg/unknown.go", 11)
+		r.writeFile("pkg/broken.go", 11)
+		fakeBin := installFakeGit(t, r, `
+case " $* " in
+  *" diff --name-status -z "*)
+    printf 'X\000pkg/unknown.go\000B\000pkg/broken.go\000'
+    exit 0
+    ;;
+esac`)
+		stdout, stderr, err := r.script([]string{
+			"XPF_AUDIT_BASE_REF=master",
+			"PATH=" + prependPath(fakeBin),
+		}, "scripts/refactoring-audit-touched.sh")
+		if err != nil {
+			t.Fatalf("X/B producer: %v\n%s", err, stderr)
+		}
+		rows := parseTouched(t, "X/B producer", stdout)
+		if len(rows) != 2 {
+			t.Fatalf("X/B must preserve both rows: %+v", rows)
+		}
+		for _, path := range []string{"pkg/unknown.go", "pkg/broken.go"} {
+			row := requireTouchedPath(t, rows, path)
+			if row.isNew || row.baseLOC != 10 || row.headLOC != 11 {
+				t.Fatalf("X/B same-path row changed baseline: %+v", row)
+			}
+			if !strings.Contains(stderr, path) {
+				t.Fatalf("X/B warning must name %s: %q", path, stderr)
+			}
+		}
+		if !strings.Contains(stderr, "reported X") || !strings.Contains(stderr, "reported B") {
+			t.Fatalf("X/B warning must identify status: %q", stderr)
+		}
+	})
+
+	t.Run("defensive deletion status is ignored", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.commit("D base")
+		r.git("checkout", "-q", "-b", "feature")
+		fakeBin := installFakeGit(t, r, `
+case " $* " in
+  *" diff --name-status -z "*)
+    printf 'D\000pkg/deleted.go\000'
+    exit 0
+    ;;
+esac`)
+		stdout, stderr, err := r.script([]string{
+			"XPF_AUDIT_BASE_REF=master",
+			"PATH=" + prependPath(fakeBin),
+		}, "scripts/refactoring-audit-touched.sh")
+		if err != nil {
+			t.Fatalf("defensive D producer: %v\n%s", err, stderr)
+		}
+		if strings.TrimSpace(stdout) != "" {
+			t.Fatalf("defensive D must not emit rows: %q", stdout)
 		}
 	})
 
@@ -596,8 +750,12 @@ func TestTouchedRename10488(t *testing.T) {
 		if !row.isNew || row.headLOC != 1600 {
 			t.Fatalf("below-threshold add must remain new: %+v", row)
 		}
+		requireNoTouchedPath(t, r.touched("master"), "pkg/boiler_old.go")
+		crossings := thresholdCrossings([]touchedFile{row})
+		if len(crossings) != 1 || crossings[0].tier != tierWatch {
+			t.Fatalf("new 1600-line destination must be one WATCH crossing: %+v", crossings)
+		}
 	})
-
 	t.Run("ambiguous pair keeps true source", func(t *testing.T) {
 		r := newFixtureRepo(t)
 		r.writePattern("pkg/ambiguous_big.go", 2100, 840, "big")
@@ -653,6 +811,39 @@ func TestTouchedRename10488(t *testing.T) {
 			t.Fatalf("copy must remain a new file even under copies config: %+v", row)
 		}
 		requireNoTouchedPath(t, rows, "pkg/copy_source.go")
+		marker := filepath.Join(r.dir, "copy-config-marker")
+		fakeBin := installFakeGit(t, r, fmt.Sprintf(`
+case " $* " in
+  *" -c diff.renames=true diff --name-status -z "*)
+    printf 'A\000pkg/copy_new.go\000'
+    printf pinned > %q
+    exit 0
+    ;;
+  *" diff --name-status -z "*)
+    printf 'C\000pkg/copy_source.go\000pkg/copy_new.go\000'
+    printf leaked > %q
+    exit 0
+    ;;
+esac`, marker, marker))
+		stdout, stderr, err := r.script([]string{
+			"XPF_AUDIT_BASE_REF=master",
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=diff.renames",
+			"GIT_CONFIG_VALUE_0=copies",
+			"PATH=" + prependPath(fakeBin),
+		}, "scripts/refactoring-audit-touched.sh")
+		if err != nil {
+			t.Fatalf("copy-config producer: %v\n%s", err, stderr)
+		}
+		if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "pinned" {
+			t.Fatalf("producer must pin diff.renames=true before copies config: marker=%q err=%v", got, readErr)
+		}
+		fakeRows := parseTouched(t, "copy-config producer", stdout)
+		fakeRow := requireTouchedPath(t, fakeRows, "pkg/copy_new.go")
+		if !fakeRow.isNew || fakeRow.headLOC != 1701 {
+			t.Fatalf("pinned copy-config producer must keep destination new: %+v", fakeRow)
+		}
+		requireNoTouchedPath(t, fakeRows, "pkg/copy_source.go")
 	})
 
 	t.Run("consumed source recreation is new", func(t *testing.T) {
@@ -702,8 +893,14 @@ func TestTouchedRename10488(t *testing.T) {
 	t.Run("audited source exits population", func(t *testing.T) {
 		r := renameBase(t, "pkg/included_old.go", 1701)
 		r.git("mv", "pkg/included_old.go", "pkg/included_new_test.go")
+		r.writeFile("pkg/included_old.go", 1701)
 		requireRename(t, r, "master", "pkg/included_old.go", "pkg/included_new_test.go")
-		requireNoTouchedPath(t, r.touched("master"), "pkg/included_new_test.go")
+		rows := r.touched("master")
+		requireNoTouchedPath(t, rows, "pkg/included_new_test.go")
+		old := requireTouchedPath(t, rows, "pkg/included_old.go")
+		if !old.isNew || old.headLOC != 1701 {
+			t.Fatalf("recreated source must be new even when rename destination is excluded: %+v", old)
+		}
 	})
 
 	t.Run("two committed renames use original base", func(t *testing.T) {

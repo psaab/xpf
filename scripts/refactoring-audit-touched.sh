@@ -83,6 +83,11 @@ die() {
     exit 3
 }
 
+if (( BASH_VERSINFO[0] < 4 ||
+      (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    die "requires bash >= 4.4 for associative arrays under set -u"
+fi
+
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" ||
     die "not inside a git work tree; the changed set is undeterminable"
 cd "$ROOT"

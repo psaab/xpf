@@ -127,6 +127,9 @@ git -c diff.renames=true diff --name-status -z -M90% --diff-filter=d <merge-base
 git ls-files --others --exclude-standard -z
 ```
 
+The probe requires Bash 4.4 or newer because it uses associative and indexed
+arrays safely under `set -u`.
+
 `<merge-base>` is `git merge-base origin/master HEAD`. The single-commit
 `git diff` form compares the working tree with the named commit, so staged
 and unstaged edits are both measured. Lowercase `d` excludes deletions;

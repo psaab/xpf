@@ -2,9 +2,7 @@
 
 ## Status
 
-**DRAFT v2 — round-1 findings addressed; pending delta re-review.** Plan only;
-no implementation, new tests, PR, deployment, or merge is authorized in this
-round. The parent owns native reviewer dispatch and the implementation decision.
+**IMPLEMENTED — PR #10538 (initial implementation at `ce57b56e1`).** v2 addressed round-1 findings; delta re-review confirmed PLAN-READY; implementation landed on base `f4bae0a5a` (merged #10487). This document is retained as review history.
 
 - Issue: <https://github.com/psaab/xpf/issues/10488> (OPEN at intake).
 - Comparison/base: `b71c52d6093f23a7d9c9cca12d00cb40b3dffa8d` (`origin/master`).
@@ -67,21 +65,21 @@ a developer-friction false positive in a repository validation gate.
 
 | Finding | v1 gap | v2 close-out |
 |---|---|---|
-| A-F1 `U` hidden in reject rule | v1:187 rejected "unsupported statuses" without naming `U` | §4 now records the exact command distinction: intended `git diff <commit>` emits one `M` for a conflict; index-form `git diff` can emit duplicate `U+M`, which a defensive parser must coalesce by current path into one M-equivalent row; the fresh real-conflict fixture pins both |
+| A-F1 `U` hidden in reject rule | v1:187 rejected "unsupported statuses" without naming `U` | §4 records the exact command distinction: intended `git diff <commit>` emits one `M` for a conflict; index-form `git diff` can emit duplicate `U+M`, which defensive parser coalescing now feeds through producer-level fake-stream cases in addition to the fresh real-conflict byte probe |
 | A-F2 rename-limit unspecified | v1:211-212 left limit to Git | §4: accept-and-document + §8 smoke criterion (1200-file diff, 5× budget, FP-direction preservation) |
 | A-F3 no dissimilarity control | 10-case table had no below-threshold row | §8: heavy-rewrite ⇒ new-file crossing row (doubles as `-M90%` lower-bound pin) |
 | A-F4 wrong #10487 attribution | v1:385 claimed parser hardening owned by #10487 | §9: corrected — #10487 owns accepted-entry drift/expiry only (issue text + no `docs/pr/*10487*` plan); numeric hardening out of scope for both |
 | A-F5 80-vs-50 gap | no reconciliation sentence | §2: fresh generator emits exactly 80 = census; committed 50-row artifact last touched `254ca9939`; gap is pure staleness |
 | A-F6 red-package rule implicit | no acceptance rule while 6937 red | §8: failure-set-equality sentence (pass iff failure set == `{TestStructMetricIsTypesNotFields6937}`) |
 | A-F7/F8 overlap moved / recreation sound | v1:237-240 serialized the wrong file | §4: zero-touch `audit_touched_test.go`; real overlap is `docs/refactoring-audit.md` gate section; order-independence stated |
-| B-F1 `-z` order unspecified | v1:148-151 "decode the extra pathname" | §4: byte-exact `R<score>\0<src>\0<dst>\0` (git 2.53.0, od-quoted) + malformed rules + swap fixture |
-| B-F2 non-rename delta unproven | v1 table omitted C/U/X/B; `R+T` unaddressed | §4: full A/C/M/R/T/U/X/B table with per-row delta-vs-today proof; `R+T` probed (`A+D`, zero delta); T/U/C fixtures |
-| B-F3 blob-absent policy | v1:184-186 error rule breaks shallow availability | §4: commit-unreadable → error; blob-absent-with-present-commit → `-` fallback + stderr warning (today's direction, availability preserved) |
+| B-F1 `-z` order unspecified | v1:148-151 "decode the extra pathname" | §4: byte-exact `R<score>\0<src>\0<dst>\0` (git 2.53.0, od-quoted) + malformed rules + real/fake source-order fixtures |
+| B-F2 non-rename delta unproven | v1 table omitted C/U/X/B; `R+T` unaddressed | §4: full A/C/M/R/T/U/X/B table with per-row delta-vs-today proof; `R+T` probed (`A+D`, zero delta); T/U/C/X/B/D fixtures |
+| B-F3 blob-absent policy | v1:184-186 error rule breaks shallow availability | §4: commit-unreadable → error; TRACKED blob-absent-with-present-commit → `-` fallback + stderr warning (today's direction, availability preserved); untracked `W` misses stay silent `-` like `A`/`C` |
 | B-F4 staged-vs-working uncited | v1:206-208 asserted without citation | §4: man citation (worktree-vs-commit) + `R099` staged+unstaged probe; growth rows labeled; staged+unstaged fixtures at both floors |
 | B-F5 threshold unpinned | v1 bare `-M` (50%) | §4: pinned `-M90%` with FN-bound rationale + boilerplate/ambiguity fixtures; bare `-M` and exact-only explicitly rejected with consequences |
 | B-F6 dir renames | no mention | §4: one sentence + 3-file `pkg/olddir→pkg/newdir` fixture |
 | B-F7 harness method | `r.script()` vs `r.touched()` unstated; 6 fixtures missing | §8: `r.script()` for all nonzero cases, `R`-precondition snippet, all missing fixtures added |
-| B-F8 rebase order | no order, no domain note | §4: zero-touch decision + order proposal + one-line numeric-domain compatibility |
+| B-F8 rebase order | v1:237-240 serialized the wrong file | §4: zero-touch decision + order proposal + one-line numeric-domain compatibility; implementation also records a Bash 4.4 floor |
 | B-F9 editorial + smoke bound | "perf gain" wording; unbounded smoke | §2 wording fixed to "value gain"; §8 smoke N=1200 / 5× / row-superset criterion |
 
 ## 2. Honest scope/value and quantified blast radius
@@ -236,8 +234,10 @@ stays-new; 93%-similar true-source pairing; heavy-rewrite dissimilarity control)
   matching `^[ACDMRTUXB][0-9]*$`; score digits on any status except `R`/`C`;
   `R`/`C` without exactly two following path fields; empty path field;
   truncated tail (stream ends mid-record). A swapped source/destination
-  implementation is caught by the §8 swap fixture (old+new both exist at base
-  with different LOCs — only the correct source yields the correct base).
+  implementation is caught twice: the §8 real-rename order fixture reads an
+  absent destination blob → `-` (asserted `!isNew`), and a fake-git
+  `R100\0src\0dst\0` feed with both blobs present (1700 vs 900) pins src-first
+  byte order — only the correct source yields base 1700.
 
 ### Full status table: every `--diff-filter=d`-visible status (B-F2, A-F1)
 
@@ -258,6 +258,8 @@ against today (current: destination-only path → `audit_is_audited_path` +
 | `T` Typechange | Same path at merge base | `[ -f ]` guard drops non-regular dests (dangling symlink, submodule, gitlink); row iff audited + regular file | None — identical path. `R+T` combined (rename + file→symlink) surfaces as `A+D`, NOT `R` or `T` (probed, §8: no cross-type pairing) → dest is `A` → `-`; `D` dropped by the filter; dangling symlinks additionally dropped by `[ -f ]`. Residual FP for rename-to-valid-symlink disclosed — byte-identical code path to any `A` today |
 | `U` Unmerged | Not emitted by the intended tree-vs-working-tree command | No independent `U` row. If a future refactor accidentally feeds index-form `U\0path\0M\0path\0`, coalesce the duplicate current path and measure it once with the same-path `M` rules; a lone `U` is a malformed stream and errors | None for the intended producer: the real gate emits one `M` row. Defensive coalescing preserves today's sorted-unique one-row result; never emit two rows |
 | `X` Unknown, `B` Broken pairing | Same path at merge base (today's handling) + stderr warning naming the path | Working dest; row iff audited + `[ -f ]` | None: deliberately today's behavior, not an error. Rationale: `X`/`B` can theoretically appear with uncertain meaning; erroring the whole probe on one such row would turn a single odd path into branch-level infra-red (availability-hostile). Same-path handling degrades safely (miss → `-` → false positive, never suppression), and the stderr warning keeps it visible. `U` is deliberately absent from this rule because it is not an input to the intended producer; only the defensive duplicate-coalescing rule above applies |
+
+`D` Deleted is excluded by `--diff-filter=d`; if a future Git emits one anyway, the parser drops it silently — a deletion cannot cross a floor upward and must not create a duplicate path or an error.
 
 The excluded→audited admission rule (`R` from an excluded/out-of-root source
 begins at `-`) is an explicit proposed boundary policy: excluded LOC was never
@@ -291,13 +293,15 @@ row — the destination is not in the audited population.
      carries the shallow-CI risk, and it triggers only when the base commit
      is actually absent, not on every shallow clone (the merge-base commit
      of a shallow clone against its own `origin/master` is normally present).
-   - Commit present but a promised source/same-path BLOB unreadable (shallow
-     boundary truncation, partial-clone lazy-fetch failure, genuinely absent
-     path) → `-` fallback (today's behavior) + stderr warning naming the
-     path. This preserves availability (shallow/partial CI keeps working)
-     and preserves today's fail direction (miss → new → possible false
-     crossing, never suppression). Tracked and untracked probing now agree —
-     the v1 inconsistency is resolved in favor of fallback+warning.
+   - Commit present but a promised TRACKED source/same-path BLOB unreadable
+     (shallow boundary truncation, partial-clone lazy-fetch failure,
+     genuinely absent path) → `-` fallback (today's behavior) + stderr
+     warning naming the path. This preserves availability (shallow/partial CI
+     keeps working) and preserves today's fail direction (miss → new →
+     possible false crossing, never suppression). Untracked `W` same-path
+     misses stay silent `-`: warning on every genuinely-new untracked file
+     would be noise, and silence matches `A`/`C` (always `-` without warning).
+     Tracked and untracked agree on fallback; they differ on warning by design.
    - Existence probe succeeds but the subsequent `git show … | wc -l` count
      fails → hard error (the repo changed under the probe or is corrupt;
      counting garbage as a baseline is never acceptable).
@@ -552,7 +556,7 @@ if !strings.Contains(status, "R") || !strings.Contains(status, "old.go") {
 |---|---|---|
 | 1 | Committed pure `1701 -> 1701` rename | One dest row, base 1701, not new; no crossing. Catches destination-only base lookup. Fails pre-fix (`- 1701` WATCH). |
 | 2 | Staged pure `2100 -> 2100` rename with `diff.renames=false` | Same contract, no crossing. Catches relying on user rename config; pins higher-band baseline. Fails pre-fix. |
-| 3 | Swap order: base holds `a.go` 1700 AND `b.go` 900; branch renames `a.go`→`b.go` (overwrite) | Dest row base 1700 (source), head 1700, silent. A swapped src/dst implementation reads base 900 → false WATCH. THE B-F1 discriminator. Fails pre-fix AND on swapped-lookup. |
+| 3 | Source/destination order: base holds `swap_a.go` 1700 AND `swap_b.go` 900 decoy; branch renames `swap_a.go→swap_c.go` (fresh name) | Dest row base 1700 (source), head 1700, silent. A swapped implementation reads base `swap_c.go` (absent) → `-` → false WATCH, caught via `!isNew`. Both-endpoints-exist overwrite (`a→b` with `b` present) cannot be real `R`: Git reports `M/M` (overwrite `D/M`), never `R`, so the v2 overwrite sketch is withdrawn. Byte order with both blobs present is pinned by a fake-git `R100` feed. Fails pre-fix AND on swapped-lookup. |
 | 4 | Staged rename + UNSTAGED `1499 -> 1500` growth | Exactly WATCH at dest, base 1499. Catches skipping renames, HEAD-instead-of-working measurement, and pairing broken by unstaged edits. Tier alone passes pre-fix; the base-1499 assertion discriminates. |
 | 5 | Staged rename + UNSTAGED `1999 -> 2000` growth | Exactly REFACTOR at dest, base 1999. Same, higher band. |
 | 6 | Committed rename + committed `1499 -> 1500` growth | Exactly WATCH, base 1499. Pins the committed-growth path alongside the unstaged path. |
@@ -612,12 +616,21 @@ NEW failures allowed. The targeted `-run` regex above excludes all 6937 tests,
 and the new fixtures create no structs under `pkg/`, so they cannot plausibly
 perturb that calibration.
 
-**Many-path smoke (A-F2/B-F9, pass/fail).** In scratch: 1200-file rename diff
-(above the default `diff.renameLimit=1000`, exercising the limit path):
+**Many-path smoke (A-F2/B-F9, pass/fail).** In scratch: 1200-file rename
+diff. This validates many-path completion, exit status, destination-set
+preservation, and predecessor-baseline correctness:
 (1) new probe completes within **5×** the same-tree today's-probe wall time;
 (2) exit 0; (3) emitted audited-destination set ⊇ today's set (no silent
-drops); (4) every row's baseline ∈ {today's baseline, true predecessor}
-(unpaired destinations are `-`, FP direction). All four must hold.
+drops); (4) every row's baseline ∈ {today's baseline, true predecessor}.
+This smoke does not by itself claim that Git degraded pairings to A+D; that
+status outcome must be recorded directly if the limit path is observed.
+
+**Many-path smoke result.** The post-implementation scratch run used 1,200
+inexact renames: a direct status probe reported `R=1200` with no warning, so
+no A+D rename-limit degradation is claimed for this content. Old probe:
+6.599s / 1,200 rows. New probe: 13.320s / 1,200 rows (2.02×). Both exited
+0, the new destination set contained the old set, and every new baseline was
+the true 101-line predecessor blob. All four many-path conditions passed.
 
 The parent owns the full integration gate once sibling work has landed. Cargo,
 IPv4/IPv6 throughput, per-class CoS, and HA smoke do not discriminate this
@@ -627,8 +640,7 @@ never part of this worker's plan-only round.
 
 ## 9. Out of scope
 
-- Production implementation, test edits, PR creation, review dispatch, or merge
-  in this round; delivery is a committed/pushed plan only.
+- Historical v2 scope excluded production implementation, test edits, PR creation, review dispatch, or merge; implementation is now landed in PR #10538 and this plan is retained as superseded review history.
 - Changing either LOC threshold, band-growth policy, accepted-crossing policy,
   global heatmap freshness, shared classifier, or raw LOC definition.
 - Parser numeric-domain hardening: owned by NEITHER #10488 nor #10487. v1's
