@@ -347,11 +347,11 @@ test-race-dp:
 # #9499 member 1: a THIRD leg makes integer overflow an executed failure
 # oracle. The --release leg is the only other leg that runs tests, and a
 # release build has overflow-checks OFF, so a wrap was caught only when a
-# test happened to assert the exact wrapped value. This leg runs the frame,
-# NAT, session and checksum tests in the default test profile, where
-# overflow checks and debug assertions are on. It is filtered rather than
-# whole-suite because it is a second full build; widen the filter rather
-# than dropping the leg.
+# test happened to assert the exact wrapped value. This leg runs the exact
+# target-qualified paths recorded in debug-leg.tests; the live validator
+# compares every target's `--list` and `--list --ignored` output before Cargo
+# executes the registry-derived exact argv. Registry additions/removals
+# therefore fail closed instead of silently widening or shrinking the oracle.
 #
 # It is not decoration: with `parsed.seq.wrapping_add(seg_len)` in
 # afxdp/frame/tcp.rs mutated to `parsed.seq + seg_len`, the --release leg

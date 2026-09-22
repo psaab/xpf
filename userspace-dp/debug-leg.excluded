@@ -38,9 +38,9 @@ xpf-userspace-dp	afxdp::coordinator::status::status_mapping_6961_tests::worker_r
 xpf-userspace-dp	afxdp::coordinator::status::status_mapping_6961_tests::worker_runtime_status_rows_are_not_transposed_across_workers_6961	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::status::tests::claim_flow_overlay_populates_every_v8_lease	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_cursor_rotates_so_no_worker_is_starved	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_no_overflow_leaves_latch_clear	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_overflow_arms_loss_of_sync_latch	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_serves_every_worker_and_arms_overflow	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
+xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_no_overflow_leaves_latch_clear	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant; logical budget overflow, not integer wrapping
+xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_overflow_arms_loss_of_sync_latch	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant; logical budget overflow, not integer wrapping
+xpf-userspace-dp	afxdp::coordinator::status::tests::drain_session_deltas_serves_every_worker_and_arms_overflow	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant; logical budget overflow, not integer wrapping
 xpf-userspace-dp	afxdp::coordinator::status::tests::equal_flow_overlay_populates_active_equal_flow_leases	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::status::tests::equal_flow_overlay_populates_target_policy_label	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::status::tests::equal_flow_overlay_skips_non_equal_flow_v8_leases	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant

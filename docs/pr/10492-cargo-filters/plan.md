@@ -2,17 +2,21 @@
 
 ## Status
 
-DRAFT v2 — addresses round-1 PLAN-NEEDS-MAJOR findings from both hostile
-reviewers. NO production code in this round; this file remains the only
-change on branch `fix/10492-cargo-filters`.
+READY v4 — plan review closed; implementation shipped on branch
+`fix/10492-cargo-filters` (9 files: Makefile leg, three registries, live
+validator + static self-test, selftest registration, log, and this plan).
 
 - Round-1 findings closed in this revision: validator contract and family
   tripwire, coordinator criterion, ignored-test rule, multi-target
   normalization, Miri precedent, current `--list` membership, validator
   self-tests, and timing/argument-size bounds.
+- v3/v4 delta review folded the exact registry cutover, live validator,
+  coordinator dispositions, ignored transitions, target normalization,
+  fixture mutations, and argv/timing bounds; the parent marked v4 PLAN-READY
+  before implementation.
 - Issue: #10492 (OPEN, validated-by:research, source:deep-review finding
   `q06-rust-types-F5`). Issue state verified 2026-09-21.
-- Prior-fix checks: `origin/master b71c52d60` still has the unanchored
+- Prior-fix checks: historical pin `b71c52d60` had the unanchored
   recipe; `git log origin/master --grep=10492` and matching filter/anchor
   searches found no fix. PR authority searches were also explicit:
   GitHub Search API `repo:psaab/xpf is:pr "10492"` returned
@@ -20,9 +24,9 @@ change on branch `fix/10492-cargo-filters`.
   returned 4 results, of which merged #9833 is the #9499 introducer and
   still contains the bare filters. No later matching fix was found.
 - Worktree: `/home/ps/git/pi-xpf/.claude/worktrees/10492-cargo`,
-  base `b71c52d60` (matches `origin/master`, no rebase needed).
-- Next gate: delta plan re-review; implementation lands only after
-  PLAN-READY.
+  base `4d45b4115` (rebased onto `origin/master` 2026-09-21).
+- Next gate: code review of the shipped implementation; PR #10542 is open
+  with `Closes #10492`.
 
 ## 1. Issue framing
 
@@ -126,9 +130,9 @@ validator, and its static self-test. Nothing else.
 
 ## 3. Shipped context
 
-Base: `origin/master b71c52d60` (`pmech: land deny-only D11 bridge (#9506)
-(#10483)`). Evidence pin from the issue (`1a6952b61`) still accurate —
-`Makefile:362-367` line numbers unchanged between the pin and `b71c52d60`.
+Base: `origin/master 4d45b4115` (current merge-base after the
+latest implementation rebase). The historical evidence pin from the issue
+(`1a6952b61`) remains accurate for the original unanchored recipe.
 
 Why the leg exists (`Makefile:347-361` + `docs/log/9499.md`):
 
@@ -180,10 +184,12 @@ Structural facts constraining the design:
   integration targets. The current 14-section list must therefore be
   normalized by target, not by one global first-result parser.
 - The validator's normalized key is `(target-name, full-test-path)`, matching the registry's two columns; `cargo metadata --no-deps` shows all 14 bin/test target names unique across kinds, so the kind adds no identity.
-  For each target discovered from Cargo metadata, capture both
+- For each target discovered from Cargo metadata, capture both
   `cargo test --bin/--test <target> -- --list` and the corresponding
-  `--list --ignored`; parse every `: test` line and sum every target. This
-  avoids the Miri first-section failure mode and preserves target identity.
+  `--list --ignored`; parse every `: test` line and sum every target. A
+  zero-row normal list emits an explicit warning and contributes an empty set;
+  the global empty-census guard still fails if every target is empty. An empty
+  ignored list is valid.
   Current selected raw paths are unique across targets; a future selected
   duplicate is a fail-closed validator error until target-grouped selectors
   are used.
@@ -339,6 +345,9 @@ Implementation steps:
 1. Generate the three registries from the current 14-target census, then
    human-review every coordinator path and every `E` reason. Keep entries
    target-qualified, sorted, and duplicate-free.
+   For deterministic regeneration, use byte-order sorting for each file:
+   `LC_ALL=C sort -u userspace-dp/debug-leg.tests -o userspace-dp/debug-leg.tests`,
+   and the same command for `debug-leg.ignored` and `debug-leg.excluded`.
 2. Run the live validator under the pinned wrapper before the exact debug
    invocation. It enforces `A ⊆ R`, `E ⊆ R`, `X = F ∩ I`,
    `A ∪ E = F ∩ R`, and `A ∩ E = ∅`, then prints named set diffs.
