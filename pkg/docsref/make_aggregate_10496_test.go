@@ -18,7 +18,7 @@ import (
 // second prerequisite when the first one fails.
 func capturedLeg(line, target string) bool {
 	suffix := target + " || status=$$?"
-	return line == suffix || line == suffix+"; \\"
+	return line == suffix+"; \\"
 }
 
 func initializedStatus(line string) bool {
@@ -195,6 +195,19 @@ func TestMakefileSerialAggregate10496(t *testing.T) {
 	if err := validateMakeAggregate(droppedCapture); err == nil ||
 		!strings.Contains(err.Error(), "lack contiguous status capture") {
 		t.Fatalf("dropped capture did not trip the capture check: %v", err)
+	}
+
+	// A captured leg without the continuation loses status before the
+	// trailing exit because each non-continued recipe line gets a shell.
+	droppedContinuation := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-go || status=$$?\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\techo \"NOT EXAMINED\"; \\\n" +
+		"\texit $$status\n"
+	if err := validateMakeAggregate(droppedContinuation); err == nil ||
+		!strings.Contains(err.Error(), "lack contiguous status capture") {
+		t.Fatalf("dropped continuation did not trip the capture check: %v", err)
 	}
 
 	// A capture line that resets status after the submake can erase a red
