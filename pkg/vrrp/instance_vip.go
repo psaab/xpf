@@ -207,7 +207,11 @@ func (vi *vrrpInstance) addVIPsLocked() vipActuationResult {
 		}
 		if err := vi.nlAddrAdd(link, addr); err != nil {
 			// EEXIST is fine — address already present, so it IS actuated.
-			if strings.Contains(err.Error(), "exists") {
+			// errors.Is unwraps the netlink errno even when it is annotated with
+			// NLMSGERR_ATTR TLV text; the string check is a belt-and-suspenders
+			// match for wrappers that only expose Error().
+			if errors.Is(err, unix.EEXIST) ||
+				strings.Contains(err.Error(), "file exists") {
 				res.applied = append(res.applied, vip)
 			} else {
 				slog.Warn("vrrp: failed to add VIP",
