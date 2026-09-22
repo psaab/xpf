@@ -176,13 +176,53 @@ configuration-driven admission rejects, the same operator-enforcement class
 as folded host-inbound deny. Add two dedicated global indices named
 `GlobalCtrUnknownVLANDrops` and `GlobalCtrDstMACDrops` at the next currently
 free slots (41 and 42 on this baseline; re-check before implementation),
-raise `GlobalCtrMax` accordingly, and update the shared C/Rust/Go map-size
+raise `GlobalCtrMax` accordingly and update the shared C/Go map-size
 constants. `userspaceCounterSnapshot` sums both fields; `totalDrops()` adds
 both; `syncBPFCountersLocked` pushes both reason deltas and the aggregate.
 Add the corresponding CLI/API/Prometheus breakdown rows and distinct global
 series (for example `xpf_unknown_vlan_drops_total` and
 `xpf_dst_mac_drops_total`) so GlobalCtrDrops remains a total-with-breakdown.
 Concrete current owners for those checkpoints are `userspace-dp/src/afxdp/mod.rs` (batch/flush), `userspace-dp/src/afxdp/binding_state/mod.rs` and `binding_state/snapshot.rs` (live/snapshot), `userspace-dp/src/afxdp/coordinator/refresh_bindings.rs` plus `coordinator/reconcile/reset.rs` (copy/zero/reset), `userspace-dp/src/protocol/binding.rs` (Rust serde wire), `pkg/dataplane/userspace/protocol_binding.go` and `manager_counters.go` (Go wire/sum/bridge), `pkg/dataplane/userspace/format/status_sections.go` and its golden test (show summary), `pkg/api/metrics_descriptors_userspace_drops.go`, `metrics_userspace.go`, and `metrics.go` (Prometheus descriptors/collector/registration), `pkg/cli/cli_show_flow.go`, `pkg/grpcapi/server_show_flow.go`, and `pkg/grpcapi/server_show_status.go` (operator/API views), plus `docs/junos-cli-reference.md`.
+
+### Pinned global_counters ABI and upgrade path
+
+The two new global indices are not mixed-version-safe merely because the
+BindingStatus wire fields use serde defaults and Go `omitempty`. The pinned
+`global_counters` map is a separate ABI: `bpf/headers/xpf_common.h:305`
+currently defines `GLOBAL_CTR_MAX` as 41, `bpf/headers/xpf_maps.h:324` uses
+that C value for `max_entries`, `pkg/dataplane/types.go:982` defines the Go
+`GlobalCtrMax` as 41, and `pkg/dataplane/loader_userspace_shim.go:728`
+creates the Go shared map with that value. Adding indices 41 and 42 requires
+all of these max-entry values to become 43. There is no Rust `GlobalCtrMax`
+constant or Rust declaration to update; the C header and Go loader are the
+map-size authorities.
+
+The live upgrade path is already explicit and must remain the compatibility
+contract: `LoadUserspaceShim` → `shimPrePublishLoad` →
+`loadUserspaceShimObjectsOnce` → `validateUserspaceShimSpec` →
+`validateUserspaceShimLivePins`, with `xpfd verify-dataplane` (including the
+`xpfd upgrade --rolling` deploy/reload path) running the
+same pre-stop gate during deploy. A running old daemon's pinned
+`global_counters` shape (max_entries 41) therefore intentionally fails the
+new shape (max_entries 43) before the old daemon is stopped; the plan must
+not promise a hitless rolling upgrade across this map-ABI change. The error
+uses `userspaceShimStalePinRemediation`, whose existing recovery path is
+`docs/operations/userspace-shim-pin-recovery.md`: drain the node or move
+traffic to its peer, stop xpfd, unlink only the named incompatible pin, and
+start xpfd so the new map is recreated. Hitless shutdown preserves pins, so a
+plain restart is not a migration. No targeted automatic migration tool
+exists; `xpfd cleanup` is the broader last resort and must not be proposed as
+the default.
+
+Add a fail-on-revert compatibility cell in
+`pkg/dataplane/livepin_global_counters_10498_test.go`: with a new expected
+shape at max_entries 43, a fabricated old live pin at 41 must be rejected by
+`validateUserspaceShimSpecWith` with `global_counters`, `MaxEntries`,
+`ABI-incompatible`, and the targeted-pin remediation; a matching 43 pin must
+pass. The cell is RED if `global_counters` is removed from the ABI inventory
+or if the max-entry comparison is bypassed. Also pin C/Go parity by checking
+`GLOBAL_CTR_MAX` in `bpf/headers/xpf_common.h`, Go `GlobalCtrMax`, and the
+Go `global_counters` MapSpec all equal 43.
 
 The UMEM-slice failure is a driver/memory hygiene failure, analogous to
 metadata_errors and the martian/IPv6 non-enforcement family. It receives the
@@ -203,7 +243,10 @@ the two folded global series read their dedicated GlobalCtr offsets.
   only additive fields and observer increments are required.
 - Rust and Go wire fields are additive, use exact matching names,
   `serde(default)` on Rust and `omitempty` on Go, and decode absent fields
-  as zero for mixed-version helper/manager rollout.
+  as zero for mixed-version helper/manager rollout. This additive-wire
+  compatibility does not make the separately pinned `global_counters` map
+  shape mixed-version-safe; its 41→43 crossing is guarded by the live-pin
+  preflight and targeted migration path in §4.3.
 - Additive CLI/status/REST/gRPC rows do not remove existing fields. The one
   intentional semantic change is documented: GlobalCtrDrops gains the two
   configured admission reasons, while the UMEM hygiene counter remains
@@ -247,14 +290,17 @@ the two folded global series read their dedicated GlobalCtr offsets.
 - H10 Global bridge deltas are disjoint: VLAN and MAC each bump once on the
   first matching pre-L3 guard; UMEM never enters totalDrops, so no double
   count or orphaned global term is possible.
+- H11 `global_counters` is a pinned map ABI, not an additive wire field:
+  C/Go `max_entries` must be exactly 43 after adding indices 41 and 42. An
+  old 41-entry live pin is refused before stop and requires the targeted
+  migration; no hitless mixed-version crossing is claimed.
 
 ## 7. Risk table (exactly four classes)
 
 | # | Class | Risk | Likelihood / effect | Mitigation | Residual |
 |---|---|---|---|---|---|
 | P1 | Packet-path | An observer edit reorders a guard, swallows recycle, or changes a verdict. | Low / HIGH — forward/drop behavior could flip. | Keep the two-line bump inside each existing arm; head tests assert recycle and downstream non-reachability. | Near zero. |
-| P2 | Packet-path | Counter work adds hot-path cost or cache contention. | Very low / low — only taken drop arms increment; live atomics remain batched. | H1/H8; no new branch/alloc/lock/atomic; use the existing cluster-smoke throughput regression lane named at afxdp/mod.rs:337-341. | Low and measurable. |
-| C1 | Compat | Additive Rust/Go fields or two new global indices mismatch mixed versions or layout/map sizes. | Low / medium — silent zero, status skew, or map failure. | Exact wire-name pins, serde default/json omitempty, re-measured layout guards, shared GlobalCtrMax update. | Near zero. |
+| C1 | Compat | Additive Rust/Go fields, the pinned global_counters max_entries 41→43, or two new global indices mismatch mixed versions or layout/map sizes. | Low / medium — silent zero, status skew, map refusal, or blocked upgrade. | Exact wire-name pins, serde default/json omitempty, C/Go max-entry parity at 43, live-pin preflight, targeted recovery documentation, and the explicit old-pin fail-on-revert cell. | Low with planned migration; no hitless crossing claim. |
 | C2 | Compat | A new field is copied but not cleared, or reconcile reset omits it. | Medium / medium — stale unbound totals or reset survivors; this recurrence happened before. | #5190 auto census for copy/zero; targeted 9956 round-trip plus reset.rs companion cell for the three fields. | Low if both cells land. |
 | O1 | Operability | A counter exists but its status/Prometheus/global scope is misleading or undiscoverable. | Medium / medium — triage remains ambiguous or Packets dropped arithmetic lies. | 16-checkpoint checklist; distinct rows/series; explicit VLAN/MAC-included vs UMEM-excluded docs and global breakdowns. | Low. |
 | T1 | Test | All-ones fixtures or fabricated-only tests let wiring mistakes pass, especially at the Rust/Go JSON seam. | Medium / high — green suite with permanent zero telemetry. | Distinct 1/2/3 fixtures, split Rust/Go harnesses, both wire-name pins, and enumerated red-on-revert tripwires in §8. | Low. |
@@ -314,6 +360,12 @@ the proof honest by splitting the harnesses while pinning their seam.
   plus the existing enforcement terms but not UMEM. Removing either
   sum/total/delta term or either new index is RED; repeated polls assert
   safeDelta idempotence.
+- The global ABI cell fabricates an old pinned `global_counters` shape at
+  max_entries 41 against the new 43-entry expected shape and asserts the
+  pre-stop refusal plus targeted migration remediation. Reverting the
+  `global_counters` inventory entry, the C/Go max-entry parity, or the
+  `MaxEntries` comparison makes this cell RED; a matching 43-entry pin is a
+  positive control.
 - Status golden data uses distinct values (for example 1, 2, 3), not three
   ones, so a copy-paste row wiring error cannot pass.
 
