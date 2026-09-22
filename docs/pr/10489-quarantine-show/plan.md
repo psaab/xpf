@@ -266,8 +266,9 @@ this table exactly.
   `SurfacePredicates: ["ZoneQuarantineExclusions", "ZoneQuarantineExcludedReason"]`;
   `Unannotated: [52 exact entries]`;
   `Successor: "#10489"` (`docs/pr/10490-showaudit-discovery/plan.md:268-297`).
-  The permanent canary is local-CLI `showZonesDisplay`, annotated by #10490
-  and excluded from #10489's annotation set; the other 52 remain tracked.
+  The permanent canary is local-CLI `showZonesDisplay`; #10489 preserves its
+  #10490 census call and may add the text-row qualification without removing
+  the canary. The other 52 entries remain tracked.
   The committed census is 53 functions / 32 files: baseline 36/23 plus
   17 marginal functions from 19 `ZoneIDs` loops (two overlaps:
   `grpcapi buildSessionFilter`, `api buildSessionView`)
@@ -282,14 +283,12 @@ this table exactly.
   does NOT waive the gate drain for adjacent census entries. The gate has no
   output filter: every remaining function that prints or serializes a Zone
   calls the shared reason helper or receives a reviewed exact disposition.
-  Only exact no-Zone-value-enforcement helpers and the two named structured
-  handlers may be exempt; metric paths omit a quarantined sample
-  (`docs/pr/10490-showaudit-discovery/plan.md:339-377`). #10489's gate
-  annotation/reason accounting for adjacent outputs is not a claim that
-  #10530's runtime policy, counter, interface, session, or event behavior is
-  fixed. There are NO package-wide exemptions. The shared
-  `showaudit.exemptRenderers` map is the actual mechanism; this plan's
-  per-function matrix records how each shared-map entry is applied, not a
+  Every exemption is still an exact function-level disposition: no family or
+  package-wide waiver is permitted. Structured REST/gRPC entries explicitly
+  defer their wire fields to #10531; exact no-Zone-value helpers remain
+  #10530-adjacent exemptions; metric paths omit a quarantined sample. The
+  shared `showaudit.exemptRenderers` map is the actual mechanism; this plan's
+  per-function matrix records how each exact map entry is applied, not a
   row-local map. The row closes `Unannotated` only after all 52 entries are
   predicate-reached or explicitly reasoned-exempt. The sibling explicitly
   requires #10489 to stay open until that drain is merged
