@@ -131,7 +131,7 @@ excluded by `parsePackage` unless explicitly called out.
 
 The exact union was independently measured by a temporary probe calling
 `parsePackage` and `rangesOverAny`; the probe was deleted before the v2
-plan edit. The implementation MUST materialize the sorted 52-entry list
+plan edit. The implementation MUST materialize the exact 52-entry list
 below, not hand-wave the count or add a new exemption:
 
 ```text
@@ -145,7 +145,6 @@ pkg/api/security.go:zonesHandler
 pkg/api/sessions.go:buildSessionView
 pkg/api/sessions.go:sessionZonePairHandler
 pkg/api/stats.go:ifaceStatsHandler
-pkg/cli/apply.go:syslogZoneNameMap
 pkg/cli/cli_request_testcmd.go:testSecurityZone
 pkg/cli/cli_show_cluster.go:showChassisClusterStatus
 pkg/cli/cli_show_flow.go:showFlowSession
@@ -162,6 +161,7 @@ pkg/cli/cli_show_security_screen.go:showScreen
 pkg/cli/cli_show_security_screen.go:showScreenIdsOption
 pkg/cli/cli_show_security_screen.go:showScreenIdsOptionDetail
 pkg/cli/cli_show_security_screen.go:showScreenStatisticsAll
+pkg/cli/apply.go:syslogZoneNameMap
 pkg/cli/session_filter.go:populateIfaceMaps
 pkg/grpcapi/server_helpers.go:allInterfaceNames
 pkg/grpcapi/server_nat.go:GetNATDestination
