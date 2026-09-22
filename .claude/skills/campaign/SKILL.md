@@ -133,6 +133,7 @@ Run as many concurrently as the box allows.
   (`git worktree add -b fix/<n>-<slug> .claude/worktrees/<n> origin/master`),
   implement + fail-on-revert tests + build green + open PR ("Closes #<n>")
   + STOP (do not merge, do not dispatch reviewers).
+- **Commit-message standard (lanes, enforced)**: every issue-driven commit subject MUST be `<area>: <imperative summary> (#NNNN)` (area vocabulary: `docs:`, `test:`, `assurance:`, `forwarding:`, `config:`, `daemon:`, `cluster:`, `sessions:`, `audit:`, `show:`, `telemetry:`, `nftables:`, `ha:`, `frr:`, `process:`; new areas allowed when no existing one fits, never bare) + Why/What/Validation body via `git commit -F -` heredoc. PROHIBITED: `Issue #NNNN:` prefix form, ref-less subjects (`Fold review hardening`), title-only commits. Parent process commits without an issue cite the ruling instead (e.g. `(user-directive 2026-09-22)`). State this verbatim in every dispatch/fold brief. Parent bounces non-conforming branches before review (check `git log` shape at PR time).
 - **Worktree hygiene is absolute**: agents point at `.claude/worktrees/<x>`,
   NEVER the main checkout. Read other branches via `git show <ref>:<path>`,
   never `git checkout` in the main checkout.
@@ -194,11 +195,12 @@ Per PR, in order:
    `_Log.md`** conflict (keep both blocks, drop the markers), build-check if
    a behavior-relevant file conflicted, push the rebased branch via
    `git -C`. NEVER resolve in the main checkout.
-3. `gh pr merge <n> --merge --delete-branch`.
+3. Set the PR title + body first: `gh pr edit <n> --title "<area>: <summary> (#NNNN)" --body-file /tmp/pr<n>_body.md` (body with Why/What/Validation + gate evidence). Then merge with an explicit pair: `gh pr merge <n> --merge -t "<area>: <summary> (#NNNN)" -F - <<<"<same body>" --delete-branch`. Both flags REQUIRED together: `-t` alone yields a title-only merge whose body echoes the subject, and bare merge yields GitHub's `Merge pull request #N` template — both are log pollution (ruled 2026-09-22). `git fetch origin` first if the ref may be stale, then verify with `git log --format=%B -1 origin/master` after merging.
 4. Verify the issue auto-closed (`Closes #<n>` in the body). If not,
    `gh issue close <n>` with a comment citing the merge SHA + smoke result.
 5. Fetch master; the NEXT PR now needs its own `_Log` rebase vs the new
    master — repeat.
+**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing except known `.claude/worktrees/` untracked entries: zero M/A/D/R lines AND zero unexpected `??` lines. If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`: worktrees live under untracked dirs); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually (`mv` aside per-file for inspection, NEVER `git clean -fd`). NEVER blanket-checkout a dirty control tree and NEVER `merge --ff-only` into one. Restate worktree discipline to all lanes after any incident.
 
 **NEVER backticks in `git commit -m`** — use `git commit -F -` heredoc (PR
 bodies + commit messages contain backticked identifiers).
