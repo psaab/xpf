@@ -1069,6 +1069,7 @@ func decodeIPsecSAPayload(payload []byte) ([]string, bool) {
 // additive and self-detecting via the magic.
 var configGenMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'C', 'G', 0x00}
 var configAncestryMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'A', 'N', 0x00}
+
 const maxConfigAncestryPayload = 64 << 10
 
 func encodeConfigPayload(configText string, gen uint64) []byte {

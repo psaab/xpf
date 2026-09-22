@@ -257,7 +257,10 @@ includes `SyncImport`, `SharedMaterialize`, `WorkerLocalImport`, and
 locally bound demote-flipped replicas. No configstore ancestry or positional
 bind is added for #10510. The worker may carry `removed_zone_ids` as a
 rotation-local value if it receives only precomputed ForwardingState; it is
-not operator mutation metadata. Purge runs before #10511 retention.
+not operator mutation metadata. Rotation order is Go-arm rebind BEFORE the
+#10510 purge; the predicates are disjoint (rebind touches bound sessions,
+purge touches unbound id-0 sync-derived rows), so the order is benign rather
+than load-bearing (contract C7).
 
 ### 3.3 #10511 — provenance, evaluator, capture, id-0, and HA transport
 

@@ -274,3 +274,27 @@ fn policy_verdict_corpus_differential_9167() {
         }
     }
 }
+
+/// Presence pin for the #10511 icmp-unknown row: the count floors admit silent
+/// single-case deletion, so without this the row could be removed with both
+/// halves green. Mirror of the Go pin; symmetric removal reds both.
+#[test]
+fn policy_verdict_corpus_pins_icmp_unknown_case_10511() {
+    let cases = corpus_cases();
+    let case = cases
+        .iter()
+        .find(|c| c.name == "icmp-unknown-application")
+        .unwrap_or_else(|| {
+            panic!(
+                "corpus case `icmp-unknown-application` is missing ({} cases present); \
+                 the #10511 icmp-unknown coverage was removed",
+                cases.len()
+            )
+        });
+    assert!(
+        case.queries.len() >= 2,
+        "icmp-unknown-application carries {} queries, want at least the permit + \
+         unknown-application rows",
+        case.queries.len()
+    );
+}

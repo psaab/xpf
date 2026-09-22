@@ -110,6 +110,11 @@ type ClusterBulkReconcileResult struct {
 // When two tenants hold that tuple the probe is ambiguous and the helper REFUSES
 // (#8636). #9146 fixed the SINGULAR delete this way; the batch path — which is
 // the one that retires sessions continuously, from the conntrack GC — still
+// stripped the value.
+//
+// `RoutingDomain == 0` means "no domain to name", which is both the default
+// instance and "the caller had no value". Both want the pre-#9364 bare delete, so
+// one value serves both and no reserved sentinel is needed.
 type ScopedSessionKey struct {
 	Key           SessionKey
 	RoutingDomain uint32

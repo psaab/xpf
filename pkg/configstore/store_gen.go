@@ -36,6 +36,7 @@ var ErrCandidateGenerationConflict = errors.New(
 //     `s.candidate = …` reassignment is immediately followed by a bump —
 //     verified by code audit — plus the generation-conflict tests that would
 //     fail if a reset silently kept a stale token.
+//
 // bumpCandidateGenLocked advances the generation for a candidate replacement
 // or discard. Only the currently edited candidate lineage is retired; older
 // committed generations remain available to their apply transactions.

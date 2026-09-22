@@ -315,7 +315,8 @@ func (s *SessionSync) queueConfig(
 	if len(ancestry) > 0 && s.ConfigAncestryCapable() {
 		payload = encodeConfigPayloadWithAncestry(configText, gen, ancestry)
 	}
-	// #6629: carries every Secret leaf, including `chassis cluster
+	// #6629: the config text is the ACTIVE TREE, rendered unredacted — it
+	// carries every Secret leaf, including `chassis cluster
 	// authentication-key`, the PSK this very link authenticates with. Seal it
 	// under the connection's ephemeral key so a passive observer on the
 	// control segment cannot read it. The plaintext is the payload built
