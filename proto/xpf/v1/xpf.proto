@@ -35,6 +35,7 @@ service BpfrxService {
   rpc GetNATDestination(GetNATDestinationRequest) returns (GetNATDestinationResponse);
   rpc GetScreen(GetScreenRequest) returns (GetScreenResponse);
   rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+  rpc GetD11AttestationLedger(GetD11AttestationLedgerRequest) returns (GetD11AttestationLedgerResponse);
   rpc GetInterfaces(GetInterfacesRequest) returns (GetInterfacesResponse);
   rpc ShowInterfacesDetail(ShowInterfacesDetailRequest) returns (ShowInterfacesDetailResponse);
   rpc GetDHCPLeases(GetDHCPLeasesRequest) returns (GetDHCPLeasesResponse);
@@ -190,6 +191,50 @@ message GetStatusResponse {
   // Cluster status (empty string if not in a cluster)
   string cluster_role = 6;  // "primary" or "secondary"
   int32 cluster_node_id = 7; // node ID (0, 1, ...)
+}
+
+message GetD11AttestationLedgerRequest {}
+message GetD11AttestationLedgerResponse {
+  string node_id = 1;
+  string run_id = 2;
+  uint64 permit_epoch = 3;
+  uint64 snapshot_seq = 4;
+  bool finalized = 5;
+  bool truncated = 6;
+  repeated D11LedgerRecord records = 7;
+  repeated D11LedgerFailure failures = 8;
+}
+message D11LedgerRecord {
+  string node_id = 1;
+  uint64 request_id = 2;
+  uint64 permit_epoch = 3;
+  uint64 queue_epoch = 4;
+  uint32 queue_number = 5;
+  string family = 6;
+  string hook = 7;
+  string owner = 8;
+  string stn = 9;
+  uint32 owned_ifindex = 10;
+  bytes frame_digest = 11;
+  string admission_code = 12;
+  string completion = 13;
+  uint64 resolve_count = 14;
+  string terminal_state = 15;
+  uint64 late_attempts = 16;
+  bool duplicate = 17;
+  bool contract_refusal = 18;
+  string early_outcome = 19;
+  string early_reason = 20;
+  uint32 early_bytes_written = 21;
+}
+message D11LedgerFailure {
+  string family = 1;
+  string hook = 2;
+  string owner = 3;
+  string stn = 4;
+  uint32 owned_ifindex = 5;
+  bytes frame_digest = 6;
+  string reason = 7;
 }
 
 message GetGlobalStatsRequest {}

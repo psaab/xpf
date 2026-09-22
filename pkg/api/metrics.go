@@ -301,6 +301,8 @@ type xpfCollector struct {
 	ipsecCaptureStaleTotal           *prometheus.Desc
 	ipsecCaptureCancelledTotal       *prometheus.Desc
 	ipsecCaptureRefusedTotal         *prometheus.Desc
+	ipsecCaptureD11SuppressedTotal   *prometheus.Desc
+	ipsecCaptureD11Deny52Total       *prometheus.Desc
 	ipsecCaptureDeliveredAvail       *prometheus.Desc
 	ipsecCaptureDeliveredTotal       *prometheus.Desc
 
@@ -1007,6 +1009,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ipsecCaptureStaleTotal
 	ch <- c.ipsecCaptureCancelledTotal
 	ch <- c.ipsecCaptureRefusedTotal
+	ch <- c.ipsecCaptureD11SuppressedTotal
+	ch <- c.ipsecCaptureD11Deny52Total
 	ch <- c.ipsecCaptureDeliveredAvail
 	ch <- c.ipsecCaptureDeliveredTotal
 	ch <- c.configPersistDegraded

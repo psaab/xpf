@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/logging"
+	"github.com/psaab/xpf/pkg/nfqueue"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
 	"github.com/psaab/xpf/pkg/webmgmt"
@@ -146,8 +148,21 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		grpcDP = live
 	}
 	grpcSrv := grpcapi.NewServer(d.opts.GRPCAddr, grpcapi.Config{
-		Store:      d.store,
-		DP:         grpcDP,
+		Store: d.store,
+		DP:    grpcDP,
+		D11ArmFn: func(runID string, permitEpoch uint64, markerHex string) error {
+			if d.d11Armer == nil {
+				return fmt.Errorf("D11 attestation armer unavailable")
+			}
+			return d.d11Armer.Arm(runID, permitEpoch, markerHex)
+		},
+		D11LedgerFn: func() *nfqueue.D11LedgerSnapshot {
+			if d.d11Ledger == nil {
+				return nil
+			}
+			snapshot := d.d11Ledger.Snapshot()
+			return &snapshot
+		},
 		EventBuf:   eventBuf,
 		GC:         d.gc,
 		Routing:    d.routing,
@@ -717,7 +732,8 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				return api.IpsecCaptureWitness{}
 			}
 			status := runtime.actor.Status()
-			return api.IpsecCaptureWitness{
+			arm, d11Current := d.d11WitnessAuthority(runtime)
+			witness := api.IpsecCaptureWitness{
 				Available:          status.Available,
 				RunID:              status.RunID,
 				ActorActive:        status.Active && !status.Down,
@@ -734,9 +750,18 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				Stale:              status.Counters.Stale,
 				Cancelled:          status.Counters.Cancelled,
 				Refused:            status.Counters.Refused,
+				D11Suppressed:      status.Counters.D11Suppressed,
+				D11Deny52:          status.Counters.D11Deny52,
 				DeliveredAvailable: status.DeliveredAvailable,
 				Delivered:          status.Delivered,
 			}
+			if d11Current {
+				witness.D11Available = true
+				witness.D11RunID = arm.RunID
+				witness.D11Generation = status.Generation
+				witness.D11PermitEpoch = arm.PermitEpoch
+			}
+			return witness
 		},
 		SchedulerRepublishStaleSecondsFn: d.SchedulerRepublishStaleSeconds,
 		// #5669: surface the bounded-age fail-closed escalation so

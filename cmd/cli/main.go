@@ -26,6 +26,7 @@ import (
 	"github.com/psaab/xpf/pkg/policymatch"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // maxConfigRecvBytes bounds a single gRPC response the CLI will accept. The
@@ -83,19 +84,67 @@ func isLocalOnlyCommand(cmd string) bool {
 		f[2] == "wireguard" && f[3] == "generate-private-key"
 }
 
+func d11ArmAction(runID string, permitEpoch uint64, markerHex string) string {
+	return fmt.Sprintf("userspace-attest:arm:%s:%d:%s", runID, permitEpoch, markerHex)
+}
+
+func runD11Reattest(
+	ctx context.Context,
+	client pb.BpfrxServiceClient,
+	phase, runID string,
+	permitEpoch uint64,
+	markerHex string,
+) ([]byte, error) {
+	switch phase {
+	case "arm":
+		response, err := client.SystemAction(ctx, &pb.SystemActionRequest{
+			Action: d11ArmAction(runID, permitEpoch, markerHex),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return []byte(response.GetMessage()), nil
+	case "ledger":
+		response, err := client.GetD11AttestationLedger(ctx, &pb.GetD11AttestationLedgerRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return protojson.MarshalOptions{UseProtoNames: true}.Marshal(response)
+	default:
+		return nil, fmt.Errorf("invalid D11 phase %q (want arm or ledger)", phase)
+	}
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:50051", "xpfd gRPC address")
 	cmdFlag := flag.String("c", "", "run a single command non-interactively and exit")
+	d11Mode := flag.Bool("d11-reattest", false, "internal D11 arm/ledger driver")
+	d11Phase := flag.String("d11-phase", "", "internal D11 phase: arm or ledger")
+	d11RunID := flag.String("d11-run-id", "", "internal D11 run ID")
+	d11PermitEpoch := flag.Uint64("d11-permit-epoch", 0, "internal D11 permit epoch")
+	d11MarkerHex := flag.String("d11-marker-hex", "", "internal D11 marker selector")
 	flag.Parse()
-
 	conn, err := grpc.NewClient(*addr, dialOpts()...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cli: connect: %v\n", err)
 		os.Exit(1)
 	}
 	defer conn.Close()
-
 	client := pb.NewBpfrxServiceClient(conn)
+
+	if *d11Mode {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		output, callErr := runD11Reattest(
+			ctx, client, *d11Phase, *d11RunID, *d11PermitEpoch, *d11MarkerHex,
+		)
+		cancel()
+		if callErr != nil {
+			fmt.Fprintf(os.Stderr, "cli: D11 %s: %v\n", *d11Phase, callErr)
+			os.Exit(1)
+		}
+		fmt.Println(string(output))
+		return
+	}
 
 	hostname, _ := os.Hostname()
 	if hostname == "" {

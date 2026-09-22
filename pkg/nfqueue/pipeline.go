@@ -43,6 +43,12 @@ type LeaseMinter interface {
 	MintLease(CaptureFrame) (ReinjectLease, error)
 }
 
+// AttestLeaseMinter binds a lease to the D11 authority run and epoch. D11
+// selection refuses minters that do not implement this explicit contract.
+type AttestLeaseMinter interface {
+	MintLeaseForAttest(CaptureFrame, string, uint64) (ReinjectLease, error)
+}
+
 // LeaseMinterFunc adapts a function to LeaseMinter.
 type LeaseMinterFunc func(CaptureFrame) (ReinjectLease, error)
 
@@ -179,6 +185,7 @@ type CapturePipelineConfig struct {
 	OnUncertain      func(reason string)
 	ZoneEvaluator    ZoneEvaluator
 	ZoneSnapshot     ZoneSnapshotRef
+	Attestation      *D11AttestationConfig
 	DenyEvents       DenyEventSink
 }
 
@@ -230,6 +237,10 @@ type PipelineStats struct {
 	Adjudicated uint64
 	// #10478 Phase 2a witness: terminal q0 Written completions (equals Written).
 	Reinjected uint64
+	// #10484 D11 terminal WouldPermit accounting; routine pre-submit
+	// suppression remains V1PermitSuppressed and is intentionally separate.
+	D11Suppressed uint64
+	D11Deny52     uint64
 }
 
 type pipelineStats struct {
@@ -237,9 +248,14 @@ type pipelineStats struct {
 }
 
 type pendingReinject struct {
-	frame    CaptureFrame
-	lease    ReinjectLease
-	deadline time.Time
+	frame            CaptureFrame
+	lease            ReinjectLease
+	deadline         time.Time
+	admissionPending bool
+	earlyCompletion  *ReinjectCompletion
+	duplicateEarly   bool
+	ledger           *D11AttestationLedger
+	ledgerKey        D11LedgerKey
 }
 
 type flowState struct {
@@ -260,6 +276,7 @@ type CapturePipeline struct {
 	registry         *OriginRegistry
 	leaseMinter      LeaseMinter
 	submitter        ReinjectSubmitter
+	attestation      *D11AttestationConfig
 	sink             PacketVerdictSink
 	onUncertain      func(string)
 	zoneEvaluator    ZoneEvaluator
@@ -276,7 +293,10 @@ type CapturePipeline struct {
 	pending          map[uint64]*pendingReinject
 	closed           bool
 	revoked          bool
-	stats            pipelineStats
+	// d11RevokedPermitEpoch fences only the attestation selector after its
+	// scoped rollback cancellation; ordinary capture remains reusable.
+	d11RevokedPermitEpoch uint64
+	stats                 pipelineStats
 }
 
 // NewCapturePipeline constructs a pipeline with explicit bounded resources.
@@ -321,6 +341,7 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	return &CapturePipeline{
 		phase: cfg.Phase, registry: cfg.Registry, leaseMinter: cfg.LeaseMinter,
 		submitter: cfg.Submitter, sink: cfg.Sink, onUncertain: cfg.OnUncertain,
+		attestation:   cfg.Attestation,
 		zoneEvaluator: cfg.ZoneEvaluator, zoneSnapshot: cfg.ZoneSnapshot,
 		denyEvents: cfg.DenyEvents,
 		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
@@ -460,7 +481,7 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 			p.finishFrame(frame, VerdictAccept)
 		}
 		if len(enforcing) != 0 {
-			p.submitEligible(enforcing)
+			p.dispatchAttestEligible(enforcing)
 		}
 		p.mu.Lock()
 		eligible = p.eligibleLocked()
@@ -566,15 +587,15 @@ func DispatchWorkers(parts map[string][]CaptureFrame) []string {
 	sort.Strings(owners)
 	return owners
 }
-func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) {
+func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) bool {
 	if p == nil || p.denyEvents == nil || !reason.Valid() {
-		return
+		return false
 	}
 	queueID := uint16(0)
 	if frame.Packet != nil {
 		queueID = frame.Packet.QueueID()
 	}
-	_ = p.denyEvents.EmitIpsecInnerDeny(IpsecInnerDeny{
+	return p.denyEvents.EmitIpsecInnerDeny(IpsecInnerDeny{
 		Reason: reason, Origin: frame.origin, OriginSet: frame.originSet,
 		QueueID: queueID, Tunnel: frame.origin.STN,
 		Generation: frame.Generation,
@@ -848,6 +869,9 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 	var expired []*pendingReinject
 	p.mu.Lock()
 	for id, pending := range p.pending {
+		if pending.admissionPending || pending.deadline.IsZero() {
+			continue
+		}
 		if !now.Before(pending.deadline) {
 			expired = append(expired, pending)
 			delete(p.pending, id)
@@ -863,6 +887,13 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 		p.stats.Uncertain++
 		p.stats.FlowRetires++
 		p.mu.Unlock()
+		if pending.ledger != nil {
+			pending.ledger.RecordCompletion(pending.ledgerKey, ReinjectCompletion{
+				RequestID: pending.lease.RequestID, PermitEpoch: pending.lease.PermitEpoch,
+				QueueNumber: pending.lease.QueueNumber, QueueEpoch: pending.lease.QueueEpoch,
+				Outcome: CompletionUncertain, Reason: "ack timeout",
+			}, "Uncertain")
+		}
 		p.finishFrame(pending.frame, VerdictDrop)
 		p.retireFlow(pending.frame.FlowKey)
 		resolved++
@@ -916,6 +947,13 @@ func (p *CapturePipeline) failPending(reason string) int {
 	}
 	p.uncertain(reason)
 	for _, item := range pending {
+		if item.ledger != nil {
+			item.ledger.RecordCompletion(item.ledgerKey, ReinjectCompletion{
+				RequestID: item.lease.RequestID, PermitEpoch: item.lease.PermitEpoch,
+				QueueNumber: item.lease.QueueNumber, QueueEpoch: item.lease.QueueEpoch,
+				Outcome: CompletionUncertain, Reason: reason,
+			}, "Uncertain")
+		}
 		p.finishFrame(item.frame, VerdictDrop)
 		p.retireFlow(item.frame.FlowKey)
 	}
@@ -927,16 +965,47 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 	pending := p.pending[completion.RequestID]
 	if pending == nil {
 		p.stats.LateCompletions++
+		ledger := (*D11AttestationLedger)(nil)
+		if p.attestation != nil {
+			ledger = p.attestation.Ledger
+		}
 		p.mu.Unlock()
+		if ledger != nil {
+			ledger.MarkLate(completion.RequestID)
+		}
 		return false
+	}
+	if pending.admissionPending {
+		ledger := pending.ledger
+		if pending.earlyCompletion == nil {
+			copyCompletion := completion
+			pending.earlyCompletion = &copyCompletion
+			p.mu.Unlock()
+			if ledger != nil {
+				ledger.RecordEarlyCompletion(pending.ledgerKey, completion)
+			}
+		} else {
+			pending.duplicateEarly = true
+			p.mu.Unlock()
+			if ledger != nil {
+				ledger.MarkDuplicate(pending.ledgerKey)
+			}
+		}
+		return true
 	}
 	delete(p.pending, completion.RequestID)
 	if flow := p.flows[pending.frame.FlowKey]; flow != nil {
 		flow.pending = nil
 	}
+	family, hook := d11OriginWire(pending.frame.origin)
+	originMismatch := pending.ledger != nil &&
+		(completion.Family != family ||
+			completion.Hook != hook ||
+			completion.OwnedIfindex != pending.frame.origin.OwnedIfindex)
 	identityMismatch := completion.PermitEpoch != pending.lease.PermitEpoch ||
 		completion.QueueNumber != pending.lease.QueueNumber ||
-		completion.QueueEpoch != pending.lease.QueueEpoch
+		completion.QueueEpoch != pending.lease.QueueEpoch ||
+		originMismatch
 	bytesMismatch := completion.Outcome == CompletionWritten &&
 		completion.BytesWritten != uint32(len(pending.frame.Packet.Payload()))
 	wouldPermit := completion.Outcome == CompletionWouldPermit &&
@@ -962,16 +1031,37 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		case CompletionRefused, CompletionDenied:
 			p.stats.Refused++
 		case CompletionWouldPermit:
-			p.stats.V1PermitSuppressed++
+			if pending.ledger != nil {
+				p.stats.D11Suppressed++
+			} else {
+				p.stats.V1PermitSuppressed++
+			}
 		default:
 			p.stats.Uncertain++
 		}
 	}
+	terminal := string(completion.Outcome)
+	if ambiguous {
+		terminal = "Uncertain"
+	} else if wouldPermit {
+		// E28 suppression is a deliberate terminal deny, not a successful
+		// reinjection. Keep the completion outcome for accounting while
+		// retaining the historical FAIL terminal discriminator for the
+		// attestation manifest.
+		terminal = "FAIL"
+	} else if completion.Outcome == CompletionWritten {
+		terminal = "Written"
+	}
+	ledger := pending.ledger
+	ledgerKey := pending.ledgerKey
 	p.mu.Unlock()
+	if ledger != nil {
+		ledger.RecordCompletion(ledgerKey, completion, terminal)
+	}
 	if ambiguous {
 		reason := "uncertain completion"
 		if identityMismatch {
-			reason = "completion lease mismatch"
+			reason = "completion lease or origin mismatch"
 		} else if bytesMismatch {
 			reason = "completion byte-count mismatch"
 		}
@@ -981,14 +1071,19 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		return true
 	}
 	if wouldPermit {
-		p.emitDeny(pending.frame, ReasonEvaluatorUnavailable)
+		if pending.ledger != nil {
+			if p.emitDeny(pending.frame, ReasonEvaluatorUnavailable) {
+				p.mu.Lock()
+				p.stats.D11Deny52++
+				p.mu.Unlock()
+			}
+		}
 		p.finishFrame(pending.frame, VerdictDrop)
 		return true
 	}
 	p.finishFrame(pending.frame, VerdictDrop)
 	return true
 }
-
 func (p *CapturePipeline) retireFlow(key string) {
 	p.mu.Lock()
 	flow := p.flows[key]
@@ -1011,6 +1106,73 @@ func (p *CapturePipeline) retireFlow(key string) {
 // linearization point; queued and admitted originals are then terminal-DROPed
 // exactly once, while late completions are ignored. Queue number and epoch
 // are always carried together when a scoped cancellation is requested.
+// CancelForD11Drain fences D11 submissions and asks the reinjection owner to
+// cancel the matching requests without deleting their local pending entries.
+// The caller must continue polling until each Rust completion is resolved;
+// pipeline Close remains the fallback for requests that never receive one.
+func (p *CapturePipeline) CancelForD11Drain(permitEpoch uint64) error {
+	if p == nil || permitEpoch == 0 {
+		return nil
+	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+	p.submitGate.Lock()
+	p.mu.Lock()
+	if p.attestation != nil {
+		p.d11RevokedPermitEpoch = permitEpoch
+	}
+	ids := make([]uint64, 0, len(p.pending))
+	scopeSet := make(map[ReinjectQueueScope]struct{})
+	for id, pending := range p.pending {
+		if pending.lease.PermitEpoch != permitEpoch {
+			continue
+		}
+		ids = append(ids, id)
+		scopeSet[ReinjectQueueScope{
+			QueueNumber: pending.lease.QueueNumber,
+			QueueEpoch:  pending.lease.QueueEpoch,
+		}] = struct{}{}
+	}
+	p.mu.Unlock()
+	var err error
+	if p.submitter != nil {
+		scopes := make([]ReinjectQueueScope, 0, len(scopeSet))
+		for scope := range scopeSet {
+			scopes = append(scopes, scope)
+		}
+		_, err = p.submitter.CancelReinject(ids, permitEpoch, scopes)
+	}
+	p.submitGate.Unlock()
+	return err
+}
+
+// DrainD11 polls Rust completions until no pending request remains for the
+// selected permit epoch or the bounded wait expires.
+func (p *CapturePipeline) DrainD11(permitEpoch uint64, timeout time.Duration) error {
+	if p == nil || permitEpoch == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		p.Poll(time.Now())
+		p.mu.Lock()
+		pending := 0
+		for _, request := range p.pending {
+			if request.lease.PermitEpoch == permitEpoch {
+				pending++
+			}
+		}
+		p.mu.Unlock()
+		if pending == 0 {
+			return nil
+		}
+		if timeout <= 0 || !time.Now().Before(deadline) {
+			return fmt.Errorf("D11 drain left %d pending request(s)", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEpoch uint64) error {
 	scoped := permitEpoch != 0 || queueNumber != 0 || queueEpoch != 0
 	p.drainMu.Lock()
@@ -1023,21 +1185,33 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 	}
 	ids := make([]uint64, 0, len(p.pending))
 	drops := make([]CaptureFrame, 0, len(p.pending))
+	ledgerItems := make([]*pendingReinject, 0, len(p.pending))
+	d11Flows := make(map[string]struct{})
 	scopeSet := make(map[ReinjectQueueScope]struct{})
 	for id, pending := range p.pending {
 		if (permitEpoch == 0 || pending.lease.PermitEpoch == permitEpoch) &&
 			(queueNumber == 0 || pending.lease.QueueNumber == queueNumber) &&
 			(queueEpoch == 0 || pending.lease.QueueEpoch == queueEpoch) {
 			ids = append(ids, id)
-			drops = append(drops, pending.frame)
 			scopeSet[ReinjectQueueScope{QueueNumber: pending.lease.QueueNumber, QueueEpoch: pending.lease.QueueEpoch}] = struct{}{}
+			if pending.ledger != nil {
+				// Keep D11 rows and their flow heads pending through the
+				// send-only cancel write. Poll may concurrently receive the
+				// real Rust completion; post-write reconciliation observes
+				// which terminal path won instead of manufacturing a late row.
+				ledgerItems = append(ledgerItems, pending)
+				d11Flows[pending.frame.FlowKey] = struct{}{}
+				continue
+			}
+			drops = append(drops, pending.frame)
 			delete(p.pending, id)
 		}
 	}
 	if scoped {
 		// A scoped rotation only owns admitted packets whose lease matches
-		// the requested queue/epoch. Remove those heads from their flow so
-		// they cannot be submitted again; leave unrelated queued work live.
+		// the requested queue/epoch. Remove those ordinary heads from their
+		// flow so they cannot be submitted again; leave unrelated queued
+		// work live. D11 heads remain until cancel reconciliation above.
 		for _, dropped := range drops {
 			flow := p.flows[dropped.FlowKey]
 			if flow == nil {
@@ -1060,6 +1234,9 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 		}
 	} else {
 		for flowKey, flow := range p.flows {
+			if _, keep := d11Flows[flowKey]; keep {
+				continue
+			}
 			flow.pending = nil
 			drops = append(drops, flow.frames...)
 			flow.frames = nil
@@ -1102,9 +1279,42 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 	}
 	if p.submitter != nil &&
 		(len(ids) != 0 || wirePermitEpoch != 0 || len(scopes) != 0) {
+		// CancelReinject is send-only; its returned IDs are a local copy,
+		// not Rust acknowledgements. Terminalize retained D11 rows as
+		// Uncertain unless Poll has already consumed a real completion.
 		_, cancelErr = p.submitter.CancelReinject(ids, wirePermitEpoch, scopes)
 	}
 	p.submitGate.Unlock()
+	for _, item := range ledgerItems {
+		p.mu.Lock()
+		current := p.pending[item.lease.RequestID] == item
+		if current {
+			delete(p.pending, item.lease.RequestID)
+			if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
+				flow.pending = nil
+			}
+		}
+		p.mu.Unlock()
+		if !current {
+			continue
+		}
+		p.mu.Lock()
+		p.stats.Uncertain++
+		p.mu.Unlock()
+		p.uncertain("cancel response is not a completion")
+		item.ledger.RecordCompletion(item.ledgerKey, ReinjectCompletion{
+			RequestID: item.lease.RequestID, PermitEpoch: item.lease.PermitEpoch,
+			QueueNumber: item.lease.QueueNumber, QueueEpoch: item.lease.QueueEpoch,
+			Outcome: CompletionUncertain, Reason: "pipeline cancelled",
+		}, "Uncertain")
+		p.finishFrame(item.frame, VerdictDrop)
+		p.retireFlow(item.frame.FlowKey)
+	}
+	if !scoped {
+		for flowKey := range d11Flows {
+			p.retireFlow(flowKey)
+		}
+	}
 	seen := make(map[*Packet]struct{}, len(drops))
 	for _, frame := range drops {
 		if frame.Packet == nil {

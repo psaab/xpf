@@ -354,7 +354,6 @@ pub(crate) struct ControlRequest {
     pub fabrics: Option<Vec<FabricSnapshot>>,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SlowPathStatus {
     #[serde(default)]
@@ -438,6 +437,10 @@ pub(crate) struct S5ReinjectProvenance {
     pub outcome: String,
     #[serde(default)]
     pub bytes_written: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_digest: Vec<u8>,
+    #[serde(default)]
+    pub reason: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -537,6 +540,8 @@ impl From<crate::slowpath_reinject_9506::ReinjectStatusSnapshot> for S5ReinjectS
                     stn: row.stn,
                     outcome: row.outcome,
                     bytes_written: row.bytes_written,
+                    frame_digest: row.frame_digest.to_vec(),
+                    reason: row.reason,
                 })
                 .collect(),
             delivered_available: value.delivered_available,

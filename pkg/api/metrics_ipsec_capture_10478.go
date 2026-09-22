@@ -49,6 +49,11 @@ func (c *xpfCollector) collectIpsecCaptureWitness(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureStaleTotal, prometheus.CounterValue, float64(w.Stale), labels...)
 	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureCancelledTotal, prometheus.CounterValue, float64(w.Cancelled), labels...)
 	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureRefusedTotal, prometheus.CounterValue, float64(w.Refused), labels...)
+	if w.D11Available {
+		d11Labels := []string{w.D11RunID, strconv.FormatUint(w.D11Generation, 10), strconv.FormatUint(w.D11PermitEpoch, 10)}
+		ch <- prometheus.MustNewConstMetric(c.ipsecCaptureD11SuppressedTotal, prometheus.CounterValue, float64(w.D11Suppressed), d11Labels...)
+		ch <- prometheus.MustNewConstMetric(c.ipsecCaptureD11Deny52Total, prometheus.CounterValue, float64(w.D11Deny52), w.D11RunID, strconv.FormatUint(w.D11Generation, 10), strconv.FormatUint(w.D11PermitEpoch, 10), "52")
+	}
 	deliveredAvailable := 0.0
 	if w.DeliveredAvailable {
 		deliveredAvailable = 1

@@ -136,10 +136,11 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	// If these are added to cmdtree later nothing here will notice — they stay
 	// excused — so deleting an entry below is the deliberate step that makes
 	// them mappable.
-	"GetOSPFStatus": "no `show ospf` node exists in the operational tree",
-	"GetISISStatus": "no `show isis` node exists in the operational tree",
-	"GetRIPStatus":  "no `show rip` node exists in the operational tree",
-	"GetVRRPStatus": "no `show vrrp` node exists in the operational tree",
-	"ShowText":      "priced from the decoded request; the topic selects the command (showTextTopicCommand)",
-	"SystemAction":  "priced from the decoded request; the verb selects the command (systemActionVerbCommand)",
+	"GetOSPFStatus":           "no `show ospf` node exists in the operational tree",
+	"GetISISStatus":           "no `show isis` node exists in the operational tree",
+	"GetRIPStatus":            "no `show rip` node exists in the operational tree",
+	"GetVRRPStatus":           "no `show vrrp` node exists in the operational tree",
+	"ShowText":                "priced from the decoded request; the topic selects the command (showTextTopicCommand)",
+	"SystemAction":            "priced from the decoded request; the verb selects the command (systemActionVerbCommand)",
+	"GetD11AttestationLedger": "privileged bounded D11 evidence has no operator command; handler requires local root or configured super-user",
 }

@@ -115,6 +115,29 @@ fn ipsec_inner_verdict_bridge_maps_e24_to_uncertain() {
     );
 }
 
+#[test]
+fn d11_digest_frozen_vector_matches_go_contract() {
+    let mut vector = frame(1, 1, 3);
+    vector.lease.permit_epoch = 2;
+    vector.lease.queue_epoch = 3;
+    vector.lease.queue_number = 4;
+    vector.bytes = vec![0x00, 0x11, 0x22];
+    vector.origin.owned_ifindex = 5;
+    vector.origin.owner = "rg1".to_string();
+    vector.origin.stn = "stn1".to_string();
+    assert_eq!(
+        d11_frame_digest(
+            &vector,
+            "attest-00000000000000000000000000000000"
+        ),
+        [
+            0x79, 0x72, 0xbb, 0xf3, 0x3f, 0xb7, 0xf8, 0x1d, 0x51, 0xee, 0x31, 0xab,
+            0x9b, 0x05, 0x88, 0xf3, 0xd1, 0x04, 0xb3, 0x3d, 0xeb, 0x48, 0xe6, 0x2d,
+            0xe6, 0xbb, 0x9a, 0x7e, 0x24, 0xb0, 0x5a, 0xb1,
+        ]
+    );
+}
+
 /// Test stub authority: scripts open/closed without publishing epochs.
 struct StubAuthority {
     open: bool,
@@ -336,7 +359,88 @@ fn admit_duplicate_id_rejected_until_drained() {
     assert!(!dup2.admitted, "undrained terminal id cannot be reused");
     assert_eq!(core.drain_ready(16).len(), 1);
     let ok = core.admit(&frame(1, 4, 64));
-    assert!(ok.admitted, "drained id is reusable");
+    assert!(ok.admitted, "ordinary run IDs remain reusable after drain");
+}
+
+#[test]
+fn attest_terminal_id_tombstone_resets_only_on_run_change() {
+    let core = open_core();
+    assert!(core.announce_epochs(
+        "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        1,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    let first = core.admit(&frame(1, 1, 64));
+    assert!(first.admitted);
+    assert_eq!(core.pre_write_check(&lease(1)), PreWrite::Proceed);
+    assert!(core.resolve_write(&lease(1), written(64)));
+    assert_eq!(core.drain_ready(16).len(), 1);
+    let same_run = core.admit(&frame(1, 2, 64));
+    assert!(!same_run.admitted);
+    assert_eq!(same_run.reason, ADMIT_BAD_LEASE);
+    assert!(core.announce_epochs(
+        "attest-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        2,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    let new_run = core.admit(&frame(1, 3, 64));
+    assert!(new_run.admitted, "new attestation run clears old tombstones");
+}
+
+#[test]
+fn attest_tombstone_overflow_is_full_only_in_attest_run() {
+    let source = open_core();
+    assert!(source.announce_epochs(
+        "attest-cccccccccccccccccccccccccccccccc",
+        1,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    for id in 1..=TERMINAL_TOMBSTONE_MAX as u64 + 1 {
+        assert!(source.admit(&frame(id, id, 64)).admitted, "id {id} admission");
+        assert_eq!(source.pre_write_check(&lease(id)), PreWrite::Proceed);
+        assert!(source.resolve_write(&lease(id), written(64)));
+        assert_eq!(source.drain_ready(1).len(), 1);
+    }
+    let source_overflow =
+        source.admit(&frame(TERMINAL_TOMBSTONE_MAX as u64 + 2, 1, 64));
+    assert!(!source_overflow.admitted);
+    assert_eq!(source_overflow.reason, ADMIT_FULL);
+
+    let ordinary_source = ReinjectCore::new_shared();
+    assert!(ordinary_source.announce_epochs(
+        "ordinary-copy",
+        2,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    let target = ReinjectCore::new_shared();
+    assert!(target.announce_epochs(
+        "ordinary-copy",
+        2,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    {
+        let mut inner = target.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.terminal_tombstones.insert(99_999);
+        inner.terminal_tombstone_overflow = true;
+    }
+    target.copy_authority_from(&ordinary_source);
+    {
+        let inner = target.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(inner.terminal_tombstones.is_empty());
+        assert!(!inner.terminal_tombstone_overflow);
+    }
+    let ordinary = target.admit(&frame(TERMINAL_TOMBSTONE_MAX as u64 + 2, 1, 64));
+    assert!(ordinary.admitted, "ordinary handoff must clear D11 overflow poison");
 }
 
 #[test]

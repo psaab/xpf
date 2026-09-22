@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,21 +74,21 @@ type IpsecCapturePipelineStatus struct {
 // remains the authority for permit state, queue epochs, terminality, and
 // rotation; this type owns the bounded capture worker and queue receive loops.
 type IpsecCapturePipeline struct {
-	mu          sync.Mutex
-	supervisor  *ipsecSupervisor
-	registry    *nfqueue.OriginRegistry
-	queueEpochs map[uint16]uint64
-	queues      []IpsecCaptureQueue
-	pipeline    *nfqueue.CapturePipeline
-	rotation    *ipsecRotation
-	runID       string
+	mu               sync.Mutex
+	supervisor       *ipsecSupervisor
+	registry         *nfqueue.OriginRegistry
+	queueEpochs      map[uint16]uint64
+	queues           []IpsecCaptureQueue
+	pipeline         *nfqueue.CapturePipeline
+	rotation         *ipsecRotation
+	runID            string
 	configGeneration atomic.Uint64
 	fibGeneration    atomic.Uint32
-	requestID   atomic.Uint64
-	active      bool
-	down        bool
-	cancel      context.CancelFunc
-	done        chan struct{}
+	requestID        atomic.Uint64
+	active           bool
+	down             bool
+	cancel           context.CancelFunc
+	done             chan struct{}
 
 	deliveredCounterReader func() (xnft.TransitFenceCounter, bool, error)
 	deliveredBaseline      uint64
@@ -169,7 +170,6 @@ func (a *IpsecCapturePipeline) publishSnapshotAuthority(configGeneration uint64,
 	a.configGeneration.Store(configGeneration)
 	a.fibGeneration.Store(fibGeneration)
 }
-
 
 // Start launches the bounded poll/drain actor and one bounded-deadline receive
 // loop per configured NFQUEUE. An actor with no queues is still useful for
@@ -257,12 +257,12 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 		fibGeneration := a.fibGeneration.Load()
 		frame := nfqueue.CaptureFrame{
 			Packet: packet, FlowKey: classification.FlowKey,
-			Generation: captureQueue.Generation,
+			Generation:         captureQueue.Generation,
 			SnapshotGeneration: captureQueue.SnapshotGeneration,
-			ConfigGeneration: configGeneration,
-			FIBGeneration: fibGeneration,
-			QueueNumber: captureQueue.QueueNumber,
-			QueueEpoch: captureQueue.QueueEpoch,
+			ConfigGeneration:   configGeneration,
+			FIBGeneration:      fibGeneration,
+			QueueNumber:        captureQueue.QueueNumber,
+			QueueEpoch:         captureQueue.QueueEpoch,
 		}
 		if classification.IsFragment {
 			key, keyOK := classification.FragmentKey(captureQueue.Tunnel, captureQueue.VRF, captureQueue.Generation)
@@ -493,6 +493,31 @@ func (a *IpsecCapturePipeline) RollbackRotation() {
 	a.mu.Lock()
 	a.down = true
 	a.mu.Unlock()
+}
+
+// MintLeaseForAttest binds a selected frame to the exact D11 authority run
+// and permit epoch. It never falls back to the ordinary process run identity.
+func (a *IpsecCapturePipeline) MintLeaseForAttest(frame nfqueue.CaptureFrame, runID string, permitEpoch uint64) (nfqueue.ReinjectLease, error) {
+	if a == nil || a.supervisor == nil || frame.Packet == nil ||
+		!strings.HasPrefix(runID, "attest-") || permitEpoch == 0 {
+		return nfqueue.ReinjectLease{}, errIpsecPermitClosed
+	}
+	permit := a.supervisor.loadPermit()
+	if permit == nil || permit.state != ipsecPermitOpen || permit.permitEpoch != permitEpoch {
+		return nfqueue.ReinjectLease{}, errIpsecPermitClosed
+	}
+	queueEpoch := a.queueEpochs[frame.Packet.QueueID()]
+	if queueEpoch == 0 {
+		return nfqueue.ReinjectLease{}, errIpsecQueueStale
+	}
+	requestID := a.requestID.Add(1)
+	if requestID == 0 {
+		return nfqueue.ReinjectLease{}, errors.New("ipsec capture pipeline: request id exhausted")
+	}
+	return nfqueue.ReinjectLease{
+		PermitEpoch: permitEpoch, QueueNumber: frame.Packet.QueueID(),
+		QueueEpoch: queueEpoch, RequestID: requestID,
+	}, nil
 }
 
 // MintLease implements nfqueue.LeaseMinter using the immutable S4 permit and

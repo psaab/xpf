@@ -7,21 +7,24 @@
 # and emits one ledger row per cell.  A cluster without real route-based IPsec
 # fixtures/SAs is VOID with the missing precondition named; it is never PASS.
 #
-# Usage:
-#   ./test/incus/t12-g2-9506.sh --selftest
-#   ./test/incus/with-cluster.sh '9506 S5 T12/G2' -- \
-#       ./test/incus/t12-g2-9506.sh
+# Optional D11 re-attestation mode:
+#   ./test/incus/t12-g2-9506.sh --d11-reattest
+#
+# It arms a single bounded marker run, reads the retained ledger, and records
+# explicit VOID evidence when the live fixture cannot prove the contract.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 MODE=live
+D11_REATTEST=0
 while (($#)); do
     case "$1" in
     --selftest) MODE=selftest ;;
+    --d11-reattest) D11_REATTEST=1 ;;
     -h|--help)
-        sed -n '1,20p' "$0"
+        sed -n '1,24p' "$0"
         exit 0
         ;;
     *)
@@ -972,6 +975,596 @@ observe_vrf_scope() {
         "$tag" "$VRF_TEST_CREATED" "$VRF_ATTACHED" "$VRF_MASTER_INDEX" \
         "$VRF_INPUT_QUEUE_HITS" "$VRF_SCOPE_REASON"
 }
+d11_map_node_id() {
+    # Pure mapping mirroring the daemon d11NodeID rule (daemon.go): a
+    # present /etc/xpf/node-id restricted to 0|1 wins as node-N, else the
+    # trimmed hostname, else the standalone fallback. $1=hostname $2=file.
+    local host="$1" fileid="$2"
+    host="${host#"${host%%[![:space:]]*}"}"
+    host="${host%"${host##*[![:space:]]}"}"
+    fileid="${fileid#"${fileid%%[![:space:]]*}"}"
+    fileid="${fileid%"${fileid##*[![:space:]]}"}"
+    if [[ "$fileid" == 0 || "$fileid" == 1 ]]; then
+        printf 'node-%s' "$fileid"
+    elif [[ -n "$host" ]]; then
+        printf '%s' "$host"
+    else
+        printf 'standalone'
+    fi
+}
+d11_exe_allowed() {
+    [[ "$1" == MATCH ]] && printf '1' || printf '0'
+}
+
+d11_expected_node_id() {
+    # Independently observe one node's D11 identity inputs and map them.
+    # Prints the expected ledger node_id. Returns nonzero on transport
+    # failure only; a missing node-id file falls back to the hostname.
+    local node="$1" host fileid
+    host="$(remote "$node" 'hostname' 2>/dev/null)" || return 1
+    fileid="$(remote "$node" 'cat /etc/xpf/node-id 2>/dev/null' 2>/dev/null)" || fileid=""
+    d11_map_node_id "$host" "$fileid"
+}
+
+d11_join_fields() {
+    # Join parser: ledger0 ledger1 run status0 status1 traffic expected0 expected1.
+    # Single source for the live path and --selftest negatives. Prints:
+    # join_ok rows0 rows1 digest_joined term0 term1 traffic_ok set_ok q0_ok
+    # truncated_ok mapping_ok reason52_ok outcome_ok origin_ok rust_exact_ok
+    # nodes_ok nodeid0 nodeid1 wouldpermit_count
+    python3 - "$@" <<'PY'
+import base64
+import json
+import re
+import sys
+
+want, status_paths, traffic = sys.argv[3], sys.argv[4:6], sys.argv[6]
+expected = sys.argv[7:9]
+expected_ok = (len(expected) == 2 and
+               all(isinstance(x, str) and x and x != "standalone" for x in expected) and
+               expected[0] != expected[1])
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+def digest_bytes(value):
+    if isinstance(value, str):
+        try:
+            return base64.b64decode(value, validate=True)
+        except Exception:
+            return b""
+    if isinstance(value, list) and all(isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 255 for x in value):
+        return bytes(value)
+    return b""
+
+def provenance(path):
+    doc = load(path)
+    if isinstance(doc.get("status"), dict):
+        doc = doc["status"]
+    rust = doc.get("s5_reinject") if isinstance(doc, dict) else None
+    if not isinstance(rust, dict) or rust.get("run_id") != want:
+        return {}, False, True
+    rows = rust.get("provenance")
+    if not isinstance(rows, list):
+        return {}, False, True
+    out = {}
+    duplicate = False
+    malformed = False
+    for row in rows:
+        if not isinstance(row, dict):
+            malformed = True
+            continue
+        key = tuple(row.get(item, 0) for item in
+                   ("request_id", "permit_epoch", "queue_epoch", "queue_number"))
+        if not all(isinstance(item, int) and not isinstance(item, bool) and item > 0
+                   for item in key):
+            malformed = True
+            continue
+        digest = digest_bytes(row.get("frame_digest"))
+        reason = row.get("reason")
+        bytes_written = row.get("bytes_written")
+        family = row.get("family")
+        hook = row.get("hook")
+        owned_ifindex = row.get("owned_ifindex")
+        owner = row.get("owner")
+        stn = row.get("stn")
+        if (
+            len(digest) != 32 or not isinstance(row.get("outcome"), str) or
+            not row.get("outcome") or not isinstance(reason, int) or
+            isinstance(reason, bool) or not 0 <= reason <= 255 or
+            not isinstance(bytes_written, int) or isinstance(bytes_written, bool) or
+            bytes_written != 0 or not isinstance(family, int) or
+            isinstance(family, bool) or family not in {1, 2} or
+            not isinstance(hook, int) or isinstance(hook, bool) or hook not in {1, 2} or
+            not isinstance(owned_ifindex, int) or isinstance(owned_ifindex, bool) or
+            owned_ifindex <= 0 or not isinstance(owner, str) or not owner or
+            not isinstance(stn, str) or not stn
+        ):
+            malformed = True
+        if key in out:
+            duplicate = True
+        out[key] = (
+            digest,
+            row.get("outcome"),
+            row.get("reason"),
+            row.get("bytes_written"),
+            row.get("family"),
+            row.get("hook"),
+            row.get("owned_ifindex"),
+            row.get("owner"),
+            row.get("stn"),
+        )
+    return out, duplicate, malformed
+
+prov_maps = []
+rust_exact_ok = 1
+for status_path in status_paths:
+    prov, duplicate, malformed = provenance(status_path)
+    prov_maps.append(prov)
+    rust_exact_ok &= int(not duplicate and not malformed)
+node_valid = []
+node_ids = []
+selected_counts = []
+joined_counts = []
+terminal_counts = []
+selected_sets = []
+admitted_sets = []
+completed_sets = []
+digest_joined = 0
+q0_bad = 0
+truncated_ok = 1
+mapping_ok = 1
+reason52_ok = 1
+outcome_ok = 1
+origin_ok = 1
+wouldpermit_count = 0
+duplicate_ok = 1
+terminal_by_outcome = {
+    "written": "Written",
+    "stale": "stale",
+    "cancelled": "cancelled",
+    "refused": "refused",
+    "uncertain": "Uncertain",
+    "fenced": "fenced",
+    "denied": "denied",
+    "accepted": "Uncertain",
+    "would_reinject": "Uncertain",
+    "would_permit": "FAIL",
+}
+for index, path in enumerate(sys.argv[1:3]):
+    doc = load(path)
+    rows = doc.get("records")
+    failures = doc.get("failures")
+    node_id = doc.get("node_id")
+    valid = (isinstance(rows, list) and doc.get("run_id") == want and
+             isinstance(node_id, str) and bool(node_id) and
+             isinstance(failures if failures is not None else [], list) and
+             not (failures if failures is not None else []))
+    node_valid.append(bool(valid and len(expected) == 2 and node_id == expected[index]))
+    node_ids.append(node_id if isinstance(node_id, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", node_id) else "invalid-node-id")
+    truncated_ok &= int(valid and doc.get("truncated", False) is False)
+    prov = prov_maps[index]
+    selected = []
+    admitted = []
+    completed = []
+    joined = 0
+    terminals = 0
+    for row in rows if valid else []:
+        if not isinstance(row, dict):
+            mapping_ok = 0
+            continue
+        key4 = tuple(row.get(item, 0) for item in
+                    ("request_id", "permit_epoch", "queue_epoch", "queue_number"))
+        key = (node_id,) + key4
+        selected.append(key)
+        code = row.get("admission_code")
+        if code == "ADMIT_OK":
+            admitted.append(key)
+        else:
+            expected_terminal = (
+                "VOID" if code in {"ADMIT_STALE", "ADMIT_FULL", "ADMIT_SHUTDOWN"}
+                else "FAIL")
+            mapping_ok &= int(row.get("terminal_state") == expected_terminal)
+        digest = digest_bytes(row.get("frame_digest"))
+        proof = prov.get(key4)
+        completion = row.get("completion")
+        resolve = row.get("resolve_count")
+        duplicate = row.get("duplicate", False)
+        late = row.get("late_attempts", 0)
+        resolve_ok = isinstance(resolve, int) and not isinstance(resolve, bool) and resolve == 1
+        accounting_ok = (
+            duplicate is False and isinstance(late, int) and
+            not isinstance(late, bool) and late == 0
+        )
+        valid_completion = (
+            code == "ADMIT_OK" and completion in terminal_by_outcome and
+            resolve_ok and accounting_ok and
+            row.get("terminal_state") == terminal_by_outcome[completion]
+        )
+        origin_match = False
+        if valid_completion:
+            completed.append(key)
+        if proof:
+            outcome_ok &= int(proof[1] == completion)
+            q0_bad |= int(proof[1] == "written" or proof[2] == 52 or
+                          proof[3] not in (0, None))
+            reason52_ok &= int(proof[2] != 52)
+            ledger_origin = (
+                {"inet": 1, "bridge": 2}.get(row.get("family")),
+                {"forward": 1, "input": 2}.get(row.get("hook")),
+                row.get("owned_ifindex"),
+                row.get("owner"),
+                row.get("stn"),
+            )
+            ledger_origin_valid = (
+                ledger_origin[0] in {1, 2} and ledger_origin[1] in {1, 2} and
+                isinstance(ledger_origin[2], int) and
+                not isinstance(ledger_origin[2], bool) and ledger_origin[2] > 0 and
+                isinstance(ledger_origin[3], str) and bool(ledger_origin[3]) and
+                isinstance(ledger_origin[4], str) and bool(ledger_origin[4])
+            )
+            rust_origin_valid = (
+                len(proof) == 9 and isinstance(proof[4], int) and
+                not isinstance(proof[4], bool) and proof[4] in {1, 2} and
+                isinstance(proof[5], int) and not isinstance(proof[5], bool) and
+                proof[5] in {1, 2} and isinstance(proof[6], int) and
+                not isinstance(proof[6], bool) and proof[6] > 0 and
+                isinstance(proof[7], str) and bool(proof[7]) and
+                isinstance(proof[8], str) and bool(proof[8])
+            )
+            origin_match = bool(
+                ledger_origin_valid and rust_origin_valid and
+                tuple(proof[4:9]) == ledger_origin
+            )
+            origin_ok &= int(origin_match)
+            if (valid_completion and completion == "would_permit" and
+                    proof[1] == "would_permit" and row.get("terminal_state") == "FAIL"):
+                wouldpermit_count += 1
+        else:
+            outcome_ok = 0
+            origin_ok = 0
+        if (row.get("node_id") == node_id and code == "ADMIT_OK" and
+                all(isinstance(item, int) and not isinstance(item, bool) and item > 0
+                    for item in key4) and len(digest) == 32 and proof and
+                proof[0] == digest and origin_match):
+            joined += 1
+        if (completion == "would_permit" and valid_completion and
+                row.get("terminal_state") == "FAIL" and proof and
+                proof[1] == "would_permit"):
+            terminals += 1
+    rust_exact_ok &= int(len(prov) == len(selected))
+    duplicate_ok &= int(len(selected) == len(set(selected)))
+    selected_sets.append(set(selected))
+    admitted_sets.append(set(admitted))
+    completed_sets.append(set(completed))
+    selected_counts.append(len(selected))
+    joined_counts.append(joined)
+    terminal_counts.append(terminals)
+set_ok = int(duplicate_ok and all(selected_sets[i] == admitted_sets[i] == completed_sets[i]
+                                   for i in range(len(selected_sets))))
+digest_joined = sum(joined_counts)
+nodes_ok = int(expected_ok and len(node_valid) == 2 and all(node_valid))
+join_ok = int(all(node_valid) and selected_counts == [2, 2] and
+              set_ok and digest_joined == 4 and q0_bad == 0 and
+              truncated_ok and mapping_ok and reason52_ok and outcome_ok and
+              origin_ok and rust_exact_ok and nodes_ok)
+terminal0 = int(terminal_counts[0] > 0) if terminal_counts else 0
+terminal1 = int(terminal_counts[1] > 0) if len(terminal_counts) > 1 else 0
+try:
+    traffic_lines = open(traffic, encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    traffic_lines = []
+flow_ids = []
+flow_rows = {}
+for line in traffic_lines:
+    match = re.match(r"^D11_FLOW id=([0-9]+) direction=(peer-to-lan|lan-to-peer) inner=([^ ]+)$", line)
+    if match:
+        flow_id = int(match.group(1))
+        direction = match.group(2)
+        inner = match.group(3)
+        flow_ids.append(flow_id)
+        flow_rows[flow_id] = (direction, inner)
+zero_loss = sum(bool(re.search(r"(?:^|,\s*)0% packet loss(?:,|$)", line))
+                for line in traffic_lines)
+expected_directions = {
+    41001: "peer-to-lan", 41002: "lan-to-peer",
+    41003: "peer-to-lan", 41004: "lan-to-peer",
+}
+flow_shape_ok = (
+    all(flow_rows.get(flow_id, (None, None))[0] == direction
+        for flow_id, direction in expected_directions.items()) and
+    flow_rows.get(41001, (None, None))[1] == flow_rows.get(41002, (None, None))[1] and
+    flow_rows.get(41003, (None, None))[1] == flow_rows.get(41004, (None, None))[1] and
+    flow_rows.get(41001, (None, None))[1] != flow_rows.get(41003, (None, None))[1]
+)
+traffic_ok = int(len(flow_ids) == 4 and len(set(flow_ids)) == 4 and
+                 set(flow_ids) == set(expected_directions) and flow_shape_ok and
+                 zero_loss == 4)
+print(join_ok, selected_counts[0] if selected_counts else 0,
+      selected_counts[1] if len(selected_counts) > 1 else 0,
+      digest_joined, terminal0, terminal1, traffic_ok, set_ok, int(q0_bad == 0),
+      truncated_ok, mapping_ok, reason52_ok, outcome_ok, origin_ok,
+      rust_exact_ok, nodes_ok, node_ids[0] if node_ids else "invalid-node-id",
+      node_ids[1] if len(node_ids) > 1 else "invalid-node-id", wouldpermit_count)
+PY
+}
+
+d11_final_fields() {
+    # Final parser: final0 final1 run expected0 expected1 pre0 pre1.
+    # It repeats row/set/accounting checks after teardown and proves that the
+    # final key sets are identical to the pre-rollback snapshots.
+    python3 - "$@" <<'PY'
+import base64
+import json
+import sys
+
+final_paths = sys.argv[1:3]
+want = sys.argv[3]
+expected = sys.argv[4:6]
+pre_paths = sys.argv[6:8]
+expected_ok = (len(expected) == 2 and
+               all(isinstance(x, str) and x and x != "standalone" for x in expected) and
+               expected[0] != expected[1])
+terminal_by_outcome = {
+    "written": "Written", "stale": "stale", "cancelled": "cancelled",
+    "refused": "refused", "uncertain": "Uncertain", "fenced": "fenced",
+    "denied": "denied", "accepted": "Uncertain",
+    "would_reinject": "Uncertain", "would_permit": "FAIL",
+}
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+def digest_bytes(value):
+    if not isinstance(value, str):
+        return b""
+    try:
+        return base64.b64decode(value, validate=True)
+    except Exception:
+        return b""
+
+def key(row, node_id):
+    fields = ("request_id", "permit_epoch", "queue_epoch", "queue_number")
+    values = tuple(row.get(item) for item in fields)
+    if not all(isinstance(item, int) and not isinstance(item, bool) and item > 0
+               for item in values):
+        return None
+    return (node_id,) + values
+
+def pre_keys(path):
+    doc = load(path)
+    rows = doc.get("records")
+    node_id = doc.get("node_id")
+    if not isinstance(rows, list) or not isinstance(node_id, str) or not node_id:
+        return set()
+    out = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return set()
+        row_key = key(row, node_id)
+        if row_key is None or row_key in out:
+            return set()
+        out.add(row_key)
+    return out
+
+pre_sets = [pre_keys(path) for path in pre_paths]
+final_sets = []
+final_ok = 1
+accounting_ok = 1
+node_ok = 1
+row_counts = []
+for index, path in enumerate(final_paths):
+    doc = load(path)
+    node_id = doc.get("node_id")
+    rows = doc.get("records")
+    failures = doc.get("failures", [])
+    basic = (
+        doc.get("run_id") == want and doc.get("finalized") is True and
+        doc.get("truncated", False) is False and isinstance(rows, list) and
+        isinstance(failures, list) and not failures and expected_ok and
+        isinstance(node_id, str) and node_id == expected[index]
+    )
+    node_ok &= int(isinstance(node_id, str) and node_id == expected[index])
+    rows_ok = bool(basic and len(rows) == 2)
+    seen = set()
+    admitted = set()
+    completed = set()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            rows_ok = False
+            continue
+        row_key = key(row, node_id)
+        duplicate = row.get("duplicate", False)
+        late = row.get("late_attempts", 0)
+        code = row.get("admission_code")
+        completion = row.get("completion")
+        row_ok = (
+            row_key is not None and row_key not in seen and
+            row.get("node_id") == node_id and
+            isinstance(row.get("resolve_count"), int) and
+            not isinstance(row.get("resolve_count"), bool) and
+            row.get("resolve_count") == 1 and
+            isinstance(late, int) and not isinstance(late, bool) and late == 0 and
+            duplicate is False and code == "ADMIT_OK" and
+            completion in terminal_by_outcome and
+            row.get("terminal_state") == terminal_by_outcome[completion] and
+            len(digest_bytes(row.get("frame_digest"))) == 32
+        )
+        origin_ok = (
+            row.get("family") in {"inet", "bridge"} and
+            row.get("hook") in {"forward", "input"} and
+            isinstance(row.get("owned_ifindex"), int) and
+            not isinstance(row.get("owned_ifindex"), bool) and
+            row.get("owned_ifindex") > 0 and
+            isinstance(row.get("owner"), str) and bool(row.get("owner")) and
+            isinstance(row.get("stn"), str) and bool(row.get("stn"))
+        )
+        row_ok = row_ok and origin_ok
+        if row_key is not None:
+            seen.add(row_key)
+            admitted.add(row_key)
+            if completion in terminal_by_outcome and row_ok:
+                completed.add(row_key)
+        rows_ok = rows_ok and row_ok
+    sets_ok = bool(rows_ok and len(seen) == 2 and admitted == completed == seen and
+                   seen == pre_sets[index])
+    accounting_ok &= int(sets_ok)
+    final_sets.append(seen)
+    row_counts.append(len(rows) if isinstance(rows, list) else 0)
+    final_ok &= int(rows_ok and sets_ok)
+final_ok &= int(len(final_sets) == 2 and final_sets[0] != final_sets[1] and node_ok)
+print(final_ok, node_ok, row_counts[0] if row_counts else 0,
+      row_counts[1] if len(row_counts) > 1 else 0, accounting_ok,
+      int(expected_ok))
+PY
+}
+d11_final_runtime_fields() {
+    # Final runtime observer requires each node's restored normal status to
+    # prove the selected authority is closed. Missing retired-actor data is
+    # not absence evidence; unreadable or malformed status/metrics fails closed.
+    python3 - "$@" <<'PY'
+import json
+import re
+import sys
+
+status_paths = sys.argv[1:3]
+metric_paths = sys.argv[3:5]
+want = sys.argv[5]
+runtime_ok = 1
+authority_ok = 1
+status_witnesses = 0
+status_identities = []
+for path in status_paths:
+    try:
+        doc = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        runtime_ok = authority_ok = 0
+        status_identities.append(None)
+        continue
+    if isinstance(doc, dict) and isinstance(doc.get("status"), dict):
+        doc = doc["status"]
+    if not isinstance(doc, dict) or "s5_reinject" not in doc:
+        runtime_ok = authority_ok = 0
+        status_identities.append(None)
+        status_witnesses += 1
+        continue
+    rust = doc["s5_reinject"]
+    run_id = rust.get("run_id") if isinstance(rust, dict) else None
+    generation = rust.get("generation") if isinstance(rust, dict) else None
+    permit_epoch = rust.get("permit_epoch") if isinstance(rust, dict) else None
+    permit_state = rust.get("permit_state") if isinstance(rust, dict) else None
+    valid = (
+        isinstance(run_id, str) and bool(run_id) and run_id != want and
+        not re.fullmatch(r"attest-[0-9a-f]{32}", run_id) and
+        isinstance(generation, int) and not isinstance(generation, bool) and generation > 0 and
+        isinstance(permit_epoch, int) and not isinstance(permit_epoch, bool) and permit_epoch > 0 and
+        permit_state == "CLOSED"
+    )
+    if not valid:
+        runtime_ok = authority_ok = 0
+        status_identities.append(None)
+    else:
+        status_identities.append((run_id, str(generation), str(permit_epoch)))
+    status_witnesses += 1
+for index, path in enumerate(metric_paths):
+    expected = status_identities[index] if index < len(status_identities) else None
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        runtime_ok = authority_ok = 0
+        continue
+    if not text.strip():
+        runtime_ok = authority_ok = 0
+        continue
+    saw_permit_metric = False
+    normal_seen = False
+    normal_closed = False
+    for line in text.splitlines():
+        match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line)
+        if not match:
+            continue
+        try:
+            value = float(match.group(3))
+        except ValueError:
+            runtime_ok = authority_ok = 0
+            continue
+        labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', match.group(2)))
+        if match.group(1) != "xpf_ipsec_capture_permit_state":
+            continue
+        saw_permit_metric = True
+        identity = (labels.get("run_id"), labels.get("generation"), labels.get("permit_epoch"))
+        if identity == expected:
+            normal_seen = True
+            if labels.get("state") == "CLOSED" and value == 1:
+                normal_closed = True
+            if labels.get("state") == "OPEN" and value != 0:
+                runtime_ok = authority_ok = 0
+            continue
+        if labels.get("run_id") == want and labels.get("state") == "OPEN" and value != 0:
+            runtime_ok = authority_ok = 0
+    if not saw_permit_metric or not normal_seen or not normal_closed:
+        runtime_ok = authority_ok = 0
+if status_witnesses != 2:
+    runtime_ok = authority_ok = 0
+print(runtime_ok, authority_ok)
+PY
+}
+d11_status_ready() {
+    local status="$1" run_id="$2" epoch="$3"
+    python3 - "$status" "$run_id" "$epoch" <<'PY'
+import json
+import sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print(0)
+    raise SystemExit
+if isinstance(doc, dict) and isinstance(doc.get("status"), dict):
+    doc = doc["status"]
+rust = doc.get("s5_reinject") if isinstance(doc, dict) else None
+print(int(isinstance(rust, dict) and rust.get("run_id") == sys.argv[2] and
+          rust.get("permit_epoch") == int(sys.argv[3]) and
+          rust.get("permit_state") == "OPEN"))
+PY
+}
+d11_new_marker_hex() {
+    # Per-run 16-byte marker selector as 32 lowercase hex. Every live D11
+    # consumer (arm RPCs, ping -p payloads) already takes the value from
+    # $D11_MARKER_HEX, so randomizing here binds the run without new plumbing.
+    local hex
+    hex="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [[ "$hex" =~ ^[0-9a-f]{32}$ ]]; then
+        printf '%s' "$hex"
+    else
+        printf '%s' "$(printf '%s' "$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -c1-32)"
+    fi
+}
+d11_restore_verdict() {
+    # $1=verdict $2=reason $3=restore_ok. Prints "verdict reason".
+    # A failed restore demotes PASS to VOID but preserves FAIL/VOID evidence
+    # with the restore failure annotated, so the acceptance surface cannot
+    # mislabel a broken claim as environmental.
+    local verdict="$1" reason="$2" restore_ok="$3"
+    if [[ "$restore_ok" != 1 ]]; then
+        if [[ "$verdict" == PASS ]]; then
+            verdict=VOID
+            reason=env-void
+        else
+            reason="${reason};restore-failed"
+        fi
+    fi
+    printf '%s %s' "$verdict" "$reason"
+}
 # The selftest is hermetic: it must not source cluster-env, call incus, or
 # create ledger rows.  It checks the conservative refusal model and cell shape.
 if [[ "$MODE" == selftest ]]; then
@@ -990,17 +1583,51 @@ if [[ "$MODE" == selftest ]]; then
         elif [[ "$fixture" != 1 ]]; then
             printf 'VOID\tenv-void\n'
         else
-            # The live body is deliberately conservative until packet/workload
-            # measurements and verdict logic are implemented.
+            # Static selftest inputs do not include packet/workload evidence.
             printf 'VOID\tmeasurement-not-run\n'
         fi
     }
     expect "missing SA is VOID" "VOID" "$(cell_verdict 1 1 0 MATCH/both | cut -f1)"
     expect "missing divert is VOID" "VOID" "$(cell_verdict 1 0 0 MATCH/both | cut -f1)"
-    expect "unattested binary is VOID" "VOID" "$(cell_verdict 1 1 1 MISMATCH/both | cut -f1)"
+    expect "unattested binary is VOID" "0" "$(d11_exe_allowed MISMATCH)"
+    expect "unavailable binary is VOID" "0" "$(d11_exe_allowed UNAVAILABLE)"
+    expect "attested binary is allowed" "1" "$(d11_exe_allowed MATCH)"
     expect "complete fixture awaits measurement" "VOID" "$(cell_verdict 1 1 1 MATCH/both | cut -f1)"
-    expect "bad fence awaits measurement" "VOID" "$(cell_verdict 0 1 1 MATCH/both | cut -f1)"
-    expect "bad divert awaits measurement" "VOID" "$(cell_verdict 1 0 1 MATCH/both | cut -f1)"
+    d11_run_id="attest-0123456789abcdef0123456789abcdef"
+    d11_permit_epoch=41
+    d11_marker_hex=00112233445566778899aabbccddeeff
+    d11_action="userspace-attest:arm:${d11_run_id}:${d11_permit_epoch}:${d11_marker_hex}"
+    expect "D11 arm action has exact wire prefix" \
+        "userspace-attest:arm:" "${d11_action%%${d11_run_id}*}"
+    expect "D11 run id is attest plus 32 lowercase hex" "1" \
+        "$( [[ "$d11_run_id" =~ ^attest-[0-9a-f]{32}$ ]] && echo 1 || echo 0 )"
+    expect "D11 selector is exactly 16 bytes" "32" "${#d11_marker_hex}"
+    expect "D11 malformed run id is refused" "0" \
+        "$( [[ "attest-0123" =~ ^attest-[0-9a-f]{32}$ ]] && echo 1 || echo 0 )"
+    expect "D11 zero permit epoch is refused" "0" \
+        "$( [[ "$d11_permit_epoch" == 0 ]] && echo 1 || echo 0 )"
+    expect "D11 short selector is refused" "0" \
+        "$( [[ ${#d11_marker_hex} == 16 ]] && echo 1 || echo 0 )"
+    marker_a="$(d11_new_marker_hex)"
+    marker_b="$(d11_new_marker_hex)"
+    expect "D11 marker is per-run 32 lowercase hex" "1" \
+        "$( [[ "$marker_a" =~ ^[0-9a-f]{32}$ && "$marker_b" =~ ^[0-9a-f]{32}$ ]] && echo 1 || echo 0 )"
+    expect "D11 marker is not fixed across runs" "1" \
+        "$( [[ "$marker_a" != "$marker_b" ]] && echo 1 || echo 0 )"
+    expect "D11 restore demotes PASS to VOID" "VOID env-void" \
+        "$(d11_restore_verdict PASS armed-and-ready 0)"
+    expect "D11 restore preserves FAIL evidence" "FAIL join-or-safety-mismatch;restore-failed" \
+        "$(d11_restore_verdict FAIL join-or-safety-mismatch 0)"
+    expect "D11 restore preserves VOID evidence" "VOID env-void:missing-fixture;restore-failed" \
+        "$(d11_restore_verdict VOID env-void:missing-fixture 0)"
+    expect "D11 restore leaves PASS on clean restore" "PASS armed-and-ready" \
+        "$(d11_restore_verdict PASS armed-and-ready 1)"
+    noarg_status=0
+    env -u XPF_CLUSTER_LOCK_HELD "$0" >/dev/null 2>&1 || noarg_status=$?
+    expect "no-arg live mode requires cluster lock" "2" "$noarg_status"
+    expect "D11 arm action names the selected run" "1" \
+        "$( [[ "$d11_action" == *":${d11_run_id}:"* ]] && echo 1 || echo 0 )"
+    expect "bad divert is VOID" "VOID" "$(cell_verdict 1 0 1 MATCH/both | cut -f1)"
     cell_shape() {
         local label="$1"
         shift
@@ -1391,8 +2018,245 @@ PY
         "$parser_dir/provenance-st-links.txt")"
     expect "malformed provenance stays unavailable" "unavailable" \
         "$(observer_field "$MALFORMED_OBS" packet_samples)"
-    rm -rf "$parser_dir"
-    if [[ "$fail" == 0 && "$pass" == 63 ]]; then
+    cat >"$parser_dir/d11-build.py" <<'PY'
+import base64
+import copy
+import json
+import sys
+
+root, run = sys.argv[1:]
+for node_index, node_id in enumerate(("node-0", "node-1")):
+    records = []
+    provenance = []
+    for row_index in range(2):
+        request_id = node_index * 2 + row_index + 1
+        queue_number = 1000 + request_id
+        digest = bytes([request_id]) * 32
+        digest_text = base64.b64encode(digest).decode()
+        key = {
+            "request_id": request_id,
+            "permit_epoch": 7,
+            "queue_epoch": 1,
+            "queue_number": queue_number,
+        }
+        records.append({
+            **key, "node_id": node_id, "family": "inet", "hook": "forward",
+            "owned_ifindex": 7, "owner": "owner", "stn": "stn",
+            "frame_digest": digest_text, "admission_code": "ADMIT_OK",
+            "completion": "would_permit", "resolve_count": 1,
+            "terminal_state": "FAIL", "duplicate": False,
+        })
+        provenance.append({
+            **key, "frame_digest": digest_text, "outcome": "would_permit",
+            "reason": 0, "bytes_written": 0, "family": 1, "hook": 1,
+            "owned_ifindex": 7, "owner": "owner", "stn": "stn",
+        })
+    with open(f"{root}/ledger{node_index}.json", "w", encoding="utf-8") as fh:
+        json.dump({"node_id": node_id, "run_id": run, "records": records,
+                   "failures": [], "truncated": False}, fh)
+    with open(f"{root}/status{node_index}.json", "w", encoding="utf-8") as fh:
+        json.dump({"s5_reinject": {"run_id": run, "generation": 4,
+                                   "permit_epoch": 7, "permit_state": "OPEN",
+                                   "provenance": provenance}}, fh)
+with open(f"{root}/traffic.txt", "w", encoding="utf-8") as fh:
+    for flow_id in (41001, 41002, 41003, 41004):
+        direction = "peer-to-lan" if flow_id in (41001, 41003) else "lan-to-peer"
+        inner = "10.0.0.1" if flow_id in (41001, 41002) else "10.0.0.2"
+        fh.write(f"D11_FLOW id={flow_id} direction={direction} inner={inner}\n")
+        fh.write("1 packets transmitted, 1 received, 0% packet loss\n")
+with open(f"{root}/wrong-direction.txt", "w", encoding="utf-8") as fh:
+    for flow_id in (41001, 41002, 41003, 41004):
+        inner = "10.0.0.1" if flow_id in (41001, 41002) else "10.0.0.2"
+        fh.write(f"D11_FLOW id={flow_id} direction=peer-to-lan inner={inner}\n")
+        fh.write("1 packets transmitted, 1 received, 0% packet loss\n")
+with open(f"{root}/same-node.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/ledger1.json", encoding="utf-8"))
+    value["node_id"] = "node-0"
+    json.dump(value, fh)
+with open(f"{root}/duplicate-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/status0.json", encoding="utf-8"))
+    value["s5_reinject"]["provenance"].append(
+        copy.deepcopy(value["s5_reinject"]["provenance"][0]))
+    json.dump(value, fh)
+with open(f"{root}/digest-mismatch-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/status0.json", encoding="utf-8"))
+    value["s5_reinject"]["provenance"][0]["frame_digest"] = base64.b64encode(bytes([9]) * 32).decode()
+    json.dump(value, fh)
+with open(f"{root}/wrong-lease-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/status0.json", encoding="utf-8"))
+    value["s5_reinject"]["provenance"][0]["queue_number"] = 9999
+    json.dump(value, fh)
+with open(f"{root}/closed-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/status1.json", encoding="utf-8"))
+    value["s5_reinject"]["run_id"] = "normal-1"
+    value["s5_reinject"]["generation"] = 5
+    value["s5_reinject"]["permit_epoch"] = 8
+    value["s5_reinject"]["permit_state"] = "CLOSED"
+    json.dump(value, fh)
+with open(f"{root}/different-attest-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/closed-status.json", encoding="utf-8"))
+    value["s5_reinject"]["run_id"] = "attest-11111111111111111111111111111111"
+    json.dump(value, fh)
+with open(f"{root}/malformed-runtime.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/closed-status.json", encoding="utf-8"))
+    value["s5_reinject"] = []
+    json.dump(value, fh)
+with open(f"{root}/runtime.metrics", "w", encoding="utf-8") as fh:
+    fh.write(f'xpf_ipsec_capture_permit_state{{run_id="{run}",generation="4",permit_epoch="7",state="CLOSED"}} 0\n')
+    fh.write('xpf_ipsec_capture_permit_state{run_id="normal-1",generation="5",permit_epoch="8",state="CLOSED"} 1\n')
+with open(f"{root}/selected-only.metrics", "w", encoding="utf-8") as fh:
+    fh.write(f'xpf_ipsec_capture_permit_state{{run_id="{run}",generation="4",permit_epoch="7",state="CLOSED"}} 1\n')
+with open(f"{root}/unrelated.metrics", "w", encoding="utf-8") as fh:
+    fh.write('xpf_other_metric{state="CLOSED"} 1\n')
+with open(f"{root}/missing-runtime.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/closed-status.json", encoding="utf-8"))
+    del value["s5_reinject"]
+    json.dump(value, fh)
+with open(f"{root}/empty.metrics", "w", encoding="utf-8") as fh:
+    pass
+PY
+    d11_parser_run="attest-00000000000000000000000000000000"
+    python3 "$parser_dir/d11-build.py" "$parser_dir" "$d11_parser_run"
+    expect "D11 readiness accepts serialized OPEN state" "1" \
+        "$(d11_status_ready "$parser_dir/status0.json" "$d11_parser_run" 7)"
+    read -r parser_join parser_rows0 parser_rows1 parser_digest parser_term0 parser_term1 \
+        parser_traffic parser_set parser_q0 parser_truncated parser_mapping parser_reason \
+        parser_outcome parser_origin parser_rust parser_nodes parser_node0 parser_node1 \
+        parser_would <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/status0.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    expect "D11 parser positive fixture joins" "1" "$parser_join"
+    expect "D11 parser positive fixture proves distinct nodes" "1" "$parser_nodes"
+    read -r same_join _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/same-node.json" \
+        "$d11_parser_run" "$parser_dir/status0.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    read -r _ _ _ _ _ _ wrong_traffic _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/status0.json" "$parser_dir/status1.json" \
+        "$parser_dir/wrong-direction.txt" node-0 node-1)"
+    expect "D11 parser rejects wrong direction distribution" "0" "$wrong_traffic"
+    expect "D11 parser rejects same node twice" "0" "$same_join"
+    read -r duplicate_join _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/duplicate-status.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    expect "D11 parser rejects duplicate Rust provenance" "0" "$duplicate_join"
+    read -r digest_join _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/digest-mismatch-status.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    expect "D11 parser rejects digest mismatch" "0" "$digest_join"
+    read -r lease_join _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/wrong-lease-status.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    expect "D11 parser rejects wrong lease key" "0" "$lease_join"
+    read -r closed_runtime_ok closed_authority_ok <<<"$(d11_final_runtime_fields \
+        "$parser_dir/closed-status.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/runtime.metrics" "$parser_dir/runtime.metrics" "$d11_parser_run")"
+    expect "D11 final runtime accepts closed status metrics" "1" "$closed_runtime_ok"
+    expect "D11 final runtime proves closed authority" "1" "$closed_authority_ok"
+    read -r selected_only_ok _ <<<"$(d11_final_runtime_fields \
+        "$parser_dir/closed-status.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/selected-only.metrics" "$parser_dir/selected-only.metrics" "$d11_parser_run")"
+    expect "D11 final runtime rejects selected-only closed metric" "0" "$selected_only_ok"
+    read -r different_attest_ok _ <<<"$(d11_final_runtime_fields \
+        "$parser_dir/different-attest-status.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/runtime.metrics" "$parser_dir/runtime.metrics" "$d11_parser_run")"
+    expect "D11 final runtime rejects different attest nonce" "0" "$different_attest_ok"
+    read -r malformed_runtime_ok _ <<<"$(d11_final_runtime_fields \
+        "$parser_dir/malformed-runtime.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/runtime.metrics" "$parser_dir/runtime.metrics" "$d11_parser_run")"
+    expect "D11 final runtime rejects malformed present status" "0" "$malformed_runtime_ok"
+    read -r unrelated_runtime_ok _ <<<"$(d11_final_runtime_fields \
+        "$parser_dir/closed-status.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/unrelated.metrics" "$parser_dir/unrelated.metrics" "$d11_parser_run")"
+    expect "D11 final runtime rejects unrelated-only metrics" "0" "$unrelated_runtime_ok"
+    read -r missing_runtime_ok _ <<<"$(d11_final_runtime_fields \
+        "$parser_dir/missing-runtime.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/runtime.metrics" "$parser_dir/runtime.metrics" "$d11_parser_run")"
+    expect "D11 final runtime rejects missing authority status" "0" "$missing_runtime_ok"
+    read -r empty_metrics_ok _ <<<"$(d11_final_runtime_fields \
+        "$parser_dir/closed-status.json" "$parser_dir/closed-status.json" \
+        "$parser_dir/runtime.metrics" "$parser_dir/empty.metrics" "$d11_parser_run")"
+    expect "D11 final runtime rejects empty per-node metrics" "0" "$empty_metrics_ok"
+    python3 - "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" <<'PY'
+import json
+import sys
+for source, target in zip(sys.argv[1:3], sys.argv[3:]):
+    value = json.load(open(source, encoding="utf-8"))
+    value["finalized"] = True
+    json.dump(value, open(target, "w", encoding="utf-8"))
+PY
+    read -r final_fixture_ok final_fixture_nodes _ _ final_fixture_accounts _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser repeats accounting and node checks" "1" "$final_fixture_ok"
+    expect "D11 final parser repeats accounting set proof" "1" "$final_fixture_accounts"
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["failures"] = [{"reason": "unmatched late completion request_id=99"}]
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    read -r unmatched_final_ok _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser rejects unmatched late marker" "0" "$unmatched_final_ok"
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["failures"] = []
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["records"][0]["late_attempts"] = 1
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    read -r dirty_final_ok _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser rejects late accounting" "0" "$dirty_final_ok"
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["records"][0]["late_attempts"] = 0
+value["records"][0]["duplicate"] = True
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    read -r dup_final_ok _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser rejects duplicate flag" "0" "$dup_final_ok"
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["records"][0]["duplicate"] = False
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    python3 - "$parser_dir/final1.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["node_id"] = "node-0"
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    read -r sn_final_ok sn_final_nodes _ _ _ _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser rejects same node twice" "0" "$sn_final_ok"
+    expect "D11 final parser node check rejects same node" "0" "$sn_final_nodes"
+    if [[ "$fail" == 0 && "$pass" == 101 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -1662,6 +2526,357 @@ run_fixture_measure() {
     return 0
 }
 
+d11_row() {
+    local gate="$1" section="$2" predicate="$3" observed="$4" verdict="$5" reason="$6" metrics="$7"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$gate" "$section" "$predicate" "$observed" "$verdict" "$reason" "$metrics" >>"$D11_ROWS_FILE"
+}
+
+d11_metric_delta() {
+    local before0="$1" after0="$2" before1="$3" after1="$4" run_id="$5" metric="$6" reason="${7:-}"
+    python3 - "$before0" "$after0" "$before1" "$after1" "$run_id" "$metric" "$reason" <<'PY'
+import re
+import sys
+
+before0, after0, before1, after1, run_id, metric, reason = sys.argv[1:]
+def total(path):
+    value = 0.0
+    found = False
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return found, value
+    for line in text.splitlines():
+        match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line)
+        if not match or match.group(1) != metric:
+            continue
+        labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', match.group(2)))
+        if labels.get("run_id") != run_id:
+            continue
+        if reason and labels.get("reason") != reason:
+            continue
+        if set(labels) != ({"run_id", "generation", "permit_epoch"} |
+                           ({"reason"} if reason else set())):
+            continue
+        try:
+            value += float(match.group(3))
+            found = True
+        except ValueError:
+            continue
+    return found, value
+before_found, before_value = total(before0)
+after_found, after_value = total(after0)
+before1_found, before1_value = total(before1)
+after1_found, after1_value = total(after1)
+if not after_found or not after1_found:
+    print(-1)
+else:
+    if not before_found or not before1_found:
+        before_value = 0.0 if not before_found else before_value
+        before1_value = 0.0 if not before1_found else before1_value
+    delta0 = after_value - before_value
+    delta1 = after1_value - before1_value
+    print(int(delta0 + delta1) if delta0 >= 0 and delta1 >= 0 else -1)
+PY
+}
+
+d11_process_metric_delta() {
+    local before="$1" after="$2" run_id="$3" generation="$4" permit_epoch="$5" metric="$6"
+    python3 - "$before" "$after" "$run_id" "$generation" "$permit_epoch" "$metric" <<'PY'
+import re
+import sys
+
+before, after, run_id, generation, permit_epoch, metric = sys.argv[1:]
+want = {"run_id": run_id, "generation": generation, "permit_epoch": permit_epoch}
+def total(path):
+    value = 0.0
+    found = False
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return found, value
+    for line in text.splitlines():
+        match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([-+0-9.eE]+)", line)
+        if not match or match.group(1) != metric:
+            continue
+        labels = dict(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"', match.group(2)))
+        if set(labels) != set(want) or any(labels.get(k) != v for k, v in want.items()):
+            continue
+        try:
+            value += float(match.group(3))
+            found = True
+        except ValueError:
+            continue
+    return found, value
+b_found, b = total(before)
+a_found, a = total(after)
+if not a_found:
+    print(-1)
+else:
+    if not b_found:
+        b = 0.0
+    delta = a - b
+    print(int(delta) if delta >= 0 else -1)
+PY
+}
+
+
+
+run_d11_reattest() {
+    D11_ROWS_FILE="$ARCHIVE_DIR/d11-cells.tsv"
+    : >"$D11_ROWS_FILE"
+    D11_RUN_ID="attest-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    if [[ ! "$D11_RUN_ID" =~ ^attest-[0-9a-f]{32}$ ]]; then
+        D11_RUN_ID="attest-$(printf '%s' "$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -c1-32)"
+    fi
+    D11_MARKER_HEX="$(d11_new_marker_hex)"
+    D11_ARM0="$ARCHIVE_DIR/d11-fw0-arm.txt"
+    D11_ARM1="$ARCHIVE_DIR/d11-fw1-arm.txt"
+    D11_LEDGER0="$ARCHIVE_DIR/d11-fw0-ledger-before.json"
+    D11_LEDGER1="$ARCHIVE_DIR/d11-fw1-ledger-before.json"
+    D11_LEDGER0_FINAL="$ARCHIVE_DIR/d11-fw0-ledger-final.json"
+    D11_LEDGER1_FINAL="$ARCHIVE_DIR/d11-fw1-ledger-final.json"
+    D11_TRAFFIC="$ARCHIVE_DIR/d11-marker-traffic.txt"
+    local epoch0="${D11_PRE_EPOCH_FW0:-0}" epoch1="${D11_PRE_EPOCH_FW1:-0}"
+    local arm0=0 arm1=0 ready0=0 ready1=0 join_ok=0 terminal_ok=0 final_ok=0
+    local setup_reason env_verdict="" env_reason
+    local pre_metrics0 pre_metrics1 post_metrics0 post_metrics1
+    local d11_suppressed=0 d11_deny52=0
+    local expected_node0="" expected_node1="" node_ids_ready=0
+
+    # Capture readiness independently on both nodes. A CLI arm success by
+    # itself is not proof that the Rust authority and Go metrics surfaces are
+    # joined, so every later cell consumes these observations.
+    observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-ready
+    local status0_ready="$RUNTIME_STATUS_FILE" metrics0_ready="$RUNTIME_METRICS_FILE"
+    local run0_ready="$RUNTIME_RUN_ID" gen0_ready="$RUNTIME_GENERATION" state0_ready="$RUNTIME_PERMIT_STATE" go_epoch0_ready="$RUNTIME_PERMIT_EPOCH"
+    pre_metrics0="$metrics0_ready"
+    if [[ "$RUNTIME_S5_AVAILABLE" == 1 && "$RUNTIME_SOCKET_READY" == 1 &&
+          "$RUNTIME_PERMIT_OPEN" == 1 && "$epoch0" =~ ^[1-9][0-9]*$ ]]; then
+        ready0=1
+    fi
+    observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-ready
+    local status1_ready="$RUNTIME_STATUS_FILE" metrics1_ready="$RUNTIME_METRICS_FILE"
+    local run1_ready="$RUNTIME_RUN_ID" gen1_ready="$RUNTIME_GENERATION" state1_ready="$RUNTIME_PERMIT_STATE" go_epoch1_ready="$RUNTIME_PERMIT_EPOCH"
+    pre_metrics1="$metrics1_ready"
+    if [[ "$RUNTIME_S5_AVAILABLE" == 1 && "$RUNTIME_SOCKET_READY" == 1 &&
+          "$RUNTIME_PERMIT_OPEN" == 1 && "$epoch1" =~ ^[1-9][0-9]*$ ]]; then
+        ready1=1
+    fi
+    if expected_node0="$(d11_expected_node_id "$NODE0" 2>/dev/null)" &&
+       expected_node1="$(d11_expected_node_id "$NODE1" 2>/dev/null)" &&
+       [[ -n "$expected_node0" && -n "$expected_node1" &&
+          "$expected_node0" != standalone && "$expected_node1" != standalone &&
+          "$expected_node0" != "$expected_node1" ]]; then
+        node_ids_ready=1
+    fi
+    D11_EXPECTED_NODE0="$expected_node0"
+    D11_EXPECTED_NODE1="$expected_node1"
+    if [[ "$T12_FIXTURE_SETUP" != 1 || "$fixture" != 1 ||
+          "$T12_FIXTURE_SHAPE" != v4_native || "$T12_FIXTURE_COUNT" != 2 ]]; then
+        env_verdict=VOID
+        env_reason="missing-precondition:d11-complete-v4-native-x2-fixture"
+    elif [[ "$node_ids_ready" != 1 ]]; then
+        env_verdict=VOID
+        env_reason="node-identity-unavailable-or-not-distinct:fw0=$expected_node0 fw1=$expected_node1"
+    elif [[ "$(d11_exe_allowed "$EXE_CHECK")" != 1 ]]; then
+        env_verdict=VOID
+        env_reason="exe-attestation-${EXE_CHECK}-requires-MATCH"
+    elif [[ "$ready0" != 1 || "$ready1" != 1 ]]; then
+        env_verdict=VOID
+        env_reason="runtime-readiness-unavailable:both-node-s5-go-authority"
+    fi
+    if [[ "$env_verdict" == VOID ]]; then
+        d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
+            "fixture_ready=0 ready_fw0=$ready0 ready_fw1=$ready1 run_id=$D11_RUN_ID" "$env_verdict" "$env_reason" \
+            "cell_failed=1 arm_fw0=0 arm_fw1=0"
+        d11_row d11_reattest_join 'r6 §6.4' 'Go ledger and Rust provenance join on node/request/lease/digest' \
+            "fixture_ready=0 ready_fw0=$ready0 ready_fw1=$ready1" "$env_verdict" "$env_reason" \
+            "cell_failed=1 joined=0 rows_fw0=0 rows_fw1=0 digest_joined=0"
+        d11_row d11_reattest_reason52 'r6 §6.4' 'WouldPermit emits evaluator-unavailable reason 52 and suppression accounting' \
+            "fixture_ready=0" "$env_verdict" "$env_reason" \
+            "cell_failed=1 suppressed=0 deny52=0 terminal_would_permit=0"
+        d11_row d11_reattest_rollback 'r6 §6.4' 'rollback finalizes the selected D11 ledger and restores the fixture' \
+            "fixture_ready=0 run_id=$D11_RUN_ID finalized=0 restore_clean=0" "$env_verdict" "$env_reason" \
+            "cell_failed=1 finalized=0 restore_clean=0 d11_authority_absent=0"
+        if [[ "$T12_FIXTURE_SETUP" == 1 && "$T12_FIXTURE_CLEANED" != 1 ]]; then
+            if fix9506_teardown "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
+                T12_FIXTURE_CLEANED=1
+                ACTIVE_FIXTURE_SETUP=0
+                ACTIVE_FIXTURE_COUNT=0
+                ACTIVE_FIXTURE_DIR=""
+            else
+                T12_FIXTURE_RESTORE_OK=0
+                FIXTURE_PHASE_BLOCKED=1
+            fi
+        fi
+        return 0
+    fi
+
+    if [[ "$epoch0" =~ ^[1-9][0-9]*$ && "$epoch1" =~ ^[1-9][0-9]*$ ]]; then
+        remote "$NODE0" "/usr/local/sbin/cli --d11-reattest --d11-phase arm --d11-run-id $D11_RUN_ID --d11-permit-epoch $epoch0 --d11-marker-hex $D11_MARKER_HEX" >"$D11_ARM0" 2>&1 && arm0=1
+        remote "$NODE1" "/usr/local/sbin/cli --d11-reattest --d11-phase arm --d11-run-id $D11_RUN_ID --d11-permit-epoch $epoch1 --d11-marker-hex $D11_MARKER_HEX" >"$D11_ARM1" 2>&1 && arm1=1
+    fi
+    # Re-read both authorities after the arm RPC. This catches one-node arms
+    # that returned success before the Rust authority publication was visible.
+    observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-armed
+    local status0_armed="$RUNTIME_STATUS_FILE"
+    local armed0
+    armed0="$(d11_status_ready "$status0_armed" "$D11_RUN_ID" "$epoch0")"
+    post_metrics0="$RUNTIME_METRICS_FILE"
+    observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-armed
+    local status1_armed="$RUNTIME_STATUS_FILE"
+    local armed1
+    armed1="$(d11_status_ready "$status1_armed" "$D11_RUN_ID" "$epoch1")"
+    post_metrics1="$RUNTIME_METRICS_FILE"
+    if ((arm0 == 1 && arm1 == 1 && armed0 == 1 && armed1 == 1)); then
+        d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
+            "fixture_ready=1 ready_fw0=$ready0 ready_fw1=$ready1 armed_fw0=$armed0 armed_fw1=$armed1 run_id=$D11_RUN_ID permit_epoch_fw0=$epoch0 permit_epoch_fw1=$epoch1" PASS "armed-and-ready" \
+            "cell_failed=0 arm_fw0=1 arm_fw1=1 readiness_fw0=1 readiness_fw1=1"
+        : >"$D11_TRAFFIC"
+        d11_inner0="$(fix9506_inner4_ip 0)"
+        d11_inner1="$(fix9506_inner4_ip 1)"
+        printf 'D11_FLOW id=41001 direction=peer-to-lan inner=%s\n' "$d11_inner1" >>"$D11_TRAFFIC"
+        fix9506_remote "$FIX9506_PEER_REF" "ping -c 1 -W 2 -e 41001 -s 32 -p $D11_MARKER_HEX -I $d11_inner1 $LAN_HOST_IP" >>"$D11_TRAFFIC" 2>&1 || :
+        printf 'D11_FLOW id=41002 direction=lan-to-peer inner=%s\n' "$d11_inner1" >>"$D11_TRAFFIC"
+        fix9506_remote "$FIX9506_LAN_REF" "ping -c 1 -W 2 -e 41002 -s 32 -p $D11_MARKER_HEX $d11_inner1" >>"$D11_TRAFFIC" 2>&1 || :
+        printf 'D11_FLOW id=41003 direction=peer-to-lan inner=%s\n' "$d11_inner0" >>"$D11_TRAFFIC"
+        fix9506_remote "$FIX9506_PEER_REF" "ping -c 1 -W 2 -e 41003 -s 32 -p $D11_MARKER_HEX -I $d11_inner0 $LAN_HOST_IP" >>"$D11_TRAFFIC" 2>&1 || :
+        printf 'D11_FLOW id=41004 direction=lan-to-peer inner=%s\n' "$d11_inner0" >>"$D11_TRAFFIC"
+        fix9506_remote "$FIX9506_LAN_REF" "ping -c 1 -W 2 -e 41004 -s 32 -p $D11_MARKER_HEX $d11_inner0" >>"$D11_TRAFFIC" 2>&1 || :
+        observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-post
+        local status0_post="$RUNTIME_STATUS_FILE"
+        post_metrics0="$RUNTIME_METRICS_FILE"
+        observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-post
+        local status1_post="$RUNTIME_STATUS_FILE"
+        post_metrics1="$RUNTIME_METRICS_FILE"
+        remote "$NODE0" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER0" 2>&1 || :
+        remote "$NODE1" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER1" 2>&1 || :
+        read -r join_ok join_rows0 join_rows1 digest_joined terminal0 terminal1 traffic_ok set_ok q0_ok truncated_ok mapping_ok reason52_ok outcome_ok origin_ok rust_exact_ok nodes_ok nodeid0 nodeid1 wouldpermit_count <<<"$(d11_join_fields \
+            "$D11_LEDGER0" "$D11_LEDGER1" "$D11_RUN_ID" "$status0_post" "$status1_post" \
+            "$D11_TRAFFIC" "$D11_EXPECTED_NODE0" "$D11_EXPECTED_NODE1")"
+        [[ "$join_ok" =~ ^[01]$ ]] || join_ok=0
+        [[ "$join_rows0" =~ ^[0-9]+$ ]] || join_rows0=0
+        [[ "$join_rows1" =~ ^[0-9]+$ ]] || join_rows1=0
+        [[ "$digest_joined" =~ ^[0-9]+$ ]] || digest_joined=0
+        [[ "$terminal0" =~ ^[01]$ ]] || terminal0=0
+        [[ "$terminal1" =~ ^[01]$ ]] || terminal1=0
+        [[ "$traffic_ok" =~ ^[01]$ ]] || traffic_ok=0
+        [[ "$set_ok" =~ ^[01]$ ]] || set_ok=0
+        [[ "$q0_ok" =~ ^[01]$ ]] || q0_ok=0
+        [[ "$truncated_ok" =~ ^[01]$ ]] || truncated_ok=0
+        [[ "$mapping_ok" =~ ^[01]$ ]] || mapping_ok=0
+        [[ "$reason52_ok" =~ ^[01]$ ]] || reason52_ok=0
+        [[ "$outcome_ok" =~ ^[01]$ ]] || outcome_ok=0
+        [[ "$origin_ok" =~ ^[01]$ ]] || origin_ok=0
+        [[ "$rust_exact_ok" =~ ^[01]$ ]] || rust_exact_ok=0
+        [[ "$nodes_ok" =~ ^[01]$ ]] || nodes_ok=0
+        [[ "$nodeid0" =~ ^[A-Za-z0-9_.-]+$ ]] || nodeid0=invalid-node-id
+        [[ "$nodeid1" =~ ^[A-Za-z0-9_.-]+$ ]] || nodeid1=invalid-node-id
+        [[ "$wouldpermit_count" =~ ^[0-9]+$ ]] || wouldpermit_count=0
+        local consumed_delta0 consumed_delta1 consumed_delta written_delta reinjected_delta
+        local late_delta0 late_delta1 late_delta timeout_delta0 timeout_delta1 timeout_delta
+        local uncertain_delta0 uncertain_delta1 uncertain_delta
+        consumed_delta0="$(d11_process_metric_delta "$pre_metrics0" "$post_metrics0" "$run0_ready" "$gen0_ready" "$go_epoch0_ready" xpf_ipsec_capture_consumed_total)"
+        consumed_delta1="$(d11_process_metric_delta "$pre_metrics1" "$post_metrics1" "$run1_ready" "$gen1_ready" "$go_epoch1_ready" xpf_ipsec_capture_consumed_total)"
+        consumed_delta=$((consumed_delta0 + consumed_delta1))
+        late_delta0="$(d11_process_metric_delta "$pre_metrics0" "$post_metrics0" "$run0_ready" "$gen0_ready" "$go_epoch0_ready" xpf_ipsec_capture_late_completions_total)"
+        late_delta1="$(d11_process_metric_delta "$pre_metrics1" "$post_metrics1" "$run1_ready" "$gen1_ready" "$go_epoch1_ready" xpf_ipsec_capture_late_completions_total)"
+        late_delta=$((late_delta0 + late_delta1))
+        timeout_delta0="$(d11_process_metric_delta "$pre_metrics0" "$post_metrics0" "$run0_ready" "$gen0_ready" "$go_epoch0_ready" xpf_ipsec_capture_timeouts_total)"
+        timeout_delta1="$(d11_process_metric_delta "$pre_metrics1" "$post_metrics1" "$run1_ready" "$gen1_ready" "$go_epoch1_ready" xpf_ipsec_capture_timeouts_total)"
+        timeout_delta=$((timeout_delta0 + timeout_delta1))
+        uncertain_delta0="$(d11_process_metric_delta "$pre_metrics0" "$post_metrics0" "$run0_ready" "$gen0_ready" "$go_epoch0_ready" xpf_ipsec_capture_uncertain_total)"
+        uncertain_delta1="$(d11_process_metric_delta "$pre_metrics1" "$post_metrics1" "$run1_ready" "$gen1_ready" "$go_epoch1_ready" xpf_ipsec_capture_uncertain_total)"
+        uncertain_delta=$((uncertain_delta0 + uncertain_delta1))
+        written_delta=$(( $(d11_process_metric_delta "$pre_metrics0" "$post_metrics0" "$run0_ready" "$gen0_ready" "$go_epoch0_ready" xpf_ipsec_capture_written_total) +
+            $(d11_process_metric_delta "$pre_metrics1" "$post_metrics1" "$run1_ready" "$gen1_ready" "$go_epoch1_ready" xpf_ipsec_capture_written_total) ))
+        reinjected_delta=$(( $(d11_process_metric_delta "$pre_metrics0" "$post_metrics0" "$run0_ready" "$gen0_ready" "$go_epoch0_ready" xpf_ipsec_capture_reinjected_total) +
+            $(d11_process_metric_delta "$pre_metrics1" "$post_metrics1" "$run1_ready" "$gen1_ready" "$go_epoch1_ready" xpf_ipsec_capture_reinjected_total) ))
+        terminal_ok=$((terminal0 == 1 && terminal1 == 1))
+        local join_gate=0
+        if [[ "$join_ok" == 1 && "$nodes_ok" == 1 && "$origin_ok" == 1 && "$rust_exact_ok" == 1 &&
+              "$digest_joined" == 4 && "$outcome_ok" == 1 &&
+              "$wouldpermit_count" -gt 0 && "$terminal_ok" == 1 &&
+              "$traffic_ok" == 1 && "$consumed_delta" == 4 && "$late_delta" == 0 &&
+              "$timeout_delta" == 0 && "$uncertain_delta" == 0 && "$written_delta" == 0 &&
+              "$reinjected_delta" == 0 ]]; then
+            join_gate=1
+        fi
+        d11_row d11_reattest_join 'r6 §6.4' 'Go ledger and Rust provenance join on node/request/lease/digest' \
+            "run_id=$D11_RUN_ID node_expected_fw0=$D11_EXPECTED_NODE0 node_expected_fw1=$D11_EXPECTED_NODE1 node_observed_fw0=$nodeid0 node_observed_fw1=$nodeid1 nodes_ok=$nodes_ok rows_fw0=$join_rows0 rows_fw1=$join_rows1 selected=$((join_rows0 + join_rows1)) joined=$join_ok digest_joined=$digest_joined terminal_fw0=$terminal0 terminal_fw1=$terminal1 traffic_ok=$traffic_ok set_ok=$set_ok q0_ok=$q0_ok truncated_ok=$truncated_ok mapping_ok=$mapping_ok outcome_ok=$outcome_ok origin_ok=$origin_ok rust_exact_ok=$rust_exact_ok wouldpermit_count=$wouldpermit_count consumed_delta=$consumed_delta late_delta=$late_delta timeout_delta=$timeout_delta uncertain_delta=$uncertain_delta written_delta=$written_delta reinjected_delta=$reinjected_delta" \
+            "$([[ "$join_gate" == 1 ]] && echo PASS || echo FAIL)" \
+            "$([[ "$join_gate" == 1 ]] && echo joined || echo join-or-safety-mismatch)" \
+            "cell_failed=$([[ "$join_gate" == 1 ]] && echo 0 || echo 1) nodes_ok=$nodes_ok node_expected_fw0=$D11_EXPECTED_NODE0 node_expected_fw1=$D11_EXPECTED_NODE1 node_observed_fw0=$nodeid0 node_observed_fw1=$nodeid1 joined=$join_ok selected=$((join_rows0 + join_rows1)) digest_joined=$digest_joined terminal_fw0=$terminal0 terminal_fw1=$terminal1 traffic_ok=$traffic_ok set_ok=$set_ok q0_ok=$q0_ok truncated_ok=$truncated_ok mapping_ok=$mapping_ok outcome_ok=$outcome_ok origin_ok=$origin_ok rust_exact_ok=$rust_exact_ok wouldpermit_count=$wouldpermit_count consumed_delta=$consumed_delta late_delta=$late_delta timeout_delta=$timeout_delta uncertain_delta=$uncertain_delta written_delta=$written_delta reinjected_delta=$reinjected_delta"
+        d11_suppressed="$(d11_metric_delta "$pre_metrics0" "$post_metrics0" "$pre_metrics1" "$post_metrics1" "$D11_RUN_ID" xpf_ipsec_capture_suppressed_total)"
+        d11_deny52="$(d11_metric_delta "$pre_metrics0" "$post_metrics0" "$pre_metrics1" "$post_metrics1" "$D11_RUN_ID" xpf_ipsec_capture_deny_events_total 52)"
+        local reason_ok=0
+        if [[ "$terminal_ok" == 1 && "$reason52_ok" == 1 &&
+              "$wouldpermit_count" -gt 0 && "$d11_suppressed" -eq "$wouldpermit_count" &&
+              "$d11_deny52" -eq "$wouldpermit_count" ]]; then
+            reason_ok=1
+        fi
+        d11_row d11_reattest_reason52 'r6 §6.4' 'WouldPermit emits evaluator-unavailable reason 52 and suppression accounting' \
+            "run_id=$D11_RUN_ID suppressed=$d11_suppressed deny52=$d11_deny52 terminal_fw0=$terminal0 terminal_fw1=$terminal1 provenance_reason52_ok=$reason52_ok" \
+            "$([[ "$reason_ok" == 1 ]] && echo PASS || echo FAIL)" \
+            "$([[ "$reason_ok" == 1 ]] && echo reason-52-sink-joined || echo reason-52-metric-mismatch)" \
+            "cell_failed=$([[ "$reason_ok" == 1 ]] && echo 0 || echo 1) suppressed=$d11_suppressed deny52=$d11_deny52 terminal_fw0=$terminal0 terminal_fw1=$terminal1 provenance_reason52_ok=$reason52_ok"
+    else
+        d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
+            "fixture_ready=1 ready_fw0=$ready0 ready_fw1=$ready1 arm_fw0=$arm0 arm_fw1=$arm1" FAIL "arm-or-post-arm-readiness-failed" \
+            "cell_failed=1 arm_fw0=$arm0 arm_fw1=$arm1"
+        d11_row d11_reattest_join 'r6 §6.4' 'Go ledger and Rust provenance join on node/request/lease/digest' \
+            "fixture_ready=1 ready_fw0=$ready0 ready_fw1=$ready1" FAIL "arm-failed" "cell_failed=1 joined=0 rows_fw0=0 rows_fw1=0 digest_joined=0"
+        d11_row d11_reattest_reason52 'r6 §6.4' 'WouldPermit emits evaluator-unavailable reason 52 and suppression accounting' \
+            "fixture_ready=1" FAIL "arm-failed" "cell_failed=1 suppressed=0 deny52=0 terminal_would_permit=0"
+    fi
+    local restore_clean=0
+    local final_ok=0 final_nodes_ok=0 final_rows0=0 final_rows1=0
+    local final_accounts_ok=0 final_expected_ok=0
+    local final_runtime_ok=0 d11_authority_absent=0
+    if fix9506_teardown "$T12_FIXTURE_COUNT" "$T12_FIXTURE_DIR"; then
+        restore_clean=1
+        T12_FIXTURE_CLEANED=1
+        ACTIVE_FIXTURE_SETUP=0
+        ACTIVE_FIXTURE_COUNT=0
+        ACTIVE_FIXTURE_DIR=""
+        sleep 1
+        remote "$NODE0" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER0_FINAL" 2>&1 || :
+        remote "$NODE1" "/usr/local/sbin/cli --d11-reattest --d11-phase ledger" >"$D11_LEDGER1_FINAL" 2>&1 || :
+        observe_runtime "$NODE0" "$ARCHIVE_DIR" d11-fw0-final
+        local final_status0="$RUNTIME_STATUS_FILE"
+        local final_metrics0="$RUNTIME_METRICS_FILE"
+        observe_runtime "$NODE1" "$ARCHIVE_DIR" d11-fw1-final
+        local final_status1="$RUNTIME_STATUS_FILE"
+        local final_metrics1="$RUNTIME_METRICS_FILE"
+        final_runtime_ok=0
+        d11_authority_absent=0
+        read -r final_runtime_ok d11_authority_absent <<<"$(d11_final_runtime_fields \
+            "$final_status0" "$final_status1" "$final_metrics0" "$final_metrics1" "$D11_RUN_ID")"
+        [[ "$final_runtime_ok" =~ ^[01]$ ]] || final_runtime_ok=0
+        [[ "$d11_authority_absent" =~ ^[01]$ ]] || d11_authority_absent=0
+        read -r final_ok final_nodes_ok final_rows0 final_rows1 final_accounts_ok final_expected_ok <<<"$(d11_final_fields \
+            "$D11_LEDGER0_FINAL" "$D11_LEDGER1_FINAL" "$D11_RUN_ID" \
+            "$D11_EXPECTED_NODE0" "$D11_EXPECTED_NODE1" "$D11_LEDGER0" "$D11_LEDGER1")"
+        [[ "$final_ok" =~ ^[01]$ ]] || final_ok=0
+        [[ "$final_nodes_ok" =~ ^[01]$ ]] || final_nodes_ok=0
+        [[ "$final_rows0" =~ ^[0-9]+$ ]] || final_rows0=0
+        [[ "$final_rows1" =~ ^[0-9]+$ ]] || final_rows1=0
+        [[ "$final_accounts_ok" =~ ^[01]$ ]] || final_accounts_ok=0
+        [[ "$final_expected_ok" =~ ^[01]$ ]] || final_expected_ok=0
+    fi
+    local rollback_ok=0
+    if [[ "$restore_clean" == 1 && "$final_ok" == 1 && "$final_nodes_ok" == 1 &&
+          "$final_accounts_ok" == 1 && "$d11_authority_absent" == 1 &&
+          "$final_runtime_ok" == 1 ]]; then
+        rollback_ok=1
+    fi
+    d11_row d11_reattest_rollback 'r6 §6.4' 'rollback finalizes the selected D11 ledger and restores the fixture' \
+        "run_id=$D11_RUN_ID finalized=$final_ok final_nodes_ok=$final_nodes_ok final_rows_fw0=$final_rows0 final_rows_fw1=$final_rows1 final_accounts_ok=$final_accounts_ok final_expected_ok=$final_expected_ok restore_clean=$restore_clean d11_authority_absent=$d11_authority_absent final_runtime_closed=$final_runtime_ok" \
+        "$([[ "$rollback_ok" == 1 ]] && echo PASS || echo FAIL)" \
+        "$([[ "$rollback_ok" == 1 ]] && echo finalized-and-restored || echo rollback-proof-incomplete)" \
+        "cell_failed=$([[ "$rollback_ok" == 1 ]] && echo 0 || echo 1) finalized=$final_ok final_nodes_ok=$final_nodes_ok final_rows_fw0=$final_rows0 final_rows_fw1=$final_rows1 final_accounts_ok=$final_accounts_ok final_expected_ok=$final_expected_ok restore_clean=$restore_clean d11_authority_absent=$d11_authority_absent final_runtime_closed=$final_runtime_ok"
+}
 snapshot_node() {
     local node="$1" path="$2"
     remote "$node" 'cli -c "show configuration | display set"' >"$path" 2>&1
@@ -1827,8 +3042,10 @@ if [[ "$T12_RULESET_READ" == 1 && "$T12_RULESET_READ1" == 1 &&
 fi
 observe_runtime "$NODE0" "$ARCHIVE_DIR" t12-fw0-pre
 T12_RUNTIME_FW0_PRE="$RUNTIME_PROC_FILE"
+D11_PRE_EPOCH_FW0="$RUNTIME_PERMIT_EPOCH"
 observe_runtime "$NODE1" "$ARCHIVE_DIR" t12-fw1-pre
 T12_RUNTIME_FW1_PRE="$RUNTIME_PROC_FILE"
+D11_PRE_EPOCH_FW1="$RUNTIME_PERMIT_EPOCH"
 observe_chain_overhead "$NODE0" "$ARCHIVE_DIR" t12-fw0-pre
 T12_OVERHEAD_FW0_PRE="$CHAIN_OVERHEAD_FILE"
 observe_chain_overhead "$NODE1" "$ARCHIVE_DIR" t12-fw1-pre
@@ -1906,8 +3123,11 @@ T12_TRAFFIC_XFRM_TUNNEL0_PACKETS=0
 T12_TRAFFIC_OFFERED_FW0=0
 T12_TRAFFIC_OFFERED_FW1=0
 T12_TRAFFIC_LAN_OK=0
+if [[ "$D11_REATTEST" == 1 ]]; then
+    run_d11_reattest
+fi
 T12_TRAFFIC_PEER_OK=0
-if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
+if [[ "$T12_FIXTURE_SETUP" == 1 && "$D11_REATTEST" != 1 ]]; then
     T12_TRAFFIC_DIR="$T12_FIXTURE_DIR/traffic"
     mkdir -p "$T12_TRAFFIC_DIR"
     fixture_measure_traffic "$T12_FIXTURE_SHAPE" "$T12_FIXTURE_COUNT" "$T12_TRAFFIC_DIR"
@@ -1919,12 +3139,6 @@ if [[ "$T12_FIXTURE_SETUP" == 1 ]]; then
     T12_TRAFFIC_LAN_OK="$MEASURE_LAN_OK"
     T12_TRAFFIC_PEER_OK="$MEASURE_PEER_OK"
 fi
-T12_S5_FW0=0
-T12_S5_FW1=0
-T12_ACTOR_FW0=0
-T12_ACTOR_FW1=0
-T12_RUN_ID_FW0=unknown
-T12_RUN_ID_FW1=unknown
 T12_GENERATION_FW0=0
 T12_GENERATION_FW1=0
 T12_PERMIT_STATE_FW0=UNKNOWN
@@ -2120,6 +3334,10 @@ else
     PREASON=""
 fi
 LIVE_REASON="${PREASON:-harness-void}"
+if [[ "$D11_REATTEST" != 1 ]]; then
+    # Ordinary T12/G2 measurement cells are intentionally bypassed in
+    # reattestation mode. The D11 fixture and marker run have their own
+    # bounded four-row ledger and must not be followed by fresh mutations.
 # r6 §5.2 cells.
 if [[ "$has_fence" == 1 ]]; then
     emit_cell t12_9506_fence_shape 'r6 §5.2.1' 'inet+bridge fence exact shape/policy DROP' \
@@ -2281,6 +3499,7 @@ emit_cell g2_9506_queue_economics 'r6 §5.1' '32-tunnel admission prices 128 que
     "retained v4_native 32-tunnel observer ready=$QUEUE32_READY fw0=$QUEUE32_ECON_FW0 fw1=$QUEUE32_ECON_FW1; buffer reservations/rotation/teardown ownership are not exposed" VOID \
     "measurement-incomplete:queue-buffer-and-rotation-observer-unavailable" \
     "cell_failed=1 tunnels=32 observer_ready=$QUEUE32_READY queue_instances=$(observer_field "$QUEUE32_ECON_FW0" queue_instances) queue_instances_fw1=$(observer_field "$QUEUE32_ECON_FW1" queue_instances) fd_count=$(observer_field "$QUEUE32_ECON_FW0" fd_count) fd_count_fw1=$(observer_field "$QUEUE32_ECON_FW1" fd_count) queue_pending=$(observer_field "$QUEUE32_ECON_FW0" queue_pending) queue_pending_fw1=$(observer_field "$QUEUE32_ECON_FW1" queue_pending) queue_drops=$(observer_field "$QUEUE32_ECON_FW0" queue_drops) queue_drops_fw1=$(observer_field "$QUEUE32_ECON_FW1" queue_drops) recv_buffers_mib=0 recv_buffers_known=0 socket_buffers_mib=0 socket_buffers_known=0 rotation_overlap=0 rotation_known=0 teardown_known=0"
+fi
 
 # Full restore/residue proof.  No temporary fixture is created by this
 # conservative first live cell; deployment is intentionally outside config
@@ -2318,7 +3537,17 @@ if [[ "$restore0" != 1 || "$restore1" != 1 || "$residue0" != 1 || "$residue1" !=
 fi
 
 # Only now, after both node snapshots and residue checks, write the ledger
-# rows.  A failed restore demotes every would-be result to an explicit VOID.
+# rows.  A failed restore demotes would-be PASS results to an explicit
+# VOID and annotates preserved FAIL/VOID evidence with the restore failure.
+if [[ "$D11_REATTEST" == 1 ]]; then
+    REPLAY_ROWS_FILE="$D11_ROWS_FILE"
+    EXPECTED_ROW_COUNT=4
+    SUMMARY_NAME=T12_D11_SUMMARY
+else
+    REPLAY_ROWS_FILE="$CELL_ROWS_FILE"
+    EXPECTED_ROW_COUNT=30
+    SUMMARY_NAME=T12_G2_SUMMARY
+fi
 CELL_BUFFER_ONLY=0
 CELL_COUNT=0
 CELL_VOID=0
@@ -2327,20 +3556,20 @@ CELL_PASS=0
 while IFS=$'\t' read -r gate section predicate observed verdict reason metrics; do
     [[ -n "${gate:-}" ]] || continue
     if [[ "$restore_ok" != 1 ]]; then
-        verdict=VOID
-        reason=env-void
-        observed="${observed};restore-failed"
+        restore_orig_verdict="$verdict"
+        read -r verdict reason <<<"$(d11_restore_verdict "$verdict" "$reason" "$restore_ok")"
+        observed="${observed};restore-failed(orig=${restore_orig_verdict})"
         metrics="${metrics} restore_clean=0"
     fi
     emit_cell "$gate" "$section" "$predicate" "$observed" "$verdict" "$reason" "$metrics"
-done <"$CELL_ROWS_FILE"
+done <"$REPLAY_ROWS_FILE"
 row_count_ok=1
-if [[ "$CELL_COUNT" != 30 ]]; then
+if [[ "$CELL_COUNT" != "$EXPECTED_ROW_COUNT" ]]; then
     row_count_ok=0
-    echo "T12_G2_RESTORE FAIL (expected 30 ledger rows, got $CELL_COUNT)" >&2
+    echo "T12_G2_RESTORE FAIL (expected $EXPECTED_ROW_COUNT ledger rows, got $CELL_COUNT)" >&2
 fi
-printf 'T12_G2_SUMMARY cells=%s pass=%s fail=%s void=%s exe_check=%s archive=%s\n' \
-    "$CELL_COUNT" "$CELL_PASS" "$CELL_FAIL" "$CELL_VOID" "$EXE_CHECK" "$ARCHIVE_DIR"
+printf '%s cells=%s pass=%s fail=%s void=%s exe_check=%s archive=%s\n' \
+    "$SUMMARY_NAME" "$CELL_COUNT" "$CELL_PASS" "$CELL_FAIL" "$CELL_VOID" "$EXE_CHECK" "$ARCHIVE_DIR"
 if [[ "$restore_ok" != 1 || "$row_count_ok" != 1 ]]; then exit 1; fi
 if ((CELL_FAIL > 0)); then exit 1; fi
 if ((CELL_VOID > 0)); then exit 2; fi
