@@ -8560,3 +8560,300 @@ fn policy_batch_abort_probe_retries_once_then_fails_loud_10512() {
         "exactly the retried probe must be acked"
     );
 }
+
+/// #10512 advisory-25/2: coordinator-owned phase 2 executes each intent
+/// under ITS collecting worker's holder bit, against a caller-held
+/// Finalizing lease. Covered intent: BPF deletes recorded, worker claim
+/// retired, returns true. Uncovered intent: fails loud BEFORE any write
+/// (registry untouched), returns false. The retirement assert is the
+/// holder pin — execute under `Coordinator` and the worker's claim bit
+/// survives (`remove_claim` returns Remaining without running delete).
+#[test]
+fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
+    let fixture = fixture_10512_lease(230, 42093, 52093, 0xF80512, 0xC80512);
+    let key = fixture.forward.key.clone();
+    // Production-fidelity lease: acquired + Finalizing, exactly as the batch holds it.
+    let lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("test lease on the forward tuple");
+    lease.begin_finalizing().expect("test lease finalizes");
+    // Pre-claim the session row for Worker(1): the collector's holder.
+    let owners = crate::afxdp::bpf_map::SteeringRowOwners::default();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+    owners
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(1),
+            || Ok(()),
+        )
+        .expect("pre-claim publishes");
+    assert_eq!(owners.held_row_count(&key, 1), 1, "fixture must pre-claim one row");
+    // Base holder is Coordinator: the helper must override per-intent.
+    let map = crate::afxdp::bpf_map::SteeringMap {
+        fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+        owners: &owners,
+        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+    };
+    let intent = crate::afxdp::DeferredRedirectDelete {
+        key: key.clone(),
+        decision: fixture.forward.decision.clone(),
+        metadata: fixture.forward.metadata.clone(),
+        origin: fixture.forward.origin,
+        worker_id: 1,
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let ok =
+        crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[intent]);
+    assert!(ok, "covered intent must execute cleanly");
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .any(|record| record.value.is_none() && record.key == key),
+        "covered intent must record BPF deletes for its key"
+    );
+    assert_eq!(
+        owners.held_row_count(&key, 1),
+        0,
+        "execution must retire the collecting worker's claim (holder pin)"
+    );
+    assert_eq!(
+        owners.owner_count(&row),
+        0,
+        "the claimed row must be fully released"
+    );
+    // Uncovered intent: loud failure BEFORE any write — registry untouched.
+    let mut outside_key = key.clone();
+    outside_key.src_port = outside_key.src_port.wrapping_add(1);
+    let outside_row = crate::afxdp::bpf_map::session_map_row(&outside_key);
+    owners
+        .publish_row(
+            &outside_row,
+            &outside_key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(1),
+            || Ok(()),
+        )
+        .expect("pre-claim publishes");
+    let outside = crate::afxdp::DeferredRedirectDelete {
+        key: outside_key.clone(),
+        decision: fixture.forward.decision.clone(),
+        metadata: fixture.forward.metadata.clone(),
+        origin: fixture.forward.origin,
+        worker_id: 1,
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let ok =
+        crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[outside]);
+    assert!(!ok, "uncovered intent must fail loud");
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes().is_empty(),
+        "cover failure must precede any BPF write"
+    );
+    assert_eq!(
+        owners.held_row_count(&outside_key, 1),
+        1,
+        "failed intent must leave the registry untouched"
+    );
+}
+
+/// #10512 advisory-25/2: end-to-end wiring — a mock worker that stashes a
+/// covered intent and acks drives the coordinator through execution: BPF
+/// deletes for the intent key are RECORDED (execution ran), and the batch
+/// continues past execution to the mirror verdict (repair fails closed on
+/// absent conntrack fds — never success in unit tests). Delete the
+/// coordinator's execute call and the recorder stays empty.
+#[test]
+fn policy_batch_covered_intent_executes_then_reports_mirror_10512() {
+    let mut fixture = fixture_10512_lease(228, 42893, 52893, 0xFC0512, 0xCC0512);
+    fixture
+        .coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Mock worker: stash ONE covered intent (built from the leased item key,
+    // so coverage is structural, not hardcoded), mark applied, ack; ack
+    // probes immediately (absence — repair then fails closed on fd -1).
+    let decision = fixture.forward.decision.clone();
+    let metadata = fixture.forward.metadata.clone();
+    let origin = fixture.forward.origin;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands.lock().expect("commands").drain(..).collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch {
+                            items,
+                            intents,
+                            applied,
+                            pending,
+                            ..
+                        } => {
+                            intents
+                                .lock()
+                                .expect("intents")
+                                .push(crate::afxdp::DeferredRedirectDelete {
+                                    key: items[0].key.clone(),
+                                    decision: decision.clone(),
+                                    metadata: metadata.clone(),
+                                    origin,
+                                    worker_id: 0,
+                                });
+                            applied.lock().expect("applied")[0] = true;
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "no conntrack fds: repair fails closed, got complete={complete} outcomes={outcomes:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "covered intent must execute cleanly and continue to the mirror verdict, got {errors:?}"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .any(|record| record.value.is_none() && record.key == fixture.forward.key),
+        "coordinator must execute the stashed intent (BPF deletes recorded)"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "normal path must run the shared loop past execution"
+    );
+}
+
+/// #10512 advisory-25/3: an uncovered intent fails the execution with the
+/// phase-2 verdict — routed THROUGH the abort-convergence sequence (shared
+/// quiesce + best-effort repair), never a direct return. Recorder stays
+/// empty (cover failed before any write); shared converges (no zombie
+/// authority behind the failed batch); the abort probe ran exactly once.
+#[test]
+fn policy_batch_uncovered_intent_fails_loud_then_quiesces_shared_10512() {
+    let mut fixture = fixture_10512_lease(229, 42993, 52993, 0xFD0512, 0xCD0512);
+    fixture
+        .coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Mock worker: stash ONE intent for a key OUTSIDE the batch lease,
+    // mark applied (the worker did remove), ack; ack probes immediately.
+    let decision = fixture.forward.decision.clone();
+    let metadata = fixture.forward.metadata.clone();
+    let origin = fixture.forward.origin;
+    let probes_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let probes_seen = Arc::clone(&probes_seen);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands.lock().expect("commands").drain(..).collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch {
+                            items,
+                            intents,
+                            applied,
+                            pending,
+                            ..
+                        } => {
+                            let mut outside = items[0].key.clone();
+                            outside.src_port = outside.src_port.wrapping_add(1);
+                            intents
+                                .lock()
+                                .expect("intents")
+                                .push(crate::afxdp::DeferredRedirectDelete {
+                                    key: outside,
+                                    decision: decision.clone(),
+                                    metadata: metadata.clone(),
+                                    origin,
+                                    worker_id: 0,
+                                });
+                            applied.lock().expect("applied")[0] = true;
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            probes_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "an uncovered intent must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-deferred-failed"),
+        "execution failure must carry the phase-2 verdict, got {errors:?}"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes().is_empty(),
+        "cover failure must precede any BPF write"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on phase-2 failure"
+    );
+    assert_eq!(
+        probes_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the abort probe must run exactly once (best-effort repair attempted)"
+    );
+}

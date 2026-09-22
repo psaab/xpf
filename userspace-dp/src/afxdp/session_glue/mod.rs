@@ -1429,39 +1429,55 @@ pub(super) fn apply_worker_commands(
                 applied,
                 pending,
                 report,
+                intents,
             } => {
-                // Abort fence: hold the report mutex across the cancel check
-                // and the whole per-item teardown loop, so cancel validation
-                // is atomic with the mutations (see PolicyDeleteBatchReport).
-                // Lock order fence -> applied slot, never reversed: the
-                // coordinator reads slots without the fence (after all acks)
-                // and takes the fence without slots (on abort).
-                let mut guard = report
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if !guard.cancelled {
-                    let mut applied_slot = applied
+                // Abort fence, phase 1 (table work ONLY): hold the report
+                // mutex across cancel-check and the per-item teardown loop, so
+                // cancel validation is atomic with the table mutations (see
+                // PolicyDeleteBatchReport). Microsecond, syscall-free, and
+                // tree-standard to hold — BPF redirect deletes are collected
+                // as intents and stashed into the shared handoff INSIDE this
+                // scope (table-side metadata only): holding syscalls would let
+                // a slow worker wedge the coordinator's abort indefinitely,
+                // and post-fence worker BPF would break abort-quiescence.
+                // The coordinator drains + executes after phase-1 acks, under
+                // the batch lease. Lock order fence -> applied slot / intents,
+                // never reversed: the coordinator reads slots and drains
+                // intents without the fence (after all acks) and takes the
+                // fence touching neither (on abort).
+                {
+                    let mut guard = report
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    for (index, item) in items.iter().enumerate() {
-                        if commands::handle_remove_policy_item(
-                            sessions,
-                            session_map,
-                            forwarding,
-                            ha_state,
-                            item,
-                            &mut *guard,
-                            index,
-                            now_ns,
-                            now_secs,
-                            &mut deleted_synced_keys,
-                            worker_id,
-                        ) {
-                            applied_slot[index] = true;
+                    if !guard.cancelled {
+                        let mut applied_slot = applied
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut deferred = Vec::new();
+                        for (index, item) in items.iter().enumerate() {
+                            if commands::handle_remove_policy_item(
+                                sessions,
+                                session_map,
+                                forwarding,
+                                ha_state,
+                                item,
+                                &mut *guard,
+                                index,
+                                now_ns,
+                                now_secs,
+                                &mut deleted_synced_keys,
+                                worker_id,
+                                &mut deferred,
+                            ) {
+                                applied_slot[index] = true;
+                            }
                         }
+                        intents
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .extend(deferred);
                     }
                 }
-                drop(guard);
                 pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::ProbePolicyBatch {

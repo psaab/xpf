@@ -12753,7 +12753,7 @@ fn reverse_companion_stamps_zero_install_table_9752() {
 #[test]
 fn policy_remove_absent_companion_is_applied_not_partial_10512() {
     use crate::afxdp::bpf_map::{
-        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMap, SteeringRowOwners,
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
     };
     let now_ns = 1_000_000_000u64;
     let run_item = |sessions: &mut SessionTable,
@@ -12773,13 +12773,10 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             partial: vec![false],
             refused: vec![false],
         };
-        let owners = SteeringRowOwners::default();
-        let map = SteeringMap {
-            fd: RECORDER_ONLY_MAP_FD,
-            owners: &owners,
-            holder: SteeringHolder::Worker(0),
-        };
+        let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
         let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        clear_session_map_writes();
         let removed = super::commands::handle_remove_policy_item(
             sessions,
             map,
@@ -12792,8 +12789,17 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             now_ns / 1_000_000_000,
             &mut deleted_keys,
             0,
+            &mut deferred,
         );
-        (removed, report)
+        // Phase-1 pin (THE advisory-25 property): table work under the abort
+        // fence issues NO BPF — every redirect delete is deferred.
+        assert!(
+            session_map_writes().is_empty(),
+            "phase 1 must issue no BPF under the abort fence"
+        );
+        // No phase 2 here: execution is coordinator-owned (ha_tests pins it).
+        // The handoff vector below is what the arm stashes fence-scoped.
+        (removed, report, deferred)
     };
     // (A) Companion absent: forward removed, NO partial flag.
     {
@@ -12811,7 +12817,10 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         let forward_id = sessions.session_id_for(&key);
         assert_ne!(forward_id, 0, "fixture must mint a live identity");
         let companion = crate::session::reverse_session_key(&key, NatDecision::default());
-        let (removed, report) = run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion));
+        let (removed, report, deferred) =
+            run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion));
+        assert_eq!(deferred.len(), 1, "absent companion: only the forward intent");
+        assert_eq!(deferred[0].key, key, "intent must name the removed forward");
         assert!(removed, "forward with an absent expected companion must be removed");
         assert!(
             !report.partial[0],
@@ -12852,8 +12861,10 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         ));
         let live_companion_id = sessions.session_id_for(&companion);
         assert_ne!(live_companion_id, 0, "fixture must mint a live companion");
-        let (removed, report) =
+        let (removed, report, deferred) =
             run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion.clone()));
+        assert_eq!(deferred.len(), 1, "refused companion: only the forward intent");
+        assert_eq!(deferred[0].key, key, "intent must name the removed forward");
         assert!(removed, "forward must be removed");
         assert!(
             report.partial[0],
@@ -12897,12 +12908,21 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             TCP_FLAG_ACK,
         ));
         let live_companion_id = sessions.session_id_for(&companion);
-        let (removed, report) = run_item(
+        let (removed, report, deferred) = run_item(
             &mut sessions,
             &key,
             forward_id,
             live_companion_id,
             Some(companion.clone()),
+        );
+        assert_eq!(deferred.len(), 2, "matched companion: forward + companion intents");
+        assert!(
+            deferred.iter().any(|intent| intent.key == key),
+            "forward intent present"
+        );
+        assert!(
+            deferred.iter().any(|intent| intent.key == companion),
+            "companion intent present"
         );
         assert!(removed, "forward must be removed");
         assert!(
@@ -12920,4 +12940,166 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             "matched companion row must be gone"
         );
     }
+    // (D') Intent fidelity: the handoff carries owned copies of everything
+    // phase 2 needs (no table re-derivation on the coordinator) plus the
+    // collecting worker's id (phase 2 executes under its holder bit).
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let decision = test_decision();
+        let mut metadata = test_metadata();
+        // Distinctive zones: proves the intent CLONED the entry's metadata
+        // rather than carrying defaults.
+        metadata.ingress_zone = 0xA11C;
+        metadata.egress_zone = 0xE61E;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision.clone(),
+            metadata.clone(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        let item = crate::afxdp::PolicyDeleteItem {
+            key: key.clone(),
+            session_id: forward_id,
+            forward_only: true,
+            companion_session_id: 0,
+            captured_companion: None,
+        };
+        let mut report = crate::afxdp::PolicyDeleteBatchReport {
+            cancelled: false,
+            partial: vec![false],
+            refused: vec![false],
+        };
+        let map = SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        clear_session_map_writes();
+        assert!(super::commands::handle_remove_policy_item(
+            &mut sessions,
+            map,
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            &item,
+            &mut report,
+            0,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            7,
+            &mut deferred,
+        ));
+        assert!(
+            session_map_writes().is_empty(),
+            "phase 1 must issue no BPF under the abort fence"
+        );
+        assert_eq!(deferred.len(), 1, "one removal produces one intent");
+        let intent = &deferred[0];
+        assert_eq!(intent.key, key, "intent names the removed entry");
+        assert_eq!(intent.decision, decision, "intent carries the removed decision");
+        assert_eq!(
+            intent.metadata.ingress_zone, 0xA11C,
+            "intent clones the entry metadata (ingress)"
+        );
+        assert_eq!(
+            intent.metadata.egress_zone, 0xE61E,
+            "intent clones the entry metadata (egress)"
+        );
+        assert_eq!(intent.origin, SessionOrigin::ForwardFlow, "intent carries the origin");
+        assert_eq!(intent.worker_id, 7, "intent names the collecting worker");
+    }
+}
+
+/// #10512 advisory-25: the batch arm stashes redirect-delete intents into
+/// the shared handoff INSIDE the abort fence and issues NO BPF itself —
+/// phase 2 is coordinator-owned. What this pins through the real
+/// dispatcher: end-to-end wiring (applied/pending/table/report), the stash
+/// landing in the shared vec (fence-scoped handoff), and the recorder
+/// staying EMPTY (worker issues nothing — abort-quiescence).
+/// Coordinator-side execution is pinned in `ha_tests` (helper-unit +
+/// wiring cells).
+#[test]
+fn policy_delete_batch_arm_stashes_intents_without_bpf_10512() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forward_id = sessions.session_id_for(&key);
+    assert_ne!(forward_id, 0, "fixture must mint a live identity");
+    let applied = Arc::new(Mutex::new(vec![false]));
+    let pending = Arc::new(AtomicUsize::new(1));
+    let report = Arc::new(Mutex::new(crate::afxdp::PolicyDeleteBatchReport {
+        cancelled: false,
+        partial: vec![false],
+        refused: vec![false],
+    }));
+    let intents = Arc::new(Mutex::new(Vec::new()));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .expect("commands lock")
+        .push_back(crate::afxdp::WorkerCommand::DeletePolicyBatch {
+            items: vec![crate::afxdp::PolicyDeleteItem {
+                key: key.clone(),
+                session_id: forward_id,
+                forward_only: true,
+                companion_session_id: 0,
+                captured_companion: None,
+            }],
+            applied: Arc::clone(&applied),
+            pending: Arc::clone(&pending),
+            report: Arc::clone(&report),
+            intents: Arc::clone(&intents),
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    clear_session_map_writes();
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    // Wiring: applied, acked, table row gone, report clean.
+    assert!(applied.lock().expect("applied lock")[0], "arm must mark applied");
+    assert_eq!(pending.load(Ordering::SeqCst), 0, "arm must ack");
+    assert_eq!(sessions.session_id_for(&key), 0, "forward row must be gone");
+    {
+        let guard = report.lock().expect("report lock");
+        assert!(!guard.partial[0] && !guard.refused[0], "report must be clean");
+    }
+    // Handoff: the intent landed in the SHARED vec (fence-scoped stash).
+    {
+        let stashed = intents.lock().expect("intents lock");
+        assert_eq!(stashed.len(), 1, "arm must stash exactly one intent");
+        assert_eq!(stashed[0].key, key, "stashed intent must name the removed forward");
+        assert_eq!(stashed[0].worker_id, 0, "stashed intent must name the collecting worker");
+    }
+    // Abort-quiescence: the worker issued NO BPF — the recorder is empty.
+    // (Execution belongs to the coordinator; ha_tests pins it there.)
+    assert!(
+        session_map_writes().is_empty(),
+        "arm must issue no BPF under or after the fence"
+    );
 }

@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::afxdp::DeferredRedirectDelete;
 
 /// Apply one identity-conditional delete from a micro-batch envelope. The
 /// session id is checked immediately before dispatching the ordinary teardown
@@ -37,6 +38,7 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
     now_secs: u64,
     deleted_keys: &mut Vec<SessionKey>,
     worker_id: u32,
+    deferred_redirects: &mut Vec<DeferredRedirectDelete>,
 ) -> bool {
     if item.session_id == 0 || sessions.session_id_for(&item.key) != item.session_id {
         return false;
@@ -98,6 +100,7 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
         worker_id,
         false,
         false,
+        &mut *deferred_redirects,
     );
     if let Some(companion) = remove_companion {
         handle_delete_synced_with_guard(
@@ -110,8 +113,9 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
             now_secs,
             deleted_keys,
             worker_id,
-            false,
-            false,
+        false,
+        false,
+        &mut *deferred_redirects,
         );
     }
     true
@@ -219,9 +223,9 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
         worker_id,
         true,
         true,
+        &mut Vec::new(),
     );
 }
-
 fn handle_delete_synced_with_guard(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -234,11 +238,18 @@ fn handle_delete_synced_with_guard(
     worker_id: u32,
     enforce_peer_owner: bool,
     remove_mirror: bool,
+    deferred_redirects: &mut Vec<DeferredRedirectDelete>,
 ) {
     let (delete_alias, existing_origin) = match sessions.probe_with_origin(&key) {
         Some((lookup, origin)) => (Some(lookup), Some(origin)),
         None => (None, None),
     };
+    // `deferred_redirects` intentionally accumulates across calls: the batch
+    // arm owns ONE vec for the whole batch (forward + companion items),
+    // stashes it into the shared handoff INSIDE the fence scope, and the
+    // COORDINATOR drains + executes after phase-1 acks. No per-call
+    // emptiness invariant holds here — a second removal queuing behind the
+    // first is the design, not a bug.
     // #9048: REFUSE a peer delete that would tear down a LIVE LOCAL session.
     //
     // This is the delete-side mirror of the install-side clobber guard in
@@ -334,15 +345,19 @@ fn handle_delete_synced_with_guard(
                 &lookup.metadata,
             );
         } else {
-            // The policy path repairs/deletes the bare conntrack row only
-            // after every worker reports its surviving same-tuple rows.
-            delete_session_map_redirect_for_session(
-                session_map,
-                &key,
-                lookup.decision,
-                &lookup.metadata,
-                existing_origin.expect("lookup origin"),
-            );
+            // Batched policy path (deferred mode): collect the redirect
+            // delete for phase 2 instead of issuing the BPF syscall here.
+            // The abort fence is held across this whole call, and BPF
+            // syscalls can stall (reclaim) — holding them would let a slow
+            // worker wedge the coordinator's abort indefinitely. Table work
+            // above is microsecond, syscall-free, and tree-standard to hold.
+            deferred_redirects.push(DeferredRedirectDelete {
+                key: key.clone(),
+                decision: lookup.decision,
+                metadata: lookup.metadata.clone(),
+                origin: existing_origin.expect("lookup origin"),
+                worker_id,
+            });
         }
     } else {
         // #9560 round 3: the local entry is already gone, so there is no decision to

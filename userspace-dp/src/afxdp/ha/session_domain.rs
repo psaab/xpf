@@ -735,6 +735,11 @@ impl SessionDomain {
         let mut remove_fences: Vec<std::sync::Arc<std::sync::Mutex<crate::afxdp::PolicyDeleteBatchReport>>> =
             Vec::new();
         let mut applied_slots: Vec<std::sync::Arc<std::sync::Mutex<Vec<bool>>>> = Vec::new();
+        // Phase-2 handoff: ONE intent vec per batch, shared across workers
+        // (each arm pushes inside its fence scope — see the variant doc).
+        let remove_intents: std::sync::Arc<
+            std::sync::Mutex<Vec<crate::afxdp::DeferredRedirectDelete>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let remove_pending = std::sync::Arc::new(AtomicUsize::new(0));
         let mut remove_failed = false;
         let records = self.workers.load();
@@ -759,6 +764,7 @@ impl SessionDomain {
                 applied: slot,
                 pending: std::sync::Arc::clone(&remove_pending),
                 report: fence,
+                intents: std::sync::Arc::clone(&remove_intents),
             };
             let mut queue = crate::afxdp::worker_queue::lock_recover(&record.handle.commands);
             remove_pending.fetch_add(1, Ordering::Release);
@@ -782,15 +788,89 @@ impl SessionDomain {
                 remove_pending.load(Ordering::Acquire)
             );
         }
+        // Phase-2 failure verdict (default: fan-out abort): set by the normal
+        // phase-2 attempt below on failure so the abort sequence returns the
+        // precise error. `&str`: all candidates are 'static; allocated once,
+        // on the failure return only.
+        let mut remove_error = "policy-batch-remove-aborted";
+        // True once the normal path attempted phase 2 (success or failure):
+        // the abort sequence skips its best-effort re-execution (deletes are
+        // idempotent, but a second attempt is pure noise).
+        let mut phase2_attempted = false;
+        // Coordinator-owned phase 2, normal path: every worker acked, so
+        // every intent is in hand (acks cover the fence-scoped stash).
+        // Executed under the batch lease (dropped below after repair), which
+        // serializes same-tuple installs — no replacement can land between
+        // any worker's phase 1 and this execution, so no re-probe is needed.
+        // On failure this sets flags and falls THROUGH into the abort
+        // sequence below (shared quiesce + best-effort repair, then the
+        // phase-2 verdict): returning directly would leave shared authority
+        // contradicting already-removed worker state plus ghost mirrors.
+        if !remove_failed {
+            phase2_attempted = true;
+            let maps = self.bpf_maps.load();
+            match maps.session_map_fd.as_ref() {
+                // No session map (unit tests, pre-bringup): skip, don't fail.
+                // The old worker path wrote to fd -1 and no-op'd silently;
+                // the mirror verdict below stays the loud signal. Logged so
+                // a production map disappearance is visible, not silent.
+                None => {
+                    eprintln!("xpf-ha: policy batch phase 2 skipped: no session map");
+                }
+                Some(session_map_fd) => {
+                    let stashed = remove_intents
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let map = crate::afxdp::bpf_map::SteeringMap {
+                        fd: session_map_fd.fd,
+                        owners: &self.steering_owners,
+                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                    };
+                    if !Self::execute_deferred_redirects(map, &lease, &stashed) {
+                        remove_error = "policy-batch-deferred-failed";
+                        remove_failed = true;
+                    }
+                }
+            }
+        }
         if remove_failed {
             // Cancel every queued fence in fan-out order. Each worker's
-            // in-flight section (if any) completes before its flag lands, so
-            // every mutation is either final pre-return or never happens.
+            // in-flight section (table work ONLY — workers issue no BPF in
+            // this path) completes before its flag lands, so every mutation
+            // is either final pre-return or never happens. Redirect deletes
+            // run coordinator-side below, from the in-hand intents.
             for fence in &remove_fences {
                 fence
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .cancelled = true;
+            }
+            // Coordinator-owned phase 2, abort path: execute the in-hand
+            // intents while still fenced/leased (every worker either pushed
+            // before its fence landed or observes `cancelled` and pushes
+            // nothing — the set is complete). Best-effort: the batch fails
+            // regardless, but fewer ghost rows is live+consistent. Intentions
+            // that never arrive belong to dead workers whose tables died
+            // with their threads (stale rows self-heal via overwrite).
+            // Skipped when the normal path already attempted it (success or
+            // failure — re-execution is idempotent but pure noise).
+            if !phase2_attempted {
+                let maps = self.bpf_maps.load();
+                if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
+                    let stashed = remove_intents
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let map = crate::afxdp::bpf_map::SteeringMap {
+                        fd: session_map_fd.fd,
+                        owners: &self.steering_owners,
+                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                    };
+                    if !Self::execute_deferred_redirects(map, &lease, &stashed) {
+                        eprintln!("xpf-ha: policy batch abort: deferred redirect execution failed");
+                    }
+                } else {
+                    eprintln!("xpf-ha: policy batch abort phase 2 skipped: no session map");
+                }
             }
             let applied_count: usize = applied_slots
                 .iter()
@@ -856,7 +936,7 @@ impl SessionDomain {
             return (
                 Vec::new(),
                 false,
-                vec!["policy-batch-remove-aborted".to_string()],
+                vec![remove_error.to_string()],
             );
         }
         let mut worker_applied = vec![false; items.len()];
@@ -995,6 +1075,47 @@ impl SessionDomain {
         self.sessions
             .policy_batch_hold_max_ns
             .fetch_max(held_ns, Ordering::Relaxed);
+    }
+
+    /// Coordinator-owned phase 2: execute worker-collected redirect-delete
+    /// intents. Called after phase-1 acks (normal) or after setting
+    /// cancelled (abort) — always under the caller's Finalizing batch lease
+    /// (the `&GateLease` parameter is the proof, mirroring
+    /// `repair_policy_bares`). No re-probe: the lease serializes
+    /// same-tuple installs, so no replacement can land between any phase 1
+    /// and this execution. Each intent executes under ITS collecting
+    /// worker's holder bit (claims are per-holder — Coordinator-holder
+    /// execution would strand worker claims and skip every delete). Every
+    /// intent is mechanically verified against the lease before its
+    /// execution — an uncovered intent is a caller bug that fails loud,
+    /// never an unfenced delete. Returns false on any cover failure
+    /// (attempts all intents, like the repair); BPF delete errors are
+    /// fire-and-forget (pre-existing: the worker path never observed them
+    /// either).
+    pub(in crate::afxdp) fn execute_deferred_redirects(
+        map: crate::afxdp::bpf_map::SteeringMap<'_>,
+        lease: &crate::afxdp::bpf_map::GateLease,
+        intents: &[crate::afxdp::DeferredRedirectDelete],
+    ) -> bool {
+        let mut ok = true;
+        for intent in intents {
+            if !lease.covers(&intent.key) {
+                eprintln!("xpf-ha: policy batch deferred redirect for unleased tuple");
+                ok = false;
+                continue;
+            }
+            crate::afxdp::bpf_map::delete_session_map_redirect_for_session(
+                crate::afxdp::bpf_map::SteeringMap {
+                    holder: crate::afxdp::bpf_map::SteeringHolder::Worker(intent.worker_id),
+                    ..map
+                },
+                &intent.key,
+                intent.decision,
+                &intent.metadata,
+                intent.origin,
+            );
+        }
+        ok
     }
 
     /// Run every match's shared conditional remove (lease-less: the caller

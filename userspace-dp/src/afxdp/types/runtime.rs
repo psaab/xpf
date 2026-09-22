@@ -562,8 +562,11 @@ pub(in crate::afxdp) struct PolicyDeleteBatchReport {
     /// Workers that observe it remove NOTHING. Persists in the queued
     /// commands, so even a restart-replayed queue cannot resurrect the
     /// mutation. The mutex is the abort fence, not just a report lock: the
-    /// worker arm holds it across cancel-check + the ENTIRE per-item
-    /// teardown loop, so cancel validation is atomic with the mutations.
+    /// worker arm holds it across cancel-check + the ENTIRE per-item table
+    /// loop (phase 1 ONLY — the arm issues NO BPF under this fence, ever;
+    /// redirect deletes are collected as intents and executed COORDINATOR-side
+    /// after phase-1 acks, under the batch lease), so cancel validation is
+    /// atomic with the table mutations.
     /// Post-return mutation is impossible (not merely unlikely): safety never
     /// depends on timing, only liveness assumes eventual progress, like every
     /// other mutex in the tree.
@@ -596,6 +599,30 @@ pub(in crate::afxdp) struct PolicyDeleteItem {
     pub(in crate::afxdp) forward_only: bool,
     pub(in crate::afxdp) companion_session_id: u64,
     pub(in crate::afxdp) captured_companion: Option<SessionKey>,
+}
+
+/// #10512: one steering-redirect delete deferred out of the abort fence.
+/// Phase 1 (worker, under the fence: table work only — microsecond, no
+/// syscalls) collects these into the batch's shared `intents` vec; phase 2
+/// (COORDINATOR-owned, after phase-1 acks, under the batch's Finalizing
+/// lease) executes them. Owned copies throughout — the table entry is
+/// already gone when phase 2 runs, and the coordinator has no table view
+/// to re-derive from. No re-probe: the lease serializes same-tuple
+/// installs, so no replacement can land between phase 1 and phase 2 —
+/// the lease IS the re-probe. `worker_id` names the collecting worker so
+/// phase 2 executes each intent under ITS holder bit (`release_entry`
+/// clears only the executing holder's claim — Coordinator-holder execution
+/// would strand the worker's claims and skip every delete). A worker NEVER
+/// issues these post-fence (abort-quiescence: every worker mutation is
+/// final pre-return or never happens).
+#[derive(Clone, Debug)]
+pub(in crate::afxdp) struct DeferredRedirectDelete {
+    pub(in crate::afxdp) key: SessionKey,
+    pub(in crate::afxdp) decision: crate::session::SessionDecision,
+    pub(in crate::afxdp) metadata: crate::session::SessionMetadata,
+    pub(in crate::afxdp) origin: crate::session::SessionOrigin,
+    /// Collecting worker: phase 2 executes under `Worker(worker_id)`.
+    pub(in crate::afxdp) worker_id: u32,
 }
 
 /// #10512: hard cap on one policy READ capture (plan §2.4
@@ -684,12 +711,23 @@ pub(in crate::afxdp) enum WorkerCommand {
         applied: Arc<Mutex<Vec<bool>>>,
         pending: Arc<AtomicUsize>,
         /// Fence + report (see `PolicyDeleteBatchReport`): the arm holds this
-        /// mutex across cancel-check and the whole per-item teardown loop.
-        /// Workers re-derive each companion from the live forward's NAT at
-        /// execution and remove it ONLY on full key equality with the
-        /// captured companion — a mismatch preserves it (partial) rather
-        /// than deleting by an uncertain key.
+        /// mutex across cancel-check and the whole per-item TABLE loop
+        /// (phase 1 only — no BPF under the fence, ever). Workers re-derive
+        /// each companion from the live forward's NAT at execution and remove
+        /// it ONLY on full key equality with the captured companion — a
+        /// mismatch preserves it (partial) rather than deleting by an
+        /// uncertain key.
         report: Arc<Mutex<PolicyDeleteBatchReport>>,
+        /// Phase-2 handoff: ONE vec per batch, shared across workers. Each
+        /// arm pushes its collected redirect-delete intents here INSIDE its
+        /// fence scope (table-side metadata only — microsecond, no syscalls),
+        /// so abort's fence acquisition makes the in-hand set complete: every
+        /// worker either pushed before the abort's fence landed or observes
+        /// `cancelled` and pushes nothing. The coordinator drains + executes
+        /// after phase-1 acks (normal) or after setting cancelled (abort),
+        /// always before lease release. Lock order fence -> intents on the
+        /// worker; the coordinator takes intents alone — no cycle.
+        intents: Arc<Mutex<Vec<DeferredRedirectDelete>>>,
     },
     /// #10512: READ-ONLY bare-tuple probe envelope for the micro-batch's
     /// token-authorized mirror repair (plan §2.4 phase three). The coordinator
