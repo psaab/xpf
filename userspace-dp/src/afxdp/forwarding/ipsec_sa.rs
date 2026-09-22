@@ -8,8 +8,8 @@
 use super::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -216,7 +216,9 @@ impl IpsecSaStore {
 
     #[inline]
     fn lock_writer(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[inline]
@@ -235,16 +237,12 @@ impl IpsecSaStore {
 
     #[inline]
     fn next_stale_epoch(&self) -> u64 {
-        self.stale_epoch
-            .load(Ordering::Relaxed)
-            .wrapping_add(1)
+        self.stale_epoch.load(Ordering::Relaxed).wrapping_add(1)
     }
 
     #[inline]
     fn next_removal_epoch(&self) -> u64 {
-        self.removal_epoch
-            .load(Ordering::Relaxed)
-            .wrapping_add(1)
+        self.removal_epoch.load(Ordering::Relaxed).wrapping_add(1)
     }
 
     #[inline]
@@ -296,8 +294,7 @@ impl IpsecSaStore {
         self.publish_snapshot_at_epochs(snapshot, next_stale_epoch, next_removal_epoch);
         after_snapshot();
         if stale_fence {
-            self.stale_epoch
-                .store(next_stale_epoch, Ordering::Release);
+            self.stale_epoch.store(next_stale_epoch, Ordering::Release);
         }
         if removal_fence {
             self.removal_epoch
@@ -455,10 +452,7 @@ impl IpsecSaStore {
                 .map(|live| live.incarnation)
                 .unwrap_or_else(|| self.next_incarnation());
         }
-        let removal_fence = current
-            .entries
-            .keys()
-            .any(|key| !entries.contains_key(key));
+        let removal_fence = current.entries.keys().any(|key| !entries.contains_key(key));
         // Stale→fresh and fresh→fresh deletion are both revocation
         // transitions. A fresh redump with no deletion is benign drift sync.
         let next = IpsecSaSnapshot {
@@ -572,12 +566,7 @@ impl IpsecSaStore {
         removed
     }
 
-    pub(in crate::afxdp) fn remove_dst_spi(
-        &self,
-        family: u8,
-        dst: u128,
-        spi: u32,
-    ) -> u64 {
+    pub(in crate::afxdp) fn remove_dst_spi(&self, family: u8, dst: u128, spi: u32) -> u64 {
         let _writer = self.lock_writer();
         let current = self.snapshot.load_full();
         let mut entries = current.entries.clone();
@@ -619,10 +608,7 @@ fn multi_source_collision_count(entries: &FastMap<IpsecSaKey, IpsecSaEpoch>) -> 
     for key in entries.keys() {
         *groups.entry((key.family, key.dst, key.spi)).or_default() += 1;
     }
-    groups
-        .values()
-        .map(|count| count.saturating_sub(1))
-        .sum()
+    groups.values().map(|count| count.saturating_sub(1)).sum()
 }
 
 fn cap_entries(
@@ -648,11 +634,7 @@ fn cap_entries(
 }
 
 #[inline]
-pub(in crate::afxdp) fn ipsec_sa_key(
-    dst: IpAddr,
-    spi: u32,
-    src: IpAddr,
-) -> Option<IpsecSaKey> {
+pub(in crate::afxdp) fn ipsec_sa_key(dst: IpAddr, spi: u32, src: IpAddr) -> Option<IpsecSaKey> {
     let family = match (dst, src) {
         (IpAddr::V4(_), IpAddr::V4(_)) => libc::AF_INET as u8,
         (IpAddr::V6(_), IpAddr::V6(_)) => libc::AF_INET6 as u8,
@@ -698,11 +680,7 @@ pub(in crate::afxdp) fn esp_in_udp_spi(
     Some(spi)
 }
 
-fn esp_in_udp_payload(
-    packet_frame: &[u8],
-    l4_offset: usize,
-    declared_end: usize,
-) -> Option<&[u8]> {
+fn esp_in_udp_payload(packet_frame: &[u8], l4_offset: usize, declared_end: usize) -> Option<&[u8]> {
     let packet = packet_frame.get(..declared_end)?;
     let header_end = l4_offset.checked_add(8)?;
     let header = packet.get(l4_offset..header_end)?;
@@ -800,11 +778,7 @@ enum XfrmEventResult {
 
 /// Receive one multicast XFRM event. A timeout returns control to the outer
 /// monitor so it can re-check the periodic drift-redump deadline.
-fn recv_xfrm_events(
-    fd: libc::c_int,
-    store: &IpsecSaStore,
-    stop: &AtomicBool,
-) -> XfrmEventResult {
+fn recv_xfrm_events(fd: libc::c_int, store: &IpsecSaStore, stop: &AtomicBool) -> XfrmEventResult {
     if stop.load(Ordering::Acquire) {
         return XfrmEventResult::Stop;
     }
@@ -816,7 +790,10 @@ fn recv_xfrm_events(
             return XfrmEventResult::Idle;
         }
         if err == Some(libc::ENOBUFS) {
-            store.counters.netlink_enobufs.fetch_add(1, Ordering::Relaxed);
+            store
+                .counters
+                .netlink_enobufs
+                .fetch_add(1, Ordering::Relaxed);
         }
         store.mark_stale();
         return XfrmEventResult::NeedRedump;
@@ -852,7 +829,10 @@ pub(in crate::afxdp) fn ipsec_sa_monitor_loop(store: Arc<IpsecSaStore>, stop: Ar
     let mut dump_ready = false;
     while !stop.load(Ordering::Acquire) {
         if !dump_ready || std::time::Instant::now() >= next_drift {
-            store.counters.netlink_redumps.fetch_add(1, Ordering::Relaxed);
+            store
+                .counters
+                .netlink_redumps
+                .fetch_add(1, Ordering::Relaxed);
             let ok = full_dump(fd, &store, seq);
             seq = seq.wrapping_add(1).max(1);
             if ok {
@@ -932,10 +912,7 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
     let request_len = request.len() as u32;
     put_u32(&mut request[0..4], request_len);
     put_u16(&mut request[4..6], XFRM_MSG_GETSA);
-    put_u16(
-        &mut request[6..8],
-        NLM_F_REQUEST | NLM_F_ROOT | NLM_F_MATCH,
-    );
+    put_u16(&mut request[6..8], NLM_F_REQUEST | NLM_F_ROOT | NLM_F_MATCH);
     put_u32(&mut request[8..12], seq);
     put_u32(&mut request[12..16], 0);
     // The all-zero xfrm_usersa_id is the kernel's dump selector.
@@ -961,10 +938,11 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
     loop {
         let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
         if n <= 0 {
-            if n < 0
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOBUFS)
-            {
-                store.counters.netlink_enobufs.fetch_add(1, Ordering::Relaxed);
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOBUFS) {
+                store
+                    .counters
+                    .netlink_enobufs
+                    .fetch_add(1, Ordering::Relaxed);
             }
             return false;
         }
@@ -975,12 +953,9 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
             if len < NLMSG_HDR_LEN || offset + len > bytes.len() {
                 return false;
             }
-            let msg_type =
-                u16::from_ne_bytes(bytes[offset + 4..offset + 6].try_into().unwrap());
-            let flags =
-                u16::from_ne_bytes(bytes[offset + 6..offset + 8].try_into().unwrap());
-            let msg_seq =
-                u32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+            let msg_type = u16::from_ne_bytes(bytes[offset + 4..offset + 6].try_into().unwrap());
+            let flags = u16::from_ne_bytes(bytes[offset + 6..offset + 8].try_into().unwrap());
+            let msg_seq = u32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
             // A multicast event interleaving a dump, or the kernel's
             // NLM_F_DUMP_INTR marker, invalidates the candidate snapshot.
             // Abort and retry rather than publishing a pre-delete map.
@@ -992,7 +967,8 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
                 if offset + ((len + 3) & !3) != bytes.len() {
                     return false;
                 }
-                store.counters
+                store
+                    .counters
                     .netlink_redump_upserts
                     .fetch_add(entries.len() as u64, Ordering::Relaxed);
                 store.publish_full_dump(entries);
@@ -1003,7 +979,13 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
             }
             if msg_type == XFRM_MSG_NEWSA {
                 if let Some((key, add_time)) = parse_sa_payload_with_epoch(payload, true) {
-                    entries.insert(key, IpsecSaEpoch { generation: add_time, incarnation: 0 });
+                    entries.insert(
+                        key,
+                        IpsecSaEpoch {
+                            generation: add_time,
+                            incarnation: 0,
+                        },
+                    );
                 }
             }
             offset += (len + 3) & !3;
@@ -1118,9 +1100,7 @@ fn parse_sa_payload_with_epoch(
     {
         return None;
     }
-    if require_direction
-        && parse_sa_direction(&payload[XFRM_INFO_LEN..]) != Some(XFRM_SA_DIR_IN)
-    {
+    if require_direction && parse_sa_direction(&payload[XFRM_INFO_LEN..]) != Some(XFRM_SA_DIR_IN) {
         return None;
     }
     Some((ipsec_sa_key(dst, spi, src)?, add_time))
@@ -1148,9 +1128,6 @@ fn parse_id_identity(payload: &[u8]) -> Option<(u8, u128, u32, u8)> {
     let dst = parse_address(family, payload.get(0..16)?)?;
     Some((family, ip_to_u128(dst), spi, proto))
 }
-
-
-
 
 fn parse_address(family: u8, bytes: &[u8]) -> Option<IpAddr> {
     match family as i32 {
@@ -1219,27 +1196,27 @@ mod tests {
     fn multi_source_collision_counter_tracks_wildcard_group() {
         let store = IpsecSaStore::new();
         let dst = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
-        let first = ipsec_sa_key(
-            dst,
-            0x1122_3344,
-            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
-        )
-        .expect("same-family SA fixture");
-        let second = ipsec_sa_key(
-            dst,
-            0x1122_3344,
-            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
-        )
-        .expect("same-family SA fixture");
-        let third = ipsec_sa_key(
-            dst,
-            0x1122_3344,
-            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3)),
-        )
-        .expect("same-family SA fixture");
+        let first = ipsec_sa_key(dst, 0x1122_3344, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)))
+            .expect("same-family SA fixture");
+        let second = ipsec_sa_key(dst, 0x1122_3344, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)))
+            .expect("same-family SA fixture");
+        let third = ipsec_sa_key(dst, 0x1122_3344, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3)))
+            .expect("same-family SA fixture");
         let mut entries = FastMap::default();
-        entries.insert(first, IpsecSaEpoch { generation: 0, incarnation: 0 });
-        entries.insert(second, IpsecSaEpoch { generation: 0, incarnation: 0 });
+        entries.insert(
+            first,
+            IpsecSaEpoch {
+                generation: 0,
+                incarnation: 0,
+            },
+        );
+        entries.insert(
+            second,
+            IpsecSaEpoch {
+                generation: 0,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         assert_eq!(store.counters.snapshot().sa_multi_source_collisions, 1);
         store.upsert(third);
@@ -1249,7 +1226,13 @@ mod tests {
     fn fenced_publication_orders_snapshot_before_epoch() {
         let store = Arc::new(IpsecSaStore::new());
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
 
@@ -1285,7 +1268,6 @@ mod tests {
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
     }
 
-
     fn key(n: u32) -> IpsecSaKey {
         let page = (n / 256) as u8;
         let host = n as u8;
@@ -1313,7 +1295,13 @@ mod tests {
         let store = IpsecSaStore::new();
         assert_eq!(store.lookup(key(1)), IpsecSaLookup::Stale);
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         assert_eq!(store.lookup(key(1)), IpsecSaLookup::Hit);
         assert_eq!(store.lookup(key(2)), IpsecSaLookup::Miss);
@@ -1323,7 +1311,13 @@ mod tests {
     fn stale_denies_existing_entry_immediately() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         store.mark_stale();
         assert_eq!(store.lookup(key(1)), IpsecSaLookup::Stale);
@@ -1333,7 +1327,13 @@ mod tests {
     fn loaded_batch_snapshot_fences_after_store_update() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
@@ -1342,17 +1342,26 @@ mod tests {
         // immediately, while a refreshed snapshot reports a plain miss.
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
         let refreshed = store.load_snapshot();
-        assert_eq!(
-            store.lookup_loaded(&refreshed, key(1)),
-            IpsecSaLookup::Miss
-        );
+        assert_eq!(store.lookup_loaded(&refreshed, key(1)), IpsecSaLookup::Miss);
     }
     #[test]
     fn loaded_batch_keeps_rekey_overlap_key_but_fences_removed_key() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
-        entries.insert(key(2), IpsecSaEpoch { generation: 2, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
+        entries.insert(
+            key(2),
+            IpsecSaEpoch {
+                generation: 2,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
 
@@ -1367,7 +1376,13 @@ mod tests {
     fn loaded_batch_keeps_verdict_across_additive_upsert_but_fences_redump_delete() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
         store.upsert(key(2));
@@ -1375,22 +1390,31 @@ mod tests {
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
 
         let mut redump = FastMap::default();
-        redump.insert(key(3), IpsecSaEpoch { generation: 2, incarnation: 0 });
+        redump.insert(
+            key(3),
+            IpsecSaEpoch {
+                generation: 2,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(redump);
         // The redump deleted key(1), so the old batch is fenced immediately.
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
         let refreshed = store.load_snapshot();
-        assert_eq!(
-            store.lookup_loaded(&refreshed, key(1)),
-            IpsecSaLookup::Miss
-        );
+        assert_eq!(store.lookup_loaded(&refreshed, key(1)), IpsecSaLookup::Miss);
     }
 
     #[test]
     fn loaded_batch_snapshot_fences_after_mark_stale() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
         assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Hit);
@@ -1402,13 +1426,25 @@ mod tests {
     fn loaded_batch_stays_fenced_across_stale_recovery_with_retained_key() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
 
         store.mark_stale();
         let mut recovery = FastMap::default();
-        recovery.insert(key(1), IpsecSaEpoch { generation: 2, incarnation: 0 });
+        recovery.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 2,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(recovery);
 
         // Hard stale transitions fence the whole old batch, even when the
@@ -1421,7 +1457,13 @@ mod tests {
     fn loaded_batch_stays_fenced_across_remove_and_readd() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
 
@@ -1437,7 +1479,13 @@ mod tests {
     fn loaded_batch_stays_fenced_across_mass_removal_readd() {
         let store = IpsecSaStore::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         let batch = store.load_snapshot();
 
@@ -1458,7 +1506,13 @@ mod tests {
     fn stopping_monitor_fences_existing_snapshot() {
         let mut monitor = IpsecSaMonitor::new();
         let mut entries = FastMap::default();
-        entries.insert(key(1), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         monitor.store.publish_full_dump(entries);
         assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Hit);
         monitor.stop_and_join();
@@ -1468,7 +1522,6 @@ mod tests {
         monitor.store.publish_empty_dump_for_test();
         assert_eq!(monitor.store.lookup(key(1)), IpsecSaLookup::Stale);
     }
-
 
     #[test]
     fn full_dump_and_incremental_upsert_share_cap_order_domain() {
@@ -1524,8 +1577,7 @@ mod tests {
         for l4_offset in [34usize, 54usize] {
             let mut frame = vec![0u8; l4_offset + 8 + 4];
             frame[l4_offset + 4..l4_offset + 6].copy_from_slice(&12u16.to_be_bytes());
-            frame[l4_offset + 8..l4_offset + 12]
-                .copy_from_slice(&0x1122_3344u32.to_be_bytes());
+            frame[l4_offset + 8..l4_offset + 12].copy_from_slice(&0x1122_3344u32.to_be_bytes());
             let declared_end = l4_offset + 8;
             assert_eq!(
                 esp_in_udp_spi(&frame, l4_offset, 4500, declared_end),
@@ -1549,8 +1601,7 @@ mod tests {
         let l4_offset = 34usize;
         let mut frame = vec![0u8; l4_offset + 8 + 4];
         frame[l4_offset + 4..l4_offset + 6].copy_from_slice(&10u16.to_be_bytes());
-        frame[l4_offset + 8..l4_offset + 12]
-            .copy_from_slice(&0x1122_3344u32.to_be_bytes());
+        frame[l4_offset + 8..l4_offset + 12].copy_from_slice(&0x1122_3344u32.to_be_bytes());
         let tiny_first_fragment_end = l4_offset + 8 + 2;
         assert_eq!(
             esp_in_udp_spi(&frame, l4_offset, 4500, tiny_first_fragment_end),
@@ -1713,27 +1764,25 @@ mod tests {
         let store = IpsecSaStore::new();
         let esp = key(1);
         let mut entries = FastMap::default();
-        entries.insert(esp, IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            esp,
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
 
         let ah_delete = one_netlink_message(
             XFRM_MSG_DELSA,
-            &xfrm_id_payload(
-                Ipv4Addr::new(192, 0, 2, 1),
-                1,
-                libc::IPPROTO_AH as u8,
-            ),
+            &xfrm_id_payload(Ipv4Addr::new(192, 0, 2, 1), 1, libc::IPPROTO_AH as u8),
         );
         assert!(!apply_xfrm_messages(&store, &ah_delete));
         assert_eq!(store.lookup(esp), IpsecSaLookup::Hit);
 
         let ah_expire = one_netlink_message(
             XFRM_MSG_EXPIRE,
-            &xfrm_info_payload(
-                Ipv4Addr::new(192, 0, 2, 1),
-                1,
-                libc::IPPROTO_AH as u8,
-            ),
+            &xfrm_info_payload(Ipv4Addr::new(192, 0, 2, 1), 1, libc::IPPROTO_AH as u8),
         );
         assert!(!apply_xfrm_messages(&store, &ah_expire));
         assert_eq!(store.lookup(esp), IpsecSaLookup::Hit);
@@ -1741,11 +1790,7 @@ mod tests {
 
         let esp_expire = one_netlink_message(
             XFRM_MSG_EXPIRE,
-            &xfrm_info_payload(
-                Ipv4Addr::new(192, 0, 2, 1),
-                1,
-                libc::IPPROTO_ESP as u8,
-            ),
+            &xfrm_info_payload(Ipv4Addr::new(192, 0, 2, 1), 1, libc::IPPROTO_ESP as u8),
         );
         assert!(!apply_xfrm_messages(&store, &esp_expire));
         assert_eq!(store.lookup(esp), IpsecSaLookup::Miss);
@@ -1759,7 +1804,13 @@ mod tests {
         store.upsert(key(7));
         assert_eq!(store.lookup(key(7)), IpsecSaLookup::Stale);
         let mut entries = FastMap::default();
-        entries.insert(key(7), IpsecSaEpoch { generation: 1, incarnation: 0 });
+        entries.insert(
+            key(7),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
         store.publish_full_dump(entries);
         assert_eq!(store.lookup(key(7)), IpsecSaLookup::Hit);
     }
