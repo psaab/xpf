@@ -843,6 +843,13 @@ impl super::Coordinator {
         }
     }
 
+    /// #10516: shared XFRM-SA snapshot telemetry. These atomics are updated
+    /// by Stage 11 and the monitor thread; status reads remain cold-path
+    /// snapshots and never touch the packet-path map lock.
+    pub fn ipsec_sa_counters(&self) -> IpsecSaCounterSnapshot {
+        self.neighbors.ipsec_sa_monitor.store.counters.snapshot()
+    }
+
     /// #1772: neighbor/ARP resolution LATENCY telemetry. Returns the
     /// pending-dwell + resolver GETNEIGH-RTT histogram snapshots plus the
     /// pending-neigh timeout-drop count and queue-depth high-water mark.

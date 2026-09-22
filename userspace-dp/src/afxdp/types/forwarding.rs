@@ -403,6 +403,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) static_nat: StaticNatTable,
     pub(in crate::afxdp) dnat_table: DnatTable,
     pub(in crate::afxdp) nat64: Nat64State,
+    /// Shared inbound XFRM-SA existence snapshot used by Stage 11's
+    /// ESP-in-UDP gate. The Arc is carried across forwarding rebuilds so a
+    /// config apply cannot transiently empty the monitor's live table.
+    pub(in crate::afxdp) ipsec_sa:
+        std::sync::Arc<crate::afxdp::forwarding::IpsecSaStore>,
     pub(in crate::afxdp) nptv6: Nptv6State,
     pub(in crate::afxdp) screen_profiles: FastMap<String, ScreenProfile>,
     /// #3082: zone → name of a screen profile the zone REFERENCES but that was

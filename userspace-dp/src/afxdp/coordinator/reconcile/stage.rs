@@ -125,6 +125,9 @@ pub(crate) enum ReconcileStage {
     /// A worker thread failed to spawn (post-teardown). Renders
     /// `spawn_worker_failed:{worker_id}:{err}`.
     SpawnWorkerFailed { worker_id: u32, err: String },
+    /// The XFRM-SA monitor did not complete its first full GETSA dump within
+    /// the bounded dataplane-ready window; no workers may report ready.
+    IpsecSaNotReady,
     /// A spawned worker bound an incomplete queue set / never reported
     /// readiness (post-teardown). Renders
     /// `worker_bind_incomplete:{id}:bound={n}:planned={p}` or
@@ -165,6 +168,7 @@ impl std::fmt::Display for ReconcileStage {
             ReconcileStage::SpawnWorkerFailed { worker_id, err } => {
                 write!(f, "spawn_worker_failed:{worker_id}:{err}")
             }
+            ReconcileStage::IpsecSaNotReady => f.write_str("ipsec_sa_not_ready"),
             ReconcileStage::WorkerBindIncomplete(shortfall) => match shortfall.bound {
                 // #6245: a partial-bind shortfall appends the EXPLICIT per-slot
                 // binding-setup failures. Byte-identical to #6245's original

@@ -850,14 +850,22 @@ queues. See PR #1243's kill record for why i40e doesn't reshape.
   heartbeat used to satisfy the supervisor), caught by `bring_up_workers`'
   per-worker startup readiness barrier (HEARTBEAT != READINESS). Both
   `apply_snapshot` legs handle it IDENTICALLY to `WorkerSpawn` (the shared
-  `WorkerSpawn(stage) | WorkerBindIncomplete(stage)` arm): `ok=false`, roll
+  three-way `WorkerSpawn(stage) | WorkerBindIncomplete(stage) |
+  IpsecSaNotReady(stage)` arm): `ok=false`, roll
   the in-memory baseline back, refresh status to the REAL post-teardown
   per-binding state, and return BEFORE `persist_state=true`. Only the error
   verb differs — "`worker bind incomplete after teardown (...)`" vs "`worker
-  spawn failed after teardown (...)`" — so the #4952/#6140 assertions that
-  pin the "worker spawn failed" wording stay green. Regression-tested (full-
+  spawn failed after teardown (...)`" vs "`ipsec SA monitor not ready after
+  teardown (...)`" — so the #4952/#6140 assertions that
+  pin the "worker spawn failed" wording stay green.
+  Regression-tested (full-
   apply leg) by
   `full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143`.
+  #10516: `ReconcileError::IpsecSaNotReady` is the THIRD post-teardown
+  variant — the XFRM-SA monitor did not complete its first full GETSA dump
+  before the dataplane-ready deadline, so no worker launch was attempted.
+  Both `apply_snapshot` legs handle it identically through the same shared
+  arm (no persist, baseline rollback, status refresh).
   When
   `should_run_afxdp` does NOT hold (forwarding disarmed / unsupported) it
   `stop()`s every worker and then routes the per-binding status through

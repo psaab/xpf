@@ -1355,6 +1355,91 @@ pub(super) fn txn_run_descriptor_inner(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     desc_len: Option<u32>,
 ) -> (BatchCounters, DebugPollCounters) {
+    txn_run_descriptor_inner_with_slow_path(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        local_tunnel_deliveries,
+        shared_sessions,
+        desc_len,
+        None,
+    )
+}
+
+/// Descriptor driver variant that wires a queue-only slow-path reinjector
+/// into the production `WorkerContext`, allowing poll-loop tests to observe
+/// the selected outlet without a TUN or worker thread.
+pub(super) fn txn_run_descriptor_inner_with_slow_path(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    desc_len: Option<u32>,
+    slow_path: Option<&Arc<crate::slowpath::SlowPathReinjector>>,
+) -> (BatchCounters, DebugPollCounters) {
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        local_tunnel_deliveries,
+        shared_sessions,
+        desc_len,
+        slow_path,
+        None,
+    )
+}
+
+pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    desc_len: Option<u32>,
+    slow_path: Option<&Arc<crate::slowpath::SlowPathReinjector>>,
+    ike_exchanges: &Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+) -> (BatchCounters, DebugPollCounters) {
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        local_tunnel_deliveries,
+        shared_sessions,
+        desc_len,
+        slow_path,
+        Some(ike_exchanges),
+    )
+}
+
+fn txn_run_descriptor_inner_with_slow_path_impl(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    desc_len: Option<u32>,
+    slow_path: Option<&Arc<crate::slowpath::SlowPathReinjector>>,
+    ike_exchanges: Option<&Arc<crate::afxdp::forwarding::IkeExchangeTable>>,
+) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -1388,7 +1473,8 @@ pub(super) fn txn_run_descriptor_inner(
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let default_ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let ike_exchanges = ike_exchanges.unwrap_or(&default_ike_exchanges);
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
@@ -1409,7 +1495,7 @@ pub(super) fn txn_run_descriptor_inner(
         shared_forward_wire_sessions: &shared_forward_wire_sessions,
         shared_owner_rg_indexes: &shared_owner_rg_indexes,
         ike_exchanges: &ike_exchanges,
-        slow_path: None,
+        slow_path,
         event_stream: None,
         local_tunnel_deliveries,
         recent_exceptions: &recent_exceptions,

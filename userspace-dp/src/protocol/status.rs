@@ -833,6 +833,36 @@ pub(crate) struct ProcessStatus {
     pub neighbor_netlink_redumps_total: u64,
     #[serde(rename = "neighbor_netlink_redump_upserts_total", default)]
     pub neighbor_netlink_redump_upserts_total: u64,
+    /// #10516: XFRM-SA snapshot gate telemetry. All fields are additive and
+    /// default to zero for older managers and mixed-version daemons.
+    #[serde(rename = "ipsec_sa_miss_dropped_packets_total", default)]
+    pub ipsec_sa_miss_dropped_packets_total: u64,
+    #[serde(rename = "ipsec_sa_miss_no_sa_total", default)]
+    pub ipsec_sa_miss_no_sa_total: u64,
+    #[serde(rename = "ipsec_sa_miss_truncated_total", default)]
+    pub ipsec_sa_miss_truncated_total: u64,
+    #[serde(rename = "ipsec_sa_miss_malformed_ike_total", default)]
+    pub ipsec_sa_miss_malformed_ike_total: u64,
+    #[serde(rename = "ipsec_sa_miss_keepalive_total", default)]
+    pub ipsec_sa_miss_keepalive_total: u64,
+    #[serde(rename = "ipsec_sa_snapshot_stale_deny_total", default)]
+    pub ipsec_sa_snapshot_stale_deny_total: u64,
+    #[serde(rename = "ipsec_sa_inserts_total", default)]
+    pub ipsec_sa_inserts_total: u64,
+    #[serde(rename = "ipsec_sa_removes_total", default)]
+    pub ipsec_sa_removes_total: u64,
+    #[serde(rename = "ipsec_sa_expiry_removes_total", default)]
+    pub ipsec_sa_expiry_removes_total: u64,
+    #[serde(rename = "ipsec_sa_evictions_total", default)]
+    pub ipsec_sa_evictions_total: u64,
+    #[serde(rename = "ipsec_sa_multi_source_collisions_total", default)]
+    pub ipsec_sa_multi_source_collisions_total: u64,
+    #[serde(rename = "ipsec_sa_netlink_enobufs_total", default)]
+    pub ipsec_sa_netlink_enobufs_total: u64,
+    #[serde(rename = "ipsec_sa_netlink_redumps_total", default)]
+    pub ipsec_sa_netlink_redumps_total: u64,
+    #[serde(rename = "ipsec_sa_netlink_redump_upserts_total", default)]
+    pub ipsec_sa_netlink_redump_upserts_total: u64,
     #[serde(rename = "neighbor_pending_keys", default)]
     pub neighbor_pending_keys: u64,
     #[serde(rename = "neg_neigh_keys", default)]

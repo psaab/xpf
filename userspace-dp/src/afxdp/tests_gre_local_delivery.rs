@@ -1208,6 +1208,54 @@ fn gre_decap_well_formed_udp_inner_v4_still_decaps_with_ports() {
         "synthetic frame and inner meta must stay self-consistent"
     );
 }
+/// #10516 required poll composition: native GRE decapsulation must expose the
+/// inner local UDP/4500 ESP payload to the Stage-11 SA gate, which may then
+/// delegate the packet only after a matching SA hit.
+#[test]
+fn gre_inner_ipsec_sa_hit_reaches_delegated_outlet_10516() {
+    let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    forwarding.ipsec_sa.publish_empty_dump_for_test();
+    let src = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1));
+    let spi: u32 = 0x3344_5566;
+    let mut inner = build_gre_inner_v4(PROTO_UDP, 8 + 12);
+    inner[20..28].copy_from_slice(&[0x9c, 0x40, 0x11, 0x94, 0x00, 0x14, 0, 0]);
+    inner[28..32].copy_from_slice(&spi.to_be_bytes());
+    inner[32..40].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0, 1, 2, 3]);
+    let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
+    let meta = gre_to_self_outer_meta(0, frame.len());
+    let key = ipsec_sa_key(dst, spi, src).expect("same-family GRE-inner SA fixture");
+    forwarding.ipsec_sa.upsert(key);
+
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+
+    assert_eq!(reinjector.status().queued_packets, 0);
+    assert_eq!(reinjector.delegated_status().queued_packets, 1);
+    assert_eq!(reinjector.test_enqueued_delegated(), vec![true]);
+    assert_eq!(
+        forwarding.ipsec_sa.counters.snapshot().sa_miss_dropped_packets,
+        0
+    );
+    assert_eq!(binding.scratch.scratch_recycle.len(), 1);
+}
 
 
 /// #2376 anti-over-reject: a well-formed GRE-tunneled ICMP echo inner
