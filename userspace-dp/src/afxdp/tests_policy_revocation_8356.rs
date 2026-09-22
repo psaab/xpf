@@ -2196,6 +2196,56 @@ fn an_arrival_with_no_interface_identity_still_declines_9513() {
     assert_eq!(session_count(&sessions), 1, "the session must survive");
 }
 
+/// The descriptor path must recycle an identity-less arrival at the ingress
+/// MAC gate before policy revalidation. This drives the real poll body with an
+/// installed session; deleting that recycle branch would make the session hit
+/// and policy counter assertions below expose the regression.
+#[test]
+fn an_arrival_with_no_interface_identity_still_fails_mac_gate_9513() {
+    let forwarding = forwarding_with_ingress_zone_9384("lan", true);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 0, 0);
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        flow_key_to(DST),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    let frame =
+        build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, TEST_LAN_MAC);
+    let meta = txn_meta_v4(0, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        false,
+    );
+    assert_eq!(
+        dbg.rx, 1,
+        "the identity-less descriptor must reach the poll recycle path (#9513)"
+    );
+    assert_eq!(
+        dbg.session_hit, 0,
+        "MAC-gate recycling must happen before session lookup (#9513)"
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 0,
+        "MAC-gate recycling must bypass policy revalidation (#9513)"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        1,
+        "the recycled descriptor must leave the installed session untouched (#9513)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #9381 relay: does `default-policy reject` make the revoke arm INERT?
 // ---------------------------------------------------------------------------
@@ -4311,6 +4361,9 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
     let (syn, meta_syn, ack, meta_ack) = dnat_frames();
     // Strict TCP admission requires a SYN; the following ACK then seeds the
     // cacheable flow slot without weakening the phase-1 admission witness.
+    // This mirrors `strict_syn_check_drops_new_flow` in
+    // afxdp/poll_descriptor/session_admission.rs:56-72, called from
+    // afxdp/poll_descriptor/mod.rs:2492-2527: only SYN may admit a new flow.
     let admit_syn = drive_packet_9604(
         &mut sessions,
         &forwarding_permit,
@@ -4524,6 +4577,8 @@ fn admit_fabric_flow_9604() -> FabricAdmitOutcome {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = ha_state_fabric_admit_9604(now_secs);
     let mut binding = binding_for_9604(FABRIC_PARENT_9604, "ge-0-0-0");
+    // Keep the production strict-SYN admission phase intact: the first SYN
+    // admits, then the ACK observes the installed pair/cache.
     let (frame_syn, meta_syn) = fabric_admit_frame_9604(TCP_FLAG_SYN);
     let (frame_ack, meta_ack) = fabric_admit_frame_9604(TCP_ACK);
     let mut sessions = SessionTable::new();

@@ -839,7 +839,7 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v4() {
     let client = Ipv4Addr::new(10, 0, 61, 102);
     let server = Ipv4Addr::new(1, 1, 1, 1);
     let mut frame =
-        build_icmp_echo_frame_v4(client, server, 1, crate::afxdp::tests_support::TEST_DMZ_MAC);
+        build_icmp_echo_frame_v4(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC);
     frame[34] = 11; // ICMP type Time Exceeded (an error)
     let meta = UserspaceDpMeta {
         l3_offset: 14,
@@ -874,7 +874,7 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v4() {
     assert!(req.is_none(), "no Time Exceeded for an inbound ICMP error");
     // An echo *request* (a query, type 8) is NOT suppressed.
     let mut echo =
-        build_icmp_echo_frame_v4(client, server, 1, crate::afxdp::tests_support::TEST_DMZ_MAC);
+        build_icmp_echo_frame_v4(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC);
     echo[34] = 8;
     assert!(
         can_generate_icmp_error_reply(&echo, meta, &ForwardingState::default()),
@@ -889,7 +889,7 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v6() {
     let client: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
     let server: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
     let mut frame =
-        build_icmp_echo_frame_v6(client, server, 1, crate::afxdp::tests_support::TEST_DMZ_MAC);
+        build_icmp_echo_frame_v6(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC);
     frame[54] = 3; // ICMPv6 Time Exceeded (error, < 128)
     let meta = UserspaceDpMeta {
         l3_offset: 14,
@@ -905,7 +905,7 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v6() {
     );
     // ICMPv6 echo request (type 128, a query) is NOT suppressed.
     let echo =
-        build_icmp_echo_frame_v6(client, server, 1, crate::afxdp::tests_support::TEST_DMZ_MAC); // type 128
+        build_icmp_echo_frame_v6(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC); // type 128
     assert!(
         can_generate_icmp_error_reply(&echo, meta, &ForwardingState::default()),
         "inbound ICMPv6 echo request must still draw an error"

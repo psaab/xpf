@@ -696,8 +696,8 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
         private_s,    // embedded dst = the DNAT'd private server
         client_port,  // embedded src port
         private_port, // embedded dst port (the DNAT'd port)
-        PROTO_TCP
-     );
+        PROTO_TCP,
+    );
 
     let icmp_match = EmbeddedIcmpMatch {
         nat: NatDecision {
@@ -769,8 +769,8 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
         private_s,
         client_port,
         server_port,
-        PROTO_TCP
-     );
+        PROTO_TCP,
+    );
 
     let icmp_match = EmbeddedIcmpMatch {
         nat: NatDecision {
@@ -1042,8 +1042,8 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
         internal_s,
         client_port,
         internal_port,
-        PROTO_TCP
-     );
+        PROTO_TCP,
+    );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1335,8 +1335,8 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         server_ip,
         echo_id,
         0,
-        PROTO_ICMPV6
-     );
+        PROTO_ICMPV6,
+    );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1506,8 +1506,8 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         server_ip,
         echo_id,
         0,
-        PROTO_ICMPV6
-     );
+        PROTO_ICMPV6,
+    );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1638,8 +1638,8 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         server_ip,
         echo_id,
         0,
-        PROTO_ICMPV6
-     );
+        PROTO_ICMPV6,
+    );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,

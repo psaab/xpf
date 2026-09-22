@@ -23,7 +23,9 @@ use crate::{
 
 pub(super) const TEST_LAN_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01];
 pub(super) const TEST_WAN_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08];
-pub(super) const TEST_DMZ_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01];
+// Synthetic CoS MAC for pure ICMP-TE frame generation; it is not a
+// descriptor DMZ interface.
+pub(super) const TEST_COS_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01];
 pub(super) const TEST_FABRIC_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01];
 pub(super) const TEST_VLAN50_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08];
 pub(super) const TEST_VLAN70_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x70, 0x07];
@@ -1148,6 +1150,11 @@ pub(super) fn txn_run_descriptor_checked(
 /// pre-bumps that specific shard and asserts the stamp reflects it. The stock
 /// `txn_run_descriptor*` helpers own an internal fresh (all-zero) map, which
 /// cannot exercise a non-zero snapshot. Returns the batch + debug counters.
+///
+/// These specialized wrappers intentionally omit the expected-MAC assertion:
+/// caller-owned maps/receivers change their return shape, while every variant
+/// still enters `poll_binding_process_descriptor`; canonical checked cells pin
+/// the gate and each variant asserts its own observable outcome.
 pub(super) fn txn_run_descriptor_with_neighbors(
     binding: &mut BindingWorker,
     sessions: &mut SessionTable,
@@ -1653,6 +1660,8 @@ pub(super) fn gre_to_self_snapshot() -> ConfigSnapshot {
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
     snapshot.source_nat_rules.clear();
+    // The outer GRE descriptor arrives on this physical parent (ifindex 11);
+    // its configured MAC is required by the ingress gate before tunnel delivery.
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/0".to_string(),
         zone: "wan".to_string(),

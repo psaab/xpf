@@ -418,10 +418,10 @@ fn flowless_non_first_fragment_transit_permitted_by_any_policy_3291() {
 /// every fragment of one datagram. src 10.0.61.100 (lan) -> dst 172.16.80.200
 /// (wan), matching `frag_transit_wan_neighbor`.
 fn udp_frag_frame_5689(frag_off: u16, id: u16) -> Vec<u8> {
-    let mut f = vec![
-        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
-    ];
-    f[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
+    let mut f = crate::afxdp::tests_support::TEST_LAN_MAC.to_vec();
+    f.extend_from_slice(&[
+        0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
+    ]);
     // For a first fragment the 8 bytes at l4 are a real UDP header (sport
     // 33333, dport 443); for a non-first fragment they are payload (never read
     // as ports — the fragment is flowless per #2344).

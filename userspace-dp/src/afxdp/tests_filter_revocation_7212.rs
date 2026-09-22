@@ -144,6 +144,20 @@ fn revocation_snapshot(terms: Vec<FirewallTermSnapshot>) -> ConfigSnapshot {
         action: "permit".into(),
         ..Default::default()
     });
+    // #10554: the control keeps distinct per-row MACs. The LAN row regressing
+    // to the WAN alias (02:bf:72:00:80:08) would silently reintroduce the
+    // tripwire this repair removed — every driver below builds a LAN-dst frame.
+    let lan_mac = snapshot
+        .interfaces
+        .iter()
+        .find(|iface| iface.ifindex == LAN_IFINDEX)
+        .expect("LAN row")
+        .hardware_addr
+        .clone();
+    assert_eq!(
+        lan_mac, "02:bf:72:01:00:01",
+        "control LAN row must carry the LAN MAC, not the WAN alias (#10554)"
+    );
     snapshot
 }
 
