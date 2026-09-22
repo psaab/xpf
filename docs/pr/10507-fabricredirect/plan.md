@@ -281,6 +281,45 @@ Retain the original A1/A2 resets only as defense in depth:
   `origin.is_peer_synced()` entry even when `owner_rg_id <= 0` and
   `fabric_ingress == false`. This closes the known collector omission as
   defense in depth; it is not a substitute for the packet-time invariant.
+**Recorded deviation from unconditional A1/A2 (Main-approved Option A).**
+The lane implements Fresh-only transition resets, not the unconditional
+clear stated above: `update_session` (A1) and `refresh_for_ha_transition`
+(A2) reset `policy_revalidation_kind` to `Unvalidated` only when
+`policy_revalidated_gen` equals the live generation (Fresh); a Stale row
+retains its kind through the transition. Main (invariant authority)
+approved this tightening over (B) a distinct Reset provenance (same Stale
+fencing outcome, bigger blast radius — newly fences Fresh resets beyond
+the RED) and (C) accepting Decline for Stale-reset (violates §7.1
+explicitly); the approval satisfies the 6th advisory's AGENTS escalation.
+Precedented as a recorded deviation (cf. #10567's accepted deviations).
+
+Rationale: an unconditional reset launders Stale Recorded — a fenced
+recorded authorization that must fail closed on Decline and type-armed
+ICMP even when stale (gate: `Recorded + intent` fences regardless of
+freshness) — into Stale Unvalidated, the never-validated carve-out that
+Declines per #8618/#9513 to avoid manufacturing a verdict it could not
+derive. The laundering trades a fail-closed fence for an unfenced
+carve-out precisely when a prior recorded authorization exists but the
+generation moved (Cell 1c RED: gen-7 Recorded → gen-8 armed + A1 reset →
+Stale Unvalidated + type-armed → Decline/survive instead of revoke). A
+Stale row already re-judges via the Stale arm; its kind decides
+fail-closed vs carve-out, so preserving Stale Recorded keeps the fence
+through the transition. Fresh behavior is bit-identical to unconditional
+(Fresh → Unvalidated, forcing cold); the packet-time fence — the
+security proof — is unaffected and remains correct if commands are
+delayed, dropped, or never emitted.
+
+Fencing table for A1/A2 (post-deviation):
+- Fresh (any kind) + peer→local / Refresh → Unvalidated (force cold;
+  fail closed on Decline/ICMP when locally forwarding).
+- Stale Recorded + transition → Recorded preserved (cold via Stale arm;
+  fail closed on Decline/ICMP when locally forwarding, incl. no-egress).
+- Stale Unvalidated/Live + transition → preserved (Stale Unvalidated
+  keeps the #8618 with-egress Decline carve-out; Stale Live keeps the
+  ordinary stale Decline; both still fail closed on no-egress per the
+  unconditional rule 4).
+- Boundary pins (Fresh behavior unchanged) live with the stamp-lifecycle
+  tests; Cell 1c pins the Stale-Recorded fence through A1.
 
 
 ## 5. Ten-origin coverage table
@@ -417,6 +456,25 @@ must run the full affected test files, not only the expected-to-flip test.
    verify A1/A2 clear only as defense while PF supplies authority. Separately
    cover HAInactive and TableUnavailable refresh skips and assert no local
    forwarding from their stale recorded stamps. RED on revert.
+**TableUnavailable waiver (Main-granted, redundancy-by-construction).**
+No independent TableUnavailable M2 cell is added: `PolicyGateCurrent::NonLocal`
+is a SINGLE variant fed by a wildcard (`policy_gate_current_for_resolution`
+`_ => NonLocal`, covering HAInactive, TableUnavailable, NoRoute,
+FabricRedirect, LocalDelivery, PolicyDenied, DiscardRoute,
+NextTableUnsupported with no per-disposition branches), so HAInactive and
+TableUnavailable produce BIT-IDENTICAL gate answers for equal (gen,kind)
+(force/fail false → Fresh coasts, Stale cold Declines stand). The skip guard
+is likewise ONE shared `!matches!(HAInactive|TableUnavailable)` condition
+around a SINGLE skipped `refresh_for_ha_transition` call
+(`refresh_owner_rgs.rs`, `demote_owner_rgs.rs`); kind preservation holds by
+construction (skipped call touches nothing) with no per-arm kind path to
+diverge. Coverage rides on HAInactive skip+retention (Cell 5b, GREEN),
+NoRoute retention (Cell 7b poll + #9513, GREEN), gate NonLocal units
+(Fresh-Live/Recorded + NonLocal coast, GREEN), and existing #9752 terminal
+re-resolution pins (stamped+empty → TableUnavailable, GREEN).
+SELF-INVALIDATING: if you add a TableUnavailable-specific arm anywhere in
+gate/skip/retention, you MUST add Cell 5c proving it — this waiver dies the
+moment the unity breaks.
 6. **Reverse-first/reverse-only promotion.** Store a FabricRedirect forward
    companion with recorded Permit, switch HA state, and deliver a production
    reverse hit before Refresh is applied. Resolve the current forward egress;

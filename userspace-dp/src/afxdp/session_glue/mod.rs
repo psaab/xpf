@@ -12,6 +12,47 @@ pub(in crate::afxdp) use install_table_purge::{
 pub(in crate::afxdp) use promote::{
     SharedSessionRefs, maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
 };
+/// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
+/// cross-module poll tests (unshared map, no BPF). Production `handle_*`
+/// stay `pub(in session_glue)`; these `#[cfg(test)]` delegates widen
+/// nothing outside tests.
+#[cfg(test)]
+pub(crate) fn handle_demote_owner_rgs_for_test(
+    sessions: &mut crate::session::SessionTable,
+    session_map: crate::afxdp::bpf_map::SteeringMap<'_>,
+    conntrack_v4_fd: libc::c_int,
+    conntrack_v6_fd: libc::c_int,
+    forwarding: &crate::afxdp::ForwardingState,
+    ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
+    dynamic_neighbors: &std::sync::Arc<crate::afxdp::sharded_neighbor::ShardedNeighborMap>,
+    owner_rgs: Vec<i32>,
+    now_ns: u64,
+    now_secs: u64,
+    cancelled_keys: &mut Vec<crate::session::SessionKey>,
+    cancelled_keys_seen: &mut rustc_hash::FxHashSet<crate::session::SessionKey>,
+) -> bool {
+    commands::handle_demote_owner_rgs(
+        sessions, session_map, conntrack_v4_fd, conntrack_v6_fd, forwarding,
+        ha_state, dynamic_neighbors, owner_rgs, now_ns, now_secs,
+        cancelled_keys, cancelled_keys_seen,
+    )
+}
+#[cfg(test)]
+pub(crate) fn handle_refresh_owner_rgs_for_test(
+    sessions: &mut crate::session::SessionTable,
+    session_map: crate::afxdp::bpf_map::SteeringMap<'_>,
+    forwarding: &crate::afxdp::ForwardingState,
+    ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
+    dynamic_neighbors: &std::sync::Arc<crate::afxdp::sharded_neighbor::ShardedNeighborMap>,
+    owner_rgs: Vec<i32>,
+    now_ns: u64,
+    now_secs: u64,
+) -> bool {
+    commands::handle_refresh_owner_rgs(
+        sessions, session_map, forwarding, ha_state, dynamic_neighbors,
+        owner_rgs, now_ns, now_secs,
+    )
+}
 use promote::{purge_translated_synced_hit, should_keep_synced_hit_transient};
 
 pub(super) fn resolution_target_for_session(

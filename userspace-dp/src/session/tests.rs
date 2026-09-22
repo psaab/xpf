@@ -4389,8 +4389,11 @@ fn reference_update_session(
     let was_peer_synced = entry.origin.is_peer_synced();
     entry.decision = decision;
     entry.metadata = metadata.clone();
-    // #10507: mirror A1's peer-to-local provenance reset.
-    if was_peer_synced && !origin.is_peer_synced() {
+    // #10507: mirror A1's Fresh-only reset (Main-approved Option A).
+    if was_peer_synced
+        && !origin.is_peer_synced()
+        && entry.policy_revalidated_gen == table.policy_revalidation_gen()
+    {
         entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
     }
     entry.origin = origin;
@@ -4912,8 +4915,10 @@ fn reference_refresh_for_ha_transition(
     };
     entry.decision = decision;
     entry.metadata = metadata;
-    // #10507: mirror A2's transition provenance reset.
-    entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+    // #10507: mirror A2's Fresh-only reset (Main-approved Option A).
+    if entry.policy_revalidated_gen == table.policy_revalidation_gen() {
+        entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+    }
     // #9856: mirror refresh_for_ha_transition — install_epoch is write-once, no re-stamp.
     entry.last_seen_ns = now_ns;
     table.restore_entry(key.clone(), entry);
