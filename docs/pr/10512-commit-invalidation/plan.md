@@ -290,22 +290,38 @@ after a bare row delete — it has no B value once the row is gone).
   counts, and first-error status. Go only drives that continuation; it never
   enumerates or deletes through the shim and never acquires an unbounded
   tuple-gate set.
-Clear-fence ordering is normative: every tuple mutation first takes shared
-`ClearAdmission`, then its `GateLease`/`PublishPermit`; `mirror_clear_chunk`
-transitions `Draining`, rejects new admissions, drains existing leases and
-permits, then takes exclusive `ClearFence` before bounded enumeration. The
-order is never reversed: queued delete/import waits for clear release, while
-clear waits only for operations that already hold `ClearAdmission`; the
-exclusive clear token is carried through reentrant table-removal and mirror
-callbacks so they do not reacquire normal admission. Restart quarantine owns a
-helper-owned durable `ReconcileProbeStore` keyed by logical mutation identity
-plus tuple/family, recording operation phase and SessionTable/BPF pre/post
-fingerprints. After a crash, the helper reopens that store and probes live
-maps; `reconcile_quarantine` holds all mutators until every in-flight identity
-resolves to `Applied`, `Noop`, or `Absent` and the bounded SessionTable/BPF
-reconcile completes, then publishes the new epoch. Go reissues only after
-release with a new epoch-scoped operation id, and the helper consults the store
-and live maps before mutating so a different incarnation is preserved.
+- Clear-fence ordering is normative: every tuple mutation first takes shared
+  `ClearAdmission`, then its `GateLease`/`PublishPermit`; `mirror_clear_chunk`
+  transitions `Draining`, rejects new admissions, drains existing leases and
+  permits, then takes exclusive `ClearFence` before bounded enumeration. The
+  helper retains a `ClearFenceID` plus epoch across every continuation page;
+  Go sends only the cursor/token and cannot release/reacquire the fence between
+  pages. Each `ClearFenceID` has a bounded continuation-idle expiry; if Go
+  stops sending pages, the helper aborts the clear, records an incomplete
+  first-error, quiesces any active callback, and releases `ClearAdmission`. A
+  retry starts a fresh clear epoch/cursor and cannot claim completion from the
+  partial run. Draining/fence acquisition has a bounded deadline of one 200ms
+  lease window plus a 50ms abort drain; expiry returns typed `clear_timeout`/
+  first-error status, commits no page, and releases admission only after
+  fenced abort quiescence. The order is never reversed: queued delete/import
+  waits for clear release, while clear waits only for operations that already
+  hold `ClearAdmission`; callbacks carry the exclusive token through
+  table/mirror removal without reacquiring normal admission.
+
+- Restart quarantine owns a helper-owned durable `ReconcileProbeStore`, keyed
+  by logical mutation identity plus tuple/family, recording operation phase and
+  `SessionTable` identity pre/post fingerprints. On restart, the helper
+  rebuilds a `SessionTableIdentityIndex` from durable table/journal rows and
+  emits a `ReconcileOrphanReport` for every BPF mirror row lacking an indexed
+  identity; BPF is consulted only for pre-image/rollback and orphan accounting,
+  never to classify `Applied`. `reconcile_quarantine` holds all mutators until
+  probe-store replay, identity-index rebuild, orphan accounting, and bounded
+  table reconciliation complete; every in-flight identity must resolve to
+  `Applied`, `Noop`, or `Absent` from the store/index before the new epoch is
+  published. Go reissues only after release with a new epoch-scoped operation
+  id, and the helper consults the identity index/store before mutating so a
+  different incarnation is preserved.
+
 
 - Mutator transport failure or unavailable helper is fail-closed: no tuple BPF
   syscall has occurred, the caller receives `helper_unavailable`/
@@ -328,14 +344,15 @@ and live maps before mutating so a different incarnation is preserved.
   creates a helper table row. Both requests carry a logical mutation identity
   plus `(helper_epoch, operation_id)`. A lost response is reported
   `unknown_outcome`, never success; after the helper reconciles, Go reissues
-  with a new epoch-scoped operation id carrying the same logical identity;
-  the helper probes
-  identity first. An already-applied upsert returns `Applied` without
-  rewriting a different incarnation; an absent upsert applies once; a
-  conditional publish/delete already applied returns `Noop`. No unknown
-  outcome triggers a direct Go repair write.
-  `restoreBPFSessionV4/V6` becomes a token-authorized helper rollback, not a
-  `bpfShim.SetSession`/`DeleteSession` call.
+  with a new epoch-scoped operation id carrying the same logical identity; the
+  helper probes the `SessionTableIdentityIndex` and `ReconcileProbeStore`
+  first. An already-applied upsert returns `Applied` without rewriting a
+  different incarnation; an absent upsert applies once; a conditional
+  publish/delete already applied returns `Noop`. No unknown outcome triggers
+  a direct Go repair write. `restoreBPFSessionV4/V6` becomes a
+  token-authorized helper rollback, not a `bpfShim.SetSession`/`DeleteSession`
+  call.
+
 - Helper-backed `DeleteSessionV4/V6`, peer/scoped/bare batches, and
   `deleteAppliedMirrorRows` use `mirror_delete*` and receive
   `preserve`/`delete`/`republish` dispositions. The helper performs the sole
@@ -343,7 +360,9 @@ and live maps before mutating so a different incarnation is preserved.
   post-repair bare deletes. Legacy non-policy callers retain bounded chunk
   and count/error contracts, but they also use helper-first mutation.
   `ClearAllSessionsChunked` becomes bounded `mirror_clear_chunk` calls under
-  a helper map-wide clear fence, so no clear callback can bypass tuple gates.
+  one helper-owned `ClearFenceID` across all continuation pages, so no tuple
+  publisher can bypass the fence.
+
 - The source audit enumerates every production direct mutation to cut over:
   `manager_sessions.go:37,107,132,189,194,201,236,248,283,288,346,425,
   493,508,537,561,570,598,608,659`, with `ClearAllSessionsChunked` at
@@ -358,11 +377,13 @@ and live maps before mutating so a different incarnation is preserved.
   restart. A helper crash/restart bumps the coordinator epoch and rejects
   old `(helper_epoch, operation_id)` pairs until map reconcile completes.
   Go receives `unknown_outcome`, then submits a new operation id carrying the
-  same logical identity; the reconciled helper returns `Applied`/`Noop` if
+  same logical identity; the reconciled helper consults the
+  `SessionTableIdentityIndex`/probe record and returns `Applied`/`Noop` if
   the old transaction had completed, or applies it once if absent, with
   conditional identity checks preserving any different incarnation. Thus
   #5305 cannot split on a lost response and helper restart cannot admit a
   stale direct writer.
+
 - Install-generation revalidation: each worker-local table mutation uses the
   non-blocking `InstallPermit` protocol above and returns the observed
   `install_seq` with its survivor probe. Before the final probe the coordinator
@@ -373,12 +394,15 @@ and live maps before mutating so a different incarnation is preserved.
   sequence during earlier repair passes forces another pass, up to three
   passes or the remaining 200ms lease. A continuously changing tuple stays
   fenced and returns `gate_timeout` rather than releasing with a mirror gap.
-- Token and lease: each key has
+- Token and lease: each tuple key has
   `TupleToken { seq: u64 per-shard monotonic, shard: u8 }`, while every
-  helper-owned logical mutation obtains one `GateLease { epoch: u32
+  tuple-scoped helper mutation obtains one `GateLease { epoch: u32
   coordinator epoch (bumped on restart/reconcile), expiry_ns: u64 monotonic,
-  entries: Vec<(TupleKey, TupleToken)> }`. The full forward-plus-companion key
-  set is derived and deduplicated before any acquire; entries are sorted in
+  entries: Vec<(TupleKey, TupleToken)> }`. `mirror_clear_chunk` is the
+  map-wide exception: it owns the exclusive `ClearFenceID`/epoch above across
+  its full continuation and never uses a tuple `GateLease`. The full
+  forward-plus-companion key set is derived and deduplicated before any
+  acquire; entries are sorted in
   canonical family/tuple order, acquired as one bounded operation, and
   released together. Helper operations validate the token corresponding to
   each BPF key plus the shared lease epoch/expiry; a singular per-shard token
@@ -457,13 +481,17 @@ and live maps before mutating so a different incarnation is preserved.
   the syscall, while table installs stay worker-local. A concurrent install's
   BPF publish waits, so the second survivor probe (which reads `SessionTable`,
   not BPF) sees B and the repair republishes B instead of deleting.
-- Proof sketch: under the gate, `probe, conditional_remove, survivor-probe,
+- Proof sketch: under the tuple gate,
+  `probe, conditional_remove, survivor-probe,
   publish_under_token/delete_under_token` is atomic with respect to every
-  helper-internal publisher, including `mirror_upsert`,
-  `mirror_publish_only`, refresh, HA import, and clear. Each operation holds
-  its per-key `PublishPermit` through the BPF syscall; Go callers can only
-  enqueue these helper verbs and have no direct map syscall that could bypass
-  `Held` or `Finalizing`. Conditional ids make
+  helper-internal tuple publisher, including `mirror_upsert`,
+  `mirror_publish_only`, refresh, and HA import; clear is the explicit
+  map-wide exception and owns exclusive `ClearFence` through its full
+  continuation. Non-clear tuple operations hold their per-key
+  `PublishPermit` through each BPF syscall; clear callbacks use only their
+  `ClearFenceID`, and no tuple publisher can enter until its release. Go
+  callers can only enqueue these helper verbs and have no direct map syscall
+  that could bypass `Held`, `Finalizing`, or `ClearFence`. Conditional ids make
   removal equality-only (stale or different ids are no-ops, so tuple reuse
   cannot over-clear); survivor selection is deterministic over post-remove
   table contents (which include every concurrent install); each worker's
@@ -837,16 +865,17 @@ copies intact).
   carrying the same logical identity after reconcile, no token self-blocks,
   no A resurrection occurs, and no B is lost.
 - Clear-fence vs tuple-GateLease race (privileged helper test, v4 and v6):
-  tuple-first starts `mirror_delete` or `mirror_upsert`, acquires shared
-  `ClearAdmission` and `GateLease A`, then `mirror_clear_chunk` requests
-  `Draining`; assert new tuple admissions stop, clear waits for A to
-  finalize/release, and only then obtains exclusive `ClearFence` and completes
-  its bounded chunk. Clear-first enters `Draining`/`Held` before a queued
-  delete/import; assert both remain outside admission with no BPF syscall until
-  clear releases, then exactly one conditional mutation proceeds. Hold the
-  clear callback on its exclusive token and assert table/mirror callbacks do
-  not self-block or reacquire normal admission; repeat with reverse-only
-  import and assert no row resurrection or clear/delete interleave.
+  tuple-first pauses `mirror_delete` in `Finalizing` after it holds shared
+  `ClearAdmission` and `GateLease A`; `mirror_clear_chunk` requests `Draining`
+  and must wait for final probe/repair and A release before exclusive
+  `ClearFence`. Assert no post-fence A ack can publish or resurrect A, and
+  clear completes its bounded chunk under one fence token. Clear-first enters
+  `Draining`/`Held` before a queued stale-A delete and different-identity B
+  import; assert neither queued operation reaches BPF during clear, A delete
+  re-probes to `Noop` after release, and only explicit B import applies. Hold
+  the clear callback on its exclusive token and assert table/mirror callbacks
+  do not self-block or reacquire normal admission; repeat reverse-only import
+  and assert no clear/delete interleave or post-clear resurrection.
 
 
 
