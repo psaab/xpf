@@ -46,10 +46,10 @@ from unittest import mock
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-import sign  # noqa: E402
-
 _ROOT = _HERE.parent.parent
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_ROOT / "scripts" / "image"))
+import sign  # noqa: E402
 _SPEC = importlib.util.spec_from_file_location(
     "xpf_bake", _ROOT / "scripts" / "image" / "bake.py")
 bake = importlib.util.module_from_spec(_SPEC)
