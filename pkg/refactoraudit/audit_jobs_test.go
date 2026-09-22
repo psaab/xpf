@@ -154,6 +154,132 @@ func (r *fixtureRepo) touched(baseRef string) []touchedFile {
 	return parseTouched(r.t, "fixture refactoring-audit-touched.sh", stdout)
 }
 
+func (r *fixtureRepo) touchedWithEnv(baseRef string, env []string) []touchedFile {
+	r.t.Helper()
+	runEnv := append([]string{"XPF_AUDIT_BASE_REF=" + baseRef}, env...)
+	stdout, stderr, err := r.script(runEnv, "scripts/refactoring-audit-touched.sh")
+	if err != nil {
+		r.t.Fatalf("refactoring-audit-touched.sh: %v\n%s", err, stderr)
+	}
+	return parseTouched(r.t, "fixture refactoring-audit-touched.sh", stdout)
+}
+
+func (r *fixtureRepo) writeText(rel, text string) {
+	r.t.Helper()
+	path := filepath.Join(r.dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		r.t.Fatalf("mkdir for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		r.t.Fatalf("write %s: %v", rel, err)
+	}
+}
+
+// writePattern makes line identity deliberate so Git's similarity threshold
+// is a property of the fixture, not an accidental property of comments.
+func (r *fixtureRepo) writePattern(rel string, lines, shared int, variant string) {
+	r.t.Helper()
+	if lines < 1 || shared < 0 || shared >= lines {
+		r.t.Fatalf("invalid pattern dimensions: lines=%d shared=%d", lines, shared)
+	}
+	var b strings.Builder
+	b.WriteString("package fixture\n")
+	for i := 1; i < lines; i++ {
+		if i <= shared {
+			fmt.Fprintf(&b, "// shared line %04d\n", i)
+		} else {
+			fmt.Fprintf(&b, "// %s line %04d\n", variant, i)
+		}
+	}
+	r.writeText(rel, b.String())
+}
+
+func renameBase(t *testing.T, rel string, lines int) *fixtureRepo {
+	t.Helper()
+	r := newFixtureRepo(t)
+	r.writeFile(rel, lines)
+	r.commit("rename fixture base")
+	r.git("checkout", "-q", "-b", "feature")
+	return r
+}
+
+func requireRename(t *testing.T, r *fixtureRepo, base, source, dest string) {
+	t.Helper()
+	status := r.git("diff", "--name-status", "-M90%", base, "--")
+	if !strings.Contains(status, "\t"+source+"\t"+dest) ||
+		!strings.Contains(status, "R") {
+		t.Fatalf("fixture is not a rename (want R %s -> %s); got:\n%s", source, dest, status)
+	}
+}
+
+func requireTouchedPath(t *testing.T, rows []touchedFile, path string) touchedFile {
+	t.Helper()
+	for _, row := range rows {
+		if row.path == path {
+			return row
+		}
+	}
+	t.Fatalf("missing touched row for %s; got %+v", path, rows)
+	return touchedFile{}
+}
+
+func requireNoTouchedPath(t *testing.T, rows []touchedFile, path string) {
+	t.Helper()
+	for _, row := range rows {
+		if row.path == path {
+			t.Fatalf("unexpected touched row for %s: %+v", path, row)
+		}
+	}
+}
+
+func (r *fixtureRepo) appendLines(rel string, n int, prefix string) {
+	r.t.Helper()
+	path := filepath.Join(r.dir, rel)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		r.t.Fatalf("open %s for append: %v", rel, err)
+	}
+	defer f.Close()
+	for i := range n {
+		if _, err := fmt.Fprintf(f, "// %s line %04d\n", prefix, i); err != nil {
+			r.t.Fatalf("append %s: %v", rel, err)
+		}
+	}
+}
+
+func (r *fixtureRepo) symlink(rel, target string) {
+	r.t.Helper()
+	path := filepath.Join(r.dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		r.t.Fatalf("mkdir for %s: %v", rel, err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		r.t.Fatalf("symlink %s -> %s: %v", rel, target, err)
+	}
+}
+
+func installFakeGit(t *testing.T, r *fixtureRepo, body string) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("locate git: %v", err)
+	}
+	bin := filepath.Join(r.dir, "fake-bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("mkdir fake git bin: %v", err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\n%s\nexec %s \"$@\"\n", body, realGit)
+	path := filepath.Join(bin, "git")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	return bin
+}
+
+func prependPath(dir string) string {
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
 // staleFixture builds the #7253 situation. Four commits, and every one of
 // them is load-bearing:
 //
@@ -344,6 +470,458 @@ func TestUndeterminableBaseFailsLoudly(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "common ancestor") {
 			t.Errorf("the error must say what it could not compute; got %q", stderr)
+		}
+	})
+}
+
+// TestTouchedRename10488 is the producer-side fail-on-revert for #10488.
+// Every rename assertion requires the destination row and its measured base:
+// a test that merely sees a crossing (or merely sees no crossing) can pass
+// while still losing the predecessor identity.
+func TestTouchedRename10488(t *testing.T) {
+	t.Run("committed pure rename", func(t *testing.T) {
+		r := renameBase(t, "pkg/rename_old.go", 1701)
+		r.git("mv", "pkg/rename_old.go", "pkg/rename_new.go")
+		r.commit("commit pure rename")
+		requireRename(t, r, "master", "pkg/rename_old.go", "pkg/rename_new.go")
+
+		rows := r.touched("master")
+		row := requireTouchedPath(t, rows, "pkg/rename_new.go")
+		if row.isNew || row.baseLOC != 1701 || row.headLOC != 1701 {
+			t.Fatalf("pure rename must inherit 1701 LOC: %+v", row)
+		}
+		if crossings := thresholdCrossings(rows); len(crossings) != 0 {
+			t.Fatalf("pure rename must not cross: %+v", crossings)
+		}
+	})
+
+	t.Run("staged rename ignores diff renames false", func(t *testing.T) {
+		r := renameBase(t, "pkg/staged_old.go", 2100)
+		r.git("mv", "pkg/staged_old.go", "pkg/staged_new.go")
+		requireRename(t, r, "master", "pkg/staged_old.go", "pkg/staged_new.go")
+
+		rows := r.touchedWithEnv("master", []string{
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=diff.renames",
+			"GIT_CONFIG_VALUE_0=false",
+		})
+		row := requireTouchedPath(t, rows, "pkg/staged_new.go")
+		if row.isNew || row.baseLOC != 2100 || row.headLOC != 2100 {
+			t.Fatalf("explicit rename detection must beat user config: %+v", row)
+		}
+	})
+
+	t.Run("source destination order", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.writeFile("pkg/swap_a.go", 1700)
+		r.writeFile("pkg/swap_b.go", 900)
+		r.commit("source destination fixture base")
+		r.git("checkout", "-q", "-b", "feature")
+		r.git("mv", "pkg/swap_a.go", "pkg/swap_c.go")
+		r.commit("rename with destination decoy")
+		requireRename(t, r, "master", "pkg/swap_a.go", "pkg/swap_c.go")
+
+		row := requireTouchedPath(t, r.touched("master"), "pkg/swap_c.go")
+		if row.isNew || row.baseLOC != 1700 || row.headLOC != 1700 {
+			t.Fatalf("rename baseline must come from source, not destination: %+v", row)
+		}
+	})
+
+	t.Run("staged rename with unstaged watch growth", func(t *testing.T) {
+		r := renameBase(t, "pkg/watch_old.go", 1499)
+		r.git("mv", "pkg/watch_old.go", "pkg/watch_new.go")
+		r.writeFile("pkg/watch_new.go", 1500)
+		requireRename(t, r, "master", "pkg/watch_old.go", "pkg/watch_new.go")
+
+		rows := r.touched("master")
+		row := requireTouchedPath(t, rows, "pkg/watch_new.go")
+		if row.isNew || row.baseLOC != 1499 || row.headLOC != 1500 {
+			t.Fatalf("unstaged rename growth must retain source baseline: %+v", row)
+		}
+		crossings := thresholdCrossings(rows)
+		if len(crossings) != 1 || crossings[0].tier != tierWatch {
+			t.Fatalf("1499 -> 1500 rename must be one WATCH crossing: %+v", crossings)
+		}
+	})
+
+	t.Run("staged rename with unstaged refactor growth", func(t *testing.T) {
+		r := renameBase(t, "pkg/refactor_old.go", 1999)
+		r.git("mv", "pkg/refactor_old.go", "pkg/refactor_new.go")
+		r.writeFile("pkg/refactor_new.go", 2000)
+		requireRename(t, r, "master", "pkg/refactor_old.go", "pkg/refactor_new.go")
+
+		rows := r.touched("master")
+		row := requireTouchedPath(t, rows, "pkg/refactor_new.go")
+		if row.isNew || row.baseLOC != 1999 || row.headLOC != 2000 {
+			t.Fatalf("unstaged refactor growth must retain source baseline: %+v", row)
+		}
+		crossings := thresholdCrossings(rows)
+		if len(crossings) != 1 || crossings[0].tier != tierRefactor {
+			t.Fatalf("1999 -> 2000 rename must be one REFACTOR crossing: %+v", crossings)
+		}
+	})
+
+	t.Run("committed rename growth", func(t *testing.T) {
+		r := renameBase(t, "pkg/committed_old.go", 1499)
+		r.git("mv", "pkg/committed_old.go", "pkg/committed_new.go")
+		r.writeFile("pkg/committed_new.go", 1500)
+		r.commit("commit rename growth")
+		requireRename(t, r, "master", "pkg/committed_old.go", "pkg/committed_new.go")
+
+		rows := r.touched("master")
+		row := requireTouchedPath(t, rows, "pkg/committed_new.go")
+		if row.isNew || row.baseLOC != 1499 || row.headLOC != 1500 {
+			t.Fatalf("committed rename growth must retain source baseline: %+v", row)
+		}
+		if crossings := thresholdCrossings(rows); len(crossings) != 1 ||
+			crossings[0].tier != tierWatch {
+			t.Fatalf("committed 1499 -> 1500 must be one WATCH crossing: %+v", crossings)
+		}
+	})
+
+	t.Run("below threshold similarity stays new", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.writePattern("pkg/boiler_old.go", 1600, 1599, "old")
+		r.commit("boilerplate base")
+		r.git("checkout", "-q", "-b", "feature")
+		r.git("rm", "-q", "pkg/boiler_old.go")
+		r.writePattern("pkg/boiler_new.go", 1600, 960, "new")
+		r.commit("dissimilar add")
+
+		status := r.git("diff", "--name-status", "-M90%", "master", "--")
+		if strings.Contains(status, "\tboiler_old.go\tboiler_new.go") {
+			t.Fatalf("60%% similarity must not pair as a rename: %s", status)
+		}
+		row := requireTouchedPath(t, r.touched("master"), "pkg/boiler_new.go")
+		if !row.isNew || row.headLOC != 1600 {
+			t.Fatalf("below-threshold add must remain new: %+v", row)
+		}
+	})
+
+	t.Run("ambiguous pair keeps true source", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.writePattern("pkg/ambiguous_big.go", 2100, 840, "big")
+		r.writePattern("pkg/ambiguous_small.go", 1400, 1399, "small")
+		r.commit("ambiguous pair base")
+		r.git("checkout", "-q", "-b", "feature")
+		r.git("mv", "pkg/ambiguous_small.go", "pkg/ambiguous_mid.go")
+		r.appendLines("pkg/ambiguous_mid.go", 100, "growth")
+		requireRename(t, r, "master", "pkg/ambiguous_small.go", "pkg/ambiguous_mid.go")
+
+		row := requireTouchedPath(t, r.touched("master"), "pkg/ambiguous_mid.go")
+		if row.isNew || row.baseLOC != 1400 || row.headLOC != 1500 {
+			t.Fatalf("ambiguous pairing must use the 1400-line source: %+v", row)
+		}
+		if crossings := thresholdCrossings([]touchedFile{row}); len(crossings) != 1 ||
+			crossings[0].tier != tierWatch {
+			t.Fatalf("ambiguous 1400 -> 1500 must remain WATCH: %+v", crossings)
+		}
+	})
+
+	t.Run("heavy rewrite remains new", func(t *testing.T) {
+		r := renameBase(t, "pkg/rewrite_old.go", 1600)
+		r.git("mv", "pkg/rewrite_old.go", "pkg/rewrite_new.go")
+		r.writePattern("pkg/rewrite_new.go", 1700, 0, "rewritten")
+		r.commit("heavy rewrite")
+
+		status := r.git("diff", "--name-status", "-M90%", "master", "--")
+		if strings.Contains(status, "\trewrite_old.go\trewrite_new.go") {
+			t.Fatalf("heavy rewrite must not pair at -M90%%: %s", status)
+		}
+		row := requireTouchedPath(t, r.touched("master"), "pkg/rewrite_new.go")
+		if !row.isNew || row.headLOC != 1700 {
+			t.Fatalf("heavy rewrite must degrade to a new file: %+v", row)
+		}
+	})
+
+	t.Run("copy config cannot lend baseline", func(t *testing.T) {
+		r := renameBase(t, "pkg/copy_source.go", 1701)
+		r.writeFile("pkg/copy_new.go", 1701)
+		r.git("add", "pkg/copy_new.go")
+		status := r.git("diff", "--name-status", "-M90%", "master", "--")
+		if strings.Contains(status, "\tcopy_source.go\tcopy_new.go") {
+			t.Fatalf("without -C the fixture must not be a copy record: %s", status)
+		}
+
+		rows := r.touchedWithEnv("master", []string{
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=diff.renames",
+			"GIT_CONFIG_VALUE_0=copies",
+		})
+		row := requireTouchedPath(t, rows, "pkg/copy_new.go")
+		if !row.isNew || row.headLOC != 1701 {
+			t.Fatalf("copy must remain a new file even under copies config: %+v", row)
+		}
+		requireNoTouchedPath(t, rows, "pkg/copy_source.go")
+	})
+
+	t.Run("consumed source recreation is new", func(t *testing.T) {
+		r := renameBase(t, "pkg/consumed_old.go", 1701)
+		r.git("mv", "pkg/consumed_old.go", "pkg/consumed_new.go")
+		r.writeFile("pkg/consumed_old.go", 1701)
+		requireRename(t, r, "master", "pkg/consumed_old.go", "pkg/consumed_new.go")
+
+		rows := r.touched("master")
+		newRow := requireTouchedPath(t, rows, "pkg/consumed_new.go")
+		if newRow.isNew || newRow.baseLOC != 1701 {
+			t.Fatalf("rename destination must inherit its source: %+v", newRow)
+		}
+		oldRow := requireTouchedPath(t, rows, "pkg/consumed_old.go")
+		if !oldRow.isNew || oldRow.headLOC != 1701 {
+			t.Fatalf("recreated consumed source must be new: %+v", oldRow)
+		}
+		crossings := thresholdCrossings(rows)
+		if len(crossings) != 1 || crossings[0].path != "pkg/consumed_old.go" {
+			t.Fatalf("only recreated source should cross: %+v", crossings)
+		}
+	})
+
+	t.Run("same path untracked restoration keeps baseline", func(t *testing.T) {
+		r := renameBase(t, "pkg/restored.go", 1701)
+		r.git("rm", "-q", "pkg/restored.go")
+		r.writeFile("pkg/restored.go", 1701)
+
+		rows := r.touched("master")
+		row := requireTouchedPath(t, rows, "pkg/restored.go")
+		if row.isNew || row.baseLOC != 1701 || row.headLOC != 1701 {
+			t.Fatalf("same-path untracked restoration must probe its base blob: %+v", row)
+		}
+	})
+
+	t.Run("excluded source enters audit population", func(t *testing.T) {
+		r := renameBase(t, "pkg/excluded_old_test.go", 1701)
+		r.git("mv", "pkg/excluded_old_test.go", "pkg/excluded_new.go")
+		requireRename(t, r, "master", "pkg/excluded_old_test.go", "pkg/excluded_new.go")
+
+		row := requireTouchedPath(t, r.touched("master"), "pkg/excluded_new.go")
+		if !row.isNew || row.headLOC != 1701 {
+			t.Fatalf("excluded source to audited destination must start at zero: %+v", row)
+		}
+	})
+
+	t.Run("audited source exits population", func(t *testing.T) {
+		r := renameBase(t, "pkg/included_old.go", 1701)
+		r.git("mv", "pkg/included_old.go", "pkg/included_new_test.go")
+		requireRename(t, r, "master", "pkg/included_old.go", "pkg/included_new_test.go")
+		requireNoTouchedPath(t, r.touched("master"), "pkg/included_new_test.go")
+	})
+
+	t.Run("two committed renames use original base", func(t *testing.T) {
+		r := renameBase(t, "pkg/chain_orig.go", 1701)
+		r.git("mv", "pkg/chain_orig.go", "pkg/chain_mid.go")
+		r.commit("first chain rename")
+		r.git("mv", "pkg/chain_mid.go", "pkg/chain_final.go")
+		r.commit("second chain rename")
+		requireRename(t, r, "master", "pkg/chain_orig.go", "pkg/chain_final.go")
+
+		row := requireTouchedPath(t, r.touched("master"), "pkg/chain_final.go")
+		if row.isNew || row.baseLOC != 1701 || row.headLOC != 1701 {
+			t.Fatalf("final destination must use merge-base original: %+v", row)
+		}
+	})
+
+	t.Run("directory rename and recreated source", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		for _, name := range []string{"a.go", "b.go", "c.go"} {
+			r.writeFile(filepath.Join("pkg/olddir", name), 100)
+		}
+		r.commit("directory base")
+		r.git("checkout", "-q", "-b", "feature")
+		r.git("mv", "pkg/olddir", "pkg/newdir")
+		r.writeFile("pkg/olddir/a.go", 1701)
+
+		rows := r.touched("master")
+		for _, name := range []string{"a.go", "b.go", "c.go"} {
+			row := requireTouchedPath(t, rows, filepath.Join("pkg/newdir", name))
+			if row.isNew || row.baseLOC != 100 || row.headLOC != 100 {
+				t.Fatalf("directory rename row must retain its own source: %+v", row)
+			}
+		}
+		old := requireTouchedPath(t, rows, "pkg/olddir/a.go")
+		if !old.isNew || old.headLOC != 1701 {
+			t.Fatalf("recreated directory source must be new: %+v", old)
+		}
+		wantOrder := []string{
+			"pkg/newdir/a.go", "pkg/newdir/b.go", "pkg/newdir/c.go", "pkg/olddir/a.go",
+		}
+		if len(rows) != len(wantOrder) {
+			t.Fatalf("want four directory rows, got %+v", rows)
+		}
+		for i, want := range wantOrder {
+			if rows[i].path != want {
+				t.Fatalf("rows must be C-locale destination sorted: got %+v", rows)
+			}
+		}
+	})
+
+	t.Run("symlink source typechange uses raw blob LOC", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.symlink("pkg/type_src.go", "target.go")
+		r.commit("symlink base")
+		r.git("checkout", "-q", "-b", "feature")
+		if err := os.Remove(filepath.Join(r.dir, "pkg/type_src.go")); err != nil {
+			t.Fatalf("remove source symlink: %v", err)
+		}
+		r.writeFile("pkg/type_src.go", 1700)
+		status := r.git("diff", "--name-status", "-z", "master", "--")
+		if status != "T\x00pkg/type_src.go\x00" {
+			t.Fatalf("want exact T NUL record, got %q", status)
+		}
+
+		row := requireTouchedPath(t, r.touched("master"), "pkg/type_src.go")
+		if row.isNew || row.baseLOC != 0 || row.headLOC != 1700 {
+			t.Fatalf("symlink blob has zero newline LOC and regular head has 1700: %+v", row)
+		}
+	})
+
+	t.Run("regular to dangling symlink is dropped", func(t *testing.T) {
+		r := renameBase(t, "pkg/type_dest.go", 1700)
+		if err := os.Remove(filepath.Join(r.dir, "pkg/type_dest.go")); err != nil {
+			t.Fatalf("remove regular source: %v", err)
+		}
+		r.symlink("pkg/type_dest.go", "missing.go")
+		status := r.git("diff", "--name-status", "-z", "master", "--")
+		if status != "T\x00pkg/type_dest.go\x00" {
+			t.Fatalf("want exact T NUL record, got %q", status)
+		}
+		requireNoTouchedPath(t, r.touched("master"), "pkg/type_dest.go")
+	})
+
+	t.Run("rename plus typechange remains add and drop", func(t *testing.T) {
+		r := renameBase(t, "pkg/cross_old.go", 1700)
+		r.git("mv", "pkg/cross_old.go", "pkg/cross_new.go")
+		if err := os.Remove(filepath.Join(r.dir, "pkg/cross_new.go")); err != nil {
+			t.Fatalf("remove renamed regular: %v", err)
+		}
+		r.symlink("pkg/cross_new.go", "missing.go")
+		status := r.git("diff", "--name-status", "-M", "master", "--")
+		if strings.Contains(status, "\tcross_old.go\tcross_new.go") ||
+			!strings.Contains(status, "A\tpkg/cross_new.go") ||
+			!strings.Contains(status, "D\tpkg/cross_old.go") {
+			t.Fatalf("want A+D with no cross-type rename, got:\n%s", status)
+		}
+		requireNoTouchedPath(t, r.touched("master"), "pkg/cross_new.go")
+	})
+
+	t.Run("content conflict stays one M row", func(t *testing.T) {
+		r := newFixtureRepo(t)
+		r.writeFile("pkg/conflict.go", 2)
+		r.commit("conflict base")
+		r.git("checkout", "-q", "-b", "ours")
+		r.writeText("pkg/conflict.go", "package fixture\n// ours\n")
+		r.commit("ours")
+		r.git("checkout", "-q", "master")
+		r.writeText("pkg/conflict.go", "package fixture\n// theirs\n")
+		r.commit("theirs")
+		r.git("checkout", "-q", "ours")
+		if output, err := r.gitErr("merge", "master", "--no-edit"); err == nil {
+			t.Fatalf("merge must leave a content conflict, output=%s", output)
+		}
+
+		treeDiff := r.git("diff", "--name-status", "-z", "master", "--")
+		if treeDiff != "M\x00pkg/conflict.go\x00" {
+			t.Fatalf("tree-vs-commit conflict must be one M record, got %q", treeDiff)
+		}
+		indexDiff := r.git("diff", "--name-status", "-z", "--")
+		if indexDiff != "U\x00pkg/conflict.go\x00M\x00pkg/conflict.go\x00" {
+			t.Fatalf("index-form conflict diagnostic changed, got %q", indexDiff)
+		}
+		rows := r.touched("master")
+		row := requireTouchedPath(t, rows, "pkg/conflict.go")
+		if row.isNew || row.baseLOC != 2 || row.headLOC <= row.baseLOC {
+			t.Fatalf("conflict must preserve M baseline and measure markers: %+v", row)
+		}
+	})
+
+	t.Run("source-only whitespace is safe", func(t *testing.T) {
+		r := renameBase(t, "pkg/old dir/source.go", 1700)
+		r.git("mv", "pkg/old dir/source.go", "pkg/whitespace_new.go")
+		r.commit("whitespace source rename")
+		requireRename(t, r, "master", "pkg/old dir/source.go", "pkg/whitespace_new.go")
+
+		row := requireTouchedPath(t, r.touched("master"), "pkg/whitespace_new.go")
+		if row.isNew || row.baseLOC != 1700 || row.headLOC != 1700 {
+			t.Fatalf("quoted source-only whitespace must preserve baseline: %+v", row)
+		}
+	})
+
+	t.Run("whitespace destination and malformed streams fail closed", func(t *testing.T) {
+		t.Run("audited destination", func(t *testing.T) {
+			r := newFixtureRepo(t)
+			r.commit("empty base")
+			r.git("checkout", "-q", "-b", "feature")
+			r.writeFile("pkg/bad name.go", 1700)
+			stdout, _, err := r.script([]string{"XPF_AUDIT_BASE_REF=master"},
+				"scripts/refactoring-audit-touched.sh")
+			if err == nil || strings.TrimSpace(stdout) != "" {
+				t.Fatalf("whitespace destination must fail with no rows: err=%v stdout=%q", err, stdout)
+			}
+		})
+
+		t.Run("truncated NUL tail", func(t *testing.T) {
+			r := renameBase(t, "pkg/truncated_old.go", 10)
+			fakeBin := installFakeGit(t, r, `
+case " $* " in
+  *" diff --name-status -z "*)
+    printf 'M\000pkg/truncated.go'
+    exit 0
+    ;;
+esac`)
+			stdout, _, err := r.script([]string{
+				"XPF_AUDIT_BASE_REF=master",
+				"PATH=" + prependPath(fakeBin),
+			}, "scripts/refactoring-audit-touched.sh")
+			if err == nil || strings.TrimSpace(stdout) != "" {
+				t.Fatalf("truncated NUL stream must fail with no rows: err=%v stdout=%q", err, stdout)
+			}
+		})
+
+		t.Run("git diff failure", func(t *testing.T) {
+			r := renameBase(t, "pkg/failure_old.go", 10)
+			fakeBin := installFakeGit(t, r, `
+case " $* " in
+  *" diff --name-status -z "*)
+    echo fake diff failure >&2
+    exit 1
+    ;;
+esac`)
+			stdout, _, err := r.script([]string{
+				"XPF_AUDIT_BASE_REF=master",
+				"PATH=" + prependPath(fakeBin),
+			}, "scripts/refactoring-audit-touched.sh")
+			if err == nil || strings.TrimSpace(stdout) != "" {
+				t.Fatalf("git producer failure must fail with no rows: err=%v stdout=%q", err, stdout)
+			}
+		})
+	})
+
+	t.Run("missing source blob falls back with warning", func(t *testing.T) {
+		r := renameBase(t, "pkg/missing_old.go", 1701)
+		r.git("mv", "pkg/missing_old.go", "pkg/missing_new.go")
+		requireRename(t, r, "master", "pkg/missing_old.go", "pkg/missing_new.go")
+		fakeBin := installFakeGit(t, r, `
+if [ "${1:-}" = cat-file ] && [ "${2:-}" = -e ]; then
+  case "${3:-}" in
+    *:pkg/missing_old.go)
+      echo missing source blob >&2
+      exit 1
+      ;;
+  esac
+fi`)
+		stdout, stderr, err := r.script([]string{
+			"XPF_AUDIT_BASE_REF=master",
+			"PATH=" + prependPath(fakeBin),
+		}, "scripts/refactoring-audit-touched.sh")
+		if err != nil {
+			t.Fatalf("missing source blob must be availability-safe: %v\n%s", err, stderr)
+		}
+		row := requireTouchedPath(t, parseTouched(t, "missing-blob producer", stdout),
+			"pkg/missing_new.go")
+		if !row.isNew || row.headLOC != 1701 {
+			t.Fatalf("missing source blob must emit a new row: %+v", row)
+		}
+		if !strings.Contains(stderr, "pkg/missing_old.go") {
+			t.Fatalf("missing source warning must name source path: %q", stderr)
 		}
 	})
 }
