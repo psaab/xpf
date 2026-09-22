@@ -215,12 +215,13 @@ For a UDP-500/4500 packet to a DNAT-to-another-host external:
   unadjudicated population" holds for GRE-inner UDP only.
 - Consequence: v1 §5.4.1-2 (ESP/AH SPI parsers), §5.4.5 (outer non-first drop),
   §6.1 ESP/AH parser cells, and §6.3/§7 proto-50 U-5 probe are DELETED as dead
-  (:1113-1115). The forwarding README secondary-path sentence listing
-  "transit/NAT IPv4 AH" (forwarding/README.md:1084-1093, esp. :1087) is stale
-  post-#6837 for the AH half (raw outer ESP was already noted as shunted at
-  :1105-1108). The same README's "configured interface IPs, including SNAT/WAN
-  IP and VIPs" wording at :1099-1100 is stale for VIP ownership; the source
-  insert sites and this plan's NotClaimed cell are authoritative.
+  code/tests/probes (flowless proof inspect.rs:1113-1115). The forwarding README
+  secondary-path sentence listing "transit/NAT IPv4 AH"
+  (forwarding/README.md:1084-1093, esp. :1087) is stale post-#6837 for the AH
+  half (raw outer ESP was already noted as shunted at :1105-1108). The same
+  README's "configured interface IPs, including SNAT/WAN IP and VIPs" wording
+  at :1099-1100 is stale for VIP ownership; the source insert sites and this
+  plan's NotClaimed cell are authoritative.
 
 - #6837 MUST NOT be reversed: reintroducing SessionKey { protocol, 0, 0 }
   aliasing reinstalls "two entries per transit flow, aliasing every distinct
@@ -388,10 +389,16 @@ implement-time latitude on this point: gate at the arm with flow-derived key.
 
 The arm MUST classify the already-admitted IKE branch before the ESP SPI
 parser. Reuse the exact `isakmp_demux` semantics from
-userspace-dp/src/afxdp/forwarding/ipsec.rs:84-112: UDP 500 direct ISAKMP and
-UDP 4500 with the four-byte zero non-ESP marker are IKE; an incomplete/
-truncated payload is not a positive IKE marker. Established-IKE spoof without
-the #6471 live-exchange seed is Denied in stage_ipsec_passthrough_check
+`userspace-dp/src/afxdp/forwarding/ipsec.rs:84-112`, and distinguish transport
+demux from the outlet predicate: for UDP-500, a present payload slice of any
+length, including empty or 1-15 bytes, is `Isakmp`; only an absent payload
+slice (a truncated UDP header) is `Truncated` (ipsec.rs:96-98, :108-111). For
+UDP-4500, only a payload whose first four bytes are all zero is `Isakmp` (the
+four-byte marker). The outlet-level `is_admitted_positive_ike` branch narrows
+that positive demux to a complete 16-byte ISAKMP header (the responder-SPI
+span checked by classification at ipsec.rs:143-148); shorter or `Truncated` packets
+are malformed IKE and drop under §5.7. Established-IKE spoof without the
+#6471 live-exchange seed is Denied in stage_ipsec_passthrough_check
 (:1367-1395) and never reaches this arm.
 
 Pseudocode at the arm (names illustrative; implementer reuses in-tree styles;
@@ -401,13 +408,23 @@ exact fail path mirrors :599-606):
     // existing frag-overlap check_and_record block unchanged (:575-596),
     // yielding admission_to_commit: Option<OverlapAdmissionToken>
     // NEW: branch on the existing demux before the data-plane SA gate
-    //   let outlet = if is_admitted_ike_marker_or_udp500(packet_frame, meta) {
-    //     // IKE already passed #4323/#6471. No SA lookup is permitted.
-    //     SlowPathOutlet::Delegated                    // ALWAYS unmarked/q1
+    //   let outlet = if is_admitted_positive_ike(packet_frame, meta) {
+    //     // IKE passed #4323/#6471 and has a complete 16-byte header.
+    //     // No SA lookup is permitted; always unmarked/q1.
+    //     SlowPathOutlet::Delegated
+    //   } else if is_malformed_ike(packet_frame, meta) {
+    //     // UDP-500/4500 IKE demux-positive but short/truncated header.
+    //     sa_miss_dropped_packets.fetch_add(1, Relaxed);
+    //     sampled_sa_miss_exception_reason("malformed_ike"); // §5.8
+    //     if let Some(tok) = admission_to_commit.take() {
+    //       worker_ctx.forwarding.nat64.frag_overlap.fail_admission(tok);
+    //     }
+    //     binding.scratch.scratch_recycle.push(desc.addr);
+    //     continue; // NEVER run the 4500 ESP parser or reinject
     //   } else {
     //     // UDP-4500 ESP-in-UDP data plane only; malformed/unknown -> miss
     //     let (dst, src) = (flow.dst_ip, flow.src_ip);   // flow is Some here
-    //     let spi = esp_in_udp_spi(packet_frame, meta)?; // §5.4; None => miss
+    //     let spi = esp_in_udp_spi(packet_frame, meta); // §5.4; None => miss
     //     let proven = spi.is_some_and(|s| sa_cache.lookup(dst, s, src));
     //     if proven {
     //       SlowPathOutlet::Delegated                      // ALWAYS unmarked/q1
@@ -429,9 +446,11 @@ exact fail path mirrors :599-606):
   }
 
 Denied (:610-630) and NotClaimed paths unchanged. No error/nil/unknown path
-reaches an outlet selection — every one takes the drop arm. Admitted IKE is
-the sole non-SA branch and always selects Delegated; a true SA lookup never
-selects SlowPathOutlet::Adjudicated: Stage 11 has no q0 mint.
+reaches an outlet selection — every one takes the drop arm. Admitted positive
+IKE is the sole non-SA branch and always selects Delegated; malformed
+IKE/UDP-500 never reaches the ESP parser; a true SA lookup never selects
+SlowPathOutlet::Adjudicated: Stage 11 has no q0 mint.
+
 
 ### 5.2 What "SA proof" means (UDP data plane only)
 
@@ -448,17 +467,21 @@ The gate applies to the UDP-500/4500 data plane ONLY:
   machine. Counter plus release note required; strongSwan non-reply behavior
   to be confirmed by the implement lane against a live daemon (one armed-box
   observation, §7).
-- Tiny/truncated UDP (payload shorter than the SPI word, UDP header itself
-  truncated): unproven, dropped. (Note the existing demux already fails IKE
-  CLOSED on truncation — ipsec.rs:96-98 Truncated to NewInboundIke at :139 —
-  the gate extends the same posture to the data plane.)
+- Tiny/truncated UDP-4500 data (payload shorter than the SPI word, UDP header
+  itself truncated): unproven, dropped. For UDP-500 or UDP-4500 marker IKE,
+  the §5.1 malformed-IKE branch handles a missing/shorter 16-byte ISAKMP
+  header before the ESP parser and drops it with the same fail/recycle path.
 - IKE ISAKMP (UDP 500 direct, UDP 4500 with the four-byte zero marker):
-  admitted IKE is OUT OF THE SA gate but NOT out of the outlet decision. It
-  has already passed #4323/#6471 host-inbound/live-exchange admission and
+  admitted IKE means the demux is positive and the ISAKMP header is complete
+  (at least 16 bytes); it is OUT OF THE SA gate but NOT out of the outlet
+  decision. It has passed #4323/#6471 host-inbound/live-exchange admission and
   selects unmarked Delegated/q1 without any SA-cache lookup. This preserves
   local IKE INPUT delivery; an IKE packet to a transit-DNAT destination is
-  intentionally unmarked and is dropped by the FORWARD fence. An unseeded
-  established-spoof is Denied by :1367-1395 before this arm.
+  intentionally unmarked and is dropped by the FORWARD fence. An empty/short
+  UDP-500 payload may be host-inbound-gated as NewInboundIke, but if permitted
+  it takes the explicit malformed-IKE drop arm under §5.7 rather than the
+  Delegated branch. An unseeded established-spoof is Denied by :1367-1395
+  before this arm.
 - Raw ESP/AH (proto 50/51): unreachable (flowless to NotClaimed, §2.2) — no
   parser, no gate, no test cells beyond the NotClaimed pins (§6). AH (v4 and
   v6) is DEFERRED permanently with the flowless proof (no AH work exists to
@@ -503,12 +526,17 @@ needs its own plan review.
 ### 5.4 Parsers (ESP-in-UDP SPI only; fail-closed)
 
 Single parser: esp_in_udp_spi(packet_frame, l4_offset, dst_port) -> Option<u32>.
-dst_port is 4500 here (500 carries IKE only — a 500 packet reaching the data
-plane arm is unproven by construction). Steps, all bounds-checked with .get
+dst_port is 4500 for this parser; except admitted IKE handled by the §5.1
+IKE-first branch, UDP-500 is not sent here. A complete UDP-500 IKE header
+reaches the Delegated branch; a short or truncated UDP-500 packet is
+unparseable and drops under §5.7. Steps, all bounds-checked with .get
 (mirroring isakmp_demux, ipsec.rs:84-112), no allocs, no panics:
 
 1. UDP header present: packet_frame.get(l4_offset..l4_offset+8) else None.
-2. Payload = frame[l4_offset+8..]; match payload.get(0..4):
+2. Payload = frame[l4_offset+8..]. Check the exact one-byte
+   `payload == [0xFF]` NAT-T keepalive BEFORE any `payload.get(0..4)` call:
+   return None with the keepalive reason and never treat 0xFF as an SPI.
+   Otherwise match payload.get(0..4):
    - None (shorter than one SPI word — includes tiny first-fragments whose
      L4 span covers the UDP header but not the SPI word): None (truncated to
      unproven). NOTE: the shim's first-fragment 8-byte minimum
@@ -516,9 +544,10 @@ plane arm is unproven by construction). Steps, all bounds-checked with .get
      SPI word — the parser must bounds-check the word independently.
    - Some([0,0,0,0]): IKE marker — out of scope (caller already demuxed;
      defensive None).
-   - 1-byte 0xFF keepalive: None (keepalive counter, §5.2).
-   - Else: Some(u32 BE word 0) — the ESP SPI. (A 2-3 byte payload is None via
-     the get(0..4) failure, matching the existing demux shape at ipsec.rs:104.)
+   - Some(spi_bytes): Some(u32 BE word 0) — the ESP SPI. A 2-3 byte payload
+     is None via the get(0..4) failure, matching the existing demux shape at
+     ipsec.rs:104.
+
 3. No GRO/coalescing assumption is silently relied upon: the parser reads the
    frame as presented; state explicitly that GRO is assumed not to coalesce
    ESP-in-UDP across datagrams (no GRO hooks exist for it) AND that a
@@ -650,6 +679,9 @@ pinned — no "to be settled at implement time" remains on bypass-risking axes.
   IKE_EXCHANGE_TABLE_CAP plus evictions at ipsec.rs:206 and :294-298, but
   with lock-free reads — the IKE Mutex is safe ONLY at IKE pps, ipsec.rs:273-283,
   and MUST NOT be reused at ESP-in-UDP data rates).
+
+### 5.6 No-q0 disposition and actual local-consumer proof
+
 - DELETED v1 claims: "Over-admit is bounded by T and closed by XFRM's own
   drop" (§5.5), "same-SPI collision resolves as proven, XFRM enforces on
   input" as a FORWARD argument (§5.3), "3 missed polls to deny-all" and
@@ -770,8 +802,8 @@ other q0 writers and must stay zero for every Stage-11 cell.
 Per-miss work on the worker:
 
 1. Atomic counter ALWAYS: sa_miss_dropped_packets.fetch_add(1, Relaxed)
-   (plus reason-split counters: no_sa, truncated, keepalive, stale_deny).
-   No lock, no alloc, wait-free.
+   (plus reason-split counters: no_sa, truncated, malformed_ike, keepalive,
+   stale_deny). No lock, no alloc, wait-free.
 2. Exception event CONDITIONALLY: thread-local 1-in-N pre-gate (mirror
    `REDIRECT_SAMPLE_SEQ: Cell<u64>` sequence, no shared RMW —
    `userspace-dp/src/afxdp/binding_state/latency.rs:54-61`; non-sampled cost
@@ -921,49 +953,63 @@ snapshot, and asserts disposition plus queue plus counters:
     XFRM daddr, send ESP-in-UDP to the raw external dst — EXPECT drop with
     sa_miss and q0 zero; assert no unreviewed candidate-key lookup. REDS ON:
     treating NAT translation as implicit SA-key equivalence.
-14. admitted IKE local delivery: native-GRE inner UDP-500 (and the
-    UDP-4500 four-byte zero-marker variant) with a seeded #6471 live exchange
-    and host-inbound admission — EXPECT Delegated/q1, no SA lookup, q0 zero,
-    and kernel INPUT/IKE delivery. REDS ON: Adjudicated/q0, SA-cache lookup,
-    or transit IKE being able to bypass the unmarked fence.
+14a. permitted NEW-IKE: with an empty / fail-on-access SA snapshot (any SA
+    lookup hard-fails), construct a complete (at least 16-byte) ISAKMP header
+    with a zero responder SPI in a permitted host-inbound zone. Exercise both
+    UDP-500 direct and the UDP-4500 four-byte zero-marker form where applicable.
+    EXPECT #4323 host-inbound admission followed by #6471 seeding, then
+    Delegated/q1, INPUT/IKE delivery, q0 zero, and no SA lookup. REDS ON:
+    SA-cache access, drop, Adjudicated/q0, or transit bypass.
+14b. seeded-established-IKE: with an empty / fail-on-access SA snapshot (any SA
+    lookup hard-fails), construct a complete ISAKMP header with a non-zero
+    responder SPI and a preexisting live #6471 seed. Exercise both UDP-500
+    direct and the UDP-4500 four-byte zero-marker form where applicable.
+    EXPECT host-inbound bypassed, Delegated/q1, INPUT/IKE delivery, q0 zero,
+    and no SA lookup. REDS ON: SA-cache access, host-inbound re-gating,
+    Adjudicated/q0, or transit bypass.
 15. unseeded established-IKE spoof: establish no #6471 live-exchange entry,
     send an established-looking UDP-4500 IKE frame with a non-zero responder
     SPI — EXPECT Denied before the arm, no outlet and no SA lookup, q0 zero.
     REDS ON: spoof reaching Passthrough or minting any queue/mark.
-
+16. permitted-zone truncated UDP-500: send a full UDP header whose ISAKMP
+    payload is empty or 1-15 bytes; `isakmp_demux` reports Isakmp but the
+    explicit 16-byte outlet threshold classifies it as malformed IKE. With
+    host-inbound admission permitted, EXPECT the §5.1 malformed-IKE drop
+    branch, malformed_ike counter, fragment fail/recycle, no SA lookup, no
+    outlet/queue, and q0 zero. REDS ON: Delegated, ESP-SPI parsing, or any q0.
 
 ### 6.2 Wiring pins (arm level — NOT source text)
-- gate-to-outlet behavioral cell: drive proven/unproven through the REAL arm
+
+- Gate-to-outlet behavioral cell: drive proven/unproven through the REAL arm
   (not maybe_reinject..._with_outlet directly — that fn takes outlet as a
   PARAMETER at userspace-dp/src/afxdp/tx/dispatch/slow_path.rs:313-435 and
   cannot prove verdict-to-outlet wiring) and assert the outlet argument
   observed at the reinject call: proven plus a current inbound SA is
-  Delegated/q1, every unproven path is dropped before reinject, admitted
-  IKE marker/UDP-500 is Delegated/q1 with INPUT delivery and no SA lookup,
-  unseeded established-IKE spoof is Denied before the arm, and Adjudicated
-  is impossible. REDS ON: wiring swapped, literal Adjudicated outlet
-  restored, or queue 0 observed.
+  Delegated/q1, every unproven path is dropped before reinject, full-header
+  admitted IKE is Delegated/q1 with INPUT delivery and no SA lookup,
+  malformed-IKE/short UDP-500 takes the explicit drop arm, unseeded
+  established-IKE spoof is Denied before the arm, and Adjudicated is
+  impossible. REDS ON: wiring swapped, literal Adjudicated outlet restored,
+  malformed-IKE path reaching the ESP parser, or queue 0 observed.
 - Re-pointed pinning test (tests_slow_path_disposition.rs:1291-1306): delete
   the Stage-11 Adjudicated assertion and add behavioral rows for
   valid-SA-local-via-Delegated (queue 1, q0 zero, INPUT delivery),
-  Delegated-on-NAT-appended-hit, admitted-IKE-to-Delegated, and drop-on-miss.
-  DELETE the "exempt classes never gate-passed, but ... must carry the
-  structural fence mark" comment (it states the bug). DO NOT add a source-text
-  "gate precedes outlet" cell (repeats the bug-pinning anti-pattern — the
-  behavioral cell above replaces it).
+  Delegated-on-NAT-appended-hit, admitted-IKE-to-Delegated, malformed-IKE
+  drop, and drop-on-miss. DELETE the "exempt classes never gate-passed, but
+  ... must carry the structural fence mark" comment (it states the bug). DO
+  NOT add a source-text "gate precedes outlet" cell (repeats the bug-pinning
+  anti-pattern — the behavioral cell above replaces it).
 - No-Adjudicated-from-Stage-11 regression: enumerate every Stage-11 UDP
   disposition in the real arm and assert no call can submit
   PacketQueue::Adjudicated; leave the other q0 writers' policy-proof tests
   intact. RED-on-revert (implement lane, firsthand) is split by reversion:
   restoring only the literal Adjudicated outlet while retaining the gate makes
-  hit cells 2, 3, and 14 RED, while Stage-11 miss/drop cells 1, 4, 5, 6, 8,
-  10, 11, 12, and 13 remain GREEN; independent NotClaimed/Denied cells 9 and
-  15 remain GREEN. Removing the gate/miss drop makes unproven Stage-11 cells
-  1, 4, 5, 6, 8, 10, 11, 12, and 13 RED while hit cells 2, 3, and 14 remain
-  GREEN and independent cells 9 and 15 remain NotClaimed/Denied. Record both
-  outputs in the PR.
-
-
+  hit cells 2, 3, 14a, and 14b RED, while Stage-11 miss/drop cells 1, 4, 5,
+  6, 8, 10, 11, 12, 13, and 16 remain GREEN; independent NotClaimed/Denied
+  cells 7, 9, and 15 remain GREEN. Removing the gate/miss drop makes
+  unproven Stage-11 cells 1, 4, 5, 6, 8, 10, 11, 12, 13, and 16 RED while
+  hit cells 2, 3, 14a, and 14b remain GREEN and independent cells 7, 9, and
+  15 remain NotClaimed/Denied. Record both outputs in the PR.
 
 ### 6.3 Snapshot/monitor cells (deterministic, socketpair-driven)
 
@@ -1046,9 +1092,11 @@ armed session with the #10518 GRE-inner-UDP experiment (§7 joint run):
   the USERSPACE_LOCAL_V4 inner destination. EXPECT: drop, q0 ZERO (joint
   #10518 population).
 - P6 (compat): rekey during P2 flood — EXPECT zero sa_miss spike across
-  overlap (§5.10); 60s inbound keepalive flood — EXPECT drops plus zero IKE
-  state/log impact; cold establishment from an empty snapshot to the first
-  proven Delegated reinject MUST complete within the ready-gate bound (§5.10).
+  overlap (§5.10); DPD/rekey IKE traffic during snapshot churn — EXPECT no
+  IKE state or log change; 60s inbound keepalive flood — EXPECT drops plus
+  zero IKE state/log impact; cold establishment from an empty snapshot to the
+  first proven Delegated reinject MUST complete within the ready-gate bound
+  (§5.10).
 
 Severity gate (unchanged): inward route/egress on P0-P1 pre-fix implies
 High; WAN hairpin only implies Medium stands. Post-fix, P1/P2/P3/P4/P5 must
@@ -1058,12 +1106,6 @@ of severity.
 
 ## 8. Rollout and compat
 
-- PLAN-KILL observer disposition (N3): if the capture observer cannot prove
-  absence in §6.2 and Slice-1a, record this plan as KILL-grade in the §8
-  disposition list.
-- Capture-observer bound (N4): cap records at `D11ManifestCap` and cap the
-  observation to one named armed-box run window; report both values in the
-  evidence.
 - Fence/wire format: UNCHANGED (same mark, mask, iifname, counter, TC
   program). No nftables/daemon prod change; fence tests unchanged.
 - Dataplane upgrade: restart blackout bounded by first-dump latency
@@ -1156,10 +1198,11 @@ fold-brief directives win all ties):
   no source-text gate-precedence cell; no-Adjudicated-from-Stage-11 pin).
 - §6 cells green as FULL modules/files; RED-on-revert demonstrated
   firsthand by the implement lane. With only the outlet literal reverted
-  (gate retained), hit cells 2/3/14 RED while Stage-11 miss/drop cells
-  1/4/5/6/8/10/11/12/13 stay GREEN; independent cells 9/15 stay GREEN.
-  With the gate removed, unproven Stage-11 cells 1/4/5/6/8/10/11/12/13 RED
-  while hit cells 2/3/14 stay GREEN; cells 9/15 remain NotClaimed/Denied.
+  (gate retained), hit cells 2/3/14a/14b RED while Stage-11 miss/drop cells
+  1/4/5/6/8/10/11/12/13/16 stay GREEN; independent cells 7/9/15 stay
+  GREEN. With the gate removed, unproven Stage-11 cells
+  1/4/5/6/8/10/11/12/13/16 RED while hit cells 2/3/14a/14b stay GREEN;
+  cells 7/9/15 remain NotClaimed/Denied.
 
 - Numeric perf bars met (§5.9) with measured numbers in the PR.
 - §7 P0-P6 armed-box run complete: P0 reproduces pre-fix (nonzero q0);
@@ -1167,9 +1210,10 @@ fold-brief directives win all ties):
   proven; severity settled and recorded.
 - strongSwan compat proofs (a)-(d) in §5.10 delivered.
 - No #6837-reversal code anywhere (cell 7 tripwire guards).
-- No outlet-only residual: no-SA traffic never queues; the only positive
-  Stage-11 IPsec traffic is SA-gated Delegated/q1, so q0 cannot be minted by
-  mere SA existence.
+- No outlet-only residual: unproven ESP-in-UDP traffic never queues; admitted
+  IKE is the explicit admission-proven non-SA exception and queues only
+  unmarked Delegated/q1; no Stage-11 path can mint q0 from mere SA
+  existence.
 
 ## Appendix A. File:line index (source tip 5dbdc95dc; v3 plan fold)
 
