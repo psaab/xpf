@@ -1364,13 +1364,16 @@ Scope of the fallback:
   zone. A FULL refusal denies transit as unattributed before the implicit
   default policy (#6682), in both default-policy postures, rather than
   adjudicating under the sibling's zone. Host-bound handling is shape-dependent:
-  addressed or tunnel traffic gets the #5659 empty-zone host-inbound sentinel
-  (with ICMP errors/PMTUD/ND controls admitted and explicit per-interface
-  overrides taking precedence); address-less non-tunnel traffic remains on the
-  global `None => true` admit path; and a retained agreed zone is
-  policy-evaluated (zone-gated). A contested lifeline still emits the warning,
-  but #10503 deliberately skips its host-inbound sentinel, so host-bound
-  lifeline traffic remains admitted.
+  addressed or tunnel traffic follows the #5659 empty-zone host-inbound
+  sentinel when local-target/tunnel exposure arms it (with ICMP errors/PMTUD/ND
+  controls admitted and explicit per-interface overrides taking precedence),
+  except narrow lifeline names, which remain admitted without that sentinel, and
+  AF_XDP bind-excluded prefix-only/`lo0` names, which remain zone-gated without
+  a sentinel; address-less non-tunnel traffic remains on the global `None => true`
+  admit path; and a retained agreed zone is policy-evaluated (zone-gated). A
+  contested narrow lifeline still emits the warning, but #10503 deliberately
+  skips its host-inbound sentinel, so host-bound narrow-lifeline traffic remains
+  admitted.
 
   In practice the full-refusal transit shape is untagged traffic on a mixed-zone
   trunk and unit-0 traffic on an interface-level tunnel. It is Junos parity —

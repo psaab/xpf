@@ -87,8 +87,12 @@ func snapshotUnitDevice(
 	return cfg.resolveKernelIfNameWith(name, tunnelNames)
 }
 
-// interfaceUnitCollapsesOnBase reports whether a unit reference resolves to
-// the same kernel device as the interface-level tunnel. Per-unit tunnel stanzas
+// interfaceUnitCollapsesOnBase reports whether a unit reference counts toward
+// its base's contest. Ordinary parents return true for every unit: distinct
+// children on distinct devices still contest the parent via fan-UP, and that
+// contest is genuine (untagged ingress cannot be attributed to one child).
+// Interface-level tunnel parents count only units whose resolved kernel device
+// matches the base (collapsed-only same-ifindex). Per-unit tunnel stanzas
 // usually own their own device, but unit 0 can deliberately anchor to the base
 // device; compare the canonical resolver answers rather than the stanza shape.
 func interfaceUnitCollapsesOnBase(
@@ -240,10 +244,12 @@ func contestedHostBoundAdvisory(
 
 
 // contestedTrunkZones returns, per base interface, the sorted distinct zones its
-// COLLAPSED UNITS are bound to — only for bases whose collapsed units span MORE
-// THAN ONE zone and whose raw parent is not disambiguated by a zoned native unit
-// 0. A per-unit tunnel stanza resolving to a distinct device is not part of this
-// set; a unit stanza that resolves to the base device remains part of it.
+// contesting units are bound to — only for bases whose units span MORE THAN ONE
+// zone and whose raw parent is not disambiguated by a zoned native unit 0.
+// For an ordinary parent, every unit participates: fan-UP of distinct children
+// makes the bare parent genuinely ambiguous. For an interface-level tunnel,
+// only units whose resolved device is the same base ifindex participate; a
+// per-unit tunnel stanza resolving to a distinct device remains independent.
 //
 // Keyed off `InterfaceZoneMap` rather than walking zones directly so this and
 // the snapshot builder answer from the same source. That map already canonicalises

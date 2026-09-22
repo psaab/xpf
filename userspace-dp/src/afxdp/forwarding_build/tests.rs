@@ -2689,7 +2689,7 @@ fn contested_row_10503(
 }
 
 #[test]
-fn contested_lifeline_parents_keep_unconditional_host_admit_10503() {
+fn contested_lifeline_parents_keep_no_sentinel_classifier_admit_10503() {
     use crate::afxdp::forwarding::host_inbound_admits_iface;
 
     const PROTO_TCP: u8 = 6;
@@ -2718,7 +2718,7 @@ fn contested_lifeline_parents_keep_unconditional_host_admit_10503() {
         );
         assert!(
             host_inbound_admits_iface(&state, parent, 0, PROTO_TCP, 22, false, 0),
-            "{label} lifeline must keep unconditional host-bound ssh admission"
+            "{label} classifier-level host-bound admission must remain true without an AF_XDP deny sentinel"
         );
     }
 }
