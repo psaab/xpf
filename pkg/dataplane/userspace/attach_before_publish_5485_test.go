@@ -260,17 +260,148 @@ func assignsRetainedAuthority5485(stmt ast.Stmt) bool {
 	return ok && rhs.Name == "snap"
 }
 
-// callsSyncInterfaceAttachments5485 reports whether stmt is a bare
-// `m.syncInterfaceAttachments(...)` expression statement.
+// callsSyncInterfaceAttachments5485 reports whether stmt invokes
+// `m.syncInterfaceAttachments(...)`, either as the historical bare expression
+// or as the error-capturing assignment used by #10519.
 func callsSyncInterfaceAttachments5485(stmt ast.Stmt) bool {
+	var call *ast.CallExpr
+	switch stmt := stmt.(type) {
+	case *ast.ExprStmt:
+		call, _ = stmt.X.(*ast.CallExpr)
+	case *ast.AssignStmt:
+		if len(stmt.Rhs) == 1 {
+			call, _ = stmt.Rhs[0].(*ast.CallExpr)
+		}
+	}
+	if call == nil {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "syncInterfaceAttachments"
+}
+
+// TestDetachDebtLatchFollowsReconciliation10519 pins the observability latch
+// immediately after both accepted-snapshot reconciliation calls. The deferred
+// path records unconditionally, while the published path keeps its
+// detach-error conditional early stamp before later status work can fail.
+func TestDetachDebtLatchFollowsReconciliation10519(t *testing.T) {
+	t.Parallel()
+
+	const path = "manager_compile.go"
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "applyCompiledSnapshot" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("applyCompiledSnapshot not found in manager_compile.go")
+	}
+
+	calls, latched, stamped, conditionalStamps := 0, 0, 0, 0
+	ast.Inspect(fn, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i, stmt := range block.List {
+			if !callsSyncInterfaceAttachments5485(stmt) {
+				continue
+			}
+			calls++
+			if i+1 >= len(block.List) || !callsDetachDebtLatch10519(block.List[i+1]) {
+				t.Errorf("syncInterfaceAttachments at %s is not immediately followed by "+
+					"noteDetachDebtLocked(result, detachErr)", fset.Position(stmt.Pos()))
+				continue
+			}
+			latched++
+			hasStamp := false
+			for _, tail := range block.List[i+2:] {
+				if containsApplyResultStamp10519(tail) {
+					hasStamp = true
+				}
+				if conditionalApplyResultStamp10519(tail) {
+					conditionalStamps++
+				}
+			}
+			if hasStamp {
+				stamped++
+			} else {
+				t.Errorf("syncInterfaceAttachments at %s has no following recordApplyResultLocked stamp",
+					fset.Position(stmt.Pos()))
+			}
+		}
+		return true
+	})
+	if calls != 2 || latched != 2 || stamped != 2 || conditionalStamps != 1 {
+		t.Errorf("reconciliation latch/stamp wiring = calls:%d latched:%d stamped:%d conditional:%d, want 2/2/2/1 (deferred unconditional stamp plus published detach-error conditional)",
+			calls, latched, stamped, conditionalStamps)
+	}
+}
+
+func callsDetachDebtLatch10519(stmt ast.Stmt) bool {
 	expr, ok := stmt.(*ast.ExprStmt)
 	if !ok {
 		return false
 	}
 	call, ok := expr.X.(*ast.CallExpr)
-	if !ok {
+	if !ok || len(call.Args) != 2 {
 		return false
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "syncInterfaceAttachments"
+	if !ok || sel.Sel.Name != "noteDetachDebtLocked" {
+		return false
+	}
+	result, ok := call.Args[0].(*ast.Ident)
+	if !ok || result.Name != "result" {
+		return false
+	}
+	detachErr, ok := call.Args[1].(*ast.Ident)
+	return ok && detachErr.Name == "detachErr"
+}
+
+func containsApplyResultStamp10519(stmt ast.Stmt) bool {
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && sel.Sel.Name == "recordApplyResultLocked" {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+func conditionalApplyResultStamp10519(stmt ast.Stmt) bool {
+	ifStmt, ok := stmt.(*ast.IfStmt)
+	if !ok || ifStmt.Cond == nil {
+		return false
+	}
+	binary, ok := ifStmt.Cond.(*ast.BinaryExpr)
+	if !ok || binary.Op != token.NEQ {
+		return false
+	}
+	isDetachErr := func(expr ast.Expr) bool {
+		ident, ok := expr.(*ast.Ident)
+		return ok && ident.Name == "detachErr"
+	}
+	isNil := func(expr ast.Expr) bool {
+		ident, ok := expr.(*ast.Ident)
+		return ok && ident.Name == "nil"
+	}
+	if !(isDetachErr(binary.X) && isNil(binary.Y)) &&
+		!(isDetachErr(binary.Y) && isNil(binary.X)) {
+		return false
+	}
+	return containsApplyResultStamp10519(ifStmt.Body)
 }

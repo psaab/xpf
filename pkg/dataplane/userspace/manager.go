@@ -156,9 +156,9 @@ type Manager struct {
 	// restartTimerFn overrides how a crash restart is armed. Production leaves
 	// it nil (time.AfterFunc); a test injects a synchronous or recording timer.
 	// Per-Manager, not a package var — see scheduleRestartTimer.
-	restartTimerFn func(time.Duration, func())
-	cfg            config.UserspaceConfig
-	clusterHA      bool
+	restartTimerFn            func(time.Duration, func())
+	cfg                       config.UserspaceConfig
+	clusterHA                 bool
 	captureEpochProvider      CaptureEpochProvider
 	captureAuthorityCommitter func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	// helperHAStatePublished records whether THIS helper process has been sent a
@@ -567,9 +567,15 @@ type Manager struct {
 	// buildDesiredLocalAddressSets so tests can inject a transient
 	// enumeration failure (#3924). Production leaves it nil.
 	addrListForLocalSyncHook addrListHook
-	// localAddressCapacityAlarm latches the #9646 capacity refusal text while it
-	// persists, so the 1/s status poll alarms once per transition. Guarded by mu.
+	// localAddressCapacityAlarm latches the #9646 capacity refusal text while
+	// it persists, so the 1/s status poll alarms once per transition. Guarded
+	// by mu.
 	localAddressCapacityAlarm string
+	// detachDebtAlarm latches the #10519 obsolete-attachment reconciliation
+	// error while any detach debt persists. Guarded by mu; the acceptance
+	// paths call noteDetachDebtLocked immediately after reconciliation and
+	// before recordApplyResultLocked stamps DetachedWithErrors.
+	detachDebtAlarm string
 
 	mode               DataplaneMode // current active runtime mode
 	configuredMode     DataplaneMode // user-configured desired mode (from config)

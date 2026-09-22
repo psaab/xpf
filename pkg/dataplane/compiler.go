@@ -86,6 +86,10 @@ type CompileResult struct {
 	// deferred success as NOT running it. Set ONLY on that branch; the
 	// normal tail publishes synchronously before returning success.
 	SnapshotPublishDeferred bool
+	// DetachedWithErrors records ifindexes whose obsolete XDP or TC
+	// attachment reconciliation failed after the accepted snapshot advanced.
+	// ApplyResult copies this stable operator surface.
+	DetachedWithErrors []int
 	// pendingXDP/TC collect interface indexes for deferred program attachment.
 	// Attachment happens AFTER all compilation phases so that link.Update()
 	// atomically switches to programs with fully-populated maps.

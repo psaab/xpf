@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -537,7 +538,8 @@ func (m *Manager) applyCompiledSnapshot(
 		// userspace_ingress_ifaces, so the kernel attachment set may follow.
 		// The publish is deferred, not skipped — this branch still returns nil
 		// and its snapshot is what every later reader enforces.
-		m.syncInterfaceAttachments(result, snap)
+		detachErr := m.syncInterfaceAttachments(result, snap)
+		m.noteDetachDebtLocked(result, detachErr)
 		m.cfg = ucfg
 		m.publishHAWatchdogSnapshotLocked()
 		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
@@ -607,7 +609,11 @@ func (m *Manager) applyCompiledSnapshot(
 	// so the later status/HA/forwarding steps — every one of which can fail
 	// AFTER the snapshot is already the authority — cannot strand a stale
 	// attachment for an interface the applied snapshot no longer adjudicates.
-	m.syncInterfaceAttachments(result, snap)
+	detachErr := m.syncInterfaceAttachments(result, snap)
+	m.noteDetachDebtLocked(result, detachErr)
+	if detachErr != nil {
+		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
+	}
 	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
 	// new neighbors. NOW rebuild listener caches; before this
 	// point the index would shadow events for entries the
@@ -1118,30 +1124,73 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	return nil
 }
 
-func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) {
+func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) error {
 	if result == nil {
-		return
+		return nil
 	}
+	result.DetachedWithErrors = nil
 	allowed := make(map[int]bool)
 	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
 		allowed[int(ifindex)] = true
 	}
-	for ifindex := range m.bpfShim.XDPLinks() {
+	// The retained snapshot is now authoritative at both call sites. If an
+	// older arm-(a) failure left debt for an interface this snapshot accepts,
+	// clear it only here — after acceptance. AttachXDP runs before acceptance
+	// and must not clear debt, or a later pre-publish failure could reopen a
+	// fence pinhole for the previous-good snapshot (#5485, #10519).
+	allowedIfindexes := make([]int, 0, len(allowed))
+	for ifindex := range allowed {
+		allowedIfindexes = append(allowedIfindexes, ifindex)
+	}
+	sort.Ints(allowedIfindexes)
+	m.bpfShim.ReconcileDetachDebt(allowedIfindexes)
+
+	var detachErrs []error
+	failed := make(map[int]struct{})
+	xdpLinks := m.bpfShim.XDPLinks()
+	xdpIfindexes := make([]int, 0, len(xdpLinks))
+	for ifindex := range xdpLinks {
+		xdpIfindexes = append(xdpIfindexes, ifindex)
+	}
+	sort.Ints(xdpIfindexes)
+	for _, ifindex := range xdpIfindexes {
 		if allowed[ifindex] {
 			continue
 		}
 		if err := m.bpfShim.DetachXDP(ifindex); err != nil {
-			slog.Warn("userspace: detach XDP from non-data interface failed", "ifindex", ifindex, "err", err)
+			slog.Error("userspace: detach XDP from non-data interface failed",
+				"ifindex", ifindex, "err", err)
+			detachErrs = append(detachErrs,
+				fmt.Errorf("detach XDP from obsolete ifindex %d: %w", ifindex, err))
+			failed[ifindex] = struct{}{}
 		}
 	}
-	for ifindex := range m.bpfShim.TCLinks() {
+	tcLinks := m.bpfShim.TCLinks()
+	tcIfindexes := make([]int, 0, len(tcLinks))
+	for ifindex := range tcLinks {
+		tcIfindexes = append(tcIfindexes, ifindex)
+	}
+	sort.Ints(tcIfindexes)
+	for _, ifindex := range tcIfindexes {
 		if allowed[ifindex] {
 			continue
 		}
 		if err := m.bpfShim.DetachTC(ifindex); err != nil {
-			slog.Warn("userspace: detach TC from non-data interface failed", "ifindex", ifindex, "err", err)
+			slog.Error("userspace: detach TC from non-data interface failed",
+				"ifindex", ifindex, "err", err)
+			detachErrs = append(detachErrs,
+				fmt.Errorf("detach TC from obsolete ifindex %d: %w", ifindex, err))
+			failed[ifindex] = struct{}{}
 		}
 	}
+	if len(failed) > 0 {
+		result.DetachedWithErrors = make([]int, 0, len(failed))
+		for ifindex := range failed {
+			result.DetachedWithErrors = append(result.DetachedWithErrors, ifindex)
+		}
+		sort.Ints(result.DetachedWithErrors)
+	}
+	return errors.Join(detachErrs...)
 }
 
 func configHasScheduledPolicy(cfg *config.Config) bool {

@@ -57,6 +57,11 @@ type Manager struct {
 	// the range loop outside any lock the accessor could take, which is how the
 	// race survived the #2114 A3 registry rule.
 	xdpLinks map[int]link.Link
+	// detachDebt is the fail-closed set for DetachXDP's flag-clear arm:
+	// an intended-detached link whose claim cleanup failed remains live in
+	// xdpLinks and must be omitted from every armed-fence census. Guarded by
+	// m.mu, like xdpLinks; see detach_debt_10519.go.
+	detachDebt map[int]struct{}
 	// attachedLinksObserver is a wake-only callback. It never carries a count:
 	// callers must re-read kernel link truth through AttachedXDPLinkCount.
 	// Access is serialized by m.mu and callbacks run after m.mu is released.
@@ -148,6 +153,7 @@ func New() *Manager {
 		maps:              make(map[string]*ebpf.Map),
 		xdpLinks:          make(map[int]link.Link),
 		tcLinks:           make(map[int]link.Link),
+		detachDebt:        make(map[int]struct{}),
 		PersistentNAT:     NewPersistentNATTable(),
 		xdpEntryProg:      defaultXDPEntryProg,
 		vlanSubInterfaces: make(map[int]bool),
@@ -690,6 +696,13 @@ func (m *Manager) swapXDPEntryProg(name string) error {
 	return nil
 }
 
+func tagDetachLinkError10519(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // DetachXDP detaches the XDP program from the given interface and
 // removes its pin file.
 func (m *Manager) DetachXDP(ifindex int) error {
@@ -697,6 +710,10 @@ func (m *Manager) DetachXDP(ifindex int) error {
 	defer m.xdpOwnershipMu.Unlock()
 	l, exists := m.xdpLinkFor(ifindex)
 	if !exists {
+		// A previous flag-clear failure can leave debt behind even if another
+		// lifecycle path removed the link. Absence is already fail-closed;
+		// discard the now-unobservable debt.
+		m.ReconcileDetachDebt([]int{ifindex})
 		return nil
 	}
 	// #863: clear IFACE_FLAG_XDP_ATTACHED claims FIRST, before
@@ -705,20 +722,31 @@ func (m *Manager) DetachXDP(ifindex int) error {
 	// left off. Doing it the other way around (close then clear)
 	// leaves stale claims with no retry path — the next DetachXDP
 	// early-returns at !exists.
-	if err := m.setXDPAttachedFlag(ifindex, false); err != nil {
+	if err := detachXDPFlagClearFn(m, ifindex, false); err != nil {
+		m.noteDetachDebt(ifindex)
 		slog.Error("DetachXDP: failed to clear IFACE_FLAG_XDP_ATTACHED — tc_main bypass may stay enabled until next config push",
 			"ifindex", ifindex, "err", err)
 		return fmt.Errorf("detach XDP from ifindex %d: clear flag: %w", ifindex, err)
 	}
-	l.Unpin()
+	unpinErr := l.Unpin()
+	if unpinErr != nil && !errors.Is(unpinErr, os.ErrNotExist) {
+		// A failed Unpin leaves the pinned kernel link live. Keep the handle
+		// tracked for a later reconciliation, and fence it out as debt rather
+		// than closing a handle whose pin still owns the attachment. ENOENT is
+		// benign: an earlier successful Unpin already removed the pin.
+		m.noteDetachDebt(ifindex)
+		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("unpin", unpinErr))
+	}
 	closeErr := l.Close()
 	// Claim cleanup succeeded; the link is conceptually gone whether
 	// or not Close errored. Remove from m.xdpLinks so a retry doesn't
-	// infinite-loop on a stuck-close link, but surface the close
-	// error.
+	// infinite-loop on a stuck-close link, but surface the close error.
 	m.deleteXDPLink(ifindex)
+	m.ReconcileDetachDebt([]int{ifindex})
 	if closeErr != nil {
-		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex, closeErr)
+		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("close", closeErr))
 	}
 	slog.Info("detached XDP program", "ifindex", ifindex)
 	return nil
@@ -1209,9 +1237,17 @@ func (m *Manager) DetachTC(ifindex int) error {
 	if !exists {
 		return nil
 	}
-	l.Unpin()
-	if err := l.Close(); err != nil {
-		return fmt.Errorf("detach TC from ifindex %d: %w", ifindex, err)
+	unpinErr := l.Unpin()
+	if unpinErr != nil && !errors.Is(unpinErr, os.ErrNotExist) {
+		// Keep the live handle for a later retry when the pin removal itself
+		// failed. ENOENT means the link was already unpinned by an earlier
+		// pass, so Close remains the only cleanup step.
+		return fmt.Errorf("detach TC from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("unpin", unpinErr))
+	}
+	if closeErr := l.Close(); closeErr != nil {
+		return fmt.Errorf("detach TC from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("close", closeErr))
 	}
 	m.deleteTCLink(ifindex)
 	slog.Info("detached TC egress program", "ifindex", ifindex)
@@ -1381,6 +1417,7 @@ func (m *Manager) Teardown() error {
 	m.mu.Lock()
 	clear(m.xdpLinks)
 	clear(m.tcLinks)
+	clear(m.detachDebt)
 	clear(m.vlanSubInterfaces)
 	m.mu.Unlock()
 	return err
