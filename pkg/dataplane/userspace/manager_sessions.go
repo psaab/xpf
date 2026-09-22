@@ -16,11 +16,16 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 // ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
-// session authority. The returned response is authoritative only when
-// SessionPolicyComplete is true; callers must not synthesize an empty capture
-// from a transport or incomplete result.
+// session authority. It deliberately uses the control socket: this request is
+// the commit-time discovery boundary and must not be accepted on the dedicated
+// session socket, whose allowlist is limited to sync_session/ping/HA refresh.
+// The helper handler still performs the worker fan-out after releasing its
+// snapshot-wide state lock, so the Go side only holds m.mu while framing and
+// re-acquires it after the round trip.
 func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlResponse, error) {
-	return m.requestSessionSyncResponse(ControlRequest{
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requestDetailedLocked(ControlRequest{
 		Type:              "list_sessions_by_policy",
 		SuppressStatus:    true,
 		SessionPolicyList: &req,

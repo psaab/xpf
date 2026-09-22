@@ -364,7 +364,13 @@ const (
 	// the D14 authoritative stn/if_id/logical_ifindex fence.
 	// v29 -> v30 BUMPED (#10485): the capture-generation stamp paired with
 	// tunnel rows rejects same-key stale NFQUEUE identity.
-	snapshotShapeVersion8892 = 30
+	// v30 -> v31 STANDS (#10512): the helper-first session verbs (epoch/
+	// idempotency identities, policy READ matches, mirror counts) ride the
+	// session-sync control wire, not any ConfigSnapshot struct walked by this
+	// digest. The shared protocol version still moves so the manager can fence
+	// old helpers before the new verbs, while this shape's field set and
+	// golden remain unchanged.
+	snapshotShapeVersion8892 = 31
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
