@@ -1,15 +1,14 @@
-# DRAFT v2 — Issue 10516: Stage-11 IPsec passthrough mints the armed-fence Adjudicated token for unadjudicated traffic (no SA check)
+# DRAFT v3 — Issue 10516: Stage-11 IPsec passthrough mints the armed-fence Adjudicated token for unadjudicated traffic (no SA check)
 
-Status: DRAFT v2 (round-1 redesign fold, no production code)
+Status: DRAFT v3 (fold-3, no production code)
 Date: 2026-09-22
-Base: 5dcaa104fb36637f7b76bdd0b3ba26ea880f1046 (v1 base; tip at fold is 5dbdc95dc, the v1 plan commit)
+Base: 5dcaa104fb36637f7b76bdd0b3ba26ea880f1046 (v1 base; v2 commit dae7b5ad8)
 Branch: fix/10516-passthrough-adjudicated
 Worktree: /home/ps/git/pi-xpf/.claude/worktrees/10516-passthrough
 Issue: #10516 (OPEN, Medium; High iff U-5 shows inward route)
-Lane: Eng10516 (wave-4; v2 redesign per Main fold brief)
-Reviewers: Rev10516PlanA + Rev10516PlanB, round 1, BOTH PLAN-NEEDS-MAJOR (convergent)
-
-## 0. Verdict and v1-to-v2 delta
+Lane: Eng10516 (wave-4; v3 fold per Main brief)
+Reviewers: Rev10516PlanA + Rev10516PlanB round 1 (BOTH PLAN-NEEDS-MAJOR); Rev10516Delta1 + Rev10516Delta2 (BOTH STILL-NEEDS-WORK, split-convergent)
+## 0. Verdict and v1-to-v3 delta
 
 DESIGN path, unchanged. Round-1 review verified the v1 evidence chain and blast
 counts as accurate but returned PLAN-NEEDS-MAJOR on both lanes with convergent
@@ -22,13 +21,15 @@ claimed: raw ESP/AH never reach the mint (flowless to NotClaimed), so the
 parsers, fragment rule, and U-5 probe must be rescoped to UDP-500/4500, and the
 VRRP half of the issue is ungrounded (VIPs never satisfy the Stage-11 claim).
 
-v2 is a REDESIGN fold addressing every must-fix (finding-to-fix map in App. D):
+v3 is a REDESIGN fold addressing every must-fix (finding-to-fix map in App. D):
+
 
 1. RESCOPE to UDP-500/4500: raw ESP/AH are flowless to NotClaimed and never
    reach the mint or any gate (§2.2). The v1 raw ESP/AH parsers, the outer
    non-first-drop rule, and the GRE-inner-ESP claims are DELETED (not deferred).
    U-5 is fixed to ESP-in-UDP-with-SPI plus GRE-inner UDP (the v1 proto-50
-   probe is vacuous). No #6837 reversal is pursued (KILL-grade, §2.2.6).
+   probe is vacuous). No #6837 reversal is pursued (KILL-grade, §2.2 last two
+   bullets).
 2. NEVER-MINT-ADJUDICATED: Stage-11 IPsec never selects Adjudicated/q0.
    A proven SA always selects unmarked Delegated/q1; an SA miss, stale/error/
    unparseable/keepalive always drops (§5.6). This is stricter than a locality
@@ -59,6 +60,9 @@ v2 is a REDESIGN fold addressing every must-fix (finding-to-fix map in App. D):
    (Arc FxHashMap, cap 4096, control-only eviction, counter) plus perf numbers
    (§5.9); HA/blackout/rekey plus strongSwan compat plus release notes plus
    no-q0 hatch prohibition (§5.10, §5.11, §8).
+6. BLAST: q0-writer inventory, source ownership, and rollback boundaries remain
+   explicit (§2.4, §5.6, §8, App. C).
+
 7. TESTS: real wire-frame cells (no-SA UDP spoof denied with q0-zero,
    valid-SA GRE-inner-local-via-Delegated with q0-zero plus INPUT delivery,
    raw/non-first to NotClaimed) plus arm-level gate-to-outlet wiring pins,
@@ -66,7 +70,8 @@ v2 is a REDESIGN fold addressing every must-fix (finding-to-fix map in App. D):
    and stale/observed-SPI bypass pins (§6). OQ1-12 adopted per PlanB except
    where PlanA is stricter (§9).
 
-No production or test code is changed by this lane. V2 goes to delta re-review.
+No production or test code is changed by this lane. V3 goes to delta re-review.
+
 
 ## 1. Problem (fail-open), rescoped
 
@@ -106,10 +111,11 @@ Scope corrections from v1 (each proven in §2):
   undemonstrated — gated on U-5/U-5a (§7). Medium stands; High iff inward
   route is shown.
 
-## 2. Live evidence (re-verified at tip for v2)
+## 2. Live evidence (re-verified at v3 fold)
 
-All file:line refs below were read from the worktree. Base 5dcaa10; tip at
-fold 5dbdc95dc (v1 plan commit only — all source refs re-verified identical).
+All file:line refs below were read from the worktree. Source base 5dcaa10;
+the source refs were re-verified unchanged through the v3 plan fold.
+
 
 ### 2.1 UDP-only poll path: wire to mark (the live chain)
 
@@ -209,10 +215,13 @@ For a UDP-500/4500 packet to a DNAT-to-another-host external:
   unadjudicated population" holds for GRE-inner UDP only.
 - Consequence: v1 §5.4.1-2 (ESP/AH SPI parsers), §5.4.5 (outer non-first drop),
   §6.1 ESP/AH parser cells, and §6.3/§7 proto-50 U-5 probe are DELETED as dead
-  code/tests/probes. The forwarding README secondary-path sentence listing
+  (:1113-1115). The forwarding README secondary-path sentence listing
   "transit/NAT IPv4 AH" (forwarding/README.md:1084-1093, esp. :1087) is stale
   post-#6837 for the AH half (raw outer ESP was already noted as shunted at
-  :1105-1108).
+  :1105-1108). The same README's "configured interface IPs, including SNAT/WAN
+  IP and VIPs" wording at :1099-1100 is stale for VIP ownership; the source
+  insert sites and this plan's NotClaimed cell are authoritative.
+
 - #6837 MUST NOT be reversed: reintroducing SessionKey { protocol, 0, 0 }
   aliasing reinstalls "two entries per transit flow, aliasing every distinct
   flow between one endpoint pair onto one key" (inspect.rs:1106-1109) and
@@ -268,7 +277,9 @@ Three logical writers select PacketQueue::Adjudicated (queue 0, marked):
    selects Adjudicated only when missing_neighbor_adjudicated is true, with
    the "explicit userspace adjudication proof" comment
    (poll_descriptor/mod.rs:7249-7268, outlet at :7261; mapping at
-   slow_path.rs:433 routes through the same enqueue_adjudicated API).
+   userspace-dp/src/afxdp/tx/dispatch/slow_path.rs:433 routes through the same
+   enqueue_adjudicated API).
+
 3. #9506 Go-submit xfrmi-plaintext (lease plus admission gated):
    submit_adjudicated_frame builds PacketQueue::Adjudicated with lease Some
    (slowpath.rs:1392-1394, fn at :1324-1440) after admit_with_class plus
@@ -375,28 +386,40 @@ shim-stamped L4 tuple is known-unreliable for fragments
 (inspect.rs:1576-1578) — flow is authoritative, meta is not. No
 implement-time latitude on this point: gate at the arm with flow-derived key.
 
+The arm MUST classify the already-admitted IKE branch before the ESP SPI
+parser. Reuse the exact `isakmp_demux` semantics from
+userspace-dp/src/afxdp/forwarding/ipsec.rs:84-112: UDP 500 direct ISAKMP and
+UDP 4500 with the four-byte zero non-ESP marker are IKE; an incomplete/
+truncated payload is not a positive IKE marker. Established-IKE spoof without
+the #6471 live-exchange seed is Denied in stage_ipsec_passthrough_check
+(:1367-1395) and never reaches this arm.
+
 Pseudocode at the arm (names illustrative; implementer reuses in-tree styles;
 exact fail path mirrors :599-606):
 
   Passthrough => {
     // existing frag-overlap check_and_record block unchanged (:575-596),
     // yielding admission_to_commit: Option<OverlapAdmissionToken>
-    // NEW: UDP data-plane SA gate (fail closed)
-    //   let (dst, src) = (flow.dst_ip, flow.src_ip);   // flow is Some here
-    //   let spi = esp_in_udp_spi(packet_frame, meta)?; // §5.4; None => unproven
-    //   // NOTE: IKE ISAKMP never reaches here as unproven — classify plus
-    //   // #6471 already admitted it; the gate switches on demux (§5.2).
-    //   let proven = spi.is_some_and(|s| sa_cache.lookup(dst, s, src));
-    //   let outlet = if proven {
+    // NEW: branch on the existing demux before the data-plane SA gate
+    //   let outlet = if is_admitted_ike_marker_or_udp500(packet_frame, meta) {
+    //     // IKE already passed #4323/#6471. No SA lookup is permitted.
     //     SlowPathOutlet::Delegated                    // ALWAYS unmarked/q1
     //   } else {
-    //     sa_miss_dropped_packets.fetch_add(1, Relaxed);
-    //     sampled_sa_miss_exception(...);               // §5.8, may skip
-    //     if let Some(tok) = admission_to_commit.take() {
-    //       worker_ctx.forwarding.nat64.frag_overlap.fail_admission(tok);
-    //     }                                             // mirror :603-605
-    //     binding.scratch.scratch_recycle.push(desc.addr);
-    //     continue;                                     // NEVER reinject
+    //     // UDP-4500 ESP-in-UDP data plane only; malformed/unknown -> miss
+    //     let (dst, src) = (flow.dst_ip, flow.src_ip);   // flow is Some here
+    //     let spi = esp_in_udp_spi(packet_frame, meta)?; // §5.4; None => miss
+    //     let proven = spi.is_some_and(|s| sa_cache.lookup(dst, s, src));
+    //     if proven {
+    //       SlowPathOutlet::Delegated                      // ALWAYS unmarked/q1
+    //     } else {
+    //       sa_miss_dropped_packets.fetch_add(1, Relaxed);
+    //       sampled_sa_miss_exception(...);                 // §5.8, may skip
+    //       if let Some(tok) = admission_to_commit.take() {
+    //         worker_ctx.forwarding.nat64.frag_overlap.fail_admission(tok);
+    //       }                                               // mirror :603-605
+    //       binding.scratch.scratch_recycle.push(desc.addr);
+    //       continue;                                       // NEVER reinject
+    //     }
     //   };
     //   // existing reinject now takes the computed outlet (signature gains
     //   // one param; the ::Adjudicated literal at :1420 is deleted):
@@ -406,8 +429,9 @@ exact fail path mirrors :599-606):
   }
 
 Denied (:610-630) and NotClaimed paths unchanged. No error/nil/unknown path
-reaches an outlet selection — every one takes the drop arm. A true SA lookup
-never selects SlowPathOutlet::Adjudicated: Stage 11 has no q0 mint.
+reaches an outlet selection — every one takes the drop arm. Admitted IKE is
+the sole non-SA branch and always selects Delegated; a true SA lookup never
+selects SlowPathOutlet::Adjudicated: Stage 11 has no q0 mint.
 
 ### 5.2 What "SA proof" means (UDP data plane only)
 
@@ -428,10 +452,13 @@ The gate applies to the UDP-500/4500 data plane ONLY:
   truncated): unproven, dropped. (Note the existing demux already fails IKE
   CLOSED on truncation — ipsec.rs:96-98 Truncated to NewInboundIke at :139 —
   the gate extends the same posture to the data plane.)
-- IKE ISAKMP (UDP 500 direct, UDP 4500 with the 4-byte zero marker): OUT OF
-  SCOPE for the SA gate — already gated by #4323/#6471 host-inbound plus
-  live-exchange seed (poll_stages.rs:1340-1395). The gate switches on the
-  existing demux and does not re-evaluate IKE.
+- IKE ISAKMP (UDP 500 direct, UDP 4500 with the four-byte zero marker):
+  admitted IKE is OUT OF THE SA gate but NOT out of the outlet decision. It
+  has already passed #4323/#6471 host-inbound/live-exchange admission and
+  selects unmarked Delegated/q1 without any SA-cache lookup. This preserves
+  local IKE INPUT delivery; an IKE packet to a transit-DNAT destination is
+  intentionally unmarked and is dropped by the FORWARD fence. An unseeded
+  established-spoof is Denied by :1367-1395 before this arm.
 - Raw ESP/AH (proto 50/51): unreachable (flowless to NotClaimed, §2.2) — no
   parser, no gate, no test cells beyond the NotClaimed pins (§6). AH (v4 and
   v6) is DEFERRED permanently with the flowless proof (no AH work exists to
@@ -593,7 +620,8 @@ pinned — no "to be settled at implement time" remains on bypass-risking axes.
   never within one poll interval; no deletion can create a q0 mint.
 - Owner thread (exact): `xfrm-sa-monitor`, a supervised aux thread mirroring
   the neighbor monitor lifecycle: spawn via spawn_supervised_aux (mirror
-  reconcile/bringup.rs:1107-1136, incl. catch_unwind no-respawn semantics
+  `userspace-dp/src/afxdp/coordinator/reconcile/bringup.rs:1107-1136`, incl.
+  catch_unwind no-respawn semantics
   plus spawn-failure retry with BOTH handles None), stop plus JOIN via
   retained monitor_stop/monitor_join handles (mirror
   coordinator/neighbor_manager.rs:51-61 and stop_and_join_monitor at :168-176
@@ -601,6 +629,7 @@ pinned — no "to be settled at implement time" remains on bypass-risking axes.
   guard), 500ms recv timeout (same bound), process-wide thread-count leak
   gates mirroring the #6637/#7413 neigh-monitor gates. It owns the ONLY
   writer to the snapshot ArcSwap.
+
 - Ready-gate (exact): block dataplane-ready on the FIRST successful full
   dump (blackout == one dump latency, millisecond-scale, one-time, measured
   and asserted in §6). Defense in depth regardless of hook wiring: workers
@@ -632,23 +661,24 @@ pinned — no "to be settled at implement time" remains on bypass-risking axes.
   path still lets XFRM enforce packet authentication, while q1 FORWARD
   traffic reaches the armed fence DROP.
 
-### 5.6 No-q0 disposition and actual local-consumer proof
-
 No `is_kernel_local_ip` helper is introduced and no configured/local set is
 treated as a mint authorization oracle. `owns_configured_ip` remains the
 Stage-11 CLAIM gate (interface addrs plus NAT externals), but its result never
-selects Adjudicated. A direct interface address or current VIP is shunted by
-the XDP shim before AF_XDP (`userspace-xdp/src/lib.rs:794-806`), so it is not
-a Stage-11 local-consumer population and cannot be used as the valid-SA test.
+selects Adjudicated. Ordinary direct interface addresses and current VIPs are
+shunted by the XDP shim before AF_XDP (`userspace-xdp/src/lib.rs:794-806`);
+interface-NAT-excluded direct addresses are the explicit XSK exception and
+follow table rows 8/9 (Delegated on a hit, drop on a miss), never q0.
+
 
 The q0/q1 consumer split is concrete, not a naming convention:
 
-- `slow_path.rs:1506-1555` opens the Delegated outlet's primary TUN plus a
-  separate `adjudicated_tun`; `slow_path.rs:1583-1586` maps
+- `slowpath.rs:1506-1555` opens the Delegated outlet's primary TUN plus a
+  separate `adjudicated_tun`; `slowpath.rs:1583-1586` maps
   `(Delegated, PacketQueue::Delegated)` to the primary `tun.as_raw_fd()`.
-- `slow_path.rs:1586-1589` maps `PacketQueue::Adjudicated` only to the
+- `slowpath.rs:1586-1589` maps `PacketQueue::Adjudicated` only to the
   separate adjudicated TUN, whose ingress classifier is the q0 mark path
   (`slowpath.rs:188-243`). Stage 11 will no longer submit that queue.
+
 - The remaining q0 writers are the missing-neighbor policy-proof path and the
   #9506 lease/admission path (complete inventory §2.4/App. C). Those are
   unrelated authorization consumers; neither is needed for a packet delivered
@@ -687,26 +717,31 @@ to another host is unmarked q1 and reaches FORWARD, where the armed fence
 drops it. This explicit mismatch disposition is fail-closed and is a
 release-noted availability consideration for any future candidate-key plan.
 
-Disposition table (UDP data plane, post-SA-gate):
+Disposition table (Stage-11 populations, post-admission):
 
-| # | dst class                              | SA   | disposition  | rationale                         |
-|---|----------------------------------------|------|--------------|-----------------------------------|
-| 1 | GRE-inner -> interface-local target    | hit  | Delegated    | primary TUN; INPUT/XFRM; q0 zero  |
-| 2 | GRE-inner -> interface-local target    | miss | drop+sa_miss | no proven SA                      |
-| 3 | NAT external -> DNAT-to-self, key hit  | hit  | Delegated    | INPUT/XFRM; q0 zero               |
-| 4 | NAT external -> DNAT-to-self, key miss | miss | drop+sa_miss | explicit raw/post-NAT mismatch   |
-| 5 | NAT external -> transit target         | hit  | Delegated    | unmarked q1; FORWARD fence        |
-| 6 | NAT external -> transit target         | miss | drop+sa_miss | no SA, no function to preserve   |
-| 7 | interface IP or VIP                    | —    | NotClaimed   | shim/ownership proof; no Stage 11 |
-| 8 | unowned                              | —    | NotClaimed   | existing :1331-1333 gate          |
+| # | dst class                                  | SA   | disposition  | rationale                         |
+|---|--------------------------------------------|------|--------------|-----------------------------------|
+| 1 | GRE-inner -> interface-local target        | hit  | Delegated    | primary TUN; INPUT/XFRM; q0 zero  |
+| 2 | GRE-inner -> interface-local target        | miss | drop+sa_miss | no proven SA                      |
+| 3 | NAT external -> DNAT-to-self, key hit      | hit  | Delegated    | INPUT/XFRM; q0 zero               |
+| 4 | NAT external -> DNAT-to-self, key miss     | miss | drop+sa_miss | explicit raw/post-NAT mismatch   |
+| 5 | NAT external -> transit target             | hit  | Delegated    | unmarked q1; FORWARD fence        |
+| 6 | NAT external -> transit target             | miss | drop+sa_miss | no SA, no function to preserve   |
+| 7 | outer direct interface IP or VIP           | —    | NotClaimed   | shim shunt/ownership; no Stage 11 |
+| 8 | outer interface-NAT-excluded direct IP     | hit  | Delegated    | XSK claim; INPUT/XFRM; q0 zero    |
+| 9 | outer interface-NAT-excluded direct IP     | miss | drop+sa_miss | no proven SA                    |
+| 10| admitted IKE marker or UDP-500             | —    | Delegated    | no SA lookup; INPUT/q1; q0 zero   |
+| 11| unowned                                    | —    | NotClaimed   | existing :1331-1333 gate          |
 
-Rows 1, 3, and 5 are intentionally the same SA-hit outlet: locality is
-observed for proof and tests, never used to mint q0. Rows 2, 4, and 6 drop
-regardless of destination. A BACKUP-VIP cannot reach this table under the
-current shim/ownership proof. If a future change puts VIPs into userspace
-ownership, it MUST preserve the unmarked-only invariant and separately
-require active-RG authorization; no VIP change may reintroduce Stage-11
-Adjudicated.
+Rows 1, 3, 5, and 8 are positive SA hits and intentionally use the same
+unmarked outlet; row 10 is the admitted-IKE exception and deliberately skips
+the SA lookup. Locality is observed for proof and tests, never used to mint
+q0. Rows 2, 4, 6, and 9 drop regardless of destination. An unseeded
+established IKE spoof is Denied before this table. A BACKUP-VIP cannot reach
+this table under the current shim/ownership proof. If a future change puts
+VIPs into userspace ownership, it MUST preserve the unmarked-only invariant
+and separately require active-RG authorization; no VIP change may reintroduce
+Stage-11 Adjudicated.
 
 Fence, mark, counter, TC: unchanged. `xpf_transit_q0_delivered` no longer
 counts Stage-11 IPsec traffic after this fix; it remains the witness for the
@@ -738,17 +773,20 @@ Per-miss work on the worker:
    (plus reason-split counters: no_sa, truncated, keepalive, stale_deny).
    No lock, no alloc, wait-free.
 2. Exception event CONDITIONALLY: thread-local 1-in-N pre-gate (mirror
-   REDIRECT_SAMPLE: Cell<u64> sequence, no shared RMW —
-   afxdp/latency.rs:54-61; non-sampled cost ~one fetch_add plus mask,
-   tx_inbox.rs:157-164) with N=256, THEN the existing per-worker ring
-   admit(key, now) sampler (afxdp/disposition.rs:473-474) via
+   `REDIRECT_SAMPLE_SEQ: Cell<u64>` sequence, no shared RMW —
+   `userspace-dp/src/afxdp/binding_state/latency.rs:54-61`; non-sampled cost
+   ~one fetch_add plus mask, `userspace-dp/src/afxdp/binding_state/tx_inbox.rs:
+   157-164`) with N=256, THEN the existing per-worker ring
+   `admit(key, now)` sampler (afxdp/disposition.rs:473-474) via
    record_exception with a &'static reason (alloc-free per :454-461) or
    record_exception_suffixed for miss sub-reasons (alloc-free per :521-529,
-   the #6101 slow-path precedent at slow_path.rs:441-453). The ring Mutex is
+   the #6101 slow-path precedent at
+   `userspace-dp/src/afxdp/tx/dispatch/slow_path.rs:441-453`). The ring Mutex is
    per-worker (disposition.rs:227-228 "no cross-worker contention"), and the
    pre-gate means 255/256 misses never touch it. No per-event String, no
    Utc::now, no tuple-rich owned payload on the flood path (tuple detail
    lives in the sampled 1/256 only).
+
 3. Frag admission fail plus recycle per §5.1 (fail_admission takes a shard
    lock at fragment_overlap/mod.rs:761-764 — acceptable: only for packets
    that already hold an admission token, i.e. fragments, never for the
@@ -844,8 +882,10 @@ snapshot, and asserts disposition plus queue plus counters:
    inbound SA for the inner (dst,SPI,src). EXPECT Stage 11 Delegated outlet,
    queue 1, NO mark, q0 delta zero, and INPUT/XFRM delivery. REDS ON:
    over-drop, key mismatch (e.g. src omitted), snapshot wiring break, or any
-   Adjudicated/q0 result. A direct interface-IP frame is shunted before Stage
-   11 and is not a valid substitute.
+   Adjudicated/q0 result. An ordinary direct interface-IP frame is shunted
+   before Stage 11 and is not a valid substitute; an interface-NAT-excluded
+   direct IP is the separate table-row-8/9 XSK population.
+
 3. NAT-appended SA-hit to a transit target: raw UDP-4500 frame with dst a
    DNAT external mapped to another host, snapshot seeded — EXPECT Delegated
    outlet, queue 1, NO mark, and armed-fence FORWARD drop. REDS ON: any
@@ -881,29 +921,49 @@ snapshot, and asserts disposition plus queue plus counters:
     XFRM daddr, send ESP-in-UDP to the raw external dst — EXPECT drop with
     sa_miss and q0 zero; assert no unreviewed candidate-key lookup. REDS ON:
     treating NAT translation as implicit SA-key equivalence.
+14. admitted IKE local delivery: native-GRE inner UDP-500 (and the
+    UDP-4500 four-byte zero-marker variant) with a seeded #6471 live exchange
+    and host-inbound admission — EXPECT Delegated/q1, no SA lookup, q0 zero,
+    and kernel INPUT/IKE delivery. REDS ON: Adjudicated/q0, SA-cache lookup,
+    or transit IKE being able to bypass the unmarked fence.
+15. unseeded established-IKE spoof: establish no #6471 live-exchange entry,
+    send an established-looking UDP-4500 IKE frame with a non-zero responder
+    SPI — EXPECT Denied before the arm, no outlet and no SA lookup, q0 zero.
+    REDS ON: spoof reaching Passthrough or minting any queue/mark.
+
 
 ### 6.2 Wiring pins (arm level — NOT source text)
 - gate-to-outlet behavioral cell: drive proven/unproven through the REAL arm
   (not maybe_reinject..._with_outlet directly — that fn takes outlet as a
-  PARAMETER at slow_path.rs:313-435 and cannot prove verdict-to-outlet
-  wiring) and assert the outlet argument observed at the reinject call:
-  proven plus a current inbound SA is Delegated/q1, every unproven path is
-  dropped before reinject, and Adjudicated is impossible. REDS ON: wiring
-  swapped, literal Adjudicated outlet restored, or queue 0 observed.
+  PARAMETER at userspace-dp/src/afxdp/tx/dispatch/slow_path.rs:313-435 and
+  cannot prove verdict-to-outlet wiring) and assert the outlet argument
+  observed at the reinject call: proven plus a current inbound SA is
+  Delegated/q1, every unproven path is dropped before reinject, admitted
+  IKE marker/UDP-500 is Delegated/q1 with INPUT delivery and no SA lookup,
+  unseeded established-IKE spoof is Denied before the arm, and Adjudicated
+  is impossible. REDS ON: wiring swapped, literal Adjudicated outlet
+  restored, or queue 0 observed.
 - Re-pointed pinning test (tests_slow_path_disposition.rs:1291-1306): delete
   the Stage-11 Adjudicated assertion and add behavioral rows for
   valid-SA-local-via-Delegated (queue 1, q0 zero, INPUT delivery),
-  Delegated-on-NAT-appended-hit, and drop-on-miss. DELETE the "exempt classes
-  never gate-passed, but ... must carry the structural fence mark" comment
-  (it states the bug). DO NOT add a source-text "gate precedes outlet" cell
-  (repeats the bug-pinning anti-pattern — the behavioral cell above replaces
-  it).
+  Delegated-on-NAT-appended-hit, admitted-IKE-to-Delegated, and drop-on-miss.
+  DELETE the "exempt classes never gate-passed, but ... must carry the
+  structural fence mark" comment (it states the bug). DO NOT add a source-text
+  "gate precedes outlet" cell (repeats the bug-pinning anti-pattern — the
+  behavioral cell above replaces it).
 - No-Adjudicated-from-Stage-11 regression: enumerate every Stage-11 UDP
   disposition in the real arm and assert no call can submit
   PacketQueue::Adjudicated; leave the other q0 writers' policy-proof tests
-  intact. RED-on-revert (implement lane, firsthand): restore the literal
-  Adjudicated outlet — cells 1, 2, 3, 4, 5, 6, 8, 10, 11, 13 go RED;
-  restore the gate — all PASS. Record both outputs in the PR.
+  intact. RED-on-revert (implement lane, firsthand) is split by reversion:
+  restoring only the literal Adjudicated outlet while retaining the gate makes
+  hit cells 2, 3, and 14 RED, while Stage-11 miss/drop cells 1, 4, 5, 6, 8,
+  10, 11, 12, and 13 remain GREEN; independent NotClaimed/Denied cells 9 and
+  15 remain GREEN. Removing the gate/miss drop makes unproven Stage-11 cells
+  1, 4, 5, 6, 8, 10, 11, 12, and 13 RED while hit cells 2, 3, and 14 remain
+  GREEN and independent cells 9 and 15 remain NotClaimed/Denied. Record both
+  outputs in the PR.
+
+
 
 ### 6.3 Snapshot/monitor cells (deterministic, socketpair-driven)
 
@@ -954,7 +1014,8 @@ No project-wide validation in-lane (parent owns it).
 The v1 probe ("send ESP proto 50, no SA") is VACUOUS: raw ESP is flowless to
 NotClaimed (§2.2) and shows zero q0 delta even unfixed. Redone probes use
 ESP-in-UDP with SPI. All runs on an armed box with live DNAT, sharing one
-armed session with the #10518 GRE-inner-UDP experiment (§5.4 joint run):
+armed session with the #10518 GRE-inner-UDP experiment (§7 joint run):
+
 
 - P0 (repro, pre-fix): ip route get <DNAT-to-another-host external>; confirm
   the (xpf-usp1, 0x58465001) ACCEPT in the fence nft listing; send ESP-in-UDP
@@ -970,7 +1031,9 @@ armed session with the #10518 GRE-inner-UDP experiment (§5.4 joint run):
   EXPECT: queue 1, no mark, q0 delta ZERO, correct INPUT/XFRM delivery
   (function preserved). Any Adjudicated/q0 result is a fix failure and
   proves the no-q0 pin is absent. This is the reachable local population;
-  direct interface-IP input is shunted before Stage 11.
+  ordinary direct interface-IP input is shunted before Stage 11, while
+  interface-NAT-excluded direct IP follows table rows 8/9.
+
 - P3 (fix, stale-SPI): delete the SA, probe the deleted SPI within 30s.
   EXPECT: drop, sa_miss/stale telemetry, q0 delta ZERO (monitor DELSA removal
   proof — a T-window design would mint or reinject here).
@@ -984,6 +1047,9 @@ armed session with the #10518 GRE-inner-UDP experiment (§5.4 joint run):
   #10518 population).
 - P6 (compat): rekey during P2 flood — EXPECT zero sa_miss spike across
   overlap (§5.10); 60s inbound keepalive flood — EXPECT drops plus zero IKE
+  state/log impact; cold establishment from an empty snapshot to the first
+  proven Delegated reinject MUST complete within the ready-gate bound (§5.10).
+
 Severity gate (unchanged): inward route/egress on P0-P1 pre-fix implies
 High; WAN hairpin only implies Medium stands. Post-fix, P1/P2/P3/P4/P5 must
 show zero q0 delta in ALL cases; P2 must additionally show Delegated queue 1
@@ -992,6 +1058,12 @@ of severity.
 
 ## 8. Rollout and compat
 
+- PLAN-KILL observer disposition (N3): if the capture observer cannot prove
+  absence in §6.2 and Slice-1a, record this plan as KILL-grade in the §8
+  disposition list.
+- Capture-observer bound (N4): cap records at `D11ManifestCap` and cap the
+  observation to one named armed-box run window; report both values in the
+  evidence.
 - Fence/wire format: UNCHANGED (same mark, mask, iifname, counter, TC
   program). No nftables/daemon prod change; fence tests unchanged.
 - Dataplane upgrade: restart blackout bounded by first-dump latency
@@ -1002,13 +1074,15 @@ of severity.
 - Breaking behaviors (all release-noted with counters): inbound NAT-T
   keepalive drop (§5.2 traversal argument); tiny-first-fragment UDP-4500
   drop (§5.4); DNAT-to-self raw/post-NAT SA-key mismatch drop (§5.6);
-  reauth/manual-down over-drop windows (§5.10); fragmented-ESP senders
-  unaffected (never reached the gate — flowless, §2.2 — no note needed beyond
-  the rescope statement).
+  admitted-IKE-to-Delegated for host INPUT and unmarked transit-IKE fence
+  drop (§5.1/§5.6); reauth/manual-down over-drop windows (§5.10);
+  fragmented-ESP senders unaffected (never reached the gate — flowless,
+  §2.2 — no note needed beyond the rescope statement).
 - Sequencing: land #10525 (IKE gate) and this fix in either order; both
   touch stage_ipsec_passthrough_check plus shared tests — second implementer
   rebases and re-runs the joint cells (§6). Coordinate via hub before editing
   shared files. #10518 joint armed run per §7.
+
 
 ## 9. Open questions (adopted resolutions)
 
@@ -1070,6 +1144,10 @@ fold-brief directives win all ties):
   ESP-in-UDP hit is Delegated/q1 with no mark; every miss/stale/error/
   unparseable/keepalive drops with counters; no Stage-11 path submits q0;
   no T-window; no last-good latch; no "XFRM closes FORWARD" claim.
+- Admitted IKE UDP-500 and UDP-4500 zero-marker traffic selects Delegated/q1
+  without an SA-cache lookup and reaches local INPUT; an unseeded
+  established-IKE spoof is Denied before the arm and cannot mint any queue or
+  mark.
 - Valid-SA GRE-inner-local-via-Delegated preserves queue-1 delivery through
   the primary xpf-usp1 TUN into kernel INPUT/XFRM, with q0 delta zero.
   Owned-but-not-local SA hits are also Delegated or drops on miss, never
@@ -1077,8 +1155,12 @@ fold-brief directives win all ties):
 - Pinning test re-pointed per §6.2 (behavioral rows; bug comment deleted;
   no source-text gate-precedence cell; no-Adjudicated-from-Stage-11 pin).
 - §6 cells green as FULL modules/files; RED-on-revert demonstrated
-  firsthand by the implement lane (cells 1/2/3/4/5/6/10/11 red if the
-  gate or unmarked-only outlet is removed).
+  firsthand by the implement lane. With only the outlet literal reverted
+  (gate retained), hit cells 2/3/14 RED while Stage-11 miss/drop cells
+  1/4/5/6/8/10/11/12/13 stay GREEN; independent cells 9/15 stay GREEN.
+  With the gate removed, unproven Stage-11 cells 1/4/5/6/8/10/11/12/13 RED
+  while hit cells 2/3/14 stay GREEN; cells 9/15 remain NotClaimed/Denied.
+
 - Numeric perf bars met (§5.9) with measured numbers in the PR.
 - §7 P0-P6 armed-box run complete: P0 reproduces pre-fix (nonzero q0);
   P1/P2/P3/P4/P5 zero q0 post-fix, with P2 INPUT/XFRM delivery; P6 compat
@@ -1089,7 +1171,8 @@ fold-brief directives win all ties):
   Stage-11 IPsec traffic is SA-gated Delegated/q1, so q0 cannot be minted by
   mere SA existence.
 
-## Appendix A. File:line index (tip 5dbdc95dc)
+## Appendix A. File:line index (source tip 5dbdc95dc; v3 plan fold)
+
 
 - Issue: gh issue view 10516 --json title,body,state,comments,url (OPEN,
   3266-char body: What/Evidence/Narrowed/Acceptance/Review-origin; 1 comment:
@@ -1150,15 +1233,19 @@ fold-brief directives win all ties):
 - userspace-dp/src/afxdp/disposition.rs:227-228 (per-worker ring),
   :454-485 (record_exception plus admit sampler), :521-548 (suffixed
   alloc-free).
-- userspace-dp/src/afxdp/latency.rs:54-61 (thread-local 1-in-N sample);
-  tx_inbox.rs:157-164 (sampled cost).
+- userspace-dp/src/afxdp/binding_state/latency.rs:54-61 (thread-local
+  1-in-N sample, `REDIRECT_SAMPLE_SEQ`);
+  userspace-dp/src/afxdp/binding_state/tx_inbox.rs:157-164 (sampled cost).
+
 - userspace-dp/src/afxdp/neighbor.rs:460-470 (raw AF_NETLINK send),
   :975-1002 (monitor thread socket plus group bind), :1101-1105
   (socketpair test seam).
 - userspace-dp/src/afxdp/coordinator/neighbor_manager.rs:51-61, :168-176
-  (stop plus JOIN); reconcile/bringup.rs:1107-1136 (supervised spawn);
-  coordinator/status.rs:837-842 (ENOBUFS telemetry); coordinator/mod.rs:262,
-  :549 (local_tunnel_deliveries ArcSwap), :568 (control exception ring).
+  (stop plus JOIN); userspace-dp/src/afxdp/coordinator/reconcile/bringup.rs:
+  1107-1136 (supervised spawn); coordinator/status.rs:837-842 (ENOBUFS
+  telemetry); coordinator/mod.rs:262, :549 (local_tunnel_deliveries ArcSwap),
+  :568 (control exception ring).
+
 - userspace-dp/src/fragment_overlap/mod.rs:482 (check_overlap), :607
   (check_and_record), :734 (commit_admission), :761 (fail_admission).
 - userspace-dp/Cargo.toml:11 (arc-swap), :17 (libc), :20 (rustc-hash).
@@ -1176,7 +1263,8 @@ fold-brief directives win all ties):
 - userspace-dp/src/afxdp/forwarding/tests.rs:3222-3292 (predicate cells).
 - 3329415f7 (mark infrastructure plus Adjudicated move, Refs #10391).
 
-## Appendix B. Verification commands run (v1 STEP-0 plus v2 fold)
+## Appendix B. Verification commands run (v1 STEP-0 plus v2/v3 folds)
+
 
 - pwd plus HEAD plus branch (worktree 10516-passthrough; base 5dcaa10;
   tip 5dbdc95 v1 plan commit; branch fix/10516-passthrough-adjudicated).
@@ -1205,9 +1293,9 @@ fold-brief directives win all ties):
   by the fix, replaced by the §5.1 computed Delegated outlet; reinject
   signature gains one param.
 - SlowPathOutlet::Adjudicated baseline: 4 files times 1 (Stage-11 mint,
-  chokepoint :7261, mapping slow_path.rs:433, pin :1300). The fix removes
-  the Stage-11 mint and pin; the enum/mapping remain for the other q0
-  writers.
+  chokepoint :7261, mapping userspace-dp/src/afxdp/tx/dispatch/slow_path.rs:
+  433, pin :1300). The fix removes the Stage-11 mint and pin; the enum/mapping
+  remain for the other q0 writers.
 - q0 writers (fence level, baseline complete): (1) IPsec lease-None outlet
   path (this issue, removed by this fix); (2) missing-neighbor policy-proof
   outlet path; (3) #9506 lease plus admission submit path with pre-write
@@ -1225,7 +1313,7 @@ fold-brief directives win all ties):
   decap; interface-NAT ESP/GRE to kernel, UDP to XSK; DNAT externals (not in
   shim maps) to XSK; session-miss UDP to XSK.
 
-## Appendix D. Round-1 finding-to-fix map (v2 audit trail)
+## Appendix D. Round-1 finding-to-fix map (v2 audit trail retained)
 
 PlanA: F1 (existence-gate FORWARD bypass; XFRM-closure false) to §5.6
 never-mint-Adjudicated closure plus §5.5 deletion of the closure claim;
@@ -1242,9 +1330,11 @@ re-checked); M2 (GRE :308-314) corrected; M3 (pre-hook :481-549) cited; M4
 (:7261) re-pinned; M5 (line counts, log-empty-at-tip) noted.
 
 PlanB: P0-1 (raw/flowless premise) to §2.2 rescope plus §5.2/§5.4/§6/§7
-UDP-only rewrite plus §2.2.6 #6837 non-reversal; P0-2 (T-window fail-open)
+UDP-only rewrite plus §2.2 last two bullets (#6837 non-reversal); P0-2
+ (T-window fail-open)
 to §5.5 monitor-immediate plus deny-on-stale with all windows/latches
 deleted; P1-3 (unresolved lookup) to §5.5 exact API/filter/owner/ready-gate;
+
 P1-4 (wildcard key) to §5.3 src-hardened key plus collision analysis;
 P1-5 (frag/admission) to §5.1 exact fail path plus §5.4 raw/UDP split;
 P1-6 (miss-path lock) to §5.8 counter-plus-thread-local-sampled design;
