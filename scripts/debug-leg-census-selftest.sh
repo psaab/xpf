@@ -192,6 +192,24 @@ lines.insert(1, "fixture-test\tframe::keep")
 open(registry_path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 PY
 }
+argv_bound() {
+	python3 - "$1/census.json" "$1/debug-leg.tests" <<'PY'
+import json
+import sys
+
+census_path, registry_path = sys.argv[1:]
+data = json.load(open(census_path, encoding="utf-8"))
+paths = [f"frame::argv_bound_{index:05d}_{'x' * 80}" for index in range(12_000)]
+data["targets"][0]["listed"].extend(paths)
+json.dump(data, open(census_path, "w", encoding="utf-8"), separators=(",", ":"))
+lines = open(registry_path, encoding="utf-8").read().splitlines()
+lines.extend(f"fixture-bin\t{path}" for path in paths)
+lines.sort()
+open(registry_path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+}
+
+expect_fail "argv bound" "1 MiB" argv_bound
 
 expect_fail "empty allowlist" "registry is empty" empty_allowlist
 expect_fail "empty live list" "live census is empty" empty_live
