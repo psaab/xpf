@@ -1342,6 +1342,33 @@ pub(super) fn txn_run_descriptor_capturing_shared(
     (batch, dbg, published)
 }
 
+/// Descriptor driver variant with a worker-less slow-path reinjector wired in,
+/// so tests can observe which outlet the real poll chokepoint selected.
+pub(super) fn txn_run_descriptor_with_reinjector(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    slow_path: &Arc<crate::slowpath::SlowPathReinjector>,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(slow_path),
+    )
+}
+
 /// The descriptor driver itself. The shared session map is a PARAMETER so a pin can
 /// read what a local install published into it (#9582: the replicated id).
 pub(super) fn txn_run_descriptor_inner(

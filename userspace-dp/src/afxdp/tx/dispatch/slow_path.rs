@@ -163,12 +163,17 @@ pub(in crate::afxdp) enum SlowPathOutlet {
 /// The ONLY trusted path is a `LocalDelivery` disposition through the
 /// FILTERED chokepoint (`poll_descriptor`, downstream of the session-hit /
 /// session-miss / flowless host-inbound gates — every deny `continue`s before
-/// reinject). All other reinject classes are delegated or explicitly
-/// adjudicated at their policy-gated outlet.
+/// reinject). `gate_proof` is the per-packet bit the chokepoint threads from
+/// the gate pass arms: Trusted requires a gate-produced proof, so an unproven
+/// `LocalDelivery` (no gate passed — unreachable today, but a future ungated
+/// arm must fail closed) takes the delegated outlet (destination-judged).
+/// All other reinject classes are delegated or explicitly adjudicated at
+/// their policy-gated outlet.
 pub(in crate::afxdp) fn reinject_host_authorized(
     disposition: ForwardingDisposition,
+    gate_proof: bool,
 ) -> bool {
-    matches!(disposition, ForwardingDisposition::LocalDelivery)
+    matches!(disposition, ForwardingDisposition::LocalDelivery) && gate_proof
 }
 
 #[cold]

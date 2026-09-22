@@ -1179,17 +1179,18 @@ fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates
     }
 }
 
-// #9637 operator narrowing: the outlet mapping is exhaustive — exactly the
-// gate-passed LocalDelivery takes the trusted TUN; every other disposition
-// (including every other SLOW-PATH-ELIGIBLE one: NoRoute and MissingNeighbor
-// delegate) takes the delegated TUN. A new disposition variant fails this
-// test until its outlet is classified here.
+// #9637/#10522 operator narrowing: only a LocalDelivery packet with a
+// per-packet host-inbound gate proof may select the trusted outlet. Every
+// disposition, including the current TableUnavailable arm, is delegated when
+// the proof is absent; the positive LocalDelivery control remains trusted.
+// Explicitly NOT an M1 killer: this mapper-only cell never calls the
+// host-inbound gate, so an M1 gate mutation cannot change its inputs.
 #[test]
 fn reinject_host_authorized_maps_only_gated_local_delivery_to_trusted() {
     use super::tx::dispatch::reinject_host_authorized;
     use ForwardingDisposition::*;
-    assert!(reinject_host_authorized(LocalDelivery));
-    for d in [
+    let all = [
+        LocalDelivery,
         ForwardCandidate,
         FabricRedirect,
         HAInactive,
@@ -1198,12 +1199,101 @@ fn reinject_host_authorized_maps_only_gated_local_delivery_to_trusted() {
         MissingNeighbor,
         DiscardRoute,
         NextTableUnsupported,
-    ] {
+        TableUnavailable,
+    ];
+    for disposition in all {
         assert!(
-            !reinject_host_authorized(d),
-            "{d:?} must take the delegated outlet (destination-judged)"
+            !reinject_host_authorized(disposition, false),
+            "{disposition:?} must delegate without a per-packet gate proof"
         );
     }
+    assert!(
+        reinject_host_authorized(LocalDelivery, true),
+        "a gate-proven LocalDelivery must select Trusted"
+    );
+    for disposition in all {
+        if !matches!(disposition, LocalDelivery) {
+            assert!(
+                !reinject_host_authorized(disposition, true),
+                "{disposition:?} must remain delegated even with a gate proof"
+            );
+        }
+    }
+}
+
+/// #10522 Cell 1 (M1 killer): drive a denied TCP/443 LocalDelivery MISS
+/// through the real poll loop, host-inbound gate, and trailing reinject
+/// chokepoint. The explicit lo0 ACCEPT term means an M1 admit-all mutant
+/// reaches the outlet instead of being masked by a lo0 reject terminal.
+#[test]
+fn host_inbound_gate_to_reinject_chokepoint_is_end_to_end_10522() {
+    use crate::slowpath::SlowPathReinjector;
+    let mut snapshot = nat_snapshot();
+    let lan = snapshot
+        .zones
+        .iter_mut()
+        .find(|zone| zone.name == "lan")
+        .expect("nat fixture lan zone");
+    lan.host_inbound_system_services.clear();
+    lan.host_inbound_protocols.clear();
+    snapshot.flow.lo0_filter_input_v4 = "lo0-accept".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "lo0-accept".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "accept-web".to_string(),
+            protocols: vec!["tcp".to_string()],
+            destination_ports: vec!["443".to_string()],
+            action: "accept".to_string(),
+            ..Default::default()
+        }],
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 0, 61, 1),
+        40000,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let reinjector = Arc::new(SlowPathReinjector::new_without_worker(1500));
+    // Force deterministic outlet-local refusals after the real chokepoint
+    // selects an outlet. The clean denied packet never calls either enqueue
+    // path; an M1-admitted packet is refused by whichever outlet it reaches.
+    reinjector.force_mtu_state_for_test(1500, 32, false);
+    reinjector.force_delegated_mtu_state_for_test(32, false);
+
+    let (batch, dbg) = txn_run_descriptor_with_reinjector(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &reinjector,
+    );
+
+    assert_eq!(
+        reinjector.status().dropped_packets,
+        0,
+        "a host-inbound-denied packet must never reach Trusted",
+    );
+    assert_eq!(
+        reinjector.delegated_status().dropped_packets,
+        0,
+        "a host-inbound-denied packet must never reach Delegated",
+    );
+    assert_eq!(dbg.local, 1, "probe must resolve through LocalDelivery");
+    assert_eq!(
+        batch.host_inbound_denied_packets, 1,
+        "DENY_ZONE TCP/443 must be stopped by host-inbound H2",
+    );
 }
 
 // #9637 operator narrowing: the enqueue lands on the selected outlet's
@@ -1279,6 +1369,36 @@ fn reinject_outlet_declared_per_production_site_9637() {
     assert!(
         choke.contains("reinject_host_authorized("),
         "filtered chokepoint must derive Trusted from the disposition mapping"
+    );
+    assert!(
+        choke.contains("host_inbound_gate_proof"),
+        "filtered chokepoint must consume the per-packet gate proof"
+    );
+    // Cell 3 split: the runtime unit covers helper→mapper behavior. This
+    // production pin covers the owner predicate and the exempt HIT arm's
+    // proof assignment; the existing #10038 family covers lo0/TTL/input
+    // semantics for the exemption.
+    let exempt_start = src
+        .find("let solicited_exempt = foreign_arrival_zone.is_none()")
+        .expect("owner-only solicited exemption marker");
+    let gated_start = src
+        .find("let gated = if solicited_exempt {")
+        .expect("solicited gated branch marker");
+    let owner_predicate = &src[exempt_start..gated_start];
+    assert!(
+        owner_predicate.contains("foreign_arrival_zone.is_none()")
+            && owner_predicate.contains("resolved.metadata.is_reverse")
+            && owner_predicate.contains("tun_origin_reverse_exempt("),
+        "solicited exemption must retain the owner/reverse/TUN-origin predicate"
+    );
+    let branch_len = src[gated_start..]
+        .find("} else {")
+        .expect("ordinary HIT gated branch marker");
+    let exempt_branch = &src[gated_start..gated_start + branch_len];
+    assert!(
+        exempt_branch.contains("host_inbound_gate_proof = true")
+            && exempt_branch.contains("Some(lo0_action_for_solicited_reply("),
+        "solicited exemption must produce proof in its own HIT arm"
     );
 }
 

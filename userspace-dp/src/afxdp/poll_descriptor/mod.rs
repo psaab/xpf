@@ -1016,6 +1016,11 @@ pub(super) fn poll_binding_process_descriptor(
                 // only need eventual cross-thread visibility. NUM_SHARDS relaxed
                 // loads, on this cold cache-miss/resolve path only.
                 let neighbor_epoch_snapshot = worker_ctx.dynamic_neighbors.snapshot_shard_epochs();
+                // Per-packet proof consumed by the filtered reinject
+                // chokepoint below. It is set only by the host-inbound gate
+                // pass arms (or the owner-only solicited-reply exemption);
+                // an unproven LocalDelivery therefore cannot select Trusted.
+                let mut host_inbound_gate_proof = false;
                 let mut decision = if let Some(flow) = flow.as_ref() {
                 if let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
                         sessions,
@@ -1669,6 +1674,12 @@ pub(super) fn poll_binding_process_descriptor(
                             // lo0 always answers — so the deny arm cannot fire
                             // for it, and the accept arm runs unchanged).
                             let gated = if solicited_exempt {
+                                // The owner-only TUN-origin reverse exemption
+                                // is an explicit host-inbound proof: the forward
+                                // companion was already proven as firewall-
+                                // originated, while lo0/TTL/input-filter gates
+                                // remain in force (#10038).
+                                host_inbound_gate_proof = true;
                                 Some(lo0_action_for_solicited_reply(
                                     worker_ctx.forwarding,
                                     ingress_logical,
@@ -1785,6 +1796,12 @@ pub(super) fn poll_binding_process_descriptor(
                                 // (discard/reject). An accepted flow with a lo0
                                 // `then log` term still emits and falls through.
                                 Some((lo0_action, lo0_log)) => {
+                                    if !solicited_exempt {
+                                        // `Some` from the gated helper proves
+                                        // host-inbound admission for ordinary
+                                        // HIT LocalDelivery packets.
+                                        host_inbound_gate_proof = true;
+                                    }
                                     if filter_terminal(
                                         &mut binding.tx_pipeline,
                                         worker_ctx.forwarding,
@@ -2966,6 +2983,9 @@ pub(super) fn poll_binding_process_descriptor(
                                 // (discard/reject). An accepted lo0 `then log`
                                 // flow still emits and falls through.
                                 Some((lo0_action, lo0_log)) => {
+                                    // Reaching the admitted arm proves the H2
+                                    // host-inbound gate passed for this packet.
+                                    host_inbound_gate_proof = true;
                                     if filter_terminal(
                                         &mut binding.tx_pipeline,
                                         worker_ctx.forwarding,
@@ -5379,7 +5399,11 @@ pub(super) fn poll_binding_process_descriptor(
                             desc.len as u64,
                             now_ns,
                         ) {
-                            FlowlessLocalVerdict::Deliver => {}
+                            FlowlessLocalVerdict::Deliver => {
+                                // Flowless Deliver is the shared H2 pass result;
+                                // carry its proof to the reinject chokepoint.
+                                host_inbound_gate_proof = true;
+                            }
                             FlowlessLocalVerdict::HostInboundDeny => {
                                 telemetry.dbg.local += 1;
                                 // #3610/M07: own debug counter, not policy_deny.
@@ -7524,6 +7548,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 SlowPathOutlet::Adjudicated
                             } else if reinject_host_authorized(
                                 decision.resolution.disposition,
+                                host_inbound_gate_proof,
                             ) {
                                 SlowPathOutlet::Trusted
                             } else {
