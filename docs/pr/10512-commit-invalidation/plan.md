@@ -290,6 +290,23 @@ after a bare row delete — it has no B value once the row is gone).
   counts, and first-error status. Go only drives that continuation; it never
   enumerates or deletes through the shim and never acquires an unbounded
   tuple-gate set.
+Clear-fence ordering is normative: every tuple mutation first takes shared
+`ClearAdmission`, then its `GateLease`/`PublishPermit`; `mirror_clear_chunk`
+transitions `Draining`, rejects new admissions, drains existing leases and
+permits, then takes exclusive `ClearFence` before bounded enumeration. The
+order is never reversed: queued delete/import waits for clear release, while
+clear waits only for operations that already hold `ClearAdmission`; the
+exclusive clear token is carried through reentrant table-removal and mirror
+callbacks so they do not reacquire normal admission. Restart quarantine owns a
+helper-owned durable `ReconcileProbeStore` keyed by logical mutation identity
+plus tuple/family, recording operation phase and SessionTable/BPF pre/post
+fingerprints. After a crash, the helper reopens that store and probes live
+maps; `reconcile_quarantine` holds all mutators until every in-flight identity
+resolves to `Applied`, `Noop`, or `Absent` and the bounded SessionTable/BPF
+reconcile completes, then publishes the new epoch. Go reissues only after
+release with a new epoch-scoped operation id, and the helper consults the store
+and live maps before mutating so a different incarnation is preserved.
+
 - Mutator transport failure or unavailable helper is fail-closed: no tuple BPF
   syscall has occurred, the caller receives `helper_unavailable`/
   `unknown_outcome`, and the existing Go best-effort mirror shortcut is
@@ -819,6 +836,18 @@ copies intact).
   epoch is rejected, the Go retry reissues one new epoch-scoped operation id
   carrying the same logical identity after reconcile, no token self-blocks,
   no A resurrection occurs, and no B is lost.
+- Clear-fence vs tuple-GateLease race (privileged helper test, v4 and v6):
+  tuple-first starts `mirror_delete` or `mirror_upsert`, acquires shared
+  `ClearAdmission` and `GateLease A`, then `mirror_clear_chunk` requests
+  `Draining`; assert new tuple admissions stop, clear waits for A to
+  finalize/release, and only then obtains exclusive `ClearFence` and completes
+  its bounded chunk. Clear-first enters `Draining`/`Held` before a queued
+  delete/import; assert both remain outside admission with no BPF syscall until
+  clear releases, then exactly one conditional mutation proceeds. Hold the
+  clear callback on its exclusive token and assert table/mirror callbacks do
+  not self-block or reacquire normal admission; repeat with reverse-only
+  import and assert no row resurrection or clear/delete interleave.
+
 
 
 Process: tests first, RED on base where the defect exists (T1–T8 + protocol
