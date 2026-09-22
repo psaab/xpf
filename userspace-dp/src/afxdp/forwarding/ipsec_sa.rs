@@ -1403,6 +1403,43 @@ mod tests {
         let refreshed = store.load_snapshot();
         assert_eq!(store.lookup_loaded(&refreshed, key(1)), IpsecSaLookup::Miss);
     }
+    #[test]
+    fn loaded_batch_survives_redump_retaining_sibling_but_fences_deleted_key() {
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        entries.insert(
+            key(1),
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
+        entries.insert(
+            key(2),
+            IpsecSaEpoch {
+                generation: 2,
+                incarnation: 0,
+            },
+        );
+        store.publish_full_dump(entries);
+        let batch = store.load_snapshot();
+
+        let mut redump = FastMap::default();
+        redump.insert(
+            key(2),
+            IpsecSaEpoch {
+                generation: 3,
+                incarnation: 0,
+            },
+        );
+        store.publish_full_dump(redump);
+
+        // Retention preserves key(2)'s presence episode across the redump:
+        // the old batch stays Hit for the survivor and fences only the
+        // deleted key.
+        assert_eq!(store.lookup_loaded(&batch, key(1)), IpsecSaLookup::Stale);
+        assert_eq!(store.lookup_loaded(&batch, key(2)), IpsecSaLookup::Hit);
+    }
 
     #[test]
     fn loaded_batch_snapshot_fences_after_mark_stale() {
