@@ -643,6 +643,12 @@ func emitIpsecQuarantineRules(p *nlPlan, family, hook string, spec IpsecDivertSp
 	if p == nil || p.err != nil {
 		return
 	}
+	// #10501: loopback survives the quarantine guard. Without this ACCEPT,
+	// QuarantineAll with no candidates renders a bare DROP that kills lo,
+	// including daemon gRPC on 127.0.0.1:50051 (self-lockout). iifname lo
+	// cannot be spoofed from the wire; everything else still hits the
+	// candidate + base DROPs below and the chain DROP policy.
+	p.rule().iifname([]string{"lo"}).emit(verdictAccept()...)
 	generation := spec.QuarantineGeneration
 	for _, ifindex := range spec.CandidateIfindices {
 		counter := fmt.Sprintf("xpf_ipsec_quarantine_hits_%s_%s_g%d_if%d", family, hook, generation, ifindex)
