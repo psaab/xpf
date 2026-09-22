@@ -1537,6 +1537,34 @@ print(int(isinstance(rust, dict) and rust.get("run_id") == sys.argv[2] and
           rust.get("permit_state") == "OPEN"))
 PY
 }
+d11_new_marker_hex() {
+    # Per-run 16-byte marker selector as 32 lowercase hex. Every live D11
+    # consumer (arm RPCs, ping -p payloads) already takes the value from
+    # $D11_MARKER_HEX, so randomizing here binds the run without new plumbing.
+    local hex
+    hex="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [[ "$hex" =~ ^[0-9a-f]{32}$ ]]; then
+        printf '%s' "$hex"
+    else
+        printf '%s' "$(printf '%s' "$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -c1-32)"
+    fi
+}
+d11_restore_verdict() {
+    # $1=verdict $2=reason $3=restore_ok. Prints "verdict reason".
+    # A failed restore demotes PASS to VOID but preserves FAIL/VOID evidence
+    # with the restore failure annotated, so the acceptance surface cannot
+    # mislabel a broken claim as environmental.
+    local verdict="$1" reason="$2" restore_ok="$3"
+    if [[ "$restore_ok" != 1 ]]; then
+        if [[ "$verdict" == PASS ]]; then
+            verdict=VOID
+            reason=env-void
+        else
+            reason="${reason};restore-failed"
+        fi
+    fi
+    printf '%s %s' "$verdict" "$reason"
+}
 # The selftest is hermetic: it must not source cluster-env, call incus, or
 # create ledger rows.  It checks the conservative refusal model and cell shape.
 if [[ "$MODE" == selftest ]]; then
@@ -1580,6 +1608,20 @@ if [[ "$MODE" == selftest ]]; then
         "$( [[ "$d11_permit_epoch" == 0 ]] && echo 1 || echo 0 )"
     expect "D11 short selector is refused" "0" \
         "$( [[ ${#d11_marker_hex} == 16 ]] && echo 1 || echo 0 )"
+    marker_a="$(d11_new_marker_hex)"
+    marker_b="$(d11_new_marker_hex)"
+    expect "D11 marker is per-run 32 lowercase hex" "1" \
+        "$( [[ "$marker_a" =~ ^[0-9a-f]{32}$ && "$marker_b" =~ ^[0-9a-f]{32}$ ]] && echo 1 || echo 0 )"
+    expect "D11 marker is not fixed across runs" "1" \
+        "$( [[ "$marker_a" != "$marker_b" ]] && echo 1 || echo 0 )"
+    expect "D11 restore demotes PASS to VOID" "VOID env-void" \
+        "$(d11_restore_verdict PASS armed-and-ready 0)"
+    expect "D11 restore preserves FAIL evidence" "FAIL join-or-safety-mismatch;restore-failed" \
+        "$(d11_restore_verdict FAIL join-or-safety-mismatch 0)"
+    expect "D11 restore preserves VOID evidence" "VOID env-void:missing-fixture;restore-failed" \
+        "$(d11_restore_verdict VOID env-void:missing-fixture 0)"
+    expect "D11 restore leaves PASS on clean restore" "PASS armed-and-ready" \
+        "$(d11_restore_verdict PASS armed-and-ready 1)"
     noarg_status=0
     env -u XPF_CLUSTER_LOCK_HELD "$0" >/dev/null 2>&1 || noarg_status=$?
     expect "no-arg live mode requires cluster lock" "2" "$noarg_status"
@@ -2036,6 +2078,14 @@ with open(f"{root}/duplicate-status.json", "w", encoding="utf-8") as fh:
     value["s5_reinject"]["provenance"].append(
         copy.deepcopy(value["s5_reinject"]["provenance"][0]))
     json.dump(value, fh)
+with open(f"{root}/digest-mismatch-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/status0.json", encoding="utf-8"))
+    value["s5_reinject"]["provenance"][0]["frame_digest"] = base64.b64encode(bytes([9]) * 32).decode()
+    json.dump(value, fh)
+with open(f"{root}/wrong-lease-status.json", "w", encoding="utf-8") as fh:
+    value = json.load(open(f"{root}/status0.json", encoding="utf-8"))
+    value["s5_reinject"]["provenance"][0]["queue_number"] = 9999
+    json.dump(value, fh)
 with open(f"{root}/closed-status.json", "w", encoding="utf-8") as fh:
     value = json.load(open(f"{root}/status1.json", encoding="utf-8"))
     value["s5_reinject"]["run_id"] = "normal-1"
@@ -2089,6 +2139,14 @@ PY
         "$d11_parser_run" "$parser_dir/duplicate-status.json" "$parser_dir/status1.json" \
         "$parser_dir/traffic.txt" node-0 node-1)"
     expect "D11 parser rejects duplicate Rust provenance" "0" "$duplicate_join"
+    read -r digest_join _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/digest-mismatch-status.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    expect "D11 parser rejects digest mismatch" "0" "$digest_join"
+    read -r lease_join _ <<<"$(d11_join_fields "$parser_dir/ledger0.json" "$parser_dir/ledger1.json" \
+        "$d11_parser_run" "$parser_dir/wrong-lease-status.json" "$parser_dir/status1.json" \
+        "$parser_dir/traffic.txt" node-0 node-1)"
+    expect "D11 parser rejects wrong lease key" "0" "$lease_join"
     read -r closed_runtime_ok closed_authority_ok <<<"$(d11_final_runtime_fields \
         "$parser_dir/closed-status.json" "$parser_dir/closed-status.json" \
         "$parser_dir/runtime.metrics" "$parser_dir/runtime.metrics" "$d11_parser_run")"
@@ -2164,7 +2222,41 @@ PY
         "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
         node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
     expect "D11 final parser rejects late accounting" "0" "$dirty_final_ok"
-    if [[ "$fail" == 0 && "$pass" == 90 ]]; then
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["records"][0]["late_attempts"] = 0
+value["records"][0]["duplicate"] = True
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    read -r dup_final_ok _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser rejects duplicate flag" "0" "$dup_final_ok"
+    python3 - "$parser_dir/final0.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["records"][0]["duplicate"] = False
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    python3 - "$parser_dir/final1.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["node_id"] = "node-0"
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+    read -r sn_final_ok sn_final_nodes _ _ _ _ <<<"$(d11_final_fields \
+        "$parser_dir/final0.json" "$parser_dir/final1.json" "$d11_parser_run" \
+        node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
+    expect "D11 final parser rejects same node twice" "0" "$sn_final_ok"
+    expect "D11 final parser node check rejects same node" "0" "$sn_final_nodes"
+    if [[ "$fail" == 0 && "$pass" == 101 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -2537,7 +2629,7 @@ run_d11_reattest() {
     if [[ ! "$D11_RUN_ID" =~ ^attest-[0-9a-f]{32}$ ]]; then
         D11_RUN_ID="attest-$(printf '%s' "$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -c1-32)"
     fi
-    D11_MARKER_HEX=00112233445566778899aabbccddeeff
+    D11_MARKER_HEX="$(d11_new_marker_hex)"
     D11_ARM0="$ARCHIVE_DIR/d11-fw0-arm.txt"
     D11_ARM1="$ARCHIVE_DIR/d11-fw1-arm.txt"
     D11_LEDGER0="$ARCHIVE_DIR/d11-fw0-ledger-before.json"
@@ -2547,7 +2639,7 @@ run_d11_reattest() {
     D11_TRAFFIC="$ARCHIVE_DIR/d11-marker-traffic.txt"
     local epoch0="${D11_PRE_EPOCH_FW0:-0}" epoch1="${D11_PRE_EPOCH_FW1:-0}"
     local arm0=0 arm1=0 ready0=0 ready1=0 join_ok=0 terminal_ok=0 final_ok=0
-    local setup_reason env_verdict env_reason
+    local setup_reason env_verdict="" env_reason
     local pre_metrics0 pre_metrics1 post_metrics0 post_metrics1
     local d11_suppressed=0 d11_deny52=0
     local expected_node0="" expected_node1="" node_ids_ready=0
@@ -2587,15 +2679,12 @@ run_d11_reattest() {
     elif [[ "$node_ids_ready" != 1 ]]; then
         env_verdict=VOID
         env_reason="node-identity-unavailable-or-not-distinct:fw0=$expected_node0 fw1=$expected_node1"
-    elif [[ "$EXE_CHECK" != MATCH ]]; then
+    elif [[ "$(d11_exe_allowed "$EXE_CHECK")" != 1 ]]; then
         env_verdict=VOID
         env_reason="exe-attestation-${EXE_CHECK}-requires-MATCH"
     elif [[ "$ready0" != 1 || "$ready1" != 1 ]]; then
         env_verdict=VOID
         env_reason="runtime-readiness-unavailable:both-node-s5-go-authority"
-    else
-        env_verdict=FAIL
-        env_reason="d11-cell-observation-failed"
     fi
     if [[ "$env_verdict" == VOID ]]; then
         d11_row d11_reattest_arm 'r6 §6.4' 'both node-local D11 arms succeed' \
@@ -3448,7 +3537,8 @@ if [[ "$restore0" != 1 || "$restore1" != 1 || "$residue0" != 1 || "$residue1" !=
 fi
 
 # Only now, after both node snapshots and residue checks, write the ledger
-# rows.  A failed restore demotes every would-be result to an explicit VOID.
+# rows.  A failed restore demotes would-be PASS results to an explicit
+# VOID and annotates preserved FAIL/VOID evidence with the restore failure.
 if [[ "$D11_REATTEST" == 1 ]]; then
     REPLAY_ROWS_FILE="$D11_ROWS_FILE"
     EXPECTED_ROW_COUNT=4
@@ -3466,9 +3556,9 @@ CELL_PASS=0
 while IFS=$'\t' read -r gate section predicate observed verdict reason metrics; do
     [[ -n "${gate:-}" ]] || continue
     if [[ "$restore_ok" != 1 ]]; then
-        verdict=VOID
-        reason=env-void
-        observed="${observed};restore-failed"
+        restore_orig_verdict="$verdict"
+        read -r verdict reason <<<"$(d11_restore_verdict "$verdict" "$reason" "$restore_ok")"
+        observed="${observed};restore-failed(orig=${restore_orig_verdict})"
         metrics="${metrics} restore_clean=0"
     fi
     emit_cell "$gate" "$section" "$predicate" "$observed" "$verdict" "$reason" "$metrics"
