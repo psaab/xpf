@@ -86,10 +86,7 @@ func parseFlowSessionArgs(args []string) (*flowSessionParse, error) {
 			if err != nil {
 				return nil, err
 			}
-			// Lenient: accept any protocol NAME the system still
-			// displays (e.g. "ipv6"=41) plus the strict name/numeric set,
-			// so a displayable protocol is never rejected (#3439, #3393).
-			if _, ok := appid.ProtocolNumberLenient(v); !ok {
+			if _, ok := appid.ParseProtocolFilterToken(v); !ok {
 				return nil, fmt.Errorf("unknown protocol %q", v)
 			}
 			p.req.Protocol = strings.ToUpper(v)

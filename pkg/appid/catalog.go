@@ -385,6 +385,25 @@ func ProtocolNumberLenient(name string) (uint8, bool) {
 	return 0, false
 }
 
+// ParseProtocolFilterToken resolves one non-empty session-filter token through
+// the Lenient protocol taxonomy. Callers must keep their token != "" guard so
+// an absent or explicitly empty filter remains "no protocol filter"; both
+// absence and invalid non-empty input return (0, false).
+func ParseProtocolFilterToken(token string) (proto uint8, ok bool) {
+	if token == "" {
+		return 0, false
+	}
+	return ProtocolNumberLenient(token)
+}
+
+// ProtoFilterMatches compares a session protocol with a parsed filter pair.
+// A false hasProto bit means no protocol filter; callers parse and validate
+// the token once before walking sessions, preserving protocol 0 as a valid
+// filter value.
+func ProtoFilterMatches(protocol, filterProto uint8, hasProto bool) bool {
+	return !hasProto || protocol == filterProto
+}
+
 // ProtocolName is the single source of truth for rendering an IP protocol
 // number as a canonical lowercase protocol name. It returns "" for a
 // protocol that has no display name here, letting callers fall back to the

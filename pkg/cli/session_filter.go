@@ -23,7 +23,8 @@ import (
 type sessionFilter struct {
 	zoneID   uint16 // 0 = any
 	zoneName string // zone filter as typed (for peer forwarding)
-	proto    uint8  // 0 = any
+	proto    uint8  // parsed protocol value
+	hasProto bool   // protocol filter is present, including protocol 0
 	srcNet   *net.IPNet
 	dstNet   *net.IPNet
 	srcPort  uint16         // 0 = any (host byte order; keys are network order)
@@ -127,24 +128,11 @@ func (c *CLI) parseSessionFilterMode(args []string, clearMode bool) sessionFilte
 			}
 		case "protocol":
 			if v, ok := takeValue(&i, "protocol"); ok {
-				switch strings.ToLower(v) {
-				case "tcp":
-					f.proto = 6
-				case "udp":
-					f.proto = 17
-				case "icmp":
-					f.proto = 1
-				case "icmpv6":
-					f.proto = dataplane.ProtoICMPv6
-				default:
-					// Numeric IP protocol (Junos accepts numbers);
-					// anything else must error, not silently drop
-					// the predicate.
-					if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 256 {
-						f.proto = uint8(n)
-					} else {
-						f.setParseErr(fmt.Errorf("unknown protocol %q", v))
-					}
+				if n, valid := appid.ParseProtocolFilterToken(v); valid {
+					f.proto = n
+					f.hasProto = true
+				} else {
+					f.setParseErr(fmt.Errorf("unknown protocol %q", v))
 				}
 			}
 		case "source-prefix":
@@ -273,7 +261,7 @@ func (f *sessionFilter) matchesV4(key dataplane.SessionKey, val dataplane.Sessio
 			return false
 		}
 	}
-	if f.proto != 0 && key.Protocol != f.proto {
+	if !appid.ProtoFilterMatches(key.Protocol, f.proto, f.hasProto) {
 		return false
 	}
 	if f.srcNet != nil && !f.srcNet.Contains(net.IP(key.SrcIP[:])) {
@@ -318,7 +306,7 @@ func (f *sessionFilter) matchesV6(key dataplane.SessionKeyV6, val dataplane.Sess
 			return false
 		}
 	}
-	if f.proto != 0 && key.Protocol != f.proto {
+	if !appid.ProtoFilterMatches(key.Protocol, f.proto, f.hasProto) {
 		return false
 	}
 	if f.srcNet != nil && !f.srcNet.Contains(net.IP(key.SrcIP[:])) {
@@ -353,7 +341,7 @@ func (f *sessionFilter) matchesV6(key dataplane.SessionKeyV6, val dataplane.Sess
 }
 
 func (f *sessionFilter) hasFilter() bool {
-	return f.parseErr != nil || f.zoneID != 0 || f.zoneName != "" || f.proto != 0 ||
+	return f.parseErr != nil || f.zoneID != 0 || f.zoneName != "" || f.hasProto ||
 		f.srcNet != nil || f.dstNet != nil || f.srcPort != 0 || f.dstPort != 0 ||
 		f.natOnly || f.iface != "" || f.appName != "" || f.snatPool != ""
 }
@@ -667,7 +655,7 @@ func (c *CLI) fetchPeerSessions(f sessionFilter) *pb.GetSessionsResponse {
 		// across the cluster, so the peer resolves the same ID.
 		req.Zone = uint32(f.zoneID)
 	}
-	if f.proto != 0 {
+	if f.hasProto {
 		req.Protocol = strings.ToUpper(protoNameFromNum(f.proto))
 	}
 	if f.srcNet != nil {

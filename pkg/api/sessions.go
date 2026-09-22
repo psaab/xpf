@@ -1327,7 +1327,8 @@ func buildSessionIfaceNames(cfg *config.Config, lookupIfindex func(string) (int,
 // of scope here (separate from #3421/#3423).
 type sessionQuery struct {
 	zone         uint16
-	proto        string
+	proto        uint8
+	hasProto     bool
 	natOnly      bool
 	app          string
 	iface        string
@@ -1355,11 +1356,10 @@ func buildSessionQuery(r *http.Request, view sessionView) (sessionQuery, string)
 		return q, "invalid zone filter: " + r.URL.Query().Get("zone")
 	}
 	q.zone = zoneFilter
-	q.proto = r.URL.Query().Get("protocol")
-	if q.proto != "" {
-		if _, ok := appid.ProtocolNumberLenient(q.proto); !ok {
-			return q, "invalid protocol filter: " + q.proto
-		}
+	protocol := r.URL.Query().Get("protocol")
+	q.proto, q.hasProto = appid.ParseProtocolFilterToken(protocol)
+	if protocol != "" && !q.hasProto {
+		return q, "invalid protocol filter: " + protocol
 	}
 	q.app = r.URL.Query().Get("application")
 	q.iface = r.URL.Query().Get("interface")
@@ -1436,7 +1436,7 @@ func (q *sessionQuery) matchV4(key dataplane.SessionKey, val dataplane.SessionVa
 	if q.zone != 0 && val.IngressZone != q.zone && val.EgressZone != q.zone {
 		return false
 	}
-	if q.proto != "" && !protoFilterMatches(key.Protocol, q.proto) {
+	if !appid.ProtoFilterMatches(key.Protocol, q.proto, q.hasProto) {
 		return false
 	}
 	if q.srcNet != nil && !q.srcNet.Contains(net.IP(key.SrcIP[:])) {
@@ -1480,7 +1480,7 @@ func (q *sessionQuery) matchV6(key dataplane.SessionKeyV6, val dataplane.Session
 	if q.zone != 0 && val.IngressZone != q.zone && val.EgressZone != q.zone {
 		return false
 	}
-	if q.proto != "" && !protoFilterMatches(key.Protocol, q.proto) {
+	if !appid.ProtoFilterMatches(key.Protocol, q.proto, q.hasProto) {
 		return false
 	}
 	if q.srcNet != nil && !q.srcNet.Contains(net.IP(key.SrcIP[:])) {
@@ -1777,23 +1777,6 @@ func monotonicSeconds() uint64 {
 	var ts unix.Timespec
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Sec)
-}
-
-// protoFilterMatches matches a session protocol against an operator filter
-// string: a case-insensitive protocol name (tcp/udp/icmp/icmpv6/...) OR a
-// numeric IP protocol number ("6" matches TCP, "47" matches GRE). This
-// mirrors the gRPC (pkg/grpcapi server_sessions.go protoFilterMatches) and
-// CLI (pkg/cli monitor) contract; REST previously did a case-SENSITIVE
-// string compare with no numeric form, so protocol=tcp and protocol=6
-// silently returned an empty result (#2935).
-func protoFilterMatches(p uint8, filter string) bool {
-	if strings.EqualFold(protoName(p), filter) {
-		return true
-	}
-	if n, err := strconv.Atoi(filter); err == nil {
-		return n == int(p)
-	}
-	return false
 }
 
 // protoName renders an IP protocol number for the REST surface. The named

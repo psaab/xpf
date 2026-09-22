@@ -40,8 +40,9 @@ func TestParseFlowSessionArgsRejectsMalformed(t *testing.T) {
 		{"source-port", "0"}, // out of 1-65535
 		{"destination-port", "70000"},
 		{"protocol", "tcpip"},                  // unknown protocol token
+		{"protocol", "+6"},                     // signed numerics are non-canonical
+		{"protocol", " 6"},                     // whitespace-padded numerics are non-canonical
 		{"limit", "0"},                         // non-positive limit
-		{"bogus-token"},                        // unknown filter keyword
 		{"destination-port"},                   // missing value
 		{"summary", "destination-port", "abc"}, // malformed after a terminal subcmd
 		// A filter combined with a global aggregation (summary/sort-by)
@@ -64,6 +65,21 @@ func TestParseFlowSessionArgsRejectsMalformed(t *testing.T) {
 		t.Errorf("parseFlowSessionArgs(protocol ipv6) = %v; want accepted", err)
 	} else if p.req.Protocol != "IPV6" {
 		t.Errorf("protocol ipv6: req.Protocol = %q; want IPV6", p.req.Protocol)
+	}
+
+	for _, tc := range []struct {
+		token string
+		want  string
+	}{
+		{"007", "007"},
+		{" tcp ", " TCP "},
+	} {
+		p, err := parseFlowSessionArgs([]string{"protocol", tc.token})
+		if err != nil {
+			t.Errorf("parseFlowSessionArgs(protocol %q) = %v; want accepted", tc.token, err)
+		} else if p.req.Protocol != tc.want {
+			t.Errorf("protocol %q: req.Protocol = %q; want %q", tc.token, p.req.Protocol, tc.want)
+		}
 	}
 
 	// summary / sort-by WITHOUT a filter still work (brief is a display

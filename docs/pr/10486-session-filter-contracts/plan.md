@@ -521,7 +521,7 @@ B contract:
   `v4Sessions`/`v6Sessions` maps drive callback-based
   `IterateSessions`/`IterateSessionsV6` (with `IsLoaded` true), and each map
   has matching and nonmatching rows for the exercised protocols. Send
-  `" tcp "`, `"0"`, `"sctp"`, `"ipv6"`, and `"007"` through
+  `"tcp"`, `"6"`, `" tcp "`, `"0"`, `"sctp"`, `"ipv6"`, and `"007"` through
   `buildSessionFilter`/the session endpoint and assert exact selective counts
   across both v4 and v6 rows, plus `f.hasProto`/`f.proto` and
   `f.hasFilters=true` for protocol-only filters (including proto 0).

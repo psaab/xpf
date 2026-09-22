@@ -2553,10 +2553,14 @@ the drop fails loudly instead of going quietly vacuous.
   signed/non-canonical spelling (`dst_port=+80`, which `Atoi` accepted as `80`)
   is rejected here exactly as the #3606 commit-time and dataplane port parsers
   reject it — no commit-vs-diagnostic split. The session `protocol`
-  filter (`sessions.go` `protoFilterMatches`) is case-insensitive AND
-  accepts a numeric IP protocol number (`tcp`/`TCP`/`6` all match TCP),
-  mirroring gRPC (`pkg/grpcapi` `protoFilterMatches`) and CLI. The event
-  filter (`pkg/logging` `EventFilter.matches`) matches protocol/action
+  filter uses the shared `appid.ParseProtocolFilterToken` parser and
+  `appid.ProtoFilterMatches` matcher: names are case-insensitive, numeric
+  values `0..255` are accepted (`tcp`/`TCP`/`6` all match TCP), and absent or
+  empty protocol is a wildcard. REST rejects malformed non-empty values with
+  HTTP 400; gRPC and local CLI reject them with an invalid-argument/parse
+  error, while peer requests preserve numeric protocol `0` rather than
+  turning it into clear-all. The event filter (`pkg/logging`
+  `EventFilter.matches`) matches protocol/action
   EXACTLY (case-insensitive), not by substring — `protocol=C` no longer
   over-matches TCP/ICMP/ICMPv6. These contracts are pinned by
   `rest_filter_failclosed_test.go` (and, for the events `limit`,

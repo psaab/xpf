@@ -92,6 +92,75 @@ func (d *orderedClearDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return 
 func (d *orderedClearDP) DeleteDNATEntry(dataplane.DNATKey) error      { return nil }
 func (d *orderedClearDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
 
+type protocolClearDP struct {
+	*dataplane.Manager
+	sessions map[dataplane.SessionKey]dataplane.SessionValue
+	deleted  []dataplane.SessionKey
+}
+
+func (d *protocolClearDP) IsLoaded() bool { return true }
+
+func (d *protocolClearDP) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	for k, v := range d.sessions {
+		if !fn(k, v) {
+			break
+		}
+	}
+	return nil
+}
+
+func (d *protocolClearDP) IterateSessionsFrom(_ *dataplane.SessionKey, fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	return d.IterateSessions(fn)
+}
+
+func (d *protocolClearDP) IterateSessionsV6(func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	return nil
+}
+
+func (d *protocolClearDP) IterateSessionsV6From(*dataplane.SessionKeyV6, func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error {
+	return nil
+}
+
+func (d *protocolClearDP) DeleteSession(key dataplane.SessionKey) error {
+	d.deleted = append(d.deleted, key)
+	delete(d.sessions, key)
+	return nil
+}
+
+func (d *protocolClearDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
+func (d *protocolClearDP) DeleteDNATEntry(dataplane.DNATKey) error      { return nil }
+func (d *protocolClearDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
+
+func TestClearFilteredSessionsSCTPOnly_10486(t *testing.T) {
+	sctp := dataplane.SessionKey{
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{10, 0, 0, 2},
+		SrcPort:  1000,
+		DstPort:  2000,
+		Protocol: 132,
+	}
+	tcp := sctp
+	tcp.SrcIP[3] = 3
+	tcp.Protocol = 6
+	dp := &protocolClearDP{
+		Manager:  dataplane.New(),
+		sessions: map[dataplane.SessionKey]dataplane.SessionValue{sctp: {}, tcp: {}},
+	}
+	c := newRecordingCLI(t, dp)
+	if err := c.handleClearSecurity([]string{"flow", "session", "protocol", "sctp"}); err != nil {
+		t.Fatalf("handleClearSecurity: %v", err)
+	}
+	if _, ok := dp.sessions[sctp]; ok {
+		t.Fatal("SCTP session survived protocol=sctp clear")
+	}
+	if _, ok := dp.sessions[tcp]; !ok {
+		t.Fatal("TCP session was cleared by protocol=sctp")
+	}
+	if len(dp.deleted) != 1 || dp.deleted[0] != sctp {
+		t.Fatalf("deleted keys = %v, want only SCTP key %v", dp.deleted, sctp)
+	}
+}
+
 func TestClearFilteredSessionsBoundedWorkingSet_4886(t *testing.T) {
 	const (
 		batch = 4

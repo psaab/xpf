@@ -651,7 +651,7 @@ func buildPeerClearRequest(f *sessionFilter) *pb.ClearSessionsRequest {
 	if f.dstNet != nil {
 		req.DestinationPrefix = f.dstNet.String()
 	}
-	if f.proto != 0 {
+	if f.hasProto {
 		switch f.proto {
 		case 6:
 			req.Protocol = "tcp"
@@ -662,11 +662,8 @@ func buildPeerClearRequest(f *sessionFilter) *pb.ClearSessionsRequest {
 		case dataplane.ProtoICMPv6:
 			req.Protocol = "icmpv6"
 		default:
-			// Numeric protocols forward as numbers; the server matcher
-			// accepts numeric protocol strings. NEVER leave Protocol
-			// empty when f.proto is set — a protocol-only filter would
-			// forward an empty request = peer clear-all (the icmpv6
-			// case did exactly that before #1827 PR-3 r1).
+			// Numeric protocols, including protocol 0, must never be
+			// omitted: an empty protocol field is peer clear-all.
 			req.Protocol = strconv.Itoa(int(f.proto))
 		}
 	}
