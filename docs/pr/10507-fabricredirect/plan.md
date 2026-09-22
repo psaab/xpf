@@ -213,10 +213,11 @@ forward resolution before it can promote or reuse a Permit:
   Permit. Fabric return traffic must continue to use the recorded FROM-zone
   semantics where #7770 requires it.
 
-This makes a reverse packet incapable of clearing only its own stamp while the
-forward companion remains a recorded-egress Permit. The production regression
-must exercise the actual reverse-hit poll path before any eager Refresh command
-is applied.
+This ensures the reverse cold judgment cannot consume the stored
+`FabricRedirect` decision: it must use the same-packet live forward resolution.
+Paired stamp synchronization is optional and is not the security proof. The
+production regression must exercise the actual reverse-hit poll path before any
+eager Refresh command is applied.
 
 ### 4.4 Gate ordering and ICMP early exits
 
@@ -226,11 +227,13 @@ type-sensitive ICMP exits. The host-inbound/junos-host path remains the
 authority for a genuine `LocalDelivery` result; the transit fence must prove
 that a recorded transit stamp is not being used to authorize that result.
 
-The current forward ICMP guard at `policy_revalidation.rs:351-355` and the
-reverse-companion guard at `:596-600` return `None` before
-`policy_revalidation_target`. That is safe for a `LiveEgress` stamp (the
-existing type-sensitive policy cannot be re-derived without the packet type),
-but it is not safe for `RecordedEgress` after the resolution becomes local.
+The forward ICMP guard at `policy_revalidation.rs:351-355` returns before
+`policy_revalidation_target`. The reverse companion first probes its reverse
+stamp at `:552-557`, then its forward-companion ICMP guard at `:596-600` can
+return before the cold forward policy walk. Both placement points must be
+fenced. That is safe for a `LiveEgress` stamp (the existing type-sensitive
+policy cannot be re-derived without the packet type), but it is not safe for
+`RecordedEgress` after the resolution becomes local.
 The new order is:
 
 1. Inspect stamp provenance and the current packet-time resolution.
