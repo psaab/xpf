@@ -1,10 +1,10 @@
-# DRAFT v1 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
+# DRAFT v2 — Fix the 183-red descriptor-enforcement baseline on the fixture-MAC gate (#10504)
 
-- Status: DRAFT v1 (plan only; no production code, no test changes in this lane).
+- Status: DRAFT v2 (plan only; no production code, no test changes in this lane).
 - Base: `7dcdd7383` (`sessions: share protocol filter contract across REST/gRPC/CLI (#10486)`), branch `fix/10504-fixture-mac`.
 - Pinned research base: `b71c52d6` (issue body; our HEAD is newer — see STEP-0 drift note).
 - Date: 2026-09-22.
-- Sequencing: implementation starts the day PR #10544 lands (blocked-by note quoted in §10).
+- Sequencing: implementation starts after PR #10544 landed (blocked-by note quoted in §10).
 
 ## 1. Problem
 
@@ -31,10 +31,13 @@ are pre-L3 preconditions, not policy verdicts:
 - `eth_ipv4_frag_frame` / `frag_v4_transit_frame` (`tests_support.rs:2370-2540`) stamp
   dst `02:bf:72:00:80:08` (the WAN MAC) but tests ingress them on LAN (ifindex 24) →
   mismatch → recycle (or fail-close on the MAC-less LAN fixture).
-- Cross-interface arrivals on MAC-complete fixtures: `inbound_dnat_snapshot` /
-  `nat_snapshot` (`test_fixtures.rs:674-745`) carry real MACs, but drivers address
-  every frame to the LAN MAC while arriving on WAN (ifindex 12, MAC `02:bf:72:00:80:08`)
-  or DMZ (ifindex 26, MAC `02:bf:72:02:00:01`) → `Some(expected) != dst` → recycle.
+- Cross-interface arrivals on MAC-complete fixtures: `inbound_dnat_snapshot`
+  (`userspace-dp/src/afxdp/tests_support.rs:2232-2268`) extends `nat_snapshot`
+  (`test_fixtures.rs:674-822`) with the real LAN/WAN MACs. The authority tests
+  add their DMZ row at `tests_session_hit_authority_9519.rs:77-83`. Drivers
+  address every frame to the LAN MAC while arriving on WAN (ifindex 12, MAC
+  `02:bf:72:00:80:08`) or DMZ (ifindex 26, MAC `02:bf:72:02:00:01`) →
+  `Some(expected) != dst` → recycle.
   This is the whole `tests_session_hit_authority_9519` family (0/10, all red inside the
   `admitted()` helper's `tx==1` assert) and the DNAT `admit_then_one_more_packet` cells.
 
@@ -95,7 +98,7 @@ the STEP-0 census is closed before implementation.
 | MAC recycle (pre-L3) | `userspace-dp/src/afxdp/poll_descriptor/mod.rs` | 276-289 (`ingress_destination_mac_accepted` → `scratch_recycle`) |
 | MAC accept / fail-close | `userspace-dp/src/afxdp/forwarding/fabric.rs` | 198-238 (`None => false`) |
 | MAC-less fixture | `userspace-dp/src/afxdp/test_fixtures.rs` | 951-1021 (`policy_deny_snapshot`, reth1.0/24 `..Default::default()`) |
-| MAC-complete fixture | `userspace-dp/src/afxdp/test_fixtures.rs` | 674-822 (`nat_snapshot`, LAN `02:bf:72:01:00:01`, WAN `02:bf:72:00:80:08`) |
+| MAC-complete fixture | `userspace-dp/src/afxdp/test_fixtures.rs` | 674-822 (`nat_snapshot`, LAN `02:bf:72:01:00:01`, WAN `02:bf:72:00:80:08`); `inbound_dnat_snapshot` extends it at `tests_support.rs:2232-2268` |
 | LAN-MAC txn builders | `userspace-dp/src/afxdp/tests_support.rs` | 994-1004 (v4), 1494-1508 (v6) |
 | WAN-MAC deny builder | `userspace-dp/src/afxdp/tests_support.rs` | 669-691 (`build_policy_deny_tcp_syn_frame`, dst `02:bf:72:00:80:08`) |
 | Garbage-MAC ICMP builder | `userspace-dp/src/afxdp/tests_support.rs` | 24-45 (dst `aa:bb:cc:dd:ee:ff`) |
@@ -122,47 +125,50 @@ still starts with a recount after rebasing onto #10544 as required by §10.
 
 ## 3. Failure-class census (183 reds)
 
-The full-run artifact contains 183 distinct failure blocks. The failure class
-assignment below is exhaustive and sums exactly to 183. The 181 descriptor-path
-failures all fail before their intended L3 behavior: the common MAC destination
-gate recycles the frame (`poll_descriptor/mod.rs:276-289`) or fail-closes because
-the expected MAC is absent (`forwarding/fabric.rs:216-237`). The first assertion
-then observes zero forward/session-hit/event output. The module breakdown is the
-reproducible census surface:
+The full-run artifact contains 183 distinct failure blocks. The table below is an
+exhaustive failure-name/module census and sums exactly to 183; it is not, by
+itself, proof of a root cause for every block. The 181 descriptor-path blocks all
+stop before the intended L3 assertion and observe zero forward/session-hit/event
+output. Source inspection plus the cited one-field experiment make M-MAC the
+working attribution for those 181 blocks, but representative MAC instrumentation
+or a post-fix recount must confirm each cell before implementation calls that
+attribution final.
 
-| Class | Failing module/family | Reds | Representative first failed precondition |
+| Working class | Failing module/family | Reds | Representative first failed precondition |
 |---|---|---:|---|
-| M-MAC | `tests_9950` | 10 | fragment anchor/premise forward is 0 |
-| M-MAC | `tests_decap_dnat_table` | 1 | decapped packet never reaches MissingNeighbor |
-| M-MAC | `tests_embedded_poll_filter` | 36 | embedded reversal/filter/event forward is 0/empty |
-| M-MAC | `tests_fragment` | 19 | fragment forward/association/filter precondition is 0 |
-| M-MAC | `tests_gre_local_delivery` | 4 | inner packet never reaches LocalDelivery |
-| M-MAC | `tests_host_bound_post_dnat_9529` | 9 | translated host-bound verdict/event is 0/empty |
-| M-MAC | `tests_nat64_tunnel` | 4 | NAT64 translation/drop precondition is 0 |
-| M-MAC | `tests_policy_inbound_nat` | 12 | translated policy forward/deny precondition is 0 |
-| M-MAC | `tests_policy_revocation_8356` | 58 | hit/tx/phase-1 admission precondition is 0 |
-| M-MAC | `tests_session_hit_authority_9519` | 10 | WAN admission or DMZ session hit is 0 |
-| M-MAC | `tests_session_ingress_identity` | 9 | LocalDelivery/transit install precondition is 0 |
-| M-MAC | `tests_txn_flow_cache` | 7 | trigger/flow-cache forward is 0 |
-| M-MAC | `wg::decap_tests` | 2 | VRF reply delivery is absent |
+| M-MAC? | `tests_9950` | 10 | fragment anchor/premise forward is 0 |
+| M-MAC? | `tests_decap_dnat_table` | 1 | decapped packet never reaches MissingNeighbor |
+| M-MAC? | `tests_embedded_poll_filter` | 36 | embedded reversal/filter/event forward is 0/empty |
+| M-MAC? | `tests_fragment` | 19 | fragment forward/association/filter precondition is 0 |
+| M-MAC? | `tests_gre_local_delivery` | 4 | inner packet never reaches LocalDelivery |
+| M-MAC? | `tests_host_bound_post_dnat_9529` | 9 | translated host-bound verdict/event is 0/empty |
+| M-MAC? | `tests_nat64_tunnel` | 4 | NAT64 translation/drop precondition is 0 |
+| M-MAC? | `tests_policy_inbound_nat` | 12 | translated policy forward/deny precondition is 0 |
+| M-MAC? | `tests_policy_revocation_8356` | 58 | hit/tx/phase-1 admission precondition is 0 |
+| M-MAC? | `tests_session_hit_authority_9519` | 10 | WAN admission or DMZ session hit is 0 |
+| M-MAC? | `tests_session_ingress_identity` | 9 | LocalDelivery/transit install precondition is 0 |
+| M-MAC? | `tests_txn_flow_cache` | 7 | trigger/flow-cache forward is 0 |
+| M-MAC? | `wg::decap_tests` | 2 | VRF reply delivery is absent |
 | H-TUN | `coordinator::tests::gre1881_mode_flip_to_wireguard_prunes_gre_entry` | 1 | TUN mode-flip cleanup remains non-empty; `TUNSETIFF` is denied |
 | H-EXPECT | `session::routing_domain_wire::tests::empty_name_hash_panics_9752` | 1 | expected-panic contract does not panic |
-| **Total** |  | **183** | 181 + 1 + 1 |
+| **Total** |  | **183** | 181 working M-MAC + 1 + 1 |
 
-M-MAC has three repair shapes, all backed by the live source map and the cited
-one-field causality result: M1 absent expected MAC (`policy_deny_snapshot` LAN
-row); M2 destination MAC belongs to a different arrival interface (WAN/DMZ,
+The M-MAC working attribution has three repair shapes, all backed by the source
+map and cited one-field causality: M1 absent expected MAC (`policy_deny_snapshot`
+LAN row); M2 destination MAC belongs to a different arrival interface (WAN/DMZ,
 reverse, or fabric path); M3 unmatchable hardcoded destination (notably ICMP
-`aa:bb:cc:dd:ee:ff`). The run was not instrumented to distinguish M1/M2/M3
-inside each module, so this plan does not invent sub-counts; the exact accepted
-census is M-MAC=181 by module, H-TUN=1, H-EXPECT=1. Those repair shapes and
-their contracts are explicit in §4 and §6.
+`aa:bb:cc:dd:ee:ff`). The run did not instrument M1/M2/M3 or establish
+per-cell causality, so this plan intentionally does not claim sub-counts.
 
+- H-TUN and H-EXPECT are directly evidenced non-MAC residuals and are not
+  repair targets for fixture-MAC work. H-TUN is separately owned by #10553;
+  H-EXPECT is separately owned by #10552. Their independent disposition and
+  explicit two-block residual denominator are in §4, §6, and §9.
 - Class V — six vacuous survivors are green, not part of the 183-red sum, but are
   load-bearing. They are named in §5 and receive positive hit/admission guards.
 - The cited family arithmetic is consistent: 58 revocation + 36 embedded +
-  19 fragment + 10 authority = 123 red families; the remaining 60 are exactly
-  58 M-MAC module reds outside those cited families plus H-TUN and H-EXPECT.
+  19 fragment + 10 authority = 123 red families; the remaining 60 failure blocks
+  are 58 outside-family working M-MAC attributions plus H-TUN and H-EXPECT.
 
 
 ## 4. Fix strategy per failure class
@@ -184,28 +190,56 @@ correct; production AF_XDP ingress always carries a configured MAC).
   the dependency (fixture chases frames, WAN MAC on a LAN row). The fix direction is
   fixtures carry production-plausible distinct MACs, frames address the arrival.
 - M2/M3 (builder parameterization + per-test repair): add a dst-MAC parameter to
-  `build_txn_tcp_syn_frame_v4`, `build_txn_tcp_frame_v6`, `build_icmp_echo_frame_v4`,
-  `build_icmp_echo_frame_v6`, `eth_ipv4_frag_frame` (and thin wrappers where the
-  call-site count favors it); update all call sites (104 + 7 + 41 + 9 + 13 uses across
-  18 + 2 + 13 + 2 + 3 files) to pass the arrival interface's MAC. Each interface keeps
-  its distinct production-plausible MAC (LAN `02:bf:72:01:00:01`, WAN
-  `02:bf:72:00:80:08`, DMZ `02:bf:72:02:00:01`); reusing one MAC across rows is
-  forbidden (it would mask cross-interface bugs the way the control's WAN-MAC-on-LAN
-  patch does). Special arrivals repaired individually: VLAN-tagged (dst = logical-unit
-  MAC per `resolve_ingress_logical_ifindex`), fabric-stamped (dst = matched fabric
+  `build_txn_tcp_syn_frame_v4`, `build_txn_tcp_frame_v6`,
+  `build_icmp_echo_frame_v4`, `build_icmp_echo_frame_v6`,
+  `eth_ipv4_frag_frame`, and `build_policy_deny_tcp_syn_frame` (and thin
+  wrappers where the call-site count favors it). The
+  `build_txn_tcp_syn_frame_v6` wrapper must carry the parameter through its
+  `build_txn_tcp_frame_v6` call. Migrate the exact per-site checklist: txn-v4
+  104/18, txn-v6 7 hits/2 (one definition plus wrapper and external uses),
+  ICMP-v4 41/13, ICMP-v6 7 hits/3, fragment eth 9/2 plus transit 13/3, and
+  deny-SYN 13/6. The deny-SYN sites are M2 arrivals, not a generic default:
+  `tests_support.rs:715-778`, `tests_nat64_tunnel.rs:898,975`, and the
+  `tests_embedded_poll_filter.rs` LAN-bound sites must pass the LAN MAC.
+  Each interface keeps its distinct production-plausible MAC (LAN
+  `02:bf:72:01:00:01`, WAN `02:bf:72:00:80:08`, DMZ `02:bf:72:02:00:01`);
+  reusing one MAC across rows is forbidden (it would mask cross-interface bugs
+  the way the control's WAN-MAC-on-LAN patch does). Special arrivals repaired
+  individually: VLAN-tagged (dst = logical-unit MAC per
+  `resolve_ingress_logical_ifindex`), fabric-stamped (dst = matched fabric
   `local_mac` or parent egress MAC per the `fabric.rs:228-232` fallback order —
-  verify against `fabric_admit_snapshot_9604`), foreign/DMZ arrivals (dst = DMZ MAC).
-  The `ifindex==0` no-identity cell (§9 Q1) cannot pass any MAC gate by construction
-  and gets re-scoped, not patched.
-- V (driver preconditions, first): add `assert_eq!(dbg.session_hit, 1, …)` (session-hit
-  drivers) or `assert_eq!(dbg.tx, 1, …)` + `session_count==2` (admission drivers) to
-  `drive_one_packet_with_action`, `drive_one_icmp_packet`, and any other outcome
-  driver lacking them — mirroring the guards the 9384/9386/9604/9382 drivers already
-  carry. This runs BEFORE M1-M3 so the six vacuous greens convert to honest reds with
-  a clear precondition signal, then flip to honest greens as fixtures/frames land.
-  No outcome assert is weakened; guards are added, never removed.
+  verify against `fabric_admit_snapshot_9604`), foreign/DMZ arrivals (dst = DMZ
+  MAC). The `ifindex==0` no-identity cell (§11 Q1) cannot pass any MAC gate by
+  construction and gets re-scoped, not patched. The duplicate
+  `frame/tests_support.rs` ICMP builder is pure-frame/no-descriptor and is
+  explicitly no-touch; B9 must verify it is not double-counted.
+- V (driver preconditions, first): add `assert_eq!(dbg.session_hit, 1, …)`
+  (session-hit drivers) or `assert_eq!(dbg.tx, 1, …)` + `session_count==2`
+  (admission drivers) to `drive_one_packet_with_action`,
+  `drive_one_icmp_packet`, and the inline ifindex-0 cell at
+  `tests_policy_revocation_8356.rs:2141-2154` — mirroring the guards the
+  9384/9386/9604/9382 drivers already carry. This runs BEFORE M1-M3 so five
+  descriptor-driven vacuous greens convert to honest reds with a clear
+  precondition signal; the sixth (#9513) is re-scoped to a helper-level
+  assertion per §11 Q1. No currently-green cell outside the six turns red;
+  existing reds may fail at an earlier guard. No outcome assert is weakened.
 - G (consume, do not duplicate): rebase onto #10544; verify `make test` reaches Rust;
   no Makefile or `pkg/refactoraudit` changes in this issue.
+- H-TUN (environment residual, no source fix here): independently rerun
+  `coordinator::tests::gre1881_mode_flip_to_wireguard_prunes_gre_entry` in the
+  required TUN-capable environment. The current failure includes `TUNSETIFF:
+  Operation not permitted`; if privilege fixes it, record that prerequisite. If
+  it remains red, #10553 owns the privileged-runner/coordinator disposition.
+  This one block is outside the 181-cell M-MAC acceptance denominator. Never add
+  a fixture-MAC exemption to make this cell green.
+- H-EXPECT (semantic residual, no source fix here): the release leg
+  deterministically strips the `debug_assert!` used by
+  `empty_name_hash_panics_9752`; its `#[should_panic]` contract therefore
+  remains a known release residual. Follow-up #10552 owns the cfg-gated
+  debug/release pair modeled on the flow-cache precedent. This issue records
+  the one named H-EXPECT block outside the 181-cell denominator; descriptor
+  fixture changes cannot alter the expected-panic contract.
+  M1-M3 acceptance must not silently absorb or weaken this contract.
 
 Rejected alternatives: (a) disabling/softening the MAC gate under `#[cfg(test)]` —
   destroys the boundary the gate exists to enforce and would green every cell without
@@ -234,8 +268,9 @@ both):
 5. `a_still_permitted_icmp_flow_survives_the_re_derivation_8618` (`:699-707`; same).
 6. `an_arrival_with_no_interface_identity_still_declines_9513` (`:2115-2155`; meta
    ifindex 0 → `egress.get(0)` None → recycle; asserts `revoked==0` + count 1, no
-   hit assert — the intended decline gate is never reached). See §9 Q1: unfixable by
-   MAC patching; re-scope candidate.
+   hit assert — the intended decline gate is never reached). See §11 Q1:
+   re-scope to helper-level coverage before M1; do not patch an unrepresentable
+   descriptor arrival with a MAC.
 
 GENUINE (stay green throughout; regression tripwires):
 
@@ -267,14 +302,26 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
   egress MAC, else fabric `local_mac`; broadcast/multicast exempt by the I/G-bit arm).
   No test relies on `None => false` recycle to reach its assertions except cells whose
   stated subject IS the MAC gate (none in the red set; gate-owning cells stay green).
-- V: every revocation/outcome driver asserts a positive precondition before outcome
-  asserts: session-hit drivers `session_hit==1`; admission drivers `tx==1` +
-  `session_count==2` (pair). `validated_packets==1` holds wherever the driver exposes
-  telemetry (MAC recycle happens after `validated_packets` increments, so the pair
-  `validated==1, hit==0` is the recycle fingerprint vs `hit==1` admitted).
+- V: every revocation/outcome driver asserts a positive precondition before
+  outcome asserts: five descriptor-driven survivors use `session_hit==1`;
+  admission drivers use `tx==1` + `session_count==2` (pair). The ifindex-0
+  survivor is covered by a helper-level re-scope before M1. For RED-on-revert
+  evidence, retain the returned batch/counters from `txn_run_descriptor` (rename
+  discarded `_batch` bindings as needed) and report
+  `BatchCounters.validated_packets` from that value alongside
+  `dbg.session_hit`; do not claim the recycle fingerprint from `dbg` alone.
 - G: `make test` runs the Go leg AND the Rust leg on a clean tree (aggregate
   fail-dominant, exit nonzero iff either leg fails); `pkg/refactoraudit` passes
   uncached. Verified post-rebase, owned by #10544.
+- H-TUN: this issue makes no claim about coordinator/TUN cleanup. The unfiltered
+  release denominator is 183 total: 181 M-MAC cells plus one H-TUN block and one
+  H-EXPECT block. H-TUN is owned by #10553 and requires a TUN-capable rerun or
+  its separate disposition; a MAC fixture change cannot satisfy this contract.
+- H-EXPECT: this issue makes no claim about the session panic contract. The
+  unfiltered release denominator is the same explicit 181 + 1 + 1; H-EXPECT is
+  owned by #10552, and the release `debug_assert!` behavior is deterministic.
+  The cfg-gated debug/release repair is out of scope here. Descriptor fixture
+  changes cannot alter the expected-panic contract.
 
 ## 7. Invariants (MUST NOT break)
 
@@ -285,32 +332,43 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
    stated subject requires it (none anticipated).
 3. No assert weakened anywhere; preconditions only added. The six V cells keep their
    outcome asserts (`revoked==0`, counts) and gain hit guards.
-4. Genuine survivors (§5 #7-8) and the filter-revocation control 6/0 stay green on
-   every commit of the fix stack (tripwires against over-correction).
-5. Distinct MACs per interface row in every touched fixture (no MAC aliasing across
-   rows); frames address the arrival row.
-6. Full release recount is the acceptance signal, not family spot-checks: residual
-   must recount to 0 failed with all survivors carrying hit/admission witnesses.
+4. Genuine survivors (§5 #7-8) stay green on every commit of the fix stack.
+   The filter-revocation control 6/0 also remains a tripwire, and its post-
+   `policy_deny_snapshot()` WAN-MAC-on-LAN overwrite is intentionally exempt
+   from invariant 5 for this issue: it preserves the control's existing
+   tripwire shape. Follow-up #10554 owns its later repair to a distinct-MAC
+   shape; do not repair that control in this migration.
+5. Distinct MACs per interface row in every touched fixture (no MAC aliasing
+   across rows); the sole scoped exception is the filter-revocation control
+   named in invariant 4 and owned by #10554. Frames address the arrival row.
+6. Full release recount is the acceptance signal, not family spot-checks: all 181
+   M-MAC working-attribution cells must be green with survivor witnesses; the
+   H-TUN and H-EXPECT blocks remain separately owned residuals with the explicit
+   181 + 2 denominator and issue references #10553/#10552. No unexplained red
+   may be called a fixture-MAC success.
 
 ## 8. Risks (incl. fixture-churn blast radius)
 
 - R1 Fixture-churn blast radius (largest): `policy_deny_snapshot` 71 sites / 13 files;
   `nat_snapshot` 171 / 23; `txn_run_descriptor` 232 / 19; txn v4 builder 104 / 18;
-  v6 builder 7 / 2; ICMP echo 41 / 13; frag builders 9 + 13 uses / 2 + 3 files;
-  `build_policy_deny_tcp_syn_frame` 13 / 6. Builder-signature changes are mechanical
-  but wide; a missed call site is a silent MAC mismatch (honest red via new guards,
-  not silent green — the V-first ordering bounds this). Mitigation: `grep`-verified
-  call-site migration checklists from the fan-out numbers in §12; V guards land first so
-  every miss reds loudly.
+  v6 builder 7 / 2; ICMP echo v4 41 / 13 and v6 7 / 3; frag builders 9 + 13
+  uses / 2 + 3 files; `build_policy_deny_tcp_syn_frame` 13 / 6. Builder-signature
+  changes are mechanical but wide; a missed call site is a silent MAC mismatch
+  (honest red via new guards, not silent green — the V-first ordering bounds this).
+  Mitigation: `grep`-verified call-site migration checklists from the fan-out
+  numbers in §12; V guards land first so every miss reds loudly.
 - R2 MAC aliasing masking cross-interface bugs: fixed by invariant 5 (distinct MACs)
-  + review checklist item per touched fixture.
+  + review checklist item per touched fixture. The filter-revocation control is
+  the explicit temporary exception, preserved as a tripwire and tracked by #10554;
+  no other touched fixture may alias.
 - R3 Tunnel MAC-lessness (`st0.0`, xfrmi shapes): adding MACs there would flip
   to-zone 0 → zoned and break #6722/#9513 expectations. Mitigation: arrival-only MAC
   rule (§4 M1) + explicit no-touch list in the implementation PR.
-- R4 `ifindex==0` cell unrepresentable via descriptor (§9 Q1): patching is impossible
+- R4 `ifindex==0` cell unrepresentable via descriptor (§11 Q1): patching is impossible
   (no expected MAC can exist for ifindex 0); forcing it green via a gate exemption
-  would weaken production. Mitigation: re-scope to helper-level or delete with
-  reviewer sign-off; decided before M1 lands so the recount denominator is settled.
+  would weaken production. Mitigation: choose the helper-level re-scope before M1
+  so the recount denominator is settled before fixture changes land; do not defer
+  Q1 until after M2/M3.
 - R5 Base/provenance: the live current-HEAD run exactly matches the pinned
   6392/183/6 denominator, but implementation still rebases onto #10544. Mitigation:
   repeat the unfiltered release recount after rebase and compare the exact module
@@ -330,32 +388,49 @@ no-route hit assert (`:282-285`), default-reject inline hit assert (`:2303`),
 ## 9. Test plan (how each class proves green + RED-on-revert)
 
 - M1: `tests_policy_revocation_8356` TCP subset (drive_one_packet cells) flips
-  revoke-cells red→green on outcome asserts with new hit guards passing; `cargo test
-  --release --bin xpf-userspace-dp -- --test-threads=1 tests_policy_revocation_8356`
-  → 66/66. Revert check: temporarily blank the LAN MAC → hit guards red (not outcome
-  asserts alone).
-- M2: `tests_session_hit_authority_9519` → 10/10 (phase-1 `admitted()` tx==1 passes);
-  DNAT 9382 cells → green on phase-1 + outcome; 9604 reverse cells → green on
-  `out.hit==1` + outcome. Revert check: restore one hardcoded LAN-MAC frame on a WAN
-  arrival → that cell's hit/tx guard reds.
-- M3: ICMP revocation cells (8618/9949/9386 groups) → green on hit + outcome; frag
-  `tests_fragment.rs` → 32/32 with `frame/tests_fragment_term_extra.rs` 32/32
-  unchanged (pure-frame control). Revert check: restore `aa:bb:cc:dd:ee:ff` dst on one
-  ICMP cell → hit guard reds.
+  revoke-cells red→green on outcome asserts with new hit guards passing;
+  `cargo test --release --bin xpf-userspace-dp -- --test-threads=1
+  tests_policy_revocation_8356` → 66/66 after the Q1 helper move. Revert check:
+  temporarily blank the LAN MAC → the five descriptor hit guards red (not
+  outcome asserts alone); the helper-level #9513 pin has its own revert proof.
+- M2: `tests_session_hit_authority_9519` → 10/10 (phase-1 `admitted()` tx==1
+  passes); DNAT 9382 cells → green on phase-1 + outcome; 9604 reverse cells →
+  green on `out.hit==1` + outcome; deny-SYN 13/6 sites → green with LAN arrival
+  MACs. Revert check: restore one hardcoded LAN-MAC frame on a WAN arrival →
+  that cell's hit/tx guard reds.
+- M3: ICMP revocation cells (8618/9949/9386 groups) → green on hit + outcome;
+  `tests_fragment.rs` → 33/33 with `frame/tests_fragment_term_extra.rs` 33/33
+  unchanged (pure-frame control). Revert check: restore
+  `aa:bb:cc:dd:ee:ff` dst on one ICMP cell → hit guard reds. ICMP-v6 call sites
+  are included in the 7-hit/3-file checklist; the frame/ duplicate remains
+  no-touch and excluded from the descriptor count.
 - V (RED-on-revert cells for the vacuous six — permanent guards, not throwaway):
-  for each of §5 #1-6, the added `session_hit==1` guard IS the revert cell: with the
-  fix reverted (fixture MAC blanked or frame MAC mismatched), the cell fails AT THE
-  GUARD with the recycle fingerprint (`validated_packets==1`, `session_hit==0`,
-  `revoked==0`), proving the outcome asserts below it are reached rather than
-  incidentally satisfied. Implementation PR must show, per survivor, the guard message
-  on revert (paste the `session_hit` assert text, not just FAIL). #6 additionally
-  resolves Q1 (re-scope or helper-level move with its own revert logic).
-- G: post-rebase `go test -count=1 ./pkg/refactoraudit/` PASS + `make -n test` sane +
-  full `make test` reaching the Rust leg (owned by #10544; this issue only verifies).
-- Acceptance: full `cargo test --release --bin xpf-userspace-dp -- --test-threads=1`
-  recount → 0 failed, ignored set unchanged-or-explained, every survivor carrying a
-  hit/admission witness (re-run the §5 table against live output); plus the
-  `make test` Rust leg green post-#10544.
+  for §5 #1-5, the added `session_hit==1` guard is the revert cell: with the
+  fix reverted (fixture MAC blanked or frame MAC mismatched), each fails AT THE
+  GUARD with the retained-batch recycle fingerprint
+  (`validated_packets==1`, `session_hit==0`, `revoked==0`). #6's helper-level
+  re-scope has its own direct decline assertion and revert proof. The
+  implementation PR must show, per survivor, the guard message and retained
+  batch counter on revert (paste the assert text, not just FAIL).
+- G: post-rebase `go test -count=1 ./pkg/refactoraudit/` PASS + `make -n test`
+  sane + full `make test` reaching the Rust leg (owned by #10544; this issue
+  only verifies). The exact Makefile Rust command is the acceptance runner,
+  with the target cargo command above used for focused evidence.
+- H-TUN: standalone rerun of
+  `coordinator::tests::gre1881_mode_flip_to_wireguard_prunes_gre_entry` in a
+  TUN-capable privileged runner; otherwise record the one residual block and
+  #10553 disposition. It is not counted against the 181 M-MAC denominator.
+- H-EXPECT: standalone debug-profile cfg-gated pair from #10552 must prove the
+  intended panic/release assertion contract. The known release
+  `#[should_panic]` residual is not counted against the 181 M-MAC denominator;
+  do not claim this issue fixes it.
+- Acceptance: run the exact post-#10544 `make test` Rust leg and retain the
+  unfiltered denominator. This issue passes when all 181/181 M-MAC working-
+  attribution cells are green, all six survivor witnesses are present, and the
+  two named residual blocks are explicitly recorded as separately owned by
+  #10553 (H-TUN) and #10552 (H-EXPECT). The allowed release denominator is
+  181 + 2 = 183; this issue does not require a 0-failed release leg. Any
+  additional red is unexplained until instrumented and routed separately.
 
 ## 10. Sequencing (what starts the day #10544 lands)
 
@@ -375,59 +450,67 @@ Day-zero order (in this lane's successor implementation):
 2. Verify the Make gate reaches Rust: `go test -count=1 ./pkg/refactoraudit/` PASS;
    `make -n test`; then the real Rust leg runs (no longer blocked).
 3. FULL release recount on the rebased base (same command as §2.1, unfiltered):
-   re-anchor total/failed/ignored + all family splits; verify the exact §3 census
-   (M-MAC=181, H-TUN=1, H-EXPECT=1 unless the rebase changes it), then attribute
-   each M-MAC red to repair shape M1/M2/M3 and every green survivor to
-   genuine/vacuous. This is the implementation baseline — no code until it exists.
-4. Land V driver preconditions first (six survivors → honest reds; all other cells
-   unaffected). Family run proves the only newly-red cells are the six.
+   re-anchor total/failed/ignored + all family splits; verify the exact §3 module
+   census (181 working M-MAC candidates, H-TUN=1, H-EXPECT=1 unless the rebase
+   changes it). Before calling any candidate M-MAC attribution final, collect
+   representative test-only MAC instrumentation (ingress ifindex, expected MAC,
+   frame dst, gate result) for each repair shape and compare the post-fix recount
+   per cell. Any red fitting none of M1/M2/M3 is an H-NONMAC residual: preserve
+   its first-failure evidence, file/route it separately, and exclude it from this
+   issue's denominator rather than guessing.
+4. Land V driver preconditions first: resolve Q1's helper-level #9513 move before
+   M1; add five descriptor guards plus the helper assertion. No currently-green
+   cell outside the six may turn red; existing reds may fail at an earlier guard.
+   Family run proves the survivor witnesses and RED-on-revert messages.
 5. Land M1 fixture MACs (revocation TCP + fragment LAN + embedded policy_deny cells
-   flip red→green). Family runs per area.
+   flip red→green). Family runs per area; retain the control's scoped exception.
 6. Land M2/M3 builder parameterization + per-test arrival-MAC repairs (authority,
-   DNAT, reverse-path, ICMP, frag, embedded nat_based cells flip). Family runs per
-   area. Resolve Q1 (ifindex-0) before closing this step.
-7. Full recount + RED-on-revert evidence per §9 (paste guard output for each of the
-   six). Residual must be 0 failed.
-8. Open the implementation PR (this DRAFT becomes its plan section); parent lanes run
-   plan review next — no reviewer dispatch from this lane.
+   DNAT, reverse-path, ICMP v4/v6, deny-SYN, frag, embedded nat_based cells flip).
+   Run the exact builder checklist in §4 and verify B9's frame/ duplicate is not
+   double-counted. Family runs per area.
+7. Full recount + RED-on-revert evidence per §9 (paste guard output for each of
+   the five descriptor survivors and the helper-level #9513 proof). Record exactly
+   181 M-MAC green plus the two named #10553/#10552 residual blocks, or route any
+   additional red as H-NONMAC with evidence. Do not require release 0-failed.
+8. Open the implementation PR (this DRAFT v2 becomes its plan section); parent
+   lanes run delta plan review next — no reviewer dispatch from this lane.
 
 ## 11. Open questions (incl. PLAN-KILL)
 
 - Q1 (re-scope): `an_arrival_with_no_interface_identity_still_declines_9513` drives
   meta ifindex 0, for which NO expected MAC can exist — the MAC gate correctly
-  recycles before identity resolution. Options: (a) move to helper-level (direct
-  re-derivation call with no identity, no descriptor); (b) re-express as an unzoned
-  (not missing) arrival via descriptor; (c) delete as unrepresentable, with the
-  decline logic covered by the helper suite. Owner: implementer + reviewer; decision
-  needed before step 6 closes. Recommendation: (a).
-- Q2 (builder shape): dst-MAC param on existing builders vs new `_with_mac` helpers +
-  wrapper: recommend param (single source, `grep`-verifiable migration); confirm with
-  parent review. Either way the hardcoded LAN-MAC default must not survive as the
-  silent path for cross-interface callers.
+  recycles before identity resolution. Move it to helper-level coverage (direct
+  re-derivation call with no identity) before M1; do not express it as a
+  descriptor arrival or delete the decline coverage. Owner: implementation
+  lane + reviewer; decision is binding before fixture MACs land.
+- Q2 (builder shape): use dst-MAC parameters on existing builders and carry them
+  through `build_txn_tcp_syn_frame_v6`; include `build_policy_deny_tcp_syn_frame`,
+  `build_icmp_echo_frame_v6`, and the frag transit wrapper in the checklist.
+  The `frame/` duplicate ICMP builder is pure-frame/no-descriptor and is
+  explicitly no-touch; verify B9 does not double-count it. No hardcoded LAN,
+  WAN, or garbage default may survive as a silent cross-interface path.
 - Q3 (fabric arrivals): confirm `fabric_admit_snapshot_9604` MACs + `stamp_fabric_zone`
-  dst (`02:bf:72:ff:00:01`) satisfy the `fabric.rs:216-232` fallback order (egress
-  src_mac, else ingress src_mac, else fabric local_mac) post-fix; the 9604 fabric
-  trio is the proof set.
-- Q4 (residual-60 arithmetic is closed): the four cited families account for
-  123 reds (58 + 36 + 19 + 10); the 60 outside them are exactly 58 M-MAC module
-  reds plus H-TUN=1 and H-EXPECT=1, as shown in §3. After #10544 rebase, repeat
-  the same block-name parse and change a class only if the observed first failure
-  changes; do not leave an unclassified remainder.
-- Q5 (fail-fast helper): should `txn_run_descriptor` (test-only path) `debug_assert`
-  MAC coverage (arrival interface has expected MAC and frame dst matches/broadcast)
-  to fail fast with a fixture-blaming message? Pro: instant diagnosis for future
-  cells. Con: production-shared helper gains test-only logic (mitigable via
-  `#[cfg(test)]` + `debug_assertions`). Recommendation: yes, `debug_assert`-only;
-  confirm with parent.
-- PLAN-KILL conditions (either kills or fundamentally redirects this plan):
-  K1: the step-3 recount on the rebased base shows the 183 baseline GONE (0 failed,
-  or failures with a different mechanism) — e.g. #10544 or an intervening PR already
-  fixed/removed the MAC gate or the fixtures. Action: re-census; if nothing remains,
-  close #10504 as obsoleted with the recount as evidence. K2: review determines the
-  production MAC gate itself is wrong (should admit MAC-less test fixtures) —
-  rejected a priori (production ingress always has a MAC; the gate is correct), but
-  if overturned, the fix inverts (gate change + gate-owning tests, not fixtures).
-  Neither is expected; both are checkable at step 3.
+  dst (`02:bf:72:ff:00:01`) satisfy the `fabric.rs:216-232` fallback order
+  (egress src_mac, else ingress src_mac, else fabric local_mac) post-fix; the
+  9604 fabric trio is the proof set.
+- Q4 (residual-60 attribution): arithmetic is closed, but the 58 outside-family
+  M-MAC assignments remain working attribution until evidence closes them.
+  Step 3 must capture representative MAC instrumentation for M1/M2/M3 (or
+  equivalent post-fix/revert evidence) before calling each attribution final;
+  an H-NONMAC branch routes any first failure that fits none.
+- Q5 (fail-fast helper): yes, add a fixture-blaming `debug_assert!` in
+  `txn_run_descriptor`; this helper is already `#[cfg(test)]`-only
+  (`afxdp/mod.rs:621-623`), so there is no production-shared-code concern.
+  The debug-only diagnostic is separate from H-EXPECT/#10552's cfg-gated
+  session-test repair; retained batch counters and representative instrumentation
+  provide release-leg evidence when the debug assertion is compiled out.
+- K1 (baseline gone): rejected as a current PLAN-KILL premise. #10544 changed
+  Make/Go only and the gate/fixtures/builders remain on this tip; step 3 still
+  revalidates the baseline after rebase, but a changed denominator is handled
+  by re-census and evidence, not by assuming the issue is killed.
+- K2 (gate wrong): rejected. Production AF_XDP ingress has a configured MAC and
+  the gate's fail-closed pre-L3 ordering is correct; no gate inversion or
+  test-only bypass is in scope.
 
 ## 12. Blast-radius numbers (live on HEAD 7dcdd7383 unless marked CITED)
 
@@ -441,12 +524,14 @@ Day-zero order (in this lane's successor implementation):
 | B6 | `policy_deny_snapshot` fan-out | 71 sites / 13 files (top: tests_fragment 20, revocation 18, tests_9950 9, embedded 6, filter_revalidation 6, nat64_tunnel 4) | `policy_deny_snapshot\\(\\)` regex |
 | B7 | `nat_snapshot` fan-out | 171 sites / 23 files | `nat_snapshot\\(\\)` regex |
 | B8 | `txn_run_descriptor` fan-out | 232 sites / 19 files | `txn_run_descriptor\\(` regex |
-| B9 | Frame-builder fan-out | txn-v4 104/18; txn-v6 7/2; ICMP echo v4 41/13; frag eth 9/2 + transit 13/3; deny-SYN 13/6 | per-builder regex (§2.1) |
+| B9 | Frame-builder fan-out | txn-v4 104/18; txn-v6 7 hits/2 (definition + wrapper + external uses); ICMP echo v4 41/13; ICMP echo v6 7 hits/3; frag eth 9/2 + transit 13/3; deny-SYN 13/6; frame/ duplicate excluded | per-builder regex (§2.1), with no double-count across descriptor and pure-frame modules |
 | B10 | Gate symbol fan-out | `ingress_destination_mac_accepted` 4 uses / 3 files (def + poll call site + tests) | regex |
 | B11 | Fixture file sizes | `test_fixtures.rs` 2126 lines / 88K; `tests_support.rs` 2852 lines / 104K; `fabric.rs` 820; `poll_descriptor/mod.rs` 7312 (read-only) | `wc -l`, `du -sh` |
 | B12 | PR #10544 file overlap with this issue | 0 paths (that PR: Makefile + 2 docs + 2 Go files; this issue: `userspace-dp/src/afxdp/**` only) | PR body Files(5) vs §2.2 map |
-| B13 | Fix touch estimate (strategy §4) | fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); builders: 5 fns + ~165 call sites across ~30 files; drivers: 2-3 fns + guards; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact file list at implementation |
+| B13 | Fix touch estimate (strategy §4) | fixtures: ~2 snapshot fns + arrival-row audit (~13 files read, ~6 edited); builders: 6 MAC-parameterized fns + 1 v6 wrapper and 179 external call-site migrations (181 builder hits including definition/wrapper) across ~30 files; drivers: 2-3 fns + five descriptor guards + one helper-level guard; tests: 0 outcome asserts weakened | B6-B9 fan-out; exact per-site checklist at implementation |
 | B14 | Go gate live proof | `TestStructMetricIsTypesNotFields6937` FAIL (CompileResult 32f/21t vs floor 20) | RUN §2.1 |
 
 Evidence sources: in-repo source census for B2/B6-B10, `wc -l`/`du -sh` for B11,
-and the internal issue/PR records (`issue://10504`, `pr://10544`) for B4/B12.
+and the internal issue/PR records (`issue://10504`, `issue://10544`, `issue://10552`,
+`issue://10553`, `issue://10554`) for B4/B12 and the three separately owned
+residual/repair dispositions.
