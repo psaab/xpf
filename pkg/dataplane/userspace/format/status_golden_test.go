@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,10 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 		Capabilities: userspace.UserspaceCapabilities{
 			ForwardingSupported: false,
 			UnsupportedReasons:  []string{"reason-a", "reason-b"},
+		},
+		LastSnapshotRejectReasons: []string{
+			`policy trust->untrust/web names content the userspace matcher cannot represent: source-address "missing-book"; application "bad-app", "worse-app"`,
+			`policy global/dns names content the userspace matcher cannot represent: destination-address`,
 		},
 		HAGroups: []userspace.HAGroupStatus{
 			{RGID: 0, Active: true, WatchdogTimestamp: 100},
@@ -184,5 +189,38 @@ func TestFormatStatusSummaryGolden(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Fatalf("FormatStatusSummary output diverged from golden.\n--- got ---\n%s\n--- want ---\n%s", got, string(want))
+	}
+}
+
+// #10500: removing the diagnostic from the same deterministic fixture must
+// restore every pre-existing byte. The checked-in golden contains the
+// deliberate rejection block; subtract only those additive lines to retain a
+// captured baseline for the absent case.
+func TestFormatStatusSummaryRejectReasonsAbsentByteCompare10500(t *testing.T) {
+	withReasons := goldenStatusSummaryFixture()
+	withoutReasons := withReasons
+	withoutReasons.LastSnapshotRejectReasons = nil
+
+	goldenPath := filepath.Join("testdata", "status_summary.golden")
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	want := string(wantBytes)
+	for i, reason := range withReasons.LastSnapshotRejectReasons {
+		prefix := strings.Repeat(" ", 29)
+		if i == 0 {
+			prefix = "  Last snapshot rejection:   "
+		}
+		line := prefix + reason + "\n"
+		before, after, found := strings.Cut(want, line)
+		if !found {
+			t.Fatalf("golden missing rejection line %q", line)
+		}
+		want = before + after
+	}
+	got := FormatStatusSummary(withoutReasons)
+	if got != want {
+		t.Fatalf("empty LastSnapshotRejectReasons changed pre-existing bytes.\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }

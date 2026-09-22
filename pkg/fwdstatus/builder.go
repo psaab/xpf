@@ -168,6 +168,9 @@ func Build(
 		}
 	}
 	if isUserspace && usErr == nil {
+		fs.LastSnapshotRejectReasons = append([]string(nil), usStatus.LastSnapshotRejectReasons...)
+	}
+	if isUserspace && usErr == nil {
 		fs.WorkerCPUMode = CPUModeWorkers
 		// #878: derive Buffer% from per-binding UMEM in-flight and
 		// TX-ring depth. Both inputs come from atomics published by

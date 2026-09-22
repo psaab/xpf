@@ -1062,6 +1062,9 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		// on the next scheduler tick until the rebuild succeeds and converges.
 		return fmt.Errorf("userspace: %w", err)
 	}
+	// #10500: the scheduler rebuild recomputes content-rejection reasons;
+	// record before publish so the manager stamp follows this attempt.
+	m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
 
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)

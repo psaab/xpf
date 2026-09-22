@@ -65,6 +65,10 @@ type ForwardingStatus struct {
 	BufferFollowupRef int     // GitHub issue number printed in place of buffer %.
 	Uptime            time.Duration
 
+	// LastSnapshotRejectReasons is stamped by the userspace manager when the
+	// latest snapshot contains policy content the matcher cannot represent.
+	// The forwarding view receives it from the already-fetched ProcessStatus.
+	LastSnapshotRejectReasons []string
 	// --- Helper crash/restart state (#7250) ----------------------
 	//
 	// #5838's last acceptance bullet: "operational status exposes exit
@@ -197,6 +201,12 @@ func Format(fs *ForwardingStatus) string {
 	}
 
 	writeRow(&b, "Uptime:", formatUptime(fs.Uptime))
+	if len(fs.LastSnapshotRejectReasons) > 0 {
+		writeRow(&b, "Last snapshot rejection", fs.LastSnapshotRejectReasons[0])
+		for _, reason := range fs.LastSnapshotRejectReasons[1:] {
+			fmt.Fprintf(&b, "%37s%s\n", "", reason)
+		}
+	}
 
 	writeHelperCrash(&b, fs)
 
