@@ -282,8 +282,8 @@ before execution and the same change must switch to target-grouped
   identity and ignored transitions are explicit; registry diffs are a
   review surface; one current invocation stays below the measured bound.
 - Con: approximately 2,855 entries are churn-prone; the live validator
-  needs 14 target-list probes and a small parser; coordinator exclusions
-  require per-path review.
+  needs 14 targets × (`--list` + `--list --ignored`) = 28 list
+  invocations and a small parser; coordinator exclusions require per-path review.
 
 ### Option B — prefix filters plus floors (honest alternative, not selected)
 
@@ -402,8 +402,9 @@ test-rust: check-userspace-dt-needed
    `--include-ignored`; every ignored family path is explicit in `X`.
 5. Multi-target normalization sums all 14 target sections, retains target
    identity, and rejects a selected duplicate raw path or expanded argv
-   at/above 1 MiB (current selected argv is 236,137 B; host ARG_MAX is
-   2,097,152 B).
+   at/above 1 MiB (current F∩R candidate argv is 236,137 B, a conservative
+   upper bound on selected-A argv; the 1 MiB assertion measures F∩R;
+   host ARG_MAX is 2,097,152 B).
 6. Release leg remains the same command and full-suite scope; its historical
    5877 result is not asserted as a current baseline.
 7. Serialization preserved: `--test-threads=1` stays on both test legs
@@ -433,10 +434,12 @@ Operability.
   toolchain. Mitigation: parse only `: test` lines from every target,
   capture `--list` and `--list --ignored`, retain target identity, sum all
   sections, and fail closed on unknown format or duplicate selected paths.
-- **Performance — Low-Medium, bounded.** Risk: 14 warm list probes and the
+- **Performance — Low-Medium, bounded.** Risk: 14 targets ×
+  (`--list` + `--list --ignored`) = 28 warm list invocations, plus the
   exact allowlist increase gate overhead. Mitigation: probes reuse compiled
-   artifacts; current selected argv is 236,137 B versus a 1 MiB assertion;
-  one exact invocation remains the current path; no per-test process loop.
+  artifacts; current F∩R candidate argv is 236,137 B (conservative upper
+  bound on selected-A argv) versus a 1 MiB assertion on F∩R; one exact
+  invocation remains the current path; no per-test process loop.
   Implementation reports timing and flags >2x the historical 213 s cold /
   65 s run for review.
 - **Operability — Medium, mitigated.** Risk: a new family test or ignored
@@ -476,7 +479,9 @@ cluster/incus commands in Wave 1):
    contain `coordinator` are not excluded by name.
 6. **Target normalization/argv:** fixture two targets with the same raw
    path and exceed the 1 MiB expansion; validator must fail before cargo
-   runs. Verify current selected set has no collision and 236,137 B.
+   runs. Verify current F∩R candidate argv has no collision and is
+   236,137 B (conservative upper bound on selected-A argv); the 1 MiB
+   assertion measures F∩R.
 7. **Oracle re-proof:** re-apply the #9499 planted mutant
    (`wrapping_add` -> `+` in `afxdp/frame/tcp.rs`); the exact registry must
    include `reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499`; the
