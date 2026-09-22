@@ -133,15 +133,16 @@ fn drive_lan_segment(
     // An established segment (ACK, no SYN): on a session MISS the #4400/#4539
     // guard declines to seed a session for a non-SYN first packet, so "which
     // session was found" is the only thing that can produce a forward here.
-    let frame = build_txn_tcp_syn_frame_v4(CLIENT, SERVER, CLIENT_PORT, SERVER_PORT, 0x10);
+    let frame = build_txn_tcp_syn_frame_v4(CLIENT, SERVER, CLIENT_PORT, SERVER_PORT, 0x10, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(24, 0x10, frame.len() as u16);
-    let _ = txn_run_descriptor(
+    let _ = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     binding

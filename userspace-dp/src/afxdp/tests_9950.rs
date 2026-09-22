@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-/// Build eth(14) + IPv4(20) + payload with explicit id/frag_off/proto/addrs.
 fn ipv4_frag_frame_9950(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -24,9 +23,23 @@ fn ipv4_frag_frame_9950(
     frag_off: u16,
     payload: &[u8],
 ) -> Vec<u8> {
+    ipv4_frag_frame_9950_with_mac(src, dst, proto, id, frag_off, payload, TEST_LAN_MAC)
+}
+
+/// Build eth(14) + IPv4(20) + payload with explicit id/frag_off/proto/addrs.
+fn ipv4_frag_frame_9950_with_mac(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    proto: u8,
+    id: u16,
+    frag_off: u16,
+    payload: &[u8],
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
     let mut f = vec![
         0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
     ];
+    f[..6].copy_from_slice(&dst_mac);
     let mut ip = vec![0u8; 20];
     ip[0] = 0x45;
     let total = (20 + payload.len()) as u16;
@@ -170,13 +183,14 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
             frame_second_arrival.len() as u16,
         );
 
-        let (_b1, dbg1) = txn_run_descriptor(
+        let (_b1, dbg1) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &frame_first_arrival,
             meta_a,
+            true,
         );
         assert_eq!(
             dbg1.forward, 1,
@@ -184,13 +198,14 @@ fn f035_overlap_fragments_denied_both_orders_9950() {
         );
         let d0 = crate::fragment_overlap::FRAG_OVERLAP_DROPPED
             .load(std::sync::atomic::Ordering::Relaxed);
-        let (_b2, dbg2) = txn_run_descriptor(
+        let (_b2, dbg2) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &frame_second_arrival,
             meta_b,
+            true,
         );
         assert_eq!(
             dbg2.forward, expect_second_forward,
@@ -232,13 +247,14 @@ fn f035_ttl_rewrite_failure_keeps_overlap_anchored_10285() {
     let tail_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, tail.len() as u16);
     let overlap_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
 
-    let (_batch, first_dbg) = txn_run_descriptor(
+    let (_batch, first_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &head,
         head_meta,
+        true,
     );
     assert_eq!(first_dbg.forward, 1, "head must establish the overlap anchor");
     let mut head_request = binding
@@ -253,13 +269,14 @@ fn f035_ttl_rewrite_failure_keeps_overlap_anchored_10285() {
         .commit();
     drop(head_request);
 
-    let (_batch, tail_dbg) = txn_run_descriptor(
+    let (_batch, tail_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &tail,
         tail_meta,
+        true,
     );
     assert_eq!(tail_dbg.forward, 1, "adjacent terminal tail must queue");
     let pending = binding
@@ -292,15 +309,16 @@ fn f035_ttl_rewrite_failure_keeps_overlap_anchored_10285() {
     );
     drop(pending);
 
-    let drops_before = crate::fragment_overlap::FRAG_OVERLAP_DROPPED
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let (_batch, overlap_dbg) = txn_run_descriptor(
+    let drops_before =
+        crate::fragment_overlap::FRAG_OVERLAP_DROPPED.load(std::sync::atomic::Ordering::Relaxed);
+    let (_batch, overlap_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &overlap,
         overlap_meta,
+        true,
     );
     assert_eq!(
         overlap_dbg.forward, 0,
@@ -343,13 +361,14 @@ fn f035_middle_ttl_rewrite_failure_then_terminal_keeps_overlap_anchored_10285() 
     let terminal_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, terminal.len() as u16);
     let overlap_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
 
-    let (_batch, head_dbg) = txn_run_descriptor(
+    let (_batch, head_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &head,
         head_meta,
+        true,
     );
     assert_eq!(head_dbg.forward, 1, "head must establish the overlap anchor");
     let mut head_request = binding
@@ -364,13 +383,14 @@ fn f035_middle_ttl_rewrite_failure_then_terminal_keeps_overlap_anchored_10285() 
         .commit();
     drop(head_request);
 
-    let (_batch, middle_dbg) = txn_run_descriptor(
+    let (_batch, middle_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &middle,
         middle_meta,
+        true,
     );
     assert_eq!(
         middle_dbg.forward, 1,
@@ -416,13 +436,14 @@ fn f035_middle_ttl_rewrite_failure_then_terminal_keeps_overlap_anchored_10285() 
         "failed middle admission must retain the datagram entry"
     );
 
-    let (_batch, terminal_dbg) = txn_run_descriptor(
+    let (_batch, terminal_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &terminal,
         terminal_meta,
+        true,
     );
     assert_eq!(
         terminal_dbg.forward, 1,
@@ -449,13 +470,14 @@ fn f035_middle_ttl_rewrite_failure_then_terminal_keeps_overlap_anchored_10285() 
         "failed middle keeps the complete datagram protected after terminal TX acceptance"
     );
 
-    let (_batch, overlap_dbg) = txn_run_descriptor(
+    let (_batch, overlap_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &overlap,
         overlap_meta,
+        true,
     );
     assert_eq!(
         overlap_dbg.forward, 0,
@@ -500,13 +522,14 @@ fn f035_terminal_tail_dscp_output_refusal_keeps_overlap_anchored_10285() {
     let mut tail_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, tail.len() as u16);
     tail_meta.dscp = 46;
 
-    let (_batch, head_dbg) = txn_run_descriptor(
+    let (_batch, head_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &head,
         head_meta,
+        true,
     );
     assert_eq!(head_dbg.forward, 1, "head must establish the overlap anchor");
     let mut head_request = binding
@@ -521,15 +544,16 @@ fn f035_terminal_tail_dscp_output_refusal_keeps_overlap_anchored_10285() {
         .commit();
     drop(head_request);
 
-    let drops_before_tail = crate::fragment_overlap::FRAG_OVERLAP_DROPPED
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let (_batch, tail_dbg) = txn_run_descriptor(
+    let drops_before_tail =
+        crate::fragment_overlap::FRAG_OVERLAP_DROPPED.load(std::sync::atomic::Ordering::Relaxed);
+    let (_batch, tail_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &tail,
         tail_meta,
+        true,
     );
     assert_eq!(
         tail_dbg.tx, 0,
@@ -547,15 +571,15 @@ fn f035_terminal_tail_dscp_output_refusal_keeps_overlap_anchored_10285() {
     );
 
     let overlap = ipv4_frag_frame_9950(src, dst, PROTO_UDP, 0xD285, 0x0001, &[0xCC; 16]);
-    let overlap_meta =
-        frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
-    let (_batch, overlap_dbg) = txn_run_descriptor(
+    let overlap_meta = frag_meta_9950(24, PROTO_UDP, 0, src, dst, overlap.len() as u16);
+    let (_batch, overlap_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &overlap,
         overlap_meta,
+        true,
     );
     assert_eq!(
         overlap_dbg.forward, 0,
@@ -617,20 +641,14 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
-        frag_meta_9950(
-            24,
-            PROTO_UDP,
-            0,
-            src,
-            dst,
-            frame.len() as u16,
-        ),
+        frag_meta_9950(24, PROTO_UDP, 0, src, dst, frame.len() as u16),
+        true,
     );
     assert_eq!(
         crate::fragment_overlap::FRAG_OVERLAP_SHARD_FULL_DROPPED
@@ -739,7 +757,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     // (1) Forward SYN (unfragmented) wan->lan: establishes the DNAT session.
     let mut binding_wan = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding_wan.interface = Arc::<str>::from("reth0.80");
-    let syn = build_txn_tcp_syn_frame_v4(client, public, client_port, public_port, 0x02);
+    let syn = build_txn_tcp_syn_frame_v4(client, public, client_port, public_port, 0x02, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta_syn = {
         let mut m = txn_meta_v4(12, 0x02, syn.len() as u16);
         m.protocol = PROTO_TCP;
@@ -749,13 +767,14 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         m.flow_dst_addr = [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         m
     };
-    let (_b0, dbg0) = txn_run_descriptor(
+    let (_b0, dbg0) = txn_run_descriptor_checked(
         &mut binding_wan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg0.forward, 1, "F-036 premise: forward SYN must forward");
     assert_eq!(dbg0.nat_applied_dnat, 1, "F-036 premise: forward must DNAT");
@@ -810,13 +829,14 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     );
     meta_reordered.flow_src_port = internal_port;
     meta_reordered.flow_dst_port = client_port;
-    let (batch_reordered, dbg_reordered) = txn_run_descriptor(
+    let (batch_reordered, dbg_reordered) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reordered_tail,
         meta_reordered,
+        true,
     );
     assert_eq!(
         dbg_reordered.forward, 0,
@@ -827,13 +847,14 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         "#10130: session-gated reply-tail drop is observable"
     );
 
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reply_first,
         meta_first,
+        true,
     );
     assert_eq!(
         dbg1.forward, 1,
@@ -861,13 +882,14 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     };
     // Clear prior forwards so index 0 is this packet's request.
     binding_lan.scratch.scratch_forwards.clear();
-    let (_b2, dbg2) = txn_run_descriptor(
+    let (_b2, dbg2) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reply_tail,
         meta_tail,
+        true,
     );
     assert_eq!(
         dbg2.forward, 1,
@@ -927,13 +949,14 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     meta_plain.flow_src_port = internal_port;
     meta_plain.flow_dst_port = 443;
     binding_lan.scratch.scratch_forwards.clear();
-    let (batch_plain, dbg_plain) = txn_run_descriptor(
+    let (batch_plain, dbg_plain) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &plain_tail,
         meta_plain,
+        true,
     );
     assert_eq!(
         dbg_plain.forward, 1,
@@ -1030,7 +1053,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
     // (1) Forward SYN lan->wan: allocates the pool port.
     let mut binding_lan = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding_lan.interface = Arc::<str>::from("reth1.0");
-    let syn = build_txn_tcp_syn_frame_v4(internal, external, internal_port, external_port, 0x02);
+    let syn = build_txn_tcp_syn_frame_v4(internal, external, internal_port, external_port, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_syn = {
         let mut m = txn_meta_v4(24, 0x02, syn.len() as u16);
         m.flow_src_port = internal_port;
@@ -1039,13 +1062,14 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         m.flow_dst_addr = [8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         m
     };
-    let (_b0, dbg0) = txn_run_descriptor(
+    let (_b0, dbg0) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg0.forward, 1, "F-053 premise: forward SYN must forward");
     assert_eq!(
@@ -1077,7 +1101,15 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
     tcp[12] = 0x50;
     tcp[13] = 0x10; // ACK
     let reply_id = 0xD001u16;
-    let reply_first = ipv4_frag_frame_9950(external, pool, PROTO_TCP, reply_id, 0x2000, &tcp);
+    let reply_first = ipv4_frag_frame_9950_with_mac(
+        external,
+        pool,
+        PROTO_TCP,
+        reply_id,
+        0x2000,
+        &tcp,
+        TEST_WAN_MAC,
+    );
     let meta_first = {
         let mut m = frag_meta_9950(
             12,
@@ -1092,13 +1124,14 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         m.l4_offset = 34;
         m
     };
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding_wan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reply_first,
         meta_first,
+        true,
     );
     assert_eq!(
         dbg1.forward, 1,
@@ -1113,8 +1146,15 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
     // 24-byte first — NOT overlapping). Wire dst must be the internal host,
     // not the pool address.
     let tail_payload = [0xDDu8; 16];
-    let reply_tail =
-        ipv4_frag_frame_9950(external, pool, PROTO_TCP, reply_id, 0x0003, &tail_payload);
+    let reply_tail = ipv4_frag_frame_9950_with_mac(
+        external,
+        pool,
+        PROTO_TCP,
+        reply_id,
+        0x0003,
+        &tail_payload,
+        TEST_WAN_MAC,
+    );
     let meta_tail = {
         let mut m = frag_meta_9950(12, PROTO_TCP, 0, external, pool, reply_tail.len() as u16);
         m.flow_src_port = external_port;
@@ -1122,13 +1162,14 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         m
     };
     binding_wan.scratch.scratch_forwards.clear();
-    let (_b2, dbg2) = txn_run_descriptor(
+    let (_b2, dbg2) = txn_run_descriptor_checked(
         &mut binding_wan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reply_tail,
         meta_tail,
+        true,
     );
     assert_eq!(
         dbg2.forward, 1,
@@ -1242,7 +1283,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
     let mut sessions = SessionTable::new();
     let mut binding_lan = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding_lan.interface = Arc::<str>::from("reth1.0");
-    let syn = build_txn_tcp_syn_frame_v4(internal, external, internal_port, external_port, 0x02);
+    let syn = build_txn_tcp_syn_frame_v4(internal, external, internal_port, external_port, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_syn = {
         let mut m = txn_meta_v4(24, 0x02, syn.len() as u16);
         m.flow_src_port = internal_port;
@@ -1251,13 +1292,14 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
         m.flow_dst_addr = [8, 8, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         m
     };
-    let (_b0, dbg0) = txn_run_descriptor(
+    let (_b0, dbg0) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg0.forward, 1, "premise: forward SYN must forward");
     let pool_port = binding_lan.scratch.scratch_forwards[0]
@@ -1273,7 +1315,15 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
         tcp[2..4].copy_from_slice(&pool_port.to_be_bytes());
         tcp[12] = 0x50;
         tcp[13] = 0x10;
-        let reply_first = ipv4_frag_frame_9950(external, pool, PROTO_TCP, reply_id, 0x2000, &tcp);
+        let reply_first = ipv4_frag_frame_9950_with_mac(
+            external,
+            pool,
+            PROTO_TCP,
+            reply_id,
+            0x2000,
+            &tcp,
+            TEST_WAN_MAC,
+        );
         let meta_first = {
             let mut m = frag_meta_9950(
                 12,
@@ -1288,18 +1338,26 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             m.l4_offset = 34;
             m
         };
-        let (_b1, dbg1) = txn_run_descriptor(
+        let (_b1, dbg1) = txn_run_descriptor_checked(
             &mut binding_wan,
             &mut sessions,
             &forwarding,
             &ha_state,
             &reply_first,
             meta_first,
+            true,
         );
         assert_eq!(dbg1.forward, 1, "{label}: reply first must forward");
         let tail_payload = [0xDDu8; 16];
-        let reply_tail =
-            ipv4_frag_frame_9950(external, pool, PROTO_TCP, reply_id, 0x0003, &tail_payload);
+        let reply_tail = ipv4_frag_frame_9950_with_mac(
+            external,
+            pool,
+            PROTO_TCP,
+            reply_id,
+            0x0003,
+            &tail_payload,
+            TEST_WAN_MAC,
+        );
         let meta_tail = {
             let mut m = frag_meta_9950(12, PROTO_TCP, 0, external, pool, reply_tail.len() as u16);
             m.flow_src_port = external_port;
@@ -1307,13 +1365,14 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             m
         };
         binding_wan.scratch.scratch_forwards.clear();
-        let (_b2, dbg2) = txn_run_descriptor(
+        let (_b2, dbg2) = txn_run_descriptor_checked(
             &mut binding_wan,
             &mut sessions,
             &forwarding,
             &ha_state,
             &reply_tail,
             meta_tail,
+            true,
         );
         assert_eq!(dbg2.forward, 1, "{label}: reply tail must forward");
         let fwd = &binding_wan.scratch.scratch_forwards[0];
@@ -1372,7 +1431,7 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
     // (1) Unfragmented SYN establishes the session (no frag assoc — not a fragment).
-    let syn = build_txn_tcp_syn_frame_v4(internal, external, 33333, 443, 0x02);
+    let syn = build_txn_tcp_syn_frame_v4(internal, external, 33333, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_syn = {
         let mut m = txn_meta_v4(24, 0x02, syn.len() as u16);
         m.flow_src_port = 33333;
@@ -1381,13 +1440,14 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
         m.flow_dst_addr = [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         m
     };
-    let (_b0, dbg0) = txn_run_descriptor(
+    let (_b0, dbg0) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg0.forward, 1, "premise: SYN must forward");
     // (2) Later fragmented datagram on the SAME 5-tuple: first hits the session (not a
@@ -1406,13 +1466,14 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
         m.l4_offset = 34;
         m
     };
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         meta_first,
+        true,
     );
     assert_eq!(dbg1.forward, 1, "forward first (session hit) must forward");
     assert_eq!(dbg1.nat_applied_none, 0, "forward first must be SNAT'd");
@@ -1424,13 +1485,14 @@ fn forward_hit_existing_flow_forwards_translated_9950() {
         m
     };
     binding.scratch.scratch_forwards.clear();
-    let (_b2, dbg2) = txn_run_descriptor(
+    let (_b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &tail,
         meta_tail,
+        true,
     );
     assert_eq!(
         dbg2.forward, 1,
@@ -1552,6 +1614,7 @@ fn ipv6_frag_frame_9950(
     let mut f = vec![
         0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x86, 0xDD,
     ];
+    f[..6].copy_from_slice(&TEST_LAN_MAC);
     let mut ip = vec![0u8; 40];
     ip[0] = 0x60;
     let plen = (8 + payload.len()) as u16;
@@ -1647,9 +1710,9 @@ fn f035_overlap_v6_denied_both_orders_9950() {
             ..UserspaceDpMeta::default()
         };
         let flags_b = if is_tail_first { 0x02u8 } else { 0x10u8 };
-        let (_b1, dbg1) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_a, meta_for(&frame_a, flags_a));
+        let (_b1, dbg1) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_a, meta_for(&frame_a, flags_a), true);
         assert_eq!(dbg1.forward, 1, "{label}: first arrival must forward");
-        let (_b2, dbg2) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_b, meta_for(&frame_b, flags_b));
+        let (_b2, dbg2) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_b, meta_for(&frame_b, flags_b), true);
         assert_eq!(dbg2.forward, expect_second, "{label}: second arrival");
     }
 }

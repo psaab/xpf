@@ -202,6 +202,7 @@ fn run_ingress_identity_flow_on(
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_VLAN50_MAC,
     );
     // The shim strips the 802.1Q tag and conveys the VID out of band in
     // `meta.ingress_vlan_id`, so the frame stays untagged and l3 is at 14 —
@@ -216,13 +217,14 @@ fn run_ingress_identity_flow_on(
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, INGRESS_PARENT_IFINDEX, 0);
     binding.interface = Arc::<str>::from("ge-0-0-0");
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -518,6 +520,7 @@ fn run_missing_neighbor_seed_flow_capturing_shared(worker: u32) -> (SessionTable
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_VLAN50_MAC,
     );
     let mut meta = txn_meta_v4(
         INGRESS_PARENT_IFINDEX as u32,
@@ -722,6 +725,7 @@ fn run_local_miss_identity_flow() -> SessionTable {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_VLAN70_MAC,
     );
     // As in the transit flow: the shim strips the 802.1Q tag and conveys the
     // VID out of band in `meta.ingress_vlan_id`, so the frame stays untagged.
@@ -736,13 +740,14 @@ fn run_local_miss_identity_flow() -> SessionTable {
     binding.interface = Arc::<str>::from("ge-0-0-3");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(

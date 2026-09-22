@@ -266,16 +266,18 @@ fn pool_snat_pat_survives_expected_ports_9782() {
         client_port,
         5201,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     seed_l4_csum_v4(&mut frame, PROTO_TCP);
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(dbg.tx, 1, "pool SYN must forward");
@@ -374,16 +376,18 @@ fn interface_pat_collider_both_complete_9782() {
             sport,
             5201,
             TCP_FLAG_SYN,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         seed_l4_csum_v4(&mut frame, PROTO_TCP);
         let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-        let (_batch, dbg) = txn_run_descriptor(
+        let (_batch, dbg) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &frame,
             meta,
+            true,
         );
         assert_eq!(dbg.tx, 1, "flow {i} SYN must forward");
         let fwd = binding.scratch.scratch_forwards.last().expect("request");
@@ -488,16 +492,18 @@ fn interface_preserve_control_unchanged_9782() {
         50001,
         5201,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     seed_l4_csum_v4(&mut frame, PROTO_TCP);
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(dbg.tx, 1);
     let fwd = &binding.scratch.scratch_forwards[0];
@@ -563,6 +569,7 @@ fn dnat_dst_port_survives_expected_ports_9782() {
         54321,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     seed_l4_csum_v4(&mut frame, PROTO_TCP);
     let nat = crate::nat::NatDecision {
@@ -590,6 +597,7 @@ fn v6_tcp_snat_port_survives_expected_ports_9782() {
         "2001:559:8585:80::200".parse().unwrap(),
         59508,
         5201,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     seed_l4_csum_v6(&mut frame, PROTO_TCP);
     let nat = crate::nat::NatDecision {
@@ -710,6 +718,7 @@ fn untranslated_torn_dst_port_still_repaired_9782() {
         50002,
         5201,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     frame[34 + 2] = 0x27;
     frame[34 + 3] = 0x0F; // 9999

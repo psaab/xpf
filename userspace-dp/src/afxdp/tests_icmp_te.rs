@@ -93,8 +93,7 @@ fn forwarding_state_allow_embedded_icmp_wired() {
 
 #[test]
 fn packet_ttl_would_expire_identifies_v4_and_v6() {
-    let frame_v4 =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 1);
+    let frame_v4 = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 1, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_v4 = UserspaceDpMeta {
         l3_offset: 14,
         addr_family: libc::AF_INET as u8,
@@ -106,6 +105,7 @@ fn packet_ttl_would_expire_identifies_v4_and_v6() {
         "2001:559:8585:ef00::102".parse().unwrap(),
         "2606:4700:4700::1111".parse().unwrap(),
         2,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta_v6 = UserspaceDpMeta {
         l3_offset: 14,
@@ -123,7 +123,7 @@ fn build_local_time_exceeded_request_returns_prebuilt_forward_for_ttl_expiry() {
     let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1);
+    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 34,
@@ -582,7 +582,7 @@ fn build_local_time_exceeded_request_resolves_logical_ingress_for_classify_6102(
 fn build_local_time_exceeded_request_skips_fabric_ingress_packets() {
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1);
+    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1, crate::afxdp::tests_support::TEST_FABRIC_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 34,
@@ -656,7 +656,7 @@ fn build_local_time_exceeded_request_skips_fabric_ingress_packets() {
 fn build_local_time_exceeded_v4_quotes_original_packet() {
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1);
+    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 1, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 34,
@@ -717,7 +717,7 @@ fn build_local_time_exceeded_v4_quotes_original_packet() {
 fn build_local_time_exceeded_v6_quotes_original_packet() {
     let client_ip: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
     let dst_ip: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
-    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 1);
+    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 1, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 54,
@@ -838,7 +838,8 @@ fn time_exceeded_emitted_for_unicast_tcp() {
 fn time_exceeded_suppressed_for_inbound_icmp_error_v4() {
     let client = Ipv4Addr::new(10, 0, 61, 102);
     let server = Ipv4Addr::new(1, 1, 1, 1);
-    let mut frame = build_icmp_echo_frame_v4(client, server, 1);
+    let mut frame =
+        build_icmp_echo_frame_v4(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC);
     frame[34] = 11; // ICMP type Time Exceeded (an error)
     let meta = UserspaceDpMeta {
         l3_offset: 14,
@@ -872,7 +873,8 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v4() {
     );
     assert!(req.is_none(), "no Time Exceeded for an inbound ICMP error");
     // An echo *request* (a query, type 8) is NOT suppressed.
-    let mut echo = build_icmp_echo_frame_v4(client, server, 1);
+    let mut echo =
+        build_icmp_echo_frame_v4(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC);
     echo[34] = 8;
     assert!(
         can_generate_icmp_error_reply(&echo, meta, &ForwardingState::default()),
@@ -886,7 +888,8 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v4() {
 fn time_exceeded_suppressed_for_inbound_icmp_error_v6() {
     let client: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
     let server: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
-    let mut frame = build_icmp_echo_frame_v6(client, server, 1);
+    let mut frame =
+        build_icmp_echo_frame_v6(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC);
     frame[54] = 3; // ICMPv6 Time Exceeded (error, < 128)
     let meta = UserspaceDpMeta {
         l3_offset: 14,
@@ -901,7 +904,8 @@ fn time_exceeded_suppressed_for_inbound_icmp_error_v6() {
         "gate must suppress reply to an inbound ICMPv6 error"
     );
     // ICMPv6 echo request (type 128, a query) is NOT suppressed.
-    let echo = build_icmp_echo_frame_v6(client, server, 1); // type 128
+    let echo =
+        build_icmp_echo_frame_v6(client, server, 1, crate::afxdp::tests_support::TEST_COS_MAC); // type 128
     assert!(
         can_generate_icmp_error_reply(&echo, meta, &ForwardingState::default()),
         "inbound ICMPv6 echo request must still draw an error"
@@ -1039,7 +1043,7 @@ fn time_exceeded_suppressed_for_bad_source_v4() {
 fn time_exceeded_suppressed_for_bad_source_v6() {
     let bad_src: Ipv6Addr = "ff02::1".parse().unwrap(); // multicast
     let server: Ipv6Addr = "2001:559:8585:ef00::1".parse().unwrap();
-    let frame = build_icmp_echo_frame_v6(bad_src, server, 1);
+    let frame = build_icmp_echo_frame_v6(bad_src, server, 1, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 54,

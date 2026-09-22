@@ -101,10 +101,6 @@ fn revocation_snapshot(terms: Vec<FirewallTermSnapshot>) -> ConfigSnapshot {
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
-            // The AF_XDP poll boundary rejects PACKET_OTHERHOST unicast
-            // frames. Match the synthetic frame's destination to this
-            // ingress interface so the test reaches session-hit revalidation.
-            iface.hardware_addr = "02:bf:72:00:80:08".into();
         }
     }
     // PBR cells need a live `blue` table identity while leaving the tested
@@ -148,6 +144,20 @@ fn revocation_snapshot(terms: Vec<FirewallTermSnapshot>) -> ConfigSnapshot {
         action: "permit".into(),
         ..Default::default()
     });
+    // #10554: the control keeps distinct per-row MACs. The LAN row regressing
+    // to the WAN alias (02:bf:72:00:80:08) would silently reintroduce the
+    // tripwire this repair removed — every driver below builds a LAN-dst frame.
+    let lan_mac = snapshot
+        .interfaces
+        .iter()
+        .find(|iface| iface.ifindex == LAN_IFINDEX)
+        .expect("LAN row")
+        .hardware_addr
+        .clone();
+    assert_eq!(
+        lan_mac, "02:bf:72:01:00:01",
+        "control LAN row must carry the LAN MAC, not the WAN alias (#10554)"
+    );
     snapshot
 }
 
@@ -209,7 +219,7 @@ fn drive_packets(
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
 
-    let frame = build_policy_deny_tcp_syn_frame();
+    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -338,12 +348,12 @@ fn drive_packets(
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
     let mut dbg = DebugPollCounters::default();
+    let area_ptr = binding.umem.area() as *const MmapArea;
+
     let mut telemetry = TelemetryContext {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
-
     poll_binding_process_descriptor(
         &mut binding,
         0,
@@ -365,8 +375,21 @@ fn drive_packets(
         &worker_ctx,
         &mut telemetry,
     );
+    drop(telemetry);
+    assert_eq!(
+        batch.validated_packets, 1,
+        "the descriptor must pass validation before filter revalidation"
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the revocation fixture must exercise a real session hit"
+    );
     if second_packet {
         push_packet(&mut binding);
+        let mut telemetry = TelemetryContext {
+            dbg: &mut dbg,
+            counters: &mut batch,
+        };
         poll_binding_process_descriptor(
             &mut binding,
             0,

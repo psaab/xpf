@@ -37,6 +37,7 @@ fn copy_v4_snat_port_survives_expected_ports_9782() {
         59508,
         5201,
         0x02,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     // Valid input checksum (builder leaves TCP csum zero).
     crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
@@ -86,6 +87,7 @@ fn copy_v6_snat_port_survives_expected_ports_9782() {
         "2001:559:8585:80::200".parse().unwrap(),
         59508,
         5201,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(
         &mut frame[14..],
@@ -138,6 +140,7 @@ fn copy_v4_build_ignores_wrong_l3_stamp_9900() {
         59508,
         5201,
         0x02,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
         &mut frame[14..],
@@ -197,6 +200,7 @@ fn copy_v6_build_coheres_l4_with_fallback_l3_9900() {
         "2001:559:8585:80::200".parse().unwrap(),
         59508,
         5201,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     frame.splice(12..12, [0x81, 0x00, 0x00, 0x0a]);
     crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(

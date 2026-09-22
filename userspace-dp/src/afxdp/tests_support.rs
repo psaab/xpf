@@ -21,11 +21,22 @@ use crate::{
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
 
-pub(super) fn build_icmp_echo_frame_v4(src: Ipv4Addr, dst: Ipv4Addr, ttl: u8) -> Vec<u8> {
+pub(super) const TEST_LAN_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01];
+pub(super) const TEST_WAN_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08];
+// Synthetic CoS MAC for pure ICMP-TE frame generation; it is not a
+// descriptor DMZ interface.
+pub(super) const TEST_COS_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01];
+pub(super) const TEST_FABRIC_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01];
+pub(super) const TEST_VLAN50_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08];
+pub(super) const TEST_VLAN70_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x70, 0x07];
+pub(super) const TEST_RETH1_PARENT_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x00];
+pub(super) const TEST_RETH1_SECOND_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x02];
+
+pub(super) fn build_icmp_echo_frame_v4(src: Ipv4Addr, dst: Ipv4Addr, ttl: u8, dst_mac: [u8; 6]) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        dst_mac,
         [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
         0,
         0x0800,
@@ -44,12 +55,11 @@ pub(super) fn build_icmp_echo_frame_v4(src: Ipv4Addr, dst: Ipv4Addr, ttl: u8) ->
     frame
 }
 
-
-pub(super) fn build_icmp_echo_frame_v6(src: Ipv6Addr, dst: Ipv6Addr, hop_limit: u8) -> Vec<u8> {
+pub(super) fn build_icmp_echo_frame_v6(src: Ipv6Addr, dst: Ipv6Addr, hop_limit: u8, dst_mac: [u8; 6]) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        dst_mac,
         [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
         0,
         0x86dd,
@@ -285,9 +295,6 @@ pub(super) fn build_udp_frame_v4(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
 }
 
 
-/// Build an IPv4 ICMP Time Exceeded frame with an embedded TCP packet.
-/// outer: [Eth][IP: src=router_ip, dst=snat_ip][ICMP type=11 code=0]
-///        [Embedded: IP src=snat_ip, dst=server_ip, proto=TCP][TCP src=snat_port, dst=server_port]
 pub(super) fn build_icmp_te_frame_v4(
     router_ip: Ipv4Addr,
     snat_ip: Ipv4Addr,
@@ -296,11 +303,34 @@ pub(super) fn build_icmp_te_frame_v4(
     server_port: u16,
     embedded_proto: u8,
 ) -> Vec<u8> {
+    build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        snat_ip,
+        server_ip,
+        snat_port,
+        server_port,
+        embedded_proto,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    )
+}
+
+/// Build an IPv4 ICMP Time Exceeded frame with an embedded TCP packet.
+/// outer: [Eth][IP: src=router_ip, dst=snat_ip][ICMP type=11 code=0]
+///        [Embedded: IP src=snat_ip, dst=server_ip, proto=TCP][TCP src=snat_port, dst=server_port]
+pub(super) fn build_icmp_te_frame_v4_with_mac(
+    router_ip: Ipv4Addr,
+    snat_ip: Ipv4Addr,
+    server_ip: Ipv4Addr,
+    snat_port: u16,
+    server_port: u16,
+    embedded_proto: u8,
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
     let mut frame = Vec::new();
     // Ethernet header
     write_eth_header(
         &mut frame,
-        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], // dst MAC
+        dst_mac, // dst MAC
         [0x00, 0x25, 0x90, 0x12, 0x34, 0x56], // src MAC
         0,
         0x0800,
@@ -440,7 +470,6 @@ pub(super) fn icmp_err_metadata() -> SessionMetadata {
 }
 
 
-/// Build an IPv6 ICMPv6 Time Exceeded frame with an embedded TCP packet.
 pub(super) fn build_icmpv6_te_frame(
     router_ip: Ipv6Addr,
     snat_ip: Ipv6Addr,
@@ -449,10 +478,31 @@ pub(super) fn build_icmpv6_te_frame(
     server_port: u16,
     embedded_proto: u8,
 ) -> Vec<u8> {
+    build_icmpv6_te_frame_with_mac(
+        router_ip,
+        snat_ip,
+        server_ip,
+        snat_port,
+        server_port,
+        embedded_proto,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    )
+}
+
+/// Build an IPv6 ICMPv6 Time Exceeded frame with an embedded TCP packet.
+pub(super) fn build_icmpv6_te_frame_with_mac(
+    router_ip: Ipv6Addr,
+    snat_ip: Ipv6Addr,
+    server_ip: Ipv6Addr,
+    snat_port: u16,
+    server_port: u16,
+    embedded_proto: u8,
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        dst_mac,
         [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
         0,
         0x86dd,
@@ -665,12 +715,11 @@ pub(super) fn rewrite_outer_icmpv4_type(frame: &mut [u8], l4_offset: usize, new_
     frame[l4_offset + 2..l4_offset + 4].copy_from_slice(&csum.to_be_bytes());
 }
 
-
-pub(super) fn build_policy_deny_tcp_syn_frame() -> Vec<u8> {
+pub(super) fn build_policy_deny_tcp_syn_frame(dst_mac: [u8; 6]) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
+        dst_mac,
         [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
         0,
         0x0800,
@@ -769,7 +818,7 @@ pub(super) fn run_input_filter_accept_log_poll(
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let frame = build_policy_deny_tcp_syn_frame();
+    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -997,11 +1046,12 @@ pub(super) fn build_txn_tcp_syn_frame_v4(
     src_port: u16,
     dst_port: u16,
     tcp_flags: u8,
+    dst_mac: [u8; 6],
 ) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01],
+        dst_mac,
         [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
         0,
         0x0800,
@@ -1067,6 +1117,29 @@ pub(super) fn txn_run_descriptor(
         &local_tunnel_deliveries,
     )
 }
+#[cfg(test)]
+pub(super) fn txn_run_descriptor_checked(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    expect_mac_acceptance: bool,
+) -> (BatchCounters, DebugPollCounters) {
+    let mac_accepted = crate::afxdp::forwarding::ingress_destination_mac_accepted(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        frame,
+    );
+    assert_eq!(
+        mac_accepted, expect_mac_acceptance,
+        "fixture MAC expectation mismatch: ingress_ifindex={} vlan={} accepted={} expected={}",
+        meta.ingress_ifindex, meta.ingress_vlan_id, mac_accepted, expect_mac_acceptance,
+    );
+    txn_run_descriptor(binding, sessions, forwarding, ha_state, frame, meta)
+}
 
 
 /// `txn_run_descriptor` with a CALLER-PROVIDED `dynamic_neighbors` map, so a
@@ -1077,6 +1150,11 @@ pub(super) fn txn_run_descriptor(
 /// pre-bumps that specific shard and asserts the stamp reflects it. The stock
 /// `txn_run_descriptor*` helpers own an internal fresh (all-zero) map, which
 /// cannot exercise a non-zero snapshot. Returns the batch + debug counters.
+///
+/// These specialized wrappers intentionally omit the expected-MAC assertion:
+/// caller-owned maps/receivers change their return shape, while every variant
+/// still enters `poll_binding_process_descriptor`; canonical checked cells pin
+/// the gate and each variant asserts its own observable outcome.
 pub(super) fn txn_run_descriptor_with_neighbors(
     binding: &mut BindingWorker,
     sessions: &mut SessionTable,
@@ -1508,8 +1586,9 @@ pub(super) fn build_txn_tcp_syn_frame_v6(
     dst: Ipv6Addr,
     src_port: u16,
     dst_port: u16,
+    dst_mac: [u8; 6],
 ) -> Vec<u8> {
-    build_txn_tcp_frame_v6(src, dst, src_port, dst_port, TCP_FLAG_SYN)
+    build_txn_tcp_frame_v6(src, dst, src_port, dst_port, TCP_FLAG_SYN, dst_mac)
 }
 
 /// #9382: `build_txn_tcp_syn_frame_v6` with the TCP FLAGS as a parameter, for a
@@ -1526,11 +1605,12 @@ pub(super) fn build_txn_tcp_frame_v6(
     src_port: u16,
     dst_port: u16,
     tcp_flags: u8,
+    dst_mac: [u8; 6],
 ) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01],
+        dst_mac,
         [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
         0,
         0x86dd,
@@ -1559,8 +1639,7 @@ pub(super) fn tunnel_gate_test_fixture() -> (
     UserspaceDpMeta,
     Vec<u8>,
 ) {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -1610,6 +1689,16 @@ pub(super) fn gre_to_self_snapshot() -> ConfigSnapshot {
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
     snapshot.source_nat_rules.clear();
+    // The outer GRE descriptor arrives on this physical parent (ifindex 11);
+    // its configured MAC is required by the ingress gate before tunnel delivery.
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/0".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-0".to_string(),
+        ifindex: 11,
+        hardware_addr: "02:bf:72:00:80:08".to_string(),
+        ..Default::default()
+    });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "gr-0/0/0.0".to_string(),
         zone: "wan".to_string(),
@@ -1835,6 +1924,7 @@ pub(super) fn run_junos_host_permit_local_delivery(snapshot: &ConfigSnapshot) ->
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
@@ -2107,13 +2197,14 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
     let frame = build_gre_to_self_outer_frame_v4(vlan_id, &inner);
     let meta = gre_to_self_outer_meta(vlan_id, frame.len());
 
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut bindings[0],
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.missing_neigh, 1,
@@ -2396,13 +2487,14 @@ pub(super) fn drop_neighbor(snapshot: &mut ConfigSnapshot, ip: &str) {
 /// field) + `payload`. A non-first fragment carries payload where an L4
 /// header would be; we plant TCP-port-shaped bytes there to prove they are
 /// NOT parsed as ports.
-pub(super) fn eth_ipv4_frag_frame(frag_off: u16, payload: &[u8]) -> Vec<u8> {
-    let mut f = vec![
-        // dst mac, src mac
-        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5,
-        // ethertype IPv4
+pub(super) fn eth_ipv4_frag_frame(frag_off: u16, payload: &[u8], dst_mac: [u8; 6]) -> Vec<u8> {
+    let mut f = Vec::new();
+    f.extend_from_slice(&dst_mac);
+    f.extend_from_slice(&[
+        // src mac
+        0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, // ethertype IPv4
         0x08, 0x00,
-    ];
+    ]);
     let mut ip = vec![0u8; 20];
     ip[0] = 0x45;
     let total = (20 + payload.len()) as u16;
@@ -2564,8 +2656,8 @@ pub(super) fn frag_transit_wan_neighbor() -> NeighborSnapshot {
 
 
 /// A non-first IPv4 fragment frame (offset != 0 => flowless per #2344).
-pub(super) fn frag_v4_transit_frame() -> Vec<u8> {
-    eth_ipv4_frag_frame(0x0001, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0])
+pub(super) fn frag_v4_transit_frame(dst_mac: [u8; 6]) -> Vec<u8> {
+    eth_ipv4_frag_frame(0x0001, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0], dst_mac)
 }
 
 

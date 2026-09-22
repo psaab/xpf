@@ -2277,6 +2277,7 @@ mod rewrite_plan_nibble_tests_9900 {
             1234,
             80,
             0x02,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         let mut area = MmapArea::new(4096).expect("mmap");
         area.slice_mut(0, frame.len())

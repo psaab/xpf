@@ -99,13 +99,14 @@ fn drive_8670(proto: u8, dst: Ipv6Addr) -> (u64, u64, u64, u64) {
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
     let frame = v6_plain_frame_8670(src, dst, proto);
     let meta = v6_plain_meta_8670(frame.len(), src, dst, proto);
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     (
         dbg.tx as u64,
@@ -246,13 +247,14 @@ fn pref64_nonfirst_fragment_is_still_attributed_to_the_fragment_counter_8670() {
     meta.l4_offset = 62;
     meta.payload_offset = 82;
 
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &f,
         meta,
+        true,
     );
     assert_eq!(dbg.tx, 0, "a NAT64 fragment-association miss must drop");
     assert_eq!(

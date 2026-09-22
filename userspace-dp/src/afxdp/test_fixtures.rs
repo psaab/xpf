@@ -487,6 +487,7 @@ pub(super) fn native_gre_pbr_snapshot(include_neighbor: bool) -> ConfigSnapshot 
         zone: "lan".to_string(),
         linux_name: "ge-0-0-1".to_string(),
         ifindex: 5,
+        hardware_addr: "02:bf:72:01:00:00".to_string(),
         filter_input_v4: "sfmix-pbr".to_string(),
         addresses: vec![InterfaceAddressSnapshot {
             family: "inet".to_string(),
@@ -986,6 +987,7 @@ pub(super) fn policy_deny_snapshot() -> ConfigSnapshot {
                 zone: "lan".to_string(),
                 linux_name: "ge-0-0-1".to_string(),
                 ifindex: 24,
+                hardware_addr: "02:bf:72:01:00:01".to_string(),
                 ..Default::default()
             },
             InterfaceSnapshot {

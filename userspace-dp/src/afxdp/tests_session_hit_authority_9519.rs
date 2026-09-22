@@ -31,6 +31,7 @@ use std::net::Ipv4Addr;
 const WAN_IFINDEX: i32 = 12;
 const LAN_IFINDEX: i32 = 24;
 const DMZ_IFINDEX: i32 = 26;
+const AUTHORITY_DMZ_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x02, 0x00, 0x01];
 const CLIENT: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 10);
 const VIP: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 8);
 const REAL: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
@@ -166,7 +167,13 @@ fn tcp(
     flags: u8,
     arrival: i32,
 ) -> (Vec<u8>, UserspaceDpMeta) {
-    let frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags);
+    let dst_mac = match arrival {
+        WAN_IFINDEX => TEST_WAN_MAC,
+        LAN_IFINDEX => TEST_LAN_MAC,
+        DMZ_IFINDEX => AUTHORITY_DMZ_MAC,
+        other => panic!("9519 fixture has no destination MAC for ingress ifindex {other}"),
+    };
+    let frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, dst_mac);
     let meta = txn_meta_v4(arrival as u32, flags, frame.len() as u16);
     (frame, meta)
 }
@@ -186,7 +193,12 @@ fn drive_on(
     packet: (Vec<u8>, UserspaceDpMeta),
 ) -> DebugPollCounters {
     let ha_state = txn_ha_state();
-    let (_batch, dbg) = txn_run_descriptor(b, sessions, fw, &ha_state, &packet.0, packet.1);
+    let (batch, dbg) =
+        txn_run_descriptor_checked(b, sessions, fw, &ha_state, &packet.0, packet.1, true);
+    assert_eq!(
+        batch.validated_packets, 1,
+        "authority fixture must pass descriptor validation"
+    );
     dbg
 }
 

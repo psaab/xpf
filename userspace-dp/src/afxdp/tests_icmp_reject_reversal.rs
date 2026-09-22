@@ -232,7 +232,7 @@ fn reject_icmp_unreachable_v6_is_type1_code1_admin_prohibited() {
     // Reuse the echo-frame helper (ICMPv6 echo request = a query, not an
     // error) so the suppression guard does NOT fire: a rejected query
     // gets an unreachable.
-    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 64);
+    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 54,
@@ -260,7 +260,7 @@ fn reject_icmp_unreachable_suppressed_for_inbound_icmp_error() {
     // An inbound ICMPv4 error (type 3) must NOT draw a reject reply.
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let mut frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64);
+    let mut frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     // Rewrite the ICMP type byte (at l4_offset = 34) to 3 (dest unreach).
     frame[34] = 3;
     let meta = UserspaceDpMeta {
