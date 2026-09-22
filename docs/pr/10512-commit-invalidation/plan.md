@@ -1,11 +1,16 @@
-# DRAFT v4 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
+# DRAFT v6 — Fix plan for #10512: commit invalidation misses deleted tenant on bare 5-tuple mirror collision
 
-Status: DRAFT v4 (Fold-3: cross-process Go↔helper tuple-gate coverage for every Go BPF mirror mutation, HA-import race proof, and Delta1 NR-1/NR-2/NR-3 corrections; no production code in this commit).
+Status: DRAFT v6 (helper-first cross-process tuple-gate cutover, clear-fence
+ordering and continuation ownership, restart identity-index quarantine,
+HA-import race proof, and Delta1 NR-1/NR-2/NR-3/NR-4 plus Delta2 NR-5/NR-6
+corrections; no production code in this commit).
 Issue: #10512 (OPEN, bug + audit + validated-by:research + source:deep-review).
-Base: `2781465ee3afe52a780d94d2245cb565a1e80548` on `fix/10512-commit-invalidation`; v1 tip `4d2cb2bf6` (in history).
+Base: `5dcaa104fb36637f7b76bdd0b3ba26ea880f1046` (`origin/master` after
+rebase); prior plan base `2781465ee3afe52a780d94d2245cb565a1e80548` and v1 tip
+`4d2cb2bf6` remain in history.
 Lane: Eng10512. Date: 2026-09-22.
 
-## 0. Plan-review fold (round 1 → v4)
+## 0. Plan-review fold (round 1 → v6)
 
 Round-1 verdicts on v1 (both read in full): Rev10512PlanA PLAN-NEEDS-MAJOR
 (F1 mirror GC, F2 bare HA-sync, F3 frozen/admissions, F4 two-phase, F5 fan-out,
@@ -30,6 +35,13 @@ Fold-3 (V4): Delta2 R1's cross-process objection is closed by a helper-first
 Delta1's NR-1 positive-empty contrast, NR-2 mixed-version skew sentences, and
 NR-3 within-commit retry/convergence correction are folded in §1.2, §2.4, §4,
 and §5.
+
+Fold-4 (V6; Delta1 NR-4, Delta2 NR-5/NR-6): clear-all contract re-pins
+target `mirror_clear_chunk`; shared `ClearAdmission` orders tuple `GateLease`s
+against the full-continuation `ClearFenceID`; and restart quarantine rebuilds
+the `SessionTableIdentityIndex` with orphan accounting. The §5 matrix now
+covers clear-fence/delete-import interleavings, mid-`Finalizing` fencing, and
+post-dispatch `unknown_outcome` reissue semantics.
 
 Parent SOURCE-DETERMINED closures (closed in this revision, not re-asked):
 
@@ -322,13 +334,13 @@ after a bare row delete — it has no B value once the row is gone).
   id, and the helper consults the identity index/store before mutating so a
   different incarnation is preserved.
 
-
-- Mutator transport failure or unavailable helper is fail-closed: no tuple BPF
-  syscall has occurred, the caller receives `helper_unavailable`/
-  `unknown_outcome`, and the existing Go best-effort mirror shortcut is
-  removed. Retry uses the logical identity after helper recovery; no direct
-  shim fallback is permitted for local admission, HA import, policy delete,
-  stale sweep, or clear.
+- Pre-dispatch `helper_unavailable` is fail-closed: no tuple BPF syscall has
+  occurred. A lost or post-dispatch transport response is `unknown_outcome`;
+  the helper may already have applied the transaction, so the caller waits for
+  reconcile quarantine and reissues the same logical identity under a new
+  epoch-scoped operation id. The existing Go best-effort mirror shortcut is
+  removed; no direct shim fallback is permitted for local admission, HA import,
+  policy delete, stale sweep, or clear.
 - `SetSessionV4/V6` forwards and both forward
   `SetClusterSyncedSessionV4/V6` branches submit their values to
   `mirror_upsert`; helper-side synthesis covers the reverse companion. A
@@ -353,22 +365,37 @@ after a bare row delete — it has no B value once the row is gone).
   token-authorized helper rollback, not a `bpfShim.SetSession`/`DeleteSession`
   call.
 
-- Helper-backed `DeleteSessionV4/V6`, peer/scoped/bare batches, and
+- Helper-backed `DeleteSessionV4/V6`, `DeletePeerSyncedSession`/V6,
+  `BatchDeletePeerSyncedSessionsScoped`/V6, scoped/bare batches, and
   `deleteAppliedMirrorRows` use `mirror_delete*` and receive
   `preserve`/`delete`/`republish` dispositions. The helper performs the sole
-  final mirror mutation under the matching per-key tokens; Go suppresses all
-  post-repair bare deletes. Legacy non-policy callers retain bounded chunk
-  and count/error contracts, but they also use helper-first mutation.
-  `ClearAllSessionsChunked` becomes bounded `mirror_clear_chunk` calls under
-  one helper-owned `ClearFenceID` across all continuation pages, so no tuple
-  publisher can bypass the fence.
+  final mirror mutation under matching per-key tokens; Go suppresses all
+  post-repair bare deletes. Scoped-batch wrappers retain #10513's
+  `surfaceScopedHelperDeleteError`/Join/precedence boundary, while legacy
+  non-policy callers retain bounded chunk and count/error contracts. All use
+  helper-first mutation. `ClearAllSessionsChunked` becomes bounded
+  `mirror_clear_chunk` calls under one helper-owned `ClearFenceID` across all
+  continuation pages, so no tuple publisher can bypass the fence.
 
-- The source audit enumerates every production direct mutation to cut over:
-  `manager_sessions.go:37,107,132,189,194,201,236,248,283,288,346,425,
-  493,508,537,561,570,598,608,659`, with `ClearAllSessionsChunked` at
-  `:724`; after cutover each is an RPC wrapper, not a Go BPF write. Read-only
-  `GetSession` calls remain allowed for diagnostics; test fixture seed calls
-  are setup, not publishers.
+- Post-#10513 source audit enumerates every current production direct
+  session-map mutation in `manager_sessions.go` (21 callsites, including
+  clear): `SetSessionV4:37`; `SetClusterSyncedSessionV4` reverse/forward
+  `107/132` and rollback `189/194`; `SetSessionV6:201`;
+  `SetClusterSyncedSessionV6` reverse/forward `236/248` and rollback
+  `283/288`; `DeleteSession:346`; `DeleteSessionV6:425`;
+  `DeletePeerSyncedSession:493`; `DeletePeerSyncedSessionV6:508`;
+  `BatchDeleteSessions:537`; `BatchDeleteSessionsScoped:563`;
+  `BatchDeleteSessionsScopedV6:590`; peer-batch applied-row closures
+  `643/653`; `BatchDeleteSessionsV6:704`; and the direct
+  `bpfShim.ClearAllSessionsChunked` call at `769` (wrapper
+  `ClearAllSessions:743`, maps implementation `maps_session.go:450`).
+  Compared with the pre-#10513 audit, scoped-batch anchors moved
+  `561/570`→`563/590`, peer closures `598/608`→`643/653`, the V6 bare batch
+  at `704` is explicit, and clear moved from the old wrapper pin to the
+  direct callback call. Every listed callsite becomes an RPC wrapper, not a
+  Go BPF write. `LegacyDataPlaneAdapter` delegates to these methods and adds
+  no direct shim writer; read-only `GetSession` and fixture seed calls remain
+  out of publisher scope.
 - Lock order is normative: Go does not hold `m.mu` while waiting for helper
   gate admission or a BPF operation. The helper acquires its `GateLease`,
   mutates `SessionTable` and BPF, and returns a typed result; Go then takes
@@ -749,6 +776,17 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
 - NO mirror fallback (Q4 closed): unknown-verb/partial NEVER degrades to a
   PolicyID-only mirror scan — that reintroduces the silent miss. Old helper +
   new verb maps to `clearErr`, never nil.
+- #10513 scoped-batch error contract remains normative after helper-first
+  cutover: `BatchDeleteSessionsScoped`/`V6` maps typed `mirror_delete_batch`
+  failures through `surfaceScopedHelperDeleteError`; helper failure wins over
+  mirror `ErrKeyNotExist`, and a genuine mirror error joins it. The wrapper
+  keeps `errSessionHelperUnreachable` discoverable without unwrapping dial
+  `ENOENT`, so session-store per-key NotFound retry cannot swallow helper
+  failure. `BatchDeleteSessions`/`V6` remain #5096 best-effort, peer-marked
+  batches retain #9714 refused/applied semantics, and clear retains first-error
+  propagation (#5881). `TupleGate` typed `Applied`/`Noop` is allowed only for
+  conditional absence/already-completed identity; refusal, transport, and
+  `unknown_outcome` stay surfaced and cannot be converted to `Noop`.
 - Version floor: bump 30→31 on the merits (verified current floor:
   `ProtocolVersion = 30`, protocol.go:335; mirror
   `CONFIG_SNAPSHOT_PROTOCOL_VERSION = 30`, control.rs:197; exact-equality
@@ -834,6 +872,14 @@ return A from an otherwise unchanged mock.
   first-error status); #5304 (every key is handled by helper-owned internal
   enumeration); #5380 (fast-fail across chunks on `helper_unavailable`, with
   no per-chunk deadline stacking).
+- #10513 scoped-helper error controls (ordinary CI, v4 and v6): transport
+  failure and semantic refusal must surface through
+  `surfaceScopedHelperDeleteError`; helper failure wins over mirror
+  `ErrKeyNotExist`, real mirror errors join, ENOENT remains hidden from the
+  session-store NotFound classifier, and healthy helpers return clean while
+  all requests reach the helper. The typed `mirror_delete_batch`/`TupleGate`
+  result must preserve these boundary contracts rather than turning a
+  refusal or `unknown_outcome` into `Noop`.
 
 
 Guard cells: B-preservation (§2.3 proof items 1-4); id-0-collision
@@ -880,9 +926,9 @@ copies intact).
 
 
 Process: tests first, RED on base where the defect exists (T1–T8 + protocol
-contrast + cross-process race + revert legs), then implement; record exact
-`go test`/`cargo test` invocations with lane-isolated caches in the implement
-PR; affected suites green per §9.
+contrast + cross-process race + clear-fence race + revert legs), then
+implement; record exact `go test`/`cargo test` invocations with lane-isolated
+caches in the implement PR; affected suites green per §9.
 
 ## 6. STEP-0 verification (condensed; v1 §1 in history)
 
@@ -898,7 +944,7 @@ publish_conntrack.rs:138-145/390-397); empty→nil success
 (handlers/mod.rs:262-472). Siblings #10513/#10528 are distinct roots —
 out of scope.
 
-## 7. Source map (v1 §2 + v2 pins)
+## 7. Source map (v1 §2 + v6 pins)
 
 Invalidation: `pkg/daemon/daemon_policy_invalidate.go` (id sets :93-118 +
 :631-651, clears :154-167/:201-215/:272-284, core :406-507, delete site
@@ -910,8 +956,9 @@ Mirror: `pkg/dataplane/session_store.go` (ForEach :221-233, scoped keys,
 `DeleteBatchKnown`, `DeleteWithCompanionsV4` :888-899,
 `deleteAppliedMirrorRows` precedent via userspace manager);
 `pkg/dataplane/userspace/manager_sessions.go:37,107,132,189,194,201,236,
-248,283,288,346,425,493,508,537,561,570,598,608,659,724` (all production
-session-map mutations cut over to helper-first RPC); `pkg/dataplane/maps_session.go`
+248,283,288,346,425,493,508,537,563,590,643,653,704,769` (21 current
+direct mutation callsites; `ClearAllSessions` wrapper :743 drives the clear;
+all cut over to helper-first RPC); `pkg/dataplane/maps_session.go`
 iterators, `types.go` keys/values, `bpf_session_value.go` domain slot; Rust
 `userspace-dp/src/server/handlers/mod.rs` mutator dispatch and
 `userspace-dp/src/session` TupleGate/SessionTable transaction; Rust
@@ -931,7 +978,9 @@ Tests: existing contract cells `daemon_policy_invalidate_test.go`,
 `policy_reused_id_overclear_6948_test.go`, `daemon_policy_modified_4234_test.go`,
 `daemon_policy_default_4342_test.go`, `policy_rematch_shipped_6723_test.go`,
 `batch_delete_domain_9364_test.go`, `batch_delete_mirror_domain_9546_test.go`,
-`sync_delete_domain_9146_test.go`.
+`sync_delete_domain_9146_test.go`,
+`batch_delete_helper_error_10513_test.go` (scoped helper-error surface,
+precedence, ENOENT masking, and healthy-helper controls).
 
 The userspace manager's direct session-map mutation surface is a required
 cutover boundary: all listed `bpfShim` writers become helper-first RPC
@@ -940,6 +989,18 @@ upsert, helper-disposition deletes, and map-clear chunks. The helper control
 protocol, TupleGate/SessionTable transaction, restart epoch, and ordinary
 CI/privileged race cells therefore join the blast radius; no Go direct-write
 fallback is permitted.
+
+Post-rebase drift disposition: `filters.go` and `protocol_policies.go` carry
+the unrelated #10514 NextTerm disclosure change; it does not alter the frozen
+policy-id capture predicate and remains out of scope. `manager_sessionsync_transmit.go`
+now documents #10513 scoped-batch first-error propagation, so that contract is
+in scope here; the helper-first verb result must preserve its surface/Join/
+precedence behavior rather than restoring a best-effort discard.
+Implementation pins for the merged #10513 contract are
+`manager_sessions.go:602-610` (`surfaceScopedHelperDeleteError`) and
+`manager_sessionsync_transmit.go:182` (`syncSessionRequestsLocked` first-error
+return); helper-first implementation must preserve both.
+
 ## 8. Blast radius (v1 §3 corrected)
 
 3 arm sites, 1 capture site, 3 clears + shared core + shared delete site, 2
@@ -1032,5 +1093,9 @@ with `Closes #10512` + Why/What/Validation body, report + STOP.
   #5305 compensation); per-key GateLease/restart epoch/reissue semantics are
   specified, and the HA-import/delete race cell is present; NR-1 positive-empty,
   NR-2 skew, and NR-3 retry/convergence corrections are recorded.
-- [x] DRAFT v4 plan force-added and committed; branch publication handled
+- [x] Fold-4 V6: Delta1 NR-4 clear-all contract repins and Delta2 NR-5/NR-6
+  clear-fence/reconcile-quarantine semantics are recorded; the post-rebase
+  #10513 mutation audit, scoped error surface/Join/precedence contract, and
+  clear-fence race/process cell are pinned against origin/master.
+- [x] DRAFT v6 plan force-added and committed; branch publication handled
   outside this document.
