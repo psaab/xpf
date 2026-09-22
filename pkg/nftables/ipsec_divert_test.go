@@ -623,17 +623,67 @@ func TestIpsecQuarantineRuleShape9506(t *testing.T) {
 	if p.err != nil {
 		t.Fatalf("render quarantine rules: %v", p.err)
 	}
-	if len(p.rules) != 2 {
-		t.Fatalf("quarantine rule count = %d, want candidate + base", len(p.rules))
+	if len(p.rules) != 3 {
+		t.Fatalf("quarantine rule count = %d, want loopback + candidate + base", len(p.rules))
 	}
-	if _, ok := p.rules[0][0].(*expr.Meta); !ok {
-		t.Fatalf("candidate first expression = %#v, want meta iif", p.rules[0][0])
-	}
-	if verdict, ok := p.rules[0][len(p.rules[0])-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictDrop {
-		t.Fatalf("candidate verdict = %#v, want DROP", p.rules[0][len(p.rules[0])-1])
+	assertIpsecQuarantineLoopbackAccept9506(t, p.rules[0])
+	if _, ok := p.rules[1][0].(*expr.Meta); !ok {
+		t.Fatalf("candidate first expression = %#v, want meta iif", p.rules[1][0])
 	}
 	if verdict, ok := p.rules[1][len(p.rules[1])-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictDrop {
-		t.Fatalf("base verdict = %#v, want DROP", p.rules[1][len(p.rules[1])-1])
+		t.Fatalf("candidate verdict = %#v, want DROP", p.rules[1][len(p.rules[1])-1])
+	}
+	if verdict, ok := p.rules[2][len(p.rules[2])-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictDrop {
+		t.Fatalf("base verdict = %#v, want DROP", p.rules[2][len(p.rules[2])-1])
+	}
+}
+
+func assertIpsecQuarantineLoopbackAccept9506(t *testing.T, rule []expr.Any) {
+	t.Helper()
+	if len(rule) != 3 {
+		t.Fatalf("loopback rule expression count = %d, want iifname + compare + ACCEPT", len(rule))
+	}
+	meta, ok := rule[0].(*expr.Meta)
+	if !ok || meta.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("loopback rule first expression = %#v, want iifname meta", rule[0])
+	}
+	cmp, ok := rule[1].(*expr.Cmp)
+	if !ok || cmp.Op != expr.CmpOpEq || !bytes.Equal(cmp.Data, ifname16("lo")) {
+		t.Fatalf("loopback rule comparison = %#v, want iifname lo", rule[1])
+	}
+	verdict, ok := rule[2].(*expr.Verdict)
+	if !ok || verdict.Kind != expr.VerdictAccept {
+		t.Fatalf("loopback rule verdict = %#v, want ACCEPT", rule[2])
+	}
+}
+
+func TestIpsecQuarantineLoopbackExemptionBothHooks10501(t *testing.T) {
+	spec := normalizeIpsecQuarantineSpec(IpsecDivertSpec{QuarantineAll: true})
+	for _, tc := range []struct {
+		name          string
+		hook          string
+		hooknum       *gnft.ChainHook
+		countingOwner bool
+	}{
+		{name: "forward", hook: "forward", hooknum: gnft.ChainHookForward, countingOwner: true},
+		{name: "input", hook: "input", hooknum: gnft.ChainHookInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := &gnft.Table{Family: gnft.TableFamilyINet, Name: IpsecQuarantineTableName}
+			p := newBuildPlan(t, IpsecQuarantineTableName, IpsecQuarantinePriority)
+			p.chain = ipsecDenyChain(tbl, tc.hook, tc.hooknum, IpsecQuarantinePriority)
+			emitIpsecQuarantineRules(p, "inet", tc.hook, spec, tc.countingOwner)
+			if p.err != nil {
+				t.Fatalf("render quarantine rules: %v", p.err)
+			}
+			if len(p.rules) != 2 {
+				t.Fatalf("quarantine rule count = %d, want loopback + base", len(p.rules))
+			}
+			assertIpsecQuarantineLoopbackAccept9506(t, p.rules[0])
+			if verdict, ok := p.rules[1][len(p.rules[1])-1].(*expr.Verdict); !ok || verdict.Kind != expr.VerdictDrop {
+				t.Fatalf("base verdict = %#v, want DROP", p.rules[1][len(p.rules[1])-1])
+			}
+		})
 	}
 }
 func TestIpsecQuarantineLaterHookDropsWithoutCounter9506(t *testing.T) {
