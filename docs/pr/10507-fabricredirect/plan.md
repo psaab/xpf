@@ -165,11 +165,12 @@ resolution and the stamp kind:
 2. `RecordedEgress` may short-circuit only while the current resolution is
    still a non-local fabric redirect. The packet must remain on the fabric
    redirect path; the recorded Permit never authorizes a local TX.
-3. `RecordedEgress` plus a current `ForwardCandidate` or other locally
-   forwarding candidate is always stale, even when its numeric generation
-   equals the live generation. Run the cold policy walk against the current
-   local egress. A Permit changes the stamp to `LiveEgress`; Deny/Reject
-   revokes the pair before forwarding.
+3. Any non-`LiveEgress` provenance (`Unvalidated` or `RecordedEgress`) plus a
+   current `ForwardCandidate` or other locally forwarding candidate is always
+   stale, even when its numeric generation equals the live generation (for
+   example after A1 resets provenance without an eager command). Run the cold
+   policy walk against the current local egress. A Permit changes the stamp to
+   `LiveEgress`; Deny/Reject revokes the pair before forwarding.
 4. If the current result cannot provide a valid local egress while the caller
    would otherwise locally forward, fail closed: revoke/drop rather than
    returning `Decline` and allowing a stale recorded Permit to stand. A
@@ -191,19 +192,23 @@ wiring point.
 
 ### 4.3 Reverse-first and reverse-only handling
 
-A reverse hit is authoritative only through its forward companion. When the
-stamp provenance is `RecordedEgress`, the reverse path must obtain the current
-forward resolution before it can promote or reuse a Permit:
+A reverse hit is authoritative only through its forward companion. Whenever
+the packet-time result would locally forward and the stored forward companion
+is `FabricRedirect` or otherwise lacks `LiveEgress` provenance, the reverse
+path must obtain the current forward resolution before it can promote or reuse
+a Permit. This requirement applies even when A1 has reset the reverse row to
+`Unvalidated`; it is not conditional on seeing `RecordedEgress` on the reverse
+row:
 
 - Resolve the stored forward companion with the same local FIB plus HA/lease
   authority used by the session-hit resolver, not the reverse packet's cached
   or fabric transport resolution.
-- If the current forward resolution is a valid local forwarding candidate,
-  pass that live forward egress to the policy walk. On Permit, mark the judged
-  forward companion `LiveEgress`; a reverse-row stamp may be synchronized only
-  after that same forward judgment succeeds, but correctness MUST NOT depend on
-  clearing both rows. On Deny/Reject, revoke both sides using the existing
-  pair-aware teardown.
+- If the current forward resolution is a valid local forwarding candidate, use
+  that live forward egress for this one cold reverse judgment. On Permit, stamp
+  only the reverse hit's row; do not mark or update the forward companion from
+  reverse-packet evidence, because its live-arrival FROM identity is not proven
+  equivalent to the reverse stored-provenance FROM identity. On Deny/Reject,
+  revoke both sides using the existing pair-aware teardown.
 - If the forward companion is absent, inconsistent, or cannot produce a valid
   current egress while the packet would be locally forwarded, fail closed; do
   not return `Decline` and do not promote the reverse row. This is the explicit
@@ -214,13 +219,14 @@ forward resolution before it can promote or reuse a Permit:
   semantics where #7770 requires it.
 
 This ensures the reverse cold judgment cannot consume the stored
-`FabricRedirect` decision: it must use the same-packet live forward resolution.
-Paired stamp synchronization is optional and is not the security proof. The
-production regression must exercise the actual reverse-hit poll path before any
-eager Refresh command is applied.
+`FabricRedirect` decision: it uses the same-packet live forward resolution but
+stamps only the reverse row. The forward companion remains non-live/recorded,
+so its next forward hit re-enters the cold path under §4.2; no paired stamp
+synchronization is required or treated as the security proof. The production
+regression must exercise the actual reverse-hit poll path before any eager
+Refresh command is applied.
 
 ### 4.4 Gate ordering and ICMP early exits
-
 The provenance/authority fence MUST run immediately after the `flow?` guard
 and before the existing `LocalDelivery` shortcut, reverse dispatch, and
 type-sensitive ICMP exits. The host-inbound/junos-host path remains the
@@ -230,10 +236,12 @@ that a recorded transit stamp is not being used to authorize that result.
 The forward ICMP guard at `policy_revalidation.rs:351-355` returns before
 `policy_revalidation_target`. The reverse companion first probes its reverse
 stamp at `:552-557`, then its forward-companion ICMP guard at `:596-600` can
-return before the cold forward policy walk. Both placement points must be
-fenced. That is safe for a `LiveEgress` stamp (the existing type-sensitive
-policy cannot be re-derived without the packet type), but it is not safe for
-`RecordedEgress` after the resolution becomes local.
+return before the cold forward policy walk. The security-relevant distinction
+is that the reverse guard follows the reverse stamp probe but still precedes
+the forward cold judgment. Both placement points must be fenced. That is safe
+for a `LiveEgress` stamp (the existing type-sensitive policy cannot be
+re-derived without the packet type), but it is not safe for `RecordedEgress`
+after the resolution becomes local.
 The new order is:
 
 1. Inspect stamp provenance and the current packet-time resolution.
