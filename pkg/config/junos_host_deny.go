@@ -144,9 +144,12 @@ type JunosHostDenyProgram struct {
 	// rule with (JunosHostZoneIngressNetdevs). EXCLUDES lifelines and any netdev
 	// shared with another zone (a cross-zone-ambiguous physical parent). Empty
 	// when the zone resolves to no unambiguous non-lifeline netdev: the program
-	// then emits NOTHING and its denies keep the #4168 warning — the config
-	// projection gates Representable/RenderedPolicyKeys on this so the warning can
-	// never be suppressed for a deny that produced no kernel rule (§8 inv-1/12).
+	// then emits NOTHING. A zone with a configured lifeline ref and no
+	// non-lifeline candidates is recorded in LifelineOnlyZones; a no-interface
+	// zone is not recorded, and an empty scope with Unscopable candidates remains
+	// an ordinary coverage gap. The validator retains the warning for configured
+	// lifeline applicability even when RenderedPolicyKeys contains another zone's
+	// enforced rule.
 	IngressNetdevs []string
 	// Representable is false when any contributing term is un-representable; the
 	// program then carries NO rules and the daemon emits nothing for the zone.
@@ -177,22 +180,45 @@ type JunosHostDenyProgram struct {
 }
 
 // JunosHostDenyProjection is the whole-config result: the per-zone programs the
-// daemon renders, plus the set of junos-host policy keys that rendered an
-// enforced kernel rule (so the #4168 warning is suppressed for exactly those).
+// daemon renders, plus policy-key and coverage bookkeeping for the #4168
+// warning. RenderedPolicyKeys is the aggregate set of DENY-class keys that have
+// at least one applicable enforceable ordinary zone and for which every
+// applicable ordinary zone was fully scoped, representable, and emitted the key.
+// The validator suppresses only when this set contains the key and
+// LifelineOnlyZones has no entry for it.
+//
 // RenderedApplicationAnyPolicyKeysByZone is narrower provenance for #10524:
 // it records application-any DENY/REJECT keys that emitted a rule in each
 // surviving zone, even when that zone has partial netdev coverage and therefore
 // cannot enter the global RenderedPolicyKeys suppression set.
+//
+// RenderedPolicyZoneKeys records the ordinary zones that emitted each aggregate
+// rendered key. LifelineOnlyZones records policy applicability on fully-scoped
+// zones with a configured lifeline ref and no non-lifeline candidates: there is
+// no kernel rule by design, so the warning is retained. Together they make
+// suppression coverage-aware for shared and per-zone applicability (#10521):
+// ordinary-zone enforcement suppresses only when complete, while configured
+// lifeline applicability retains one warning.
 type JunosHostDenyProjection struct {
 	Programs                               []JunosHostDenyProgram
 	RenderedPolicyKeys                     map[string]bool
 	RenderedApplicationAnyPolicyKeysByZone map[string]map[string]bool
+	// RenderedPolicyZoneKeys maps a policy key to the enforceable ingress
+	// zones where it rendered an enforced DENY/REJECT kernel rule. The inner
+	// value is a zone set; consumers sort names before operator-visible formatting.
+	RenderedPolicyZoneKeys map[string]map[string]bool
+	// LifelineOnlyZones maps a policy key to sorted zones where the policy
+	// applies with a configured lifeline ref but no non-lifeline candidates
+	// (no kernel rule by design, lifeline NEVER-deny). A rendered key with a
+	// non-empty entry keeps its warning.
+	LifelineOnlyZones map[string][]string
 }
 
 // JunosHostZonePairPolicyKey / JunosHostGlobalPolicyKey are the stable identity
-// keys used to correlate a rendered program back to the emitting policy so the
-// #4168 warning can suppress exactly the rendered ones. Both the projection and
-// the warning compute the same key.
+// keys used to correlate a rendered program back to the emitting policy. The
+// projection and warning compute the same key; coverage-aware suppression also
+// consults LifelineOnlyZones when the policy applies to configured lifeline-only
+// applicability.
 func JunosHostZonePairPolicyKey(fromZone, name string) string {
 	return "zp\x00" + fromZone + "\x00" + name
 }
@@ -232,6 +258,8 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 	out := JunosHostDenyProjection{
 		RenderedPolicyKeys:                     map[string]bool{},
 		RenderedApplicationAnyPolicyKeysByZone: map[string]map[string]bool{},
+		RenderedPolicyZoneKeys:                 map[string]map[string]bool{},
+		LifelineOnlyZones:                      map[string][]string{},
 	}
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return out
@@ -247,15 +275,26 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 	// and not the netdev list.
 	coverageByZone := junosHostZoneNetdevCoverageMap(cfg)
 
-	// Per-policy-key bookkeeping to decide rendered-vs-warned (§3.3): a policy is
-	// rendered (warning suppressed) iff it is a DENY or REJECT that applies to
-	// >=1 enforceable ingress zone and EVERY enforceable zone it applies to has a
-	// representable program that emitted it. A PERMIT is NEVER suppressed: its
-	// "deny non-permitted" half is enforced on no path, because the runtime has
-	// no implicit junos-host default-deny (#9504).
+	// Per-policy-key bookkeeping to decide rendered-vs-warned (§3.3): a policy
+	// is rendered at policy level iff it is a DENY or REJECT that applies to
+	// >=1 ordinary enforceable ingress zone and EVERY such zone's whole program
+	// has emitted it. A PERMIT is NEVER suppressed: its "deny non-permitted"
+	// half is enforced on no path, because the runtime has no implicit
+	// junos-host default-deny (#9504). The validator separately retains a
+	// warning when LifelineOnlyZones records uncovered configured lifeline
+	// applicability.
 	appliesEnforceable := map[string]int{}
 	blockedByUnrep := map[string]bool{}
 	actionByKey := map[string]PolicyAction{}
+	// renderedZonesByKey records the enforceable zones where a term emitted a
+	// kernel rule. It is copied into RenderedPolicyZoneKeys for aggregate-rendered
+	// DENY/REJECT keys.
+	renderedZonesByKey := map[string]map[string]bool{}
+	// lifelineZonesByKey records policy applicability on configured lifeline-only
+	// zones with no non-lifeline candidates and therefore no kernel rule. Keep it
+	// separate from blockedByUnrep: an unscopable ordinary candidate is an
+	// ordinary coverage gap.
+	lifelineZonesByKey := map[string]map[string]bool{}
 
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
@@ -273,6 +312,13 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 			continue
 		}
 		ifaceRefs := junosHostNonLifelineRefs(zone, lifelines)
+		hasLifelineRef := false
+		for _, ref := range zone.Interfaces {
+			if HostInboundLifelineInterface(ref, lifelines) {
+				hasLifelineRef = true
+				break
+			}
+		}
 		cov := coverageByZone[zoneName]
 		netdevs := cov.Scoped
 		// TWO decisions, deliberately not one boolean (#6564 member 8).
@@ -280,14 +326,13 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		// emitsRules gates kernel emission: a DROP needs >=1 usable netdev to
 		// scope it by iifname. Unchanged.
 		//
-		// fullyScoped gates the #4168 warning SUPPRESSION, and it is a COVERAGE
-		// question, not an existence one. A zone that had candidates and could
-		// not use all of them is not enforcing the policy on every ingress path,
-		// whether it salvaged some of them or none. Note the two cases are not
-		// the same predicate: a zone with NO candidates at all (lifeline-only, or
-		// no interfaces) has nothing to enforce and must NOT block suppression —
-		// which is exactly what distinguishes it from a zone whose candidates all
-		// turned out to be unscopable.
+		// fullyScoped gates #4168 warning SUPPRESSION for ordinary ingress
+		// coverage. A zone that had candidates and could not use all of them is
+		// not enforcing the policy on every ingress path, whether it salvaged
+		// some or none. A zone with NO candidates at all has nothing to enforce.
+		// Only a configured lifeline-only zone records that applicability
+		// separately, so a shared policy still warns about the uncovered lifeline
+		// while ordinary-zone enforcement remains suppressible.
 		emitsRules := len(netdevs) > 0
 		fullyScoped := len(cov.Unscopable) == 0
 		representable := true
@@ -320,6 +365,27 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 				junosHostZoneExemptNetdevs(cfg, zoneName, zone, netdevs)
 			prog.CoarseAdmitsIKE = len(prog.IKEExemptNetdevs) > 0
 			prog.CoarseIdentResets = len(prog.IdentResetNetdevs) > 0
+			for key, didEmit := range emitted {
+				if !didEmit {
+					continue
+				}
+				if renderedZonesByKey[key] == nil {
+					renderedZonesByKey[key] = map[string]bool{}
+				}
+				renderedZonesByKey[key][zoneName] = true
+			}
+		}
+		// No candidates on a configured lifeline-only zone is intentional. It must
+		// not block ordinary-zone enforcement, but applicable policy keys still need
+		// one warning for this uncovered zone. A zone with no configured lifeline ref
+		// is not an ingress path and must not affect suppression.
+		if !emitsRules && fullyScoped && hasLifelineRef {
+			for _, t := range terms {
+				if lifelineZonesByKey[t.key] == nil {
+					lifelineZonesByKey[t.key] = map[string]bool{}
+				}
+				lifelineZonesByKey[t.key][zoneName] = true
+			}
 		}
 		// #10524 exact provenance: retain the app-any DENY/REJECT keys that
 		// emitted a rule in THIS surviving zone. This intentionally ignores
@@ -387,7 +453,18 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 	for key, n := range appliesEnforceable {
 		if a := actionByKey[key]; n > 0 && !blockedByUnrep[key] && (a == PolicyDeny || a == PolicyReject) {
 			out.RenderedPolicyKeys[key] = true
+			if zones := renderedZonesByKey[key]; len(zones) > 0 {
+				out.RenderedPolicyZoneKeys[key] = zones
+			}
 		}
+	}
+	for key, zones := range lifelineZonesByKey {
+		names := make([]string, 0, len(zones))
+		for zone := range zones {
+			names = append(names, zone)
+		}
+		sort.Strings(names)
+		out.LifelineOnlyZones[key] = names
 	}
 	return out
 }
@@ -920,9 +997,11 @@ type junosHostUnscopableNetdev struct {
 // The three states are NOT interchangeable and the projection reads them
 // differently (#6564 member 8):
 //
-//   - No candidates at all (both fields empty) — a lifeline-only zone, or one
-//     with no interfaces. There is NOTHING to enforce, so this must not block a
-//     policy's warning suppression.
+//   - No candidates at all (both fields empty) — a zone with a configured
+//     lifeline ref and no non-lifeline interfaces. There is NOTHING to enforce,
+//     so this must not block ordinary-zone suppression. The projection records
+//     this configured lifeline applicability so a shared or per-zone policy
+//     retains one warning; a no-interface zone is not recorded.
 //   - Scoped non-empty, Unscopable empty — fully resolved. Rules are emitted and
 //     the policy is genuinely enforced on every ingress path of the zone.
 //   - Unscopable non-empty — the zone HAD candidates and at least one of its OWN

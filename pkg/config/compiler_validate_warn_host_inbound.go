@@ -606,13 +606,48 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 	}
 	// #4146: the representable ordered DENY class is now ENFORCED on the direct
 	// host-bound path by the kernel nft `xpf_hostinbound` chain
-	// (BuildJunosHostDenyProjection). Suppress the parity warning for exactly the
-	// policies that rendered an enforced kernel rule; every un-representable /
-	// lifeline-only / unenforceable policy still warns (the documented
-	// partial-coverage remainder). Rendered means: the policy applies only to
-	// enforceable ingress zones and EVERY such zone's whole program is
-	// representable (§3.3 / §8 inv-12).
+	// (BuildJunosHostDenyProjection). Suppress the parity warning only for
+	// policies whose rendered ordinary-zone coverage is complete. A
+	// lifeline-only applicability has no kernel rule by design (lifelines are
+	// NEVER-deny), but it still retains one warning for the uncovered zone.
 	rendered := projection.RenderedPolicyKeys
+	formatZones := func(zones []string) string {
+		sorted := append([]string(nil), zones...)
+		sort.Strings(sorted)
+		quoted := make([]string, len(sorted))
+		for i, zone := range sorted {
+			quoted[i] = fmt.Sprintf("%q", zone)
+		}
+		return "{" + strings.Join(quoted, ", ") + "}"
+	}
+	coverageReason := func(key string) string {
+		if len(projection.LifelineOnlyZones[key]) == 0 {
+			return ""
+		}
+		ordinary := make([]string, 0, len(projection.RenderedPolicyZoneKeys[key]))
+		for zone := range projection.RenderedPolicyZoneKeys[key] {
+			ordinary = append(ordinary, zone)
+		}
+		if len(ordinary) == 0 {
+			return fmt.Sprintf(
+				"The policy is not covered on lifeline-only zone(s) %s: no "+
+					"kernel junos-host rule (lifeline NEVER-deny), and the "+
+					"coarse gate still admits",
+				formatZones(projection.LifelineOnlyZones[key]))
+		}
+		return fmt.Sprintf(
+			"The kernel rule is enforced on ordinary zone(s) %s but not covered "+
+				"on lifeline-only zone(s) %s: no kernel junos-host rule "+
+				"(lifeline NEVER-deny), and the coarse gate still admits",
+			formatZones(ordinary),
+			formatZones(projection.LifelineOnlyZones[key]))
+	}
+	withCoverage := func(key, warning string) string {
+		if extra := coverageReason(key); extra != "" {
+			return warning + ". " + extra + "."
+		}
+		return warning
+	}
 	msg := func(who, reason string) string {
 		return fmt.Sprintf(
 			"security policy %s expresses a %s to-zone junos-host that the kernel "+
@@ -659,12 +694,13 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 			if p == nil {
 				continue
 			}
-			if rendered[JunosHostZonePairPolicyKey(zpp.FromZone, p.Name)] {
-				continue // #4146: enforced on the direct path — no parity gap.
+			key := JunosHostZonePairPolicyKey(zpp.FromZone, p.Name)
+			if rendered[key] && len(projection.LifelineOnlyZones[key]) == 0 {
+				continue // #4146: enforced on every applicable path.
 			}
 			if stricter, reason := junosHostPolicyStricterThanCoarseGate(p.Action, p.Match); stricter {
-				warnings = append(warnings, pick(p.Action)(fmt.Sprintf(
-					"%q (from-zone %q)", p.Name, zpp.FromZone), reason))
+				warnings = append(warnings, withCoverage(key, pick(p.Action)(fmt.Sprintf(
+					"%q (from-zone %q)", p.Name, zpp.FromZone), reason)))
 			} else if p.Action == PolicyPermit {
 				// #7374: the APPLICATION dimension. Checked separately because
 				// it needs the zone's effective admit set, which the
@@ -673,8 +709,8 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 				// permit is only stricter when the gate admits something the
 				// permit does not cover.
 				if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zpp.FromZone), p.Match); gap {
-					warnings = append(warnings, permitMsg(fmt.Sprintf(
-						"%q (from-zone %q)", p.Name, zpp.FromZone), reason))
+					warnings = append(warnings, withCoverage(key, permitMsg(fmt.Sprintf(
+						"%q (from-zone %q)", p.Name, zpp.FromZone), reason)))
 				}
 			}
 		}
@@ -688,11 +724,12 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 		if p == nil || !IsHostToZoneScope(p.Match.ToZones) {
 			continue
 		}
-		if rendered[JunosHostGlobalPolicyKey(p.Name)] {
-			continue // #4146: enforced on the direct path — no parity gap.
+		key := JunosHostGlobalPolicyKey(p.Name)
+		if rendered[key] && len(projection.LifelineOnlyZones[key]) == 0 {
+			continue // #4146: enforced on every applicable path.
 		}
 		if stricter, reason := junosHostPolicyStricterThanCoarseGate(p.Action, p.Match); stricter {
-			warnings = append(warnings, pick(p.Action)(fmt.Sprintf("global %q", p.Name), reason))
+			warnings = append(warnings, withCoverage(key, pick(p.Action)(fmt.Sprintf("global %q", p.Name), reason)))
 		} else if p.Action == PolicyPermit {
 			// #7374: a global `to-zone junos-host` permit applies from EVERY
 			// zone, so it has a gap if ANY zone's gate admits something it does
@@ -700,7 +737,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 			// gap is deterministic.
 			for _, zn := range sortedZoneNames(cfg) {
 				if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zn), p.Match); gap {
-					warnings = append(warnings, permitMsg(fmt.Sprintf("global %q", p.Name), reason))
+					warnings = append(warnings, withCoverage(key, permitMsg(fmt.Sprintf("global %q", p.Name), reason)))
 					break
 				}
 			}

@@ -55,12 +55,13 @@ type JunosHostProgram struct {
 
 // BuildJunosHostPrograms returns the per-ingress-zone junos-host programs
 // the daemon renders into the kernel `xpf_hostinbound` chain. It calls the
-// config projection for the representable first-match rules and resolves the
-// iifname scope from the live interface snapshots. A representable program that
-// resolves to no non-lifeline netdev (lifeline-only, or a freshly-renamed
-// interface not yet in the snapshot) is dropped — it emits nothing and the
-// #4168 warning stays (the config projection already keeps the warning for such
-// a zone because it never lands in RenderedPolicyKeys without a rendered rule).
+// config projection for the representable first-match rules and uses the
+// projection's config-derived iifname scope (with the same Linux-name rules as
+// the live snapshot). A program with no usable non-lifeline netdev (a
+// configured lifeline-only zone, or an unresolved scope) is intentionally
+// dropped — no kernel rule is emitted. Configured lifeline-only applicability
+// is recorded separately so the #4168 warning stays when another zone renders
+// the same policy; ordinary-zone enforcement remains suppressible.
 func BuildJunosHostPrograms(cfg *config.Config) []JunosHostProgram {
 	proj := config.BuildJunosHostDenyProjection(cfg)
 	if len(proj.Programs) == 0 {
@@ -77,8 +78,9 @@ func BuildJunosHostPrograms(cfg *config.Config) []JunosHostProgram {
 		// IngressNetdevs is the config-computed iifname scope
 		// (config.JunosHostZoneIngressNetdevs): lifeline-excluded and free of any
 		// cross-zone-ambiguous shared parent. A representable program that
-		// resolves to no netdev emits nothing (and its config projection kept the
-		// #4168 warning — the two agree by construction on this SSOT).
+		// resolves to no netdev emits nothing; configured lifeline-only
+		// applicability is recorded so the validator retains a warning while
+		// ordinary-zone enforcement remains suppressible.
 		if len(p.IngressNetdevs) == 0 {
 			continue
 		}
