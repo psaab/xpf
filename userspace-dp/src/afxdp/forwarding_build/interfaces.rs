@@ -101,12 +101,18 @@ const UNIT_REFUSED_TRANSIT_FULL_10520: &str =
 const UNIT_REFUSED_TRANSIT_RETAINED_10520: &str =
     "Transit is evaluated under the retained zone's policy (zone-gated; the #6682 \
      unzoned-ingress deny does not apply), so its verdict follows that policy.";
-const UNIT_REFUSED_HOST_BOUND_10520: &str =
+const UNIT_REFUSED_HOST_BOUND_FULL_10520: &str =
     "Host-bound handling is shape-dependent: addressed/tunnel traffic is denied by \
      the #5659 empty-zone host-inbound sentinel (ICMP errors/PMTUD/ND control \
      messages remain admitted; an explicit per-interface host-inbound stanza still \
      takes precedence); address-less non-tunnel traffic remains admitted via the \
      global None => true path; retained sibling-zone traffic is zone-gated.";
+const UNIT_REFUSED_HOST_BOUND_RETAINED_10520: &str =
+    "Host-bound traffic is evaluated under the retained sibling zone policy \
+     (zone-gated).";
+const UNIT_REFUSED_HOST_BOUND_LIFELINE_10520: &str =
+    "Host-bound traffic on this lifeline remains admitted; #5659 deliberately does \
+     not arm an empty-zone host-inbound sentinel.";
 
 fn unit_refused_transit_warning_10520(retained_zone: bool) -> &'static str {
     if retained_zone {
@@ -116,22 +122,51 @@ fn unit_refused_transit_warning_10520(retained_zone: bool) -> &'static str {
     }
 }
 
+fn unit_refused_host_bound_warning_10520(
+    retained_zone: bool,
+    config_name: Option<&str>,
+) -> &'static str {
+    if retained_zone {
+        UNIT_REFUSED_HOST_BOUND_RETAINED_10520
+    } else if config_name.is_some_and(is_host_inbound_lifeline) {
+        UNIT_REFUSED_HOST_BOUND_LIFELINE_10520
+    } else {
+        UNIT_REFUSED_HOST_BOUND_FULL_10520
+    }
+}
+
 #[cfg(test)]
 mod warning_text_tests_10520 {
     use super::*;
 
     #[test]
-    fn refusal_warning_text_pins_full_and_partial_mechanisms_10520() {
+    fn refusal_warning_text_pins_full_partial_and_lifeline_mechanisms_10520() {
         assert!(UNIT_REFUSED_TRANSIT_FULL_10520.contains("#6682"));
         assert!(UNIT_REFUSED_TRANSIT_FULL_10520.contains("#9989"));
         assert!(UNIT_REFUSED_TRANSIT_FULL_10520.contains("UNZONED_INGRESS_DENIED"));
         assert!(UNIT_REFUSED_TRANSIT_RETAINED_10520.contains("zone-gated"));
         assert!(UNIT_REFUSED_TRANSIT_RETAINED_10520.contains("does not apply"));
-        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("#5659"));
-        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("address-less"));
-        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("None => true"));
-        assert!(UNIT_REFUSED_HOST_BOUND_10520.contains("zone-gated"));
-        assert!(!UNIT_REFUSED_HOST_BOUND_10520.contains("#10503"));
+        assert!(UNIT_REFUSED_HOST_BOUND_FULL_10520.contains("#5659"));
+        assert!(UNIT_REFUSED_HOST_BOUND_FULL_10520.contains("address-less"));
+        assert!(UNIT_REFUSED_HOST_BOUND_FULL_10520.contains("None => true"));
+        assert!(UNIT_REFUSED_HOST_BOUND_FULL_10520.contains("zone-gated"));
+        assert!(UNIT_REFUSED_HOST_BOUND_RETAINED_10520.contains("zone-gated"));
+        assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("admitted"));
+        assert!(UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("#5659"));
+        assert!(!UNIT_REFUSED_HOST_BOUND_LIFELINE_10520.contains("#10503"));
+
+        assert_eq!(
+            unit_refused_host_bound_warning_10520(true, Some("fab0.0")),
+            UNIT_REFUSED_HOST_BOUND_RETAINED_10520
+        );
+        assert_eq!(
+            unit_refused_host_bound_warning_10520(false, Some("fab0.0")),
+            UNIT_REFUSED_HOST_BOUND_LIFELINE_10520
+        );
+        assert_eq!(
+            unit_refused_host_bound_warning_10520(false, Some("reth0.0")),
+            UNIT_REFUSED_HOST_BOUND_FULL_10520
+        );
     }
 }
 /// True for a snapshot row that names a LOGICAL UNIT (`st0.0`, `reth1.0`,
@@ -506,10 +541,11 @@ pub(super) fn populate_interfaces(
                 // The dataplane sees an IFINDEX, not a unit, so it cannot tell
                 // the two apart with anything on the wire today. When it cannot
                 // know which zone a packet belongs to, the firewall must decline
-                // Transit is denied as unattributed before the implicit default
-                // policy (#6682); non-lifeline host-bound traffic is denied by
-                // the contested-parent host-inbound sentinel (#10503), while
-                // lifeline contests remain admitted by deliberate sentinel skip.
+                // to pick one rather than guess. Transit is denied as unattributed
+                // before the implicit default policy (#6682); non-lifeline
+                // host-bound traffic is denied by the contested-parent
+                // host-inbound sentinel (#10503), while lifeline contests remain
+                // admitted by deliberate sentinel skip.
                 //
                 // This also collapses an asymmetry rather than adding a second
                 // mechanism: the egress half already resolves a contested
@@ -872,9 +908,15 @@ pub(super) fn populate_interfaces(
             continue;
         }
         let ids: Vec<String> = zones.iter().map(|z| z.to_string()).collect();
-        let transit =
-            unit_refused_transit_warning_10520(state.ifindex_to_zone_id.contains_key(ifindex));
-        let host_bound = UNIT_REFUSED_HOST_BOUND_10520;
+        let retained_zone = state.ifindex_to_zone_id.contains_key(ifindex);
+        let transit = unit_refused_transit_warning_10520(retained_zone);
+        let host_bound = unit_refused_host_bound_warning_10520(
+            retained_zone,
+            state
+                .ifindex_to_config_name
+                .get(ifindex)
+                .map(String::as_str),
+        );
         eprintln!(
             "xpf-userspace-dp: WARNING ifindex {} carries a logical unit the operator \
              left out of zone ids [{}]: that unit is what receives frames on the \
