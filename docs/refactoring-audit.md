@@ -92,8 +92,8 @@ runs produce byte-identical output.
 
 ## The two gates
 
-The audit answers two different questions, and #7253 split them apart
-because fusing them made the useful one unusable.
+The audit answers three different questions, and #7253 split the original
+two gates apart because fusing them made the useful one unusable.
 
 | Question | Who it is for | Surface | Fails a build? |
 |---|---|---|---|
