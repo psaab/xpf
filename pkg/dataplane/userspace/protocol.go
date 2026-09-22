@@ -562,12 +562,20 @@ type ControlResponse struct {
 	// ErrSessionCountersUnsupported, never as an empty answer.
 	SessionCounters []SessionCounterRow `json:"session_counters,omitempty"`
 	// #10512: helper-owned clear transaction metadata.
-	SessionMirrorV4Count      uint64 `json:"session_mirror_v4_count,omitempty"`
-	SessionMirrorV6Count      uint64 `json:"session_mirror_v6_count,omitempty"`
-	SessionMirrorComplete     bool   `json:"session_mirror_complete,omitempty"`
-	SessionMirrorFenceID      uint64 `json:"session_mirror_fence_id,omitempty"`
-	SessionMirrorContinuation string `json:"session_mirror_continuation,omitempty"`
-	SessionDeleteIdentityRefused bool `json:"session_delete_identity_refused,omitempty"`
+	SessionMirrorV4Count          uint64 `json:"session_mirror_v4_count,omitempty"`
+	SessionMirrorV6Count          uint64 `json:"session_mirror_v6_count,omitempty"`
+	SessionMirrorComplete         bool   `json:"session_mirror_complete,omitempty"`
+	SessionMirrorFenceID          uint64 `json:"session_mirror_fence_id,omitempty"`
+	SessionMirrorContinuation     string `json:"session_mirror_continuation,omitempty"`
+	// PolicyDeleteOutcomes is the per-match outcome vector for one
+	// mirror_delete_policy_batch micro-batch (#10512, plan §2.4), positional
+	// against the request's PolicyMatches: applied | stale_forward |
+	// partial_companion | refused_identity. Valid only when
+	// PolicyDeleteComplete is true; any other shape is a batch failure the
+	// caller surfaces as a persistent gap, never partial success.
+	PolicyDeleteOutcomes []string `json:"policy_delete_outcomes,omitempty"`
+	PolicyDeleteComplete bool     `json:"policy_delete_complete,omitempty"`
+	PolicyDeleteErrors   []string `json:"policy_delete_errors,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than

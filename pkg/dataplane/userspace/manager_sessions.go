@@ -11,7 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -25,6 +28,17 @@ const (
 	policyReadMatchCap     = 262144
 	policyReadByteCap      = 48 * 1024 * 1024
 	policyReadDeadline     = 30 * time.Second
+	policyDeleteDeadline   = 30 * time.Second
+	// Plan §2.4 micro-batch caps: the helper acquires all of one batch's
+	// gate keys together, so Go packs forward matches and their captured
+	// companions under both ceilings.
+	policyDeleteBatchMatches = 64
+	policyDeleteBatchKeys    = 128
+	// Consecutive helper-determined batch failures before the driver stops
+	// issuing batches: sustained systemic failure (contention, overload)
+	// fails fast instead of burning the deadline batch by batch. Isolated
+	// failures (one corrupt batch among clean ones) continue past.
+	policyDeleteSemanticBreaker = 3
 )
 // ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
 // session authority. It deliberately uses the control socket: this request is
@@ -92,8 +106,226 @@ func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlRes
 		seenContinuations[page.SessionPolicyContinuation] = struct{}{}
 		pageReq.Continuation = page.SessionPolicyContinuation
 	}
+	}
+
+// PolicyDeleteResult records helper outcomes for one policy READ capture.
+// Stale rows are successful conditional no-ops; partial companion outcomes
+// remove the forward row but retain a replacement companion and therefore
+// remain visible to the caller.
+type PolicyDeleteResult struct {
+	Applied int
+	Stale   int
+	Partial int
 }
 
+// DeletePolicySessions performs helper-first, identity-conditional deletes for
+// the matches returned by ListSessionsByPolicy. The helper owns both the
+// authoritative table and the bare-key mirror repair; this method never uses a
+// Go-side mirror delete that could destroy a colliding survivor.
+//
+// Plan §2.4 micro-batches: at most 64 matches and 128 gate keys (forward plus
+// captured companion) per helper round trip, so a full 262144-match capture
+// costs at most 4096 round trips — never one per match. Batches share one
+// absolute 30-second delete deadline; at the deadline, on a batch transport
+// failure, or on an incomplete batch answer, it stops issuing new batches and
+// returns the partial counts with an error. The remainder is a SURFACED
+// PERSISTENT GAP, not a retryable backlog: the commit already activated the
+// new config, so no recommit re-captures these matches (§2.4: no cross-commit
+// retention) — the survivors forward until idle timeout unless the operator
+// clears sessions or recommits an touching change. Callers join the error
+// into the commit result (#5578) rather than reporting success.
+func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDeleteResult, error) {
+	var result PolicyDeleteResult
+	if len(matches) == 0 {
+		return result, nil
+	}
+	for _, match := range matches {
+		if match.ExpectedRTFlowSessionID == 0 {
+			return result, fmt.Errorf("policy session delete: identity-missing")
+		}
+		if match.ExpectedCompanionRTFlowSessionID != 0 && match.ReverseKey == nil {
+			return result, fmt.Errorf("policy session delete: companion-identity-missing")
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc == nil || m.proc.Process == nil {
+		return result, errSessionHelperUnreachable
+	}
+	startProcGen := m.procGen
+	deadline := time.Now().Add(policyDeleteDeadline)
+	var firstErr error
+	confirmed := 0
+	consecutiveSemantic := 0
+	for start := 0; start < len(matches); {
+		if time.Now().After(deadline) {
+			return result, policyDeleteGapError(
+				fmt.Errorf("deadline exceeded after %s", policyDeleteDeadline),
+				result, confirmed, len(matches))
+		}
+		if m.proc == nil || m.procGen != startProcGen {
+			// Helper churned mid-invalidation (crash/restart/upgrade): the
+			// capture predates the new incarnation, whose rebuilt tables may
+			// carry reminted identities. Never evaluate a stale capture
+			// against fresh tables — gap loud and let a touching recommit
+			// re-capture (precedent: owner_rg_export_paging_9344 procGen fence).
+			return result, policyDeleteGapError(
+				fmt.Errorf("helper churned mid-invalidation (procGen %d -> %d)", startProcGen, m.procGen),
+				result, confirmed, len(matches))
+		}
+		end := start + policyDeleteBatchMatches
+		if end > len(matches) {
+			end = len(matches)
+		}
+		// Shrink to the 128 gate-key cap: each match costs its forward key
+		// plus its captured companion when one is expected.
+		for end > start && policyDeleteBatchKeysOf(matches[start:end]) > policyDeleteBatchKeys {
+			end--
+		}
+		batch := matches[start:end]
+		req := SessionSyncRequest{
+			Operation:     "mirror_delete_policy_batch",
+			PolicyMatches: batch,
+			// Stable content identity across attempts and epochs: retries
+			// and restarts reconcile the SAME logical batch instead of
+			// minting a new one per attempt. OperationID stays per attempt
+			// (stamped once below and reused by the transport retry).
+			MutationID: policyDeleteBatchMutationID(batch),
+		}
+		// Stamp once so the transport retry below reuses identical
+		// identities (the send path only fills empty fields).
+		m.stampSessionMutationLocked(&req)
+		resp, err := m.syncSessionRequestResponseLocked(req)
+		if err != nil && errors.Is(err, errSessionHelperUnreachable) {
+			// Fence the retry: the send dropped m.mu, so the helper may have
+			// churned (crash/restart) during I/O. Never resend a pre-churn
+			// capture against rebuilt tables (reminted identities would
+			// all-stale-count a live revocation), and never hand a fresh
+			// helper generation a pre-churn request at all.
+			if m.proc == nil || m.procGen != startProcGen {
+				return result, policyDeleteGapError(
+					fmt.Errorf("helper churned during batch send (procGen %d -> %d)", startProcGen, m.procGen),
+					result, confirmed, len(matches))
+			}
+			// Transport-unknown outcome (lost request/response, slow
+			// helper): resend ONCE with identical identities — the helper
+			// replays the recorded outcome if it executed, or executes
+			// first-time if the request never arrived (exactly-once per
+			// attempt pair).
+			resp, err = m.syncSessionRequestResponseLocked(req)
+		}
+		if err != nil {
+			if errors.Is(err, errSessionHelperUnreachable) {
+				// Helper down/hung (both attempts failed transport): #5380
+				// fast-fail — stop issuing batches rather than burning the
+				// deadline on a dead helper.
+				return result, policyDeleteGapError(err, result, confirmed, len(matches))
+			}
+			// Semantic determination (helper refused/failed this batch):
+			// record and CONTINUE — other batches carry different content
+			// and may succeed (revocation-maximizing). The breaker below
+			// stops sustained systemic failure fast.
+			if firstErr == nil {
+				firstErr = err
+			}
+			consecutiveSemantic++
+			if consecutiveSemantic >= policyDeleteSemanticBreaker {
+				return result, policyDeleteGapError(firstErr, result, confirmed, len(matches))
+			}
+			start = end
+			continue
+		}
+		if len(resp.PolicyDeleteOutcomes) != len(batch) || !resp.PolicyDeleteComplete {
+			// Contract breach (not a determination): the helper answered OK
+			// with an unusable batch result. Every batch would breach
+			// identically (same helper version) — stop fast.
+			return result, policyDeleteGapError(
+				fmt.Errorf("incomplete batch answer (%d outcomes for %d matches, complete=%v, errors=%v)",
+					len(resp.PolicyDeleteOutcomes), len(batch),
+					resp.PolicyDeleteComplete, resp.PolicyDeleteErrors),
+				result, confirmed, len(matches))
+		}
+		for _, outcome := range resp.PolicyDeleteOutcomes {
+			switch outcome {
+			case "applied":
+				result.Applied++
+			case "stale_forward", "refused_identity":
+				// Nothing removed; the live state differs from the capture.
+				// Refused (capture stale about the companion) and stale
+				// (forward gone or replaced) both mean "no-op, session live
+				// under a different incarnation".
+				result.Stale++
+			case "partial_companion":
+				result.Applied++
+				result.Partial++
+			default:
+				// Unknown token (helper newer than Go): contract breach — stop.
+				return result, policyDeleteGapError(
+					fmt.Errorf("unknown batch outcome %q", outcome),
+					result, confirmed, len(matches))
+			}
+		}
+		confirmed += len(batch)
+		consecutiveSemantic = 0
+		start = end
+	}
+	if firstErr != nil {
+		return result, policyDeleteGapError(firstErr, result, confirmed, len(matches))
+	}
+	if result.Partial != 0 {
+		return result, fmt.Errorf(
+			"policy session delete: %d partial companion outcome(s)", result.Partial)
+	}
+	return result, nil
+}
+
+// policyDeleteGapError reports a partial policy invalidation as the persistent
+// gap it is: `confirmed` counts only fully-resolved batches (a later success
+// never jumps over an earlier failed range), and every unconfirmed match will
+// NOT be re-captured by a recommit (the config is already active). Survivors
+// among them persist until idle timeout. Loud by construction (#5578).
+func policyDeleteGapError(err error, result PolicyDeleteResult, confirmed, total int) error {
+	return fmt.Errorf(
+		"policy session delete INCOMPLETE: %v (applied %d, stale %d, partial %d of %d matches, %d without confirmed outcomes; "+
+			"survivors persist until idle timeout — recommit does not re-capture; "+
+			"clear sessions or recommit an touching change to force)",
+		err, result.Applied, result.Stale, result.Partial, total, total-confirmed)
+}
+
+// policyDeleteBatchFallback numbers the unreachable digest fallback below.
+var policyDeleteBatchFallback atomic.Uint64
+
+// policyDeleteBatchMutationID derives the batch's stable content identity: the
+// ordered matches hashed (FNV-1a over the canonical JSON encoding — field
+// order fixed, no maps — so future fields join automatically) and hex-encoded.
+// Same batch content in the same order (any attempt, any epoch) yields the
+// same mutation ID, so the helper reconciles retries, re-sends, and restarts
+// instead of treating every attempt as a new logical batch. The "pb:" prefix
+// distinguishes batch digests from tuple mutations and op-derived fallbacks.
+func policyDeleteBatchMutationID(batch []SessionPolicyMatch) string {
+	encoded, err := json.Marshal(batch)
+	if err != nil {
+		// Unreachable for this struct shape (no maps/channels/functions);
+		// unique-per-call preserves correctness (no false reconcile).
+		return "pb:unencodable-" + strconv.FormatUint(policyDeleteBatchFallback.Add(1), 10)
+	}
+	sum := fnv.New64a()
+	sum.Write(encoded)
+	return "pb:" + strconv.FormatUint(sum.Sum64(), 16)
+}
+
+// policyDeleteBatchKeysOf counts the gate keys one micro-batch would acquire:
+// each match's forward key plus its captured companion when one is expected.
+func policyDeleteBatchKeysOf(batch []SessionPolicyMatch) int {
+	keys := 0
+	for _, match := range batch {
+		keys++
+		if match.ReverseKey != nil {
+			keys++
+		}
+	}
+	return keys
+}
 
 // ExportAllSessionsViaEventStream tells the Rust helper to push all current
 // sessions through the event stream as Open events. The Go daemon receives

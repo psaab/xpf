@@ -863,6 +863,18 @@ func (a *LegacyDataPlaneAdapter) ListSessionsByPolicy(
 		return ControlResponse{}, err
 	}
 	return m.ListSessionsByPolicy(req)
+	}
+
+// DeletePolicySessions forwards the helper-first identity-conditional policy
+// invalidation path to the published userspace adapter.
+func (a *LegacyDataPlaneAdapter) DeletePolicySessions(
+	matches []SessionPolicyMatch,
+) (PolicyDeleteResult, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return PolicyDeleteResult{}, err
+	}
+	return m.DeletePolicySessions(matches)
 }
 
 // BatchDeletePeerSyncedSessionsScoped forwards the #9714 peer-delete batch. The

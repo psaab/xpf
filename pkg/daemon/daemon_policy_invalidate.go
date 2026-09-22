@@ -409,6 +409,56 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 		return nil
 	}
 
+	if lister, ok := rt.(interface {
+		ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
+	}); ok {
+		// The raw activation stamp, possibly 0 ("boundary unknown"). The
+		// helper honors Some(0) as unbounded in legacy mode — every matching
+		// forward is returned — which is exactly the #6948 contract this
+		// branch replaces (activationSecs==0 clears every matching id).
+		// Never nil here: legacy mode requires the fence precisely so an
+		// omitted boundary errors instead of silently unbounded.
+		beforeSecs := d.policyActivationSecs
+		policyIDs := make([]uint32, 0, len(ids))
+		for id := range ids {
+			policyIDs = append(policyIDs, id)
+		}
+		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
+			PolicyIDs:  policyIDs,
+			Mode:       "legacy",
+			BeforeSecs: &beforeSecs,
+			Families:   []uint8{4, 6},
+			Classes:    []string{"forward"},
+		})
+		if err != nil {
+			return fmt.Errorf("policy session READ (%s): %w", what, err)
+		}
+		if !resp.SessionPolicyComplete {
+			return fmt.Errorf(
+				"policy session READ (%s) incomplete: %v",
+				what, resp.SessionPolicyPerWorkerErrors)
+		}
+		capture := capturedSessions{targets: len(ids)}
+		var errs []error
+		for _, match := range resp.SessionPolicyMatches {
+			entry4, entry6, entryErr := policyMatchEntries(match)
+			if entryErr != nil {
+				errs = append(errs, entryErr)
+				continue
+			}
+			capture.policy = append(capture.policy, match)
+			if entry4 != nil {
+				capture.v4 = append(capture.v4, *entry4)
+			}
+			if entry6 != nil {
+				capture.v6 = append(capture.v6, *entry6)
+			}
+		}
+		capture.enumFailed = len(errs) != 0
+		errs = append(errs, d.deleteInvalidatedSessions(capture, reason, what))
+		return errors.Join(errs...)
+	}
+
 	store := rt.Sessions()
 	if store == nil {
 		return nil
@@ -534,6 +584,27 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 	if rt == nil {
 		return nil
 	}
+	if invalidator, ok := rt.(interface {
+		DeletePolicySessions([]dpuserspace.SessionPolicyMatch) (dpuserspace.PolicyDeleteResult, error)
+	}); ok && len(c.policy) > 0 {
+		result, err := invalidator.DeletePolicySessions(c.policy)
+		var errs []error
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"policy session invalidation (%s): helper delete: %w", what, err))
+		}
+		if !c.enumFailed && len(errs) == 0 {
+			slog.Info("cleared sessions of changed policies at commit",
+				"change", what,
+				"policies", c.targets,
+				"matched", len(c.policy),
+				"cleared", result.Applied,
+				"stale", result.Stale,
+				"ha_sync", d.cluster != nil && d.cluster.IsLocalPrimaryAny())
+		}
+		return errors.Join(errs...)
+	}
+
 	store := rt.Sessions()
 	if store == nil {
 		return nil

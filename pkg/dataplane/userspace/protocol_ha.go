@@ -131,10 +131,15 @@ type SessionSyncRequest struct {
 	// omitempty: a 0 value MUST serialize as 0 (legacy/unknown) so an old
 	// Rust side declares `#[serde(default)] generation: u64`.
 	Generation uint64 `json:"generation"`
-	// #10512: identity-conditional policy invalidation delete. A zero value
-	// preserves the legacy unconditioned delete contract.
-	ExpectedRTFlowSessionID          uint64 `json:"expected_rt_flow_session_id,omitempty"`
-	ExpectedCompanionRTFlowSessionID uint64 `json:"expected_companion_rt_flow_session_id,omitempty"`
+	// PolicyMatches carries ONE micro-batch of identity-conditional policy
+	// deletes (#10512, plan §2.4: at most 64 matches and 128 gate keys per
+	// batch; Go packs, the helper rejects over-cap before acquisition). Each
+	// item is a READ match verbatim — forward tuple, captured reverse tuple,
+	// and both expected identities. Tuple routing domains are RAW (0 =
+	// default instance, stated), never the #7239 wire codec. Set only with
+	// operation mirror_delete_policy_batch; nil for every other verb.
+	// Additive: an old helper without the verb rejects it as unknown.
+	PolicyMatches []SessionPolicyMatch `json:"policy_matches,omitempty"`
 	// #3301: the admitting policy's firewall metadata, carried so a
 	// peer-PROMOTED session is correctly attributed, counted, and aged after
 	// failover instead of degrading to policy 0 / no counter / the global
