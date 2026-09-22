@@ -18,9 +18,10 @@ import (
 // divert-absent window is the residual local-input exposure. For WireGuard,
 // #8274 moved transport decapsulation into the AF_XDP worker, which adjudicates
 // the inner packet under the tunnel's zone, and left a kernel-path residual
-// (docs/log/8274.md "The residual, stated rather than closed"), which #9594
-// narrowed to ingress the shim does not adjudicate. Since #9251 the two
-// advisories render DIFFERENT facts through one shared shape.
+// (docs/log/8274.md "The residual, narrowed by Half A (#10527)"). #9594 and
+// #10527 now apply the local-vs-transit posture on covered and shim-uncovered
+// ingress respectively. Since #9251 the two advisories render DIFFERENT facts
+// through one shared shape.
 //
 // WHAT IS SHARED HERE and what is deliberately NOT:
 //

@@ -10470,10 +10470,18 @@ fn wg_resteering_restarts_control_threads_with_the_new_decision_9521() {
 /// per-tunnel map seam instead of bpffs — decides. The steered endpoint's ingress
 /// (loopback) is placed in the shim's adjudicated set, so its record is a
 /// degraded-window arrival: transit must be refused and counted, and the same
-/// record addressed to the firewall must still be delivered.
+/// record addressed to the firewall must still be delivered to the TUN stand-in.
 ///
-/// This is the cell that dies if `wg_control_loop` ever runs the loop without the
-/// shim-map view: every loop-level cell drives the loop directly with a fake.
+/// This production-spawn proof is deliberately bounded at the control-thread
+/// TUN handoff: the stand-in observes the bytes before any kernel input/nft
+/// processing. An uncovered-production local-delivery pin would duplicate the
+/// seam that Half B (#10597) will rework, so the dedicated Half-A cells pin its
+/// uncovered disposition and TUN handoff without claiming beyond-TUN policy.
+/// The existing configured-ingress placement cell below still proves that the
+/// production view classifies uncovered interfaces from runtime state.
+///
+/// This is the cell that dies if `wg_control_loop` ever runs the loop without
+/// the shim-map view: every loop-level cell drives the loop directly with a fake.
 #[test]
 fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     use crate::afxdp::coordinator::wg_control::kernel_path::{

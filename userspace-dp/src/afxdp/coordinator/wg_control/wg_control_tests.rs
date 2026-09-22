@@ -1321,7 +1321,10 @@ fn observe_one_record_9521(
 #[test]
 fn unsteered_port_kernel_transport_is_dropped_not_written_9521() {
     use crate::afxdp::types::WgKernelTransport;
-    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+    for (outer_v6, inner) in [
+        (false, super::inner_v4_9521()),
+        (true, super::inner_v6_9521()),
+    ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
 
         let steered = observe_one_record_9521(WgKernelTransport::Deliver, outer_v6, &inner);
@@ -1338,7 +1341,10 @@ fn unsteered_port_kernel_transport_is_dropped_not_written_9521() {
             "{family}: the STEERED port wrote uncovered TRANSIT plaintext to the wgN TUN (#10527): {:?}",
             steered.delivered
         );
-        assert_eq!(steered.unsteered_drops, 0, "{family}: the steered port counted an unsteered drop");
+        assert_eq!(
+            steered.unsteered_drops, 0,
+            "{family}: the steered port counted an unsteered drop"
+        );
 
         let unsteered = observe_one_record_9521(WgKernelTransport::DropUnsteered, outer_v6, &inner);
         assert_eq!(
@@ -1549,10 +1555,17 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
     use crate::afxdp::types::WgKernelTransport::Deliver;
     let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
     assert!(lo > 0, "setup: the loopback interface has no ifindex");
-    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+    for (outer_v6, inner) in [
+        (false, super::inner_v4_9521()),
+        (true, super::inner_v6_9521()),
+    ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
         let obs = observe_one_record_9594(Deliver, Uncovered, false, outer_v6, &inner);
-        assert_eq!(obs.decap_packets, 1, "{family}: record did not authenticate");
+        assert_eq!(
+            obs.decap_packets,
+            1,
+            "{family}: record did not authenticate"
+        );
         assert_eq!(
             obs.degraded_drops, 1,
             "{family}: uncovered transit must increment the degraded-transit refusal counter"
@@ -1571,13 +1584,16 @@ fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
 }
 
 /// #10527 cell 2: the uncovered-ingress fix is not a blanket drop. A
-/// steered-port record addressed to the firewall still reaches the TUN/input
-/// path in both outer families.
+/// steered-port record addressed to the firewall still reaches the TUN handoff
+/// in both outer families; the test stand-in observes bytes before kernel input.
 #[test]
 fn steered_port_uncovered_host_inbound_still_delivered_10527() {
     use super::kernel_path::WgKernelPathIngress::Uncovered;
     use crate::afxdp::types::WgKernelTransport::Deliver;
-    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+    for (outer_v6, inner) in [
+        (false, super::inner_v4_9521()),
+        (true, super::inner_v6_9521()),
+    ] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
         let obs = observe_one_record_9594(Deliver, Uncovered, true, outer_v6, &inner);
         assert_eq!(

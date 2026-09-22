@@ -277,8 +277,10 @@ func wireGuardPlaintextAdvisoryWording() plaintextAdvisoryWording {
 			"address, not a security policy — it has no destination, zone-pair or " +
 			"application scope.",
 		unzonedCaveat: wgPlaintextUnzonedCaveat,
-		remedy: "On the kernel path, restrict what the tunnel can reach with routing, with " +
-			"the peer's `allowed-ips`, or with the peer's own policy.",
+		remedy: "Use host-input controls for traffic addressed to the firewall; the " +
+			"local TUN handoff is not adjudicated by zone, session, NAT or screen. " +
+			"Peer/source scoping remains a peer-selection control, not a substitute " +
+			"for those host-input controls.",
 	}
 }
 

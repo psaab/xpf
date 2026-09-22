@@ -296,11 +296,9 @@ pub(super) fn wg_control_loop(
     eprintln!("xpf-userspace-dp: WG control thread stopped tun={tunnel_name}");
 }
 
-/// #9594: the loop with NO kernel-path posture view — every kernel-path record
-/// is handled as arriving on an UNCOVERED ingress, which is the pre-#9594
-/// behavior the older loop cells were written against. Test-only by
-/// construction: a production caller would be a silent fail-open, so it does not
-/// exist outside `cfg(test)`; `wg_control_loop` passes the shim-map view.
+/// #9594/#10527: test-only loop using an uncovered, non-local view; transport
+/// plaintext is refused under #10527. Production `wg_control_loop` passes the
+/// shim-map view.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn run_wg_control_loop(

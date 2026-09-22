@@ -4,7 +4,7 @@
 //! Only a STEERED port's thread gets here — #9521 already drops every
 //! other port's kernel-path transport (`WgKernelTransport::DropUnsteered`,
 //! set-valued since #9587). For a steered port the kernel path has two
-//! causes, and they need opposite answers:
+//! causes, and both get the SAME local-vs-transit posture:
 //!
 //!   * the record arrived on an ingress the XDP shim does NOT adjudicate (#8274's
 //!     stated residual, `docs/log/8274.md`, tightened for transit by #10527);
