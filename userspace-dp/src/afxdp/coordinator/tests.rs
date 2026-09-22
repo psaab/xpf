@@ -10589,14 +10589,15 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     drop(coordinator);
 }
 
-/// #9594: the PRODUCTION posture view places an ingress the way the fix depends
-/// on — in the shim's ingress set is covered (degraded arrival); a CONFIGURED
-/// interface outside it is uncovered, #8274's residual, and must stay delivered;
-/// an ifindex that is neither cannot be placed. The middle case is the one a
+/// #9594/#10527: the PRODUCTION posture view places an ingress the way the fix
+/// depends on — in the shim's ingress set is covered (degraded arrival); a
+/// CONFIGURED interface outside it is uncovered, #8274's residual, and now
+/// receives the same transit refusal while preserving local delivery; an
+/// ifindex that is neither cannot be placed. The middle case is the one a
 /// regression would hide in: if the view stopped consulting the runtime
 /// forwarding state, every uncovered ingress would read as unplaceable and its
-/// transit would be silently dropped — no loop cell sees that, because they all
-/// drive the loop with a fixed view.
+/// classification would change from the #10527 uncovered arm to fail-closed
+/// Unknown.
 #[test]
 fn shim_maps_view_places_configured_uncovered_ingress_9594() {
     use crate::afxdp::coordinator::wg_control::kernel_path::{
@@ -10637,8 +10638,9 @@ fn shim_maps_view_places_configured_uncovered_ingress_9594() {
     assert_eq!(
         view.ingress(Some(4551)),
         WgKernelPathIngress::Uncovered,
-        "a configured interface the shim does not adjudicate is #8274's residual and must be \
-         delivered — reading it as unplaceable would drop its transit silently"
+        "a configured interface the shim does not adjudicate is #8274's residual \
+         and must remain classified as uncovered — #10527 applies transit refusal \
+         after classification; reading it as unplaceable would hide the map state"
     );
     assert_eq!(
         view.ingress(Some(999_999)),

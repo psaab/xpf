@@ -1220,6 +1220,7 @@ fn keepalives_are_not_marked_7758() {
 struct LoopObservation9521 {
     delivered: Option<Vec<u8>>,
     unsteered_drops: u64,
+    degraded_drops: u64,
     decap_packets: u64,
 }
 
@@ -1285,8 +1286,10 @@ fn observe_one_record_9521(
             delivered = Some(bytes);
             break;
         }
-        if resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > 0 {
-            // A write racing the counter would land here.
+        if resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > 0
+            || resp.counters().rx_degraded_transit_drops.load(Ordering::Relaxed) > 0
+        {
+            // A write racing either drop counter would land here.
             std::thread::sleep(Duration::from_millis(50));
             delivered = super::tun_standin_recv_9521(&tun_test_end);
             break;
@@ -1298,6 +1301,7 @@ fn observe_one_record_9521(
     LoopObservation9521 {
         delivered,
         unsteered_drops: resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+        degraded_drops: resp.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
         decap_packets: resp.counters().decap_packets.load(Ordering::Relaxed),
     }
 }
@@ -1308,12 +1312,12 @@ fn observe_one_record_9521(
 /// used to decrypt it straight onto the wgN TUN for the kernel to forward with
 /// no zone policy. Now it authenticates the record and drops the plaintext.
 ///
-/// Both outer families, because the socket is dual-stack and a v4-only cell
-/// would say nothing about the v6 path an operator's peers may use. The steered
-/// run is the positive control in each family: the same record through the same
-/// loop DOES reach the TUN, so the unsteered run's silence is the gate and not
-/// a broken fixture — and the drop counter plus `decap_packets` prove the record
-/// arrived and authenticated before it was dropped.
+/// Both outer families are covered, because the socket is dual-stack and a v4-
+/// only cell would say nothing about the v6 path an operator's peers may use.
+/// The STEERED run is now the #10527 regression: its shim-uncovered transit
+/// plaintext must be dropped and counted, while the UNSTEERED run is refused
+/// by #9521 before the posture gate. `decap_packets` proves each record arrived
+/// and authenticated before its respective drop.
 #[test]
 fn unsteered_port_kernel_transport_is_dropped_not_written_9521() {
     use crate::afxdp::types::WgKernelTransport;
@@ -1322,10 +1326,17 @@ fn unsteered_port_kernel_transport_is_dropped_not_written_9521() {
 
         let steered = observe_one_record_9521(WgKernelTransport::Deliver, outer_v6, &inner);
         assert_eq!(
-            steered.delivered.as_deref(),
-            Some(&inner[..]),
-            "{family}: the STEERED port's control thread must still deliver kernel-path \
-             transport plaintext — #8274 kept that path for ingress the shim does not cover"
+            steered.decap_packets, 1,
+            "{family}: the steered record never authenticated, so this run observed nothing"
+        );
+        assert_eq!(
+            steered.degraded_drops, 1,
+            "{family}: uncovered transit on the steered port must be counted as a degraded drop"
+        );
+        assert!(
+            steered.delivered.is_none(),
+            "{family}: the STEERED port wrote uncovered TRANSIT plaintext to the wgN TUN (#10527): {:?}",
+            steered.delivered
         );
         assert_eq!(steered.unsteered_drops, 0, "{family}: the steered port counted an unsteered drop");
 
@@ -1529,46 +1540,76 @@ fn observe_one_record_9594(
     }
 }
 
-/// #9594: while the dataplane is degraded the shim passes a steered-port record
-/// addressed to the firewall up to the kernel, and the steered port's thread
-/// used to write its plaintext to the wgN TUN whatever it was — so inner TRANSIT
-/// rode the kernel's open forward hook while every other transit packet was
-/// being dropped. On an ingress the shim adjudicates, the thread now applies the
-/// shim's own degraded posture to the decapsulated packet.
-///
-/// Every arm runs in both outer families, and three controls sit beside the
-/// refusal: the #8274 uncovered-ingress record is still delivered (positive
-/// control), a covered record addressed to the firewall is still delivered (the
-/// posture is not a blanket drop), and the record's REAL receiving interface —
-/// the loopback ifindex, from the kernel's pktinfo cmsg through `wg_recvmsg` —
-/// is what the posture was asked about, so the decision is not being made on a
-/// value the loop never learned.
+/// #10527 cell 1: a steered-port transport record on a shim-uncovered
+/// configured ingress is authenticated, counted as transit refusal, and never
+/// written to the wgN TUN. Both outer families exercise the real pktinfo path.
 #[test]
-fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594() {
-    use super::kernel_path::WgKernelPathIngress::{Covered, Uncovered, Unknown};
+fn steered_port_uncovered_transit_is_dropped_not_written_10527() {
+    use super::kernel_path::WgKernelPathIngress::Uncovered;
     use crate::afxdp::types::WgKernelTransport::Deliver;
     let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
     assert!(lo > 0, "setup: the loopback interface has no ifindex");
     for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
         let family = if outer_v6 { "IPv6" } else { "IPv4" };
-
-        let uncovered = observe_one_record_9594(Deliver, Uncovered, false, outer_v6, &inner);
+        let obs = observe_one_record_9594(Deliver, Uncovered, false, outer_v6, &inner);
+        assert_eq!(obs.decap_packets, 1, "{family}: record did not authenticate");
         assert_eq!(
-            uncovered.delivered.as_deref(),
-            Some(&inner[..]),
-            "{family}: an UNCOVERED ingress must still deliver the steered port's plaintext — \
-             #8274 kept that path because it is the only one there (positive control)"
+            obs.degraded_drops, 1,
+            "{family}: uncovered transit must increment the degraded-transit refusal counter"
         );
-        assert_eq!(uncovered.degraded_drops, 0, "{family}: uncovered ingress counted a degraded drop");
+        assert!(
+            obs.delivered.is_none(),
+            "{family}: uncovered transit was written to the wgN TUN: {:?}",
+            obs.delivered
+        );
         assert_eq!(
-            uncovered.asked,
+            obs.asked,
             vec![Some(lo)],
-            "{family}: the posture must be asked about the record's real receiving interface \
-             (the kernel's pktinfo cmsg for loopback). Anything else means the loop is deciding \
-             on a value it never learned — no pktinfo option, a dropped cmsg parse, or a \
-             dispatch that does not pass the ifindex through"
+            "{family}: posture did not receive the real pktinfo ifindex"
         );
+    }
+}
 
+/// #10527 cell 2: the uncovered-ingress fix is not a blanket drop. A
+/// steered-port record addressed to the firewall still reaches the TUN/input
+/// path in both outer families.
+#[test]
+fn steered_port_uncovered_host_inbound_still_delivered_10527() {
+    use super::kernel_path::WgKernelPathIngress::Uncovered;
+    use crate::afxdp::types::WgKernelTransport::Deliver;
+    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+        let family = if outer_v6 { "IPv6" } else { "IPv4" };
+        let obs = observe_one_record_9594(Deliver, Uncovered, true, outer_v6, &inner);
+        assert_eq!(
+            obs.delivered.as_deref(),
+            Some(&inner[..]),
+            "{family}: uncovered host-inbound traffic was not delivered"
+        );
+        assert_eq!(
+            obs.degraded_drops, 0,
+            "{family}: uncovered host-inbound traffic was counted as transit"
+        );
+    }
+}
+
+/// #9594: while the dataplane is degraded the shim passes a steered-port
+/// record addressed to the firewall up to the kernel, and the steered port's
+/// thread used to write its plaintext to the wgN TUN whatever it was — so inner
+/// TRANSIT rode the kernel's open forward hook while every other transit packet
+/// was being dropped. The thread applies the shim's local-vs-transit degraded
+/// posture on covered ingresses.
+///
+/// Every arm runs in both outer families. Covered transit, covered host-inbound,
+/// and unknown-ingress transit are the #9594 controls. The record's REAL
+/// receiving interface — the loopback ifindex, from the kernel's pktinfo cmsg
+/// through `wg_recvmsg` — is what the posture was asked about, so the decision
+/// is not being made on a value the loop never learned.
+#[test]
+fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594() {
+    use super::kernel_path::WgKernelPathIngress::{Covered, Unknown};
+    use crate::afxdp::types::WgKernelTransport::Deliver;
+    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+        let family = if outer_v6 { "IPv6" } else { "IPv4" };
         let transit = observe_one_record_9594(Deliver, Covered, false, outer_v6, &inner);
         assert_eq!(
             transit.decap_packets, 1,

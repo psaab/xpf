@@ -378,14 +378,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// #5618 WireGuard plaintext advisory. Since #8274 the AF_XDP worker
 	// decapsulates WireGuard transport and adjudicates the inner packet under
 	// the tunnel's zone (an unzoned tunnel's transit is denied there, #6682).
-	// What is NOT adjudicated is the kernel path: a transport record for the
-	// steered listen port that reaches the firewall through the kernel on an
-	// ingress the shim does not attach to (#8274's residual) is written to the
-	// wgN TUN by the helper's WG control thread and forwarded by Linux with no
-	// zone policy, session, NAT or screen. While the dataplane is degraded, a
-	// record on an ingress the shim does attach to has its transit dropped
-	// (#9594), and other listen ports are dropped there (#9521). The advisory
-	// states both
+	// The kernel path authenticates steered-port records on the helper's
+	// control socket. It delivers host-inbound plaintext to the wgN TUN for
+	// the kernel's input chains, but drops and counts transit on both the
+	// shim-uncovered residual (#10527) and degraded covered ingress (#9594);
+	// other listen ports are dropped there (#9521). The advisory states both
 	// halves; it used to say the zone was not enforced at all, which #8274 made
 	// false (#9251).
 	//
