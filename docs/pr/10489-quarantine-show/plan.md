@@ -202,6 +202,35 @@ This is a sequential two-PR close from the committed sibling contract:
   qualification because active config may not yet be applied. The shared
   annotation makes that disposition explicit. UNKNOWN-state rendering is
   specified in API, not here.
+### Interface-stats census resolutions (supersedes blanket annotation rule)
+
+The interface-stats entries are not one homogeneous wire family. Each census
+entry is resolved below with a file/line anchor and an explicit outcome:
+
+| Census entry | Surface classification | #10489 resolution |
+|---|---|---|
+| `pkg/api/interfaces.go:interfacesHandler:15-84` | REST structured `InterfaceStats` JSON | Exact `exemptRenderers` entry; defer quarantine presence, counters, and enum fields to #10531; no REST wire change here. |
+| `pkg/api/interfaces.go:writeInterfacesTerse:86-214` | REST terse text, but the emitted rows contain no zone value | Exact no-zone-value exemption (`#10530` adjacency); do not add a misleading annotation to an output that never names a zone. |
+| `pkg/api/interfaces.go:writeInterfacesDetail:215-301` | REST text `Zone:` rows | Annotate each quarantined zone with `ZoneQuarantineInterfacesQualifier`; shared verdict helper is reached at the zone line (`:263-269`). |
+| `pkg/api/stats.go:ifaceStatsHandler:117-170` | REST structured interface-stat JSON | Exact `exemptRenderers` entry; defer quarantine presence/counters to #10531; no REST wire change here. |
+| `pkg/grpcapi/server_show_interfaces.go:GetInterfaces:17-67` | gRPC structured `InterfaceInfo` protobuf | Exact `exemptRenderers` entry; defer quarantine presence, counters, and enum fields to #10531; no protobuf change here. |
+| `pkg/grpcapi/server_show_interfaces.go:ShowInterfacesDetail:70-508` | gRPC text detail, including `Security: Zone:` | Annotate the displayed zone with `ZoneQuarantineInterfacesQualifier` (`:354-358`). |
+| `pkg/grpcapi/server_show_interfaces.go:showInterfacesTerse:510-979` | gRPC terse text, but no zone value is emitted | Exact no-zone-value exemption (`#10530` adjacency). |
+| `pkg/grpcapi/server_show_interfaces.go:writeRethDetail:980-1050` | gRPC text reth detail `Security zone:` rows | Annotate the displayed zone with `ZoneQuarantineInterfacesQualifier` (`:1022-1027`). |
+| `pkg/grpcapi/server_show_interfaces_text.go:showInterfacesExtensive:46-181` | gRPC text extensive `Security zone:` rows | Annotate each displayed zone (`:108-115`). |
+| `pkg/grpcapi/server_show_interfaces_text.go:showInterfacesDetail:182-431` | gRPC text detail `Security zone:` rows | Annotate each displayed zone (`:271-279`). |
+| `pkg/grpcapi/server_show_interfaces_text.go:showVLANs:433-499` | gRPC text VLAN table zone column | Annotate the zone cell (`:491-495`); preserve the table's native/qualified VLAN ordering. |
+| `pkg/cli/cli_show_interfaces.go:showInterfaces:52-562` | Local CLI text logical-interface `Security: Zone:` rows | Annotate each displayed zone (`:399-403`). |
+| `pkg/cli/cli_show_interfaces_detail.go:showInterfacesDetail:13-178` and `showInterfacesRethDetail:188-288` | Local CLI text detail/reth `Security zone:` rows | Annotate both renderers (`:109-114`, `:240-245`); VLAN tags and line termination remain unchanged. |
+| `pkg/cli/cli_show_interfaces_extensive.go:showInterfacesExtensiveFiltered:20-220` | Local CLI text extensive `Security zone:` rows | Annotate each displayed zone (`:95-102`). |
+| `pkg/cli/cli_show_interfaces_stats.go:showVlans:51-160` | Local CLI text VLAN table zone column | Annotate the zone cell (`:150-154`). |
+
+This matrix is the binding disposition for #10489: structured entries are
+explicit #10531 exemptions, text entries that emit a zone are annotated, and
+text/internal entries that never emit a zone are not padded with a fabricated
+qualifier. The gate's security-zone census and exemption reasons must match
+this table exactly.
+
 - Why config-derived recompute instead of reading `m.lastZoneIDCollisions`
   via `Status()`: (a) the local CLI runs with `dp == nil` (all detail tests
   construct `&CLI{store: store}`) and must annotate without a dataplane;
