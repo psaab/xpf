@@ -501,6 +501,37 @@ after a bare row delete — it has no B value once the row is gone).
   Shed queues (`worker_command_queue_shed_total`), poison recoveries, and
   drops (`worker_command_queue_drops_total`) all force batch `complete=false`
   (R2).
+- AMENDMENT (2026-09-22, bounded abort — architect-approved): the
+  implementation bounds every abort phase and releases the lease with a loud
+  error instead of retaining an Aborting fence until successful final repair:
+  1. Retention cannot compel unresponsive workers (dead never ack; stalled
+     unboundedly), so retained-until-success either wedges same-tuple
+     forwarding until restart (blackhole) or needs unbounded reaper
+     machinery with the same give-up boundary one level down. The plan's own
+     "bounded acks" concedes that boundary; this design places it
+     explicitly: remove (single attempt) → shared quiesce (infallible) →
+     probe (+1 retry) → repair → release + loud error.
+  2. Impact inversion: retention trades a possible ghost mirror row
+     (observability-only; forwarding unaffected; dead-worker orphans are an
+     independently pre-existing class) for certain per-tuple blackholing
+     (forwarding impact) — disproportionate by orders of magnitude.
+  3. Dead tables are dropped with their threads (verified: no
+     Arc<SessionTable> exists anywhere; worker tables are thread-owned
+     plain fields), so live-only evidence is complete — retention protects
+     nothing real in the dead case. Dead workers fail the remove fan-out (a
+     panic during commit fails loud, by policy) and are skipped by the probe
+     (diagnostic only).
+  Abort order stays plan-literal (fence-cancel atomic with mutations →
+  shared quiesce → fenced probe+repair attempt → release + loud error).
+  Residual, explicitly documented, not silently accepted: workers stalled
+  past both probe attempts (~500ms, pathological) skip repair with a loud
+  error — a physical boundary no design compels past (plan-literal 20ms
+  phases hit it sooner). Pinned by
+  `policy_batch_remove_abort_quiesces_shared_then_fails_loud_10512` and
+  `policy_batch_dead_abort_quiesces_shared_then_fails_loud_10512` (quiesce
+  happened + loud error on queue-full and pre-dead triggers). If deltas
+  find retention protects something real in the dead case, this ruling
+  reopens.
 - Necessity: conditional-delete plus republish without BPF serialization loses
   when delete probes (no survivor), concurrent B installs into its table and
   publishes the bare BPF row, then delete deletes that fresh row. The gate
