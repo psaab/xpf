@@ -54,6 +54,7 @@ fn stamped_fabric_frame(zone_id: u16) -> Vec<u8> {
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     let [hi, lo] = zone_id.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
@@ -93,13 +94,14 @@ fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -151,6 +153,7 @@ fn forged_fabric_stamp_denied_for_host_inbound_when_owner_rg_remote_6458() {
         12345,
         22,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
@@ -159,13 +162,14 @@ fn forged_fabric_stamp_denied_for_host_inbound_when_owner_rg_remote_6458() {
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -200,6 +204,7 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
         43210,
         22,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
@@ -208,13 +213,14 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -240,13 +246,14 @@ fn legitimate_fabric_punted_flow_still_admitted_6458() {
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -285,7 +292,7 @@ fn fabric_ingress_syn_ack_seeds_no_reverse_session_6478() {
     let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(8, 8, 8, 8);
-    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, 12345, 443, TCP_FLAG_SYN | TCP_FLAG_ACK);
+    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, 12345, 443, TCP_FLAG_SYN | TCP_FLAG_ACK, crate::afxdp::tests_support::TEST_FABRIC_MAC);
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
@@ -293,13 +300,14 @@ fn fabric_ingress_syn_ack_seeds_no_reverse_session_6478() {
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     let key = SessionKey {
@@ -344,7 +352,8 @@ fn fabric_ingress_icmp_echo_reply_seeds_no_reverse_session_6478() {
     let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(8, 8, 8, 8);
-    let mut frame = build_icmp_echo_frame_v4(src, dst, 64);
+    let mut frame =
+        build_icmp_echo_frame_v4(src, dst, 64, crate::afxdp::tests_support::TEST_FABRIC_MAC);
     // Flip the echo REQUEST (type 8) the builder emits to an echo REPLY
     // (type 0) and recompute the ICMP checksum.
     let icmp_start = 34;
@@ -374,13 +383,14 @@ fn fabric_ingress_icmp_echo_reply_seeds_no_reverse_session_6478() {
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     let key = SessionKey {
@@ -664,13 +674,14 @@ fn frag_assoc_authority_binds_the_fabric_zone_stamp_5798() {
 
     // ---- (1) The FIRST fragment installs, under the `lan` stamp. -----------
     let first = stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2000, ident);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         meta,
+        true,
     );
     assert_eq!(
         dbg1.nat_applied_snat, 1,
@@ -690,13 +701,14 @@ fn frag_assoc_authority_binds_the_fabric_zone_stamp_5798() {
     let mut offset_units = 1u16;
     for (zone, id) in [("dmz", TEST_DMZ_ZONE_ID), ("mgmt", TEST_MGMT_ZONE_ID)] {
         let foreign = stamped_fabric_frag_frame(id, 0x2000 | offset_units, ident);
-        let (_bf, dbg_foreign) = txn_run_descriptor(
+        let (_bf, dbg_foreign) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &foreign,
             meta,
+            true,
         );
         assert_eq!(
             dbg_foreign.forward, 0,
@@ -715,13 +727,14 @@ fn frag_assoc_authority_binds_the_fabric_zone_stamp_5798() {
         // misses. Without it, a build in which NOTHING ever hits would satisfy
         // every refusal assertion above.
         let home = stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2000 | offset_units, ident);
-        let (_bh, dbg_home) = txn_run_descriptor(
+        let (_bh, dbg_home) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &home,
             meta,
+            true,
         );
         assert_eq!(
             dbg_home.forward, 1,
@@ -953,7 +966,7 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
         (
             "icmp echo reply",
             {
-                let mut f = build_icmp_echo_frame_v4(wan_peer, lan_host, 64);
+                let mut f = build_icmp_echo_frame_v4(wan_peer, lan_host, 64, crate::afxdp::tests_support::TEST_FABRIC_MAC);
                 let icmp_start = 34;
                 f[icmp_start] = 0; // echo REQUEST -> echo REPLY
                 f[icmp_start + 2..icmp_start + 4].copy_from_slice(&[0, 0]);
@@ -967,7 +980,7 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
         ),
         (
             "tcp syn-ack",
-            build_txn_tcp_syn_frame_v4(wan_peer, lan_host, 443, 12345, TCP_FLAG_SYN | TCP_FLAG_ACK),
+            build_txn_tcp_syn_frame_v4(wan_peer, lan_host, 443, 12345, TCP_FLAG_SYN | TCP_FLAG_ACK, crate::afxdp::tests_support::TEST_FABRIC_MAC),
             PROTO_TCP,
             443,
             12345,
@@ -1079,18 +1092,20 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
         12345,
         443,
         TCP_FLAG_SYN | TCP_FLAG_ACK,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     stamp_fabric_zone_7770(&mut frame, TEST_LAN_ZONE_ID);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &BTreeMap::from([(1, active_rg(now_secs))]),
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         sessions.len(),
@@ -1167,12 +1182,13 @@ fn drive_fabric_return_7770(
         443,
         12345,
         TCP_FLAG_SYN | TCP_FLAG_ACK,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     stamp_fabric_zone_7770(&mut frame, TEST_WAN_ZONE_ID);
     let mut meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
     meta.protocol = PROTO_TCP;
     let mut binding = fabric_binding();
-    let (_batch, dbg) = txn_run_descriptor(&mut binding, sessions, forwarding, ha_state, &frame, meta);
+    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, sessions, forwarding, ha_state, &frame, meta, true);
     (dbg.policy_deny, binding.scratch.scratch_forwards.len())
 }
 
@@ -1210,15 +1226,16 @@ fn fabric_punt_seed_admits_the_peers_return_7770() {
     // --- 1. PUNT ---------------------------------------------------------
     let mut sessions = SessionTable::new();
     let mut lan_binding = lan_binding_7770();
-    let out_frame = build_txn_tcp_syn_frame_v4(lan_host, wan_peer, 12345, 443, TCP_FLAG_SYN);
+    let out_frame = build_txn_tcp_syn_frame_v4(lan_host, wan_peer, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
     let out_meta = txn_meta_v4(24, TCP_FLAG_SYN, out_frame.len() as u16);
-    let (_batch, punt_dbg) = txn_run_descriptor(
+    let (_batch, punt_dbg) = txn_run_descriptor_checked(
         &mut lan_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &out_frame,
         out_meta,
+        true,
     );
     assert_eq!(
         punt_dbg.policy_deny, 0,
@@ -1283,15 +1300,16 @@ fn fabric_punt_seed_admits_the_peers_return_7770() {
     let deny_forwarding = build_forwarding_state(&fabric_snapshot_policy_denies_the_lan_host_7770());
     let mut deny_sessions = SessionTable::new();
     let mut deny_binding = lan_binding_7770();
-    let deny_out = build_txn_tcp_syn_frame_v4(lan_host, wan_peer, 12345, 443, TCP_FLAG_SYN);
+    let deny_out = build_txn_tcp_syn_frame_v4(lan_host, wan_peer, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
     let deny_meta = txn_meta_v4(24, TCP_FLAG_SYN, deny_out.len() as u16);
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut deny_binding,
         &mut deny_sessions,
         &deny_forwarding,
         &ha_state,
         &deny_out,
         deny_meta,
+        true,
     );
     assert_eq!(
         session_shapes_7770(&deny_sessions),
@@ -1355,12 +1373,13 @@ fn fabric_ingress_never_mints_a_punt_seed_7770() {
         12345,
         443,
         TCP_FLAG_SYN | TCP_FLAG_ACK,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     stamp_fabric_zone_7770(&mut frame, TEST_LAN_ZONE_ID);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     let shapes = session_shapes_7770(&sessions);
     assert!(
@@ -1570,6 +1589,7 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
         12345,
         443,
         TCP_FLAG_ACK,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
@@ -1577,13 +1597,14 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
     let meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
 
     let mut binding = fabric_binding();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,
@@ -1642,6 +1663,7 @@ fn unstamped_parent_not_redirected_10314() {
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     // Good dst (our fabric MAC) so only the anti-loop guard is exercised;
     // unstamped src (peer MAC, not 02:bf:72:fe...) on the fabric parent.
@@ -1650,7 +1672,7 @@ fn unstamped_parent_not_redirected_10314() {
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "unstamped parent arrival must not redirect (RED pre-fix: queued {})",
@@ -1674,13 +1696,14 @@ fn overlay_arrival_not_redirected_10314() {
         12346,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
     let meta = txn_meta_v4(101, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "overlay arrival must not redirect (guard: expected empty, got {})",
@@ -1706,6 +1729,7 @@ fn stamped_parent_not_redirected_10314() {
         12347,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
@@ -1713,7 +1737,7 @@ fn stamped_parent_not_redirected_10314() {
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "stamped parent arrival must not redirect (guard: expected empty, got {})",
@@ -1738,6 +1762,7 @@ fn lan_good_mac_still_redirects_10314() {
         12348,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     // LAN ingress MAC (reth1.0) + LAN host src; default frame already carries
     // these, set explicitly so the test does not depend on the builder.
@@ -1746,7 +1771,7 @@ fn lan_good_mac_still_redirects_10314() {
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = lan_binding_10314();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
@@ -1772,6 +1797,7 @@ fn lan_wrong_unicast_dst_dropped_pre_l3_10314() {
         12349,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     // Wrong unicast dst: not ours, not broadcast/multicast/VRRP.
     frame[0..6].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x66]);
@@ -1877,13 +1903,13 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
         12350,
         443,
         TCP_FLAG_ACK,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
     );
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
     let meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
     let mut binding = fabric_binding();
-    let (_batch, dbg) =
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert_eq!(
         dbg.session_hit, 1,
         "parent frame must exercise the session-hit arm"

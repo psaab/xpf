@@ -46,7 +46,10 @@ mod host_inbound_policy;
 mod nat64_icmp_error;
 mod nat_exception;
 mod prerouting_scope;
+
 mod policy_revalidation;
+#[cfg(test)]
+pub(crate) use policy_revalidation::revalidate_zone_policy_declines_for_test;
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;

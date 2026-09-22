@@ -56,12 +56,13 @@ fn lan_ssh_junos_host_deny() -> PolicyRuleSnapshot {
 }
 
 fn from_lan(fw: &ForwardingState, sessions: &mut SessionTable, flags: u8) -> DebugPollCounters {
-    let frame = build_txn_tcp_syn_frame_v4(LAN_HOST, LOCAL, HOST_PORT, 22, flags);
+    let frame = build_txn_tcp_syn_frame_v4(LAN_HOST, LOCAL, HOST_PORT, 22, flags, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, flags, frame.len() as u16);
     let mut b = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     b.interface = Arc::<str>::from("reth1.0");
     let ha_state = txn_ha_state();
-    let (_batch, dbg) = txn_run_descriptor(&mut b, sessions, fw, &ha_state, &frame, meta);
+    let (_batch, dbg) =
+        txn_run_descriptor_checked(&mut b, sessions, fw, &ha_state, &frame, meta, true);
     dbg
 }
 

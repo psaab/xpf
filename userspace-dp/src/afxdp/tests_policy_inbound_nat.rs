@@ -40,15 +40,17 @@ fn policy_inbound_dnat_matches_translated_destination_permit() {
         54321,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -87,15 +89,17 @@ fn policy_inbound_dnat_denies_when_only_original_dst_permitted() {
         54322,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -143,15 +147,17 @@ fn policy_inbound_dnat_matches_translated_destination_port() {
         54323,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -180,15 +186,16 @@ fn policy_inbound_nptv6_matches_translated_destination_permit() {
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     // External-prefix destination; NPTv6 maps it to fd35:1940:27:100::102.
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54321, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54321, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta = txn_meta_v6(12, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -220,15 +227,16 @@ fn policy_inbound_nptv6_denies_when_only_external_prefix_permitted() {
 
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54322, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54322, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta = txn_meta_v6(12, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -265,15 +273,16 @@ fn policy_inbound_nat64_matches_synthetic_v6_destination_permit() {
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("v6 client");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v6(24, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -315,15 +324,16 @@ fn policy_inbound_nat64_denies_on_synthetic_v6_deny_rule() {
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("v6 client");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12346, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12346, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v6(24, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -432,15 +442,17 @@ fn static_nat_precedes_overlapping_dnat_pool_6473() {
         54333,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert!(
         dbg.tx >= 1,
@@ -524,15 +536,17 @@ fn policy_inbound_dnat_missing_neighbor_permits_on_translated_dst() {
         54331,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -572,15 +586,17 @@ fn policy_inbound_dnat_missing_neighbor_denies_when_only_original_dst_permitted(
         54332,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -615,15 +631,16 @@ fn policy_inbound_nptv6_missing_neighbor_permits_on_translated_dst() {
 
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54331, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54331, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta = txn_meta_v6(12, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -658,15 +675,16 @@ fn policy_inbound_nptv6_missing_neighbor_denies_when_only_external_prefix_permit
 
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54332, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 54332, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta = txn_meta_v6(12, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -707,15 +725,16 @@ fn policy_inbound_nat64_missing_neighbor_permits_on_synthetic_v6_not_default_den
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("v6 client");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v6(24, frame.len());
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -789,15 +808,17 @@ fn source_nat_matches_post_dnat_destination_port_9034() {
         54323,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -844,15 +865,17 @@ fn source_nat_does_not_match_pre_dnat_destination_port_9034() {
         54323,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
     );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -883,14 +906,22 @@ fn source_nat_does_not_match_pre_dnat_destination_port_9034() {
 /// installed reverse companion reads 0 while the forward reads 7.
 #[test]
 fn nat64_reverse_companion_carries_the_routing_domain_9033() {
-    let mut snapshot = nat64_snapshot(lan_to_wan_permit("64:ff9b::/96", "permit-synthetic-v6"));
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-extracted-v4"));
     // Put every interface in routing instance 7. Without this the cell is
     // vacuous — which is exactly why the existing NAT64 cells could not catch
     // the defect.
     for iface in snapshot.interfaces.iter_mut() {
         iface.routing_domain = 7;
     }
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.install_tables.insert(
+        7,
+        crate::afxdp::types::InstallTables {
+            v4: Some("inet.0".to_string()),
+            v6: Some("inet6.0".to_string()),
+            h2: 1,
+        },
+    );
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
@@ -898,15 +929,26 @@ fn nat64_reverse_companion_carries_the_routing_domain_9033() {
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("v6 client");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
-    let meta = txn_meta_v6(24, frame.len());
-    let (_batch, _dbg) = txn_run_descriptor(
+    let frame = build_txn_tcp_syn_frame_v6(
+        src,
+        dst,
+        12345,
+        443,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let mut meta = txn_meta_v6(24, frame.len());
+    meta.flow_src_addr = src.octets();
+    meta.flow_dst_addr = dst.octets();
+    meta.flow_src_port = 12345;
+    meta.flow_dst_port = 443;
+    let (_batch, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     // Collect every installed key's domain. The forward (v6) session and its

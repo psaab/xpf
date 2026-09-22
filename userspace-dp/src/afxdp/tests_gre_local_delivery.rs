@@ -111,6 +111,7 @@ fn unencapsulated_local_delivery_reinjects_slow_path_exactly_once() {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
@@ -167,6 +168,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_miss() {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
@@ -229,6 +231,7 @@ fn poll_descriptor_no_junos_host_policy_local_delivery_unchanged_session_miss() 
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
@@ -371,15 +374,17 @@ fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
-    let (_b, dbg) = txn_run_descriptor(
+    let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         syn_meta,
+        true,
     );
     assert_eq!(dbg.local, 1, "SYN must take the LocalDelivery arm");
     assert_eq!(
@@ -401,16 +406,18 @@ fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
         12345,
         179,
         0x10_u8,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let ack_meta = txn_meta_v4(24, 0x10_u8, (ack.len() - 14) as u16);
     for i in 0..3 {
-        let (_b, dbg) = txn_run_descriptor(
+        let (_b, dbg) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &ack,
             ack_meta,
+            true,
         );
         assert_eq!(
             dbg.session_hit, 1,
@@ -460,16 +467,18 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(dbg.local, 1, "packet must take the LocalDelivery arm");
@@ -515,6 +524,7 @@ fn poll_descriptor_host_inbound_deny_emits_tuple_event_session_miss() {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
@@ -590,16 +600,18 @@ fn poll_descriptor_host_inbound_admit_does_not_count_deny_session_miss() {
         12345,
         179,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(dbg.local, 1, "packet must take the LocalDelivery arm");
@@ -640,7 +652,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let mut frame = build_policy_deny_tcp_syn_frame();
+    let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     set_ipv4_dst(&mut frame, Ipv4Addr::new(10, 0, 61, 1));
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -1339,13 +1351,14 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
     frame[34] = 0x0B; // ICMPv4 time-exceeded (11) — an error type in the #3171 set
     let meta = gre_to_self_outer_meta(0, frame.len());
 
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -1426,13 +1439,14 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
 
     // Pass 1 — admit-all host-inbound: the inner echo is admitted on the
     // session-MISS local-delivery arm and caches a host-local session.
-    let (batch1, dbg1) = txn_run_descriptor(
+    let (batch1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(dbg1.local, 1, "pass 1 inner echo must take LocalDelivery");
     assert_eq!(
@@ -1455,13 +1469,14 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
     }
 
     // Pass 2 — session-HIT: the host-inbound re-check reads the INNER ICMP type.
-    let (batch2, dbg2) = txn_run_descriptor(
+    let (batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg2.local, 1,
@@ -1600,13 +1615,14 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
     assert_eq!(frame[22], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta = gre_to_self_outer_meta_wan(frame.len());
 
-    let (_batch, _dbg) = txn_run_descriptor(
+    let (_batch, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert_eq!(
@@ -1652,13 +1668,14 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
     // Pass 1: inner TTL 64 — forwards + installs the transit session.
     let frame_seed = gre_frame_inner_icmp_echo_v4(Ipv4Addr::new(8, 8, 8, 8), 64);
     let meta_seed = gre_to_self_outer_meta_wan(frame_seed.len());
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame_seed,
         meta_seed,
+        true,
     );
     assert!(
         sessions.len() >= 1,
@@ -1669,13 +1686,14 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
     let frame_hit = gre_frame_inner_icmp_echo_v4(Ipv4Addr::new(8, 8, 8, 8), 1);
     assert_eq!(frame_hit[22], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame_hit,
         meta_hit,
+        true,
     );
 
     assert_eq!(
@@ -1722,13 +1740,14 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
     // Pass 1: inner UDP TTL 64 to transit 8.8.8.8 — seeds the flow cache.
     let frame_seed = gre_frame_inner_udp_v4(Ipv4Addr::new(8, 8, 8, 8), 64, 12345, 53);
     let meta_seed = gre_to_self_outer_meta_wan(frame_seed.len());
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame_seed,
         meta_seed,
+        true,
     );
     assert_eq!(
         txn_flow_cache_entries(&binding),
@@ -1741,13 +1760,14 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
     let frame_hit = gre_frame_inner_udp_v4(Ipv4Addr::new(8, 8, 8, 8), 1, 12345, 53);
     assert_eq!(frame_hit[22], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
-    txn_run_descriptor(
+    txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame_hit,
         meta_hit,
+        true,
     );
 
     assert_eq!(

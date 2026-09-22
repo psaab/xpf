@@ -1811,6 +1811,21 @@ impl SessionTable {
         self.policy_revalidation_gen
     }
 
+    /// #8356 test seam: age one entry without changing the live generation.
+    ///
+    /// The strict-SYN admission witness first hits the forward tuple to seed
+    /// its cache entry.  Controls that exercise reverse-only stamping need
+    /// that tuple stale again while keeping the harness generation fixed.
+    #[cfg(test)]
+    pub(crate) fn age_policy_revalidation_for_test(&mut self, key: &SessionKey) {
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.policy_revalidated_gen = 0;
+        }
+    }
+
     /// #8356: resolve the entry this WIRE tuple names and report whether its
     /// zone-policy verdict is stale, in ONE probe.
     ///

@@ -19,8 +19,10 @@
 
 use super::super::test_fixtures::wg_outer_mtu_snapshot;
 use crate::test_zone_ids::TEST_SFMIX_ZONE_ID;
+use super::super::tests_support::{
+    txn_ha_state, txn_run_descriptor, txn_run_descriptor_checked, txn_run_descriptor_inner,
+};
 use super::super::*;
-use super::super::tests_support::{txn_ha_state, txn_run_descriptor, txn_run_descriptor_inner};
 use super::tests::established_pair;
 use super::{WgEngine, WgWorkerScratch};
 use crate::afxdp::coordinator::{
@@ -410,13 +412,14 @@ fn poll_loop_adjudicates_wg_inner_plaintext_under_the_tunnel_zone_8274() {
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    let (_b, _dbg) = txn_run_descriptor(
+    let (_b, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     let mut tunnel_zones: Vec<u16> = Vec::new();
@@ -463,13 +466,14 @@ fn poll_loop_denies_wg_inner_plaintext_with_no_permitting_policy_8274() {
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     // NON-VACUITY CONTROL. "No tunnel session" is also what a packet that never
@@ -552,13 +556,14 @@ fn run_unzoned_wiring_9251(forwarding: &ForwardingState, init: &WgEngine, rpub: 
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
     let before = crate::policy::UNZONED_INGRESS_DENIED.load(Ordering::Relaxed);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     let after = crate::policy::UNZONED_INGRESS_DENIED.load(Ordering::Relaxed);
     let mut tunnel_sessions = 0usize;
@@ -1093,7 +1098,7 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
         let meta = wiring_meta(frame.len());
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
         binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
-        txn_run_descriptor(&mut binding, sessions, &forwarding, &ha_state, &frame, meta)
+        txn_run_descriptor_checked(&mut binding, sessions, &forwarding, &ha_state, &frame, meta, true)
     };
 
     // CONTROL (passes on base AND after fix): no session → MISS → the
@@ -1404,7 +1409,7 @@ fn drive_solicited_inner_10038(
     let meta = wiring_meta(frame.len());
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
-    txn_run_descriptor(&mut binding, sessions, forwarding, &ha_state, &frame, meta)
+    txn_run_descriptor_checked(&mut binding, sessions, forwarding, &ha_state, &frame, meta, true)
 }
 
 /// Drive `inner` (an echo reply 5-tuple) as a PLAIN frame arriving on the
@@ -1435,7 +1440,7 @@ fn drive_spoofed_plain_10038(
     meta.tcp_flags = 0;
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
-    txn_run_descriptor(&mut binding, sessions, forwarding, &ha_state, &frame, meta)
+    txn_run_descriptor_checked(&mut binding, sessions, forwarding, &ha_state, &frame, meta, true)
 }
 
 fn session_row_count_10038(sessions: &SessionTable) -> usize {
@@ -2448,6 +2453,15 @@ fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
         .expect("encap reply");
     let frame = outer_frame(&wire[..enc.len], WG_PORT);
     let meta = wiring_meta(frame.len());
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            &frame,
+        ),
+        "fixture MAC must match the WAN underlay before VRF WG decap"
+    );
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
     let mut sessions = SessionTable::new();

@@ -345,7 +345,7 @@ fn table_with_session(
 /// that has nothing to do with the code under test. Using one real frame
 /// everywhere removes that class of fixture lie.
 fn frame() -> Vec<u8> {
-    crate::afxdp::tests_support::build_policy_deny_tcp_syn_frame()
+    crate::afxdp::tests_support::build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC)
 }
 
 /// A static `then discard` attached after the session was established revokes

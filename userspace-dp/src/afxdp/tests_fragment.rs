@@ -25,7 +25,7 @@ fn non_first_fragment_v4_not_dropped_by_port_matching_output_filter() {
     // payload at the post-IP offset spells src=33333 dst=443 — exactly what
     // the buggy meta fallback would parse as the discarded web port.
     let payload = [0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0];
-    let frame = eth_ipv4_frag_frame(0x0001, &payload); // non-first (offset != 0)
+    let frame = eth_ipv4_frag_frame(0x0001, &payload, crate::afxdp::tests_support::TEST_LAN_MAC); // non-first (offset != 0)
     let forwarding = wan_drop_443_forwarding();
     let ingress_ident = frag_test_ingress_ident();
     let decision = frag_test_decision();
@@ -159,7 +159,7 @@ fn slack_tcp_v4_installs_no_synthesized_tx_flow_key_9894() {
     // forward_request arm synthesizes Some((33333, 443)) -> the filter drops
     // -> expect RED; reverting only the authoritative_forward_ports gate
     // leaves expected_ports Some -> assert RED.
-    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb]);
+    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb], crate::afxdp::tests_support::TEST_LAN_MAC);
     frame[16] = 0x00;
     frame[17] = 20; // total_len=20: the 4 port bytes are slack, not datagram
     assert_eq!(&frame[34..38], &[0x82, 0x35, 0x01, 0xbb]);
@@ -230,7 +230,7 @@ fn flowless_non_fragmented_tcp_still_hits_port_matching_output_filter() {
     // 34 — total 28 covers [34,38), so the declared-end gate genuinely
     // passes here rather than passing vacuously on l4=0.)
     let payload = [0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0];
-    let frame = eth_ipv4_frag_frame(0x0000, &payload); // atomic (offset 0)
+    let frame = eth_ipv4_frag_frame(0x0000, &payload, crate::afxdp::tests_support::TEST_LAN_MAC); // atomic (offset 0)
     let forwarding = wan_drop_443_forwarding();
     let ingress_ident = frag_test_ingress_ident();
     let decision = frag_test_decision();
@@ -344,14 +344,15 @@ fn flowless_non_first_fragment_transit_dropped_by_deny_all_3291() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
-    let (_batch, dbg) = txn_run_descriptor(
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta(),
+        true,
     );
 
     assert_eq!(
@@ -389,14 +390,15 @@ fn flowless_non_first_fragment_transit_permitted_by_any_policy_3291() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
-    let (_batch, dbg) = txn_run_descriptor(
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta(),
+        true,
     );
 
     assert_eq!(
@@ -419,6 +421,7 @@ fn udp_frag_frame_5689(frag_off: u16, id: u16) -> Vec<u8> {
     let mut f = vec![
         0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
     ];
+    f[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
     // For a first fragment the 8 bytes at l4 are a real UDP header (sport
     // 33333, dport 443); for a non-first fragment they are payload (never read
     // as ports — the fragment is flowless per #2344).
@@ -523,13 +526,14 @@ fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
     // (1) FIRST fragment: MF=1, offset 0, id 0xbeef. Seeds the session, applies
     //     interface SNAT, and installs the ordinary-NAT fragment association.
     let first = udp_frag_frame_5689(0x2000, 0xbeef);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(
         dbg1.nat_applied_snat, 1,
@@ -544,13 +548,14 @@ fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
     // (2) NON-first fragment: offset 1, SAME id 0xbeef -> flowless -> consult
     //     the association installed above and inherit the SNAT translation.
     let non_first = udp_frag_frame_5689(0x0001, 0xbeef);
-    let (_b2, dbg2) = txn_run_descriptor(
+    let (_b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(
         dbg2.forward, 1,
@@ -592,13 +597,14 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
 
     // Establish the live forward interface-SNAT session.
     let first = udp_frag_frame_5689(0x2000, 0xbeef);
-    let (_batch_first, dbg_first) = txn_run_descriptor(
+    let (_batch_first, dbg_first) = txn_run_descriptor_checked(
         &mut binding_lan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(dbg_first.nat_applied_snat, 1);
 
@@ -615,13 +621,14 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
         flow_dst_addr: [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ..udp_frag_meta_5689()
     };
-    let (batch_reply, dbg_reply) = txn_run_descriptor(
+    let (batch_reply, dbg_reply) = txn_run_descriptor_checked(
         &mut binding_wan,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reply_tail,
         reply_meta,
+        true,
     );
     assert_eq!(
         dbg_reply.forward, 0,
@@ -871,13 +878,14 @@ fn nat_nonfirst_fragment_assoc_miss_fails_closed_6122() {
     // NON-first fragment (offset 1, id 0xbeef) arriving WITHOUT its first
     // fragment -> flowless -> association MISS -> #6122 fail-closed drop.
     let non_first = udp_frag_frame_5689(0x0001, 0xbeef);
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(
         dbg.forward, 0,
@@ -920,13 +928,14 @@ fn nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122() {
     let ha_state = BTreeMap::new();
 
     let non_first = udp_frag_frame_5689(0x0001, 0xbeef);
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(
         dbg.forward, 1,
@@ -970,14 +979,15 @@ fn flowless_non_first_fragment_dropped_by_is_fragment_input_filter_3291() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
-    let (_batch, dbg) = txn_run_descriptor(
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta(),
+        true,
     );
 
     assert_eq!(
@@ -1002,7 +1012,6 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
     // existing slow-path behavior, but a non-default install identity does not.
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
-    snapshot.interfaces[0].hardware_addr = "02:bf:72:00:80:08".to_string();
     snapshot.policies.clear();
     snapshot.interfaces[0].filter_input_v4 = "frag-to-scrub".to_string();
     snapshot.filters = vec![FirewallFilterSnapshot {
@@ -1023,14 +1032,15 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
-    let (_batch, dbg) = txn_run_descriptor(
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta(),
+        true,
     );
 
     assert_eq!(
@@ -1061,7 +1071,7 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
 /// Addrs match the frag-transit fixtures (10.0.61.100 -> 172.16.80.200) so
 /// the base table forwards it.
 fn slack_tcp_transit_frame_9894() -> Vec<u8> {
-    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x04, 0x57, 0x01, 0xbb]);
+    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x04, 0x57, 0x01, 0xbb], crate::afxdp::tests_support::TEST_LAN_MAC);
     frame[16] = 0x00;
     frame[17] = 20; // total_len=20: the L4 bytes are slack, not datagram
     frame
@@ -1086,7 +1096,7 @@ fn wellformed_tcp_transit_frame_9894(src_port: u16, dst_port: u16) -> Vec<u8> {
     tcp[2..4].copy_from_slice(&dst_port.to_be_bytes());
     tcp[12] = 0x50; // dataofs 5
     tcp[13] = 0x02; // SYN
-    eth_ipv4_frag_frame(0x0000, &tcp)
+    eth_ipv4_frag_frame(0x0000, &tcp, crate::afxdp::tests_support::TEST_LAN_MAC)
 }
 
 fn wellformed_tcp_transit_meta_9894(src_port: u16, dst_port: u16) -> UserspaceDpMeta {
@@ -1121,13 +1131,14 @@ fn run_one_packet_9894(
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         forwarding,
         &ha_state,
         frame,
         meta,
+        true,
     );
     (dbg.forward, dbg.no_route)
 }
@@ -1248,14 +1259,15 @@ fn flowless_non_first_fragment_missing_neighbor_dropped_by_deny_all_4024() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
-    let (_batch, dbg) = txn_run_descriptor(
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta(),
+        true,
     );
 
     assert_eq!(
@@ -1301,14 +1313,15 @@ fn flowless_non_first_fragment_missing_neighbor_permitted_forwards_4024() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
-    let (_batch, dbg) = txn_run_descriptor(
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta(),
+        true,
     );
 
     assert_eq!(
@@ -1513,7 +1526,7 @@ fn pending_neigh_fragment_buffers_no_flow_key() {
 
     // Non-first fragment frame; meta claims a ported tuple (the shim stamps
     // payload bytes). The gate must suppress the meta fallback.
-    let frag_frame = eth_ipv4_frag_frame(0x0001, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0]);
+    let frag_frame = eth_ipv4_frag_frame(0x0001, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0], crate::afxdp::tests_support::TEST_LAN_MAC);
     let frag_meta = frag_test_meta(14);
     let frag_key = flow
         .as_ref()
@@ -1531,7 +1544,7 @@ fn pending_neigh_fragment_buffers_no_flow_key() {
     );
 
     // First/atomic fragment (real L4 header) — same meta — keeps its ports.
-    let ok_frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0]);
+    let ok_frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0], crate::afxdp::tests_support::TEST_LAN_MAC);
     let ok_meta = frag_test_meta(14);
     let ok_key = flow
         .as_ref()
@@ -1653,13 +1666,14 @@ fn nat_ordinary_association_hit_still_runs_interface_input_filter_5798() {
         // FIRST fragment: terminates on the `destination-port 443` accept term,
         // is interface-SNAT'd, and installs the ordinary-NAT association.
         let first = udp_frag_frame_5689(0x2000, 0xf00d);
-        let (_b1, dbg1) = txn_run_descriptor(
+        let (_b1, dbg1) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &first,
             udp_frag_meta_5689(),
+            true,
         );
         assert_eq!(
             dbg1.nat_applied_snat, 1,
@@ -1673,13 +1687,14 @@ fn nat_ordinary_association_hit_still_runs_interface_input_filter_5798() {
 
         // NON-first fragment: association HIT, then the per-packet filter.
         let non_first = udp_frag_frame_5689(0x0001, 0xf00d);
-        let (batch, dbg2) = txn_run_descriptor(
+        let (batch, dbg2) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &non_first,
             udp_frag_meta_5689(),
+            true,
         );
         (
             dbg2.forward,
@@ -1788,16 +1803,17 @@ fn unspecified_source_still_runs_the_is_fragment_input_filter_7890() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
 
     let before = unspecified_witness_7890();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta_unspecified_src_7890(),
+        true,
     );
 
     // WITNESS FIRST: prove the arm was entered with an unspecified source. If
@@ -1849,16 +1865,17 @@ fn unspecified_source_honours_a_non_discard_filter_verdict_7890() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = frag_v4_transit_frame();
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
 
     let before = unspecified_witness_7890();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta_unspecified_src_7890(),
+        true,
     );
 
     assert!(
@@ -1953,13 +1970,14 @@ fn unspecified_source_association_hit_still_runs_the_input_filter_7890() {
         // FIRST fragment: carries dport 443, terminates on the accept term, is
         // SNAT'd, and installs the association.
         let first = zero_v4_src_7890(udp_frag_frame_5689(0x2000, 0xf00d));
-        let (_b1, _dbg1) = txn_run_descriptor(
+        let (_b1, _dbg1) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &first,
             unspec_meta,
+            true,
         );
         assert_eq!(
             forwarding.nat64.frag_assoc.len(),
@@ -1972,13 +1990,14 @@ fn unspecified_source_association_hit_still_runs_the_input_filter_7890() {
         // NON-first fragment: association HIT, then the per-packet filter.
         let non_first = zero_v4_src_7890(udp_frag_frame_5689(0x0001, 0xf00d));
         let before = unspecified_witness_7890();
-        let (batch, dbg2) = txn_run_descriptor(
+        let (batch, dbg2) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &non_first,
             unspec_meta,
+            true,
         );
         (
             dbg2.forward,
@@ -2045,16 +2064,17 @@ fn unspecified_source_missing_neighbor_fragment_still_policy_denied_7890() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = zero_v4_src_7890(frag_v4_transit_frame());
+    let frame = zero_v4_src_7890(frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC));
 
     let before = unspecified_witness_7890();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         frag_v4_transit_meta_unspecified_src_7890(),
+        true,
     );
 
     assert!(
@@ -2095,20 +2115,24 @@ fn unspecified_source_noroute_fragment_still_policy_denied_7890() {
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
     // 203.0.113.9 is in no route table in the fixture => NoRoute.
-    let frame = set_v4_dst_7890(zero_v4_src_7890(frag_v4_transit_frame()), [203, 0, 113, 9]);
+    let frame = set_v4_dst_7890(
+        zero_v4_src_7890(frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC)),
+        [203, 0, 113, 9],
+    );
     let meta = UserspaceDpMeta {
         flow_dst_addr: [203, 0, 113, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ..frag_v4_transit_meta_unspecified_src_7890()
     };
 
     let before = unspecified_witness_7890();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -2184,7 +2208,7 @@ fn unspecified_source_flowless_egress_filter_log_is_still_emitted_7890() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    let frame = zero_v4_src_7890(frag_v4_transit_frame());
+    let frame = zero_v4_src_7890(frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC));
 
     let before = unspecified_witness_7890();
     let (_batch, dbg, handle, rx) = txn_run_descriptor_capturing_events(
@@ -2280,13 +2304,14 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
     // (1) FIRST fragment: MF=1, offset 0, id 0xbeef. Flow-backed: installs
     //     the session and is charged to it at the shared chokepoint.
     let first = udp_frag_frame_5689(0x2000, 0xbeef);
-    let (batch1, dbg1) = txn_run_descriptor(
+    let (batch1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(
         dbg1.forward, 1,
@@ -2309,13 +2334,14 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
     //     "still forwards" half lives in
     //     `nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122`).
     let non_first = udp_frag_frame_5689(0x0001, 0xbeef);
-    let (batch2, dbg2) = txn_run_descriptor(
+    let (batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         udp_frag_meta_5689(),
+        true,
     );
     assert_eq!(
         dbg2.forward, 1,

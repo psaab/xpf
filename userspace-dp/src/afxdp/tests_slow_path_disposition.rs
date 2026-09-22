@@ -22,8 +22,7 @@ use super::tests_support::*;
 
 #[test]
 fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let mut area = MmapArea::new(4096).expect("mmap");
     area.slice_mut(0, frame.len())
         .expect("slice")
@@ -125,8 +124,7 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
         ForwardingDisposition::HAInactive,
         ForwardingDisposition::DiscardRoute,
     ] {
-        let frame =
-            build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+        let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
         let mut area = MmapArea::new(4096).expect("mmap");
         area.slice_mut(0, frame.len())
             .expect("slice")
@@ -264,8 +262,7 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
 
 #[test]
 fn maybe_reinject_slow_path_from_frame_records_unavailable() {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
     let binding = BindingIdentity {
         slot: 7,
@@ -323,8 +320,7 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
 
 #[test]
 fn handle_forward_build_failure_records_build_and_slow_path_failures() {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -392,8 +388,7 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
 
 #[test]
 fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -465,8 +460,7 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
 /// `fallback_to_slow_path == true`.
 #[test]
 fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -550,8 +544,7 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
 /// proving the gate let it through.
 #[test]
 fn handle_forward_build_failure_still_reinjects_forward_candidate() {
-    let frame =
-        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -1084,8 +1077,7 @@ fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates
         },
     ] {
         let disposition = case.disposition;
-        let frame =
-            build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64);
+        let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
         let mut area = MmapArea::new(4096).expect("mmap");
         area.slice_mut(0, frame.len())
             .expect("slice")
@@ -1360,6 +1352,7 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
             Ipv4Addr::new(10, 0, 61, 102),
             Ipv4Addr::new(172, 16, 80, 8),
             64,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         frame.resize(c.frame_len, 0);
         let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
@@ -1501,7 +1494,7 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
     let (frame, meta) = if v6 {
         let client: std::net::Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
         let server: std::net::Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
-        let frame = build_txn_tcp_syn_frame_v6(client, server, 12345, 80);
+        let frame = build_txn_tcp_syn_frame_v6(client, server, 12345, 80, crate::afxdp::tests_support::TEST_LAN_MAC);
         let meta = txn_meta_v6(24, frame.len());
         (frame, meta)
     } else {
@@ -1511,6 +1504,7 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
             12345,
             443,
             TCP_FLAG_SYN,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
         (frame, meta)

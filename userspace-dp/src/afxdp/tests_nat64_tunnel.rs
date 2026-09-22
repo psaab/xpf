@@ -43,7 +43,7 @@ fn txn_nat64_refusal_at_cap_drops_translated_packet() {
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -60,13 +60,14 @@ fn txn_nat64_refusal_at_cap_drops_translated_packet() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.tx, 0,
@@ -81,13 +82,14 @@ fn txn_nat64_refusal_at_cap_drops_translated_packet() {
     // actually exercises the NAT64 install path (forward + reverse).
     sessions.set_max_sessions_for_test(16);
     let meta2 = UserspaceDpMeta { ..meta };
-    let (batch2, dbg2) = txn_run_descriptor(
+    let (batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta2,
+        true,
     );
     assert_eq!(
         sessions.len(),
@@ -140,7 +142,7 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     sessions.set_max_sessions_for_test(0);
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
-    let fwd_frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let fwd_frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let fwd_meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -157,13 +159,14 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    let (refused_batch, refused_dbg) = txn_run_descriptor(
+    let (refused_batch, refused_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &fwd_frame,
         fwd_meta,
+        true,
     );
     assert_eq!(refused_dbg.tx, 0, "refused NAT64 flow must not forward");
     assert_eq!(
@@ -173,13 +176,14 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
 
     // Below cap: the forward v6->v4 translation is admitted and counted once.
     sessions.set_max_sessions_for_test(16);
-    let (fwd_batch, fwd_dbg) = txn_run_descriptor(
+    let (fwd_batch, fwd_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &fwd_frame,
         UserspaceDpMeta { ..fwd_meta },
+        true,
     );
     assert_eq!(
         fwd_dbg.tx, 1,
@@ -218,8 +222,7 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     // SYN-ACK = SYN (0x02) | ACK (0x10). TCP_FLAG_ACK is not exported at the
     // afxdp module level, so spell the ACK bit inline.
     const ACK: u8 = 0x10;
-    let reply_frame =
-        build_txn_tcp_syn_frame_v4(dst_v4, pool_v4, 443, translated_port, TCP_FLAG_SYN | ACK);
+    let reply_frame = build_txn_tcp_syn_frame_v4(dst_v4, pool_v4, 443, translated_port, TCP_FLAG_SYN | ACK, crate::afxdp::tests_support::TEST_WAN_MAC);
     // #9519: the reply arrives where it really does, on the WAN interface the
     // forward flow left through (reth0.80, ifindex 12), not on the lan binding
     // the v6 SYN used. Before #9519 the session-hit path never read the arrival
@@ -230,13 +233,14 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     wan_binding.interface = Arc::<str>::from("reth0.80");
     let reply_meta = txn_meta_v4(12, TCP_FLAG_SYN | ACK, reply_frame.len() as u16);
-    let (rev_batch, _rev_dbg) = txn_run_descriptor(
+    let (rev_batch, _rev_dbg) = txn_run_descriptor_checked(
         &mut wan_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reply_frame,
         reply_meta,
+        true,
     );
     assert_eq!(
         rev_batch.nat64_translations, 1,
@@ -279,15 +283,17 @@ fn txn_source_nat_translation_bumps_rule_counter_once() {
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_b0, d0) = txn_run_descriptor(
+    let (_b0, d0) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(d0.tx, 0, "refused SNAT flow must not forward");
     assert_eq!(
@@ -299,13 +305,14 @@ fn txn_source_nat_translation_bumps_rule_counter_once() {
     // Phase 2 — admitted below cap: the forward translation commits and the
     // counter bumps exactly once (per committed flow, with the trigger len).
     sessions.set_max_sessions_for_test(16);
-    let (_b1, d1) = txn_run_descriptor(
+    let (_b1, d1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(d1.tx, 1, "admitted SNAT flow must forward its trigger");
     let snaps = nat_counters.snapshots();
@@ -342,13 +349,14 @@ fn txn_source_nat_translation_bumps_rule_counter_once() {
     binding2.interface = Arc::<str>::from("reth1.0");
     let mut sessions2 = SessionTable::new();
     sessions2.set_max_sessions_for_test(16);
-    let (_b2, d2) = txn_run_descriptor(
+    let (_b2, d2) = txn_run_descriptor_checked(
         &mut binding2,
         &mut sessions2,
         &forwarding2,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(d2.tx, 1, "the uncounted SNAT flow still forwards");
     assert!(
@@ -781,15 +789,17 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     // First packet: residual HAInactive (rg=0) tunnel-marked frame.
     // R-E invariant: never buffered for in-place retry.
@@ -828,13 +838,14 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         "HAInactive frame must NOT seed a session (second run stays on the miss path)"
     );
     let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch2, dbg2) = txn_run_descriptor(
+    let (_batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta2,
+        true,
     );
     let _ = dbg2;
     assert!(
@@ -894,16 +905,17 @@ fn txn_policy_denied_missing_neighbor_is_dropped_not_reinjected() {
 
     // src 10.0.61.102 (lan, ingress ifindex 24) -> dst 172.16.80.200
     // (connected wan). lan->wan is default-deny.
-    let frame = build_policy_deny_tcp_syn_frame();
+    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let sessions_before = sessions.len();
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -971,15 +983,16 @@ fn txn_policy_denied_missing_neighbor_skips_neg_cache_fast_fail() {
         .insert((12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))), now_ns);
     let mut sessions = SessionTable::new();
 
-    let frame = build_policy_deny_tcp_syn_frame();
+    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
 
     assert!(
@@ -1078,11 +1091,12 @@ fn nat64_missing_neighbor_fail_closed_drop_5174() {
     let mut sessions = SessionTable::new();
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
-    let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst (extracts 8.8.8.8)");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let dst: Ipv6Addr = "64:ff9b::808:808"
+        .parse()
+        .expect("nat64 dst (extracts 8.8.8.8)");
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = nat64_v6_syn_meta(frame.len(), src, dst);
-    let (_batch, dbg) =
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         dbg.nat64_missing_neigh_drop, 1,
@@ -1119,10 +1133,10 @@ fn non_nat64_missing_neighbor_still_buffers_5174() {
         12345,
         443,
         TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) =
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         dbg.nat64_missing_neigh_drop, 0,
@@ -1155,11 +1169,12 @@ fn nat64_missing_neighbor_denied_no_fail_closed_drop_5174() {
     let mut sessions = SessionTable::new();
 
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
-    let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst (extracts 8.8.8.8)");
-    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
+    let dst: Ipv6Addr = "64:ff9b::808:808"
+        .parse()
+        .expect("nat64 dst (extracts 8.8.8.8)");
+    let frame = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = nat64_v6_syn_meta(frame.len(), src, dst);
-    let (_batch, dbg) =
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         dbg.nat64_missing_neigh_drop, 0,
@@ -1244,7 +1259,7 @@ fn nat64_v4_frag_frame(
     dst_port: u16,
     tcp_flags: u8,
 ) -> Vec<u8> {
-    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, src_port, dst_port, tcp_flags);
+    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, src_port, dst_port, tcp_flags, crate::afxdp::tests_support::TEST_LAN_MAC);
     // Four bytes beyond the TCP header make the first fragment's payload
     // 24 bytes, so a companion at offset 3 starts exactly at its end.
     frame.extend_from_slice(&[0u8; 4]);
@@ -1297,13 +1312,14 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
     // First establish the NAT64 forward + reverse sessions and the v6-side
     // association. This is the liveness control for the reverse-session path.
     let forward_first = nat64_v6_frag_frame(0x0001, 0x1234_5678, src_v6, dst_v6, 12345, 443);
-    let (forward_batch, forward_dbg) = txn_run_descriptor(
+    let (forward_batch, forward_dbg) = txn_run_descriptor_checked(
         &mut lan_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &forward_first,
         nat64_v6_frag_meta(forward_first.len(), src_v6, dst_v6),
+        true,
     );
     assert_eq!(forward_dbg.tx, 1, "the NAT64 forward first fragment must be live");
     assert_eq!(forward_batch.nat64_translations, 1);
@@ -1349,16 +1365,9 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
     let ident = 0x4321;
     let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     wan_binding.interface = Arc::<str>::from("reth0.80");
-    let reverse_nonfirst = nat64_v4_frag_frame(
-        0x0003,
-        ident,
-        server_v4,
-        pool_v4,
-        0,
-        0,
-        0,
-    );
-    let (early_batch, early_dbg) = txn_run_descriptor(
+    let mut reverse_nonfirst = nat64_v4_frag_frame(0x0003, ident, server_v4, pool_v4, 0, 0, 0);
+    reverse_nonfirst[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
+    let (early_batch, early_dbg) = txn_run_descriptor_checked(
         &mut wan_binding,
         &mut sessions,
         &forwarding,
@@ -1370,6 +1379,7 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
             m.flow_dst_addr[..4].copy_from_slice(&pool_v4.octets());
             m
         },
+        true,
     );
     assert_eq!(
         early_dbg.tx, 0,
@@ -1380,7 +1390,7 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
         "#10130: the missing reverse NAT64 association must be a dedicated untranslated drop"
     );
     const TCP_SYN_ACK: u8 = TCP_FLAG_SYN | 0x10;
-    let reverse_first = nat64_v4_frag_frame(
+    let mut reverse_first = nat64_v4_frag_frame(
         0x2000,
         ident,
         server_v4,
@@ -1389,14 +1399,16 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
         translated_port,
         TCP_SYN_ACK,
     );
+    reverse_first[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
     let reverse_first_meta = txn_meta_v4(12, TCP_SYN_ACK, reverse_first.len() as u16);
-    let (reverse_batch, reverse_dbg) = txn_run_descriptor(
+    let (reverse_batch, reverse_dbg) = txn_run_descriptor_checked(
         &mut wan_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &reverse_first,
         reverse_first_meta,
+        true,
     );
     assert_eq!(reverse_dbg.tx, 1, "the reverse first fragment must hit the NAT64 session");
     assert_eq!(reverse_batch.nat64_translations, 1);
@@ -1434,7 +1446,7 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
     // The same datagram's non-first reply fragment has no L4 tuple. It is
     // flowless, so the AF_INET association consult must supply the reverse
     // info that the NAT64 builder requires.
-    let (nonfirst_batch, nonfirst_dbg) = txn_run_descriptor(
+    let (nonfirst_batch, nonfirst_dbg) = txn_run_descriptor_checked(
         &mut wan_binding,
         &mut sessions,
         &forwarding,
@@ -1446,6 +1458,7 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
             m.flow_dst_addr[..4].copy_from_slice(&pool_v4.octets());
             m
         },
+        true,
     );
     assert_eq!(
         nonfirst_batch.nat64_translations, 1,
@@ -1536,13 +1549,14 @@ fn nat64_committed_first_fragment_publishes_frag_assoc_and_nonfirst_inherits_514
     // source allocation, admission, forward+reverse install, THEN (post-commit)
     // the first-fragment association install.
     let first = nat64_v6_frag_frame(0x0001, 0x1234_5678, src, dst, 12345, 443);
-    let (b1, dbg1) = txn_run_descriptor(
+    let (b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(dbg1.tx, 1, "the committed NAT64 first fragment must translate + forward");
     assert_eq!(b1.nat64_translations, 1, "the first fragment is NAT64-translated");
@@ -1557,13 +1571,14 @@ fn nat64_committed_first_fragment_publishes_frag_assoc_and_nonfirst_inherits_514
     // NON-first fragment (offset 1, SAME ident) is flowless: it consults the
     // association and inherits the first fragment's NAT64 translation.
     let non_first = nat64_v6_frag_frame(0x0018, 0x1234_5678, src, dst, 0, 0);
-    let (b2, dbg2) = txn_run_descriptor(
+    let (b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         nat64_v6_frag_meta(non_first.len(), src, dst),
+        true,
     );
     assert_eq!(
         dbg2.tx, 1,
@@ -1593,14 +1608,15 @@ fn nat64_session_hit_first_fragment_records_v6_assoc_10132() {
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
 
     // Establish the NAT64 forward/reverse session with an unfragmented SYN.
-    let syn = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443);
-    let (syn_batch, syn_dbg) = txn_run_descriptor(
+    let syn = build_txn_tcp_syn_frame_v6(src, dst, 12345, 443, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let (syn_batch, syn_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         nat64_v6_syn_meta(syn.len(), src, dst),
+        true,
     );
     assert_eq!(syn_dbg.tx, 1, "the establishing NAT64 SYN must forward");
     assert_eq!(syn_batch.nat64_translations, 1);
@@ -1611,13 +1627,14 @@ fn nat64_session_hit_first_fragment_records_v6_assoc_10132() {
     // therefore it reaches the #9950 hit-tail record site.
     let ident = 0x1013_2001;
     let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-    let (first_batch, first_dbg) = txn_run_descriptor(
+    let (first_batch, first_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(
         first_dbg.tx, 1,
@@ -1636,13 +1653,14 @@ fn nat64_session_hit_first_fragment_records_v6_assoc_10132() {
     // The tail is flowless (no L4 ports) and can only forward by consulting
     // the association planted by the session-hit first fragment.
     let tail = nat64_v6_frag_frame(0x0018, ident, src, dst, 0, 0);
-    let (tail_batch, tail_dbg) = txn_run_descriptor(
+    let (tail_batch, tail_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &tail,
         nat64_v6_frag_meta(tail.len(), src, dst),
+        true,
     );
     assert_eq!(
         tail_dbg.tx, 1,
@@ -1680,13 +1698,14 @@ fn nat64_rolled_back_first_fragment_publishes_no_frag_assoc_5146() {
 
     // FIRST fragment (offset 0, MF=1) — admission-refused, rolled back.
     let first = nat64_v6_frag_frame(0x0001, 0x0bad_f00d, src, dst, 12345, 443);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(dbg1.tx, 0, "a refused NAT64 first fragment must not forward");
     assert_eq!(sessions.admission_refused(), 1, "the flow must hit the can_admit rollback arm");
@@ -1704,13 +1723,14 @@ fn nat64_rolled_back_first_fragment_publishes_no_frag_assoc_5146() {
     // session), so raise it to isolate the miss from any admission effect.
     sessions.set_max_sessions_for_test(16);
     let non_first = nat64_v6_frag_frame(0x0018, 0x0bad_f00d, src, dst, 0, 0);
-    let (b2, dbg2) = txn_run_descriptor(
+    let (b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         nat64_v6_frag_meta(non_first.len(), src, dst),
+        true,
     );
     assert_eq!(
         b2.nat64_translations, 0,
@@ -1787,13 +1807,14 @@ fn nat64_cross_domain_nonfirst_fragment_does_not_inherit_5798() {
 
     // Domain A installs the association off a committed first fragment.
     let first = nat64_v6_frag_frame(0x0001, 0x5798_0042, src, dst, 12345, 443);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(dbg1.tx, 1, "the domain-A first fragment must translate + forward");
     assert_eq!(
@@ -1805,16 +1826,19 @@ fn nat64_cross_domain_nonfirst_fragment_does_not_inherit_5798() {
     // Domain B: SAME (src, dst, ident) — the whole pre-#5798 key — but a
     // different, fully-configured ingress interface/VLAN/zone.
     let non_first = nat64_v6_frag_frame(0x0018, 0x5798_0042, src, dst, 0, 0);
+    let mut non_first_wan = non_first.clone();
+    non_first_wan[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
     let mut meta_b = nat64_v6_frag_meta(non_first.len(), src, dst);
     meta_b.ingress_ifindex = 12;
     meta_b.ingress_vlan_id = 80;
-    let (b2, dbg2) = txn_run_descriptor(
+    let (b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
-        &non_first,
+        &non_first_wan,
         meta_b,
+        true,
     );
     assert_eq!(
         dbg2.tx, 0,
@@ -1834,13 +1858,14 @@ fn nat64_cross_domain_nonfirst_fragment_does_not_inherit_5798() {
 
     // Positive control: the SAME domain still inherits and forwards, so the
     // authority scoping is not blackholing legitimate fragmented NAT64 traffic.
-    let (b3, dbg3) = txn_run_descriptor(
+    let (b3, dbg3) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         nat64_v6_frag_meta(non_first.len(), src, dst),
+        true,
     );
     assert_eq!(
         dbg3.tx, 1,
@@ -1938,13 +1963,14 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
             seed_binding.interface = Arc::<str>::from("reth1.0");
             let mut seed_sessions = SessionTable::new();
             seed_sessions.set_max_sessions_for_test(16);
-            let (_sb, seed_dbg) = txn_run_descriptor(
+            let (_sb, seed_dbg) = txn_run_descriptor_checked(
                 &mut seed_binding,
                 &mut seed_sessions,
                 &seed_fwd,
                 &seed_ha,
                 &first,
                 nat64_v6_frag_meta(first.len(), src, dst),
+                true,
             );
             assert_eq!(seed_dbg.tx, 1, "the seed first fragment must translate + forward");
             let seed_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
@@ -1991,13 +2017,14 @@ fn nat64_association_hit_still_runs_interface_input_filter_5798() {
             "the seeded association must be live before the consult"
         );
 
-        let (batch, dbg) = txn_run_descriptor(
+        let (batch, dbg) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &non_first,
             meta,
+            true,
         );
         (batch.nat64_translations, dbg.tx)
     };
@@ -2177,15 +2204,21 @@ fn nat64_frag_authority_dimensions_are_threaded_end_to_end_5798() {
              dimension for this case to be a single-dimension guard (base {base_authority:?}, \
              perturbed {other_authority:?})"
         );
+        let mut perturbed_frame = non_first.clone();
+        if dimension == "logical ingress interface (same zone)" {
+            perturbed_frame[..6]
+                .copy_from_slice(&crate::afxdp::tests_support::TEST_RETH1_SECOND_MAC);
+        }
 
         // Domain A installs off a real committed first fragment.
-        let (_b1, dbg1) = txn_run_descriptor(
+        let (_b1, dbg1) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &first,
             nat64_v6_frag_meta(first.len(), src, dst),
+            true,
         );
         assert_eq!(
             dbg1.tx, 1,
@@ -2198,13 +2231,14 @@ fn nat64_frag_authority_dimensions_are_threaded_end_to_end_5798() {
         );
 
         // Same frame bytes, one dimension of ingress authority changed.
-        let (b2, dbg2) = txn_run_descriptor(
+        let (b2, dbg2) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
-            &non_first,
+            &perturbed_frame,
             perturbed,
+            true,
         );
         assert_eq!(
             dbg2.tx, 0,
@@ -2225,13 +2259,14 @@ fn nat64_frag_authority_dimensions_are_threaded_end_to_end_5798() {
         // Positive control per case: the UNPERTURBED fragment still inherits, so
         // the negative assertion above cannot be satisfied by a cache/consult
         // that simply never returns a hit.
-        let (b3, dbg3) = txn_run_descriptor(
+        let (b3, dbg3) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &non_first,
             base_meta,
+            true,
         );
         assert_eq!(
             dbg3.tx, 1,
@@ -2291,13 +2326,14 @@ fn nat64_third_fragment_from_another_domain_refused_after_a_same_domain_hit_5798
     );
 
     // (1) first-A installs.
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frag1_first,
         nat64_v6_frag_meta(frag1_first.len(), src, dst),
+        true,
     );
     assert_eq!(dbg1.tx, 1, "the domain-A first fragment must translate + forward");
     assert_eq!(
@@ -2307,13 +2343,14 @@ fn nat64_third_fragment_from_another_domain_refused_after_a_same_domain_hit_5798
     );
 
     // (2) middle-A HITS — the state is now not merely created but USED.
-    let (b2, dbg2) = txn_run_descriptor(
+    let (b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frag2_middle,
         nat64_v6_frag_meta(frag2_middle.len(), src, dst),
+        true,
     );
     assert_eq!(
         dbg2.tx, 1,
@@ -2323,19 +2360,22 @@ fn nat64_third_fragment_from_another_domain_refused_after_a_same_domain_hit_5798
         b2.nat64_translations, 1,
         "the inherited middle fragment is NAT64-translated"
     );
+    let mut frag3_last_wan = frag3_last.clone();
+    frag3_last_wan[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
 
     // (3) last-B — same datagram identity, different security domain. Must be
-    //     refused even though the association is live AND has just been hit.
+    // refused even though the association is live AND has just been hit.
     let mut meta_b = nat64_v6_frag_meta(frag3_last.len(), src, dst);
     meta_b.ingress_ifindex = 12;
     meta_b.ingress_vlan_id = 80;
-    let (b3, dbg3) = txn_run_descriptor(
+    let (b3, dbg3) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
-        &frag3_last,
+        &frag3_last_wan,
         meta_b,
+        true,
     );
     assert_eq!(
         dbg3.tx, 0,
@@ -2354,13 +2394,14 @@ fn nat64_third_fragment_from_another_domain_refused_after_a_same_domain_hit_5798
 
     // (4) And domain A can STILL use it afterwards: the refusal did not poison
     //     or evict the entry.
-    let (b4, dbg4) = txn_run_descriptor(
+    let (b4, dbg4) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frag3_last,
         nat64_v6_frag_meta(frag3_last.len(), src, dst),
+        true,
     );
     assert_eq!(
         dbg4.tx, 1,
@@ -2468,13 +2509,14 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
     // Fragment 1 (first): flow-backed cold path. Its Accept exit legitimately
     // defers to the routing evaluator, which DOES run there and counts.
     let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(dbg1.tx, 1, "the first fragment must translate + forward");
     assert_eq!(
@@ -2498,13 +2540,14 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
     // stamped by the shim.
     meta.flow_src_addr = src.octets();
     meta.flow_dst_addr = dst.octets();
-    let (b2, dbg2) = txn_run_descriptor(
+    let (b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         meta,
+        true,
     );
     assert_eq!(
         dbg2.tx, 1,
@@ -2637,13 +2680,14 @@ fn nat64_frag_assoc_hit_applies_matching_pbr_discard_6927() {
     // translates, forwards, and installs the association. Without this the
     // `tx == 0` below could just mean nothing was ever cached.
     let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-    let (b1, dbg1) = txn_run_descriptor(
+    let (b1, dbg1) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(
         dbg1.tx, 1,
@@ -2656,13 +2700,14 @@ fn nat64_frag_assoc_hit_applies_matching_pbr_discard_6927() {
     let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
     meta.flow_src_addr = src.octets();
     meta.flow_dst_addr = dst.octets();
-    let (b2, dbg2) = txn_run_descriptor(
+    let (b2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         meta,
+        true,
     );
     assert_eq!(
         dbg2.tx, 0,
@@ -2728,13 +2773,14 @@ fn nat64_frag_assoc_hit_reenforces_owner_rg_6927() {
         sessions.set_max_sessions_for_test(16);
 
         let first = nat64_v6_frag_frame(0x0001, ident, src, dst, 12345, 443);
-        let (_b1, dbg1) = txn_run_descriptor(
+        let (_b1, dbg1) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &active,
             &first,
             nat64_v6_frag_meta(first.len(), src, dst),
+            true,
         );
         assert_eq!(
             dbg1.tx, 1,
@@ -2746,8 +2792,7 @@ fn nat64_frag_assoc_hit_reenforces_owner_rg_6927() {
         let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
         meta.flow_src_addr = src.octets();
         meta.flow_dst_addr = dst.octets();
-        let (_b2, dbg2) =
-            txn_run_descriptor(&mut binding, &mut sessions, &forwarding, ha, &non_first, meta);
+        let (_b2, dbg2) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, ha, &non_first, meta, true);
         dbg2.tx
     };
 
@@ -2818,13 +2863,14 @@ fn nat64_frag_assoc_miss_must_drop_with_default_route_6927() {
     let mut meta = nat64_v6_frag_meta(non_first.len(), src, dst);
     meta.flow_src_addr = src.octets();
     meta.flow_dst_addr = dst.octets();
-    let (batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &non_first,
         meta,
+        true,
     );
     assert_eq!(
         dbg.tx, 0,
@@ -2864,13 +2910,14 @@ fn nat64_frag_assoc_miss_must_drop_with_default_route_6927() {
     // prevent: the repair lines look redundant, and deleting them would
     // reintroduce a meta that describes a packet the frame does not carry.
     let plain_meta = nat64_v6_frag_meta(plain.len(), src, plain_dst);
-    let (plain_batch, plain_dbg) = txn_run_descriptor(
+    let (plain_batch, plain_dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &plain,
         plain_meta,
+        true,
     );
     assert_eq!(
         plain_dbg.tx, 1,
@@ -3148,13 +3195,14 @@ fn nat64_frag_assoc_install_site_derives_the_owner_rg_6857() {
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
     let first = nat64_v6_frag_frame(0x0001, 0x1234_5678, src, dst, 12345, 443);
-    let (_b, dbg) = txn_run_descriptor(
+    let (_b, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &first,
         nat64_v6_frag_meta(first.len(), src, dst),
+        true,
     );
     assert_eq!(
         dbg.tx, 1,

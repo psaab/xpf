@@ -77,7 +77,7 @@ fn no_match_embedded_icmp_returns_none() {
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
 
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, 40000, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, 40000, 80, PROTO_TCP, TEST_LAN_MAC);
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -108,13 +108,13 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
     // Untranslated quote: the inner tuple is server -> client, so the
     // forward-NAT reverse matcher has no forward candidate and the ordinary
     // same-family fallback must resolve this exact reverse entry.
-    let frame = build_icmp_te_frame_v4(
+    let frame = build_icmp_te_frame_v4_with_mac(
         router_ip,
         server_ip,
         client_ip,
         server_port,
         client_port,
-        PROTO_TCP,
+        PROTO_TCP, TEST_LAN_MAC
     );
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -219,7 +219,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
 
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -361,7 +361,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
     // checksum over the whole header so the frame stays valid.
     const REDIRECT_GATEWAY: [u8; 4] = [192, 0, 2, 1]; // RFC 5737 TEST-NET-1
     let mut frame =
-        build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+        build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_LAN_MAC);
     frame[38..42].copy_from_slice(&REDIRECT_GATEWAY); // ICMP bytes 4..8 = gateway
     rewrite_outer_icmpv4_type(&mut frame, 34, 5);
     assert_eq!(frame[34], 5, "outer ICMP type must be Redirect");
@@ -496,7 +496,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
 fn embedded_icmp_nat_match_ignores_non_error_echo() {
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64);
+    let frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -567,7 +567,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
     let client_port: u16 = 12345;
 
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
-    let mut frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let mut frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
     frame[14 + 8] = outer_ttl;
     frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
     let outer_csum = checksum16(&frame[14..34]);
@@ -1224,13 +1224,13 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     expect_fabric_redirect: bool,
 ) {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
-    let mut frame = build_icmp_te_frame_v4(
+    let mut frame = build_icmp_te_frame_v4_with_mac(
         router_ip,
         n6472_pool_v4(),
         n6472_server_v4(),
         N6472_XLATED_PORT,
         N6472_SERVER_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_WAN_MAC
     );
     n6472_patch_ptb(&mut frame, 34);
     // allow_embedded_icmp deliberately NOT set: the NAT64 arm is ungated.
@@ -1540,13 +1540,13 @@ fn poll_descriptor_nat64_icmp_error_fabric_redirect_passthrough_9948() {
 #[test]
 fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() {
     let lan_router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
-    let frame = build_icmpv6_te_frame(
+    let frame = build_icmpv6_te_frame_with_mac(
         lan_router,
         n6472_pref64_server(),
         n6472_client_v6(),
         N6472_SERVER_PORT,
         N6472_CLIENT_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_LAN_MAC
     );
 
     let forwarding = build_forwarding_state(&nat64_snapshot(lan_to_wan_permit(
@@ -1592,7 +1592,7 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     assert_eq!(
         sessions.lifetime_state_for(&quote_key),
         Some(quote_lifetime_before),
@@ -1744,13 +1744,13 @@ struct N9162Outcome {
 /// vacuous in exactly the way #9033's were.
 fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
-    let mut frame = build_icmp_te_frame_v4(
+    let mut frame = build_icmp_te_frame_v4_with_mac(
         router_ip,
         n6472_pool_v4(),
         n6472_server_v4(),
         N6472_XLATED_PORT,
         N6472_SERVER_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_WAN_MAC
     );
     n6472_patch_ptb(&mut frame, 34);
     let mut snapshot = n9162_nat64_snapshot_in_domain(
@@ -1790,7 +1790,7 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     n9162_capture(&binding, sessions.len() as i64 - sessions_before as i64)
 }
 
@@ -1798,13 +1798,13 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
 /// `domain`.
 fn n9162_run_v6_to_v4(domain: u32) -> N9162Outcome {
     let lan_router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
-    let frame = build_icmpv6_te_frame(
+    let frame = build_icmpv6_te_frame_with_mac(
         lan_router,
         n6472_pref64_server(),
         n6472_client_v6(),
         N6472_SERVER_PORT,
         N6472_CLIENT_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_LAN_MAC
     );
 
     let forwarding = build_forwarding_state(&n9162_nat64_snapshot_in_domain(
@@ -1842,7 +1842,7 @@ fn n9162_run_v6_to_v4(domain: u32) -> N9162Outcome {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     n9162_capture(&binding, sessions.len() as i64 - sessions_before as i64)
 }
 
@@ -2025,13 +2025,13 @@ fn poll_descriptor_nat64_icmp_error_outer_dst_mismatch_declined_6472() {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
     // Outer dst = 172.16.80.51, but the quote's source stays 172.16.80.50
     // (the pool address): the RFC 792 consistency gate rejects the match.
-    let frame = build_icmp_te_frame_v4(
+    let frame = build_icmp_te_frame_v4_with_mac(
         router_ip,
         Ipv4Addr::new(172, 16, 80, 51),
         n6472_server_v4(),
         N6472_XLATED_PORT,
         N6472_SERVER_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_WAN_MAC
     );
     // Patch the embedded quote's source back to the pool address so ONLY the
     // outer dst differs (the fixture ties them together by construction).
@@ -2076,7 +2076,7 @@ fn poll_descriptor_nat64_icmp_error_outer_dst_mismatch_declined_6472() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
@@ -2097,7 +2097,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
 
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
     // NAT64 prefix configured AND allow_embedded_icmp set: both arms are
     // eligible — the NAT64 arm must decline (the NAT44 half carries no
@@ -2361,7 +2361,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_6474() {
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
 
     // Outer (client -> server); embedded quote (server:80 -> client:12345).
-    let mut frame = build_icmp_te_frame_v4(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP);
+    let mut frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
     // Destination Unreachable / port-unreachable (3/3): the natural error a
     // host emits about a reply it cannot handle.
     frame[34] = 3;
@@ -2389,7 +2389,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_6474() {
     let sessions_before = sessions.len();
 
     let meta = n6474_meta(24, libc::AF_INET as u8, PROTO_ICMP, frame.len());
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -2450,7 +2450,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_6474() {
     let snat_v6: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6 (reth0.80)");
 
     // Outer (client -> server); embedded quote (server:80 -> client:12345).
-    let mut frame = build_icmpv6_te_frame(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP);
+    let mut frame = build_icmpv6_te_frame_with_mac(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
     // Destination Unreachable / port-unreachable (1/4).
     let l4 = 54;
     frame[l4] = 1;
@@ -2477,7 +2477,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_6474() {
     );
 
     let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -2571,7 +2571,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
 
-    let mut frame = build_icmp_te_frame_v4(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP);
+    let mut frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
     frame[34] = 3;
     frame[35] = 3;
     frame[36] = 0;
@@ -2600,7 +2600,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     );
 
     let meta = n6474_meta(24, libc::AF_INET as u8, PROTO_ICMP, frame.len());
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -2648,7 +2648,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     let server_v6: Ipv6Addr = "2001:db8::1".parse().expect("server v6");
     let snat_v6: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6 (reth0.80)");
 
-    let mut frame = build_icmpv6_te_frame(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP);
+    let mut frame = build_icmpv6_te_frame_with_mac(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
     let l4 = 54;
     frame[l4] = 1;
     frame[l4 + 1] = 4;
@@ -2677,7 +2677,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     );
 
     let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -2738,7 +2738,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         libc::AF_INET as u8,
         0,
     );
-    let frame = build_icmp_te_frame_v4(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
     let m = try_embedded_icmp_nat_match_from_frame(
         &frame,
         meta,
@@ -2836,13 +2836,13 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         libc::AF_INET as u8,
         0,
     );
-    let inbound_frame = build_icmp_te_frame_v4(
+    let inbound_frame = build_icmp_te_frame_v4_with_mac(
         Ipv4Addr::new(172, 16, 80, 1),
         snat_ip,
         server_ip,
         40000,
         80,
-        PROTO_TCP,
+        PROTO_TCP, TEST_LAN_MAC
     );
     let m = try_embedded_icmp_nat_match_from_frame(
         &inbound_frame,
@@ -2896,7 +2896,7 @@ fn poll_descriptor_policy_deny_path_emits_rt_flow_event() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let frame = build_policy_deny_tcp_syn_frame();
+    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -3146,7 +3146,7 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
     // The physical port the VLAN sub-interface rides on is ifindex 11.
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     binding.interface = Arc::<str>::from("ge-0-0-0");
-    let frame = build_policy_deny_tcp_syn_frame();
+    let frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_VLAN50_MAC);
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -3359,7 +3359,7 @@ fn poll_descriptor_input_filter_discard_drops_and_logs() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let mut frame = build_policy_deny_tcp_syn_frame();
+    let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     frame[47] = 0x10;
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -3536,7 +3536,7 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let mut frame = build_policy_deny_tcp_syn_frame();
+    let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     frame[47] = 0x10;
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -3770,7 +3770,7 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let mut frame = build_policy_deny_tcp_syn_frame();
+    let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     set_ipv4_dst(&mut frame, Ipv4Addr::new(10, 0, 61, 1));
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -3962,7 +3962,7 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let mut frame = build_policy_deny_tcp_syn_frame();
+    let mut frame = build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     set_ipv4_dst(&mut frame, Ipv4Addr::new(10, 0, 61, 1));
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -4206,7 +4206,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
     let client_port: u16 = 12345;
 
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
@@ -4495,7 +4495,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
     let client_port: u16 = 12345;
 
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
@@ -4881,7 +4881,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     // payload rather than presented directly. `build_icmp_te_frame_v4` returns
     // an Ethernet frame; the GRE payload is the IP packet, so the 14-byte L2
     // header is stripped.
-    let inner_l2 = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let inner_l2 = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_LAN_MAC);
     let inner = inner_l2[14..].to_vec();
     // vlan 80 = the live reth0.80 shape. See the header note on why tagged.
     let frame = build_gre_to_self_outer_frame_v4(80, &inner);
@@ -5188,13 +5188,13 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
 #[test]
 fn gre_decapped_nat64_icmp_error_reads_the_inner_frame_8271() {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
-    let mut inner_l2 = build_icmp_te_frame_v4(
+    let mut inner_l2 = build_icmp_te_frame_v4_with_mac(
         router_ip,
         n6472_pool_v4(),
         n6472_server_v4(),
         N6472_XLATED_PORT,
         N6472_SERVER_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_LAN_MAC
     );
     n6472_patch_ptb(&mut inner_l2, 34);
     // The GRE payload is the IP packet, so drop the 14-byte L2 header.
@@ -5246,7 +5246,7 @@ fn gre_decapped_nat64_icmp_error_reads_the_inner_frame_8271() {
     meta.ingress_ifindex = 12;
     meta.config_generation = 7;
     meta.fib_generation = 9;
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
 
     // RED on revert: under the defect the helper parses the un-decapped outer
     // GRE frame at the inner meta's offsets, recognises no ICMP error, and
@@ -5300,7 +5300,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
     // Outer: router -> CLIENT (an ICMP error travels back to the original
     // source); embedded quoted: client:client_port -> server:80, i.e. the
     // POST-DNAT tuple as it appeared on the wire toward the real server.
-    let frame = build_icmp_te_frame_v4(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
     // allow_embedded_icmp gates the poll-path reversal — enable it.
     let mut snapshot = nat_snapshot();
@@ -5581,7 +5581,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
     // between the same pair of addresses.
     let gre_key: u16 = 40000;
 
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, gre_key, 0, PROTO_GRE);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, gre_key, 0, PROTO_GRE, TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -5727,7 +5727,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     let quoted_key_value: u16 = 40001; // a DIFFERENT tunnel
 
     let frame =
-        build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, quoted_key_value, 0, PROTO_GRE);
+        build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, quoted_key_value, 0, PROTO_GRE, TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -5858,7 +5858,7 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
     let gre_key: u16 = 40000;
 
     // The quote names tunnel_src -> tunnel_dst with this GRE key.
-    let frame = build_icmp_te_frame_v4(router_ip, tunnel_src, tunnel_dst, gre_key, 0, PROTO_GRE);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, tunnel_src, tunnel_dst, gre_key, 0, PROTO_GRE, TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -5947,7 +5947,7 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
     let tunnel_src = Ipv4Addr::new(172, 16, 80, 8);
     let tunnel_dst = Ipv4Addr::new(1, 1, 1, 1);
 
-    let frame = build_icmp_te_frame_v4(router_ip, tunnel_src, tunnel_dst, 40001, 0, PROTO_GRE);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, tunnel_src, tunnel_dst, 40001, 0, PROTO_GRE, TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -6549,13 +6549,13 @@ fn g9528_v4(ip: Ipv4Addr) -> [u8; 16] {
 /// term's packet count or None without a filter).
 fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<u64>) {
     let router_ip = Ipv4Addr::new(172, 16, 80, 1);
-    let mut frame = build_icmp_te_frame_v4(
+    let mut frame = build_icmp_te_frame_v4_with_mac(
         router_ip,
         n6472_pool_v4(),
         n6472_server_v4(),
         N6472_XLATED_PORT,
         N6472_SERVER_PORT,
-        PROTO_TCP,
+        PROTO_TCP, TEST_WAN_MAC
     );
     n6472_patch_ptb(&mut frame, 34);
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
@@ -6590,7 +6590,7 @@ fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<
         flow_dst_addr: g9528_v4(n6472_pool_v4()),
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
     let count = with_filter.then(|| g9528_packets(&forwarding));
     (
         binding.scratch.scratch_forwards.len(),
@@ -6608,7 +6608,7 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
     let mut snapshot = nat_snapshot();
     permit_wan_to_lan_flowless_icmp(&mut snapshot);
     snapshot.flow.allow_embedded_icmp = true;
@@ -6703,7 +6703,7 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
         flow_dst_addr: g9528_v4(snat_ip),
         ..UserspaceDpMeta::default()
     };
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, meta, true);
     let count = with_filter.then(|| g9528_packets(&forwarding));
     (
         binding.scratch.scratch_forwards.len(),
@@ -6792,10 +6792,10 @@ fn flowless_fragment_evaluates_pbr_exactly_once_9528() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let frame = frag_v4_transit_frame();
+    let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
     let mut meta = frag_v4_transit_meta();
     meta.pkt_len = frame.len() as u16;
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &BTreeMap::new(), &frame, meta);
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &BTreeMap::new(), &frame, meta, true);
     assert_eq!(
         g9528_packets(&forwarding),
         1,
@@ -6824,7 +6824,7 @@ fn n9901_floor_fixture() -> (
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
-    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -6832,6 +6832,7 @@ fn n9901_floor_fixture() -> (
         l3_offset: 14,
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
+        ingress_ifindex: 24,
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
@@ -7114,13 +7115,13 @@ fn same_router_sessions_match_independently_9901() {
     let (frame_a, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
         n9901_floor_fixture();
     n9901_install_snat_session(&mut sessions, 12346, 40001, 1_000_000);
-    let frame_b = build_icmp_te_frame_v4(
+    let frame_b = build_icmp_te_frame_v4_with_mac(
         Ipv4Addr::new(10, 0, 0, 1),
         Ipv4Addr::new(172, 16, 80, 8),
         Ipv4Addr::new(1, 1, 1, 1),
         40001,
         80,
-        PROTO_TCP,
+        PROTO_TCP, TEST_LAN_MAC
     );
     for i in 0..64 {
         let matched = try_embedded_icmp_nat_match_from_frame(
@@ -7231,7 +7232,7 @@ fn poll_flood_queues_burst_and_recycles_excess_9901() {
 
     // Outer (client -> server); embedded quote (server:80 -> client:12345);
     // Destination Unreachable / port-unreachable — mirrors #6474's v4 cell.
-    let mut frame = build_icmp_te_frame_v4(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP);
+    let mut frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
     frame[34] = 3;
     frame[35] = 3;
     frame[36] = 0;
@@ -7264,7 +7265,7 @@ fn poll_flood_queues_burst_and_recycles_excess_9901() {
     let mut recycled = 0usize;
     let mut leaked = 0usize;
     for _ in 0..100 {
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+        txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
         for fwd in binding.scratch.scratch_forwards.iter() {
             queued += 1;
             // Leak pin: every queued error must carry the EXTERNAL source.
@@ -7351,7 +7352,7 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286_impl(install_session:
     // source); embedded quoted: client:client_port -> server:80, i.e. the
     // exact forward tuple the client sent (no NAT to reverse).
     let mut frame =
-        build_icmp_te_frame_v4(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP);
+        build_icmp_te_frame_v4_with_mac(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP, TEST_WAN_MAC);
     // Frag-Needed shape (type 3 / code 4, MTU 1400) — the v4 PMTUD signal.
     n6472_patch_ptb(&mut frame, 34);
 
@@ -7637,7 +7638,7 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl() {
     let server_ip: Ipv6Addr = "2606:4700:4700::1111".parse().expect("server v6");
     let client_port: u16 = 12345;
 
-    let mut frame = build_icmpv6_te_frame(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP);
+    let mut frame = build_icmpv6_te_frame_with_mac(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP, TEST_WAN_MAC);
     // PTB shape: type 2 / code 0, MTU 1280. l4 = eth(14) + IPv6(40) = 54.
     frame[54] = 2;
     frame[55] = 0;

@@ -449,6 +449,31 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     }
 }
 
+/// Test-only seam for exercising re-derivation without the descriptor MAC gate.
+#[cfg(test)]
+pub(crate) fn revalidate_zone_policy_declines_for_test(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    packet_fabric_ingress: bool,
+) -> bool {
+    revalidate_zone_policy_on_session_hit(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        decision,
+        flow,
+        meta,
+        packet_fabric_ingress,
+    )
+    .is_none()
+}
+
 /// #10038: is this FORWARD entry firewall-self-originated (TUN-originated)?
 ///
 /// The single predicate shared by the #9604 decline (Part C, both arms below)

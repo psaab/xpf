@@ -49,6 +49,7 @@ use crate::tcp_flags::TCP_ACK;
 const LAN_IFINDEX: i32 = 24;
 const WAN_IFINDEX: i32 = 12;
 const DMZ_IFINDEX: i32 = 26;
+const REVOCATION_DMZ_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x02, 0x00, 0x01];
 /// A MAC-less egress: routable, but absent from the unambiguous zone ledger.
 const MACLESS_IFINDEX: i32 = 77;
 const SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
@@ -219,15 +220,24 @@ fn drive_one_packet_with_action(
         "the fixture must install the session, or every assertion below is vacuous"
     );
 
-    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the established session must be reached before policy re-derivation"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "the descriptor must pass validation before policy re-derivation"
     );
     Outcome {
         sessions,
@@ -269,15 +279,16 @@ fn drive_one_packet_no_route_9513() -> Outcome {
         ),
         "the fixture must install the session, or the assertion is vacuous"
     );
-    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,
@@ -634,17 +645,26 @@ fn drive_one_icmp_packet(permit_lan: bool, with_type_constrained_permit: bool) -
         "the fixture must install the ICMP session, or every assertion is vacuous"
     );
 
-    let frame = build_icmp_echo_frame_v4(SRC, DST, 64);
+    let frame = build_icmp_echo_frame_v4(SRC, DST, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
-    let (_batch, dbg) = txn_run_descriptor(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the established ICMP session must be reached before policy re-derivation"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "the descriptor must pass validation before policy re-derivation"
     );
     Outcome {
         sessions,
@@ -774,6 +794,7 @@ fn forwarding_with_icmp_type_split_9949() -> ForwardingState {
         zone: "dmz".into(),
         linux_name: "ge-0-0-2".into(),
         ifindex: DMZ_IFINDEX,
+        hardware_addr: "02:bf:72:02:00:01".into(),
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
@@ -796,13 +817,14 @@ fn forwarding_with_icmp_type_split_9949() -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
-fn icmp_frame_type_9949(icmp_type: u8) -> Vec<u8> {
-    let mut frame = build_icmp_echo_frame_v4(SRC, DST, 64);
+fn icmp_frame_type_9949(icmp_type: u8, dst_mac: [u8; 6]) -> Vec<u8> {
+    let mut frame = build_icmp_echo_frame_v4(SRC, DST, 64, dst_mac);
     frame[34] = icmp_type;
     // Keep the repro wire-valid when changing the type byte.
-    frame[36..38].copy_from_slice(&[0, 0]);
-    let checksum = checksum16(&frame[34..]);
-    frame[36..38].copy_from_slice(&checksum.to_be_bytes());
+    frame[36] = 0;
+    frame[37] = 0;
+    let csum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&csum.to_be_bytes());
     frame
 }
 
@@ -813,17 +835,18 @@ fn drive_owner_icmp_type_9949(
 ) -> DebugPollCounters {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let frame = icmp_frame_type_9949(icmp_type);
+    let frame = icmp_frame_type_9949(icmp_type, TEST_LAN_MAC);
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         sessions,
         forwarding,
         &BTreeMap::new(),
         &frame,
         meta,
+        true,
     );
     dbg
 }
@@ -834,17 +857,18 @@ fn drive_foreign_icmp_type_9949(
 ) -> DebugPollCounters {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth2.0");
-    let frame = icmp_frame_type_9949(icmp_type);
+    let frame = icmp_frame_type_9949(icmp_type, REVOCATION_DMZ_MAC);
     let mut meta = txn_meta_v4(DMZ_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         sessions,
         forwarding,
         &BTreeMap::new(),
         &frame,
         meta,
+        true,
     );
     dbg
 }
@@ -968,17 +992,18 @@ fn drive_icmp_against_9386(forwarding: &ForwardingState) -> u64 {
     ));
     // An echo REQUEST, type 8 — the type the junos-ping term constrains on, so a
     // fully-informed evaluation WOULD match the deny.
-    let frame = build_icmp_echo_frame_v4(SRC, DST, 64);
+    let frame = build_icmp_echo_frame_v4(SRC, DST, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,
@@ -1146,13 +1171,14 @@ fn admit_then_one_more_packet(
     let forwarding1 = build_forwarding_state(&snapshot_phase1);
     let mut binding1 = BindingWorker::new_for_mirror_test(0, 0, ifindex, 0);
     binding1.interface = Arc::<str>::from(iface);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding1,
         &mut sessions,
         &forwarding1,
         &ha_state,
         frame_admit,
         meta_admit,
+        true,
     );
     assert_eq!(
         dbg1.tx, 1,
@@ -1170,13 +1196,14 @@ fn admit_then_one_more_packet(
     let forwarding2 = build_forwarding_state(&snapshot_phase2);
     let mut binding2 = BindingWorker::new_for_mirror_test(0, 0, ifindex, 0);
     binding2.interface = Arc::<str>::from(iface);
-    let (_b2, dbg2) = txn_run_descriptor(
+    let (_b2, dbg2) = txn_run_descriptor_checked(
         &mut binding2,
         &mut sessions,
         &forwarding2,
         &ha_state,
         frame_established,
         meta_established,
+        true,
     );
     TranslatedOutcome {
         revoked: dbg2.policy_revoked_sessions,
@@ -1255,13 +1282,14 @@ fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
             std::sync::Arc::clone(&owners),
             SteeringHolder::Worker(0),
         );
-        let (_batch, dbg) = txn_run_descriptor(
+        let (_batch, dbg) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &syn,
             meta_syn,
+            true,
         );
         assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive a reverse key");
         let mut found: Option<SessionKey> = None;
@@ -1306,13 +1334,14 @@ fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
          the release below has nothing to observe (held {seeded})"
     );
 
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
 
@@ -1378,13 +1407,14 @@ fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_95
             std::sync::Arc::clone(&owners),
             SteeringHolder::Worker(0),
         );
-        let (_batch, dbg) = txn_run_descriptor(
+        let (_batch, dbg) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
             &forwarding,
             &ha_state,
             &syn,
             meta_syn,
+            true,
         );
         assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive the forward rows");
         let key = forward_key_of(&sessions).expect("FIXTURE: pass 1 must install a forward entry");
@@ -1438,13 +1468,14 @@ fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_95
         real_rows.len()
     );
 
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
 
@@ -1484,13 +1515,14 @@ fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
         SteeringHolder::Worker(0),
     );
 
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(
         dbg.tx, 1,
@@ -1578,9 +1610,9 @@ fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
 }
 
 fn dnat_frames() -> (Vec<u8>, UserspaceDpMeta, Vec<u8>, UserspaceDpMeta) {
-    let syn = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_FLAG_SYN);
+    let syn = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta_syn = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
-    let ack = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_ACK);
+    let ack = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_ACK, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta_ack = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_ACK, ack.len() as u16);
     (syn, meta_syn, ack, meta_ack)
 }
@@ -1743,11 +1775,13 @@ fn a_deny_naming_only_the_pre_translation_vip_does_not_revoke_9382() {
 #[test]
 fn an_unchanged_nptv6_policy_does_not_revoke_the_established_session_9382() {
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
-    let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("external prefix dst");
-    let syn = build_txn_tcp_frame_v6(src, dst, 54321, 443, TCP_FLAG_SYN);
+    let dst: Ipv6Addr = "2602:fd41:70:100::102"
+        .parse()
+        .expect("external prefix dst");
+    let syn = build_txn_tcp_frame_v6(src, dst, 54321, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
     let mut meta_syn = txn_meta_v6(WAN_INGRESS_IFINDEX as u32, syn.len());
     meta_syn.tcp_flags = TCP_FLAG_SYN;
-    let ack = build_txn_tcp_frame_v6(src, dst, 54321, 443, TCP_ACK);
+    let ack = build_txn_tcp_frame_v6(src, dst, 54321, 443, TCP_ACK, crate::afxdp::tests_support::TEST_WAN_MAC);
     let mut meta_ack = txn_meta_v6(WAN_INGRESS_IFINDEX as u32, ack.len());
     meta_ack.tcp_flags = TCP_ACK;
 
@@ -1786,10 +1820,10 @@ fn an_unchanged_nptv6_policy_does_not_revoke_the_established_session_9382() {
 fn an_unchanged_nat64_policy_with_a_mixed_family_destination_set_does_not_revoke_9382() {
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("v6 client");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 synthetic dst");
-    let syn = build_txn_tcp_frame_v6(src, dst, 12345, 443, TCP_FLAG_SYN);
+    let syn = build_txn_tcp_frame_v6(src, dst, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
     let mut meta_syn = txn_meta_v6(LAN_IFINDEX as u32, syn.len());
     meta_syn.tcp_flags = TCP_FLAG_SYN;
-    let ack = build_txn_tcp_frame_v6(src, dst, 12345, 443, TCP_ACK);
+    let ack = build_txn_tcp_frame_v6(src, dst, 12345, 443, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let mut meta_ack = txn_meta_v6(LAN_IFINDEX as u32, ack.len());
     meta_ack.tcp_flags = TCP_ACK;
 
@@ -1922,15 +1956,16 @@ fn drive_moved_interface_9384(
         "the fixture must install the session, or every assertion below is vacuous"
     );
 
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,
@@ -2016,15 +2051,16 @@ fn a_move_into_a_still_permitted_zone_does_not_revoke_9384() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(dbg.session_hit, 1, "the packet must hit the session");
     assert_eq!(
@@ -2115,39 +2151,45 @@ fn an_ingress_moved_to_no_zone_is_re_judged_rather_than_skipped_9513() {
 #[test]
 fn an_arrival_with_no_interface_identity_still_declines_9513() {
     let forwarding = forwarding_with_ingress_zone_9384("lan", true);
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
-    binding.interface = Arc::<str>::from("reth1.0");
-    let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
     // The ENTRY records a zone, so a derivation that reached evaluation would
     // have a pair to judge; only the ARRIVAL identity is missing.
+    let key = flow_key_to(DST);
+    let decision = decision(WAN_IFINDEX);
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
         ..metadata(false)
     };
     assert!(sessions.install_with_protocol_with_origin(
-        flow_key_to(DST),
-        decision(WAN_IFINDEX),
-        metadata,
+        key.clone(),
+        decision.clone(),
+        metadata.clone(),
         SessionOrigin::ForwardFlow,
         122_000_000_000,
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
-    // ifindex 0: no arrival interface identity at all.
-    let meta = txn_meta_v4(0, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
-        &mut binding,
-        &mut sessions,
-        &forwarding,
-        &ha_state,
-        &frame,
-        meta,
-    );
-    assert_eq!(
-        dbg.policy_revoked_sessions, 0,
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(SRC),
+        dst_ip: IpAddr::V4(DST),
+        forward_key: key.clone(),
+    };
+    // ifindex 0: no arrival interface identity at all. This calls the actual
+    // re-derivation helper directly, below the descriptor MAC gate.
+    let meta = txn_meta_v4(0, TCP_ACK, 0);
+    assert!(
+        super::poll_descriptor::revalidate_zone_policy_declines_for_test(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            Some(&flow),
+            meta,
+            false,
+        ),
         "an arrival with no interface identity is a LOOKUP FAILURE, not an \
          unzoned interface, and must DECLINE (#9513)"
     );
@@ -2219,15 +2261,16 @@ fn a_default_policy_of_reject_still_revokes_the_established_session_9381() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,
@@ -2290,15 +2333,16 @@ fn a_default_policy_of_reject_does_not_revoke_a_permitted_flow_9381() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(dbg.session_hit, 1, "the packet must hit the session");
     assert_eq!(
@@ -2393,15 +2437,16 @@ fn the_re_derivation_records_no_hit_on_the_matched_rule_9385() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,
@@ -2473,21 +2518,16 @@ fn the_ordinary_admission_path_does_record_a_hit_9385() {
     let ha_state = txn_ha_state();
     // An EMPTY session table: this packet is a session MISS and takes admission.
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v4(
-        Ipv4Addr::new(198, 51, 100, 10),
-        Ipv4Addr::new(172, 16, 80, 8),
-        54321,
-        443,
-        TCP_FLAG_SYN,
-    );
+    let frame = build_txn_tcp_syn_frame_v4(Ipv4Addr::new(198, 51, 100, 10), Ipv4Addr::new(172, 16, 80, 8), 54321, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 0,
@@ -2534,15 +2574,23 @@ fn the_re_derivation_records_no_hit_on_the_implicit_default_9385() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(dbg.session_hit, 1, "the packet must hit the session");
     assert_eq!(
@@ -2579,21 +2627,16 @@ fn the_ordinary_admission_path_does_record_a_default_hit_9385() {
     binding.interface = Arc::<str>::from("reth0.80");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v4(
-        Ipv4Addr::new(198, 51, 100, 10),
-        Ipv4Addr::new(172, 16, 80, 8),
-        54322,
-        443,
-        TCP_FLAG_SYN,
-    );
+    let frame = build_txn_tcp_syn_frame_v4(Ipv4Addr::new(198, 51, 100, 10), Ipv4Addr::new(172, 16, 80, 8), 54322, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(dbg.session_hit, 0, "this packet must be a session MISS");
     assert!(
@@ -2736,8 +2779,19 @@ fn reverse_tcp_frame_v4_9604(
         (IpAddr::V4(s), IpAddr::V4(d)) => (s, d),
         _ => panic!("9604 v4 driver handed a non-v4 reverse key"),
     };
-    let frame =
-        build_txn_tcp_syn_frame_v4(src, dst, rev_key.src_port, rev_key.dst_port, TCP_ACK);
+    let dst_mac = match arrival_ifindex {
+        WAN_IFINDEX => TEST_WAN_MAC,
+        LAN_IFINDEX => TEST_LAN_MAC,
+        other => panic!("9604 v4 fixture has no destination MAC for ingress ifindex {other}"),
+    };
+    let frame = build_txn_tcp_syn_frame_v4(
+        src,
+        dst,
+        rev_key.src_port,
+        rev_key.dst_port,
+        TCP_ACK,
+        dst_mac,
+    );
     let meta = txn_meta_v4(arrival_ifindex as u32, TCP_ACK, frame.len() as u16);
     (frame, meta)
 }
@@ -2751,7 +2805,12 @@ fn reverse_tcp_frame_v6_9604(
         (IpAddr::V6(s), IpAddr::V6(d)) => (s, d),
         _ => panic!("9604 v6 driver handed a non-v6 reverse key"),
     };
-    let frame = build_txn_tcp_frame_v6(src, dst, rev_key.src_port, rev_key.dst_port, TCP_ACK);
+    let dst_mac = match arrival_ifindex {
+        WAN_IFINDEX => TEST_WAN_MAC,
+        LAN_IFINDEX => TEST_LAN_MAC,
+        other => panic!("9604 v6 fixture has no destination MAC for ingress ifindex {other}"),
+    };
+    let frame = build_txn_tcp_frame_v6(src, dst, rev_key.src_port, rev_key.dst_port, TCP_ACK, dst_mac);
     let mut meta = txn_meta_v6(arrival_ifindex as u32, frame.len());
     meta.tcp_flags = TCP_ACK;
     (frame, meta)
@@ -2774,7 +2833,8 @@ fn drive_packet_9604(
     meta: UserspaceDpMeta,
 ) -> ReverseOutcome {
     let ha_state = txn_ha_state();
-    let (_batch, dbg) = txn_run_descriptor(binding, sessions, forwarding, &ha_state, frame, meta);
+    let (_batch, dbg) =
+        txn_run_descriptor_checked(binding, sessions, forwarding, &ha_state, frame, meta, true);
     ReverseOutcome {
         revoked: dbg.policy_revoked_sessions,
         hit: dbg.session_hit,
@@ -2832,14 +2892,7 @@ fn admit_then_reverse_9604(
     let mut sessions = SessionTable::new();
     let forwarding1 = build_forwarding_state(&snapshot_phase1);
     let mut binding1 = binding_for_9604(admit_ifindex, admit_iface);
-    let (_b1, dbg1) = txn_run_descriptor(
-        &mut binding1,
-        &mut sessions,
-        &forwarding1,
-        &ha_state,
-        frame_admit,
-        meta_admit,
-    );
+    let (_b1, dbg1) = txn_run_descriptor_checked(&mut binding1, &mut sessions, &forwarding1, &ha_state, frame_admit, meta_admit, true);
     assert_eq!(
         dbg1.tx, 1,
         "9604 phase 1 must ADMIT and forward, or the pair under test was never \
@@ -3090,21 +3143,16 @@ fn snat_pair_reverse_triggered_deny_revokes_both_halves_9604() {
     // Via the default route (172.16.80.1 has a neighbor entry): DST sits in the
     // connected WAN subnet with no neighbor entry, so a SYN to it installs but
     // never forwards — the wrong server for an admit-then-revoke cell.
-    let syn = build_txn_tcp_syn_frame_v4(
-        SRC,
-        Ipv4Addr::new(8, 8, 8, 8),
-        SPORT,
-        DPORT,
-        TCP_FLAG_SYN,
-    );
+    let syn = build_txn_tcp_syn_frame_v4(SRC, Ipv4Addr::new(8, 8, 8, 8), SPORT, DPORT, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_syn = txn_meta_v4(LAN_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
-    let (_b1, dbg1) = txn_run_descriptor(
+    let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding1,
         &mut sessions,
         &forwarding1,
         &ha_state,
         &syn,
         meta_syn,
+        true,
     );
     assert_eq!(dbg1.tx, 1, "9604 SNAT phase 1 must admit");
     assert_eq!(session_count(&sessions), 2, "9604 phase 1 must install the pair");
@@ -3259,11 +3307,16 @@ fn port_constraint_enforced_on_reverse_9604() {
 /// An ICMPv4 echo-REPLY frame (type 0) carrying `ident`, mirroring
 /// `build_icmp_echo_frame_v4` (which emits only requests). The reply parses to
 /// `(ident, 0)` off the wire, i.e. the reverse tuple of an echo session.
-fn build_icmp_echo_reply_frame_v4_9604(src: Ipv4Addr, dst: Ipv4Addr, ident: u16) -> Vec<u8> {
+fn build_icmp_echo_reply_frame_v4_9604(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    ident: u16,
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
-        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        dst_mac,
         [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
         0,
         0x0800,
@@ -3360,6 +3413,7 @@ fn drive_nat64_icmp_reply_9604(
         Ipv4Addr::from(NAT64_SERVER_V4_9604),
         Ipv4Addr::from(NAT64_MAPPED_V4_9604),
         ICMP_ID,
+        TEST_WAN_MAC,
     );
     let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
@@ -3748,7 +3802,14 @@ fn drive_move_then_reverse_9604(live_zone: &str) -> (SessionTable, SessionKey, S
     // Under G the forward judgment permits and stamps the forward half — the
     // transition model: the pair is judged, not merely installed, before the move.
     let mut binding_fwd = binding_for_9604(LAN_IFINDEX, "reth1.0");
-    let frame_fwd = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame_fwd = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta_fwd = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_fwd.len() as u16);
     let out_fwd = drive_packet_9604(&mut sessions, &forwarding_g, &mut binding_fwd, &frame_fwd, meta_fwd);
     assert_eq!(out_fwd.hit, 1, "9604 move fixture: the forward packet must hit");
@@ -4021,13 +4082,7 @@ fn snat_src_scoped_permit_kept_on_reverse_9604() {
         ..Default::default()
     });
     // Via the default route — see the deny cell: DST has no neighbor entry.
-    let syn = build_txn_tcp_syn_frame_v4(
-        SRC,
-        Ipv4Addr::new(8, 8, 8, 8),
-        SPORT,
-        DPORT,
-        TCP_FLAG_SYN,
-    );
+    let syn = build_txn_tcp_syn_frame_v4(SRC, Ipv4Addr::new(8, 8, 8, 8), SPORT, DPORT, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta_syn = txn_meta_v4(LAN_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
     let out = admit_then_reverse_9604(
         snap.clone(),
@@ -4175,7 +4230,14 @@ fn same_generation_reverse_then_forward_kept_9604() {
          dual-stamp would read Fresh here (#9604)"
     );
     let mut binding_fwd = binding_for_9604(LAN_IFINDEX, "reth1.0");
-    let frame_fwd = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame_fwd = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta_fwd = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_fwd.len() as u16);
     let out_fwd = drive_packet_9604(&mut sessions, &forwarding, &mut binding_fwd, &frame_fwd, meta_fwd);
     assert_eq!((out_fwd.hit, out_fwd.revoked), (1, 0), "the forward packet must hit and keep");
@@ -4246,14 +4308,38 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
     let forwarding_permit = build_forwarding_state(&snap_permit);
     let mut sessions = SessionTable::new();
     let mut binding = binding_for_9604(WAN_INGRESS_IFINDEX, "reth0.80");
-    let (_syn, _meta_syn, ack, meta_ack) = dnat_frames();
-    // ACK-first: only an eligible packet seeds the flow-cache slot.
-    // `should_cache` admits a pure-ACK TCP (or UDP) packet to a cacheable
-    // disposition — a SYN admit installs the pair but seeds nothing, which
-    // would leave the eviction assertions below vacuous.
-    let admit = drive_packet_9604(&mut sessions, &forwarding_permit, &mut binding, &ack, meta_ack);
-    assert_eq!((admit.hit, admit.revoked, admit.tx), (0, 0, 1), "phase 1 must MISS, admit and forward");
-    assert_eq!(session_count(&sessions), 2, "phase 1 must install the pair");
+    let (syn, meta_syn, ack, meta_ack) = dnat_frames();
+    // Strict TCP admission requires a SYN; the following ACK then seeds the
+    // cacheable flow slot without weakening the phase-1 admission witness.
+    let admit_syn = drive_packet_9604(
+        &mut sessions,
+        &forwarding_permit,
+        &mut binding,
+        &syn,
+        meta_syn,
+    );
+    assert_eq!(
+        (admit_syn.hit, admit_syn.revoked, admit_syn.tx),
+        (0, 0, 1),
+        "phase 1 SYN must MISS, admit and forward"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "phase 1 SYN must install the pair"
+    );
+    let admit_ack = drive_packet_9604(
+        &mut sessions,
+        &forwarding_permit,
+        &mut binding,
+        &ack,
+        meta_ack,
+    );
+    assert_eq!(
+        (admit_ack.hit, admit_ack.revoked, admit_ack.tx),
+        (1, 0, 1),
+        "phase 1 ACK must HIT and forward"
+    );
     let mut fwd_key = None;
     let mut rev_key = None;
     sessions.iter_with_origin(|key, _decision, metadata, _origin| {
@@ -4413,16 +4499,12 @@ fn ha_state_fabric_admit_9604(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
     ])
 }
 
-/// The phase-1 admit frame: `lan -> wan` ACK stamped `lan`, arriving on the
-/// fabric parent. ACK (not SYN) so admission seeds the flow-cache slot —
-/// otherwise the post-revoke eviction assertions below cannot distinguish
-/// eviction from an empty cache (the #6457 contract, as in
-/// `post_revoke_both_tuples_miss_and_drop_9604`).
-fn fabric_admit_frame_9604() -> (Vec<u8>, UserspaceDpMeta) {
-    let mut frame =
-        build_txn_tcp_syn_frame_v4(SRC, FABRIC_WAN_PEER_9604, SPORT, DPORT, TCP_ACK);
+/// The #7770 stamp shape, claiming `zone`: peer fabric MAC as dst (V1a),
+/// magic + zone id as src.
+fn fabric_admit_frame_9604(tcp_flags: u8) -> (Vec<u8>, UserspaceDpMeta) {
+    let mut frame = build_txn_tcp_syn_frame_v4(SRC, FABRIC_WAN_PEER_9604, SPORT, DPORT, tcp_flags, TEST_FABRIC_MAC);
     stamp_fabric_zone_9604(&mut frame, TEST_LAN_ZONE_ID);
-    let meta = txn_meta_v4(FABRIC_PARENT_9604 as u32, TCP_ACK, frame.len() as u16);
+    let meta = txn_meta_v4(FABRIC_PARENT_9604 as u32, tcp_flags, frame.len() as u16);
     (frame, meta)
 }
 
@@ -4442,25 +4524,45 @@ fn admit_fabric_flow_9604() -> FabricAdmitOutcome {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = ha_state_fabric_admit_9604(now_secs);
     let mut binding = binding_for_9604(FABRIC_PARENT_9604, "ge-0-0-0");
-    let (frame, meta) = fabric_admit_frame_9604();
+    let (frame_syn, meta_syn) = fabric_admit_frame_9604(TCP_FLAG_SYN);
+    let (frame_ack, meta_ack) = fabric_admit_frame_9604(TCP_ACK);
     let mut sessions = SessionTable::new();
-    let (_batch, dbg) =
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let (_batch_syn, dbg_syn) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame_syn,
+        meta_syn,
+        true,
+    );
     assert_eq!(
-        (dbg.session_hit, dbg.policy_revoked_sessions, dbg.tx),
-        (0, 0, 1),
-        "phase 1 must MISS, admit off the fabric stamp, and forward"
+        (dbg_syn.session_hit, dbg_syn.tx),
+        (0, 1),
+        "phase 1 SYN must MISS, admit off the fabric stamp, and forward"
     );
     assert_eq!(
         session_count(&sessions),
         2,
-        "phase 1 must install the forward + reverse pair"
+        "phase 1 SYN must install the forward + reverse pair"
+    );
+    let (batch_ack, dbg_ack) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_ack, meta_ack, true);
+    assert_eq!(
+        (
+            dbg_ack.session_hit,
+            dbg_ack.policy_revoked_sessions,
+            dbg_ack.tx
+        ),
+        (1, 0, 1),
+        "phase 1 ACK must HIT and forward"
+    );
+    assert_eq!(
+        batch_ack.validated_packets, 1,
+        "phase 1 ACK must pass descriptor validation"
     );
     assert!(
         txn_flow_cache_entries(&binding) >= 1,
-        "admission must seed the flow-cache slot — otherwise the post-revoke \
-         miss+drop assertions below cannot distinguish eviction from an empty \
-         cache"
+        "phase 1 ACK must seed the flow-cache slot for eviction assertions"
     );
     let mut fwd_key = None;
     let mut rev_key = None;
@@ -4575,7 +4677,7 @@ fn assert_fabric_evicted_9604(
         "the revoked reverse tuple must miss and drop, not forward off a \
          surviving cache slot"
     );
-    let (frame_fwd, meta_fwd) = fabric_admit_frame_9604();
+    let (frame_fwd, meta_fwd) = fabric_admit_frame_9604(TCP_ACK);
     let again_fwd = drive_packet_9604(sessions, forwarding, binding, &frame_fwd, meta_fwd);
     assert_eq!(
         (again_fwd.hit, again_fwd.tx),
@@ -4656,8 +4758,12 @@ fn fabric_ingress_forward_flow_permit_kept_on_reverse_9604() {
     snap.generation = 8;
     let forwarding = build_forwarding_state(&snap);
     let mut outcome = admit_fabric_flow_9604();
-    let (frame_rev, meta_rev) =
-        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    // Strict SYN admission seeds the forward cache with an ACK hit. Age only
+    // that half so this control still proves reverse-only permit stamping.
+    outcome
+        .sessions
+        .age_policy_revalidation_for_test(&outcome.fwd_key);
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(
         &mut outcome.sessions,
         &forwarding,
@@ -4728,15 +4834,16 @@ fn a_revoked_session_bumps_the_release_visible_live_atomic_10021() {
         0,
         "a fresh binding starts at 0, so the increment below comes from this poll"
     );
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
-    let (_batch, dbg) = txn_run_descriptor(
+    let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
+        true,
     );
     assert_eq!(
         dbg.session_hit, 1,

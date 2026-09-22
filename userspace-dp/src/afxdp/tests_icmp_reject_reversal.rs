@@ -232,7 +232,7 @@ fn reject_icmp_unreachable_v6_is_type1_code1_admin_prohibited() {
     // Reuse the echo-frame helper (ICMPv6 echo request = a query, not an
     // error) so the suppression guard does NOT fire: a rejected query
     // gets an unreachable.
-    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 64);
+    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 54,
@@ -260,7 +260,7 @@ fn reject_icmp_unreachable_suppressed_for_inbound_icmp_error() {
     // An inbound ICMPv4 error (type 3) must NOT draw a reject reply.
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let mut frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64);
+    let mut frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
     // Rewrite the ICMP type byte (at l4_offset = 34) to 3 (dest unreach).
     frame[34] = 3;
     let meta = UserspaceDpMeta {
@@ -696,8 +696,8 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
         private_s,    // embedded dst = the DNAT'd private server
         client_port,  // embedded src port
         private_port, // embedded dst port (the DNAT'd port)
-        PROTO_TCP,
-    );
+        PROTO_TCP
+     );
 
     let icmp_match = EmbeddedIcmpMatch {
         nat: NatDecision {
@@ -769,8 +769,8 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
         private_s,
         client_port,
         server_port,
-        PROTO_TCP,
-    );
+        PROTO_TCP
+     );
 
     let icmp_match = EmbeddedIcmpMatch {
         nat: NatDecision {
@@ -1042,8 +1042,8 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
         internal_s,
         client_port,
         internal_port,
-        PROTO_TCP,
-    );
+        PROTO_TCP
+     );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1335,8 +1335,8 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         server_ip,
         echo_id,
         0,
-        PROTO_ICMPV6,
-    );
+        PROTO_ICMPV6
+     );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1506,8 +1506,8 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         server_ip,
         echo_id,
         0,
-        PROTO_ICMPV6,
-    );
+        PROTO_ICMPV6
+     );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1638,8 +1638,8 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         server_ip,
         echo_id,
         0,
-        PROTO_ICMPV6,
-    );
+        PROTO_ICMPV6
+     );
 
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
