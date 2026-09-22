@@ -21,6 +21,10 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 	}
 	sort.Strings(zoneNames)
 	cr := c.applyResult()
+	quarantined := config.ZoneQuarantineExclusions(zoneNames)
+	if cr != nil && config.ZoneInventoryDiffers(zoneNames, cr.ZoneIDs) {
+		fmt.Println(config.ZoneQuarantineDriftNote)
+	}
 
 	// #3408: surface a per-zone counter read failure as a warning AFTER all
 	// zones are rendered, rather than silently dropping the traffic-statistics
@@ -35,19 +39,37 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 			continue
 		}
 
-		// Resolve zone ID for counter lookup
+		// Resolve the zone ID used for display and counter lookup. A
+		// quarantined name retains its stable ID for attribution, but that
+		// ID is not installed for this name and its live counters are not
+		// attributable.
 		var zoneID uint16
-		if cr != nil {
+		reason := config.ZoneQuarantineExcludedReason(name, cfg)
+		if _, excluded := quarantined[name]; excluded {
+			zoneID = config.StableZoneID(name)
+		} else if cr != nil {
 			zoneID = cr.ZoneIDs[name]
+		}
+		survivor := ""
+		if reason != "" {
+			survivor = config.StableZoneIDOwner(zoneNames, zoneID)
 		}
 
 		// Junos format: "Security zone: <name>"
 		fmt.Printf("Security zone: %s\n", name)
-		if reason := config.ZoneQuarantineExcludedReason(name, cfg); reason != "" {
+		if reason != "" {
+			// Keep the #10490 canary's original reason line while adding the
+			// shared prospective marker required by the text contract.
 			fmt.Printf("  Quarantine: %s\n", reason)
+			fmt.Println(config.ZoneQuarantineHeadlineFor(zoneID, survivor))
 		}
 		if zoneID > 0 {
-			fmt.Printf("  Zone ID: %d\n", zoneID)
+			if reason != "" {
+				fmt.Printf("  Zone ID: %d %s\n", zoneID,
+					config.ZoneQuarantineIDQualifierFor(survivor))
+			} else {
+				fmt.Printf("  Zone ID: %d\n", zoneID)
+			}
 		}
 		if zone.Description != "" {
 			fmt.Printf("  Description: %s\n", zone.Description)
@@ -62,7 +84,11 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 			fmt.Printf("  Screen: %s\n", zone.ScreenProfile)
 		}
 		fmt.Printf("  Interfaces bound: %d\n", len(zone.Interfaces))
-		fmt.Printf("  Interfaces:\n")
+		interfaceHeader := "  Interfaces:"
+		if reason != "" {
+			interfaceHeader += " " + config.ZoneQuarantineInterfacesQualifier
+		}
+		fmt.Println(interfaceHeader)
 		for _, ifName := range zone.Interfaces {
 			fmt.Printf("    %s\n", ifName)
 		}
@@ -83,7 +109,9 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		}
 
 		// Per-zone traffic counters (xpf extension, not in Junos)
-		if c.dp != nil && c.dp.IsLoaded() && zoneID > 0 {
+		if reason != "" {
+			fmt.Println(config.ZoneQuarantineCountersLine)
+		} else if c.dp != nil && c.dp.IsLoaded() && zoneID > 0 {
 			ingress, errIn := c.dp.ReadZoneCounters(zoneID, 0)
 			egress, errOut := c.dp.ReadZoneCounters(zoneID, 1)
 			switch {
@@ -215,6 +243,9 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 			// with the gRPC-text renderer (L10) so the two surfaces cannot
 			// drift. Parity with the REST inventory (pkg/api/security.go) and
 			// gRPC GetPolicies (#3363).
+			if reason != "" {
+				fmt.Println("  " + config.ZoneQuarantinePoliciesQualifier)
+			}
 			schedActive, haveSched := c.policySchedulerActiveState()
 			for _, line := range policymatch.ZoneDetailPolicySummary(cfg, name, schedActive, haveSched) {
 				fmt.Println(line)

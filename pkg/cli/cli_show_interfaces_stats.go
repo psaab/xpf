@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 )
 
@@ -147,7 +148,11 @@ func (c *CLI) showVlans() error {
 		if e.vlanID == 0 {
 			vid = "native"
 		}
-		fmt.Printf("%-16s %-6d %-8s %-12s %s\n", e.iface, e.unit, vid, e.zone, mode)
+		qualifier := ""
+		if config.ZoneQuarantineExcludedReason(e.zone, cfg) != "" {
+			qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+		}
+		fmt.Printf("%-16s %-6d %-8s %-12s%s %s\n", e.iface, e.unit, vid, e.zone, qualifier, mode)
 	}
 	return nil
 }

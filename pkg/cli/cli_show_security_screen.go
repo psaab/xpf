@@ -50,11 +50,13 @@ func (c *CLI) showScreen() error {
 			continue
 		}
 		if zone.ScreenProfile != "" {
-			zonesByProfile[zone.ScreenProfile] = append(
-				zonesByProfile[zone.ScreenProfile], name)
+			label := name
+			if config.ZoneQuarantineExcludedReason(name, cfg) != "" {
+				label += " " + config.ZoneQuarantineReferenceQualifier
+			}
+			zonesByProfile[zone.ScreenProfile] = append(zonesByProfile[zone.ScreenProfile], label)
 		}
 	}
-
 	for name, profile := range cfg.Security.Screen {
 		// #3476: skip a nil profile map value (reachable on the tolerant /
 		// HA-sync config path the runtime walker skips) rather than
@@ -215,7 +217,11 @@ func (c *CLI) showScreenIdsOption(name string) error {
 			continue
 		}
 		if zone.ScreenProfile == name {
-			zones = append(zones, zname)
+			label := zname
+			if config.ZoneQuarantineExcludedReason(zname, cfg) != "" {
+				label += " " + config.ZoneQuarantineReferenceQualifier
+			}
+			zones = append(zones, label)
 		}
 	}
 	if len(zones) > 0 {
@@ -348,7 +354,11 @@ func (c *CLI) showScreenIdsOptionDetail(name string) error {
 			continue
 		}
 		if zone.ScreenProfile == name {
-			zones = append(zones, zname)
+			label := zname
+			if config.ZoneQuarantineExcludedReason(zname, cfg) != "" {
+				label += " " + config.ZoneQuarantineReferenceQualifier
+			}
+			zones = append(zones, label)
 		}
 	}
 	if len(zones) > 0 {
@@ -378,6 +388,15 @@ func (c *CLI) showScreenStatistics(zoneName string) error {
 	zoneID, ok := cr.ZoneIDs[zoneName]
 	if !ok {
 		fmt.Printf("Zone '%s' not found\n", zoneName)
+		return nil
+	}
+	if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
+		fmt.Printf("Screen statistics for zone '%s':\n", zoneName+" "+config.ZoneQuarantineReferenceQualifier)
+		if z, ok := cfg.Security.Zones[zoneName]; ok && z != nil && z.ScreenProfile != "" {
+			fmt.Printf("  Screen profile: %s\n", z.ScreenProfile)
+		}
+		fmt.Println(config.ZoneQuarantineScreenCountersLine)
+		fmt.Print(c.screenSYNCookieCounterRows())
 		return nil
 	}
 	fs, err := c.dp.ReadFloodCounters(zoneID)
@@ -450,6 +469,15 @@ func (c *CLI) showScreenStatisticsAll() error {
 	// flood events for that zone").
 	var readErr error
 	for _, zoneName := range zones {
+		if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
+			fmt.Printf("Screen statistics for zone '%s':\n", zoneName+" "+config.ZoneQuarantineReferenceQualifier)
+			if z, ok := cfg.Security.Zones[zoneName]; ok && z != nil && z.ScreenProfile != "" {
+				fmt.Printf("  Screen profile: %s\n", z.ScreenProfile)
+			}
+			fmt.Println(config.ZoneQuarantineScreenCountersLine)
+			fmt.Println()
+			continue
+		}
 		zoneID := cr.ZoneIDs[zoneName]
 		fs, err := c.dp.ReadFloodCounters(zoneID)
 		screenProfile := ""

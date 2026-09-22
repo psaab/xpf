@@ -261,7 +261,11 @@ func (s *Server) writeInterfacesDetail(w http.ResponseWriter, cfg *config.Config
 		b.WriteString("\n")
 
 		if zone, ok := ifaceZoneName[ifName]; ok {
-			fmt.Fprintf(&b, "  Zone: %s\n", zone)
+			qualifier := ""
+			if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			}
+			fmt.Fprintf(&b, "  Zone: %s%s\n", zone, qualifier)
 		}
 
 		if s.dp != nil && s.dp.IsLoaded() {

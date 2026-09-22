@@ -351,7 +351,11 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 				}
 			}
 
-			fmt.Fprintf(&buf, "    Security: Zone: %s\n", li.zoneName)
+			zoneLabel := li.zoneName
+			if config.ZoneQuarantineExcludedReason(li.zoneName, cfg) != "" {
+				zoneLabel += " " + config.ZoneQuarantineInterfacesQualifier
+			}
+			fmt.Fprintf(&buf, "    Security: Zone: %s\n", zoneLabel)
 
 			// Host-inbound traffic services (#8183): render the EFFECTIVE
 			// admitted set for THIS logical interface, not the zone's.
@@ -1016,7 +1020,11 @@ func writeRethDetail(buf *strings.Builder, cfg *config.Config, maps config.RethS
 			}
 			fmt.Fprintln(buf)
 			if zone, ok := ifZone[fmt.Sprintf("%s.%d", reth, ru.Unit)]; ok {
-				fmt.Fprintf(buf, "    Security zone: %s\n", zone)
+				qualifier := ""
+				if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				}
+				fmt.Fprintf(buf, "    Security zone: %s%s\n", zone, qualifier)
 			}
 			if len(ru.V4Addrs) > 0 || len(ru.V6Addrs) > 0 {
 				fmt.Fprintln(buf, "    Addresses:")

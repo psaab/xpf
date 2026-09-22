@@ -106,7 +106,11 @@ func (s *Server) showInterfacesExtensive(cfg *config.Config, filter string, buf 
 			}
 		}
 		if zone, ok := ifZoneMap[attrs.Name]; ok {
-			fmt.Fprintf(buf, "  Security zone: %s\n", zone)
+			qualifier := ""
+			if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			}
+			fmt.Fprintf(buf, "  Security zone: %s%s\n", zone, qualifier)
 		}
 		// #4328: annotate a physical reth member with its aenet aggregation.
 		if rethName, ok := rethMaps.LookupMember(attrs.Name); ok && cfg != nil {
@@ -265,7 +269,11 @@ func (s *Server) showInterfacesDetail(cfg *config.Config, filter string, buf *st
 			fmt.Fprintf(buf, "  Current address: %s\n", attrs.HardwareAddr)
 		}
 		if zone, ok := ifZoneMap[attrs.Name]; ok {
-			fmt.Fprintf(buf, "  Security zone: %s\n", zone)
+			qualifier := ""
+			if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			}
+			fmt.Fprintf(buf, "  Security zone: %s%s\n", zone, qualifier)
 		}
 		fmt.Fprintf(buf, "  Logical interface %s.0\n", attrs.Name)
 		// #4328: annotate a physical reth member with its aenet aggregation.
@@ -480,7 +488,11 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 				if e.vlanID == 0 {
 					vid = "native"
 				}
-				fmt.Fprintf(buf, "%-16s %-6d %-8s %-12s %s\n", e.iface, e.unit, vid, e.zone, mode)
+				qualifier := ""
+				if config.ZoneQuarantineExcludedReason(e.zone, cfg) != "" {
+					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				}
+				fmt.Fprintf(buf, "%-16s %-6d %-8s %-12s%s %s\n", e.iface, e.unit, vid, e.zone, qualifier, mode)
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -192,6 +193,12 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		fmt.Println("No source NAT configured")
 		return nil
 	}
+	zoneLabel := func(name string) string {
+		if config.ZoneQuarantineExcludedReason(name, cfg) != "" {
+			return name + " " + config.ZoneQuarantineReferenceQualifier
+		}
+		return name
+	}
 
 	// Count pools: named pools + interface-mode rules
 	type ruleSetKey struct{ from, to string }
@@ -206,6 +213,7 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		// availability/utilization do not apply even when the helper reports
 		// the structurally-zero UsedPorts value (#9995).
 		portUtilizationNA bool
+		pairQuarantined   bool
 		key               ruleSetKey
 	}
 	var pools []poolInfo
@@ -244,10 +252,12 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				}
 				ifacePoolSeen[key] = struct{}{}
 				pools = append(pools, poolInfo{
-					name:    fmt.Sprintf("%s/%s (interface)", rs.FromZone, rs.ToZone),
+					name:    fmt.Sprintf("%s/%s (interface)", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)),
 					address: "interface",
 					isIface: true,
-					key:     key,
+					pairQuarantined: config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+						config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "",
+					key: key,
 				})
 			}
 		}
@@ -262,8 +272,23 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		var zoneByID map[uint16]string
 		if cr != nil {
 			zoneByID = make(map[uint16]string, len(cr.ZoneIDs))
-			for name, id := range cr.ZoneIDs {
-				zoneByID[id] = name
+			names := make([]string, 0, len(cr.ZoneIDs))
+			for name := range cr.ZoneIDs {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				id := cr.ZoneIDs[name]
+				owner := config.StableZoneIDOwner(names, id)
+				if owner == "" {
+					if _, exists := zoneByID[id]; exists {
+						continue
+					}
+					owner = name
+				}
+				if owner == name {
+					zoneByID[id] = name
+				}
 			}
 			// #8606: occupancy comes from the helper's live status. The
 			// legacy `nat_port_counters` map is seeded with `rand.Uint64()`
@@ -392,6 +417,11 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				used = "unknown"
 			}
 		}
+		if p.pairQuarantined {
+			used = config.ZoneQuarantineLiveCountersUnavailable
+			avail = config.ZoneQuarantineLiveCountersUnavailable
+			util = config.ZoneQuarantineLiveCountersUnavailable
+		}
 		fmt.Printf("%-20s %-20s %-8s %-8s %-12s %-12s\n",
 			p.name, p.address, ports, used, avail, util)
 		if poolDisarm != "" {
@@ -400,14 +430,31 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 	}
 
 	// Per-rule-set session counts
-	if len(rsSessions) > 0 {
+	showZonePairs := len(rsSessions) > 0
+	if !showZonePairs {
+		for _, rs := range cfg.Security.NAT.Source {
+			if config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "" {
+				showZonePairs = true
+				break
+			}
+		}
+	}
+	if showZonePairs {
 		fmt.Println()
 		fmt.Printf("%-30s %-12s\n", "Rule-set (from -> to)", "Sessions")
 		for _, rs := range cfg.Security.NAT.Source {
 			key := ruleSetKey{rs.FromZone, rs.ToZone}
+			if config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "" {
+				fmt.Printf("%-30s %-12s\n",
+					fmt.Sprintf("%s -> %s", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)),
+					config.ZoneQuarantineLiveCountersUnavailable)
+				continue
+			}
 			if cnt, ok := rsSessions[key]; ok {
 				fmt.Printf("%-30s %-12d\n",
-					fmt.Sprintf("%s -> %s", rs.FromZone, rs.ToZone), cnt)
+					fmt.Sprintf("%s -> %s", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)), cnt)
 			}
 		}
 	}
@@ -766,6 +813,12 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 		fmt.Println("No destination NAT pools configured")
 		return nil
 	}
+	zoneLabel := func(name string) string {
+		if config.ZoneQuarantineExcludedReason(name, cfg) != "" {
+			return name + " " + config.ZoneQuarantineReferenceQualifier
+		}
+		return name
+	}
 
 	// Count active DNAT sessions per pool and per rule-set
 	poolHits := make(map[string]int)
@@ -795,8 +848,23 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 
 		// Count active DNAT sessions by iterating sessions
 		zoneByID := make(map[uint16]string, len(cr.ZoneIDs))
-		for name, id := range cr.ZoneIDs {
-			zoneByID[id] = name
+		names := make([]string, 0, len(cr.ZoneIDs))
+		for name := range cr.ZoneIDs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			id := cr.ZoneIDs[name]
+			owner := config.StableZoneIDOwner(names, id)
+			if owner == "" {
+				if _, exists := zoneByID[id]; exists {
+					continue
+				}
+				owner = name
+			}
+			if owner == name {
+				zoneByID[id] = name
+			}
 		}
 		errV4 := c.dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
 			if val.IsReverse == 0 && val.Flags&dataplane.SessFlagDNAT != 0 {
@@ -837,14 +905,31 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 	}
 
 	// Per-rule-set session counts
-	if len(rsSessions) > 0 {
+	showZonePairs := len(rsSessions) > 0
+	if !showZonePairs {
+		for _, rs := range dnat.RuleSets {
+			if config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "" {
+				showZonePairs = true
+				break
+			}
+		}
+	}
+	if showZonePairs {
 		fmt.Println()
 		fmt.Printf("%-30s %-12s\n", "Rule-set (from -> to)", "Sessions")
 		for _, rs := range dnat.RuleSets {
 			key := ruleSetKey{rs.FromZone, rs.ToZone}
+			if config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "" {
+				fmt.Printf("%-30s %-12s\n",
+					fmt.Sprintf("%s -> %s", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)),
+					config.ZoneQuarantineLiveCountersUnavailable)
+				continue
+			}
 			if cnt, ok := rsSessions[key]; ok {
 				fmt.Printf("%-30s %-12d\n",
-					fmt.Sprintf("%s -> %s", rs.FromZone, rs.ToZone), cnt)
+					fmt.Sprintf("%s -> %s", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)), cnt)
 			}
 		}
 	}

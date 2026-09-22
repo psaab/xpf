@@ -613,12 +613,22 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp apiRu
 
 	// Iterate the CONFIGURED zone set (not cr.ZoneIDs) with the same nil-zone
 	// skip the REST handler uses (#3493 tolerant/HA-sync configs can carry a nil
-	// zone value), so this gauge counts exactly the zones REST reports
-	// per_zone_counters_available:false for. Pinned by
+	// zone value). For ordinary configs this gauge counts exactly the zones REST
+	// reports per_zone_counters_available:false for, pinned by
 	// TestZoneUnpopulatedGaugeMatchesRESTAvailability — the two surfaces must
 	// not drift.
+	// Quarantine divergence (#10489, temporary): a quarantined name is omitted
+	// here and counts as unpopulated, while REST zonesHandler still reports the
+	// survivor's counters under the loser until #10530 lands the existing-field
+	// half (#10531 owns structured quarantine presence). The parity pin uses
+	// ordinary zones and stays green; quarantined configs diverge by design
+	// until the follow-ups land.
 	for zoneName, zone := range cfg.Security.Zones {
 		if zone == nil {
+			continue
+		}
+		if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
+			unpopulated++
 			continue
 		}
 		// No loaded dataplane, no apply result, or a configured zone the last
