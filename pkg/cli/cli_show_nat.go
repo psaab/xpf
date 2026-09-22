@@ -3,15 +3,16 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/nat"
 	"github.com/psaab/xpf/pkg/natshow"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
 )
 
 // warnSessionScan prints a single operator warning to stderr when a

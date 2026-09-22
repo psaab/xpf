@@ -75,6 +75,21 @@ const ZoneQuarantinePoliciesQualifier = "(would be scrubbed if this snapshot is 
 // set can never identify the loser.
 const ZoneQuarantineDriftNote = "note: zone inventory differs from last applied result — quarantine annotation follows active configuration"
 
+// ZoneInventoryDiffers reports whether the active zone key set differs from
+// the last applied ZoneIDs key set. Shared by local CLI and gRPC text
+// renderers for the drift note (#7473 composition: one implementation).
+func ZoneInventoryDiffers(active []string, applied map[string]uint16) bool {
+	if len(active) != len(applied) {
+		return true
+	}
+	for _, name := range active {
+		if _, ok := applied[name]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ZoneQuarantineTestZoneQualifierFor qualifies a showTestZone
 // interface→zone match on a quarantined zone with the survivor/id the
 // interface's zone assignment would resolve against.

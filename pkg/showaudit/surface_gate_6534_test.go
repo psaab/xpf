@@ -84,15 +84,15 @@ var exemptRenderers = map[string]string{
 	"pkg/api/interfaces.go:interfacesHandler":                   "#10531 — REST structured interface wire needs explicit quarantine presence/counters",
 	"pkg/api/interfaces.go:writeInterfacesTerse":                "#10530 adjacency — terse text view emits no zone value",
 	"pkg/api/nat.go:natPoolStatsHandler":                        "#10531 — REST structured NAT pool wire needs explicit quarantine presence/counters",
-	"pkg/api/security.go:zonesHandler":                          "#10531 — REST structured zone wire needs explicit quarantine presence/counters",
+	"pkg/api/security.go:zonesHandler":                          "deferred to #10531 — structured-wire quarantine enum/presence and counter truthfulness",
 	"pkg/api/sessions.go:buildSessionView":                      "#10531 — REST structured session view needs explicit quarantine disposition",
 	"pkg/api/sessions.go:sessionZonePairHandler":                "#10531 — REST structured zone-pair wire needs explicit quarantine disposition",
 	"pkg/api/stats.go:ifaceStatsHandler":                        "#10531 — REST structured interface-stats wire needs explicit quarantine presence/counters",
 	"pkg/cli/apply.go:syslogZoneNameMap":                        "#10530 adjacency — internal syslog ID map emits no zone text",
 	"pkg/cli/cli_show_cluster.go:showChassisClusterStatus":      "#10530 adjacency — cluster status emits counters, not zone identity",
-	"pkg/cli/cli_show_flow.go:showFlowSession":                  "#10531 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
-	"pkg/cli/cli_show_flow.go:showTopTalkers":                   "#10531 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
-	"pkg/cli/cli_show_security_log.go:showSecurityLog":          "#10531 — event-time zone names are historical; current config must not rewrite them",
+	"pkg/cli/cli_show_flow.go:showFlowSession":                  "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
+	"pkg/cli/cli_show_flow.go:showTopTalkers":                   "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
+	"pkg/cli/cli_show_security_log.go:showSecurityLog":          "#10530 — event-time zone names are historical; current config must not rewrite them",
 	"pkg/cli/session_filter.go:populateIfaceMaps":               "#10530 adjacency — internal session filter map emits no zone text",
 	"pkg/grpcapi/server_helpers.go:allInterfaceNames":           "#10530 adjacency — internal interface-name lookup emits no zone value",
 	"pkg/grpcapi/server_nat.go:GetNATDestination":               "#10531 — gRPC structured NAT wire needs explicit quarantine presence/counters",
@@ -100,11 +100,11 @@ var exemptRenderers = map[string]string{
 	"pkg/grpcapi/server_sessions.go:buildSessionFilter":         "#10530 adjacency — internal session filter emits no zone text",
 	"pkg/grpcapi/server_sessions.go:computeZonePairSummary":     "#10531 — gRPC structured zone-pair wire needs explicit quarantine disposition",
 	"pkg/grpcapi/server_show_events.go:GetEvents":               "#10531 — gRPC structured event wire needs event-time disposition fields",
-	"pkg/grpcapi/server_show_flow.go:showSessionsTop":           "#10531 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
+	"pkg/grpcapi/server_show_flow.go:showSessionsTop":           "#10530 — applied session IDs collapse collisions; text cannot truthfully qualify runtime traffic",
 	"pkg/grpcapi/server_show_interfaces.go:GetInterfaces":       "#10531 — gRPC structured interface wire needs explicit quarantine presence/counters",
 	"pkg/grpcapi/server_show_interfaces.go:showInterfacesTerse": "#10530 adjacency — terse text view emits no zone value",
-	"pkg/grpcapi/server_show_zones.go:GetZones":                 "#10531 — gRPC structured zone wire needs explicit quarantine presence/counters",
-	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":  "#10531 — event-time zone names are historical; current config must not rewrite them",
+	"pkg/grpcapi/server_show_zones.go:GetZones":                 "deferred to #10531 — structured-wire quarantine enum/presence and counter truthfulness",
+	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":  "#10530 — event-time zone names are historical; current config must not rewrite them",
 }
 
 var families = []family{
@@ -226,7 +226,6 @@ var families = []family{
 		BuilderPredicates: []string{"ZoneQuarantineExclusions"},
 		SurfacePredicates: []string{"ZoneQuarantineExclusions", "ZoneQuarantineExcludedReason"},
 		Unannotated:       nil, // every remaining census member is annotated or exempted above
-		Successor:         "#10489",
 	},
 }
 

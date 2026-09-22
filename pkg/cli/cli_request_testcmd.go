@@ -2,14 +2,15 @@ package cli
 
 import (
 	"fmt"
-	"github.com/psaab/xpf/pkg/config"
-	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/policymatch"
-	"github.com/psaab/xpf/pkg/routing"
 	"net"
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/policymatch"
+	"github.com/psaab/xpf/pkg/routing"
 )
 
 // handleTest dispatches test sub-commands (policy, routing, security-zone).

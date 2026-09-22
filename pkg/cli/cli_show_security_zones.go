@@ -22,7 +22,7 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 	sort.Strings(zoneNames)
 	cr := c.applyResult()
 	quarantined := config.ZoneQuarantineExclusions(zoneNames)
-	if cr != nil && zoneShowInventoryDiffers(zoneNames, cr.ZoneIDs) {
+	if cr != nil && config.ZoneInventoryDiffers(zoneNames, cr.ZoneIDs) {
 		fmt.Println(config.ZoneQuarantineDriftNote)
 	}
 
@@ -263,18 +263,6 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		}
 	}
 	return nil
-}
-
-func zoneShowInventoryDiffers(names []string, applied map[string]uint16) bool {
-	if len(names) != len(applied) {
-		return true
-	}
-	for _, name := range names {
-		if _, ok := applied[name]; !ok {
-			return true
-		}
-	}
-	return false
 }
 
 // zoneCounterOverflowActive reports whether the helper says its per-zone

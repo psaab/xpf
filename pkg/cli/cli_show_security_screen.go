@@ -392,7 +392,11 @@ func (c *CLI) showScreenStatistics(zoneName string) error {
 	}
 	if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
 		fmt.Printf("Screen statistics for zone '%s':\n", zoneName+" "+config.ZoneQuarantineReferenceQualifier)
+		if z, ok := cfg.Security.Zones[zoneName]; ok && z != nil && z.ScreenProfile != "" {
+			fmt.Printf("  Screen profile: %s\n", z.ScreenProfile)
+		}
 		fmt.Println(config.ZoneQuarantineScreenCountersLine)
+		fmt.Print(c.screenSYNCookieCounterRows())
 		return nil
 	}
 	fs, err := c.dp.ReadFloodCounters(zoneID)
@@ -467,6 +471,9 @@ func (c *CLI) showScreenStatisticsAll() error {
 	for _, zoneName := range zones {
 		if config.ZoneQuarantineExcludedReason(zoneName, cfg) != "" {
 			fmt.Printf("Screen statistics for zone '%s':\n", zoneName+" "+config.ZoneQuarantineReferenceQualifier)
+			if z, ok := cfg.Security.Zones[zoneName]; ok && z != nil && z.ScreenProfile != "" {
+				fmt.Printf("  Screen profile: %s\n", z.ScreenProfile)
+			}
 			fmt.Println(config.ZoneQuarantineScreenCountersLine)
 			fmt.Println()
 			continue

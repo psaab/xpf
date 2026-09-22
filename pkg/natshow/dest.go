@@ -3,11 +3,12 @@ package natshow
 import (
 	"context"
 	"fmt"
-	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	"io"
 	"sort"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // RenderDestRuleDetail renders detailed destination NAT rule

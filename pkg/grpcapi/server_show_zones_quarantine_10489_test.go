@@ -255,3 +255,22 @@ func TestShowTestZoneQuarantineAndOrdinaryMatches10489(t *testing.T) {
 		t.Fatalf("ordinary test-zone match changed:\n%s", buf.String())
 	}
 }
+
+func TestShowTestZoneSortedDuplicateInterface10489(t *testing.T) {
+	cfg := &config.Config{Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
+		"z174":    {Name: "z174", Interfaces: []string{"ge-0/0/9.0"}},
+		"z214":    {Name: "z214", Interfaces: []string{"ge-0/0/9.0"}},
+		"nilzone": nil,
+	}}}
+	for i := 0; i < 20; i++ {
+		var buf strings.Builder
+		if _, err := (&Server{}).showTestZone(
+			&pb.ShowTextRequest{Topic: "test-zone:interface=ge-0/0/9.0"},
+			cfg, &buf); err != nil {
+			t.Fatalf("showTestZone duplicate: %v", err)
+		}
+		if !strings.Contains(buf.String(), "belongs to zone: z174") {
+			t.Fatalf("duplicate interface resolved nondeterministically (want sorted-first z174):\n%s", buf.String())
+		}
+	}
+}

@@ -59,7 +59,7 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 	}
 	sort.Strings(zoneNames)
 	cr := s.applyResult()
-	if cr != nil && zoneInventoryDiffers(allZoneNames, cr.ZoneIDs) {
+	if cr != nil && config.ZoneInventoryDiffers(allZoneNames, cr.ZoneIDs) {
 		buf.WriteString(config.ZoneQuarantineDriftNote + "\n")
 	}
 	// #3408: surface a per-zone counter read failure as a warning AFTER all
@@ -150,6 +150,20 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 			switch {
 			case errors.Is(errIn, dataplane.ErrCounterNotPopulated) ||
 				errors.Is(errOut, dataplane.ErrCounterNotPopulated):
+				// #6843: per-zone accounting IS implemented and populated
+				// (#3651). ErrCounterNotPopulated now means the helper has
+				// published nothing for THIS zone, which has three causes: a
+				// pre-#3651 helper, a zone past the helper's hot-path slot
+				// capacity (its traffic really is uncounted), or an idle zone.
+				// Naming "not implemented" was accurate under the #3643 HIDE
+				// and is now actively misleading — with 64+ zones one `show
+				// security zones` prints real byte counts for slotted zones and
+				// "not implemented" for overflowed ones, pointing the operator
+				// at the wrong cause.
+				// #6895: one canonical spelling for all three surfaces — and
+				// this renderer previously had NO #6845 overflow
+				// specialisation, so the same cluster reported slot exhaustion
+				// on the local CLI and the generic three-cause line here.
 				buf.WriteString(zonecounters.UnavailableLineFor(
 					s.zoneCounterLayoutVersion(), s.zoneCounterOverflowActive()) + "\n")
 			case errIn == nil && errOut == nil:
@@ -383,18 +397,6 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 		}
 	}
 	return &pb.ShowTextResponse{Output: buf.String()}, nil
-}
-
-func zoneInventoryDiffers(active []string, applied map[string]uint16) bool {
-	if len(active) != len(applied) {
-		return true
-	}
-	for _, name := range active {
-		if _, ok := applied[name]; !ok {
-			return true
-		}
-	}
-	return false
 }
 
 // zoneCounterOverflowActive reports whether the dataplane says its per-zone
