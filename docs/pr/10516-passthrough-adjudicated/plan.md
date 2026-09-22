@@ -1,6 +1,6 @@
 # DRAFT v4 — Issue 10516: Stage-11 IPsec passthrough mints the armed-fence Adjudicated token for unadjudicated traffic (no SA check)
 
-Status: DRAFT v4 (fold-4, no production code)
+Status: IMPLEMENTATION FOLD (v4 design; deferred armed-box procedures in §7.1)
 Date: 2026-09-22
 Base: 5dcaa104fb36637f7b76bdd0b3ba26ea880f1046 (v1 base; v2 commit dae7b5ad8)
 Branch: fix/10516-passthrough-adjudicated
@@ -70,7 +70,9 @@ v4 is a REDESIGN fold addressing every must-fix (finding-to-fix map in App. D):
    and stale/observed-SPI bypass pins (§6). OQ1-12 adopted per PlanB except
    where PlanA is stricter (§9).
 
-No production or test code is changed by this lane. V4 goes to delta re-review.
+The deterministic implementation and unit-path cells are now landed on this
+branch; armed-box, privileged-socket, flood, and perf procedures remain
+deferred as enumerated in §7.1.
 
 
 ## 1. Problem (fail-open), rescoped
@@ -1118,6 +1120,201 @@ High; WAN hairpin only implies Medium stands. Post-fix, P1/P2/P3/P4/P5 must
 show zero q0 delta in ALL cases; P2 must additionally show Delegated queue 1
 and correct local INPUT/XFRM delivery. The fix closes the pinhole regardless
 of severity.
+
+### 7.1 Approved deferred executable procedures
+
+The following checks are intentionally deferred to an armed box or a
+privileged host. They are not substitutes for the deterministic cells above:
+each procedure records the exact fixture, the counters to snapshot, and the
+fail-closed acceptance condition. Save command output, packet captures, and
+counter snapshots under one run directory, and record the commit under test.
+
+#### 7.1.1 Privileged live-XFRM-socket monitor variant
+
+Run this only after the socketpair test in §6.3 is green. It proves the same
+NEWSA/DELSA/EXPIRE/FLUSHSA path against the live kernel netlink socket while
+using a dedicated strongSwan child and an isolated capture directory:
+
+```bash
+set -euo pipefail
+run="$PWD/evidence/10516-live-xfrm-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$run"
+: "${METRICS_URL:?set METRICS_URL to the daemon's Prometheus endpoint}"
+: "${CHILD:?set CHILD to the dedicated strongSwan child name}"
+sudo ip -s xfrm state >"$run/xfrm.before"
+curl -fsS "$METRICS_URL" >"$run/metrics.before"
+sudo swanctl --load-all
+sudo swanctl --initiate --child "$CHILD"
+sudo swanctl --list-sas --raw >"$run/sas.after-init"
+sudo swanctl --terminate --child "$CHILD"
+sudo ip xfrm state flush
+curl -fsS "$METRICS_URL" >"$run/metrics.after-events"
+sudo ip -s xfrm state >"$run/xfrm.after"
+```
+
+The run must exercise NEWSA, UPDSA, DELSA, at least one soft or hard EXPIRE,
+and FLUSHSA. Acceptance is: NEWSA/UPDSA are visible on the next lookup, DELSA
+and EXPIRE are misses before the next poll, FLUSHSA leaves the store stale
+until a complete dump, and the monitor leaves no child or open socket after
+the daemon is stopped. Attach `swanctl --list-sas --raw`, the metrics delta,
+and the kernel-state snapshots. If the armed-box strongSwan profile cannot
+force one of the expiry forms, mark that row `INCONCLUSIVE`; do not weaken
+the deterministic socketpair cell.
+
+#### 7.1.2 NAT, GRE, VIP, and DNAT-to-self wire variants
+
+Use one isolated capture directory and take counter snapshots immediately
+before and after each row:
+
+```bash
+set -euo pipefail
+run="$PWD/evidence/10516-wire-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$run"
+: "${METRICS_URL:?set METRICS_URL to the daemon's Prometheus endpoint}"
+: "${INGRESS_IF:?set INGRESS_IF to the fixture ingress interface}"
+curl -fsS "$METRICS_URL" >"$run/metrics.before"
+sudo nft list ruleset >"$run/nft.before"
+sudo tcpdump -i any -nn -s 256 -w "$run/wire.pcap" \
+  '(udp port 500 or udp port 4500 or proto 47)' &
+cap=$!
+trap 'kill "$cap" 2>/dev/null || true' EXIT
+```
+
+Build the fixed packet manifest before the run (family, ingress interface,
+source, destination, UDP ports, SPI, responder SPI, GRE inner tuple, and
+expected SA key); do not hand-edit captures between rows. Replay exactly one
+pcap per row and retain each generator command and exit status:
+
+```bash
+for row in nat-hit-transit nat-miss gre-inner-no-sa vip-notclaimed dnat-to-self; do
+  sudo tcpreplay --intf1 "$INGRESS_IF" --pps=1 "$run/$row.pcap" \
+    >"$run/$row.replay" 2>&1
+done
+```
+
+* **NAT-hit-transit + fence:** send a complete UDP-4500 ESP-in-UDP frame to
+  the DNAT external with a seeded inbound `(translated-dst,SPI,src)` SA.
+  Require Delegated/q1, zero q0 delta, and an observed armed-fence drop on
+  FORWARD; a kernel egress is a failure.
+* **NAT-miss:** repeat with the same frame and no SA. Require no queue,
+  `sa_miss_dropped_packets` and `sa_miss_no_sa` deltas of one, zero q0, and
+  no egress.
+* **GRE-inner no-SA:** decapsulate a native GRE frame whose inner destination
+  is the interface-local address, then send the same UDP-4500 payload without
+  an SA. Require no queue, a miss counter delta, zero q0, and no INPUT/XFRM
+  delivery.
+* **VIP NotClaimed:** send UDP-4500 to a VIP-shaped destination absent from
+  the userspace ownership set. Require NotClaimed behavior, unchanged SA
+  counters, no q0, and the normal route disposition.
+* **DNAT-to-self:** send the raw-external destination while seeding only the
+  translated local destination. Require a miss/drop and zero q0; any
+  candidate-key lookup or Delegated result fails the row.
+
+Stop capture after all rows, then collect:
+
+```bash
+curl -fsS "$METRICS_URL" >"$run/metrics.after"
+sudo nft list ruleset >"$run/nft.after"
+kill "$cap"; wait "$cap" || test "$?" = 143
+```
+
+#### 7.1.3 Fragment and parser variants
+
+Run the two permitted-zone UDP-500 rows separately. The **16-frag** row is a
+full UDP header followed by a 0--15-byte ISAKMP payload in the first fragment;
+the **16-unfrag** row is the same bytes in one unfragmented frame. Record
+whether an overlap admission token was issued. Both rows must take the
+malformed-IKE drop arm, increment only `sa_miss_malformed_ike`, recycle the
+descriptor, perform no SA lookup, and enqueue neither q0 nor q1. Only the
+fragmented row may call `fail_admission`; seeing that call on the unfragmented
+row fails the run.
+
+#### 7.1.4 Armed-box P0--P6 and strongSwan compatibility
+
+Pin the fixture before every run:
+
+```bash
+set -euo pipefail
+run="$PWD/evidence/10516-armed-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$run"
+: "${METRICS_URL:?set METRICS_URL to the daemon's Prometheus endpoint}"
+: "${DNAT_EXTERNAL:?set DNAT_EXTERNAL to the DNAT-to-another-host address}"
+sudo cli show chassis cluster status >"$run/cluster.before"
+curl -fsS "$METRICS_URL" >"$run/metrics.before"
+sudo nft list chain inet xpf-transit forward-fence >"$run/fence.before"
+ip route get "$DNAT_EXTERNAL" >"$run/route.before"
+```
+Before each phase row, establish its stated SA/IKE precondition, then replay
+exactly one pcap and retain the output:
+
+```bash
+: "${INGRESS_IF:?set INGRESS_IF to the fixture ingress interface}"
+for phase in P0 P1 P2 P3 P4 P5 P6; do
+  sudo tcpreplay --intf1 "$INGRESS_IF" --pps=1 "$run/$phase.pcap" \
+    >"$run/$phase.replay" 2>&1
+done
+```
+
+* **P0 (pre-fix reproduction):** on the pre-fix binary, send the manifest's
+  no-SA UDP-4500 non-zero-SPI packet to the DNAT external. The q0 counter must
+  increase and the packet must take the recorded fence route; this is the
+  only expected non-zero-q0 row.
+* **P1 (post-fix miss):** repeat on the fixed binary. Require q0 delta zero,
+  `sa_miss_no_sa` positive, and no egress.
+* **P2 (post-fix local hit):** establish a real inbound strongSwan SA for a
+  native GRE inner UDP flow, send matching GRE-encapsulated ESP-in-UDP, and
+  capture the inner path. Require Delegated/q1, zero q0, and INPUT/XFRM
+  delivery.
+* **P3 (stale):** delete the P2 SA, resend the exact SPI within 30 seconds,
+  and require immediate miss/stale telemetry, q0 zero, and no INPUT delivery.
+* **P4 (source spoof):** keep `(dst,SPI,srcA)` live and send the same
+  `(dst,SPI)` from `srcB` to both transit and GRE-local destinations. Require
+  both drops, zero q0, and no INPUT delivery; the srcA control packet must
+  remain Delegated/q1.
+* **P5 (GRE-inner no-SA):** run the P2 GRE manifest with the SA absent.
+  Require miss/drop, zero q0, and no INPUT delivery.
+* **P6 (compatibility):** during P2, rekey once, initiate a fresh IKE
+  exchange, send DPD/keepalive traffic, and remove/reinstall the SA. Record
+  `swanctl --list-sas --raw`, daemon logs, and the before/after counters.
+  Require no IKE state/log errors, no q0, and the first proven Delegated
+  reinject after an empty-store restart within the §5.5 ready bound.
+
+For every row, include `swanctl --list-sas --raw` before/after and a
+timestamped q0-counter delta. P0--P5 are invalid if the armed fence is not
+loaded; P2/P6 are invalid if strongSwan cannot report the expected SA.
+
+#### 7.1.5 1Mpps flood and perf-budget measurements
+
+Use `tcpreplay` with a pinned source-port/SPI pcap so each miss is
+independent and no generated packet can accidentally match a live SA:
+
+```bash
+set -euo pipefail
+run="$PWD/evidence/10516-perf-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$run"
+: "${METRICS_URL:?set METRICS_URL to the daemon's Prometheus endpoint}"
+: "${INGRESS_IF:?set INGRESS_IF to the fixture ingress interface}"
+: "${PACKET_PCAP:?set PACKET_PCAP to the fixed nonzero-SPI miss pcap}"
+curl -fsS "$METRICS_URL" >"$run/metrics.before"
+sudo perf stat -a -e cycles,instructions,cache-misses \
+  -o "$run/perf.txt" -- \
+  tcpreplay --intf1 "$INGRESS_IF" --loop=60 --pps=1000000 "$PACKET_PCAP" \
+  >"$run/generator.log" 2>&1
+curl -fsS "$METRICS_URL" >"$run/metrics.after"
+```
+
+The generator must report 60 seconds at 1,000,000 packets/s; abort and mark
+the row invalid on underrun, packet loss in the generator, or a live matching
+SA. Acceptance for §5.8 is linear `sa_miss_dropped_packets`, bounded sampled
+exceptions (the configured sample phase, approximately 3900/s at N=256),
+no worker stall, and no q0. For §5.9, run the same fixture with (a) ordinary
+non-IPsec traffic, (b) proven-SA UDP-4500 traffic, and (c) the 1Mpps miss
+load. Record packets/s, p50/p99 latency if available, cycles/packet,
+instructions/packet, cache misses, CPU utilization, and q0/miss deltas.
+Compare fixed versus the immediately preceding binary on identical hardware:
+non-IPsec throughput regression <1%, proven-SA regression <2%, and all
+miss/fence invariants above remain true. A missing perf counter or an
+unreached offered rate is `INCONCLUSIVE`, never a pass.
 
 ## 8. Rollout and compat
 

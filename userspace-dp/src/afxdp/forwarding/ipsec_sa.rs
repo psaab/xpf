@@ -345,9 +345,10 @@ impl IpsecSaStore {
 
     pub(in crate::afxdp) fn reset_for_monitor_start(&self) {
         let _writer = self.lock_writer();
-        // A (re)started monitor establishes a new baseline: clear any prior
-        // teardown revocation, then fence all pre-reset batches.
-        self.revoked.store(false, Ordering::Release);
+        // A (re)started monitor establishes a new baseline. Publish the
+        // generation-zero stale fence while revocation is still asserted,
+        // then clear the independent teardown fence. There is never a
+        // ready-looking window in which old readers can race a reset.
         self.bump_stale_epoch();
         self.publish_snapshot(IpsecSaSnapshot {
             entries: FastMap::default(),
@@ -355,6 +356,7 @@ impl IpsecSaStore {
             stale: true,
             stale_epoch: 0,
         });
+        self.revoked.store(false, Ordering::Release);
     }
 
     pub(in crate::afxdp) fn wait_ready(&self, timeout: Duration) -> bool {
@@ -634,6 +636,47 @@ const XFRMGRP_SA: u32 = 4;
 const XFRM_INFO_LEN: usize = 224;
 const XFRM_MSG_ID_LEN: usize = 24;
 
+enum XfrmEventResult {
+    Idle,
+    NeedRedump,
+    Stop,
+}
+
+/// Receive one multicast XFRM event. A timeout returns control to the outer
+/// monitor so it can re-check the periodic drift-redump deadline.
+fn recv_xfrm_events(
+    fd: libc::c_int,
+    store: &IpsecSaStore,
+    stop: &AtomicBool,
+) -> XfrmEventResult {
+    if stop.load(Ordering::Acquire) {
+        return XfrmEventResult::Stop;
+    }
+    let mut buf = [0u8; 64 * 1024];
+    let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n < 0 {
+        let err = std::io::Error::last_os_error().raw_os_error();
+        if matches!(err, Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)) {
+            return XfrmEventResult::Idle;
+        }
+        if err == Some(libc::ENOBUFS) {
+            store.counters.netlink_enobufs.fetch_add(1, Ordering::Relaxed);
+        }
+        store.mark_stale();
+        return XfrmEventResult::NeedRedump;
+    }
+    if n == 0 {
+        store.mark_stale();
+        return XfrmEventResult::NeedRedump;
+    }
+    if apply_xfrm_messages(store, &buf[..n as usize]) {
+        store.mark_stale();
+        XfrmEventResult::NeedRedump
+    } else {
+        XfrmEventResult::Idle
+    }
+}
+
 /// Run the event-driven XFRM-SA monitor.  A failed socket, dump, or receive
 /// operation immediately sets the stale fence; only a later complete dump
 /// clears it.  The 500 ms receive timeout is the lifecycle join bound.
@@ -666,28 +709,10 @@ pub(in crate::afxdp) fn ipsec_sa_monitor_loop(store: Arc<IpsecSaStore>, stop: Ar
                 continue;
             }
         }
-        let mut buf = [0u8; 64 * 1024];
-        let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
-        if n < 0 {
-            let err = std::io::Error::last_os_error().raw_os_error();
-            if matches!(err, Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)) {
-                continue;
-            }
-            if err == Some(libc::ENOBUFS) {
-                store.counters.netlink_enobufs.fetch_add(1, Ordering::Relaxed);
-            }
-            store.mark_stale();
-            dump_ready = false;
-            continue;
-        }
-        if n == 0 {
-            store.mark_stale();
-            dump_ready = false;
-            continue;
-        }
-        if apply_xfrm_messages(&store, &buf[..n as usize]) {
-            store.mark_stale();
-            dump_ready = false;
+        match recv_xfrm_events(fd, &store, &stop) {
+            XfrmEventResult::Stop => break,
+            XfrmEventResult::NeedRedump => dump_ready = false,
+            XfrmEventResult::Idle => {}
         }
     }
     unsafe {
@@ -1365,6 +1390,51 @@ mod tests {
         payload[80..84].copy_from_slice(&Ipv4Addr::new(198, 51, 100, 1).octets());
         payload[212..214].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
         payload
+    }
+
+    fn xfrm_news_payload(dst: Ipv4Addr, spi: u32) -> Vec<u8> {
+        let mut payload = xfrm_info_payload(dst, spi, libc::IPPROTO_ESP as u8);
+        payload.resize(XFRM_INFO_LEN + 8, 0);
+        payload[104..112].copy_from_slice(&u64::MAX.to_ne_bytes());
+        payload[120..128].copy_from_slice(&u64::MAX.to_ne_bytes());
+        payload[224..226].copy_from_slice(&5u16.to_ne_bytes());
+        payload[226..228].copy_from_slice(&XFRMA_SA_DIR.to_ne_bytes());
+        payload[228] = XFRM_SA_DIR_IN;
+        payload
+    }
+
+    #[test]
+    fn socketpair_monitor_receive_publishes_then_stales_10516() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixDatagram;
+
+        let store = IpsecSaStore::new();
+        store.publish_empty_dump_for_test();
+        let (rx, tx) = UnixDatagram::pair().expect("socketpair");
+        let stop = AtomicBool::new(false);
+        let dst = Ipv4Addr::new(192, 0, 2, 1);
+        let src = Ipv4Addr::new(198, 51, 100, 1);
+        let key = ipsec_sa_key(IpAddr::V4(dst), 0x1122_3344, IpAddr::V4(src))
+            .expect("same-family SA fixture");
+
+        tx.send(&one_netlink_message(
+            XFRM_MSG_NEWSA,
+            &xfrm_news_payload(dst, 0x1122_3344),
+        ))
+        .expect("send NEWSA");
+        assert!(matches!(
+            recv_xfrm_events(rx.as_raw_fd(), &store, &stop),
+            XfrmEventResult::Idle
+        ));
+        assert_eq!(store.lookup(key), IpsecSaLookup::Hit);
+
+        tx.send(&one_netlink_message(XFRM_MSG_FLUSHSA, &[]))
+            .expect("send FLUSHSA");
+        assert!(matches!(
+            recv_xfrm_events(rx.as_raw_fd(), &store, &stop),
+            XfrmEventResult::NeedRedump
+        ));
+        assert_eq!(store.lookup(key), IpsecSaLookup::Stale);
     }
 
     #[test]

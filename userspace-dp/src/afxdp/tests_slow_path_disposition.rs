@@ -1415,6 +1415,7 @@ fn build_stage11_esp_udp_frame_10516(spi: u32) -> Vec<u8> {
     frame[16..18].copy_from_slice(&(total_len as u16).to_be_bytes());
     frame.extend_from_slice(&src.octets());
     frame.extend_from_slice(&dst.octets());
+    frame[24..26].fill(0);
     let ip_csum = checksum16(&frame[14..34]);
     frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     frame.extend_from_slice(&40_000u16.to_be_bytes());
@@ -1423,6 +1424,93 @@ fn build_stage11_esp_udp_frame_10516(spi: u32) -> Vec<u8> {
     frame.extend_from_slice(&[0, 0]); // UDP checksum is optional for IPv4.
     frame.extend_from_slice(&payload);
     frame
+}
+fn build_stage11_udp_v4_frame_10516(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
+    let total_len = 20 + 8 + payload.len();
+    let mut frame = vec![
+        0u8, 0, 0, 0, 0, 0, // destination MAC
+        0x02, 0x11, 0x22, 0x33, 0x44, 0x55, // peer source MAC
+        0x08, 0x00, // IPv4
+        0x45, 0x00, 0x00, 0x00, // total length filled below
+        0x00, 0x01, 0x40, 0x00, 64, PROTO_UDP, 0x00, 0x00,
+    ];
+    frame[..6].copy_from_slice(&dst_mac);
+    frame[16..18].copy_from_slice(&(total_len as u16).to_be_bytes());
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    frame[24..26].fill(0);
+    let ip_csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+    frame.extend_from_slice(&src_port.to_be_bytes());
+    frame.extend_from_slice(&dst_port.to_be_bytes());
+    frame.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn stage11_ipv4_udp_meta_10516(
+    frame: &[u8],
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    ingress_ifindex: u32,
+    src_port: u16,
+    dst_port: u16,
+) -> UserspaceDpMeta {
+    let mut src_addr = [0u8; 16];
+    src_addr[..4].copy_from_slice(&src.octets());
+    let mut dst_addr = [0u8; 16];
+    dst_addr[..4].copy_from_slice(&dst.octets());
+    UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        flow_src_port: src_port,
+        flow_dst_port: dst_port,
+        flow_src_addr: src_addr,
+        flow_dst_addr: dst_addr,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    }
+}
+fn build_stage11_ike_v4_frame_10516(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    initiator_spi: u64,
+    responder_spi: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(if dst_port == 4500 { 20 } else { 16 });
+    if dst_port == 4500 {
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    payload.extend_from_slice(&initiator_spi.to_be_bytes());
+    payload.extend_from_slice(&responder_spi.to_be_bytes());
+    payload.extend_from_slice(&[0; 8]);
+    build_stage11_udp_v4_frame_10516(
+        src,
+        dst,
+        src_port,
+        dst_port,
+        &payload,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    )
 }
 fn stage11_esp_udp_meta_10516(frame: &[u8]) -> UserspaceDpMeta {
     let mut src_addr = [0u8; 16];
@@ -1527,20 +1615,54 @@ fn run_stage11_frame_poll_with_options_10516(
     usize,
     Vec<bool>,
 ) {
-    let mut forwarding = build_forwarding_state(&nat_snapshot());
+    run_stage11_frame_poll_on_snapshot_with_options_10516(
+        &nat_snapshot(),
+        frame,
+        meta,
+        sa_key,
+        stale,
+        remove_after_seed,
+    )
+}
+fn run_stage11_frame_poll_on_snapshot_with_options_10516(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sa_key: Option<crate::afxdp::forwarding::IpsecSaKey>,
+    stale: bool,
+    remove_after_seed: bool,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    crate::afxdp::forwarding::IpsecSaCounterSnapshot,
+    usize,
+    Vec<bool>,
+) {
+    let mut forwarding = build_forwarding_state(snapshot);
     forwarding.ipsec_sa.publish_empty_dump_for_test();
     if let Some(sa_key) = sa_key {
         forwarding.ipsec_sa.upsert(sa_key);
         if remove_after_seed {
-            assert!(forwarding.ipsec_sa.remove(sa_key));
+            assert_eq!(
+                forwarding
+                    .ipsec_sa
+                    .remove_dst_spi(sa_key.family, sa_key.dst, sa_key.spi),
+                1,
+                "DELSA fixture must remove the seeded destination/SPI"
+            );
         }
     }
     let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
     if stale {
         forwarding.ipsec_sa.mark_stale();
     }
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
-    binding.interface = Arc::<str>::from("ge-0-0-1");
+    let mut binding =
+        BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(match meta.ingress_ifindex {
+        6 => "ge-0-0-1",
+        12 => "reth0.80",
+        _ => "ge-0-0-1",
+    });
     let mut sessions = SessionTable::new();
     let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -1555,6 +1677,58 @@ fn run_stage11_frame_poll_with_options_10516(
         &shared_sessions,
         None,
         Some(&reinjector),
+    );
+    (
+        reinjector.status(),
+        reinjector.delegated_status(),
+        forwarding.ipsec_sa.counters.snapshot(),
+        binding.scratch.scratch_recycle.len(),
+        reinjector.test_enqueued_delegated(),
+    )
+}
+fn run_stage11_frame_poll_with_seeded_ike_10516(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    stale: bool,
+    ike_key: crate::afxdp::forwarding::IkeExchangeKey,
+) -> (
+    crate::slowpath::SlowPathStatus,
+    crate::slowpath::SlowPathStatus,
+    crate::afxdp::forwarding::IpsecSaCounterSnapshot,
+    usize,
+    Vec<bool>,
+) {
+    let mut forwarding = build_forwarding_state(snapshot);
+    forwarding.ipsec_sa.publish_empty_dump_for_test();
+    if stale {
+        forwarding.ipsec_sa.mark_stale();
+    }
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    ike_exchanges.seed(ike_key, 123_000_000_000);
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let mut binding =
+        BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from(match meta.ingress_ifindex {
+        6 => "ge-0-0-1",
+        12 => "reth0.80",
+        _ => "ge-0-0-1",
+    });
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path_and_ike(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+        &ike_exchanges,
     );
     (
         reinjector.status(),
@@ -1625,6 +1799,7 @@ fn run_stage11_esp_udp_poll_10516(with_sa: bool) -> (
 fn build_stage11_raw_v4_frame_10516(protocol: u8) -> Vec<u8> {
     let mut frame = build_stage11_esp_udp_frame_10516(0x1122_3344);
     frame[23] = protocol;
+    frame[24..26].fill(0);
     let ip_csum = checksum16(&frame[14..34]);
     frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     frame
@@ -1632,7 +1807,7 @@ fn build_stage11_raw_v4_frame_10516(protocol: u8) -> Vec<u8> {
 
 fn build_stage11_raw_v6_frame_10516(protocol: u8) -> Vec<u8> {
     let mut frame = vec![
-        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, // local destination MAC
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // destination filled below
         0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, // peer source MAC
         0x86, 0xdd, // IPv6
     ];
@@ -1640,10 +1815,21 @@ fn build_stage11_raw_v6_frame_10516(protocol: u8) -> Vec<u8> {
     ip[0] = 0x60;
     ip[6] = protocol;
     ip[7] = 64;
-    ip[8..24].copy_from_slice(&"2001:db8:61::102".parse::<Ipv6Addr>().unwrap().octets());
-    ip[24..40].copy_from_slice(&"2001:db8:61::1".parse::<Ipv6Addr>().unwrap().octets());
+    ip[8..24].copy_from_slice(
+        &"2001:559:8585:ef00::102"
+            .parse::<Ipv6Addr>()
+            .expect("v6 source fixture")
+            .octets(),
+    );
+    ip[24..40].copy_from_slice(
+        &"2001:559:8585:ef00::1"
+            .parse::<Ipv6Addr>()
+            .expect("v6 local fixture")
+            .octets(),
+    );
     let payload = [0x11, 0x22, 0x33, 0x44, 0, 0, 0, 1];
     ip[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
     frame.extend_from_slice(&ip);
     frame.extend_from_slice(&payload);
     frame
@@ -1675,9 +1861,19 @@ fn raw_v4_meta_10516(frame: &[u8], protocol: u8) -> UserspaceDpMeta {
 
 fn raw_v6_meta_10516(frame: &[u8], protocol: u8) -> UserspaceDpMeta {
     let mut src_addr = [0u8; 16];
-    src_addr.copy_from_slice(&"2001:db8:61::102".parse::<Ipv6Addr>().unwrap().octets());
+    src_addr.copy_from_slice(
+        &"2001:559:8585:ef00::102"
+            .parse::<Ipv6Addr>()
+            .expect("v6 source fixture")
+            .octets(),
+    );
     let mut dst_addr = [0u8; 16];
-    dst_addr.copy_from_slice(&"2001:db8:61::1".parse::<Ipv6Addr>().unwrap().octets());
+    dst_addr.copy_from_slice(
+        &"2001:559:8585:ef00::1"
+            .parse::<Ipv6Addr>()
+            .expect("v6 local fixture")
+            .octets(),
+    );
     UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -1764,7 +1960,6 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v4_frame_10516(PROTO_ESP),
                 PROTO_ESP,
             ),
-            vec![false],
         ),
         (
             "v4 AH",
@@ -1773,7 +1968,6 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v4_frame_10516(PROTO_AH),
                 PROTO_AH,
             ),
-            vec![false],
         ),
         (
             "v6 ESP",
@@ -1782,7 +1976,6 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
                 &build_stage11_raw_v6_frame_10516(PROTO_ESP),
                 PROTO_ESP,
             ),
-            Vec::new(),
         ),
         (
             "v4 ESP non-first fragment",
@@ -1790,7 +1983,6 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v4_non_first_meta_10516(
                 &build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP),
             ),
-            Vec::new(),
         ),
         (
             "v4 AH non-first fragment",
@@ -1798,7 +1990,6 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v4_non_first_meta_10516(
                 &build_stage11_raw_v4_non_first_frame_10516(PROTO_AH),
             ),
-            Vec::new(),
         ),
         (
             "v6 ESP non-first fragment",
@@ -1806,19 +1997,19 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
             raw_v6_non_first_meta_10516(
                 &build_stage11_raw_v6_non_first_frame_10516(PROTO_ESP),
             ),
-            Vec::new(),
         ),
     ];
-    for (label, frame, meta, expected_outlet) in cases {
-        let (_trusted, delegated, counters, recycled, queues) =
+    for (label, frame, meta) in cases {
+        assert!(
+            parse_session_flow_from_bytes(&frame, meta).is_none(),
+            "{label}: raw IPsec must remain flowless"
+        );
+        let (_trusted, delegated, counters, recycled, _queues) =
             run_stage11_frame_poll_10516(&frame, meta, None);
         assert_eq!(delegated.queued_packets, 0, "{label}: raw packet minted q1");
         assert_eq!(counters.sa_miss_dropped_packets, 0, "{label}: SA gate consulted");
         assert_eq!(counters.sa_snapshot_stale_deny, 0, "{label}: stale gate consulted");
         assert_eq!(recycled, 1, "{label}: descriptor was not recycled exactly once");
-        // The flowless NotClaimed path must continue through the expected
-        // transit outlet; a flow reversal into Stage 11 would change this.
-        assert_eq!(queues, expected_outlet, "{label}: unexpected transit outlet");
     }
 }
 
@@ -1847,6 +2038,96 @@ fn stage11_esp_udp_sa_gate_runs_poll_loop_10516() {
     assert_eq!(hit_queues, vec![true]);
 }
 #[test]
+fn stage11_ike_new_and_established_bypass_stale_sa_gate_10516() {
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(10, 0, 61, 1);
+    let initiator_spi = 0x1122_3344_5566_7788;
+
+    let new_frame = build_stage11_ike_v4_frame_10516(
+        src,
+        dst,
+        40_000,
+        500,
+        initiator_spi,
+        0,
+    );
+    let new_meta = stage11_ipv4_udp_meta_10516(&new_frame, src, dst, 24, 40_000, 500);
+    let (_, new_delegated, new_counters, new_recycled, new_queues) =
+        run_stage11_frame_poll_with_options_10516(&new_frame, new_meta, None, true, false);
+    assert_eq!(new_delegated.queued_packets, 1, "admitted NEW-IKE must delegate");
+    assert_eq!(new_counters.sa_miss_dropped_packets, 0);
+    assert_eq!(new_counters.sa_snapshot_stale_deny, 0);
+    assert_eq!(new_recycled, 1);
+    assert_eq!(new_queues, vec![true]);
+
+    let established_frame = build_stage11_ike_v4_frame_10516(
+        src,
+        dst,
+        40_000,
+        4500,
+        initiator_spi,
+        0x8877_6655_4433_2211,
+    );
+    let established_meta =
+        stage11_ipv4_udp_meta_10516(&established_frame, src, dst, 24, 40_000, 4500);
+    let ike_key = crate::afxdp::forwarding::IkeExchangeKey::new(
+        initiator_spi,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+    let (_, established_delegated, established_counters, established_recycled, established_queues) =
+        run_stage11_frame_poll_with_seeded_ike_10516(
+            &nat_snapshot(),
+            &established_frame,
+            established_meta,
+            true,
+            ike_key,
+        );
+    assert_eq!(
+        established_delegated.queued_packets, 1,
+        "seeded established-IKE must delegate"
+    );
+    assert_eq!(established_counters.sa_miss_dropped_packets, 0);
+    assert_eq!(established_counters.sa_snapshot_stale_deny, 0);
+    assert_eq!(established_recycled, 1);
+    assert_eq!(established_queues, vec![true]);
+}
+
+#[test]
+fn stage11_unseeded_established_ike_is_denied_before_stale_sa_gate_10516() {
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(10, 0, 61, 1);
+    let frame = build_stage11_ike_v4_frame_10516(
+        src,
+        dst,
+        40_000,
+        4500,
+        0x1122_3344_5566_7788,
+        0x8877_6655_4433_2211,
+    );
+    let meta = stage11_ipv4_udp_meta_10516(&frame, src, dst, 24, 40_000, 4500);
+    let mut denied_snapshot = nat_snapshot();
+    for zone in &mut denied_snapshot.zones {
+        zone.host_inbound_system_services.clear();
+    }
+    let (trusted, delegated, counters, recycled, queues) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &denied_snapshot,
+            &frame,
+            meta,
+            None,
+            true,
+            false,
+        );
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 0);
+    assert_eq!(queues, Vec::<bool>::new());
+    assert_eq!(counters.sa_miss_dropped_packets, 0);
+    assert_eq!(counters.sa_snapshot_stale_deny, 0);
+    assert_eq!(recycled, 1);
+}
+
+#[test]
 fn stage11_declared_end_rejects_v4_spi_slack_10516() {
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
@@ -1855,6 +2136,7 @@ fn stage11_declared_end_rejects_v4_spi_slack_10516() {
     // Declare only the IPv4 header plus UDP header while retaining the
     // complete UDP length and matching SPI in backing UMEM slack.
     frame[16..18].copy_from_slice(&28u16.to_be_bytes());
+    frame[24..26].fill(0);
     let ip_csum = checksum16(&frame[14..34]);
     frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let meta = stage11_esp_udp_meta_10516(&frame);
@@ -1867,6 +2149,157 @@ fn stage11_declared_end_rejects_v4_spi_slack_10516() {
     assert_eq!(counters.sa_miss_dropped_packets, 1);
     assert_eq!(counters.sa_miss_truncated, 1);
     assert_eq!(recycled, 1);
+}
+#[test]
+fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
+    let src = Ipv4Addr::new(198, 51, 100, 10);
+    let dst = Ipv4Addr::new(203, 0, 113, 10);
+    let spi: u32 = 0x2233_4455;
+    let payload = [
+        spi.to_be_bytes().as_slice(),
+        &[0xde, 0xad, 0xbe, 0xef, 0, 1, 2, 3],
+    ]
+    .concat();
+    let frame = build_stage11_udp_v4_frame_10516(
+        src,
+        dst,
+        40_000,
+        4500,
+        &payload,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = stage11_ipv4_udp_meta_10516(&frame, src, dst, 6, 40_000, 4500);
+    let ownership = build_forwarding_state(&static_nat_snapshot());
+    assert!(ownership.owns_configured_ip(IpAddr::V4(dst)));
+    assert!(parse_session_flow_from_bytes(&frame, meta).is_some());
+    let (_, miss_delegated, miss_counters, miss_recycled, miss_queues) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &static_nat_snapshot(),
+            &frame,
+            meta,
+            None,
+            false,
+            false,
+        );
+    assert_eq!(miss_delegated.queued_packets, 0);
+    assert_eq!(miss_counters.sa_miss_dropped_packets, 1);
+    assert_eq!(miss_counters.sa_miss_no_sa, 1);
+    assert_eq!(miss_recycled, 1);
+    assert!(miss_queues.is_empty());
+
+    let key = ipsec_sa_key(IpAddr::V4(dst), spi, IpAddr::V4(src))
+        .expect("same-family external SA fixture");
+    let (_, hit_delegated, hit_counters, hit_recycled, hit_queues) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &static_nat_snapshot(),
+            &frame,
+            meta,
+            Some(key),
+            false,
+            false,
+        );
+    assert_eq!(hit_delegated.queued_packets, 1);
+    assert_eq!(hit_counters.sa_miss_dropped_packets, 0);
+    assert_eq!(hit_recycled, 1);
+    assert_eq!(hit_queues, vec![true]);
+}
+#[test]
+fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
+    let (local_trusted, local_delegated, _, _, local_queues) =
+        run_stage11_esp_udp_poll_10516(true);
+
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(10, 0, 61, 1);
+    let initiator_spi: u64 = 0x1122_3344_5566_7788;
+    let new_frame =
+        build_stage11_ike_v4_frame_10516(src, dst, 40_000, 500, initiator_spi, 0);
+    let new_meta = stage11_ipv4_udp_meta_10516(&new_frame, src, dst, 24, 40_000, 500);
+    let (new_trusted, new_delegated, _, _, new_queues) =
+        run_stage11_frame_poll_with_options_10516(&new_frame, new_meta, None, true, false);
+
+    let established_frame = build_stage11_ike_v4_frame_10516(
+        src,
+        dst,
+        40_000,
+        4500,
+        initiator_spi,
+        0x8877_6655_4433_2211,
+    );
+    let established_meta =
+        stage11_ipv4_udp_meta_10516(&established_frame, src, dst, 24, 40_000, 4500);
+    let established_key = crate::afxdp::forwarding::IkeExchangeKey::new(
+        initiator_spi,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+    let (
+        established_trusted,
+        established_delegated,
+        _,
+        _,
+        established_queues,
+    ) = run_stage11_frame_poll_with_seeded_ike_10516(
+        &nat_snapshot(),
+        &established_frame,
+        established_meta,
+        true,
+        established_key,
+    );
+
+    let external_src = Ipv4Addr::new(198, 51, 100, 10);
+    let external_dst = Ipv4Addr::new(203, 0, 113, 10);
+    let external_spi: u32 = 0x2233_4455;
+    let external_payload = [
+        external_spi.to_be_bytes().as_slice(),
+        &[0xde, 0xad, 0xbe, 0xef, 0, 1, 2, 3],
+    ]
+    .concat();
+    let external_frame = build_stage11_udp_v4_frame_10516(
+        external_src,
+        external_dst,
+        40_000,
+        4500,
+        &external_payload,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let external_meta =
+        stage11_ipv4_udp_meta_10516(&external_frame, external_src, external_dst, 6, 40_000, 4500);
+    let external_key =
+        ipsec_sa_key(IpAddr::V4(external_dst), external_spi, IpAddr::V4(external_src))
+            .expect("same-family external SA fixture");
+    let (external_trusted, external_delegated, _, _, external_queues) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &static_nat_snapshot(),
+            &external_frame,
+            external_meta,
+            Some(external_key),
+            false,
+            false,
+        );
+
+    for (label, trusted, delegated, queues) in [
+        ("SA hit", local_trusted, local_delegated, local_queues),
+        ("NEW-IKE", new_trusted, new_delegated, new_queues),
+        (
+            "established-IKE",
+            established_trusted,
+            established_delegated,
+            established_queues,
+        ),
+        (
+            "external DNAT SA hit",
+            external_trusted,
+            external_delegated,
+            external_queues,
+        ),
+    ] {
+        assert_eq!(trusted.queued_packets, 0, "{label}: positive cell minted q0");
+        assert_eq!(delegated.queued_packets, 1, "{label}: positive cell did not delegate");
+        assert!(
+            !queues.is_empty() && queues.iter().all(|delegated| *delegated),
+            "{label}: positive cell minted an adjudicated q0 outlet: {queues:?}"
+        );
+    }
 }
 #[test]
 fn stage11_declared_end_rejects_v6_spi_slack_10516() {
@@ -1900,6 +2333,7 @@ fn stage11_keepalive_and_tiny_first_fragment_drop_10516() {
     keepalive[16..18].copy_from_slice(&29u16.to_be_bytes());
     keepalive[42] = 0xff;
     keepalive[38..40].copy_from_slice(&9u16.to_be_bytes());
+    keepalive[24..26].fill(0);
     let ip_csum = checksum16(&keepalive[14..34]);
     keepalive[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let keepalive_meta = stage11_esp_udp_meta_10516(&keepalive);
@@ -1917,6 +2351,7 @@ fn stage11_keepalive_and_tiny_first_fragment_drop_10516() {
     // UDP declares the full payload, but the first fragment's IP end exposes
     // only two payload bytes; the remaining SPI word is backing slack.
     tiny[38..40].copy_from_slice(&20u16.to_be_bytes());
+    tiny[24..26].fill(0);
     let ip_csum = checksum16(&tiny[14..34]);
     tiny[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let tiny_meta = stage11_esp_udp_meta_10516(&tiny);
@@ -1934,6 +2369,7 @@ fn stage11_observed_spi_wrong_source_drops_10516() {
     let spi = 0x1122_3344;
     let mut frame = build_stage11_esp_udp_frame_10516(spi);
     frame[26..30].copy_from_slice(&[10, 0, 61, 103]);
+    frame[24..26].fill(0);
     let ip_csum = checksum16(&frame[14..34]);
     frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
     let mut meta = stage11_esp_udp_meta_10516(&frame);
