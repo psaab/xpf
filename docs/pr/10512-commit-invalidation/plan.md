@@ -783,6 +783,12 @@ return A from an otherwise unchanged mock.
   producer; `complete=false` joins `clearErr` and suppresses success. The cell
   asserts these three states remain distinct, so an authoritative empty is
   never manufactured from a missing or incomplete capture.
+- Clear-all contract re-pins for `mirror_clear_chunk`: #9364 control-2
+  (`ClearAllSessions` stays bare at the public boundary while the helper
+  enumerates all domains natively); #5881 (helper-error propagation returns
+  first-error status); #5304 (every key is handled by helper-owned internal
+  enumeration); #5380 (fast-fail across chunks on `helper_unavailable`, with
+  no per-chunk deadline stacking).
 
 
 Guard cells: B-preservation (§2.3 proof items 1-4); id-0-collision
