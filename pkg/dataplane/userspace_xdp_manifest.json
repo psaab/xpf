@@ -16,7 +16,7 @@
     },
     {
       "path": "bpf/headers/xpf_common.h",
-      "sha256": "800e05d0746a3e3b5becb958bd2dcda63e47af28a2a2eeb4eed6b174f543c87b"
+      "sha256": "ef1b1710dbb992948546afa7d457f29c4ffa10a7e04f038a4c20bde765c5bbca"
     },
     {
       "path": "pkg/dataplane/build-userspace-xdp.sh",

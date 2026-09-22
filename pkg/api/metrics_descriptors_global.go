@@ -14,18 +14,31 @@ func (c *xpfCollector) initGlobalDescriptors() {
 	)
 	c.dropsTotal = prometheus.NewDesc(
 		"xpf_drops_total",
-		// #4508: enforcement drops only — policy deny + screen/IDS +
-		// host-inbound deny + source-NAT alloc fail (the GlobalCtrDrops
-		// bridge, #4477). This does NOT include no-route/missing-neighbor,
-		// fabric-forwarding (idx 32), VLAN-push (idx 40), or NAT64
+		// #4508/#10498: configured enforcement/admission drops only —
+		// policy deny + screen/IDS + host-inbound deny + source-NAT alloc
+		// fail + unknown VLAN + destination-MAC admission rejects. This
+		// does NOT include no-route/missing-neighbor, fabric-forwarding
+		// (idx 32), UMEM-slice hygiene, VLAN-push (idx 40), or NAT64
 		// fail-closed drops, so it undercounts total discards. No-route
-		// drops surface separately in the userspace helper status
-		// ("Route misses"). Kept the mirror of the vSRX "Packets dropped"
-		// field name/scope; see docs/junos-cli-reference.md.
-		"Packets dropped by enforcement (policy deny, screen/IDS, "+
-			"host-inbound deny, source-NAT alloc fail). Does NOT include "+
-			"no-route, fabric-forwarding, VLAN-push, or NAT64 fail-closed "+
-			"drops, so it undercounts total discards.",
+		// drops surface separately in userspace helper status. Kept as the
+		// vSRX "Packets dropped" mirror; see docs/junos-cli-reference.md.
+		"Packets dropped by enforcement/admission (policy deny, screen/IDS, "+
+			"host-inbound deny, source-NAT alloc fail, unknown VLAN, "+
+			"destination MAC). Does NOT include no-route, fabric-forwarding, "+
+			"UMEM-slice hygiene, VLAN-push, or NAT64 fail-closed drops, so it "+
+			"undercounts total discards.",
+		nil, nil,
+	)
+	c.unknownVLANDropsTotal = prometheus.NewDesc(
+		"xpf_unknown_vlan_drops_total",
+		"Total packets dropped during pre-L3 admission because their VLAN "+
+			"identity was not configured (#10498).",
+		nil, nil,
+	)
+	c.dstMACDropsTotal = prometheus.NewDesc(
+		"xpf_dst_mac_drops_total",
+		"Total packets dropped during pre-L3 admission because their "+
+			"destination MAC did not match a configured identity (#10498).",
 		nil, nil,
 	)
 	// #3345/#3408: scrape-error signal for counter reads across the global,

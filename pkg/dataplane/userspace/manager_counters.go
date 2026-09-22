@@ -19,6 +19,8 @@ type userspaceCounterSnapshot struct {
 	sessionExpires    uint64
 	policyDenied      uint64
 	hostInboundDenied uint64
+	unknownVLANDrops  uint64
+	dstMACDrops       uint64
 	screenDrops       uint64
 	// #3343: per-screen-reason drop tallies, indexed by the
 	// dataplane.ScreenReasonCounters ordinal. Summed across bindings and pushed
@@ -39,12 +41,13 @@ type userspaceCounterSnapshot struct {
 }
 
 // totalDrops (#4477) is the aggregate "Packets dropped" figure surfaced by
-// GlobalCtrDrops. It sums the firewall's ENFORCEMENT drops — policy
-// denies, screen/IDS drops, host-inbound admission denies, and source-NAT
-// allocation failures. These are exactly the four breakdown lines rendered
-// beneath "Packets dropped" in `show security flow statistics`, so the
-// aggregate equals the sum of its parts (a total-with-breakdown, not a
-// double count into any single reason's own index). Before #4477 GlobalCtrDrops
+// GlobalCtrDrops. It sums the firewall's ENFORCEMENT drops — policy denies,
+// screen/IDS drops, host-inbound admission denies, unknown-VLAN rejects,
+// destination-MAC rejects, and source-NAT allocation failures. These are
+// exactly the six breakdown lines rendered beneath "Packets dropped" in
+// `show security flow statistics`, so the aggregate equals the sum of its parts
+// (a total-with-breakdown, not a double count into any single reason's own
+// index). Before #4477 GlobalCtrDrops
 // was never written and printed a false, always-0 value.
 //
 // #4508: this is ENFORCEMENT drops only, NOT the literal total of every packet
@@ -55,13 +58,15 @@ type userspaceCounterSnapshot struct {
 //     helper status (see pkg/dataplane/userspace/format/status.go);
 //   - fabric-forwarding drops (dataplane.GlobalCtrFabricFwdDrop, idx 32);
 //   - VLAN-push failures (dataplane.GlobalCtrVlanPushFail, idx 40);
+//   - UMEM slice drops, which have no GlobalCtrDrops contribution;
 //   - NAT64 fail-closed drops (distinct from source-NAT alloc failure).
 //
 // If a true total is ever wanted, extend this sum to include those indices —
 // but keep the display label verbatim for vSRX parity. Doc: the "Packets
-// dropped scope" caveat in docs/junos-cli-reference.md.
+// dropped" scope caveat in docs/junos-cli-reference.md.
 func (s userspaceCounterSnapshot) totalDrops() uint64 {
-	return s.policyDenied + s.screenDrops + s.hostInboundDenied + s.natAllocFail
+	return s.policyDenied + s.screenDrops + s.hostInboundDenied +
+		s.unknownVLANDrops + s.dstMACDrops + s.natAllocFail
 }
 
 // sumBindingCounters aggregates counters across all bindings in a status response.
@@ -76,6 +81,8 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 		s.sessionExpires += b.SessionExpires
 		s.policyDenied += b.PolicyDeniedPackets
 		s.hostInboundDenied += b.HostInboundDeniedPackets
+		s.unknownVLANDrops += b.UnknownVLANDropped
+		s.dstMACDrops += b.DstMACDropped
 		s.screenDrops += b.ScreenDrops
 		// #3343: sum each per-reason ordinal. The Rust helper always sends a
 		// fixed-length array, but guard the length so a short/old wire payload
@@ -127,14 +134,8 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 		{dataplane.GlobalCtrTxPackets, safeDelta(cur.txPackets, prev.txPackets)},
 		{dataplane.GlobalCtrSessionsNew, safeDelta(cur.sessionCreates, prev.sessionCreates)},
 		{dataplane.GlobalCtrSessionsClosed, safeDelta(cur.sessionExpires, prev.sessionExpires)},
-		// #4477: bridge the aggregate "Packets dropped" total (policy deny +
-		// screen + host-inbound deny + NAT-alloc-fail) into GlobalCtrDrops and
-		// source-NAT allocation failures into GlobalCtrNATAllocFail. Both
-		// indices were never written before #4477 — ReadGlobalCounter returned a
-		// clean (0, nil) so `show security flow statistics` ("Packets dropped" /
-		// "NAT allocation failures"), REST, Prometheus, and the CLI printed a
-		// false 0 with no #3345 ErrCounterNotPopulated disclosure. Bridging real
-		// deltas populates them so the disclosure correctly stays silent.
+		// #4477/#10498: GlobalCtrDrops includes the enforcement/admission
+		// reasons below; named VLAN/MAC deltas also get dedicated indices.
 		{dataplane.GlobalCtrDrops, safeDelta(cur.totalDrops(), prev.totalDrops())},
 		{dataplane.GlobalCtrNATAllocFail, safeDelta(cur.natAllocFail, prev.natAllocFail)},
 		{dataplane.GlobalCtrPolicyDeny, safeDelta(cur.policyDenied, prev.policyDenied)},
@@ -144,6 +145,8 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 		// drop per-binding; this delta-push mirrors the policy-deny plumbing so
 		// host-inbound enforcement is observable (was always 0 before #3326).
 		{dataplane.GlobalCtrHostInboundDeny, safeDelta(cur.hostInboundDenied, prev.hostInboundDenied)},
+		{dataplane.GlobalCtrUnknownVLANDrops, safeDelta(cur.unknownVLANDrops, prev.unknownVLANDrops)},
+		{dataplane.GlobalCtrDstMACDrops, safeDelta(cur.dstMACDrops, prev.dstMACDrops)},
 		{dataplane.GlobalCtrScreenDrops, safeDelta(cur.screenDrops, prev.screenDrops)},
 		// Challenge decisions are not "sent" until the worker admits a
 		// SYN-ACK reply into bounded TX. Secret-unavailable and reply

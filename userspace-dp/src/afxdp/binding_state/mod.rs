@@ -136,6 +136,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// and counted. Distinct from a TRUNCATED chain (which stays flowless).
     /// Surfaced as the `IPv6 ext-header drops` operator counter.
     pub(super) ipv6_ext_header_dropped: AtomicU64,
+    /// #10498: named pre-L3 drops that previously had no dedicated
+    /// operator-visible telemetry.
+    pub(super) umem_slice_dropped: AtomicU64,
+    pub(super) unknown_vlan_dropped: AtomicU64,
+    pub(super) dst_mac_dropped: AtomicU64,
     pub(super) neighbor_miss_packets: AtomicU64,
     pub(super) discard_route_packets: AtomicU64,
     pub(super) next_table_packets: AtomicU64,
@@ -985,9 +990,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #10131 adds five unconditional u64 overlap-attribution counters ahead of
 // both sentinels. The 2432-byte alignment unit still has room, so size stays
 // unchanged; both pinned offsets move 2248 -> 2288 and 2376 -> 2416.
-const _: [(); 2432] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2288] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2416] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #10498 adds three unconditional u64 named pre-L3 drop counters ahead of both
+// sentinels. The alignment unit grows by 64 bytes; both offsets move by 24.
+const _: [(); 2496] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2312] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2440] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1015,6 +1022,9 @@ impl BindingLiveState {
             route_miss_packets: AtomicU64::new(0),
             martian_dropped: AtomicU64::new(0),
             ipv6_ext_header_dropped: AtomicU64::new(0),
+            umem_slice_dropped: AtomicU64::new(0),
+            unknown_vlan_dropped: AtomicU64::new(0),
+            dst_mac_dropped: AtomicU64::new(0),
             neighbor_miss_packets: AtomicU64::new(0),
             discard_route_packets: AtomicU64::new(0),
             next_table_packets: AtomicU64::new(0),

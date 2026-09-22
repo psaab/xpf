@@ -297,15 +297,16 @@ Maximum-sessions: 4194304
 - Every line indented 4 spaces.
 - Key-value with colon separator.
 - All numbers right-aligned (no fixed width, just the number).
-- **`Packets dropped` = ENFORCEMENT drops only (#4508).** This figure sums
-  policy denies, screen/IDS drops, host-inbound denies, and source-NAT
-  allocation failures — it is NOT the literal total of every discarded
-  packet. No-route / missing-neighbor drops (helper status `Route misses:`),
-  fabric-forwarding drops, VLAN-push failures, and NAT64 fail-closed drops
-  are counted separately and are excluded here, so `Packets dropped`
-  undercounts total discards. See the `Packets dropped` scope caveat
-  (#4477/#4508) in the counter-accounting notes further below for the full
-  breakdown of excluded paths and their counter indices.
+- **`Packets dropped` = configured ENFORCEMENT/admission drops only (#10498).**
+  This figure sums policy denies, screen/IDS drops, host-inbound denies,
+  source-NAT allocation failures, unknown-VLAN admission drops, and
+  destination-MAC admission drops. It is NOT the literal total of every
+  discarded packet. No-route / missing-neighbor drops (helper status
+  `Route misses:`), UMEM-slice hygiene drops, fabric-forwarding drops,
+  VLAN-push failures, and NAT64 fail-closed drops are counted separately and
+  are excluded here, so `Packets dropped` undercounts total discards. See the
+  `Packets dropped` scope caveat (#4477/#4508/#10498) in the
+  counter-accounting notes further below for the full breakdown.
 
 ---
 
@@ -533,71 +534,80 @@ From zone: guest, To zone: lan
     labeled Prometheus series `xpf_screen_drops_by_reason_total{reason=...}`
     exposes the breakdown for alerting; the aggregate `xpf_screen_drops_total`
     is unchanged.
-  - **Packets-dropped / NAT-allocation-failure accounting (#4477):** the
-    `Packets dropped` (`dataplane.GlobalCtrDrops`) and `NAT allocation failures`
-    (`dataplane.GlobalCtrNATAllocFail`) rows of `show security flow statistics`
-    were dead counters — the userspace counter bridge never wrote either index,
-    so `ReadGlobalCounter` returned a clean `(0, nil)` (the #3345
-    `ErrCounterNotPopulated` disclosure never fired) and the CLI, gRPC, REST
-    (`drops` / `nat_alloc_fails`), and Prometheus (`xpf_drops_total` /
-    `xpf_nat_alloc_fails_total`) surfaces printed a false, always-0 value even
-    while the firewall was actively dropping traffic under attack. The Rust
-    helper now counts each source-NAT allocation failure per worker at the single
-    `record_source_nat_failure` chokepoint (`BindingStatus.nat_alloc_fail` — a
-    rule matched but no translated mapping could be allocated: missing/empty/
-    invalid/exhausted pool, wrong family, or a non-first fragment on a
-    port-translating rule; the packet is dropped). The Go manager sums it across
-    bindings and pushes the per-poll delta into `GlobalCtrNATAllocFail`, and
-    folds it — together with policy denies, screen/IDS drops, and host-inbound
-    denies — into the aggregate `Packets dropped` figure pushed into
-    `GlobalCtrDrops` (a total whose breakdown is exactly the four rows rendered
-    beneath it), mirroring the host-inbound / NAT64 / per-screen-reason plumbing.
-    Once bridged the counters carry real values, so the #3345 disclosure
-    correctly stays silent for them.
-  - **`Packets dropped` scope — ENFORCEMENT drops only (#4508):** the
-    `Packets dropped` counter is the sum of the four ENFORCEMENT/discard
-    reasons above (policy deny + screen/IDS + host-inbound deny + source-NAT
-    allocation failure). It is deliberately **not** the literal total of every
-    packet the dataplane discards. Other real drop paths are counted
-    elsewhere or not folded into this figure, so `Packets dropped`
-    **undercounts** total discards. Excluded paths and where to read them:
+  - **Packets-dropped / named pre-L3 accounting (#4477/#10498):** the
+    `Packets dropped` (`dataplane.GlobalCtrDrops`), `NAT allocation failures`
+    (`dataplane.GlobalCtrNATAllocFail`), `Unknown VLAN drops`
+    (`dataplane.GlobalCtrUnknownVLANDrops`, index 41), and `Destination MAC
+    drops` (`dataplane.GlobalCtrDstMACDrops`, index 42) rows of `show security
+    flow statistics` are fed by the userspace counter bridge. Before #4477,
+    the first two indices were dead: the bridge never wrote them, so
+    `ReadGlobalCounter` returned a clean `(0, nil)` and the CLI, gRPC, REST,
+    and Prometheus surfaces printed a false, always-0 value while the firewall
+    was dropping traffic. The Rust helper now counts each source-NAT
+    allocation failure per worker at the single `record_source_nat_failure`
+    chokepoint (`BindingStatus.nat_alloc_fail`): a rule matched but no
+    translated mapping could be allocated because the pool was missing, empty,
+    invalid, or exhausted, the family was wrong, or a non-first fragment used
+    a port-translating rule. The Go manager sums each BindingStatus reason
+    across bindings and pushes per-poll deltas into the dedicated global
+    indices. `GlobalCtrDrops` folds policy denies, screen/IDS drops,
+    host-inbound denies, NAT allocation failures, unknown VLAN admission
+    drops, and destination-MAC admission drops, so the named rows are a
+    truthful breakdown of that aggregate. REST (`unknown_vlan_drops` /
+    `dst_mac_drops`), gRPC (`unknown_vlan_drops` / `dst_mac_drops`), and
+    Prometheus (`xpf_unknown_vlan_drops_total` /
+    `xpf_dst_mac_drops_total`) read the same dedicated indices.
+  - **`Packets dropped` scope — configured enforcement/admission only
+    (#4508/#10498):** the `Packets dropped` counter is the sum of six
+    configured enforcement/admission reasons: policy deny, screen/IDS,
+    host-inbound deny, source-NAT allocation failure, unknown-VLAN admission
+    reject, and destination-MAC admission reject. It is deliberately **not**
+    the literal total of every packet the dataplane discards. Other real drop
+    paths are counted elsewhere or not folded into this figure, so `Packets
+    dropped` **undercounts** total discards. Excluded paths and where to read
+    them:
+    - **UMEM-slice hygiene drops** (#10498): an invalid descriptor range is
+      recycled before raw-frame access and counted as `umem_slice_dropped` in
+      helper status and `xpf_userspace_umem_slice_dropped_total`. The
+      `unknown_vlan_dropped` and `dst_mac_dropped` admission counters are
+      likewise exposed as `xpf_userspace_unknown_vlan_dropped_total` and
+      `xpf_userspace_dst_mac_dropped_total`. Those VLAN/MAC series are
+      configured admission reasons with dedicated global indices; only UMEM is
+      hygiene rather than a configured enforcement decision and is intentionally
+      excluded from both `GlobalCtrDrops` and the global reason-index family.
     - **No-route** (userspace has no route to the destination) and
       **missing-neighbor** (route resolved but ARP/ND unresolved) drops are
       counted per binding as `route_miss_packets` / `neighbor_miss_packets`
-      and surfaced separately as the `Route misses:` line in the userspace
-      helper status (`pkg/dataplane/userspace/format/status.go`) — never in
-      `Packets dropped`.
+      and surfaced separately as the `Route misses:` line in helper status —
+      never in `Packets dropped`.
       - **Martian drops** (#4743): a no-route drop whose destination is a
         martian address (IPv4 multicast/broadcast/unspecified/loopback, IPv6
-        multicast/unspecified/loopback) is ALSO counted distinctly as
-        `martian_dropped` and shown as the `Martian drops:` status line. It is a
-        strict sub-breakout of `route_miss_packets` (a martian dst misses the
-        FIB and drops as no-route, so it bumps both), letting an operator tell a
-        martian-dst drop apart from an ordinary route miss and correlate it with
-        the firewall-filter `accept` log.
-    - **IPv6 extension-header fail-closed drops** (#4743): an IPv6 packet whose
-      extension-header chain is still on an extension header after
-      `MAX_IPV6_EXT_HEADERS` (8) iterations (an over-limit, uninspectable chain)
-      is dropped fail-closed and counted as `ipv6_ext_header_dropped`, shown as
-      the `IPv6 ext-header drops:` status line. Before #4743 such a packet was
-      forwarded flowless (`l4_present = false`), an ext-header IDS-evasion; it is
-      distinct from a TRUNCATED chain (which stays flowless). Not in `Packets
-      dropped`.
-      - **Prometheus (#4768):** both counters are also exposed as aggregate
-        scrape series — `xpf_userspace_martian_dropped_total` and
-        `xpf_userspace_ipv6_ext_header_dropped_total` — summed across bindings
-        and emitted unconditionally (0 is a real "no such drops" signal), so an
-        operator can alert on them without polling the status text.
+        multicast/unspecified/loopback) is also counted distinctly as
+        `martian_dropped` and shown as `Martian drops:`. It is a strict
+        sub-breakout of `route_miss_packets` (a martian destination misses the
+        FIB and drops as no-route), letting an operator correlate it with a
+        firewall-filter `accept` log.
+    - **IPv6 extension-header fail-closed drops** (#4743): an IPv6 packet
+      whose extension-header chain is still on an extension header after
+      `MAX_IPV6_EXT_HEADERS` (8) iterations is dropped fail-closed and counted
+      as `ipv6_ext_header_dropped`, shown as `IPv6 ext-header drops:`. Before
+      #4743 such a packet was forwarded flowless (`l4_present = false`), an
+      extension-header IDS-evasion; it is distinct from a truncated chain,
+      which stays flowless. It is not in `Packets dropped`.
+    - **Prometheus (#4768/#10498):** the martian, IPv6, UMEM-slice,
+      unknown-VLAN, and destination-MAC counters are aggregate process-level
+      scrape series, summed across bindings and emitted unconditionally
+      without labels.
     - **Fabric-forwarding drops** (`GlobalCtrFabricFwdDrop`, index 32) — a
       peer-owned synced session whose fabric redirect could not be completed.
     - **VLAN-push failures** (`GlobalCtrVlanPushFail`, index 40).
     - **NAT64 fail-closed drops** — the NAT64 translator dropping a packet it
-      cannot safely translate (distinct from the source-NAT allocation
-      failure that IS in the total).
+      cannot safely translate, distinct from the source-NAT allocation failure
+      that is in the total.
     This is the vSRX `show security flow statistics` field name, so the label
     is kept verbatim for Junos parity; the caveat lives here rather than in a
     relabel. The Prometheus mirror `xpf_drops_total` carries the same scope in
-    its help text (`enforcement drops … does NOT include no-route`).
+    its help text.
   - **Token validation (#3200):** `host-inbound-traffic system-services
     <tok>` / `protocols <tok>` is now validated at commit against the
     recognized-token SSOT (`pkg/config/host_inbound_tokens.go`:

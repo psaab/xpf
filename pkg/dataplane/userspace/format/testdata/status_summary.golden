@@ -39,6 +39,9 @@ Userspace dataplane helper:
   Forward candidates:        80
   Flowless forwards:         7 pkts / 700 bytes
   Route misses:              2
+  UMEM slice drops:          1
+  Unknown VLAN drops:        2
+  Destination MAC drops:     3
   Martian drops:             1
   IPv6 ext-header drops:     4
   Neighbor misses:           1

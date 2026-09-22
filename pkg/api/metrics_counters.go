@@ -416,6 +416,8 @@ func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp api
 	emit(c.packetsTotal, dataplane.GlobalCtrRxPackets, "rx")
 	emit(c.packetsTotal, dataplane.GlobalCtrTxPackets, "tx")
 	emit(c.dropsTotal, dataplane.GlobalCtrDrops)
+	emit(c.unknownVLANDropsTotal, dataplane.GlobalCtrUnknownVLANDrops)
+	emit(c.dstMACDropsTotal, dataplane.GlobalCtrDstMACDrops)
 	emit(c.sessionsCreatedTotal, dataplane.GlobalCtrSessionsNew)
 	emit(c.sessionsClosedTotal, dataplane.GlobalCtrSessionsClosed)
 	emit(c.screenDropsTotal, dataplane.GlobalCtrScreenDrops)

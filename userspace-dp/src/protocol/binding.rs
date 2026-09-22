@@ -415,6 +415,12 @@ pub(crate) struct BindingStatus {
     /// wire safety. Surfaced as the `IPv6 ext-header drops` status row.
     #[serde(rename = "ipv6_ext_header_dropped", default)]
     pub ipv6_ext_header_dropped: u64,
+    #[serde(rename = "umem_slice_dropped", default)]
+    pub umem_slice_dropped: u64,
+    #[serde(rename = "unknown_vlan_dropped", default)]
+    pub unknown_vlan_dropped: u64,
+    #[serde(rename = "dst_mac_dropped", default)]
+    pub dst_mac_dropped: u64,
     #[serde(rename = "neighbor_miss_packets", default)]
     pub neighbor_miss_packets: u64,
     #[serde(rename = "discard_route_packets", default)]

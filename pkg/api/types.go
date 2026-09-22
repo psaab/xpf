@@ -19,15 +19,17 @@ type StatusResponse struct {
 
 // GlobalStats holds all global counter values.
 type GlobalStats struct {
-	RxPackets       uint64 `json:"rx_packets"`
-	TxPackets       uint64 `json:"tx_packets"`
-	Drops           uint64 `json:"drops"`
-	SessionsCreated uint64 `json:"sessions_created"`
-	SessionsClosed  uint64 `json:"sessions_closed"`
-	ScreenDrops     uint64 `json:"screen_drops"`
-	PolicyDenies    uint64 `json:"policy_denies"`
-	NATAllocFails   uint64 `json:"nat_alloc_failures"`
-	HostInboundDeny uint64 `json:"host_inbound_denies"`
+	RxPackets        uint64 `json:"rx_packets"`
+	TxPackets        uint64 `json:"tx_packets"`
+	Drops            uint64 `json:"drops"`
+	UnknownVLANDrops uint64 `json:"unknown_vlan_drops"`
+	DstMACDrops      uint64 `json:"dst_mac_drops"`
+	SessionsCreated  uint64 `json:"sessions_created"`
+	SessionsClosed   uint64 `json:"sessions_closed"`
+	ScreenDrops      uint64 `json:"screen_drops"`
+	PolicyDenies     uint64 `json:"policy_denies"`
+	NATAllocFails    uint64 `json:"nat_alloc_failures"`
+	HostInboundDeny  uint64 `json:"host_inbound_denies"`
 	// HostInboundKernelDenies is the aggregate of the kernel nftables
 	// host-inbound DROP counters across all zones/families (#3361). This is the
 	// PRIMARY host-inbound enforcement path and is DISTINCT from

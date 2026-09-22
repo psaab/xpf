@@ -154,6 +154,9 @@ func TestSumBindingCounters(t *testing.T) {
 				SessionExpires:           5,
 				PolicyDeniedPackets:      3,
 				HostInboundDeniedPackets: 6,
+				UMEMSliceDropped:         1,
+				UnknownVLANDropped:       2,
+				DstMACDropped:            3,
 				ScreenDrops:              2,
 				// #3343: per-reason screen drops, one element per
 				// dataplane.ScreenReasonCounters ordinal.
@@ -175,6 +178,9 @@ func TestSumBindingCounters(t *testing.T) {
 				SessionExpires:           10,
 				PolicyDeniedPackets:      7,
 				HostInboundDeniedPackets: 14,
+				UMEMSliceDropped:         5,
+				UnknownVLANDropped:       7,
+				DstMACDropped:            11,
 				ScreenDrops:              4,
 				ScreenReasonDrops:        []uint64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150},
 				SYNCookieSynAckSent:      17,
@@ -213,6 +219,12 @@ func TestSumBindingCounters(t *testing.T) {
 	if s.hostInboundDenied != 20 {
 		t.Fatalf("hostInboundDenied = %d, want 20", s.hostInboundDenied)
 	}
+	if s.unknownVLANDrops != 9 {
+		t.Fatalf("unknownVLANDrops = %d, want 9", s.unknownVLANDrops)
+	}
+	if s.dstMACDrops != 14 {
+		t.Fatalf("dstMACDrops = %d, want 14", s.dstMACDrops)
+	}
 	if s.screenDrops != 6 {
 		t.Fatalf("screenDrops = %d, want 6", s.screenDrops)
 	}
@@ -245,11 +257,12 @@ func TestSumBindingCounters(t *testing.T) {
 	if s.natAllocFail != 24 {
 		t.Fatalf("natAllocFail = %d, want 24", s.natAllocFail)
 	}
-	// #4477: totalDrops() is the aggregate "Packets dropped" figure pushed into
-	// GlobalCtrDrops: policyDenied(10) + screenDrops(6) + hostInboundDenied(20) +
-	// natAllocFail(24) = 60.
-	if s.totalDrops() != 60 {
-		t.Fatalf("totalDrops() = %d, want 60", s.totalDrops())
+	// #4477/#10498: totalDrops() is the aggregate "Packets dropped" figure
+	// pushed into GlobalCtrDrops: policyDenied(10) + screenDrops(6) +
+	// hostInboundDenied(20) + unknownVLANDrops(9) + dstMACDrops(14) +
+	// natAllocFail(24) = 83. UMEMSliceDropped is intentionally excluded.
+	if s.totalDrops() != 83 {
+		t.Fatalf("totalDrops() = %d, want 83", s.totalDrops())
 	}
 	// #3343: per-reason screen drops sum element-wise across bindings. RED if
 	// the `s.screenReasonDrops[i] += b.ScreenReasonDrops[i]` loop is reverted
@@ -334,6 +347,9 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 				PolicyDeniedPackets:      3,
 				ScreenDrops:              2,
 				HostInboundDeniedPackets: 6,
+				UMEMSliceDropped:         17,
+				UnknownVLANDropped:       1,
+				DstMACDropped:            2,
 				NatAllocFail:             8,
 			},
 			{
@@ -341,6 +357,9 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 				PolicyDeniedPackets:      7,
 				ScreenDrops:              4,
 				HostInboundDeniedPackets: 14,
+				UMEMSliceDropped:         19,
+				UnknownVLANDropped:       8,
+				DstMACDropped:            8,
 				NatAllocFail:             16,
 			},
 		},
@@ -350,37 +369,55 @@ func TestSyncBPFCountersPushesDropAndNATAllocFail(t *testing.T) {
 	m.syncBPFCountersLocked(status)
 	m.mu.Unlock()
 
-	// GlobalCtrNATAllocFail = sum of NatAllocFail across bindings (8 + 16 = 24).
+	// Dedicated reason indices aggregate their distinct per-binding values.
 	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrNATAllocFail); got != 24 {
-		t.Fatalf("GlobalCtrNATAllocFail = %d, want 24 (NAT-alloc-fail bridge reverted?)", got)
+		t.Fatalf("GlobalCtrNATAllocFail = %d, want 24", got)
 	}
-	// GlobalCtrDrops = policyDeny(10) + screen(6) + host-inbound(20) + NAT-alloc(24) = 60.
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 60 {
-		t.Fatalf("GlobalCtrDrops = %d, want 60 (aggregate-drops bridge reverted?)", got)
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrUnknownVLANDrops); got != 9 {
+		t.Fatalf("GlobalCtrUnknownVLANDrops = %d, want 9", got)
+	}
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDstMACDrops); got != 10 {
+		t.Fatalf("GlobalCtrDstMACDrops = %d, want 10", got)
+	}
+	// GlobalCtrDrops includes the configured VLAN/MAC admission reasons but
+	// excludes UMEM hygiene: 10 + 6 + 20 + 24 + 9 + 10 = 79.
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 79 {
+		t.Fatalf("GlobalCtrDrops = %d, want 79", got)
 	}
 
-	// A second poll with the same cumulative totals produces a zero delta, so
-	// the counters must stay put (no double count).
+	// A second poll with the same cumulative totals produces zero deltas.
 	m.mu.Lock()
 	m.syncBPFCountersLocked(status)
 	m.mu.Unlock()
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrNATAllocFail); got != 24 {
-		t.Fatalf("GlobalCtrNATAllocFail after idempotent re-poll = %d, want 24", got)
-	}
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 60 {
-		t.Fatalf("GlobalCtrDrops after idempotent re-poll = %d, want 60", got)
+	for idx, want := range map[uint32]uint64{
+		dataplane.GlobalCtrNATAllocFail:     24,
+		dataplane.GlobalCtrUnknownVLANDrops: 9,
+		dataplane.GlobalCtrDstMACDrops:      10,
+		dataplane.GlobalCtrDrops:            79,
+	} {
+		if got := m.bpfShim.ReadUserspaceCounterOffset(idx); got != want {
+			t.Fatalf("counter %d after idempotent re-poll = %d, want %d", idx, got, want)
+		}
 	}
 
-	// A subsequent poll with higher cumulative totals advances by the delta.
-	status.Bindings[0].NatAllocFail = 18 // +10 over the prior 8
+	// A subsequent poll advances only by each changed cumulative delta.
+	status.Bindings[0].NatAllocFail = 18       // +10
+	status.Bindings[0].UnknownVLANDropped = 11 // +10
+	status.Bindings[1].DstMACDropped = 28      // +20
 	m.mu.Lock()
 	m.syncBPFCountersLocked(status)
 	m.mu.Unlock()
 	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrNATAllocFail); got != 34 {
-		t.Fatalf("GlobalCtrNATAllocFail after +10 = %d, want 34", got)
+		t.Fatalf("GlobalCtrNATAllocFail after deltas = %d, want 34", got)
 	}
-	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 70 {
-		t.Fatalf("GlobalCtrDrops after +10 = %d, want 70", got)
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrUnknownVLANDrops); got != 19 {
+		t.Fatalf("GlobalCtrUnknownVLANDrops after delta = %d, want 19", got)
+	}
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDstMACDrops); got != 30 {
+		t.Fatalf("GlobalCtrDstMACDrops after delta = %d, want 30", got)
+	}
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrDrops); got != 119 {
+		t.Fatalf("GlobalCtrDrops after deltas = %d, want 119", got)
 	}
 }
 
@@ -750,5 +787,25 @@ func TestSafeDelta(t *testing.T) {
 	// First poll (prev=0)
 	if d := safeDelta(42, 0); d != 42 {
 		t.Fatalf("safeDelta(42, 0) = %d, want 42", d)
+	}
+}
+
+func TestBindingStatusDecodesNamedPreL3Keys10498(t *testing.T) {
+	var got BindingStatus
+	err := json.Unmarshal([]byte(`{
+		"umem_slice_dropped": 1,
+		"unknown_vlan_dropped": 2,
+		"dst_mac_dropped": 3
+	}`), &got)
+	if err != nil {
+		t.Fatalf("decode BindingStatus: %v", err)
+	}
+	if got.UMEMSliceDropped != 1 || got.UnknownVLANDropped != 2 || got.DstMACDropped != 3 {
+		t.Fatalf(
+			"named pre-L3 fields = (%d, %d, %d), want (1, 2, 3)",
+			got.UMEMSliceDropped,
+			got.UnknownVLANDropped,
+			got.DstMACDropped,
+		)
 	}
 }

@@ -111,6 +111,8 @@ func (s *Server) GetGlobalStats(_ context.Context, _ *pb.GetGlobalStatsRequest) 
 		RxPackets:          readCounter(dataplane.GlobalCtrRxPackets),
 		TxPackets:          readCounter(dataplane.GlobalCtrTxPackets),
 		Drops:              readCounter(dataplane.GlobalCtrDrops),
+		UnknownVlanDrops:   readCounter(dataplane.GlobalCtrUnknownVLANDrops),
+		DstMacDrops:        readCounter(dataplane.GlobalCtrDstMACDrops),
 		SessionsCreated:    readCounter(dataplane.GlobalCtrSessionsNew),
 		SessionsClosed:     readCounter(dataplane.GlobalCtrSessionsClosed),
 		ScreenDrops:        readCounter(dataplane.GlobalCtrScreenDrops),

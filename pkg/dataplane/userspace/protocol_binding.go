@@ -67,6 +67,11 @@ type BindingStatus struct {
 	FlowlessForwardPkts  uint64 `json:"flowless_forward_packets,omitempty"`
 	FlowlessForwardBytes uint64 `json:"flowless_forward_bytes,omitempty"`
 	RouteMissPackets     uint64 `json:"route_miss_packets,omitempty"`
+	// #10498: named pre-L3 drops. UMEM is hygiene; VLAN/MAC are also
+	// mirrored into dedicated GlobalCtr reason indices by the bridge.
+	UMEMSliceDropped   uint64 `json:"umem_slice_dropped,omitempty"`
+	UnknownVLANDropped uint64 `json:"unknown_vlan_dropped,omitempty"`
+	DstMACDropped      uint64 `json:"dst_mac_dropped,omitempty"`
 	// #4743: NoRoute drops whose destination is a MARTIAN address (IPv4
 	// multicast/broadcast/unspecified/loopback, IPv6
 	// multicast/unspecified/loopback). A strict sub-breakout of RouteMissPackets

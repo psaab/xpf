@@ -68,6 +68,15 @@ func TestGlobalStatsHandlerSurfacesNAT64AndHostInbound(t *testing.T) {
 			resp.Data.HostInboundAllowed, wantHostInbound)
 	}
 
+	wantUnknownVLAN := uint64(dataplane.GlobalCtrUnknownVLANDrops)*1000 + 7
+	if resp.Data.UnknownVLANDrops != wantUnknownVLAN {
+		t.Errorf("UnknownVLANDrops = %d, want %d", resp.Data.UnknownVLANDrops, wantUnknownVLAN)
+	}
+	wantDstMAC := uint64(dataplane.GlobalCtrDstMACDrops)*1000 + 7
+	if resp.Data.DstMACDrops != wantDstMAC {
+		t.Errorf("DstMACDrops = %d, want %d", resp.Data.DstMACDrops, wantDstMAC)
+	}
+
 	// Sanity: the pre-existing deny counter still reads its own (distinct)
 	// index, guarding against a copy-paste that points both at the same slot.
 	wantDeny := uint64(dataplane.GlobalCtrHostInboundDeny)*1000 + 7

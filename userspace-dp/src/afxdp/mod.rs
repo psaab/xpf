@@ -636,6 +636,9 @@ mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_reject_reversal.rs"]
 mod tests_icmp_reject_reversal;
+#[cfg(test)]
+#[path = "tests_named_pre_l3_10498.rs"]
+mod tests_named_pre_l3_10498;
 // #8486: the peer-supplied owner_rg_id filing bound.
 #[cfg(test)]
 #[path = "owner_rg_bound_8486_tests.rs"]
@@ -1010,6 +1013,10 @@ pub(in crate::afxdp) struct BatchCounters {
     // (still on an ext header after MAX_IPV6_EXT_HEADERS iterations). Bumped at
     // the flow-parse stage when the helper walkers fail closed.
     ipv6_ext_header_dropped: u64,
+    // #10498: named pre-L3 drops, kept distinct from downstream dispositions.
+    umem_slice_dropped: u64,
+    unknown_vlan_dropped: u64,
+    dst_mac_dropped: u64,
     neighbor_miss_packets: u64,
     discard_route_packets: u64,
     next_table_packets: u64,
@@ -1518,6 +1525,21 @@ impl BatchCounters {
             live.ipv6_ext_header_dropped
                 .fetch_add(self.ipv6_ext_header_dropped, Ordering::Relaxed);
             self.ipv6_ext_header_dropped = 0;
+        }
+        if self.umem_slice_dropped != 0 {
+            live.umem_slice_dropped
+                .fetch_add(self.umem_slice_dropped, Ordering::Relaxed);
+            self.umem_slice_dropped = 0;
+        }
+        if self.unknown_vlan_dropped != 0 {
+            live.unknown_vlan_dropped
+                .fetch_add(self.unknown_vlan_dropped, Ordering::Relaxed);
+            self.unknown_vlan_dropped = 0;
+        }
+        if self.dst_mac_dropped != 0 {
+            live.dst_mac_dropped
+                .fetch_add(self.dst_mac_dropped, Ordering::Relaxed);
+            self.dst_mac_dropped = 0;
         }
         if self.neighbor_miss_packets != 0 {
             live.neighbor_miss_packets

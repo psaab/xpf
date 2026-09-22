@@ -7,9 +7,10 @@ import (
 
 // TestDropsTotalHelpDeclaresEnforcementScope pins the #4508 clarification of
 // the xpf_drops_total help text. The GlobalCtrDrops bridge (#4477) sums only
-// the four ENFORCEMENT reasons (policy deny, screen/IDS, host-inbound deny,
-// source-NAT alloc fail) — it is NOT the literal total of every discarded
-// packet (no-route/missing-neighbor, fabric-forwarding, VLAN-push, and NAT64
+// the six ENFORCEMENT/admission reasons (policy deny, screen/IDS,
+// host-inbound deny, source-NAT alloc fail, unknown VLAN, and destination-MAC
+// admission reject) — it is NOT the literal total of every discarded packet
+// (no-route/missing-neighbor, fabric-forwarding, VLAN-push, and NAT64
 // fail-closed drops are excluded). The pre-#4508 help text was a bare "Total
 // packets dropped." which misled an operator into reading the counter as the
 // total discard count. This test fails RED if that regression is reverted, so

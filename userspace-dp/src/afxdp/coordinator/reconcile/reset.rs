@@ -26,6 +26,9 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.route_miss_packets = 0;
         binding.martian_dropped = 0;
         binding.ipv6_ext_header_dropped = 0;
+        binding.umem_slice_dropped = 0;
+        binding.unknown_vlan_dropped = 0;
+        binding.dst_mac_dropped = 0;
         binding.neighbor_miss_packets = 0;
         binding.discard_route_packets = 0;
         binding.next_table_packets = 0;
@@ -114,4 +117,22 @@ mod reset_9956_tests {
             "reset_binding_counters must clear the flowless family"
         );
     }
+    #[test]
+    fn reset_binding_counters_clears_named_pre_l3_10498() {
+        let mut binding = BindingStatus::default();
+        binding.umem_slice_dropped = 1;
+        binding.unknown_vlan_dropped = 2;
+        binding.dst_mac_dropped = 3;
+        reset_binding_counters(std::slice::from_mut(&mut binding));
+        assert_eq!(
+            (
+                binding.umem_slice_dropped,
+                binding.unknown_vlan_dropped,
+                binding.dst_mac_dropped,
+            ),
+            (0, 0, 0),
+            "reset_binding_counters must clear named pre-L3 drops"
+        );
+    }
+
 }

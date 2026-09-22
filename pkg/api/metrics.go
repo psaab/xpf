@@ -46,11 +46,13 @@ type xpfCollector struct {
 	sessionGaugeTTLOverride time.Duration
 
 	// Global counters
-	packetsTotal         *prometheus.Desc
-	dropsTotal           *prometheus.Desc
-	sessionsCreatedTotal *prometheus.Desc
-	sessionsClosedTotal  *prometheus.Desc
-	screenDropsTotal     *prometheus.Desc
+	packetsTotal          *prometheus.Desc
+	dropsTotal            *prometheus.Desc
+	unknownVLANDropsTotal *prometheus.Desc
+	dstMACDropsTotal      *prometheus.Desc
+	sessionsCreatedTotal  *prometheus.Desc
+	sessionsClosedTotal   *prometheus.Desc
+	screenDropsTotal      *prometheus.Desc
 	// #3343: per-screen-reason drop counter, labeled by reason. The aggregate
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
@@ -637,6 +639,10 @@ type xpfCollector struct {
 	// #4768: per-binding drop-class counters (#4743) summed across bindings.
 	userspaceMartianDropped       *prometheus.Desc
 	userspaceIPv6ExtHeaderDropped *prometheus.Desc
+	// #10498: pre-L3 admission counters, summed across bindings.
+	userspaceUMEMSliceDropped     *prometheus.Desc
+	userspaceUnknownVLANDropped   *prometheus.Desc
+	userspaceDstMACDropped        *prometheus.Desc
 	userspaceFlowCacheActiveFlows *prometheus.Desc
 	userspaceFlowCacheCapacity    *prometheus.Desc
 	// #10069: dual slow-path outlet health/counters, labelled by outlet
@@ -874,6 +880,8 @@ type xpfCollector struct {
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.packetsTotal
 	ch <- c.dropsTotal
+	ch <- c.unknownVLANDropsTotal
+	ch <- c.dstMACDropsTotal
 	ch <- c.sessionsCreatedTotal
 	ch <- c.sessionsClosedTotal
 	ch <- c.screenDropsTotal
@@ -1167,6 +1175,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceRejectRateLimitedBySource
 	ch <- c.userspaceMartianDropped
 	ch <- c.userspaceIPv6ExtHeaderDropped
+	ch <- c.userspaceUMEMSliceDropped
+	ch <- c.userspaceUnknownVLANDropped
+	ch <- c.userspaceDstMACDropped
 	ch <- c.userspaceFlowCacheActiveFlows
 	ch <- c.userspaceFlowCacheCapacity
 	ch <- c.userspaceEventStreamFramesTotal
