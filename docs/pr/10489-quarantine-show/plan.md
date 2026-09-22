@@ -2,19 +2,17 @@
 
 ## Status
 
-DRAFT v2 (delta re-review round). No production code in this round.
+DRAFT v3 (delta-1 residual fold). No production code in this round.
 Worktree `/home/ps/git/pi-xpf/.claude/worktrees/10489-quarantine`,
 branch `fix/10489-quarantine-show`, base `origin/master b71c52d60`.
 Round-1: BOTH hostile reviewers PLAN-NEEDS-MAJOR
-(`agent://Rev10489PlanA`, `agent://Rev10489PlanB`); direction sound,
-contracts wrong. v2 resolves all eight findings per Main adjudication:
-F1 input rule (Design); F2 enum/presence wire contract assigned to #10531
-(API boundary); F3/F4 counter-id-interfaces-policies attribution for the
-in-scope text paths (Design table + tests); F5 sibling contract (Design gate
-row + Q8); F6 functions-unit gate census (Design + test cell 4); F7 skew
-wording (Design + Q5); F8 corrected numbers (census + API citations).
-Sibling-order paragraph lands with the recorded #10490 agreement (see Design
-gate row + Q8); adjacent behavior is filed as #10530.
+(`agent://Rev10489PlanA`, `agent://Rev10489PlanB`); v2 fixed the core
+contracts. v3 folds the six adjudicated residuals: #10490-owned canary,
+explicit `showTestZone` disposition, bounded traffic wording, shared-map
+versus review-matrix ownership, #10530 REST/metrics parity, and corrected
+apply-result citations. The exact predicate names, 53-function/52-entry
+census, full-set input, counter attribution, and #10531 wire contract remain
+locked from v2.
 
 ## Issue framing
 
@@ -54,9 +52,12 @@ In scope: per-zone quarantine annotation on the 3 text zone-inventory paths
 (local CLI, gRPC text, and remote detail), so a quarantined zone can never
 again render as enforced on those text surfaces. Structured `GetZones` and
 REST `zonesHandler` are named gate exemptions deferred to #10531; remote
-brief follows that structured-wire boundary. Adjacent same-class surfaces
-(interfaces, screen, policy inventory, per-zone metrics, sessions/events)
-are explicitly dispositioned in Out of scope, not silently claimed.
+brief follows that structured-wire boundary. `showTestZone` is a separately
+named diagnostic obligation: its interface→zone line gets the shared
+quarantine qualification, while adjacent same-class inventory/telemetry
+surfaces remain behavior refinements in #10530 and are not silently claimed.
+Adjacent same-class surfaces (interfaces, screen, policy inventory, per-zone
+metrics, sessions/events) are explicitly dispositioned in Out of scope.
 
 Blast-radius census (measured, not asserted):
 
@@ -68,9 +69,9 @@ Blast-radius census (measured, not asserted):
 | Structured-schema owners | 2 | `proto/xpf/v1/xpf.proto:244` (`ZoneInfo`, current fields 1-17; #10531 contract fields 18-19); `pkg/api/types.go:107` (REST `ZoneInfo`) |
 | Show-gate families | 7 registered, 0 zone | `pkg/showaudit/surface_gate_6534_test.go:85` (port-mirroring, CoS, static-route, flow-server, static NAT, source NAT, destination NAT) |
 | Golden/agreement tests over the 5 zone render paths | 29 files | `grep -rl showZonesDisplay\|showZonesDetail\|zonesHandler\|GetZones(` over `pkg/**/*_test.go` (6 api + 11 cli + 12 grpcapi) |
-| Broader lexical `Security.Zones` candidate population | 39 raw loops across 26 files (CLI 15, gRPC 16, API 8); 38 non-test loops across 25 files enter the gate | Cross-lane scan by Eng10490, independently confirmed in-worktree (`grep -rn -E 'for .*range .*Security.Zones' pkg/cli pkg/grpcapi pkg/api cmd` → 39/26/CLI15); ONE loop in `apply_syslog_zonemap_3704_test.go:40` is excluded by `parsePackage` (`surface_gate_6534_test.go:493-495`). Lexical candidates, not confirmed renderers: the 38 non-test candidates include non-render helpers (if-zone maps, session/completion paths). The 3 in-scope text paths above are the confirmed #10489 behavior scope; structured handlers are explicit #10531 exemptions; the gate classifies FUNCTIONS (not loops) via annotation or `exemptRenderers` — see Design gate row. |
-| Planned gate function universe after #10490 F1 | 53 functions across 32 files; 52 `Unannotated` plus one permanent canary | Locked sibling contract: baseline 36 functions / 23 files after two global completion exemptions; adding `ZoneIDs` to `Collections` contributes 17 marginal functions from 19 loops (two overlaps: `grpcapi buildSessionFilter`, `api buildSessionView`). #10490 owns this census and lands the skeleton first; #10489 drains all 52 with exact predicates, then closes the row to nil. |
-| Consumers of this plan | 3 text paths | local CLI operators, gRPC text `show`, and remote-detail operators; structured automation is #10531 |
+| Broader lexical `Security.Zones` candidate population | 39 raw loops across 26 files (CLI 15, gRPC 16, API 8); 38 non-test loops across 25 files enter the gate | Cross-lane scan by Eng10490, independently confirmed in-worktree (`grep -rn -E 'for .*range .*Security.Zones' pkg/cli pkg/grpcapi pkg/api cmd` → 39/26/CLI15); ONE loop in `apply_syslog_zonemap_3704_test.go:40` is excluded by `parsePackage` (`surface_gate_6534_test.go:493-495`). Lexical candidates, not confirmed renderers: the 38 non-test candidates include non-render helpers (if-zone maps, session/completion paths). The 3 operator text paths plus the named showTestZone diagnostic are the confirmed #10489 behavior obligations; structured handlers are explicit #10531 exemptions; adjacent refinements remain #10530. |
+| Planned gate function universe after #10490 F1 | 53 functions across 32 files; 52 `Unannotated` plus the #10490-owned local `showZonesDisplay` canary | Locked sibling contract: baseline 36/23 after two global completion exemptions; adding `ZoneIDs` to `Collections` contributes 17 marginal functions from 19 loops (two overlaps: `grpcapi buildSessionFilter`, `api buildSessionView`). #10490 owns this census/skeleton and canary first; #10489 drains all 52 with exact predicates or reviewed reasons, then closes the row to nil. |
+| Consumers of this plan | 3 text paths plus showTestZone | local CLI operators, gRPC text `show`, remote-detail operators, and the interface→zone diagnostic; structured automation is #10531 |
 
 Value: closes the exact defect class #6534 exists for (builder knows,
 surface lies) on the zone family; delivers the observability PR #3837
@@ -127,14 +128,14 @@ in Test plan.
    the new shared helper (disposition in API). Any proto change requires
    `make proto` regen of checked-in `pkg/grpcapi/xpfv1/*.pb.go`
    (`Makefile:80-84`).
-
 ## Design
 
-**Recommended: config-derived per-zone annotation on 3 text paths implemented
-by 2 daemon renderer functions, with structured-wire truthfulness deferred to
-#10531.**
-This is a sequential two-PR close: #10490 lands the gate skeleton first;
-#10489 drains the text outputs and named exemptions second.
+**Recommended: config-derived per-zone annotation on the 3 text paths
+implemented by 2 daemon renderer functions, plus the named `showTestZone`
+diagnostic; structured-wire truthfulness is deferred to #10531.**
+This is a sequential two-PR close: #10490 lands the gate skeleton and owns
+the `showZonesDisplay` canary first; #10489 drains the text outputs, the
+`showTestZone` annotation, and named exemptions second.
 
 - New shared verdict/explanation helpers in `pkg/config` (locked exact
   #10490 spelling): `ZoneQuarantineExclusions(names)` is the builder
@@ -151,31 +152,37 @@ This is a sequential two-PR close: #10490 lands the gate skeleton first;
   `quarantinedZoneNames` (`zones.go:137-145`) and
   `quarantinedZoneNamesForConfig` (`zones_quarantine.go:228-236`) both build
   `names` from ALL cfg keys ("buildZoneSnapshots publishes exactly
-  cfg.Security.Zones", `zones.go:133-136`), as does
+  `cfg.Security.Zones`", `zones.go:133-136`), as does
   `policymatch.quarantinedZoneNames` (`policymatch.go:1627-1631`).
   Filtered detail (`show security zones z214 detail`) therefore still marks:
   the filter selects from an already-verdict-annotated set. Filter=survivor
   renders the survivor unmarked (it IS enforced); the collision record stays
   visible on the quarantined name only — no cross-annotation.
-- Remote detail is not a sixth renderer: `cmd/cli/show.go:508-511` routes
+- Remote detail is not a sixth renderer: `cmd/cli/show.go:508-517` routes
   `show security zones detail` through `server_show.go:165` to
   `showZonesDetail:44-47`; the full-set server verdict therefore covers it.
   Remote brief uses the structured `GetZones` state and never recomputes the
   verdict client-side.
 - Attribution table (F3/F4 fix): for a QUARANTINED zone, per surface —
   marker, id line, counters+availability, interfaces, policies. The survivor
-  renders byte-identical to today (silent default, Q6).
+  renders byte-identically to today (silent default, Q6).
   | Surface | Marker | Zone-ID line | Counters + availability | Interfaces | Policies |
   |---|---|---|---|---|---|
   | Local CLI brief/detail (`cli_show_security_zones.go`) | `QUARANTINED (id <n> collides with "<survivor>")` + degraded note (detail: full block) | id kept, qualified: `Zone ID: <n> (collides with "<survivor>" — not installed)` | traffic block REPLACED by a shared quarantined-counters line (never the survivor's live numbers) | authored list kept, header qualified `(unzoned at runtime — quarantined)`; per-interface detail unchanged | `ZoneDetailPolicySummary` output prefixed with a `(policies referencing this zone are scrubbed at runtime — quarantined)` header line |
   | gRPC structured `GetZones` | DEFERRED — explicit `exemptRenderers` entry: `deferred to #10531 — gRPC GetZones structured-wire quarantine enum/presence and counter truthfulness` | no #10489 change | no #10489 change | no #10489 change | n/a |
   | gRPC text `zones-detail` | same text as local CLI | same qualification | same replacement line (shared const) | same qualification | refs (`server_show_zones_text.go:151-172`) + summary (`:229`) get the same scrubbed-header line |
   | REST `/security/zones` | DEFERRED — explicit `exemptRenderers` entry: `deferred to #10531 — REST zonesHandler structured-wire quarantine presence and counter truthfulness` | no #10489 change | no #10489 change | no #10489 change | n/a |
-  | Remote CLI brief/detail | brief DEFERRED with structured `GetZones` until #10531; detail inherits the gRPC text marker | detail wire id rendered with `(collides … — not installed)` qualification | brief deferred; detail same replacement line | detail wire list gets runtime-unzoned qualification | brief policy refs remain coupled to #10531; detail inherits gRPC text policy annotation; `/security/policies` inventory remains #10530 follow-up |
-  Rationale: the id is a stable pure function of the name (still TRUE, so kept
-  and qualified); counters/interfaces/policies describe RUNTIME state the
-  quarantine revoked (so replaced/qualified, never survivor-aliased, never
-  silently listed). UNKNOWN-state rendering is specified in API, not here.
+  | Remote CLI brief/detail | brief DEFERRED with structured `GetZones` until #10531; detail is opaque `ShowTextResponse.Output` and inherits every gRPC text column | detail inherits server text id qualification; no client wire-id rendering | brief deferred; detail inherits server text replacement line | detail inherits server text interface qualification | after #10531 state=YES, brief `GetPolicies` refs prepend the scrubbed-at-runtime header; detail inherits gRPC text policy annotation; `/security/policies` inventory remains #10530 refinement |
+  Auxiliary zone-output obligation: `showTestZone` (`server_show_zones_text.go:242-349`)
+  must apply the shared reason helper to its interface→zone diagnostic. A
+  quarantined match says the interface belongs to the quarantined zone and
+  includes the survivor/id plus the same shared qualification; ordinary
+  matches remain byte-identical. (The server-side loop and diagnostic are
+  real output, not a pure helper.)
+  Rationale: the id is a stable pure function of the name (still TRUE, so
+  kept and qualified); counters/interfaces/policies describe runtime state
+  the quarantine revoked, and the shared annotation makes the disposition
+  explicit. UNKNOWN-state rendering is specified in API, not here.
 - Why config-derived recompute instead of reading `m.lastZoneIDCollisions`
   via `Status()`: (a) the local CLI runs with `dp == nil` (all detail tests
   construct `&CLI{store: store}`) and must annotate without a dataplane;
@@ -186,53 +193,57 @@ This is a sequential two-PR close: #10490 lands the gate skeleton first;
 - Divergence guard (the #3643 skew class, F7 fix): option (b) (suppress the
   active-config marker when `applyResult()` is nil/stale) is DROPPED — it
   contradicts the dp-nil contract (`pkg/cli/cli.go:238-243`,
-  `pkg/dataplane/apply_result.go:5-10`, `pkg/api/api.go:117-120`). Decided:
+  `pkg/grpcapi/apply_result.go:5-10`, `pkg/api/api.go:117-120`). Decided:
   (a) annotate from active config unconditionally, plus a #5067-style drift
   banner (`printFirewallEffectiveBanner` precedent,
   `cli_show_security_filters.go:355-387`) ONLY when an applied result exists:
   compare `keys(cfg.Security.Zones)` against `keys(cr.ZoneIDs)` (the
-  applied-set key source at `pkg/cli/apply.go:118-119`). When they differ,
-  render `note: zone inventory differs from last applied result — quarantine
-  verdict per active configuration`. With no `cr` baseline (dp-nil), omit
-  only that note; never suppress the marker/attribution. The applied-set
-  refinement (verdict over `keys(cr.ZoneIDs)`) stays future work.
-- **Sibling gate contract (locked with Eng10490, v2):** #10490 lands FIRST;
+  applied-set key source at `pkg/dataplane/apply.go:118-119`). When they
+  differ, render `note: zone inventory differs from last applied result —
+  quarantine annotation follows active configuration`. This is an inventory
+  freshness note, NOT an applied-quarantine verdict: `assignZoneIDs` places
+  both colliding names in `cr.ZoneIDs` (`pkg/dataplane/compiler.go:355-358`).
+  With no `cr` baseline (dp-nil), omit only that note; never suppress the
+  marker/attribution.
+- **Sibling gate contract (locked with Eng10490, v3):** #10490 lands FIRST;
   a single combined PR is rejected. It owns predicate names, the zone-family
-  row, and the census; #10489 owns the 3 text paths using the exact names
-  above, with `GetZones` and `zonesHandler` explicitly exempted to #10531.
-  Its skeleton adds both helpers (each delegating to the SSOT), switches the
-  three builderPkg sites to `ZoneQuarantineExclusions`, and registers:
+  row, the census mechanics, and the permanent `showZonesDisplay` canary;
+  #10489 uses the exact names below and drains the non-nil `Unannotated`
+  list. Its skeleton adds both helpers (each delegating to the SSOT),
+  switches the three builderPkg sites to `ZoneQuarantineExclusions`, and
+  registers:
   `Name: "security zone"`;
   `Collections: ["Security.Zones", "ZoneIDs"]`;
   `BuilderPredicates: ["ZoneQuarantineExclusions"]`;
   `SurfacePredicates: ["ZoneQuarantineExclusions", "ZoneQuarantineExcludedReason"]`;
   `Unannotated: [52 exact entries]`;
   `Successor: "#10489"`.
-  The one permanent canary is local-CLI `showZonesDisplay` (primary text
-  inventory); this satisfies the gate's not-all-unannotated floor while the
-  other 52 functions remain explicitly tracked. Gate green is required at
-  each step; #10490's two global completion exemptions apply, with no new
-  broad exemptions. The function universe is 53 functions / 32 files:
+  The one permanent canary is local-CLI `showZonesDisplay`, annotated by
+  #10490 and excluded from #10489's annotation set; the other 52 functions
+  remain explicitly tracked. Gate green is required at each step, with no
+  new broad exemptions. The function universe is 53 functions / 32 files:
   baseline 36/23 plus 17 marginal functions from 19 `ZoneIDs` loops (two
   overlaps: `grpcapi buildSessionFilter`, `api buildSessionView`).
-  #10489 then annotates the two daemon renderer implementations
-  (`showZonesDisplay`, `showZonesDetail`), records the remote-detail route,
-  and drains all 52 with exact predicates/reasons before closing
-  `Unannotated` to nil.
- **Gate-only drain versus behavior scope (binding):** the 3 text paths are
-  the only #10489 behavior obligations. After the two in-gate renderer
-  implementations are annotated (remote detail reuses `showZonesDetail`;
-  remote client is outside `surfacePkgs`), every remaining census entry is
-  handled by an exact per-function `exemptRenderers` reason: concrete helper
-  role, adjacent output `deferred to #10530 — <surface/function>`, or exactly
-  `GetZones`/`zonesHandler` `deferred to #10531 — <surface/function>`.
-  There are NO package-wide exemptions. Adjacent wording makes ZERO claim
-  that the function cannot render enforcement state; structured wording makes
-  ZERO claim that the handler currently emits truthful state.
-  `TestExemptionsNameRealRenderers6534` guards the boundary. Only after all
-  52 entries are predicate-reached or explicitly reasoned-exempt does the
-  row close `Unannotated` to nil. This is a gate census drain, not expansion
-  of #10489's runtime/show behavior scope.
+  #10489 annotates `showZonesDetail` and the named `showTestZone` diagnostic,
+  records the remote-detail route, and drains the remaining 52 with exact
+  predicates/reasons before closing `Unannotated` to nil.
+- **Gate-only drain versus behavior scope (binding):** the 5 output paths
+  are the only inventory behavior obligations. After #10490 annotates the
+  local canary and #10489 annotates `showZonesDetail` plus `showTestZone`
+  (the remote client is outside `surfacePkgs` and inherits server text),
+  every remaining census entry is handled by an exact per-function
+  `exemptRenderers` reason tied to an adjacent refinement #10530 or a
+  concrete non-output/helper role. `GetZones` and `zonesHandler` are the
+  only structured-wire exceptions and use exact
+  `deferred to #10531 — <surface/function>` reasons. There are NO
+  package-wide exemptions. The shared `showaudit.exemptRenderers` map is
+  the actual mechanism; this plan's per-function matrix records how each
+  shared-map entry is applied, not a new row-local map. The row closes
+  `Unannotated` only after all 52 entries are predicate-reached or
+  explicitly reasoned-exempt. `TestExemptionsNameRealRenderers6534`
+  proves only that exemption keys name existing functions
+  (`surface_gate_6534_test.go:424-445`); reviewed per-function reasons,
+  not that existence check, control the semantic boundary.
 
 **Considered and rejected:**
 
@@ -266,10 +277,15 @@ This is a sequential two-PR close: #10490 lands the gate skeleton first;
   claim clean; quarantine skew is the un-upgraded HA peer case
   (`zoneid.go:208-210`).
 - #10489 text contract (local CLI + gRPC text + remote detail):
-  `QUARANTINED (id <n> collides with "<survivor>") — dropped from dataplane,
-  interfaces unzoned, traffic denied; zone isolation DEGRADED until one zone
-  is renamed`. Detail adds the full attribution table; the shared const/
-  format helper keeps all three text surfaces identical (#6895 lesson).
+  `QUARANTINED (id <n> collides with "<survivor>") — snapshot construction omits
+  the quarantined zone and clears its interface zone references; ordinary
+  zone-directed traffic then has no matching zone policy (default-deny);
+  zone isolation is DEGRADED until one zone is renamed`.
+  Host-bound lifeline traffic remains on the kernel path
+  (`zones_quarantine.go:83-107`, #3682), and egress identity resolution keeps
+  the surviving zone rather than blanking `EgressZone` (#6722). Detail adds
+  the full attribution table; the shared const/format helper keeps all three
+  text surfaces identical (#6895 lesson).
 - UNKNOWN is not a local/gRPC render state because those servers compute from
   active config; they render the explicit quarantine marker, never clean.
   Remote brief is deferred with `GetZones` until #10531, so #10489 makes no
@@ -295,14 +311,14 @@ This is a sequential two-PR close: #10490 lands the gate skeleton first;
    re-derived per surface (#7473 composition rule).
 3. On each of the 3 in-scope text paths (local CLI, gRPC text, remote
    detail), a quarantined zone renders as NOT enforced (marker + qualified
-   id/counters/interfaces/policies per the attribution table); a surviving
-   zone renders as enforced with no quarantine marker (signal direction
-   pinned by fail-on-revert tests). `GetZones`, `zonesHandler`, and remote
-   brief are explicitly deferred to #10531 and claim no #10489 wire behavior.
-4. dp-nil renderers annotate identically to dp-loaded ones for marker,
-   qualified id, counters, interfaces, and policy attribution (verdict is
-   config-derived; no `Status()` round trip). The drift note is omitted only
-   when there is no applied-result baseline to compare.
+   id/counters/interfaces/policies per the attribution table); the named
+   `showTestZone` diagnostic also qualifies a quarantined interface match. A
+   surviving zone renders as enforced with no quarantine marker (signal
+   direction pinned by fail-on-revert tests). `GetZones`, `zonesHandler`, and
+   remote brief are explicitly deferred to #10531 and claim no #10489 wire
+   behavior.
+4. dp-nil renderers annotate identically to dp-loaded ones (verdict is
+   config-derived; no `Status()` round trip on the render path).
 5. HA symmetry: identical configs render identical annotations on both
    nodes (pure function of the name set; no node-local state).
 6. The #10489 text path has no false-clean skew default: its verdict is
@@ -359,7 +375,7 @@ No test files are modified in this plan round. Implementation PR must carry:
    topology: local CLI `showZonesDisplay(filter=z214)` and gRPC text
    `showZonesDetail(filter=z214)` STILL mark `z214`; `filter=z174` leaves the
    survivor unmarked; unfiltered output is unchanged. Remote detail follows
-   the gRPC text path (`cmd/cli/show.go:508-511` → `server_show.go:165` →
+   the gRPC text path (`cmd/cli/show.go:508-517` → `server_show.go:165` →
    `showZonesDetail:44-47`). Every `z214` block pins qualified id line,
    generic/degraded traffic wording (no survivor live numbers), qualified
    interfaces header, and scrubbed-policy header. Reverting any renderer
@@ -368,7 +384,9 @@ No test files are modified in this plan round. Implementation PR must carry:
    brief is explicitly DEFERRED because it consumes structured `GetZones`
    data that remains absent until #10531. The #10489 test must not fake
    `quarantine_state` on an unmodified `GetZonesResponse`; #10531 owns the
-   `UNKNOWN/NO/YES` structured-wire and old-server/old-client cells.
+   `UNKNOWN/NO/YES` structured-wire and old-server/old-client cells. Once
+   state=YES exists, remote `GetPolicies` references in each zone block
+   carry the same scrubbed-at-runtime qualification as local/gRPC text.
 3. **Structured-handler exemption cell:** gate `exemptRenderers` carries
    exact per-entry rationale for `GetZones` and `zonesHandler`: “deferred to
    #10531 — structured-wire quarantine enum/presence and counter
@@ -379,22 +397,26 @@ No test files are modified in this plan round. Implementation PR must carry:
 4. **Show-gate census cell:** the raw `Security.Zones` population is
    classified exactly as 39 loops across 26 files (CLI 15, gRPC 16, API 8),
    including 1 test loop; the non-test count is 38 loops across 25 files.
-   Eng10490's gate skeleton records 53 functions across 32 files with 52
-   `Unannotated` entries plus the permanent local `showZonesDisplay`
-   canary. #10489 annotates the 2 daemon renderer implementations
-   (`showZonesDisplay`, `showZonesDetail`; remote detail reuses the latter)
-   and gives every remaining entry an exact `exemptRenderers` reason:
-   concrete helper role; `deferred to #10530 — <surface/function>` for an
-   adjacent output; or `deferred to #10531 — <surface/function>` for exactly
-   `GetZones`/`zonesHandler`.
-   `TestExemptionsNameRealRenderers6534`,
-   `TestEveryBuilderDropPredicateIsRegistered6534`, and
-   `TestSurfaceAnnotationCensusIsExact6534` are green; only then does
+   Eng10490's skeleton records 53 functions across 32 files with 52
+   `Unannotated` entries; it owns and annotates the permanent
+   `showZonesDisplay` canary. #10489 annotates `showZonesDetail` and
+   `showTestZone` (`server_show_zones_text.go:242-349`; this is a real
+   diagnostic output, not a pure helper), records the remote-detail route,
+   and gives every other entry an exact `exemptRenderers` reason: concrete
+   helper role; `deferred to #10530 — <surface/function>` for an adjacent
+   refinement; or `deferred to #10531 — <surface/function>` for exactly
+   `GetZones`/`zonesHandler`. `TestExemptionsNameRealRenderers6534`
+   proves only that exemption keys name existing functions
+   (`surface_gate_6534_test.go:424-445`); reviewed per-function reasons
+   control the semantic boundary. `TestEveryBuilderDropPredicateIsRegistered6534`
+   and `TestSurfaceAnnotationCensusIsExact6534` are green; only then does
    `Unannotated` close to nil.
 5. **No-false-positive cell:** `{"trust","untrust","dmz"}` renders zero
-   markers on local CLI, gRPC text, and remote detail AND byte-identical
-   counters/ids to today (extends `TestQuarantinedZoneNamesNoFalsePositive`
-   to the text layer with survivor attribution pins — the F4 mirror).
+   markers on local CLI, gRPC text, and remote detail; `showTestZone`
+   remains byte-identical for ordinary interface matches; counters/ids stay
+   byte-identical to today (extends
+   `TestQuarantinedZoneNamesNoFalsePositive` to the text layer with
+   survivor attribution pins — the F4 mirror).
 6. **Scoped parity gates:** focused tests over the 29 related files
    (6 API, 11 CLI, 12 gRPC) plus `pkg/showaudit`, `pkg/config`, and
    `pkg/policymatch`; byte-drift triage for text goldens; dedicated dp-nil
@@ -403,15 +425,19 @@ No test files are modified in this plan round. Implementation PR must carry:
    baseline exists); HA-symmetry cell (identical configs → identical text);
    active-vs-applied skew cell asserting the drift banner fires exactly when
    an applied result exists and active config keys differ from `cr.ZoneIDs`.
-   `make proto` only in #10531 when its wire fields land.
-7. **Re-measure commands (acceptance evidence):** the new verdict helper
-   appears in both daemon renderer implementations
-   (`showZonesDisplay`, `showZonesDetail`) consuming FULL pre-filter key
-   sets (remote detail is the `showZonesDetail` path; assert the call-site
-   input, not just helper presence); structured handlers are present only in
-   the named #10531 exemptions; no renderer reads manager-local
-   `ProcessStatus.ZoneIDCollisions` directly (that grep stays
-   producer/gauge-only by design).
+   The #10530 refinement must preserve
+   `TestZoneUnpopulatedGaugeMatchesRESTAvailability`
+   (`pkg/api/zone_counters_metrics_test.go:320-388`): the gauge counts
+   exactly the zones REST reports with
+   `per_zone_counters_available:false`. `make proto` only in #10531 when
+   its wire fields land.
+7. **Re-measure commands (acceptance evidence):** the shared reason helper
+   appears in `showZonesDetail` and `showTestZone`; `showZonesDisplay` is
+   the #10490-owned canary, and remote detail is the `showZonesDetail` path.
+   Assert FULL pre-filter key-set input, not just helper presence; structured
+   handlers are present only in the named #10531 exemptions; no renderer
+   reads manager-local `ProcessStatus.ZoneIDCollisions` directly (that grep
+   stays producer/gauge-only by design).
 
 ## Out of scope
 
@@ -434,7 +460,13 @@ No test files are modified in this plan round. Implementation PR must carry:
   (`session_filter.go:385`, `server_sessions.go:531`, `sessions.go:1258`).
   The gate gives each adjacent output an exact
   `deferred to #10530 — <surface/function>` rationale and makes no claim it
-  cannot emit state. Invariant 3 explicitly excludes them.
+  cannot emit state. Invariant 3 explicitly excludes their behavior.
+  #10530 also owns the REST/metrics parity decision pinned by
+  `TestZoneUnpopulatedGaugeMatchesRESTAvailability`
+  (`pkg/api/zone_counters_metrics_test.go:320-388`): its metric disposition
+  must count exactly the zones REST reports with
+  `per_zone_counters_available:false`; #10531 wire work must coordinate with
+  that decision.
 - Structured `GetZones` and `zonesHandler` are explicitly deferred to filed
   follow-up #10531 (enum/presence and counter truthfulness); the gate gives
   each the exact `deferred to #10531 — <surface/function>` rationale. This is
@@ -448,13 +480,14 @@ No test files are modified in this plan round. Implementation PR must carry:
   census above).
 - Old-helper / pre-#3075 persisted-config migration behavior.
 
-## Open questions (resolved in v2)
+## Open questions (resolved in v3)
 
 1. **Single PR or split? CLOSED: sequential campaign.** A single PR is
-   rejected. #10490 lands the gate predicate names, row, and census first;
-   #10489 then drains the three text output paths and exact exemptions;
-   #10530 and #10531 remain the filed adjacent-surface and structured-wire
-   follow-ups.
+   rejected. #10490 lands the gate predicate names, row, census, and
+   `showZonesDisplay` canary first; #10489 then drains the 52-entry
+   `Unannotated` list, annotates `showZonesDetail`/`showTestZone`, and
+   records exact exemptions. #10530 and #10531 remain the filed adjacent
+   refinement and structured-wire follow-ups.
 2. **Bool vs enum on the wire? CLOSED: enum in #10531.**
    `ZoneQuarantineState` UNKNOWN=0/NO/YES at 18 plus survivor string at 19;
    REST presence-typed with absent=UNKNOWN. Decisive: `xpf.proto:220-230` +
@@ -464,10 +497,10 @@ No test files are modified in this plan round. Implementation PR must carry:
    withdrawn.
 3. **Gate-row landing shape? CLOSED: exact two-step drain.** Eng10490's
    skeleton records 53 functions across 32 files, with 52 `Unannotated`
-   entries and the permanent local `showZonesDisplay` canary; #10489
-   annotates its three output paths and exact exemptions, then closes
-   `Unannotated` to nil only after `TestExemptionsNameRealRenderers6534`
-   and the census tests pass.
+   entries and the permanent local `showZonesDisplay` canary annotated by
+   Eng10490. #10489 annotates `showZonesDetail` and `showTestZone`, then
+   closes `Unannotated` to nil only after
+   `TestExemptionsNameRealRenderers6534` and the census tests pass.
 4. **Predicate alias vs regex widening? CLOSED: exact aliases.**
    `ZoneQuarantineExclusions(names)` and
    `ZoneQuarantineExcludedReason(name,cfg)` are the locked names; builder
@@ -476,31 +509,42 @@ No test files are modified in this plan round. Implementation PR must carry:
 5. **Skew wording? CLOSED: active-config verdict + conditional drift
    banner.** Suppression when `applyResult()` is nil/stale is dropped because
    dp-nil implies nil (`pkg/cli/cli.go:238-243`,
-   `pkg/dataplane/apply_result.go:5-10`, `pkg/api/api.go:117-120`):
+   `pkg/grpcapi/apply_result.go:5-10`, `pkg/api/api.go:117-120`):
    the marker/attribution still renders. When an applied result exists,
-   compare `keys(cfg.Security.Zones)` with `keys(cr.ZoneIDs)` and use the
-   #5067 banner precedent (`cli_show_security_filters.go:355-387`); when no
-   applied baseline exists, omit only the note. #10489 makes no
+   compare `keys(cfg.Security.Zones)` with `keys(cr.ZoneIDs)` (applied-set
+   source `pkg/dataplane/apply.go:118-119`) only for an inventory-freshness
+   note; `assignZoneIDs` puts both colliders in that map
+   (`pkg/dataplane/compiler.go:355-358`), so it is never a quarantine verdict.
+   Use the #5067 banner precedent (`cli_show_security_filters.go:355-387`);
+   when no applied baseline exists, omit only the note. #10489 makes no
    structured-wire skew claim, which belongs to #10531.
-6. **Survivor-side note? CLOSED: silent default.** The survivor renders
-   byte-identically to today; the collision id is audit-visible only on the
-   quarantined text block and existing one-shot alarm
+6. **Survivor-side note? CLOSED: silent default.**
+   The survivor renders byte-identically to today; the collision id is
+   audit-visible only on the quarantined text block and existing one-shot alarm
    (`ZoneIDCollision.String()` names both).
 7. **Text spelling SSOT location? CLOSED: `pkg/config`.** One shared const/
    format helper next to the verdict (the #6895 `UnavailableLineFor`
-   precedent) serves local CLI, gRPC text, and remote detail. Direct
-   `String()` reuse is blocked by import direction (userspace → config).
+   precedent) serves local CLI, gRPC text, remote detail, and showTestZone.
+   Direct `String()` reuse is blocked by import direction (userspace → config).
 8. **Eng10490 boundary? CLOSED and locked.** Eng10490 owns predicate names,
-   the zone-family row, the 53-function census, and gate skeleton; #10489
-   uses those exact names for its three text paths and drains every remaining
-   entry with a concrete helper reason, `deferred to #10530 — <surface/function>`
-   for adjacent output, or `deferred to #10531 — <surface/function>` for
-   exactly `GetZones`/`zonesHandler`. Lower issue #10490 lands first; no
-   unilateral renaming or gate-mechanics edit.
-9. **Candidate classification ownership? CLOSED: row-local reasons.** The
-   corrected lexical population is 39 raw loops across 26 files (CLI 15,
-   gRPC 16, API 8), including 1 test loop; 38 non-test loops across 25
-   files. The generic scanner stays generic; the family row carries exact
-   per-function reasons. No broad package exemption, and `Unannotated`
-   closes to nil only after all 52 entries are predicate-covered or
-   reasoned exempt.
+   the zone-family row, the 53-function census, gate mechanics, and the
+   `showZonesDisplay` canary. #10489 uses those exact names, drains the
+   remaining 52, annotates `showZonesDetail` and `showTestZone`, and records
+   `deferred to #10530 — <surface/function>` for adjacent behavior refinement
+   or `deferred to #10531 — <surface/function>` for exactly
+   `GetZones`/`zonesHandler`. Lower issue #10490 lands first; no unilateral
+   renaming or gate-mechanics edit.
+9. **Candidate classification ownership? CLOSED: shared map plus review
+   matrix.** `showaudit.exemptRenderers` is the shared global mechanics map;
+   #10490 owns its structure and completion exemptions, while #10489's
+   per-function matrix records the reviewed application of each key. Pure
+   no-output/helper entries may use a concrete helper reason; adjacent
+   behavior refinements use #10530; only the two structured handlers use
+   #10531. No family-local map or package-wide exemption is introduced.
+10. **showTestZone disposition? CLOSED: annotate.** Its server-side loop
+    (`server_show_zones_text.go:306-344`) emits an interface→zone membership
+    diagnostic, so exempting it would leave an operator-facing zone value
+    unqualified. The shared reason helper adds the survivor/id quarantine
+    qualification; ordinary membership and host-inbound output remain
+    unchanged. This is a named diagnostic obligation, not a new inventory
+    surface.
