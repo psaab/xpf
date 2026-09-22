@@ -1,6 +1,10 @@
 package nftables
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/google/nftables/expr"
+)
 
 // netlink_mutation_test.go proves the parity comparison is MUTATION-SENSITIVE
 // (#6387 §12.1): a deliberately widened set, a dropped `saddr !=` subtraction, a
@@ -18,8 +22,36 @@ func mutBuild(t *testing.T, build func(p *nlPlan)) string {
 	build(p)
 	if p.err != nil {
 		t.Fatalf("build error: %v", p.err)
+
 	}
 	return canonRules(p)
+}
+
+// TestJunosHostIKEAcceptDeleted10524 is the pure-netlink Cell 1 pin. With an
+// application-any deny and coarse IKE admission, the jump emitter must queue
+// only the fine-chain jump: an IKE ACCEPT ahead of it would terminally bypass
+// the fine chain. Restoring the old netlink shield makes this fail with two
+// rules and an ACCEPT verdict in the first rule.
+func TestJunosHostIKEAcceptDeleted10524(t *testing.T) {
+	p := newBuildPlan(t, "xpf_10524", hostInboundPriority)
+	emitJunosHostProgramJumpNetlink(p, 0, JunosHostProgram{
+		Zone:                  "untrust",
+		IngressIfnames:        []string{"ge-0-0-1"},
+		HasApplicationAnyDeny: true,
+		CoarseAdmitsIKE:       true,
+		IKEExemptNetdevs:      []string{"ge-0-0-1"},
+	})
+	if p.err != nil {
+		t.Fatalf("build error: %v", p.err)
+	}
+	if len(p.rules) != 1 {
+		t.Fatalf("#10524 netlink jump must queue one rule (no IKE accept), got %d:\n%s",
+			len(p.rules), canonRules(p))
+	}
+	v, ok := p.rules[0][len(p.rules[0])-1].(*expr.Verdict)
+	if !ok || v.Kind != expr.VerdictJump {
+		t.Fatalf("#10524 netlink first rule verdict = %#v, want jump", p.rules[0][len(p.rules[0])-1])
+	}
 }
 
 func TestMutationSensitivity(t *testing.T) {

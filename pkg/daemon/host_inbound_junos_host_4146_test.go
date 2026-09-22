@@ -242,9 +242,11 @@ func TestJunosHostPermitRendersAReturnAheadOfTheDeny9504(t *testing.T) {
 	}
 }
 
-// TestJunosHostDenyIKEExemption proves the fine-eligible-L4 domain: an
-// `application any` deny in an ike-admitting zone emits the IKE 500/4500
-// exemption shield ahead of the drop (so coarse-admitted IKE survives).
+// TestJunosHostDenyIKEExemption is the #10524 three-cell regression:
+// (1) no terminal IKE accept may render ahead of the fine jump,
+// (2) BAD udp/500 is denied by the application-any fine DROP, and
+// (3) a GOOD source still reaches the coarse IKE admit after the subchain
+// returns. The old shield-order assertion was a pin of the bug, not parity.
 func TestJunosHostDenyIKEExemption(t *testing.T) {
 	cfg := junosHostDenyTestConfig()
 	cfg.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ike"}
@@ -256,14 +258,59 @@ func TestJunosHostDenyIKEExemption(t *testing.T) {
 	if len(programs) != 1 || !programs[0].CoarseAdmitsIKE {
 		t.Fatalf("expected 1 program with CoarseAdmitsIKE, got %+v", programs)
 	}
-	shield := `iifname "ge-0-0-1" udp dport { 500, 4500 } accept`
+	// Cell 1: #10524 deletes the IKE accept; it must not precede the jump.
+	if strings.Contains(strings.Join(junosHostSection(payload), "\n"),
+		"udp dport { 500, 4500 } accept") {
+		t.Fatalf("IKE accept rendered in the fine window ahead of the jump:\n%s", payload)
+	}
+	jump := `iifname "ge-0-0-1" jump ` + xnft.HostInboundJunosHostChainName(0, "untrust")
+	if !strings.Contains(payload, jump) {
+		t.Fatalf("payload missing fine jump %q:\n%s", jump, payload)
+	}
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	// The shield must precede the JUMP: once the packet is in the subchain the
-	// drop is unconditional for that source, so a shield after it never runs.
-	assertOrder(t, payload, shield, `iifname "ge-0-0-1" jump `+xnft.HostInboundJunosHostChainName(0, "untrust"))
 	drop := `meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
 	if !strings.Contains(payload, drop) {
 		t.Fatalf("payload missing the junos-host drop %q:\n%s", drop, payload)
+	}
+	// Cell 2: first-match walk through the rendered input window and jumped
+	// subchain denies BAD udp/500. This independently detects a restored
+	// terminal ACCEPT; it does not inspect the projection in isolation.
+	if got := junosHostInputIKEWalk(payload, "10.0.0.5"); got != "drop" {
+		t.Fatalf("#10524: BAD udp/500 walk = %q, want drop", got)
+	}
+	// Cell 3 safety: a source not covered by the deny returns from the subchain,
+	// then remains admitted by the coarse IKE gate below the fine window.
+	if got := junosHostInputIKEWalk(payload, "10.0.0.6"); got != "accept" {
+		t.Fatalf("non-denied IKE walk = %q, want coarse accept", got)
+	}
+	coarse := strings.Index(payload, "udp dport { 500, 4500 } accept")
+	jumpAt := strings.Index(payload, jump)
+	if coarse < 0 || jumpAt < 0 || coarse <= jumpAt {
+		t.Fatalf("coarse IKE admit must remain below the fine jump (jump=%d coarse=%d):\n%s",
+			jumpAt, coarse, payload)
+	}
+}
+
+// TestJunosHostDenyIKEWalk10524 is the independent Cell 2 pin. It exercises
+// the rendered input-window/subchain first-match walker without Cell 1's
+// no-shield assertion, so restoring the old terminal IKE ACCEPT alone flips
+// this test from DROP to ACCEPT.
+func TestJunosHostDenyIKEWalk10524(t *testing.T) {
+	cfg := junosHostDenyTestConfig()
+	cfg.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ike"}
+	cfg.Security.Policies = []*config.ZonePairPolicies{
+		{FromZone: "untrust", ToZone: "junos-host",
+			Policies: zonePairDeny("untrust", "block-bad", "src:bad-host", "app:any")},
+	}
+	payload, programs := junosHostPayload(t, cfg)
+	if len(programs) != 1 {
+		t.Fatalf("want one junos-host program, got %d", len(programs))
+	}
+	if got := junosHostInputIKEWalk(payload, "10.0.0.5"); got != "drop" {
+		t.Fatalf("BAD udp/500 first-match walk = %q, want drop", got)
+	}
+	if got := junosHostInputIKEWalk(payload, "10.0.0.6"); got != "accept" {
+		t.Fatalf("GOOD udp/500 first-match walk = %q, want coarse accept", got)
 	}
 }
 
@@ -496,17 +543,11 @@ func TestJunosHostNftMatchesRustOracle(t *testing.T) {
 	}
 }
 
-// TestJunosHostExemptTupleParity documents the fine-eligible-L4 exemptions as
-// parity cells the naive `policymatch.Match` oracle CANNOT express. For an
-// IKE-admitting / ident-resetting zone, a `match source BAD application any then
-// deny` STILL admits BAD's IKE (udp 500/4500) and STILL RSTs BAD's ident (tcp
-// 113) — because the Rust IPsec-passthrough / ident-reset stages run BEFORE the
-// fine junos-host policy (Stage 11 returns pre-fine; ident-reset is a coarse
-// terminal). The pure-fine oracle returns DENY for those tuples (it models only
-// the fine layer), so the kernel nft ADMIT/RST is FAITHFUL to the Rust runtime,
-// NOT a divergence — the exemption shields the codegen emits ahead of the jump
-// into the zone's subchain encode exactly that pre-fine behaviour. Only the
-// fine-eligible tuples (e.g. tcp/22) are actually dropped.
+// TestJunosHostExemptTupleParity is the #10524 parity rework. The old test
+// declared the IKE shield "not a bug", but that terminal accept was exactly the
+// explicit-deny bypass under review. IKE now reaches the fine application-any
+// DROP, while ident-reset retains its terminal RST because reject cannot
+// re-admit traffic. Fine-eligible tcp/22 remains denied.
 func TestJunosHostExemptTupleParity(t *testing.T) {
 	mkPayload := func(svc string) (string, dpuserspace.JunosHostProgram) {
 		cfg := junosHostDenyTestConfig()
@@ -523,8 +564,8 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 	}
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
 
-	// oracle: the pure-fine junos-host semantics DENY BAD on every app (incl. the
-	// exempt tuples) — but that is NOT what the runtime does for IKE/ident.
+	// The pure-fine junos-host semantics DENY BAD on every app. This is now also
+	// the kernel result for IKE; ident remains a coarse RST by explicit design.
 	oracleDenies := func(proto string, port int) bool {
 		res := policymatch.Match(junosHostDenyTestConfig4146Oracle(), policymatch.Query{
 			FromZone: "untrust", ToZone: policymatch.JunosHostZone,
@@ -534,25 +575,25 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 		return res.Matched && res.Action == config.PolicyDeny
 	}
 
-	t.Run("IKE 500/4500 admitted despite deny (Stage-11 pre-fine)", func(t *testing.T) {
+	t.Run("IKE 500/4500 fine deny governs (#10524)", func(t *testing.T) {
 		payload, p := mkPayload("ike")
 		if !p.CoarseAdmitsIKE {
 			t.Fatal("zone should coarse-admit ike")
 		}
-		// The IKE shield precedes the application-any drop, so BAD's 500/4500 is
-		// admitted before the drop can silence it.
-		assertOrder(t, payload,
-			`iifname "ge-0-0-1" udp dport { 500, 4500 } accept`,
-			`iifname "ge-0-0-1" jump `+xnft.HostInboundJunosHostChainName(0, "untrust"),
-		)
-		// The naive fine oracle would DENY BAD's 500 — nft's admit is the faithful
-		// runtime behaviour, not a bug.
-		if !oracleDenies("udp", 500) {
-			t.Fatal("sanity: the pure-fine oracle should DENY BAD's udp/500 (documents the intended nft divergence)")
+		if strings.Contains(strings.Join(junosHostSection(payload), "\n"),
+			"udp dport { 500, 4500 } accept") {
+			t.Fatalf("#10524 IKE shield must be deleted from the fine window:\n%s", payload)
+		}
+		if !oracleDenies("udp", 500) || !junosHostProgramDrops(p, net.ParseIP("10.0.0.5")) {
+			t.Fatal("BAD udp/500 must be denied by the fine application-any rule")
+		}
+		jump := `iifname "ge-0-0-1" jump ` + xnft.HostInboundJunosHostChainName(0, "untrust")
+		if coarse := strings.Index(payload, "udp dport { 500, 4500 } accept"); coarse <= strings.Index(payload, jump) {
+			t.Fatalf("coarse IKE admit must remain below the fine jump (coarse=%d):\n%s", coarse, payload)
 		}
 	})
 
-	t.Run("ident 113 RST despite deny (coarse-terminal pre-fine)", func(t *testing.T) {
+	t.Run("ident 113 RST despite deny (explicit retained disposition)", func(t *testing.T) {
 		payload, p := mkPayload("ident-reset")
 		if !p.CoarseIdentResets {
 			t.Fatal("zone should coarse-reset ident")
@@ -562,13 +603,18 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 			`iifname "ge-0-0-1" jump `+xnft.HostInboundJunosHostChainName(0, "untrust"),
 		)
 		if !oracleDenies("tcp", 113) {
-			t.Fatal("sanity: the pure-fine oracle should DENY BAD's tcp/113 (documents the intended nft divergence)")
+			t.Fatal("sanity: the pure-fine oracle should DENY BAD's tcp/113")
+		}
+		// A terminal reject refuses the connection; unlike the deleted IKE
+		// accept, it cannot re-admit the packet and is therefore not #10524.
+		if strings.Contains(strings.Join(junosHostSection(payload), "\n"),
+			"tcp dport 113 accept") {
+			t.Fatalf("ident must never render as an accept:\n%s", payload)
 		}
 	})
 
 	t.Run("fine-eligible tcp/22 still dropped", func(t *testing.T) {
 		payload, _ := mkPayload("ike")
-		// The drop is application-any (no L4 match), so it catches BAD's tcp/22.
 		if !strings.Contains(payload, `meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "`+cn+`" drop`) {
 			t.Fatalf("fine-eligible traffic from BAD must still be dropped:\n%s", payload)
 		}
@@ -586,10 +632,39 @@ func junosHostDenyTestConfig4146Oracle() *config.Config {
 	return cfg
 }
 
-// junosHostProgramDrops simulates the nft verdict of a program's v4 rules for a
-// source IP in first-match order (#9504): the first rule whose source matches
-// decides, a return (a permit) admitting and every other verdict denying.
-// Application-any only (the fixture uses app any).
+// junosHostInputIKEWalk performs the Cell 2 first-match walk over the rendered
+// input-window rules and the jumped subchain. It deliberately models the
+// terminal IKE ACCEPT before the jump, then the source-scoped fine DROP, then
+// the coarse IKE ACCEPT after a subchain RETURN. Restoring the old shield makes
+// BAD's result flip to "accept" independently of the Cell 1 absence assertion.
+func junosHostInputIKEWalk(payload, source string) string {
+	const ikeAccept = "udp dport { 500, 4500 } accept"
+	section := junosHostSection(payload)
+	jump := `iifname "ge-0-0-1" jump ` + xnft.HostInboundJunosHostChainName(0, "untrust")
+	for _, line := range section {
+		if strings.Contains(line, ikeAccept) {
+			return "accept"
+		}
+		if !strings.Contains(line, jump) {
+			continue
+		}
+		for _, chainLine := range junosHostChainLines(payload) {
+			if strings.Contains(chainLine, "ip saddr "+source+"/32") &&
+				strings.Contains(chainLine, "drop") {
+				return "drop"
+			}
+		}
+		jumpAt := strings.Index(payload, jump)
+		if coarse := strings.Index(payload[jumpAt+len(jump):], ikeAccept); coarse >= 0 {
+			return "accept"
+		}
+		return "return"
+	}
+	return "drop"
+}
+
+// junosHostProgramDrops simulates the projected subchain verdict for tests
+// that do not need the outer input-window walk.
 func junosHostProgramDrops(p dpuserspace.JunosHostProgram, ip net.IP) bool {
 	for _, r := range p.RulesV4 {
 		var matched bool
@@ -607,7 +682,6 @@ func junosHostProgramDrops(p dpuserspace.JunosHostProgram, ip net.IP) bool {
 	}
 	return false
 }
-
 func ipInAny(ip net.IP, cidrs []string) bool {
 	for _, c := range cidrs {
 		_, n, err := net.ParseCIDR(c)

@@ -462,6 +462,93 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 	if cfg == nil {
 		return nil
 	}
+	// #10524: the IKE shield was removed from the kernel render, but an
+	// application-any DENY on an IKE-admitting ingress still deserves an
+	// explicit commit advisory. Do not infer the policy from a program-level
+	// HasApplicationAnyDeny bit: that bit is aggregate for the whole zone and
+	// could attribute a sibling policy. Instead, join each policy's own
+	// application-any projected term to the zone(s) it applies to and to the
+	// IKE-exempt netdev subset. This advisory is intentionally computed before
+	// the global RenderedPolicyKeys suppression below; exact per-zone emission
+	// provenance still warns when coverage is only partial, and names the
+	// policy/netdev intersection.
+	projection := BuildJunosHostDenyProjection(cfg)
+	var warnings []string
+	policyLabels := make(map[string]string)
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil || zpp.ToZone != junosHostSelfZone {
+			continue
+		}
+		for _, p := range zpp.Policies {
+			if p != nil {
+				policyLabels[JunosHostZonePairPolicyKey(zpp.FromZone, p.Name)] =
+					fmt.Sprintf("%q (from-zone %q)", p.Name, zpp.FromZone)
+			}
+		}
+	}
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p != nil && IsHostToZoneScope(p.Match.ToZones) {
+			policyLabels[JunosHostGlobalPolicyKey(p.Name)] = fmt.Sprintf("global %q", p.Name)
+		}
+	}
+	feedBound := junosHostFeedBoundNames(cfg)
+	overlapNetdevs := make(map[string]map[string]bool)
+	overlapZones := make(map[string]map[string]bool)
+	for _, prog := range projection.Programs {
+		if len(prog.IKEExemptNetdevs) == 0 {
+			continue
+		}
+		for _, term := range junosHostEffectiveTerms(cfg, prog.Zone, feedBound) {
+			if !term.appAny || (term.action != PolicyDeny && term.action != PolicyReject) ||
+				!projection.RenderedApplicationAnyPolicyKeysByZone[prog.Zone][term.key] {
+				continue
+			}
+			nds := overlapNetdevs[term.key]
+			if nds == nil {
+				nds = make(map[string]bool)
+				overlapNetdevs[term.key] = nds
+			}
+			for _, nd := range prog.IKEExemptNetdevs {
+				nds[nd] = true
+			}
+			zones := overlapZones[term.key]
+			if zones == nil {
+				zones = make(map[string]bool)
+				overlapZones[term.key] = zones
+			}
+			zones[prog.Zone] = true
+		}
+	}
+	overlapKeys := make([]string, 0, len(overlapNetdevs))
+	for key := range overlapNetdevs {
+		overlapKeys = append(overlapKeys, key)
+	}
+	sort.Strings(overlapKeys)
+	for _, key := range overlapKeys {
+		netdevs := make([]string, 0, len(overlapNetdevs[key]))
+		for nd := range overlapNetdevs[key] {
+			netdevs = append(netdevs, nd)
+		}
+		sort.Strings(netdevs)
+		zones := make([]string, 0, len(overlapZones[key]))
+		for zone := range overlapZones[key] {
+			zones = append(zones, zone)
+		}
+		sort.Strings(zones)
+		label := policyLabels[key]
+		if label == "" {
+			label = fmt.Sprintf("%q", key)
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"security policy %s has an application-any DENY/REJECT to-zone "+
+				"junos-host overlapping coarse IKE admission on netdev(s) %s "+
+				"(zone(s) %s). The fine junos-host rule now governs denied IKE, "+
+				"but the coarse `ike`/`ipsec` service remains admitted for other "+
+				"sources; remove `ike`/`ipsec` from host-inbound-traffic or "+
+				"narrow/review the policy if that admission is not intended "+
+				"(#10524; see docs/host-inbound-service-matrix.md)",
+			label, strings.Join(netdevs, ", "), strings.Join(zones, ", ")))
+	}
 	// #4146: the representable ordered DENY class is now ENFORCED on the direct
 	// host-bound path by the kernel nft `xpf_hostinbound` chain
 	// (BuildJunosHostDenyProjection). Suppress the parity warning for exactly the
@@ -470,8 +557,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 	// partial-coverage remainder). Rendered means: the policy applies only to
 	// enforceable ingress zones and EVERY such zone's whole program is
 	// representable (§3.3 / §8 inv-12).
-	rendered := BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys
-	var warnings []string
+	rendered := projection.RenderedPolicyKeys
 	msg := func(who, reason string) string {
 		return fmt.Sprintf(
 			"security policy %s expresses a %s to-zone junos-host that the kernel "+

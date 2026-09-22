@@ -7,10 +7,10 @@ import "testing"
 // every host-inbound token before admitting (unionHostInboundTokens /
 // lowerTokens in pkg/dataplane/userspace and the Rust classify_system_service),
 // so a lenient-loaded UPPER-case `IKE`/`IPSEC`/`ALL` is admitted (and
-// `IDENT-RESET` RST-marked) on the wire. The junos-host coarse `application
-// any` shield must reach the SAME verdict, or it drops the very IKE/NAT-T (udp
-// 500/4500) and ident (tcp 113 RST) traffic enforcement admits. Only `ALL`/
-// `any-service` are packet-wide full-admits; `IKE`/`IPsec` admit udp 500/4500.
+// the projected coarse metadata must reach the SAME verdict, or the warning
+// scope / retained ident RST can drift from the traffic enforcement. Only
+// `ALL`/`any-service` are packet-wide full-admits; `IKE`/`IPsec` admit udp
+// 500/4500.
 //
 // This mirrors the lower-case TestJunosHostExemptionFlags with upper-case
 // tokens. Reverting the case-fold (junosHostSvcAdmitsIKE / the note() loop /
@@ -33,7 +33,7 @@ func TestJunosHostExemptionFlagsCaseInsensitive_5557(t *testing.T) {
 	// IKE / IPsec / full-admit are all case-insensitive coarse-admits for IKE.
 	for _, tok := range []string{"IKE", "IPsec", "ALL", "Any-Service"} {
 		if p := mk(tok); !p.CoarseAdmitsIKE {
-			t.Errorf("system-services %q: want CoarseAdmitsIKE (enforcement admits, shield must too)", tok)
+			t.Errorf("system-services %q: want CoarseAdmitsIKE (enforcement and warning metadata must agree)", tok)
 		}
 	}
 	// Upper-case ident-reset must set the RST verdict, matching enforcement.
@@ -48,8 +48,8 @@ func TestJunosHostExemptionFlagsCaseInsensitive_5557(t *testing.T) {
 }
 
 // TestHostInboundFullAdmitServiceCaseInsensitive_5557 pins the SSOT predicate
-// itself. Enforcement lower-cases before calling it, but the coarse-shield and
-// the commit-time full-admit advisory feed it the raw authored case; a
+// itself. Enforcement lower-cases before calling it, but the coarse metadata
+// and the commit-time full-admit advisory feed it the raw authored case; a
 // case-sensitive `== "all"` let an upper-case `ALL` escape both. Reverting to
 // the raw comparison makes these assertions RED.
 func TestHostInboundFullAdmitServiceCaseInsensitive_5557(t *testing.T) {

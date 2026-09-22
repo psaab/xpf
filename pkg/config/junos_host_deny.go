@@ -154,37 +154,40 @@ type JunosHostDenyProgram struct {
 	// order. A non-empty list never ends in a JunosHostReturn.
 	RulesV4 []JunosHostDenyRule
 	RulesV6 []JunosHostDenyRule
-	// CoarseAdmitsIKE / CoarseIdentResets drive the daemon's fine-eligible-L4
-	// exemption rules ahead of an `application any` drop (§6.6). They are true
-	// iff at least one ingress netdev in the zone admits the exemption
-	// (len(IKEExemptNetdevs) / len(IdentResetNetdevs) > 0) — NOT a zone-wide
-	// union of every per-interface override (#5565).
+	// CoarseAdmitsIKE / CoarseIdentResets describe the effective coarse
+	// fine-eligible-L4 verdicts. CoarseIdentResets drives the retained terminal
+	// ident RST; CoarseAdmitsIKE plus IKEExemptNetdevs drives the #10524 overlap
+	// advisory (the former IKE ACCEPT shield was deleted).
 	CoarseAdmitsIKE   bool
 	CoarseIdentResets bool
 	// IKEExemptNetdevs / IdentResetNetdevs are the SUBSET of IngressNetdevs whose
-	// EFFECTIVE per-interface host-inbound set admits IKE (udp 500/4500) /
-	// answers TCP/113 with a RST (#5565). The daemon scopes the IKE / ident
-	// exemption shield to these netdevs instead of the whole zone iifname set, so
-	// a per-INTERFACE `ike` / `ident-reset` override is never widened to a sibling
-	// interface in the same zone that did not configure it. A genuinely
-	// zone-level exception (authored on the zone's own host-inbound-traffic)
-	// admits on every interface, so its subset equals IngressNetdevs and the
-	// shield stays zone-wide (no regression). Sorted; each a subset of
-	// IngressNetdevs.
+	// EFFECTIVE per-interface host-inbound set admits IKE (udp 500/4500) / answers
+	// TCP/113 with a RST (#5565). The daemon uses IdentResetNetdevs for the
+	// retained ident RST scope; IKEExemptNetdevs remains metadata for the
+	// #10524 commit advisory and is not rendered as an IKE ACCEPT.
+	// Sorted; each is a subset of IngressNetdevs.
 	IKEExemptNetdevs  []string
 	IdentResetNetdevs []string
 	// HasApplicationAnyDeny is true when the program contains a rendered
 	// `application any` rule with a DENY-class verdict, so the daemon knows to
-	// emit the IKE/ident exemption shields ahead of it.
+	// retain the ident-reset shield where needed and the warning validator can
+	// correlate the aggregate program shape. The validator still examines each
+	// policy term individually and never uses this aggregate bit to name a
+	// policy (#10524).
 	HasApplicationAnyDeny bool
 }
 
 // JunosHostDenyProjection is the whole-config result: the per-zone programs the
 // daemon renders, plus the set of junos-host policy keys that rendered an
 // enforced kernel rule (so the #4168 warning is suppressed for exactly those).
+// RenderedApplicationAnyPolicyKeysByZone is narrower provenance for #10524:
+// it records application-any DENY/REJECT keys that emitted a rule in each
+// surviving zone, even when that zone has partial netdev coverage and therefore
+// cannot enter the global RenderedPolicyKeys suppression set.
 type JunosHostDenyProjection struct {
-	Programs           []JunosHostDenyProgram
-	RenderedPolicyKeys map[string]bool
+	Programs                               []JunosHostDenyProgram
+	RenderedPolicyKeys                     map[string]bool
+	RenderedApplicationAnyPolicyKeysByZone map[string]map[string]bool
 }
 
 // JunosHostZonePairPolicyKey / JunosHostGlobalPolicyKey are the stable identity
@@ -222,12 +225,14 @@ type junosHostTerm struct {
 	lenientDropped bool
 }
 
-// BuildJunosHostDenyProjection projects every configured ingress zone's
 // effective `to-zone junos-host` policy program into the kernel-representable
 // DROP-only form. It is the SSOT consumed by both the daemon nft codegen (via
 // the pkg/dataplane/userspace wrapper) and the #4168 commit warning.
 func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
-	out := JunosHostDenyProjection{RenderedPolicyKeys: map[string]bool{}}
+	out := JunosHostDenyProjection{
+		RenderedPolicyKeys:                     map[string]bool{},
+		RenderedApplicationAnyPolicyKeysByZone: map[string]map[string]bool{},
+	}
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return out
 	}
@@ -315,6 +320,20 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 				junosHostZoneExemptNetdevs(cfg, zoneName, zone, netdevs)
 			prog.CoarseAdmitsIKE = len(prog.IKEExemptNetdevs) > 0
 			prog.CoarseIdentResets = len(prog.IdentResetNetdevs) > 0
+		}
+		// #10524 exact provenance: retain the app-any DENY/REJECT keys that
+		// emitted a rule in THIS surviving zone. This intentionally ignores
+		// fullyScoped / global RenderedPolicyKeys status; partial coverage still
+		// needs the overlap advisory for the netdevs where the rule exists.
+		if emitsRules && representable {
+			appAnyKeys := make(map[string]bool)
+			for _, t := range terms {
+				if emitted[t.key] && t.appAny &&
+					(t.action == PolicyDeny || t.action == PolicyReject) {
+					appAnyKeys[t.key] = true
+				}
+			}
+			out.RenderedApplicationAnyPolicyKeysByZone[zoneName] = appAnyKeys
 		}
 		// Bookkeeping for the warning.
 		for _, t := range terms {

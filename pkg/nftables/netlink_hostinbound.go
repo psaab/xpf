@@ -198,20 +198,19 @@ func emitUnzonedHostInboundDenyNetlink(p *nlPlan, f nlFamily, family string, add
 }
 
 // emitJunosHostProgramJumpNetlink mirrors emitJunosHostProgramJump (#4146,
-// #9504): the exemption shields, then the iifname-scoped jump to the zone's
-// subchain.
+// #9504): the ident exemption shield, then the iifname-scoped jump to the
+// zone's subchain. There is deliberately NO IKE shield (#10524, mirroring the
+// text-oracle deletion): the fine DENY governs denied sources' IKE.
 func emitJunosHostProgramJumpNetlink(p *nlPlan, index int, prog JunosHostProgram) {
-	if prog.HasApplicationAnyDeny {
-		if prog.CoarseAdmitsIKE {
-			p.rule().iifname(prog.IKEExemptNetdevs).
-				l4Port(protoUDP, "dport", []nlPort{{500, 500}, {4500, 4500}}, false).
-				emit(verdictAccept()...)
-		}
-		if prog.CoarseIdentResets {
-			p.rule().iifname(prog.IdentResetNetdevs).
-				l4Port(protoTCP, "dport", []nlPort{{113, 113}}, false).
-				emit(rejectTCPReset()...)
-		}
+	// #10524: the pre-fix IKE accept (`iifname <IKEExemptNetdevs> udp dport
+	// { 500, 4500 } accept`) is deleted here exactly as in the text oracle —
+	// its terminal accept re-admitted denied IKE ahead of the fine jump.
+	// Ident shield KEPT (mirroring the oracle disposition): a terminal TCP RST
+	// still refuses the connection and cannot re-admit traffic.
+	if prog.HasApplicationAnyDeny && prog.CoarseIdentResets {
+		p.rule().iifname(prog.IdentResetNetdevs).
+			l4Port(protoTCP, "dport", []nlPort{{113, 113}}, false).
+			emit(rejectTCPReset()...)
 	}
 	p.rule().iifname(prog.IngressIfnames).emit(verdictJump(HostInboundJunosHostChainName(index, prog.Zone))...)
 }
