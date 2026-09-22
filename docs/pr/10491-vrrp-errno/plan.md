@@ -270,7 +270,10 @@ Add path (`addVIPsLocked`, single-VIP instance):
    synthetic contract pin for I1, not a demonstrated reachable producer; it
    justifies narrowing the fallback's dangerous direction.
 6. other errnos direct + annotated (`syscall.Errno(unix.EADDRNOTAVAIL)`,
-   `syscall.Errno(unix.EPERM)`) → failed.
+   `syscall.Errno(unix.EPERM)`) use neutral TLV text
+   (`"NLMSGERR_ATTR_MSG: address rejected"`, containing no `"exists"`) →
+   failed both pre- and post-fix. This pins the no-change complement rather
+   than relying on an unspecified annotation string.
 7. ownership-gate wiring: drive `becomeMaster` with a resolvable fake link,
    `suppressGARP=true`, and an `annotatedErr` wrapping
    `syscall.Errno(unix.EEXIST)`. Assert `becomeMaster()` returns true, the
@@ -289,13 +292,18 @@ matrix, which stays green untouched):
 9. the pinned netlink shape wrapping `syscall.Errno(unix.EADDRNOTAVAIL)` with
    an ext-ack message → benign (nil error).
 10. chained annotated other errno (`syscall.Errno(unix.EEXIST)`,
-    `syscall.Errno(unix.EPERM)`) → real failure (non-nil, `del vip` wrapped).
+    `syscall.Errno(unix.EPERM)`) use neutral TLV text
+    (`"NLMSGERR_ATTR_MSG: delete denied"`, containing no remove-benign
+    substring) → real failure both pre- and post-fix (non-nil, `del vip`
+    wrapped).
 
 RED-first verification: run the new test against the pre-fix tree (stash
-the one-line fix) and confirm add cases 2, 5, and 7 fail; add case 3 and
-remove cases 8-9 should remain green because they document existing
-errors.Is-compatible behavior. Re-apply and confirm all cases green. Then
-run the full package with no other test touched:
+the one-line fix) and confirm add cases 2, 5, and 7 fail. Cases 1, 3, 4, 6,
+8, 9, and 10 remain green both pre- and post-fix: cases 1 and 4 are existing
+EEXIST text compatibility, case 3 is the pinned shape, cases 8-9 exercise
+existing remove errno handling, and cases 6/10 use neutral TLV text. Re-apply
+and confirm all cases green. Then run the full package with no other test
+touched:
 
 ```
 GOCACHE=/dev/shm/gocache-10491 GOTMPDIR=/dev/shm go test ./pkg/vrrp/ \
