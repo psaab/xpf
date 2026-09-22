@@ -150,7 +150,11 @@ func TestPeerCapabilitiesPayloadIsLengthGated6650(t *testing.T) {
 		t.Error("the syncMsgPeerCapabilities arm has no length gate — a 1-byte frame " +
 			"would slice out of range or decode garbage into the peer capability")
 	}
-	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(uint32(peerProto))") {
+	// Either spelling stores the decoded version; Swap additionally reports
+	// whether the advertisement changed, which gates the capabilities-changed
+	// callback so steady-state re-advertisements do not re-fire it (#10511).
+	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(uint32(peerProto))") &&
+		!sourceContainsFlat(src, "s.peerSnapshotProtocol.Swap(uint32(peerProto))") {
 		t.Error("the syncMsgPeerCapabilities arm does not store the decoded version")
 	}
 }

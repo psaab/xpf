@@ -193,15 +193,15 @@ fn rematch_bound_first_policy_sessions(
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
     worker_id: u32,
     now_ns: u64,
-) -> usize {
+) -> (usize, usize) {
     if !new_forwarding.policy_rematch_extensive {
-        return 0;
+        return (0, 0);
     }
     let Some(old_first) = old_forwarding.policy.rule_for_policy_id(0) else {
-        return 0;
+        return (0, 0);
     };
     if old_first.rule_id.is_empty() {
-        return 0;
+        return (0, 0);
     }
     let ancestry: Vec<_> = new_forwarding
         .policy_rename_ancestry
@@ -217,7 +217,7 @@ fn rematch_bound_first_policy_sessions(
             .iter()
             .any(|rule| rule.rule_id == old_first.rule_id)
     {
-        return 0;
+        return (0, 0);
     }
 
     let mut candidates = Vec::new();
@@ -234,7 +234,8 @@ fn rematch_bound_first_policy_sessions(
         candidates.push((key.clone(), decision, metadata.clone(), origin));
     });
 
-    let mut changed = 0;
+    let mut rebound = 0;
+    let mut purged = 0;
     for (key, decision, metadata, origin) in candidates {
         let mut retained = false;
         if ancestry.len() == 1 {
@@ -379,10 +380,12 @@ fn rematch_bound_first_policy_sessions(
                 now_ns,
                 worker_id,
             );
+            purged += 1;
+        } else {
+            rebound += 1;
         }
-        changed += 1;
     }
-    changed
+    (rebound, purged)
 }
 #[allow(clippy::too_many_arguments)]
 fn rebind_policy_sessions_from_snapshot(
@@ -1350,7 +1353,7 @@ pub(crate) fn worker_loop(
             // the new tables can free the live (possibly carried)
             // reservation. Releasing against the old state would miss carried
             // copies and strand them in the new allocators.
-            let rematched_first_policy_sessions = rematch_bound_first_policy_sessions(
+            let (rematched_rebound, rematched_purged) = rematch_bound_first_policy_sessions(
                 &forwarding,
                 &new_forwarding,
                 &mut sessions,
@@ -1366,11 +1369,12 @@ pub(crate) fn worker_loop(
                 worker_id,
                 loop_now_ns,
             );
-            if rematched_first_policy_sessions > 0 {
+            if rematched_rebound + rematched_purged > 0 {
                 debug_log!(
-                    "RENAMED_FIRST_POLICY_REBIND_OR_PURGE: worker={} sessions={}",
+                    "RENAMED_FIRST_POLICY_REMAP: worker={} rebound={} purged={}",
                     worker_id,
-                    rematched_first_policy_sessions,
+                    rematched_rebound,
+                    rematched_purged,
                 );
             }
             forwarding = new_forwarding;
@@ -3456,8 +3460,7 @@ mod snapshot_refresh_ordering_tests {
         fn mint(&mut self, generation: u64) -> Arc<RuntimeView> {
             let forwarding = Arc::new(ForwardingState::default());
             self.views.push((generation, forwarding.clone()));
-            Arc::new(RuntimeView::new(
-                // runtime-view-canary: test-local
+            Arc::new(RuntimeView::new(  // runtime-view-canary: test-local
                 ValidationState {
                     snapshot_installed: true,
                     config_generation: generation,
@@ -3613,8 +3616,7 @@ mod snapshot_refresh_ordering_tests {
         // forwarding-rotation branch. The pair stays coherent because it is
         // still one view.
         let unrotated = shared_runtime.load().forwarding().clone();
-        channel.publish(Arc::new(RuntimeView::new(
-            // runtime-view-canary: test-local
+        channel.publish(Arc::new(RuntimeView::new(  // runtime-view-canary: test-local
             ValidationState {
                 snapshot_installed: true,
                 config_generation: 3,

@@ -68,8 +68,10 @@ func (s *Store) recordRenameAncestryLocked(gen uint64, descriptor RenameDescript
 	)
 }
 
-// ClearPendingRenameAncestryForGeneration retires only the descriptor set
-// associated with a successfully converged candidate generation.
+// ClearPendingRenameAncestryForGeneration retires the descriptor set for a
+// consumed candidate generation. The daemon calls it at bind time in
+// commitWithGenBinding, which transfers ownership to its own copy; no apply
+// outcome retains store-side state.
 func (s *Store) ClearPendingRenameAncestryForGeneration(gen uint64) {
 	if s == nil {
 		return

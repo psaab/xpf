@@ -1538,3 +1538,148 @@ fn conntrack_policy_restamp_preserves_runtime_state_10511() {
     assert_eq!(value.session_id, before.session_id);
     assert_eq!(value.routing_domain, before.routing_domain);
 }
+
+#[test]
+fn conntrack_policy_restamp_preserves_runtime_state_v6_10511() {
+    let mut metadata = synced_forward_metadata();
+    metadata.policy_id = 73;
+    metadata.ingress_zone = 31;
+    metadata.egress_zone = 42;
+
+    let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+    value.state = 4;
+    value.flags = 0x223;
+    value.tcp_state = 7;
+    value.is_reverse = 1;
+    value.app_timeout = 92;
+    value.session_id = 0x1112_1314_1516_1718;
+    value.created = 4_000;
+    value.last_seen = 5_000;
+    value.timeout = 6_000;
+    value.policy_id = 8;
+    value.ingress_zone = 9;
+    value.egress_zone = 10;
+    value.nat_src_ip = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+    value.nat_dst_ip = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2];
+    value.nat_src_port = 50;
+    value.nat_dst_port = 51;
+    value.fwd_packets = 60;
+    value.fwd_bytes = 61;
+    value.rev_packets = 62;
+    value.rev_bytes = 63;
+    value.app_id = 10;
+    value.fib_ifindex = 11;
+    value.fib_vlan_id = 12;
+    value.ingress_ifindex = 13;
+    value.ingress_vlan_id = 14;
+    value.routing_domain = 15;
+    let before = value;
+
+    restamp_bpf_value_v6(&mut value, &metadata);
+
+    assert_eq!(value.policy_id, 73);
+    assert_eq!(value.ingress_zone, 31);
+    assert_eq!(value.egress_zone, 42);
+    assert_eq!(value.created, before.created);
+    assert_eq!(value.last_seen, before.last_seen);
+    assert_eq!(value.timeout, before.timeout);
+    assert_eq!(value.nat_src_ip, before.nat_src_ip);
+    assert_eq!(value.nat_dst_ip, before.nat_dst_ip);
+    assert_eq!(value.nat_src_port, before.nat_src_port);
+    assert_eq!(value.nat_dst_port, before.nat_dst_port);
+    assert_eq!(value.fwd_packets, before.fwd_packets);
+    assert_eq!(value.fwd_bytes, before.fwd_bytes);
+    assert_eq!(value.rev_packets, before.rev_packets);
+    assert_eq!(value.rev_bytes, before.rev_bytes);
+    assert_eq!(value.session_id, before.session_id);
+    assert_eq!(value.routing_domain, before.routing_domain);
+}
+
+/// Pins the documented no-map convention: fd -1 means "no pinned conntrack
+/// map" (unit tests, builds without the map), which is NOT a failure — the
+/// worker rotation tests inherit this, so their rebinds never observe a BPF
+/// error. A revert that reports fd -1 as failure would tear down every
+/// rebound pair in those tests.
+#[test]
+fn conntrack_policy_restamp_unmapped_fd_is_not_a_failure_10511() {
+    let v4 = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4("10.0.0.10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V4("10.0.0.20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        restamp_bpf_conntrack_policy(-1, -1, &v4, &synced_forward_metadata()),
+        "an unmapped v4 fd must not report a restamp failure"
+    );
+    let v6 = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V6("2001:db8::10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V6("2001:db8::20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        restamp_bpf_conntrack_policy(-1, -1, &v6, &synced_forward_metadata()),
+        "an unmapped v6 fd must not report a restamp failure"
+    );
+}
+
+/// The unit-testable `false` shapes: a family/address mismatch fails closed
+/// without touching any map. The remaining `false` arm — a lookup/update
+/// error on a LIVE fd, which makes the rotation caller tear the rebound pair
+/// down rather than expose a split policy identity — needs a real BPF map
+/// (CAP_BPF) and is untestable in unit tests; that is the documented MIN-7
+/// residual, not an omission.
+#[test]
+fn conntrack_policy_restamp_mismatched_addrs_fail_closed_10511() {
+    let v4_family_v6_addrs = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V6("2001:db8::10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V6("2001:db8::20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        !restamp_bpf_conntrack_policy(-1, -1, &v4_family_v6_addrs, &synced_forward_metadata()),
+        "v4 family with v6 addresses must fail closed"
+    );
+    let v6_family_v4_addrs = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4("10.0.0.10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V4("10.0.0.20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        !restamp_bpf_conntrack_policy(-1, -1, &v6_family_v4_addrs, &synced_forward_metadata()),
+        "v6 family with v4 addresses must fail closed"
+    );
+    let unknown_family = SessionKey {
+        addr_family: libc::AF_UNIX as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4("10.0.0.10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V4("10.0.0.20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        !restamp_bpf_conntrack_policy(-1, -1, &unknown_family, &synced_forward_metadata()),
+        "an unknown address family must fail closed"
+    );
+}

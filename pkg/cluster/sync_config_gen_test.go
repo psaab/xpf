@@ -1,9 +1,12 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -622,5 +625,403 @@ func TestQueueConfigWithAncestryWireReceiveApplyChain10511(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("wire config frame never reached the ancestry apply callback")
+	}
+}
+
+func TestConfigAncestryCapabilityStateAndLegacyGate10511(t *testing.T) {
+	s := &SessionSync{}
+	if s.ConfigAncestryNegotiated() {
+		t.Fatal("a fresh peer must not report negotiated ancestry capability")
+	}
+	if s.ConfigAncestryCapable() {
+		t.Fatal("a fresh peer must not advertise ancestry capability")
+	}
+	s.peerSnapshotProtocol.Store(1)
+	if !s.ConfigAncestryNegotiated() {
+		t.Fatal("a peer protocol advertisement must mark capability discovery complete")
+	}
+	if s.ConfigAncestryCapable() {
+		t.Fatal("discovery without the ancestry bit must stay on the legacy payload")
+	}
+	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	if !s.ConfigAncestryCapable() {
+		t.Fatal("the config-ancestry capability bit was not recognized")
+	}
+}
+
+func TestQueueConfigAncestryUnknownAndIncapablePeersUseLegacyPayload10511(t *testing.T) {
+	const text = "set system host-name mixed-version\n"
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	for _, tc := range []struct {
+		name  string
+		known bool
+	}{
+		{name: "unknown", known: false},
+		{name: "known-incapable", known: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+			local, peer := net.Pipe()
+			t.Cleanup(func() {
+				local.Close()
+				peer.Close()
+			})
+			s.installConn(0, local)
+			if tc.known {
+				s.peerSnapshotProtocol.Store(1)
+			}
+			queued := make(chan bool, 1)
+			go func() {
+				queued <- s.QueueConfigWithAncestryAtGeneration(text, want, 91)
+			}()
+			msgType, payload, _ := readOneFrame(t, peer)
+			if msgType != syncMsgConfig {
+				t.Fatalf("legacy-gated queue emitted frame type %d, want config", msgType)
+			}
+			if !<-queued {
+				t.Fatal("legacy-gated queue reported a write failure")
+			}
+			gotText, gotGen, gotAncestry := decodeConfigPayloadWithAncestry(payload)
+			if gotText != text || gotGen != 91 {
+				t.Fatalf("legacy-gated payload changed text/gen: text=%q gen=%d", gotText, gotGen)
+			}
+			if gotAncestry != nil {
+				t.Fatalf("unknown/incapable peer received a rename sidecar: %#v", gotAncestry)
+			}
+		})
+	}
+}
+
+func TestConfigAncestryPayloadIsFailSafeForOldParser10511(t *testing.T) {
+	const text = "set system host-name sidecar\n"
+	payload := encodeConfigPayloadWithAncestry(text, 92, []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}})
+	if bytes.Equal(payload, []byte(text)) || !bytes.Contains(payload[len(text):], configAncestryMagic[:]) {
+		t.Fatalf("sidecar payload lost its additive binary framing: %x", payload)
+	}
+	legacyText := string(payload)
+	if legacyText == text {
+		t.Fatal("an old parser must not silently see the sidecar as the original text")
+	}
+}
+
+func TestQueueConfigWithAncestryWrapperUsesNegotiatedSidecar10511(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	local, peer := net.Pipe()
+	t.Cleanup(func() {
+		local.Close()
+		peer.Close()
+	})
+	s.installConn(0, local)
+	s.peerSnapshotProtocol.Store(1)
+	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	queued := make(chan bool, 1)
+	go func() {
+		queued <- s.QueueConfigWithAncestry("set system host-name wrapper\n", want)
+	}()
+	msgType, payload, _ := readOneFrame(t, peer)
+	if msgType != syncMsgConfig || !<-queued {
+		t.Fatal("QueueConfigWithAncestry wrapper did not emit a config frame")
+	}
+	_, _, got := decodeConfigPayloadWithAncestry(payload)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("wrapper dropped negotiated ancestry: got %#v want %#v", got, want)
+	}
+}
+
+func TestPeerCapabilitiesChangedOnlyOnStateTransition10511(t *testing.T) {
+	s := &SessionSync{}
+	changed := make(chan struct{}, 4)
+	s.OnPeerCapabilitiesChanged = func() { changed <- struct{}{} }
+	base := capabilityFrame9714(t, capFlagConfigAncestry)
+	s.handleMessage(nil, syncMsgPeerCapabilities, base)
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("first capability advertisement did not trigger a changed callback")
+	}
+	s.handleMessage(nil, syncMsgPeerCapabilities, base)
+	select {
+	case <-changed:
+		t.Fatal("an identical repeated capability frame re-triggered the callback")
+	case <-time.After(50 * time.Millisecond):
+	}
+	s.handleMessage(nil, syncMsgPeerCapabilities, capabilityFrame9714(t, capFlagConfigAncestry))
+	select {
+	case <-changed:
+		t.Fatal("another identical capability frame re-triggered the callback")
+	case <-time.After(50 * time.Millisecond):
+	}
+	s.handleMessage(nil, syncMsgPeerCapabilities, capabilityFrame9714(t, 0))
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("a capability downgrade did not trigger a changed callback")
+	}
+}
+
+// A reordered STALE ancestry pair must drop whole: neither its text nor its
+// sidecar may reach the apply callback. The legacy reorder cell pins the
+// generation gate for text-only payloads; this one pins that the gate drops
+// the pair, so a superseded rename cannot arm a capture for a config that no
+// longer converges.
+func TestAncestryReorderedGenerationsDropStalePair10511(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	type pair struct {
+		text     string
+		ancestry []configstore.RenameDescriptor
+	}
+	applied := make(chan pair, 2)
+	s.OnConfigReceivedWithAncestry = func(text string, ancestry []configstore.RenameDescriptor) error {
+		select {
+		case entered <- struct{}{}:
+			<-release
+		default:
+		}
+		applied <- pair{text: text, ancestry: ancestry}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.configApplyLoop(ctx)
+
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayloadWithAncestry("config-C2", 2, want))
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer ancestry config never entered apply callback")
+	}
+	s.handleMessage(nil, syncMsgConfig, encodeConfigPayloadWithAncestry("config-C1", 1, want))
+	close(release)
+	select {
+	case got := <-applied:
+		if got.text != "config-C2" || !reflect.DeepEqual(got.ancestry, want) {
+			t.Fatalf("newer pair must apply intact: text=%q ancestry=%#v", got.text, got.ancestry)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer ancestry apply did not complete")
+	}
+	select {
+	case got := <-applied:
+		t.Fatalf("reordered stale ancestry pair must not apply: text=%q ancestry=%#v", got.text, got.ancestry)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := s.lastAppliedConfigGen.Load(); got != 2 {
+		t.Fatalf("reordered ancestry chain must retain newest applied generation: got %d", got)
+	}
+	if got := s.stats.ConfigsStaleIgnored.Load(); got != 1 {
+		t.Fatalf("stale ancestry pair must count exactly one stale-ignore: got %d", got)
+	}
+}
+
+// The #5084 binder for ancestry payloads: a pair QUEUED from a REPLACED peer
+// boot must drop whole at apply time — its sidecar must never arm a capture
+// for a dead incarnation's generation — while the rebooted peer's own lower-
+// generation pair still applies intact. Reuses the #5084 incarnation env; the
+// loop prefers the ancestry callback, which mirrors the env's hold/entered/
+// applied rendezvous and additionally records the delivered sidecar.
+func TestQueuedPriorIncarnationAncestryPairNeverApplies10511(t *testing.T) {
+	e := newIncEnv(t, 1)
+	type pair struct {
+		text     string
+		ancestry []configstore.RenameDescriptor
+	}
+	delivered := make(chan pair, 16)
+	e.s.OnConfigReceivedWithAncestry = func(text string, ancestry []configstore.RenameDescriptor) error {
+		e.mu.Lock()
+		h := e.hold
+		e.hold = nil
+		e.mu.Unlock()
+		if h != nil {
+			e.entered <- text
+			<-h
+		}
+		e.applied <- text
+		delivered <- pair{text: text, ancestry: ancestry}
+		return nil
+	}
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	pushAncestry := func(idx int, text string, gen uint64) {
+		e.s.handleMessage(e.conns[idx], syncMsgConfig, encodeConfigPayloadWithAncestry(text, gen, want))
+	}
+	e.prime(0, 1, &incA)
+	hold := e.holdNext()
+	pushAncestry(0, "config-from-boot-A", 5)
+	e.waitEntered(t, "config-from-boot-A")
+	pushAncestry(0, "stale-from-boot-A", 9_000_001)
+	e.waitQueued(t, 1)
+	e.prime(0, 2, &incB)
+	close(hold)
+	if got := e.waitApplied(3 * time.Second); got != "config-from-boot-A" {
+		t.Fatalf("setup: boot A's first pair must apply normally; got %q", got)
+	}
+	select {
+	case got := <-delivered:
+		if got.text != "config-from-boot-A" || !reflect.DeepEqual(got.ancestry, want) {
+			t.Fatalf("boot A's first pair must deliver its sidecar intact: text=%q ancestry=%#v", got.text, got.ancestry)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("boot A's first pair never reached the ancestry callback")
+	}
+	if got := e.waitApplied(1500 * time.Millisecond); got != "" {
+		t.Fatalf("an ancestry pair QUEUED from a REPLACED peer boot must never apply; it applied as %q", got)
+	}
+	select {
+	case got := <-delivered:
+		t.Fatalf("the replaced boot's sidecar leaked to the callback: text=%q ancestry=%#v", got.text, got.ancestry)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if n := e.s.stats.ConfigsDeadIncarnationDropped.Load(); n != 1 {
+		t.Fatalf("the pair drop must be counted; got %d", n)
+	}
+	pushAncestry(0, "current-from-boot-B", 42)
+	if got := e.waitApplied(3 * time.Second); got != "current-from-boot-B" {
+		t.Fatalf("the rebooted peer's pair must apply despite its lower generation; got %q", got)
+	}
+	select {
+	case got := <-delivered:
+		if got.text != "current-from-boot-B" || !reflect.DeepEqual(got.ancestry, want) {
+			t.Fatalf("boot B's pair must deliver its sidecar intact: text=%q ancestry=%#v", got.text, got.ancestry)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("boot B's pair never reached the ancestry callback")
+	}
+}
+
+// ReserveConfigGen hands the daemon a generation token under its
+// active-publication lock so the queued frame carries the SNAPSHOT's
+// generation even after a concurrent commit advances the counter. This pins
+// both halves: the reservation is honored verbatim (not redrawn at queue
+// time), and gen 0 — never a reservation — is refused without emitting.
+func TestReservedConfigGenerationIsHonoredNotRedrawn10511(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	local, peer := net.Pipe()
+	t.Cleanup(func() {
+		local.Close()
+		peer.Close()
+	})
+	s.installConn(0, local)
+	s.peerSnapshotProtocol.Store(1)
+	s.peerCapabilityFlags.Store(uint32(capFlagConfigAncestry))
+	g1 := s.ReserveConfigGen()
+	g2 := s.ReserveConfigGen()
+	if !(g1 < g2) {
+		t.Fatalf("reservations must be strictly monotonic, got %d then %d", g1, g2)
+	}
+	want := []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}}
+	queued := make(chan bool, 1)
+	go func() {
+		queued <- s.QueueConfigWithAncestryAtGeneration("reserved-text", want, g1)
+	}()
+	msgType, payload, _ := readOneFrame(t, peer)
+	if msgType != syncMsgConfig || !<-queued {
+		t.Fatal("reserved-generation queue did not emit a config frame")
+	}
+	gotText, gotGen, got := decodeConfigPayloadWithAncestry(payload)
+	if gotText != "reserved-text" || gotGen != g1 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("reservation was not honored verbatim: text=%q gen=%d (want %d) ancestry=%#v", gotText, gotGen, g1, got)
+	}
+	if s.QueueConfigWithAncestryAtGeneration("zero-gen", want, 0) {
+		t.Fatal("gen 0 is never a reservation and must be refused")
+	}
+	if _, _, ok := readOneFrame6778(peer, 100*time.Millisecond); ok {
+		t.Fatal("refused zero-gen queue emitted a frame")
+	}
+}
+
+// An old (pre-sidecar) peer decodes with the gen-magic tail check only: the
+// last 16 bytes of a sidecar payload are JSON tail, not the gen magic, so it
+// sees gen 0 and the whole framed blob as config text. That text must then
+// fail LOUD at the old ingress (Store.SyncApply) instead of converging on
+// garbage. The base hierarchical text SyncApplies cleanly on its own, so the
+// rejection below proves the framing causes the failure rather than a bad
+// fixture. The current decoder recovers the exact text, generation, and
+// sidecar (see the RoundTrip cells).
+func TestSidecarPayloadFailsSafeUnderLegacyDecode10511(t *testing.T) {
+	const text = "system {\n    host-name sidecar;\n}\n"
+	payload := encodeConfigPayloadWithAncestry(text, 92, []configstore.RenameDescriptor{{
+		SourcePath:      []string{"security", "policies", "old"},
+		DestinationPath: []string{"security", "policies", "new"},
+	}})
+	var legacyGen uint64
+	legacyText := string(payload)
+	if len(payload) >= 16 && bytes.Equal(payload[len(payload)-16:len(payload)-8], configGenMagic[:]) {
+		legacyGen = binary.LittleEndian.Uint64(payload[len(payload)-8:])
+		legacyText = string(payload[:len(payload)-16])
+	}
+	if legacyGen != 0 {
+		t.Fatalf("old decoder extracted gen %d from a sidecar payload; a nonzero gen would arm ordering on garbage", legacyGen)
+	}
+	if legacyText == text {
+		t.Fatal("old decoder silently recovered the original text from a sidecar payload")
+	}
+	if !bytes.Contains([]byte(legacyText), configAncestryMagic[:]) {
+		t.Fatal("legacy-visible garbage lost the ancestry framing; an operator could not identify the payload shape from the parse error")
+	}
+	base, err := configstore.New(filepath.Join(t.TempDir(), "base"))
+	if err != nil {
+		t.Fatalf("fixture store: %v", err)
+	}
+	if _, err := base.SyncApply(text, nil); err != nil {
+		t.Fatalf("fixture: the base hierarchical text must SyncApply cleanly alone: %v", err)
+	}
+	legacy, err := configstore.New(filepath.Join(t.TempDir(), "legacy"))
+	if err != nil {
+		t.Fatalf("fixture store: %v", err)
+	}
+	if _, err := legacy.SyncApply(legacyText, nil); err == nil {
+		t.Fatal("legacy-decoded sidecar payload SyncApplied cleanly; an old peer would " +
+			"converge on framed garbage instead of failing loud at ingress")
+	}
+}
+
+// This build must actually advertise the config-ancestry bit, or no peer can
+// ever gate the sidecar on it — and a fully-upgraded cluster would send
+// legacy text-only frames forever, each node believing the other cannot decode
+// ancestry. Binds the constant to the flag rather than assuming they agree
+// (peer of TestThisBuildAdvertisesPeerDeleteOwnership9714).
+func TestThisBuildAdvertisesConfigAncestry10511(t *testing.T) {
+	t.Parallel()
+	if localCapabilityFlags&capFlagConfigAncestry == 0 {
+		t.Fatal("localCapabilityFlags does not set capFlagConfigAncestry, so this node tells its peer " +
+			"it cannot decode a rename sidecar, and two upgraded nodes would take the legacy " +
+			"teardown path for every rename permanently")
+	}
+	for _, tc := range []struct {
+		name string
+		bit  uint8
+	}{
+		{"capFlagFenceAck", capFlagFenceAck},
+		{"capFlagPeerDeleteOwnership", capFlagPeerDeleteOwnership},
+		{"capFlagPurgeRetirementForwardOnly", capFlagPurgeRetirementForwardOnly},
+		{"capFlagInstallTableIdentity", capFlagInstallTableIdentity},
+	} {
+		if capFlagConfigAncestry == tc.bit {
+			t.Fatalf("capFlagConfigAncestry collides with %s: one bit cannot carry two capabilities", tc.name)
+		}
+		if localCapabilityFlags&tc.bit == 0 {
+			t.Fatalf("adding capFlagConfigAncestry dropped %s from localCapabilityFlags", tc.name)
+		}
 	}
 }

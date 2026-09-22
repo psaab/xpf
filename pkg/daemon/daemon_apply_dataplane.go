@@ -168,20 +168,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// misses the deleted policy's own. Placement is the design: this is a READ,
 	// so it cannot re-admit anything, and moving it any later re-opens the
 	// window. See daemon_policy_invalidate_capture.go.
-	d.capturePolicyInvalidationLocked(cfg)
-	if rt := d.dataplane(); rt != nil {
-		var ancestry []dpuserspace.PolicyRenameAncestry
-		var rebinds []dpuserspace.PolicySessionRebind
-		if captured := d.policyInvalidationCapture; captured != nil {
-			ancestry = captured.renameAncestry
-			rebinds = captured.renamed
-		}
-		if setter, ok := rt.(interface {
-			SetPolicyRenameAncestry([]dpuserspace.PolicyRenameAncestry, []dpuserspace.PolicySessionRebind)
-		}); ok {
-			setter.SetPolicyRenameAncestry(ancestry, rebinds)
-		}
-	}
+	d.captureAndStagePolicyRenameAncestry(cfg)
 	if rt := d.dataplane(); rt != nil {
 		if adapter, ok := rt.(interface {
 			Manager() *dpuserspace.Manager

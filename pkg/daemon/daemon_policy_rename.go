@@ -330,6 +330,12 @@ func capturedTunnelDiscriminatorValid(protocol uint8, discriminator uint64) bool
 	return protocol != 47 || discriminator != 0
 }
 
+// Translated-dst rematch consults SessFlagDNAT only, and that covers inbound
+// NPTv6 too: NPTv6 populates decision.nat.rewrite_dst with the translated
+// internal dst (no port rewrite), and helper session flags derive solely from
+// rewrite_src/rewrite_dst — no SESS_FLAG_NPTV6 exists on the helper, and the Go
+// constant is ABI width documentation nothing stamps. An NPTv6 row therefore
+// reaches the capture as DNAT-flagged with a translated NATDstIP and zero port.
 func rematchRenamedV4(oldCfg, newCfg *config.Config, binding policyRenameBinding, key dataplane.SessionKey, value dataplane.SessionValue) (dpuserspace.PolicySessionRebind, bool) {
 	if !capturedTunnelDiscriminatorValid(key.Protocol, value.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false

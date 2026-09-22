@@ -3,12 +3,17 @@ package daemon
 import (
 	"context"
 	"errors"
-	"testing"
-
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"golang.org/x/sync/semaphore"
+	"strings"
+	"testing"
 )
 
 // twoPolicyConfig builds a config with a single trust->untrust zone pair
@@ -267,17 +272,15 @@ func TestClearSessionsForDeletedPolicies_NoDeletionIsNoop(t *testing.T) {
 }
 
 // policyInvalTestDP is an in-memory RuntimeDataPlane whose session store backs
-// onto plain maps, enough to exercise the commit-time deletion-clear.
 type policyInvalTestDP struct {
 	dataplane.DataPlane // embedded nil — only the overridden methods are called
 
 	v4           map[dataplane.SessionKey]dataplane.SessionValue
 	v6           map[dataplane.SessionKeyV6]dataplane.SessionValueV6
 	iterateCalls int
-	// iterErr, when non-nil, is returned by BatchIterateSessions AFTER yielding
-	// its entries — models a dataplane iterator that fails partway, exercising
-	// the enumerate-error path in clearSessionsForPolicyIDs (Copilot #4320).
-	iterErr error
+	renameWire   []dpuserspace.PolicyRenameAncestry
+	renameRows   []dpuserspace.PolicySessionRebind
+	iterErr      error
 	// delErr, when non-nil, is returned by BatchDeleteSessions/V6 WITHOUT
 	// deleting anything — models a dataplane batch-delete that fails, so the
 	// MATCHED sessions stay INSTALLED. Exercises the delete-error propagation
@@ -303,6 +306,14 @@ func (d *policyInvalTestDP) Sessions() dataplane.SessionStore {
 func (d *policyInvalTestDP) Telemetry() dataplane.Telemetry                  { return dataplane.TelemetryOf(nil) }
 func (d *policyInvalTestDP) SessionDeltas() dpruntime.SessionDeltaSource     { return nil }
 func (d *policyInvalTestDP) GetPersistentNAT() *dataplane.PersistentNATTable { return nil }
+
+func (d *policyInvalTestDP) SetPolicyRenameAncestry(
+	wire []dpuserspace.PolicyRenameAncestry,
+	rows []dpuserspace.PolicySessionRebind,
+) {
+	d.renameWire = append([]dpuserspace.PolicyRenameAncestry(nil), wire...)
+	d.renameRows = append([]dpuserspace.PolicySessionRebind(nil), rows...)
+}
 
 func (d *policyInvalTestDP) BatchIterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
 	d.iterateCalls++
@@ -480,5 +491,280 @@ func TestApplyAndSyncCommittedSurfacesInvalidationError(t *testing.T) {
 	if got != compiled {
 		t.Fatalf("applyAndSyncCommitted returned config %p, want the committed config %p "+
 			"(a non-fatal invalidation error must not drop the commit)", got, compiled)
+	}
+}
+
+func TestCapturePolicyInvalidationRetainsRenamedAndLeavesFirstPolicy10511(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	renamedKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 1234, DstPort: 443, Protocol: 6,
+	}
+	unboundKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 11}, DstIP: [4]byte{10, 0, 0, 21},
+		SrcPort: 1235, DstPort: 443, Protocol: 6,
+	}
+	dp := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			renamedKey: {
+				State:       dataplane.SessStateEstablished,
+				PolicyID:    oldID,
+				IngressZone: config.StableZoneID("lan"),
+				EgressZone:  config.StableZoneID("wan"),
+			},
+			unboundKey: {
+				State:       dataplane.SessStateEstablished,
+				PolicyID:    0,
+				IngressZone: config.StableZoneID("lan"),
+				EgressZone:  config.StableZoneID("wan"),
+			},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, &pendingRenameApply{
+		descriptors: []configstore.RenameDescriptor{
+			policyRenameDescriptor("p-old", "p-new"),
+		},
+	})
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("rename apply did not produce a pre-publication capture")
+	}
+	if len(capture.renamed) != 1 {
+		t.Fatalf("renamed rows = %d, want one nonzero-policy rebind: %+v", len(capture.renamed), capture.renamed)
+	}
+	if capture.renamed[0].RuleID != "lan->wan/p-new" {
+		t.Fatalf("capture rebound unexpected rule: %+v", capture.renamed[0])
+	}
+	if len(capture.deleted.v4) != 0 {
+		t.Fatalf("permitted renamed row entered delete bucket: %+v", capture.deleted.v4)
+	}
+	if _, ok := dp.v4[unboundKey]; !ok {
+		t.Fatal("id-0 unbound row was consumed during rename capture; Rust owns its rotation purge")
+	}
+}
+
+// A renamed GRE row with discriminator zero cannot be re-identified: the BPF
+// conntrack mirror omits the discriminator, so zero is both the valid
+// non-tunnel class and an unidentifiable GRE row. The capture routes it to
+// the delete bucket (never the renamed set) with PurgeTunnelVariants set, so
+// the helper deletes every discriminator variant of the tuple rather than
+// under-matching None and leaking the row — or aliasing it onto another GRE
+// session. A non-GRE row in the same capture must not carry the flag.
+func TestCaptureRoutesGreZeroRenameToWildcardDelete10511(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	greKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 0, DstPort: 0, Protocol: 47,
+	}
+	tcpKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 11}, DstIP: [4]byte{10, 0, 0, 21},
+		SrcPort: 1234, DstPort: 443, Protocol: 6,
+	}
+	dp := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			greKey: {
+				State: dataplane.SessStateEstablished, PolicyID: oldID,
+				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+				TunnelDiscriminator: 0,
+			},
+			tcpKey: {
+				State: dataplane.SessStateEstablished, PolicyID: oldID,
+				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	d.armPolicyInvalidationPlanWithRename(oldCfg, newCfg, &pendingRenameApply{
+		descriptors: []configstore.RenameDescriptor{
+			policyRenameDescriptor("p-old", "p-new"),
+		},
+	})
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("rename apply did not produce a pre-publication capture")
+	}
+	if len(capture.renamed) != 1 || capture.renamed[0].RuleID != "lan->wan/p-new" {
+		t.Fatalf("TCP row was not retained as the one renamed rebind: %+v", capture.renamed)
+	}
+	if len(capture.deleted.v4) != 1 {
+		t.Fatalf("GRE0 row did not land exactly once in the delete bucket: %+v", capture.deleted.v4)
+	}
+	entry := capture.deleted.v4[0]
+	if entry.Key != greKey {
+		t.Fatalf("delete bucket holds the wrong row: %+v", entry.Key)
+	}
+	if !entry.PurgeTunnelVariants {
+		t.Fatal("GRE0 delete entry must set PurgeTunnelVariants for the helper wildcard delete")
+	}
+}
+
+func TestPeerSyncRenameAncestryCaptureAndClearJointFixture10511(t *testing.T) {
+	render := func(rule string, extensive bool) string {
+		lines := []string{
+			"set security zones security-zone other",
+			"set security zones security-zone lan",
+			"set security zones security-zone wan",
+			"set security policies default-policy deny-all",
+			"set security policies from-zone other to-zone wan policy p-seed match source-address any",
+			"set security policies from-zone other to-zone wan policy p-seed match destination-address any",
+			"set security policies from-zone other to-zone wan policy p-seed match application any",
+			"set security policies from-zone other to-zone wan policy p-seed then deny",
+			"set security policies from-zone lan to-zone wan policy " + rule + " match source-address any",
+			"set security policies from-zone lan to-zone wan policy " + rule + " match destination-address any",
+			"set security policies from-zone lan to-zone wan policy " + rule + " match application any",
+			"set security policies from-zone lan to-zone wan policy " + rule + " then permit",
+		}
+		if extensive {
+			lines = append(lines, "set security policies policy-rematch extensive")
+		}
+		return strings.Join(lines, "\n") + "\n"
+	}
+	canonical := func(rule string, extensive bool) string {
+		raw := strings.TrimSuffix(render(rule, extensive), "\n")
+		lines := strings.Split(raw, "\n")
+		for i := range lines {
+			lines[i] = strings.TrimPrefix(lines[i], "set ")
+		}
+		return renderSyncedConfigText(t, lines...)
+	}
+	store := newConfigStore(t, t.TempDir())
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(render("p-old", false)), "\n") {
+		line = strings.TrimPrefix(line, "set ")
+		if err := store.SetFromInput(line); err != nil {
+			t.Fatalf("SetFromInput(%q): %v", line, err)
+		}
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("initial Commit: %v", err)
+	}
+	oldCfg := store.ActiveConfig()
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	if oldID == 0 {
+		t.Fatalf("fixture needs a nonzero renamed policy id, got %d", oldID)
+	}
+	renamedKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 1234, DstPort: 443, Protocol: 6,
+	}
+	idZeroKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 11}, DstIP: [4]byte{10, 0, 0, 21},
+		SrcPort: 1235, DstPort: 443, Protocol: 6,
+	}
+	dp := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			renamedKey: {
+				State: dataplane.SessStateEstablished, PolicyID: oldID,
+				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			},
+			idZeroKey: {
+				State: dataplane.SessStateEstablished, PolicyID: 0,
+				IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+			},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
+	// The seam stands in for the full dataplane body, but the capture AND
+	// the rename staging run through the shared production helper — never a
+	// test-local re-implementation — so removing the staging from the helper
+	// reds the assertions below. The helper's production callsite placement
+	// (before ApplyConfig) is pinned structurally by
+	// TestRenameStagingRunsBeforeDataplanePublish10511.
+	d.applyBodyForTest = func(cfg *config.Config) {
+		d.captureAndStagePolicyRenameAncestry(cfg)
+	}
+	d.setDataplane(dp)
+	ancestry := []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")}
+	if _, err := d.syncAndApplyWithAncestry(context.Background(), canonical("p-new", true), nil, ancestry); err != nil {
+		t.Fatalf("peer sync apply returned %v", err)
+	}
+	if len(dp.renameWire) != 1 {
+		t.Fatalf("peer-sync capture emitted %d ancestry rows, want one: %#v", len(dp.renameWire), dp.renameWire)
+	}
+	if len(dp.renameRows) != 1 || dp.renameRows[0].RuleID != "lan->wan/p-new" {
+		t.Fatalf("peer-sync capture did not deliver one permitted rebind: %#v", dp.renameRows)
+	}
+	if _, ok := dp.v4[renamedKey]; !ok {
+		t.Fatal("renamed row was deleted instead of retained for Rust rotation")
+	}
+	if _, ok := dp.v4[idZeroKey]; !ok {
+		t.Fatal("overloaded policy-id 0 row was consumed by the rename capture")
+	}
+	if d.policyInvalidationCapture != nil {
+		t.Fatal("joint peer-sync path left its pre-publication capture armed after clear")
+	}
+}
+
+// TestRenameStagingRunsBeforeDataplanePublish10511 pins the production
+// callsite the HA joint fixture cannot reach through its apply seam: the real
+// dataplane body must invoke the shared captureAndStagePolicyRenameAncestry
+// helper before its ApplyConfig publish. The joint test proves the helper's
+// LOGIC (capture + transfer) through the seam; this proves the real apply
+// CALLS it at the #6948 placement. Moving the call after ApplyConfig — or
+// deleting it — re-opens the positional-id race the capture exists to close,
+// while the joint test alone would stay green.
+func TestRenameStagingRunsBeforeDataplanePublish10511(t *testing.T) {
+	const src = "daemon_apply_dataplane.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, src, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", src, err)
+	}
+	var (
+		stagingCalls int
+		stagingPos   token.Pos
+		stagingFunc  string
+		publishPos   token.Pos
+	)
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		var staged, published token.Pos
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "captureAndStagePolicyRenameAncestry":
+				stagingCalls++
+				staged = call.Pos()
+			case "ApplyConfig":
+				if staged.IsValid() && !published.IsValid() {
+					published = call.Pos()
+				}
+			}
+			return true
+		})
+		if staged.IsValid() {
+			stagingPos, stagingFunc, publishPos = staged, fn.Name.Name, published
+		}
+	}
+	if stagingCalls != 1 {
+		t.Fatalf("want exactly one production captureAndStagePolicyRenameAncestry call, found %d", stagingCalls)
+	}
+	if !publishPos.IsValid() || publishPos <= stagingPos {
+		t.Fatalf("%s: the rename staging call (%s) must precede the ApplyConfig publish in %s",
+			src, fset.Position(stagingPos), stagingFunc)
 	}
 }

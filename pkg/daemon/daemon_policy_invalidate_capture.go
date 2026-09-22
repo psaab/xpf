@@ -72,19 +72,12 @@ import (
 // call itself — by capturing at the last statement before it. It is strictly
 // narrower than the pre-#6948 window (the whole post-activation apply tail).
 
-// policyInvalidationPlan is the (old, new) config pair a commit-class apply
-// will diff for the commit-time session invalidation. The apply's CALLER arms
-// it before calling applyConfigLocked, because only the caller holds the
-// pre-commit active config — by the time the apply runs, the store has already
-// promoted the new one. capturePolicyInvalidationLocked consumes it at the
-// publication boundary.
-//
 // pendingRenameApply binds config ancestry to the exact promoted active
-// generation and the candidate generation that produced it. The active
-// generation is the transaction key; the candidate generation retires only
-// the matching store lineage after convergence.
+// generation, which is the transaction key. Ownership transferred from the
+// store at bind time in commitWithGenBinding; the daemon copy is the sole
+// owner afterward, retained for peer retry/reconnect and pruned by the next
+// commit's bind.
 type pendingRenameApply struct {
-	generation  uint64
 	descriptors []configstore.RenameDescriptor
 }
 
@@ -313,6 +306,37 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	}
 
 	d.policyInvalidationCapture = capture
+}
+
+// captureAndStagePolicyRenameAncestry is the ONE production handoff from the
+// pre-publication capture to the dataplane's rename staging: take the capture
+// (which consumes the armed plan), then hand any rename ancestry + rebind
+// records to the dataplane before it publishes the new snapshot. The
+// dataplane without the staging interface (or a capture without rename rows)
+// receives empty slices, which is a no-op by construction.
+//
+// The dataplane-apply path calls this at the last statement before it
+// publishes the new policy snapshot (see the #6948 placement comment at the
+// call site); the HA joint test's apply seam calls this same helper rather
+// than re-implementing the transfer, so the staging logic has exactly one
+// implementation and the test reds if it is removed. Caller holds d.applySem.
+func (d *Daemon) captureAndStagePolicyRenameAncestry(cfg *config.Config) {
+	d.capturePolicyInvalidationLocked(cfg)
+	rt := d.dataplane()
+	if rt == nil {
+		return
+	}
+	var ancestry []dpuserspace.PolicyRenameAncestry
+	var rebinds []dpuserspace.PolicySessionRebind
+	if captured := d.policyInvalidationCapture; captured != nil {
+		ancestry = captured.renameAncestry
+		rebinds = captured.renamed
+	}
+	if setter, ok := rt.(interface {
+		SetPolicyRenameAncestry([]dpuserspace.PolicyRenameAncestry, []dpuserspace.PolicySessionRebind)
+	}); ok {
+		setter.SetPolicyRenameAncestry(ancestry, rebinds)
+	}
 }
 
 func idInSet(ids map[uint32]struct{}, id uint32) bool {

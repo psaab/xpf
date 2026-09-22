@@ -40,6 +40,23 @@ func TestPartialRepublishStripsSingleUseRenameMetadata(t *testing.T) {
 				return m.retryDeferredWorkerArmLocked()
 			},
 		},
+		{
+			name: "capture authority",
+			prepare: func(m *Manager) {
+				m.captureEpochProvider = func(uint64, uint32) (
+					uint64,
+					[]QueueEpochSnapshot,
+					uint64,
+					[]IpsecTunnelRowSnapshot,
+				) {
+					return 1, nil, 1, nil
+				}
+			},
+			publish: func(m *Manager, _ *config.Config) error {
+				_, err := m.RepublishCurrentCaptureAuthority()
+				return err
+			},
+		},
 	}
 
 	for _, tc := range paths {
@@ -268,6 +285,49 @@ func TestPublishedFullFIBBumpThenRouteOverlayStripsRenameMetadata(t *testing.T) 
 	}
 	if len(sent.PolicyRenameAncestry) != 0 || len(sent.PolicySessionRebinds) != 0 {
 		t.Fatalf("post-FIB-bump overlay replayed consumed rename metadata: ancestry=%v rebinds=%v",
+			sent.PolicyRenameAncestry, sent.PolicySessionRebinds)
+	}
+}
+
+func TestStatusPartialRepublishStripsConsumedRenameMetadataAfterFIBBump(t *testing.T) {
+	f := newDeferredPublishFixture9337(t, nil)
+	f.m.xskLivenessProven = true
+	f.m.pendingFullSnapshotMetadata = false
+	f.m.publishedSnapshot = f.snap.Generation
+	f.m.generation = f.snap.Generation + 1
+	f.m.lastSnapshot.Generation = f.m.generation
+	f.m.partialOutcomeUnknown = partialFabrics
+	f.snap.PolicyRenameAncestry = []PolicyRenameAncestry{
+		{SourceRuleID: "old", DestinationRuleID: "new"},
+	}
+	f.snap.PolicySessionRebinds = []PolicySessionRebind{
+		{Family: "ipv4", RuleID: "new", PolicyID: 2},
+	}
+	var sent *ConfigSnapshot
+	f.m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "apply_snapshot" {
+			sent = req.Snapshot
+		}
+		if status != nil {
+			*status = ProcessStatus{
+				ConfigSnapshotProtocolVersion: ProtocolVersion,
+				LastSnapshotGeneration:        req.Snapshot.Generation,
+				LastFIBGeneration:             req.Snapshot.FIBGeneration,
+			}
+		}
+		return nil
+	}
+	f.m.mu.Lock()
+	err := f.m.syncSnapshotLocked()
+	f.m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("status partial republish: %v", err)
+	}
+	if sent == nil {
+		t.Fatal("status partial republish did not send apply_snapshot")
+	}
+	if len(sent.PolicyRenameAncestry) != 0 || len(sent.PolicySessionRebinds) != 0 {
+		t.Fatalf("status partial republish replayed consumed metadata: ancestry=%v rebinds=%v",
 			sent.PolicyRenameAncestry, sent.PolicySessionRebinds)
 	}
 }

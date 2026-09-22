@@ -45,6 +45,18 @@
 # ADDING A ROW: add it here and BOTH languages assert it. A row only one side
 # knows about cannot exist, which is the property two hand-maintained lists do
 # not have.
+#
+# KNOWN GRAMMAR LIMIT (#10511): the `q` row carries no NAT translation fields
+# and no scheduler/time fields, so translated-dst rematch (DNAT, inbound NPTv6
+# via its DNAT-channel encoding) and scheduler-gated verdicts are INEXPRESSIBLE
+# here. Those shapes are pinned instead by the Go rename-evaluator unit cells
+# TestPolicyRenameEvaluatorHandlesDNATV4AndV6Rows10511,
+# TestPolicyRenameEvaluatorRematchesNPTv6ShapedRow10511, and
+# TestPolicyRenameEvaluatorHonorsInjectedSchedulerState10511
+# (pkg/daemon/daemon_policy_rename_test.go), which drive the same
+# policymatch.Match the corpus differentials bind. Extending the grammar is a
+# deliberate non-goal: both languages would need new row fields for shapes only
+# the rename-rematch path consumes.
 
 # ---------------------------------------------------------------- tier 1
 case exact-zone-pair-permit
@@ -332,4 +344,22 @@ set security policies from-zone trust to-zone untrust policy p-nonlab match appl
 set security policies from-zone trust to-zone untrust policy p-nonlab then permit
 q trust untrust 10.0.1.100 10.0.2.5 tcp 1234 80 deny -
 q trust untrust 10.0.1.101 10.0.2.5 tcp 1234 80 permit p-nonlab
+end
+
+# ICMP is a first-class application protocol even when the packet carries no
+# TCP/UDP ports. The unknown application row keeps a policy reader from
+# defaulting every non-TCP tuple to a port-bearing deny.
+case icmp-unknown-application
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set applications application app-icmp protocol icmp
+set security policies from-zone trust to-zone untrust policy p-icmp match source-address any
+set security policies from-zone trust to-zone untrust policy p-icmp match destination-address any
+set security policies from-zone trust to-zone untrust policy p-icmp match application app-icmp
+set security policies from-zone trust to-zone untrust policy p-icmp then permit
+q trust untrust 10.0.1.5 10.0.2.5 icmp 0 0 permit p-icmp
+q trust untrust 10.0.1.5 10.0.2.5 udp 0 0 deny -
 end

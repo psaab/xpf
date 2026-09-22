@@ -198,9 +198,9 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 		DefaultLogSessionClose: cfg.Security.DefaultPolicyLogSessionClose,
 		Policies:               policies,
 		PolicyRematchExtensive: cfg.Security.PolicyRematchExtensive,
-		// to a feed-backed `match {source,destination}-address-name` resolves the
-		// live feed prefixes, exactly as the policy/address-book path does. Static
-		// NAT has no address-name match, so it needs no overlay.
+		// #2049: feed-backed `match {source,destination}-address-name` resolves
+		// the live feed prefixes, exactly as the policy/address-book path does.
+		// Static NAT has no address-name match, so it needs no overlay.
 		SourceNAT:             buildSourceNATSnapshotsWithFeeds(cfg, natCounterIDs, feedOverlay),
 		StaticNAT:             buildStaticNATSnapshots(cfg, natCounterIDs),
 		DestinationNAT:        buildDestinationNATSnapshotsWithFeeds(cfg, natCounterIDs, feedOverlay),

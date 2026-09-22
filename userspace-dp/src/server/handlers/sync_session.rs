@@ -259,9 +259,11 @@ pub(super) fn handle(
                 // ambiguity probe, where it could be refused for naming too many
                 // tenants when it had named exactly one.
                 let bare = resolved_domain.is_none();
-                let purge_tunnel_variants = sync_req.purge_tunnel_variants
-                    && sync_req.protocol == crate::ip_proto::PROTO_GRE
-                    && sync_req.tunnel_discriminator == 0;
+                let purge_tunnel_variants = tunnel_variant_purge_applies(
+                    sync_req.purge_tunnel_variants,
+                    sync_req.protocol,
+                    sync_req.tunnel_discriminator,
+                );
                 let mut matched: Vec<u32> = Vec::new();
                 if bare {
                     // Domain 0 is a CANDIDATE like any other, not a special case
@@ -361,5 +363,45 @@ pub(super) fn handle(
             response.ok = false;
             response.error = format!("unknown session sync operation {other}");
         }
+    }
+}
+
+/// #10511 MIN-10: the tunnel-variant wildcard fires ONLY for a GRE delete
+/// whose discriminator reads zero — the BPF-mirror shape where the row cannot
+/// be re-identified. Every other protocol, every nonzero discriminator, and
+/// every request without the flag takes the exact-match path, so the wildcard
+/// can never widen beyond the GRE0 rows the Go capture marks.
+fn tunnel_variant_purge_applies(
+    purge_tunnel_variants: bool,
+    protocol: u8,
+    tunnel_discriminator: u64,
+) -> bool {
+    purge_tunnel_variants
+        && protocol == crate::ip_proto::PROTO_GRE
+        && tunnel_discriminator == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_variant_purge_fires_only_for_gre_zero_10511() {
+        assert!(tunnel_variant_purge_applies(
+            true,
+            crate::ip_proto::PROTO_GRE,
+            0
+        ));
+        assert!(!tunnel_variant_purge_applies(true, 6, 0));
+        assert!(!tunnel_variant_purge_applies(
+            true,
+            crate::ip_proto::PROTO_GRE,
+            7
+        ));
+        assert!(!tunnel_variant_purge_applies(
+            false,
+            crate::ip_proto::PROTO_GRE,
+            0
+        ));
     }
 }

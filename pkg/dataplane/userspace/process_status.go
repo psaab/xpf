@@ -92,6 +92,14 @@ func (m *Manager) syncSnapshotLocked() error {
 	// (resampleUnresolvedSectionsLocked keeps the fabric rows' plan half), so the
 	// gate's decision holds for the copy that will be sent.
 	retained := *m.lastSnapshot
+	// A FIB bump can advance lastSnapshot.Generation without publishing a
+	// full snapshot. If a later status retry is the first accepted publication
+	// of a deferred or unknown-outcome full snapshot, preserve its one-shot
+	// rename metadata; otherwise strip metadata consumed by the prior full
+	// publication just like every other partial republish path.
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&retained)
+	}
 	resampled := m.resampleUnresolvedSectionsLocked(&retained)
 	m.refreshCaptureAuthorityLocked(&retained)
 	if xskStartup {

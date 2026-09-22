@@ -1,15 +1,16 @@
-# DRAFT v4 cluster plan: zone-rename trio (#10509, #10510, #10511)
+# Cluster plan: zone-rename trio (#10509, #10510, #10511)
 
-Status: DRAFT v4 after hostile round-1 review and Delta-1/Delta-2 review.
-Base: `2781465ee` (docs: correct session-sync contract documentation, #10508).
+Status: IMPLEMENTED in the cluster lane; retain the design gates below as
+verification scope for #10509, #10510, and #10511.
+Base: `9927bbfa` (current origin/master at implementation start).
 Worktree: `.claude/worktrees/10509-zonerenames`, branch `fix/10509-zone-renames`.
-Lane: Wave-4 cluster lane, SERIAL route. No production code is included.
+Lane: Wave-4 cluster lane, SERIAL route. Production and test changes are included.
 
 ## 0. Verdicts and gate
 
 - **#10509: PLAN-NEEDS-MINOR.** Foreign is deterministic but Drop is
   conditional. Stage A remains measurement/pinning only, with the required
-  shape matrix, sweep-emulated boundary, and non-vacuous positive control.
+  shape matrix, observation window, and non-vacuous positive control.
 - **#10510: PLAN-NEEDS-MAJOR.** Bare positional-index binding is killed as
   skew-unsafe. Option B now derives removed zone ids from old/new snapshot
   disappearance, independent of the CLI mutation or HA ancestry.
@@ -20,10 +21,11 @@ Lane: Wave-4 cluster lane, SERIAL route. No production code is included.
   sidecar cannot follow the existing ordered config-apply lifecycle, #10511
   becomes PLAN-KILL rather than falling back to content-only inference.
 
-All three issue pages are OPEN. Local fix search was scoped to base
-`2781465ee`; the actual merged-PR cache query
-`pr://psaab/xpf?state=merged&limit=100` returned recent merged work but no
-merged #10509, #10510, or #10511 fix. No production file is changed here.
+All three issue pages remain the source requirements for this implementation.
+The lane was rebased for implementation against `9927bbfa`; the additive
+sidecar now follows local and HA config-apply paths, with legacy fallback
+gates retained for unknown or incapable peers. This plan records the design
+evidence; implementation and scoped proof live in the source and tests.
 
 ## 1. Per-issue problem and STEP-0 evidence
 
@@ -205,7 +207,7 @@ Required matrix:
 | multi-zone rename, recorded egress id dead, default permit | peer-synced forward, reverse companion, local admitting-interface forward | Foreign then Forward | default-policy zero control for both Drop and Revoke |
 
 Count packets, distinct affected sessions, `foreign_authority_drops`, and
-`policy_revoked_sessions` until the sweep-emulated boundary. The Drop lane
+`policy_revoked_sessions` through the observation window. The Drop lane
 must use a peer-synced/reverse or non-admitting-interface row, because a local
 forward hit on its admitting interface is allowed to Revoke and does not
 increment the Drop counter. The dead-pair cell must observe at least one Drop
@@ -290,14 +292,19 @@ scheduler maps already exist (`pkg/daemon/daemon_policy_invalidate.go:209-214`).
 Query contract: evaluate the forward row once and use its canonical companion
 for reverse rows; source remains original; captured DNAT destination and port
 are used as Rust does (`session_hit_authority.rs:274-295`); SessionValue carries
-NAT fields (`pkg/dataplane/bpf_session_value.go:99-103,170-173`); NPTv6 lacks a
-per-row rewrite field and uses original tuple; sync rows lack ICMP type/code,
-so nil is an explicit fail-closed query matching runtime `packet_icmp=None`;
-established rows are L4-present/non-first-fragment. No new Rust RPC is needed.
-The parity corpus extends `testdata/policy_verdict_corpus.txt` and
-`pkg/policymatch/policy_verdict_corpus_9167_test.go` for NAT/NPTv6,
-ICMP-unknown, scheduler, global, wildcard, duplicate, default, and fragment
-cases. Go decides retain/delete; Rust/joint tests forwarding separately.
+NAT fields (`pkg/dataplane/bpf_session_value.go:99-103,170-173`); inbound NPTv6
+arrives DNAT-shaped (its `rewrite_dst` sets the generic DNAT bit with the
+translated dst and no port rewrite), so it rematches through the same
+translated-dst path while outbound source translation keeps the original
+policy tuple; sync rows lack ICMP type/code, so nil is an explicit fail-closed
+query matching runtime `packet_icmp=None`; established rows are
+L4-present/non-first-fragment. No new Rust RPC is needed. The shared corpus
+covers ICMP-unknown, scheduler-shape-agnostic, global, wildcard, duplicate,
+default, and fragment cases in `testdata/policy_verdict_corpus.txt`; NAT and
+scheduler TIME shapes are inexpressible in the `q` row grammar (no NAT or time
+fields) and are pinned instead by the Go evaluator unit cells, a documented
+decision rather than a corpus gap. Go decides retain/delete; Rust/joint tests
+forwarding separately.
 
 #### Capture, id-0, retain-rebind, and cost
 
@@ -423,6 +430,21 @@ Design the bounded additive sidecar as follows:
 - **C5 compatibility:** absent sidecar/old callback/old payload defaults to nil
   ancestry and current safe teardown; no positional-index rebind.
 
+- **C6 GRE0 tunnel-variant purge (sanctioned):** a BPF-mirror GRE row with
+  discriminator zero cannot be re-identified, so the Go capture routes it to
+  the delete bucket with `PurgeTunnelVariants` and the helper deletes every
+  discriminator variant of the tuple (`delete_synced_tunnel_variants`). The
+  wildcard fires ONLY for GRE + discriminator zero on both sides; all other
+  shapes take exact-match delete. Same-tuple sibling GRE sessions are deleted
+  with the target — intentional fail-closed teardown (the alternative is a
+  leaked row or a cross-session alias), documented and pinned, not incidental.
+- **C7 rotation order (intentional):** the worker rotation runs the Go-arm
+  rebind BEFORE the #10510 removed-zone purge. The predicates are disjoint —
+  rebind touches bound sessions, purge touches unbound id-0 sync-derived rows
+  — so rebound rows (now bound under new zones) cannot match the purge, and
+  the order is benign rather than load-bearing. Earlier plan text describing
+  purge-before-retain as order-sensitive is superseded by this contract.
+
 Invariants: default/plain rename teardown unchanged; overloaded-zero local,
 legacy, and non-sync rows never swept; genuine Foreign/#9384 re-zone behavior
 unchanged; demoted-owner close filtering unchanged; old peers preserve current
@@ -441,10 +463,18 @@ retain previous-good state; ancestry mismatch/ambiguity fails closed.
 - Positional binding is explicitly killed.
 - HA sidecar loss safely falls back to teardown but leaves the extensive retain
   cohort uncovered; this is the #10511 conditional-KILL tripwire.
-- Go/Rust evaluator drift is mitigated by the existing policymatch parity
-  corpus and separate Rust forwarding oracle.
-- Bulk cost is O(Z) for #10510 and O(P+R+S) for #10511, with one table pass
-  per invalidation path and no deleted-by-added quadratic scan.
+- Blind-rebind race (residual, bounded stale-authorization risk): a rebind
+  record names the tuple, not the old policy id, so a session that closes and
+  reopens on the same tuple between the pre-publication capture and the
+  rotation rebind (~ms window, shrunk from unbounded by single-use metadata)
+  is rebound without a fresh verdict. The renamed rule's identical fingerprint
+  bounds the exposure, but concurrent policy reordering or other commit
+  changes in the window could expand authorization; only an old policy/session
+  identity guard on the record would close it fully.
+- Multi-hop HA ancestry loss (residual): a standby that applies a peer-synced
+  config records no daemon-side pending ancestry for it, so a second hop
+  forwards text-only and the extensive retain is lost (safe teardown) beyond
+  one hop. Documented, not fixed: provenance survives exactly one HA hop.
 
 Shippability order: Stage A; #10510 snapshot-zone purge plus full Rust/Go
 controls; #10511 local ancestry and evaluator; HA sidecar and sync-path test;
@@ -452,8 +482,10 @@ then joint fixture. Each earlier leg remains useful if a later leg is deferred.
 
 ## 6. Test plan and RED cells
 
-No tests run on design path. Implementers must run full affected files/modules,
-not only the expected-to-flip test, and record RED-on-revert firsthand.
+The design-path cells below are IMPLEMENTED in the lane; the PR body Validation
+section records the firsthand module runs and RED-on-revert proofs. Reviewers
+must still run full affected files/modules, not only the expected-to-flip
+test, and record RED-on-revert firsthand.
 
 ### #10509
 
@@ -519,33 +551,35 @@ teardown, and the #10509 shape-specific window.
 
 ## 7. Open questions and PLAN-KILL conditions
 
+Stage-B items stay open; every implementation prerequisite below is RESOLVED
+with its outcome recorded, since the lane implemented rather than killed.
 - **O-10509-1 (Stage-B PLAN-KILL only):** measured bound per shape; if no
-  material positive window, kill Stage B and accept+pin.
+  material positive window, kill Stage B and accept+pin. OPEN (Stage B deferred).
 - **O-10509-2:** if Stage B is selected, can its measured per-object
-  zone-transition map preserve genuine Foreign/#9384 semantics?
-- **O-10510-1:** do all supported snapshot producers expose **populated** old
-  and new zone sets plus duplicate validation? If either side has no zone data,
-  the removal set must be empty and the purge a safe no-op; an empty new set
-  must never be interpreted as every old zone having disappeared. Scope
-  acceptance to producers with this evidence and never infer from CLI ancestry.
-- **O-10510-2:** can origin/zone/collision negatives run without cluster
-  commands? Existing unit harnesses and delta probes indicate yes; otherwise
-  owner-absent acceptance is PLAN-KILL.
-- **O-10511-1 (conditional-KILL, local + HA):** can Rename ancestry be carried
-  from `RenameAsPlantClass` through both local commit and the complete
-  QueueConfig/encode/decode/configApplyItem/OnConfigReceived/handleConfigSync/
-  capture lifecycle with bounded additive fields and legacy fallback? If the
-  answer is no for either leg, concede PLAN-KILL for #10511; never use
-  content-only inference.
-- **O-10511-2:** add exact NAT/NPTv6, ICMP-unknown, scheduler, tier, and
-  fragment parity cases to the existing corpus before implementation.
-- **O-JOINT-1:** lock the two predicates and sidecar schema before production
-  work; #10510 must remain independent of sidecar availability.
+  zone-transition map preserve genuine Foreign/#9384 semantics? OPEN (Stage B
+  deferred).
+- **O-10510-1: RESOLVED.** Producers expose the `zone_set_validated` marker;
+  either side unvalidated/empty forces an empty removal set and a safe no-op,
+  never inferring disappearance from an empty new set or from CLI ancestry.
+- **O-10510-2: RESOLVED.** Origin/zone/collision negatives run in unit
+  harnesses without cluster commands (derivation cells, rotation purge and
+  selectivity, marker validation); no PLAN-KILL triggered.
+- **O-10511-1 (conditional-KILL, local + HA): RESOLVED — kill cleared.**
+  Rename ancestry travels `RenameAsPlantClass` through local commit and the
+  complete QueueConfig/encode/decode/configApplyItem/OnConfigReceived/
+  handleConfigSync/capture lifecycle with bounded additive fields and legacy
+  fallback on both legs; content-only inference was never used.
+- **O-10511-2: RESOLVED.** ICMP-unknown, tier, and fragment parity cases went
+  into the shared corpus; NAT/NPTv6/scheduler-time shapes are pinned by Go
+  evaluator unit cells because the `q` grammar cannot encode session NAT
+  metadata or time (documented in the corpus header).
+- **O-JOINT-1: RESOLVED.** Predicates and sidecar schema locked before
+  production work; #10510 stays independent of sidecar availability.
 
 ## 8. Verification record
 
-- First action reported pwd, branch `fix/10509-zone-renames`, HEAD `2781465ee`,
-  and assigned scope.
+- Implementation started from origin/master `9927bbfa` in branch
+  `fix/10509-zone-renames`, with this worktree and assigned scope recorded.
 - All three issue pages were read; merged-PR cache search was run in addition
   to base-scoped local history and found no merged fix.
 - Source callsites checked: authority/dispatch; daemon invalidation/capture;
@@ -555,4 +589,6 @@ teardown, and the #10509 shape-specific window.
 - This v4 folds D1-R4 retain/rebind/restamp for both Go and Rust arms, D2-R1
   Drop/Revoke accounting, D2-R2 rotation-query detail, D2-R3 invariant
   correction, D2-R4 populated-zone producer guard, and D2-R5 wording cleanup.
-- No production code or tests changed; plan-only design path remains active.
+- The implementation added the evaluator, capture, sidecar, capability-gate,
+  and userspace restamp proofs listed above; the parent validation pass must
+  still run the complete repository matrix after the lane rebase.

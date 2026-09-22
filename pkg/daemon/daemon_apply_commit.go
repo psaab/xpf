@@ -129,8 +129,16 @@ func (d *Daemon) commitWithGenBinding(
 			}
 			if activeGen != 0 && len(descriptors) > 0 {
 				d.pendingRenameApplies[activeGen] = pendingRenameApply{
-					generation: gen, descriptors: descriptors,
+					descriptors: descriptors,
 				}
+				// Ownership transfers to the daemon copy here: retire the
+				// consumed store generation now, in ALL outcomes. Promotion
+				// already advanced the candidate past it, and the mutation
+				// carry moves only the current generation's entry, so no
+				// future commit can read it again — retaining it past this
+				// point (even on a failed apply) leaks one dead entry per
+				// rename commit with no possible reader (#10511 MIN-14).
+				d.store.ClearPendingRenameAncestryForGeneration(gen)
 			}
 			d.pendingRenameMu.Unlock()
 			return oldActive, compiled, nil
@@ -142,7 +150,7 @@ func (d *Daemon) commitWithGenBinding(
 			continue
 		}
 		return nil, nil, err
-}
+	}
 }
 
 // commitAndApply atomically promotes the candidate config and
@@ -364,17 +372,10 @@ func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncP
 		d.pushCommittedConfigToPeer()
 	}
 	joined := errors.Join(applyErr, clearErr)
-	if joined == nil && d.store != nil {
-		d.pendingRenameMu.Lock()
-		pending, ok := d.pendingRenameApplies[activeGen]
-		d.pendingRenameMu.Unlock()
-		if ok {
-			// The store-side candidate lineage is no longer needed once this
-			// generation reached the local dataplane. Keep the daemon-side
-			// descriptor copy for peer retry/reconnect.
-			d.store.ClearPendingRenameAncestryForGeneration(pending.generation)
-		}
-	}
+	// The store-side candidate lineage was already retired at bind time in
+	// commitWithGenBinding, which transferred ownership to the daemon-side
+	// descriptor copy keyed by activeGen. That copy is retained here in every
+	// outcome for peer retry/reconnect and pruned by the next commit's bind.
 	// #4957: a fully-successful commit apply (no fatal apply error, no partial
 	// session-invalidation) means the committed active config has converged on
 	// the dataplane. Stamp it applied so that if THIS node later becomes secondary and

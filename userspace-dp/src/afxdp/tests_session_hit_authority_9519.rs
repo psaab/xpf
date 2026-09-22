@@ -656,8 +656,7 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
             ip: "172.16.80.200".to_string(),
             mac: "00:11:22:33:44:66".to_string(),
             state: "reachable".to_string(),
-            router: false,
-            link_local: false,
+            ..Default::default()
         });
         snapshot.zones.push(ZoneSnapshot {
             name: "dmz".to_string(),
@@ -717,7 +716,15 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
             arrival,
         )
     }
-    const SWEEP_BOUNDARY_PACKETS: usize = 3;
+    /// Fixed observation window: three packets per shape/lane. This is NOT a
+    /// sweep emulation — no sweep runs here, no wall clock, no idle/GC — so
+    /// the Drop lane proves retention for AT LEAST three packets (a lower
+    /// bound on the stale-row lifetime), not a transient upper bound or a
+    /// packets-per-rename quantification. Only the Revoke lane pins an upper
+    /// bound (the pair clears within three packets). Production-window
+    /// quantification against real sweep timing is follow-up work, deliberately
+    /// out of this mechanism-regression matrix.
+    const OBSERVATION_PACKETS: usize = 3;
 
     fn matrix_forward_observation(sessions: &SessionTable) -> (u64, u32) {
         let mut observation = None;
@@ -764,7 +771,7 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
             let mut revokes = 0u64;
             let mut forwarded = 0u64;
             let mut iterations = 0;
-            while session_count(&sessions) != 0 && iterations < SWEEP_BOUNDARY_PACKETS {
+            while session_count(&sessions) != 0 && iterations < OBSERVATION_PACKETS {
                 let (before_idle, before_policy) = matrix_forward_observation(&sessions);
                 let dbg = drive(
                     &live,
@@ -801,12 +808,12 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
 
             if shape.permit_control {
                 assert_eq!(
-                    iterations, SWEEP_BOUNDARY_PACKETS,
-                    "{name}: Foreign+Forward must be observed through the sweep-emulated bound"
+                    iterations, OBSERVATION_PACKETS,
+                    "{name}: Foreign+Forward must be observed through the full observation window"
                 );
                 assert!(
                     forwarded >= 1,
-                    "{name}: Foreign+Forward control must forward before the sweep boundary (forwarded={forwarded}, drops={drops}, revokes={revokes}, rows={})",
+                    "{name}: Foreign+Forward control must forward within the observation window (forwarded={forwarded}, drops={drops}, revokes={revokes}, rows={})",
                     session_count(&sessions)
                 );
                 assert_eq!(drops, 0, "{name}: permit control must not count a drop");
@@ -814,16 +821,16 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
                 assert_eq!(
                     session_count(&sessions),
                     2,
-                    "{name}: Foreign+Forward must retain both halves through the emulated sweep window"
+                    "{name}: Foreign+Forward must retain both halves through the observation window"
                 );
             } else if revoke_lane {
                 assert!(
-                    iterations <= SWEEP_BOUNDARY_PACKETS,
-                    "{name}: Revoke must terminate no later than the sweep-emulated bound"
+                    iterations <= OBSERVATION_PACKETS,
+                    "{name}: Revoke must terminate no later than the observation window (the one upper bound this matrix pins)"
                 );
                 assert!(
                     revokes >= 1,
-                    "{name}: local admitting-interface deny must produce a positive Revoke before bounds"
+                    "{name}: local admitting-interface deny must produce a positive Revoke within the window"
                 );
                 assert_eq!(
                     drops, 0,
@@ -836,18 +843,18 @@ fn zone_rename_window_matrix_has_drop_revoke_and_forward_controls_10509() {
                 );
             } else {
                 assert_eq!(
-                    iterations, SWEEP_BOUNDARY_PACKETS,
-                    "{name}: Drop must be observed through the sweep-emulated bound"
+                    iterations, OBSERVATION_PACKETS,
+                    "{name}: Drop must be observed through the full observation window (retention lower bound, not a transient upper bound)"
                 );
                 assert!(
                     drops >= 1,
-                    "{name}: peer/non-admitting deny must produce a positive Drop before bounds"
+                    "{name}: peer/non-admitting deny must produce a positive Drop within the window"
                 );
                 assert_eq!(revokes, 0, "{name}: Drop lane must not revoke the pair");
                 assert_eq!(
                     session_count(&sessions),
                     2,
-                    "{name}: Drop must retain both halves through the emulated sweep window"
+                    "{name}: Drop must retain both halves through the observation window"
                 );
             }
         }

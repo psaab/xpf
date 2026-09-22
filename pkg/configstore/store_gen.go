@@ -46,8 +46,9 @@ func (s *Store) bumpCandidateGenLocked() {
 }
 
 // bumpCandidatePromotionLocked advances the candidate generation after a
-// successful promotion. The pre-promotion generation remains the key for the
-// apply transaction, which clears it only after convergence.
+// successful promotion. The pre-promotion generation's lineage is consumed by
+// the binder (commitWithGenBinding), which transfers ownership to the daemon
+// copy and retires the store entry immediately, in all apply outcomes.
 func (s *Store) bumpCandidatePromotionLocked() {
 	s.candidateGen++
 }

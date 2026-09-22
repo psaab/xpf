@@ -365,7 +365,8 @@ const (
 	// v29 -> v30 BUMPED (#10485): the capture-generation stamp paired with
 	// tunnel rows rejects same-key stale NFQUEUE identity.
 	// v30 -> v31 BUMPED (#10510): zone_set_validated authenticates the
-	// collision-free zone identity set before removed-zone purge.
+	// collision-free zone identity set before removed-zone purge. The re-pinned
+	// golden additionally fences the #10511 ancestry/rebind/extensive fields.
 	snapshotShapeVersion8892 = 31
 )
 

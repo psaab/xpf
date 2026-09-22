@@ -120,14 +120,14 @@ func TestNilLocalTreePreservesNothing7441(t *testing.T) {
 // TestHandleConfigSyncInstallsThePreserveHook7441 is the WIRING cell.
 //
 // The cells above test the hook. This one tests that the peer-sync apply path
-// passes it. handleConfigSync used to call syncAndApply with a literal nil for
-// chassisPreserve; restoring that nil leaves every cell above green while the
-// posture becomes clearable by the peer again — the exact defect, with a
-// passing suite.
+// passes it. handleConfigSyncWithAncestry is the production body; the
+// one-argument handleConfigSync wrapper exists only for legacy callers.
+// Restoring a nil there leaves every cell above green while the posture becomes
+// clearable by the peer again — the exact defect, with a passing suite.
 //
-// A source scan rather than an execution because reaching handleConfigSync's
-// apply needs a live store, a cluster manager reporting non-primary and a
-// dataplane; the wiring is one call argument and the scan sees it directly.
+// A source scan rather than an execution because reaching the peer-sync apply
+// needs a live store, a cluster manager reporting non-primary and a dataplane;
+// the wiring is one call argument and the scan sees it directly.
 func TestHandleConfigSyncInstallsThePreserveHook7441(t *testing.T) {
 	const src = "daemon_ha_sync.go"
 	fset := token.NewFileSet()
@@ -138,7 +138,7 @@ func TestHandleConfigSyncInstallsThePreserveHook7441(t *testing.T) {
 	var scanned, found bool
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Body == nil || fd.Name.Name != "handleConfigSync" {
+		if !ok || fd.Body == nil || fd.Name.Name != "handleConfigSyncWithAncestry" {
 			continue
 		}
 		scanned = true

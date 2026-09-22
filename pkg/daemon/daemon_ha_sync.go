@@ -494,6 +494,18 @@ func (d *Daemon) pushConfigToPeer() {
 	}
 	// The snapshot and generation reservation share pendingRenameMu; release
 	// it before queueing because QueueConfig may await a key and perform I/O.
+	if d.configSyncPushForTest != nil {
+		_, configText, _ := d.activeConfigSnapshotForPeer()
+		if configText == "" {
+			return
+		}
+		d.configSyncPushForTest()
+		d.noteConfigSharedWithPeer(configText) // #9530
+		if d.syncPeerConnected.Load() {
+			d.markConfigSyncPushed(configText)
+		}
+		return
+	}
 	cfg, configText, ancestry, reservedGen := d.activeConfigSnapshotAndReserveForPeer(ss, 0)
 	if cfg == nil || reservedGen == 0 {
 		return
