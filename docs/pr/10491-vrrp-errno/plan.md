@@ -2,11 +2,10 @@
 
 ## Status
 
-DRAFT v2 (Wave 1, plan-only round). No production code changed. Base
+CONFIRMED v3 (Wave 1, thrice-folded dual-confirmed plan). Plan artifact only. Base
 `b71c52d60` (`fix/10491-vrrp-errno`). Round-1 plan review found only
 documentation/test-precision minors; this revision folds all adjudicated
-findings. Parent delta review is the next gate; implementation starts only
-after review sign-off.
+findings. Dual-confirmed; implementation authorized under the same branch.
 
 ## Issue framing
 

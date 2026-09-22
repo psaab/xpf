@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"syscall"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -13,7 +13,9 @@ import (
 )
 
 // annotatedErr10491 models a netlink error whose outer text is an ext-ack/TLV
-// message while preserving the kernel errno in its unwrap chain.
+// message while preserving the kernel errno in its unwrap chain. Synthetic
+// outer wrapper: Error() returns TLV text ONLY, which the pinned netlink
+// shape never produces (real shape prefixes errno text via "%w: %s").
 type annotatedErr10491 struct {
 	cause error
 	text  string
@@ -60,11 +62,10 @@ func removeVIPErrno10491(t *testing.T, injected error) error {
 	return err
 }
 
-
 func TestVIPAddErrnoClassification_10491(t *testing.T) {
 	cases := []struct {
-		name       string
-		err        error
+		name        string
+		err         error
 		wantApplied bool
 	}{
 		{
@@ -91,6 +92,8 @@ func TestVIPAddErrnoClassification_10491(t *testing.T) {
 			wantApplied: true,
 		},
 		{
+			// Synthetic contract pin: a non-EEXIST error containing bare
+			// "exists" must remain fail-closed; no producer is claimed.
 			name:        "bare-exists-non-eexist",
 			err:         errors.New("interface exists but is down"),
 			wantApplied: false,
