@@ -55,7 +55,7 @@ func validateMakeAggregate(mk string) error {
 			statusInit = true
 		}
 		if strings.HasPrefix(line, "$(MAKE) test-go ") {
-			if !strings.Contains(line, "||") {
+			if !strings.Contains(line, "|| status=$$?") {
 				return fmt.Errorf("Go leg does not capture failure: %q", line)
 			}
 			if goLeg >= 0 {
@@ -64,7 +64,7 @@ func validateMakeAggregate(mk string) error {
 			goLeg = i
 		}
 		if strings.HasPrefix(line, "$(MAKE) test-rust ") {
-			if !strings.Contains(line, "||") {
+			if !strings.Contains(line, "|| status=$$?") {
 				return fmt.Errorf("Rust leg does not capture failure: %q", line)
 			}
 			if rustLeg >= 0 {
@@ -87,9 +87,11 @@ func validateMakeAggregate(mk string) error {
 	}
 	exit := -1
 	for i, line := range recipe {
-		if strings.Contains(line, "exit $$status") {
+		if strings.HasPrefix(line, "exit $$status") {
+			if exit >= 0 {
+				return fmt.Errorf("duplicate trailing exit $$status")
+			}
 			exit = i
-			break
 		}
 	}
 	if exit <= rustLeg {
@@ -123,6 +125,17 @@ func TestMakefileSerialAggregate10496(t *testing.T) {
 		"\t@echo \"$(MAKE) test-go || $(MAKE) test-rust || exit $$status\"\n"
 	if err := validateMakeAggregate(echoOnly); err == nil {
 		t.Fatal("echo-only recipe passed the aggregate contract")
+	}
+
+	// Valid leg prefixes with a swallowed status and echoed exit must still
+	// fail: token presence alone cannot prove the shell control flow.
+	brokenCapture := "test:\n" +
+		"\t@status=0; \\\n" +
+		"\t$(MAKE) test-go || status=$$?; \\\n" +
+		"\t$(MAKE) test-rust || status=$$?; \\\n" +
+		"\t@echo \"exit $$status\"\n"
+	if err := validateMakeAggregate(brokenCapture); err == nil {
+		t.Fatal("echoed exit passed the aggregate status contract")
 	}
 
 	// A missing target is a zero-denominator control: a canary that finds no
