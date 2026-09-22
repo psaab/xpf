@@ -207,6 +207,24 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 		fmt.Fprintf(buf, "%s\n", err)
 		return
 	}
+	filterZoneName := ""
+	filterParts := strings.Fields(filter)
+	for i := 0; i+1 < len(filterParts); i++ {
+		if filterParts[i] == "zone" {
+			filterZoneName = filterParts[i+1]
+			break
+		}
+	}
+	var cfg *config.Config
+	if s.store != nil {
+		cfg = s.store.ActiveConfig()
+	}
+	filterZoneQualifier := ""
+	if cfg != nil && filterZoneName != "" &&
+		config.ZoneQuarantineExcludedReason(filterZoneName, cfg) != "" {
+		filterZoneQualifier = config.ZoneQuarantineReferenceQualifier
+		fmt.Fprintf(buf, "zone %s %s\n", filterZoneName, filterZoneQualifier)
+	}
 
 	var events []logging.EventRecord
 	if evFilter.IsEmpty() {
@@ -229,9 +247,7 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 	evZoneNames := make(map[uint16]string)
 	if s.dp != nil {
 		if cr := s.applyResult(); cr != nil {
-			for name, id := range cr.ZoneIDs {
-				evZoneNames[id] = name
-			}
+			evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 		}
 	}
 	zoneName := func(stored string, id uint16) string {
@@ -239,6 +255,9 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 			return stored
 		}
 		if n, ok := evZoneNames[id]; ok {
+			if filterZoneQualifier != "" && evFilter.Zone == id {
+				return n + " " + filterZoneQualifier
+			}
 			return n
 		}
 		return fmt.Sprintf("%d", id)

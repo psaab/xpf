@@ -40,6 +40,23 @@ func (c *CLI) showSecurityLog(args []string) error {
 	if err != nil {
 		return err
 	}
+	filterZoneName := ""
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "zone" {
+			filterZoneName = args[i+1]
+			break
+		}
+	}
+	var cfg *config.Config
+	if c.store != nil {
+		cfg = c.store.ActiveConfig()
+	}
+	filterZoneQualifier := ""
+	if cfg != nil && filterZoneName != "" &&
+		config.ZoneQuarantineExcludedReason(filterZoneName, cfg) != "" {
+		filterZoneQualifier = config.ZoneQuarantineReferenceQualifier
+		fmt.Printf("zone %s %s\n", filterZoneName, filterZoneQualifier)
+	}
 
 	var events []logging.EventRecord
 	if !filter.IsEmpty() {
@@ -61,15 +78,16 @@ func (c *CLI) showSecurityLog(args []string) error {
 	// only when the record carries no resolved name.
 	evZoneNames := make(map[uint16]string)
 	if cr != nil {
-		for name, id := range cr.ZoneIDs {
-			evZoneNames[id] = name
-		}
+		evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 	}
 	zoneName := func(stored string, id uint16) string {
 		if stored != "" {
 			return stored
 		}
 		if n, ok := evZoneNames[id]; ok {
+			if filterZoneQualifier != "" && filter.Zone == id {
+				return n + " " + filterZoneQualifier
+			}
 			return n
 		}
 		return fmt.Sprintf("%d", id)

@@ -62,6 +62,40 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 	// knob is off the "Policy count" column reads 0 (we skip the
 	// dataplane read).
 	statsEnabled := cfg.Security.PolicyStatsEnabled
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	isQuarantined := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	qualifyZone := func(name string) string {
+		if isQuarantined(name) {
+			return name + " " + config.ZoneQuarantinePoliciesQualifier
+		}
+		return name
+	}
+	qualifyScopeLabel := func(zones []string, placeholder string) string {
+		label := config.ScopeLabelOr(zones, placeholder)
+		if len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+			return label
+		}
+		parts := strings.Fields(label)
+		for i, name := range parts {
+			parts[i] = qualifyZone(name)
+		}
+		return strings.Join(parts, " ")
+	}
+	scopeQuarantined := func(from, to []string) bool {
+		for _, name := range append(append([]string{}, from...), to...) {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		return false
+	}
 
 	fmt.Println("Logical system: root-logical-system")
 	fmt.Printf("%-8s%-17s%-18s%-24s%-14s%s\n",
@@ -116,10 +150,11 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 			case 2:
 				action = "Reject"
 			}
+			ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
 			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			var count uint64
 			published := true
-			if statsEnabled || pol.Count {
+			if !ruleQuarantined && (statsEnabled || pol.Count) {
 				counters, err := readPolicy(ruleID)
 				switch {
 				case err == nil:
@@ -132,7 +167,7 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 						readErr = err
 					}
 				}
-			} else {
+			} else if !ruleQuarantined {
 				// Reached ONLY when policy-stats is off and the rule carries no
 				// `count`: this function early-returns unless the dataplane is
 				// loaded, so there is no third way in. Written bare rather than
@@ -142,9 +177,15 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 				// also carries `readPolicy != nil`.
 				statsDisabled++
 			}
+			fromDisplay := qualifyZone(zpp.FromZone)
+			toDisplay := qualifyZone(zpp.ToZone)
+			packetDisplay := policyCountCell(count, published)
+			if ruleQuarantined {
+				packetDisplay = config.ZoneQuarantineLiveCountersUnavailable
+			}
 			fmt.Printf("%-8d%-17s%-18s%-24s%-14s%s\n",
-				index, zpp.FromZone, zpp.ToZone, pol.Name,
-				policyCountCell(count, published), action)
+				index, fromDisplay, toDisplay, pol.Name,
+				packetDisplay, action)
 			index++
 		}
 		policySetID++
@@ -172,10 +213,11 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 			case 2:
 				action = "Reject"
 			}
+			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
 			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			var count uint64
 			published := true
-			if statsEnabled || pol.Count {
+			if !ruleQuarantined && (statsEnabled || pol.Count) {
 				counters, err := readPolicy(ruleID)
 				switch {
 				case err == nil:
@@ -188,7 +230,7 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 						readErr = err
 					}
 				}
-			} else {
+			} else if !ruleQuarantined {
 				// Reached ONLY when policy-stats is off and the rule carries no
 				// `count`: this function early-returns unless the dataplane is
 				// loaded, so there is no third way in. Written bare rather than
@@ -201,11 +243,15 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 			// #3286/#4626: a scoped global (#3148) shows its zone SET in the
 			// From/To columns so counter-based validation is unambiguous;
 			// an unscoped global keeps junos-global/junos-global.
-			hcFrom := config.ScopeLabelOr(pol.Match.FromZones, "junos-global")
-			hcTo := config.ScopeLabelOr(pol.Match.ToZones, "junos-global")
+			hcFrom := qualifyScopeLabel(pol.Match.FromZones, "junos-global")
+			hcTo := qualifyScopeLabel(pol.Match.ToZones, "junos-global")
+			packetDisplay := policyCountCell(count, published)
+			if ruleQuarantined {
+				packetDisplay = config.ZoneQuarantineLiveCountersUnavailable
+			}
 			fmt.Printf("%-8d%-17s%-18s%-24s%-14s%s\n",
 				index, hcFrom, hcTo, pol.Name,
-				policyCountCell(count, published), action)
+				packetDisplay, action)
 			index++
 		}
 	}
@@ -311,6 +357,40 @@ func printPolicyMatchAddresses(cfg *config.Config, pol *config.Policy) {
 
 func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) error {
 	schedActive, haveSched := c.policySchedulerActiveState()
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	isQuarantined := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	qualifyZone := func(name string) string {
+		if isQuarantined(name) {
+			return name + " " + config.ZoneQuarantinePoliciesQualifier
+		}
+		return name
+	}
+	qualifyScopeLabel := func(zones []string, placeholder string) string {
+		label := config.ScopeLabelOr(zones, placeholder)
+		if len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+			return label
+		}
+		parts := strings.Fields(label)
+		for i, name := range parts {
+			parts[i] = qualifyZone(name)
+		}
+		return strings.Join(parts, " ")
+	}
+	scopeQuarantined := func(from, to []string) bool {
+		for _, name := range append(append([]string{}, from...), to...) {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		return false
+	}
 	// #3063: the displayed Index must equal the runtime/RT_FLOW policy ID,
 	// which advances by application-set expansion. RuntimePolicyIDs mirrors the
 	// snapshot's PolicyID assignment so an operator cross-referencing a
@@ -339,6 +419,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			if pol == nil {
 				continue
 			}
+			ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
 			action := "permit"
 			switch pol.Action {
 			case 1:
@@ -359,7 +440,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 				fmt.Printf("  Scheduler: %s (inactive)\n", pol.SchedulerName)
 			}
 			fmt.Printf("  Sequence number: %d\n", seqNum)
-			fmt.Printf("  From zone: %s, To zone: %s\n", zpp.FromZone, zpp.ToZone)
+			fmt.Printf("  From zone: %s, To zone: %s\n", qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone))
 			if pol.Description != "" {
 				fmt.Printf("  Description: %s\n", pol.Description)
 			}
@@ -370,6 +451,9 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			}
 			if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 				fmt.Printf("  Session log: %s\n", strings.Join(modes, ", "))
+			}
+			if ruleQuarantined {
+				fmt.Printf("  Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
 			}
 			seqNum++
 		}
@@ -398,6 +482,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			case 2:
 				action = "reject"
 			}
+			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
 			ruleID := runtimePolicyIndex(runtimeIDs, policySetID, uint32(i))
 			// #3062: scheduler-inactive global policy reports State: inactive.
 			state := policyDetailState(pol.SchedulerName, schedActive, haveSched)
@@ -413,8 +498,8 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			// scope instead of the all-zones "junos-global" placeholder so
 			// an operator can tell which zones a global rule applies to.
 			// An unscoped global keeps junos-global/junos-global.
-			globalFromZone := config.ScopeLabelOr(pol.Match.FromZones, "junos-global")
-			globalToZone := config.ScopeLabelOr(pol.Match.ToZones, "junos-global")
+			globalFromZone := qualifyScopeLabel(pol.Match.FromZones, "junos-global")
+			globalToZone := qualifyScopeLabel(pol.Match.ToZones, "junos-global")
 			fmt.Printf("  From zone: %s, To zone: %s\n", globalFromZone, globalToZone)
 			if pol.Description != "" {
 				fmt.Printf("  Description: %s\n", pol.Description)
@@ -426,6 +511,9 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			}
 			if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 				fmt.Printf("  Session log: %s\n", strings.Join(modes, ", "))
+			}
+			if ruleQuarantined {
+				fmt.Printf("  Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
 			}
 			seqNum++
 

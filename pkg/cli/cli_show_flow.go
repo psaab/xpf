@@ -259,9 +259,7 @@ func (c *CLI) showFlowSession(args []string) error {
 	var policyNames map[uint32]string
 	cr := c.applyResult()
 	if cr != nil {
-		for name, id := range cr.ZoneIDs {
-			zoneNames[id] = name
-		}
+		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, f.cfg)
 		policyNames = cr.PolicyNames
 	}
 
@@ -334,6 +332,8 @@ func (c *CLI) showFlowSession(args []string) error {
 			outZone = fmt.Sprintf("%d", val.EgressZone)
 		}
 
+		inZone = f.zoneDisplay(val.IngressZone, inZone)
+		outZone = f.zoneDisplay(val.EgressZone, outZone)
 		sid := flowSessionDisplayID(val.SessionID, idx)
 
 		if f.brief {
@@ -429,6 +429,8 @@ func (c *CLI) showFlowSession(args []string) error {
 			if outZ == "" {
 				outZ = fmt.Sprintf("zone-%d", val.EgressZone)
 			}
+			inZ = f.zoneDisplay(val.IngressZone, inZ)
+			outZ = f.zoneDisplay(val.EgressZone, outZ)
 			byZonePair[inZ+"->"+outZ]++
 			if val.Flags&(dataplane.SessFlagSNAT|dataplane.SessFlagDNAT) != 0 {
 				natCount++
@@ -461,6 +463,8 @@ func (c *CLI) showFlowSession(args []string) error {
 			outZone = fmt.Sprintf("%d", val.EgressZone)
 		}
 
+		inZone = f.zoneDisplay(val.IngressZone, inZone)
+		outZone = f.zoneDisplay(val.EgressZone, outZone)
 		sid := flowSessionDisplayID(val.SessionID, idx)
 
 		if f.brief {
@@ -556,6 +560,8 @@ func (c *CLI) showFlowSession(args []string) error {
 			if outZ == "" {
 				outZ = fmt.Sprintf("zone-%d", val.EgressZone)
 			}
+			inZ = f.zoneDisplay(val.IngressZone, inZ)
+			outZ = f.zoneDisplay(val.EgressZone, outZ)
 			byZonePair[inZ+"->"+outZ]++
 			if val.Flags&(dataplane.SessFlagSNAT|dataplane.SessFlagDNAT) != 0 {
 				natCount++
@@ -766,9 +772,7 @@ func (c *CLI) showFlowSession(args []string) error {
 func (c *CLI) showTopTalkers(f sessionFilter) error {
 	zoneNames := make(map[uint16]string)
 	if cr := c.applyResult(); cr != nil {
-		for name, id := range cr.ZoneIDs {
-			zoneNames[id] = name
-		}
+		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, f.cfg)
 	}
 	now := monotonicSeconds()
 	collector := newTopTalkerCollector(topTalkerLimit)

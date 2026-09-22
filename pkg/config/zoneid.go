@@ -294,3 +294,30 @@ func StableZoneIDOwner(names []string, id uint16) string {
 	}
 	return owner
 }
+
+// SurvivorZoneNames builds the id→name reverse map the show/telemetry surfaces
+// render from (#10530). assignZoneIDs stamps EVERY configured name into
+// cr.ZoneIDs — both sides of a StableZoneID collision with the SAME id — so a
+// naive `for name, id := range cr.ZoneIDs { m[id] = name }` loop resolves a
+// colliding id to whichever name won a map-iteration overwrite race and can
+// name live traffic after a quarantined zone the dataplane never installed.
+// This helper skips every name the active config quarantines, so a colliding id
+// resolves deterministically to the SAME surviving zone the dataplane actually
+// installed (the sorted-first owner QuarantinedZoneNames keeps). Sessions (all
+// three stacks) and events (fallback map) share this one implementation instead
+// of each re-deriving the verdict.
+//
+// A nil cfg carries no verdict, so the map degrades to the plain copy (the
+// pre-#10530 behavior); callers that always have a config never hit that arm.
+// Names absent from cfg (a rename/delete the apply result predates, #3075) are
+// kept: ExcludedReason only fires for names quarantined within cfg's own set.
+func SurvivorZoneNames(zoneIDs map[string]uint16, cfg *Config) map[uint16]string {
+	m := make(map[uint16]string, len(zoneIDs))
+	for name, id := range zoneIDs {
+		if cfg != nil && ZoneQuarantineExcludedReason(name, cfg) != "" {
+			continue
+		}
+		m[id] = name
+	}
+	return m
+}

@@ -502,15 +502,16 @@ func (s *Server) buildSessionFilter(req *pb.GetSessionsRequest) *sessionFilter {
 	// Build zone/policy/app name maps.
 	cr := s.applyResult()
 	if cr != nil {
-		for name, id := range cr.ZoneIDs {
-			f.zoneNames[id] = name
-		}
+		f.zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, f.cfg)
 		f.policyNames = cr.PolicyNames
 		f.appNames = cr.AppNames
 	}
 	if f.cfg != nil && cr != nil {
 		for zoneName, zone := range f.cfg.Security.Zones {
-			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
+			if zone == nil { // #3493: tolerant/HA-sync path can carry a nil zone value
+				continue
+			}
+			if config.ZoneQuarantineExcludedReason(zoneName, f.cfg) != "" {
 				continue
 			}
 			if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
@@ -1149,11 +1150,13 @@ func (s *Server) GetZonePairSummary(ctx context.Context, req *pb.GetZonePairSumm
 // backend iterator error fails the call rather than returning a partial,
 // healthy-looking breakdown (#2469), matching GetSessionSummary.
 func (s *Server) computeZonePairSummary() ([]*pb.ZonePairSessionSummary, error) {
+	var cfg *config.Config
+	if s.store != nil {
+		cfg = s.store.ActiveConfig()
+	}
 	zoneNames := make(map[uint16]string)
 	if cr := s.applyResult(); cr != nil {
-		for name, id := range cr.ZoneIDs {
-			zoneNames[id] = name
-		}
+		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 	}
 
 	type zpKey struct{ from, to uint16 }

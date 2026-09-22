@@ -65,11 +65,13 @@ func (s *Server) GetEvents(_ context.Context, req *pb.GetEventsRequest) (*pb.Get
 	// (#3075) must NOT retroactively rewrite an old event's zone name from the
 	// live config. Prefer the stored name; only consult this map when the
 	// record carries no resolved name.
+	var cfg *config.Config
+	if s.store != nil {
+		cfg = s.store.ActiveConfig()
+	}
 	evZoneNames := make(map[uint16]string)
 	if cr := s.applyResult(); cr != nil {
-		for name, id := range cr.ZoneIDs {
-			evZoneNames[id] = name
-		}
+		evZoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 	}
 	zoneName := func(stored string, id uint16) string {
 		if stored != "" {

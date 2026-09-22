@@ -374,6 +374,9 @@ func (f *sessionFilter) populateIfaceMaps(c *CLI) {
 			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
 				continue
 			}
+			if config.ZoneQuarantineExcludedReason(zoneName, f.cfg) != "" {
+				continue
+			}
 			if zid, ok := cr.ZoneIDs[zoneName]; ok && len(zone.Interfaces) > 0 {
 				// #4792: keep EVERY interface bound to the zone, not just
 				// the first — a zone with multiple member interfaces
@@ -384,6 +387,19 @@ func (f *sessionFilter) populateIfaceMaps(c *CLI) {
 	}
 	f.zoneIfaces = zoneIfaces
 	f.ifaceNamesByKey = buildSessionEgressIfaces(f.cfg)
+}
+
+// zoneDisplay applies the only display-time exception for a named quarantined
+// filter. Matching still uses the shared numeric stable id, but the operator
+// must not mistake the survivor's name for the requested quarantined config
+// member; annotate that zone column while keeping survivor-wins reverse maps
+// deterministic everywhere else.
+func (f *sessionFilter) zoneDisplay(id uint16, resolved string) string {
+	if f != nil && f.zoneName != "" && f.zoneID == id && f.cfg != nil &&
+		config.ZoneQuarantineExcludedReason(f.zoneName, f.cfg) != "" {
+		return f.zoneName + " " + config.ZoneQuarantineReferenceQualifier
+	}
+	return resolved
 }
 
 // ifaceMatches checks whether ifName matches the filter's interface name.
