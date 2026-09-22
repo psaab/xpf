@@ -812,11 +812,10 @@ impl SessionDomain {
             // landed pre-cancel, and the mirror must not misrepresent live
             // survivors as ghost rows. Always attempted: dead workers are
             // skipped inside the probe (their tables died with their threads,
-            // so live-only evidence is complete), and a live stall simply
-            // fails the attempt. The batch fails regardless — revocation is
-            // incomplete — but live+consistent beats live+ghost. Single
-            // attempt (no retry): unlike the success path, where a retry can
-            // still complete the batch, here the verdict is already failure.
+            // so live-only evidence is complete). Retried once like the
+            // success path — a stall that clears still repairs. The batch
+            // fails regardless — revocation is incomplete — but
+            // live+consistent beats live+ghost.
             let mut bares: Vec<SessionKey> = Vec::new();
             for item in items {
                 for key in std::iter::once(&item.key).chain(item.captured_companion.iter()) {
@@ -832,7 +831,11 @@ impl SessionDomain {
                 let found: std::sync::Arc<
                     std::sync::Mutex<Vec<Option<crate::afxdp::worker::SyncedSessionEntry>>>,
                 > = std::sync::Arc::new(std::sync::Mutex::new(vec![None; bares.len()]));
-                if self.probe_policy_bares(&bares, &found).is_ok() {
+                let mut probed = self.probe_policy_bares(&bares, &found).is_ok();
+                if !probed {
+                    probed = self.probe_policy_bares(&bares, &found).is_ok();
+                }
+                if probed {
                     let view = self.runtime_view();
                     let forwarding = view.forwarding();
                     let maps = self.bpf_maps.load();

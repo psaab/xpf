@@ -8468,3 +8468,95 @@ fn policy_batch_dead_abort_quiesces_shared_then_fails_loud_10512() {
         "quiesce: the deterministic shared half must land even on abort"
     );
 }
+
+/// #10512: the abort-path probe retries once — a first probe that never acks
+/// (scripted stall: command dropped) is followed by a second that succeeds —
+/// and the batch still fails loud (revocation was already incomplete; the
+/// retry only maximizes repair coverage). Deterministic: drops guarantee
+/// both 250ms timeouts with no timing races (nothing ever acks a dropped
+/// command), and the scripted ack lands in ~milliseconds against a 250ms
+/// budget. A mock worker thread drains the queue per the script below.
+#[test]
+fn policy_batch_abort_probe_retries_once_then_fails_loud_10512() {
+    let mut fixture = fixture_10512_lease(227, 42793, 52793, 0xFA0512, 0xCA0512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    // Script: drop the remove (forces abort via timeout) and the first probe
+    // (forces the retry), ack everything after. Counters prove exact shape.
+    let removes_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probes_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let commands = Arc::clone(&commands);
+        let removes_seen = Arc::clone(&removes_seen);
+        let probes_seen = Arc::clone(&probes_seen);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut probes_acked = 0usize;
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let drained: Vec<WorkerCommand> = {
+                    commands
+                        .lock()
+                        .expect("commands")
+                        .drain(..)
+                        .collect()
+                };
+                for cmd in drained {
+                    match cmd {
+                        WorkerCommand::DeletePolicyBatch { .. } => {
+                            removes_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            // Drop: never ack (forces the remove timeout).
+                        }
+                        WorkerCommand::ProbePolicyBatch { pending, .. } => {
+                            let n = probes_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            // Drop the first probe, ack the retry.
+                            if n > 0 {
+                                probes_acked += 1;
+                                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            probes_acked
+        })
+    };
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    let probes_acked = worker.join().expect("mock worker");
+    assert!(
+        !complete && outcomes.is_empty(),
+        "an aborted batch must carry no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-remove-aborted"),
+        "abort must name itself loudly, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on abort"
+    );
+    assert_eq!(
+        removes_seen.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the remove envelope must arrive exactly once (no remove retry)"
+    );
+    assert_eq!(
+        probes_seen.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the abort probe must retry exactly once after the first stalls"
+    );
+    assert_eq!(
+        probes_acked, 1,
+        "exactly the retried probe must be acked"
+    );
+}
