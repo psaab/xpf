@@ -1369,8 +1369,9 @@ Scope of the fallback:
   controls admitted and explicit per-interface overrides taking precedence),
   except narrow lifeline names, which remain admitted without that sentinel, and
   AF_XDP bind-excluded prefix-only/`lo0` names, which remain zone-gated without
-  a sentinel; address-less non-tunnel traffic remains on the global `None => true`
-  admit path; and a retained agreed zone is policy-evaluated (zone-gated). A
+  a sentinel; for ordinary, non-gated names, address-less non-tunnel traffic
+  remains on the global `None => true` admit path; and a retained agreed zone is
+  policy-evaluated (zone-gated). A
   contested narrow lifeline still emits the warning, but #10503 deliberately
   skips its host-inbound sentinel, so host-bound narrow-lifeline traffic remains
   admitted.

@@ -2689,7 +2689,7 @@ fn contested_row_10503(
 }
 
 #[test]
-fn contested_lifeline_parents_keep_no_sentinel_classifier_admit_10503() {
+fn contested_bind_excluded_parents_keep_no_sentinel_classifier_admit_10503() {
     use crate::afxdp::forwarding::host_inbound_admits_iface;
 
     const PROTO_TCP: u8 = 6;
@@ -2714,7 +2714,7 @@ fn contested_lifeline_parents_keep_no_sentinel_classifier_admit_10503() {
         );
         assert!(
             !state.ifindex_host_inbound.contains_key(&parent),
-            "{label} lifeline contest must not receive an AF_XDP deny sentinel"
+            "{label} bind-excluded parent must not receive an AF_XDP deny sentinel"
         );
         assert!(
             host_inbound_admits_iface(&state, parent, 0, PROTO_TCP, 22, false, 0),
