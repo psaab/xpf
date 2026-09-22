@@ -181,12 +181,14 @@ This is deliberately tree-global and master-loud: `readAccepted` uses
 check does not read the changed set or merge base. The existing touched gate
 stays diff-local and master-silent.
 
-Why fail rather than warn: the only red is an actionable shrink/split author
-(or a deleted accepted path), and the failure names the exact entry. Warn-only
-would recreate the advisory shape #7253 deliberately demoted; #7700 already
-shows that a voluntary prune is not reliable. A fail-closed [REFACTOR] entry
-that remains 1500–1999 LOC is fixed by demotion or pruning, while an entry
-below 1500 is pruned.
+Why fail rather than warn: the red names the stale entry and gives an
+actionable shrink/split repair. With no CI, a shrinker can skip `make
+test-go` and leave master red until the next developer runs it; that manual
+enforcement residual is documented in the cutover docs and is preferable to
+silently accepting the stale licence. Warn-only would recreate the advisory
+shape #7253 deliberately demoted; #7700 already shows that a voluntary prune
+is not reliable. A fail-closed [REFACTOR] entry that remains 1500–1999 LOC
+is fixed by demotion or pruning, while an entry below 1500 is pruned.
 
 ### 5.2 Alternatives considered
 
@@ -290,7 +292,7 @@ format remains `<tier> <path> <reason...>`.
 | Class | Level | Why + mitigation |
 |---|---|---|
 | Correctness | LOW | The predicate is a strict tree fact (tier floor × current raw LOC); synthetic boundary, band, deleted-path, re-add, and metric-parity fixtures pin false-red/false-green edges. The smallest current live margin is 41 LOC. |
-| Compatibility | LOW | Only split/shrink authors with stale entries go red; the repair is one prune or a [REFACTOR]→[WATCH] demotion. No open PR matched #10487 at review time; recheck the open-PR list at implementation time. |
+| Compatibility | LOW | A shrinker who runs `make test-go` gets a self-naming prune/demote repair; a shrinker who skips the target can leave master red until the next developer runs it. No open PR matched #10487 at review time; recheck the open-PR list at implementation time. |
 | Performance | NONE | At most 12 small `ReadFile`/`bytes.Count` operations in an existing Go test package; no runtime or hot-path work. `classify.sh loc` is used only by parity tests. |
 | Security / robustness | POSITIVE | Closes silent pre-authorization of 1471/675 LOC of regrowth headroom. Explicit missing/read errors fail closed; no network or new trust boundary. |
 

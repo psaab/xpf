@@ -618,9 +618,16 @@ inlining. Treat the trend as a defect, not a style preference.
   against the merge base — so an unrelated file growing elsewhere can
   never red you, and regenerating `docs/refactoring-audit-current.txt`
   can never silence you. Split the file, or record the decision and its
-  reason in `docs/refactoring-audit-accepted.txt`. Keeping the global
-  heatmap current is `make audit-refresh`'s job; its lag fails nothing.
-  See `docs/refactoring-audit.md` "The two gates".
+  reason in `docs/refactoring-audit-accepted.txt`.
+- **Keep accepted decisions live.** If a file named by an accepted entry is
+  split, shrunk, deleted, or renamed, prune the entry in that same PR when
+  it drops below its tier floor. A [REFACTOR] entry at 1500–1999 LOC must
+  be demoted to [WATCH] or pruned. `TestAcceptedEntriesAreLive` fails closed
+  on the next `make test-go` run, even when the touched-file set is empty.
+  This repository has no CI, so a change that skips `make test-go` can leave
+  master red until the next developer runs it; run the target before merge.
+- Keeping the global heatmap current is `make audit-refresh`'s job; its lag
+  fails nothing. See `docs/refactoring-audit.md` "The two gates".
 
 ## Overflow / failure policy
 

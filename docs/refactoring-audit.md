@@ -98,6 +98,7 @@ because fusing them made the useful one unusable.
 | Question | Who it is for | Surface | Fails a build? |
 |---|---|---|---|
 | Did **you** grow a file **you touched** past 1500 / 2000 LOC? | the author of the growth | `pkg/refactoraudit.TestTouchedFileCrossedModularityThreshold` | **yes** |
+| Does every accepted crossing still name a live file at its tier floor? | the author of the shrink and the next test run | `pkg/refactoraudit.TestAcceptedEntriesAreLive` | **yes** |
 | Does the committed global snapshot still match the tree? | nobody in particular | `make audit-refresh` (job) + `TestGlobalHeatmapFreshnessAdvisory` (reports) | no |
 
 ### 1. The touched-file gate (hard)
@@ -153,11 +154,23 @@ and its reason in `docs/refactoring-audit-accepted.txt`:
 [WATCH] pkg/foo/bar.go one cohesive generated schema; splitting it buys nothing
 ```
 
-That file is hand-written and never generated, so unlike the heatmap it
-cannot go stale from someone else's commit. An entry accepts one path at
-one tier (a `[REFACTOR]` entry implies `[WATCH]` for the same file), and
-`TestAcceptedFileWellFormed` rejects an entry with no reason or a path the
-audit would never measure.
+That file is hand-written and never generated. Unlike the heatmap it cannot
+go stale from someone else's growth elsewhere, but a split, shrink, delete,
+or rename can make an entry stop describing a live decision. The tree-global
+`TestAcceptedEntriesAreLive` check reads each accepted path from the working
+tree, requires it to exist, and compares raw `wc -l`-equivalent LOC with the
+entry's tier floor. It runs even when the touched-file set is empty.
+
+An entry accepts one path at one tier (a `[REFACTOR]` entry implies `[WATCH]`
+for the same file). If the file drops below 1500 LOC, prune the entry in the
+same PR; if a `[REFACTOR]` entry drops to 1500–1999 LOC, demote it to
+`[WATCH]` or prune it. `TestAcceptedFileWellFormed` still rejects an entry
+with no reason or a path the audit would never measure.
+
+There is no CI in this repository; `make test-go` is the enforcement surface.
+Run it before merging a split or shrink. If a change skips that target, the
+tree can remain red until the next invocation, which then names the stale
+entry even though that next developer did not cause the shrink.
 
 ### 2. The freshness job (advisory)
 

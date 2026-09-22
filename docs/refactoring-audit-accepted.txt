@@ -15,12 +15,14 @@
 # a PR that grows a file IT TOUCHES past a threshold. It is hand-written,
 # never generated: unlike docs/refactoring-audit-current.txt it cannot go
 # stale from an unrelated file growing elsewhere, because nothing outside
-# a deliberate human edit ever changes it.
+# a deliberate human edit ever changes it. A split or shrink of the named
+# file can make an entry stale; TestAcceptedEntriesAreLive rejects that.
 #
-# Nothing gates on an entry's continued presence. Once the crossing PR
-# has landed, every later branch measures the file as already over the
-# floor and no longer crosses it, so an entry may be pruned as soon as it
-# stops describing a live decision. It is a decision record, not state.
+# An entry is a live decision only while its file is at or above the entry's
+# tier floor. It may be pruned as soon as it stops describing a live
+# decision, and MUST be pruned in the same PR that takes the file below its
+# tier floor (or a [REFACTOR] entry must be demoted to [WATCH]). The check
+# is tree-global and runs even when the touched-file set is empty.
 [WATCH] pkg/daemon/daemon.go the crossing is TWO STRUCT FIELDS, not a shape this change chose. #6948 moves the commit-time session invalidation to a pre-publication capture, whose plan + capture are apply-scoped Daemon state and can only live on the Daemon struct; the reasoning that would normally accompany them sits in daemon_policy_invalidate_capture.go, so what lands here is 5 comment lines and 2 fields. daemon.go was already at 1499 LOC at the merge base, so any branch adding a single field to Daemon crosses 1500. Splitting the Daemon struct + lifecycle file is a real end state but it is a mechanical repo-wide change that must carry the daemon package's construction and accessor tests with it; doing it inside a session-invalidation correctness fix would bury the change under code motion. Owed as its own PR.
 [WATCH] pkg/api/metrics.go the xpfCollector struct definition plus its Describe method — every new dataplane metric MUST add a *prometheus.Desc field here and a matching `ch <- c.X` line, because both belong to the collector type itself and cannot live elsewhere. #7398 wired three counters out of the status-wiring allowlist and crossed 1500 at exactly 1500 LOC on those 7 unavoidable lines. Splitting it means moving struct fields to an embedded sub-struct and rewriting every reference across pkg/api, which is a repo-wide mechanical change that must carry metrics_test.go's descriptor-coverage sentinels with it or silently decommission them — the same argument already accepted for its sibling pkg/api/metrics_userspace.go, and the same PR should do both. Tracked as #7700.
 [WATCH] userspace-dp/src/afxdp/coordinator/mod.rs the crossing is ONE STRUCT FIELD, not a shape this change chose — the same situation as the pkg/daemon/daemon.go and pkg/vrrp/instance.go entries above. #7699 builds the PPTP control-segment dispatch: the hot-path stage copies a TCP/1723 segment into a node-shared inbox and the worker's periodic drain parses it, so the inbox must be coordinator-owned state cloned into every worker's WorkerSharedDataplane, which can only live on the Coordinator struct. All of the reasoning that would normally accompany it sits on PptpControlInbox in session/pptp_control.rs and in afxdp/README.md, so what lands here is 2 comment lines, 2 field lines and 1 constructor line — already trimmed from 13 to hold it to that. coordinator/mod.rs was at 1499 LOC at the merge base, so ANY branch adding a single field to Coordinator crosses 1500. Splitting the Coordinator struct + its constructor is a real end state but a mechanical change that must carry the afxdp package's construction and the Arc::ptr_eq from_coord wiring tests with it; doing it inside a dataplane-dispatch change would bury the change under code motion. Owed as its own PR.
