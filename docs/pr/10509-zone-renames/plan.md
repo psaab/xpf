@@ -324,11 +324,15 @@ not enough. Current source chain is:
 
 Design the bounded additive sidecar as follows:
 
-- Commit ancestry is recorded at `RenameAsPlantClass`; local commit/apply
-  stores it in the same generation-keyed pending record used for config push.
-  `pushConfigToPeer` and `reconcileConfigSyncToPeer` pass that record at both
-  existing QueueConfig callsites. A re-push uses the same ancestry until the
-  generation applies successfully.
+- Commit ancestry is recorded at `RenameAsPlantClass` and stored in the
+  daemon's pending map keyed by active-config hash/commit identity, not by
+  the wire generation (the existing sender retry marker is connection-epoch
+  times config-text hash). At each fresh `QueueConfigWithAncestry` call, take
+  the config text and matching ancestry atomically; `QueueConfig` allocates
+  the wire generation internally and encodes the pair. Both existing sender
+  callsites (`pushConfigToPeer` and `reconcileConfigSyncToPeer`) use that
+  lookup. A reconnect/reconcile retry gets a fresh wire generation but
+  reattaches ancestry from the same active-config identity.
 - Add an ancestry trailer to the config payload after the existing generation
   trailer: magic, length, and bounded serialized RenameDescriptor. Decode the
   ancestry trailer first, then the existing config-generation trailer. A
@@ -340,9 +344,10 @@ Design the bounded additive sidecar as follows:
   falls back to teardown. A new sender reaching an old parser retains the
   fail-safe apply rejection behavior rather than applying text with unknown
   metadata.
-- Extend `configApplyItem` with ancestry and preserve it through the ordered
-  queue, stale-generation check, peer-incarnation check, queue-full drop, and
-  nack/re-push lifecycle. Add an additive callback
+- Extend `configApplyItem` with ancestry and carry text plus ancestry together
+  through stale-generation and peer-incarnation checks. A queue-full receive
+  drops the whole item and sends the existing config-apply nack; the receiver
+  never retains an orphaned descriptor. Add an additive callback
   `OnConfigReceivedWithAncestry(text, ancestry)` while retaining the old
   `OnConfigReceived(text)` fallback for legacy tests/peers. `configApplyLoop`
   calls the new callback when present and the old callback otherwise.
@@ -350,11 +355,14 @@ Design the bounded additive sidecar as follows:
   `handleConfigSync(text)` remains a wrapper passing nil. The apply path passes
   ancestry into capture construction before snapshot publication, then
   `reportSessionAuthorizationChanges` consumes it exactly once. On successful
-  apply, clear the pending ancestry with the generation; on compile/promote
-  failure, RG0-primary rejection, queue-full drop, or nack, retain/re-push the
-  generation-keyed ancestry. Reordered generations and replaced peer
-  incarnations discard the pair together. Duplicate already-applied pushes
-  may clear ancestry only after active/applied digest convergence.
+  apply, clear the daemon's pending ancestry by active-config hash/commit
+  identity after the active/applied digest converges. On compile/promote
+  failure, RG0-primary rejection, queue-full drop, or nack, leave that sender
+  entry pending; the next reconcile creates a fresh wire generation and
+  reattaches the sidecar from sender state. Reordered generations and replaced
+  peer incarnations discard text plus ancestry together. Duplicate already-
+  applied pushes may clear sender state only after active/applied digest
+  convergence.
 - This is an internal transport addition. No external cluster command or
   provider API is added, but the HA leg does require this codec/callback/
   capture change. The existing config-sync codec, callers, callback, ordered
