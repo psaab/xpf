@@ -1,16 +1,18 @@
 # 10486: REST / gRPC / CLI session-filter contract convergence
 
-Status: DRAFT v2 — plan only, no production code.
+Status: DRAFT v3 — plan only, no production code.
 Base: `origin/master b71c52d60`; worktree `.claude/worktrees/10486-session`,
 branch `fix/10486-session-filter-contracts`. All `file:line` refs re-pinned at
 that HEAD (the issue's evidence pin `1a6952b` is stale).
 Review lineage: v1 (`44f4e10bc`) drew two concurring PLAN-NEEDS-MAJOR verdicts
-(direction sound, Lenient/canonical ruler, staged A-then-B; bug real). This v2
-implements the parent adjudication: Q2 closed as source-resolved, Q3 decided
-canonical now with the `007` record corrected, A/B-expected tables split, the
-five-surface matrix made executable, the filtered-clear peer `hasProto` site
-added, Q1/Q4 restated as owner gates, Q5 default-omit, Q6 closed, Q7 split
-trailers. No production code in this round; v2 goes to delta re-review next.
+(direction sound, Lenient/canonical ruler, staged A-then-B; bug real). v2
+(`366ee44f8`) folded the adjudication (Q2 closed, Q3 canonical, A/B tables,
+parse-once `(proto,hasProto)` ruler, `hasProto` peer-clear site) and drew a
+split delta: READY / STILL-NEEDS-WORK on executable-test gaps. This v3 folds
+the delta-2 residuals only: proto-41 + proto-7 fixture rows, URL-encoded REST
+rows, explicit conformance matrix, SCTP selective-clear test, G wiring proof,
+C serialization-only scope, and citation/mechanical-wording corrections. No
+production code in this round; v3 goes to delta-3 (single confirming pass).
 
 ## 1. Issue framing
 
@@ -47,8 +49,8 @@ five operator surfaces:
 | # | Surface | Parse / validate site | Match site | Invalid-token behavior |
 |---|---------|-----------------------|------------|------------------------|
 | R | REST list (`sessionsHandler`, `pkg/api/sessions.go:102`) | `buildSessionQuery` `:1351-1410`; `protocol` raw at `:1358` | `protoFilterMatches` `:1784-1792` (`EqualFold(protoName(p),f) \|\| Atoi(f)==p`; `protoName` `:1801-1810` = `ToUpper(appid.ProtocolName)`, `ICMPv6` special) | `200` + empty list (fail-open) |
-| G | gRPC `GetSessions`/`ClearSessions` (`pkg/grpcapi/server_sessions.go:57`, `:1272`) | `buildSessionFilter` `:456-545`; protocol guard `:499-502` via `appid.ProtocolNumberLenient` (`pkg/appid/catalog.go:371-386`) | `protoFilterMatches` `:436-441` (same Lenient resolution) | `InvalidArgument` (fail-closed) |
-| L | Local interactive CLI show/clear (`pkg/cli/cli_show_flow.go:211`, `pkg/cli/cli_clear.go:173`) | `parseSessionFilterMode` `:100-245`; protocol switch `:128-149` accepts `tcp/udp/icmp/icmpv6` + `Atoi 1-255`, else `parseErr "unknown protocol"` | direct `uint8` compare `:276` (v4) / `:321` (v6) | command fails with `parseErr` (fail-closed) |
+| G | gRPC `GetSessions`/`ClearSessions` (`pkg/grpcapi/server_sessions.go:57`, `:1272`) | `buildSessionFilter` `:456-546`; protocol guard `:499-502` via `appid.ProtocolNumberLenient` (`pkg/appid/catalog.go:371-386`) | `protoFilterMatches` `:436-441` (same Lenient resolution) | `InvalidArgument` (fail-closed) |
+| L | Local interactive CLI show/clear (`pkg/cli/cli_show_flow.go:211`, `pkg/cli/cli_clear.go:173`) | `parseSessionFilterMode` `:100-246`; protocol switch `:128-149` accepts `tcp/udp/icmp/icmpv6` + `Atoi 1-255`, else `parseErr "unknown protocol"` | direct `uint8` compare `:276` (v4) / `:321` (v6) | command fails with `parseErr` (fail-closed) |
 | S | Remote `cli show security flow session` (`cmd/cli/show_flow.go:201`) | `parseFlowSessionArgs` `:57-199`; protocol via Lenient `:92-94`, forwarded upper-cased `:95` | server-side (G) | client-side error before RPC (fail-closed) |
 | C | Remote `cli clear security flow session` (`cmd/cli/clear.go:166`) | **none client-side**: `req.Protocol = args[i]` raw at `:191-193` | server-side (G), via `ClearSessions`→`getReq` translation `:1344-1354` + `buildSessionFilter` `:1367` | server-side `InvalidArgument` after a round trip (fail-closed, late) |
 
@@ -70,7 +72,7 @@ Full-dimension divergence matrix (all cells verified at HEAD):
 | application | raw string, unknown app matches nothing (empty success) | same | same (`SessionMatches`) | same (forwarded) |
 | interface | raw string + zone-fallback match | same | same + recorded-identity corroboration (`:482-532`) | same (forwarded) |
 | source_nat_pool | not-found → 400 (`:1369-1378`) | not-found → InvalidArgument (`validate`, `:450-451`) | not-found → error (`validate`, `:368-370`) | forwarded; server decides |
-| pagination/summary/sort-by | `page_size>0` cursor else offset (`:154-172`); no summary/sort params | `PageSize>0` cursor (`:141`) else limit/offset (`:840`); summary RPCs separate | `summary/brief/sort-by` local; `sort-by` restricted to `bytes\|packets` (`:232-236`); peer fetch `Limit:10000`, no `PageSize` (`:664`) | `Limit:100` (`show_flow.go:58`); `summary`/`sort-by` reject combination with filters (`:195-197`) |
+| pagination/summary/sort-by | `page_size>0` cursor else offset (`:154-172`); no summary/sort params | `PageSize>0` cursor (`:122`) else limit/offset (`:840`); summary RPCs separate | `summary/brief/sort-by` local; `sort-by` restricted to `bytes\|packets` (`:232-236`); peer fetch `Limit:10000`, no `PageSize` (`:664`) | `Limit:100` (`show_flow.go:58`); `summary`/`sort-by` reject combination with filters (`:195-197`) |
 
 ## 3. Honest scope / value
 
@@ -118,7 +120,7 @@ Each item landed; each leaves the specific residual named.
   residual (A-lineage, this issue's R cell); the PROPOSED-but-not-shipped
   "extract `protoFilterMatches` into a shared helper used by REST, CLI, and
   gRPC" is exactly Option B (B-lineage, Q7 trailers).
-- `#2949`: `appid.ProtocolName` is the render SSOT (`catalog.go:388-436`).
+- `#2949`: `appid.ProtocolName` is the render SSOT (`catalog.go:388-437`).
   Residual: render set ≠ filter-accept set on R (P2).
 - `#3393`: `ipv6=41` round-trips through the STRICT resolver
   (`catalog.go:325-330`); Lenient is documented as belt-and-suspenders over
@@ -172,20 +174,21 @@ Each item landed; each leaves the specific residual named.
 
 ### Blast radius (all counts at `b71c52d60`)
 
-- `protoFilterMatches`: 2 definitions (R `:1784`, G `:436`), 4 match call
-  sites (R `:1434`/`:1478`, G `:610`/`:655`).
+- `protoFilterMatches`: 2 production definitions (R `:1784`, G `:436`), 4
+  production match call sites (R `:1434`/`:1478`, G `:610`/`:655`).
 - `ProtocolNumberLenient`: 1 definition (`catalog.go:371`), 3 production call
   sites in 2 files (G match `:437`, G validate `:500`, S validate
   `cmd/cli/show_flow.go:92`), 1 dedicated test file.
-- `buildSessionQuery`: 1 definition, 1 validating caller (`sessionsHandler`,
-  `:131-136`) + 1 lenient re-reader (`peerSessionsRequest`, `:567`).
-- `buildSessionFilter`: 1 definition, 3 callers (`GetSessions :153`,
-  legacy/cursor `:853`, `ClearSessions :1367`); `GetSessionsRequest`
-  referenced from exactly 28 files (protobuf schema, generated bindings,
-  production callers, tests).
+- `buildSessionQuery`: 1 production definition, 1 production validating
+  caller (`sessionsHandler`, `:131-136`) + 1 production lenient re-reader
+  (`peerSessionsRequest`, `:567`).
+- `buildSessionFilter`: 1 production definition, 3 production callers
+  (`GetSessions :153`, legacy/cursor `:853`, `ClearSessions :1367`);
+  `GetSessionsRequest` is referenced from exactly 28 files (protobuf schema,
+  generated bindings, production callers, tests).
 - CLI parse: 3 definitions (`:79`/`:93`/`:100`), 2 production callers
   (`cli_show_flow.go:211`, `cli_clear.go:173`); `parseFlowSessionArgs` 1
-  definition + 1 caller (`show_flow.go:57`, `:202`).
+  production definition + 1 production caller (`show_flow.go:57`, `:202`).
 - L `f.proto` census (repo-wide grep, `\.proto\b|proto:` in `pkg/cli`):
   prod writes at parse `:132,134,136,138,144`; prod gates at `:276` (matchesV4),
   `:321` (matchesV6), `:356` (hasFilter), `:670` (fetchPeerSessions),
@@ -200,9 +203,11 @@ Each item landed; each leaves the specific residual named.
   `server_sessions.go:375,478,493-501,610,655`, plus direct test literals
   in `pagination_test.go:158-171` and helper assertions in
   `session_filter_test.go:93` and `session_filter_3439_test.go:62-66`.
-  B changes the field to `(proto uint8, hasProto bool)`, moves
-  `hasFilters` to test `hasProto`, and updates every listed test to build or
-  assert the parsed pair; no raw-string matcher call remains.
+  B changes the field to `(proto uint8, hasProto bool)`, parses once before
+  matching, and changes the `server_sessions.go:478` `hasFilters` predicate
+  from raw-string presence to `f.hasProto`; protocol-only requests, including
+  proto 0, therefore remain filtered. Every listed test must build or assert
+  the parsed pair; no raw-string matcher call remains.
 
 ### Option A — REST-side validation (resolves the filed acceptance)
 
@@ -269,8 +274,9 @@ or re-points its 2 match sites. Migration per surface:
   `protoName` (`:1801-1810`) stays (rendering, not matching).
 - G: `sessionFilter` stores `proto uint8` plus `hasProto bool` instead of the
   raw `protoFilter string`. `buildSessionFilter` calls
-  `ParseProtocolFilterToken(req.Protocol)` once when non-empty, records
-  `inputErr` on `ok=false`, and computes `hasFilters` from `hasProto` (not
+  `ParseProtocolFilterToken(req.Protocol)` once when non-empty, stores the
+  parsed pair before computing `hasFilters`, records `inputErr` on `ok=false`,
+  and computes `hasFilters` from `hasProto` at `server_sessions.go:478` (not
   from a raw string) before either matcher runs. Both matchers (`:610`/`:655`)
   call `ProtoFilterMatches(key.Protocol, f.proto, f.hasProto)`. The shared
   show and clear paths therefore use the same parsed pair and retain the
@@ -330,11 +336,13 @@ stale comment 1); `pkg/grpcapi/pagination_test.go` (direct filter literals);
 `pkg/grpcapi/session_filter_3439_test.go` (stale comment 2, direct matcher
 assertions, + extended validation sets);
 `pkg/cli/session_filter.go` (field/parse + 4 gates);
-`pkg/cli/cli_clear.go` (5th gate); `pkg/cli/session_filter_test.go` (literals +
-new rows); `pkg/cli/session_filter_ingress_identity_4983_test.go` (`:361`);
+`pkg/cli/cli_clear.go` (5th gate);
+`pkg/cli/cli_clear_bounded_4886_test.go` (SCTP selective-clear proof);
+`pkg/cli/session_filter_test.go` (literals + new rows);
+`pkg/cli/session_filter_ingress_identity_4983_test.go` (`:361` presence-bit literal);
 `cmd/cli/show_flow.go` (`:92` re-point, no behavior change);
 `cmd/cli/show_flowsession_3439_test.go` (S matrix rows);
-`cmd/cli/clear_session_filter_10486_test.go` (new C raw-forwarding test);
+`cmd/cli/clear_session_filter_10486_test.go` (new C serialization-only test);
 `docs/junos-cli-reference.md` (`:75` + stale paragraph 3);
 `pkg/api/README.md` (contract paragraph). `cmd/cli/clear.go` explicitly NOT
 touched (Q5 omit).
@@ -394,8 +402,10 @@ claiming full unification. Commit trailers split per Q7: A carries
 6. Key ports are network order; `ntohs` exactly once at compare
    (R `:1443-1448`, G `:619-624`, L `:285-291`).
 7. Multi-interface zone maps are caller-populated (`populateIfaceMaps`,
-   `#4792`); the clear path MUST call it before matching
-   (`session_filter.go:377-381` doc comment states the requirement).
+   `#4792`); the clear path MUST call `f.populateIfaceMaps(c)` at
+   `pkg/cli/cli_clear.go:235` before matching. `session_filter.go:377-381`
+   documents the requirement; the call-site citation is the executable
+   invariant.
 8. Ingress recorded-identity + zone corroboration; egress FIB-precise else
    zone fallback; display stricter than filter (`:423-603`, `#4983/#6987`).
 9. Cursor tokens are node-local and never forwarded (R `:601-602`, G `:753-755`).
@@ -424,9 +434,9 @@ claiming full unification. Commit trailers split per Q7: A carries
 | Class | Risk | Likelihood × Impact | Mitigation | Residual |
 |---|---|---|---|---|
 | Correctness / Security | R-400 validation accidentally widens a predicate (e.g. validating but still matching on failure) or touches a clear path, degrading a filtered clear toward clear-all | Low × Critical | Validate-then-return before any match state (A sketch returns `q` + reason, caller 400s before iteration); B keeps G's shared matcher single; A does not touch clear code, while B's local parser/matcher/`hasFilter`/peer-serialization edits are covered by the `#5066` empty-only-clear-all guard and protocol-0/SCTP clear rows; regression rows in section 9 pin the guard | Shared-matcher coupling remains: future dimension edits must still update show+clear together (existing `#1827` hazard, unchanged) |
-| Correctness / Security | L widening under B newly matches sessions an operator did not intend; the `buildPeerClearRequest` site in particular could forward an empty `Protocol` for proto 0 (peer clear-all) | Medium × High | All FIVE `f.proto` gates migrate to `hasProto` (repo-wide grep census in §5 — no sixth site exists outside audited-unrelated namesakes); widening is still conjunctive narrowing (more tokens accepted, each match exact); clear path already requires `validate()` + `hasFilter()`; §9 adds the protocol-0 peer-forward test (`"0"`, never empty) + `protocol sctp` selective-clear test | Operator surprise on previously-erroring commands now succeeding, plus `+6` tightening (`: accept → parseErr`) (Q4 compat note) |
+| Correctness / Security | L widening under B newly matches sessions an operator did not intend; the `buildPeerClearRequest` site in particular could forward an empty `Protocol` for proto 0 (peer clear-all) | Medium × High | All FIVE `f.proto` gates migrate to `hasProto` (repo-wide grep census in §5 — no sixth site exists outside audited-unrelated namesakes); widening is still conjunctive narrowing (more tokens accepted, each match exact); clear path already requires `validate()` + `hasFilter()`; §9 adds the protocol-0 peer-forward test (`"0"`, never empty) + `protocol sctp` selective-clear test | Operator surprise on previously-erroring commands now succeeding, plus `+6` tightening (accept → parseErr; Q4 compat note) |
 | Compatibility / Operational | Automation asserting R-`200` on arbitrary tokens now gets `400`; dashboards scraping `protocol=<typo>` flip from empty-graph to error | Medium × Medium | Same envelope as 7 sibling 400s; reason string includes the token; previously-matching valid tokens unaffected EXCEPT `+6` (decided flip, Q3); document in release note; Q1 decides single-shot vs phased (precedent: single-shot) | Single-shot 400 is observable in status-code metrics by design |
-| Compatibility / Operational | Canonical numeric grammar retires R/L leniencies (`+6` accepted today on both; space-padded numerics silently empty on R) | Medium × Low | Grammar decided BEFORE A (Q3: canonical per #3606/#3679/#9899-F102 + REST zone/port `ParseUint` precedent); conformance matrix (§9) pins the decided grammar on all 5 surfaces at once; `007` needs no decision (accepted everywhere already) | R/L `+6`-accepting scripts must drop the sign; one surface's historical leniency deliberately retired |
+| Compatibility / Operational | Canonical numeric grammar retires R/L leniencies (`+6` accepted today on both; space-padded numerics silently empty on R) | Medium × Low | Grammar decided BEFORE A (Q3: canonical per #3606/#3679/#9899-F102 + REST zone/port `ParseUint` precedent); the explicit §9 token matrix pins changed and control cells across R/G/L/S/C, including `007`, L/C protocol-0 forwarding, explicit-empty/absent, and C whitespace-name server matching | R/L `+6`-accepting scripts must drop the sign; one surface's historical leniency deliberately retired |
 | Performance | Shared-helper move adds per-session cost on the conntrack-walk hot path | Low × Low | Every builder calls `ParseProtocolFilterToken` once per request; R/G/L matchers compare the cached `(proto,hasProto)` pair per session with no per-row string parse or Lenient lookup. No new per-session allocation; S/C are unchanged | None expected; matcher work stays one numeric comparison |
 | Modularity / Maintainability | Third copy of the matcher survives (B-without-L), or R/G drift again after the move | Medium × Low | Delete R's private `:1784-1792` in the same commit that re-points it; alias (not copy) on G; `pkg/api/README.md:2555-2561` contract paragraph + 3 stale Lenient-vs-Strict comments updated in the same commit | No duplicate string parser; all matchers consume the same parsed pair |
 
@@ -437,34 +447,57 @@ claiming full unification. Commit trailers split per Q7: A carries
 `newProtocolMatrixDP()` in `pkg/api/sessions_pagination_test.go` (NEW helper;
 `multiSessionDP` is left untouched because cursor/parity count assertions pin
 its 4 rows): v4 TCP×2 (dports 80/443), UDP, GRE(47), SCTP(132), HOPOPT(0),
-255; v6 UDP + ICMPv6. Every row forward-only with distinct tuples so each
-token below has an exact expected count on both offset and cursor paths.
+protocol 7, protocol 41, and 255; v6 UDP + ICMPv6. Every row is forward-only
+with distinct tuples, and every changed numeric/name row below has a non-zero
+exact count on both offset and cursor paths.
 
 ### Unit table A-expected (REST — the filed acceptance; must pass after A alone)
 
 Extend `TestRESTSessionFilterFailsClosed` (`sessions_pagination_test.go:195`)
 with 400-rows: `protocol=tcpip`, `protocol=bogus`, `protocol=256`,
-`protocol=-1`, `protocol=%206` (space-padded numeric), `protocol=+6`
-(decided flip). New `TestRESTProtocolFilterMatrixA` over the matrix DP:
+`protocol=-1`, `protocol=%206` (decoded `" 6"`), and `protocol=%2B6`
+(decoded `"+6"`). These tests build raw query strings, so whitespace MUST be
+encoded as `%20` and the plus sign as `%2B`; assert the decoded error reason
+contains `+6`. New `TestRESTProtocolFilterMatrixA` over the matrix DP:
 
-| Token | A-expected | Why |
+| Token / query encoding | A-expected | Why |
 |---|---|---|
-| `tcp`,`TCP`,`6`,`47`,`gre`,`GRE`,`ipv6`,`0`,`255`,`007` | 200 + exact narrowed counts | validate + match (007 accepted: canonical digits-only) |
-| `sctp`, `" tcp "` | 200 + EMPTY (pinned residual) | validate (Lenient) but matcher unchanged — documents what B closes |
-| `tcpip`,`bogus`,`256`,`-1`,`" 6"`,`+6` | 400 + `invalid protocol filter: <tok>` | decided grammar |
-| (absent) | 200 unfiltered | control |
-| invalid protocol + `include_peer=true` | 400 before any fan-out | validation (`sessionsHandler :132-136`) runs before fan-out — no partial local-empty/peer-error response |
+| `tcp`,`TCP`,`6`,`47`,`gre`,`GRE`,`ipv6` (41), `0`,`255`,`007` (7) | 200 + exact non-zero narrowed counts | validate + match; protocol 41 and 7 fixture rows make `ipv6`/`007` red-on-revert rather than vacuous |
+| `sctp`, `%20tcp%20` (decoded `" tcp "`) | 200 + EMPTY (pinned residual) | validate (Lenient) but matcher unchanged — documents what B closes |
+| `tcpip`,`bogus`,`256`,`-1`, `%206` (decoded `" 6"`), `%2B6` (decoded `"+6"`) | 400 + `invalid protocol filter: <decoded token>` | decided grammar; `%2B6` must not become a space |
+| absent `protocol` | 200 unfiltered | control |
+| explicit `protocol=` | 200 unfiltered | explicit-empty equals absent on REST |
+| invalid protocol + `include_peer=true` | 400 before any fan-out, zero peer calls | validation (`sessionsHandler :132-136`) runs before fan-out — no partial local-empty/peer-error response |
 
 Red-on-revert: validator branch removed → every 400-row returns 200; matcher
-narrowed → counts flip. The `sctp`/`" tcp "` empty-rows fail (become matches)
-exactly when B lands — they are specified to move to the B table in the B
-commit, so neither commit can silently drift.
+narrowed → exact counts flip. The `sctp`/`%20tcp%20` empty-rows fail (become
+matches) exactly when B lands — they are specified to move to the B table in
+the B commit, so neither commit can silently drift.
 
 ### Unit table B-expected (REST — added/adjusted by the B commit)
 
-Same test, B rows: `sctp` → exact SCTP count; `" tcp "` → exact TCP count;
-all A rows unchanged. A test asserting B-expectations fails pre-B by
-construction (committed WITH B).
+Same test, B rows: `sctp` → exact SCTP count; `%20tcp%20` (decoded
+`" tcp "`) → exact TCP count; all A rows unchanged. A test asserting
+B-expectations fails pre-B by construction (committed WITH B).
+### Five-surface conformance matrix (post-A/B contract)
+
+This is the shared matrix referenced by §8. Each cell names the observable
+proof; direct helper tables are not substitutes for the endpoint/builder
+rows. `R(A/B)` records the staged REST result, while G/L/S/C record the final
+B contract:
+
+| Token / wire spelling | R | G | L | S | C | Proof |
+|---|---|---|---|---|---|---|
+| `tcp`, `6` | A/B 200 + exact TCP count | exact match | exact match | parse/forward + exact match | raw/forward; paired G exact match | R offset+cursor counts; G endpoint; C serialization + G |
+| `sctp` | A 200 empty; B exact SCTP count | exact match | B exact match | parse/forward + exact match | raw/forward; paired G exact match | R A/B rows; G/L endpoint rows; C serialization + G |
+| `ipv6` (41) | A/B 200 + non-zero proto-41 count | exact match | B exact match | parse/forward + exact match | raw/forward; paired G exact match | fixture row makes all counts non-vacuous; C serialization + G |
+| `007` (7) | A/B 200 + non-zero proto-7 count | exact match | B exact match | accept + forward + exact match | raw `007`; paired G exact match | protocol-7 fixture; C serialization + G |
+| `+6` (wire `%2B6`) | A/B 400, reason contains `+6` | InvalidArgument | parseErr | client parseErr | raw `+6`; paired G InvalidArgument | encoded REST row; G/S/C status tests |
+| `" 6"` (wire `%206`) | A/B 400 | InvalidArgument | parseErr | client parseErr | raw `" 6"`; paired G InvalidArgument | encoded REST row; status tests |
+| `" tcp "` (wire `%20tcp%20`) | A empty; B exact TCP count | exact match after Lenient trim | B exact match | accept/forward + exact match | raw whitespace reaches G; paired server trims and exact-matches TCP | R A/B rows; G wiring; C raw-forward + G endpoint |
+| `0` | A/B 200 + exact HOPOPT count | exact match | B exact match with `hasProto` | accept/forward + exact match | raw `"0"`; paired G exact match | protocol-0 peer/show/clear tests |
+| `tcpip` | A/B 400 | InvalidArgument | parseErr | client parseErr | raw `tcpip`; paired G InvalidArgument | fail-closed status rows |
+| absent / explicit empty | 200 unfiltered | no protocol filter | no protocol filter | no protocol field | no protocol field; paired clear-all only when every selector is empty | absent vs `protocol=` controls and clear-all guard |
 
 ### Executable cell map (one test + observable + red-on-revert per surface)
 
@@ -476,21 +509,38 @@ construction (committed WITH B).
 - G-validate: extend `TestSessionFilterRejectsInvalidProtocol`
   (`session_filter_3439_test.go:27-68`): add `007` to the valid set, `+6` and
   `" 6"` to the InvalidArgument set, `" tcp "` to the valid set. Observable:
-  `validate()` code. Red-on-revert: per the file's existing FAIL-ON-REVERT
-  header (`:8-13` pattern).
+  `validate()` status/code. The existing FAIL-ON-REVERT header (`:8-13`)
+  protects the invalid-token guard; already-valid compatibility rows are
+  not themselves claimed as production red-on-revert coverage.
 - G-match: extend the `ProtoFilterMatches` matrix (`session_filter_test.go:93`)
   with parsed-pair cases `(7,7,true)→true`, `(6,7,true)→false`, and
-  `(6,0,false)→true`. Raw-token acceptance/rejection remains covered by
-  G-validate above. Observable: boolean. Red-on-revert: direct assertion flip.
+  `(6,0,false)→true`. Observable: helper boolean only; the direct table is
+  not production wiring proof.
+- G-wiring: NEW endpoint/builder coverage uses a separate
+  `sessionRowsGRPCDP` fake, not `viewFaultGRPCDP`: explicit
+  `v4Sessions`/`v6Sessions` maps drive callback-based
+  `IterateSessions`/`IterateSessionsV6` (with `IsLoaded` true), and each map
+  has matching and nonmatching rows for the exercised protocols. Send
+  `" tcp "`, `"0"`, `"sctp"`, `"ipv6"`, and `"007"` through
+  `buildSessionFilter`/the session endpoint and assert exact selective counts
+  across both v4 and v6 rows, plus `f.hasProto`/`f.proto` and
+  `f.hasFilters=true` for protocol-only filters (including proto 0).
+  Red-on-revert: forgetting to store the parsed number/bit or changing
+  `hasFilters` to raw-string/`proto!=0` produces an unfiltered count or drops
+  the protocol-only predicate. `viewFaultGRPCDP` remains only for
+  validation/zero-clear tests that reject before iteration; this fake is the
+  production call-site proof for both G matchers and complements, rather than
+  duplicates, the helper truth table.
 - G-clear: NEW `TestClearSessionsRejectsInvalidProtocol` (same file family,
   `newViewServer` + `viewFaultGRPCDP` fixture per `:28`): `ClearSessions`
   with `Protocol:"tcpip"` → `InvalidArgument` (`invalid session filter: …`
   wrap) + zero cleared. Red-on-revert: validate bypass → clear proceeds.
 - L-parse/match: extend `session_filter_test.go` parse table: post-B accepts
-  `gre/sctp/ipv6/0/" tcp "` (with `hasProto=true` asserted), rejects `+6`
+  `gre/sctp/ipv6/0/007/" tcp "` (with `hasProto=true` asserted), rejects `+6`
   (parseErr) and still rejects `ospfx`; match assertions run `matchesV4/V6`
-  against fixed `SessionKey`s (observable: boolean, NOT the `proto` field —
-  a field assertion would pass even if the matcher ignored it).
+  against fixed `SessionKey`s for protocols 7, 41, and 0 (observable:
+  boolean, NOT the `proto` field — a field assertion would pass even if the
+  matcher ignored it).
 - L-peer-show: `fetchPeerSessions` protocol-0 case: parsed `protocol 0` →
   forwarded `req.Protocol == "0"`. Observable: serialized request field.
   Red-on-revert: `hasProto` gate omitted → `""`.
@@ -502,15 +552,32 @@ construction (committed WITH B).
 - S: extend `show_flowsession_3439_test.go` tables (`:41-44` pattern): `+6`
   and `" 6"` join the want-error set; `007` joins the accept set (with
   `req.Protocol` value assertion). Observable: error presence + forwarded
-  value. Red-on-revert: per the file's FAIL-ON-REVERT header.
-- C: NEW `cmd/cli/clear_session_filter_10486_test.go` with a capturing fake
-  `ClearSessions` client (same fake seam as the 9065 fakes): `protocol tcpip`
-  is forwarded RAW (pins the fail-closed-late contract — server rejects);
-  malformed port still rejected client-side (existing `clear.go:197-210`
-  behavior pin). Observable: captured request + client error. Red-on-revert:
+  value. The existing FAIL-ON-REVERT header protects the invalid-token
+  rejection; valid compatibility rows are not claimed as shared-ruler wiring
+  proof because the same behavior exists at HEAD.
+- L-selective-clear: NEW coverage in
+  `pkg/cli/cli_clear_bounded_4886_test.go` seeds forward SCTP and TCP rows,
+  runs `clear security flow session protocol sctp`, and asserts only SCTP
+  rows (and their companions) are deleted while TCP remains. Observable:
+  deletion set. Red-on-revert: the local shared parser/matcher or a missing
+  `hasProto` gate changes the deleted set; this fulfills the SCTP selective
+  clear promised by §8.
+- C: NEW `cmd/cli/clear_session_filter_10486_test.go` is
+  serialization-only: a capturing fake asserts raw forwarding for `tcp`, `6`,
+  `sctp`, `ipv6`, `+6`, `" 6"`, `tcpip`, `" tcp "` (quoted whitespace-name),
+  `007`, and `0`; malformed port remains
+  rejected client-side (`clear.go:197-210`). It MUST NOT claim that the fake
+  proves server rejection or fail-closed behavior. The G-clear endpoint test
+  above is the paired proof of server `InvalidArgument`; C's observable is
+  only captured request shape and client-side error. Red-on-revert:
   forwarding dropped → empty request assertion catches the peer-clear-all
-  shape. (No `cmd/cli` clear-session-protocol test exists today — only
-  dhcp/hitcount/arity files — hence NEW, not extend.)
+  shape.
+
+REST test ownership is intentionally parallel: the existing
+`rest_filter_failclosed_test.go:286-314` suite remains an unmodified guard for
+the shipped GRE/case/numeric contract, while the new
+`sessions_pagination_test.go` fixture owns the A/B token matrix across offset
+and cursor paths without disturbing `multiSessionDP`'s pinned four-row counts.
 
 ### Regression guards (precisely scoped)
 
@@ -522,15 +589,19 @@ MUST stay green UNMODIFIED: `session_filtered_total_5034` (totals parity),
 `:286-314` valid-token 200 rows + GRE DP),
 `cli_clear_flow_display_reject_test.go:114-143` (`#5066`),
 `selector_type_and_scope_9065_test.go`, `session_filter_test.go:219-222`
-(numeric-47 parse still sets `proto=47, hasProto=true`), `TestSessionFilterParseErrors`
+(numeric-47 parse still sets `proto=47`; this existing guard remains
+unmodified), `TestSessionFilterParseErrors`
 (`ospfx`/missing-value/bad-port still parseErr).
 
 REQUIRE mechanical updates under B-with-L (named, not "unmodified"):
-`pkg/cli/session_filter_test.go:171-188` (struct literals gain
-`hasProto:true`; add `{0,"0"}` row) and
+`pkg/grpcapi/pagination_test.go:158,167` (direct filter literals become
+`proto` + `hasProto:true`, preserving pagination assertions);
+`pkg/cli/session_filter_test.go:171-188` (literals gain `hasProto:true`;
+add `{0,"0"}` row) and
 `pkg/cli/session_filter_ingress_identity_4983_test.go:361` (direct
 `f.proto = 17` gains `f.hasProto = true`, else the mismatch-reject assertion
-inverts). Both are covered by the L test work above.
+inverts). `session_filter_test.go:219-222` remains unchanged and only guards
+numeric-47 parsing; proto-0 and peer-clear wiring are covered by the new rows.
 
 ### Non-goals for verification
 
@@ -555,7 +626,7 @@ live-cluster runs in this round (parent sequences smoke at merge time).
   fail-closed validations in this handler shipped as single-shot 400 with no
   warn phase (zone, prefix/port, limit/offset, page_size, nat_only,
   include_peer), and no deprecation-header machinery exists in `pkg/api`
-  (`eprecat` grep: only two unrelated comments). Warn-then-enforce would be
+  (`[Dd]eprecat` search: only two unrelated comments). Warn-then-enforce would
   new machinery for a one-cell fix. The owner gate is whether supported
   external automation asserts 200 on arbitrary tokens. If none, Q1 closes;
   if a corpus surfaces AND phased rollout is unacceptable, PLAN-KILL
@@ -563,7 +634,7 @@ live-cluster runs in this round (parent sequences smoke at merge time).
 - Q2 — CLOSED as source-resolved (no kill branch). The strict and lenient
   resolvers are behaviorally IDENTICAL at HEAD: `catalog.go:362-370` ("for the
   current tables this function is equal to ProtocolNumber"), the strict
-  `ipv6=41` reverse at `:325-330`, and the full render set (`:416-436`) all
+  `ipv6=41` reverse at `:325-330`, and the full render set (`:416-437`) all
   reversing at `:311-330` — #3393 closed the last gap. Ruler = the Lenient
   seam (retained per #3393's rationale so a future render-only name still
   resolves). There is no Strict-narrowing alternative; the v1 kill branch is
