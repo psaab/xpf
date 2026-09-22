@@ -150,6 +150,7 @@ pub(crate) fn handle_stream(
         session_mirror_complete: false,
         session_mirror_fence_id: 0,
         session_mirror_continuation: String::new(),
+        session_delete_identity_refused: false,
     };
     let mut persist_state = false;
     // Capture suppress_status before the match — bool is Copy so this

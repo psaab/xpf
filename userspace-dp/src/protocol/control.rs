@@ -328,7 +328,6 @@ pub(crate) struct ControlRequest {
     pub binding: Option<BindingControlRequest>,
     #[serde(default)]
     pub packet: Option<InjectPacketRequest>,
-    #[serde(default)]
     #[serde(rename = "session_sync", default)]
     pub session_sync: Option<SessionSyncRequest>,
     /// #10512: pre-publication policy invalidation discovery. The helper
@@ -839,6 +838,10 @@ pub(crate) struct ControlResponse {
     pub session_mirror_fence_id: u64,
     #[serde(rename = "session_mirror_continuation", default)]
     pub session_mirror_continuation: String,
+    /// #10512: true when an identity-conditional delete declined because the
+    /// live helper incarnation no longer matches the captured one.
+    #[serde(rename = "session_delete_identity_refused", default)]
+    pub session_delete_identity_refused: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1019,6 +1022,12 @@ pub(crate) struct SessionSyncRequest {
     /// which falls back to unconditional behavior (rolling-upgrade safe).
     #[serde(default)]
     pub generation: u64,
+    /// #10512: identity-conditional policy invalidation delete. Zero keeps
+    /// the legacy unconditioned delete behavior for older callers.
+    #[serde(rename = "expected_rt_flow_session_id", default)]
+    pub expected_rt_flow_session_id: u64,
+    #[serde(rename = "expected_companion_rt_flow_session_id", default)]
+    pub expected_companion_rt_flow_session_id: u64,
     /// #3301: the admitting policy's ID (#3056 namespace), carried so a
     /// peer-PROMOTED session resolves the admitting policy on its live-session
     /// rows / RT_FLOW records instead of the `0` sentinel (which the Go side
@@ -1202,6 +1211,8 @@ pub(crate) struct SessionPolicyTuple {
     pub src_port: u16,
     #[serde(rename = "dst_port", default)]
     pub dst_port: u16,
+    #[serde(rename = "tunnel_discriminator", default)]
+    pub tunnel_discriminator: u64,
     #[serde(rename = "routing_domain", default)]
     pub routing_domain: u32,
 }

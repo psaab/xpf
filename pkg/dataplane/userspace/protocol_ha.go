@@ -53,8 +53,9 @@ type SessionPolicyTuple struct {
 	SrcIP         string `json:"src_ip,omitempty"`
 	DstIP         string `json:"dst_ip,omitempty"`
 	SrcPort       uint16 `json:"src_port,omitempty"`
-	DstPort       uint16 `json:"dst_port,omitempty"`
-	RoutingDomain uint32 `json:"routing_domain,omitempty"`
+	DstPort              uint16 `json:"dst_port,omitempty"`
+	TunnelDiscriminator  uint64 `json:"tunnel_discriminator,omitempty"`
+	RoutingDomain        uint32 `json:"routing_domain,omitempty"`
 }
 
 type SessionPolicyMatch struct {
@@ -128,11 +129,12 @@ type SessionSyncRequest struct {
 	// generation guard (belt-and-suspenders for helper-originated deletes
 	// and the delayed-stale-install variant). Plain uint64 with NO
 	// omitempty: a 0 value MUST serialize as 0 (legacy/unknown) so an old
-	// helper without the field still decodes via serde(default), and a new
-	// helper sees an explicit 0 rather than a missing key — the #1961
-	// wire-type discipline (no omitempty ambiguity on a numeric field). The
 	// Rust side declares `#[serde(default)] generation: u64`.
 	Generation uint64 `json:"generation"`
+	// #10512: identity-conditional policy invalidation delete. A zero value
+	// preserves the legacy unconditioned delete contract.
+	ExpectedRTFlowSessionID          uint64 `json:"expected_rt_flow_session_id,omitempty"`
+	ExpectedCompanionRTFlowSessionID uint64 `json:"expected_companion_rt_flow_session_id,omitempty"`
 	// #3301: the admitting policy's firewall metadata, carried so a
 	// peer-PROMOTED session is correctly attributed, counted, and aged after
 	// failover instead of degrading to policy 0 / no counter / the global

@@ -580,6 +580,15 @@ pub(in crate::afxdp) enum WorkerCommand {
         sequence: u64,
         key: SessionKey,
     },
+    /// #10512: read the policy-tagged rows in THIS worker's table. The
+    /// control handler broadcasts the request to every live worker and waits
+    /// for the bounded acknowledgements before publishing the response.
+    ListSessionsByPolicy {
+        request: crate::protocol::SessionPolicyListRequest,
+        matches: Arc<Mutex<Vec<crate::protocol::SessionPolicyMatch>>>,
+        errors: Arc<Mutex<Vec<String>>>,
+        pending: Arc<AtomicUsize>,
+    },
     EnqueueShapedLocal(TxRequest),
     /// #941 Work item C: vacate ALL V_min slots owned by this worker
     /// across every binding's shared_exact queues. Enqueued by the

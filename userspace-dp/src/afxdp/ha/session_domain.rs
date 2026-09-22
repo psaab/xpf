@@ -307,6 +307,54 @@ pub(crate) struct SessionDomainView<'a> {
     view: arc_swap::Guard<Arc<RuntimeView>>,
 }
 
+
+/// The READ wire deliberately uses compact `4`/`6` family tags rather than
+/// leaking Linux's `AF_INET`/`AF_INET6` values (`2`/`10`) into Go.
+pub(crate) fn policy_wire_family(addr_family: u8) -> u8 {
+    match addr_family as i32 {
+        libc::AF_INET => 4,
+        libc::AF_INET6 => 6,
+        _ => 0,
+    }
+}
+
+pub(crate) fn policy_tuple_from_key(
+    key: &SessionKey,
+) -> Option<crate::protocol::SessionPolicyTuple> {
+    let family = policy_wire_family(key.addr_family);
+    (family != 0).then(|| crate::protocol::SessionPolicyTuple {
+        addr_family: family,
+        protocol: key.protocol,
+        src_ip: key.src_ip.to_string(),
+        dst_ip: key.dst_ip.to_string(),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        tunnel_discriminator: key.discriminator.to_wire(),
+        routing_domain: key.routing_domain,
+    })
+}
+
+pub(crate) fn policy_match_from_parts(
+    key: &SessionKey,
+    metadata: &SessionMetadata,
+    session_id: u64,
+    created_ns: u64,
+) -> Option<crate::protocol::SessionPolicyMatch> {
+    let family = policy_wire_family(key.addr_family);
+    let tuple = policy_tuple_from_key(key)?;
+    Some(crate::protocol::SessionPolicyMatch {
+        addr_family: family,
+        routing_domain: key.routing_domain,
+        tuple,
+        reverse_key: None,
+        policy_id: metadata.policy_id,
+        created_secs: created_ns / 1_000_000_000,
+        created_ns,
+        expected_rt_flow_session_id: session_id,
+        companion_policy_id: 0,
+        expected_companion_rt_flow_session_id: 0,
+    })
+}
 impl SessionDomain {
     /// Take this request's view. Cheap (one `ArcSwap` load), and the guard is
     /// held for as long as the returned value lives.
@@ -336,10 +384,12 @@ impl SessionDomain {
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced).len()
     }
 
-    /// #10512: enumerate policy-tagged sessions from the helper-owned shared
-    /// authority. The worker-local tables are added by the control-plane
-    /// capture command; this shared leg is intentionally kept read-only and
-    /// lock-free with respect to `ServerState`.
+    /// #10512: enumerate policy-tagged sessions from the helper-owned
+    /// authority. The request is fanned out to every live worker because the
+    /// worker table is the only place that retains the creation/identity pair
+    /// needed for an identity-conditional delete. The shared synced map is
+    /// included as a fallback source and the final response is de-duplicated
+    /// by tuple plus incarnation.
     pub(crate) fn list_sessions_by_policy(
         &self,
         request: &crate::protocol::SessionPolicyListRequest,
@@ -349,13 +399,17 @@ impl SessionDomain {
         Vec<String>,
     ) {
         use std::collections::HashSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
 
-        let wanted: HashSet<u32> = request.policy_ids.iter().copied().filter(|id| *id != 0).collect();
+        let wanted: HashSet<u32> =
+            request.policy_ids.iter().copied().filter(|id| *id != 0).collect();
         if wanted.is_empty() {
             return (Vec::new(), true, Vec::new());
         }
         let family_allowed = |family: u8| {
-            request.families.is_empty() || request.families.iter().any(|candidate| *candidate == family)
+            request.families.is_empty()
+                || request.families.iter().any(|candidate| *candidate == family)
         };
         let class_allowed = |is_reverse: bool| {
             request.classes.is_empty()
@@ -363,33 +417,98 @@ impl SessionDomain {
                     (is_reverse && class == "reverse") || (!is_reverse && class == "forward")
                 })
         };
-        let shared = crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced);
-        // A complete READ must include every worker-local table. The command
-        // fan-out/ack leg is not wired yet, so never report a shared-only scan
-        // as authoritative (an ordinary local session would become a false
-        // empty capture).
-        let matches = Vec::new();
-        let mut errors = vec!["worker-local-scan-unavailable".to_string()];
-        let complete = false;
-        for entry in shared.values() {
-            if entry.metadata.is_reverse
-                || !family_allowed(entry.key.addr_family)
-                || !class_allowed(false)
-                || !wanted.contains(&entry.metadata.policy_id)
-            {
+
+        let matches = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let pending = Arc::new(AtomicUsize::new(0));
+        let mut complete = true;
+        let mut queued = 0usize;
+        let records = self.workers.load();
+        for (worker_id, record) in records.iter() {
+            if record.is_dead() {
+                errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("worker-{worker_id}:dead"));
+                complete = false;
                 continue;
             }
-            // SyncedSessionEntry predates the READ verb and does not carry the
-            // monotonic creation timestamp required for a safe prepublish
-            // audit or the legacy before_secs fence. Do not encode zero as a
-            // timestamp: an incomplete answer is fail-closed and lets Go
-            // surface #5578 instead of manufacturing an authoritative empty.
-            errors.push(format!(
-                "shared:{}:created-time-unavailable",
-                entry.key.addr_family
-            ));
+            let command = crate::afxdp::WorkerCommand::ListSessionsByPolicy {
+                request: request.clone(),
+                matches: Arc::clone(&matches),
+                errors: Arc::clone(&errors),
+                pending: Arc::clone(&pending),
+            };
+            let mut queue = crate::afxdp::worker_queue::lock_recover(&record.handle.commands);
+            // Reserve the acknowledgement before enqueueing: a worker can
+            // consume a command immediately after the queue lock is released.
+            pending.fetch_add(1, Ordering::Release);
+            if crate::afxdp::worker_queue::push_bounded(&mut queue, command) {
+                queued += 1;
+            } else {
+                pending.fetch_sub(1, Ordering::AcqRel);
+                errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("worker-{worker_id}:queue-full"));
+                complete = false;
+            }
         }
-        (matches, complete, errors)
+        drop(records);
+
+        // Worker acknowledgements are bounded: a dead/stalled worker must
+        // produce an incomplete READ rather than hold the control socket.
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while pending.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if pending.load(Ordering::Acquire) != 0 {
+            errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(format!(
+                    "worker-ack-timeout:{}",
+                    pending.load(Ordering::Acquire)
+                ));
+            complete = false;
+        }
+        if queued == 0 {
+            complete = false;
+            errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push("worker-local-scan-unavailable".to_string());
+        }
+
+        let mut rows = matches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let mut seen = HashSet::new();
+        rows.retain(|row| {
+            let key = format!(
+                "{}:{}:{}:{}:{}:{}",
+                row.addr_family,
+                row.tuple.src_ip,
+                row.tuple.src_port,
+                row.tuple.dst_ip,
+                row.tuple.dst_port,
+                row.expected_rt_flow_session_id
+            );
+            seen.insert(key)
+        });
+        let mut all_errors = errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        if request.mode == "legacy"
+            && request.before_secs.is_none()
+        {
+            all_errors.push("legacy-before-secs-missing".to_string());
+            complete = false;
+        }
+        (rows, complete && all_errors.is_empty(), all_errors)
     }
 
     /// #9629: the operator-facing HA status for one RG, read lock-free.

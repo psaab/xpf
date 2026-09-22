@@ -1227,6 +1227,113 @@ pub(super) fn apply_worker_commands(
                 };
                 session_counter_answers.push(answer);
             }
+            WorkerCommand::ListSessionsByPolicy {
+                request,
+                matches,
+                errors,
+                pending,
+            } => {
+                let wanted = |policy_id: u32| {
+                    policy_id != 0 && request.policy_ids.iter().any(|candidate| *candidate == policy_id)
+                };
+                let family_allowed = |family: u8| {
+                    request.families.is_empty()
+                        || request.families.iter().any(|candidate| *candidate == family)
+                };
+                let class_allowed = |is_reverse: bool| {
+                    request.classes.is_empty()
+                        || request.classes.iter().any(|class| {
+                            (is_reverse && class == "reverse")
+                                || (!is_reverse && class == "forward")
+                        })
+                };
+                if request.mode == "legacy" && request.before_secs.is_none() {
+                    errors
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push("legacy-before-secs-missing".to_string());
+                } else {
+                    sessions.iter_with_identity(
+                        |key, decision, metadata, _origin, created_ns, session_id| {
+                            let family = crate::afxdp::ha::policy_wire_family(key.addr_family);
+                            if !family_allowed(family)
+                                || !class_allowed(metadata.is_reverse)
+                                || !wanted(metadata.policy_id)
+                            {
+                                return;
+                            }
+                            if request.mode == "legacy"
+                                && request
+                                    .before_secs
+                                    .map(|before| created_ns / 1_000_000_000 > before)
+                                    .unwrap_or(true)
+                            {
+                                return;
+                            }
+                            if session_id == 0 {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(format!(
+                                        "identity-missing:{}:{}",
+                                        key.src_ip, key.dst_ip
+                                    ));
+                                return;
+                            }
+                            let Some(mut row) = crate::afxdp::ha::policy_match_from_parts(
+                                key,
+                                metadata,
+                                session_id,
+                                created_ns,
+                            ) else {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push("unsupported-address-family".to_string());
+                                return;
+                            };
+                            let Some((companion_key, companion_metadata, companion_id)) =
+                                sessions.policy_companion(key, decision.nat)
+                            else {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(format!(
+                                        "companion-missing:{}:{}",
+                                        key.src_ip, key.dst_ip
+                                    ));
+                                return;
+                            };
+                            if companion_id == 0 {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(format!(
+                                        "companion-identity-missing:{}:{}",
+                                        key.src_ip, key.dst_ip
+                                    ));
+                                return;
+                            }
+                            row.reverse_key =
+                                crate::afxdp::ha::policy_tuple_from_key(&companion_key);
+                            if row.reverse_key.is_none() {
+                                errors
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push("unsupported-companion-family".to_string());
+                                return;
+                            }
+                            row.companion_policy_id = companion_metadata.policy_id;
+                            row.expected_companion_rt_flow_session_id = companion_id;
+                            matches
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(row);
+                        },
+                    );
+                }
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
             WorkerCommand::UpsertSynced(entry) => {
                 commands::handle_upsert_synced(
                     sessions,

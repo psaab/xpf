@@ -567,6 +567,7 @@ type ControlResponse struct {
 	SessionMirrorComplete     bool   `json:"session_mirror_complete,omitempty"`
 	SessionMirrorFenceID      uint64 `json:"session_mirror_fence_id,omitempty"`
 	SessionMirrorContinuation string `json:"session_mirror_continuation,omitempty"`
+	SessionDeleteIdentityRefused bool `json:"session_delete_identity_refused,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than

@@ -94,6 +94,9 @@ type capturedSessions struct {
 	targets int
 	v4      []dataplane.SessionEntryV4
 	v6      []dataplane.SessionEntryV6
+	// policy retains the helper READ rows, including their incarnation and
+	// companion identities, for the userspace identity-conditional delete.
+	policy []dpuserspace.SessionPolicyMatch
 	// enumFailed marks a candidate set gathered from an INCOMPLETE scan. It
 	// suppresses the delete site's success line only — the counts describe what
 	// was gathered, not what existed, so reporting them as a complete clear
@@ -101,7 +104,10 @@ type capturedSessions struct {
 	enumFailed bool
 }
 
-func (c capturedSessions) empty() bool { return len(c.v4) == 0 && len(c.v6) == 0 }
+func (c capturedSessions) empty() bool {
+	return len(c.v4) == 0 && len(c.v6) == 0 && len(c.policy) == 0
+}
+
 
 // policyInvalidationCapture is the whole pre-publication snapshot: one bucket
 // per change class, plus the enumerate errors.
@@ -251,6 +257,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			} else if idInSet(deflt, match.PolicyID) {
 				target = &capture.deflt
 			}
+			target.policy = append(target.policy, match)
 			if entry4 != nil {
 				target.v4 = append(target.v4, *entry4)
 			}
@@ -327,6 +334,108 @@ func idInSet(ids map[uint32]struct{}, id uint32) bool {
 	}
 	_, ok := ids[id]
 	return ok
+}
+// policyMatchEntries converts one helper READ match into the existing
+// dataplane entry shape consumed by the companion-aware delete path. The
+// helper is authoritative for the routing domain and RT_FLOW identity; the
+// mirror value is only a transport container for that identity.
+func policyMatchEntries(match dpuserspace.SessionPolicyMatch) (*dataplane.SessionEntryV4, *dataplane.SessionEntryV6, error) {
+	family := match.AddrFamily
+	if family == 0 {
+		family = match.Tuple.AddrFamily
+	}
+	if match.ExpectedRTFlowSessionID == 0 {
+		return nil, nil, fmt.Errorf(
+			"policy session READ: identity-missing for policy %d (%s -> %s)",
+			match.PolicyID, match.Tuple.SrcIP, match.Tuple.DstIP,
+		)
+	}
+	if match.ExpectedCompanionRTFlowSessionID != 0 && match.ReverseKey == nil {
+		return nil, nil, fmt.Errorf(
+			"policy session READ: companion identity without reverse key for policy %d",
+			match.PolicyID,
+		)
+	}
+	switch family {
+	case 4:
+		key, discriminator, err := policyTupleV4(match.Tuple)
+		if err != nil {
+			return nil, nil, err
+		}
+		val := dataplane.SessionValue{
+			PolicyID:            match.PolicyID,
+			Created:             match.CreatedSecs,
+			RoutingDomain:       match.RoutingDomain,
+			RTFlowSessionID:     match.ExpectedRTFlowSessionID,
+			TunnelDiscriminator: discriminator,
+		}
+		if val.RoutingDomain == 0 {
+			val.RoutingDomain = match.Tuple.RoutingDomain
+		}
+		if match.ReverseKey != nil {
+			reverse, _, err := policyTupleV4(*match.ReverseKey)
+			if err != nil {
+				return nil, nil, err
+			}
+			val.ReverseKey = reverse
+		}
+		return &dataplane.SessionEntryV4{Key: key, Value: val}, nil, nil
+	case 6:
+		key, discriminator, err := policyTupleV6(match.Tuple)
+		if err != nil {
+			return nil, nil, err
+		}
+		val := dataplane.SessionValueV6{
+			PolicyID:            match.PolicyID,
+			Created:             match.CreatedSecs,
+			RoutingDomain:       match.RoutingDomain,
+			RTFlowSessionID:     match.ExpectedRTFlowSessionID,
+			TunnelDiscriminator: discriminator,
+		}
+		if val.RoutingDomain == 0 {
+			val.RoutingDomain = match.Tuple.RoutingDomain
+		}
+		if match.ReverseKey != nil {
+			reverse, _, err := policyTupleV6(*match.ReverseKey)
+			if err != nil {
+				return nil, nil, err
+			}
+			val.ReverseKey = reverse
+		}
+		return nil, &dataplane.SessionEntryV6{Key: key, Value: val}, nil
+	default:
+		return nil, nil, fmt.Errorf("policy session READ: unsupported address family %d", family)
+	}
+}
+
+func policyTupleV4(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKey, uint64, error) {
+	src := net.ParseIP(tuple.SrcIP).To4()
+	dst := net.ParseIP(tuple.DstIP).To4()
+	if src == nil || dst == nil {
+		return dataplane.SessionKey{}, 0, fmt.Errorf("policy session READ: invalid IPv4 tuple %q -> %q", tuple.SrcIP, tuple.DstIP)
+	}
+	var key dataplane.SessionKey
+	copy(key.SrcIP[:], src)
+	copy(key.DstIP[:], dst)
+	key.SrcPort = tuple.SrcPort
+	key.DstPort = tuple.DstPort
+	key.Protocol = tuple.Protocol
+	return key, tuple.TunnelDiscriminator, nil
+}
+
+func policyTupleV6(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKeyV6, uint64, error) {
+	src := net.ParseIP(tuple.SrcIP).To16()
+	dst := net.ParseIP(tuple.DstIP).To16()
+	if src == nil || dst == nil || net.ParseIP(tuple.SrcIP).To4() != nil || net.ParseIP(tuple.DstIP).To4() != nil {
+		return dataplane.SessionKeyV6{}, 0, fmt.Errorf("policy session READ: invalid IPv6 tuple %q -> %q", tuple.SrcIP, tuple.DstIP)
+	}
+	var key dataplane.SessionKeyV6
+	copy(key.SrcIP[:], src)
+	copy(key.DstIP[:], dst)
+	key.SrcPort = tuple.SrcPort
+	key.DstPort = tuple.DstPort
+	key.Protocol = tuple.Protocol
+	return key, tuple.TunnelDiscriminator, nil
 }
 
 // enumerateErr reports the capture's enumerate failure ONCE for all three
