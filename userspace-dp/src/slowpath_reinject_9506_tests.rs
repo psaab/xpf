@@ -392,6 +392,58 @@ fn attest_terminal_id_tombstone_resets_only_on_run_change() {
 }
 
 #[test]
+fn attest_tombstone_overflow_is_full_only_in_attest_run() {
+    let source = open_core();
+    assert!(source.announce_epochs(
+        "attest-cccccccccccccccccccccccccccccccc",
+        1,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    for id in 1..=TERMINAL_TOMBSTONE_MAX as u64 + 1 {
+        assert!(source.admit(&frame(id, id, 64)).admitted, "id {id} admission");
+        assert_eq!(source.pre_write_check(&lease(id)), PreWrite::Proceed);
+        assert!(source.resolve_write(&lease(id), written(64)));
+        assert_eq!(source.drain_ready(1).len(), 1);
+    }
+    let source_overflow =
+        source.admit(&frame(TERMINAL_TOMBSTONE_MAX as u64 + 2, 1, 64));
+    assert!(!source_overflow.admitted);
+    assert_eq!(source_overflow.reason, ADMIT_FULL);
+
+    let ordinary_source = ReinjectCore::new_shared();
+    assert!(ordinary_source.announce_epochs(
+        "ordinary-copy",
+        2,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    let target = ReinjectCore::new_shared();
+    assert!(target.announce_epochs(
+        "ordinary-copy",
+        2,
+        PERMIT,
+        true,
+        &[(1, QEPOCH)],
+    ));
+    {
+        let mut inner = target.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.terminal_tombstones.insert(99_999);
+        inner.terminal_tombstone_overflow = true;
+    }
+    target.copy_authority_from(&ordinary_source);
+    {
+        let inner = target.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(inner.terminal_tombstones.is_empty());
+        assert!(!inner.terminal_tombstone_overflow);
+    }
+    let ordinary = target.admit(&frame(TERMINAL_TOMBSTONE_MAX as u64 + 2, 1, 64));
+    assert!(ordinary.admitted, "ordinary handoff must clear D11 overflow poison");
+}
+
+#[test]
 fn admit_stale_epoch() {
     let core = open_core();
     let mut wrong_permit = frame(1, 1, 64);

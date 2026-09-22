@@ -1,17 +1,20 @@
-# DRAFT v3: #10484 live re-attestation proving the D11 join before S9.5 relies on the bridge
+# READY v4: #10484 live re-attestation proving the D11 join before S9.5 relies on the bridge
 
-Status: DRAFT v3 after residual adjudication. Folds round-1 hostile reviews (both
-PLAN-NEEDS-MAJOR, convergent, no KILL): reviewer A (E28-impossible cell,
-trigger-underspec, provenance-gap, predicates, citations) and reviewer B
-(F1 permit contradiction, F2 E28, F3 provenance auth, F4 singleton/location,
-F5 pending lifecycle, F6 mode gaps, F7 runbook, F8 boundary-holds). No
-production code. No live run performed in-lane (cluster/incus commands are
-forbidden in this lane; the attested run is prescribed for a lab-capable
-lane). All source citations were re-grounded at base `4858dc2d4` for this
-DRAFT v3 via `read`; grep snapshots drifted by 2 lines in `pipeline.go` during
-grounding, so every line cite below is read-verified against that base. New
-(designed, not yet in tree) symbols are explicitly marked NEW; everything else
-must already exist at the cited file:line.
+Status: READY v4 after Fold-2 acceptance review. This plan records the
+implemented source contract, its acceptance predicates, and the explicit
+deviations below. The design remains lab-only and default-off; this lane does
+not run cluster/incus commands.
+
+Source grounding: the implementation branch is re-grounded against merge-base
+`5dcaa104fb36637f7b76bdd0b3ba26ea880f1046`. Every source citation below is
+rechecked by symbol and surrounding construct at that base before merge; line
+numbers are navigation hints only and must not be treated as stable identity.
+The Fold-2 implementation is recorded at the branch tip and each deviation is
+observable in the code or harness evidence.
+
+No external provider API, companion script, or S9.5 permit path is introduced.
+The accepted run still requires a live, non-VOID four-cell D11 artifact in a
+lab-capable lane.
 
 ## 1. Problem restatement (from source, not memory)
 
@@ -1003,6 +1006,58 @@ The accepted #10484 run is: `t12-g2-9506.sh --d11-reattest` with
 fixtures, per-node composite-key attribution, and clean restore. The no-arg script
 remains the broader r6 ledger, not this follow-up's acceptance command.
 
+## 7.2 Fold-2 implementation deviations and safety case
+Sections 1 through 7.1 preserve the STEP-0 investigation and pre-Fold-2 design
+record for audit. In those historical sections, words such as NEW, future-only,
+DESIGN, Slice-*, and zero-code describe the proposal at the time of review;
+they are not current claims that the branch lacks an implementation. The
+normative current contract is the source-grounded implementation map and safety
+case in this section, followed by the gates in section 8. Where a historical
+line conflicts with those sections, the current source behavior and the
+explicit deviation table below control.
+
+Current implementation anchors are:
+
+- `pkg/nfqueue/pipeline_attest_10484.go`: bounded D11 armer, ledger admission,
+  completion classification, archive, and in-process `VoidReason`.
+- `pkg/nfqueue/pipeline.go`: D11 admission routing, WouldPermit accounting, and
+  cancellation/uncertain completion handling.
+- `pkg/daemon/daemon.go` and `pkg/daemon/ipsec_capture_wiring_9506.go`: runtime
+  authority override publication, witness ownership checks, and retained
+  close/restore ordering.
+- `pkg/grpcapi/server_d11_attestation_10484.go`: exact maintenance authorization
+  for the D11 ledger RPC.
+- `userspace-dp/src/slowpath_reinject_9506.rs`: run-scoped tombstone cleanup
+  and bounded overflow behavior.
+- `test/incus/t12-g2-9506.sh`: four-row live driver, exact Go/Rust join,
+  outcome agreement, reason-52 accounting, traffic attribution, and rollback
+  proof; `--selftest` is the hermetic source gate.
+
+The following deviations are intentional, reviewed against the current source,
+and are part of this READY plan rather than silent changes:
+
+| Plan contract | Implemented contract and evidence |
+| --- | --- |
+| Ten-step S4/fence/close-permit rollback owner | The current runtime owns only the D11 authority override. `rollbackD11` linearizes ARMED→DRAINING, fences D11 submissions, issues scoped cancellation, drains completion polling, and retains the override through actor/queue teardown. `clearD11AuthorityOverride` then publishes `permit_open=false`; `finalizeD11AfterClose` finalizes retained ledger rows and disarms only after the override is gone. Shared S4 permit close, host-input fence retirement, topology revoke, commit-lease draining, and Rust close-permit remain deliberately outside this old-generation close owner: mutating them after replacement could close or fence a newer owner. The harness therefore treats any missing close/restore/authority proof as FAIL, never PASS. |
+| Plan cell names `submit_admit`, `worker_verdict`, `completion_join`, `wouldpermit_accounting` | The shipped driver uses four explicit rows named `arm`, `join`, `reason52`, and `rollback`; each row is buffered and replayed only after restore. The row predicates are equivalent only where stated in §6.4; the live artifact must report exactly four rows, four PASS, zero FAIL, and zero VOID. |
+| V1 absolute predicate `V1PermitSuppressed-delta == WouldPermit-count` | The driver uses run-scoped D11 suppressed and reason-52 deltas, exact label sets, and the Rust per-row reason field. Ordinary V1 counters remain cumulative process counters. A quiescence guard and per-row D11 count are required; routine-path pollution is FAIL/VOID per §8. |
+| Four-cell count was previously implicit | Count four is now an explicit gate: exactly two identified marker echoes per decrypted direction, one selected/admitted/completed composite key per echo, with both nodes represented. |
+| `WouldPermit` terminal naming | The completion outcome remains `would_permit`, while the attestation ledger terminal discriminator is `FAIL`, because suppression is a deliberate deny and not a successful reinjection. |
+| Re-arm and prior-ledger retention | A later nonce is accepted only after the prior run is finalized and its snapshot is archived in the bounded daemon-local archive before `Begin` can clear the active ledger. Same-nonce reuse is refused for daemon lifetime. |
+| VOID provenance surface | The in-process snapshot carries `VoidReason`; the generated RPC schema currently has no field, so the live driver uses explicit cell reasons and refuses to infer a PASS from missing/invalid surfaces. Adding a protobuf field is deferred as a recorded interface deviation, not silently assumed. |
+| Independent byte-identical capture observer | This lane does not add a second packet-byte capture or independent digest path. The live join compares the Go ledger's captured-frame digest against the Rust provenance digest, and the traffic cell verifies the four marker probes. The old observer requirement is therefore not a PASS predicate for this implementation; missing Go/Rust digest or traffic evidence after arm/readiness is FAIL, while pre-arm unavailability remains VOID. |
+| Post-arm admission refusal classification | Once the successful arm/readiness branch selects marker rows, `ADMIT_STALE`, `ADMIT_FULL`, and `ADMIT_SHUTDOWN`, zero captured markers, or unreadable/mismatched Rust, ledger, metrics, or traffic evidence make the selected/admitted/completed join fail and emit FAIL. This is intentional: a refusal or missing measurement after the armed claim breaks it. Setup, fixture, arm, and readiness unavailability before entering that branch remain VOID. |
+
+Safety invariants for the retained D11-only rollback are: (1) no new D11
+selection after DRAINING; (2) every selected pending lease is either joined to
+a Rust completion, recorded Uncertain on timeout/cancel failure, or causes a
+FAIL; (3) the old override remains installed until its actor/listener teardown
+returns; (4) normal CLOSED authority is announced before disarm; (5) the
+ledger is finalized only after no matching pending lease remains; and (6) a
+new runtime/epoch/run cannot be labeled by the old runtime's witness callback.
+These invariants are the reason shared S4 close/fence mutation is not added to
+this lane.
+
 ## 8. Proof cells and kill-gates
 
 PASS requires ALL of: exe_check=MATCH (local==fw0==fw1, t12-g2-9506.sh:1687-1697);
@@ -1016,8 +1071,8 @@ D11 ledger has exactly one ADMIT_OK record and exactly one completion record
 `(node_id, request_id, local lease tuple)` and no extra keys
 (admitted==completed==internally-selected sets); exactly one Rust worker
 verdict per key; LateCompletions, Timeouts, Uncertain deltas == 0; Rust
-provenance row per key matches request/lease/origin and the independently
-computed digest with the expected non-Written outcome; E28 split holds
+provenance row per key matches request/lease/origin and the Go ledger's
+captured-frame digest with the expected non-Written outcome; E28 split holds
 (Rust-52-delta==0; Go-52-delta==WouldPermit-count;
 suppressed-delta==WouldPermit-count); never-q0 holds (per-key + global
 halves, section 6.4); routine-path pollution deltas == 0 (quiesce guard);
@@ -1027,21 +1082,20 @@ the trigger-only selection exception; shared restore clean
 until after restore. The run retains exactly four selected-frame ledger records;
 the mode emits exactly four proof-cell rows, all PASS, zero VOID/FAIL, exit 0.
 VOID (never PASS, never FAIL): exe_check != MATCH; fixture-setup-failed (any
-fix9506_setup step incl. RG2 failover); no captured marker frames; authority
-drift (STALE), FULL, SHUTDOWN, or required selector/authority/generation
-precondition unavailable; those environmental refusals are VOID; any required
-observer unavailable (Rust status, Go D11 ledger, Go metrics incl. NEW
-suppressed/deny surfaces, nfqueue, st-links, digest/reason fields, or the
-independent byte-identical capture observer); routine-path pollution in-window;
+fix9506_setup step incl. RG2 failover); required selector/authority/generation
+precondition unavailable before marker selection; those environmental refusals
+are VOID; after the successful arm/readiness branch, absent or unreadable
+measurement is FAIL as stated above.
 Q4 showing default dark intact-but-unverifiable. A VOID run is retained as
 diagnostic evidence but cannot close the issue.
 FAIL (claim broken, not environment): Go ledger or Rust completion joined to a
 wrong `(node_id, request_id, local lease tuple)`; duplicate or late
 completion; ledger `resolve_count` not one or terminal-state mismatch;
 provenance identity/digest/reason mismatch; outcome mismatch between the
-internal selected row, Go ledger, and Rust provenance; BAD_LEASE/BRIDGE/
-INPUT_HOOK/NON_DRY_RUN/NO_GENERATION/TUNNEL_ROW_MISSING after frozen
-preconditions -> FAIL; any Rust-52 among D11 rows; Go-52 or suppressed delta
+internal selected row, Go ledger, and Rust provenance; post-arm
+ADMIT_STALE/ADMIT_FULL/ADMIT_SHUTDOWN; BAD_LEASE/BRIDGE/INPUT_HOOK/
+NON_DRY_RUN/NO_GENERATION/TUNNEL_ROW_MISSING after frozen preconditions ->
+FAIL; any Rust-52 among D11 rows; Go-52 or suppressed delta
 != WouldPermit-count; any Written outcome (either half); PASS emitted before
 restore; `D11_CELL_COUNT != 4`; any selected-frame ledger record silently omitted. Any FAIL kills the run: no close.
 
@@ -1049,9 +1103,9 @@ PLAN-KILL boundaries (return to owner for re-scope per the merge-gate
 sequencing: #10483 ruling, #10484 before S9.5/counter reliance): the guarded
 trigger cannot preserve every deny-only predicate (section 5.3 table); the
 Rust admit-time digest witness or its additive status surface cannot be
-produced; the bounded byte-identical capture observer, its byte-equality or
-overflow fail-loud proof cannot be produced, or the harness cannot independently
-compare it; the bounded Go ledger cannot expose one authoritative record per
+produced; the Go ledger/Rust provenance digest join, its outcome agreement, or
+the harness's traffic attribution cannot be produced; the bounded Go ledger
+cannot expose one authoritative record per
 `(node_id, request_id, local lease tuple)` through the authenticated
 `GetD11AttestationLedger` RPC; the run would need the S9.5 cutover (Option C) or
 any product semantic change to default paths (e.g. removing pipeline.go:984,

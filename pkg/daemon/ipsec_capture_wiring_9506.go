@@ -697,8 +697,7 @@ func (r *ipsecCaptureRuntime) clearD11AuthorityOverride() error {
 		return nil
 	}
 	if r.submitter == nil {
-		r.d11Override = nil
-		return nil
+		return errors.New("ipsec capture: D11 close authority unavailable")
 	}
 	rows := append([]nfqueue.ReinjectQueueEpoch(nil), override.rows...)
 	if err := r.submitter.AnnounceReinject(
@@ -784,12 +783,13 @@ func (d *Daemon) d11WitnessAuthority(runtime *ipsecCaptureRuntime) (nfqueue.D11A
 		return nfqueue.D11AttestationArmStatus{}, false
 	}
 	runtime.authorityMu.Lock()
-	_, _, permitEpoch, open, _ := runtime.authoritySnapshotLocked()
+	runID, _, permitEpoch, open, _ := runtime.authoritySnapshotLocked()
 	overrideActive := runtime.d11Override != nil
 	runtime.authorityMu.Unlock()
 	arm := d.d11Armer.Status()
 	return arm, overrideActive && open &&
-		permitEpoch == arm.PermitEpoch && arm.State == nfqueue.D11Armed.String()
+		runID == arm.RunID && permitEpoch == arm.PermitEpoch &&
+		arm.State == nfqueue.D11Armed.String()
 }
 
 func (d *Daemon) d11AuthorityCurrentForRuntime(runtime *ipsecCaptureRuntime) bool {

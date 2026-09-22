@@ -778,7 +778,12 @@ impl ReinjectCore {
             .extend(target_authority.tombstones.iter().copied());
         inner.authority = merged;
         let target_tombstone_overflow = inner.terminal_tombstone_overflow;
-        if source_authority.run_id == target_authority.run_id {
+        if !inner.authority.run_id.starts_with("attest-") {
+            // Ordinary and empty authorities never inherit D11-only
+            // terminal tombstones or their overflow poison.
+            inner.terminal_tombstones.clear();
+            inner.terminal_tombstone_overflow = false;
+        } else if source_authority.run_id == target_authority.run_id {
             if source_tombstone_overflow
                 || target_tombstone_overflow
                 || source_terminal_tombstones.len() + inner.terminal_tombstones.len()

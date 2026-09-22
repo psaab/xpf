@@ -11,11 +11,7 @@ import (
 	"github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
-func d11LedgerPrincipalAllowed(principal authz.Principal, cfgs ...*config.Config) bool {
-	var cfg *config.Config
-	if len(cfgs) != 0 {
-		cfg = cfgs[0]
-	}
+func d11LedgerPrincipalAllowed(principal authz.Principal, cfg *config.Config) bool {
 	return principal.Source == authz.SourcePeerUID &&
 		(principal.UID == 0 ||
 			principal.Superuser ||

@@ -1947,13 +1947,30 @@ func New(opts Options) (*Daemon, error) {
 	}
 	d.d11Ledger = nfqueue.NewD11AttestationLedger()
 	d.d11Armer = nfqueue.NewD11AttestationArmer(d11NodeID, d.d11Ledger, func(runID string, permitEpoch uint64) error {
+		// Serialize D11 publication with runtime swaps, but do not hold
+		// ipsecCaptureMu while entering runtime authorityMu: reconciliation
+		// samples in the opposite order.
+		d.ipsecCapturePublishMu.Lock()
+		defer d.ipsecCapturePublishMu.Unlock()
 		d.ipsecCaptureMu.Lock()
 		runtime := d.ipsecCapture
 		d.ipsecCaptureMu.Unlock()
 		if runtime == nil {
 			return fmt.Errorf("D11 capture runtime unavailable")
 		}
-		return runtime.installD11AuthorityOverride(runID, permitEpoch)
+		if err := runtime.installD11AuthorityOverride(runID, permitEpoch); err != nil {
+			return err
+		}
+		d.ipsecCaptureMu.Lock()
+		current := d.ipsecCapture
+		d.ipsecCaptureMu.Unlock()
+		if current != runtime {
+			if clearErr := runtime.clearD11AuthorityOverride(); clearErr != nil {
+				return fmt.Errorf("D11 capture runtime rotated during arm: %w", clearErr)
+			}
+			return fmt.Errorf("D11 capture runtime rotated during arm")
+		}
+		return nil
 	})
 	d.d11Armer.SetEnvironmentGate(func() bool { return d11ArmEnabled })
 	return d, nil

@@ -51,25 +51,69 @@ var (
 
 // D11AttestationArmer owns the node-local one-shot selector. The announce
 // callback is the daemon's authority publication hook; it runs before ARMED is
-// made visible to the pipeline.
+// made visible to the pipeline. Nonces are daemon-lifetime anti-replay:
+// every attempted run ID is retained in a bounded set and reuse is refused
+// even across disarm (A->B->A is rejected, not just A->A).
+// D11AttemptedRunCap bounds that history; when full the armer fails closed
+// and refuses new nonces rather than evicting history to allow reuse.
+const D11AttemptedRunCap = 64
+const D11ArchiveCap = 8
+
 type D11AttestationArmer struct {
-	mu             sync.Mutex
-	nodeID         string
-	state          D11ArmState
-	runID          string
-	attemptedRunID string
-	permitEpoch    uint64
-	selector       [16]byte
-	ledger         *D11AttestationLedger
-	announce       func(runID string, permitEpoch uint64) error
-	allow          func() bool
+	mu              sync.Mutex
+	nodeID          string
+	state           D11ArmState
+	runID           string
+	attemptedRunIDs map[string]struct{}
+	permitEpoch     uint64
+	selector        [16]byte
+	ledger          *D11AttestationLedger
+	announce        func(runID string, permitEpoch uint64) error
+	allow           func() bool
+	archives        map[string]D11LedgerSnapshot
+	archiveOrder    []string
 }
 
 func NewD11AttestationArmer(nodeID string, ledger *D11AttestationLedger, announce func(string, uint64) error) *D11AttestationArmer {
-	return &D11AttestationArmer{nodeID: nodeID, ledger: ledger, announce: announce}
+	return &D11AttestationArmer{
+		nodeID: nodeID, ledger: ledger, announce: announce,
+		attemptedRunIDs: make(map[string]struct{}),
+		archives:        make(map[string]D11LedgerSnapshot),
+	}
 }
 
-// SetEnvironmentGate allows daemon wiring to cache the process-start arm bit;
+func (a *D11AttestationArmer) archiveFinalizedLedgerLocked() bool {
+	if a == nil || a.ledger == nil {
+		return true
+	}
+	snapshot := a.ledger.Snapshot()
+	if !snapshot.Finalized || snapshot.RunID == "" {
+		return false
+	}
+	if _, exists := a.archives[snapshot.RunID]; exists {
+		return true
+	}
+	if len(a.archiveOrder) >= D11ArchiveCap {
+		return false
+	}
+	a.archives[snapshot.RunID] = snapshot
+	a.archiveOrder = append(a.archiveOrder, snapshot.RunID)
+	return true
+}
+
+// ArchivedSnapshot returns the retained final artifact for a prior D11 run.
+// The returned snapshot owns independent slices from the live ledger.
+func (a *D11AttestationArmer) ArchivedSnapshot(runID string) (D11LedgerSnapshot, bool) {
+	if a == nil {
+		return D11LedgerSnapshot{}, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snapshot, ok := a.archives[runID]
+	return snapshot, ok
+}
+
+// SetEnvironmentGate allows the daemon to cache the process-start arm bit;
 // nil uses XPF_ATTEST_10484_ARM directly and is intentionally fail-closed.
 func (a *D11AttestationArmer) SetEnvironmentGate(allow func() bool) {
 	if a == nil {
@@ -108,7 +152,9 @@ func decodeD11Selector(runID, selectorHex string) ([16]byte, error) {
 }
 
 // Arm validates and publishes the exact run/epoch/selector tuple. A second
-// arm, including a same-nonce re-arm after disarm, is refused.
+// arm while active is refused; after DISARMED only a distinct new nonce may
+// arm, and only after the prior ledger is archived and finalized. Failed
+// announces never touch the ledger, preserving the prior artifact.
 func (a *D11AttestationArmer) Arm(runID string, permitEpoch uint64, selectorHex string) error {
 	if a == nil {
 		return errD11ArmShape
@@ -119,8 +165,17 @@ func (a *D11AttestationArmer) Arm(runID string, permitEpoch uint64, selectorHex 
 		return errors.New("nfqueue: D11 authority wiring unavailable")
 	}
 	allow := a.allow
-	if (a.state != D11Inactive && a.state != D11Disarmed) || permitEpoch == 0 ||
-		a.attemptedRunID == runID {
+	_, attempted := a.attemptedRunIDs[runID]
+	if (a.state != D11Inactive && a.state != D11Disarmed) || permitEpoch == 0 || attempted {
+		a.mu.Unlock()
+		return errD11ArmActive
+	}
+	if a.state == D11Disarmed && (a.ledger == nil || !a.ledger.Snapshot().Finalized) {
+		a.mu.Unlock()
+		return errD11ArmActive
+	}
+	if len(a.attemptedRunIDs) >= D11AttemptedRunCap ||
+		(a.state == D11Disarmed && len(a.archives) >= D11ArchiveCap) {
 		a.mu.Unlock()
 		return errD11ArmActive
 	}
@@ -136,43 +191,52 @@ func (a *D11AttestationArmer) Arm(runID string, permitEpoch uint64, selectorHex 
 		return err
 	}
 	a.mu.Lock()
-	if (a.state != D11Inactive && a.state != D11Disarmed) || a.announce == nil ||
-		a.attemptedRunID == runID {
+	if (a.state != D11Inactive && a.state != D11Disarmed) || a.announce == nil {
 		a.mu.Unlock()
 		return errD11ArmActive
 	}
-	a.attemptedRunID = runID
+	if _, dup := a.attemptedRunIDs[runID]; dup {
+		a.mu.Unlock()
+		return errD11ArmActive
+	}
+	if a.state == D11Disarmed && (a.ledger == nil || !a.ledger.Snapshot().Finalized) {
+		a.mu.Unlock()
+		return errD11ArmActive
+	}
+	if len(a.attemptedRunIDs) >= D11AttemptedRunCap ||
+		(a.state == D11Disarmed && len(a.archives) >= D11ArchiveCap) {
+		a.mu.Unlock()
+		return errD11ArmActive
+	}
+	if a.attemptedRunIDs == nil {
+		a.attemptedRunIDs = make(map[string]struct{})
+	}
+	if a.archives == nil {
+		a.archives = make(map[string]D11LedgerSnapshot)
+	}
+	if a.state == D11Disarmed && !a.archiveFinalizedLedgerLocked() {
+		a.mu.Unlock()
+		return errD11ArmActive
+	}
+	a.attemptedRunIDs[runID] = struct{}{}
 	a.state = D11Arming
 	a.mu.Unlock()
 
 	err = a.announce(runID, permitEpoch)
 	a.mu.Lock()
-	ledger := a.ledger
 	if err != nil {
 		if a.state == D11Arming {
 			a.state = D11Inactive
 		}
-		if ledger != nil {
-			ledger.Begin(a.nodeID, runID, permitEpoch)
-		}
 		a.mu.Unlock()
-		if ledger != nil {
-			ledger.MarkVoid("announce failed")
-		}
 		return fmt.Errorf("nfqueue: D11 announce: %w", err)
 	}
 	if a.state != D11Arming {
-		if ledger != nil {
-			ledger.Begin(a.nodeID, runID, permitEpoch)
-		}
 		a.mu.Unlock()
-		if ledger != nil {
-			ledger.MarkVoid("arm interrupted")
-		}
 		return errors.New("nfqueue: D11 arm interrupted")
 	}
-	if ledger != nil {
-		ledger.Begin(a.nodeID, runID, permitEpoch)
+	if a.ledger != nil {
+		a.ledger.Begin(a.nodeID, runID, permitEpoch)
 	}
 	a.runID, a.permitEpoch, a.selector = runID, permitEpoch, selector
 	a.state = D11Armed
