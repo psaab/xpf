@@ -38,16 +38,35 @@ func (m *Manager) AttachedXDPLinkCount() int {
 // The tracked map is only a candidate set. Both the bpf_link's reported
 // ifindex and the tracked map key must agree before an ifindex is returned;
 // disagreement or an Info failure is the conservative, no-pinhole result.
+//
+// #10519: detach-debt members are intentionally excluded even when kernel
+// truth still proves their XDP link attached. Their accepted snapshot has
+// already dropped the interface, but the claim-clear arm failed before the
+// link could be closed; returning it here would re-open the stale forward
+// fence pinhole on every gate reassert. Copy the candidates and debt under
+// m.mu, then perform kernel Info reads without holding m.mu.
 func (m *Manager) AttachedXDPIfindexes() []int {
 	if m == nil {
 		return nil
 	}
-	links := m.XDPLinks()
+	m.mu.Lock()
+	links := make(map[int]link.Link, len(m.xdpLinks))
+	for ifindex, l := range m.xdpLinks {
+		links[ifindex] = l
+	}
+	debt := make(map[int]struct{}, len(m.detachDebt))
+	for ifindex := range m.detachDebt {
+		debt[ifindex] = struct{}{}
+	}
+	m.mu.Unlock()
 	if len(links) == 0 {
 		return nil
 	}
 	out := make([]int, 0, len(links))
 	for ifindex, l := range links {
+		if _, owed := debt[ifindex]; owed {
+			continue
+		}
 		reported, ok := xdpLinkIfindexFn(l)
 		if ok && reported == ifindex && ifindex > 0 {
 			out = append(out, ifindex)
@@ -76,6 +95,9 @@ func (m *Manager) withAttachedXDPFence(fn func([]int) error) error {
 	m.mu.Lock()
 	out := make([]int, 0, len(m.xdpLinks))
 	for ifindex, l := range m.xdpLinks {
+		if _, owed := m.detachDebt[ifindex]; owed {
+			continue
+		}
 		reported, ok := xdpLinkIfindexFn(l)
 		if ok && reported == ifindex && ifindex > 0 {
 			out = append(out, ifindex)

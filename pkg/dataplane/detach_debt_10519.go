@@ -1,0 +1,91 @@
+package dataplane
+
+import "sort"
+
+// Detach debt (#10519) is the fail-closed fence half of the DetachXDP
+// observability fix.
+//
+// DetachXDP fails in two arms with opposite fence consequences. Arm (a), the
+// IFACE_FLAG_XDP_ATTACHED claim cleanup, fails BEFORE the link is closed or
+// removed: the xdpLinks entry stays, the kernel program stays attached, and
+// the fence census (AttachedXDPIfindexes / withAttachedXDPFence) keeps
+// returning the ifindex — a stale pinhole for an interface the accepted
+// snapshot intends detached. Arm (b), l.Close(), fails AFTER the entry is
+// deleted: the census already omits the ifindex by absence (availability
+// loss, never widening).
+//
+// detachDebt records exactly the arm-(a) population: intended-detached +
+// detach-failed + still tracked. The census skips debt members, so the armed
+// forward fence closes the pinhole instead of re-opening it on every install.
+// The daemon reinstalls the fence on every transit-gate reassert (1 Hz tick
+// plus event wakes), so the pinhole closes at most one tick after the debt is
+// recorded; no observer wake is needed.
+//
+// Lifecycle (all post-acceptance safe — see below):
+//   - set by DetachXDP on the flag-clear failure return, under the XDP
+//     ownership write lease it already holds;
+//   - cleared by DetachXDP on the no-link no-op and on every entry delete
+//     (success and close-failure alike: an untracked ifindex is already
+//     absent from the census, so debt for it is meaningless);
+//   - cleared for allowed+tracked ifindexes by the userspace reconciler,
+//     which runs only AFTER the new snapshot becomes the retained authority;
+//   - cleared wholesale by Teardown alongside the link maps.
+//
+// AttachXDP deliberately does NOT clear debt: attachment runs BEFORE the new
+// snapshot acceptance boundary, so clearing there would reopen the fence for
+// an interface the retained snapshot still intends detached if the later
+// apply fails — the same ordering invariant #5485 protects. Only a detach
+// outcome under the ownership lease, or the post-acceptance reconciliation,
+// may move this set.
+//
+// Guarded by m.mu, not the ownership lease: AttachedXDPIfindexes holds no
+// lease, so lease-guarded debt would be unreadable exactly where the fence
+// needs it. Lock order is ownership-lease -> m.mu, matching the existing
+// xdpLinkFor/deleteXDPLink calls DetachXDP already makes under the write
+// lease and the RLock -> m.mu order withAttachedXDPFence takes.
+
+// detachXDPFlagClearFn is a narrow test seam around the claim-cleanup step of
+// DetachXDP. Tests inject a flag-clear failure to reach arm (a) — retained
+// link, live kernel attachment — without a privileged BPF map; production
+// uses setXDPAttachedFlag unchanged. Same shape as the xdpLinkIfindexFn
+// kernel-truth seam: package var, default set here, tests restore via
+// t.Cleanup.
+var detachXDPFlagClearFn func(m *Manager, ifindex int, attached bool) error = (*Manager).setXDPAttachedFlag
+
+// noteDetachDebt records ifindex as intended-detached but detach-failed.
+// Caller holds the XDP ownership write lease (DetachXDP); the set itself is
+// m.mu-guarded for the lease-less census readers.
+func (m *Manager) noteDetachDebt(ifindex int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.detachDebt == nil {
+		m.detachDebt = make(map[int]struct{})
+	}
+	m.detachDebt[ifindex] = struct{}{}
+}
+
+// ReconcileDetachDebt clears debt for the interfaces the accepted snapshot
+// still adjudicates and returns the sorted debt census after that clear. It
+// is the single post-acceptance bridge used by the userspace reconciler:
+// AttachXDP must not clear debt before acceptance (#5485), while the alarm
+// needs a lease-free census to stay latched across a no-new-error pass.
+func (m *Manager) ReconcileDetachDebt(allowed []int) []int {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	for _, ifindex := range allowed {
+		delete(m.detachDebt, ifindex)
+	}
+	if len(m.detachDebt) == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	out := make([]int, 0, len(m.detachDebt))
+	for ifindex := range m.detachDebt {
+		out = append(out, ifindex)
+	}
+	m.mu.Unlock()
+	sort.Ints(out)
+	return out
+}

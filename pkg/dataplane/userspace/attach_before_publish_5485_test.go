@@ -260,15 +260,20 @@ func assignsRetainedAuthority5485(stmt ast.Stmt) bool {
 	return ok && rhs.Name == "snap"
 }
 
-// callsSyncInterfaceAttachments5485 reports whether stmt is a bare
-// `m.syncInterfaceAttachments(...)` expression statement.
+// callsSyncInterfaceAttachments5485 reports whether stmt invokes
+// `m.syncInterfaceAttachments(...)`, either as the historical bare expression
+// or as the error-capturing assignment used by #10519.
 func callsSyncInterfaceAttachments5485(stmt ast.Stmt) bool {
-	expr, ok := stmt.(*ast.ExprStmt)
-	if !ok {
-		return false
+	var call *ast.CallExpr
+	switch stmt := stmt.(type) {
+	case *ast.ExprStmt:
+		call, _ = stmt.X.(*ast.CallExpr)
+	case *ast.AssignStmt:
+		if len(stmt.Rhs) == 1 {
+			call, _ = stmt.Rhs[0].(*ast.CallExpr)
+		}
 	}
-	call, ok := expr.X.(*ast.CallExpr)
-	if !ok {
+	if call == nil {
 		return false
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)

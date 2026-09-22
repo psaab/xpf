@@ -142,6 +142,12 @@ type ApplyResult struct {
 	Capabilities Capabilities
 	Generation   uint64
 
+	// DetachedWithErrors carries obsolete XDP/TC ifindexes whose
+	// post-acceptance reconciliation failed. The accepted snapshot is still
+	// authoritative; this field makes the partial host outcome visible to
+	// callers through LastApplyResult.
+	DetachedWithErrors []int
+
 	// SnapshotPublishDeferred mirrors CompileResult.SnapshotPublishDeferred:
 	// true when the successful apply did NOT publish its snapshot (XSK-startup
 	// deferral; the status loop lands it later). Freshness gates must treat
@@ -249,6 +255,7 @@ func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
 		AppNames:                maps.Clone(result.AppNames),
 		PolicyScheduleRuleSlots: slices.Clone(result.PolicyScheduleRuleSlots),
 		UnconvergedMTUs:         result.sortedMTUUnconverged(),
+		DetachedWithErrors:      slices.Clone(result.DetachedWithErrors),
 		SnapshotPublishDeferred: result.SnapshotPublishDeferred,
 	}
 	for key, id := range result.NATCounterIDs {
@@ -275,6 +282,7 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	// Deep copy: a shared backing array would let one holder's append
 	// mutate another's view of the published metadata.
 	out.UnconvergedMTUs = slices.Clone(r.UnconvergedMTUs)
+	out.DetachedWithErrors = slices.Clone(r.DetachedWithErrors)
 	return &out
 }
 
