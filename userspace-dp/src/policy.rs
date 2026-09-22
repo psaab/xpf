@@ -1611,6 +1611,9 @@ pub(crate) struct PolicyState {
     /// AGY catch — never the frozen positional id a later reorder could reassign
     /// to a different rule).
     rule_id_to_policy_id: FxHashMap<String, u32>,
+    /// Stable-rule-id to current rule-vector index. Rotation/rematch consumers
+    /// use this binding map instead of scanning positional policy ids.
+    rule_id_to_index: FxHashMap<String, usize>,
 }
 
 impl Default for PolicyState {
@@ -1637,6 +1640,7 @@ impl Default for PolicyState {
             // #3395: empty map — the Default state carries no rules, so there
             // is nothing to re-resolve.
             rule_id_to_policy_id: FxHashMap::default(),
+            rule_id_to_index: FxHashMap::default(),
         }
     }
 }
@@ -1759,6 +1763,20 @@ impl PolicyState {
         idx: u32,
     ) -> Option<&'a Arc<PolicyRuleCounter>> {
         bound.or_else(|| self.hit_counter_by_idx(idx))
+    }
+    pub(crate) fn rule_for_policy_id(&self, policy_id: u32) -> Option<&PolicyRule> {
+        self.rules.iter().find(|rule| rule.policy_id == policy_id)
+    }
+
+    pub(crate) fn rule_for_stable_id(&self, rule_id: &str) -> Option<&PolicyRule> {
+        let index = *self.rule_id_to_index.get(rule_id)?;
+        self.rules.get(index)
+    }
+
+    pub(crate) fn rule_binding_by_stable_id(&self, rule_id: &str) -> Option<(u32, &PolicyRule)> {
+        let index = *self.rule_id_to_index.get(rule_id)?;
+        let counter_idx = u32::try_from(index + 1).ok()?;
+        Some((counter_idx, self.rules.get(index)?))
     }
 
     /// #3395: re-resolve the CURRENT positional `policy_id` (#3056) for an
@@ -2112,6 +2130,7 @@ pub(crate) fn parse_policy_state_with_counters(
         // #3395: populated after the rule loop below (the rules carry both the
         // stable rule_id and the positional policy_id).
         rule_id_to_policy_id: FxHashMap::default(),
+        rule_id_to_index: FxHashMap::default(),
     };
 
     // #1606: build the dense book table first. Hard-fail on
@@ -2549,6 +2568,10 @@ pub(crate) fn parse_policy_state_with_counters(
         state
             .rule_id_to_policy_id
             .insert(rule.rule_id.clone(), rule.policy_id);
+    }
+    state.rule_id_to_index.reserve(state.rules.len());
+    for (index, rule) in state.rules.iter().enumerate() {
+        state.rule_id_to_index.insert(rule.rule_id.clone(), index);
     }
     state.rule_id_to_policy_id.insert(
         DEFAULT_POLICY_COUNTER_RULE_ID.to_string(),

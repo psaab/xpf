@@ -681,7 +681,9 @@ pub(super) fn lookup_shared_forward_wire_match(
     wire_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
     // #2402: recover poison (see lookup_shared_session).
-    lock_shared_recover(shared_forward_wire_sessions).get(wire_key).cloned()
+    lock_shared_recover(shared_forward_wire_sessions)
+        .get(wire_key)
+        .cloned()
 }
 
 #[derive(Clone, Debug)]
@@ -842,9 +844,7 @@ fn shared_closing_tcp_entry_for_syn(
     key: &SessionKey,
     tcp_flags: u8,
 ) -> Option<(SessionKey, SessionKey)> {
-    if !crate::tcp_flags::is_initial_syn(tcp_flags)
-        || crate::tcp_flags::is_closing(tcp_flags)
-    {
+    if !crate::tcp_flags::is_initial_syn(tcp_flags) || crate::tcp_flags::is_closing(tcp_flags) {
         return None;
     }
     let entry = lookup_shared_session(shared_sessions, key)
@@ -899,7 +899,10 @@ pub(super) fn lookup_session_across_scopes_with_shared(
         }
         return Some(ResolvedSessionLookup::local_query(lookup, origin));
     }
-    if matches!(probe_local_exact_at(sessions, key, now_ns), LocalExpiryProbe::Stale) {
+    if matches!(
+        probe_local_exact_at(sessions, key, now_ns),
+        LocalExpiryProbe::Stale
+    ) {
         return None;
     }
     match probe_local_wire_at(sessions, key, now_ns) {
@@ -1098,8 +1101,7 @@ pub(super) fn lookup_forward_nat_across_scopes(
     reply_key: &SessionKey,
     ingress: ReverseIngress,
 ) -> Option<ForwardSessionMatch> {
-    let m =
-        lookup_forward_nat_across_scopes_inner(sessions, shared_nat_sessions, reply_key, None)?;
+    let m = lookup_forward_nat_across_scopes_inner(sessions, shared_nat_sessions, reply_key, None)?;
     revalidate_reverse_ingress(m, ingress)
 }
 
@@ -1118,7 +1120,6 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
     )?;
     revalidate_reverse_ingress(m, ingress)
 }
-
 
 fn lookup_forward_nat_across_scopes_inner(
     sessions: &SessionTable,
@@ -1315,12 +1316,17 @@ pub(super) fn build_reverse_session_from_forward_match_in_table(
         policy_counter_idx: forward_match.metadata.policy_counter_idx,
         policy_counter: forward_match.metadata.policy_counter.clone(),
     };
-    let decision = SessionDecision { resolution: redirect_session_resolution_for_metadata(forwarding, resolution, &metadata), nat: forward_match.decision.nat.reverse(
-        forward_match.key.src_ip,
-        forward_match.key.dst_ip,
-        forward_match.key.src_port,
-        forward_match.key.dst_port,
-    ), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: redirect_session_resolution_for_metadata(forwarding, resolution, &metadata),
+        nat: forward_match.decision.nat.reverse(
+            forward_match.key.src_ip,
+            forward_match.key.dst_ip,
+            forward_match.key.src_port,
+            forward_match.key.dst_port,
+        ),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     SessionLookup { decision, metadata }
 }
 
@@ -1629,13 +1635,12 @@ pub(super) fn install_reverse_session_from_forward_match(
         now_secs,
         ha_startup_grace_until_secs,
     );
-    let reverse_leak_incarnation =
-        crate::afxdp::session_glue::leak_incarnation_for_session(
-            forwarding,
-            reverse.decision,
-            reverse_key.dst_ip,
-        )
-        .unwrap_or(0);
+    let reverse_leak_incarnation = crate::afxdp::session_glue::leak_incarnation_for_session(
+        forwarding,
+        reverse.decision,
+        reverse_key.dst_ip,
+    )
+    .unwrap_or(0);
     // #1861 §5.4: the synthesized decision is returned EVEN when the
     // install fails (max_sessions) so the reply keeps forwarding — but
     // the caller must know the outcome: `created` telemetry and the
@@ -1763,6 +1768,71 @@ pub(super) fn publish_shared_session(
     }
 }
 
+/// Update policy identity in every shared alias without replacing the entry.
+/// A policy rename must not reset HA generation, counters, or liveness.
+pub(super) fn restamp_shared_policy_entries(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    entries: &[crate::session::PolicyRebindEntry],
+) {
+    fn apply(stored: &mut SyncedSessionEntry, entry: &crate::session::PolicyRebindEntry) {
+        stored.metadata.policy_id = entry.metadata.policy_id;
+        stored.metadata.policy_counter_idx = entry.metadata.policy_counter_idx;
+        stored.metadata.policy_counter = entry.metadata.policy_counter.clone();
+        stored.metadata.ingress_zone = entry.metadata.ingress_zone;
+        stored.metadata.egress_zone = entry.metadata.egress_zone;
+        stored.metadata.log_session_init = entry.metadata.log_session_init;
+        stored.metadata.log_session_close = entry.metadata.log_session_close;
+    }
+
+    // Hold each alias map lock once for the complete pair. This prevents a
+    // concurrent reader from observing one half restamped while the other
+    // still carries the old policy identity within any one map.
+    {
+        let mut sessions = lock_shared_recover(shared_sessions);
+        for entry in entries {
+            if let Some(stored) = sessions.get_mut(&entry.key) {
+                apply(stored, entry);
+            }
+        }
+    }
+    {
+        let mut sessions = lock_shared_recover(shared_nat_sessions);
+        for entry in entries {
+            if entry.metadata.is_reverse {
+                continue;
+            }
+            let aliases = [
+                reverse_session_key(&entry.key, entry.decision.nat),
+                reverse_canonical_key(&entry.key, entry.decision.nat),
+            ];
+            for alias in aliases {
+                if let Some(stored) = sessions.get_mut(&alias)
+                    && stored.key == entry.key
+                {
+                    apply(stored, entry);
+                }
+            }
+        }
+    }
+    {
+        let mut sessions = lock_shared_recover(shared_forward_wire_sessions);
+        for entry in entries {
+            if entry.metadata.is_reverse {
+                continue;
+            }
+            let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
+            if wire_key != entry.key
+                && let Some(stored) = sessions.get_mut(&wire_key)
+                && stored.key == entry.key
+            {
+                apply(stored, entry);
+            }
+        }
+    }
+}
+
 /// #9679: remove `alias` from a single-value shared alias map only while it
 /// still names `owner`.
 ///
@@ -1778,7 +1848,10 @@ fn remove_shared_alias_owned_by(
     alias: &SessionKey,
     owner: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
-    if aliases.get(alias).is_some_and(|stored| &stored.key == owner) {
+    if aliases
+        .get(alias)
+        .is_some_and(|stored| &stored.key == owner)
+    {
         aliases.remove(alias)
     } else {
         None
@@ -1912,8 +1985,7 @@ pub(super) fn remove_shared_session_if(
                 );
             }
             {
-                let mut forward_wire_sessions =
-                    lock_shared_recover(shared_forward_wire_sessions);
+                let mut forward_wire_sessions = lock_shared_recover(shared_forward_wire_sessions);
                 let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
                 if wire_key != entry.key
                     && let Some(removed) = remove_shared_alias_owned_by(

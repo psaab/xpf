@@ -194,7 +194,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // generations, and the closed admit-reason/completion contract are mandatory.
 // v29 -> v30 (#10485): the capture-generation stamp paired with tunnel rows
 // prevents same-key config/FIB publishes from reusing stale NFQUEUE identity.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 30;
+// v30 -> v31 (#10510): `zone_set_validated` authenticates a populated,
+// collision-free zone identity set before removed-zone purge. A v30 helper
+// cannot distinguish a quarantined/legacy partial map from a real disappearance;
+// exact equality refuses the mixed pair rather than retaining stale sessions.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 31;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -1130,6 +1134,12 @@ pub(crate) struct SessionSyncRequest {
     /// The rename MUST match the Go struct tag (same file).
     #[serde(rename = "install_table_check", default)]
     pub install_table_check: u32,
+    /// #10509: a BPF-mirror GRE delete cannot name its keyed/PPTP
+    /// discriminator because the on-map ABI omits that sync-only field. This
+    /// trailing additive flag asks the helper to purge every discriminator
+    /// variant for the stated tuple/domain rather than under-matching `None`.
+    #[serde(rename = "purge_tunnel_variants", default)]
+    pub purge_tunnel_variants: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

@@ -992,7 +992,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		peerProto := binary.LittleEndian.Uint16(payload[:2])
-		s.peerSnapshotProtocol.Store(uint32(peerProto))
+		oldProto := s.peerSnapshotProtocol.Swap(uint32(peerProto))
 		// #7147: capability flags ride in the trailing byte under the same
 		// discipline — a 2-byte frame is a pre-#7147 peer, and 0 flags is the
 		// correct reading of it (advertises no capabilities).
@@ -1000,7 +1000,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if len(payload) >= 3 {
 			peerFlags = payload[2]
 		}
-		s.peerCapabilityFlags.Store(uint32(peerFlags))
+		oldFlags := s.peerCapabilityFlags.Swap(uint32(peerFlags))
 		// #7990: the peer's session-sync WIRE version rides as a trailing u16
 		// under the same discipline — a payload shorter than 5 bytes is a
 		// pre-#7990 peer and leaves 0 = UNKNOWN, which callers must handle
@@ -1009,7 +1009,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if len(payload) >= 5 {
 			peerWire = binary.LittleEndian.Uint16(payload[3:5])
 		}
-		s.peerSessionSyncWire.Store(uint32(peerWire))
+		oldWire := s.peerSessionSyncWire.Swap(uint32(peerWire))
+		capabilityChanged := oldProto != uint32(peerProto) ||
+			oldFlags != uint32(peerFlags) || oldWire != uint32(peerWire)
 		// #9818: the sender's process identity rides after the existing
 		// capabilities fields. Old peers ignore this trailing extension; a
 		// short frame leaves the connection unattributed and therefore on the
@@ -1025,6 +1027,11 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			}
 		}
 		s.noteConnPeerCapabilities(conn, peerIdentity)
+		if capabilityChanged {
+			if cb := s.OnPeerCapabilitiesChanged; cb != nil {
+				go cb()
+			}
+		}
 		// #9752 round 4: a capable discovery re-arms the bulk. A window that
 		// aborted during the discovery race must not stay latched once the
 		// peer proves capable — the next redrive completes it.
@@ -1144,7 +1151,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	s.stats.ConfigsReceived.Add(1)
 	s.stats.LastConfigSyncTime.Store(time.Now().UnixNano())
-	configText, gen := decodeConfigPayload(payload)
+	configText, gen, ancestry := decodeConfigPayloadWithAncestry(payload)
 	s.stats.LastConfigSyncSize.Store(uint64(len(configText)))
 	slog.Info("cluster sync: config received from peer", "size", len(configText), "gen", gen)
 	// #5563: advance the received-config high-water BEFORE enqueue. This is
@@ -1175,7 +1182,7 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	// payload that was already QUEUED when the re-prime landed, which is the
 	// reported defect ("resetRecvGen does not drain items already queued from
 	// the prior boot"). Neither site subsumes the other.
-	item := configApplyItem{gen: gen, text: configText, incarnation: s.connBootIncarnation(conn)}
+	item := configApplyItem{gen: gen, text: configText, ancestry: ancestry, incarnation: s.connBootIncarnation(conn)}
 	if s.configItemIncarnationStale(item) {
 		s.stats.ConfigsDeadIncarnationDropped.Add(1)
 		slog.Warn("cluster sync: dropping config received under a replaced peer boot "+

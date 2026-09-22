@@ -3,12 +3,14 @@ package cluster
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	"net"
 	"time"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"golang.org/x/sys/unix"
@@ -1066,26 +1068,65 @@ func decodeIPsecSAPayload(payload []byte) ([]string, bool) {
 // sync for the whole mixed-base window (the #2239 lesson). Config-gen is
 // additive and self-detecting via the magic.
 var configGenMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'C', 'G', 0x00}
+var configAncestryMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'A', 'N', 0x00}
 
-// encodeConfigPayload builds a config-sync payload carrying the config text
-// and a trailing generation (see the codec note above).
+const maxConfigAncestryPayload = 64 << 10
+
 func encodeConfigPayload(configText string, gen uint64) []byte {
+	return encodeConfigPayloadWithAncestry(configText, gen, nil)
+}
+
+func encodeConfigPayloadWithAncestry(
+	configText string,
+	gen uint64,
+	ancestry []configstore.RenameDescriptor,
+) []byte {
 	buf := make([]byte, 0, len(configText)+16)
 	buf = append(buf, configText...)
 	buf = append(buf, configGenMagic[:]...)
 	buf = binary.LittleEndian.AppendUint64(buf, gen)
+	if len(ancestry) > 0 {
+		raw, err := json.Marshal(ancestry)
+		if err == nil && len(raw) <= maxConfigAncestryPayload {
+			buf = append(buf, configAncestryMagic[:]...)
+			buf = binary.LittleEndian.AppendUint32(buf, uint32(len(raw)))
+			buf = append(buf, raw...)
+		}
+	}
 	return buf
 }
 
-// decodeConfigPayload splits a config-sync payload into its config text and
-// generation. A payload without the trailing configGenMagic is a legacy
-// sender's raw config text and yields gen=0.
 func decodeConfigPayload(payload []byte) (configText string, gen uint64) {
+	configText, gen, _ = decodeConfigPayloadWithAncestry(payload)
+	return configText, gen
+}
+
+func decodeConfigPayloadWithAncestry(
+	payload []byte,
+) (configText string, gen uint64, ancestry []configstore.RenameDescriptor) {
+	if len(payload) >= len(configAncestryMagic)+4 {
+		magicAt := bytes.LastIndex(payload, configAncestryMagic[:])
+		if magicAt >= 0 && magicAt+len(configAncestryMagic)+4 <= len(payload) {
+			n := int(binary.LittleEndian.Uint32(payload[magicAt+len(configAncestryMagic):]))
+			start := magicAt + len(configAncestryMagic) + 4
+			if n <= maxConfigAncestryPayload && n >= 0 && start+n == len(payload) {
+				var decoded []configstore.RenameDescriptor
+				if json.Unmarshal(payload[start:start+n], &decoded) == nil {
+					ancestry = decoded
+				}
+			}
+			// A malformed sidecar must not hide the valid generation trailer
+			// before it. The magic is non-printable and cannot occur in normal
+			// config text, so strip the candidate sidecar even when its JSON or
+			// length is invalid and continue decoding the older framing.
+			payload = payload[:magicAt]
+		}
+	}
 	if len(payload) >= 16 && bytes.Equal(payload[len(payload)-16:len(payload)-8], configGenMagic[:]) {
 		gen = binary.LittleEndian.Uint64(payload[len(payload)-8:])
-		return string(payload[:len(payload)-16]), gen
+		payload = payload[:len(payload)-16]
 	}
-	return string(payload), 0
+	return string(payload), gen, ancestry
 }
 
 // --- #5706 full-set state-sync ordering wire codec ------------------------

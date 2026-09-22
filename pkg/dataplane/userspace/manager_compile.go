@@ -306,15 +306,31 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	}
 	stampCaptureAuthority(snap, epochProvider)
 	snap.partialUpdateEpoch = partialEpoch
-	// #1620: stamp the cold-path sample mask onto the snapshot. The
-	// daemon called SetColdPathSampleMask once at startup with the
-	// validated CLI flag value (or nil for "use default"). A nil
-	// pointer here leaves the wire field absent (omitempty), which
-	// the Rust receiver unwrap_or-s to 0xff per plan §4.3.
+	// The daemon stages provenance immediately before this Compile call, while
+	// holding its apply semaphore. Copy it onto this exact snapshot and consume
+	// the manager staging slot so a later partial republish cannot inherit a
+	// single-use commit's ancestry or rebinds.
 	m.mu.Lock()
+	ancestry, rebinds := m.takeStagedRenameMetadataLocked()
+	replayInFlight := m.deferredReplayInFlight
+	m.deferredReplayInFlight = false
+	snap.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
+	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
 	m.mu.Unlock()
-	return m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+	if replayInFlight {
+		m.mu.Lock()
+		if applyErr == nil {
+			m.clearDeferredReplayMetadataLocked()
+		} else {
+			// Keep the exact accepted attempt cached so the debt retry can
+			// restage it after a transient replay failure.
+			m.deferredReplayInFlight = false
+		}
+		m.mu.Unlock()
+	}
+	return compiled, applyErr
 }
 
 // applyCompiledSnapshot is everything Compile does after the XDP shim is
@@ -428,6 +444,18 @@ func (m *Manager) applyCompiledSnapshot(
 	// #3719: record + alarm any StableZoneID collision the builder quarantined
 	// (lenient / HA-sync / pre-#3075-persisted path). The colliding zone was
 	// already dropped from snap; this surfaces the degraded-isolation state.
+	if m.deferWorkers {
+		// Stamp the workerless contract before any pending-startup branch can
+		// retain this snapshot; deferred MAC replays must never arm workers
+		// early just because startup publication is also deferred.
+		snap.DeferWorkers = true
+	}
+	if snap.DeferWorkers {
+		// Cache the exact workerless compile attempt before any startup,
+		// protocol, or publish branch can fail. The daemon may still run the
+		// same-commit MAC replay after that transient error.
+		m.rememberDeferredReplayMetadataLocked(snap)
+	}
 	m.recordZoneIDCollisionsLocked(snap.zoneIDCollisions)
 	m.clusterHA = cfg != nil && cfg.Chassis.Cluster != nil
 	m.seedHAGroupInventoryLocked(cfg)
@@ -524,6 +552,7 @@ func (m *Manager) applyCompiledSnapshot(
 				return result, fmt.Errorf("clear userspace HA state (deferred startup): %w", err)
 			}
 		}
+		m.pendingFullSnapshotMetadata = true
 		m.lastSnapshot = snap
 		// #9637-D1/F1-B: this success did NOT publish (pendingXSKStartup) — mark
 		// it so freshness gates (daemon hostInboundDataplaneFresh, fed via
@@ -572,9 +601,6 @@ func (m *Manager) applyCompiledSnapshot(
 		m.ensureStatusLoopLocked()
 		return result, m.disarmSnapshotProtocolFailClosedLocked(snap, err, samePlanRefresh)
 	}
-	if m.deferWorkers {
-		snap.DeferWorkers = true
-	}
 	var status ProcessStatus
 	if err := m.disarmBeforeUnsupportedPublishLocked(snap); err != nil {
 		return result, err
@@ -620,6 +646,7 @@ func (m *Manager) applyCompiledSnapshot(
 	// dataplane hadn't accepted.
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
+	m.pendingFullSnapshotMetadata = false
 	m.publishedSnapshot = snap.Generation
 	m.publishedPlanKey = newPlanKey
 	// #2079: this full apply_snapshot succeeded — record the applied
@@ -801,6 +828,11 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 				}
 				m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
 				m.lastSnapshot = &adopted
+				// The helper outcome is unknown: this retained full snapshot
+				// may already have been consumed, but it may also be unsent.
+				// Keep one-shot commit metadata available until a later
+				// publication or status catch-up resolves the ambiguity.
+				m.pendingFullSnapshotMetadata = true
 				if !adoptedRetainedIdentity || !spawnedIdentityDiverged {
 					m.cfg = adopted.Userspace
 				}
@@ -1050,6 +1082,13 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return fmt.Errorf("userspace: refusing snapshot publish to incompatible helper: %w", err)
 	}
 	next := *m.lastSnapshot
+	// A full snapshot can be retained before its first apply_snapshot when
+	// startup publication is deferred or the apply outcome is unknown. If this
+	// scheduler publish is the first accepted publication, keep its single-use
+	// rename metadata; otherwise this partial republish consumes it.
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&next)
+	}
 	nextGeneration := m.generation + 1
 	next.Generation = nextGeneration
 	next.FIBGeneration = m.readFIBGeneration()
@@ -1106,6 +1145,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
+	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&next)
 	// #2079: full apply_snapshot succeeded — record the applied snapshot.
 	m.markAppliedSnapshotLocked()

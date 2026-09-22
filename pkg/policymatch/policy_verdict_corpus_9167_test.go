@@ -212,6 +212,27 @@ func TestPolicyVerdictCorpusGoHalf9167(t *testing.T) {
 	}
 }
 
+// TestPolicyVerdictCorpusPinsIcmpUnknownCase10511 pins the #10511 row by NAME:
+// the count floors admit silent deletion of any single case (15 cases stay
+// above the 8-case floor), so without this the icmp-unknown coverage could be
+// removed with both halves green. The Rust half carries the mirror pin;
+// symmetric removal reds both.
+func TestPolicyVerdictCorpusPinsIcmpUnknownCase10511(t *testing.T) {
+	cases := parsePolicyCorpus9167(t, policyCorpusPath9167)
+	for _, c := range cases {
+		if c.Name != "icmp-unknown-application" {
+			continue
+		}
+		if len(c.Queries) < 2 {
+			t.Fatalf("icmp-unknown-application carries %d queries, want at least "+
+				"the permit + unknown-application rows", len(c.Queries))
+		}
+		return
+	}
+	t.Fatalf("corpus case `icmp-unknown-application` is missing (%d cases present); "+
+		"the #10511 icmp-unknown coverage was removed", len(cases))
+}
+
 func policyActionName9167(a config.PolicyAction) string {
 	switch a {
 	case config.PolicyPermit:

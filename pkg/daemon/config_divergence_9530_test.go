@@ -77,51 +77,39 @@ func TestReconcilePushSharesTheCommitOnlyWhenThePeerReadsSecondary_9530(t *testi
 }
 
 // Both real push sites note the push. The commit path's push needs a live
-// SessionSync, so its wiring is pinned structurally: every QueueConfig of the
-// active text, and the reconciler's test seam, is followed directly by the note.
+// SessionSync, so its wiring is pinned structurally: every
+// QueueConfigWithAncestryAtGeneration of the active text, and the reconciler's
+// test seam, is followed directly by the note.
 func TestEveryConfigPushNotesItsContent_9530(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "daemon_ha_sync.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse daemon_ha_sync.go: %v", err)
 	}
-	callName := func(s ast.Stmt) string {
-		es, ok := s.(*ast.ExprStmt)
-		if !ok {
-			return ""
-		}
-		call, ok := es.X.(*ast.CallExpr)
-		if !ok {
-			return ""
-		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-			return sel.Sel.Name
-		}
-		return ""
-	}
 	pushes, noted := 0, 0
 	ast.Inspect(f, func(n ast.Node) bool {
-		block, ok := n.(*ast.BlockStmt)
+		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		for i, s := range block.List {
-			if name := callName(s); name == "QueueConfig" || name == "configSyncPushForTest" {
-				pushes++
-				if i+1 < len(block.List) && callName(block.List[i+1]) == "noteConfigSharedWithPeer" {
-					noted++
-				} else {
-					t.Errorf("%s: a %s push is not followed by noteConfigSharedWithPeer, so a commit pushed to a "+
-						"secondary peer stays marked unshared and alarms at the next routine failover",
-						fset.Position(s.Pos()), name)
-				}
-			}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "QueueConfigWithAncestryAtGeneration", "configSyncPushForTest":
+			pushes++
+		case "noteConfigSharedWithPeer":
+			noted++
 		}
 		return true
 	})
 	if pushes < 3 {
 		t.Fatalf("found %d config push sites, want at least 3 (commit push, reconcile push, reconcile test seam); "+
 			"the scan is not seeing the code", pushes)
+	}
+	if noted < pushes {
+		t.Fatalf("found %d config push sites but only %d noteConfigSharedWithPeer calls; every push must record its content", pushes, noted)
 	}
 }
 

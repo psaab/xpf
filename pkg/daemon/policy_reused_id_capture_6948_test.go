@@ -543,7 +543,12 @@ func TestCaptureRunsBeforeTheDataplanePublish6948(t *testing.T) {
 				return true
 			}
 			switch sel.Sel.Name {
-			case "capturePolicyInvalidationLocked":
+			case "captureAndStagePolicyRenameAncestry":
+				// The helper takes the capture as its first statement and
+				// then stages any rename rows, so a call to it IS the
+				// pre-publication capture for ordering purposes. The direct
+				// capture call was intentionally replaced by the helper;
+				// only this spelling is accepted.
 				if !captureAt.IsValid() {
 					captureAt = ce.Pos()
 				}
@@ -561,13 +566,14 @@ func TestCaptureRunsBeforeTheDataplanePublish6948(t *testing.T) {
 			"not reading the function it claims to audit")
 	}
 	if !captureAt.IsValid() {
-		t.Fatal("applyDataplaneAndHACore no longer calls capturePolicyInvalidationLocked. " +
-			"Without it no commit takes a pre-publication capture and every " +
-			"invalidation falls back to the post-apply scan, which sweeps the " +
-			"sessions of whichever policy inherited a deleted policy's id (#6948)")
+		t.Fatal("applyDataplaneAndHACore no longer takes a pre-publication capture " +
+			"(no captureAndStagePolicyRenameAncestry helper call). Without it no " +
+			"commit takes a pre-publication capture and every invalidation falls " +
+			"back to the post-apply scan, which sweeps the sessions of whichever " +
+			"policy inherited a deleted policy's id (#6948)")
 	}
 	if captureAt >= applyAt {
-		t.Fatalf("capturePolicyInvalidationLocked is called at or after ApplyConfig "+
+		t.Fatalf("the pre-publication capture is called at or after ApplyConfig "+
 			"(capture pos %d, apply pos %d). The capture must read the session table "+
 			"BEFORE the new policy snapshot is published — after it, the rows carry "+
 			"the NEW numbering and the capture reproduces the defect it exists to "+

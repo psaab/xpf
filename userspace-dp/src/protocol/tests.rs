@@ -56,6 +56,30 @@ fn zone_snapshot_host_inbound_fields_roundtrip() {
     assert!(legacy.host_inbound_protocols.is_empty());
 }
 
+#[test]
+fn zone_set_validated_omits_false_and_roundtrips_true_10510() {
+    let default_value =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default snapshot");
+    assert!(
+        default_value.get("zone_set_validated").is_none(),
+        "default wire fixture must omit the absent zone-set marker"
+    );
+
+    let snapshot = ConfigSnapshot {
+        zone_set_validated: true,
+        ..ConfigSnapshot::default()
+    };
+    let value = serde_json::to_value(&snapshot).expect("serialize validated snapshot");
+    assert_eq!(value["zone_set_validated"], true);
+    let decoded: ConfigSnapshot =
+        serde_json::from_value(value).expect("decode validated snapshot");
+    assert!(decoded.zone_set_validated);
+
+    let legacy: ConfigSnapshot =
+        serde_json::from_value(default_value).expect("decode default wire fixture");
+    assert!(!legacy.zone_set_validated);
+}
+
 // #3082: the references-missing-profile set is an additive, skew-tolerant wire
 // field. A snapshot from an OLD Go binary that does not emit
 // `screen_missing_profile_zones` must still decode (the field defaults to

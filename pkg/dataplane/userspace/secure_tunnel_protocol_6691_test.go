@@ -135,8 +135,9 @@ const preSecureTunnelProtocolVersion = 4
 // Issue #9506 moved the current snapshot wire to v28 for q0 capture
 // authority; its P-MECH D14 tunnel-row identity extension moved it to v29,
 // and the same-key capture-generation fence moved it to v30.
+// Issue #10510 moved it to v31 for the validated zone identity marker.
 // secure_tunnel still does not change, so its historical floor remains 7.
-const secureTunnelSnapshotProtocolVersion = 30
+const secureTunnelSnapshotProtocolVersion = 31
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

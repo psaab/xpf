@@ -142,6 +142,12 @@ type Store struct {
 	// ALWAYS bumped via bumpCandidateGenLocked under s.mu.Lock.
 	candidateGen uint64
 
+	// pendingRenameAncestry records candidate Rename operations by the
+	// candidate generation that produced them. The daemon binds only the
+	// exact generation it compiled/promoted, so an old failed apply cannot be
+	// attached to a later candidate.
+	pendingRenameAncestry map[uint64][]RenameDescriptor
+
 	// activeGen is the writer-side counter behind the published active
 	// snapshot (#9905). Advanced on every compiled-active swap — commit,
 	// commit-confirmed, auto-rollback, peer sync, load, and boot recovery —

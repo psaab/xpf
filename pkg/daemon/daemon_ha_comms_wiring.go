@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -191,10 +192,17 @@ func (d *Daemon) wireSessionSyncConfigCallbacks(ss *cluster.SessionSync) {
 	// flows has no session to be derived from.
 	d.wirePersistentNatLeaseCallbacks(ss)
 
-	// Wire config sync callback: when secondary receives config from primary.
 	ss.OnConfigReceived = func(configText string) error {
 		d.cluster.RecordEvent(cluster.EventConfigSync, -1, fmt.Sprintf("Config received (%d bytes)", len(configText)))
 		return d.handleConfigSync(configText)
+	}
+	ss.OnConfigReceivedWithAncestry = func(configText string, ancestry []configstore.RenameDescriptor) error {
+		d.cluster.RecordEvent(cluster.EventConfigSync, -1, fmt.Sprintf("Config received (%d bytes)", len(configText)))
+		return d.handleConfigSyncWithAncestry(configText, ancestry)
+	}
+	ss.OnPeerCapabilitiesChanged = func() {
+		d.invalidateConfigSyncPushed()
+		d.reconcileConfigSyncToPeer("peer capabilities learned")
 	}
 
 	// #6387: surface a persistent config-sync APPLY failure as a

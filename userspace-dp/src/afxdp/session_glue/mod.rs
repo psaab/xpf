@@ -5,9 +5,9 @@ mod delete_drop_sweep;
 mod install_table_purge;
 mod promote;
 
-pub(in crate::afxdp) use delete_drop_sweep::{DeleteDropSweep, DELETE_DROP_SWEEP_BUDGET};
+pub(in crate::afxdp) use delete_drop_sweep::{DELETE_DROP_SWEEP_BUDGET, DeleteDropSweep};
 pub(in crate::afxdp) use install_table_purge::{
-    InstallTablePurge, INSTALL_TABLE_PURGE_BUDGET, install_table_purge_predicate,
+    INSTALL_TABLE_PURGE_BUDGET, InstallTablePurge, install_table_purge_predicate,
 };
 pub(in crate::afxdp) use promote::{
     SharedSessionRefs, maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
@@ -37,12 +37,10 @@ pub(in crate::afxdp) fn local_resolution_without_install_table(
     }
     let wildcard_owned = match target {
         IpAddr::V4(ip) => {
-            forwarding.local_v4.contains(&ip)
-                && forwarding.local_nat_any_table_v4.contains(&ip)
+            forwarding.local_v4.contains(&ip) && forwarding.local_nat_any_table_v4.contains(&ip)
         }
         IpAddr::V6(ip) => {
-            forwarding.local_v6.contains(&ip)
-                && forwarding.local_nat_any_table_v6.contains(&ip)
+            forwarding.local_v6.contains(&ip) && forwarding.local_nat_any_table_v6.contains(&ip)
         }
     };
     wildcard_owned.then(|| ForwardingResolution {
@@ -66,9 +64,8 @@ pub(in crate::afxdp) fn local_resolution_without_install_table(
 /// load per loop pass. Same shape and ceiling as
 /// `SESSION_DELETE_DROP_EPOCH` below.
 pub(crate) static INSTALL_TABLE_PURGE_NEEDED: [std::sync::atomic::AtomicBool;
-    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
-    [const { std::sync::atomic::AtomicBool::new(false) };
-        crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] = [const { std::sync::atomic::AtomicBool::new(false) };
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
 
 pub(in crate::afxdp) fn flag_install_table_purge(worker_id: u32) {
     if let Some(slot) = INSTALL_TABLE_PURGE_NEEDED.get(worker_id as usize) {
@@ -614,9 +611,8 @@ pub(super) fn purge_sessions_for_input_dscp_filter_revalidation(
     }
     let mut stale = Vec::new();
     sessions.iter_with_origin(|key, decision, metadata, origin| {
-        let family_matches =
-            (purge_v4 && key.addr_family == libc::AF_INET as u8)
-                || (purge_v6 && key.addr_family == libc::AF_INET6 as u8);
+        let family_matches = (purge_v4 && key.addr_family == libc::AF_INET as u8)
+            || (purge_v6 && key.addr_family == libc::AF_INET6 as u8);
         if family_matches {
             stale.push((key.clone(), decision, metadata.clone(), origin));
         }
@@ -629,6 +625,104 @@ pub(super) fn purge_sessions_for_input_dscp_filter_revalidation(
         // double-process the pair). Both halves of a translated flow are in
         // `stale`; the helper is idempotent, so whichever half is visited first
         // frees the shared reservation once and the second visit is a no-op.
+        delete_terminal_filtered_session(
+            sessions,
+            session_map,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            peer_worker_commands,
+            worker_commands_by_id,
+            forwarding,
+            &key,
+            decision,
+            &metadata,
+            origin,
+            now_ns,
+            worker_id,
+        );
+    }
+    purged
+}
+
+/// #10510: derive the zone ids that disappeared during this worker's
+/// forwarding-state rotation. The state maps are built from the validated
+/// snapshot zone set; an empty map on either side means the producer did not
+/// provide a populated zone set, so the safe answer is no removal rather than
+/// interpreting an empty new set as deletion of every old zone.
+/// `zone_set_validated` is carried by the producer only after it has supplied
+/// a populated, collision-free zone set. Both generations must carry the
+/// marker; absent/false is a safe no-op for legacy, empty, or quarantined
+/// snapshots because the id-keyed maps cannot distinguish quarantine from
+/// genuine disappearance.
+pub(super) fn removed_zone_ids_for_rotation(
+    old_forwarding: &ForwardingState,
+    new_forwarding: &ForwardingState,
+) -> FastSet<u16> {
+    if !old_forwarding.zone_set_validated
+        || !new_forwarding.zone_set_validated
+        || old_forwarding.zone_id_to_name.is_empty()
+        || new_forwarding.zone_id_to_name.is_empty()
+    {
+        return FastSet::default();
+    }
+    old_forwarding
+        .zone_id_to_name
+        .iter()
+        .filter(|(zone_id, old_name)| {
+            **zone_id != 0
+                && new_forwarding
+                    .zone_id_to_name
+                    .get(zone_id)
+                    .is_none_or(|new_name| new_name != *old_name)
+        })
+        .map(|(zone_id, _)| *zone_id)
+        .collect()
+}
+
+/// #10510: purge peer-derived, unbound sessions whose recorded zone identity
+/// disappeared from the old snapshot. Policy id zero is overloaded on the
+/// wire, so the sync-derived and unbound predicates are required in addition
+/// to the zone-set test. The existing terminal delete owns pair expansion,
+/// NAT release, BPF/shared-map cleanup, and HA delete propagation.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn purge_sessions_with_removed_zone_ids(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    forwarding: &ForwardingState,
+    removed_zone_ids: &FastSet<u16>,
+    now_ns: u64,
+    worker_id: u32,
+) -> usize {
+    if removed_zone_ids.is_empty() {
+        return 0;
+    }
+    let mut stale = Vec::new();
+    sessions.iter_with_origin(|key, decision, metadata, origin| {
+        if metadata.is_reverse
+            || metadata.policy_counter.is_some()
+            || metadata.policy_id != 0
+            || !(origin.is_peer_synced() || origin == SessionOrigin::SharedPromote)
+            || (!removed_zone_ids.contains(&metadata.ingress_zone)
+                && !removed_zone_ids.contains(&metadata.egress_zone))
+        {
+            return;
+        }
+        stale.push((key.clone(), decision, metadata.clone(), origin));
+    });
+    let purged = stale.len();
+    for (key, decision, metadata, origin) in stale {
         delete_terminal_filtered_session(
             sessions,
             session_map,
@@ -741,7 +835,7 @@ pub(super) fn purge_sessions_bound_to_deleted_first_policy(
     purged
 }
 
-pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
+pub(crate) fn publish_worker_session_map_entry(
     session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     key: &SessionKey,
@@ -757,8 +851,13 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
     // #9517: on a node WITH routing domains this is always false, so the row is
     // published as REDIRECT and an aliased publish can no longer flip a peer's
     // REDIRECT row to PASS_TO_KERNEL.
-    let uses_kernel_local =
-        uses_kernel_local_session_map_entry(key, decision, metadata, origin, forwarding.has_routing_domains);
+    let uses_kernel_local = uses_kernel_local_session_map_entry(
+        key,
+        decision,
+        metadata,
+        origin,
+        forwarding.has_routing_domains,
+    );
     if uses_kernel_local && has_lo0_filter {
         // A PASS_TO_KERNEL session-map entry cannot re-run userspace lo0
         // filters. Keep the packet visible to the helper while lo0
@@ -1308,16 +1407,17 @@ pub(super) fn apply_worker_commands(
                 // registry. Lagging senders, re-added tables, and
                 // Companions are not replicated: they converge locally
                 // (age/evict; default-scoped and validation-gated).
-                let purgeable = sessions.entry_with_origin(&key).is_some_and(
-                    |(decision, metadata, _)| {
-                        !metadata.is_reverse
-                            && decision.install_table_domain == domain
-                            && decision.install_table_check == check
-                            && install_table_purge::install_table_purge_predicate(
-                                forwarding, &key, &decision,
-                            )
-                    },
-                );
+                let purgeable =
+                    sessions
+                        .entry_with_origin(&key)
+                        .is_some_and(|(decision, metadata, _)| {
+                            !metadata.is_reverse
+                                && decision.install_table_domain == domain
+                                && decision.install_table_check == check
+                                && install_table_purge::install_table_purge_predicate(
+                                    forwarding, &key, &decision,
+                                )
+                        });
                 if purgeable {
                     commands::handle_delete_synced(
                         sessions,
@@ -1336,7 +1436,11 @@ pub(super) fn apply_worker_commands(
                 // Trivial variant — kept inline (#1346 plan v2 §4.1).
                 shaped_tx_requests.push(req);
             }
-            WorkerCommand::InstallPptpCall { call, control, learned_ns } => {
+            WorkerCommand::InstallPptpCall {
+                call,
+                control,
+                learned_ns,
+            } => {
                 // #7699: learn the association on THIS worker. A collision is
                 // refused rather than merged (two calls sharing one handle
                 // share one session), and counted so a refusal is not silent.
@@ -2231,8 +2335,8 @@ fn materialize_shared_session_hit(
         // Local entries preserve their published stamp; peer entries above
         // recompute it from this worker's forwarding state before reaching
         // this point, so no remote numeric token is trusted.
-        if let Some(incarnation) = (replica.leak_incarnation != 0)
-            .then_some(replica.leak_incarnation)
+        if let Some(incarnation) =
+            (replica.leak_incarnation != 0).then_some(replica.leak_incarnation)
         {
             sessions.stamp_leak_incarnation(&replica.key, incarnation);
         }
@@ -2394,11 +2498,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         let resolution_target = resolution_target_for_session(flow, decision);
         let leak_incarnation = sessions.leak_incarnation(&resolved_key);
         let leak_revoked = leak_incarnation.is_some_and(|incarnation| {
-            !super::forwarding::leak_incarnation_is_live(
-                forwarding,
-                resolution_target,
-                incarnation,
-            )
+            !super::forwarding::leak_incarnation_is_live(forwarding, resolution_target, incarnation)
         });
         let looked_up_resolution = if let Some(stamped_incarnation) =
             leak_incarnation.filter(|_| leak_revoked)
@@ -2524,13 +2624,12 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // `.unwrap_or(ingress_ifindex)` is the same fallback those sites use: an
         // untagged port, and any arrival with no `(parent, vlan)` mapping,
         // resolves logical == physical and is byte-identical to pre-#9383.
-        let arrival_logical =
-            crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-                forwarding,
-                ingress_ifindex,
-                ingress_vlan_id,
-            )
-            .unwrap_or(ingress_ifindex);
+        let arrival_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+            forwarding,
+            ingress_ifindex,
+            ingress_vlan_id,
+        )
+        .unwrap_or(ingress_ifindex);
         match forwarding.ifindex_to_zone_id.get(&arrival_logical).copied() {
             Some(z) => crate::afxdp::shared_ops::ReverseIngress::Zone(z),
             // Fail CLOSED. An unmapped arrival interface gives nothing to
@@ -2577,7 +2676,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         now_secs,
         fabric_ingress,
         resolution_target,
-            install_table_name_for_session(forwarding, decision, resolution_target),
+        install_table_name_for_session(forwarding, decision, resolution_target),
         looked_up_resolution,
     );
     let enforced_resolution = enforce_session_ha_resolution(

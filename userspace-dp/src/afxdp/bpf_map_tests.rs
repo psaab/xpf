@@ -10,17 +10,22 @@ use super::*;
 use crate::test_zone_ids::*;
 
 fn local_delivery_decision(tunnel_endpoint_id: u16) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// #9517: the predicate now reads the session KEY, because the steering map
@@ -439,23 +444,28 @@ fn session_map_redirect_keys_for_forward_session_include_nat_aliases() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 41086,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 14,
-        tx_ifindex: 14,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 14,
+            tx_ifindex: 14,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -495,23 +505,28 @@ fn session_map_redirect_keys_for_kernel_local_synced_session_delete_superset() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
         src_port: 0,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 14,
-        egress_ifindex: 14,
-        tx_ifindex: 14,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 14,
+            egress_ifindex: 14,
+            tx_ifindex: 14,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = synced_forward_metadata();
 
     let keys =
@@ -564,8 +579,8 @@ fn build_conntrack_value_stamps_stable_session_id_v4() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 41086,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let decision = local_delivery_decision(0);
     let metadata = synced_forward_metadata();
@@ -593,8 +608,8 @@ fn build_conntrack_value_stamps_stable_session_id_v6() {
         dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
         src_port: 41086,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let decision = local_delivery_decision(0);
     let metadata = synced_forward_metadata();
@@ -624,17 +639,7 @@ fn publish_conntrack_records_origin_bit_10227() {
     ] {
         let _guard = take_conntrack_publish_guard();
         publish_bpf_conntrack_entry(
-            -1,
-            -1,
-            &key,
-            decision,
-            &metadata,
-            &zone_ids,
-            0,
-            0,
-            0,
-            0,
-            origin,
+            -1, -1, &key, decision, &metadata, &zone_ids, 0, 0, 0, 0, origin,
         );
         let records = conntrack_publishes();
         assert_eq!(records.len(), 1, "origin={origin:?}");
@@ -690,7 +695,10 @@ fn refresh_bpf_conntrack_last_seen_is_budgeted_across_slices() {
     let mut table = SessionTable::new();
     const N: usize = 40;
     const BUDGET: usize = 8;
-    assert!(N > BUDGET, "test only meaningful when the table exceeds one slice");
+    assert!(
+        N > BUDGET,
+        "test only meaningful when the table exceeds one slice"
+    );
 
     let install_time = 1_000_000_000u64;
     for i in 0..N {
@@ -701,20 +709,25 @@ fn refresh_bpf_conntrack_last_seen_is_budgeted_across_slices() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             src_port: 10_000 + i as u16, // distinct 5-tuples -> distinct forward entries
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         };
-        let decision = SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: None,
-            tx_vlan_id: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
         let metadata = SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -827,8 +840,8 @@ fn build_conntrack_value_stamps_ingress_identity_v4_4983() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 41086,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let decision = local_delivery_decision(0);
     let mut metadata = synced_forward_metadata();
@@ -865,8 +878,8 @@ fn build_conntrack_value_stamps_ingress_identity_v6_4983() {
         dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
         src_port: 41086,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let decision = local_delivery_decision(0);
     let mut metadata = synced_forward_metadata();
@@ -905,8 +918,8 @@ fn ingress_identity_does_not_occupy_the_fib_egress_slots_4983() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 41086,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let decision = local_delivery_decision(0);
     let mut metadata = synced_forward_metadata();
@@ -956,10 +969,7 @@ fn bpf_conntrack_key_v6_port_byte_order() {
 #[test]
 fn conntrack_key_encoding_has_no_hand_rolled_copies() {
     let sources = [
-        (
-            "bpf_map/mod.rs",
-            include_str!("bpf_map/mod.rs"),
-        ),
+        ("bpf_map/mod.rs", include_str!("bpf_map/mod.rs")),
         (
             "bpf_map/publish_conntrack.rs",
             include_str!("bpf_map/publish_conntrack.rs"),
@@ -1148,11 +1158,31 @@ fn conntrack_timeout_column_reports_the_session_window_8125() {
     const CLOSING_SECS: u32 = 30;
 
     let established = publish_conntrack::build_conntrack_value_v4(
-        &key, decision, &metadata, 0, 1, 2, 100, 0, 0, 0, ESTABLISHED_SECS,
+        &key,
+        decision,
+        &metadata,
+        0,
+        1,
+        2,
+        100,
+        0,
+        0,
+        0,
+        ESTABLISHED_SECS,
     )
     .expect("a v4 session must map to a v4 conntrack value");
     let closing = publish_conntrack::build_conntrack_value_v4(
-        &key, decision, &metadata, 0, 1, 2, 100, 0, 0, 0, CLOSING_SECS,
+        &key,
+        decision,
+        &metadata,
+        0,
+        1,
+        2,
+        100,
+        0,
+        0,
+        0,
+        CLOSING_SECS,
     )
     .expect("a v4 session must map to a v4 conntrack value");
 
@@ -1254,17 +1284,22 @@ fn a_refresh_slice_reports_the_largest_session_volume_it_walked_7919() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let mk_decision = || SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let mk_decision = || SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mk_metadata = || SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1284,10 +1319,20 @@ fn a_refresh_slice_reports_the_largest_session_volume_it_walked_7919() {
     let busy = mk_key(40001);
     let quiet = mk_key(40002);
     assert!(table.install_with_protocol(
-        busy.clone(), mk_decision(), mk_metadata(), install, 6, 0x10,
+        busy.clone(),
+        mk_decision(),
+        mk_metadata(),
+        install,
+        6,
+        0x10,
     ));
     assert!(table.install_with_protocol(
-        quiet.clone(), mk_decision(), mk_metadata(), install, 6, 0x10,
+        quiet.clone(),
+        mk_decision(),
+        mk_metadata(),
+        install,
+        6,
+        0x10,
     ));
     for _ in 0..1_234u32 {
         table.account_packet(&busy, 1500, 0x10, 0);
@@ -1304,9 +1349,7 @@ fn a_refresh_slice_reports_the_largest_session_volume_it_walked_7919() {
     // CONTROL: a table whose sessions have NO traffic reports 0, so a nonzero
     // reading cannot come from the walk merely having visited entries.
     let mut idle = SessionTable::new();
-    assert!(idle.install_with_protocol(
-        quiet, mk_decision(), mk_metadata(), install, 6, 0x10,
-    ));
+    assert!(idle.install_with_protocol(quiet, mk_decision(), mk_metadata(), install, 6, 0x10,));
     let idle_out = refresh_bpf_conntrack_last_seen(-1, -1, &idle, &policy, install + 1, 0, 4096);
     assert_eq!(
         idle_out.max_session_volume, 0,
@@ -1397,7 +1440,10 @@ fn steering_key_aliases_routing_domain_and_gre_discriminator_9517() {
     );
 
     // Arm 1: routing_domain. Authoritatively DIFFERENT, byte-identical row.
-    let other_domain = SessionKey { routing_domain: 100_007, ..base.clone() };
+    let other_domain = SessionKey {
+        routing_domain: 100_007,
+        ..base.clone()
+    };
     assert_ne!(base, other_domain, "the authoritative keys must differ");
     assert_eq!(
         key_bytes(&base),
@@ -1422,12 +1468,218 @@ fn steering_key_aliases_routing_domain_and_gre_discriminator_9517() {
     );
 
     // POSITIVE CONTROL: a field the key DOES carry must separate.
-    let other_port = SessionKey { src_port: 1235, ..base.clone() };
+    let other_port = SessionKey {
+        src_port: 1235,
+        ..base.clone()
+    };
     assert_ne!(
         key_bytes(&base),
         key_bytes(&other_port),
         "control: `src_port` is carried by the steering key, so it MUST separate. \
          If this is equal, the encoder ignores every field and the two aliasing \
          assertions above are vacuous (#9517)"
+    );
+}
+
+#[test]
+fn conntrack_policy_restamp_preserves_runtime_state_10511() {
+    let mut metadata = synced_forward_metadata();
+    metadata.policy_id = 37;
+    metadata.ingress_zone = 11;
+    metadata.egress_zone = 22;
+
+    let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+    value.state = 3;
+    value.flags = 0x123;
+    value.tcp_state = 6;
+    value.is_reverse = 1;
+    value.app_timeout = 91;
+    value.session_id = 0x0102_0304_0506_0708;
+    value.created = 1_000;
+    value.last_seen = 2_000;
+    value.timeout = 3_000;
+    value.policy_id = 4;
+    value.ingress_zone = 5;
+    value.egress_zone = 6;
+    value.nat_src_ip = 0x0a00_0001;
+    value.nat_dst_ip = 0xc000_0201;
+    value.nat_src_port = 40;
+    value.nat_dst_port = 41;
+    value.fwd_packets = 50;
+    value.fwd_bytes = 51;
+    value.rev_packets = 52;
+    value.rev_bytes = 53;
+    value.alg_type = 7;
+    value.log_flags = 8;
+    value.app_id = 9;
+    value.fib_ifindex = 10;
+    value.fib_vlan_id = 11;
+    value.ingress_ifindex = 12;
+    value.ingress_vlan_id = 13;
+    value.routing_domain = 14;
+    let before = value;
+
+    restamp_bpf_value_v4(&mut value, &metadata);
+
+    assert_eq!(value.policy_id, 37);
+    assert_eq!(value.ingress_zone, 11);
+    assert_eq!(value.egress_zone, 22);
+    assert_eq!(value.created, before.created);
+    assert_eq!(value.last_seen, before.last_seen);
+    assert_eq!(value.timeout, before.timeout);
+    assert_eq!(value.nat_src_ip, before.nat_src_ip);
+    assert_eq!(value.nat_dst_ip, before.nat_dst_ip);
+    assert_eq!(value.nat_src_port, before.nat_src_port);
+    assert_eq!(value.nat_dst_port, before.nat_dst_port);
+    assert_eq!(value.fwd_packets, before.fwd_packets);
+    assert_eq!(value.fwd_bytes, before.fwd_bytes);
+    assert_eq!(value.rev_packets, before.rev_packets);
+    assert_eq!(value.rev_bytes, before.rev_bytes);
+    assert_eq!(value.session_id, before.session_id);
+    assert_eq!(value.routing_domain, before.routing_domain);
+}
+
+#[test]
+fn conntrack_policy_restamp_preserves_runtime_state_v6_10511() {
+    let mut metadata = synced_forward_metadata();
+    metadata.policy_id = 73;
+    metadata.ingress_zone = 31;
+    metadata.egress_zone = 42;
+
+    let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+    value.state = 4;
+    value.flags = 0x223;
+    value.tcp_state = 7;
+    value.is_reverse = 1;
+    value.app_timeout = 92;
+    value.session_id = 0x1112_1314_1516_1718;
+    value.created = 4_000;
+    value.last_seen = 5_000;
+    value.timeout = 6_000;
+    value.policy_id = 8;
+    value.ingress_zone = 9;
+    value.egress_zone = 10;
+    value.nat_src_ip = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+    value.nat_dst_ip = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2];
+    value.nat_src_port = 50;
+    value.nat_dst_port = 51;
+    value.fwd_packets = 60;
+    value.fwd_bytes = 61;
+    value.rev_packets = 62;
+    value.rev_bytes = 63;
+    value.app_id = 10;
+    value.fib_ifindex = 11;
+    value.fib_vlan_id = 12;
+    value.ingress_ifindex = 13;
+    value.ingress_vlan_id = 14;
+    value.routing_domain = 15;
+    let before = value;
+
+    restamp_bpf_value_v6(&mut value, &metadata);
+
+    assert_eq!(value.policy_id, 73);
+    assert_eq!(value.ingress_zone, 31);
+    assert_eq!(value.egress_zone, 42);
+    assert_eq!(value.created, before.created);
+    assert_eq!(value.last_seen, before.last_seen);
+    assert_eq!(value.timeout, before.timeout);
+    assert_eq!(value.nat_src_ip, before.nat_src_ip);
+    assert_eq!(value.nat_dst_ip, before.nat_dst_ip);
+    assert_eq!(value.nat_src_port, before.nat_src_port);
+    assert_eq!(value.nat_dst_port, before.nat_dst_port);
+    assert_eq!(value.fwd_packets, before.fwd_packets);
+    assert_eq!(value.fwd_bytes, before.fwd_bytes);
+    assert_eq!(value.rev_packets, before.rev_packets);
+    assert_eq!(value.rev_bytes, before.rev_bytes);
+    assert_eq!(value.session_id, before.session_id);
+    assert_eq!(value.routing_domain, before.routing_domain);
+}
+
+/// Pins the documented no-map convention: fd -1 means "no pinned conntrack
+/// map" (unit tests, builds without the map), which is NOT a failure — the
+/// worker rotation tests inherit this, so their rebinds never observe a BPF
+/// error. A revert that reports fd -1 as failure would tear down every
+/// rebound pair in those tests.
+#[test]
+fn conntrack_policy_restamp_unmapped_fd_is_not_a_failure_10511() {
+    let v4 = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4("10.0.0.10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V4("10.0.0.20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        restamp_bpf_conntrack_policy(-1, -1, &v4, &synced_forward_metadata()),
+        "an unmapped v4 fd must not report a restamp failure"
+    );
+    let v6 = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V6("2001:db8::10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V6("2001:db8::20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        restamp_bpf_conntrack_policy(-1, -1, &v6, &synced_forward_metadata()),
+        "an unmapped v6 fd must not report a restamp failure"
+    );
+}
+
+/// The unit-testable `false` shapes: a family/address mismatch fails closed
+/// without touching any map. The remaining `false` arm — a lookup/update
+/// error on a LIVE fd, which makes the rotation caller tear the rebound pair
+/// down rather than expose a split policy identity — needs a real BPF map
+/// (CAP_BPF) and is untestable in unit tests; that is the documented MIN-7
+/// residual, not an omission.
+#[test]
+fn conntrack_policy_restamp_mismatched_addrs_fail_closed_10511() {
+    let v4_family_v6_addrs = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V6("2001:db8::10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V6("2001:db8::20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        !restamp_bpf_conntrack_policy(-1, -1, &v4_family_v6_addrs, &synced_forward_metadata()),
+        "v4 family with v6 addresses must fail closed"
+    );
+    let v6_family_v4_addrs = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4("10.0.0.10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V4("10.0.0.20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        !restamp_bpf_conntrack_policy(-1, -1, &v6_family_v4_addrs, &synced_forward_metadata()),
+        "v6 family with v4 addresses must fail closed"
+    );
+    let unknown_family = SessionKey {
+        addr_family: libc::AF_UNIX as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4("10.0.0.10".parse().unwrap()),
+        dst_ip: std::net::IpAddr::V4("10.0.0.20".parse().unwrap()),
+        src_port: 1234,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(
+        !restamp_bpf_conntrack_policy(-1, -1, &unknown_family, &synced_forward_metadata()),
+        "an unknown address family must fail closed"
     );
 }

@@ -63,6 +63,9 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	// each failed retry tick would burn a generation while the debt persists.
 	nextGeneration := m.generation + 1
 	next := *m.lastSnapshot
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&next)
+	}
 	next.DeferWorkers = false
 	next.Generation = nextGeneration
 	next.FIBGeneration = m.readFIBGeneration()
@@ -97,6 +100,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
+	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&next)
 	m.markAppliedSnapshotLocked()
 	if h, ok := snapshotContentHash(&next); ok {

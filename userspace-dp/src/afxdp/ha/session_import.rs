@@ -253,7 +253,10 @@ impl crate::afxdp::ha::SessionDomain {
     /// sourcing inside the one function those assertions drive.
     pub(in crate::afxdp) fn synced_import_cap_for(
         &self,
-        records: &std::collections::BTreeMap<u32, std::sync::Arc<crate::afxdp::coordinator::WorkerRuntimeRecord>>,
+        records: &std::collections::BTreeMap<
+            u32,
+            std::sync::Arc<crate::afxdp::coordinator::WorkerRuntimeRecord>,
+        >,
     ) -> usize {
         #[cfg(test)]
         {
@@ -300,10 +303,8 @@ impl crate::afxdp::ha::SessionDomain {
         let view = self.runtime_view();
         let forwarding = view.forwarding();
 
-        let zones = crate::afxdp::session_glue::synced_source_nat_zone_pair(
-            forwarding,
-            &entry.metadata,
-        );
+        let zones =
+            crate::afxdp::session_glue::synced_source_nat_zone_pair(forwarding, &entry.metadata);
         // #7209: count the degraded path. Bumped HERE, on the coordinator's
         // once-per-import pre-publish reservation, and deliberately NOT at the
         // worker-side twin in `commands/upsert_synced.rs`: that one runs on
@@ -320,9 +321,7 @@ impl crate::afxdp::ha::SessionDomain {
         // them would make the metric a function of how much non-NAT traffic the
         // peer syncs rather than of what was lost — an operator watching it
         // would see it climb on a healthy cluster and learn to ignore it.
-        if zones.is_none()
-            && !entry.metadata.is_reverse
-            && entry.decision.nat.rewrite_src.is_some()
+        if zones.is_none() && !entry.metadata.is_reverse && entry.decision.nat.rewrite_src.is_some()
         {
             self.sessions
                 .synced_import_zone_unresolved
@@ -701,10 +700,8 @@ impl crate::afxdp::ha::SessionDomain {
                     || previous.session_id == 0
                     || entry.session_id == previous.session_id;
                 if stamped && same {
-                    entry.decision.install_table_domain =
-                        previous.decision.install_table_domain;
-                    entry.decision.install_table_check =
-                        previous.decision.install_table_check;
+                    entry.decision.install_table_domain = previous.decision.install_table_domain;
+                    entry.decision.install_table_check = previous.decision.install_table_check;
                 }
             }
         }
@@ -866,6 +863,57 @@ impl crate::afxdp::ha::SessionDomain {
     pub fn synced_session_contains(&self, key: &SessionKey) -> bool {
         lock_shared_recover(&self.sessions.synced).contains_key(key)
     }
+    /// #10509: a BPF-mirror GRE delete cannot name the discriminator because
+    /// that value is outside the conntrack ABI. Match every discriminator
+    /// variant for the exact tuple/domain, then use the ordinary full-pair
+    /// delete so NAT, shared maps, and worker replicas are all torn down.
+    pub fn synced_tunnel_variant_contains(&self, key: &SessionKey) -> bool {
+        lock_shared_recover(&self.sessions.synced)
+            .keys()
+            .any(|candidate| {
+                candidate.addr_family == key.addr_family
+                    && candidate.protocol == key.protocol
+                    && candidate.src_ip == key.src_ip
+                    && candidate.dst_ip == key.dst_ip
+                    && candidate.src_port == key.src_port
+                    && candidate.dst_port == key.dst_port
+                    && candidate.routing_domain == key.routing_domain
+            })
+    }
+
+    pub fn delete_synced_tunnel_variants(
+        &self,
+        key: SessionKey,
+        peer_delete: bool,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        let variants: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
+            .keys()
+            .filter(|candidate| {
+                candidate.addr_family == key.addr_family
+                    && candidate.protocol == key.protocol
+                    && candidate.src_ip == key.src_ip
+                    && candidate.dst_ip == key.dst_ip
+                    && candidate.src_port == key.src_port
+                    && candidate.dst_port == key.dst_port
+                    && candidate.routing_domain == key.routing_domain
+            })
+            .cloned()
+            .collect();
+        let mut outcome = SyncedDeleteOutcome::Applied;
+        for variant in variants {
+            let next = if peer_delete {
+                self.delete_peer_synced_session(variant, forward_only)
+            } else {
+                self.delete_synced_session(variant, forward_only);
+                SyncedDeleteOutcome::Applied
+            };
+            if next.keeps_caller_rows() {
+                outcome = next;
+            }
+        }
+        outcome
+    }
 
     pub fn delete_synced_session(&self, key: SessionKey, forward_only: bool) {
         // Helper-local deletes (tunnel-remap purge, GC) are authoritative and
@@ -886,7 +934,11 @@ impl crate::afxdp::ha::SessionDomain {
     ///
     /// Returns the OUTCOME. The handler answers a refusal in-band, so the Go side
     /// keeps its own mirror and DNAT rows for the flow the helper kept.
-    pub fn delete_peer_synced_session(&self, key: SessionKey, forward_only: bool) -> SyncedDeleteOutcome {
+    pub fn delete_peer_synced_session(
+        &self,
+        key: SessionKey,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
         self.delete_synced_session_gen_marked(key, 0, true, forward_only)
     }
 
@@ -987,10 +1039,7 @@ impl crate::afxdp::ha::SessionDomain {
             &key,
             |current| {
                 // #2170: a stale delete must not remove a NEWER same-key entry.
-                if current.generation != 0
-                    && delete_gen != 0
-                    && delete_gen < current.generation
-                {
+                if current.generation != 0 && delete_gen != 0 && delete_gen < current.generation {
                     under_lock_outcome = Some(SyncedDeleteOutcome::RefusedStaleGeneration);
                     return false;
                 }
@@ -1006,8 +1055,7 @@ impl crate::afxdp::ha::SessionDomain {
                         now_secs,
                     )
                 {
-                    under_lock_outcome =
-                        Some(SyncedDeleteOutcome::RefusedConcurrentLocalOwned);
+                    under_lock_outcome = Some(SyncedDeleteOutcome::RefusedConcurrentLocalOwned);
                     return false;
                 }
                 true
@@ -1192,8 +1240,8 @@ impl crate::afxdp::ha::SessionDomain {
             // The sweep this arms (`delete_drop_sweep`) is the only thing that can
             // reach that worker's own table and registry holdings.
             if !queued || !reverse_queued {
-                if let Some(epoch) = crate::afxdp::session_glue::SESSION_DELETE_DROP_EPOCH
-                    .get(*worker_id as usize)
+                if let Some(epoch) =
+                    crate::afxdp::session_glue::SESSION_DELETE_DROP_EPOCH.get(*worker_id as usize)
                 {
                     epoch.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1249,8 +1297,8 @@ impl crate::afxdp::ha::SessionDomain {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 40000 + idx,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         };
         let resolution = ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,

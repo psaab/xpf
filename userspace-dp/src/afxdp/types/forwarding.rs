@@ -9,6 +9,7 @@
 // forwarding::*;` so external call sites resolve unchanged.
 
 use super::*;
+use crate::protocol::{PolicyRenameAncestry, PolicySessionRebind};
 
 /// SYN-cookie master key (16 bytes) wrapped so its `Debug` never renders
 /// the secret bytes (#4484 L-7). `ForwardingState` derives `Debug`; the
@@ -252,6 +253,10 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) ifindex_unambiguous_zone_id: FastMap<i32, u16>,
     pub(in crate::afxdp) zone_name_to_id: FastMap<String, u16>,
     pub(in crate::afxdp) zone_id_to_name: FastMap<u16, String>,
+    /// The zone maps passed the snapshot-level duplicate/collision validator.
+    /// Hand-built test states leave this false, so removed-zone purging is
+    /// fail-closed unless the maps came from the real forwarding builder.
+    pub(in crate::afxdp) zone_set_validated: bool,
     /// #6458: zone ID → deduplicated redundancy-group IDs (> 0) of the
     /// zone's member interfaces, built at config-commit from
     /// `ifindex_to_zone_id` x `EgressInterface.redundancy_group`. A zone is
@@ -382,6 +387,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// pre-#3527.
     pub(in crate::afxdp) session_opening_overrides: FastMap<u16, u64>,
     pub(in crate::afxdp) policy: PolicyState,
+    /// Extensive policy-rematch metadata carried by the control plane for a
+    /// zone/policy rename. Kept on the immutable forwarding generation so
+    /// rotation can consume it before the next generation is published.
+    pub(in crate::afxdp) policy_rematch_extensive: bool,
+    pub(in crate::afxdp) policy_rename_ancestry: Vec<PolicyRenameAncestry>,
+    pub(in crate::afxdp) policy_session_rebinds: Vec<PolicySessionRebind>,
     pub(in crate::afxdp) source_nat_rules: Vec<SourceNatRule>,
     /// #6751: the interface-mode source-NAT translated-identity registry.
     ///

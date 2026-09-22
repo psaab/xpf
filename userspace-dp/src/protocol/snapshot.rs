@@ -13,8 +13,8 @@ use super::nat::{
 };
 use super::security::{
     AddressBookSnapshot, AppCatalogEntry, FirewallFilterSnapshot, FlowExportSnapshot,
-    PolicerSnapshot, PolicyRuleSnapshot, ScreenMissingProfileRef, ScreenProfileSnapshot,
-    ThreeColorPolicerSnapshot,
+    PolicerSnapshot, PolicyRenameAncestry, PolicyRuleSnapshot, PolicySessionRebind,
+    ScreenMissingProfileRef, ScreenProfileSnapshot, ThreeColorPolicerSnapshot,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -534,6 +534,11 @@ pub(crate) struct ConfigSnapshot {
     pub map_pins: MapPins,
     #[serde(default)]
     pub zones: Vec<ZoneSnapshot>,
+    /// True only when the producer supplied a populated, collision-free zone
+    /// set. Removed-zone rotation is fail-closed when this marker is absent.
+    #[serde(rename = "zone_set_validated", default,
+            skip_serializing_if = "crate::protocol::bool_is_false")]
+    pub zone_set_validated: bool,
     #[serde(default)]
     pub interfaces: Vec<InterfaceSnapshot>,
     #[serde(default)]
@@ -579,6 +584,12 @@ pub(crate) struct ConfigSnapshot {
     pub default_log_session_close: bool,
     #[serde(default)]
     pub policies: Vec<PolicyRuleSnapshot>,
+    #[serde(rename = "policy_rematch_extensive", default)]
+    pub policy_rematch_extensive: bool,
+    #[serde(rename = "policy_rename_ancestry", default)]
+    pub policy_rename_ancestry: Vec<PolicyRenameAncestry>,
+    #[serde(rename = "policy_session_rebinds", default)]
+    pub policy_session_rebinds: Vec<PolicySessionRebind>,
     /// #1606: address-book table (content-hashed deduplication).
     /// Empty on snapshots from old Go binaries (v3-additive field).
     #[serde(rename = "address_books", default)]

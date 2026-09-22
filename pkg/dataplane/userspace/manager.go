@@ -231,6 +231,16 @@ type Manager struct {
 	lastStatusSeq uint64
 	lastSnapshot  *ConfigSnapshot
 	lastApply     *dataplane.ApplyResult
+	// policyRenameAncestry and policySessionRebinds are daemon-provided
+	// pre-publication metadata consumed by the Rust rotation path.
+	policyRenameAncestry []PolicyRenameAncestry
+	policySessionRebinds []PolicySessionRebind
+	// deferredReplay* is populated only after a worker-deferred full snapshot
+	// has been accepted into lastSnapshot. It is the exact compile attempt that
+	deferredReplayAncestry []PolicyRenameAncestry
+	deferredReplayRebinds  []PolicySessionRebind
+	deferredReplayReady    bool
+	deferredReplayInFlight bool
 	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
 	// most recently built snapshot carries unrepresentable policy content that
 	// the helper integrity preflight rejects (previous-good retained, or
@@ -424,6 +434,12 @@ type Manager struct {
 	consecutiveFailedAutoRebinds int
 	publishedSnapshot            uint64
 	publishedPlanKey             string
+	// pendingFullSnapshotMetadata marks a complete snapshot retained before
+	// its first apply_snapshot, including unknown-outcome retry debt. Partial
+	// republishes must preserve single-use commit metadata only while this
+	// latch is set; generation inequality alone is not sufficient because FIB
+	// bumps advance lastSnapshot.Generation without publishing a full snapshot.
+	pendingFullSnapshotMetadata bool
 	// appliedSnapshot is the config + generation the helper has
 	// ACTUALLY applied via a successful full apply_snapshot — the
 	// generation the helper echoes back as

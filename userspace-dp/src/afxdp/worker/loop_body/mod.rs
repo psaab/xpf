@@ -32,10 +32,10 @@
 
 use super::*;
 use crate::afxdp::ipsec_inner::{
-    adjudicate_descriptor, verdict_from_decision, IpsecInnerAdvisory, IpsecInnerInput,
+    IpsecInnerAdvisory, IpsecInnerInput, adjudicate_descriptor, verdict_from_decision,
 };
 use crate::afxdp::ipsec_inner_queue::{
-    IpsecInnerDoubleBatch, IpsecInnerVerdict, IPSEC_INNER_DRAIN_BUDGET,
+    IPSEC_INNER_DRAIN_BUDGET, IpsecInnerDoubleBatch, IpsecInnerVerdict,
 };
 // #1776: the one-shot setup phase (thread pin, TSC calibration,
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
@@ -61,6 +61,477 @@ mod first_policy_purge_rotation_9526_tests;
 #[cfg(test)]
 #[path = "expiry_shared_retire_10419_tests.rs"]
 mod expiry_shared_retire_10419_tests;
+
+/// Decode the trailing #10509 discriminator without ever turning an absent
+/// value into a GRE `None` class. Go captures from the BPF conntrack mirror,
+/// whose ABI omits this sync-only field, so a production GRE row arrives as
+/// zero and is torn down by the Go capture path. Non-GRE rows legitimately use
+/// the `None` class (including WireGuard's UDP inner flow); zero is accepted
+/// there for compatibility with that ABI.
+fn policy_rebind_discriminator(
+    protocol: u8,
+    wire: u64,
+) -> Option<crate::session::TunnelDiscriminator> {
+    if protocol == 47 {
+        return match crate::session::TunnelDiscriminator::from_wire(wire) {
+            crate::session::WireDiscriminator::Present(discriminator)
+                if !discriminator.is_none() =>
+            {
+                Some(discriminator)
+            }
+            _ => None,
+        };
+    }
+    if wire == 0 || wire == crate::session::TunnelDiscriminator::None.to_wire() {
+        return Some(crate::session::TunnelDiscriminator::None);
+    }
+    None
+}
+
+#[cfg(test)]
+mod policy_rebind_discriminator_tests {
+    use super::*;
+
+    #[test]
+    fn gre_requires_an_explicit_non_none_discriminator() {
+        assert_eq!(
+            policy_rebind_discriminator(47, 0),
+            None,
+            "BPF-mirrored GRE rows cannot be retained without their sync-only identity"
+        );
+        assert_eq!(
+            policy_rebind_discriminator(47, crate::session::TunnelDiscriminator::Unkeyed.to_wire(),),
+            Some(crate::session::TunnelDiscriminator::Unkeyed)
+        );
+    }
+
+    #[test]
+    fn non_gre_zero_discriminator_is_the_legacy_none_class() {
+        assert_eq!(
+            policy_rebind_discriminator(17, 0),
+            Some(crate::session::TunnelDiscriminator::None)
+        );
+        assert_eq!(
+            policy_rebind_discriminator(17, crate::session::TunnelDiscriminator::None.to_wire()),
+            Some(crate::session::TunnelDiscriminator::None)
+        );
+    }
+}
+fn ancestry_source_zone_matches(
+    forwarding: &crate::afxdp::ForwardingState,
+    name: &str,
+    id: u16,
+    any: bool,
+    actual_id: u16,
+) -> bool {
+    if actual_id == 0 {
+        return false;
+    }
+    if any {
+        return name == "any" && id == 0;
+    }
+    if name == "junos-global" {
+        return id == crate::policy::JUNOS_GLOBAL_ZONE_ID;
+    }
+    if name == "junos-host" {
+        return id == crate::policy::ZONE_ID_RESERVED_MIN
+            && actual_id == crate::policy::ZONE_ID_RESERVED_MIN;
+    }
+    id == actual_id
+        && forwarding
+            .zone_id_to_name
+            .get(&actual_id)
+            .map(String::as_str)
+            == Some(name)
+}
+
+fn ancestry_destination_zone_id(
+    forwarding: &crate::afxdp::ForwardingState,
+    name: &str,
+    id: u16,
+    any: bool,
+    fallback_id: u16,
+    require_fallback: bool,
+) -> Option<u16> {
+    if fallback_id == 0 {
+        return None;
+    }
+    if any {
+        return (name == "any" && id == 0 && forwarding.zone_id_to_name.contains_key(&fallback_id))
+            .then_some(fallback_id);
+    }
+    if name == "junos-global" {
+        return (id == crate::policy::JUNOS_GLOBAL_ZONE_ID
+            && forwarding.zone_id_to_name.contains_key(&fallback_id))
+        .then_some(fallback_id);
+    }
+    if name == "junos-host" {
+        return (id == crate::policy::ZONE_ID_RESERVED_MIN
+            && fallback_id == crate::policy::ZONE_ID_RESERVED_MIN)
+            .then_some(fallback_id);
+    }
+    let mapped = forwarding.zone_name_to_id.get(name).copied()?;
+    if mapped != id || (require_fallback && mapped != fallback_id) {
+        return None;
+    }
+    Some(mapped)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rematch_bound_first_policy_sessions(
+    old_forwarding: &crate::afxdp::ForwardingState,
+    new_forwarding: &crate::afxdp::ForwardingState,
+    sessions: &mut crate::session::SessionTable,
+    session_map: &crate::afxdp::bpf_map::SteeringMapRef,
+    conntrack_v4_fd: libc::c_int,
+    conntrack_v6_fd: libc::c_int,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    worker_id: u32,
+    now_ns: u64,
+) -> (usize, usize) {
+    if !new_forwarding.policy_rematch_extensive {
+        return (0, 0);
+    }
+    let Some(old_first) = old_forwarding.policy.rule_for_policy_id(0) else {
+        return (0, 0);
+    };
+    if old_first.rule_id.is_empty() {
+        return (0, 0);
+    }
+    let ancestry: Vec<_> = new_forwarding
+        .policy_rename_ancestry
+        .iter()
+        .filter(|candidate| candidate.source_rule_id == old_first.rule_id)
+        .collect();
+    // An unchanged first rule needs no special handling. A changed first rule
+    // without exactly one validated ancestry descriptor is fail-closed below.
+    if ancestry.is_empty()
+        && new_forwarding
+            .policy
+            .rules
+            .iter()
+            .any(|rule| rule.rule_id == old_first.rule_id)
+    {
+        return (0, 0);
+    }
+
+    let mut candidates = Vec::new();
+    sessions.iter_with_origin(|key, decision, metadata, origin| {
+        if metadata.is_reverse
+            || metadata.policy_id != 0
+            || !metadata
+                .policy_counter
+                .as_ref()
+                .is_some_and(|counter| counter.rule_id() == old_first.rule_id)
+        {
+            return;
+        }
+        candidates.push((key.clone(), decision, metadata.clone(), origin));
+    });
+
+    let mut rebound = 0;
+    let mut purged = 0;
+    for (key, decision, metadata, origin) in candidates {
+        let mut retained = false;
+        if ancestry.len() == 1 {
+            let descriptor = ancestry[0];
+            if ancestry_source_zone_matches(
+                old_forwarding,
+                &descriptor.source_from_zone,
+                descriptor.source_from_zone_id,
+                descriptor.source_from_zone_any,
+                metadata.ingress_zone,
+            )
+                && ancestry_source_zone_matches(
+                    old_forwarding,
+                    &descriptor.source_to_zone,
+                    descriptor.source_to_zone_id,
+                    descriptor.source_to_zone_any,
+                    metadata.egress_zone,
+                )
+                && let Ok(ifindex) = i32::try_from(metadata.ingress_ifindex)
+                // Untagged physical ports carry no (parent, vlan) entry; fall
+                // back to the physical ifindex exactly like the flow-cache
+                // classifier. A tagged miss on a trunk must fail closed before
+                // the physical parent's inherited first-unit zone can match.
+                && !crate::afxdp::forwarding::unknown_ingress_vlan(
+                    new_forwarding,
+                    ifindex,
+                    metadata.ingress_vlan_id,
+                )
+                && let logical_ifindex = resolve_ingress_logical_ifindex(
+                    new_forwarding,
+                    ifindex,
+                    metadata.ingress_vlan_id,
+                )
+                .unwrap_or(ifindex)
+                && let Some(&from_id) = new_forwarding.ifindex_to_zone_id.get(&logical_ifindex)
+                && from_id != 0
+                // The interface-derived ingress zone must be the ancestry
+                // pair's destination-from zone: without this, a broad/global
+                // destination rule could permit the same flow from an unrelated
+                // current zone and falsely prove continuity.
+                && ancestry_destination_zone_id(
+                    new_forwarding,
+                    &descriptor.destination_from_zone,
+                    descriptor.destination_from_zone_id,
+                    descriptor.destination_from_zone_any,
+                    from_id,
+                    true,
+                )
+                .is_some()
+                && let Some(to_id) = ancestry_destination_zone_id(
+                    new_forwarding,
+                    &descriptor.destination_to_zone,
+                    descriptor.destination_to_zone_id,
+                    descriptor.destination_to_zone_any,
+                    metadata.egress_zone,
+                    false,
+                )
+                && to_id != 0
+                && let Some(_destination_rule) = new_forwarding
+                    .policy
+                    .rule_for_stable_id(&descriptor.destination_rule_id)
+            {
+                let policy_dst_ip = decision.nat.rewrite_dst.unwrap_or(key.dst_ip);
+                let policy_dst_port = decision.nat.rewrite_dst_port.unwrap_or(key.dst_port);
+                let result = crate::policy::evaluate_policy_result_without_counting(
+                    &new_forwarding.policy,
+                    from_id,
+                    to_id,
+                    key.src_ip,
+                    policy_dst_ip,
+                    key.protocol,
+                    key.src_port,
+                    policy_dst_port,
+                    None,
+                );
+                if result.action == crate::policy::PolicyAction::Permit
+                    && result.policy_counter_idx != 0
+                    && let Some(matched_rule) = result
+                        .policy_counter_idx
+                        .checked_sub(1)
+                        .and_then(|idx| usize::try_from(idx).ok())
+                        .and_then(|idx| new_forwarding.policy.rules.get(idx))
+                    && matched_rule.policy_id == result.policy_id
+                {
+                    let record = crate::protocol::PolicySessionRebind {
+                        family: if key.addr_family == libc::AF_INET as u8 {
+                            "v4".to_string()
+                        } else {
+                            "v6".to_string()
+                        },
+                        src_ip: key.src_ip.to_string(),
+                        dst_ip: key.dst_ip.to_string(),
+                        src_port: key.src_port,
+                        dst_port: key.dst_port,
+                        protocol: key.protocol,
+                        routing_domain: key.routing_domain,
+                        policy_id: result.policy_id,
+                        rule_id: matched_rule.rule_id.clone(),
+                        ingress_zone: from_id,
+                        egress_zone: to_id,
+                        tunnel_discriminator: key.discriminator.to_wire(),
+                    };
+                    retained = rebind_policy_sessions_from_snapshot(
+                        sessions,
+                        new_forwarding,
+                        &[record],
+                        session_map,
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
+                        shared_sessions,
+                        shared_nat_sessions,
+                        shared_forward_wire_sessions,
+                        shared_owner_rg_indexes,
+                        peer_worker_commands,
+                        worker_commands_by_id,
+                        worker_id,
+                        now_ns,
+                    ) != 0;
+                }
+            }
+        }
+        if !retained {
+            // Teardown context is the new state, same rule as the
+            // rotation-purge note below: live reservations live in the new
+            // allocator objects.
+            delete_terminal_filtered_session(
+                sessions,
+                session_map.handle(),
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                shared_owner_rg_indexes,
+                peer_worker_commands,
+                worker_commands_by_id,
+                new_forwarding,
+                &key,
+                decision,
+                &metadata,
+                origin,
+                now_ns,
+                worker_id,
+            );
+            purged += 1;
+        } else {
+            rebound += 1;
+        }
+    }
+    (rebound, purged)
+}
+#[allow(clippy::too_many_arguments)]
+fn rebind_policy_sessions_from_snapshot(
+    sessions: &mut crate::session::SessionTable,
+    forwarding: &crate::afxdp::ForwardingState,
+    records: &[crate::protocol::PolicySessionRebind],
+    session_map: &crate::afxdp::bpf_map::SteeringMapRef,
+    conntrack_v4_fd: libc::c_int,
+    conntrack_v6_fd: libc::c_int,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    worker_id: u32,
+    now_ns: u64,
+) -> usize {
+    let mut rebound = 0usize;
+    if !forwarding.policy_rematch_extensive {
+        return 0;
+    }
+    for record in records {
+        let (addr_family, src_ip, dst_ip) = match record.family.as_str() {
+            "v4" => (
+                libc::AF_INET as u8,
+                match record.src_ip.parse::<std::net::Ipv4Addr>() {
+                    Ok(ip) => std::net::IpAddr::V4(ip),
+                    Err(_) => continue,
+                },
+                match record.dst_ip.parse::<std::net::Ipv4Addr>() {
+                    Ok(ip) => std::net::IpAddr::V4(ip),
+                    Err(_) => continue,
+                },
+            ),
+            "v6" => (
+                libc::AF_INET6 as u8,
+                match record.src_ip.parse::<std::net::Ipv6Addr>() {
+                    Ok(ip) => std::net::IpAddr::V6(ip),
+                    Err(_) => continue,
+                },
+                match record.dst_ip.parse::<std::net::Ipv6Addr>() {
+                    Ok(ip) => std::net::IpAddr::V6(ip),
+                    Err(_) => continue,
+                },
+            ),
+            _ => continue,
+        };
+        let Some(discriminator) =
+            policy_rebind_discriminator(record.protocol, record.tunnel_discriminator)
+        else {
+            // Missing/unrecognized tunnel identity is fail-closed. The
+            // production Go capture deletes BPF GRE rows before this wire
+            // record is built; this guard protects mixed-version/manual
+            // records from aliasing a live tunnel under `None`.
+            continue;
+        };
+        if record.rule_id.is_empty() {
+            continue;
+        }
+        let Some((policy_counter_idx, rule)) =
+            forwarding.policy.rule_binding_by_stable_id(&record.rule_id)
+        else {
+            continue;
+        };
+        if rule.policy_id != record.policy_id {
+            continue;
+        }
+        let key = crate::session::SessionKey {
+            addr_family,
+            protocol: record.protocol,
+            src_ip,
+            dst_ip,
+            src_port: record.src_port,
+            dst_port: record.dst_port,
+            discriminator,
+            routing_domain: record.routing_domain,
+        };
+        if sessions.rebind_policy_pair(
+            &key,
+            record.policy_id,
+            policy_counter_idx,
+            rule.hit_counter.clone(),
+            record.ingress_zone,
+            record.egress_zone,
+        ) {
+            let Some(entries) = sessions.policy_rebind_pair_entries(&key) else {
+                continue;
+            };
+            // Restamp both map rows before publishing any shared alias. If a
+            // live BPF row cannot be read or updated, tear down the newly
+            // rebound pair rather than exposing a split policy identity.
+            let bpf_ok = entries.iter().all(|entry| {
+                restamp_bpf_conntrack_policy(
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    &entry.key,
+                    &entry.metadata,
+                )
+            });
+            if !bpf_ok {
+                if let Some(entry) = entries.first() {
+                    delete_terminal_filtered_session(
+                        sessions,
+                        session_map.handle(),
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
+                        shared_sessions,
+                        shared_nat_sessions,
+                        shared_forward_wire_sessions,
+                        shared_owner_rg_indexes,
+                        peer_worker_commands,
+                        worker_commands_by_id,
+                        forwarding,
+                        &entry.key,
+                        entry.decision,
+                        &entry.metadata,
+                        entry.origin,
+                        now_ns,
+                        worker_id,
+                    );
+                }
+                continue;
+            }
+            crate::afxdp::shared_ops::restamp_shared_policy_entries(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                &entries,
+            );
+            for entry in entries {
+                publish_worker_session_map_entry(
+                    session_map.handle(),
+                    forwarding,
+                    &entry.key,
+                    entry.decision,
+                    &entry.metadata,
+                    entry.origin,
+                    true,
+                );
+            }
+            rebound += 1;
+        }
+    }
+    rebound
+}
 
 /// #6592: refresh the worker's per-tick `(validation, forwarding)` view from
 /// ONE `ArcSwap` load, so the two halves can never come from different
@@ -715,48 +1186,49 @@ pub(crate) fn worker_loop(
         // is reachable. Still read BEFORE the CoS map Arcs below (#5166), and
         // still #1188-short-circuited on the forwarding Arc — see
         // `refresh_runtime_view`.
-        let (new_forwarding_opt, live_validation) = refresh_runtime_view(
-            &forwarding,
-            &shared_runtime,
-            |view| {
+        let (new_forwarding_opt, live_validation) =
+            refresh_runtime_view(&forwarding, &shared_runtime, |view| {
                 let Some(transport) = ipsec_inner_transport.as_ref() else {
                     return;
                 };
                 let taken = transport.drain_worker(worker_id, &mut ipsec_inner_batch);
                 if taken != 0 {
-                for descriptor in ipsec_inner_batch.current().iter().take(taken) {
-                    let stn_len = usize::from(descriptor.stn_len)
-                        .min(descriptor.stn.len());
-                    let stn = std::str::from_utf8(&descriptor.stn[..stn_len]).unwrap_or("");
-                    let input = IpsecInnerInput {
-                        slab_id: descriptor.slab_id,
-                        inner_packet: &[],
-                        stn,
-                        inner_family: descriptor.inner_family,
-                        inner_eth_proto: descriptor.inner_eth_proto,
-                        protocol: descriptor.protocol,
-                        rel_l4_offset: descriptor.rel_l4_offset,
-                        payload_offset: descriptor.payload_offset,
-                        // The Go owned_ifindex claim is untrusted; D14 compares
-                        // it against the authoritative tunnel-row identity.
-                        logical_ifindex: i32::try_from(descriptor.stn_ifindex).unwrap_or(0),
-                        rx_queue_index: descriptor.rx_queue_index,
-                        advisory: IpsecInnerAdvisory {
-                            snapshot_generation: descriptor.snapshot_generation,
-                            config_generation: descriptor.config_generation,
-                            fib_generation: descriptor.fib_generation,
-                            zone_id: descriptor.advisory_zone_id,
-                            if_id: descriptor.advisory_if_id,
-                        },
-                        descriptor: Some(descriptor),
-                    };
-                    let decision =
-                        adjudicate_descriptor(view, transport.pool().as_ref(), descriptor, input);
-                    let verdict = verdict_from_decision(&decision);
-                    if let Err(failed) = transport.post_worker_verdict(worker_id, verdict) {
-                        let _ = transport.requeue_worker_verdict(worker_id, failed);
+                    for descriptor in ipsec_inner_batch.current().iter().take(taken) {
+                        let stn_len = usize::from(descriptor.stn_len).min(descriptor.stn.len());
+                        let stn = std::str::from_utf8(&descriptor.stn[..stn_len]).unwrap_or("");
+                        let input = IpsecInnerInput {
+                            slab_id: descriptor.slab_id,
+                            inner_packet: &[],
+                            stn,
+                            inner_family: descriptor.inner_family,
+                            inner_eth_proto: descriptor.inner_eth_proto,
+                            protocol: descriptor.protocol,
+                            rel_l4_offset: descriptor.rel_l4_offset,
+                            payload_offset: descriptor.payload_offset,
+                            // The Go owned_ifindex claim is untrusted; D14 compares
+                            // it against the authoritative tunnel-row identity.
+                            logical_ifindex: i32::try_from(descriptor.stn_ifindex).unwrap_or(0),
+                            rx_queue_index: descriptor.rx_queue_index,
+                            advisory: IpsecInnerAdvisory {
+                                snapshot_generation: descriptor.snapshot_generation,
+                                config_generation: descriptor.config_generation,
+                                fib_generation: descriptor.fib_generation,
+                                zone_id: descriptor.advisory_zone_id,
+                                if_id: descriptor.advisory_if_id,
+                            },
+                            descriptor: Some(descriptor),
+                        };
+                        let decision = adjudicate_descriptor(
+                            view,
+                            transport.pool().as_ref(),
+                            descriptor,
+                            input,
+                        );
+                        let verdict = verdict_from_decision(&decision);
+                        if let Err(failed) = transport.post_worker_verdict(worker_id, verdict) {
+                            let _ = transport.requeue_worker_verdict(worker_id, failed);
+                        }
                     }
-                }
                 }
                 ipsec_inner_completions.clear();
                 transport.drain_verdicts_into(
@@ -771,8 +1243,7 @@ pub(crate) fn worker_loop(
                 } else {
                     ipsec_inner_completions.clear();
                 }
-            },
-        );
+            });
         if live_validation != validation {
             validation = live_validation;
         }
@@ -806,6 +1277,10 @@ pub(crate) fn worker_loop(
             // that skipped intermediate generations still sees the rule vanish.
             let deleted_first_policy =
                 deleted_first_policy_rule_id(&forwarding.policy, &new_forwarding.policy);
+            // #10510: derive actual old-minus-new zone disappearance before
+            // assigning the new snapshot. Empty producer maps are a safe no-op.
+            let removed_zone_ids = removed_zone_ids_for_rotation(&forwarding, &new_forwarding);
+            let extensive_rematch = new_forwarding.policy_rematch_extensive;
 
             // Use NEW values for dependent state updates (forwarding-site
             // ordering — old `forwarding` is stale once rotated).
@@ -870,7 +1345,87 @@ pub(crate) fn worker_loop(
                 }
             }
 
+            // Teardown runs against the NEW state deliberately: interface-NAT
+            // identity is Arc-shared across the rotation, pool/NAT64
+            // allocators are reused-or-reseeded into the new objects
+            // (parse_source_nat_rules_with_previous + carry), and old-only
+            // allocator objects die with the old ForwardingState — so only
+            // the new tables can free the live (possibly carried)
+            // reservation. Releasing against the old state would miss carried
+            // copies and strand them in the new allocators.
+            let (rematched_rebound, rematched_purged) = rematch_bound_first_policy_sessions(
+                &forwarding,
+                &new_forwarding,
+                &mut sessions,
+                &session_map,
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &worker_commands_by_id,
+                worker_id,
+                loop_now_ns,
+            );
+            if rematched_rebound + rematched_purged > 0 {
+                debug_log!(
+                    "RENAMED_FIRST_POLICY_REMAP: worker={} rebound={} purged={}",
+                    worker_id,
+                    rematched_rebound,
+                    rematched_purged,
+                );
+            }
             forwarding = new_forwarding;
+            let rebound_policy_sessions = rebind_policy_sessions_from_snapshot(
+                &mut sessions,
+                &forwarding,
+                &forwarding.policy_session_rebinds,
+                &session_map,
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &worker_commands_by_id,
+                worker_id,
+                loop_now_ns,
+            );
+            if rebound_policy_sessions > 0 {
+                debug_log!(
+                    "RENAMED_POLICY_REBIND: worker={} sessions={}",
+                    worker_id,
+                    rebound_policy_sessions,
+                );
+            }
+
+            let purged_removed_zone_sessions = purge_sessions_with_removed_zone_ids(
+                &mut sessions,
+                session_map.handle(),
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &worker_commands_by_id,
+                &forwarding,
+                &removed_zone_ids,
+                loop_now_ns,
+                worker_id,
+            );
+            if purged_removed_zone_sessions > 0 {
+                debug_log!(
+                    "REMOVED_ZONE_SYNC_PURGE: worker={} zones={} sessions={}",
+                    worker_id,
+                    removed_zone_ids.len(),
+                    purged_removed_zone_sessions,
+                );
+            }
             let purged_input_dscp = purge_sessions_for_input_dscp_filter_revalidation(
                 &mut sessions,
                 session_map.handle(),
@@ -895,30 +1450,32 @@ pub(crate) fn worker_loop(
                     purged_input_dscp,
                 );
             }
-            if let Some(rule_id) = deleted_first_policy.as_deref() {
-                let purged_first_policy = purge_sessions_bound_to_deleted_first_policy(
-                    &mut sessions,
-                    session_map.handle(),
-                    conntrack_v4_fd,
-                    conntrack_v6_fd,
-                    &shared_sessions,
-                    &shared_nat_sessions,
-                    &shared_forward_wire_sessions,
-                    &shared_owner_rg_indexes,
-                    &peer_worker_commands,
-                    &worker_commands_by_id,
-                    &forwarding,
-                    rule_id,
-                    loop_now_ns,
-                    worker_id,
-                );
-                if purged_first_policy > 0 {
-                    debug_log!(
-                        "DELETED_FIRST_POLICY_PURGE: worker={} rule={} sessions={}",
-                        worker_id,
+            if !extensive_rematch {
+                if let Some(rule_id) = deleted_first_policy.as_deref() {
+                    let purged_first_policy = purge_sessions_bound_to_deleted_first_policy(
+                        &mut sessions,
+                        session_map.handle(),
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
+                        &shared_sessions,
+                        &shared_nat_sessions,
+                        &shared_forward_wire_sessions,
+                        &shared_owner_rg_indexes,
+                        &peer_worker_commands,
+                        &worker_commands_by_id,
+                        &forwarding,
                         rule_id,
-                        purged_first_policy,
+                        loop_now_ns,
+                        worker_id,
                     );
+                    if purged_first_policy > 0 {
+                        debug_log!(
+                            "DELETED_FIRST_POLICY_PURGE: worker={} rule={} sessions={}",
+                            worker_id,
+                            rule_id,
+                            purged_first_policy,
+                        );
+                    }
                 }
             }
             let republished = republish_local_delivery_sessions_for_lo0_filter(
@@ -1106,10 +1663,7 @@ pub(crate) fn worker_loop(
         // above — it records the keys and the loop applies the eviction
         // here where `&mut bindings` is held.
         if !deleted_synced_keys.is_empty() {
-            invalidate_flow_cache_slots_for_deleted_sessions(
-                &mut bindings,
-                &deleted_synced_keys,
-            );
+            invalidate_flow_cache_slots_for_deleted_sessions(&mut bindings, &deleted_synced_keys);
         }
         if !shaped_tx_requests.is_empty() {
             apply_worker_shaped_tx_requests(
@@ -1183,8 +1737,7 @@ pub(crate) fn worker_loop(
             // two gates agree: an out-of-range owner RG (>= MAX_RG_EPOCHS) and
             // owner_rg_id == 0 (fabric / unresolved-owner reverse) both
             // self-heal on the node-level rg_epochs[0] edge rather than never.
-            rg_epochs_for_gate[crate::afxdp::flow_cache::rg_epoch_index(rg)]
-                .load(Ordering::Relaxed)
+            rg_epochs_for_gate[crate::afxdp::flow_cache::rg_epoch_index(rg)].load(Ordering::Relaxed)
         };
         let ha_ctx = crate::session::ExpireHaContext {
             node_active,
@@ -1228,8 +1781,7 @@ pub(crate) fn worker_loop(
         // count_local_session_expiries (exhaustive match, no wildcard) counts
         // only the create-counted locals so accounting is balanced on the
         // SAME node and the standby gauge stays 0.
-        let local_expired =
-            count_local_session_expiries(expired_entries.iter().map(|e| e.origin));
+        let local_expired = count_local_session_expiries(expired_entries.iter().map(|e| e.origin));
         retire_expired_missing_neighbor_seeds(
             &expired_entries,
             &shared_sessions,
@@ -1321,9 +1873,7 @@ pub(crate) fn worker_loop(
         // subtract — no allocation, no regression to the empty/idle table.
         let should_slice = ct_refresh_cursor != 0
             || loop_now_ns.saturating_sub(ct_cycle_start_ns) >= CT_REFRESH_WINDOW_NS;
-        if should_slice
-            && loop_now_ns.saturating_sub(last_ct_slice_ns) >= CT_SLICE_INTERVAL_NS
-        {
+        if should_slice && loop_now_ns.saturating_sub(last_ct_slice_ns) >= CT_SLICE_INTERVAL_NS {
             last_ct_slice_ns = loop_now_ns;
             // Stamp the cycle start on the FIRST slice of a cycle (cursor at the
             // top) so successive cycles are paced to the freshness window.
@@ -1560,8 +2110,7 @@ pub(crate) fn worker_loop(
         // One relaxed load per pass. A burst raises exactly ONE reconcile per
         // pass however many refusals it caused, because the epoch is compared,
         // not counted down.
-        let delete_drop_epoch =
-            crate::afxdp::session_glue::session_delete_drop_epoch(worker_id);
+        let delete_drop_epoch = crate::afxdp::session_glue::session_delete_drop_epoch(worker_id);
         if delete_drop_epoch != last_delete_drop_epoch {
             last_delete_drop_epoch = delete_drop_epoch;
             // #9327: ARM the sweep; do not run it here. The whole-table walk
@@ -1766,63 +2315,62 @@ pub(crate) fn worker_loop(
                 if tombstone_drops != 0 {
                     export_buffer.note_export_tombstone_drops(tombstone_drops);
                 }
-                let tombstones_complete = sessions.take_tombstones_for_export(
-                    kick,
-                    &state.owner_rgs,
-                    |tombstone| {
-                        let info = crate::afxdp::export_close_direct(
-                            &export_ident,
-                            zone_names,
-                            tombstone,
-                        );
+                let tombstones_complete =
+                    sessions.take_tombstones_for_export(kick, &state.owner_rgs, |tombstone| {
+                        let info =
+                            crate::afxdp::export_close_direct(&export_ident, zone_names, tombstone);
                         export_buffer.push_export_tombstone(token, info).is_ok()
-                    },
-                );
+                    });
                 // A full export buffer leaves the tombstone queued and
                 // pauses the cursor. Do not re-walk completed open slots
                 // until the close repair has been admitted.
                 let outcome = if tombstones_complete {
                     sessions.iter_export_budgeted(
-                    state.cursor,
-                    EXPORT_SLICE_BUDGET,
-                    kick,
-                    &state.owner_rgs,
-                    |key, decision, metadata, origin| {
-                        // Emit cap FIRST: never exceed the slice, even once.
-                        if emitted >= EXPORT_SLICE_EMITS {
-                            return false;
-                        }
-                        // Slice deadline, sampled every 64 emits (vdso-cheap).
-                        if emitted > 0
-                            && emitted & 63 == 0
-                            && monotonic_nanos().saturating_sub(slice_start_ns)
-                                > EXPORT_SLICE_DEADLINE_NS
-                        {
-                            return false;
-                        }
-                        let Some(info) = crate::afxdp::export_open_direct(
-                            &sessions,
-                            &export_ident,
-                            zone_names,
-                            key.clone(),
-                            decision,
-                            metadata.clone(),
-                            origin,
-                            crate::session::ExportProvenance::CommandExport(token),
-                        ) else {
-                            // Reverse (unreachable: the walk predicate skips
-                            // them) — skip, never pause (pausing would
-                            // livelock on one slot forever).
-                            return true;
-                        };
-                        // Full: pause, retry this slot next pass — never a drop.
-                        if export_buffer.push_export_open(token, info).is_err() {
-                            return false;
-                        }
-                        emitted += 1;
-                        export_echo_scratch.push((key.clone(), decision, metadata.clone(), origin));
-                        true
-                    },
+                        state.cursor,
+                        EXPORT_SLICE_BUDGET,
+                        kick,
+                        &state.owner_rgs,
+                        |key, decision, metadata, origin| {
+                            // Emit cap FIRST: never exceed the slice, even once.
+                            if emitted >= EXPORT_SLICE_EMITS {
+                                return false;
+                            }
+                            // Slice deadline, sampled every 64 emits (vdso-cheap).
+                            if emitted > 0
+                                && emitted & 63 == 0
+                                && monotonic_nanos().saturating_sub(slice_start_ns)
+                                    > EXPORT_SLICE_DEADLINE_NS
+                            {
+                                return false;
+                            }
+                            let Some(info) = crate::afxdp::export_open_direct(
+                                &sessions,
+                                &export_ident,
+                                zone_names,
+                                key.clone(),
+                                decision,
+                                metadata.clone(),
+                                origin,
+                                crate::session::ExportProvenance::CommandExport(token),
+                            ) else {
+                                // Reverse (unreachable: the walk predicate skips
+                                // them) — skip, never pause (pausing would
+                                // livelock on one slot forever).
+                                return true;
+                            };
+                            // Full: pause, retry this slot next pass — never a drop.
+                            if export_buffer.push_export_open(token, info).is_err() {
+                                return false;
+                            }
+                            emitted += 1;
+                            export_echo_scratch.push((
+                                key.clone(),
+                                decision,
+                                metadata.clone(),
+                                origin,
+                            ));
+                            true
+                        },
                     )
                 } else {
                     ResumeAt(state.cursor)
@@ -2099,9 +2647,7 @@ pub(crate) fn worker_loop(
                     // and turns the idle wait into a hot spin on a pinned
                     // core. Capture errno BEFORE anything else can clobber it.
                     let errno = if rc < 0 {
-                        std::io::Error::last_os_error()
-                            .raw_os_error()
-                            .unwrap_or(0)
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
                     } else {
                         0
                     };
@@ -2125,9 +2671,7 @@ pass). Logged once per worker.",
                                 );
                             }
                             // Restore the duty cycle the healthy path has.
-                            thread::sleep(Duration::from_millis(
-                                INTERRUPT_POLL_TIMEOUT_MS as u64,
-                            ));
+                            thread::sleep(Duration::from_millis(INTERRUPT_POLL_TIMEOUT_MS as u64));
                         }
                     }
                 } else {
@@ -2434,8 +2978,8 @@ mod flow_cache_invalidation_tests {
             dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }
     }
 
@@ -2473,11 +3017,16 @@ mod flow_cache_invalidation_tests {
     }
 
     fn reap_decision(snat_port: Option<u16>) -> SessionDecision {
-        SessionDecision { resolution: reap_resolution(), nat: NatDecision {
-            rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: snat_port,
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 }
+        SessionDecision {
+            resolution: reap_resolution(),
+            nat: NatDecision {
+                rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: snat_port,
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
     }
 
     fn insert_cache_entry(binding: &mut BindingWorker, key: &SessionKey, snat_port: Option<u16>) {
@@ -2767,7 +3316,12 @@ mod flow_cache_invalidation_tests {
         let live = reap_key(56790);
         insert_cache_entry_on_if(&mut binding_b, &revoked, None, other_if);
         insert_cache_entry(&mut binding_a, &live, None);
-        assert!(cache_hits_on_if(&mut binding_b, &revoked, &rg_epochs, other_if));
+        assert!(cache_hits_on_if(
+            &mut binding_b,
+            &revoked,
+            &rg_epochs,
+            other_if
+        ));
         assert!(cache_hits(&mut binding_a, &live, &rg_epochs));
 
         let mut bindings = [binding_a, binding_b];
@@ -2999,10 +3553,9 @@ mod snapshot_refresh_ordering_tests {
         // whole old pair — coherent, and safe.
         let cached = shared_runtime.load().forwarding().clone();
         let view2 = published.mint(2);
-        let (new_forwarding_opt, observed) =
-            refresh_runtime_view(&cached, &shared_runtime, |_| {
-                channel.publish(view2);
-            });
+        let (new_forwarding_opt, observed) = refresh_runtime_view(&cached, &shared_runtime, |_| {
+            channel.publish(view2);
+        });
         assert_coherent(
             &published,
             &cached,
@@ -3016,10 +3569,9 @@ mod snapshot_refresh_ordering_tests {
         // does adopt a new forwarding Arc, so the coherence assert above is not
         // satisfiable by simply never adopting anything.
         let view3 = published.mint(3);
-        let (new_forwarding_opt, observed) =
-            refresh_runtime_view(&cached, &shared_runtime, |_| {
-                channel.publish(view3);
-            });
+        let (new_forwarding_opt, observed) = refresh_runtime_view(&cached, &shared_runtime, |_| {
+            channel.publish(view3);
+        });
         assert!(
             new_forwarding_opt.is_some(),
             "a worker behind by a generation must adopt the published \
@@ -3037,8 +3589,7 @@ mod snapshot_refresh_ordering_tests {
         // latest published pair. This is what makes cases 1 and 2 non-vacuous:
         // the injected publishes were real and reachable, they just were not
         // observable by a load that had already happened.
-        let (new_forwarding_opt, observed) =
-            refresh_runtime_view(&cached, &shared_runtime, |_| {});
+        let (new_forwarding_opt, observed) = refresh_runtime_view(&cached, &shared_runtime, |_| {});
         let adopted = new_forwarding_opt
             .clone()
             .expect("the worker must adopt the latest published forwarding");
@@ -3143,8 +3694,8 @@ mod gc_reap_source_nat_release_tests_6901 {
             dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }
     }
 
@@ -3178,17 +3729,22 @@ mod gc_reap_source_nat_release_tests_6901 {
     fn expired_for(src_port: u16, pool_addr: Ipv4Addr, snat_port: u16) -> ExpiredSession {
         ExpiredSession {
             key: key_for(src_port),
-            decision: SessionDecision { resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: Some([6, 7, 8, 9, 10, 11]),
-                tx_vlan_id: 0,
-            }, nat: nat_for(pool_addr, snat_port), install_table_domain: 0, install_table_check: 0 },
+            decision: SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                    src_mac: Some([6, 7, 8, 9, 10, 11]),
+                    tx_vlan_id: 0,
+                },
+                nat: nat_for(pool_addr, snat_port),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
             origin: SessionOrigin::ForwardFlow,
             session_id: 0,
             close_class: 0,
@@ -3353,8 +3909,8 @@ mod gc_reap_nat64_release_tests_7740 {
             dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }
     }
 
@@ -3380,17 +3936,22 @@ mod gc_reap_nat64_release_tests_7740 {
     fn expired(key: SessionKey, nat: crate::nat::NatDecision) -> ExpiredSession {
         ExpiredSession {
             key,
-            decision: SessionDecision { resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: Some([6, 7, 8, 9, 10, 11]),
-                tx_vlan_id: 0,
-            }, nat, install_table_domain: 0, install_table_check: 0 },
+            decision: SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                    src_mac: Some([6, 7, 8, 9, 10, 11]),
+                    tx_vlan_id: 0,
+                },
+                nat,
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
             metadata: metadata(),
             session_id: 0,
             close_class: 0,

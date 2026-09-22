@@ -12730,3 +12730,46 @@ fn reverse_companion_stamps_zero_install_table_9752() {
         "reverse companions must not inherit the forward PBR table (R1)"
     );
 }
+
+#[test]
+fn removed_zone_ids_require_validated_sets_and_detect_cross_generation_reuse_10510() {
+    let mut old = ForwardingState::default();
+    old.zone_id_to_name.insert(1, "lan".to_string());
+    old.zone_id_to_name.insert(2, "wan".to_string());
+    old.zone_set_validated = true;
+
+    let mut vanished = ForwardingState::default();
+    vanished.zone_id_to_name.insert(2, "wan".to_string());
+    vanished.zone_set_validated = true;
+    let removed = removed_zone_ids_for_rotation(&old, &vanished);
+    assert!(
+        removed.contains(&1),
+        "a genuinely vanished old zone must be purged"
+    );
+    assert!(!removed.contains(&2), "an unchanged zone must survive");
+
+    let mut reused = ForwardingState::default();
+    reused.zone_id_to_name.insert(1, "dmz".to_string());
+    reused.zone_id_to_name.insert(2, "wan".to_string());
+    reused.zone_set_validated = true;
+    let reused_ids = removed_zone_ids_for_rotation(&old, &reused);
+    assert!(
+        reused_ids.contains(&1),
+        "reusing an old stable id for another name is a removed identity"
+    );
+
+    let mut unvalidated_old = old.clone();
+    unvalidated_old.zone_set_validated = false;
+    assert!(
+        removed_zone_ids_for_rotation(&unvalidated_old, &vanished).is_empty(),
+        "legacy/quarantined old snapshots must fail closed to no purge"
+    );
+    let empty_new = ForwardingState {
+        zone_set_validated: true,
+        ..ForwardingState::default()
+    };
+    assert!(
+        removed_zone_ids_for_rotation(&old, &empty_new).is_empty(),
+        "an empty producer map is not evidence that every zone vanished"
+    );
+}

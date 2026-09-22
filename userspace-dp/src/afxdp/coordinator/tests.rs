@@ -10806,3 +10806,101 @@ fn session_delete_fan_out_sheds_dead_workers_9900() {
         "the shed leg must be counted"
     );
 }
+
+/// #10511 MIN-10: the GRE0 wildcard delete removes every discriminator
+/// variant of the tuple — including same-tuple siblings — and nothing else.
+/// The BPF mirror omits the discriminator, so a GRE delete cannot address
+/// its row exactly; deleting all variants is intentional fail-closed teardown
+/// (the sibling collateral is documented, not incidental), while a
+/// different-tuple row must survive.
+#[test]
+fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
+    fn gre_key(discriminator: crate::session::TunnelDiscriminator, dst_port: u16) -> crate::session::SessionKey {
+        crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_GRE,
+            src_ip: "10.0.0.10".parse().unwrap(),
+            dst_ip: "10.0.0.20".parse().unwrap(),
+            src_port: 0,
+            dst_port,
+            discriminator,
+            routing_domain: 0,
+        }
+    }
+    fn seed(
+        coordinator: &Coordinator,
+        key: &crate::session::SessionKey,
+    ) {
+        let entry = crate::afxdp::worker::SyncedSessionEntry {
+            key: key.clone(),
+            decision: crate::afxdp::SessionDecision {
+                resolution: crate::afxdp::ForwardingResolution {
+                    disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                },
+                nat: crate::nat::NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: crate::session::SessionMetadata {
+                ingress_zone: 1,
+                egress_zone: 2,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                owner_rg_id: 1,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            leak_incarnation: 0,
+            origin: crate::afxdp::SessionOrigin::SyncImport,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .insert(key.clone(), entry);
+    }
+    let coordinator = Coordinator::new();
+    let target = gre_key(crate::session::TunnelDiscriminator::Keyed(1), 0);
+    let sibling = gre_key(crate::session::TunnelDiscriminator::Keyed(2), 0);
+    let control = gre_key(crate::session::TunnelDiscriminator::Keyed(1), 1);
+    for key in [&target, &sibling, &control] {
+        seed(&coordinator, key);
+    }
+    assert!(
+        coordinator.session_domain().synced_tunnel_variant_contains(&target),
+        "fixture: the target tuple must be present before the delete"
+    );
+    coordinator
+        .session_domain()
+        .delete_synced_tunnel_variants(target.clone(), false, false);
+    let remaining = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
+    assert!(
+        !remaining.contains_key(&target),
+        "the named variant must be deleted"
+    );
+    assert!(
+        !remaining.contains_key(&sibling),
+        "the same-tuple sibling variant must be deleted with it (documented collateral)"
+    );
+    assert!(
+        remaining.contains_key(&control),
+        "a different-tuple row must survive the wildcard delete"
+    );
+}

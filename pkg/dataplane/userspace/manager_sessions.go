@@ -852,6 +852,7 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 			// pre-#9364 bare request, bit-identical.
 			req := m.buildSessionSyncRequestV4(
 				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
+			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)
@@ -933,6 +934,7 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 			// #9364: name the domain — see the V4 twin.
 			req := m.buildSessionSyncRequestV6(
 				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
+			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)
