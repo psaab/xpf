@@ -625,6 +625,79 @@ stale A (which would linger to GC expiry and phantom-retarget future sweeps).
   returned, the capture is consumed and dropped, with no cross-commit
   retention. Applied and stale batches remain idempotent, and the peer still
   receives only the forward identity and derives its local reverse.
+- AMENDMENT (2026-09-22, preflight deletion — architect-approved): the
+  implementation runs TWO worker envelopes per micro-batch (conditional
+  remove, survivor probe), not the three above. Each of preflight's plan
+  roles is vacuous, and lease-gating by preflight would be actively harmful:
+  1. Derive-missing-companion: Go always pre-expands (validated: a nonzero
+     expected companion identity requires a captured reverse tuple), so the
+     helper REFUSES a missing capture fail-closed instead of deriving one.
+     No sender omits; a derivation path would be dead code.
+  2. 128-key cap gate: enforced at entry from the captured tuples without
+     any fan-out; over-cap rejects before acquisition exactly as specified.
+  3. Lease-gating short-circuit (skip the lease when nothing appears to
+     proceed): REJECTED on soundness. Any check-then-skip races a concurrent
+     same-incarnation re-import (lagged peer sync) landing between the check
+     and the skip: the batch would skip what it should remove and count the
+     survivor stale — under-clear by TOCTOU. The implementation leases ALL of
+     every batch's keys uniformly instead: a lease failure then aborts with
+     provably zero mutations (nothing before acquisition mutates), and no
+     short-circuit TOCTOU can arise. Brief over-fencing of stale tuples
+     (retransmit-healed) is the accepted cost.
+  Validation preflight would have provided happens instead at execution,
+  atomically with respect to each worker's single-threaded table (the
+  check-then-teardown observes identical state: no other thread can name
+  those entries, and OS preemption freezes the table rather than interleaving
+  foreign mutations): the forward incarnation is re-checked, the companion is
+  re-derived from the live forward's NAT and compared for full key equality
+  with the capture, and any mismatch preserves (partial) rather than deleting
+  by an uncertain key. Preflight evidence would be strictly staler — a
+  replacement landing between preflight and removal flips its verdict — so
+  execution-time evidence supersedes it wherever the two could disagree.
+  Pinned by `policy_batch_lease_covers_forward_key_10512` and
+  `policy_batch_lease_covers_companion_key_10512` (each leased key blocks the
+  batch when pre-held, with shared authority provably intact on refusal) and
+  `policy_batch_lease_ignores_unrelated_tuple_10512` (exact coverage: an
+  unrelated held tuple never blocks). If review finds a live preflight role
+  this analysis misses, restore the envelope rather than extending this note.
+- AMENDMENT (2026-09-22, tree-consistent timing — architect-approved): the
+  implementation keeps the tree's established fan-out discipline instead of
+  the 20ms-phase / 200ms-sequence-lease / token_expiry-token_stale contract
+  in Kick/collect above, element by element. The 100ms acquire budget and
+  the 30s delete deadline are kept exactly as specified.
+  1. 20ms per-phase collection → 250ms bounded fan-outs (the READ, export,
+     and counters paths' established convention). A 20ms budget aborts on
+     ORDINARY scheduler jitter (10–100ms deschedules are common on shared
+     cores; 250ms stalls are rare), which would fail batches — loudly but
+     spuriously — under routine load and force operator touching-recommits
+     for timing noise. 250ms keeps spurious aborts rare; every abort still
+     fails closed (complete=false joined into #5578).
+  2. 200ms sequence lease → wait-bounded holds with no independent lease
+     clock. Typical holds are milliseconds (same order as the existing
+     shared-path deletes); only pathological multi-stall batches approach
+     ~750ms versus 200ms. Same-tuple installs during a hold are refused and
+     retransmit-heal; same-tuple deletes fail fast on the unchanged 100ms
+     acquire budget — the longer bound costs latency-to-error, never
+     correctness. True async expiry (freeing the gate under a live-but-
+     stalled holder plus token refusal of its late repair) cannot help the
+     case it targets — the holder is the single session thread, so a truly
+     wedged holder already wedges session sync regardless of gate state —
+     and is a gate-wide project, explicitly deferred, not silently dropped.
+  3. token_expiry/token_stale errors + sequence validation → omitted as
+     vacuous; lease COVERAGE is verified mechanically instead. Gate entries
+     cannot be removed or re-claimed while held or permitted
+     (`remove_if_idle` requires map-identity plus Idle plus zero counts
+     under the shard lock; claims are denied outside Idle/Publishing), so no
+     ABA can invalidate a held lease and a stored sequence cannot disagree
+     with a live entry — validation would check for an impossible event.
+     What `GateLease::covers` checks at every repair is the load-bearing
+     half: a probe set that ever names an unleased tuple fails the batch
+     loud instead of repairing unfenced (programmer-error backstop).
+  Empirical leg: every Finalizing hold is observed
+  (`xpf_userspace_policy_batch_{count,hold_ns_total,hold_max_ns}`);
+  average hold must read ms-typical in production. If review or operations
+  finds timing affects CORRECTNESS rather than latency-to-error, this ruling
+  reopens.
 
 ## 3. Predicate + timing (required block 3)
 
