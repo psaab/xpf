@@ -838,10 +838,16 @@ pub(crate) struct ControlResponse {
     pub session_mirror_fence_id: u64,
     #[serde(rename = "session_mirror_continuation", default)]
     pub session_mirror_continuation: String,
-    /// #10512: true when an identity-conditional delete declined because the
-    /// live helper incarnation no longer matches the captured one.
-    #[serde(rename = "session_delete_identity_refused", default)]
-    pub session_delete_identity_refused: bool,
+    /// #10512: per-match outcome vector for one `mirror_delete_policy_batch`
+    /// micro-batch (plan §2.4), positional against the request's matches:
+    /// `applied` | `stale_forward` | `partial_companion` | `refused_identity`.
+    /// Valid only when `policy_delete_complete` is true.
+    #[serde(rename = "policy_delete_outcomes", default)]
+    pub policy_delete_outcomes: Vec<String>,
+    #[serde(rename = "policy_delete_complete", default)]
+    pub policy_delete_complete: bool,
+    #[serde(rename = "policy_delete_errors", default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_delete_errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1022,12 +1028,15 @@ pub(crate) struct SessionSyncRequest {
     /// which falls back to unconditional behavior (rolling-upgrade safe).
     #[serde(default)]
     pub generation: u64,
-    /// #10512: identity-conditional policy invalidation delete. Zero keeps
-    /// the legacy unconditioned delete behavior for older callers.
-    #[serde(rename = "expected_rt_flow_session_id", default)]
-    pub expected_rt_flow_session_id: u64,
-    #[serde(rename = "expected_companion_rt_flow_session_id", default)]
-    pub expected_companion_rt_flow_session_id: u64,
+    /// #10512: one identity-conditional policy-delete micro-batch (plan §2.4:
+    /// at most 64 matches, 128 gate keys). Each item is a READ match
+    /// verbatim — forward tuple, captured reverse tuple, and both expected
+    /// identities. Tuple routing domains are RAW (0 = default instance,
+    /// stated) and family tags compact 4/6. Set only with operation
+    /// `mirror_delete_policy_batch`; `None` for every other verb. Additive:
+    /// an old helper rejects the unknown verb.
+    #[serde(rename = "policy_matches", default, skip_serializing_if = "Option::is_none")]
+    pub policy_matches: Option<Vec<SessionPolicyMatch>>,
     /// #3301: the admitting policy's ID (#3056 namespace), carried so a
     /// peer-PROMOTED session resolves the admitting policy on its live-session
     /// rows / RT_FLOW records instead of the `0` sentinel (which the Go side

@@ -1217,6 +1217,26 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		// #10512: the emit helper dereferences these three (see the #7398
+		// note above) — a literal omitting them segfaults instead of failing.
+		userspacePolicyBatchCount: prometheus.NewDesc(
+			"xpf_userspace_policy_batch_count_total",
+			"policy-delete micro-batches that reached a gate lease",
+			nil,
+			nil,
+		),
+		userspacePolicyBatchHoldNs: prometheus.NewDesc(
+			"xpf_userspace_policy_batch_hold_ns_total",
+			"total gate-lease hold nanoseconds",
+			nil,
+			nil,
+		),
+		userspacePolicyBatchHoldMaxNs: prometheus.NewDesc(
+			"xpf_userspace_policy_batch_hold_max_ns",
+			"max single gate-lease hold in nanoseconds",
+			nil,
+			nil,
+		),
 		// #7160: this collector is built by struct literal, so a descriptor
 		// the emit path uses and this fixture omits is a nil *Desc and
 		// `MustNewConstMetric` SEGVs rather than failing an assertion — a
@@ -1408,6 +1428,11 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		SyncedImportReserveRefused: 23,
 		SyncedImportZoneUnresolved: 7,
 		SyncedImportUnpublished:    31,
+		// #10512: distinct values (and distinct from the #7398 neighbours),
+		// so a mis-wired emit reads a number that differs.
+		PolicyBatchCount:      61,
+		PolicyBatchHoldNs:     62,
+		PolicyBatchHoldMaxNs:  63,
 		// #2315: GRE-decap RFC 6040 §4.2 illegal-combo drop counter
 		// emitted unconditionally.
 		GreDecapEcnIllegalDropsTotal: 3,
@@ -1558,12 +1583,15 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// evictions + unknown-MTU forwards + subminimal-quote refusals +
 	// per-session error suppressions) +1 for the #10021 policy-revoked-session
 	// total = 72.
+	// +3 for the #10512 policy-batch hold trio (count, total and max hold
+	// nanoseconds) = 75. Counted as three because they are distinct series;
+	// folding any two together is a change this census is here to notice.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. The twelve new series ARE asserted below, so the
 	// original claim still holds and the number moves with the population.
-	if len(got) != 72 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 72 metrics, got %d", len(got))
+	if len(got) != 75 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 75 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1659,6 +1687,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSessionInstallStaleIgnored, nil, 21)
 	assertCounterClose(t, got, c.userspaceSessionDeleteStaleIgnored, nil, 22)
 	assertCounterClose(t, got, c.userspaceSyncedImportReserveRefused, nil, 23)
+	// #10512: assert the VALUES, not merely that three more series appeared.
+	assertCounterClose(t, got, c.userspacePolicyBatchCount, nil, 61)
+	assertCounterClose(t, got, c.userspacePolicyBatchHoldNs, nil, 62)
+	assertCounterClose(t, got, c.userspacePolicyBatchHoldMaxNs, nil, 63)
 	// #7209: synced imports that skipped the #6211 zone narrowing. Emitted
 	// unconditionally like its neighbours, so a 0 is a real "every synced
 	// import resolved its zones" signal rather than an absent series. The

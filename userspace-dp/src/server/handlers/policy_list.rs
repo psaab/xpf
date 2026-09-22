@@ -14,8 +14,9 @@ pub(super) fn handle(
         response.error = "missing session policy list request".to_string();
         return;
     };
-    let (matches, complete, errors) = domain.list_sessions_by_policy(&request);
+    let (matches, complete, errors, continuation) = domain.list_sessions_by_policy(&request);
     response.session_policy_matches = matches;
     response.session_policy_complete = complete;
+    response.session_policy_continuation = continuation;
     response.session_policy_per_worker_errors = errors;
 }

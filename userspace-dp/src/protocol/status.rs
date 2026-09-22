@@ -599,6 +599,23 @@ pub(crate) struct ProcessStatus {
     /// Additive / defaulted for backward compatibility.
     #[serde(rename = "session_delete_stale_ignored", default)]
     pub session_delete_stale_ignored: u64,
+    /// #10512: policy-delete micro-batches that reached a Finalizing gate
+    /// lease. With the two hold fields below, the empirical leg of the
+    /// tree-consistent timing position: average hold must read ms-typical.
+    /// Surfaced as `xpf_userspace_policy_batch_count_total`.
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "policy_batch_count", default)]
+    pub policy_batch_count: u64,
+    /// #10512: total gate-lease hold nanoseconds across counted batches.
+    /// Surfaced as `xpf_userspace_policy_batch_hold_ns_total`.
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "policy_batch_hold_ns", default)]
+    pub policy_batch_hold_ns: u64,
+    /// #10512: max single gate-lease hold in nanoseconds (lifetime max).
+    /// Surfaced as `xpf_userspace_policy_batch_hold_max_ns`.
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "policy_batch_hold_max_ns", default)]
+    pub policy_batch_hold_max_ns: u64,
     /// #6979 F4: synced-session deletes whose `DeleteSynced` command was
     /// dropped by a full worker command queue, and whose NAT reservation the
     /// coordinator therefore released on that worker's behalf.

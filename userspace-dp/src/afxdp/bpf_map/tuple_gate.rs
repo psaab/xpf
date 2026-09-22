@@ -400,6 +400,15 @@ impl GateLease {
             .map(|(_, _, _, sequence)| *sequence)
     }
 
+    /// Whether this lease fences `key` (canonical bare-tuple compare). Lets a
+    /// repair path mechanically verify its probe set against its lease instead
+    /// of trusting the caller to pass matching sets — an uncovered repair is
+    /// a programmer bug that must fail loud, never run unfenced.
+    pub(crate) fn covers(&self, key: &SessionKey) -> bool {
+        let key = TupleGate::canonical(key);
+        self.entries.iter().any(|(_, held, _, _)| *held == key)
+    }
+
     /// Transition the lease to Finalizing before the final survivor probe.
     pub(crate) fn begin_finalizing(&self) -> Result<(), &'static str> {
         for (_, _, entry, _) in &self.entries {
@@ -575,6 +584,22 @@ mod tests {
         ));
         drop(lease);
         assert_eq!(gate.with_publish(&key(1000, 10), || ()), Ok(()));
+    }
+
+    #[test]
+    fn lease_covers_matches_bare_tuples_10512() {
+        let gate = Arc::new(TupleGate::new());
+        let lease = gate.acquire_lease([key(1000, 1), key(2000, 1)]).unwrap();
+        assert!(lease.covers(&key(1000, 1)));
+        assert!(lease.covers(&key(2000, 1)));
+        assert!(!lease.covers(&key(3000, 1)));
+        // Canonicalization: routing domain and discriminator are ignored,
+        // so scoped variants of a leased tuple still report covered.
+        let mut scoped = key(1000, 1);
+        scoped.routing_domain = 100007;
+        scoped.discriminator = crate::session::TunnelDiscriminator::Keyed(9);
+        assert!(lease.covers(&scoped));
+        drop(lease);
     }
 
     #[test]

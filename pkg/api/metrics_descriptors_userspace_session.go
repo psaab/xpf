@@ -453,6 +453,24 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"pre-failover warning, not a post-mortem.",
 		nil, nil,
 	)
+	// #10512: policy-delete micro-batch gate-lease holds — the empirical leg
+	// of the tree-consistent timing position (average hold must read
+	// ms-typical; max bounds the pathological case).
+	c.userspacePolicyBatchCount = prometheus.NewDesc(
+		"xpf_userspace_policy_batch_count_total",
+		"Policy-delete micro-batches that reached a Finalizing gate lease (#10512).",
+		nil, nil,
+	)
+	c.userspacePolicyBatchHoldNs = prometheus.NewDesc(
+		"xpf_userspace_policy_batch_hold_ns_total",
+		"Total gate-lease hold nanoseconds across counted policy-delete micro-batches (#10512).",
+		nil, nil,
+	)
+	c.userspacePolicyBatchHoldMaxNs = prometheus.NewDesc(
+		"xpf_userspace_policy_batch_hold_max_ns",
+		"Max single gate-lease hold in nanoseconds across policy-delete micro-batches (#10512, lifetime max).",
+		nil, nil,
+	)
 	c.userspaceSyncedImportUnknownRoutingDomain = prometheus.NewDesc(
 		"xpf_userspace_synced_import_unknown_routing_domain_total",
 		"Peer-synced imports refused because this node runs routing "+

@@ -8049,3 +8049,422 @@ fn single_threaded_peer_delete_never_spuriously_declines_9960() {
         assert!(matches!(outcome, SyncedDeleteOutcome::Applied));
     }
 }
+
+// #10512 lease pin (preflight-deletion ruling): the micro-batch leases ALL of
+// its keys — every forward plus every captured companion — together before
+// ANY SessionTable mutation. Pre-holding any one of them must refuse the
+// batch with shared authority fully intact (lease-before-mutation); holding
+// an unrelated tuple must not disturb it (exact coverage, no over-fencing).
+// Zero workers throughout: fan-outs go vacuous and the shared-only batch
+// exercises lease + shared remove + probe + repair deterministically. Mirror
+// writes fail closed in unit tests (no BPF fds), so post-lease progress
+// asserts shared removal plus the mirror-failed verdict — never success.
+struct Fixture10512Lease {
+    coordinator: Coordinator,
+    forward: SyncedSessionEntry,
+    reverse: SyncedSessionEntry,
+}
+
+fn fixture_10512_lease(
+    octet: u8,
+    src_port: u16,
+    dst_port: u16,
+    forward_id: u64,
+    companion_id: u64,
+) -> Fixture10512Lease {
+    // Distinct TEST-NET tuples per cell: the tuple gate is process-global and
+    // tests run in parallel, so lease coverage cells must not share tuples
+    // with each other (or with other suites' gate users).
+    let coordinator = Coordinator::new();
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, octet)),
+        src_port,
+        dst_port,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mut forward = SyncedSessionEntry {
+        key: key.clone(),
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: forward_id,
+        tcp_close_class: 0,
+    };
+    forward.metadata.is_reverse = false;
+    let reverse_key = reverse_session_key(&key, NatDecision::default());
+    let mut reverse = forward.clone();
+    reverse.key = reverse_key;
+    reverse.origin = SessionOrigin::ReverseFlow;
+    reverse.metadata.is_reverse = true;
+    reverse.session_id = companion_id;
+    for entry in [&forward, &reverse] {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            entry,
+        );
+    }
+    Fixture10512Lease {
+        coordinator,
+        forward,
+        reverse,
+    }
+}
+
+impl Fixture10512Lease {
+    fn shared_has(&self, key: &SessionKey) -> bool {
+        self.coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map")
+            .contains_key(key)
+    }
+
+    fn capture(&self) -> Vec<crate::protocol::SessionPolicyMatch> {
+        vec![crate::protocol::SessionPolicyMatch {
+            addr_family: 4,
+            routing_domain: 0,
+            tuple: crate::afxdp::ha::policy_tuple_from_key(&self.forward.key)
+                .expect("forward tuple encodes"),
+            reverse_key: Some(
+                crate::afxdp::ha::policy_tuple_from_key(&self.reverse.key)
+                    .expect("reverse tuple encodes"),
+            ),
+            policy_id: 7,
+            created_secs: 0,
+            created_ns: 0,
+            expected_rt_flow_session_id: self.forward.session_id,
+            companion_policy_id: 7,
+            expected_companion_rt_flow_session_id: self.reverse.session_id,
+        }]
+    }
+}
+
+#[test]
+fn policy_batch_lease_covers_forward_key_10512() {
+    let fixture = fixture_10512_lease(211, 41193, 51193, 0xF10512, 0xC10512);
+    let domain = fixture.coordinator.session_domain();
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([fixture.forward.key.clone()])
+        .expect("test lease on the forward tuple");
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "a fenced forward key must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e.starts_with("policy-batch-lease-refused")),
+        "failure must name the lease refusal, got {errors:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "lease-before-mutation: a refused lease must leave shared authority intact"
+    );
+    drop(held);
+    // Control: released, the same batch proceeds — shared rows removed, and
+    // the only failure left is the mirror write wanting BPF fds unit tests
+    // cannot create. That error proves post-lease progress, not a second
+    // refusal.
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(!complete && outcomes.is_empty());
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "released, the batch must reach the mirror stage, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "released, both shared rows must be conditionally removed"
+    );
+}
+
+#[test]
+fn policy_batch_lease_covers_companion_key_10512() {
+    let fixture = fixture_10512_lease(212, 41293, 51293, 0xF20512, 0xC20512);
+    let domain = fixture.coordinator.session_domain();
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([fixture.reverse.key.clone()])
+        .expect("test lease on the companion tuple");
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "a fenced companion key must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e.starts_with("policy-batch-lease-refused")),
+        "failure must name the lease refusal, got {errors:?}"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
+        "lease-before-mutation: a refused lease must leave shared authority intact"
+    );
+    drop(held);
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(!complete && outcomes.is_empty());
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "released, the batch must reach the mirror stage, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "released, both shared rows must be conditionally removed"
+    );
+}
+
+#[test]
+fn policy_batch_lease_ignores_unrelated_tuple_10512() {
+    let fixture = fixture_10512_lease(213, 41393, 51393, 0xF30512, 0xC30512);
+    let domain = fixture.coordinator.session_domain();
+    let unrelated = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99)),
+        src_port: 41099,
+        dst_port: 51099,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let _held = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([unrelated])
+        .expect("test lease on an unrelated tuple");
+    // A held UNRELATED tuple must not disturb the batch: it proceeds past
+    // acquisition (shared rows removed) and stops only at the mirror write
+    // unit tests cannot perform.
+    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(!complete && outcomes.is_empty());
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-mirror-failed"),
+        "an unrelated hold must not refuse acquisition, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "an unrelated hold must not prevent the conditional removes"
+    );
+    // Hold observer: exactly one hold recorded for the leased batch, with a
+    // sane average (sub-second bound — generous enough to never flake, tight
+    // enough to catch seconds-scale wedging) and max >= average (invariant).
+    let count = fixture.coordinator.policy_batch_count_total();
+    let total_ns = fixture.coordinator.policy_batch_hold_ns_total();
+    let max_ns = fixture.coordinator.policy_batch_hold_max_ns();
+    assert_eq!(count, 1, "one leased batch must record exactly one hold");
+    assert!(
+        total_ns / count < 1_000_000_000,
+        "average hold must read ms-typical, got {total_ns}ns over {count}"
+    );
+    assert!(
+        max_ns >= total_ns / count,
+        "max hold must bound the average"
+    );
+}
+
+/// #10512: an absent expected companion is converged (Applied), not partial —
+/// only a LIVE different incarnation preserves and reports. Shared half (the
+/// worker half is pinned in session_glue tests). Covers the trichotomy
+/// directly against `remove_shared_policy_item` (no lease, workers, or BPF):
+/// absent → Applied + forward gone; same → Applied + both gone;
+/// different-live → PartialCompanion + forward gone + companion kept.
+#[test]
+fn policy_shared_absent_companion_is_applied_not_partial_10512() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    // (A) Companion absent: forward installed alone; expected companion id +
+    // captured key given but no live row. Applied, forward gone.
+    {
+        let coordinator = Coordinator::new();
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 221)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 221)),
+            src_port: 42193,
+            dst_port: 52193,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let forward = SyncedSessionEntry {
+            key: key.clone(),
+            decision: SessionDecision {
+                resolution: test_resolution(),
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0xF40512,
+            tcp_close_class: 0,
+        };
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &forward,
+        );
+        let captured = reverse_session_key(&key, NatDecision::default());
+        let outcome = coordinator
+            .session_domain()
+            .remove_shared_policy_item(&key, 0xF40512, 0xC40512, Some(&captured), false);
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::Applied),
+            "absent companion is converged, not partial; got {outcome:?}"
+        );
+        assert!(
+            !coordinator
+                .sessions
+                .synced
+                .lock()
+                .expect("synced map")
+                .contains_key(&key),
+            "forward row must be gone"
+        );
+    }
+    // (B) Companion present with a different live incarnation: forward
+    // removed, companion preserved, PartialCompanion.
+    {
+        let fixture = fixture_10512_lease(222, 42293, 52293, 0xF50512, 0xC50512);
+        let captured =
+            reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
+        let outcome = fixture
+            .coordinator
+            .session_domain()
+            .remove_shared_policy_item(
+                &fixture.forward.key,
+                fixture.forward.session_id,
+                0xDEADBEEF,
+                Some(&captured),
+                false,
+            );
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::PartialCompanion),
+            "a LIVE different companion incarnation must report partial; got {outcome:?}"
+        );
+        assert!(
+            !fixture.shared_has(&fixture.forward.key)
+                && fixture.shared_has(&fixture.reverse.key),
+            "forward gone, live companion preserved"
+        );
+    }
+    // (C) Companion present with the expected incarnation: both removed, Applied.
+    {
+        let fixture = fixture_10512_lease(223, 42393, 52393, 0xF60512, 0xC60512);
+        let captured =
+            reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
+        let outcome = fixture
+            .coordinator
+            .session_domain()
+            .remove_shared_policy_item(
+                &fixture.forward.key,
+                fixture.forward.session_id,
+                fixture.reverse.session_id,
+                Some(&captured),
+                false,
+            );
+        assert!(
+            matches!(outcome, SyncedDeleteOutcome::Applied),
+            "matched companion must remove cleanly; got {outcome:?}"
+        );
+        assert!(
+            !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+            "both shared rows must be gone"
+        );
+    }
+}
+
+/// #10512 abort-ordering pin (bounded-abort ruling): when the remove fan-out
+/// cannot queue (worker command queue pre-filled to cap here — deterministic,
+/// no sleeps), the abort cancels fences, COMPLETES the shared half (quiesce —
+/// infallible, still fenced), attempts fenced repair, then fails loud.
+/// Asserts quiesce-happened (shared rows gone) plus the loud error with no
+/// usable outcomes — never silent, never half-fenced. The probe attempt also
+/// meets the full queue and is skipped the same deterministic way (no waits).
+#[test]
+fn policy_batch_remove_abort_quiesces_shared_then_fails_loud_10512() {
+    let mut fixture = fixture_10512_lease(225, 42593, 52593, 0xF80512, 0xC80512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut queue = commands.lock().expect("queue");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            queue.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands)),
+        None,
+    );
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "an aborted batch must carry no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-remove-aborted"),
+        "abort must name itself loudly, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on abort"
+    );
+}
+
+/// #10512 abort-ordering pin (bounded-abort ruling), dead-worker half: a
+/// worker already dead at fan-out fails the remove (a panic during commit
+/// fails loud — revocation must not silently succeed alongside one), and the
+/// abort still quiesces shared before failing. Dead tables died with their
+/// threads (no Arc<SessionTable> exists), so no worker evidence is missing —
+/// but the batch fails regardless, by policy, not by uncertainty.
+#[test]
+fn policy_batch_dead_abort_quiesces_shared_then_fails_loud_10512() {
+    let mut fixture = fixture_10512_lease(226, 42693, 52693, 0xF90512, 0xC90512);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands);
+    handle
+        .runtime_atomics
+        .dead
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(handle),
+        None,
+    );
+    let (outcomes, complete, errors) = fixture
+        .coordinator
+        .session_domain()
+        .delete_policy_batch_matches(&fixture.capture(), false);
+    assert!(
+        !complete && outcomes.is_empty(),
+        "a pre-dead worker must fail the batch with no usable outcomes"
+    );
+    assert!(
+        errors.iter().any(|e| e == "policy-batch-remove-aborted"),
+        "abort must name itself loudly, got {errors:?}"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
+        "quiesce: the deterministic shared half must land even on abort"
+    );
+}

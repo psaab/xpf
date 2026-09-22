@@ -12744,3 +12744,180 @@ fn reverse_companion_stamps_zero_install_table_9752() {
         "reverse companions must not inherit the forward PBR table (R1)"
     );
 }
+
+/// #10512: an absent expected companion is converged (forward removed, no
+/// partial flag) — only a LIVE different incarnation preserves and reports.
+/// Worker half (the shared half is pinned in ha_tests). Covers the full
+/// trichotomy: absent → clean remove; same → both removed clean; different →
+/// forward removed, companion preserved, partial set.
+#[test]
+fn policy_remove_absent_companion_is_applied_not_partial_10512() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMap, SteeringRowOwners,
+    };
+    let now_ns = 1_000_000_000u64;
+    let run_item = |sessions: &mut SessionTable,
+                    key: &SessionKey,
+                    forward_id: u64,
+                    companion_id: u64,
+                    captured: Option<SessionKey>| {
+        let item = crate::afxdp::PolicyDeleteItem {
+            key: key.clone(),
+            session_id: forward_id,
+            forward_only: false,
+            companion_session_id: companion_id,
+            captured_companion: captured,
+        };
+        let mut report = crate::afxdp::PolicyDeleteBatchReport {
+            cancelled: false,
+            partial: vec![false],
+            refused: vec![false],
+        };
+        let owners = SteeringRowOwners::default();
+        let map = SteeringMap {
+            fd: RECORDER_ONLY_MAP_FD,
+            owners: &owners,
+            holder: SteeringHolder::Worker(0),
+        };
+        let mut deleted_keys = Vec::new();
+        let removed = super::commands::handle_remove_policy_item(
+            sessions,
+            map,
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            &item,
+            &mut report,
+            0,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+        );
+        (removed, report)
+    };
+    // (A) Companion absent: forward removed, NO partial flag.
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        assert_ne!(forward_id, 0, "fixture must mint a live identity");
+        let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+        let (removed, report) = run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion));
+        assert!(removed, "forward with an absent expected companion must be removed");
+        assert!(
+            !report.partial[0],
+            "absent companion is converged, not partial"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "forward row must be gone"
+        );
+    }
+    // (B) Companion present with a different live incarnation: forward
+    // removed, companion preserved, partial set.
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+        let mut companion_metadata = test_metadata();
+        companion_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            companion.clone(),
+            test_decision(),
+            companion_metadata,
+            SessionOrigin::ReverseFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let live_companion_id = sessions.session_id_for(&companion);
+        assert_ne!(live_companion_id, 0, "fixture must mint a live companion");
+        let (removed, report) =
+            run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion.clone()));
+        assert!(removed, "forward must be removed");
+        assert!(
+            report.partial[0],
+            "a LIVE different companion incarnation must report partial"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "forward row must be gone"
+        );
+        assert_eq!(
+            sessions.session_id_for(&companion),
+            live_companion_id,
+            "live companion must be preserved, not removed"
+        );
+    }
+    // (C) Companion present with the expected incarnation: both removed, clean.
+    {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id = sessions.session_id_for(&key);
+        let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+        let mut companion_metadata = test_metadata();
+        companion_metadata.is_reverse = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            companion.clone(),
+            test_decision(),
+            companion_metadata,
+            SessionOrigin::ReverseFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let live_companion_id = sessions.session_id_for(&companion);
+        let (removed, report) = run_item(
+            &mut sessions,
+            &key,
+            forward_id,
+            live_companion_id,
+            Some(companion.clone()),
+        );
+        assert!(removed, "forward must be removed");
+        assert!(
+            !report.partial[0],
+            "matched companion must remove cleanly"
+        );
+        assert_eq!(
+            sessions.session_id_for(&key),
+            0,
+            "forward row must be gone"
+        );
+        assert_eq!(
+            sessions.session_id_for(&companion),
+            0,
+            "matched companion row must be gone"
+        );
+    }
+}

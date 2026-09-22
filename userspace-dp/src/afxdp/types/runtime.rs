@@ -538,16 +538,169 @@ pub(in crate::afxdp) struct LearnedNeighborKey {
     pub(in crate::afxdp) src_mac: [u8; 6],
 }
 
+/// #10512: the shared fence AND report for one conditional-remove fan-out.
+///
+/// The mutex is the abort fence, not just a report lock: the worker arm
+/// holds it across cancel-check + the ENTIRE teardown, and the coordinator
+/// holds it across cancel-set on abort. Cancel validation is therefore atomic
+/// with the mutation itself — a command that runs after the set observes it
+/// and skips, and a command that runs before it has fully completed before
+/// the coordinator returns. Post-return mutation is IMPOSSIBLE (not merely
+/// unlikely): safety never depends on timing, only liveness assumes eventual
+/// progress, like every other mutex in the tree.
+///
+/// Deadlock audit: the mutex is private to one fan-out (only these commands
+/// plus the coordinator name it). The worker arm runs with the command-queue
+/// lock already released (`apply_worker_commands` drains into scratch first),
+/// and the coordinator never touches a queue lock while holding this one, so
+/// no lock cycle exists. Teardown internals (allocator, steering) nest inside;
+/// nothing outside can order against a lock it cannot name.
+#[derive(Clone, Debug, Default)]
+pub(in crate::afxdp) struct PolicyDeleteBatchReport {
+    /// Set by the coordinator, under this mutex, before returning on any
+    /// remove-fan-out failure (ack timeout, dead worker, full queue).
+    /// Workers that observe it remove NOTHING. Persists in the queued
+    /// commands, so even a restart-replayed queue cannot resurrect the
+    /// mutation. The mutex is the abort fence, not just a report lock: the
+    /// worker arm holds it across cancel-check + the ENTIRE per-item
+    /// teardown loop, so cancel validation is atomic with the mutations.
+    /// Post-return mutation is impossible (not merely unlikely): safety never
+    /// depends on timing, only liveness assumes eventual progress, like every
+    /// other mutex in the tree.
+    ///
+    /// Deadlock audit: the mutex is private to one micro-batch (only these
+    /// commands plus the coordinator name it). The worker arm runs with the
+    /// command-queue lock already released (`apply_worker_commands` drains
+    /// into scratch first), and the coordinator never touches a queue lock
+    /// while holding this one, so no lock cycle exists. Teardown internals
+    /// (allocator, steering) nest inside; nothing outside can order against
+    /// a lock it cannot name.
+    pub(in crate::afxdp) cancelled: bool,
+    /// Per-match: a forward was removed while its expected companion was
+    /// missing, mismatched, or keyed differently than captured (preserved).
+    pub(in crate::afxdp) partial: Vec<bool>,
+    /// Per-match: the capture expected no companion but a live companion row
+    /// exists (check-before-remove: that worker removed nothing for the
+    /// match). Mixed with removals elsewhere it folds into `partial`.
+    pub(in crate::afxdp) refused: Vec<bool>,
+}
+
+/// #10512: one validated identity-conditional delete inside a micro-batch
+/// envelope. `captured_companion` is `Some` exactly when the capture expects
+/// a companion (`companion_session_id != 0`); the coordinator leases it with
+/// the forward key before any conditional remove (plan §2.4 all-keys lease).
+#[derive(Clone, Debug)]
+pub(in crate::afxdp) struct PolicyDeleteItem {
+    pub(in crate::afxdp) key: SessionKey,
+    pub(in crate::afxdp) session_id: u64,
+    pub(in crate::afxdp) forward_only: bool,
+    pub(in crate::afxdp) companion_session_id: u64,
+    pub(in crate::afxdp) captured_companion: Option<SessionKey>,
+}
+
+/// #10512: hard cap on one policy READ capture (plan §2.4
+/// `MAX_CAPTURE_MATCHES`). Enforced DURING worker collection (shared
+/// admission below), not after cloning — W replicated workers each pushing
+/// their full table would otherwise allocate O(W×sessions) before any
+/// truncation.
+pub(in crate::afxdp) const POLICY_READ_CAPTURE_LIMIT: usize = 262_144;
+
+/// #10512: shared admission collector for one policy READ fan-out. Every
+/// worker reserves each candidate identity here BEFORE building its row:
+/// cross-worker replicas (same tuple incarnation) admit once, and the
+/// 262144th unique identity trips `overflow` so all further candidates skip
+/// without allocating, locking (past the lock-free overflow flag), or
+/// building. Memory stays O(cap) regardless of worker count or table size.
+///
+/// SECURITY: the dedup set keys the FULL captured identity
+/// `(SessionKey, session_id)` with exact equality under the default
+/// DoS-resistant hasher. A non-crypto hash or a truncated key would let
+/// crafted packets engineer a dedup collision that drops a live session
+/// from revocation (under-clear); exact-set semantics make a drop prove a
+/// true replica.
+#[derive(Clone, Debug, Default)]
+pub(in crate::afxdp) struct PolicyReadCollector {
+    seen: std::collections::HashSet<(SessionKey, u64)>,
+    rows: Vec<crate::protocol::SessionPolicyMatch>,
+    overflow: bool,
+}
+
+impl PolicyReadCollector {
+    /// Reserve admission for one candidate identity. True = the caller must
+    /// build the row and `push` it. False = duplicate (a replica already
+    /// admitted) or cap-hit (sets `overflow`, mirrored to the lock-free flag
+    /// so later candidates skip without locking). Called with the collector
+    /// mutex held; the row build itself runs UNLOCKED between reserve and push.
+    pub(in crate::afxdp) fn reserve(
+        &mut self,
+        overflow: &std::sync::atomic::AtomicBool,
+        key: SessionKey,
+        session_id: u64,
+    ) -> bool {
+        if self.overflow {
+            return false;
+        }
+        if !self.seen.insert((key.clone(), session_id)) {
+            return false;
+        }
+        if self.seen.len() > POLICY_READ_CAPTURE_LIMIT {
+            self.seen.remove(&(key, session_id));
+            self.overflow = true;
+            overflow.store(true, std::sync::atomic::Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    /// Publish a reserved row. Pushes only follow successful reserves, so
+    /// `rows.len() <= seen.len() <= LIMIT` by construction (a worker that
+    /// dies mid-build strands its reservation; its death already fails the
+    /// capture, so the hole is never observed).
+    pub(in crate::afxdp) fn push(&mut self, row: crate::protocol::SessionPolicyMatch) {
+        debug_assert!(self.rows.len() < POLICY_READ_CAPTURE_LIMIT);
+        self.rows.push(row);
+    }
+
+    /// Move the admitted rows out, freeing the dedup set with the collector.
+    /// No clone: the fan-out WROTE here directly.
+    pub(in crate::afxdp) fn take_rows(&mut self) -> Vec<crate::protocol::SessionPolicyMatch> {
+        std::mem::take(&mut self.rows)
+    }
+
+    pub(in crate::afxdp) fn overflowed(&self) -> bool {
+        self.overflow
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
-    /// Conditional worker-local teardown for a captured session incarnation.
-    /// The id is checked at command execution, after queue delay, before any
-    /// NAT, steering, cache, or holder teardown.
-    DeleteSyncedIfIdentity { key: SessionKey, session_id: u64 },
-    /// #9752: conditional cross-worker delete (purge): delete the entry at
+    DeletePolicyBatch {
+        items: Vec<PolicyDeleteItem>,
+        /// Per-worker applied slot: `applied[i]` when THIS worker removed
+        /// match `i`'s forward. The coordinator ORs slots across workers.
+        applied: Arc<Mutex<Vec<bool>>>,
+        pending: Arc<AtomicUsize>,
+        /// Fence + report (see `PolicyDeleteBatchReport`): the arm holds this
+        /// mutex across cancel-check and the whole per-item teardown loop.
+        /// Workers re-derive each companion from the live forward's NAT at
+        /// execution and remove it ONLY on full key equality with the
+        /// captured companion — a mismatch preserves it (partial) rather
+        /// than deleting by an uncertain key.
+        report: Arc<Mutex<PolicyDeleteBatchReport>>,
+    },
+    /// #10512: READ-ONLY bare-tuple probe envelope for the micro-batch's
+    /// token-authorized mirror repair (plan §2.4 phase three). The coordinator
+    /// holds the batch's Finalizing gate lease across the fan-out, so the
+    /// first survivor any worker reports per tuple is authoritative for
+    /// republish, and an empty slot proves absence for the bare-row delete.
+    ProbePolicyBatch {
+        bares: Vec<SessionKey>,
+        found: Arc<Mutex<Vec<Option<SyncedSessionEntry>>>>,
+        pending: Arc<AtomicUsize>,
+    },
     /// `key` ONLY if it still carries `(domain, check)` AND that stamp is
     /// unresolvable under the recipient's CURRENT registry. Lagging senders,
     /// re-added tables, and reincarnations all decline (the entry survives);
@@ -584,12 +737,14 @@ pub(in crate::afxdp) enum WorkerCommand {
         sequence: u64,
         key: SessionKey,
     },
+
     /// #10512: read the policy-tagged rows in THIS worker's table. The
     /// control handler broadcasts the request to every live worker and waits
     /// for the bounded acknowledgements before publishing the response.
     ListSessionsByPolicy {
         request: crate::protocol::SessionPolicyListRequest,
-        matches: Arc<Mutex<Vec<crate::protocol::SessionPolicyMatch>>>,
+        collected: Arc<Mutex<PolicyReadCollector>>,
+        overflow: Arc<AtomicBool>,
         errors: Arc<Mutex<Vec<String>>>,
         pending: Arc<AtomicUsize>,
     },

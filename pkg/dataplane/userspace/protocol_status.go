@@ -633,6 +633,20 @@ type ProcessStatus struct {
 	// being allowed to remove a session a newer generation installed.
 	SessionDeleteStaleIgnored uint64 `json:"session_delete_stale_ignored,omitempty"`
 
+	// PolicyBatchCount is xpf_userspace_policy_batch_count_total (#10512):
+	// policy-delete micro-batches that reached a Finalizing gate lease.
+	PolicyBatchCount uint64 `json:"policy_batch_count,omitempty"`
+
+	// PolicyBatchHoldNs is xpf_userspace_policy_batch_hold_ns_total (#10512):
+	// total gate-lease hold nanoseconds across counted batches. Average
+	// hold = HoldNs / Count; ms-typical is the tree-consistent timing
+	// position's empirical leg.
+	PolicyBatchHoldNs uint64 `json:"policy_batch_hold_ns,omitempty"`
+
+	// PolicyBatchHoldMaxNs is xpf_userspace_policy_batch_hold_max_ns
+	// (#10512): max single gate-lease hold in nanoseconds (lifetime max).
+	PolicyBatchHoldMaxNs uint64 `json:"policy_batch_hold_max_ns,omitempty"`
+
 	// SyncedImportReserveRefused is xpf_userspace_synced_import_reserve_refused_total
 	// (#6600/#7398): peer-synced imports refused because this node could not
 	// reserve the translated NAT port the session names. Sustained growth means

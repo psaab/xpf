@@ -17,12 +17,13 @@ mod session_import;
 pub use session_import::{
     SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
 };
+pub(crate) use session_import::SyncedDeleteOutcome;
 pub use self::session_domain::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 mod tunnel_purge;
 
 pub(crate) use self::session_domain::{
     policy_match_from_parts, policy_tuple_from_key, policy_wire_family, HaRefreshOutcome,
-    SessionDomain,
+    HelperMutationBegin, HelperMutationOutcome, SessionDomain,
 };
 pub(crate) use self::export::{AllSessionsExport, OwnerRgExportWait};
 #[cfg(test)]

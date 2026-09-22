@@ -73,6 +73,14 @@ pub(in crate::afxdp) struct SessionManager {
     /// `session_delete_stale_ignored_total()`.
     pub(in crate::afxdp) install_stale_ignored: AtomicU64,
     pub(in crate::afxdp) delete_stale_ignored: AtomicU64,
+    /// #10512: policy-delete micro-batch gate-lease holds: count, total hold
+    /// nanoseconds, and max single hold. The average (total/count) is the
+    /// empirical leg of the tree-consistent timing position (ms-typical
+    /// holds); the max bounds the pathological case. Surfaced via
+    /// `Coordinator::policy_batch_{count,hold_ns,hold_max_ns}_total()`.
+    pub(in crate::afxdp) policy_batch_count: AtomicU64,
+    pub(in crate::afxdp) policy_batch_hold_ns: AtomicU64,
+    pub(in crate::afxdp) policy_batch_hold_max_ns: AtomicU64,
     /// #6979 F4: `DeleteSynced` commands dropped by a full worker command queue
     /// whose NAT reservation this coordinator released on the worker's behalf.
     ///
@@ -247,6 +255,9 @@ impl SessionManager {
             delete_dropped_released: AtomicU64::new(0),
             tunnel_purge_reservations_released: AtomicU64::new(0),
             import_cap_drops: AtomicU64::new(0),
+            policy_batch_count: AtomicU64::new(0),
+            policy_batch_hold_ns: AtomicU64::new(0),
+            policy_batch_hold_max_ns: AtomicU64::new(0),
             import_unknown_routing_domain: AtomicU64::new(0),
             import_reserve_refused: AtomicU64::new(0),
         }

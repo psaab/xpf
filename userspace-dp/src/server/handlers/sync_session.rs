@@ -4,7 +4,10 @@
 
 use super::super::helpers::{build_synced_session_entry, build_synced_session_key, SyncedKeyIntent};
 use crate::afxdp::SessionDomain;
-use crate::afxdp::{SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX};
+use crate::afxdp::{
+    SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
+    SYNCED_IMPORT_REFUSED_PREFIX,
+};
 use crate::{ControlResponse, SessionSyncRequest};
 
 /// #7209: served from the SESSION-DOMAIN HANDLE, not from `&mut ServerState`.
@@ -112,30 +115,39 @@ pub(super) fn handle(
             | "mirror_delete"
             | "mirror_delete_batch"
             | "mirror_clear_chunk"
+            | "mirror_delete_policy_batch"
     );
     if epoch_scoped && !domain.accepts_helper_epoch(sync_req.helper_epoch) {
         response.ok = false;
         response.error = "helper-epoch-stale".to_string();
         return;
     }
-    if epoch_scoped
+    // Exact `(epoch, operation_id, mutation_id)` replays return the recorded
+    // response summary. A new operation id carrying a known mutation id is a
+    // repair/retry-after-unknown-outcome and deliberately proceeds.
+    let mutation_lease = if epoch_scoped
         && !sync_req.operation_id.is_empty()
         && !sync_req.mutation_id.is_empty()
     {
-        match domain.helper_mutation_seen(
+        match domain.helper_mutation_begin(
             sync_req.helper_epoch,
             &sync_req.operation_id,
             &sync_req.mutation_id,
         ) {
-            Ok(true) => return,
-            Ok(false) => {}
+            Ok(crate::afxdp::HelperMutationBegin::Replay(outcome)) => {
+                outcome.apply_to_response(response);
+                return;
+            }
+            Ok(crate::afxdp::HelperMutationBegin::Proceed(lease)) => Some(lease),
             Err(reason) => {
                 response.ok = false;
                 response.error = reason.to_string();
                 return;
             }
         }
-    }
+    } else {
+        None
+    };
     match sync_req.operation.as_str() {
         "upsert" | "mirror_upsert" | "mirror_publish_only" if resolved_domain.is_none() => {
             domain.note_unknown_routing_domain_import();
@@ -213,6 +225,50 @@ pub(super) fn handle(
                 response.error = format!("mirror-clear:{err}");
             }
         },
+        // #10512: one identity-conditional policy-delete micro-batch (plan
+        // §2.4). Validates every match's capture (keys must decode, identities
+        // must be present, companion expectations must carry a reverse tuple),
+        // then runs the all-keys-leased batch. ANY malformed match fails the
+        // WHOLE batch closed: the capture is the delete's authorization, and
+        // a batch that cannot name every companion exactly must not run.
+        "mirror_delete_policy_batch" => {
+            // Decoding + validation live behind the domain (the worker item
+            // type never crosses to this layer): ANY malformed match fails
+            // the WHOLE batch closed with complete=false below.
+            let matches = sync_req.policy_matches.clone().unwrap_or_default();
+            let (outcomes, complete, errors) =
+                domain.delete_policy_batch_matches(&matches, sync_req.forward_only);
+            {
+                response.policy_delete_outcomes = outcomes
+                    .iter()
+                    .map(|outcome| match outcome {
+                        crate::afxdp::SyncedDeleteOutcome::Applied => "applied",
+                        crate::afxdp::SyncedDeleteOutcome::StaleForward => "stale_forward",
+                        crate::afxdp::SyncedDeleteOutcome::PartialCompanion => "partial_companion",
+                        crate::afxdp::SyncedDeleteOutcome::RefusedIdentity => "refused_identity",
+                        // Gate/mirror failures never surface per-match: the
+                        // batch fails (complete=false) and Go surfaces the gap.
+                        // Any other token is a bug Go loudly rejects.
+                        _ => "batch_failed",
+                    })
+                    .map(str::to_string)
+                    .collect();
+                response.policy_delete_complete = complete;
+                response.policy_delete_errors = errors;
+                if !complete {
+                    // The batch is authoritative about its own incompleteness:
+                    // fail the IPC closed so Go surfaces the persistent gap
+                    // (#5578) instead of counting partial outcomes.
+                    response.ok = false;
+                    if response.error.is_empty() {
+                        response.error = format!(
+                            "policy-batch-incomplete:{}",
+                            response.policy_delete_errors.join(",")
+                        );
+                    }
+                }
+            }
+        },
         // #7188: a delete reconstructs the key with `Delete` intent, so a peer
         // that could not state the tunnel discriminator retracts the `None`
         // class rather than being refused. A delete can only under-match; it
@@ -232,16 +288,6 @@ pub(super) fn handle(
             SyncedKeyIntent::Delete,
         ) {
             Ok(key) => {
-                // #9714: a delete the Go side marked as made on behalf of the PEER
-                // is refused for a live local session whose owner RG is locally
-                // active; every other delete stays authoritative. `delete` reports a
-                // refusal, answered in-band below so the Go side keeps its own mirror
-                // and DNAT rows for the flow the helper kept.
-                // #9714 r2 F7 / #9960: the helper reports an OUTCOME, not a bool in
-                // which a stale-generation rejection and a successful apply were
-                // the same value. Only an ownership refusal — whether the early
-                // #9714 check or the under-lock #9960 concurrent check — is
-                // answered in-band with the peer-delete token. A stale-generation
                 let forward_only = sync_req.forward_only;
                 let strict_mirror = matches!(
                     sync_req.operation.as_str(),
@@ -249,21 +295,21 @@ pub(super) fn handle(
                 );
                 let mut mirror_delete_error = false;
                 let mut delete = |key| {
-                    if sync_req.peer_delete {
-                        let outcome = if strict_mirror {
+                    let outcome = if sync_req.peer_delete {
+                        if strict_mirror {
                             domain.delete_peer_synced_session_mirror(key, forward_only)
                         } else {
                             domain.delete_peer_synced_session(key, forward_only)
-                        };
-                        mirror_delete_error |= outcome.mirror_delete_failed();
+                        }
+                    } else if strict_mirror {
+                        domain.delete_synced_session_mirror(key, forward_only)
+                    } else {
+                        domain.delete_synced_session(key, forward_only)
+                    };
+                    mirror_delete_error |= outcome.mirror_delete_failed();
+                    if sync_req.peer_delete {
                         outcome.keeps_caller_rows()
                     } else {
-                        let outcome = if strict_mirror {
-                            domain.delete_synced_session_mirror(key, forward_only)
-                        } else {
-                            domain.delete_synced_session(key, forward_only)
-                        };
-                        mirror_delete_error |= outcome.mirror_delete_failed();
                         false
                     }
                 };
@@ -413,11 +459,7 @@ pub(super) fn handle(
             response.error = format!("unknown session sync operation {other}");
         }
     }
-    if epoch_scoped && response.ok {
-        domain.record_helper_mutation(
-            sync_req.helper_epoch,
-            &sync_req.operation_id,
-            &sync_req.mutation_id,
-        );
+    if let Some(lease) = mutation_lease {
+        lease.complete(crate::afxdp::HelperMutationOutcome::from_response(response));
     }
 }

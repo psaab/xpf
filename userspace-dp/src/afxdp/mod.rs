@@ -96,8 +96,12 @@ pub(crate) mod ipsec_inner_queue;
 mod gre_discriminator;
 mod ha;
 // #6785: the control handler needs the synced-import outcome type and its
-// refusal-token prefix.
-pub use ha::{SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX};
+// #10512: expose the typed conditional-delete result and mutation replay
+// outcome to the protocol handler and coordinator wrapper.
+pub(crate) use ha::{
+    HelperMutationBegin, HelperMutationOutcome, SyncedDeleteOutcome, SyncedImportOutcome,
+    SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
+};
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.

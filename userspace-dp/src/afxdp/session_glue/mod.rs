@@ -1229,7 +1229,8 @@ pub(super) fn apply_worker_commands(
             }
             WorkerCommand::ListSessionsByPolicy {
                 request,
-                matches,
+                collected,
+                overflow,
                 errors,
                 pending,
             } => {
@@ -1262,10 +1263,19 @@ pub(super) fn apply_worker_commands(
                             {
                                 return;
                             }
+                            // Legacy time fence (#6948): keep sessions admitted
+                            // at or before the activation stamp (old numbering).
+                            // `Some(0)` is explicitly UNBOUNDED — Go sends the
+                            // raw activation stamp, and 0 means "boundary
+                            // unknown" (clear every matching id), never a real
+                            // timestamp. `None` in legacy mode is a caller bug
+                            // and is rejected above, not silently unbounded.
                             if request.mode == "legacy"
                                 && request
                                     .before_secs
-                                    .map(|before| created_ns / 1_000_000_000 > before)
+                                    .map(|before| {
+                                        before != 0 && created_ns / 1_000_000_000 > before
+                                    })
                                     .unwrap_or(true)
                             {
                                 return;
@@ -1278,6 +1288,21 @@ pub(super) fn apply_worker_commands(
                                         "identity-missing:{}:{}",
                                         key.src_ip, key.dst_ip
                                     ));
+                                return;
+                            }
+                            // Shared admission: skip fast past the cap (no
+                            // lock), else reserve (dedups cross-worker
+                            // replicas) BEFORE building the row. The build
+                            // below runs unlocked; only reserve and push take
+                            // the collector lock.
+                            if overflow.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
+                            }
+                            let admitted = collected
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .reserve(overflow.as_ref(), key.clone(), session_id);
+                            if !admitted {
                                 return;
                             }
                             let Some(mut row) = crate::afxdp::ha::policy_match_from_parts(
@@ -1317,7 +1342,7 @@ pub(super) fn apply_worker_commands(
                                 row.companion_policy_id = companion_metadata.policy_id;
                                 row.expected_companion_rt_flow_session_id = companion_id;
                             }
-                            matches
+                            collected
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .push(row);
@@ -1399,19 +1424,53 @@ pub(super) fn apply_worker_commands(
                     worker_id,
                 );
             }
-            WorkerCommand::DeleteSyncedIfIdentity { key, session_id } => {
-                commands::handle_delete_synced_if_identity(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    key,
-                    session_id,
-                    now_ns,
-                    now_secs,
-                    &mut deleted_synced_keys,
-                    worker_id,
-                );
+            WorkerCommand::DeletePolicyBatch {
+                items,
+                applied,
+                pending,
+                report,
+            } => {
+                // Abort fence: hold the report mutex across the cancel check
+                // and the whole per-item teardown loop, so cancel validation
+                // is atomic with the mutations (see PolicyDeleteBatchReport).
+                // Lock order fence -> applied slot, never reversed: the
+                // coordinator reads slots without the fence (after all acks)
+                // and takes the fence without slots (on abort).
+                let mut guard = report
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !guard.cancelled {
+                    let mut applied_slot = applied
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for (index, item) in items.iter().enumerate() {
+                        if commands::handle_remove_policy_item(
+                            sessions,
+                            session_map,
+                            forwarding,
+                            ha_state,
+                            item,
+                            &mut *guard,
+                            index,
+                            now_ns,
+                            now_secs,
+                            &mut deleted_synced_keys,
+                            worker_id,
+                        ) {
+                            applied_slot[index] = true;
+                        }
+                    }
+                }
+                drop(guard);
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            WorkerCommand::ProbePolicyBatch {
+                bares,
+                found,
+                pending,
+            } => {
+                commands::handle_probe_policy_tuples(sessions, &bares, found.as_ref());
+                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::DeleteSyncedIfTableUnknown { key, domain, check } => {
                 // #9752: conditional purge delete — decline (no-op, not even
