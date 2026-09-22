@@ -62,3 +62,56 @@ func TestShowZonesDisplayReadsCountersOnlyForSurvivor10489(t *testing.T) {
 		t.Fatalf("counter reads = %v, want exactly two survivor reads", dp.readIDs)
 	}
 }
+func TestShowZonesDisplayQuarantineDPNilAndOrdinary10489(t *testing.T) {
+	if config.StableZoneID("z174") != config.StableZoneID("z214") {
+		t.Fatal("test premise broken: z174/z214 no longer collide under the frozen fold")
+	}
+	cfg := &config.Config{Security: config.SecurityConfig{
+		Zones: map[string]*config.ZoneConfig{
+			"z174": {Name: "z174", Interfaces: []string{"ge-0/0/0.0"}},
+			"z214": {Name: "z214", Interfaces: []string{"ge-0/0/1.0"}},
+		},
+		Policies: []*config.ZonePairPolicies{{
+			FromZone: "z214",
+			ToZone:   "z174",
+			Policies: []*config.Policy{{Name: "allow-z214", Action: config.PolicyPermit}},
+		}},
+	}}
+	out := captureStdout(t, func() {
+		if err := (&CLI{}).showZonesDisplay(cfg, true, "z214"); err != nil {
+			t.Fatalf("showZonesDisplay(dp-nil): %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Security zone: z214",
+		"Zone ID: 53547 (collides with \"z174\"",
+		config.ZoneQuarantineDispositionText,
+		config.ZoneQuarantineCountersLine,
+		config.ZoneQuarantineInterfacesQualifier,
+		config.ZoneQuarantinePoliciesQualifier,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dp-nil quarantine output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, config.ZoneQuarantineDriftNote) ||
+		strings.Contains(out, "Input:  11 packets") {
+		t.Fatalf("dp-nil output claimed applied drift or live counters:\n%s", out)
+	}
+
+	ordinary := &config.Config{Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
+		"dmz":     {Name: "dmz"},
+		"trust":   {Name: "trust"},
+		"untrust": {Name: "untrust"},
+	}}}
+	ordinaryOut := captureStdout(t, func() {
+		if err := (&CLI{}).showZonesDisplay(ordinary, false, ""); err != nil {
+			t.Fatalf("showZonesDisplay(ordinary): %v", err)
+		}
+	})
+	if strings.Contains(ordinaryOut, "QUARANTINED") ||
+		strings.Contains(ordinaryOut, config.ZoneQuarantineInterfacesQualifier) ||
+		strings.Contains(ordinaryOut, config.ZoneQuarantineCountersLine) {
+		t.Fatalf("ordinary zones received quarantine output:\n%s", ordinaryOut)
+	}
+}
