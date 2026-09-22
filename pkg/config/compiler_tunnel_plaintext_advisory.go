@@ -9,16 +9,18 @@ import (
 // compiler_tunnel_plaintext_advisory.go holds the pieces the #5619 IPsec and
 // #5618 WireGuard plaintext advisories SHARE.
 //
-// The two advisories used to describe ONE fact about two protocols: a tunnel's
-// decapsulated inner traffic leaves the xpf dataplane's adjudication and is
-// forwarded by the Linux kernel, so the zone the operator put the tunnel
-// interface in does not govern it. It is still exactly that for route-based
-// IPsec. For WireGuard, #8274 moved transport decapsulation into the AF_XDP
-// worker, which adjudicates the inner packet under the tunnel's zone, and left
-// a kernel-path residual (docs/log/8274.md "The residual, stated rather than
-// closed"), which #9594 narrowed to ingress the shim does not adjudicate. So
-// since #9251 the two advisories render DIFFERENT facts
-// through one shared shape.
+// The two advisories identify where decapsulated plaintext is not
+// xpf-zone-adjudicated, but their dataplane outcomes differ. Historically,
+// both descriptions shared the Linux-forwarding outcome for plaintext that
+// bypassed xpf. Route-based IPsec now installs an admitted generation's
+// separate INPUT+FORWARD nft/NFQUEUE divert ahead of policy; its Enforcing
+// pipeline terminally drops captured plaintext (#10517), while a
+// divert-absent window is the residual local-input exposure. For WireGuard,
+// #8274 moved transport decapsulation into the AF_XDP worker, which adjudicates
+// the inner packet under the tunnel's zone, and left a kernel-path residual
+// (docs/log/8274.md "The residual, stated rather than closed"), which #9594
+// narrowed to ingress the shim does not adjudicate. Since #9251 the two
+// advisories render DIFFERENT facts through one shared shape.
 //
 // WHAT IS SHARED HERE and what is deliberately NOT:
 //
@@ -62,7 +64,7 @@ import (
 //     all. A WireGuard tunnel's zone IS enforced on the dataplane path and not
 //     on the kernel path, and an unzoned WireGuard tunnel's transit is DENIED
 //     on the dataplane path (#6682) rather than "unadjudicated by a different
-//     route". The shared heading rendered IPsec's account for WireGuard —
+//     route". The shared heading rendered then-IPsec's account for WireGuard —
 //     "ASSIGNED A ZONE THAT IS NOT ENFORCED" for a zone the dataplane
 //     enforces — which is the defect #9251 reports.
 //
@@ -92,7 +94,7 @@ type plaintextTunnelFinding struct {
 // EVERY field is required, and there is deliberately no default. A default
 // heading or caveat would be ONE protocol's account of its own decapsulation
 // path, and an advisory that left the field empty would render that account as
-// its own — which is the #9251 defect exactly: WireGuard rendering IPsec's
+// its own — which is the #9251 defect exactly: WireGuard rendering then-IPsec's
 // "ASSIGNED A ZONE THAT IS NOT ENFORCED" for a zone the dataplane enforces.
 // TestPlaintextAdvisoryWordingsAreCompleteAndDistinct is the guard.
 type plaintextAdvisoryWording struct {

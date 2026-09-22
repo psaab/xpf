@@ -611,7 +611,8 @@ affected tunnels and each one's zone: `warnSecureTunnelPlaintextUnadjudicatedAST
 aggregation shape and zone-membership reader
 (`pkg/config/compiler_tunnel_plaintext_advisory.go`) but, since #9251, not their
 headings or unzoned caveat. The IPsec advisory escalates a zoned tunnel
-("ASSIGNED A ZONE THAT IS NOT ENFORCED — this reads as protected and is not").
+("ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as
+zone-adjudicated and is not").
 The WireGuard advisory says the zone is enforced on the dataplane path and NOT
 on the kernel path, names both ways onto the kernel path, says other listen
 ports are dropped there, and says an unzoned tunnel's transit is denied on the
@@ -627,10 +628,11 @@ both HA node views — and NEITHER can reject: they have no error return and no
 `lenient` flag, so a box already running a tunnel can still commit an unrelated
 change (#1960 no-brick).
 
-The advisories make the gap VISIBLE; they do not close it. For IPsec,
-enforcement needs the kernel → userspace capture bridge that the #7167
-adjudication selected (Option B2), which is not built; #9506 owns it. For
-WireGuard, the
+The advisories make the gap VISIBLE; they do not close it. For IPsec, #9506 now
+owns the kernel-to-userspace capture bridge: an admitted generation diverts
+INPUT+FORWARD captures before policy and fail-closes them with terminal DROP.
+The Rust D11 adjudicated-PERMIT join remains unbuilt; #9506 owns the capture
+bridge and D11 owns the still-unwired permit path. For WireGuard, the
 degraded-dataplane half of the kernel path refuses transit since #9594; the
 uncovered-ingress half
 was kept deliberately, because on such an ingress the TUN write is the only

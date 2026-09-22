@@ -72,7 +72,10 @@ func TestPlaintextWarningNamesTheContradictedZone(t *testing.T) {
 	if !strings.Contains(got[0], "does NOT govern its decrypted traffic") {
 		t.Errorf("advisory must state the zone does not govern the plaintext; got: %s", got[0])
 	}
-	if !strings.Contains(got[0], "reads as protected and is not") {
+	if !strings.Contains(got[0], "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:") {
+		t.Errorf("the ZONED case must carry the full corrected heading; got: %s", got[0])
+	}
+	if !strings.Contains(got[0], "reads as zone-adjudicated and is not") {
 		t.Errorf("the ZONED case must ESCALATE — the operator has been told something "+
 			"specific and untrue, and the wording must say so; got: %s", got[0])
 	}
@@ -383,11 +386,20 @@ func TestPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 		t.Fatalf("want exactly 1 aggregated advisory, got %d: %v", len(got), got)
 	}
 	adv := got[0]
-
-	zoneIdx := strings.Index(adv, "ASSIGNED A ZONE THAT IS NOT ENFORCED")
-	plainIdx := strings.Index(adv, "NOT ZONE-ADJUDICATED")
+	const (
+		wantZonedHeading   = "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:"
+		wantUnzonedHeading = "NOT ZONE-ADJUDICATED:"
+	)
+	zoneIdx := strings.Index(adv, wantZonedHeading)
+	plainIdx := strings.Index(adv, "\n  "+wantUnzonedHeading)
 	if zoneIdx < 0 || plainIdx < 0 {
-		t.Fatalf("advisory must carry BOTH groups; got: %s", adv)
+		t.Fatalf("advisory must carry BOTH corrected literal headings; got: %s", adv)
+	}
+	if !strings.Contains(adv, wantZonedHeading) {
+		t.Errorf("advisory must carry the full corrected ZONED heading: %s", adv)
+	}
+	if !strings.Contains(adv, wantUnzonedHeading) {
+		t.Errorf("advisory must carry the full UNZONED heading: %s", adv)
 	}
 	zonedSection := adv[zoneIdx:plainIdx]
 	if !strings.Contains(zonedSection, "st0.0") {
@@ -449,7 +461,7 @@ func TestPlaintextWarningMatchesZoneAcrossSpellings(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("want exactly 1 advisory, got %d: %v", len(got), got)
 			}
-			if !strings.Contains(got[0], "ASSIGNED A ZONE THAT IS NOT ENFORCED") {
+			if !strings.Contains(got[0], "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:") {
 				t.Errorf("bind-interface %q with a zone on %q must land in the ESCALATED "+
 					"group — they are the same xfrmi (same if_id), and reporting it as "+
 					"unzoned drops the escalation exactly where the operator has been told "+

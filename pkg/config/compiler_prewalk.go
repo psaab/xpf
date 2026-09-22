@@ -358,8 +358,12 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 
 	// #5619 secure-tunnel plaintext advisory. Route-based IPsec decrypts in
 	// the KERNEL XFRM stack and the plaintext is not adjudicated by xpf:
-	// FORWARD transit is fence-dropped while armed; INPUT/host-bound still
-	// reaches local input without tunnel-zone policy, session, NAT or screen.
+	// #10517: an installed divert queues both INPUT and FORWARD before
+	// host-inbound/transit policy, and the Enforcing capture pipeline drops
+	// every captured frame (inet zone-PASS counted as V1PermitSuppressed;
+	// bridge captures drop as L2Unsupported). The quarantine guard also
+	// fail-closes. INPUT can reach local input only during a divert-absent
+	// window without quarantine guard; no session, NAT or screen is applied.
 	// Before #5619 the config gave an affirmative FALSE signal: a zone
 	// on the tunnel interface commits cleanly and is programmed, so the posture
 	// READS as enforced. This states the truth at commit.
