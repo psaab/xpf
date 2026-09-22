@@ -1549,9 +1549,9 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// reply direction is admitted ahead of the fine DROP; the denied source's
 		// original-direction established inbound falls through to the DROP below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
-		// (3) Fine junos-host programs: per ingress zone, the exemption shields
-		// and an iifname-scoped jump to the zone's first-match subchain (#9504).
-		// Placed before the ND/PMTUD accepts (§6.4).
+		// (3) Fine junos-host programs: per ingress zone, the retained ident-RST
+		// shield and an iifname-scoped jump to the zone's first-match subchain
+		// (#9504). Placed before the ND/PMTUD accepts (§6.4).
 		for i, p := range programs {
 			emitJunosHostProgramJump(&rules, i, p)
 		}

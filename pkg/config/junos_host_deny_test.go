@@ -153,7 +153,7 @@ func TestJunosHostWholeProgramGate(t *testing.T) {
 	}
 }
 
-// TestJunosHostExemptionFlags proves the coarse-admit metadata: an
+// TestJunosHostExemptionFlags proves the coarse-admission metadata: an
 // ike-admitting zone sets CoarseAdmitsIKE (used by the #10524 overlap warning);
 // an ident-reset zone sets CoarseIdentResets (used by the retained terminal
 // RST); a full-admit (`any-service`) zone shadows ident-reset (the bare accept
@@ -186,7 +186,7 @@ func TestJunosHostExemptionFlags(t *testing.T) {
 		t.Error("{any-service, ident-reset} zone: 113 is coarse-accepted (shadowed) — must NOT be treated as RST (no fail-open)")
 	}
 	// #3226: `all` expands to the named union INCLUDING ident-reset, so the
-	// kernel chain does emit the RST rule and the shield must not drop it.
+	// retained ident RST remains aligned with the coarse service answer.
 	if p := mk("all", "ident-reset"); !p.CoarseIdentResets {
 		t.Error("{all, ident-reset} zone: `all` expands to include ident-reset, so 113 IS reset — want CoarseIdentResets (#3226)")
 	}

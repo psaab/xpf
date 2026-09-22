@@ -253,7 +253,8 @@ func TestJunosHostIKEOverlapWarning10524(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"block-bad"`, "to-zone junos-host", "application-any", "IKE",
-		"ge-0-0-1", "remove `ike`/`ipsec`", "#10524",
+		"ge-0-0-1", "remove `ike`/`ipsec`", "direct host-bound path",
+		"follow-up #10585", "#10524",
 	} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("overlap warning missing %q:\n%s", want, got[0])
@@ -290,6 +291,94 @@ func TestJunosHostIKEOverlapWarning10524(t *testing.T) {
 	if got := validateJunosHostDirectDeliveryWarnings(noOverlap); len(got) != 0 {
 		t.Fatalf("non-IKE app-any DENY should remain silent after rendering: %v", got)
 	}
+	filter10524 := func(warnings []string) []string {
+		var out []string
+		for _, warning := range warnings {
+			if strings.Contains(warning, "#10524") {
+				out = append(out, warning)
+			}
+		}
+		return out
+	}
+
+	t.Run("reject overlap", func(t *testing.T) {
+		reject := jhTestConfig()
+		reject.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ike"}
+		reject.Security.Policies = []*ZonePairPolicies{
+			{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{{
+				Name: "reject-bad", Action: PolicyReject,
+				Match: PolicyMatch{SourceAddresses: []string{"bad-net"}, Applications: []string{"any"}},
+			}}},
+		}
+		got := filter10524(validateJunosHostDirectDeliveryWarnings(reject))
+		if len(got) != 1 || !strings.Contains(got[0], `"reject-bad"`) {
+			t.Fatalf("expected exactly one REJECT overlap warning naming reject-bad, got %v", got)
+		}
+	})
+
+	t.Run("global policy overlap", func(t *testing.T) {
+		global := jhTestConfig()
+		global.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ike"}
+		global.Security.GlobalPolicies = []*Policy{{
+			Name: "global-block", Action: PolicyDeny,
+			Match: PolicyMatch{
+				SourceAddresses: []string{"bad-net"},
+				Applications:    []string{"any"},
+				ToZones:         []string{"junos-host"},
+			},
+		}}
+		got := filter10524(validateJunosHostDirectDeliveryWarnings(global))
+		if len(got) != 1 || !strings.Contains(got[0], `global "global-block"`) {
+			t.Fatalf("expected exactly one global overlap warning naming global-block, got %v", got)
+		}
+	})
+
+	for _, token := range []string{"all", "any-service"} {
+		t.Run("remedy names "+token, func(t *testing.T) {
+			shaped := jhTestConfig()
+			shaped.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{token}
+			shaped.Security.Policies = []*ZonePairPolicies{
+				{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{
+					jhDeny("block-"+token, []string{"bad-net"}, []string{"any"}),
+				}},
+			}
+			got := filter10524(validateJunosHostDirectDeliveryWarnings(shaped))
+			if len(got) != 1 {
+				t.Fatalf("expected exactly one %s overlap warning, got %v", token, got)
+			}
+			if !strings.Contains(got[0], "`"+token+"`") {
+				t.Fatalf("remedy must name %s admission: %s", token, got[0])
+			}
+		})
+	}
+
+	t.Run("per-interface netdev scope", func(t *testing.T) {
+		scoped := jhTestConfig()
+		scoped.Interfaces.Interfaces["ge-0/0/2"] = &InterfaceConfig{
+			Name: "ge-0/0/2",
+			Units: map[int]*InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.0.3.10/24"}},
+			},
+		}
+		zone := scoped.Security.Zones["untrust"]
+		zone.Interfaces = append(zone.Interfaces, "ge-0/0/2.0")
+		zone.InterfaceHostInbound = map[string]*HostInboundTraffic{
+			"ge-0/0/1.0": {SystemServices: []string{"ike"}},
+		}
+		scoped.Security.Policies = []*ZonePairPolicies{
+			{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{
+				jhDeny("block-scoped", []string{"bad-net"}, []string{"any"}),
+			}},
+		}
+		got := filter10524(validateJunosHostDirectDeliveryWarnings(scoped))
+		if len(got) != 1 {
+			t.Fatalf("expected exactly one scoped overlap warning, got %v", got)
+		}
+		if !strings.Contains(got[0], "ge-0-0-1") ||
+			strings.Contains(got[0], "ge-0-0-2") {
+			t.Fatalf("warning must name only the IKE-admitting interface: %s", got[0])
+		}
+	})
 }
 
 // TestJunosHostIKEOverlapWarningPartialCoverage10524 proves the advisory does
@@ -338,11 +427,17 @@ func TestJunosHostIKEOverlapWarningPartialCoverage10524(t *testing.T) {
 			proj.RenderedApplicationAnyPolicyKeysByZone)
 	}
 
-	var got10524 []string
+	var got10524, got4146 []string
 	for _, warning := range validateJunosHostDirectDeliveryWarnings(cfg) {
 		if strings.Contains(warning, "#10524") {
 			got10524 = append(got10524, warning)
+		} else if strings.Contains(warning, "#4146") {
+			got4146 = append(got4146, warning)
 		}
+	}
+	if len(got4146) != 1 {
+		t.Fatalf("expected one generic #4146 warning alongside #10524 under partial coverage, got %d: %v",
+			len(got4146), got4146)
 	}
 	if len(got10524) != 1 {
 		t.Fatalf("expected one #10524 warning despite partial coverage, got %d: %v",

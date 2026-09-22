@@ -60,9 +60,9 @@ host path. Three test layers pin this:
   rules) and DIFFS. It ALSO compares the PER-RULE `iifname` scope read
   byte-for-byte via netlink (`iifnameScopeByRule`) — NOT a global union —
   because google/nftables v0.3.0 renders anonymous string-set elements
-  empty in `nft list`, so a scope move/widen between a narrow IKE/ident
-  per-interface exemption and the broad zone deny that preserves the union
-  is invisible to the text diff and a union check (#6405). Mutation-
+  empty in `nft list`, so a scope move/widen between retained ident-RST
+  scope and IKE warning metadata (or the broad zone deny) is invisible to
+  the text diff and a union check (#6405). Mutation-
   sensitivity sub-cases (widened daddr, dropped `saddr !=`, weakened
   verdict, dropped unzoned deny, dropped counter, and an iifname
   exemption-widen that preserves the global union) assert the netlink dump
@@ -177,15 +177,14 @@ those types into the self-contained spec structs in `netlink_spec.go`.
   running to the end of the range. Dropping the end for prefixes that DO
   have a valid next address would turn every interval open-ended, a total
   fail-open; `TestOrdinaryPrefixesStillGetTheirEnd_8597` is that control.
-- The junos-host `iifname { a, b }` anonymous set stores byte-correct
-  16-byte NUL-padded keys, but google/nftables v0.3.0 does not emit the
-  `NFTA_SET_USERDATA` nft's `list` uses to render string-typed anonymous
-  sets, so `nft list` shows `{ "", "" }`. The scope is still enforced
-  correctly (verified) — the T1 parity test canonicalizes the iifname-set
-  text and compares the decoded element bytes PER RULE (`iifnameScopeByRule`),
-  NOT as a global union: a scope move/widen between the narrow IKE/ident
-  per-interface exemption and the broad zone deny that preserves the union
-  is a fail-open a union check misses (#6405).
+  `iifname { a, b }` anonymous set stores byte-correct 16-byte NUL-padded keys,
+  but google/nftables v0.3.0 does not emit the `NFTA_SET_USERDATA` nft's
+  `list` uses to render string-typed anonymous sets, so `nft list` shows
+  `{ "", "" }`. The scope is still enforced correctly (verified) — the T1 parity
+  test canonicalizes the iifname-set text and compares the decoded element bytes
+  PER RULE (`iifnameScopeByRule`), NOT as a global union: a scope move/widen
+  between the retained ident-RST scope, IKE warning metadata, and the broad zone
+  deny that preserves the union is a fail-open a union check misses (#6405).
 - lo0 filter ports and DSCP are RESOLVED numerically at build time via the
   same SSOT the compile path uses (`config.ResolveFilterPortRange`,
   `dataplane.DSCPValues`) — the same resolution nft applies to the raw

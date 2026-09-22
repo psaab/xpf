@@ -28,10 +28,10 @@ func mutBuild(t *testing.T, build func(p *nlPlan)) string {
 }
 
 // TestJunosHostIKEAcceptDeleted10524 is the pure-netlink Cell 1 pin. With an
-// application-any deny and coarse IKE admission, the jump emitter must queue
-// only the fine-chain jump: an IKE ACCEPT ahead of it would terminally bypass
-// the fine chain. Restoring the old netlink shield makes this fail with two
-// rules and an ACCEPT verdict in the first rule.
+// application-any deny and coarse IKE admission, this ident-disabled fixture
+// must queue only the fine-chain jump: an IKE ACCEPT ahead of it would
+// terminally bypass the fine chain. Restoring the old netlink shield makes this
+// fail with two rules and an ACCEPT verdict in the first rule.
 func TestJunosHostIKEAcceptDeleted10524(t *testing.T) {
 	p := newBuildPlan(t, "xpf_10524", hostInboundPriority)
 	emitJunosHostProgramJumpNetlink(p, 0, JunosHostProgram{

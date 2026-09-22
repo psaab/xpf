@@ -70,7 +70,10 @@ type JunosHostDenyRule struct {
 	L4          []JunosHostDenyL4
 }
 
-// JunosHostProgram mirrors dpuserspace.JunosHostProgram.
+// JunosHostProgram mirrors dpuserspace.JunosHostProgram. The IKE fields remain
+// in this parity shape for config/projection tests and warning metadata; the
+// netlink renderer never emits an IKE ACCEPT from them. IdentResetNetdevs is
+// still rendered as the retained terminal RST scope.
 type JunosHostProgram struct {
 	Zone                  string
 	IngressIfnames        []string

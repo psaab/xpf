@@ -36,19 +36,18 @@ type JunosHostProgram struct {
 	// RulesV4 / RulesV6 are the projected rules (config SSOT), each family in
 	// first-match order.
 	RulesV4 []config.JunosHostDenyRule
-	RulesV6 []config.JunosHostDenyRule
-	// CoarseAdmitsIKE / CoarseIdentResets describe the effective coarse
-	// fine-eligible-L4 verdicts. CoarseIdentResets drives the retained terminal
-	// ident RST; CoarseAdmitsIKE plus IKEExemptNetdevs drives the #10524 overlap
-	// advisory. The former IKE ACCEPT shield was deleted.
+	// CoarseAdmitsIKE / CoarseIdentResets are projection metadata. The daemon
+	// uses CoarseIdentResets with HasApplicationAnyDeny for the retained ident
+	// RST; CoarseAdmitsIKE and IKEExemptNetdevs are retained for projection
+	// parity/tests and warning metadata, not rendered.
 	CoarseAdmitsIKE       bool
 	CoarseIdentResets     bool
 	HasApplicationAnyDeny bool
 	// IKEExemptNetdevs / IdentResetNetdevs are the SUBSET of IngressIfnames whose
 	// effective per-interface host-inbound set admits IKE / RSTs ident (#5565).
 	// The daemon uses IdentResetNetdevs for the retained ident RST scope;
-	// IKEExemptNetdevs remains metadata for the #10524 warning and is not emitted
-	// as an IKE ACCEPT. Both subsets are sorted and scoped to IngressIfnames.
+	// IKEExemptNetdevs is warning metadata and is not emitted as an IKE ACCEPT.
+	// Both subsets are sorted and scoped to IngressIfnames.
 	IKEExemptNetdevs  []string
 	IdentResetNetdevs []string
 }
