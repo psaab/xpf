@@ -231,6 +231,17 @@ func TestBatchDeleteV4SurfacesPerKeyErrorAfterNotFound(t *testing.T) {
 	if deleted != 3 {
 		t.Fatalf("batchDeleteV4 deleted = %d, want 3 successful deletes", deleted)
 	}
+	// The partial is NOT a prefix: the boom key's row is retained (the hole)
+	// while later tail keys were still deleted. Consumers must not treat
+	// [:deleted] as the deleted set (#10598).
+	if !dp.presentV4[keys[3]] {
+		t.Errorf("boom key index 3 was dropped from the table, want retained (failed delete keeps the row)")
+	}
+	for _, idx := range []int{0, 2, 4} {
+		if dp.presentV4[keys[idx]] {
+			t.Errorf("key index %d survived, want deleted", idx)
+		}
+	}
 
 	attempted := make(map[SessionKey]bool, len(dp.attempted))
 	for _, k := range dp.attempted {
@@ -263,6 +274,15 @@ func TestBatchDeleteV6SurfacesPerKeyErrorAfterNotFound(t *testing.T) {
 	}
 	if deleted != 3 {
 		t.Fatalf("batchDeleteV6 deleted = %d, want 3 successful deletes", deleted)
+	}
+	// Non-prefix partial, V6 twin of the V4 hole pin above (#10598).
+	if !dp.presentV6[keys[3]] {
+		t.Errorf("v6 boom key index 3 was dropped from the table, want retained (failed delete keeps the row)")
+	}
+	for _, idx := range []int{0, 2, 4} {
+		if dp.presentV6[keys[idx]] {
+			t.Errorf("v6 key index %d survived, want deleted", idx)
+		}
 	}
 
 	attempted := make(map[SessionKeyV6]bool, len(dp.attemptedV6))
