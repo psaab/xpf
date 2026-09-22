@@ -3618,6 +3618,7 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
                 &forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                None,
             );
         }
         // Per-pass control drain (mirrors the control thread collecting
@@ -3904,6 +3905,7 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
                 &forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                None,
             );
         }
         delivered += export_buffer
@@ -7771,6 +7773,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
 
     // Binding-independent consumer 1: shared session table cleared.
@@ -7941,6 +7944,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             &forwarding,
             &runtime_reader,
             &mut worker_lossless_wedged,
+            None,
         );
     };
     let mut delete_count = 0usize;
@@ -8158,6 +8162,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
         let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         let payload = frames
@@ -8297,6 +8302,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
     let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let payload = frames
@@ -8394,6 +8400,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
 
     assert!(
@@ -8495,6 +8502,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         ),
         "CommandExport echo must not arm loss-of-sync",
     );
@@ -8534,6 +8542,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         ),
         "LossResync event-stream delivery must remain lossless",
     );
@@ -8659,6 +8668,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
     let elapsed = start.elapsed();
 
@@ -8791,6 +8801,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
         all_latched &= out_of_sync;
     }
@@ -8918,6 +8929,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
     };
 
@@ -11347,6 +11359,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        None,
     );
 
     assert_eq!(
@@ -12537,6 +12550,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            None,
         );
         std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>()
     };

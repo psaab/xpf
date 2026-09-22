@@ -9731,3 +9731,37 @@ fn bulk_export_includes_held_imported_promoted_and_fabric_ingress_10317() {
         "worker-local replicas must not duplicate the authoritative export"
     );
 }
+
+#[test]
+fn bare_tuple_identity_survives_scoped_reinstall_10512() {
+    let mut table = SessionTable::new();
+    let mut old_key = key_v4();
+    old_key.routing_domain = 7;
+    assert!(table.install_with_protocol_with_origin(
+        old_key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let old_id = table.session_id_for(&old_key);
+    assert_ne!(old_id, 0);
+    table.delete(&old_key);
+
+    let mut new_key = old_key.clone();
+    new_key.routing_domain = 9;
+    assert!(table.install_with_protocol_with_origin(
+        new_key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        2_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let new_id = table.session_id_for_bare_tuple(&old_key);
+    assert_ne!(new_id, 0);
+    assert_ne!(new_id, old_id);
+}

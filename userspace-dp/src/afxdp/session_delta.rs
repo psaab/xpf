@@ -123,7 +123,54 @@ pub(super) fn purge_close_table_leg_is_stale(
 /// authorization atomically (see the flush loop below) instead of trusting
 /// this answer across the event-delivery block.
 ///
-/// Ordinary closes never reach here (callers check `purge_retirement` first).
+/// Close deltas carry the identity that produced them when available. If the
+/// worker has already installed a different live identity for the same
+/// canonical tuple, the close is stale and must not mutate or emit teardown.
+pub(super) fn close_delta_is_stale_incarnation(
+    delta: &SessionDelta,
+    current_sessions: Option<&crate::session::SessionTable>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) -> bool {
+    if delta.kind != SessionDeltaKind::Close {
+        return false;
+    }
+    if let Some(sessions) = current_sessions {
+        let current_id = sessions.session_id_for_bare_tuple(&delta.key);
+        let current_present = sessions.contains_bare_tuple(&delta.key);
+        if delta.session_id == 0 {
+            if current_present {
+                return true;
+            }
+        } else if current_id != 0 && current_id != delta.session_id {
+            return true;
+        }
+    }
+    super::shared_ops::lock_shared_recover(shared_sessions)
+        .values()
+        .any(|entry| {
+            let mut candidate = entry.key.clone();
+            let mut close_key = delta.key.clone();
+            candidate.routing_domain = 0;
+            candidate.discriminator = Default::default();
+            close_key.routing_domain = 0;
+            close_key.discriminator = Default::default();
+            if candidate != close_key {
+                return false;
+            }
+            if delta.session_id == 0 {
+                // An explicit ordinary close can carry no id while its
+                // pre-delete shared row is still present at drain time. Only
+                // a different scoped key proves a replacement here; when the
+                // worker table is available, contains_bare_tuple above also
+                // catches same-key reincarnations before this shared fallback.
+                entry.key != delta.key
+            } else {
+                entry.key != delta.key
+                    || (entry.session_id != 0 && entry.session_id != delta.session_id)
+            }
+        })
+}
+
 pub(super) fn purge_retirement_close_is_stale(
     shared_runtime: &RuntimeViewReader,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -151,10 +198,7 @@ pub(super) fn purge_close_cancel_keys(delta: &SessionDelta, stale: bool) -> Opti
             return None;
         }
         // The purge preserved or separately retired the companion, so
-        // deriving the reverse here would cancel queued flows for a session
-        // the walk deliberately kept. Pass the key twice (the
-        // loop_body/mod.rs:978 idiom): matching is per-key, so the forward
-        // cancels exactly once.
+        // cancel exactly the forward key once.
         return Some((delta.key.clone(), delta.key.clone()));
     }
     Some((
@@ -170,8 +214,33 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
     shared_runtime: &RuntimeViewReader,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     deltas: &[SessionDelta],
-) {
-    for delta in deltas {
+    current_sessions: Option<&mut crate::session::SessionTable>,
+) -> usize {
+    for (delta_index, delta) in deltas.iter().enumerate() {
+        // Plan §2.2: worker-local mutation denial is non-blocking. A failed
+        // InstallPermit enters the worker's bounded retry slot; it never
+        // synchronously waits for a coordinator lease while the worker must
+        // continue draining commands. The caller requeues this delta suffix
+        // and retries on a later poll, preserving the close and its cleanup.
+        let _close_install_permits = if delta.kind == SessionDeltaKind::Close {
+            let close_keys = [
+                delta.key.clone(),
+                reverse_session_key(&delta.key, delta.decision.nat),
+            ];
+            match crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs(close_keys) {
+                Ok(permits) => permits,
+                Err(_) => return delta_index,
+            }
+        } else {
+            Vec::new()
+        };
+        if close_delta_is_stale_incarnation(
+            delta,
+            current_sessions.as_deref(),
+            shared_sessions,
+        ) {
+            continue;
+        }
         // Cancelled flows are DROPPED, not requeued
         // (`cancel_queued_flow_on_binding` recycles only the UMEM frame), so
         // a close the drain will drop must cancel nothing: the session is
@@ -196,6 +265,7 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
         }
         apply_shared_recycles_to_bindings(bindings, binding_lookup, shared_recycles);
     }
+    deltas.len()
 }
 
 /// Convert one internal `SessionDelta` into the JSON `SessionDeltaInfo` the
@@ -493,6 +563,7 @@ pub(super) fn flush_session_deltas(
     shared_runtime: &RuntimeViewReader,
     // #5468: per-drain-cycle aggregate lossless-wedge latch (see doc above).
     worker_lossless_wedged: &mut bool,
+    mut current_sessions: Option<&mut crate::session::SessionTable>,
 ) -> bool {
     let zone_name_to_id = &forwarding.zone_name_to_id;
     let zone_id_to_name = &forwarding.zone_id_to_name;
@@ -512,23 +583,13 @@ pub(super) fn flush_session_deltas(
     // start out-of-sync and never attempt another lossless push — the aggregate
     // worker-loop wait stays ~1 budget regardless of the owned-session count K.
     let mut event_stream_out_of_sync = *worker_lossless_wedged;
-    for delta in deltas {
-        // #9752 round 4 item 3: a purge-retirement close is conditional on
-        // STILL being due when the drain runs, and the presence half of
-        // that authorization is BOUND to the removal — one lock hold, no
-        // release between. A check-then-delete here would let a concurrent
-        // republish land after the check (the event delivery below blocks)
-        // and be destroyed by the unconditional removal.
-        //
-        // TABLE leg first (lock-free latest load): re-added → stale → drop
-        // the whole delta, so a valid session's republished rows (and its
-        // HA presence) survive. Then the ATOMIC presence leg: the purge
-        // removed shared authority on accept and emits nothing on decline,
-        // so any present entry is a post-purge republish — decline and drop
-        // the whole delta. Absent → authorized; the later unconditional
-        // shared removal is skipped for purge closes (it would reintroduce
-        // the race: a republish between here and there must survive).
-        // Ordinary closes skip both (flag check first: no behavior change).
+    for (delta_index, delta) in deltas.iter().enumerate() {
+        // #10512: the plan's bounded worker retry contract forbids dropping a
+        // close when its install permit is busy. Requeue this suffix before
+        // returning so the next worker poll retries cleanup and flush.
+        // The caller's current SessionTable is the durable retry slot.
+        // Non-worker test callers pass None and only exercise non-contention
+        // paths.
         if delta.kind == SessionDeltaKind::Close
             && delta.purge_retirement
             && purge_close_table_leg_is_stale(shared_runtime, delta)
@@ -543,8 +604,11 @@ pub(super) fn flush_session_deltas(
             match crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs(close_keys) {
                 Ok(permits) => permits,
                 Err(_) => {
+                    if let Some(sessions) = current_sessions.as_deref_mut() {
+                        sessions.requeue_deltas_front(&deltas[delta_index..]);
+                    }
                     event_stream_out_of_sync = true;
-                    continue;
+                    break;
                 }
             }
         } else {
@@ -564,6 +628,15 @@ pub(super) fn flush_session_deltas(
             ) {
                 continue;
             }
+        }
+        if close_delta_is_stale_incarnation(
+            delta,
+            current_sessions.as_deref(),
+            shared_sessions,
+        ) {
+            drop(_close_install_permits);
+            event_stream_out_of_sync = true;
+            continue;
         }
         if delta.kind == SessionDeltaKind::Close {
             if cfg!(feature = "debug-log") {
