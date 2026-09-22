@@ -2,21 +2,17 @@
 
 ## Status
 
-**DRAFT v3 — round-1 reviewer adjudication applied; plan-only round.**
+**READY v4 — implementation landed; plan and code-review folds applied.**
 
-- Base `b71c52d60`; branch `fix/10490-showaudit-discovery`.
-- STEP-0: NOT fixed. The evidence revision
-  `1a6952b61ef5f7dcf0fdd1786d91b14c9bb3f705` and HEAD have no diff on
-  the four evidence paths; `gh pr list --search "10490"` was empty;
-  no merged PR touches the gate or quarantine call sites. The scoped
-  gate test passed at HEAD, so the defect is live while the gate is
-  green:
-  `go test ./pkg/showaudit/ -run TestEveryBuilderDropPredicateIsRegistered6534 -count=1`.
-- This round changes documentation only. No production code, gate code,
-  or tests are part of this branch.
-- Round-1 review dispositions: reviewer A PLAN-NEEDS-MINOR and reviewer
-  B PLAN-NEEDS-MAJOR. Their required census, structured-surface,
-  ZoneIDs, ifZone, and sibling-order decisions are recorded below.
+- Base `f4bae0a5a`; branch `fix/10490-showaudit-discovery`.
+- STEP-0 (plan-time) established the live discovery defect: the quarantine
+  builders and show surfaces lacked a #6534 family row. This branch now
+  fixes discovery while retaining the existing runtime SSOT and behavior.
+- Implementation landed in `0ddaebe25`, `338bcdbc1`, and `68daa167d`;
+  #10489 remains the live successor for the non-nil renderer census.
+- Round-1 reviewers returned PLAN-NEEDS-MINOR and PLAN-NEEDS-MAJOR;
+  Delta-3 confirmed the folded plan READY. Code reviewers found no
+  production or test defects; their docs-only findings are folded here.
 
 ### Joint implementation contract (locked with #10489)
 
@@ -149,6 +145,7 @@ pkg/api/security.go:zonesHandler
 pkg/api/sessions.go:buildSessionView
 pkg/api/sessions.go:sessionZonePairHandler
 pkg/api/stats.go:ifaceStatsHandler
+pkg/cli/apply.go:syslogZoneNameMap
 pkg/cli/cli_request_testcmd.go:testSecurityZone
 pkg/cli/cli_show_cluster.go:showChassisClusterStatus
 pkg/cli/cli_show_flow.go:showFlowSession
@@ -165,7 +162,6 @@ pkg/cli/cli_show_security_screen.go:showScreen
 pkg/cli/cli_show_security_screen.go:showScreenIdsOption
 pkg/cli/cli_show_security_screen.go:showScreenIdsOptionDetail
 pkg/cli/cli_show_security_screen.go:showScreenStatisticsAll
-pkg/cli/apply.go:syslogZoneNameMap
 pkg/cli/session_filter.go:populateIfaceMaps
 pkg/grpcapi/server_helpers.go:allInterfaceNames
 pkg/grpcapi/server_nat.go:GetNATDestination
@@ -284,9 +280,10 @@ rebuilding a subtly different name set.
    `pkg/cli/cli_show_security_zones.go:showZonesDisplay`. It is a text
    inventory path and proves the detector has at least one true positive;
    no temporary marker and no new exemption is allowed.
-5. Record RED-on-revert: reverting the alias call must fail the exact
-   builder registry test naming the alias; reverting the canary's reason
-   call must fail the exact census naming `showZonesDisplay`.
+5. Record RED-on-revert: reverting all three alias calls must fail the
+   exact builder registry test naming `ZoneQuarantineExclusions`;
+   reverting the canary's reason call must fail the exact census naming
+   `showZonesDisplay`.
 6. At landing, re-run the direct-call census: before cutover, exactly 6
    non-test direct SSOT calls in 5 files; after cutover, exactly 4 old
    calls in 4 files (the 3 non-builder consumers plus the wrapper body)
@@ -302,7 +299,7 @@ long-term by the Option-C follow-up.
 2. Triage every remaining entry in the 52-entry list. The five agreed
    operator inventory paths are:
 
-   | Path | v2 disposition | Reason |
+   | Path | Disposition | Reason |
    |---|---|---|
    | `pkg/cli/cli_show_security_zones.go:showZonesDisplay` | ANNOTATE in #10490 | Permanent text canary and local inventory surface |
    | `pkg/grpcapi/server_show_zones.go:GetZones` | EXEMPT in #10489 | Structured wire has no reason/presence slot; cite structured-wire follow-up |
@@ -480,9 +477,9 @@ structured exemptions are the explicitly named `GetZones` and
   remain real; #10490 adds no exemption. When #10489 drains the row,
   only exact no-Zone-value helpers and the two named structured handlers
   may be added, each with a written rationale; no package wildcard.
-- RED-on-revert evidence in the PR: remove one alias call and observe
-  the named builder-registry failure; remove the canary reason call and
-  observe the named census failure.
+- RED-on-revert evidence in the PR: remove all three alias calls and
+  observe the named builder-registry failure; remove the canary reason call
+  and observe the named census failure.
 
 ### Agreement and reachability
 
@@ -501,8 +498,9 @@ structured exemptions are the explicitly named `GetZones` and
 
 ## Out of scope
 
-- No production code in this plan-only branch; no gate implementation,
-  renderer implementation, or wire change lands here.
+- No additional production code, gate implementation, renderer
+  implementation, or wire change is proposed beyond the implementation
+  recorded above.
 - The independent u04 `LastSnapshotRejectReasons` show gap
   (`manager.go:233`, `protocol_status.go:81`,
   `metrics_userspace.go:170`) remains a separate issue.
@@ -517,7 +515,7 @@ structured exemptions are the explicitly named `GetZones` and
   not another implementation in this PR.
 - Historical `_Log.md` and review-archive prose.
 
-## Open questions (resolved for DRAFT v3)
+## Open questions (resolved for READY v4)
 
 1. **Wrapper or rename?** Wrapper. The 3 non-builder callers gain no
    gate value from a rename; true rename costs 6 prod + 2 test files +
