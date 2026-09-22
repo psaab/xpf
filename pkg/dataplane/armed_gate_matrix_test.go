@@ -173,9 +173,10 @@ var managerMethodClasses = map[string]string{
 	// membership under m.mu, same class as the accessors they replace on the
 	// 1 Hz status path. SetLinkForTest is a test seam (see its doc comment) and
 	// touches no kernel state, so it classifies the same way.
-	"XDPEntryPrograms":   "catG",
-	"IsVLANSubInterface": "catG",
-	"SetLinkForTest":     "catG",
+	"XDPEntryPrograms":     "catG",
+	"IsVLANSubInterface":   "catG",
+	"SetLinkForTest":       "catG",
+	"SetDetachDebtForTest": "catG",
 	// #9725/#10302: link membership is only a candidate set; these expose the
 	// kernel-truth count/ifindex census and wake-only observer to the daemon gate.
 	"AttachedXDPLinkCount":     "catG",
@@ -244,8 +245,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(inventory) != 144 {
-		t.Fatalf("exported *Manager method inventory = %d, want 144 (the 140-method baseline plus the #9725 kernel-truth XDP-link count and wake-only observer registration, the #10302 provenance-bearing ifindex census, and the #10519 post-acceptance detach-debt reconciler; reconcile the count or the plan)", len(inventory))
+	if len(inventory) != 145 {
+		t.Fatalf("exported *Manager method inventory = %d, want 145 (the 140-method baseline plus the #9725 kernel-truth XDP-link count and wake-only observer registration, the #10302 provenance-bearing ifindex census, and the #10519 post-acceptance detach-debt reconciler plus test debt seeder; reconcile the count or the plan)", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {

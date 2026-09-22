@@ -93,17 +93,27 @@ func (m *Manager) withAttachedXDPFence(fn func([]int) error) error {
 	m.xdpOwnershipMu.RLock()
 	defer m.xdpOwnershipMu.RUnlock()
 	m.mu.Lock()
-	out := make([]int, 0, len(m.xdpLinks))
+	cands := make([]struct {
+		ifindex int
+		l       link.Link
+	}, 0, len(m.xdpLinks))
 	for ifindex, l := range m.xdpLinks {
 		if _, owed := m.detachDebt[ifindex]; owed {
 			continue
 		}
-		reported, ok := xdpLinkIfindexFn(l)
-		if ok && reported == ifindex && ifindex > 0 {
-			out = append(out, ifindex)
-		}
+		cands = append(cands, struct {
+			ifindex int
+			l       link.Link
+		}{ifindex: ifindex, l: l})
 	}
 	m.mu.Unlock()
+	out := make([]int, 0, len(cands))
+	for _, cand := range cands {
+		reported, ok := xdpLinkIfindexFn(cand.l)
+		if ok && reported == cand.ifindex && cand.ifindex > 0 {
+			out = append(out, cand.ifindex)
+		}
+	}
 	sort.Ints(out)
 	return fn(out)
 }

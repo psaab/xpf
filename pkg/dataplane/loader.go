@@ -696,6 +696,13 @@ func (m *Manager) swapXDPEntryProg(name string) error {
 	return nil
 }
 
+func tagDetachLinkError10519(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // DetachXDP detaches the XDP program from the given interface and
 // removes its pin file.
 func (m *Manager) DetachXDP(ifindex int) error {
@@ -721,16 +728,25 @@ func (m *Manager) DetachXDP(ifindex int) error {
 			"ifindex", ifindex, "err", err)
 		return fmt.Errorf("detach XDP from ifindex %d: clear flag: %w", ifindex, err)
 	}
-	l.Unpin()
+	unpinErr := l.Unpin()
+	if unpinErr != nil && !errors.Is(unpinErr, os.ErrNotExist) {
+		// A failed Unpin leaves the pinned kernel link live. Keep the handle
+		// tracked for a later reconciliation, and fence it out as debt rather
+		// than closing a handle whose pin still owns the attachment. ENOENT is
+		// benign: an earlier successful Unpin already removed the pin.
+		m.noteDetachDebt(ifindex)
+		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("unpin", unpinErr))
+	}
 	closeErr := l.Close()
 	// Claim cleanup succeeded; the link is conceptually gone whether
 	// or not Close errored. Remove from m.xdpLinks so a retry doesn't
-	// infinite-loop on a stuck-close link, but surface the close
-	// error.
+	// infinite-loop on a stuck-close link, but surface the close error.
 	m.deleteXDPLink(ifindex)
 	m.ReconcileDetachDebt([]int{ifindex})
 	if closeErr != nil {
-		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex, closeErr)
+		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("close", closeErr))
 	}
 	slog.Info("detached XDP program", "ifindex", ifindex)
 	return nil
@@ -1221,9 +1237,17 @@ func (m *Manager) DetachTC(ifindex int) error {
 	if !exists {
 		return nil
 	}
-	l.Unpin()
-	if err := l.Close(); err != nil {
-		return fmt.Errorf("detach TC from ifindex %d: %w", ifindex, err)
+	unpinErr := l.Unpin()
+	if unpinErr != nil && !errors.Is(unpinErr, os.ErrNotExist) {
+		// Keep the live handle for a later retry when the pin removal itself
+		// failed. ENOENT means the link was already unpinned by an earlier
+		// pass, so Close remains the only cleanup step.
+		return fmt.Errorf("detach TC from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("unpin", unpinErr))
+	}
+	if closeErr := l.Close(); closeErr != nil {
+		return fmt.Errorf("detach TC from ifindex %d: %w", ifindex,
+			tagDetachLinkError10519("close", closeErr))
 	}
 	m.deleteTCLink(ifindex)
 	slog.Info("detached TC egress program", "ifindex", ifindex)

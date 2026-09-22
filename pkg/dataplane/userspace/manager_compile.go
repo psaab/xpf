@@ -537,11 +537,9 @@ func (m *Manager) applyCompiledSnapshot(
 		// classifier maps above already dropped the obsolete ifindexes from
 		// userspace_ingress_ifaces, so the kernel attachment set may follow.
 		// The publish is deferred, not skipped — this branch still returns nil
+		// and its snapshot is what every later reader enforces.
 		detachErr := m.syncInterfaceAttachments(result, snap)
 		m.noteDetachDebtLocked(result, detachErr)
-		if detachErr != nil {
-			m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
-		}
 		m.cfg = ucfg
 		m.publishHAWatchdogSnapshotLocked()
 		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
@@ -610,6 +608,7 @@ func (m *Manager) applyCompiledSnapshot(
 	// immediately after the acceptance rather than at the tail of this function
 	// so the later status/HA/forwarding steps — every one of which can fail
 	// AFTER the snapshot is already the authority — cannot strand a stale
+	// attachment for an interface the applied snapshot no longer adjudicates.
 	detachErr := m.syncInterfaceAttachments(result, snap)
 	m.noteDetachDebtLocked(result, detachErr)
 	if detachErr != nil {

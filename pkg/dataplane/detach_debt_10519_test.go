@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,13 +12,14 @@ import (
 type detachDebtTestLink10519 struct {
 	link.Link
 	closeErr error
+	unpinErr error
 	closed   bool
 	unpinned bool
 }
 
 func (l *detachDebtTestLink10519) Unpin() error {
 	l.unpinned = true
-	return nil
+	return l.unpinErr
 }
 
 func (l *detachDebtTestLink10519) Close() error {
@@ -118,6 +120,49 @@ func TestDetachXDPCloseFailureRemovesFenceCandidate10519(t *testing.T) {
 	}
 }
 
+// T2b: an Unpin failure is observable while the pinned handle remains
+// recoverable. XDP retains the link and records detach debt so both fence
+// census paths omit it until a later retry can unpin and close it.
+func TestDetachXDPUnpinFailureRetainsAndRecoversFenceCandidate10519(t *testing.T) {
+	const ifindex = 10525
+	m := New()
+	l := &detachDebtTestLink10519{unpinErr: errors.New("injected link unpin failure")}
+	m.SetLinkForTest(ifindex, l, nil)
+	installDetachDebtIfindexProbe10519(t, l, ifindex)
+
+	err := m.DetachXDP(ifindex)
+	if err == nil || !strings.Contains(err.Error(), "unpin: injected link unpin failure") ||
+		!errors.Is(err, l.unpinErr) {
+		t.Fatalf("DetachXDP unpin error = %v, want tagged unpin failure", err)
+	}
+	if _, ok := m.XDPLinks()[ifindex]; !ok {
+		t.Fatal("unpin failure deleted xdpLinks entry; retry state was not retained")
+	}
+	if got := m.AttachedXDPIfindexes(); len(got) != 0 {
+		t.Fatalf("AttachedXDPIfindexes = %v, want debt member omitted", got)
+	}
+	if got := m.ReconcileDetachDebt(nil); len(got) != 1 || got[0] != ifindex {
+		t.Fatalf("detach debt after unpin failure = %v, want [%d]", got, ifindex)
+	}
+	if l.closed {
+		t.Fatal("unpin failure closed the live handle before the pin was removed")
+	}
+
+	l.unpinErr = nil
+	if err := m.DetachXDP(ifindex); err != nil {
+		t.Fatalf("DetachXDP unpin recovery: %v", err)
+	}
+	if _, ok := m.XDPLinks()[ifindex]; ok {
+		t.Fatal("successful unpin retry retained xdpLinks entry")
+	}
+	if got := m.ReconcileDetachDebt(nil); len(got) != 0 {
+		t.Fatalf("detach debt after unpin recovery = %v, want empty", got)
+	}
+	if !l.closed || !l.unpinned {
+		t.Fatalf("unpin-recovery link lifecycle = closed:%v unpinned:%v, want both", l.closed, l.unpinned)
+	}
+}
+
 // T6: TC retains its link on Close failure and returns the error. A healthy
 // second pass removes it, preserving TC's existing retryable lifecycle shape
 // while D1/D2 make the failure observable to the userspace reconciler.
@@ -135,10 +180,53 @@ func TestDetachTCCloseFailureRetainsAndRecovers10519(t *testing.T) {
 		t.Fatal("TC close failure deleted tcLinks entry; retry state was not retained")
 	}
 	l.closeErr = nil
+	l.unpinErr = os.ErrNotExist
 	if err := m.DetachTC(ifindex); err != nil {
-		t.Fatalf("DetachTC recovery: %v", err)
+		t.Fatalf("DetachTC recovery after prior unpin = %v", err)
 	}
 	if _, ok := m.TCLinks()[ifindex]; ok {
 		t.Fatal("successful TC retry retained tcLinks entry")
+	}
+
+	const initiallyUnpinnedIfindex = 10529
+	initiallyUnpinned := &detachDebtTestLink10519{unpinErr: os.ErrNotExist}
+	m.SetLinkForTest(initiallyUnpinnedIfindex, nil, initiallyUnpinned)
+	if err := m.DetachTC(initiallyUnpinnedIfindex); err != nil {
+		t.Fatalf("DetachTC initially-unpinned link: %v", err)
+	}
+	if _, ok := m.TCLinks()[initiallyUnpinnedIfindex]; ok {
+		t.Fatal("initially-unpinned TC retry retained tcLinks entry")
+	}
+}
+
+// T6b: TC returns before Close when Unpin fails, retaining the live handle for
+// a subsequent recovery pass.
+func TestDetachTCUnpinFailureRetainsAndRecovers10519(t *testing.T) {
+	const ifindex = 10526
+	m := New()
+	l := &detachDebtTestLink10519{unpinErr: errors.New("injected TC unpin failure")}
+	m.SetLinkForTest(ifindex, nil, l)
+
+	if err := m.DetachTC(ifindex); err == nil ||
+		!strings.Contains(err.Error(), "unpin: injected TC unpin failure") ||
+		!errors.Is(err, l.unpinErr) {
+		t.Fatalf("DetachTC unpin error = %v, want tagged unpin failure", err)
+	}
+	if _, ok := m.TCLinks()[ifindex]; !ok {
+		t.Fatal("TC unpin failure deleted tcLinks entry; retry state was not retained")
+	}
+	if l.closed {
+		t.Fatal("TC unpin failure closed the handle before the pin was removed")
+	}
+
+	l.unpinErr = nil
+	if err := m.DetachTC(ifindex); err != nil {
+		t.Fatalf("DetachTC unpin recovery: %v", err)
+	}
+	if _, ok := m.TCLinks()[ifindex]; ok {
+		t.Fatal("successful TC unpin retry retained tcLinks entry")
+	}
+	if !l.closed || !l.unpinned {
+		t.Fatalf("TC unpin-recovery lifecycle = closed:%v unpinned:%v, want both", l.closed, l.unpinned)
 	}
 }

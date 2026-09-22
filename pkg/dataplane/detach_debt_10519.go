@@ -21,9 +21,14 @@ import "sort"
 // plus event wakes), so the pinhole closes at most one tick after the debt is
 // recorded; no observer wake is needed.
 //
-// Lifecycle (all post-acceptance safe — see below):
+// Lifecycle:
 //   - set by DetachXDP on the flag-clear failure return, under the XDP
 //     ownership write lease it already holds;
+//   - pre-acceptance attach fallback detaches in compiler.go and
+//     attachUserspaceShimXDP may transiently add debt for interfaces the
+//     pending snapshot still intends to attach. The next post-acceptance
+//     reconciliation clears debt for allowed members; until then the census
+//     omission is the fail-closed availability window;
 //   - cleared by DetachXDP on the no-link no-op and on every entry delete
 //     (success and close-failure alike: an untracked ifindex is already
 //     absent from the census, so debt for it is meaningless);
@@ -51,6 +56,27 @@ import "sort"
 // kernel-truth seam: package var, default set here, tests restore via
 // t.Cleanup.
 var detachXDPFlagClearFn func(m *Manager, ifindex int, attached bool) error = (*Manager).setXDPAttachedFlag
+
+// SetDetachXDPFlagClearFnForTest replaces the DetachXDP claim-cleanup seam and
+// returns a restore function. It is intended only for unprivileged tests that
+// need to exercise the flag-clear failure arm.
+func SetDetachXDPFlagClearFnForTest(fn func(*Manager, int, bool) error) (restore func()) {
+	old := detachXDPFlagClearFn
+	if fn == nil {
+		detachXDPFlagClearFn = (*Manager).setXDPAttachedFlag
+	} else {
+		detachXDPFlagClearFn = fn
+	}
+	return func() {
+		detachXDPFlagClearFn = old
+	}
+}
+
+// SetDetachDebtForTest seeds fail-closed detach debt without a kernel handle.
+// It is a test seam for verifying the alarm's sticky outstanding-debt branch.
+func (m *Manager) SetDetachDebtForTest(ifindex int) {
+	m.noteDetachDebt(ifindex)
+}
 
 // noteDetachDebt records ifindex as intended-detached but detach-failed.
 // Caller holds the XDP ownership write lease (DetachXDP); the set itself is
