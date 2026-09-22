@@ -263,20 +263,49 @@ func TestApplyConfigRollbackWiresAuthorityHeal10485(t *testing.T) {
 	if apply == nil {
 		t.Fatal("applyConfigLocked declaration not found")
 	}
-	var heals int
+	var heals, joins int
 	ast.Inspect(apply.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == "healIpsecCaptureAuthorityAfterRollback" {
+		if !ok {
+			return true
+		}
+		switch selector.Sel.Name {
+		case "healIpsecCaptureAuthorityAfterRollback":
 			heals++
+		case "Join":
+			if len(call.Args) != 2 {
+				return true
+			}
+			for _, arg := range call.Args {
+				if ident, ok := arg.(*ast.Ident); ok && ident.Name == "healErr" {
+					joins++
+					break
+				}
+			}
 		}
 		return true
 	})
 	if heals != 1 {
 		t.Fatalf("applyConfigLocked authority-heal calls=%d, want exactly one", heals)
+	}
+	if joins != 1 {
+		t.Fatalf("applyConfigLocked errors.Join(…, healErr) calls=%d, want exactly one", joins)
+	}
+}
+
+func TestIpsecCaptureRollbackHealDuplicateSkipDoesNotBump10485(t *testing.T) {
+	d := &Daemon{}
+	dp := &captureAuthorityHealDP10485{}
+	d.dpCell.Store(&dpSlot{v: dp})
+	if err := d.healIpsecCaptureAuthorityAfterRollback(nil); err != nil {
+		t.Fatalf("duplicate-skip heal: %v", err)
+	}
+	if len(dp.calls) != 1 || dp.calls[0] != "republish" {
+		t.Fatalf("duplicate-skip calls=%v, want [republish] without FIB bump", dp.calls)
 	}
 }
 
@@ -572,9 +601,9 @@ func TestReconcileIpsecCaptureRejectsStaleSampleAfterRestore9506(t *testing.T) {
 
 func TestIpsecCaptureZeroRowStageTokenFence10485(t *testing.T) {
 	tests := []struct {
-		name    string
-		staged  *ipsecCaptureRuntime
-		token   uint64
+		name   string
+		staged *ipsecCaptureRuntime
+		token  uint64
 	}{
 		{name: "teardown", staged: nil, token: 41},
 		{name: "quarantine", staged: &ipsecCaptureRuntime{}, token: 42},
@@ -582,8 +611,8 @@ func TestIpsecCaptureZeroRowStageTokenFence10485(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := &Daemon{
-				ipsecCaptureStagePending:  true,
-				ipsecCaptureStaged:        tt.staged,
+				ipsecCaptureStagePending:    true,
+				ipsecCaptureStaged:          tt.staged,
 				ipsecCaptureStageGeneration: tt.token,
 			}
 			d.publishIpsecCaptureSnapshotAuthority(7, 9, tt.token-1)

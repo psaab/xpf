@@ -89,6 +89,10 @@ func Boot() dataplane.RuntimeDataPlane {
 
 type Manager struct {
 	bpfShim *dataplane.Manager
+	// compileUserspaceShimHook is nil in production. Tests use it to bypass
+	// the privileged XDP compile/attach leg while still driving Manager.Compile
+	// through snapshot construction and apply_snapshot publication.
+	compileUserspaceShimHook func(*config.Config) (*dataplane.CompileResult, error)
 
 	mu        sync.Mutex
 	sessionMu sync.Mutex // separate lock for session sync requests (Phase 3)

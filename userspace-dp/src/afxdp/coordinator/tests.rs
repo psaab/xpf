@@ -232,6 +232,66 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
     );
 }
 
+#[test]
+fn snapshot_published_empty_tunnel_rows_clear_generation_10485() {
+    use crate::protocol::snapshot::ConfigSnapshot;
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: Vec::new(),
+        ..Default::default()
+    };
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 0);
+    assert!(view.ipsec_tunnel_rows().is_empty());
+}
+
+#[test]
+fn snapshot_stop_inner_clears_published_tunnel_rows_10485() {
+    use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
+
+    let mut coordinator = Coordinator::new();
+    coordinator.validation = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 3,
+    };
+    let snapshot = ConfigSnapshot {
+        generation: 7,
+        fib_generation: 3,
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }],
+        ..Default::default()
+    };
+
+    coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
+    coordinator.publish_runtime_view();
+    assert_eq!(
+        coordinator.ha.runtime.load_full().ipsec_snapshot_generation(),
+        42
+    );
+
+    coordinator.stop_inner(false);
+    let view = coordinator.ha.runtime.load_full();
+    assert_eq!(view.ipsec_snapshot_generation(), 0);
+    assert!(view.ipsec_tunnel_rows().is_empty());
+}
+
 /// #6563: a `ForwardingState` that OWNS the given addresses, i.e. they are in
 /// the global local-address membership sets `local_v4`/`local_v6`. The
 /// emit-on-wire source gate admits exactly these.

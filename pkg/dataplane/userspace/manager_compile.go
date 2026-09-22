@@ -272,7 +272,13 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// xdp_main_prog for unsupported capabilities or failed XSK liveness: the
 	// userspace runtime must not require the legacy main XDP pipeline.
 	m.bpfShim.SelectUserspaceXDPShimEntryProgram()
-	result, err := m.bpfShim.CompileUserspaceShim(cfg)
+	var result *dataplane.CompileResult
+	var err error
+	if m.compileUserspaceShimHook != nil {
+		result, err = m.compileUserspaceShimHook(cfg)
+	} else {
+		result, err = m.bpfShim.CompileUserspaceShim(cfg)
+	}
 	if err != nil {
 		return nil, err
 	}
