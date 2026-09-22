@@ -1,4 +1,20 @@
 # Fabric Cross-Chassis Forwarding — Design & Bug Report
+> **Status (2026-09): the eBPF mechanism in this document is historical.**
+> The eBPF dataplane was retired (#1373/#1476): `bpf/xdp/xdp_zone.c`,
+> `bpf/xdp/xdp_conntrack.c`, and `pkg/dataplane/loader_ebpf.go` no longer
+> exist. `try_fabric_redirect()` remains only as an uncalled inline helper in
+> `bpf/headers/xpf_helpers.h`; there are no source call sites.
+>
+> **Live mechanism:** cross-chassis redirects now use the userspace AF_XDP
+> path, whose `resolve_fabric_redirect()` entry point in
+> `userspace-dp/src/afxdp/forwarding/fabric.rs` delegates fabric-list
+> selection to `resolve_fabric_redirect_from_list()`.
+> `buildFabricSnapshots()` in `pkg/dataplane/userspace/fabric.go` supplies
+> the fabric state; `pkg/dataplane/userspace/manager_fabric_sync.go` publishes
+> it to the helper, while `pkg/daemon/daemon_ha_fabric.go` resolves link and
+> peer state and triggers the refresh. Sections marked **historical** below
+> describe the retired eBPF design and are kept for lineage; the per-issue
+> sections from #1946 onward describe live userspace behavior.
 
 ## Problem Statement
 
@@ -21,7 +37,14 @@ window** exists where fw0 is WAN MASTER but not yet LAN MASTER. During this gap:
 
 ## Solution — Three-Layer Fix
 
-### Fix 1: BPF Fabric Cross-Chassis Redirect (Primary)
+### Fix 1: BPF Fabric Cross-Chassis Redirect (Primary) — HISTORICAL (eBPF era, retired #1373/#1476)
+
+**Historical — the BPF dataplane parts below no longer exist.** The BPF call
+sites (`bpf/xdp/xdp_zone.c`), the map registration
+(`pkg/dataplane/loader_ebpf.go`), and the old method home
+(`pkg/dataplane/maps.go`) are gone with the eBPF retirement, and
+`try_fabric_redirect()` has no in-tree callers. The live equivalent is the
+userspace AF_XDP redirect (see Status above).
 
 **Concept:** When `bpf_fib_lookup` returns `NO_NEIGH` or `NOT_FWDED` for an
 existing session, redirect the **original (pre-NAT) packet** to the peer via the
@@ -41,14 +64,14 @@ instead of wan/lan) doesn't matter.
 | File | Change |
 |------|--------|
 | `bpf/headers/xpf_maps.h` | `fabric_fwd_info` struct + `fabric_fwd` ARRAY map (1 entry) |
-| `bpf/headers/xpf_helpers.h` | `try_fabric_redirect()` inline helper |
+| `bpf/headers/xpf_helpers.h` | `try_fabric_redirect()` inline helper (retained AF_XDP shim/parity header; definition has no source call sites) |
 | `bpf/headers/xpf_common.h` | `GLOBAL_CTR_FABRIC_REDIRECT = 26` |
-| `bpf/xdp/xdp_zone.c` | Call `try_fabric_redirect()` in NO_NEIGH + NOT_FWDED paths |
+| `bpf/xdp/xdp_zone.c` (deleted) | Called `try_fabric_redirect()` in NO_NEIGH + NOT_FWDED paths (eBPF era) |
 | `pkg/dataplane/types.go` | Go `FabricFwdInfo` struct matching C layout |
-| `pkg/dataplane/maps.go` | `UpdateFabricFwd()` method on eBPF Manager |
-| `pkg/dataplane/loader_ebpf.go` | Register `fabric_fwd` map from zoneObjs |
+| `pkg/dataplane/maps.go` (moved to `pkg/dataplane/maps_fabric.go`) | `UpdateFabricFwd()` method on eBPF Manager |
+| `pkg/dataplane/loader_ebpf.go` (deleted) | Registered `fabric_fwd` map from zoneObjs (eBPF era) |
 | `pkg/dataplane/dataplane.go` | `UpdateFabricFwd()` in DataPlane interface |
-| `pkg/daemon/daemon.go` | `populateFabricFwd()` goroutine in `startClusterComms()` |
+| `pkg/daemon/daemon.go` (now `pkg/daemon/daemon_ha_fabric.go`) | `populateFabricFwd()` goroutine in `startClusterComms()` |
 
 **Anti-loop protection:** `try_fabric_redirect()` checks
 `ctx->ingress_ifindex == ff->ifindex` — packets arriving on the fabric interface
@@ -57,6 +80,8 @@ are never redirected back, preventing infinite loops.
 **Map population:** `populateFabricFwd()` runs as a goroutine, resolving:
 - Fabric interface ifindex + local MAC via `netlink.LinkByName()`
 - Peer MAC from ARP table via `netlink.NeighList()` (retries up to 30x at 2s intervals)
+
+#### Live userspace fabric-state refresh and selection (#124, #4038, #4082)
 
 **Event-driven refresh (`monitorFabricState`, #124):** a sibling goroutine
 subscribes to netlink link + neighbor updates and calls `triggerFabricRefresh()`
@@ -145,7 +170,7 @@ seconds to milliseconds.
 | `pkg/vrrp/manager.go` | Call `triggerPreemptNow()` in `ReleaseSyncHold()` |
 | `pkg/vrrp/vrrp_test.go` | 3 new tests for coordinated preemption |
 
-### Fix 3: BPF RST State Protection (Defense-in-depth)
+### Fix 3: BPF RST State Protection (Defense-in-depth) — HISTORICAL (eBPF era)
 
 **Concept:** In `handle_ct_hit_v4/v6`, when `META_FLAG_KERNEL_ROUTE` is set, skip
 the RST→CLOSED state transition. The kernel may drop the packet (no route), so
@@ -154,9 +179,9 @@ that won't be delivered.
 
 | File | Change |
 |------|--------|
-| `bpf/xdp/xdp_conntrack.c` | Skip state→CLOSED when `meta->meta_flags & META_FLAG_KERNEL_ROUTE` |
+| `bpf/xdp/xdp_conntrack.c` (deleted) | Skipped state→CLOSED when `meta->meta_flags & META_FLAG_KERNEL_ROUTE` (eBPF era) |
 
-## Bugs Found and Resolved
+## Bugs Found and Resolved (historical eBPF implementation)
 
 ### Bug 1: `fabric_fwd` map not registered in Go loader
 
@@ -185,7 +210,7 @@ cluster-lan-host.
 172.16.50.1 is not present in the Incus bridge setup. Not related to the fabric
 forwarding changes. LAN connectivity (ping 10.0.60.1) works correctly.
 
-## Verification Results
+## Verification Results (eBPF era)
 
 | Check | Result |
 |-------|--------|
@@ -198,7 +223,7 @@ forwarding changes. LAN connectivity (ping 10.0.60.1) works correctly.
 | LAN connectivity | Working (cluster-lan-host → 10.0.60.1) |
 | WAN connectivity | Pre-existing test env limitation (no upstream router) |
 
-## Commits
+## Historical eBPF Commits
 
 1. `dae87cb` — Fix TCP session death on VRRP failback: fabric cross-chassis redirect
    (46 files, 459 insertions, 29 deletions)
