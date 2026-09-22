@@ -269,11 +269,12 @@ Add path (`addVIPsLocked`, single-VIP instance):
    → failed, `ok()` false. RED pre-fix (currently applied): this is a
    synthetic contract pin for I1, not a demonstrated reachable producer; it
    justifies narrowing the fallback's dangerous direction.
-6. other errnos direct + annotated (`syscall.Errno(unix.EADDRNOTAVAIL)`,
-   `syscall.Errno(unix.EPERM)`) use neutral TLV text
-   (`"NLMSGERR_ATTR_MSG: address rejected"`, containing no `"exists"`) →
-   failed both pre- and post-fix. This pins the no-change complement rather
-   than relying on an unspecified annotation string.
+6. direct and annotated variants of other errnos
+   (`syscall.Errno(unix.EADDRNOTAVAIL)`, `syscall.Errno(unix.EPERM)`) →
+   failed. The annotated variants use neutral TLV text
+   (`"NLMSGERR_ATTR_MSG: address rejected"`, containing no `"exists"`); both
+   forms are green pre- and post-fix. This pins the no-change complement
+   rather than relying on an unspecified annotation string.
 7. ownership-gate wiring: drive `becomeMaster` with a resolvable fake link,
    `suppressGARP=true`, and an `annotatedErr` wrapping
    `syscall.Errno(unix.EEXIST)`. Assert `becomeMaster()` returns true, the
