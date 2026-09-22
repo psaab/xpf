@@ -69,10 +69,10 @@ func newAuthSyncNode(t *testing.T, key []byte, node int) *SessionSync {
 }
 
 // TestSyncAuthHandshakeBothKeyedAuthenticates verifies the happy path: two
-// keyed peers with the SAME PSK complete the mutual challenge-response, both
-// negotiate authenticated, and both derive the same per-connection frame key —
-// after which a sealed session frame round-trips. RED on revert: without the
-// handshake there is no authentication and no derived key.
+// keyed peers with the SAME PSK complete Noise_NNpsk0, both negotiate
+// authenticated, and derive complementary directional read/write keys before
+// a sealed session frame round-trips. RED on revert: without the handshake
+// there is no authentication and no directional frame key.
 func TestSyncAuthHandshakeBothKeyedAuthenticates(t *testing.T) {
 	key := []byte("shared-control-link-secret-key")
 	// #7163: the two ends must be DIFFERENT nodes. The prologue binds
@@ -181,18 +181,15 @@ func TestSyncAuthHandshakeMismatchedKeyRejected(t *testing.T) {
 // draft of #5078 shipped one and it was removed; a rolling key rollout is
 // handled by the procedure in pkg/cluster/README.md instead.
 //
-// RED on revert: make the legacy-peer ARM of performSyncHandshake return a nil
-// error (i.e. hand the frame back instead of dropping the connection) and this
-// test fails. This test is the SOLE catcher in pkg/cluster for that edit.
+// RED on revert: make performSyncHandshake accept the peer frame instead of
+// failing the Noise exchange and this test fails. The rejection must happen
+// before any peer frame can reach cluster state; this is the production
+// enforcement assertion.
 //
-// It is deliberately NOT "restore the grace in syncAuthDecision" — that revert
-// does NOT fail here, and the earlier comment claiming it would was wrong. The
-// arm rejects unconditionally and discards the decision's accept bit (see
-// sync_auth.go, "This arm rejects UNCONDITIONALLY"), so relaxing syncAuthDecision
-// alone changes nothing on this path. That revert is caught instead by
-// TestSyncAuthDecisionMatrix's legacy_peer_rejected_when_keyed /
-// unkeyed_peer_rejected_when_keyed rows, and by nothing else. The two tests
-// therefore cover DIFFERENT edits and neither is redundant.
+// This is deliberately a live-handshake assertion, not a policy-matrix-only
+// claim: changing an unused compatibility decision would not reach this path.
+// The keyed-peer matrix was removed with that dead helper; the handshake tests
+// here cover the behavior that actually runs.
 func TestSyncAuthHandshakeKeyedNodeRejectsLegacyPeer(t *testing.T) {
 	a := newAuthSync(t, []byte("psk"))
 
@@ -215,19 +212,14 @@ func TestSyncAuthHandshakeKeyedNodeRejectsLegacyPeer(t *testing.T) {
 	if ar.err == nil {
 		t.Fatalf("a keyed node must REJECT an unauthenticated peer, got mode=%d", ar.mode)
 	}
-	// Assert the REASON, not just that some error occurred. A nil frame key is
-	// the failure default of every error path in performSyncHandshake — a read
-	// timeout, a short HELLO, a write failure all produce it — so `err != nil`
-	// plus `key == nil` would still pass if the connection died for an
-	// unrelated reason and never reached the legacy-peer arm at all. This
-	// string is also the operator-facing diagnostic that arm exists to emit.
-	// #7163: the reason string moved with the construction. The property the
-	// original assertion protected is UNCHANGED and still asserted — the
-	// rejection must be attributable to the handshake refusing this peer's
-	// frame, not to an unrelated death (a read timeout, a write failure), all
-	// of which also produce an error and empty keys. Under Noise the
-	// attributable diagnostic is the frame the peer sent where a Noise message
-	// was required.
+
+// Assert the REASON, not just that some error occurred. A nil frame key is
+// the failure default of every error path in performSyncHandshake — a read
+// timeout or a write failure also produces it — so `err != nil` plus
+// `key == nil` would still pass if the connection died for an unrelated
+// reason. Under Noise this peer sent a session frame where msg2 was required,
+// so the diagnostic must identify the rejected Noise message rather than an
+// unrelated I/O failure.
 	if !strings.Contains(ar.err.Error(), "noise") {
 		t.Fatalf("rejection must come from the Noise handshake and name the cause; "+
 			"got %q, want it to mention the noise exchange", ar.err.Error())
@@ -238,103 +230,13 @@ func TestSyncAuthHandshakeKeyedNodeRejectsLegacyPeer(t *testing.T) {
 }
 
 // legacySyncAuthVersion / legacySyncAuthNonceSize describe the RETIRED
-// pre-#7163 HELLO. They are literals rather than references to live constants
-// on purpose: this shape is frozen history, and pinning it to a constant the
-// current handshake still owns would let a future edit to that constant move
-// the "legacy peer" fixture along with it — at which point the flag-day tests
-// below would be asserting that a peer speaking the CURRENT wire is refused.
+// pre-#7163 HELLO used by TestNoiseHandshakeRejectsLegacyPeer7163. They are
+// literals rather than references to live constants on purpose: this frozen
+// legacy shape must not move with the current Noise handshake.
 const (
 	legacySyncAuthVersion   = 1
 	legacySyncAuthNonceSize = 32
 )
-
-// writeSyncAuthHello writes a well-formed HELLO from the PEER side of a pipe,
-// with the keyed byte under the caller's control. performSyncHandshake only
-// ever emits keyed=1 (it returns early when it holds no key), so a keyed=0
-// HELLO cannot be produced by running the real handshake on both ends — it has
-// to be hand-built here. The version byte and the 32-byte nonce match what a
-// real new-build peer sends, so the ONLY thing distinguishing the two callers
-// below is the keyed advertisement.
-func writeSyncAuthHello(t *testing.T, conn net.Conn, keyed byte, nonce []byte) {
-	t.Helper()
-	if len(nonce) != legacySyncAuthNonceSize {
-		t.Fatalf("test bug: nonce must be %d bytes, got %d", legacySyncAuthNonceSize, len(nonce))
-	}
-	hello := make([]byte, 0, 2+legacySyncAuthNonceSize)
-	hello = append(hello, legacySyncAuthVersion, keyed)
-	hello = append(hello, nonce...)
-	if err := writeMsg(conn, syncMsgAuthHello, hello); err != nil {
-		t.Fatalf("peer failed to send HELLO(keyed=%d): %v", keyed, err)
-	}
-}
-
-// TestSyncAuthHandshakeKeyedNodeRejectsUnkeyedHelloPeer covers the OTHER
-// unauthenticated-admission arm of performSyncHandshake: a peer that speaks the
-// handshake correctly but advertises keyed=0.
-//
-// This is the arm that literally IS the rolling-upgrade shape — a new build
-// that has not been keyed yet — so it is the one an operator restoring
-// rolling-upgrade compatibility edits first, and until this test existed
-// nothing in pkg/cluster stopped them. Verified by mutation before the fix:
-// replacing the whole arm body with `return syncAuthUnauthenticated, nil, nil`
-// left the ENTIRE pkg/cluster suite GREEN. A PSK-less peer admitted there
-// reaches syncMsgFence, which disables every routing group.
-//
-// TestSyncAuthDecisionMatrix does NOT reach this: it drives syncAuthDecision
-// directly and never runs a handshake. TestSyncAuthHandshakeKeyedNodeRejects-
-// LegacyPeer does not reach it either — it sends a real frame instead of a
-// HELLO, so it exits at the `typ != syncMsgAuthHello` arm above and never
-// evaluates peerKeyed.
-//
-// RED on revert: make this arm accept (return a nil error, the rolling-upgrade
-// edit) and this test fails on "a keyed node must REJECT a peer advertising
-// keyed=0". Note the arm's hardening is behavior-PRESERVING — restoring the
-// old `if !accept { reject }` shape rejects identically, so that literal revert
-// is green here by construction. What the hardening buys is that the accepting
-// edit above is no longer one deleted `if` away; what this test buys is that
-// the edit is no longer silent.
-func TestSyncAuthHandshakeKeyedNodeRejectsUnkeyedHelloPeer(t *testing.T) {
-	a := newAuthSync(t, []byte("psk"))
-
-	ca, cb := net.Pipe()
-	defer ca.Close()
-	defer cb.Close()
-
-	ach := runHandshake(a, ca, true)
-
-	// Read the keyed node's HELLO first — net.Pipe is unbuffered, and the
-	// handshake blocks in <-writeErr until its HELLO is consumed.
-	if typ, _, err := readSyncFrameRaw(cb); err != nil {
-		t.Fatalf("peer failed to read HELLO: %v", err)
-	} else if typ != syncMsgAuthHello {
-		t.Fatalf("expected server HELLO type %d, got %d", syncMsgAuthHello, typ)
-	}
-	writeSyncAuthHello(t, cb, 0, bytes.Repeat([]byte{0xA5}, legacySyncAuthNonceSize))
-
-	ar := <-ach
-	if ar.err == nil {
-		t.Fatalf("a keyed node must REJECT a peer advertising keyed=0, got mode=%d key=%x", ar.mode, ar.key)
-	}
-	// Assert the REASON, not merely that some error occurred. Every error path
-	// in performSyncHandshake returns (unauthenticated, nil, err) — a read
-	// timeout, a short HELLO, a write failure all look identical here — so
-	// `err != nil` alone would still pass if the connection died before ever
-	// reaching the keyed=0 arm.
-	// #7163: see the note in the legacy-peer test above. An unkeyed peer can no
-	// longer announce itself with a keyed=0 flag — there is no such field in a
-	// Noise exchange — so it simply cannot produce a valid msg2, and that is
-	// what the rejection must be attributable to.
-	if !strings.Contains(ar.err.Error(), "noise") {
-		t.Fatalf("rejection must come from the Noise handshake and name the cause; "+
-			"got %q, want it to mention the noise exchange", ar.err.Error())
-	}
-	if ar.mode != syncAuthUnauthenticated {
-		t.Fatalf("a rejected keyed=0 peer must not negotiate an authenticated mode, got %d", ar.mode)
-	}
-	if len(ar.key.readKey) != 0 || len(ar.key.writeKey) != 0 {
-		t.Fatalf("a rejected handshake must yield no frame key")
-	}
-}
 
 func TestSyncAuthDisabledNoHandshake(t *testing.T) {
 	s := NewSessionSync(":0", ":0", nil) // no provider
@@ -420,51 +322,6 @@ func TestSyncFrameSealVerifyRoundTripAndReplay(t *testing.T) {
 	}
 }
 
-// TestSyncAuthDecisionMatrix exercises the fail-closed keyed policy (#5078).
-//
-// The two "not seen" rows below used to expect ACCEPT: a keyed node granted an
-// unkeyed peer a first-contact grace until the sticky downgrade guard armed.
-// That grace was an unauthenticated ACTIVE bypass — a PSK-less peer reaching
-// the fabric on first contact was admitted, could fence the node, and displaced
-// the real peer — and it was open on every fresh boot, because "before the
-// guard arms" is exactly when a node starts. A keyed node now REJECTS an
-// unauthenticated peer. There is NO migration window: an earlier draft of
-// #5078 shipped a bounded dual-accept knob and it was deleted, so the
-// rolling-rollout case is served by the operator procedure in
-// pkg/cluster/README.md instead.
-//
-// RED on revert: add any unconditional accept for an unkeyed peer on a keyed
-// node — the `peerAuthSeen` parameter this decision used to take is gone, so
-// the revert is now "return accept=true from the final arm" — and
-// legacy_peer_rejected_when_keyed / unkeyed_peer_rejected_when_keyed fail.
-// This matrix is the sole catcher for that edit; the handshake test above
-// catches a different one (the arm's own unconditional rejection).
-func TestSyncAuthDecisionMatrix(t *testing.T) {
-	cases := []struct {
-		name                                       string
-		keyConfigured, peerAdv, peerKeyed, proofOK bool
-		wantMode                                   syncAuthMode
-		wantAccept                                 bool
-	}{
-		{"no local key accepts all", false, false, false, false, syncAuthUnauthenticated, true},
-		{"both keyed good proof authenticates", true, true, true, true, syncAuthAuthenticated, true},
-		{"both keyed bad proof rejected", true, true, true, false, syncAuthUnauthenticated, false},
-		// The #5078 fix: a keyed node grants no grace at all.
-		{"legacy_peer_rejected_when_keyed", true, false, false, false, syncAuthUnauthenticated, false},
-		{"unkeyed_peer_rejected_when_keyed", true, true, false, false, syncAuthUnauthenticated, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			mode, accept, reason := syncAuthDecision(tc.keyConfigured, tc.peerAdv, tc.peerKeyed, tc.proofOK)
-			if mode != tc.wantMode || accept != tc.wantAccept {
-				t.Fatalf("decision = (mode %d, accept %v, %q), want (mode %d, accept %v)", mode, accept, reason, tc.wantMode, tc.wantAccept)
-			}
-			if !accept && reason == "" {
-				t.Fatalf("rejection must carry a reason")
-			}
-		})
-	}
-}
 
 // #7163 SUPERSESSION NOTE. Four tests were removed from this file by the Noise
 // conversion, and they are recorded here rather than deleted quietly, because

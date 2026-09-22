@@ -19,18 +19,17 @@ package cluster
 // on-path attacker can neither forge nor replay a frame.
 //
 // Design summary:
-//   - Handshake (performSyncHandshake): only a node that holds the shared
-//     control-link PSK (the same `set chassis cluster authentication-key`
-//     secret that #4357 wired for the heartbeat + fabric gRPC) initiates the
-//     handshake. It sends a HELLO advertising a fresh 32-byte challenge nonce;
-//     when BOTH peers are keyed each proves possession of the PSK with an
-//     HMAC over the OTHER side's nonce (mutual challenge-response). Fresh
-//     per-connection nonces make the proof replay-safe at setup.
+//   - Handshake (`performSyncHandshake`): only a node with a local control-link
+//     PSK enters Noise_NNpsk0. The dialer writes msg1 in `syncMsgAuthHello`;
+//     the accepter reads it and writes msg2 in `syncMsgAuthProof`. Noise binds
+//     the transcript to the PSK, and a peer that cannot complete the exchange
+//     is rejected before any session frame flows. A successful split supplies
+//     independent directional frame keys.
 //   - Dual-accept, UNKEYED SIDE ONLY: a node with no key never handshakes and
 //     is byte-for-byte a legacy peer, so an unkeyed node still accepts anything.
-//     A KEYED node does NOT dual-accept — #5078 removed that. It requires an
-//     authenticated peer and rejects a legacy/unkeyed one outright, with no
-//     first-contact grace and no migration window; see syncAuthDecision.
+//     A KEYED node does NOT dual-accept — #5078 removed that. It requires a
+//     peer that completes the Noise exchange and rejects one that cannot, with
+//     no first-contact grace and no migration window; see performSyncHandshake.
 //   - No sync-side downgrade-guard: there is nothing left for one to protect.
 //     A guard of that shape only matters where an unkeyed peer would otherwise
 //     be admitted, and on a keyed node none ever is. The former
@@ -43,11 +42,11 @@ package cluster
 //     fabric guard that consumes it.
 //   - Per-frame seal (authConn.sealFrame / verifyFrame): on an authenticated
 //     connection every frame gets an 8-byte per-connection sequence + a
-//     32-byte HMAC (keyed by a per-connection key derived from the PSK and
-//     BOTH handshake nonces). The receiver rejects a bad HMAC (forgery /
-//     tamper) or a non-increasing sequence (replay). Frames on an
-//     unauthenticated connection are pass-through — identical to the legacy
-//     wire — so dual-accept never changes the bytes.
+//     32-byte HMAC keyed by the directional frame key from Noise Split(). The
+//     receiver rejects a bad HMAC (forgery / tamper) or a non-increasing
+//     sequence (replay). Frames on an unauthenticated connection are
+//     pass-through — identical to the legacy wire, so dual-accept never
+//     changes the bytes.
 
 import (
 	"crypto/hmac"
@@ -89,7 +88,7 @@ const (
 	// transient handshake failure only delays reconnect — it never bricks
 	// (dual-accept keeps a rolling upgrade alive without the handshake).
 	//
-	// The keyed↔keyed challenge-response completes in milliseconds when both
+	// The keyed↔keyed Noise exchange completes in milliseconds when both
 	// nodes are up; this bound only covers a hung or absent peer. It is kept
 	// short (#4370) because the accepting node runs the handshake per inbound
 	// connection — a longer bound lets a stalled connection tie up a handshake
@@ -373,103 +372,12 @@ func (a *authConn) verifyFrame(header, payload, trailer []byte) error {
 // an unused HMAC-over-a-nonce helper sitting in this file is what the next
 // author reaches for when they add a third one.
 
-// syncAuthDecision applies the #4107 dual-accept policy for a session-sync
-// connection handshake and returns the negotiated mode, whether to accept the
-// connection, and (on rejection) a short reason for logging — never the key.
-// It mirrors heartbeatAuthDecision.
-//
-//	keyConfigured  — the local ControlLinkAuthKey is set (we can verify).
-//	peerAdvertised — the peer sent an auth HELLO (an upgrade-aware peer).
-//	peerKeyed      — the peer's HELLO advertised that it holds a key.
-//	proofOK        — the peer's challenge-response proof verified (meaningful
-//	                 only when both sides are keyed).
-//
-// Policy:
-//   - No local key: dual-accept — this node cannot verify and may be the
-//     not-yet-keyed side of a rolling upgrade.
-//   - Local key + peer keyed (proof exchanged): enforce — reject a bad proof.
-//   - Local key + peer legacy/unkeyed: REJECT, unconditionally.
-//
-// #5078: that last line used to grant a first-contact grace — a keyed node
-// dual-accepted an unkeyed peer whenever `peerAuthSeen` was still false. That
-// grace was an unauthenticated ACTIVE bypass, not a compatibility affordance,
-// and it did not need the reflection weakness to exploit: a PSK-less attacker
-// reaching the fabric on first contact was admitted, could fence the node
-// (disabling every RG), and displaced the legitimate peer connection — after
-// which arming the sticky guard did not evict it. `peerAuthSeen` is therefore
-// no longer consulted for this branch; it cannot be, because the whole window
-// is "before the guard arms".
-//
-// There is deliberately NO relaxation knob — but the rollout constraint is
-// sharper than an earlier revision of this comment claimed. An RG0 secondary
-// whose read-only gate is ARMED cannot be keyed locally:
-// applyRG0OwnershipTransition sets the store read-only on
-// StateSecondary/StateSecondaryHold and EnterConfigureSession then returns
-// ErrClusterReadOnly, so config-sync is that node's only writer. Arming is
-// driven by an RG0 TRANSITION event and nothing else, so a node that
-// cold-starts into secondary and never transitions is still writable, and REST
-// has no RG0 check of its own — see #6890 (and #6889 for the dropped-event
-// variant). Both are OPEN and unscheduled; do not design a rollout around
-// either, and do not assume they are fixed.
-// Keying a LIVE cluster therefore means committing on the PRIMARY while sync is
-// connected and letting the established connection carry the key across — which
-// works only because the auth key is absent from clusterTransportKey, so a key
-// commit does not restart cluster comms (pinned by
-// TestAuthKeyChangeDoesNotRestartClusterComms_5078). Keying at provisioning,
-// before either node seats as secondary, avoids the question entirely.
-//
-// A bounded dual-accept window was shipped and then removed. It had to bound a
-// connection's LIFETIME rather than just its admission (an admitted
-// pass-through stream outlived the deadline), it had to stop an admitted peer
-// re-arming it through config-sync, and it could not survive a crash loop
-// without persisting its deadline. A relaxation that needs three guards of its
-// own does not belong in the fix that closes the hole.
-//
-// The property this leaves is the right one for a security appliance: for a
-// connection established AFTER keying, a node must POSSESS the key to join a
-// keyed cluster. A fresh or RMA node is keyed locally as part of the same
-// bootstrap that gives it its node-id.
-//
-// That qualifier is load-bearing, and it is exactly what makes the live-keying
-// procedure above work. Verification is gated PER CONNECTION and was fixed at
-// handshake time, so a connection established BEFORE the key was committed
-// used to stay unauthenticated for its whole lifetime and keep having its
-// frames accepted with no HMAC.
-//
-// #6628 closed the part of that about the LEGITIMATE peer: a commit now
-// triggers an IN-PLACE upgrade over the established connection
-// (sync_auth_upgrade.go), which promotes it to authenticated — and re-derives
-// its frame key on a rotation — without a reconnect and without ever dropping
-// it. So "the key never applies retroactively to an established stream" is no
-// longer true for a peer that answers.
-//
-// It is still true for a peer that does NOT answer. A hostile stream admitted
-// before the commit declines the upgrade by staying silent, and a decliner is
-// indistinguishable from a legitimate peer that is not keyed yet — which is the
-// rolling-upgrade case none of this may break. Do not read the upgrade as
-// closing it.
-//
-// #7441 closes it by DECLARATION. With `strict-session-auth` set on a keyed
-// node, a connection still unauthenticated after strictSessionAuthGrace is
-// evicted (sync_auth_strict_7441.go). The posture is off by default, and with it
-// off the residual stays open.
-//
-// #9717 makes that open residual visible rather than silent:
-//   - the Authentication status line names such a connection instead of
-//     claiming rejection;
-//   - a one-time warning fires once the grace has passed.
-func syncAuthDecision(keyConfigured, peerAdvertised, peerKeyed, proofOK bool) (mode syncAuthMode, accept bool, reason string) {
-	if !keyConfigured {
-		return syncAuthUnauthenticated, true, ""
-	}
-	if peerAdvertised && peerKeyed {
-		if proofOK {
-			return syncAuthAuthenticated, true, ""
-		}
-		return syncAuthUnauthenticated, false, "hmac verification failed"
-	}
-	return syncAuthUnauthenticated, false, "missing auth handshake (enforced: this node is keyed)"
-}
+// Session-sync admission is enforced by performSyncHandshake. The connection
+// setup runs Noise_NNpsk0, so a keyed node accepts only a peer that proves
+// possession of the control-link PSK; there is no separate policy helper whose
+// result can drift from the live handshake.
+// Keying at provisioning, before either node seats as secondary, avoids the
+// question entirely.
 
 // readSyncFrameRaw reads one length-framed sync frame (header+payload) directly
 // from a connection during the handshake, before any per-frame sealing is in
@@ -496,21 +404,18 @@ func readSyncFrameRaw(conn net.Conn) (typ uint8, payload []byte, err error) {
 	return typ, payload, nil
 }
 
-// performSyncHandshake runs the connection-setup auth-capability handshake on a
-// freshly connected sync connection and returns the negotiated mode, the
-// per-connection frame key (non-nil only when authenticated), an optional first
-// frame a legacy/unkeyed peer already sent (the caller must process it before
-// reading further), and an error when the connection must be dropped (bad PSK
-// proof, a downgrade attempt, or an I/O failure).
-//
+// performSyncHandshake runs the connection-setup Noise_NNpsk0 handshake on a
+// freshly connected sync connection and returns the negotiated mode, directional
+// frame keys (non-nil only when authenticated), and an error when the connection
+// must be dropped (a peer that cannot complete the PSK handshake or an I/O
+// failure).
 // The handshake runs ONLY when a local key is configured. An unkeyed node
 // (legacy build, or a new build with no key yet) sends nothing special and is
 // indistinguishable from — and fully compatible with — a legacy peer, so
 // existing no-key deployments and tests are unaffected (dual-accept).
-//
-// HELLO and PROOF are written concurrently with reading the peer's frame so the
-// handshake works over a fully-synchronous transport (net.Pipe in tests): a
-// strict write-then-read on both symmetric peers would deadlock.
+// The initiator writes its Noise msg1 before reading the responder's msg2; the
+// responder reads msg1 before writing msg2. This role order avoids deadlock on
+// a fully-synchronous transport (net.Pipe in tests).
 func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabricIdx int) (syncAuthMode, syncNoiseKeys, error) {
 	key := s.authKey()
 	if len(key) == 0 {
@@ -544,17 +449,11 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 }
 
 // wrapSyncConn applies the negotiated handshake result to a connection: it
-// wraps conn in an authConn (sealing frames when authenticated) and, when the
-// connection authenticated, arms the sticky downgrade-guard.
-//
-// #6881: an earlier revision of this comment described a second return value —
-// `pending`, "the legacy peer's first frame (nil when none) ... returned for
-// the caller to process before starting the receive loop". There is no such
-// value and there is no such frame. #5078 removed the dual-accept path that
-// produced one, and this function has returned a bare *authConn since. The
-// prose outlived the mechanism; see the `pendingFrame` note in
-// syncAuthDecision for why executing a peer frame before admission was the
-// bug rather than the feature.
+// wraps conn in an authConn, installing directional frame keys when the
+// connection authenticated and leaving an unauthenticated connection as a
+// pass-through. Admission has already succeeded in performSyncHandshake.
+// There is no pending frame to process before installation. A peer frame is
+// handled only after the handshake has completed and the connection is wrapped.
 func (s *SessionSync) wrapSyncConn(fabricIdx int, conn net.Conn, mode syncAuthMode, keys syncNoiseKeys) *authConn {
 	ac := &authConn{Conn: conn}
 	if mode == syncAuthAuthenticated {

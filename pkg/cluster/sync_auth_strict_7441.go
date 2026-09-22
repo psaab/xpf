@@ -56,9 +56,9 @@
 //     failure direction dissolves the constraint. Nothing here is persisted,
 //     because there is no deadline to persist: the decision is recomputed from
 //     committed config on every evaluation. A crash loop re-applies the same
-//     static rule, and after a restart the hostile peer faces
-//     performSyncHandshake, where syncAuthDecision already refuses an unkeyed
-//     peer outright.
+//     static rule, and after restart the hostile peer faces
+//     performSyncHandshake, where the Noise exchange rejects a peer that cannot
+//     prove possession of the control-link PSK.
 //
 // THE GRACE IS NOT A SECURITY DEADLINE. The in-place upgrade takes a round
 // trip, and dropping inside it would kill a connection that was about to

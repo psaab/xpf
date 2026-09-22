@@ -639,9 +639,10 @@ partial drop, or when the preferred fabric connects with no fault.
 ## Session-sync fail-closed authentication (#5078)
 
 The session-sync TCP stream (`sync_auth.go`) authenticates with the SAME
-control-link PSK. Until #5078, a node that HAD a key still **dual-accepted** an
-unkeyed or legacy peer on first contact: `syncAuthDecision` granted a grace
-whenever the sticky downgrade guard (`peerAuthSeen`) had not yet armed.
+control-link PSK. Until #5078, a node that HAD a key still **dual-accepted**
+an unkeyed or legacy peer on first contact: the pre-#5078 connection-admission
+path granted a grace whenever the sticky downgrade guard (`peerAuthSeen`) had
+not yet armed.
 
 That grace was not a compatibility affordance, it was an unauthenticated
 **active** bypass, and it did not depend on the reflection weakness this issue
@@ -658,9 +659,9 @@ also tracks:
 So a PSK-less host reaching the fabric could fence the node and hold the peer
 slot. Two changes close it:
 
-- **A keyed node requires an authenticated peer.** `syncAuthDecision` no longer
-  consults `peerAuthSeen` for the unkeyed-peer branch — it cannot, since the
-  whole exposure is the pre-arm window. An unkeyed/legacy peer is rejected.
+- **A keyed node requires an authenticated peer.** The connection-setup Noise
+  handshake requires a keyed peer to prove possession of the control-link PSK.
+  An unkeyed/legacy peer is rejected before any session frame is admitted.
 - **The pre-admission frame mechanism is DELETED, not reordered.** A legacy
   peer's first frame used to be carried out of the handshake as a
   `pendingFrame` and executed BEFORE `installConn` — `syncMsgFence` on that
@@ -2243,20 +2244,20 @@ connection is authenticated, then seals every subsequent frame.
   cost is negligible at realistic session-sync rates.
 - **Dual-accept, UNKEYED SIDE ONLY (as of #5078).** A node with no key never
   handshakes and is byte-for-byte a legacy peer, so an unkeyed node still
-  accepts anything. A KEYED node does **not** dual-accept: it rejects a
-  legacy/unkeyed peer (no HELLO, or `keyed=0`) outright, with no
-  first-contact grace and no migration window — see "Session-sync
-  fail-closed authentication (#5078)" above, which supersedes the
-  paragraph this bullet used to contain. The `pendingFrame` mechanism that
-  carried a legacy peer's first frame out of the handshake is **deleted**,
-  not merely bypassed: with no accepting arm left it was unreachable, and
-  it executed that frame BEFORE the connection was admitted. Enforcement
-  still engages only once BOTH nodes are keyed and signing — and, for an
-  ALREADY-ESTABLISHED connection, only after it is re-established, because
-  the handshake result is fixed at connect and committing a key does not
-  restart cluster comms (#6628, pinned by
-  `TestAuthKeyChangeDoesNotRestartClusterComms_5078`; see "Operating the
-  control-link PSK" below).
+  accepts anything. A KEYED node does **not** dual-accept: its
+  `performSyncHandshake` runs Noise_NNpsk0 and rejects a peer that cannot prove
+  possession of the PSK, with no first-contact grace and no migration window —
+  see "Session-sync fail-closed authentication (#5078)" above, which
+  supersedes the paragraph this bullet used to contain. The `pendingFrame`
+  mechanism that carried a legacy peer's first frame out of the handshake is
+  **deleted**, not merely bypassed: with no accepting arm left it was
+  unreachable, and it executed that frame BEFORE the connection was admitted.
+  A new connection is authenticated only after BOTH nodes complete the Noise
+  exchange. An ALREADY-ESTABLISHED connection can be promoted in place when
+  its peer answers the #6628 upgrade; a silent peer remains the
+  strict-session-auth residual. Committing a key does not restart cluster comms
+  (#6628, pinned by `TestAuthKeyChangeDoesNotRestartClusterComms_5078`; see
+  "Operating the control-link PSK" below).
 - **No sync-side downgrade-guard (removed in #5078).** There used to be one
   here: once the peer had authenticated on the sync channel (sticky
   `syncAuthedEver`) or the heartbeat channel, a later UNAUTHENTICATED
@@ -2529,10 +2530,11 @@ either changed.
 
 The shape of the constraint, so the enumeration reads in context:
 
-- **The keyed side stops accepting the unkeyed peer immediately.** Once one node
-  commits the key, `syncAuthDecision` rejects a local-key/peer-unkeyed
-  connection unconditionally. There is no first-contact grace — that grace was
-  an unauthenticated active bypass, not a compatibility affordance (#5078).
+- **The keyed side stops accepting an unkeyed peer immediately.** Once one node
+  commits the key, the connection-setup Noise handshake on the keyed side
+  rejects a peer that cannot prove possession of the PSK. There is no
+  first-contact grace — that grace was an unauthenticated active bypass, not a
+  compatibility affordance (#5078).
 - **So the second node must be keyed while it can still commit.** On an RG0
   secondary whose read-only gate is ARMED, `EnterConfigureSession` returns
   `ErrClusterReadOnly` from every entry point, and the commit that would key it
@@ -2612,8 +2614,8 @@ cannot evict it.
 node holds a control-link key, an established session-sync connection that has
 not authenticated within a short grace (`strictSessionAuthGrace`, 10s) is
 CLOSED. A legitimate keyed peer reconnects immediately and authenticates
-through `performSyncHandshake`; a hostile stream cannot, because
-`syncAuthDecision` refuses an unkeyed peer on a fresh connection.
+through `performSyncHandshake`; a hostile stream cannot, because the Noise
+exchange rejects a peer that cannot prove possession of the PSK.
 
 **With the posture off (the default), the residual stays open, but it is not
 silent (#9717).**
@@ -2984,7 +2986,7 @@ declare which one it moves:
    opposite of #6628's fix, and its failure message states the reason —
    "committing it would restart cluster comms and drop the very connection
    that must carry the key to the read-only secondary."
-3. **`sync_auth.go`'s `syncAuthDecision` comment**: an RG0 secondary whose
+3. **The session-sync rollout guidance**: an RG0 secondary whose
    read-only gate is armed returns `ErrClusterReadOnly` from
    `EnterConfigureSession`, so config-sync is that node's ONLY writer. In-band
    carriage of the PSK is not incidental — it is the documented live-keying
@@ -2993,10 +2995,10 @@ declare which one it moves:
 Consequences to hold on to:
 
 - **#6628 landed alone bricks the live-keying rollout.** The instant the
-  primary commits the key the connection drops, re-handshakes, and
-  `syncAuthDecision(keyConfigured=true, peerKeyed=false)` REJECTS the
-  still-unkeyed secondary — which can then never be keyed at all, because it
-  is read-only. A self-inflicted permanent partition.
+  primary commits the key the connection drops, re-handshakes, and the
+  connection-setup Noise handshake rejects the still-unkeyed secondary — which
+  can then never be keyed at all, because it is read-only. A self-inflicted
+  permanent partition.
 - **The eventual posture** is that the PSK becomes provisioning-time
   node-local state that config-sync neither carries nor overwrites (the
   per-node day-0 config drive already provisions `xpf.conf` alongside

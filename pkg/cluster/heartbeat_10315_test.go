@@ -16,11 +16,10 @@ import (
 // sole-surviving primary to secondary (total forwarding outage). No key
 // knowledge needed; L2/control-link access suffices.
 //
-// Session-sync removed the identical grace as a security bug (#5078:
-// syncAuthDecision no longer consults peerAuthSeen at all); the heartbeat kept
-// it. The fix mirrors #5078: key the decision on key-CONFIGURED, not on
-// process-lifetime peerAuthSeen. An unsigned frame on a keyed node is rejected
-// before it can refresh liveness or feed election.
+// Session-sync now rejects an unkeyed peer at connection setup through its
+// Noise handshake; the heartbeat keeps its own live-frame decision path.
+// An unsigned frame on a keyed node is rejected before it can refresh liveness
+// or feed election.
 //
 // These cells drive heartbeatReceiver.admitFrame — the SAME function readLoop
 // calls for every datagram — so accept/reject, lastSeen, peerAlive and the
