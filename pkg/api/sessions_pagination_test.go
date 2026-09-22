@@ -256,6 +256,7 @@ func TestRESTSessionFilterFailsClosed(t *testing.T) {
 		{"bad limit", "limit=abc", 400, ""},
 		{"negative offset", "offset=-5", 400, ""},
 		{"bad page_size", "page_size=abc", 400, ""},
+		{"negative page_size", "page_size=-1", 400, ""},
 		{"bad protocol", "protocol=tcpip", 400, "invalid protocol filter: tcpip"},
 		{"bogus protocol", "protocol=bogus", 400, "invalid protocol filter: bogus"},
 		{"out-of-range protocol", "protocol=256", 400, "invalid protocol filter: 256"},
