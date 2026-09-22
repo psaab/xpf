@@ -38,6 +38,7 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/natpoolalarm"
 	"github.com/psaab/xpf/pkg/networkd"
+	"github.com/psaab/xpf/pkg/nfqueue"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/psaab/xpf/pkg/ra"
 	"github.com/psaab/xpf/pkg/routing"
@@ -137,25 +138,29 @@ type Daemon struct {
 	// #9506 S4 permit/queue authority. The pointer is initialized before
 	// background loops start and retained until Run's joined shutdown.
 	ipsecS4 *ipsecSupervisor
+	// #10484 D11 attestation is daemon-owned so final ledger survives runtime
+	// teardown and authority restoration.
+	d11Ledger *nfqueue.D11AttestationLedger
+	d11Armer  *nfqueue.D11AttestationArmer
 	// #9506 S5 capture actor and staged generation. The mutex protects
 	// provider/reconcile publication while queue receive loops remain lock-free.
 	// Publication serializes current-runtime sampling with authority locking.
-	ipsecCaptureMu                sync.Mutex
-	ipsecCapturePublishMu         sync.Mutex
-	ipsecCapture                  *ipsecCaptureRuntime
-	ipsecCaptureStaged            *ipsecCaptureRuntime
-	ipsecCaptureStagePending      bool
-	ipsecCaptureGeneration        atomic.Uint64
-	ipsecCaptureAuthorityRevision atomic.Uint64
-	ipsecCaptureStageGeneration   uint64
+	ipsecCaptureMu                       sync.Mutex
+	ipsecCapturePublishMu                sync.Mutex
+	ipsecCapture                         *ipsecCaptureRuntime
+	ipsecCaptureStaged                   *ipsecCaptureRuntime
+	ipsecCaptureStagePending             bool
+	ipsecCaptureGeneration               atomic.Uint64
+	ipsecCaptureAuthorityRevision        atomic.Uint64
+	ipsecCaptureStageGeneration          uint64
 	ipsecCaptureSnapshotLandedGeneration uint64
-	ipsecOverlay                  atomic.Pointer[xnft.HostInputFenceOverlay]
-	ipsecOverlayAcked             atomic.Pointer[xnft.HostInputFenceOverlay]
-	ipsecOverlayRetryUntil        atomic.Int64
-	ipsecOverlayRetryGeneration   atomic.Uint64
-	ipsecOverlayRetrySequence     atomic.Uint64
-	ipsecTopologyDirty            atomic.Bool
-	ipsecTopologySubscribed       atomic.Bool
+	ipsecOverlay                         atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayAcked                    atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayRetryUntil               atomic.Int64
+	ipsecOverlayRetryGeneration          atomic.Uint64
+	ipsecOverlayRetrySequence            atomic.Uint64
+	ipsecTopologyDirty                   atomic.Bool
+	ipsecTopologySubscribed              atomic.Bool
 
 	// --- always-on transit-gate link watcher (#9848) ---
 	// The watcher has its own subscription seam so it remains independent of
@@ -1884,9 +1889,13 @@ func New(opts Options) (*Daemon, error) {
 	// silently empty-loading.
 	store.SetConfigDBWriterVersion(opts.Version)
 
-	// Read cluster node ID from file. If the file exists and contains a
-	// valid integer, the daemon runs in cluster mode with ${node} variable
-	// expansion in apply-groups. If the file does not exist, standalone mode.
+	d11ArmEnabled := os.Getenv("XPF_ATTEST_10484_ARM") == "1"
+	// The D11 ledger key must distinguish the two HA nodes even when they
+	// process identical request/lease tuples.
+	d11NodeID, hostErr := os.Hostname()
+	if hostErr != nil || strings.TrimSpace(d11NodeID) == "" {
+		d11NodeID = "standalone"
+	}
 	if data, err := os.ReadFile(nodeIDFile); err == nil {
 		// #4185: parse to the SAME strict contract every other node-id
 		// consumer enforces — a trimmed, whole-string Atoi restricted to
@@ -1899,6 +1908,7 @@ func New(opts Options) (*Daemon, error) {
 		s := strings.TrimSpace(string(data))
 		if nodeID, ok := parseNodeIDFileContent(s); ok {
 			store.SetNodeID(nodeID)
+			d11NodeID = fmt.Sprintf("node-%d", nodeID)
 			slog.Info("cluster node ID loaded from file", "node", nodeID, "file", nodeIDFile)
 		} else {
 			slog.Error("cluster node-id file is present but not a valid node id (must be exactly "+
@@ -1908,7 +1918,7 @@ func New(opts Options) (*Daemon, error) {
 		}
 	}
 
-	return &Daemon{
+	d := &Daemon{
 		opts:                       opts,
 		startTime:                  time.Now(),
 		store:                      store,
@@ -1934,7 +1944,20 @@ func New(opts Options) (*Daemon, error) {
 		failoverActuateTimeout:     3 * time.Second,
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 		applySem:                   semaphore.NewWeighted(1),
-	}, nil
+	}
+	d.d11Ledger = nfqueue.NewD11AttestationLedger()
+	d.d11Armer = nfqueue.NewD11AttestationArmer(d11NodeID, d.d11Ledger, func(runID string, permitEpoch uint64) error {
+		d.ipsecCaptureMu.Lock()
+		runtime := d.ipsecCapture
+		d.ipsecCaptureMu.Unlock()
+		if runtime == nil {
+			return fmt.Errorf("D11 capture runtime unavailable")
+		}
+		return runtime.installD11AuthorityOverride(runID, permitEpoch)
+	})
+	d.d11Armer.SetEnvironmentGate(func() bool { return d11ArmEnabled })
+	return d, nil
+
 }
 
 // NOTE (#1519, sub-#1451 S4): the (*Daemon).legacyDP() escape hatch

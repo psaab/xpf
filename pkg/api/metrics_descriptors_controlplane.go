@@ -342,6 +342,16 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 		"Frames refused by lease minting, admission, or a terminal q0 refused/denied completion (#10478).",
 		[]string{"run_id", "generation", "permit_epoch"}, nil,
 	)
+	c.ipsecCaptureD11SuppressedTotal = prometheus.NewDesc(
+		"xpf_ipsec_capture_suppressed_total",
+		"D11 selected frames suppressed after a terminal WouldPermit completion (#10484).",
+		[]string{"run_id", "generation", "permit_epoch", "reason"}, nil,
+	)
+	c.ipsecCaptureD11Deny52Total = prometheus.NewDesc(
+		"xpf_ipsec_capture_deny_events_total",
+		"D11 deny events emitted for terminal evaluator-unavailable reason 52 (#10484).",
+		[]string{"run_id", "generation", "permit_epoch", "reason"}, nil,
+	)
 	c.ipsecCaptureDeliveredAvail = prometheus.NewDesc(
 		"xpf_ipsec_capture_delivered_available",
 		"1 only when an independent product-owned witness downstream of the TUN write exists; never inferred from Written (#10478).",

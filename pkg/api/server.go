@@ -115,10 +115,11 @@ type IpsecCaptureWitness struct {
 	Stale              uint64
 	Cancelled          uint64
 	Refused            uint64
+	D11Suppressed      uint64
+	D11Deny52          uint64
 	DeliveredAvailable bool
 	Delivered          uint64
 }
-
 type CompileHealthSnapshot struct {
 	EverSucceeded    bool
 	FailureCount     uint64

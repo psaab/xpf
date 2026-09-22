@@ -41,6 +41,7 @@ import (
 	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/natpoolalarm"
+	"github.com/psaab/xpf/pkg/nfqueue"
 	"github.com/psaab/xpf/pkg/ra"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
@@ -198,6 +199,10 @@ type Config struct {
 	// TestProductionServerEnforcesRealPeerIdentity_5278 closes the loop here
 	// with no injection at all.
 	PeerLookupFn func(client, server net.Addr) authz.PeerIdentity
+	// D11ArmFn is the daemon-owned one-shot attestation authority arm.
+	D11ArmFn func(runID string, permitEpoch uint64, markerHex string) error
+	// D11LedgerFn returns the daemon-owned bounded D11 evidence snapshot.
+	D11LedgerFn func() *nfqueue.D11LedgerSnapshot
 }
 
 // Server implements the BpfrxService gRPC service.
@@ -300,6 +305,8 @@ type Server struct {
 	// peerLookupFn resolves a connection's peer identity for the #5278
 	// authorization gate on the PRIMARY listener. Production leaves it nil and
 	// lookupPeer falls back to authz.LookupPeer; wired from Config.PeerLookupFn.
+	d11ArmFn     func(runID string, permitEpoch uint64, markerHex string) error
+	d11LedgerFn  func() *nfqueue.D11LedgerSnapshot
 	peerLookupFn func(client, server net.Addr) authz.PeerIdentity
 	// fabricAuthKeyFn is a test seam for the #4107 fabric-listener PSK auth.
 	// Production leaves it nil and fabricAuthKey() reads the live control-link
@@ -410,7 +417,8 @@ func NewServer(addr string, cfg Config) *Server {
 		kernelUpgradeStatusFn:     cfg.KernelUpgradeStatusFn,
 		bootstrapImportFn:         cfg.BootstrapImportFn,
 		hostInboundAppliedFn:      cfg.HostInboundAppliedFn,
-		peerLookupFn:              cfg.PeerLookupFn,
+		d11ArmFn:                  cfg.D11ArmFn,
+		d11LedgerFn:               cfg.D11LedgerFn,
 	}
 }
 

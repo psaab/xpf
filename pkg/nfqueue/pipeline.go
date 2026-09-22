@@ -179,6 +179,7 @@ type CapturePipelineConfig struct {
 	OnUncertain      func(reason string)
 	ZoneEvaluator    ZoneEvaluator
 	ZoneSnapshot     ZoneSnapshotRef
+	Attestation      *D11AttestationConfig
 	DenyEvents       DenyEventSink
 }
 
@@ -230,6 +231,10 @@ type PipelineStats struct {
 	Adjudicated uint64
 	// #10478 Phase 2a witness: terminal q0 Written completions (equals Written).
 	Reinjected uint64
+	// #10484 D11 terminal WouldPermit accounting; routine pre-submit
+	// suppression remains V1PermitSuppressed and is intentionally separate.
+	D11Suppressed uint64
+	D11Deny52     uint64
 }
 
 type pipelineStats struct {
@@ -237,9 +242,14 @@ type pipelineStats struct {
 }
 
 type pendingReinject struct {
-	frame    CaptureFrame
-	lease    ReinjectLease
-	deadline time.Time
+	frame            CaptureFrame
+	lease            ReinjectLease
+	deadline         time.Time
+	admissionPending bool
+	earlyCompletion  *ReinjectCompletion
+	duplicateEarly   bool
+	ledger           *D11AttestationLedger
+	ledgerKey        D11LedgerKey
 }
 
 type flowState struct {
@@ -260,6 +270,7 @@ type CapturePipeline struct {
 	registry         *OriginRegistry
 	leaseMinter      LeaseMinter
 	submitter        ReinjectSubmitter
+	attestation      *D11AttestationConfig
 	sink             PacketVerdictSink
 	onUncertain      func(string)
 	zoneEvaluator    ZoneEvaluator
@@ -321,6 +332,7 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	return &CapturePipeline{
 		phase: cfg.Phase, registry: cfg.Registry, leaseMinter: cfg.LeaseMinter,
 		submitter: cfg.Submitter, sink: cfg.Sink, onUncertain: cfg.OnUncertain,
+		attestation:   cfg.Attestation,
 		zoneEvaluator: cfg.ZoneEvaluator, zoneSnapshot: cfg.ZoneSnapshot,
 		denyEvents: cfg.DenyEvents,
 		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
@@ -460,7 +472,7 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 			p.finishFrame(frame, VerdictAccept)
 		}
 		if len(enforcing) != 0 {
-			p.submitEligible(enforcing)
+			p.dispatchAttestEligible(enforcing)
 		}
 		p.mu.Lock()
 		eligible = p.eligibleLocked()
@@ -566,15 +578,15 @@ func DispatchWorkers(parts map[string][]CaptureFrame) []string {
 	sort.Strings(owners)
 	return owners
 }
-func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) {
+func (p *CapturePipeline) emitDeny(frame CaptureFrame, reason IpsecInnerReason) bool {
 	if p == nil || p.denyEvents == nil || !reason.Valid() {
-		return
+		return false
 	}
 	queueID := uint16(0)
 	if frame.Packet != nil {
 		queueID = frame.Packet.QueueID()
 	}
-	_ = p.denyEvents.EmitIpsecInnerDeny(IpsecInnerDeny{
+	return p.denyEvents.EmitIpsecInnerDeny(IpsecInnerDeny{
 		Reason: reason, Origin: frame.origin, OriginSet: frame.originSet,
 		QueueID: queueID, Tunnel: frame.origin.STN,
 		Generation: frame.Generation,
@@ -829,6 +841,8 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 	if p == nil {
 		return 0
 	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -848,6 +862,9 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 	var expired []*pendingReinject
 	p.mu.Lock()
 	for id, pending := range p.pending {
+		if pending.admissionPending || pending.deadline.IsZero() {
+			continue
+		}
 		if !now.Before(pending.deadline) {
 			expired = append(expired, pending)
 			delete(p.pending, id)
@@ -916,6 +933,13 @@ func (p *CapturePipeline) failPending(reason string) int {
 	}
 	p.uncertain(reason)
 	for _, item := range pending {
+		if item.ledger != nil {
+			item.ledger.RecordCompletion(item.ledgerKey, ReinjectCompletion{
+				RequestID: item.lease.RequestID, PermitEpoch: item.lease.PermitEpoch,
+				QueueNumber: item.lease.QueueNumber, QueueEpoch: item.lease.QueueEpoch,
+				Outcome: CompletionUncertain, Reason: reason,
+			}, "Uncertain")
+		}
 		p.finishFrame(item.frame, VerdictDrop)
 		p.retireFlow(item.frame.FlowKey)
 	}
@@ -927,16 +951,45 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 	pending := p.pending[completion.RequestID]
 	if pending == nil {
 		p.stats.LateCompletions++
+		ledger := (*D11AttestationLedger)(nil)
+		if p.attestation != nil {
+			ledger = p.attestation.Ledger
+		}
 		p.mu.Unlock()
+		if ledger != nil {
+			ledger.MarkLate(completion.RequestID)
+		}
 		return false
+	}
+	if pending.admissionPending {
+		ledger := pending.ledger
+		if pending.earlyCompletion == nil {
+			copyCompletion := completion
+			pending.earlyCompletion = &copyCompletion
+			p.mu.Unlock()
+			if ledger != nil {
+				ledger.RecordEarlyCompletion(pending.ledgerKey, completion)
+			}
+		} else {
+			pending.duplicateEarly = true
+			p.mu.Unlock()
+			if ledger != nil {
+				ledger.MarkDuplicate(pending.ledgerKey)
+			}
+		}
+		return true
 	}
 	delete(p.pending, completion.RequestID)
 	if flow := p.flows[pending.frame.FlowKey]; flow != nil {
 		flow.pending = nil
 	}
+	family, hook := d11OriginWire(pending.frame.origin)
 	identityMismatch := completion.PermitEpoch != pending.lease.PermitEpoch ||
 		completion.QueueNumber != pending.lease.QueueNumber ||
-		completion.QueueEpoch != pending.lease.QueueEpoch
+		completion.QueueEpoch != pending.lease.QueueEpoch ||
+		completion.Family != family ||
+		completion.Hook != hook ||
+		completion.OwnedIfindex != pending.frame.origin.OwnedIfindex
 	bytesMismatch := completion.Outcome == CompletionWritten &&
 		completion.BytesWritten != uint32(len(pending.frame.Packet.Payload()))
 	wouldPermit := completion.Outcome == CompletionWouldPermit &&
@@ -967,11 +1020,22 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 			p.stats.Uncertain++
 		}
 	}
+	terminal := "FAIL"
+	if ambiguous {
+		terminal = "Uncertain"
+	} else if completion.Outcome == CompletionWritten {
+		terminal = "Written"
+	}
+	ledger := pending.ledger
+	ledgerKey := pending.ledgerKey
 	p.mu.Unlock()
+	if ledger != nil {
+		ledger.RecordCompletion(ledgerKey, completion, terminal)
+	}
 	if ambiguous {
 		reason := "uncertain completion"
 		if identityMismatch {
-			reason = "completion lease mismatch"
+			reason = "completion lease or origin mismatch"
 		} else if bytesMismatch {
 			reason = "completion byte-count mismatch"
 		}
@@ -981,7 +1045,14 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		return true
 	}
 	if wouldPermit {
-		p.emitDeny(pending.frame, ReasonEvaluatorUnavailable)
+		p.mu.Lock()
+		p.stats.D11Suppressed++
+		p.mu.Unlock()
+		if p.emitDeny(pending.frame, ReasonEvaluatorUnavailable) {
+			p.mu.Lock()
+			p.stats.D11Deny52++
+			p.mu.Unlock()
+		}
 		p.finishFrame(pending.frame, VerdictDrop)
 		return true
 	}
@@ -1011,6 +1082,72 @@ func (p *CapturePipeline) retireFlow(key string) {
 // linearization point; queued and admitted originals are then terminal-DROPed
 // exactly once, while late completions are ignored. Queue number and epoch
 // are always carried together when a scoped cancellation is requested.
+// CancelForD11Drain fences D11 submissions and asks the reinjection owner to
+// cancel the matching requests without deleting their local pending entries.
+// The caller must continue polling until each Rust completion is resolved;
+// pipeline Close remains the fallback for requests that never receive one.
+func (p *CapturePipeline) CancelForD11Drain(permitEpoch uint64) error {
+	if p == nil || permitEpoch == 0 {
+		return nil
+	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+	p.submitGate.Lock()
+	p.mu.Lock()
+	p.revoked = true
+	p.phase = PipelineQuarantine
+	ids := make([]uint64, 0, len(p.pending))
+	scopeSet := make(map[ReinjectQueueScope]struct{})
+	for id, pending := range p.pending {
+		if pending.lease.PermitEpoch != permitEpoch {
+			continue
+		}
+		ids = append(ids, id)
+		scopeSet[ReinjectQueueScope{
+			QueueNumber: pending.lease.QueueNumber,
+			QueueEpoch:  pending.lease.QueueEpoch,
+		}] = struct{}{}
+	}
+	p.mu.Unlock()
+	var err error
+	if p.submitter != nil {
+		scopes := make([]ReinjectQueueScope, 0, len(scopeSet))
+		for scope := range scopeSet {
+			scopes = append(scopes, scope)
+		}
+		_, err = p.submitter.CancelReinject(ids, permitEpoch, scopes)
+	}
+	p.submitGate.Unlock()
+	return err
+}
+
+// DrainD11 polls Rust completions until no pending request remains for the
+// selected permit epoch or the bounded wait expires.
+func (p *CapturePipeline) DrainD11(permitEpoch uint64, timeout time.Duration) error {
+	if p == nil || permitEpoch == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		p.Poll(time.Now())
+		p.mu.Lock()
+		pending := 0
+		for _, request := range p.pending {
+			if request.lease.PermitEpoch == permitEpoch {
+				pending++
+			}
+		}
+		p.mu.Unlock()
+		if pending == 0 {
+			return nil
+		}
+		if timeout <= 0 || !time.Now().Before(deadline) {
+			return fmt.Errorf("D11 drain left %d pending request(s)", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEpoch uint64) error {
 	scoped := permitEpoch != 0 || queueNumber != 0 || queueEpoch != 0
 	p.drainMu.Lock()
@@ -1140,6 +1277,7 @@ func (p *CapturePipeline) Close() error {
 	if p == nil {
 		return nil
 	}
+	_ = p.failPending("pipeline closed")
 	_ = p.Cancel(0, 0, 0)
 	p.mu.Lock()
 	p.closed = true

@@ -6,9 +6,10 @@
 //! completion operations take only this module's short mutex.
 
 use crate::afxdp::ipsec_inner_queue::{
-    reason as ipsec_reason, IpsecInnerSlabPool, IpsecInnerVerdict, IPSEC_INNER_SLAB_BYTES,
+    IPSEC_INNER_SLAB_BYTES, IpsecInnerSlabPool, IpsecInnerVerdict, reason as ipsec_reason,
 };
 use crate::io_uring_write::WriteResult;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,9 @@ use std::time::{Duration, Instant};
 /// Aggregate live descriptor budget: queued + write-started + terminal but
 /// not yet drained. A descriptor releases this slot only at completion drain.
 pub(crate) const N_LIVE: usize = 16_384;
+/// Bounded per-run request-ID tombstones prevent terminal IDs being reused
+/// after their completion row is drained.
+pub(crate) const TERMINAL_TOMBSTONE_MAX: usize = N_LIVE;
 /// Maximum frames in one submit message.
 pub(crate) const SUBMIT_MAX_FRAMES: usize = 64;
 /// Maximum payload bytes in one submitted frame.
@@ -177,6 +181,28 @@ pub(crate) struct SubmitFrame {
     pub fib_generation: u32,
     pub zone_id: u16,
     pub if_id: u32,
+}
+
+fn d11_frame_digest(frame: &SubmitFrame, run_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"XPF-D11-FRAME/v1");
+    hasher.update(11u32.to_be_bytes());
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u32).to_be_bytes());
+        hasher.update(bytes);
+    };
+    field(&frame.bytes);
+    field(&frame.lease.request_id.to_be_bytes());
+    field(&frame.lease.permit_epoch.to_be_bytes());
+    field(&frame.lease.queue_epoch.to_be_bytes());
+    field(&frame.lease.queue_number.to_be_bytes());
+    field(&[frame.origin.family]);
+    field(&[frame.origin.hook]);
+    field(&frame.origin.owned_ifindex.to_be_bytes());
+    field(frame.origin.owner.as_bytes());
+    field(frame.origin.stn.as_bytes());
+    field(run_id.as_bytes());
+    hasher.finalize().into()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,11 +464,7 @@ pub(crate) fn decide_pre_write(
     match view {
         EntryView::Unknown => PreWrite::Unknown,
         EntryView::Queued
-            if authority.allows(
-                lease.permit_epoch,
-                lease.queue_number,
-                lease.queue_epoch,
-            ) =>
+            if authority.allows(lease.permit_epoch, lease.queue_number, lease.queue_epoch) =>
         {
             PreWrite::Proceed
         }
@@ -475,6 +497,7 @@ pub(crate) enum AdmissionClass {
     Adjudicated,
     Delegated,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReinjectStats {
     pub live_descriptors: usize,
@@ -495,6 +518,7 @@ pub(crate) struct ReinjectStats {
     pub dry_run_refused: u64,
     pub non_dry_run_refused: u64,
 }
+
 pub(crate) const PROVENANCE_MAX: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -510,6 +534,8 @@ pub(crate) struct ReinjectProvenanceRow {
     pub stn: String,
     pub outcome: String,
     pub bytes_written: u32,
+    pub frame_digest: [u8; 32],
+    pub reason: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -601,6 +627,7 @@ struct Entry {
     origin: CaptureOrigin,
     flow_tag: u64,
     connection_id: u64,
+    frame_digest: [u8; 32],
     since: Instant,
     state: EntryState,
 }
@@ -614,6 +641,12 @@ struct CoreInner {
     /// prevents a second client/drain pass from racing the write; a failed
     /// write releases the exact ids without losing their terminal records.
     reserved: BTreeSet<u64>,
+    /// Terminal request IDs retained for this authority run. The set is
+    /// bounded and reset only when the frozen run identity changes.
+    terminal_tombstones: BTreeSet<u64>,
+    /// Once true the run is fail-closed for all new request IDs; clearing is
+    /// allowed only on a new authority run.
+    terminal_tombstone_overflow: bool,
     announce_events: VecDeque<Vec<u8>>,
     provenance: VecDeque<ReinjectProvenanceRow>,
     stats: ReinjectStats,
@@ -632,12 +665,14 @@ impl ReinjectCore {
             inner: Mutex::new(CoreInner {
                 authority: AuthorityState::new(),
                 entries: BTreeMap::new(),
+                terminal_tombstones: BTreeSet::new(),
                 flow_order: BTreeMap::new(),
                 ready_count: 0,
                 reserved: BTreeSet::new(),
                 announce_events: VecDeque::new(),
                 provenance: VecDeque::new(),
                 stats: ReinjectStats::default(),
+                terminal_tombstone_overflow: false,
                 shutdown: false,
             }),
         })
@@ -670,8 +705,11 @@ impl ReinjectCore {
         if accepted {
             if !prev_run.is_empty() && prev_run.as_str() != run_id {
                 // A daemon restart starts a fresh run timeline; old-run
-                // provenance rows must not be relabeled under the new run.
+                // provenance and request-ID tombstones must not be relabeled
+                // under the new run.
                 inner.provenance.clear();
+                inner.terminal_tombstones.clear();
+                inner.terminal_tombstone_overflow = false;
             }
         } else {
             inner.stats.epoch_rejects += 1;
@@ -691,7 +729,12 @@ impl ReinjectCore {
             inner.authority.generation,
             inner.authority.permit_epoch,
             inner.authority.open,
-            inner.authority.queue_epochs.iter().map(|(n, e)| (*n, *e)).collect(),
+            inner
+                .authority
+                .queue_epochs
+                .iter()
+                .map(|(n, e)| (*n, *e))
+                .collect(),
         )
     }
 
@@ -705,9 +748,13 @@ impl ReinjectCore {
         if std::ptr::eq(self, source) {
             return;
         }
-        let source_authority = {
+        let (source_authority, source_terminal_tombstones, source_tombstone_overflow) = {
             let source_inner = source.inner.lock().unwrap_or_else(|e| e.into_inner());
-            source_inner.authority.clone()
+            (
+                source_inner.authority.clone(),
+                source_inner.terminal_tombstones.clone(),
+                source_inner.terminal_tombstone_overflow,
+            )
         };
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let target_authority = inner.authority.clone();
@@ -730,6 +777,24 @@ impl ReinjectCore {
             .tombstones
             .extend(target_authority.tombstones.iter().copied());
         inner.authority = merged;
+        let target_tombstone_overflow = inner.terminal_tombstone_overflow;
+        if source_authority.run_id == target_authority.run_id {
+            if source_tombstone_overflow
+                || target_tombstone_overflow
+                || source_terminal_tombstones.len() + inner.terminal_tombstones.len()
+                    > TERMINAL_TOMBSTONE_MAX
+            {
+                inner.terminal_tombstones.clear();
+                inner.terminal_tombstone_overflow = true;
+            } else {
+                inner.terminal_tombstones.extend(source_terminal_tombstones);
+            }
+        } else if inner.authority.run_id == source_authority.run_id {
+            inner.terminal_tombstones = source_terminal_tombstones;
+            inner.terminal_tombstone_overflow = source_tombstone_overflow;
+        } else {
+            inner.terminal_tombstone_overflow = target_tombstone_overflow;
+        }
     }
     pub(crate) fn enqueue_announce_ack(&self, payload: Vec<u8>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -783,7 +848,11 @@ impl ReinjectCore {
             Some(ADMIT_NO_GENERATION)
         } else if frame.if_id == 0 || frame.origin.stn.is_empty() {
             Some(ADMIT_TUNNEL_ROW_MISSING)
-        } else if inner.entries.contains_key(&frame.lease.request_id) {
+        } else if inner.terminal_tombstone_overflow {
+            Some(ADMIT_FULL)
+        } else if inner.terminal_tombstones.contains(&frame.lease.request_id)
+            || inner.entries.contains_key(&frame.lease.request_id)
+        {
             Some(ADMIT_BAD_LEASE)
         } else if inner.entries.len() >= N_LIVE {
             Some(ADMIT_FULL)
@@ -817,8 +886,6 @@ impl ReinjectCore {
         }
         Self::decision(frame, false, ADMIT_SHUTDOWN)
     }
-
-
 
     pub(crate) fn close_permit(&self, permit_epoch: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -883,7 +950,9 @@ impl ReinjectCore {
             frame.lease.queue_epoch,
         ) {
             Some(ADMIT_STALE)
-        } else if inner.entries.contains_key(&id) {
+        } else if inner.terminal_tombstone_overflow {
+            Some(ADMIT_FULL)
+        } else if inner.terminal_tombstones.contains(&id) || inner.entries.contains_key(&id) {
             Some(ADMIT_BAD_LEASE)
         } else if inner.entries.len() >= N_LIVE {
             Some(ADMIT_FULL)
@@ -897,6 +966,7 @@ impl ReinjectCore {
             return Self::decision(frame, false, reason);
         }
         let now = Instant::now();
+        let frame_digest = d11_frame_digest(frame, &inner.authority.run_id);
         inner.entries.insert(
             id,
             Entry {
@@ -904,6 +974,7 @@ impl ReinjectCore {
                 origin: frame.origin.clone(),
                 flow_tag: frame.flow_tag,
                 connection_id,
+                frame_digest,
                 since: now,
                 state: EntryState::Queued,
             },
@@ -980,12 +1051,7 @@ impl ReinjectCore {
                 PreWrite::Proceed
             }
             PreWrite::Fenced => {
-                Self::terminalize(
-                    &mut inner,
-                    lease.request_id,
-                    ReinjectOutcome::Fenced,
-                    0,
-                );
+                Self::terminalize(&mut inner, lease.request_id, ReinjectOutcome::Fenced, 0);
                 PreWrite::Fenced
             }
             other => other,
@@ -993,11 +1059,7 @@ impl ReinjectCore {
     }
     /// Resolve a write after the syscall. No authority check is repeated here:
     /// a full-frame success after WRITE_STARTED is the definitive commit.
-    pub(crate) fn resolve_write(
-        &self,
-        lease: &ReinjectLease,
-        verdict: TransferVerdict,
-    ) -> bool {
+    pub(crate) fn resolve_write(&self, lease: &ReinjectLease, verdict: TransferVerdict) -> bool {
         self.resolve_write_for(0, lease, verdict)
     }
 
@@ -1028,23 +1090,18 @@ impl ReinjectCore {
     /// Join a Rust D11 worker verdict to the Go-facing completion table.
     /// V1 is deny-only: a deny becomes `Denied`, while a successful
     /// adjudication becomes `WouldPermit` (never a q0 write or NF_ACCEPT).
-    pub(crate) fn resolve_ipsec_inner_verdict(
-        &self,
-        verdict: IpsecInnerVerdict,
-    ) -> bool {
-        let (request_id, outcome) = match verdict {
+    pub(crate) fn resolve_ipsec_inner_verdict(&self, verdict: IpsecInnerVerdict) -> bool {
+        let (request_id, outcome, reason) = match verdict {
             IpsecInnerVerdict::Deny {
-                request_id,
-                reason,
-                ..
+                request_id, reason, ..
             } if reason == ipsec_reason::VERDICT_UNCERTAIN => {
-                (request_id, ReinjectOutcome::Uncertain)
+                (request_id, ReinjectOutcome::Uncertain, reason)
             }
-            IpsecInnerVerdict::Deny { request_id, .. } => {
-                (request_id, ReinjectOutcome::Denied)
-            }
+            IpsecInnerVerdict::Deny {
+                request_id, reason, ..
+            } => (request_id, ReinjectOutcome::Denied, reason),
             IpsecInnerVerdict::WouldPermit { request_id } => {
-                (request_id, ReinjectOutcome::WouldPermit)
+                (request_id, ReinjectOutcome::WouldPermit, 0)
             }
         };
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1054,9 +1111,8 @@ impl ReinjectCore {
         if !matches!(entry.state, EntryState::Queued) {
             return false;
         }
-        Self::terminalize(&mut inner, request_id, outcome, 0)
+        Self::terminalize_with_reason(&mut inner, request_id, outcome, 0, reason)
     }
-
 
     /// Mark a queued descriptor as a definitive no-write refusal.
     pub(crate) fn refuse_queued(&self, lease: &ReinjectLease, _reason: String) -> bool {
@@ -1075,13 +1131,8 @@ impl ReinjectCore {
             return Vec::new();
         }
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner
-            .authority
-            .queue_scope_applies(scope.permit_epoch)
-        {
-            inner
-                .authority
-                .tombstone_queue_epochs(&scope.queue_epochs);
+        if inner.authority.queue_scope_applies(scope.permit_epoch) {
+            inner.authority.tombstone_queue_epochs(&scope.queue_epochs);
         }
         if let Some(permit) = scope.permit_epoch {
             if scope.queue_epochs.is_empty() {
@@ -1185,6 +1236,7 @@ impl ReinjectCore {
                 inner.flow_order.remove(&flow);
             }
             if let Some(entry) = inner.entries.remove(id) {
+                Self::remember_terminal_tombstone(&mut inner, *id);
                 if let EntryState::Terminal(completion) = entry.state {
                     inner.ready_count = inner.ready_count.saturating_sub(1);
                     output.push(completion);
@@ -1206,7 +1258,10 @@ impl ReinjectCore {
     /// peek/ack so a disconnect cannot lose a terminal record.
     pub(crate) fn drain_ready(&self, max: usize) -> Vec<ReinjectCompletion> {
         let batch = self.peek_ready(max);
-        let ids: Vec<u64> = batch.iter().map(|completion| completion.request_id).collect();
+        let ids: Vec<u64> = batch
+            .iter()
+            .map(|completion| completion.request_id)
+            .collect();
         let _ = self.ack_ready(&ids);
         batch
     }
@@ -1246,6 +1301,7 @@ impl ReinjectCore {
             let Some(entry) = inner.entries.remove(id) else {
                 continue;
             };
+            Self::remember_terminal_tombstone(inner, *id);
             match entry.state {
                 EntryState::Queued => {
                     queued += 1;
@@ -1356,11 +1412,35 @@ impl ReinjectCore {
         Self::record_refusal(&mut inner.stats, class);
     }
 
+    fn remember_terminal_tombstone(inner: &mut CoreInner, id: u64) {
+        if id == 0 || inner.terminal_tombstone_overflow {
+            return;
+        }
+        if inner.terminal_tombstones.contains(&id) {
+            return;
+        }
+        if inner.terminal_tombstones.len() >= TERMINAL_TOMBSTONE_MAX {
+            inner.terminal_tombstone_overflow = true;
+            return;
+        }
+        inner.terminal_tombstones.insert(id);
+    }
+
     fn terminalize(
         inner: &mut CoreInner,
         id: u64,
         outcome: ReinjectOutcome,
         bytes_written: u32,
+    ) -> bool {
+        Self::terminalize_with_reason(inner, id, outcome, bytes_written, 0)
+    }
+
+    fn terminalize_with_reason(
+        inner: &mut CoreInner,
+        id: u64,
+        outcome: ReinjectOutcome,
+        bytes_written: u32,
+        reason: u8,
     ) -> bool {
         let (flow_tag, already_terminal, provenance) = {
             let Some(entry) = inner.entries.get_mut(&id) else {
@@ -1392,6 +1472,8 @@ impl ReinjectCore {
                     stn: entry.origin.stn.clone(),
                     outcome: outcome.as_str().to_string(),
                     bytes_written,
+                    frame_digest: entry.frame_digest,
+                    reason,
                 })
             } else {
                 None
@@ -1399,8 +1481,10 @@ impl ReinjectCore {
             (entry.flow_tag, already, provenance)
         };
         if already_terminal {
+            Self::remember_terminal_tombstone(inner, id);
             return false;
         }
+        Self::remember_terminal_tombstone(inner, id);
         if let Some(row) = provenance {
             inner.provenance.push_back(row);
             while inner.provenance.len() > PROVENANCE_MAX {
@@ -1529,10 +1613,7 @@ impl<'a> Cursor<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], CodecError> {
         let end = self.pos.checked_add(n).ok_or(CodecError::Truncated)?;
-        let out = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or(CodecError::Truncated)?;
+        let out = self.bytes.get(self.pos..end).ok_or(CodecError::Truncated)?;
         self.pos = end;
         Ok(out)
     }
@@ -1831,8 +1912,9 @@ pub(crate) fn encode_announce(announcement: &AuthorityAnnouncement) -> Vec<u8> {
     assert!(announcement.run_id.len() <= RUN_ID_MAX);
     assert!(announcement.generation != 0);
     assert!(announcement.queue_epochs.len() <= ANNOUNCE_MAX_QUEUES);
-    let mut out =
-        Vec::with_capacity(1 + announcement.run_id.len() + 19 + announcement.queue_epochs.len() * 10);
+    let mut out = Vec::with_capacity(
+        1 + announcement.run_id.len() + 19 + announcement.queue_epochs.len() * 10,
+    );
     out.push(announcement.run_id.len() as u8);
     out.extend_from_slice(announcement.run_id.as_bytes());
     push_u64(&mut out, announcement.generation);
@@ -2055,10 +2137,7 @@ pub(crate) struct LeasedWriteOutcome {
 /// Map the existing io_uring Done/NothingWritten/Transferred/Deferred
 /// taxonomy to the ACK contract. Only NothingWritten invokes the sync fallback;
 /// Transferred and Deferred are ambiguous and are never retried.
-pub(crate) fn classify_leased_write<F>(
-    result: WriteResult,
-    sync_fallback: F,
-) -> LeasedWriteOutcome
+pub(crate) fn classify_leased_write<F>(result: WriteResult, sync_fallback: F) -> LeasedWriteOutcome
 where
     F: FnOnce(Vec<u8>) -> TransferVerdict,
 {
@@ -2092,9 +2171,8 @@ where
             fatal_ring,
         } => {
             let reason = format!("{message} (in-flight id {id}, buffer retained)");
-            let demotion_cause = fatal_ring.then(|| {
-                format!("slow-path io_uring ring failure, demoting to sync: {reason}")
-            });
+            let demotion_cause = fatal_ring
+                .then(|| format!("slow-path io_uring ring failure, demoting to sync: {reason}"));
             LeasedWriteOutcome {
                 verdict: TransferVerdict::Uncertain { reason },
                 ok: false,

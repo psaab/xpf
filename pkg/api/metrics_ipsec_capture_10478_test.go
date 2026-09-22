@@ -26,6 +26,8 @@ func TestIpsecCaptureDispositionMetricsJoinWitnessLabels10478(t *testing.T) {
 				Stale:              5,
 				Cancelled:          6,
 				Refused:            7,
+				D11Suppressed:      15,
+				D11Deny52:          16,
 				DeliveredAvailable: true,
 				Delivered:          8,
 			}
@@ -50,6 +52,8 @@ func TestIpsecCaptureDispositionMetricsJoinWitnessLabels10478(t *testing.T) {
 		"xpf_ipsec_capture_timeouts_total":         4,
 		"xpf_ipsec_capture_stale_total":            5,
 		"xpf_ipsec_capture_cancelled_total":        6,
+		"xpf_ipsec_capture_suppressed_total":       15,
+		"xpf_ipsec_capture_deny_events_total":      16,
 		"xpf_ipsec_capture_refused_total":          7,
 		"xpf_ipsec_capture_delivered_total":        8,
 	}

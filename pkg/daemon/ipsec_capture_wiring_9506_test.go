@@ -5,6 +5,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +17,35 @@ import (
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 )
+
+func TestDaemonD11ArmGateFrozenAtConstruction10484(t *testing.T) {
+	const envName = "XPF_ATTEST_10484_ARM"
+	old, hadOld := os.LookupEnv(envName)
+	t.Cleanup(func() {
+		if hadOld {
+			_ = os.Setenv(envName, old)
+		} else {
+			_ = os.Unsetenv(envName)
+		}
+	})
+	_ = os.Unsetenv(envName)
+	d, err := New(Options{
+		ConfigFile:  filepath.Join(t.TempDir(), "xpf.conf"),
+		NoDataplane: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_ = os.Setenv(envName, "1")
+	err = d.d11Armer.Arm(
+		"attest-0123456789abcdef0123456789abcdef",
+		9,
+		"00112233445566778899aabbccddeeff",
+	)
+	if err == nil || !strings.Contains(err.Error(), "environment is disabled") {
+		t.Fatalf("Arm after daemon construction = %v, want cached environment-disabled error", err)
+	}
+}
 
 func wiringHandles9506() []ipsecQueueHandle {
 	classes := []struct {
@@ -389,6 +421,9 @@ func TestIpsecCaptureStagePassesStagedQueuesToActor9506(t *testing.T) {
 			t.Fatalf("queue %d epoch=%d not carried in actor config: %+v", captureQueue.QueueNumber, captureQueue.QueueEpoch, captured.QueueEpochs)
 		}
 	}
+	if captured.Pipeline.DenyEvents == nil {
+		t.Fatal("staged pipeline has no production deny-event sink")
+	}
 	if staged.actor.Status().Active {
 		t.Fatal("staged actor active before explicit start")
 	}
@@ -536,7 +571,12 @@ func TestRestoreIpsecCaptureRuntimeInvalidatesAuthorityAnnouncement9506(t *testi
 }
 
 type fakeIpsecReinjectSubmitter9506 struct {
-	announces int
+	announces   int
+	runID       string
+	generation  uint64
+	permitEpoch uint64
+	permitOpen  bool
+	rows        []nfqueue.ReinjectQueueEpoch
 }
 
 func (f *fakeIpsecReinjectSubmitter9506) SubmitAdjudicated([]nfqueue.AdjudicatedFrame) ([]nfqueue.ReinjectAdmission, error) {
@@ -551,9 +591,54 @@ func (f *fakeIpsecReinjectSubmitter9506) CancelReinject([]uint64, uint64, []nfqu
 	return nil, nil
 }
 
-func (f *fakeIpsecReinjectSubmitter9506) AnnounceReinject(string, uint64, uint64, bool, []nfqueue.ReinjectQueueEpoch) error {
+func (f *fakeIpsecReinjectSubmitter9506) AnnounceReinject(runID string, generation, permitEpoch uint64, permitOpen bool, rows []nfqueue.ReinjectQueueEpoch) error {
 	f.announces++
+	f.runID = runID
+	f.generation = generation
+	f.permitEpoch = permitEpoch
+	f.permitOpen = permitOpen
+	f.rows = append(f.rows[:0], rows...)
 	return nil
+}
+
+func TestD11CloseRevokesSelectedAuthorityWithoutMutatingPermit10484(t *testing.T) {
+	supervisor := newIpsecSupervisor()
+	supervisor.permit.Store(&permitRecord{state: ipsecPermitOpen, permitEpoch: 17})
+	submitter := new(fakeIpsecReinjectSubmitter9506)
+	rows := []nfqueue.ReinjectQueueEpoch{{Queue: 1000, Epoch: 4}}
+	runtime := &ipsecCaptureRuntime{
+		supervisor: supervisor,
+		submitter:  submitter,
+		d11Override: &d11AuthorityOverride{
+			runID:       "attest-00112233445566778899aabbccddeeff",
+			generation:  4,
+			permitEpoch: 17,
+			permitOpen:  true,
+			rows:        rows,
+		},
+	}
+	if err := runtime.clearD11AuthorityOverride(); err != nil {
+		t.Fatalf("clear D11 authority: %v", err)
+	}
+	if submitter.runID != "attest-00112233445566778899aabbccddeeff" ||
+		submitter.generation != 4 || submitter.permitEpoch != 17 ||
+		submitter.permitOpen {
+		t.Fatalf("revoke announcement = run %q generation %d epoch %d open %v",
+			submitter.runID, submitter.generation, submitter.permitEpoch, submitter.permitOpen)
+	}
+	if len(submitter.rows) != 1 || submitter.rows[0] != rows[0] {
+		t.Fatalf("revoke rows = %+v, want %+v", submitter.rows, rows)
+	}
+	if got := supervisor.loadPermit(); got == nil || got.state != ipsecPermitOpen ||
+		got.permitEpoch != 17 {
+		t.Fatalf("shared permit mutated by D11 revoke: %+v", got)
+	}
+	runtime.authorityMu.Lock()
+	overrideActive := runtime.d11Override != nil
+	runtime.authorityMu.Unlock()
+	if overrideActive {
+		t.Fatal("D11 override retained after successful revoke announcement")
+	}
 }
 
 func (f *fakeIpsecReinjectSubmitter9506) Close() error {
@@ -738,5 +823,30 @@ func TestCommitIpsecCaptureStageActorStartFailureRestoresDivert9506(t *testing.T
 	}
 	if d.ipsecCapture != nil || d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
 		t.Fatalf("daemon state after actor failure = active=%p staged=%p pending=%v", d.ipsecCapture, d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
+	}
+}
+func TestIpsecCaptureWitnessUsesD11JoinKey10484(t *testing.T) {
+	const runID = "attest-0123456789abcdef0123456789abcdef"
+	supervisor := newIpsecSupervisor()
+	supervisor.permit.Store(&permitRecord{state: ipsecPermitOpen, permitEpoch: 17})
+	armer := nfqueue.NewD11AttestationArmer("node-a", nil, func(string, uint64) error {
+		return nil
+	})
+	armer.SetEnvironmentGate(func() bool { return true })
+	if err := armer.Arm(runID, 17, "00112233445566778899aabbccddeeff"); err != nil {
+		t.Fatalf("Arm: %v", err)
+	}
+	runtime := &ipsecCaptureRuntime{
+		supervisor: supervisor,
+		actor:      &IpsecCapturePipeline{supervisor: supervisor, runID: "process-run"},
+		d11Armer:   armer,
+		d11Override: &d11AuthorityOverride{
+			runID: runID, permitEpoch: 17, permitOpen: true,
+		},
+	}
+	d := &Daemon{opts: Options{NoDataplane: true}, ipsecCapture: runtime, d11Armer: armer}
+	witness := d.apiServerConfig(nil).IpsecCaptureWitnessFn()
+	if witness.RunID != runID || witness.PermitEpoch != 17 {
+		t.Fatalf("witness join key = run=%q epoch=%d, want %q/17", witness.RunID, witness.PermitEpoch, runID)
 	}
 }

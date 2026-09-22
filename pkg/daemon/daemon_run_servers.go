@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/logging"
+	"github.com/psaab/xpf/pkg/nfqueue"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
 	"github.com/psaab/xpf/pkg/webmgmt"
@@ -146,8 +148,21 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		grpcDP = live
 	}
 	grpcSrv := grpcapi.NewServer(d.opts.GRPCAddr, grpcapi.Config{
-		Store:      d.store,
-		DP:         grpcDP,
+		Store: d.store,
+		DP:    grpcDP,
+		D11ArmFn: func(runID string, permitEpoch uint64, markerHex string) error {
+			if d.d11Armer == nil {
+				return fmt.Errorf("D11 attestation armer unavailable")
+			}
+			return d.d11Armer.Arm(runID, permitEpoch, markerHex)
+		},
+		D11LedgerFn: func() *nfqueue.D11LedgerSnapshot {
+			if d.d11Ledger == nil {
+				return nil
+			}
+			snapshot := d.d11Ledger.Snapshot()
+			return &snapshot
+		},
 		EventBuf:   eventBuf,
 		GC:         d.gc,
 		Routing:    d.routing,
@@ -717,6 +732,14 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				return api.IpsecCaptureWitness{}
 			}
 			status := runtime.actor.Status()
+			if d.d11AuthorityCurrent() {
+				// Actor.Status carries the process run id. During an armed
+				// D11 join, the ledger/metrics labels must use the
+				// node-local attestation run id and permit epoch instead.
+				arm := d.d11Armer.Status()
+				status.RunID = arm.RunID
+				status.PermitEpoch = arm.PermitEpoch
+			}
 			return api.IpsecCaptureWitness{
 				Available:          status.Available,
 				RunID:              status.RunID,
@@ -734,6 +757,8 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				Stale:              status.Counters.Stale,
 				Cancelled:          status.Counters.Cancelled,
 				Refused:            status.Counters.Refused,
+				D11Suppressed:      status.Counters.D11Suppressed,
+				D11Deny52:          status.Counters.D11Deny52,
 				DeliveredAvailable: status.DeliveredAvailable,
 				Delivered:          status.Delivered,
 			}

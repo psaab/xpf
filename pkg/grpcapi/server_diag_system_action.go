@@ -169,6 +169,30 @@ func (s *Server) runZeroize(ctx context.Context) error {
 }
 
 func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "system action request is required")
+	}
+	if strings.HasPrefix(req.Action, "userspace-attest:arm:") {
+		principal, ok := authorizedPrincipalFromContext(ctx)
+		if !ok || !d11LedgerPrincipalAllowed(principal) {
+			return nil, status.Error(codes.PermissionDenied, "D11 attestation arm requires root or configured superuser")
+		}
+		if s.d11ArmFn == nil {
+			return nil, status.Error(codes.Unavailable, "D11 attestation authority unavailable")
+		}
+		parts := strings.Split(strings.TrimPrefix(req.Action, "userspace-attest:arm:"), ":")
+		if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+			return nil, status.Error(codes.InvalidArgument, "usage: userspace-attest:arm:<run_id>:<permit_epoch>:<marker_hex>")
+		}
+		permitEpoch, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil || permitEpoch == 0 {
+			return nil, status.Error(codes.InvalidArgument, "invalid D11 permit epoch")
+		}
+		if err := s.d11ArmFn(parts[0], permitEpoch, parts[2]); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "D11 attestation arm: %v", err)
+		}
+		return &pb.SystemActionResponse{Message: "D11 attestation authority armed"}, nil
+	}
 	switch req.Action {
 	case "reboot":
 		slog.Warn("system reboot requested via gRPC")
