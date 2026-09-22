@@ -529,11 +529,17 @@ Day-zero order (in this lane's successor implementation):
   Step 3 must capture representative MAC instrumentation for M1/M2/M3 (or
   equivalent post-fix/revert evidence) before calling each attribution final;
   an H-NONMAC branch routes any first failure that fits none.
-- Q5 (fail-fast helper): yes, add a fixture-blaming plain `assert!` or explicit
-  panic in `txn_run_descriptor`; this helper is already `#[cfg(test)]`-only
-  (`afxdp/mod.rs:621-623`), so there is no production-shared-code concern and
-  the release acceptance leg fails fast on a fixture mismatch. This is separate
-  from H-EXPECT/#10552's cfg-gated session-test repair.
+- Q5 (fail-fast helper): keep raw `txn_run_descriptor` untouched for gate-owning
+  negative controls, including exactly
+  `tests_fabric_zone_stamp::lan_wrong_unicast_dst_dropped_pre_l3_10314`.
+  Add the opt-in cfg(test)-only `txn_run_descriptor_checked(...,
+  expect_mac_acceptance: bool)` wrapper in `tests_support.rs`; it asserts that
+  `ingress_destination_mac_accepted` equals the explicit expectation before
+  delegating to the raw helper. Every migrated fixture test uses the wrapper
+  with `true`; no production path can call it. The 10314 raw control must remain
+  raw because it intentionally supplies a wrong-unicast destination and proves
+  pre-L3 recycle. This is separate from H-EXPECT/#10552's cfg-gated session-test
+  repair.
 - K1 (baseline gone): rejected as a current PLAN-KILL premise. #10544 changed
   Make/Go only and the gate/fixtures/builders remain on this tip; step 3 still
   revalidates the baseline after rebase, but a changed denominator is handled
