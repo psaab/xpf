@@ -121,8 +121,15 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 			// Junos treats a modifier-only term as an implicit fall-through, so
 			// the signal is uniformly "no terminating action" == fall-through.
 			// A routing-instance (PBR) term is terminating-wise its own decision
-			// and is NOT a fall-through even with an empty Action — leave it.
-			NextTerm: (term.NextTerm || term.Action == "") && term.RoutingInstance == "",
+			// and is NOT a fall-through even with an empty Action — the implicit
+			// arm stays gated on an empty routing-instance. The AUTHORED
+			// term.NextTerm bit is still preserved verbatim (#10514): the strict
+			// gate rejects RI+next-term but the tolerant path downgrades it to a
+			// warning, and clearing the bit here hid the contradiction from the
+			// renderer's ignored-next-term disclosure. The runtimes terminate on
+			// a set routing-instance regardless of this advisory bit (Rust
+			// `continue_term`, nft mirrors), so preserving it is disclosure-only.
+			NextTerm: term.NextTerm || (term.Action == "" && term.RoutingInstance == ""),
 		}
 		// Source / destination addresses: literal CIDRs PLUS the prefixes
 		// resolved from any `from source-prefix-list` / `destination-prefix-list`
