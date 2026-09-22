@@ -678,10 +678,16 @@ func (s dataPlaneSessionStore) batchDeleteV4(keys []ScopedSessionKey) (int, erro
 			// the row's own value and names its domain (#9146), so re-scoping it
 			// here would be redundant, and passing a scope it did not ask for
 			// would be a second derivation of the same fact.
+			var firstErr error
 			for _, sk := range chunk[chunkDeleted:] {
 				if delErr := s.dp.DeleteSession(sk.Key); delErr == nil {
 					deleted++
+				} else if firstErr == nil && !sessionNotFound(delErr) {
+					firstErr = delErr
 				}
+			}
+			if firstErr != nil {
+				return deleted, firstErr
 			}
 		}
 		keys = keys[n:]
@@ -710,10 +716,16 @@ func (s dataPlaneSessionStore) batchDeleteV6(keys []ScopedSessionKeyV6) (int, er
 				return deleted, err
 			}
 			// #9364: unchanged, and already domain-correct — see the V4 twin.
+			var firstErr error
 			for _, sk := range chunk[chunkDeleted:] {
 				if delErr := s.dp.DeleteSessionV6(sk.Key); delErr == nil {
 					deleted++
+				} else if firstErr == nil && !sessionNotFound(delErr) {
+					firstErr = delErr
 				}
+			}
+			if firstErr != nil {
+				return deleted, firstErr
 			}
 		}
 		keys = keys[n:]
