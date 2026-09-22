@@ -715,6 +715,38 @@ pub(super) fn populate_interfaces(
         }
     }
 
+    // #10503: contested-parent host-inbound fail-closed backstop — SYMMETRY with
+    // the #5659 addressed-empty-zone backstop above. A trunk parent whose units
+    // span zones has its `ifindex_to_zone_id` entry REMOVED (the #7509 contest
+    // arms), so untagged ingress on it resolves to zone 0 and
+    // `host_inbound_admits(0)` takes the `None => true` global admit arm — every
+    // host-bound service admitted, then Trusted -> xpf-usp0 -> kernel ACCEPT
+    // ahead of every drop, while the same ifindex's TRANSIT is denied via
+    // `UNZONED_INGRESS_DENIED` (policy.rs). The per-row #5659 sentinel cannot
+    // cover it: the parent is address-less (`registered_local` false, not a
+    // tunnel) and its rows carry (conflicting) zones, so `iface.zone.is_empty()`
+    // misses too. The contest set is only complete after the walk, so it is
+    // closed here rather than per row.
+    //
+    // Fix: insert an EMPTY `ZoneHostInbound` sentinel keyed by the contested
+    // parent's ifindex, so the ingress-interface-keyed
+    // `host_inbound_admits_iface` DENIES host-bound services there. Keying by
+    // ifindex — NOT by inserting at zone id 0 — leaves the genuinely-global
+    // zone-0 path untouched, exactly as #5659 does. An existing entry
+    // (explicit per-interface override) is never clobbered, and a lifeline name
+    // is never armed.
+    for ifindex in &contested_parent_ifindexes {
+        if state.ifindex_host_inbound.contains_key(ifindex) {
+            continue;
+        }
+        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
+            if is_host_inbound_lifeline(name) {
+                continue;
+            }
+        }
+        state.ifindex_host_inbound.entry(*ifindex).or_default();
+    }
+
     // #6722: flush the Go builder's egress answer, admitting an ifindex only
     // when a row on it CORROBORATES the claim by literally naming that zone.
     //
