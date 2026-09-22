@@ -23,6 +23,28 @@ const nonTypedMidKeyword10515 = `security {
     }
 }`
 
+const nonTypedMidKeywordPeel10515 = `security {
+    policies {
+        from-zone {
+            trust {
+                to-zon {
+                    untrust {
+                        policy p1 {
+                            then permit;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}`
+
+const nonTypedScalarArity10515 = `interfaces {
+    ge-0/0/0 {
+        description foo bar;
+    }
+}`
+
 func assertTypedLeafWarning10515(t *testing.T, cfg *config.Config) string {
 	t.Helper()
 	if cfg == nil {
@@ -49,8 +71,12 @@ func assertTypedLeafWarning10515(t *testing.T, cfg *config.Config) string {
 func TestTypedLeafStrictRejectsAndLenientWarningPersists10515(t *testing.T) {
 	if _, err := CheckText(toleratedTypedLeaf10515, -1); err == nil {
 		t.Fatal("strict configstore.CheckText accepted transmit-rate asd")
-	} else if !strings.Contains(err.Error(), "asd") {
-		t.Fatalf("strict rejection does not name asd: %v", err)
+	} else {
+		for _, want := range []string{"transmit-rate", "asd"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("strict rejection does not name %q: %v", want, err)
+			}
+		}
 	}
 
 	tree, errs := config.NewParser(toleratedTypedLeaf10515).Parse()
@@ -94,27 +120,53 @@ func TestSyncApplyPersistsTypedLeafWarning10515(t *testing.T) {
 func TestTypedLeafWarningFilterLeavesOrdinaryWarningsOut10515(t *testing.T) {
 	cfg := &config.Config{Warnings: []string{
 		"ordinary compiler advisory",
+		config.ToleratedTypedLeafWarningPrefix + "suffix",
 		config.ToleratedTypedLeafWarningPrefix + " schema detail (#10515)",
 	}}
 	got := config.ToleratedTypedLeafWarnings(cfg)
-	if len(got) != 1 || got[0] != cfg.Warnings[1] {
-		t.Fatalf("filtered warnings = %v, want only typed-leaf marker", got)
+	if len(got) != 1 || got[0] != cfg.Warnings[2] {
+		t.Fatalf("filtered warnings = %v, want only the space-delimited marker", got)
 	}
 }
 
 // TestToleratedNonTypedSchemaErrorsStayOutOfTypedLeafWarnings10515 prevents
-// the producer from classifying closed-world/top-level keyword failures as
-// typed-leaf values. Both fixtures are already accepted by tolerant Load.
+// the producer from classifying top-level, closed-world, midKeyword
+// structural, or untyped scalar-arity failures as typed-leaf values. These
+// fixtures are already accepted by tolerant Load.
 func TestToleratedNonTypedSchemaErrorsStayOutOfTypedLeafWarnings10515(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		body string
+		name  string
+		body  string
+		token string
 	}{
-		{name: "unknown top-level stanza", body: unknownTopLevelStanza8882},
-		{name: "security policy typo", body: typoPersistedConfig9878},
-		{name: "security policy middle keyword typo", body: nonTypedMidKeyword10515},
+		{name: "unknown top-level stanza", body: unknownTopLevelStanza8882, token: "securty"},
+		{name: "security policy typo", body: typoPersistedConfig9878, token: "frum-zone"},
+		{name: "security policy middle keyword typo", body: nonTypedMidKeyword10515, token: "to-zon"},
+		{name: "security policy peeled middle keyword typo", body: nonTypedMidKeywordPeel10515, token: "to-zon"},
+		{name: "scalar trailing token", body: nonTypedScalarArity10515, token: "bar"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			tree, errs := config.NewParser(tc.body).Parse()
+			if len(errs) > 0 {
+				t.Fatalf("fixture parse failed: %v", errs[0])
+			}
+			schemaErr := newTestStore(t).schemaValidateExpandedTree(tree)
+			if schemaErr == nil {
+				t.Fatal("schema validation accepted non-typed negative-control fixture")
+			}
+			if !strings.Contains(schemaErr.Error(), tc.token) {
+				t.Fatalf("schema rejection does not name %q: %v", tc.token, schemaErr)
+			}
+			if config.IsTypedLeafSchemaError(schemaErr) {
+				t.Fatalf("schema non-typed rejection was classified as typed: %v", schemaErr)
+			}
+			strict, err := CheckText(tc.body, -1)
+			if err == nil || strict != nil {
+				t.Fatalf("strict check accepted non-typed fixture: cfg=%v err=%v", strict, err)
+			}
+			if !strings.Contains(err.Error(), tc.token) {
+				t.Fatalf("strict rejection does not name %q: %v", tc.token, err)
+			}
 			compiled, err := newTestStore(t).SyncApply(tc.body, nil)
 			if err != nil {
 				t.Fatalf("tolerant SyncApply: %v", err)
@@ -241,6 +293,9 @@ func TestTypedLeafWarningSurvivesRetainedGenerationActiveAndHistory10515(t *test
 	}
 	if _, err := store.Commit(); err != nil {
 		t.Fatalf("clean replacement Commit: %v", err)
+	}
+	if got := config.ToleratedTypedLeafWarnings(store.ActiveConfig()); len(got) != 0 {
+		t.Fatalf("clean strict commit retained the previous typed-leaf warning: %v", got)
 	}
 	history, ok := store.RetainedGeneration(digest)
 	if !ok || history == nil {

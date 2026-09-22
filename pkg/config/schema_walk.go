@@ -982,24 +982,21 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 	// the same sense: `set system host-name` with no name commits clean and
 	// the system carries no host-name. One arity check, both directions.
 	if len(node.Keys) < allowed && len(node.Children) == 0 && !leafSchema.allowEmptyValue {
-		return typedLeafErrorf(leafPath,
-			"`%s` declares a value and none was given (this leaf takes %d value token(s)); "+
-				"the compiler drops a valueless statement, so this commits clean and the "+
-				"configuration silently does not carry it",
-			leafName, leafSchema.args)
+		return fmt.Errorf("%s: `%s` declares a value and none was given (this leaf takes %d value token(s)); "+
+			"the compiler drops a valueless statement, so this commits clean and the "+
+			"configuration silently does not carry it",
+			strings.Join(leafPath, " "), leafName, leafSchema.args)
 	}
 	if len(node.Keys) > allowed {
-		return typedLeafErrorf(leafPath,
-			"unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)",
-			node.Keys[allowed], leafSchema.args)
+		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)",
+			strings.Join(leafPath, " "), node.Keys[allowed], leafSchema.args)
 	}
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
-		return typedLeafErrorf(leafPath,
-			"unexpected trailing token %q (this leaf takes %d value token(s) and no sub-statement; the extra token would be silently dropped)",
-			c.Keys[0], leafSchema.args)
+		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s) and no sub-statement; the extra token would be silently dropped)",
+			strings.Join(leafPath, " "), c.Keys[0], leafSchema.args)
 	}
 	return nil
 }
@@ -1322,16 +1319,20 @@ func siblingSuppliesTypedValue(siblings []*Node, leafName string, leafSchema *sc
 	return false
 }
 
-// typedLeafSchemaError marks a schema rejection caused by a typed leaf. The
-// tolerant configstore path persists only this class as a queryable typed-leaf
-// warning; closed-world keyword and top-level stanza errors remain ordinary
-// tolerated schema diagnostics.
+// typedLeafSchemaError marks a schema rejection from a typed validator or
+// typed-value structure, including validated keys, multi/tail values, and
+// modifiers. The tolerant configstore path persists only this class as a
+// queryable typed-leaf warning. Top-level stanza, closed-world keyword,
+// node-validator/scalar-arity, and flat/peeled midKeyword structural errors
+// remain ordinary tolerated schema diagnostics.
 type typedLeafSchemaError struct{ msg string }
 
 func (e *typedLeafSchemaError) Error() string { return e.msg }
 
 // IsTypedLeafSchemaError reports whether err (including wrapped errors) came
-// from a typed-leaf validator or typed-leaf structural check.
+// from the typed-validator/typed-value partition. It deliberately excludes
+// top-level stanza, closed-world keyword, node-validator, scalar-arity, and
+// midKeyword structural errors.
 func IsTypedLeafSchemaError(err error) bool {
 	var typed *typedLeafSchemaError
 	return errors.As(err, &typed)

@@ -51,11 +51,18 @@ The plan therefore treats a queryable existing alarm surface as required for a c
 
 This is the minimum-change design and should be reviewed first.
 
-1. In `compileTreeLenient`, retain `schemaErr` while preserving the existing journald WARN. After the lenient compile succeeds, append one deterministic warning with a machine-filterable stable prefix, for example:
+1. In `compileTreeLenient`, retain the typed-leaf `schemaErr` while preserving
+   the existing journald WARN. After the lenient compile succeeds, append one
+   deterministic warning with a machine-filterable stable prefix, for example:
 
-   `[typed-leaf-tolerated] <schema error> (strict commit would reject this; issue #10515)`
+   `[typed-leaf-tolerated] <typed-leaf schema error> (strict commit would reject this; issue #10515)`
 
-   Wrap only `schemaErr.Error()`. Never extract or store raw AST values: existing schema-error redaction, including the secret-leaf contract from #8441/#8434, governs what the warning may reveal. The non-secret `asd` fixture therefore names `asd`, while a secret fixture retains its redacted error text. A fresh compiled config gets a fresh warning slice; no post-publication mutation is allowed.
+   Wrap only the typed-leaf `schemaErr.Error()`. Never extract or store raw AST
+   values: existing schema-error redaction, including the secret-leaf contract
+   from #8441/#8434, governs what the warning may reveal. The non-secret `asd`
+   fixture therefore names `asd`, while a secret fixture retains its redacted
+   error text. A fresh compiled config gets a fresh warning slice; no
+   post-publication mutation is allowed.
 2. Add one shared predicate/constant for the marker. The system alarm renderers append only marked typed-leaf warnings from `cfg.Warnings` to their existing `ValidateConfig(cfg)` result. Security alarm detail renderers do the same; their non-detail siblings render the resulting count only. They do not union all warning strings, rerun schema validation, or change ordinary alarm semantics. The marker cannot collide with the current `ValidateConfig` output, so no broad deduplication policy is needed.
 3. Keep the existing commit-response and apply-log projections unchanged. A strict commit still rejects the same tree before compilation.
 
@@ -129,4 +136,5 @@ Existing strict and tolerant no-brick cells remain in the affected configstore s
 
 Recommend **option 1** unless structured metrics/path identity make option 2 necessary. Either gives a persistent active `cfg.Warnings`-backed record and an existing CLI/API/alarm reader, preserves strict rejection and no-brick tolerance, and avoids a new command contract. Reject union-all. Treat option 3 as out of scope unless the issue owner explicitly requires wholesale machine-readable warning history. Treat docs-only journald as an explicit acceptance alternative, not as an unannounced implementation shortcut.
 
-No production code was changed in this DRAFT v2 plan round.
+The implementation follows option 1; this plan records the design decision,
+acceptance mapping, and review scope.
