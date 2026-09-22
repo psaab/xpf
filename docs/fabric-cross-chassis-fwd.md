@@ -56,9 +56,11 @@ been modified by dnat_table pre-routing — actual packet bytes are untouched.
 Redirecting the raw packet lets the peer process it through its full pipeline
 (dnat_table → session → FIB → NAT → forward) without double-NAT issues.
 
-**Why this works on the peer:** Established sessions skip policy evaluation
+**Why this worked on the peer (eBPF era, historical):** Established sessions skipped policy evaluation
 (conntrack fast-path), so the zone mismatch (arriving on control zone fab0
-instead of wan/lan) doesn't matter.
+instead of wan/lan) didn't matter.
+
+**Live userspace path (not the above):** established hits DO re-derive zone policy (#8356/#9384/#9519). A fabric arrival keeps the entry's recorded zone (`FromZoneSource::RecordedZone`, `userspace-dp/src/afxdp/poll_descriptor/policy_revalidation.rs`) and is judged as `HitAuthority::Owner` (`session_hit_authority.rs`), so the zone mismatch owns dedicated machinery instead of being ignored.
 
 **Components:**
 

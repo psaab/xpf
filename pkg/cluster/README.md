@@ -3994,6 +3994,19 @@ outside the monitor loop:
   guard still covers only the config-authority → peer direction; the reverse
   active/active direction stays a documented fail-OPEN residual on #6284 (item 1,
   needs a bidirectional config-gen namespace #5274 scoped out).
+- **Receiver-side per-hit policy re-judgment (#8356, closes the #7323 residual):**
+  distinct from both guards above, a synced session import lands UNVALIDATED
+  (`policy_revalidated_gen: 0`, `userspace-dp/src/session/install.rs:551`).
+  The receiver re-derives the zone verdict on the first packet it forwards per
+  config generation (`zone_policy_deny_on_session_hit`,
+  `userspace-dp/src/afxdp/poll_descriptor/policy_revalidation.rs`). The peer
+  adjudicated against the PEER's policy; `0` forces re-derivation against THIS
+  node's policy — the failover fence for a standby holding a pre-commit view.
+  A fabric arrival keeps the entry's recorded zone
+  (`FromZoneSource::RecordedZone`) and is judged as `HitAuthority::Owner`
+  (`session_hit_authority.rs`); the from-zone is otherwise resolved live from
+  the arrival interface (#9384), so a commit moving an interface between zones
+  is caught on established hits (#9519 family).
 - **RT_FLOW session id (#5212)**: distinct from the per-key install generation,
   every session install carries the ORIGINATING node's stable RT_FLOW session id
   (`SessionValue{,V6}.RTFlowSessionID`, the dataplane's

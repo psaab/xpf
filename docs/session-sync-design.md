@@ -506,13 +506,13 @@ SessionOpen and SessionUpdate share the same payload:
   [22:24] TunnelEndpointID (uint16 LE)
   [24:26] TXVLANID (uint16 LE)
   [26]    Flags (bit0=FabricRedirect, bit1=FabricIngress, bit2=IsReverse)
-  [27]    IngressZoneID (uint8)
-  [28]    EgressZoneID (uint8)
-  [29]    Disposition (uint8: 0=Accept, 1=LocalDelivery, 2=Reject, ...)
-  [30:34] SrcIP (4 bytes for v4, first 4 of 16 for v6)
-  [34:38] DstIP
-  [38:42] NATSrcIP
-  [42:46] NATDstIP
+  [27:29] IngressZoneID (uint16 LE) — #3075: widened from u8
+  [29:31] EgressZoneID (uint16 LE)  — #3075: widened from u8
+  [31]    Disposition (uint8: 0=Accept, 1=LocalDelivery, 2=Reject, ...)
+  [32:36] SrcIP (4 bytes for v4, first 4 of 16 for v6)
+  [36:40] DstIP
+  [40:44] NATSrcIP
+  [44:48] NATDstIP
   For IPv6: addresses are 16 bytes each (payload is larger)
   After addresses:
   [N:N+6]  NeighborMAC (6 bytes, zero if unresolved)
@@ -531,8 +531,8 @@ SessionClose payload is minimal:
   [10:14] DstIP (4 or 16 bytes)
   [N:N+4] OwnerRGID (int32 LE)       — #2467: widened from int16
   [N+4]   Flags (bit0=FabricRedirect, bit1=FabricIngress)
-  [N+5]   IngressZoneID (uint8)      — #919/#922
-  [N+6]   EgressZoneID (uint8)       — #919/#922
+  [N+5:N+7] IngressZoneID (uint16 LE) — #3075: widened from u8 (#919/#922 origin)
+  [N+7:N+9] EgressZoneID (uint16 LE)  — #3075: widened from u8 (#919/#922 origin)
 ```
 
 > **#2467 (breaking wire change):** the three identity fields in the open
