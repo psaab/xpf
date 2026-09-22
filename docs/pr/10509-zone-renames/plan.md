@@ -1,6 +1,6 @@
-# DRAFT v3 cluster plan: zone-rename trio (#10509, #10510, #10511)
+# DRAFT v4 cluster plan: zone-rename trio (#10509, #10510, #10511)
 
-Status: DRAFT v3 after hostile round-1 review and Delta-1 review.
+Status: DRAFT v4 after hostile round-1 review and Delta-1/Delta-2 review.
 Base: `2781465ee` (docs: correct session-sync contract documentation, #10508).
 Worktree: `.claude/worktrees/10509-zonerenames`, branch `fix/10509-zone-renames`.
 Lane: Wave-4 cluster lane, SERIAL route. No production code is included.
@@ -51,6 +51,8 @@ Evidence:
 | Foreign verdict evaluates arrival zone against recorded egress | same file `:259-298` |
 | only the non-permit result reaches Drop; Revoke is later and gated | same file `:299-325` |
 | drop is counted in packet dispatch | `userspace-dp/src/afxdp/poll_descriptor/mod.rs:1278-1284` |
+| `may_revoke` is true only for local admitting-interface forward hits | `userspace-dp/src/afxdp/poll_descriptor/session_hit_authority.rs:169-180`; `userspace-dp/src/afxdp/poll_descriptor/mod.rs:794-806` |
+| Foreign Drop increments its counter; Revoke tears down and increments policy revocation telemetry | `userspace-dp/src/afxdp/poll_descriptor/mod.rs:1277-1284,1312-1342` |
 | counter storage | `userspace-dp/src/afxdp/types/runtime.rs:691` |
 | every hit refreshes `last_seen_ns` | `userspace-dp/src/session/lookup.rs:263-268` |
 
@@ -166,8 +168,15 @@ config-apply paths. Neither requires a cross-language shared function.
    zone id is in `removed_zone_ids` is purged by #10510. It is not retained by
    an extensive permit.
 2. A bound row carrying a validated #10511 renamed policy id is re-evaluated
-   only when both rematch knobs are enabled. Permit retains; non-permit uses
-   existing companion-aware teardown.
+   only when both rematch knobs are enabled. Permit retains only after an
+   atomic pair rebind/restamp. Go's nonzero capture produces a new numeric
+   policy id, stable RuleID, and renamed-zone ids as a rebind record; it never
+   transports or stores a Rust Arc. Rust consumes that record and owns the
+   matched new rule-counter Arc, updating both Rust `SessionEntry.metadata`
+   halves, their conntrack/BPF map values, policy id, counter handle, and
+   recorded ingress/egress zones atomically. Rust's id-0 arm resolves the same
+   numeric id and Arc in its rotation walk. Non-permit uses existing
+   companion-aware teardown.
 3. Default, plain rematch, ambiguous ancestry, generic delete/add, and invalid
    or collision-quarantined snapshots use existing teardown or retain the
    previous-good snapshot as appropriate.
@@ -188,18 +197,22 @@ Foreign rows do not enter the Owner-only next-packet revalidation path.
 
 Required matrix:
 
-| Shape | Verdict before sweep | Drop oracle |
-|---|---|---|
-| single-zone rename, egress unchanged, equivalent permit | Foreign then Forward | zero drops; Foreign is not Drop |
-| single-zone rename, egress unchanged, default deny/no permit | Foreign then Drop | conditional positive |
-| multi-zone rename, recorded egress id dead, default deny | Foreign then Drop | dead-pair positive |
-| multi-zone rename, recorded egress id dead, default permit | Foreign then Forward | default-policy zero control |
+| Shape | Origin/half lanes | Verdict before sweep | Accounting oracle |
+|---|---|---|---|
+| single-zone rename, egress unchanged, equivalent permit | peer-synced forward, reverse companion, local admitting-interface forward | Foreign then Forward | zero Drop and zero Revoke; Foreign is not Drop |
+| single-zone rename, egress unchanged, default deny/no permit | peer-synced forward and reverse (Drop lane); local admitting-interface forward (Revoke lane) | Foreign then Drop/Revoke | observe each lane's matching counter before upper bounds |
+| multi-zone rename, recorded egress id dead, default deny | peer-synced forward and reverse (Drop lane); local admitting-interface forward (Revoke lane) | Foreign then Drop/Revoke | dead-pair positive in both accounting lanes |
+| multi-zone rename, recorded egress id dead, default permit | peer-synced forward, reverse companion, local admitting-interface forward | Foreign then Forward | default-policy zero control for both Drop and Revoke |
 
-Count packets, distinct affected sessions, and `foreign_authority_drops` until
-the sweep-emulated boundary. The dead-pair cell must observe at least one
-drop before an upper-bound assertion, so a single-zone max of zero cannot make
-the RED cell vacuous. Stage B options (restamp, per-object epoch, accept+pin)
-remain deferred; accept+pin is the default unless measurement is material.
+Count packets, distinct affected sessions, `foreign_authority_drops`, and
+`policy_revoked_sessions` until the sweep-emulated boundary. The Drop lane
+must use a peer-synced/reverse or non-admitting-interface row, because a local
+forward hit on its admitting interface is allowed to Revoke and does not
+increment the Drop counter. The dead-pair cell must observe at least one Drop
+and at least one Revoke in their respective lanes before upper-bound
+assertions, so a single-zone max of zero cannot make the RED cells vacuous.
+Stage B options (restamp, per-object epoch, accept+pin) remain deferred;
+accept+pin is the default unless measurement is material.
 
 ### 3.2 #10510 — Option B from snapshot disappearance; Option A killed
 
@@ -286,21 +299,45 @@ The parity corpus extends `testdata/policy_verdict_corpus.txt` and
 ICMP-unknown, scheduler, global, wildcard, duplicate, default, and fragment
 cases. Go decides retain/delete; Rust/joint tests forwarding separately.
 
-#### Capture, id-0, and cost
+#### Capture, id-0, retain-rebind, and cost
 
 `policyInvalidationCapture` gains a pre-publication `renamed` descriptor map
 alongside deleted/modified sets. It enumerates each affected forward row once
 under old numbering and sends failed re-evaluations through existing
-companion-aware delete + HA delete-sync.
+companion-aware delete + HA delete-sync. A permitting Go result supplies the
+new `PolicyID` and stable `RuleID` (`pkg/policymatch/policymatch.go:746-785`);
+the retained pair is re-bound before it can be counted as retained.
+
+For the Go nonzero arm, capture serializes canonical-key plus matched new
+numeric policy id, stable RuleID, and remapped-zone rebind records into the
+additive snapshot. Rust rotation consumes those records and atomically updates
+both Rust `SessionEntry.metadata` halves and their conntrack/BPF map values:
+stored `policy_id` becomes the new numeric id, `policy_counter` becomes the
+Arc for the permitting new rule, and recorded ingress/egress zones are
+changed through the validated rename map. Go never writes a Rust Arc, and this
+uses the existing snapshot transport rather than a new RPC. Updating the map
+values in the same rotation makes the next Go invalidation match the new id
+immediately rather than waiting for periodic refresh.
 
 The Go deleted-id set continues to exclude id 0. Additive snapshot fields carry
 `policy_rematch_extensive` and the #10511 first-policy ancestry descriptor to
 Rust. On rotation, #10510 first purges unbound sync-derived id-0 rows from the
 old-minus-new zone set. For a bound first-policy row and explicit #10511 rename
-under extensive, Rust re-evaluates against the new policy; Permit retains and
-non-permit invokes existing full-pair purge. Extensive off preserves current
-unconditional #9526 purge. Rust scans sessions once; Go captures once plus the
-O(P+R) ancestry index; #10510's zone-set difference is O(Z).
+under extensive, the Rust query runs before assigning the new forwarding state:
+it evaluates the forward row's tuple using the new forwarding policy, resolves
+arrival ingress from the row's admitting interface and current zone map, and
+remaps the recorded egress zone through the validated ancestry map before
+evaluation. It uses the row's NAT rewrite and original source/ports, and
+passes ICMP type/code as unknown (nil), fail-closed for type-constrained terms.
+It evaluates once and uses the canonical reverse companion. A Permit returns
+the matched new numeric policy id and counter handle, then atomically
+rebinds/restamps both `SessionEntry.metadata` halves, their conntrack/BPF map
+values, and renamed zone ids; a non-permit or unresolvable admitting
+interface invokes existing full-pair purge. The
+evaluator seam is `evaluate_policy_result_without_counting`
+(`userspace-dp/src/policy.rs:225-255,2987-3014`). Extensive off preserves
+current unconditional #9526 purge. Rust scans sessions once; Go captures once
+plus the O(P+R) ancestry index; #10510's zone-set difference is O(Z).
 
 #### HA config-sync ancestry sidecar (required residual closure)
 
@@ -338,12 +375,13 @@ Design the bounded additive sidecar as follows:
   ancestry trailer first, then the existing config-generation trailer. A
   legacy raw payload or old generation-only payload returns nil ancestry; the
   existing config text and generation behavior remains unchanged. Advertise
-  support with an additive flag on the existing `syncMsgPeerCapabilities`
-  frame; only a peer that advertised the sidecar receives it. An unknown or
-  legacy peer receives text/generation and extensive rename retention safely
-  falls back to teardown. A new sender reaching an old parser retains the
-  fail-safe apply rejection behavior rather than applying text with unknown
-  metadata.
+  support as `capFlagConfigAncestry` in the existing length-gated
+  `syncMsgPeerCapabilities`/`localCapabilityFlags`, scoped and reset with the
+  peer incarnation. Only a capable peer receives the sidecar; unknown and
+  incapable peers receive text/generation and extensive rename retention safely
+  falls back to teardown. Test unknown, incapable, capable, and reconnect
+  reset states. A new sender reaching an old parser retains the fail-safe
+  apply rejection behavior rather than applying text with unknown metadata.
 - Extend `configApplyItem` with ancestry and carry text plus ancestry together
   through stale-generation and peer-incarnation checks. A queue-full receive
   drops the whole item and sends the existing config-apply nack; the receiver
@@ -388,9 +426,12 @@ Design the bounded additive sidecar as follows:
 Invariants: default/plain rename teardown unchanged; overloaded-zero local,
 legacy, and non-sync rows never swept; genuine Foreign/#9384 re-zone behavior
 unchanged; demoted-owner close filtering unchanged; old peers preserve current
-behavior; extensive retention leaves no unbound stale id-0 row or stale zone
-stamp; invalid/collision-quarantined snapshots retain previous-good state;
-ancestry mismatch/ambiguity fails closed.
+behavior; any row retained by #10511 extensive rematch is rebind/restamped on
+both halves with the new policy identity and renamed zone ids, so it has no
+stale bound counter or stale zone stamp. Rows outside that retain path may
+carry old zone stamps during the measured #10509 Foreign window and remain
+subject to the live-pair verdict; invalid/collision-quarantined snapshots
+retain previous-good state; ancestry mismatch/ambiguity fails closed.
 
 ## 5. Risks and shippability
 
@@ -417,10 +458,14 @@ not only the expected-to-flip test, and record RED-on-revert firsthand.
 ### #10509
 
 Run full `userspace-dp/src/afxdp/poll_descriptor/session_hit_authority_tests.rs`
-and affected packet-dispatch tests. Matrix must observe a dead-pair drop before
-any upper-bound assertion; single-zone permit must assert Foreign+Forward+zero
-drops; sweep emulation must end the count while last-seen control proves
-policy-id refresh did not end it. Reverting accounting/verdict logic reds the
+and affected packet-dispatch tests. The matrix must drive both a Drop lane
+(peer-synced/reverse or non-admitting-interface) and a Revoke lane (local
+forward on its admitting interface), and account separately for
+`foreign_authority_drops` and `policy_revoked_sessions`. The dead-pair Drop
+cell and Revoke cell must each observe a positive event before upper-bound
+assertions; single-zone permit must assert Foreign+Forward with zero of both.
+Sweep emulation must end the count while last-seen control proves policy-id
+refresh did not end it. Reverting either accounting/verdict path reds its
 positive cell; max-minus-one is used only after observed max > 0.
 
 ### #10510
@@ -430,6 +475,8 @@ Run full `deleted_first_policy_purge_9526_tests.rs`,
 `userspace_sync_test.go`. Owner-absent fixture installs promoted SharedPromote,
 unbound, stamped-zero row, applies an old/new snapshot whose old zone id
 vanishes from the new zone set, and asserts purge; revert leaves survivor.
+Empty or absent zone-set producer controls assert no-op rather than treating
+an empty new set as disappearance of every old id.
 Failover-before-rename keeps demoted ex-owner close n=0 while receiver rotation
 purges. Negative matrix covers all SessionOrigin variants, legacy/old-peer,
 nonzero id, reverse half, bound row, zone id outside removed set, duplicate old
@@ -445,6 +492,16 @@ revert tears it down. Negatives cover default/plain, no alternate permit,
 generic no-ancestry delete/add, duplicate ambiguity, resolved-fingerprint
 change, scheduler flip, NAT/NPTv6, ICMP-unknown, global/wildcard, and fragment
 cases. Go asserts retain/delete; Rust/joint asserts forwarding.
+Retain-then-delete RED cell: T1 explicit rename + extensive alternate permit
+must retain and restamp/rebind both halves, their conntrack/BPF map values, to
+the matched new policy id/counter and remapped zones; T2 deletes the renamed
+new rule, and the next invalidation must find that new identity and remove both
+halves. Reverting either Go rebind-record serialization or Rust
+counter/metadata/map restamp must leave the row visible at T2 and RED.
+The Rust id-0 cell separately proves the same retain/rebind result during
+rotation, including new numeric id, new counter Arc, both halves, their map
+values, and remapped zones; the #10510 unbound purge runs first and cannot be
+retained by this arm.
 
 ### HA sync and joint fixture (required)
 
@@ -464,11 +521,13 @@ teardown, and the #10509 shape-specific window.
 
 - **O-10509-1 (Stage-B PLAN-KILL only):** measured bound per shape; if no
   material positive window, kill Stage B and accept+pin.
-- **O-10509-2:** if Stage B is selected, can descriptor reuse for restamp keep
-  genuine Foreign/#9384 semantics?
-- **O-10510-1:** do all supported snapshot producers expose valid old/new zone
-  sets and duplicate validation? If not, reject/retain invalid snapshots and
-  scope acceptance to valid snapshots; never infer from CLI ancestry.
+- **O-10509-2:** if Stage B is selected, can its measured per-object
+  zone-transition map preserve genuine Foreign/#9384 semantics?
+- **O-10510-1:** do all supported snapshot producers expose **populated** old
+  and new zone sets plus duplicate validation? If either side has no zone data,
+  the removal set must be empty and the purge a safe no-op; an empty new set
+  must never be interpreted as every old zone having disappeared. Scope
+  acceptance to producers with this evidence and never infer from CLI ancestry.
 - **O-10510-2:** can origin/zone/collision negatives run without cluster
   commands? Existing unit harnesses and delta probes indicate yes; otherwise
   owner-absent acceptance is PLAN-KILL.
@@ -493,7 +552,7 @@ teardown, and the #10509 shape-specific window.
   SyncImport/promotion/origin predicates; first-policy rotation; configstore
   Rename callers; QueueConfig sender/codec; decode/configApplyItem;
   configApplyLoop callback; HA wiring/handleConfigSync; and invalidation capture.
-- This v3 folds Delta-1 R1 (snapshot zone disappearance + validation), R2
-  (HA ancestry codec/callers/callback/capture/lifecycle/legacy fallback and
-  extended tripwire), and R3 (in-process HA/sync-driven joint fixture).
+- This v4 folds D1-R4 retain/rebind/restamp for both Go and Rust arms, D2-R1
+  Drop/Revoke accounting, D2-R2 rotation-query detail, D2-R3 invariant
+  correction, D2-R4 populated-zone producer guard, and D2-R5 wording cleanup.
 - No production code or tests changed; plan-only design path remains active.
